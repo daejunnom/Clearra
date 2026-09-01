@@ -9,6 +9,7 @@ on:
         type: choice
         options:
           - capture
+          - bootstrap-capture
           - restore
       snapshot_sha:
         description: Exact source commit represented by the active Pages site
@@ -17,6 +18,10 @@ on:
       expected_current_main:
         description: Exact current main commit that owns this rollback bracket
         required: true
+        type: string
+      legacy_release_tag:
+        description: Exact approved published legacy tag; required only for bootstrap-capture
+        required: false
         type: string
       current_pages_sha:
         description: Exact Pages source active immediately before restore; blank for capture
@@ -41,7 +46,7 @@ concurrency:
 
 jobs:
   capture-authority:
-    if: ${{ inputs.mode == 'capture' }}
+    if: ${{ inputs.mode == 'capture' || inputs.mode == 'bootstrap-capture' }}
     permissions:
       contents: read
       actions: read
@@ -55,18 +60,20 @@ jobs:
       - name: Verify active Pages capture authority
         env:
           GH_TOKEN: ${{ github.token }}
-          PAGES_AUTHORITY_MODE: capture
+          PAGES_AUTHORITY_MODE: ${{ inputs.mode }}
           PAGES_AUTHORITY_PHASE: initial
           AUTHORITY_SHA: ${{ inputs.expected_current_main }}
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
           CURRENT_PAGES_SHA: ${{ inputs.snapshot_sha }}
+          REQUESTED_CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}
+          LEGACY_RELEASE_TAG: ${{ inputs.legacy_release_tag }}
           CAPTURE_RUN_ID: ${{ inputs.snapshot_run_id }}
           RESTORE_AUTHORIZATION: ${{ inputs.restore_authorization }}
         shell: bash
         run: node authority-source/scripts/release/pages-rollback-authority.mjs
 
   capture-build:
-    if: ${{ inputs.mode == 'capture' }}
+    if: ${{ inputs.mode == 'capture' || inputs.mode == 'bootstrap-capture' }}
     needs: capture-authority
     permissions:
       contents: read
@@ -115,6 +122,14 @@ jobs:
           CLEARRA_SOURCE_COMMIT="$SNAPSHOT_SHA" \
           CLEARRA_ENGINE_BUILD_ID="$SNAPSHOT_SHA" \
           npm run build --workspace apps/clearra-web
+      - name: Prepare exact rollback manifest contract
+        env:
+          PAGES_AUTHORITY_MODE: prepare-manifests
+          PAGES_CAPTURE_MODE: ${{ inputs.mode }}
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+          STATIC_MANIFEST_PATH: snapshot-source/apps/clearra-web/static/wasm/clearra_wasm.manifest.json
+          BUILD_MANIFEST_PATH: snapshot-source/apps/clearra-web/build/wasm/clearra_wasm.manifest.json
+        run: node authority-source/scripts/release/pages-rollback-authority.mjs
       - name: Stamp exact rollback identity
         env:
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
@@ -162,11 +177,13 @@ jobs:
         id: artifact-authority
         env:
           GH_TOKEN: ${{ github.token }}
-          PAGES_AUTHORITY_MODE: capture
+          PAGES_AUTHORITY_MODE: ${{ inputs.mode }}
           PAGES_AUTHORITY_PHASE: preartifact
           AUTHORITY_SHA: ${{ inputs.expected_current_main }}
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
           CURRENT_PAGES_SHA: ${{ inputs.snapshot_sha }}
+          REQUESTED_CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}
+          LEGACY_RELEASE_TAG: ${{ inputs.legacy_release_tag }}
           CAPTURE_RUN_ID: ${{ inputs.snapshot_run_id }}
           RESTORE_AUTHORIZATION: ${{ inputs.restore_authorization }}
         run: |
@@ -243,6 +260,7 @@ jobs:
           AUTHORITY_SHA: ${{ inputs.expected_current_main }}
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
           CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}
+          LEGACY_RELEASE_TAG: ${{ inputs.legacy_release_tag }}
           CAPTURE_RUN_ID: ${{ inputs.snapshot_run_id }}
           CAPTURE_REPORT_PATH: rollback-capture-report/pages-rollback-capture-authority.json
           CAPTURE_REPORT_ARTIFACT_ID: ${{ steps.rollback-report.outputs.report_artifact_id }}
@@ -325,6 +343,7 @@ jobs:
           AUTHORITY_SHA: ${{ inputs.expected_current_main }}
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
           CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}
+          LEGACY_RELEASE_TAG: ${{ inputs.legacy_release_tag }}
           CAPTURE_RUN_ID: ${{ inputs.snapshot_run_id }}
           CAPTURE_REPORT_PATH: rollback-capture-report-predeploy/pages-rollback-capture-authority.json
           CAPTURE_REPORT_ARTIFACT_ID: ${{ needs.restore-authority.outputs.report_artifact_id }}

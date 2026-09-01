@@ -1,6 +1,6 @@
 // SRP rationale: rollback authority stays cohesive here because the behavior-level change reason is to capture, resolve, validate, and consume one exact Pages snapshot through a closed provenance chain.
-import { createHash } from "node:crypto";
-import { appendFile, lstat, open, readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFile, lstat, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,17 +18,28 @@ import {
   validateCanonicalAcceptanceLookup,
 } from "./canonical-acceptance-run.mjs";
 
+import {
+  CLEARRA_ARTIFACT_SCHEMA_VERSION,
+  CLEARRA_CONTRACT_SCHEMA_VERSION,
+  CLEARRA_SUPPLY_SEMANTICS_ID,
+  serializeClearraWasmManifest,
+} from "../tools/clearra-wasm-build-contract.mjs";
+
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const DECIMAL_ID_PATTERN = /^[1-9][0-9]*$/u;
 const RELEASE_TAG = "v0.8.0";
+export const LEGACY_BOOTSTRAP_RELEASE_TAG = "v0.7.4";
+const LEGACY_WASM_MANIFEST_BYTES = 768;
+const LEGACY_WASM_CAPABILITIES_SHA256 =
+  "6e6e2c1e973f62c6d6fa28f571b326104aec625e6879c4aca67df3364029d98b";
 const MINIMUM_RETENTION_MS = 89 * 24 * 60 * 60 * 1000;
 const EXPECTED_CONTRACT = Object.freeze({
   schema: "clearra.pages.identity.v2",
-  contractSchemaVersion: "clearra.search.contract.v2",
-  supplySemanticsId: "clearra.supply.projected-terminal-lookahead.v1",
-  artifactSchemaVersion: "clearra.solution-data.v1",
+  contractSchemaVersion: CLEARRA_CONTRACT_SCHEMA_VERSION,
+  supplySemanticsId: CLEARRA_SUPPLY_SEMANTICS_ID,
+  artifactSchemaVersion: CLEARRA_ARTIFACT_SCHEMA_VERSION,
 });
 export const PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID =
   "clearra.pages.rollback-capture-authority.v1";
@@ -135,6 +146,344 @@ export function validatePagesIdentity(identityValue, manifestValue, expectedSha)
   ) {
     fail("Pages WASM manifest does not match the exact release contract");
   }
+}
+
+const RUNTIME_IDENTITY_FIELDS = Object.freeze([
+  "source_commit",
+  "engine_build_id",
+  "contract_schema_version",
+  "supply_semantics_id",
+  "artifact_schema_version",
+]);
+
+function exactRuntimeIdentity(expectedSha) {
+  const sha = requireSha(expectedSha, "rollback manifest snapshot SHA");
+  return Object.freeze({
+    source_commit: sha,
+    engine_build_id: sha,
+    contract_schema_version: CLEARRA_CONTRACT_SCHEMA_VERSION,
+    supply_semantics_id: CLEARRA_SUPPLY_SEMANTICS_ID,
+    artifact_schema_version: CLEARRA_ARTIFACT_SCHEMA_VERSION,
+  });
+}
+
+function validateRollbackManifestRuntimeIdentity(manifestValue, expectedSha, label) {
+  const manifest = requireObject(manifestValue, label);
+  const build = requireObject(manifest.build, `${label} build`);
+  const identity = requireObject(build.runtime_identity, `${label} runtime identity`);
+  requireExactKeys(identity, RUNTIME_IDENTITY_FIELDS, `${label} runtime identity`);
+  const expected = exactRuntimeIdentity(expectedSha);
+  for (const field of RUNTIME_IDENTITY_FIELDS) {
+    if (identity[field] !== expected[field]) {
+      fail(`${label} runtime identity differs from the exact snapshot contract`);
+    }
+  }
+  return manifest;
+}
+
+function validateLegacyArtifact(value, label, prefix, suffix) {
+  const artifact = requireObject(value, label);
+  requireExactKeys(artifact, ["path", "bytes", "sha256"], label);
+  const sha256 = requirePattern(artifact.sha256, SHA256_PATTERN, `${label} SHA-256`);
+  if (!Number.isSafeInteger(artifact.bytes) || artifact.bytes <= 0) {
+    fail(`${label} bytes must be a positive safe integer`);
+  }
+  if (artifact.path !== `${prefix}.${sha256.slice(0, 24)}${suffix}`) {
+    fail(`${label} path does not match the v0.7.4 content-addressed artifact`);
+  }
+}
+
+function serializeLegacyWasmManifest(manifest) {
+  const json = JSON.stringify(manifest);
+  const byteLength = Buffer.byteLength(json, "utf8") + 1;
+  if (byteLength > LEGACY_WASM_MANIFEST_BYTES) {
+    fail("legacy Pages WASM manifest exceeds the v0.7.4 fixed-byte contract");
+  }
+  return `${json}${" ".repeat(LEGACY_WASM_MANIFEST_BYTES - byteLength)}\n`;
+}
+
+export function validateLegacyPagesWasmManifest(manifestValue, rawBytes, label) {
+  const manifest = requireObject(manifestValue, label);
+  requireExactKeys(manifest, ["schema_version", "build", "bindings", "wasm"], label);
+  if (manifest.schema_version !== 1) {
+    fail(`${label} schema_version is not the v0.7.4 manifest schema`);
+  }
+  const build = requireObject(manifest.build, `${label} build`);
+  if (Object.hasOwn(build, "runtime_identity")) {
+    fail(`${label} runtime_identity must be absent before legacy bootstrap`);
+  }
+  requireExactKeys(
+    build,
+    ["contract_version", "source_sha256", "source_file_count", "capabilities_sha256"],
+    `${label} build`,
+  );
+  if (
+    build.contract_version !== 1 ||
+    !SHA256_PATTERN.test(build.source_sha256) ||
+    !Number.isSafeInteger(build.source_file_count) ||
+    build.source_file_count <= 0 ||
+    build.capabilities_sha256 !== LEGACY_WASM_CAPABILITIES_SHA256
+  ) {
+    fail(`${label} build is not the exact v0.7.4 legacy contract`);
+  }
+  validateLegacyArtifact(manifest.bindings, `${label} bindings`, "clearra_wasm", ".js");
+  validateLegacyArtifact(manifest.wasm, `${label} wasm`, "clearra_wasm_bg", ".wasm");
+  if (rawBytes !== serializeLegacyWasmManifest(manifest)) {
+    fail(`${label} bytes do not match the deterministic v0.7.4 producer format`);
+  }
+  return manifest;
+}
+
+function manifestWithoutRuntimeIdentity(manifestValue) {
+  const manifest = structuredClone(manifestValue);
+  if (manifest?.build && typeof manifest.build === "object") {
+    delete manifest.build.runtime_identity;
+  }
+  return manifest;
+}
+
+async function readRollbackManifest(path, label) {
+  const target = resolve(requireString(path, `${label} path`));
+  await assertSafeDirectoryChain(dirname(target));
+  const metadata = await lstat(target);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size <= 0) {
+    fail(`${label} must be a non-empty regular non-link file`);
+  }
+  const raw = await readFile(target, "utf8");
+  let manifest;
+  try {
+    manifest = JSON.parse(raw);
+  } catch {
+    fail(`${label} is not valid JSON`);
+  }
+  return Object.freeze({ target, metadata, raw, manifest });
+}
+
+async function stageAtomicManifestReplacement(record, bytes) {
+  const temporaryPath = `${record.target}.clearra-${randomUUID()}.tmp`;
+  const handle = await open(temporaryPath, "wx", record.metadata.mode & 0o777);
+  try {
+    await handle.writeFile(bytes, "utf8");
+    await handle.sync();
+  } catch (error) {
+    await handle.close();
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
+  await handle.close();
+  return temporaryPath;
+}
+
+export async function preparePagesRollbackManifests({
+  captureMode,
+  snapshotSha,
+  staticManifestPath,
+  buildManifestPath,
+}) {
+  if (!new Set(["capture", "bootstrap-capture"]).has(captureMode)) {
+    fail("rollback manifest preparation mode must be capture or bootstrap-capture");
+  }
+  const sha = requireSha(snapshotSha, "rollback manifest snapshot SHA");
+  const [staticRecord, buildRecord] = await Promise.all([
+    readRollbackManifest(staticManifestPath, "static Pages WASM manifest"),
+    readRollbackManifest(buildManifestPath, "built Pages WASM manifest"),
+  ]);
+  if (staticRecord.target === buildRecord.target) {
+    fail("static and built Pages WASM manifests must be distinct files");
+  }
+
+  if (captureMode === "capture") {
+    validateRollbackManifestRuntimeIdentity(staticRecord.manifest, sha, "static Pages WASM manifest");
+    validateRollbackManifestRuntimeIdentity(buildRecord.manifest, sha, "built Pages WASM manifest");
+    if (canonicalJson(staticRecord.manifest) !== canonicalJson(buildRecord.manifest)) {
+      fail("static and built Pages WASM manifests differ before capture");
+    }
+    return Object.freeze({ mode: captureMode, updated: false });
+  }
+
+  validateLegacyPagesWasmManifest(
+    staticRecord.manifest,
+    staticRecord.raw,
+    "static Pages WASM manifest",
+  );
+  validateLegacyPagesWasmManifest(
+    buildRecord.manifest,
+    buildRecord.raw,
+    "built Pages WASM manifest",
+  );
+  if (staticRecord.raw !== buildRecord.raw) {
+    fail("static and built v0.7.4 Pages WASM manifests differ before bootstrap");
+  }
+
+  const originalProjection = canonicalJson(staticRecord.manifest);
+  const upgradedManifest = structuredClone(staticRecord.manifest);
+  upgradedManifest.build.runtime_identity = exactRuntimeIdentity(sha);
+  if (canonicalJson(manifestWithoutRuntimeIdentity(upgradedManifest)) !== originalProjection) {
+    fail("legacy Pages WASM manifest non-identity content changed during bootstrap");
+  }
+  const upgradedBytes = serializeClearraWasmManifest(upgradedManifest);
+  let staticTemporaryPath = "";
+  let buildTemporaryPath = "";
+  let staticCommitted = false;
+  let buildCommitted = false;
+  try {
+    staticTemporaryPath = await stageAtomicManifestReplacement(staticRecord, upgradedBytes);
+    buildTemporaryPath = await stageAtomicManifestReplacement(buildRecord, upgradedBytes);
+    const [currentStatic, currentBuild] = await Promise.all([
+      readFile(staticRecord.target, "utf8"),
+      readFile(buildRecord.target, "utf8"),
+    ]);
+    if (currentStatic !== staticRecord.raw || currentBuild !== buildRecord.raw) {
+      fail("Pages WASM manifests changed while bootstrap replacement was staged");
+    }
+    await rename(staticTemporaryPath, staticRecord.target);
+    staticCommitted = true;
+    try {
+      await rename(buildTemporaryPath, buildRecord.target);
+      buildCommitted = true;
+    } catch (commitError) {
+      let restoreTemporaryPath = "";
+      try {
+        restoreTemporaryPath = await stageAtomicManifestReplacement(
+          staticRecord,
+          staticRecord.raw,
+        );
+        await rename(restoreTemporaryPath, staticRecord.target);
+        restoreTemporaryPath = "";
+      } catch (restoreError) {
+        throw new AggregateError(
+          [commitError, restoreError],
+          "Pages WASM manifest transaction could not restore its first atomic replacement",
+        );
+      } finally {
+        if (restoreTemporaryPath !== "") {
+          await rm(restoreTemporaryPath, { force: true });
+        }
+      }
+      throw commitError;
+    }
+  } finally {
+    if (!staticCommitted && staticTemporaryPath !== "") {
+      await rm(staticTemporaryPath, { force: true });
+    }
+    if (!buildCommitted && buildTemporaryPath !== "") {
+      await rm(buildTemporaryPath, { force: true });
+    }
+  }
+
+  const [preparedStatic, preparedBuild] = await Promise.all([
+    readRollbackManifest(staticRecord.target, "prepared static Pages WASM manifest"),
+    readRollbackManifest(buildRecord.target, "prepared built Pages WASM manifest"),
+  ]);
+  validateRollbackManifestRuntimeIdentity(preparedStatic.manifest, sha, "prepared static Pages WASM manifest");
+  validateRollbackManifestRuntimeIdentity(preparedBuild.manifest, sha, "prepared built Pages WASM manifest");
+  if (
+    preparedStatic.raw !== upgradedBytes ||
+    preparedBuild.raw !== upgradedBytes ||
+    canonicalJson(manifestWithoutRuntimeIdentity(preparedStatic.manifest)) !== originalProjection ||
+    canonicalJson(manifestWithoutRuntimeIdentity(preparedBuild.manifest)) !== originalProjection
+  ) {
+    fail("prepared Pages WASM manifests did not preserve the exact legacy artifact contract");
+  }
+  return Object.freeze({ mode: captureMode, updated: true });
+}
+
+export function validateLegacyPagesBootstrapAuthority(value) {
+  requireExactKeys(value, [
+    "repository",
+    "legacyReleaseTag",
+    "snapshotSha",
+    "tagRef",
+    "annotatedTag",
+    "release",
+    "deployments",
+    "deploymentStatuses",
+    "pageUrl",
+    "identityStatus",
+  ], "legacy Pages bootstrap authority");
+  const repository = requirePattern(
+    value.repository,
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u,
+    "legacy Pages bootstrap repository",
+  );
+  const legacyReleaseTag = requireString(
+    value.legacyReleaseTag,
+    "legacy Pages bootstrap release tag",
+  );
+  if (legacyReleaseTag !== LEGACY_BOOTSTRAP_RELEASE_TAG) {
+    fail("legacy Pages bootstrap accepts only the exact approved release tag");
+  }
+  const snapshotSha = requireSha(value.snapshotSha, "legacy Pages snapshot SHA");
+  const tagRef = requireObject(value.tagRef, "legacy release tag ref");
+  const tagObjectSha = requireSha(tagRef.object?.sha, "legacy annotated tag object SHA");
+  if (
+    tagRef.ref !== `refs/tags/${legacyReleaseTag}` ||
+    tagRef.object?.type !== "tag"
+  ) {
+    fail("legacy Pages bootstrap release tag must be an annotated tag");
+  }
+  const annotatedTag = requireObject(value.annotatedTag, "legacy annotated tag");
+  if (
+    annotatedTag.sha !== tagObjectSha ||
+    annotatedTag.tag !== legacyReleaseTag ||
+    annotatedTag.object?.type !== "commit" ||
+    annotatedTag.object?.sha !== snapshotSha
+  ) {
+    fail("legacy annotated tag does not peel to the exact Pages snapshot");
+  }
+  requireObject(annotatedTag.tagger, "legacy annotated tagger");
+
+  const release = requireObject(value.release, "legacy GitHub Release");
+  if (
+    release.tag_name !== legacyReleaseTag ||
+    release.draft !== false ||
+    release.prerelease !== false ||
+    typeof release.published_at !== "string" ||
+    !Number.isFinite(Date.parse(release.published_at))
+  ) {
+    fail("legacy Pages bootstrap requires the exact published stable Release");
+  }
+
+  if (!Array.isArray(value.deployments) || value.deployments.length !== 1) {
+    fail("legacy Pages bootstrap requires one latest Pages deployment readback");
+  }
+  const deployment = requireObject(value.deployments[0], "latest Pages deployment");
+  const deploymentId = requireDecimalId(
+    String(deployment.id),
+    "latest Pages deployment ID",
+  );
+  if (
+    deployment.sha !== snapshotSha ||
+    deployment.ref !== "main" ||
+    deployment.task !== "deploy" ||
+    deployment.environment !== "github-pages"
+  ) {
+    fail("latest Pages deployment is not the exact legacy snapshot");
+  }
+  if (
+    !Array.isArray(value.deploymentStatuses) ||
+    value.deploymentStatuses.length < 1
+  ) {
+    fail("latest Pages deployment has no status readback");
+  }
+  const latestStatus = requireObject(
+    value.deploymentStatuses[0],
+    "latest Pages deployment status",
+  );
+  const normalizedPageUrl = `${requireString(value.pageUrl, "Pages URL").replace(/\/$/u, "")}/`;
+  if (
+    latestStatus.state !== "success" ||
+    latestStatus.environment !== "github-pages" ||
+    latestStatus.environment_url !== normalizedPageUrl ||
+    latestStatus.deployment_url !==
+      `https://api.github.com/repos/${repository}/deployments/${deploymentId}`
+  ) {
+    fail("latest Pages deployment is not the active successful production snapshot");
+  }
+  if (value.identityStatus !== 404) {
+    fail("legacy Pages bootstrap requires the public release identity to be absent");
+  }
+  return Object.freeze({ repository, legacyReleaseTag, snapshotSha, deploymentId });
 }
 
 export function validateCanonicalRuns(value, expectedSha, label = "canonical runs") {
@@ -557,10 +906,34 @@ function validateIndependentConsumerRun(consumerRun, {
 
 export function validateRunAttemptPolicy(mode, runAttempt) {
   const attempt = requireDecimalId(String(runAttempt), "current run attempt");
-  if (mode !== "capture" && attempt !== "1") {
+  if (!new Set(["capture", "bootstrap-capture"]).has(mode) && attempt !== "1") {
     fail("forward and restore mutations require a fresh workflow dispatch, not a rerun");
   }
   return attempt;
+}
+
+export function validatePagesCaptureRequestInputs(value) {
+  requireExactKeys(value, [
+    "mode",
+    "legacyReleaseTag",
+    "requestedCurrentPagesSha",
+    "captureRunId",
+    "restoreAuthorization",
+  ], "Pages capture request inputs");
+  if (!new Set(["capture", "bootstrap-capture"]).has(value.mode)) {
+    fail("Pages capture request input validation requires a capture mode");
+  }
+  if (value.mode === "bootstrap-capture") {
+    if (value.legacyReleaseTag !== LEGACY_BOOTSTRAP_RELEASE_TAG) {
+      fail("legacy Pages bootstrap accepts only the exact approved release tag");
+    }
+  } else {
+    assertEmpty(value.legacyReleaseTag, "legacy release tag");
+  }
+  assertEmpty(value.requestedCurrentPagesSha, "requested current Pages SHA");
+  assertEmpty(value.captureRunId, "capture run ID");
+  assertEmpty(value.restoreAuthorization, "restore authorization");
+  return value;
 }
 
 export function validateCaptureAuthority({
@@ -736,6 +1109,14 @@ async function fetchPublicJson(url, label) {
   return parseJsonResponse(response, label);
 }
 
+async function fetchPublicStatus(url) {
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  return response.status;
+}
+
 export function canonicalAcceptanceQuery(sha) {
   const sourceCommit = requireSha(sha, "canonical acceptance query SHA");
   return new URLSearchParams({
@@ -875,8 +1256,24 @@ async function resolveCaptureReportMain(mode) {
   );
 }
 
+async function prepareRollbackManifestsMain() {
+  const result = await preparePagesRollbackManifests({
+    captureMode: env("PAGES_CAPTURE_MODE"),
+    snapshotSha: env("SNAPSHOT_SHA"),
+    staticManifestPath: env("STATIC_MANIFEST_PATH"),
+    buildManifestPath: env("BUILD_MANIFEST_PATH"),
+  });
+  console.log(
+    `pages_rollback_manifests=passed mode=${result.mode} updated=${result.updated ? "yes" : "no"}`,
+  );
+}
+
 async function main() {
   const mode = env("PAGES_AUTHORITY_MODE");
+  if (mode === "prepare-manifests") {
+    await prepareRollbackManifestsMain();
+    return;
+  }
   if (mode === "capture-report") {
     await captureReportMain();
     return;
@@ -885,8 +1282,8 @@ async function main() {
     await resolveCaptureReportMain(mode);
     return;
   }
-  if (!new Set(["capture", "forward", "restore"]).has(mode)) {
-    fail("PAGES_AUTHORITY_MODE must be capture, capture-report, resolve-forward, resolve-restore, forward, or restore");
+  if (!new Set(["capture", "bootstrap-capture", "forward", "restore"]).has(mode)) {
+    fail("PAGES_AUTHORITY_MODE must be prepare-manifests, capture, bootstrap-capture, capture-report, resolve-forward, resolve-restore, forward, or restore");
   }
   const phase = env("PAGES_AUTHORITY_PHASE");
   const authoritySha = requireSha(env("AUTHORITY_SHA"), "authority SHA");
@@ -899,9 +1296,28 @@ async function main() {
   const githubSha = requireSha(env("GITHUB_SHA"), "workflow SHA");
   const token = requireString(env("GH_TOKEN"), "GitHub token");
   const apiUrl = requireString(env("GITHUB_API_URL"), "GitHub API URL");
+  const legacyReleaseTag = env("LEGACY_RELEASE_TAG", { optional: true });
+  const requestedCurrentPagesSha = env(
+    "REQUESTED_CURRENT_PAGES_SHA",
+    { optional: true },
+  );
+  const captureRunIdInput = env("CAPTURE_RUN_ID", { optional: true });
+  const restoreAuthorization = env("RESTORE_AUTHORIZATION", { optional: true });
   const expectedPath = mode === "forward"
     ? ".github/workflows/pages.yml"
     : ".github/workflows/pages-rollback.yml";
+
+  if (mode === "capture" || mode === "bootstrap-capture") {
+    validatePagesCaptureRequestInputs({
+      mode,
+      legacyReleaseTag,
+      requestedCurrentPagesSha,
+      captureRunId: captureRunIdInput,
+      restoreAuthorization,
+    });
+  } else {
+    assertEmpty(legacyReleaseTag, "legacy release tag");
+  }
 
   assertExact(githubRef, "refs/heads/main", "workflow ref");
   assertExact(githubSha, authoritySha, "workflow SHA");
@@ -942,31 +1358,80 @@ async function main() {
   const pages = await api.get("/pages", "Pages configuration");
   const pageUrl = requireString(pages.html_url, "Pages URL").replace(/\/$/u, "");
   const cacheBuster = encodeURIComponent(`${mode}-${phase}-${runId}`);
-  const [identity, manifest] = await Promise.all([
-    fetchPublicJson(
-      `${pageUrl}/clearra-build-identity.json?authority=${cacheBuster}`,
-      "live Pages identity",
-    ),
-    fetchPublicJson(
-      `${pageUrl}/wasm/clearra_wasm.manifest.json?authority=${cacheBuster}`,
-      "live Pages WASM manifest",
-    ),
-  ]);
-  validatePagesIdentity(identity, manifest, currentPagesSha);
+  if (mode === "bootstrap-capture") {
+    const tagRef = await api.get(
+      `/git/ref/tags/${encodeURIComponent(legacyReleaseTag)}`,
+      "legacy release tag ref",
+    );
+    if (tagRef?.object?.type !== "tag") {
+      fail("legacy Pages bootstrap release tag must be an annotated tag");
+    }
+    const annotatedTag = await api.get(
+      `/git/tags/${requireSha(tagRef.object.sha, "legacy annotated tag object SHA")}`,
+      "legacy annotated tag",
+    );
+    const [release, deployments, identityStatus] = await Promise.all([
+      api.get(
+        `/releases/tags/${encodeURIComponent(legacyReleaseTag)}`,
+        "legacy GitHub Release",
+      ),
+      api.get(
+        "/deployments?environment=github-pages&per_page=1",
+        "latest Pages deployment",
+      ),
+      fetchPublicStatus(
+        `${pageUrl}/clearra-build-identity.json?authority=${cacheBuster}`,
+      ),
+    ]);
+    if (!Array.isArray(deployments) || deployments.length !== 1) {
+      fail("legacy Pages bootstrap requires one latest Pages deployment readback");
+    }
+    const deploymentId = requireDecimalId(
+      String(deployments[0]?.id),
+      "latest Pages deployment ID",
+    );
+    const deploymentStatuses = await api.get(
+      `/deployments/${deploymentId}/statuses?per_page=100`,
+      "latest Pages deployment statuses",
+    );
+    validateLegacyPagesBootstrapAuthority({
+      repository,
+      legacyReleaseTag,
+      snapshotSha,
+      tagRef,
+      annotatedTag,
+      release,
+      deployments,
+      deploymentStatuses,
+      pageUrl,
+      identityStatus,
+    });
+  } else {
+    const [identity, manifest] = await Promise.all([
+      fetchPublicJson(
+        `${pageUrl}/clearra-build-identity.json?authority=${cacheBuster}`,
+        "live Pages identity",
+      ),
+      fetchPublicJson(
+        `${pageUrl}/wasm/clearra_wasm.manifest.json?authority=${cacheBuster}`,
+        "live Pages WASM manifest",
+      ),
+    ]);
+    validatePagesIdentity(identity, manifest, currentPagesSha);
+  }
 
   await api.requireAbsent(`/git/ref/tags/${RELEASE_TAG}`, `${RELEASE_TAG} tag`);
   await api.requireAbsent(`/releases/tags/${RELEASE_TAG}`, `${RELEASE_TAG} release`);
 
   const captureReportFields = {
-    captureRunId: env("CAPTURE_RUN_ID", { optional: true }),
+    captureRunId: captureRunIdInput,
     reportPath: env("CAPTURE_REPORT_PATH", { optional: true }),
     reportArtifactId: env("CAPTURE_REPORT_ARTIFACT_ID", { optional: true }),
     reportArtifactName: env("CAPTURE_REPORT_ARTIFACT_NAME", { optional: true }),
     reportArtifactDigest: env("CAPTURE_REPORT_ARTIFACT_DIGEST", { optional: true }),
   };
-  const restoreAuthorization = env("RESTORE_AUTHORIZATION", { optional: true });
 
-  if (mode === "capture") {
+  if (mode === "capture" || mode === "bootstrap-capture") {
     for (const [label, value] of Object.entries(captureReportFields)) {
       assertEmpty(value, label);
     }
