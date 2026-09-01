@@ -1633,6 +1633,32 @@ function Invoke-ReleaseIdentityGateValidation {
                 -ExpectedValue $job.Runner `
                 -Contract "$($job.Name) runner"
         }
+        $windowsProductCachePrefix = 'product-v2-${{ runner.os }}-${{ hashFiles(''Cargo.lock'', ''apps/clearra-desktop/src-tauri/Cargo.lock'', ''package-lock.json'') }}'
+        $windowsProductCacheKey = "key: $windowsProductCachePrefix-`${{ github.sha }}"
+        $windowsProductCacheRestoreKeys = "restore-keys: |`n            $windowsProductCachePrefix-`n            $windowsProductCachePrefix"
+        foreach ($productCacheJob in @(
+            @{ Name = 'Windows CLI'; Text = $windowsCliJob },
+            @{ Name = 'Windows GUI'; Text = $windowsGuiJob }
+        )) {
+            foreach ($requiredProductCacheMarker in @($windowsProductCacheKey, $windowsProductCacheRestoreKeys)) {
+                if ($productCacheJob.Text.IndexOf($requiredProductCacheMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                    Add-ArchitectureError "$($productCacheJob.Name) lock-compatible exact-SHA cache is missing '$requiredProductCacheMarker'"
+                }
+            }
+            if ([regex]::Matches($productCacheJob.Text, '(?m)\brestore-keys: \|$').Count -ne 1 -or
+                [regex]::Matches($productCacheJob.Text, [regex]::Escape($windowsProductCacheKey)).Count -ne 1) {
+                Add-ArchitectureError "$($productCacheJob.Name) must have exactly one exact-SHA product cache contract"
+            }
+        }
+        if ([regex]::Matches($windowsCliJob, 'actions/cache/restore@v4').Count -ne 1 -or
+            [regex]::Matches($windowsCliJob, '(?m)^      - uses: actions/cache@v4\s*$').Count -ne 0 -or
+            $windowsCliJob.IndexOf('actions/cache/save@v4', [System.StringComparison]::Ordinal) -ge 0) {
+            Add-ArchitectureError 'Windows CLI must remain a single restore-only product cache reader'
+        }
+        if ([regex]::Matches($windowsGuiJob, '(?m)^      - uses: actions/cache@v4\s*$').Count -ne 1 -or
+            $windowsGuiJob.IndexOf('actions/cache/save@v4', [System.StringComparison]::Ordinal) -ge 0) {
+            Add-ArchitectureError 'Windows GUI must remain the sole automatic product cache writer'
+        }
         Assert-ReleaseYamlExactKeySet `
             -Text $discordJob `
             -Indentation 4 `

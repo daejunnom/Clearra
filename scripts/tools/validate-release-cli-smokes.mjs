@@ -784,6 +784,42 @@ for (const [name, job, runner] of [
     throw new Error(`${name} job must fail closed`);
   }
 }
+const windowsProductCachePrefix =
+  "product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}";
+const windowsProductCacheKey =
+  `key: ${windowsProductCachePrefix}-` + "${{ github.sha }}";
+const windowsProductCacheRestoreKeys = [
+  "restore-keys: |",
+  `            ${windowsProductCachePrefix}-`,
+  `            ${windowsProductCachePrefix}`,
+].join("\n");
+for (const [name, job] of [
+  ["Windows CLI", windowsCliJob],
+  ["Windows GUI", windowsGuiJob],
+]) {
+  for (const marker of [windowsProductCacheKey, windowsProductCacheRestoreKeys]) {
+    requireText(job, marker, `${name} lock-compatible exact-SHA cache ${marker}`);
+  }
+  if (
+    (job.match(/\brestore-keys: \|$/gmu) ?? []).length !== 1 ||
+    job.split(windowsProductCacheKey).length - 1 !== 1
+  ) {
+    throw new Error(`${name} must have exactly one exact-SHA product cache contract`);
+  }
+}
+if (
+  (windowsCliJob.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1 ||
+  windowsCliJob.includes("actions/cache@v4") ||
+  windowsCliJob.includes("actions/cache/save@v4")
+) {
+  throw new Error("Windows CLI must remain a single restore-only product cache reader");
+}
+if (
+  (windowsGuiJob.match(/actions\/cache@v4/gu) ?? []).length !== 1 ||
+  windowsGuiJob.includes("actions/cache/save@v4")
+) {
+  throw new Error("Windows GUI must remain the sole automatic product cache writer");
+}
 requireExactYamlKeySet(
   discordJob,
   4,

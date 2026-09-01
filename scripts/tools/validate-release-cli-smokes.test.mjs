@@ -564,6 +564,33 @@ for (const [name, mutate] of [
       ),
   ],
   [
+    "rejects a Windows product cache without exact source binding",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n            ${{ runner.temp }}/clearra-release/cargo-target\n          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n",
+        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n            ${{ runner.temp }}/clearra-release/cargo-target\n          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}\n",
+      ),
+  ],
+  [
+    "rejects removal of the lock-only Windows cache migration fallback",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n            ${{ runner.temp }}/clearra-release/cargo-target\n          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n          restore-keys: |\n            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-\n            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}\n",
+        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n            ${{ runner.temp }}/clearra-release/cargo-target\n          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n          restore-keys: |\n            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-\n",
+      ),
+  ],
+  [
+    "rejects turning the Windows CLI cache reader into a writer",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "  windows-cli:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n    runs-on: windows-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - uses: actions/cache/restore@v4\n",
+        "  windows-cli:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n    runs-on: windows-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - uses: actions/cache@v4\n",
+      ),
+  ],
+  [
     "rejects removal of the isolated restore-only build snapshot",
     (source) =>
       replaceExactlyOnce(
