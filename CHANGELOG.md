@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.8.0 - 2026-08-28
+## 0.8.0 - 2026-09-02
 
 - Added actual typed product paths for all twelve Build v2 capabilities,
   including colored target and congruence generation, exact coverage
@@ -47,6 +47,12 @@
   drift evidence, Pages accepted-SHA publication, zero-traffic Cloud Run
   candidates, Oracle rollback authority, command-catalog readback, annotated
   tags, and exactly three immutable release assets.
+- Split canonical acceptance into six independent fail-closed leaves, retained
+  single-owner test coverage, and added exact-source Windows product caches
+  with a restore-only CLI reader and a single GUI writer.
+- Added a read-only one-time capture bridge for the exact v0.7.4 legacy Pages
+  deployment and durable recovery evidence for Discord workflows cancelled
+  before any protected runtime promotion begins.
 
 ## 0.7.5 - 2026-08-20
 
