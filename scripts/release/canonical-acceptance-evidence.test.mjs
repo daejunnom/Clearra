@@ -114,11 +114,14 @@ const REQUIRED_JOB_STEPS = Object.freeze(new Map([
     "Produce canonical release gate evidence",
     "Upload canonical release gate evidence",
   ]],
-  ["windows-products", [
+  ["windows-cli", [
     "Build and exercise standalone WASM CPU CLI",
+    "Upload Windows CLI artifact",
+  ]],
+  ["windows-gui", [
     "Build standalone SvelteKit and Tauri GUI",
-    "Stage Windows executables",
-    "Upload Windows product artifacts",
+    "Stage Windows GUI executable",
+    "Upload Windows GUI artifact",
   ]],
 ]));
 
@@ -294,7 +297,7 @@ test(
 );
 
 test("release job evidence rejects duplicate jobs and any failed required step", () => {
-  assert.equal(validateReleaseJobs(jobsPayload(), authority()).length, 10);
+  assert.equal(validateReleaseJobs(jobsPayload(), authority()).length, REQUIRED_JOB_STEPS.size);
   const duplicate = jobsPayload();
   duplicate.jobs.push(structuredClone(duplicate.jobs[0]));
   duplicate.total_count += 1;

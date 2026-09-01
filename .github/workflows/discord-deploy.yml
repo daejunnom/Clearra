@@ -42,6 +42,12 @@ jobs:
       accepted_run_attempt: ${{ steps.authority.outputs.accepted_run_attempt }}
       deploy_discord: ${{ steps.impact.outputs.deploy_discord }}
       impact_scope: ${{ steps.impact.outputs.impact_scope }}
+      component_scope: ${{ steps.impact.outputs.component_scope }}
+      deploy_discord_gateway: ${{ steps.impact.outputs.deploy_discord_gateway }}
+      deploy_heavy_cloud_runtime: ${{ steps.impact.outputs.deploy_heavy_cloud_runtime }}
+      deploy_pc4_lookup_service: ${{ steps.impact.outputs.deploy_pc4_lookup_service }}
+      deploy_pc4_activation_manifest: ${{ steps.impact.outputs.deploy_pc4_activation_manifest }}
+      release_infrastructure_changed: ${{ steps.impact.outputs.release_infrastructure_changed }}
     steps:
       - name: Check out main for exact authority resolution
         uses: actions/checkout@v4
@@ -299,7 +305,12 @@ jobs:
 
   candidate:
     name: Prepare immutable Discord candidate inputs
-    if: needs.authority.outputs.deploy_discord == 'true'
+    if: >-
+      needs.authority.outputs.deploy_discord_gateway == 'true' ||
+      needs.authority.outputs.deploy_heavy_cloud_runtime == 'true' ||
+      needs.authority.outputs.deploy_pc4_lookup_service == 'true' ||
+      needs.authority.outputs.deploy_pc4_activation_manifest == 'true' ||
+      needs.authority.outputs.release_infrastructure_changed == 'true'
     needs: authority
     runs-on: ubuntu-latest
     timeout-minutes: 120

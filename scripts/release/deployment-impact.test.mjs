@@ -52,16 +52,19 @@ test("an empty direct path set is an explicit all-surface no-op", () => {
   assert.equal(impact.deployCli, false);
 });
 
-test("the Discord deploy and recovery workflows are plumbing, not runtime changes", () => {
+test("Discord deployment workflow changes conservatively select their runtime and infrastructure", () => {
   const impact = classifyDeploymentImpact([
     ".github/workflows/discord-deploy.yml",
     ".github/workflows/discord-deploy-recovery.yml",
   ]);
-  assert.equal(impact.scope, "none");
+  assert.equal(impact.scope, "discord");
   assert.equal(impact.deployPages, false);
-  assert.equal(impact.deployDiscord, false);
+  assert.equal(impact.deployDiscord, true);
   assert.equal(impact.deployGui, false);
   assert.equal(impact.deployCli, false);
+  assert.equal(impact.deployDiscordGateway, true);
+  assert.equal(impact.deployHeavyCloudRuntime, true);
+  assert.equal(impact.releaseInfrastructureChanged, true);
 });
 
 test("shared core and release authority changes conservatively select every surface", () => {
@@ -212,6 +215,25 @@ test("runtime-consumer exceptions select the exact deployment surfaces", () => {
     assert.equal(impact.deployGui, expected.gui, expected.path);
     assert.equal(impact.deployCli, expected.cli, expected.path);
   }
+});
+
+test("component deployment vector distinguishes desktop, Discord, PC4, and release infrastructure", () => {
+  const tablebase = classifyDeploymentImpact([
+    "apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin",
+  ]);
+  assert.equal(tablebase.deployPages, true);
+  assert.equal(tablebase.deployDesktopGui, false);
+  assert.equal(tablebase.deployDiscordGateway, false);
+  assert.equal(tablebase.deployHeavyCloudRuntime, true);
+  assert.equal(tablebase.deployPc4LookupService, false);
+  assert.equal(tablebase.deployPc4ActivationManifest, true);
+  assert.equal(tablebase.releaseInfrastructureChanged, false);
+
+  const releaseWorkflow = classifyDeploymentImpact([".github/workflows/release-cli.yml"]);
+  assert.equal(releaseWorkflow.scope, "shared");
+  assert.equal(releaseWorkflow.releaseInfrastructureChanged, true);
+  assert.equal(releaseWorkflow.deployPc4LookupService, true);
+  assert.match(releaseWorkflow.componentScope, /release_infrastructure/u);
 });
 
 test("runtime README deletion is not mistaken for documentation-only impact", () => {

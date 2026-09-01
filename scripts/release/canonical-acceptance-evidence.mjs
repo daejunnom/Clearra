@@ -187,11 +187,14 @@ const REQUIRED_JOBS = Object.freeze(new Map([
     "Produce canonical release gate evidence",
     "Upload canonical release gate evidence",
   ])],
-  ["windows-products", Object.freeze([
+  ["windows-cli", Object.freeze([
     "Build and exercise standalone WASM CPU CLI",
+    "Upload Windows CLI artifact",
+  ])],
+  ["windows-gui", Object.freeze([
     "Build standalone SvelteKit and Tauri GUI",
-    "Stage Windows executables",
-    "Upload Windows product artifacts",
+    "Stage Windows GUI executable",
+    "Upload Windows GUI artifact",
   ])],
 ]));
 

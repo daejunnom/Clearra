@@ -34,6 +34,15 @@ test("primary has exact automatic/manual authority and explicit impact no-op", (
     "deployment-impact.mjs",
     "deploy_discord != 'true'",
   ]) assert.ok(primary.includes(marker), marker);
+  for (const component of [
+    "deploy_discord_gateway",
+    "deploy_heavy_cloud_runtime",
+    "deploy_pc4_lookup_service",
+    "deploy_pc4_activation_manifest",
+    "release_infrastructure_changed",
+  ]) {
+    assert.match(primary, new RegExp(`needs\\.authority\\.outputs\\.${component} == 'true'`, "u"));
+  }
   const authorityCheckout = primary.slice(
     primary.indexOf("Check out main for exact authority resolution"),
     primary.indexOf("Resolve exact current main and one canonical acceptance"),

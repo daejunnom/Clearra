@@ -308,7 +308,8 @@ function createAcceptanceEvidence(ctk3ManifestSha256) {
       "linux-cli",
       "discord-bot",
       "release-acceptance",
-      "windows-products",
+      "windows-cli",
+      "windows-gui",
     ].map((name, index) => ({
       name,
       job_id: String(9000 + index),

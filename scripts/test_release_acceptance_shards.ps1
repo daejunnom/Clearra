@@ -16,6 +16,15 @@ $script:ClearraAllowedTasks = @(
 )
 . (Join-Path $PSScriptRoot 'lib/clearra-task-ui-helpers.ps1')
 
+$script:ReleaseAcceptanceShardTestMarkers = @{
+    'full-local-order' = 'release_acceptance_shard_test=full-local-order status=passed'
+    'foundation-order' = 'release_acceptance_shard_test=foundation-order status=passed'
+    'sanitizer-order' = 'release_acceptance_shard_test=sanitizer-order status=passed'
+    'rust-order' = 'release_acceptance_shard_test=rust-order status=passed'
+    'pages-order' = 'release_acceptance_shard_test=pages-order status=passed'
+    'shard-union-equals-full' = 'release_acceptance_shard_test=shard-union-equals-full status=passed'
+}
+
 function Assert-Sequence {
     param(
         [string]$Name,
@@ -25,7 +34,10 @@ function Assert-Sequence {
     if (($Actual -join '|') -ne ($Expected -join '|')) {
         throw "$Name sequence differs. actual=$($Actual -join ',') expected=$($Expected -join ',')"
     }
-    Write-Output "release_acceptance_shard_test=$Name status=passed"
+    if (-not $script:ReleaseAcceptanceShardTestMarkers.ContainsKey($Name)) {
+        throw "Unknown ReleaseAcceptance shard regression '$Name'."
+    }
+    Write-Output $script:ReleaseAcceptanceShardTestMarkers[$Name]
 }
 
 $full = @(

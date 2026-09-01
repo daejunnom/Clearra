@@ -161,7 +161,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ${{ runner.temp }}/clearra-release/cargo-target
-          key: product-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'crates/**/*.rs', 'crates/**/*.toml') }}
+          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - name: Build standalone WASM CPU CLI
         env:
           CLEARRA_RELEASE_BUILD_ROOT: ${{ runner.temp }}/clearra-release
@@ -467,7 +467,7 @@ jobs:
           path: release-gate-evidence
           if-no-files-found: error
 
-  windows-products:
+  windows-cli:
     if: github.event_name == 'workflow_dispatch'
     needs: metadata
     runs-on: windows-latest
@@ -476,16 +476,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             ${{ runner.temp }}/clearra-release/cargo-target
-          key: product-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json', 'crates/**/*.rs', 'crates/**/*.toml', 'apps/clearra-desktop/**/*') }}
-      - name: Install frontend toolchain
-        run: npm ci --ignore-scripts
+          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}
       - name: Configure external release target
         shell: pwsh
         run: |
@@ -614,34 +611,61 @@ jobs:
           Invoke-ClearraJsonSmoke -Name 'terminal-supply-p0' `
             -CommandArguments @('--format', 'json', '--include-solution-data', 'pc-scenario', '--field', '0x1c0701c07', '--visible-height', '4', '--queue', 'STOILJZ', '--max-pieces', '7', '--exact-pieces', '7', '--count-policy', 'count-unique', '--backend', 'cpu', '--workers', '1') `
             -ExpectedSummary @{ actual_backend = 'wasm-cpu'; unique_solution_count = 18; normalized_unique_solution_count = 18; solution_count_calculated = $true; solution_set_materialized = $true; solution_keys_materialized_count = 18; solution_keys_complete = $true; count_complete = $true; supply_window_resolution = 'projected-terminal-lookahead'; projects_unplaced_lookahead = $true; projects_standard_bag_lookahead = $false; source_sequence_length = 7; total_possible_pattern_count = '1'; normalized_solution_set_hash = 'cts1:8a7fc484d9b49994'; actual_normalized_solution_set_hash = 'cts1:8a7fc484d9b49994' }
+      - name: Upload Windows CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clearra-windows-cli-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: dist/Clearra-CLI-v${{ needs.metadata.outputs.version }}-windows-x86_64.exe
+          if-no-files-found: error
+
+  windows-gui:
+    if: github.event_name == 'workflow_dispatch'
+    needs: metadata
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/clearra-release/cargo-target
+          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}
+      - name: Install frontend toolchain
+        run: npm ci --ignore-scripts
+      - name: Configure external release target
+        shell: pwsh
+        run: |
+          $targetDir = Join-Path $env:RUNNER_TEMP 'clearra-release\cargo-target'
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          "CARGO_TARGET_DIR=$targetDir" >> $env:GITHUB_ENV
       - name: Build standalone SvelteKit and Tauri GUI
         run: npm run tauri -w @clearra/desktop -- build --no-bundle
-      - name: Stage Windows executables
+      - name: Stage Windows GUI executable
         shell: pwsh
         run: |
           $version = '${{ needs.metadata.outputs.version }}'
-          $releaseDir = Join-Path $env:CARGO_TARGET_DIR 'release'
-          $cli = Join-Path $PWD.Path "dist\Clearra-CLI-v$version-windows-x86_64.exe"
-          $gui = Join-Path $releaseDir 'clearra-desktop.exe'
-          if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
-            throw "Exercised Clearra CLI release asset is missing: $cli"
-          }
+          $gui = Join-Path $env:CARGO_TARGET_DIR 'release\clearra-desktop.exe'
           if (-not (Test-Path -LiteralPath $gui -PathType Leaf)) {
             throw "Clearra GUI executable was not produced: $gui"
           }
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item -LiteralPath $gui -Destination "dist\Clearra-GUI-v$version-windows-x86_64.exe"
-      - name: Upload Windows product artifacts
+      - name: Upload Windows GUI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: clearra-windows-products-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
-          path: dist/*
+          name: clearra-windows-gui-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: dist/Clearra-GUI-v${{ needs.metadata.outputs.version }}-windows-x86_64.exe
           if-no-files-found: error
 
   canonical-evidence:
     if: github.event_name == 'workflow_dispatch'
     needs:
-      [metadata, ctk3, linux-cli, discord-bot, release-acceptance, windows-products]
+      [metadata, ctk3, linux-cli, discord-bot, release-acceptance, windows-cli, windows-gui]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -668,10 +692,15 @@ jobs:
         with:
           name: clearra-linux-cli-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
           path: acceptance-inputs/products
-      - name: Download Windows products
+      - name: Download Windows CLI product
         uses: actions/download-artifact@v4
         with:
-          name: clearra-windows-products-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          name: clearra-windows-cli-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: acceptance-inputs/products
+      - name: Download Windows GUI product
+        uses: actions/download-artifact@v4
+        with:
+          name: clearra-windows-gui-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
           path: acceptance-inputs/products
       - name: Read exact workflow job evidence
         env:
@@ -708,7 +737,7 @@ jobs:
   publish:
     if: always() && github.ref_type == 'tag' && needs.metadata.result == 'success'
     needs:
-      [metadata, release-acceptance, linux-cli, windows-products, discord-bot]
+      [metadata, release-acceptance, linux-cli, windows-cli, windows-gui, discord-bot]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

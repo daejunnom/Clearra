@@ -329,7 +329,8 @@ function acceptanceEvidence(sourceCommit) {
       "release-acceptance-rust",
       "release-acceptance-pages",
       "release-acceptance",
-      "windows-products",
+      "windows-cli",
+      "windows-gui",
     ].map((name, index) => ({
       name,
       job_id: String(9000 + index),

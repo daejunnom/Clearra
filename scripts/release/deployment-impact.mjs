@@ -15,18 +15,30 @@ export function classifyDeploymentImpact(paths) {
   let discord = false;
   let gui = false;
   let cli = false;
+  let discordGateway = false;
+  let heavyCloudRuntime = false;
+  let pc4LookupService = false;
+  let pc4ActivationManifest = false;
+  let releaseInfrastructure = false;
   let broad = false;
   for (const path of changed) {
     if (isTestPath(path) || isDocumentationPath(path)) continue;
     if ([
       ".github/workflows/discord-deploy.yml",
       ".github/workflows/discord-deploy-recovery.yml",
-    ].includes(path)) continue;
+    ].includes(path)) {
+      discord = true;
+      discordGateway = true;
+      heavyCloudRuntime = true;
+      releaseInfrastructure = true;
+      continue;
+    }
     if ([
       ".github/workflows/pages.yml",
       ".github/workflows/pages-rollback.yml",
     ].includes(path)) {
       pages = true;
+      releaseInfrastructure = true;
       continue;
     }
     // This static browser asset is also compiled into the native CLI and is
@@ -36,6 +48,8 @@ export function classifyDeploymentImpact(paths) {
       pages = true;
       discord = true;
       cli = true;
+      heavyCloudRuntime = true;
+      pc4ActivationManifest = true;
       continue;
     }
     if (path.startsWith("apps/clearra-web/")) {
@@ -44,6 +58,8 @@ export function classifyDeploymentImpact(paths) {
     }
     if (path.startsWith("apps/clearra-discord-bot/")) {
       discord = true;
+      discordGateway = true;
+      heavyCloudRuntime = true;
       continue;
     }
     if (path.startsWith("packages/ctk3/")) {
@@ -53,6 +69,8 @@ export function classifyDeploymentImpact(paths) {
       pages = true;
       discord = true;
       gui = true;
+      discordGateway = true;
+      heavyCloudRuntime = true;
       continue;
     }
     if (path.startsWith("apps/clearra-desktop/") ||
@@ -89,6 +107,8 @@ export function classifyDeploymentImpact(paths) {
       discord = true;
       gui = true;
       cli = true;
+      discordGateway = true;
+      heavyCloudRuntime = true;
       continue;
     }
     // The Rust CTK/output/bitmap renderer chain is consumed through
@@ -105,28 +125,43 @@ export function classifyDeploymentImpact(paths) {
       discord = true;
       gui = true;
       cli = true;
+      discordGateway = true;
+      heavyCloudRuntime = true;
       continue;
     }
     if (path.startsWith("crates/clearra-cli/")) {
       cli = true;
       discord = true;
+      heavyCloudRuntime = true;
       continue;
     }
     if (isDiscordReleaseAuthority(path)) {
       discord = true;
+      discordGateway = true;
+      heavyCloudRuntime = true;
+      releaseInfrastructure = true;
       continue;
     }
     if (isPagesReleaseAuthority(path)) {
       pages = true;
+      releaseInfrastructure = true;
       continue;
     }
     if (isPagesBuildTool(path)) {
       pages = true;
       continue;
     }
+    if (path.startsWith(".github/workflows/") || path.startsWith("scripts/release/")) {
+      releaseInfrastructure = true;
+      broad = true;
+      continue;
+    }
     broad = true;
   }
-  if (broad) pages = discord = gui = cli = true;
+  if (broad) {
+    pages = discord = gui = cli = true;
+    discordGateway = heavyCloudRuntime = pc4LookupService = pc4ActivationManifest = true;
+  }
   const scope = broad
     ? "shared"
     : [pages && "pages", discord && "discord", gui && "gui", cli && "cli"].filter(Boolean).join("+") || "none";
@@ -136,6 +171,22 @@ export function classifyDeploymentImpact(paths) {
     deployDiscord: discord,
     deployGui: gui,
     deployCli: cli,
+    componentScope: [
+      pages && "pages",
+      gui && "desktop_gui",
+      cli && "cli",
+      discordGateway && "discord_gateway",
+      heavyCloudRuntime && "heavy_cloud_runtime",
+      pc4LookupService && "pc4_lookup_service",
+      pc4ActivationManifest && "pc4_activation_manifest",
+      releaseInfrastructure && "release_infrastructure",
+    ].filter(Boolean).join("+") || "none",
+    deployDesktopGui: gui,
+    deployDiscordGateway: discordGateway,
+    deployHeavyCloudRuntime: heavyCloudRuntime,
+    deployPc4LookupService: pc4LookupService,
+    deployPc4ActivationManifest: pc4ActivationManifest,
+    releaseInfrastructureChanged: releaseInfrastructure,
     changedPaths: Object.freeze(changed),
     changedPathsSha256: createHash("sha256").update(`${changed.join("\n")}\n`, "utf8").digest("hex"),
   });
@@ -274,6 +325,13 @@ function main() {
     deploy_discord: impact.deployDiscord,
     deploy_gui: impact.deployGui,
     deploy_cli: impact.deployCli,
+    component_scope: impact.componentScope,
+    deploy_desktop_gui: impact.deployDesktopGui,
+    deploy_discord_gateway: impact.deployDiscordGateway,
+    deploy_heavy_cloud_runtime: impact.deployHeavyCloudRuntime,
+    deploy_pc4_lookup_service: impact.deployPc4LookupService,
+    deploy_pc4_activation_manifest: impact.deployPc4ActivationManifest,
+    release_infrastructure_changed: impact.releaseInfrastructureChanged,
     changed_paths_sha256: impact.changedPathsSha256,
   };
   if (values["--format"] === "github-output") {

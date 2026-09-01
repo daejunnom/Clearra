@@ -521,10 +521,10 @@ for (const [name, mutate] of [
     (source) => {
       const weakenedPublish = replaceExactlyOnce(
         source,
-        "    needs:\n      [metadata, release-acceptance, linux-cli, windows-products, discord-bot]\n",
+        "    needs:\n      [metadata, release-acceptance, linux-cli, windows-cli, windows-gui, discord-bot]\n",
         "    needs: metadata\n",
       );
-      return `${weakenedPublish}\n  audit-placeholder: # later job must not satisfy publish\n    needs:\n      [metadata, release-acceptance, linux-cli, windows-products, discord-bot]\n    runs-on: ubuntu-latest\n    steps: []\n`;
+      return `${weakenedPublish}\n  audit-placeholder: # later job must not satisfy publish\n    needs:\n      [metadata, release-acceptance, linux-cli, windows-cli, windows-gui, discord-bot]\n    runs-on: ubuntu-latest\n    steps: []\n`;
     },
   ],
   [
@@ -532,7 +532,7 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "    needs:\n      [metadata, ctk3, linux-cli, discord-bot, release-acceptance, windows-products]\n",
+        "    needs:\n      [metadata, ctk3, linux-cli, discord-bot, release-acceptance, windows-cli, windows-gui]\n",
         "    needs: [metadata, ctk3, release-acceptance]\n",
       ),
   ],

@@ -113,11 +113,16 @@ const releaseAcceptancePagesJob = section(
 const releaseAcceptanceJob = section(
   workflow,
   "\n  release-acceptance:",
-  "\n  windows-products:",
+  "\n  windows-cli:",
 );
-const windowsJob = section(
+const windowsCliJob = section(
   workflow,
-  "\n  windows-products:",
+  "\n  windows-cli:",
+  "\n  windows-gui:",
+);
+const windowsGuiJob = section(
+  workflow,
+  "\n  windows-gui:",
   "\n  canonical-evidence:",
 );
 const canonicalEvidenceJob = section(
@@ -306,7 +311,7 @@ const linuxPcTilingEnforcement = section(
   "\n            for (const [key, value] of Object.entries(expectedSummary)) {",
 );
 const windowsPcTilingEnforcement = section(
-  windowsJob,
+  windowsCliJob,
   "\n            if ($ExpectedKind -and $parsed.kind -ne $ExpectedKind) {",
   "\n            foreach ($entry in $ExpectedSummary.GetEnumerator()) {",
 );
@@ -316,7 +321,7 @@ const linuxPcTilingSmoke = section(
   "\nrun_json_smoke failed-queue",
 );
 const windowsPcTilingSmoke = section(
-  windowsJob,
+  windowsCliJob,
   "\n          Invoke-ClearraJsonSmoke -Name 'pc-tiling'",
   "\n          Invoke-ClearraJsonSmoke -Name 'failed-queue'",
 );
@@ -563,22 +568,22 @@ requireText(
 );
 requireText(linuxJob, "node-version: 22", "Linux JSON validator Node version");
 requireText(
-  windowsJob,
+  windowsCliJob,
   "--features wasm-cpu-runtime,webgpu-search",
   "Windows publish features",
 );
 requireText(
-  windowsJob,
+  windowsCliJob,
   "$identity.source_commit -ne $env:GITHUB_SHA",
   "Windows source identity",
 );
 requireText(
-  windowsJob,
+  windowsCliJob,
   "$identity.engine_build_id -ne $env:GITHUB_SHA",
   "Windows engine identity",
 );
 requireText(
-  windowsJob,
+  windowsCliJob,
   "--expected-source-commit $env:GITHUB_SHA",
   "Windows terminal-supply expected source identity",
 );
@@ -592,7 +597,7 @@ for (const smoke of [
   "pc-srs-x",
   "terminal-supply-p0",
 ]) {
-  requireText(windowsJob, `-Name '${smoke}'`, `Windows ${smoke} smoke`);
+  requireText(windowsCliJob, `-Name '${smoke}'`, `Windows ${smoke} smoke`);
 }
 for (const marker of [
   "$embedded.id -ne 'srs-x'",
@@ -601,7 +606,7 @@ for (const marker of [
   "$halfTurnCount -ne 24",
   "action = 'export'; profile = 'srs-x'",
 ]) {
-  requireText(windowsJob, marker, `Windows SRS-X export assertion ${marker}`);
+  requireText(windowsCliJob, marker, `Windows SRS-X export assertion ${marker}`);
 }
 for (const semanticMarker of [
   "actual_backend = 'wasm-cpu-build-probability'",
@@ -615,13 +620,13 @@ for (const semanticMarker of [
   "resource_probability_complete = $false",
 ]) {
   requireText(
-    windowsJob,
+    windowsCliJob,
     semanticMarker,
     `Windows semantic assertion ${semanticMarker}`,
   );
 }
 requireText(
-  windowsJob,
+  windowsCliJob,
   "-ExpectedResourceReport @{ truncated = $false; truncation_reason = $null; probability_complete = $false }",
   "Windows tiling non-calculation resource assertion",
 );
@@ -641,18 +646,18 @@ requireExactNormalizedText(
   "Windows canonical pc.tiling smoke",
 );
 const windowsTerminalSmoke = section(
-  windowsJob,
+  windowsCliJob,
   "\n          Invoke-ClearraJsonSmoke -Name 'terminal-supply-p0'",
-  "\n      - name: Build standalone SvelteKit",
+  "\n      - name: Upload Windows CLI artifact",
 );
 requireTerminalSupplySmoke(windowsTerminalSmoke, "Windows");
 requireText(
-  windowsJob,
+  windowsCliJob,
   "validate-release-cli-smokes.mjs",
   "Windows terminal-supply executable validator script",
 );
 requireText(
-  windowsJob,
+  windowsCliJob,
   TERMINAL_SUPPLY_MODE,
   "Windows terminal-supply validator mode",
 );
@@ -677,7 +682,7 @@ for (const marker of [
   "$jsonLines = & $cli @CommandArguments",
 ]) {
   requireText(
-    windowsJob,
+    windowsCliJob,
     marker,
     `Windows staged release asset execution ${marker}`,
   );
@@ -747,7 +752,8 @@ for (const key of ["CLEARRA_SOURCE_COMMIT", "CLEARRA_ENGINE_BUILD_ID"]) {
 for (const [name, job, runner] of [
   ["CTK3", ctk3Job, "ubuntu-latest"],
   ["Linux CLI", linuxJob, "ubuntu-latest"],
-  ["Windows products", windowsJob, "windows-latest"],
+  ["Windows CLI", windowsCliJob, "windows-latest"],
+  ["Windows GUI", windowsGuiJob, "windows-latest"],
 ]) {
   requireExactYamlKeySet(
     job,
@@ -1361,7 +1367,8 @@ requireExactYamlFlowSequence(
     "linux-cli",
     "discord-bot",
     "release-acceptance",
-    "windows-products",
+    "windows-cli",
+    "windows-gui",
   ],
   "canonical acceptance evidence dependency on every accepted producer",
 );
@@ -1381,7 +1388,8 @@ requireExactStepSkeleton(
     "- name: Download accepted CTK3 distribution",
     "- name: Download accepted Pages build",
     "- name: Download Linux product",
-    "- name: Download Windows products",
+    "- name: Download Windows CLI product",
+    "- name: Download Windows GUI product",
     "- name: Read exact workflow job evidence",
     "- name: Create canonical acceptance evidence",
     "- name: Upload canonical acceptance evidence",
@@ -2077,7 +2085,8 @@ requireExactYamlFlowSequence(
     "metadata",
     "release-acceptance",
     "linux-cli",
-    "windows-products",
+    "windows-cli",
+    "windows-gui",
     "discord-bot",
   ],
   "publication dependency on every release acceptance job",

@@ -1446,7 +1446,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $releaseRustJobStart = $release.IndexOf("`n  release-acceptance-rust:", [System.StringComparison]::Ordinal)
     $releasePagesJobStart = $release.IndexOf("`n  release-acceptance-pages:", [System.StringComparison]::Ordinal)
     $releaseAcceptanceJobStart = $release.IndexOf("`n  release-acceptance:", [System.StringComparison]::Ordinal)
-    $windowsProductsJobStart = $release.IndexOf("`n  windows-products:", [System.StringComparison]::Ordinal)
+    $windowsCliJobStart = $release.IndexOf("`n  windows-cli:", [System.StringComparison]::Ordinal)
+    $windowsGuiJobStart = $release.IndexOf("`n  windows-gui:", [System.StringComparison]::Ordinal)
     $canonicalEvidenceJobStart = $release.IndexOf("`n  canonical-evidence:", [System.StringComparison]::Ordinal)
     $publishBoundaryStart = $release.IndexOf("`n  publish:", [System.StringComparison]::Ordinal)
     if ($metadataJobStart -lt 0 -or
@@ -1458,8 +1459,9 @@ function Invoke-ReleaseIdentityGateValidation {
         $releaseRustJobStart -le $releaseSanitizerJobStart -or
         $releasePagesJobStart -le $releaseRustJobStart -or
         $releaseAcceptanceJobStart -le $releasePagesJobStart -or
-        $windowsProductsJobStart -le $releaseAcceptanceJobStart -or
-        $canonicalEvidenceJobStart -le $windowsProductsJobStart -or
+        $windowsCliJobStart -le $releaseAcceptanceJobStart -or
+        $windowsGuiJobStart -le $windowsCliJobStart -or
+        $canonicalEvidenceJobStart -le $windowsGuiJobStart -or
         $publishBoundaryStart -le $canonicalEvidenceJobStart) {
         Add-ArchitectureError 'Exact source archive workflow job boundaries are missing'
     }
@@ -1486,11 +1488,15 @@ function Invoke-ReleaseIdentityGateValidation {
         )
         $releaseAcceptanceJob = $release.Substring(
             $releaseAcceptanceJobStart,
-            $windowsProductsJobStart - $releaseAcceptanceJobStart
+            $windowsCliJobStart - $releaseAcceptanceJobStart
         )
-        $windowsProductsJob = $release.Substring(
-            $windowsProductsJobStart,
-            $canonicalEvidenceJobStart - $windowsProductsJobStart
+        $windowsCliJob = $release.Substring(
+            $windowsCliJobStart,
+            $windowsGuiJobStart - $windowsCliJobStart
+        )
+        $windowsGuiJob = $release.Substring(
+            $windowsGuiJobStart,
+            $canonicalEvidenceJobStart - $windowsGuiJobStart
         )
         $canonicalEvidenceJob = $release.Substring(
             $canonicalEvidenceJobStart,
@@ -1577,7 +1583,8 @@ function Invoke-ReleaseIdentityGateValidation {
         foreach ($job in @(
             @{ Name = 'CTK3'; Text = $ctk3Job; Runner = 'ubuntu-latest' },
             @{ Name = 'Linux CLI'; Text = $linuxJob; Runner = 'ubuntu-latest' },
-            @{ Name = 'Windows products'; Text = $windowsProductsJob; Runner = 'windows-latest' }
+            @{ Name = 'Windows CLI'; Text = $windowsCliJob; Runner = 'windows-latest' },
+            @{ Name = 'Windows GUI'; Text = $windowsGuiJob; Runner = 'windows-latest' }
         )) {
             Assert-ReleaseYamlExactKeySet `
                 -Text $job.Text `
@@ -1639,7 +1646,7 @@ function Invoke-ReleaseIdentityGateValidation {
         Assert-ReleaseYamlExactFlowSequence `
             -Text $canonicalEvidenceJob `
             -Key 'needs' `
-            -ExpectedValues @('metadata', 'ctk3', 'linux-cli', 'discord-bot', 'release-acceptance', 'windows-products') `
+            -ExpectedValues @('metadata', 'ctk3', 'linux-cli', 'discord-bot', 'release-acceptance', 'windows-cli', 'windows-gui') `
             -Contract 'Canonical acceptance evidence producer dependencies'
         Assert-ReleaseYamlExactScalar `
             -Text $canonicalEvidenceJob `
@@ -1740,7 +1747,13 @@ function Invoke-ReleaseIdentityGateValidation {
         if ($canonicalAcceptanceEvidence.IndexOf('canonical four-shard ReleaseAcceptance fan-in', [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError 'Canonical ReleaseAcceptance evidence must bind the four-shard fan-in command'
         }
-        if ([regex]::Matches($release, 'actions/cache/restore@v4').Count -ne 4 -or
+        $releaseAcceptanceCacheText = @(
+            $releaseFoundationJob,
+            $releaseSanitizerJob,
+            $releaseRustJob,
+            $releasePagesJob
+        ) -join "`n"
+        if ([regex]::Matches($releaseAcceptanceCacheText, 'actions/cache/restore@v4').Count -ne 4 -or
             [regex]::Matches($release, 'actions/cache/save@v4').Count -ne 0 -or
             [regex]::Matches($release, '(?m)^      - uses: actions/cache@v4\s*$').Count -ne 2) {
             Add-ArchitectureError 'Canonical ReleaseAcceptance must use four restore-only cache readers without automatic or explicit cache writers'
@@ -2040,7 +2053,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 -ExpectedValue 'ubuntu-latest' `
                 -Contract 'Release publish runner'
             if ([regex]::Matches($publishHeader, '(?m)^    needs\s*:').Count -ne 1 -or
-                $publishHeader -notmatch '(?m)^    needs:\s*\r?\n      \[metadata, release-acceptance, linux-cli, windows-products, discord-bot\]\s*$' -or
+                $publishHeader -notmatch '(?m)^    needs:\s*\r?\n      \[metadata, release-acceptance, linux-cli, windows-cli, windows-gui, discord-bot\]\s*$' -or
                 [regex]::Matches($publishHeader, '(?m)^    if\s*:').Count -ne 1 -or
                 $publishHeader -notmatch '(?m)^    if: always\(\) && github\.ref_type == ''tag'' && needs\.metadata\.result == ''success''\s*$') {
                 Add-ArchitectureError 'Release publish must depend on every exact acceptance job, tolerate expected skips, and require successful metadata on tags'
