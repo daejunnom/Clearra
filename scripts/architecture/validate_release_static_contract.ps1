@@ -2332,14 +2332,27 @@ function Invoke-ReleaseIdentityGateValidation {
         'name: Preserve or Restore GitHub Pages',
         'mode:',
         '- capture',
+        '- bootstrap-capture',
         '- restore',
         'snapshot_sha:',
         'expected_current_main:',
+        'legacy_release_tag:',
+        'required only for bootstrap-capture',
         'current_pages_sha:',
         'snapshot_run_id:',
         'restore_authorization:',
         'group: pages',
         'cancel-in-progress: false',
+        "inputs.mode == 'capture' || inputs.mode == 'bootstrap-capture'",
+        'PAGES_AUTHORITY_MODE: ${{ inputs.mode }}',
+        'LEGACY_RELEASE_TAG: ${{ inputs.legacy_release_tag }}',
+        'REQUESTED_CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}',
+        'Prepare exact rollback manifest contract',
+        'PAGES_AUTHORITY_MODE: prepare-manifests',
+        'PAGES_CAPTURE_MODE: ${{ inputs.mode }}',
+        'STATIC_MANIFEST_PATH: snapshot-source/apps/clearra-web/static/wasm/clearra_wasm.manifest.json',
+        'BUILD_MANIFEST_PATH: snapshot-source/apps/clearra-web/build/wasm/clearra_wasm.manifest.json',
+        'Stamp exact rollback identity',
         'Revalidate capture authority immediately before artifact creation',
         'clearra-pages-rollback-${SNAPSHOT_SHA}-authority-${AUTHORITY_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}',
         'actions/upload-pages-artifact@v3',
@@ -2382,6 +2395,21 @@ function Invoke-ReleaseIdentityGateValidation {
     if ($pagesRollback -match '(?ms)^\s*push:\s*\r?\n\s*branches:') {
         Add-ArchitectureError 'Pages rollback capture or restore must never run automatically on push'
     }
+    $captureSectionStart = $pagesRollback.IndexOf("`n  capture-authority:", [System.StringComparison]::Ordinal)
+    $restoreSectionStart = $pagesRollback.IndexOf("`n  restore-authority:", [System.StringComparison]::Ordinal)
+    if ($captureSectionStart -lt 0 -or $restoreSectionStart -le $captureSectionStart) {
+        Add-ArchitectureError 'Pages rollback bootstrap capture jobs are not a closed section'
+    } else {
+        $captureSection = $pagesRollback.Substring(
+            $captureSectionStart,
+            $restoreSectionStart - $captureSectionStart
+        )
+        foreach ($forbiddenCaptureMutation in @('pages: write', 'id-token: write', 'actions/deploy-pages')) {
+            if ($captureSection.IndexOf($forbiddenCaptureMutation, [System.StringComparison]::Ordinal) -ge 0) {
+                Add-ArchitectureError "Pages bootstrap capture must remain production-read-only and contains '$forbiddenCaptureMutation'"
+            }
+        }
+    }
     foreach ($required in @(
         'refs/heads/main',
         '.github/workflows/pages.yml',
@@ -2402,6 +2430,30 @@ function Invoke-ReleaseIdentityGateValidation {
         'readRollbackCaptureReport',
         'capture run must contain exactly one sealed report artifact',
         'validatePagesIdentity(identity, manifest, currentPagesSha)',
+        'LEGACY_BOOTSTRAP_RELEASE_TAG = "v0.7.4"',
+        'validateLegacyPagesBootstrapAuthority',
+        'validatePagesCaptureRequestInputs',
+        'preparePagesRollbackManifests',
+        'LEGACY_WASM_MANIFEST_BYTES = 768',
+        'LEGACY_WASM_CAPABILITIES_SHA256',
+        'serializeClearraWasmManifest',
+        'runtime_identity must be absent before legacy bootstrap',
+        'bytes do not match the deterministic v0.7.4 producer format',
+        'open(temporaryPath, "wx"',
+        'rename(staticTemporaryPath, staticRecord.target)',
+        'rename(buildTemporaryPath, buildRecord.target)',
+        'PAGES_AUTHORITY_MODE must be prepare-manifests',
+        '/git/ref/tags/${encodeURIComponent(legacyReleaseTag)}',
+        '/git/tags/${requireSha(tagRef.object.sha, "legacy annotated tag object SHA")}',
+        '/releases/tags/${encodeURIComponent(legacyReleaseTag)}',
+        '/deployments?environment=github-pages&per_page=1',
+        '/deployments/${deploymentId}/statuses?per_page=100',
+        'legacy Pages bootstrap release tag must be an annotated tag',
+        'legacy annotated tag does not peel to the exact Pages snapshot',
+        'legacy Pages bootstrap requires the exact published stable Release',
+        'latest Pages deployment is not the exact legacy snapshot',
+        'legacy Pages bootstrap requires the public release identity to be absent',
+        'REQUESTED_CURRENT_PAGES_SHA',
         'ROLLBACK:${currentPagesSha}:TO:${snapshotSha}',
         '/git/ref/tags/${RELEASE_TAG}',
         '/releases/tags/${RELEASE_TAG}',
@@ -2428,6 +2480,12 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     foreach ($required in @(
         'canonical acceptance requires one exact success and rejects duplicate or wrong authority',
+        'legacy Pages bootstrap binds one approved annotated release to the active 404 site',
+        'bootstrap capture requires its explicit tag and rejects every restore-only extra input',
+        'bootstrap manifest preparation upgrades exact v0.7.4 legacy manifests atomically without changing artifacts',
+        'regular capture verifies manifests without rewriting them and rejects missing or wrong identity',
+        'bootstrap manifest preparation rejects identity, partial identity, legacy drift, mismatch, and extra fields before mutation',
+        'Pages rollback workflow keeps bootstrap capture read-only and reuses the sealed capture path',
         'canonical acceptance query pins the main branch and a non-truncating exact SHA page',
         'capture authority binds the run attempt, job, artifact, retention, and consumer order',
         'capture names are unique per authority, run, and rerun attempt',
@@ -2449,6 +2507,14 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "Pages rollback package regression is missing adversarial case '$required'"
         }
     }
+    $manifestPreparationIndex = $pagesRollback.IndexOf(
+        'Prepare exact rollback manifest contract',
+        [System.StringComparison]::Ordinal
+    )
+    $identityStampIndex = $pagesRollback.IndexOf(
+        'Stamp exact rollback identity',
+        [System.StringComparison]::Ordinal
+    )
     $captureValidationIndex = $pagesRollback.IndexOf(
         'Revalidate capture authority immediately before artifact creation',
         [System.StringComparison]::Ordinal
@@ -2465,11 +2531,13 @@ function Invoke-ReleaseIdentityGateValidation {
         'Upload sealed rollback capture authority',
         [System.StringComparison]::Ordinal
     )
-    if ($captureValidationIndex -lt 0 -or
+    if ($manifestPreparationIndex -lt 0 -or
+        $identityStampIndex -le $manifestPreparationIndex -or
+        $captureValidationIndex -le $identityStampIndex -or
         $captureUploadIndex -le $captureValidationIndex -or
         $captureReadbackIndex -le $captureUploadIndex -or
         $captureReportUploadIndex -le $captureReadbackIndex) {
-        Add-ArchitectureError 'Pages rollback capture must revalidate, create the exact Pages tar, seal actual authorities, and upload the sealed report in order'
+        Add-ArchitectureError 'Pages rollback capture must prepare manifests, stamp identity, revalidate, create the exact Pages tar, seal actual authorities, and upload the sealed report in order'
     }
     $rollbackDownloadIndex = $pagesRollback.IndexOf(
         'Download exact rollback package',
