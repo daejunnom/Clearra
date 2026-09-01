@@ -12,6 +12,21 @@ on:
     workflows: ["Deploy Discord Production"]
     types: [completed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      original_run_id:
+        description: Failed, cancelled, or timed-out Deploy Discord Production run ID
+        required: true
+        type: string
+      original_run_attempt:
+        description: Exact original workflow run attempt
+        required: true
+        default: "1"
+        type: string
+      expected_current_main:
+        description: Exact current main commit containing the trusted recovery fix
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -25,10 +40,13 @@ concurrency:
 jobs:
   authority:
     if: >-
-      github.event.workflow_run.status == 'completed' &&
-      contains(fromJSON('["failure","cancelled","timed_out"]'), github.event.workflow_run.conclusion) &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.status == 'completed' &&
+       contains(fromJSON('["failure","cancelled","timed_out"]'), github.event.workflow_run.conclusion) &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' &&
+       inputs.expected_current_main == github.sha)
     runs-on: ubuntu-latest
     outputs:
       source_commit: ${{ steps.resolve.outputs.source_commit }}
@@ -59,11 +77,19 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-          ORIGINAL_RUN_ID: ${{ github.event.workflow_run.id }}
-          ORIGINAL_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          ORIGINAL_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.original_run_id }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.run_attempt || inputs.original_run_attempt }}
+          EXPECTED_CURRENT_MAIN: ${{ inputs.expected_current_main }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]; then
+            [[ "$ORIGINAL_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$ORIGINAL_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+            [[ "$EXPECTED_CURRENT_MAIN" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$(git rev-parse HEAD)" == "$EXPECTED_CURRENT_MAIN" ]]
+            [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$EXPECTED_CURRENT_MAIN" ]]
+          fi
           authority_root="$RUNNER_TEMP/discord-recovery-resolution"
           mkdir -p "$authority_root"
           gh api --method GET \
@@ -143,7 +169,7 @@ jobs:
       - name: Upload exact recovery resolution
         uses: actions/upload-artifact@v4
         with:
-          name: discord-recovery-resolution-run-${{ github.event.workflow_run.id }}-attempt-${{ github.event.workflow_run.run_attempt }}-recovery-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: discord-recovery-resolution-run-${{ steps.resolve.outputs.workflow_run_id }}-attempt-${{ steps.resolve.outputs.workflow_run_attempt }}-recovery-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/discord-recovery-resolution/recovery-authority.json
           if-no-files-found: error
           retention-days: 90

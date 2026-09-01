@@ -887,12 +887,14 @@ export function validateNoPrestageArtifactAuthority(value, options) {
   const jobs = getExactPrimaryJobAuthority(value, options);
   const promote = jobs.get("promote");
   const sync = jobs.get("sync-observe");
+  const isZeroStepTerminal = (job) =>
+    ["skipped", "cancelled"].includes(job.conclusion) && job.steps.length === 0;
   if (
-    promote.conclusion === "success" || sync.conclusion !== "skipped" || sync.steps.length !== 0
+    promote.conclusion === "success" || !isZeroStepTerminal(sync)
   ) throw new Error("Discord no-prestage authority violates the closed dependency topology");
   const steps = promote.steps;
   const upload = steps.find((step) => step.name === PRESTAGE_UPLOAD_STEP);
-  if (!upload && promote.conclusion !== "skipped") {
+  if (!upload && !isZeroStepTerminal(promote)) {
     throw new Error("Discord recovery promote job lacks the expected prestage upload step");
   }
   if (upload?.conclusion === "success") {

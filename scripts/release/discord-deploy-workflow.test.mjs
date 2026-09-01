@@ -113,10 +113,14 @@ test("ordinary cancellation preserves in-job path and catalog compensation", () 
 
 test("recovery executes only trusted default-branch code and exact current run-attempt authority", () => {
   assert.match(recovery, /workflow_run:\n\s+workflows: \["Deploy Discord Production"\]/u);
+  assert.match(recovery, /workflow_dispatch:\n\s+inputs:\n\s+original_run_id:/u);
+  assert.match(recovery, /inputs\.expected_current_main == github\.sha/u);
   assert.equal((recovery.match(/ref: \$\{\{ github\.sha \}\}/gu) ?? []).length, 2);
   assert.doesNotMatch(recovery, /ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/u);
   for (const marker of [
     "attempts/$ORIGINAL_RUN_ATTEMPT",
+    '[[ "$(git rev-parse HEAD)" == "$EXPECTED_CURRENT_MAIN" ]]',
+    'git/ref/heads/main',
     "primary-run-catalog.json",
     "original-jobs.json",
     "--job-list",

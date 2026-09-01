@@ -687,6 +687,20 @@ test("one successful parent-bound no-op resolution clears exact prior debt", asy
   }
 });
 
+test("a manually dispatched trusted recovery can clear exact prior debt", async () => {
+  const input = catalogs();
+  input.recoveryAttempts.attempts[0] = recoveryRun({ event: "workflow_dispatch" });
+  const plan = planDiscordRecoveryDebt(
+    input.runList,
+    input.primaryAttempts,
+    input.recoveryAttempts,
+    input.artifactPages,
+    debtIdentity(false),
+  );
+  assert.equal(plan.debts.length, 1);
+  assert.equal(plan.debts[0].candidates[0].recovery_workflow_run_id, "300");
+});
+
 test("missing, expired, ambiguous, or parent-mismatched recovery evidence remains debt", async () => {
   const missing = catalogs([]);
   assert.throws(

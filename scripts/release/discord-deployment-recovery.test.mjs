@@ -276,6 +276,23 @@ test("one exact skipped promote job with zero steps is a durable no-mutation pro
   assert.equal(authority.no_mutation_job_step_proof.prestage_upload_step, null);
 });
 
+test("workflow cancellation before promote starts is a durable no-mutation proof", () => {
+  const jobs = jobList({
+    job: { conclusion: "cancelled" },
+    steps: [],
+  });
+  jobs.jobs.find((job) => job.name === "sync-observe").conclusion = "cancelled";
+  const authority = resolveDiscordRecoveryAuthority(
+    run({ conclusion: "cancelled" }),
+    { total_count: 0, artifacts: [] },
+    { ...options, jobList: jobs },
+  );
+  assert.equal(authority.recovery_required, false);
+  assert.equal(authority.no_mutation_job_step_proof.job_name, "promote");
+  assert.equal(authority.no_mutation_job_step_proof.job_conclusion, "cancelled");
+  assert.equal(authority.no_mutation_job_step_proof.prestage_upload_step, null);
+});
+
 test("missing prestage artifact fails closed after upload success or runtime mutation", () => {
   assert.throws(
     () => resolveDiscordRecoveryAuthority(

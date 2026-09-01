@@ -42,6 +42,7 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const RECOVERABLE = new Set(["failure", "cancelled", "timed_out"]);
 const PRIMARY_EVENTS = new Set(["workflow_dispatch", "workflow_run"]);
+const RECOVERY_EVENTS = new Set(["workflow_dispatch", "workflow_run"]);
 const JOB_CONCLUSIONS = new Set([
   "success", "failure", "cancelled", "skipped", "timed_out", "action_required",
   "neutral", "stale", "startup_failure",
@@ -899,7 +900,7 @@ function validateRunIdentity(run, kind, expectedRepository) {
   if (
     run.name !== (isPrimary ? PRIMARY_NAME : RECOVERY_NAME) ||
     run.path !== (isPrimary ? PRIMARY_PATH : RECOVERY_PATH) ||
-    (isPrimary ? !PRIMARY_EVENTS.has(run.event) : run.event !== "workflow_run") ||
+    (isPrimary ? !PRIMARY_EVENTS.has(run.event) : !RECOVERY_EVENTS.has(run.event)) ||
     run.head_branch !== "main" ||
     run.repository?.id !== REPOSITORY_ID ||
     run.repository?.full_name !== repository ||
