@@ -462,6 +462,42 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
   );
 });
 
+test("Pages forward deployment keeps mutation authority in the deploy job only", async () => {
+  const workflow = await readFile(
+    new URL("../../.github/workflows/pages.yml", import.meta.url),
+    "utf8",
+  );
+  const jobsIndex = workflow.indexOf("\njobs:");
+  const deployIndex = workflow.indexOf("\n  deploy:", jobsIndex);
+  assert.notEqual(jobsIndex, -1);
+  assert.notEqual(deployIndex, -1);
+
+  const workflowAuthority = workflow.slice(0, jobsIndex);
+  const predeployJobs = workflow.slice(jobsIndex, deployIndex);
+  const deployJob = workflow.slice(deployIndex);
+  assert.match(workflowAuthority, /permissions:\s+contents: read\s+actions: read/u);
+  assert.doesNotMatch(workflowAuthority, /pages: write|id-token: write/u);
+  assert.doesNotMatch(predeployJobs, /pages: write|id-token: write/u);
+  assert.match(
+    deployJob,
+    /permissions:\s+contents: read\s+actions: read\s+pages: write\s+id-token: write/u,
+  );
+});
+
+test("legacy public identity absence probe rejects redirects", async () => {
+  const authoritySource = await readFile(
+    new URL("./pages-rollback-authority.mjs", import.meta.url),
+    "utf8",
+  );
+  const statusStart = authoritySource.indexOf("async function fetchPublicStatus(url)");
+  const bytesStart = authoritySource.indexOf("async function fetchPublicBytes(url, label)");
+  assert.notEqual(statusStart, -1);
+  assert.ok(bytesStart > statusStart);
+  const statusProbe = authoritySource.slice(statusStart, bytesStart);
+  assert.match(statusProbe, /cache: "no-store"/u);
+  assert.match(statusProbe, /redirect: "error"/u);
+});
+
 test("canonical acceptance requires one exact success and rejects duplicate or wrong authority", () => {
   validateCanonicalRuns(
     { total_count: 1, workflow_runs: [canonicalRun()] },

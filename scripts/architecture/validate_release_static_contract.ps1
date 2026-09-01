@@ -2218,6 +2218,25 @@ function Invoke-ReleaseIdentityGateValidation {
     if ($pages.IndexOf('cancel-in-progress: false', [System.StringComparison]::Ordinal) -lt 0) {
         Add-ArchitectureError 'Pages deployment must serialize with rollback capture and restore without cancelling an in-flight authority'
     }
+    $pagesJobsIndex = $pages.IndexOf("`njobs:", [System.StringComparison]::Ordinal)
+    $pagesDeployIndex = $pages.IndexOf("`n  deploy:", [System.StringComparison]::Ordinal)
+    if ($pagesJobsIndex -lt 0 -or $pagesDeployIndex -le $pagesJobsIndex) {
+        Add-ArchitectureError 'Pages workflow must retain a closed predeploy and deploy-job permission boundary'
+    }
+    else {
+        $pagesWorkflowAuthority = $pages.Substring(0, $pagesJobsIndex)
+        $pagesPredeployJobs = $pages.Substring($pagesJobsIndex, $pagesDeployIndex - $pagesJobsIndex)
+        $pagesDeployJob = $pages.Substring($pagesDeployIndex)
+        if ($pagesWorkflowAuthority -match '(?m)^\s+(pages: write|id-token: write)\s*$' -or
+            $pagesPredeployJobs -match '(?m)^\s+(pages: write|id-token: write)\s*$') {
+            Add-ArchitectureError 'Pages mutation and OIDC authority must not be available before the deploy job'
+        }
+        foreach ($requiredDeployPermission in @('contents: read', 'actions: read', 'pages: write', 'id-token: write')) {
+            if ($pagesDeployJob -notlike "*$requiredDeployPermission*") {
+                Add-ArchitectureError "Pages deploy job is missing explicit permission '$requiredDeployPermission'"
+            }
+        }
+    }
     $pagesRunBlockIndent = $null
     foreach ($line in ($pages -split "`n")) {
         if ($line -match '^(\s*)run:\s*(.*)$') {
@@ -2714,6 +2733,9 @@ function Invoke-ReleaseIdentityGateValidation {
         if ($pagesRollbackAuthority.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Pages rollback authority verifier is missing fail-closed contract '$required'"
         }
+    }
+    if ($pagesRollbackAuthority -notmatch '(?s)async function fetchPublicStatus\(url\).*?cache: "no-store",\s*redirect: "error",\s*\}\);') {
+        Add-ArchitectureError 'Legacy Pages public identity absence probe must reject redirects and bypass caches'
     }
     foreach ($required in @(
         'createHash("sha256")',
