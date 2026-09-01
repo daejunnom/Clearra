@@ -141,6 +141,13 @@ test("legacy identity is separate, canonical, exact-keyed, and capture-bound", (
     legacyReconstructedIdentitySha256(identity),
     createHash("sha256").update(bytes).digest("hex"),
   );
+  const reordered = Object.fromEntries(Object.entries(JSON.parse(bytes)).reverse());
+  assert.throws(
+    () => validateLegacyReconstructedIdentityBytes(
+      Buffer.from(`${JSON.stringify(reordered, null, 2)}\n`, "utf8"),
+    ),
+    /canonical producer bytes/u,
+  );
 
   const fabricatedV2 = {
     schema: "clearra.pages.identity.v2",
@@ -277,7 +284,9 @@ test("sealed v0.7.4 fixture is bound end-to-end across capture package and deplo
     }),
     artifact_digest: `sha256:${"7".repeat(64)}`,
     artifact_sha256: "7".repeat(64),
+    artifact_archive_size_bytes: 6_000_000,
     artifact_tar_sha256: "8".repeat(64),
+    artifact_tar_size_bytes: 8_000_000,
     artifact_api_readback_sha256: "9".repeat(64),
     artifact_created_at: "2026-08-28T00:00:00.000Z",
     artifact_expires_at: "2026-11-26T00:00:00.000Z",

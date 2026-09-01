@@ -17,6 +17,7 @@ import {
 } from "./canonical-release-evidence.mjs";
 import {
   readRollbackCaptureReport,
+  readBoundedResponseBytes,
   expectedCaptureReportArtifactName,
   validateCaptureReportArtifact,
   validateRollbackCaptureReport,
@@ -35,6 +36,8 @@ const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const BASE_PATH = /^\/[A-Za-z0-9._-]+$/u;
 const ARTIFACT_DIGEST = /^sha256:([0-9a-f]{64})$/u;
 const FORWARD_VERSION = "0.8.0";
+const HTTP_READ_TIMEOUT_MS = 30_000;
+const MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MODES = new Set(["forward", "restore"]);
 const REPORT_FIELDS = Object.freeze([
   "schema_id",
@@ -377,14 +380,17 @@ export async function producePagesDeploymentAuthority(input, {
           fetchPublicBytes(
             legacyPublicUrl(LEGACY_PAGES_PAYLOAD.manifest.path),
             "live legacy Pages manifest",
+            LEGACY_PAGES_PAYLOAD.manifest.bytes,
           ),
           fetchPublicBytes(
             legacyPublicUrl(LEGACY_PAGES_PAYLOAD.bindings.path),
             "live legacy Pages bindings",
+            LEGACY_PAGES_PAYLOAD.bindings.bytes,
           ),
           fetchPublicBytes(
             legacyPublicUrl(LEGACY_PAGES_PAYLOAD.wasm.path),
             "live legacy Pages WASM",
+            LEGACY_PAGES_PAYLOAD.wasm.bytes,
           ),
         ]);
         validateLegacySnapshot({
@@ -649,6 +655,7 @@ function githubReader({ repository, token, apiUrl }) {
       method: "GET",
       redirect: "error",
       cache: "no-store",
+      signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
       headers: {
         Accept: "application/vnd.github+json",
         Authorization: `Bearer ${token}`,
@@ -664,25 +671,33 @@ async function publicJsonReader(url, label) {
     method: "GET",
     redirect: "error",
     cache: "no-store",
+    signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
     headers: { Accept: "application/json" },
   });
   return parseJsonResponse(response, label);
 }
 
-async function publicBytesReader(url, label) {
+async function publicBytesReader(url, label, expectedSize) {
+  if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0) {
+    throw new Error(`${label} expected byte length is invalid`);
+  }
   const response = await fetch(url, {
     method: "GET",
     redirect: "error",
     cache: "no-store",
+    signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
     headers: { Accept: "application/octet-stream" },
   });
-  if (!response.ok) throw new Error(`${label} returned HTTP ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+  return readBoundedResponseBytes(response, label, {
+    maximumBytes: expectedSize,
+    exactBytes: expectedSize,
+  });
 }
 
 async function parseJsonResponse(response, label) {
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${label} returned HTTP ${response.status}`);
+  const text = (await readBoundedResponseBytes(response, label, {
+    maximumBytes: MAX_JSON_RESPONSE_BYTES,
+  })).toString("utf8");
   try {
     const value = JSON.parse(text);
     requirePlainObject(value, label);

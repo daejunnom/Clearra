@@ -6,12 +6,14 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   LEGACY_BOOTSTRAP_RELEASE_TAG,
+  captureArtifactAuthoritySha256,
   canonicalAcceptanceQuery,
   expectedCaptureArtifactName,
   expectedCaptureReportArtifactName,
   preparePagesRollbackManifests,
   produceRollbackCaptureReport,
   readRollbackCaptureReport,
+  readBoundedResponseBytes,
   resolveCaptureReportArtifact,
   validateCanonicalRuns,
   validateCaptureAuthority,
@@ -211,6 +213,7 @@ function captureFixture() {
     name: artifactName,
     expired: false,
     digest: ARTIFACT_DIGEST,
+    size_in_bytes: 6_000_000,
     created_at: "2026-08-28T00:09:00Z",
     expires_at: "2026-11-26T00:09:00Z",
     workflow_run: {
@@ -523,6 +526,50 @@ test("capture authority binds the run attempt, job, artifact, retention, and con
   }
 });
 
+test("capture artifact readback hash uses a closed authority projection", () => {
+  const artifact = captureFixture().artifact;
+  const expected = captureArtifactAuthoritySha256(artifact);
+  assert.equal(
+    captureArtifactAuthoritySha256({
+      ...artifact,
+      updated_at: "2099-01-01T00:00:00Z",
+      archive_download_url: "https://api.github.com/unstable-metadata",
+    }),
+    expected,
+  );
+  assert.notEqual(
+    captureArtifactAuthoritySha256({ ...artifact, digest: `sha256:${"f".repeat(64)}` }),
+    expected,
+  );
+});
+
+test("bounded response reader rejects Content-Length, chunked, and exact-size drift", async () => {
+  await assert.rejects(
+    readBoundedResponseBytes(new Response("12345", {
+      headers: { "content-length": "5" },
+    }), "oversized header", { maximumBytes: 4 }),
+    /Content-Length exceeds/u,
+  );
+  const chunked = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Uint8Array.from([1, 2, 3]));
+      controller.enqueue(Uint8Array.from([4, 5, 6]));
+      controller.close();
+    },
+  }));
+  await assert.rejects(
+    readBoundedResponseBytes(chunked, "chunked overrun", { maximumBytes: 5 }),
+    /body exceeds/u,
+  );
+  await assert.rejects(
+    readBoundedResponseBytes(new Response("123"), "exact payload", {
+      maximumBytes: 4,
+      exactBytes: 4,
+    }),
+    /exact byte length/u,
+  );
+});
+
 test("capture names are unique per authority, run, and rerun attempt", () => {
   const first = expectedCaptureArtifactName({
     snapshotSha: SNAPSHOT,
@@ -584,6 +631,7 @@ test("capture report seals actual artifact ID, digest, run attempt, tar hash, an
         name: artifactName,
         expired: false,
         digest: ARTIFACT_DIGEST,
+        size_in_bytes: 6_000_000,
         created_at: "2026-08-28T00:09:00Z",
         expires_at: "2026-11-26T00:09:00Z",
         workflow_run: {
@@ -610,6 +658,8 @@ test("capture report seals actual artifact ID, digest, run attempt, tar hash, an
       },
     });
     assert.equal(report.artifact_sha256, ARTIFACT_DIGEST.slice("sha256:".length));
+    assert.equal(report.artifact_archive_size_bytes, 6_000_000);
+    assert.equal(report.artifact_tar_size_bytes, Buffer.byteLength("exact-pages-tar"));
     assert.equal(
       report.artifact_tar_sha256,
       createHash("sha256").update("exact-pages-tar", "utf8").digest("hex"),
@@ -700,6 +750,7 @@ test("capture report rejects short retention and wrong active run attempt", asyn
         name: artifactName,
         expired: false,
         digest: ARTIFACT_DIGEST,
+        size_in_bytes: 6_000_000,
         created_at: "2026-08-28T00:00:00Z",
         expires_at: "2026-08-29T00:00:00Z",
         workflow_run: { id: 12345, head_branch: "main", head_sha: AUTHORITY },

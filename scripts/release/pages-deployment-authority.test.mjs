@@ -11,6 +11,7 @@ import {
   expectedCaptureReportArtifactName,
 } from "./pages-rollback-authority.mjs";
 import {
+  LEGACY_PAGES_PAYLOAD,
   LEGACY_PAGES_PAYLOADS,
   LEGACY_PAGES_READBACK_SCHEMA,
   LEGACY_PAGES_RELEASE_TAG,
@@ -101,7 +102,9 @@ function legacyCaptureReport() {
     }),
     artifact_digest: `sha256:${"7".repeat(64)}`,
     artifact_sha256: "7".repeat(64),
+    artifact_archive_size_bytes: 6_000_000,
     artifact_tar_sha256: "8".repeat(64),
+    artifact_tar_size_bytes: 8_000_000,
     artifact_api_readback_sha256: "9".repeat(64),
     artifact_created_at: "2026-08-28T00:00:00.000Z",
     artifact_expires_at: "2026-11-26T00:00:00.000Z",
@@ -211,8 +214,14 @@ function fixture({ mode = "forward" } = {}) {
           ? structuredClone(rollbackCaptureReport.legacy_snapshot.identity)
           : identity(SOURCE);
       },
-      async fetchPublicBytes(url) {
+      async fetchPublicBytes(url, _label, expectedSize) {
         assert.match(url, /\/wasm\/clearra_wasm(?:_bg)?[./]/u);
+        const descriptor = url.includes("manifest.json")
+          ? LEGACY_PAGES_PAYLOAD.manifest
+          : url.includes("_bg.")
+            ? LEGACY_PAGES_PAYLOAD.wasm
+            : LEGACY_PAGES_PAYLOAD.bindings;
+        assert.equal(expectedSize, descriptor.bytes);
         return Buffer.from("fixture");
       },
       validateLegacySnapshot(value) {

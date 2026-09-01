@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, lstat } from "node:fs/promises";
+import { readdir, lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import {
+  MAX_PAGES_ROLLBACK_TAR_BYTES,
+  readBoundedRegularFile,
   readRollbackCaptureReport,
   validatePagesIdentity,
   validateRollbackCaptureReport,
@@ -85,6 +87,28 @@ function validateHeaderChecksum(buffer, offset) {
   }
 }
 
+function validateGnuUstarHeader(buffer, offset) {
+  const magic = buffer.subarray(offset + 257, offset + 263);
+  const version = buffer.subarray(offset + 263, offset + 265);
+  if (
+    !magic.equals(Buffer.from("ustar ", "ascii")) ||
+    !version.equals(Buffer.from(" \0", "ascii"))
+  ) {
+    fail("Pages rollback tar must use the exact GNU ustar header emitted by the Pages workflow");
+  }
+}
+
+function validateMemberPrefixCollisions(entries, path, type) {
+  for (const [existingPath, existing] of entries) {
+    if (
+      (existing.type === "0" && path.startsWith(`${existingPath}/`)) ||
+      (type === "0" && existingPath.startsWith(`${path}/`))
+    ) {
+      fail("Pages rollback tar contains a file and descendant path collision");
+    }
+  }
+}
+
 function normalizeMemberPath(rawPath, type) {
   if (
     rawPath.length === 0 ||
@@ -139,9 +163,9 @@ export function parseRollbackTar(bufferValue) {
     }
 
     validateHeaderChecksum(buffer, offset);
+    validateGnuUstarHeader(buffer, offset);
     const name = decodeField(buffer, offset, 100, "tar member name");
-    const prefix = decodeField(buffer, offset + 345, 155, "tar member prefix");
-    const rawPath = prefix === "" ? name : `${prefix}/${name}`;
+    const rawPath = name;
     const typeByte = buffer[offset + 156];
     const type = typeByte === 0 ? "0" : String.fromCharCode(typeByte);
     if (type !== "0" && type !== "5") {
@@ -151,6 +175,7 @@ export function parseRollbackTar(bufferValue) {
     if (entries.has(path)) {
       fail("Pages rollback tar contains a duplicate member path");
     }
+    validateMemberPrefixCollisions(entries, path, type);
 
     const size = parseOctalField(buffer, offset + 124, 12, "tar member size");
     if (type === "5" && size !== 0) {
@@ -161,11 +186,17 @@ export function parseRollbackTar(bufferValue) {
     if (dataEnd > buffer.length) {
       fail("Pages rollback tar member exceeds the archive boundary");
     }
+    const nextOffset = dataStart + Math.ceil(size / BLOCK_SIZE) * BLOCK_SIZE;
+    for (let index = dataEnd; index < nextOffset; index += 1) {
+      if (buffer[index] !== 0) {
+        fail("Pages rollback tar member padding must be zero-filled");
+      }
+    }
     entries.set(path, {
       type,
       content: type === "0" ? buffer.subarray(dataStart, dataEnd) : Buffer.alloc(0),
     });
-    offset = dataStart + Math.ceil(size / BLOCK_SIZE) * BLOCK_SIZE;
+    offset = nextOffset;
   }
 
   if (!foundEnd) {
@@ -199,6 +230,9 @@ export function validateRollbackPackageBuffer(buffer, {
   expectedTarSha256,
   captureReport,
 }) {
+  if (!(buffer instanceof Uint8Array) || buffer.byteLength > MAX_PAGES_ROLLBACK_TAR_BYTES) {
+    fail("Pages rollback tar exceeds the product byte limit");
+  }
   const sha = requirePattern(expectedSha, SHA_PATTERN, "snapshot SHA");
   const expectedDigest = requirePattern(
     expectedTarSha256,
@@ -211,6 +245,9 @@ export function validateRollbackPackageBuffer(buffer, {
   }
 
   validateRollbackCaptureReport(captureReport, { expectedSnapshotSha: sha });
+  if (buffer.byteLength !== captureReport.artifact_tar_size_bytes) {
+    fail("Pages rollback tar size differs from the sealed capture report");
+  }
   if (captureReport.artifact_tar_sha256 !== expectedDigest) {
     fail("Pages rollback tar SHA-256 differs from the sealed capture report");
   }
@@ -275,7 +312,14 @@ export async function validateRollbackPackageDirectory(
   if (!stat.isFile() || stat.isSymbolicLink()) {
     fail("Pages rollback artifact.tar must be a regular file");
   }
-  return validateRollbackPackageBuffer(await readFile(tarPath), {
+  if (stat.size !== captureReport.artifact_tar_size_bytes) {
+    fail("Pages rollback artifact.tar size differs from the sealed capture report");
+  }
+  return validateRollbackPackageBuffer(await readBoundedRegularFile(
+    tarPath,
+    captureReport.artifact_tar_size_bytes,
+    "Pages rollback artifact.tar",
+  ), {
     expectedSha,
     expectedTarSha256,
     captureReport,

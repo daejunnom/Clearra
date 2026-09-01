@@ -47,6 +47,11 @@ const DECIMAL_ID_PATTERN = /^[1-9][0-9]*$/u;
 const RELEASE_TAG = "v0.8.0";
 export const LEGACY_BOOTSTRAP_RELEASE_TAG = LEGACY_PAGES_RELEASE_TAG;
 const MINIMUM_RETENTION_MS = 89 * 24 * 60 * 60 * 1000;
+const HTTP_READ_TIMEOUT_MS = 30_000;
+const MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
+export const MAX_PAGES_ROLLBACK_ARCHIVE_BYTES = 64 * 1024 * 1024;
+export const MAX_PAGES_ROLLBACK_TAR_BYTES = 64 * 1024 * 1024;
+const MAX_CAPTURE_REPORT_BYTES = 2 * 1024 * 1024;
 const EXPECTED_CONTRACT = Object.freeze({
   schema: "clearra.pages.identity.v2",
   contractSchemaVersion: CLEARRA_CONTRACT_SCHEMA_VERSION,
@@ -68,7 +73,9 @@ const CAPTURE_REPORT_FIELDS = Object.freeze([
   "artifact_name",
   "artifact_digest",
   "artifact_sha256",
+  "artifact_archive_size_bytes",
   "artifact_tar_sha256",
+  "artifact_tar_size_bytes",
   "artifact_api_readback_sha256",
   "artifact_created_at",
   "artifact_expires_at",
@@ -128,6 +135,59 @@ function requireObject(value, label) {
     fail(`${label} must be an object`);
   }
   return value;
+}
+
+function requireBoundedByteSize(value, maximum, label) {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    fail(`${label} must be a positive safe integer no greater than ${maximum}`);
+  }
+  return value;
+}
+
+function captureArtifactAuthorityProjection(artifactValue) {
+  const artifact = requireObject(artifactValue, "capture artifact API readback");
+  const workflowRun = requireObject(
+    artifact.workflow_run,
+    "capture artifact workflow run API readback",
+  );
+  if (artifact.expired !== false) {
+    fail("capture artifact API readback is expired");
+  }
+  return Object.freeze({
+    id: requireDecimalId(String(artifact.id), "capture artifact API readback ID"),
+    name: requireString(artifact.name, "capture artifact API readback name"),
+    digest: requirePattern(
+      artifact.digest,
+      DIGEST_PATTERN,
+      "capture artifact API readback digest",
+    ),
+    size_in_bytes: requireBoundedByteSize(
+      artifact.size_in_bytes,
+      MAX_PAGES_ROLLBACK_ARCHIVE_BYTES,
+      "capture artifact API archive size",
+    ),
+    expired: false,
+    created_at: new Date(requireDate(
+      artifact.created_at,
+      "capture artifact API readback created_at",
+    )).toISOString(),
+    expires_at: new Date(requireDate(
+      artifact.expires_at,
+      "capture artifact API readback expires_at",
+    )).toISOString(),
+    workflow_run: Object.freeze({
+      id: requireDecimalId(String(workflowRun.id), "capture artifact workflow run ID"),
+      head_branch: requireString(
+        workflowRun.head_branch,
+        "capture artifact workflow run branch",
+      ),
+      head_sha: requireSha(workflowRun.head_sha, "capture artifact workflow run SHA"),
+    }),
+  });
+}
+
+export function captureArtifactAuthoritySha256(artifactValue) {
+  return canonicalSha256(captureArtifactAuthorityProjection(artifactValue));
 }
 
 export function validatePagesIdentity(identityValue, manifestValue, expectedSha) {
@@ -494,10 +554,20 @@ export function validateRollbackCaptureReport(report, {
   if (digest.slice("sha256:".length) !== report.artifact_sha256) {
     fail("Pages rollback capture artifact digest and SHA-256 differ");
   }
+  requireBoundedByteSize(
+    report.artifact_archive_size_bytes,
+    MAX_PAGES_ROLLBACK_ARCHIVE_BYTES,
+    "capture artifact API archive size",
+  );
   requirePattern(
     report.artifact_tar_sha256,
     SHA256_PATTERN,
     "capture Pages tar SHA-256",
+  );
+  requireBoundedByteSize(
+    report.artifact_tar_size_bytes,
+    MAX_PAGES_ROLLBACK_TAR_BYTES,
+    "capture Pages tar size",
   );
   requirePattern(
     report.artifact_api_readback_sha256,
@@ -542,13 +612,16 @@ export function validateRollbackCaptureReport(report, {
 
 export async function produceRollbackCaptureReport(input, {
   getGithubJson,
-  readArtifactTar = readFile,
+  readArtifactTar,
   sleep = (milliseconds) => new Promise((resolvePromise) =>
     setTimeout(resolvePromise, milliseconds)),
   attempts = 1,
 } = {}) {
-  if (typeof getGithubJson !== "function" || typeof readArtifactTar !== "function") {
-    fail("Pages rollback capture producer requires GitHub and tar readers");
+  if (
+    typeof getGithubJson !== "function" ||
+    (readArtifactTar !== undefined && typeof readArtifactTar !== "function")
+  ) {
+    fail("Pages rollback capture producer requires a GitHub reader and optional tar reader");
   }
   const repository = requirePattern(
     input.repository,
@@ -643,6 +716,11 @@ export async function produceRollbackCaptureReport(input, {
   if (artifactReadbackError) throw artifactReadbackError;
   const createdMilliseconds = requireDate(artifactValue.created_at, "artifact created_at");
   const expiresMilliseconds = requireDate(artifactValue.expires_at, "artifact expires_at");
+  const artifactArchiveSize = requireBoundedByteSize(
+    artifactValue.size_in_bytes,
+    MAX_PAGES_ROLLBACK_ARCHIVE_BYTES,
+    "capture artifact API archive size",
+  );
   const retentionSeconds = (expiresMilliseconds - createdMilliseconds) / 1000;
   if (
     !Number.isSafeInteger(retentionSeconds) ||
@@ -652,14 +730,24 @@ export async function produceRollbackCaptureReport(input, {
   }
   const tarPath = resolve(requireString(input.artifactTarPath, "capture artifact tar path"));
   const metadata = await lstat(tarPath);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size <= 0) {
-    fail("capture artifact tar must be a non-empty regular non-link file");
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    fail("capture artifact tar must be a regular non-link file");
   }
+  const tarSize = requireBoundedByteSize(
+    metadata.size,
+    MAX_PAGES_ROLLBACK_TAR_BYTES,
+    "capture artifact tar size",
+  );
   const tarDirectoryEntries = (await readdir(dirname(tarPath))).sort();
   if (tarDirectoryEntries.length !== 1 || tarDirectoryEntries[0] !== "artifact.tar") {
     fail("downloaded capture artifact must contain exactly one artifact.tar");
   }
-  const tarBytes = await readArtifactTar(tarPath);
+  const tarBytes = readArtifactTar === undefined
+    ? await readBoundedRegularFile(tarPath, MAX_PAGES_ROLLBACK_TAR_BYTES, "capture artifact tar")
+    : Buffer.from(await readArtifactTar(tarPath));
+  if (tarBytes.byteLength !== tarSize) {
+    fail("capture artifact tar size changed during the sealed read");
+  }
   const report = sealCanonicalReport({
     schema_id: PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID,
     repository,
@@ -673,8 +761,10 @@ export async function produceRollbackCaptureReport(input, {
     artifact_name: artifactName,
     artifact_digest: digest,
     artifact_sha256: digest.slice("sha256:".length),
+    artifact_archive_size_bytes: artifactArchiveSize,
     artifact_tar_sha256: createHash("sha256").update(tarBytes).digest("hex"),
-    artifact_api_readback_sha256: canonicalSha256(artifactValue),
+    artifact_tar_size_bytes: tarSize,
+    artifact_api_readback_sha256: captureArtifactAuthoritySha256(artifactValue),
     artifact_created_at: new Date(createdMilliseconds).toISOString(),
     artifact_expires_at: new Date(expiresMilliseconds).toISOString(),
     retention_seconds: retentionSeconds,
@@ -704,14 +794,63 @@ export async function writeRollbackCaptureReport(path, report) {
   return createHash("sha256").update(bytes, "utf8").digest("hex");
 }
 
+export async function readBoundedRegularFile(path, maximumBytes, label) {
+  const target = resolve(requireString(path, `${label} path`));
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
+    fail(`${label} maximum byte length is invalid`);
+  }
+  const pathMetadata = await lstat(target);
+  if (!pathMetadata.isFile() || pathMetadata.isSymbolicLink()) {
+    fail(`${label} must be a regular non-link file`);
+  }
+  const expectedSize = requireBoundedByteSize(pathMetadata.size, maximumBytes, `${label} size`);
+  const handle = await open(target, "r");
+  try {
+    const openedMetadata = await handle.stat();
+    if (!openedMetadata.isFile() || openedMetadata.size !== expectedSize) {
+      fail(`${label} changed before its bounded read`);
+    }
+    const bytes = Buffer.allocUnsafe(expectedSize);
+    let offset = 0;
+    while (offset < expectedSize) {
+      const { bytesRead } = await handle.read(
+        bytes,
+        offset,
+        expectedSize - offset,
+        offset,
+      );
+      if (bytesRead === 0) fail(`${label} ended during its bounded read`);
+      offset += bytesRead;
+    }
+    const overflowProbe = Buffer.allocUnsafe(1);
+    const overflow = await handle.read(overflowProbe, 0, 1, expectedSize);
+    const finalMetadata = await handle.stat();
+    if (overflow.bytesRead !== 0 || finalMetadata.size !== expectedSize) {
+      fail(`${label} grew during its bounded read`);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function readRollbackCaptureReport(path) {
   const target = resolve(requireString(path, "Pages rollback capture report path"));
   await assertSafeDirectoryChain(dirname(target));
   const metadata = await lstat(target);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size <= 0) {
-    fail("Pages rollback capture report must be a non-empty regular non-link file");
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    fail("Pages rollback capture report must be a regular non-link file");
   }
-  const raw = await readFile(target, "utf8");
+  requireBoundedByteSize(
+    metadata.size,
+    MAX_CAPTURE_REPORT_BYTES,
+    "Pages rollback capture report size",
+  );
+  const raw = (await readBoundedRegularFile(
+    target,
+    MAX_CAPTURE_REPORT_BYTES,
+    "Pages rollback capture report",
+  )).toString("utf8");
   let report;
   try {
     report = JSON.parse(raw);
@@ -1038,11 +1177,57 @@ async function assertSafeDirectoryChain(directory) {
   }
 }
 
-async function parseJsonResponse(response, label) {
-  const text = await response.text();
+export async function readBoundedResponseBytes(response, label, {
+  maximumBytes,
+  exactBytes,
+} = {}) {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
+    fail(`${label} response byte limit is invalid`);
+  }
   if (!response.ok) {
     fail(`${label} request failed with HTTP ${response.status}`);
   }
+  const contentLengthValue = response.headers?.get?.("content-length");
+  if (contentLengthValue != null) {
+    if (!/^[0-9]+$/u.test(contentLengthValue)) {
+      fail(`${label} response Content-Length is invalid`);
+    }
+    const contentLength = Number(contentLengthValue);
+    if (!Number.isSafeInteger(contentLength) || contentLength > maximumBytes) {
+      fail(`${label} response Content-Length exceeds the byte limit`);
+    }
+  }
+  if (response.body === null || typeof response.body?.getReader !== "function") {
+    fail(`${label} response body is not a bounded readable stream`);
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      total += chunk.byteLength;
+      if (total > maximumBytes) {
+        await reader.cancel("response byte limit exceeded").catch(() => {});
+        fail(`${label} response body exceeds the byte limit`);
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (exactBytes !== undefined && total !== exactBytes) {
+    fail(`${label} response body differs from the exact byte length`);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+async function parseJsonResponse(response, label) {
+  const text = (await readBoundedResponseBytes(response, label, {
+    maximumBytes: MAX_JSON_RESPONSE_BYTES,
+  })).toString("utf8");
   try {
     return JSON.parse(text);
   } catch {
@@ -1059,10 +1244,20 @@ function apiClient({ repository, token, apiUrl }) {
   };
   return {
     async get(path, label) {
-      return parseJsonResponse(await fetch(`${base}${path}`, { headers }), label);
+      return parseJsonResponse(await fetch(`${base}${path}`, {
+        headers,
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
+      }), label);
     },
     async requireAbsent(path, label) {
-      const response = await fetch(`${base}${path}`, { headers });
+      const response = await fetch(`${base}${path}`, {
+        headers,
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
+      });
       if (response.status !== 404) {
         fail(`${label} must be absent before a pre-release Pages rollback`);
       }
@@ -1074,6 +1269,8 @@ async function fetchPublicJson(url, label) {
   const response = await fetch(url, {
     headers: { Accept: "application/json" },
     cache: "no-store",
+    redirect: "error",
+    signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
   });
   return parseJsonResponse(response, label);
 }
@@ -1082,20 +1279,25 @@ async function fetchPublicStatus(url) {
   const response = await fetch(url, {
     headers: { Accept: "application/json" },
     cache: "no-store",
+    redirect: "error",
+    signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
   });
   return response.status;
 }
 
 async function fetchPublicBytes(url, label) {
+  const expectedSize = arguments[2];
+  requireBoundedByteSize(expectedSize, MAX_PAGES_ROLLBACK_TAR_BYTES, `${label} expected size`);
   const response = await fetch(url, {
     headers: { Accept: "application/octet-stream" },
     cache: "no-store",
     redirect: "error",
+    signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
   });
-  if (!response.ok) {
-    fail(`${label} request failed with HTTP ${response.status}`);
-  }
-  return Buffer.from(await response.arrayBuffer());
+  return readBoundedResponseBytes(response, label, {
+    maximumBytes: expectedSize,
+    exactBytes: expectedSize,
+  });
 }
 
 export function canonicalAcceptanceQuery(sha) {
@@ -1398,14 +1600,17 @@ async function main() {
       fetchPublicBytes(
         `${pageUrl}/${LEGACY_PAGES_PAYLOAD.manifest.path}?authority=${cacheBuster}`,
         "legacy public Pages WASM manifest",
+        LEGACY_PAGES_PAYLOAD.manifest.bytes,
       ),
       fetchPublicBytes(
         `${pageUrl}/${LEGACY_PAGES_PAYLOAD.bindings.path}?authority=${cacheBuster}`,
         "legacy public Pages WASM bindings",
+        LEGACY_PAGES_PAYLOAD.bindings.bytes,
       ),
       fetchPublicBytes(
         `${pageUrl}/${LEGACY_PAGES_PAYLOAD.wasm.path}?authority=${cacheBuster}`,
         "legacy public Pages WASM binary",
+        LEGACY_PAGES_PAYLOAD.wasm.bytes,
       ),
     ]);
     if (!Array.isArray(deployments) || deployments.length !== 1) {
@@ -1536,7 +1741,7 @@ async function main() {
       artifact,
       consumerRun: currentRun,
     });
-    if (canonicalSha256(artifact) !== report.artifact_api_readback_sha256) {
+    if (captureArtifactAuthoritySha256(artifact) !== report.artifact_api_readback_sha256) {
       fail("capture artifact API readback changed after the sealed report was produced");
     }
     await appendFile(env("GITHUB_OUTPUT"), [

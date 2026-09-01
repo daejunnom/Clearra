@@ -22,7 +22,7 @@ import {
 const SHA = "1".repeat(40);
 const AUTHORITY = "2".repeat(40);
 
-function captureReport(tarSha256) {
+function captureReport(tarSha256, tarSize) {
   return sealCanonicalReport({
     schema_id: "clearra.pages.rollback-capture-authority.v2",
     repository: "daejunnom/Clearra",
@@ -41,7 +41,9 @@ function captureReport(tarSha256) {
     }),
     artifact_digest: `sha256:${"3".repeat(64)}`,
     artifact_sha256: "3".repeat(64),
+    artifact_archive_size_bytes: 6_000_000,
     artifact_tar_sha256: tarSha256,
+    artifact_tar_size_bytes: tarSize,
     artifact_api_readback_sha256: "5".repeat(64),
     artifact_created_at: "2026-08-28T00:00:00.000Z",
     artifact_expires_at: "2026-11-26T00:00:00.000Z",
@@ -74,7 +76,7 @@ function legacyReadback(phase) {
   });
 }
 
-function legacyCaptureReport(tarSha256) {
+function legacyCaptureReport(tarSha256, tarSize) {
   const identityValue = createLegacyReconstructedIdentity({
     snapshotSha: LEGACY_PAGES_SNAPSHOT_SHA,
     authoritySha: AUTHORITY,
@@ -99,7 +101,9 @@ function legacyCaptureReport(tarSha256) {
     }),
     artifact_digest: `sha256:${"7".repeat(64)}`,
     artifact_sha256: "7".repeat(64),
+    artifact_archive_size_bytes: 6_000_000,
     artifact_tar_sha256: tarSha256,
+    artifact_tar_size_bytes: tarSize,
     artifact_api_readback_sha256: "8".repeat(64),
     artifact_created_at: "2026-08-28T00:00:00.000Z",
     artifact_expires_at: "2026-11-26T00:00:00.000Z",
@@ -162,8 +166,8 @@ function tarHeader(path, size, type = "0") {
   octal(0, 12).copy(header, 136);
   header.fill(0x20, 148, 156);
   header[156] = type.charCodeAt(0);
-  Buffer.from("ustar\0", "ascii").copy(header, 257);
-  Buffer.from("00", "ascii").copy(header, 263);
+  Buffer.from("ustar ", "ascii").copy(header, 257);
+  Buffer.from(" \0", "ascii").copy(header, 263);
   let checksum = 0;
   for (const byte of header) {
     checksum += byte;
@@ -171,6 +175,14 @@ function tarHeader(path, size, type = "0") {
   const checksumText = checksum.toString(8).padStart(6, "0");
   Buffer.from(`${checksumText}\0 `, "ascii").copy(header, 148);
   return header;
+}
+
+function rewriteHeaderChecksum(buffer, offset = 0) {
+  buffer.fill(0x20, offset + 148, offset + 156);
+  let checksum = 0;
+  for (let index = offset; index < offset + 512; index += 1) checksum += buffer[index];
+  const checksumText = checksum.toString(8).padStart(6, "0");
+  Buffer.from(`${checksumText}\0 `, "ascii").copy(buffer, offset + 148);
 }
 
 function makeTar(entries) {
@@ -205,18 +217,19 @@ test("validates the exact tar hash and both complete identity documents", () => 
   const result = validateRollbackPackageBuffer(tar, {
     expectedSha: SHA,
     expectedTarSha256,
-    captureReport: captureReport(expectedTarSha256),
+    captureReport: captureReport(expectedTarSha256, tar.byteLength),
   });
   assert.equal(result.actualDigest, expectedTarSha256);
   assert.equal(result.entries.get("clearra-build-identity.json").type, "0");
 });
 
 test("rejects an incorrect tar authority before reading identity", () => {
+  const tar = validTar();
   assert.throws(
-    () => validateRollbackPackageBuffer(validTar(), {
+    () => validateRollbackPackageBuffer(tar, {
       expectedSha: SHA,
       expectedTarSha256: "2".repeat(64),
-      captureReport: captureReport("2".repeat(64)),
+      captureReport: captureReport("2".repeat(64), tar.byteLength),
     }),
     /differs from the captured SHA-256/u,
   );
@@ -246,7 +259,10 @@ test("rejects traversal, links, duplicate identities, and forged identity", () =
     assert.throws(() => validateRollbackPackageBuffer(tar, {
       expectedSha: SHA,
       expectedTarSha256: createHash("sha256").update(tar).digest("hex"),
-      captureReport: captureReport(createHash("sha256").update(tar).digest("hex")),
+      captureReport: captureReport(
+        createHash("sha256").update(tar).digest("hex"),
+        tar.byteLength,
+      ),
     }));
   }
 });
@@ -259,6 +275,23 @@ test("rejects corrupted headers and data after the tar end marker", () => {
   const trailing = Buffer.concat([validTar(), Buffer.alloc(512)]);
   trailing[trailing.length - 1] = 1;
   assert.throws(() => parseRollbackTar(trailing), /after its end marker/u);
+});
+
+test("rejects non-portable headers, nonzero padding, and file descendant collisions", () => {
+  const arbitraryMagic = makeTar([{ path: "./file", content: "x" }]);
+  arbitraryMagic[257] = "x".charCodeAt(0);
+  rewriteHeaderChecksum(arbitraryMagic);
+  assert.throws(() => parseRollbackTar(arbitraryMagic), /GNU ustar/u);
+
+  const nonzeroPadding = makeTar([{ path: "./file", content: "x" }]);
+  nonzeroPadding[513] = 1;
+  assert.throws(() => parseRollbackTar(nonzeroPadding), /padding/u);
+
+  const collision = makeTar([
+    { path: "./file", content: "x" },
+    { path: "./file/descendant", content: "y" },
+  ]);
+  assert.throws(() => parseRollbackTar(collision), /descendant path collision/u);
 });
 
 test("sealed legacy mode rejects a fabricated v2 identity before payload downgrade", () => {
@@ -276,7 +309,7 @@ test("sealed legacy mode rejects a fabricated v2 identity before payload downgra
     () => validateRollbackPackageBuffer(tar, {
       expectedSha: LEGACY_PAGES_SNAPSHOT_SHA,
       expectedTarSha256: tarSha256,
-      captureReport: legacyCaptureReport(tarSha256),
+      captureReport: legacyCaptureReport(tarSha256, tar.byteLength),
     }),
     /closed schema|legacy Pages identity schema/u,
   );

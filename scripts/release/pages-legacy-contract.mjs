@@ -303,7 +303,13 @@ export function validateLegacyReconstructedIdentity(identityValue, {
 
 export function serializeLegacyReconstructedIdentity(identityValue) {
   const identity = validateLegacyReconstructedIdentity(identityValue);
-  return `${JSON.stringify(identity, null, 2)}\n`;
+  const canonicalProducerIdentity = createLegacyReconstructedIdentity({
+    snapshotSha: identity.sourceCommit,
+    authoritySha: identity.reconstructionAuthorityCommit,
+    captureRunId: identity.captureRunId,
+    captureRunAttempt: identity.captureRunAttempt,
+  });
+  return `${JSON.stringify(canonicalProducerIdentity, null, 2)}\n`;
 }
 
 export function legacyReconstructedIdentitySha256(identityValue) {
