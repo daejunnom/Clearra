@@ -1,3 +1,4 @@
+# SRP rationale: this regression owner has one change reason: execute the Oracle release wrapper's local and modeled remote authority contract end to end.
 [CmdletBinding()]
 param()
 

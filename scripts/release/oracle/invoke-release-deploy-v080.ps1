@@ -1,3 +1,4 @@
+# SRP rationale: this wrapper has one change reason: execute and verify the closed Oracle deployment protocol from one accepted source across the pinned SSH transport.
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory = $true)]

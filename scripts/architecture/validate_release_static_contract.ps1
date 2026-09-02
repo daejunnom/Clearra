@@ -4687,7 +4687,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'Modeled prestage capture',
         'Modeled prestage backup cleanup',
         "foreach (`$failureKind in @('root', 'upload'))",
-        'disarmed its watchdog after transport cleanup failed.',
+        'changed its loaded timer or service after transport cleanup failed.',
         'Modeled prestage capture accepted duplicate helper output.',
         'oracle_release_deploy_wrapper_test=pass'
     )) {
