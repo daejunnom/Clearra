@@ -16,6 +16,7 @@ import {
 
 import {
   parseRollbackTar,
+  validateRollbackPackageCaptureKind,
   validateRollbackPackageBuffer,
 } from "./pages-rollback-package.mjs";
 
@@ -120,6 +121,23 @@ function legacyCaptureReport(tarSha256, tarSize) {
     status: "captured",
   });
 }
+
+test("restore package admits only a sealed legacy capture kind before deployment", () => {
+  const modern = captureReport("1".repeat(64), 1024);
+  const legacy = legacyCaptureReport("2".repeat(64), 1024);
+  assert.equal(
+    validateRollbackPackageCaptureKind(legacy, "legacy-v0.7.4"),
+    "legacy-v0.7.4",
+  );
+  assert.throws(
+    () => validateRollbackPackageCaptureKind(modern, "legacy-v0.7.4"),
+    /differs from the required mutation kind/u,
+  );
+  assert.throws(
+    () => validateRollbackPackageCaptureKind(legacy, "unknown"),
+    /expected capture kind is invalid/u,
+  );
+});
 
 function identity() {
   return {

@@ -38,6 +38,10 @@ const ARTIFACT_DIGEST = /^sha256:([0-9a-f]{64})$/u;
 const FORWARD_VERSION = "0.8.0";
 const HTTP_READ_TIMEOUT_MS = 30_000;
 const MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_FORWARD_PUBLIC_FILE_COUNT = 1_024;
+const MAX_FORWARD_PUBLIC_TOTAL_BYTES = 64 * 1024 * 1024;
+const MAX_FORWARD_PUBLIC_PATH_LENGTH = 512;
+const FORWARD_PUBLIC_PATH = /^[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*$/u;
 const MODES = new Set(["forward", "restore"]);
 const REPORT_FIELDS = Object.freeze([
   "schema_id",
@@ -215,12 +219,15 @@ export async function producePagesDeploymentAuthority(input, {
     setTimeout(resolvePromise, milliseconds)),
   attempts = 12,
 } = {}) {
+  const mode = requireMode(input.mode);
   if (typeof getGithubJson !== "function" || typeof fetchPublicJson !== "function") {
     throw new Error("Pages deployment producer requires GitHub and public JSON readers");
   }
-  const mode = requireMode(input.mode);
-  if (mode === "restore" && typeof fetchPublicBytes !== "function") {
-    throw new Error("restored legacy Pages authority requires a public byte reader");
+  if (typeof fetchPublicBytes !== "function") {
+    if (mode === "restore") {
+      throw new Error("restored legacy Pages authority requires a public byte reader");
+    }
+    throw new Error("forward Pages authority requires a public byte reader");
   }
   const repository = requirePattern(input.repository, REPOSITORY, "Pages repository");
   const sourceCommit = requireSourceCommit(input.sourceCommit, "Pages deployment source commit");
@@ -366,6 +373,14 @@ export async function producePagesDeploymentAuthority(input, {
           basePath,
           expectedAcceptedRunId: input.acceptedRunId,
           expectedAcceptedRunAttempt: input.acceptedRunAttempt,
+        });
+        await validateLiveForwardPayloads({
+          files: liveIdentity.files,
+          pageUrl,
+          workflowRunId,
+          workflowRunAttempt,
+          attempt,
+          fetchPublicBytes,
         });
       } else {
         const legacyPublicUrl = (path) => {
@@ -555,23 +570,75 @@ function validateLiveIdentity(identity, {
   if (!Array.isArray(identity.files) || identity.files.length === 0) {
     throw new Error("live Pages identity files must be a non-empty array");
   }
+  if (identity.files.length > MAX_FORWARD_PUBLIC_FILE_COUNT) {
+    throw new Error("live Pages identity file count exceeds the public readback limit");
+  }
   let previous = "";
+  let totalBytes = 0;
+  const publicPaths = new Set();
   for (const [index, file] of identity.files.entries()) {
     requireExactKeys(file, ["path", "sha256", "size"], `live Pages file ${index}`);
+    const segments = typeof file.path === "string" ? file.path.split("/") : [];
     if (
       typeof file.path !== "string" ||
       file.path.length === 0 ||
-      file.path.startsWith("/") ||
-      file.path.includes("\\") ||
-      file.path.split("/").includes("..") ||
+      file.path.length > MAX_FORWARD_PUBLIC_PATH_LENGTH ||
+      !FORWARD_PUBLIC_PATH.test(file.path) ||
+      segments.some((segment) => segment === "." || segment === "..") ||
+      file.path === "clearra-build-identity.json" ||
       (previous && previous.localeCompare(file.path, "en") >= 0) ||
       !Number.isSafeInteger(file.size) ||
-      file.size < 0
+      file.size < 0 ||
+      file.size > MAX_FORWARD_PUBLIC_TOTAL_BYTES
     ) {
       throw new Error("live Pages identity file set is invalid or unsorted");
     }
     requireSha256(file.sha256, `live Pages file ${file.path} SHA-256`);
+    totalBytes += file.size;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_FORWARD_PUBLIC_TOTAL_BYTES) {
+      throw new Error("live Pages identity payload bytes exceed the public readback limit");
+    }
     previous = file.path;
+    publicPaths.add(file.path);
+  }
+  for (const path of publicPaths) {
+    let slashIndex = path.indexOf("/");
+    while (slashIndex !== -1) {
+      if (publicPaths.has(path.slice(0, slashIndex))) {
+        throw new Error("live Pages identity file set is invalid or unsorted");
+      }
+      slashIndex = path.indexOf("/", slashIndex + 1);
+    }
+  }
+}
+
+async function validateLiveForwardPayloads({
+  files,
+  pageUrl,
+  workflowRunId,
+  workflowRunAttempt,
+  attempt,
+  fetchPublicBytes,
+}) {
+  for (const [index, file] of files.entries()) {
+    const payloadUrl = new URL(file.path, pageUrl);
+    payloadUrl.searchParams.set(
+      "authority",
+      `${workflowRunId}-${workflowRunAttempt}-${attempt}-${index + 1}`,
+    );
+    const label = `live Pages payload ${file.path}`;
+    const bytes = await fetchPublicBytes(payloadUrl.toString(), label, file.size);
+    if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) {
+      throw new Error(`${label} reader did not return bytes`);
+    }
+    const payload = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (payload.byteLength !== file.size) {
+      throw new Error(`${label} differs from the exact byte length`);
+    }
+    const sha256 = createHash("sha256").update(payload).digest("hex");
+    if (sha256 !== file.sha256) {
+      throw new Error(`${label} differs from the identity SHA-256`);
+    }
   }
 }
 
@@ -677,11 +744,20 @@ async function publicJsonReader(url, label) {
   return parseJsonResponse(response, label);
 }
 
-async function publicBytesReader(url, label, expectedSize) {
-  if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0) {
+export async function publicBytesReader(url, label, expectedSize, {
+  fetchImpl = fetch,
+} = {}) {
+  if (
+    !Number.isSafeInteger(expectedSize) ||
+    expectedSize < 0 ||
+    expectedSize > MAX_FORWARD_PUBLIC_TOTAL_BYTES
+  ) {
     throw new Error(`${label} expected byte length is invalid`);
   }
-  const response = await fetch(url, {
+  if (typeof fetchImpl !== "function") {
+    throw new Error(`${label} fetch implementation is invalid`);
+  }
+  const response = await fetchImpl(url, {
     method: "GET",
     redirect: "error",
     cache: "no-store",
@@ -689,7 +765,7 @@ async function publicBytesReader(url, label, expectedSize) {
     headers: { Accept: "application/octet-stream" },
   });
   return readBoundedResponseBytes(response, label, {
-    maximumBytes: expectedSize,
+    maximumBytes: Math.max(expectedSize, 1),
     exactBytes: expectedSize,
   });
 }

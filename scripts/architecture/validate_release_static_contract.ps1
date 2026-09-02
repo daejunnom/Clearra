@@ -2245,9 +2245,26 @@ function Invoke-ReleaseIdentityGateValidation {
             $pagesPredeployJobs -match '(?m)^\s+(pages: write|id-token: write)\s*$') {
             Add-ArchitectureError 'Pages mutation and OIDC authority must not be available before the deploy job'
         }
-        foreach ($requiredDeployPermission in @('contents: read', 'actions: read', 'pages: write', 'id-token: write')) {
+        foreach ($requiredDeployPermission in @('contents: read', 'actions: read', 'deployments: read', 'pages: write', 'id-token: write')) {
             if ($pagesDeployJob -notlike "*$requiredDeployPermission*") {
                 Add-ArchitectureError "Pages deploy job is missing explicit permission '$requiredDeployPermission'"
+            }
+        }
+        $pagesAcceptedSourceIndex = $pagesPredeployJobs.IndexOf("`n  accepted-source:", [System.StringComparison]::Ordinal)
+        $pagesBuildIndex = $pagesPredeployJobs.IndexOf("`n  build:", [System.StringComparison]::Ordinal)
+        if ($pagesAcceptedSourceIndex -lt 0 -or $pagesBuildIndex -le $pagesAcceptedSourceIndex) {
+            Add-ArchitectureError 'Pages accepted-source and build permission boundaries are missing'
+        } else {
+            $pagesAcceptedSourceJob = $pagesPredeployJobs.Substring(
+                $pagesAcceptedSourceIndex,
+                $pagesBuildIndex - $pagesAcceptedSourceIndex
+            )
+            $pagesBuildJobPermissions = $pagesPredeployJobs.Substring($pagesBuildIndex)
+            if ($pagesAcceptedSourceJob.IndexOf('deployments: read', [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError 'Pages accepted-source job requires explicit read-only deployment authority for legacy projection checks'
+            }
+            if ($pagesBuildJobPermissions.IndexOf('deployments: read', [System.StringComparison]::Ordinal) -ge 0) {
+                Add-ArchitectureError 'Pages build job must not inherit or receive deployment read authority'
             }
         }
     }
@@ -2566,6 +2583,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'run-id: ${{ inputs.snapshot_run_id }}',
         'Download sealed rollback capture report for package validation',
         'PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-capture-report-package/pages-rollback-capture-authority.json',
+        'PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND: legacy-v0.7.4',
         'node authority-source/scripts/release/pages-rollback-package.mjs',
         'Upload exact rollback Pages artifact',
         'name: github-pages',
@@ -2706,15 +2724,32 @@ function Invoke-ReleaseIdentityGateValidation {
         'capture_kind: captureKind',
         'legacy_snapshot: legacySnapshot === null ? null : structuredClone(legacySnapshot)',
         'downloaded capture artifact must contain exactly one artifact.tar',
-        'capture_report_file_sha256=${reportFileSha256}',
+        'capture_report_file_sha256=${captureReportRecord.file_sha256}',
         'resolveCaptureReportArtifact',
         'readRollbackCaptureReport',
         'capture run must contain exactly one sealed report artifact',
-        'validatePagesIdentity(identity, manifest, currentPagesSha)',
+        'validateLivePagesIdentity(identity, manifest, currentPagesSha)',
         'LEGACY_PAGES_RELEASE_TAG',
         'LEGACY_PAGES_SNAPSHOT_SHA',
         'LEGACY_PAGES_TAG_OBJECT_SHA',
         'validateLegacyPagesBootstrapAuthority',
+        'validateLegacyForwardPublicAuthority',
+        'validateSealedCaptureConsumerAuthority',
+        'verifyCurrentPagesAgainstCapture',
+        'validatedCaptureReport: captureReportRecord.report',
+        'if (captureKind === "legacy-v0.7.4")',
+        'if (captureKind === "modern-v2")',
+        'sealedReadback:',
+        'preartifact_public_readback',
+        '`/deployments/${sealedDeploymentId}`',
+        '`/deployments/${sealedDeploymentId}/statuses?per_page=100&page=1`',
+        '`/deployments/${sealedDeploymentId}/statuses?per_page=100&page=2`',
+        'validateCompleteDeploymentStatuses',
+        'second page must be exactly empty',
+        'validatePagesMutationCaptureKind',
+        'Pages restore requires a sealed v0.7.4 capture report',
+        'validatePagesAuthorityPhase',
+        'complete page with total_count equal to its array length',
         'validatePagesCaptureRequestInputs',
         'preparePagesRollbackManifests',
         'modern rollback manifest preparation is available only for regular capture',
@@ -2732,7 +2767,8 @@ function Invoke-ReleaseIdentityGateValidation {
         '/git/tags/${requireSha(tagRef.object.sha, "legacy annotated tag object SHA")}',
         '/releases/tags/${encodeURIComponent(legacyReleaseTag)}',
         '/deployments?environment=github-pages&per_page=1',
-        '/deployments/${deploymentId}/statuses?per_page=100',
+        '/deployments/${deploymentId}/statuses?per_page=100&page=1',
+        '/deployments/${deploymentId}/statuses?per_page=100&page=2',
         'legacy Pages bootstrap release tag must be an annotated tag',
         'legacy annotated tag does not peel to the exact Pages snapshot',
         'legacy Pages bootstrap requires the exact published stable Release',
@@ -2747,6 +2783,42 @@ function Invoke-ReleaseIdentityGateValidation {
         if ($pagesRollbackAuthority.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Pages rollback authority verifier is missing fail-closed contract '$required'"
         }
+    }
+    $pagesAuthorityMainIndex = $pagesRollbackAuthority.IndexOf('async function main()', [System.StringComparison]::Ordinal)
+    $sealedConsumerIndex = $pagesRollbackAuthority.IndexOf(
+        'captureReportRecord = await validateSealedCaptureConsumerAuthority({',
+        [Math]::Max(0, $pagesAuthorityMainIndex),
+        [System.StringComparison]::Ordinal
+    )
+    $captureKindGateIndex = $pagesRollbackAuthority.IndexOf(
+        'validatePagesMutationCaptureKind(',
+        [Math]::Max(0, $sealedConsumerIndex),
+        [System.StringComparison]::Ordinal
+    )
+    $publicRouteIndex = $pagesRollbackAuthority.IndexOf(
+        'await verifyCurrentPagesAgainstCapture({',
+        [Math]::Max(0, $captureKindGateIndex),
+        [System.StringComparison]::Ordinal
+    )
+    if ($pagesAuthorityMainIndex -lt 0 -or
+        $sealedConsumerIndex -le $pagesAuthorityMainIndex -or
+        $captureKindGateIndex -le $sealedConsumerIndex -or
+        $publicRouteIndex -le $captureKindGateIndex) {
+        Add-ArchitectureError 'Pages capture kind routing must occur only after the complete sealed consumer authority is validated'
+    }
+    $publicRouterStart = $pagesRollbackAuthority.IndexOf(
+        'export async function verifyCurrentPagesAgainstCapture({',
+        [System.StringComparison]::Ordinal
+    )
+    $captureReportMainStart = $pagesRollbackAuthority.IndexOf(
+        'async function captureReportMain()',
+        [Math]::Max(0, $publicRouterStart),
+        [System.StringComparison]::Ordinal
+    )
+    if ($publicRouterStart -lt 0 -or $captureReportMainStart -le $publicRouterStart) {
+        Add-ArchitectureError 'Pages current-public routing helper must have a closed function boundary'
+    } elseif ($pagesRollbackAuthority.Substring($publicRouterStart, $captureReportMainStart - $publicRouterStart) -match '\bcatch\b') {
+        Add-ArchitectureError 'Pages current-public routing must never use catch fallback between legacy and modern contracts'
     }
     $publicStatusStart = $pagesRollbackAuthority.IndexOf('async function fetchPublicStatus(url)', [System.StringComparison]::Ordinal)
     $publicBytesStart = $pagesRollbackAuthority.IndexOf('async function fetchPublicBytes(url, label)', [System.StringComparison]::Ordinal)
@@ -2767,6 +2839,9 @@ function Invoke-ReleaseIdentityGateValidation {
         'captureReport.artifact_tar_sha256 !== expectedDigest',
         'Pages rollback tar SHA-256 differs from the sealed capture report',
         'PAGES_ROLLBACK_CAPTURE_REPORT_PATH is required',
+        'PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND',
+        'validateRollbackPackageCaptureKind',
+        'Pages rollback package capture kind differs from the required mutation kind',
         'readRollbackCaptureReport(captureReportPath)',
         'captureReport.capture_kind === "legacy-v0.7.4"',
         'expectedAuthoritySha: captureReport.authority_source_commit',
@@ -2812,6 +2887,9 @@ function Invoke-ReleaseIdentityGateValidation {
         'serializeLegacyReconstructedIdentity',
         'legacyReconstructedIdentitySha256',
         'createLegacyPublicReadbackEvidence',
+        'validateLegacyForwardPublicAuthority',
+        'validateLegacyForwardPublicAuthorityProjection',
+        'legacy Pages forward public authority changed since the sealed capture',
         'validateLegacyPagesPublicSnapshot',
         'identityPath, "wx", 0o600',
         'rebuilt static and deployable legacy Pages payloads differ'
@@ -2826,6 +2904,8 @@ function Invoke-ReleaseIdentityGateValidation {
         'legacy identity is separate, canonical, exact-keyed, and capture-bound',
         'public readback evidence is phase-bound, canonical, and tamper-evident',
         'public identity or any public byte drift fails closed',
+        'legacy forward revalidates the sealed 404 and exact public authority projection',
+        'legacy forward rejects identity, byte, tag, release, deployment, and status drift',
         'bootstrap path never assumes the absent v0.7.4 modern release helper',
         'sealed v0.7.4 fixture is bound end-to-end across capture package and deployment'
     )) {
@@ -2839,6 +2919,9 @@ function Invoke-ReleaseIdentityGateValidation {
         'bootstrap capture requires its explicit tag and rejects every restore-only extra input',
         'regular capture verifies manifests without rewriting them and rejects missing or wrong identity',
         'legacy manifest handling is excluded from the modern preparation path',
+        'authority phases are closed for capture and mutation modes',
+        'forward capture kinds are explicit and restore rejects modern capture before mutation',
+        'current Pages routing never falls back between legacy bytes and modern identity',
         'Pages rollback workflow keeps bootstrap capture read-only and reuses the sealed capture path',
         'canonical acceptance query pins the main branch and a non-truncating exact SHA page',
         'capture authority binds the run attempt, job, artifact, retention, and consumer order',
@@ -2853,6 +2936,7 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
+        'restore package admits only a sealed legacy capture kind before deployment',
         'validates the exact tar hash and both complete identity documents',
         'rejects an incorrect tar authority before reading identity',
         'rejects traversal, links, duplicate identities, and forged identity',
@@ -3020,6 +3104,17 @@ function Invoke-ReleaseIdentityGateValidation {
     if ($pagesRollback -notmatch '(?ms)^  deploy-restore:.*?^    needs:\s*\r?\n\s+- restore-authority\s*\r?\n\s+- restore-package\s*$') {
         Add-ArchitectureError 'Pages restore deployment must depend on both restore authority and the validated package'
     }
+    $deployRestoreStart = $pagesRollback.IndexOf("`n  deploy-restore:", [System.StringComparison]::Ordinal)
+    if ($deployRestoreStart -lt 0) {
+        Add-ArchitectureError 'Pages restore deploy job is missing'
+    } else {
+        $deployRestoreJob = $pagesRollback.Substring($deployRestoreStart)
+        foreach ($requiredRestorePermission in @('contents: read', 'actions: read', 'deployments: read', 'pages: write', 'id-token: write')) {
+            if ($deployRestoreJob.IndexOf($requiredRestorePermission, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Pages restore deploy job is missing explicit permission '$requiredRestorePermission'"
+            }
+        }
+    }
     if ($rollbackDownloadIndex -lt 0 -or
         $rollbackReportDownloadIndex -le $rollbackDownloadIndex -or
         $rollbackPackageValidationIndex -le $rollbackReportDownloadIndex -or
@@ -3055,6 +3150,19 @@ function Invoke-ReleaseIdentityGateValidation {
         'rollback capture run differs from the sealed capture report',
         'rollback report artifact name differs from the sealed capture authority',
         'restored legacy Pages authority requires a public byte reader',
+        'forward Pages authority requires a public byte reader',
+        'MAX_FORWARD_PUBLIC_FILE_COUNT',
+        'MAX_FORWARD_PUBLIC_TOTAL_BYTES',
+        'MAX_FORWARD_PUBLIC_PATH_LENGTH',
+        'FORWARD_PUBLIC_PATH',
+        'validateLiveForwardPayloads',
+        'live Pages identity file count exceeds the public readback limit',
+        'live Pages identity payload bytes exceed the public readback limit',
+        'file.path === "clearra-build-identity.json"',
+        'redirect: "error"',
+        'cache: "no-store"',
+        'exactBytes: expectedSize',
+        'differs from the identity SHA-256',
         'validateLegacyDeployedPagesSnapshot',
         '/actions/artifacts/${rollbackReportArtifactId}',
         'local rollback capture report SHA-256 differs from predeploy authority',
@@ -3066,9 +3174,13 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
-        'seals forward artifact, run-attempt, deployment status, and live identity API readbacks',
+        'seals forward artifact, deployment, identity, and every live payload byte readback',
         'restore authority derives accepted identity and queries the deploy action workflow SHA',
         'rejects artifact digest, run attempt, deployment status, and public identity drift',
+        'forward live seal rejects missing, redirected, wrong-sized, and hash-drifted payloads',
+        'forward live seal retries partial CDN convergence and only seals one complete generation',
+        'forward identity manifest rejects duplicate, unsafe, excessive-count, and excessive-byte sets',
+        'public byte reader enforces no-store, no-redirect, exact bounded streaming',
         'restore late binding rejects report artifact substitution and public byte drift',
         'writes one canonical exclusive report file and rejects tampering'
     )) {

@@ -355,6 +355,7 @@ jobs:
           SNAPSHOT_TAR_SHA256: ${{ needs.restore-authority.outputs.tar_sha256 }}
           PAGES_ROLLBACK_PACKAGE_DIR: rollback-package
           PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-capture-report-package/pages-rollback-capture-authority.json
+          PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND: legacy-v0.7.4
         run: node authority-source/scripts/release/pages-rollback-package.mjs
       - name: Upload exact rollback Pages artifact
         id: restored-pages-artifact
@@ -374,6 +375,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      deployments: read
       pages: write
       id-token: write
     environment:

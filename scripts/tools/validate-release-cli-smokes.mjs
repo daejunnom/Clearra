@@ -77,6 +77,18 @@ const pagesWorkflow = await readFile(
   new URL(".github/workflows/pages.yml", root),
   "utf8",
 );
+const pagesRollbackAuthoritySource = (await readFile(
+  new URL("scripts/release/pages-rollback-authority.mjs", root),
+  "utf8",
+)).replaceAll("\r\n", "\n");
+const pagesLegacyContractSource = (await readFile(
+  new URL("scripts/release/pages-legacy-contract.mjs", root),
+  "utf8",
+)).replaceAll("\r\n", "\n");
+const pagesDeploymentAuthoritySource = (await readFile(
+  new URL("scripts/release/pages-deployment-authority.mjs", root),
+  "utf8",
+)).replaceAll("\r\n", "\n");
 
 const triggerSection = section(workflow, "\non:", "\npermissions:");
 const workflowPermissions = section(workflow, "\npermissions:", "\nconcurrency:");
@@ -302,6 +314,11 @@ const pagesDeployPermissions = section(
   pagesDeployHeader,
   "\n    permissions:",
   "\n    environment:",
+);
+const pagesAcceptedSourcePermissions = section(
+  pagesAcceptedSourceJob,
+  "\n    permissions:",
+  "\n    outputs:",
 );
 const pagesLateAcceptedRunStep = section(
   pagesDeployJob,
@@ -1524,9 +1541,28 @@ for (const marker of [
 requireExactYamlKeySet(
   pagesAcceptedSourceJob,
   4,
-  ["outputs", "runs-on", "steps"],
+  ["permissions", "outputs", "runs-on", "steps"],
   "Pages accepted-source job",
 );
+requireExactYamlKeySet(
+  pagesAcceptedSourcePermissions,
+  6,
+  ["contents", "actions", "deployments"],
+  "Pages accepted-source permissions",
+);
+for (const [key, value] of [
+  ["contents", "read"],
+  ["actions", "read"],
+  ["deployments", "read"],
+]) {
+  requireExactYamlScalar(
+    pagesAcceptedSourcePermissions,
+    key,
+    value,
+    `Pages accepted-source ${key} permission`,
+    6,
+  );
+}
 const pagesAcceptedOutputs = section(
   pagesAcceptedSourceJob,
   "\n    outputs:",
@@ -1626,6 +1662,58 @@ for (const marker of [
     pagesRollbackAuthorityStep,
     marker,
     `Pages sealed rollback report consumer ${marker}`,
+  );
+}
+for (const marker of [
+  "validateSealedCaptureConsumerAuthority({",
+  "verifyCurrentPagesAgainstCapture({",
+  "validatedCaptureReport: captureReportRecord.report",
+  'if (captureKind === "legacy-v0.7.4")',
+  'if (captureKind === "modern-v2")',
+  "validateLegacyAuthority = validateLegacyForwardPublicAuthority",
+  ').preartifact_public_readback',
+  "`/deployments/${sealedDeploymentId}`",
+  "`/deployments/${sealedDeploymentId}/statuses?per_page=100&page=1`",
+  "`/deployments/${sealedDeploymentId}/statuses?per_page=100&page=2`",
+  "validateCompleteDeploymentStatuses(",
+  "second page must be exactly empty",
+  "fetchPublicStatus(",
+  "LEGACY_PAGES_PAYLOAD.manifest.bytes",
+  "LEGACY_PAGES_PAYLOAD.bindings.bytes",
+  "LEGACY_PAGES_PAYLOAD.wasm.bytes",
+]) {
+  requireText(
+    pagesRollbackAuthoritySource,
+    marker,
+    `Pages legacy forward rollback authority ${marker}`,
+  );
+}
+for (const marker of [
+  "validateLegacyForwardPublicAuthorityProjection({",
+  "validateLegacyPagesPublicSnapshot({",
+  "legacy Pages forward public authority changed since the sealed capture",
+  "canonicalJson(currentProjection) !==\n    canonicalJson(legacyPublicAuthorityProjectionFromEvidence(baseline))",
+]) {
+  requireText(
+    pagesLegacyContractSource,
+    marker,
+    `Pages legacy forward immutable contract ${marker}`,
+  );
+}
+for (const marker of [
+  "        await validateLiveForwardPayloads({",
+  "MAX_FORWARD_PUBLIC_FILE_COUNT",
+  "MAX_FORWARD_PUBLIC_TOTAL_BYTES",
+  "MAX_FORWARD_PUBLIC_PATH_LENGTH",
+  'redirect: "error"',
+  'cache: "no-store"',
+  "exactBytes: expectedSize",
+  "differs from the identity SHA-256",
+]) {
+  requireText(
+    pagesDeploymentAuthoritySource,
+    marker,
+    `Pages deployed public byte authority ${marker}`,
   );
 }
 for (const forbidden of [
@@ -1786,12 +1874,13 @@ requireExactYamlKeySet(
 requireExactYamlKeySet(
   pagesDeployPermissions,
   6,
-  ["contents", "actions", "pages", "id-token"],
+  ["contents", "actions", "deployments", "pages", "id-token"],
   "Pages deploy permissions",
 );
 for (const [key, value, label] of [
   ["contents", "read", "Pages deploy contents permission"],
   ["actions", "read", "Pages deploy actions permission"],
+  ["deployments", "read", "Pages deploy deployments permission"],
   ["pages", "write", "Pages deploy mutation permission"],
   ["id-token", "write", "Pages deploy OIDC permission"],
 ]) {

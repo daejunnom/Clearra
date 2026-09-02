@@ -16,13 +16,18 @@ import {
   readBoundedResponseBytes,
   resolveCaptureReportArtifact,
   validateCanonicalRuns,
+  validateCompleteDeploymentStatuses,
   validateCaptureAuthority,
   validateCaptureReportArtifact,
   validateLegacyPagesBootstrapAuthority,
+  validateLivePagesIdentity,
   validatePagesCaptureRequestInputs,
+  validatePagesAuthorityPhase,
   validatePagesIdentity,
+  validatePagesMutationCaptureKind,
   validateRollbackCaptureReport,
   validateRunAttemptPolicy,
+  verifyCurrentPagesAgainstCapture,
   writeRollbackCaptureReport,
 } from "./pages-rollback-authority.mjs";
 
@@ -87,6 +92,13 @@ function pagesIdentity(sha = SNAPSHOT) {
       supplySemanticsId: "clearra.supply.projected-terminal-lookahead.v1",
       artifactSchemaVersion: "clearra.solution-data.v1",
       version: "0.7.5",
+      acceptedRunId: "12345",
+      acceptedRunAttempt: "1",
+      basePath: "/Clearra",
+      files: [
+        { path: "index.html", size: 128, sha256: "c".repeat(64) },
+        { path: "wasm/clearra_wasm_bg.wasm", size: 256, sha256: "d".repeat(64) },
+      ],
     },
     manifest: {
       build: {
@@ -99,6 +111,22 @@ function pagesIdentity(sha = SNAPSHOT) {
         },
       },
     },
+  };
+}
+
+function reconstructedPagesIdentity(sha = SNAPSHOT) {
+  const { identity, manifest } = pagesIdentity(sha);
+  return {
+    identity: {
+      schema: identity.schema,
+      sourceCommit: identity.sourceCommit,
+      engineBuildId: identity.engineBuildId,
+      contractSchemaVersion: identity.contractSchemaVersion,
+      supplySemanticsId: identity.supplySemanticsId,
+      artifactSchemaVersion: identity.artifactSchemaVersion,
+      version: identity.version,
+    },
+    manifest,
   };
 }
 
@@ -191,6 +219,7 @@ function captureFixture() {
     updated_at: "2026-08-28T00:10:00Z",
   };
   const captureJobs = {
+    total_count: 2,
     jobs: [
       {
         name: "capture-authority",
@@ -246,21 +275,52 @@ function captureFixture() {
 
 test("full Pages and WASM identity contract is required", () => {
   const valid = pagesIdentity();
-  validatePagesIdentity(valid.identity, valid.manifest, SNAPSHOT);
+  validateLivePagesIdentity(valid.identity, valid.manifest, SNAPSHOT);
+  const reconstructed = reconstructedPagesIdentity();
+  validatePagesIdentity(reconstructed.identity, reconstructed.manifest, SNAPSHOT);
+  assert.throws(
+    () => validatePagesIdentity(valid.identity, valid.manifest, SNAPSHOT),
+    /closed schema/u,
+  );
 
   for (const mutate of [
     (value) => { value.identity.sourceCommit = AUTHORITY; },
     (value) => { value.identity.contractSchemaVersion = "forged"; },
+    (value) => { value.identity.basePath = "/forged"; },
+    (value) => { value.identity.files[0].path = "../index.html"; },
+    (value) => { value.identity.files[0].path = "index.html?stale=1"; },
+    (value) => {
+      value.identity.files = ["a", "a_", "a-", "a.", "a/x"].map((path) => ({
+        path,
+        size: 1,
+        sha256: "c".repeat(64),
+      }));
+    },
+    (value) => {
+      value.identity.files = Array.from({ length: 1_025 }, (_entry, index) => ({
+        path: `assets/${String(index).padStart(4, "0")}.js`,
+        size: 0,
+        sha256: "c".repeat(64),
+      }));
+    },
+    (value) => {
+      value.identity.files = [
+        { path: "a", size: (32 * 1024 * 1024) + 1, sha256: "c".repeat(64) },
+        { path: "b", size: (32 * 1024 * 1024) + 1, sha256: "d".repeat(64) },
+      ];
+    },
+    (value) => { value.identity.files[0].extra = true; },
+    (value) => { value.identity.acceptedRunId = "0"; },
+    (value) => { value.identity.acceptedRunAttempt = "0"; },
+    (value) => { value.identity.extra = true; },
     (value) => { value.identity.version = ""; },
     (value) => { value.manifest.build.runtime_identity.engine_build_id = AUTHORITY; },
     (value) => { value.manifest.build.runtime_identity.artifact_schema_version = "forged"; },
   ]) {
     const forged = structuredClone(valid);
     mutate(forged);
-    assert.throws(
-      () => validatePagesIdentity(forged.identity, forged.manifest, SNAPSHOT),
-      /does not match/u,
-    );
+    assert.throws(() =>
+      validateLivePagesIdentity(forged.identity, forged.manifest, SNAPSHOT));
   }
 });
 
@@ -460,6 +520,212 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
       captureJobs.indexOf("Verify downloaded rollback package against sealed capture report"),
     "freshly sealed capture report must validate the downloaded tar before report upload",
   );
+  const restorePackage = workflow.slice(
+    workflow.indexOf("\n  restore-package:"),
+    workflow.indexOf("\n  deploy-restore:"),
+  );
+  assert.match(
+    restorePackage,
+    /PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND: legacy-v0\.7\.4/u,
+  );
+  const restoreDeploy = workflow.slice(workflow.indexOf("\n  deploy-restore:"));
+  for (const permission of [
+    "contents: read",
+    "actions: read",
+    "deployments: read",
+    "pages: write",
+    "id-token: write",
+  ]) {
+    assert.ok(
+      restoreDeploy.includes(permission),
+      `restore deploy permission is missing: ${permission}`,
+    );
+  }
+});
+
+test("authority phases are closed for capture and mutation modes", () => {
+  for (const mode of ["capture", "bootstrap-capture"]) {
+    assert.equal(validatePagesAuthorityPhase(mode, "initial"), "initial");
+    assert.equal(validatePagesAuthorityPhase(mode, "preartifact"), "preartifact");
+    assert.throws(
+      () => validatePagesAuthorityPhase(mode, "predeploy"),
+      /phase is invalid/u,
+    );
+  }
+  for (const mode of ["forward", "restore"]) {
+    assert.equal(validatePagesAuthorityPhase(mode, "initial"), "initial");
+    assert.equal(validatePagesAuthorityPhase(mode, "predeploy"), "predeploy");
+    assert.throws(
+      () => validatePagesAuthorityPhase(mode, "preartifact"),
+      /phase is invalid/u,
+    );
+  }
+});
+
+test("forward capture kinds are explicit and restore rejects modern capture before mutation", () => {
+  assert.equal(
+    validatePagesMutationCaptureKind("forward", "legacy-v0.7.4"),
+    "legacy-v0.7.4",
+  );
+  assert.equal(
+    validatePagesMutationCaptureKind("forward", "modern-v2"),
+    "modern-v2",
+  );
+  assert.equal(
+    validatePagesMutationCaptureKind("restore", "legacy-v0.7.4"),
+    "legacy-v0.7.4",
+  );
+  assert.throws(
+    () => validatePagesMutationCaptureKind("restore", "modern-v2"),
+    /restore requires a sealed v0\.7\.4 capture report/u,
+  );
+  assert.throws(
+    () => validatePagesMutationCaptureKind("forward", "unknown"),
+    /forward capture report kind is unsupported/u,
+  );
+});
+
+test("current Pages routing never falls back between legacy bytes and modern identity", async () => {
+  const legacyCalls = { github: 0, json: 0, status: 0, bytes: 0, validated: 0 };
+  await verifyCurrentPagesAgainstCapture({
+    mode: "forward",
+    phase: "initial",
+    validatedCaptureReport: {
+      capture_kind: "legacy-v0.7.4",
+      legacy_snapshot: {
+        preartifact_public_readback: { deployment_id: "6181925865" },
+      },
+    },
+    repository: "daejunnom/Clearra",
+    pageUrl: "https://daejunnom.github.io/Clearra",
+    cacheBuster: "forward-initial-12345",
+    currentPagesSha: LEGACY_SNAPSHOT,
+  }, {
+    async getGithubJson(path) {
+      legacyCalls.github += 1;
+      if (path.includes("/git/ref/tags/")) {
+        return legacyBootstrapFixture().tagRef;
+      }
+      if (path.includes("/git/tags/")) {
+        return legacyBootstrapFixture().annotatedTag;
+      }
+      if (path.includes("/releases/tags/")) {
+        return legacyBootstrapFixture().release;
+      }
+      if (path.endsWith("/statuses?per_page=100&page=1")) {
+        return legacyBootstrapFixture().deploymentStatuses;
+      }
+      if (path.endsWith("/statuses?per_page=100&page=2")) return [];
+      if (path === "/deployments/6181925865") {
+        return legacyBootstrapFixture().deployments[0];
+      }
+      assert.fail(`unexpected legacy GitHub read: ${path}`);
+    },
+    async readPublicJson() {
+      legacyCalls.json += 1;
+      assert.fail("legacy forward must not read modern identity JSON");
+    },
+    async readPublicStatus() {
+      legacyCalls.status += 1;
+      return 404;
+    },
+    async readPublicBytes(_url, _label, expectedSize) {
+      legacyCalls.bytes += 1;
+      assert.ok(Number.isSafeInteger(expectedSize));
+      return Buffer.alloc(1);
+    },
+    validateLegacyAuthority(value) {
+      legacyCalls.validated += 1;
+      assert.equal(value.identityStatus, 404);
+      assert.equal(value.deployment.id, 6181925865);
+      return value;
+    },
+  });
+  assert.deepEqual(legacyCalls, {
+    github: 6,
+    json: 0,
+    status: 1,
+    bytes: 3,
+    validated: 1,
+  });
+
+  const modern = pagesIdentity();
+  const modernCalls = { json: 0, status: 0, bytes: 0, github: 0 };
+  await verifyCurrentPagesAgainstCapture({
+    mode: "forward",
+    phase: "predeploy",
+    validatedCaptureReport: { capture_kind: "modern-v2" },
+    repository: "daejunnom/Clearra",
+    pageUrl: "https://daejunnom.github.io/Clearra",
+    cacheBuster: "forward-predeploy-12345",
+    currentPagesSha: SNAPSHOT,
+  }, {
+    async getGithubJson() {
+      modernCalls.github += 1;
+      assert.fail("modern forward must not read legacy GitHub projection");
+    },
+    async readPublicJson(_url, label) {
+      modernCalls.json += 1;
+      return label === "live Pages identity"
+        ? structuredClone(modern.identity)
+        : structuredClone(modern.manifest);
+    },
+    async readPublicStatus() {
+      modernCalls.status += 1;
+      assert.fail("modern forward must not probe legacy 404 status");
+    },
+    async readPublicBytes() {
+      modernCalls.bytes += 1;
+      assert.fail("modern forward must not read legacy fixed bytes");
+    },
+  });
+  assert.deepEqual(modernCalls, { json: 2, status: 0, bytes: 0, github: 0 });
+
+  const rejectedCalls = { json: 0, status: 0, bytes: 0, github: 0 };
+  const rejectBeforeRead = Object.fromEntries(
+    Object.keys(rejectedCalls).map((name) => [name, async () => {
+      rejectedCalls[name] += 1;
+      assert.fail("restore modern capture must reject before public read");
+    }]),
+  );
+  await assert.rejects(
+    verifyCurrentPagesAgainstCapture({
+      mode: "restore",
+      phase: "initial",
+      validatedCaptureReport: { capture_kind: "modern-v2" },
+      repository: "daejunnom/Clearra",
+      pageUrl: "https://daejunnom.github.io/Clearra",
+      cacheBuster: "restore-initial-12345",
+      currentPagesSha: AUTHORITY,
+    }, {
+      getGithubJson: rejectBeforeRead.github,
+      readPublicJson: rejectBeforeRead.json,
+      readPublicStatus: rejectBeforeRead.status,
+      readPublicBytes: rejectBeforeRead.bytes,
+    }),
+    /restore requires a sealed v0\.7\.4 capture report/u,
+  );
+  assert.deepEqual(rejectedCalls, { json: 0, status: 0, bytes: 0, github: 0 });
+});
+
+test("deployment status readback proves pagination completeness", () => {
+  const page = Array.from({ length: 100 }, (_value, index) => ({
+    id: index + 1,
+    state: "success",
+  }));
+  assert.equal(validateCompleteDeploymentStatuses(page, []).length, 100);
+  assert.throws(
+    () => validateCompleteDeploymentStatuses(page, [{ id: 101, state: "success" }]),
+    /second page must be exactly empty/u,
+  );
+  assert.throws(
+    () => validateCompleteDeploymentStatuses([], []),
+    /first page must contain between 1 and 100 statuses/u,
+  );
+  assert.throws(
+    () => validateCompleteDeploymentStatuses([...page, { id: 101 }], []),
+    /first page must contain between 1 and 100 statuses/u,
+  );
 });
 
 test("Pages forward deployment keeps mutation authority in the deploy job only", async () => {
@@ -479,8 +745,14 @@ test("Pages forward deployment keeps mutation authority in the deploy job only",
   assert.doesNotMatch(workflowAuthority, /pages: write|id-token: write/u);
   assert.doesNotMatch(predeployJobs, /pages: write|id-token: write/u);
   assert.match(
+    predeployJobs,
+    /accepted-source:\s+permissions:\s+contents: read\s+actions: read\s+deployments: read/u,
+  );
+  const buildJob = predeployJobs.slice(predeployJobs.indexOf("\n  build:"));
+  assert.doesNotMatch(buildJob, /deployments: read/u);
+  assert.match(
     deployJob,
-    /permissions:\s+contents: read\s+actions: read\s+pages: write\s+id-token: write/u,
+    /permissions:\s+contents: read\s+actions: read\s+deployments: read\s+pages: write\s+id-token: write/u,
   );
 });
 
@@ -548,6 +820,8 @@ test("capture authority binds the run attempt, job, artifact, retention, and con
     (value) => { value.captureRun.path = ".github/workflows/pages.yml"; },
     (value) => { value.captureJobs.jobs[1].conclusion = "failure"; },
     (value) => { value.captureJobs.jobs.push(structuredClone(value.captureJobs.jobs[1])); },
+    (value) => { value.captureJobs.total_count += 1; },
+    (value) => { value.captureJobs.total_count = 101; },
     (value) => { value.artifact.expired = true; },
     (value) => { value.artifact.digest = `sha256:${"5".repeat(64)}`; },
     (value) => { value.artifact.workflow_run.head_sha = SNAPSHOT; },
@@ -882,9 +1156,22 @@ test("resolves exactly one durable sealed report artifact from the completed cap
 
   const duplicate = structuredClone(input);
   duplicate.captureArtifacts.artifacts.push(structuredClone(reportArtifact));
+  duplicate.captureArtifacts.total_count += 1;
   assert.throws(
     () => resolveCaptureReportArtifact(duplicate),
     /exactly one sealed report artifact/u,
+  );
+  const hidden = structuredClone(input);
+  hidden.captureArtifacts.total_count += 1;
+  assert.throws(
+    () => resolveCaptureReportArtifact(hidden),
+    /complete page with total_count/u,
+  );
+  const truncated = structuredClone(input);
+  truncated.captureArtifacts.total_count = 101;
+  assert.throws(
+    () => resolveCaptureReportArtifact(truncated),
+    /complete page with total_count/u,
   );
   const shortRetention = structuredClone(input);
   shortRetention.captureArtifacts.artifacts[1].expires_at = "2026-08-29T00:09:30Z";

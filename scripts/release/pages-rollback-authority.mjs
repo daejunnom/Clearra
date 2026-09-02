@@ -30,6 +30,7 @@ import {
   legacyReconstructedIdentitySha256,
   readLegacyReconstructedIdentity,
   validateLegacyPublicReadbackEvidence,
+  validateLegacyForwardPublicAuthority,
   validateLegacyPagesPublicSnapshot,
   validateLegacyReconstructedIdentity,
 } from "./pages-legacy-contract.mjs";
@@ -52,12 +53,45 @@ const MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const MAX_PAGES_ROLLBACK_ARCHIVE_BYTES = 64 * 1024 * 1024;
 export const MAX_PAGES_ROLLBACK_TAR_BYTES = 64 * 1024 * 1024;
 const MAX_CAPTURE_REPORT_BYTES = 2 * 1024 * 1024;
+const MAX_MODERN_PAGES_FILE_COUNT = 1_024;
+const MAX_MODERN_PAGES_TOTAL_BYTES = 64 * 1024 * 1024;
+const MAX_MODERN_PAGES_PATH_LENGTH = 512;
+const MODERN_PAGES_PATH_PATTERN = /^[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*$/u;
 const EXPECTED_CONTRACT = Object.freeze({
   schema: "clearra.pages.identity.v2",
   contractSchemaVersion: CLEARRA_CONTRACT_SCHEMA_VERSION,
   supplySemanticsId: CLEARRA_SUPPLY_SEMANTICS_ID,
   artifactSchemaVersion: CLEARRA_ARTIFACT_SCHEMA_VERSION,
 });
+const MODERN_PAGES_IDENTITY_FIELDS = Object.freeze([
+  "acceptedRunAttempt",
+  "acceptedRunId",
+  "artifactSchemaVersion",
+  "basePath",
+  "contractSchemaVersion",
+  "engineBuildId",
+  "files",
+  "schema",
+  "sourceCommit",
+  "supplySemanticsId",
+  "version",
+]);
+const RECONSTRUCTED_PAGES_IDENTITY_FIELDS = Object.freeze([
+  "artifactSchemaVersion",
+  "contractSchemaVersion",
+  "engineBuildId",
+  "schema",
+  "sourceCommit",
+  "supplySemanticsId",
+  "version",
+]);
+const RUNTIME_IDENTITY_FIELDS = Object.freeze([
+  "source_commit",
+  "engine_build_id",
+  "contract_schema_version",
+  "supply_semantics_id",
+  "artifact_schema_version",
+]);
 export const PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID =
   "clearra.pages.rollback-capture-authority.v2";
 const CAPTURE_REPORT_FIELDS = Object.freeze([
@@ -144,6 +178,41 @@ function requireBoundedByteSize(value, maximum, label) {
   return value;
 }
 
+function requireCompleteSinglePage(value, arrayField, label) {
+  const payload = requireObject(value, label);
+  const entries = payload[arrayField];
+  if (!Array.isArray(entries)) {
+    fail(`${label} must contain a ${arrayField} array`);
+  }
+  if (
+    !Number.isSafeInteger(payload.total_count) ||
+    payload.total_count < 0 ||
+    payload.total_count > 100 ||
+    payload.total_count !== entries.length
+  ) {
+    fail(`${label} must be one complete page with total_count equal to its array length`);
+  }
+  return entries;
+}
+
+export function validateCompleteDeploymentStatuses(
+  firstPageValue,
+  secondPageValue,
+  label = "Pages deployment statuses",
+) {
+  if (
+    !Array.isArray(firstPageValue) ||
+    firstPageValue.length === 0 ||
+    firstPageValue.length > 100
+  ) {
+    fail(`${label} first page must contain between 1 and 100 statuses`);
+  }
+  if (!Array.isArray(secondPageValue) || secondPageValue.length !== 0) {
+    fail(`${label} second page must be exactly empty`);
+  }
+  return firstPageValue;
+}
+
 function captureArtifactAuthorityProjection(artifactValue) {
   const artifact = requireObject(artifactValue, "capture artifact API readback");
   const workflowRun = requireObject(
@@ -190,7 +259,7 @@ export function captureArtifactAuthoritySha256(artifactValue) {
   return canonicalSha256(captureArtifactAuthorityProjection(artifactValue));
 }
 
-export function validatePagesIdentity(identityValue, manifestValue, expectedSha) {
+function validatePagesIdentityCore(identityValue, manifestValue, expectedSha) {
   const sha = requireSha(expectedSha, "expected Pages SHA");
   const identity = requireObject(identityValue, "Pages identity");
   if (
@@ -205,10 +274,14 @@ export function validatePagesIdentity(identityValue, manifestValue, expectedSha)
   ) {
     fail("Pages identity does not match the exact release contract");
   }
-
   const manifest = requireObject(manifestValue, "Pages WASM manifest");
   const runtimeIdentity = requireObject(
     requireObject(manifest.build, "Pages WASM build").runtime_identity,
+    "Pages WASM runtime identity",
+  );
+  requireExactKeys(
+    runtimeIdentity,
+    RUNTIME_IDENTITY_FIELDS,
     "Pages WASM runtime identity",
   );
   if (
@@ -220,15 +293,74 @@ export function validatePagesIdentity(identityValue, manifestValue, expectedSha)
   ) {
     fail("Pages WASM manifest does not match the exact release contract");
   }
+  return Object.freeze({ identity, manifest });
 }
 
-const RUNTIME_IDENTITY_FIELDS = Object.freeze([
-  "source_commit",
-  "engine_build_id",
-  "contract_schema_version",
-  "supply_semantics_id",
-  "artifact_schema_version",
-]);
+export function validatePagesIdentity(identityValue, manifestValue, expectedSha) {
+  const identity = requireObject(identityValue, "reconstructed Pages identity");
+  requireExactKeys(
+    identity,
+    RECONSTRUCTED_PAGES_IDENTITY_FIELDS,
+    "reconstructed Pages identity",
+  );
+  return validatePagesIdentityCore(identity, manifestValue, expectedSha);
+}
+
+export function validateLivePagesIdentity(identityValue, manifestValue, expectedSha) {
+  const identity = requireObject(identityValue, "live Pages identity");
+  requireExactKeys(identity, MODERN_PAGES_IDENTITY_FIELDS, "live Pages identity");
+  const validated = validatePagesIdentityCore(identity, manifestValue, expectedSha);
+  if (identity.basePath !== "/Clearra") {
+    fail("live Pages identity base path differs from the exact release contract");
+  }
+  requireDecimalId(String(identity.acceptedRunId), "Pages accepted run ID");
+  requireDecimalId(String(identity.acceptedRunAttempt), "Pages accepted run attempt");
+  if (!Array.isArray(identity.files) || identity.files.length === 0) {
+    fail("Pages identity files must be a non-empty array");
+  }
+  if (identity.files.length > MAX_MODERN_PAGES_FILE_COUNT) {
+    fail("Pages identity file count exceeds the live authority limit");
+  }
+  let previousPath = "";
+  let totalBytes = 0;
+  const publicPaths = new Set();
+  for (const [index, fileValue] of identity.files.entries()) {
+    const file = requireObject(fileValue, `Pages identity file ${index}`);
+    requireExactKeys(file, ["path", "sha256", "size"], `Pages identity file ${index}`);
+    const segments = typeof file.path === "string" ? file.path.split("/") : [];
+    if (
+      typeof file.path !== "string" ||
+      file.path.length === 0 ||
+      file.path.length > MAX_MODERN_PAGES_PATH_LENGTH ||
+      !MODERN_PAGES_PATH_PATTERN.test(file.path) ||
+      segments.some((segment) => segment === "." || segment === "..") ||
+      file.path === "clearra-build-identity.json" ||
+      (previousPath && previousPath.localeCompare(file.path, "en") >= 0) ||
+      !Number.isSafeInteger(file.size) ||
+      file.size < 0 ||
+      file.size > MAX_MODERN_PAGES_TOTAL_BYTES
+    ) {
+      fail("Pages identity file set is invalid or unsorted");
+    }
+    requirePattern(file.sha256, SHA256_PATTERN, `Pages identity file ${file.path} SHA-256`);
+    totalBytes += file.size;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_MODERN_PAGES_TOTAL_BYTES) {
+      fail("Pages identity payload bytes exceed the live authority limit");
+    }
+    previousPath = file.path;
+    publicPaths.add(file.path);
+  }
+  for (const path of publicPaths) {
+    let slashIndex = path.indexOf("/");
+    while (slashIndex !== -1) {
+      if (publicPaths.has(path.slice(0, slashIndex))) {
+        fail("Pages identity file set is invalid or unsorted");
+      }
+      slashIndex = path.indexOf("/", slashIndex + 1);
+    }
+  }
+  return validated;
+}
 
 function exactRuntimeIdentity(expectedSha) {
   const sha = requireSha(expectedSha, "rollback manifest snapshot SHA");
@@ -794,6 +926,34 @@ export async function writeRollbackCaptureReport(path, report) {
   return createHash("sha256").update(bytes, "utf8").digest("hex");
 }
 
+export function validatePagesMutationCaptureKind(mode, captureKind) {
+  if (mode === "forward") {
+    if (!new Set(["legacy-v0.7.4", "modern-v2"]).has(captureKind)) {
+      fail("Pages forward capture report kind is unsupported");
+    }
+    return captureKind;
+  }
+  if (mode === "restore") {
+    if (captureKind !== "legacy-v0.7.4") {
+      fail("Pages restore requires a sealed v0.7.4 capture report");
+    }
+    return captureKind;
+  }
+  fail("Pages mutation capture kind is available only for forward or restore");
+}
+
+export function validatePagesAuthorityPhase(mode, phase) {
+  const allowed = new Set(["capture", "bootstrap-capture"]).has(mode)
+    ? new Set(["initial", "preartifact"])
+    : new Set(["forward", "restore"]).has(mode)
+      ? new Set(["initial", "predeploy"])
+      : null;
+  if (allowed === null || !allowed.has(phase)) {
+    fail("Pages authority phase is invalid for its mode");
+  }
+  return phase;
+}
+
 export async function readBoundedRegularFile(path, maximumBytes, label) {
   const target = resolve(requireString(path, `${label} path`));
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
@@ -897,11 +1057,12 @@ export function resolveCaptureReportArtifact({
     captureRunId: runId,
     captureRunAttempt: runAttempt,
   });
-  const payload = requireObject(captureArtifacts, "capture run artifacts");
-  if (!Array.isArray(payload.artifacts)) {
-    fail("capture run artifacts must contain an artifacts array");
-  }
-  const matches = payload.artifacts.filter((artifact) => artifact?.name === expectedName);
+  const artifacts = requireCompleteSinglePage(
+    captureArtifacts,
+    "artifacts",
+    "capture run artifacts",
+  );
+  const matches = artifacts.filter((artifact) => artifact?.name === expectedName);
   if (matches.length !== 1) {
     fail("capture run must contain exactly one sealed report artifact");
   }
@@ -1086,11 +1247,8 @@ export function validateCaptureAuthority({
     fail("capture artifact name is not bound to its exact run attempt");
   }
 
-  const jobsPayload = requireObject(captureJobs, "capture jobs");
-  if (!Array.isArray(jobsPayload.jobs)) {
-    fail("capture jobs must contain a jobs array");
-  }
-  const captureBuildJobs = jobsPayload.jobs.filter((job) => job?.name === "capture-build");
+  const jobs = requireCompleteSinglePage(captureJobs, "jobs", "capture jobs");
+  const captureBuildJobs = jobs.filter((job) => job?.name === "capture-build");
   if (captureBuildJobs.length !== 1) {
     fail("capture run must contain exactly one capture-build job");
   }
@@ -1332,6 +1490,249 @@ async function canonicalRuns(api, sha, label) {
   });
 }
 
+function validateCaptureReportConsumerBinding(report, {
+  repository,
+  snapshotSha,
+  authoritySha,
+  captureRunId,
+}) {
+  if (
+    report.repository !== repository ||
+    report.snapshot_source_commit !== snapshotSha ||
+    report.authority_source_commit !== authoritySha ||
+    report.capture_run_id !== captureRunId
+  ) {
+    fail("sealed rollback capture report differs from the requested authority");
+  }
+  return report;
+}
+
+async function validateSealedCaptureConsumerAuthority({
+  api,
+  reportRecord,
+  reportFields,
+  repository,
+  snapshotSha,
+  authoritySha,
+  currentRun,
+}) {
+  const { report, file_sha256: reportFileSha256 } = reportRecord;
+  validateCaptureReportConsumerBinding(report, {
+    repository,
+    snapshotSha,
+    authoritySha,
+    captureRunId: reportFields.captureRunId,
+  });
+  const captureRunId = requireDecimalId(report.capture_run_id, "capture run ID");
+  const captureArtifactId = requireDecimalId(report.artifact_id, "capture artifact ID");
+  const reportArtifactId = requireDecimalId(
+    reportFields.reportArtifactId,
+    "capture report artifact ID",
+  );
+  const [captureRun, captureJobs, captureArtifacts, artifact, reportArtifact] =
+    await Promise.all([
+      api.get(`/actions/runs/${captureRunId}`, "capture run"),
+      api.get(`/actions/runs/${captureRunId}/jobs?per_page=100`, "capture jobs"),
+      api.get(
+        `/actions/runs/${captureRunId}/artifacts?per_page=100`,
+        "capture run artifacts",
+      ),
+      api.get(`/actions/artifacts/${captureArtifactId}`, "capture artifact"),
+      api.get(`/actions/artifacts/${reportArtifactId}`, "capture report artifact"),
+    ]);
+  const resolvedReportArtifact = resolveCaptureReportArtifact({
+    snapshotSha,
+    authoritySha,
+    captureRunId,
+    captureRun,
+    captureArtifacts,
+    consumerRun: currentRun,
+  });
+  if (
+    resolvedReportArtifact.capture_run_attempt !== report.capture_run_attempt ||
+    resolvedReportArtifact.report_artifact_id !== reportArtifactId ||
+    resolvedReportArtifact.report_artifact_name !== reportFields.reportArtifactName ||
+    resolvedReportArtifact.report_artifact_digest !== reportFields.reportArtifactDigest
+  ) {
+    fail("capture report artifact list differs from the resolved consumer authority");
+  }
+  validateCaptureReportArtifact({
+    report,
+    reportArtifactId,
+    reportArtifactName: reportFields.reportArtifactName,
+    reportArtifactDigest: reportFields.reportArtifactDigest,
+    artifact: reportArtifact,
+  });
+  validateCaptureAuthority({
+    snapshotSha,
+    authoritySha,
+    captureRunId,
+    captureArtifactId,
+    captureArtifactName: report.artifact_name,
+    captureArtifactDigest: report.artifact_digest,
+    captureTarSha256: report.artifact_tar_sha256,
+    captureRun,
+    captureJobs,
+    artifact,
+    consumerRun: currentRun,
+  });
+  if (captureArtifactAuthoritySha256(artifact) !== report.artifact_api_readback_sha256) {
+    fail("capture artifact API readback changed after the sealed report was produced");
+  }
+  return Object.freeze({ report, file_sha256: reportFileSha256 });
+}
+
+async function verifyLegacyForwardPublicAuthority({
+  repository,
+  pageUrl,
+  cacheBuster,
+  phase,
+  sealedReadback,
+}, {
+  getGithubJson,
+  readPublicStatus = fetchPublicStatus,
+  readPublicBytes = fetchPublicBytes,
+  validateLegacyAuthority = validateLegacyForwardPublicAuthority,
+}) {
+  if (
+    typeof getGithubJson !== "function" ||
+    typeof readPublicStatus !== "function" ||
+    typeof readPublicBytes !== "function" ||
+    typeof validateLegacyAuthority !== "function"
+  ) {
+    fail("legacy Pages forward verification requires closed GitHub and public readers");
+  }
+  const sealedDeploymentId = requireDecimalId(
+    String(sealedReadback?.deployment_id),
+    "sealed legacy Pages deployment ID",
+  );
+  const tagRef = await getGithubJson(
+    `/git/ref/tags/${encodeURIComponent(LEGACY_PAGES_RELEASE_TAG)}`,
+    "legacy release tag ref",
+  );
+  const annotatedTagSha = requireSha(
+    tagRef?.object?.sha,
+    "legacy annotated tag object SHA",
+  );
+  const [annotatedTag, release, deployment, deploymentStatusesFirstPage, deploymentStatusesSecondPage, identityStatus, manifestBytes, bindingsBytes, wasmBytes] =
+    await Promise.all([
+      getGithubJson(`/git/tags/${annotatedTagSha}`, "legacy annotated tag"),
+      getGithubJson(
+        `/releases/tags/${encodeURIComponent(LEGACY_PAGES_RELEASE_TAG)}`,
+        "legacy GitHub Release",
+      ),
+      getGithubJson(`/deployments/${sealedDeploymentId}`, "sealed Pages deployment"),
+      getGithubJson(
+        `/deployments/${sealedDeploymentId}/statuses?per_page=100&page=1`,
+        "sealed Pages deployment statuses first page",
+      ),
+      getGithubJson(
+        `/deployments/${sealedDeploymentId}/statuses?per_page=100&page=2`,
+        "sealed Pages deployment statuses second page",
+      ),
+      readPublicStatus(
+        `${pageUrl}/clearra-build-identity.json?authority=${cacheBuster}`,
+      ),
+      readPublicBytes(
+        `${pageUrl}/${LEGACY_PAGES_PAYLOAD.manifest.path}?authority=${cacheBuster}`,
+        "legacy public Pages WASM manifest",
+        LEGACY_PAGES_PAYLOAD.manifest.bytes,
+      ),
+      readPublicBytes(
+        `${pageUrl}/${LEGACY_PAGES_PAYLOAD.bindings.path}?authority=${cacheBuster}`,
+        "legacy public Pages WASM bindings",
+        LEGACY_PAGES_PAYLOAD.bindings.bytes,
+      ),
+      readPublicBytes(
+        `${pageUrl}/${LEGACY_PAGES_PAYLOAD.wasm.path}?authority=${cacheBuster}`,
+        "legacy public Pages WASM binary",
+        LEGACY_PAGES_PAYLOAD.wasm.bytes,
+      ),
+    ]);
+  const deploymentStatuses = validateCompleteDeploymentStatuses(
+    deploymentStatusesFirstPage,
+    deploymentStatusesSecondPage,
+    "sealed Pages deployment statuses",
+  );
+  return validateLegacyAuthority({
+    phase,
+    sealedReadback,
+    repository,
+    pageUrl: `${pageUrl}/`,
+    identityStatus,
+    tagRef,
+    annotatedTag,
+    release,
+    deployment,
+    deploymentStatuses,
+    manifestBytes,
+    bindingsBytes,
+    wasmBytes,
+  });
+}
+
+async function verifyModernPagesPublicAuthority({
+  pageUrl,
+  cacheBuster,
+  currentPagesSha,
+}, { readPublicJson = fetchPublicJson } = {}) {
+  if (typeof readPublicJson !== "function") {
+    fail("modern Pages verification requires a public JSON reader");
+  }
+  const [identity, manifest] = await Promise.all([
+    readPublicJson(
+      `${pageUrl}/clearra-build-identity.json?authority=${cacheBuster}`,
+      "live Pages identity",
+    ),
+    readPublicJson(
+      `${pageUrl}/wasm/clearra_wasm.manifest.json?authority=${cacheBuster}`,
+      "live Pages WASM manifest",
+    ),
+  ]);
+  validateLivePagesIdentity(identity, manifest, currentPagesSha);
+}
+
+export async function verifyCurrentPagesAgainstCapture({
+  mode,
+  phase,
+  validatedCaptureReport,
+  repository,
+  pageUrl,
+  cacheBuster,
+  currentPagesSha,
+}, dependencies = {}) {
+  validatePagesAuthorityPhase(mode, phase);
+  const report = requireObject(validatedCaptureReport, "validated capture report");
+  const captureKind = validatePagesMutationCaptureKind(mode, report.capture_kind);
+  if (mode === "forward") {
+    if (captureKind === "legacy-v0.7.4") {
+      return verifyLegacyForwardPublicAuthority({
+        repository,
+        pageUrl,
+        cacheBuster,
+        phase,
+        sealedReadback: requireObject(
+          report.legacy_snapshot,
+          "validated legacy capture snapshot",
+        ).preartifact_public_readback,
+      }, dependencies);
+    }
+    if (captureKind === "modern-v2") {
+      return verifyModernPagesPublicAuthority({
+        pageUrl,
+        cacheBuster,
+        currentPagesSha,
+      }, dependencies);
+    }
+    fail("Pages forward capture report kind is unsupported");
+  }
+  return verifyModernPagesPublicAuthority({
+    pageUrl,
+    cacheBuster,
+    currentPagesSha,
+  }, dependencies);
+}
+
 async function captureReportMain() {
   const repository = requireString(env("GITHUB_REPOSITORY"), "GitHub repository");
   const token = requireString(env("GH_TOKEN"), "GitHub token");
@@ -1500,7 +1901,7 @@ async function main() {
   if (!new Set(["capture", "bootstrap-capture", "forward", "restore"]).has(mode)) {
     fail("PAGES_AUTHORITY_MODE must be prepare-manifests, capture, bootstrap-capture, capture-report, resolve-forward, resolve-restore, forward, or restore");
   }
-  const phase = env("PAGES_AUTHORITY_PHASE");
+  const phase = validatePagesAuthorityPhase(mode, env("PAGES_AUTHORITY_PHASE"));
   const authoritySha = requireSha(env("AUTHORITY_SHA"), "authority SHA");
   const snapshotSha = requireSha(env("SNAPSHOT_SHA"), "snapshot SHA");
   const currentPagesSha = requireSha(env("CURRENT_PAGES_SHA"), "current Pages SHA");
@@ -1573,6 +1974,46 @@ async function main() {
   const pages = await api.get("/pages", "Pages configuration");
   const pageUrl = requireString(pages.html_url, "Pages URL").replace(/\/$/u, "");
   const cacheBuster = encodeURIComponent(`${mode}-${phase}-${runId}`);
+  const captureReportFields = {
+    captureRunId: captureRunIdInput,
+    reportPath: env("CAPTURE_REPORT_PATH", { optional: true }),
+    reportArtifactId: env("CAPTURE_REPORT_ARTIFACT_ID", { optional: true }),
+    reportArtifactName: env("CAPTURE_REPORT_ARTIFACT_NAME", { optional: true }),
+    reportArtifactDigest: env("CAPTURE_REPORT_ARTIFACT_DIGEST", { optional: true }),
+  };
+  let captureReportRecord = null;
+  if (mode === "forward" || mode === "restore") {
+    captureReportRecord = await validateSealedCaptureConsumerAuthority({
+      api,
+      reportRecord: await readRollbackCaptureReport(captureReportFields.reportPath),
+      reportFields: captureReportFields,
+      repository,
+      snapshotSha,
+      authoritySha,
+      currentRun,
+    });
+    validatePagesMutationCaptureKind(
+      mode,
+      captureReportRecord.report.capture_kind,
+    );
+    await appendFile(env("GITHUB_OUTPUT"), [
+      `capture_artifact_id=${captureReportRecord.report.artifact_id}`,
+      `capture_artifact_name=${captureReportRecord.report.artifact_name}`,
+      `capture_artifact_digest=${captureReportRecord.report.artifact_digest}`,
+      `capture_tar_sha256=${captureReportRecord.report.artifact_tar_sha256}`,
+      `capture_report_file_sha256=${captureReportRecord.file_sha256}`,
+      "",
+    ].join("\n"), "utf8");
+    if (mode === "forward") {
+      assertEmpty(restoreAuthorization, "restore authorization");
+    } else {
+      assertExact(
+        restoreAuthorization,
+        `ROLLBACK:${currentPagesSha}:TO:${snapshotSha}`,
+        "restore authorization",
+      );
+    }
+  }
   if (mode === "bootstrap-capture") {
     const tagRef = await api.get(
       `/git/ref/tags/${encodeURIComponent(legacyReleaseTag)}`,
@@ -1620,8 +2061,19 @@ async function main() {
       String(deployments[0]?.id),
       "latest Pages deployment ID",
     );
-    const deploymentStatuses = await api.get(
-      `/deployments/${deploymentId}/statuses?per_page=100`,
+    const [deploymentStatusesFirstPage, deploymentStatusesSecondPage] = await Promise.all([
+      api.get(
+        `/deployments/${deploymentId}/statuses?per_page=100&page=1`,
+        "latest Pages deployment statuses first page",
+      ),
+      api.get(
+        `/deployments/${deploymentId}/statuses?per_page=100&page=2`,
+        "latest Pages deployment statuses second page",
+      ),
+    ]);
+    const deploymentStatuses = validateCompleteDeploymentStatuses(
+      deploymentStatusesFirstPage,
+      deploymentStatusesSecondPage,
       "latest Pages deployment statuses",
     );
     const bootstrapAuthority = validateLegacyPagesBootstrapAuthority({
@@ -1662,105 +2114,36 @@ async function main() {
       `legacy_evidence_base64=${encodeLegacyPublicReadbackEvidence(evidence)}\n`,
       "utf8",
     );
+  } else if (mode === "forward" || mode === "restore") {
+    await verifyCurrentPagesAgainstCapture({
+      mode,
+      phase,
+      validatedCaptureReport: captureReportRecord.report,
+      repository,
+      pageUrl,
+      cacheBuster,
+      currentPagesSha,
+    }, {
+      getGithubJson(path, label) {
+        return api.get(path, label);
+      },
+    });
   } else {
-    const [identity, manifest] = await Promise.all([
-      fetchPublicJson(
-        `${pageUrl}/clearra-build-identity.json?authority=${cacheBuster}`,
-        "live Pages identity",
-      ),
-      fetchPublicJson(
-        `${pageUrl}/wasm/clearra_wasm.manifest.json?authority=${cacheBuster}`,
-        "live Pages WASM manifest",
-      ),
-    ]);
-    validatePagesIdentity(identity, manifest, currentPagesSha);
+    await verifyModernPagesPublicAuthority({
+      pageUrl,
+      cacheBuster,
+      currentPagesSha,
+    });
   }
 
   await api.requireAbsent(`/git/ref/tags/${RELEASE_TAG}`, `${RELEASE_TAG} tag`);
   await api.requireAbsent(`/releases/tags/${RELEASE_TAG}`, `${RELEASE_TAG} release`);
-
-  const captureReportFields = {
-    captureRunId: captureRunIdInput,
-    reportPath: env("CAPTURE_REPORT_PATH", { optional: true }),
-    reportArtifactId: env("CAPTURE_REPORT_ARTIFACT_ID", { optional: true }),
-    reportArtifactName: env("CAPTURE_REPORT_ARTIFACT_NAME", { optional: true }),
-    reportArtifactDigest: env("CAPTURE_REPORT_ARTIFACT_DIGEST", { optional: true }),
-  };
 
   if (mode === "capture" || mode === "bootstrap-capture") {
     for (const [label, value] of Object.entries(captureReportFields)) {
       assertEmpty(value, label);
     }
     assertEmpty(restoreAuthorization, "restore authorization");
-  } else {
-    const { report, file_sha256: reportFileSha256 } =
-      await readRollbackCaptureReport(captureReportFields.reportPath);
-    if (
-      report.repository !== repository ||
-      report.snapshot_source_commit !== snapshotSha ||
-      report.authority_source_commit !== authoritySha ||
-      report.capture_run_id !== captureReportFields.captureRunId
-    ) {
-      fail("sealed rollback capture report differs from the requested authority");
-    }
-    const captureRun = await api.get(
-      `/actions/runs/${requireDecimalId(report.capture_run_id, "capture run ID")}`,
-      "capture run",
-    );
-    const [captureJobs, artifact, reportArtifact] = await Promise.all([
-      api.get(`/actions/runs/${report.capture_run_id}/jobs?per_page=100`, "capture jobs"),
-      api.get(
-        `/actions/artifacts/${requireDecimalId(report.artifact_id, "capture artifact ID")}`,
-        "capture artifact",
-      ),
-      api.get(
-        `/actions/artifacts/${requireDecimalId(
-          captureReportFields.reportArtifactId,
-          "capture report artifact ID",
-        )}`,
-        "capture report artifact",
-      ),
-    ]);
-    validateCaptureReportArtifact({
-      report,
-      reportArtifactId: captureReportFields.reportArtifactId,
-      reportArtifactName: captureReportFields.reportArtifactName,
-      reportArtifactDigest: captureReportFields.reportArtifactDigest,
-      artifact: reportArtifact,
-    });
-    validateCaptureAuthority({
-      snapshotSha,
-      authoritySha,
-      captureRunId: report.capture_run_id,
-      captureArtifactId: report.artifact_id,
-      captureArtifactName: report.artifact_name,
-      captureArtifactDigest: report.artifact_digest,
-      captureTarSha256: report.artifact_tar_sha256,
-      captureRun,
-      captureJobs,
-      artifact,
-      consumerRun: currentRun,
-    });
-    if (captureArtifactAuthoritySha256(artifact) !== report.artifact_api_readback_sha256) {
-      fail("capture artifact API readback changed after the sealed report was produced");
-    }
-    await appendFile(env("GITHUB_OUTPUT"), [
-      `capture_artifact_id=${report.artifact_id}`,
-      `capture_artifact_name=${report.artifact_name}`,
-      `capture_artifact_digest=${report.artifact_digest}`,
-      `capture_tar_sha256=${report.artifact_tar_sha256}`,
-      `capture_report_file_sha256=${reportFileSha256}`,
-      "",
-    ].join("\n"), "utf8");
-    if (mode === "forward") {
-      assertEmpty(restoreAuthorization, "restore authorization");
-    } else {
-      assertExact(
-        restoreAuthorization,
-        `ROLLBACK:${currentPagesSha}:TO:${snapshotSha}`,
-        "restore authorization",
-      );
-    }
   }
 
   console.log(`pages_rollback_authority=passed mode=${mode} phase=${phase}`);

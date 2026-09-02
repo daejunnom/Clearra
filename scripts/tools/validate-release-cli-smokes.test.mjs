@@ -31,16 +31,57 @@ const pagesWorkflowPath = join(
   "workflows",
   "pages.yml",
 );
+const pagesRollbackAuthorityPath = join(
+  repositoryRoot,
+  "scripts",
+  "release",
+  "pages-rollback-authority.mjs",
+);
+const pagesLegacyContractPath = join(
+  repositoryRoot,
+  "scripts",
+  "release",
+  "pages-legacy-contract.mjs",
+);
+const pagesDeploymentAuthorityPath = join(
+  repositoryRoot,
+  "scripts",
+  "release",
+  "pages-deployment-authority.mjs",
+);
 
-const [canonicalWorkflow, canonicalValidator, canonicalPackageScript, canonicalPagesWorkflow] =
+const [
+  canonicalWorkflow,
+  canonicalValidator,
+  canonicalPackageScript,
+  canonicalPagesWorkflow,
+  canonicalPagesRollbackAuthority,
+  canonicalPagesLegacyContract,
+  canonicalPagesDeploymentAuthority,
+] =
   await Promise.all([
     readFile(workflowPath, "utf8"),
     readFile(validatorPath, "utf8"),
     readFile(packageScriptPath, "utf8"),
     readFile(pagesWorkflowPath, "utf8"),
+    readFile(pagesRollbackAuthorityPath, "utf8"),
+    readFile(pagesLegacyContractPath, "utf8"),
+    readFile(pagesDeploymentAuthorityPath, "utf8"),
   ]);
 const normalizedWorkflow = canonicalWorkflow.replaceAll("\r\n", "\n");
 const normalizedPagesWorkflow = canonicalPagesWorkflow.replaceAll("\r\n", "\n");
+const normalizedPagesRollbackAuthority = canonicalPagesRollbackAuthority.replaceAll(
+  "\r\n",
+  "\n",
+);
+const normalizedPagesLegacyContract = canonicalPagesLegacyContract.replaceAll(
+  "\r\n",
+  "\n",
+);
+const normalizedPagesDeploymentAuthority = canonicalPagesDeploymentAuthority.replaceAll(
+  "\r\n",
+  "\n",
+);
 
 test("canonical release workflow passes the smoke validator", async () => {
   const result = await runValidator(normalizedWorkflow);
@@ -773,8 +814,26 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      contents: read\n      actions: read\n      pages: write\n      id-token: write\n",
-        "      contents: write\n      actions: read\n      pages: write\n      id-token: write\n",
+        "      contents: read\n      actions: read\n      deployments: read\n      pages: write\n      id-token: write\n",
+        "      contents: write\n      actions: read\n      deployments: read\n      pages: write\n      id-token: write\n",
+      ),
+  ],
+  [
+    "rejects Pages accepted-source without legacy deployment read authority",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      deployments: read\n    outputs:\n",
+        "    outputs:\n",
+      ),
+  ],
+  [
+    "rejects Pages deploy without legacy deployment read authority",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      actions: read\n      deployments: read\n      pages: write\n",
+        "      actions: read\n      pages: write\n",
       ),
   ],
   [
@@ -782,8 +841,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      contents: read\n      actions: read\n      pages: write\n      id-token: write\n",
-        "      contents: read\n      actions: read\n      pages: read\n      id-token: write\n",
+        "      contents: read\n      actions: read\n      deployments: read\n      pages: write\n      id-token: write\n",
+        "      contents: read\n      actions: read\n      deployments: read\n      pages: read\n      id-token: write\n",
       ),
   ],
   [
@@ -791,8 +850,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      contents: read\n      actions: read\n      pages: write\n      id-token: write\n",
-        "      contents: read\n      actions: read\n      pages: write\n      id-token: read\n",
+        "      contents: read\n      actions: read\n      deployments: read\n      pages: write\n      id-token: write\n",
+        "      contents: read\n      actions: read\n      deployments: read\n      pages: write\n      id-token: read\n",
       ),
   ],
   [
@@ -869,10 +928,78 @@ for (const [name, mutate] of [
   });
 }
 
+test("rejects legacy Pages forward fallback to the modern identity route", async () => {
+  const weakenedAuthority = replaceExactlyOnce(
+    normalizedPagesRollbackAuthority,
+    '    if (captureKind === "legacy-v0.7.4")',
+    '    if (captureKind === "modern-v2")',
+  );
+  const result = await runValidator(
+    normalizedWorkflow,
+    canonicalPackageScript,
+    normalizedPagesWorkflow,
+    weakenedAuthority,
+    normalizedPagesLegacyContract,
+  );
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects legacy Pages forward without a closed deployment-status second page", async () => {
+  const weakenedAuthority = replaceExactlyOnce(
+    normalizedPagesRollbackAuthority,
+    "`/deployments/${sealedDeploymentId}/statuses?per_page=100&page=2`",
+    "`/deployments/${sealedDeploymentId}/statuses?per_page=100&page=1`",
+  );
+  const result = await runValidator(
+    normalizedWorkflow,
+    canonicalPackageScript,
+    normalizedPagesWorkflow,
+    weakenedAuthority,
+    normalizedPagesLegacyContract,
+  );
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects legacy Pages forward without sealed projection equality", async () => {
+  const weakenedLegacyContract = replaceExactlyOnce(
+    normalizedPagesLegacyContract,
+    "canonicalJson(currentProjection) !==\n    canonicalJson(legacyPublicAuthorityProjectionFromEvidence(baseline))",
+    "canonicalJson(currentProjection) ===\n    canonicalJson(legacyPublicAuthorityProjectionFromEvidence(baseline))",
+  );
+  const result = await runValidator(
+    normalizedWorkflow,
+    canonicalPackageScript,
+    normalizedPagesWorkflow,
+    normalizedPagesRollbackAuthority,
+    weakenedLegacyContract,
+  );
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects deployed Pages sealing without every identity-listed public byte", async () => {
+  const weakenedDeploymentAuthority = replaceExactlyOnce(
+    normalizedPagesDeploymentAuthority,
+    "        await validateLiveForwardPayloads({",
+    "        await Promise.resolve({",
+  );
+  const result = await runValidator(
+    normalizedWorkflow,
+    canonicalPackageScript,
+    normalizedPagesWorkflow,
+    normalizedPagesRollbackAuthority,
+    normalizedPagesLegacyContract,
+    weakenedDeploymentAuthority,
+  );
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
 async function runValidator(
   workflow,
   packageScript = canonicalPackageScript,
   pagesWorkflow = normalizedPagesWorkflow,
+  pagesRollbackAuthority = normalizedPagesRollbackAuthority,
+  pagesLegacyContract = normalizedPagesLegacyContract,
+  pagesDeploymentAuthority = normalizedPagesDeploymentAuthority,
 ) {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "clearra-release-smoke-"));
   try {
@@ -900,15 +1027,37 @@ async function runValidator(
       "workflows",
       "pages.yml",
     );
+    const fixturePagesRollbackAuthority = join(
+      fixtureRoot,
+      "scripts",
+      "release",
+      "pages-rollback-authority.mjs",
+    );
+    const fixturePagesLegacyContract = join(
+      fixtureRoot,
+      "scripts",
+      "release",
+      "pages-legacy-contract.mjs",
+    );
+    const fixturePagesDeploymentAuthority = join(
+      fixtureRoot,
+      "scripts",
+      "release",
+      "pages-deployment-authority.mjs",
+    );
     await Promise.all([
       mkdir(dirname(fixtureValidator), { recursive: true }),
       mkdir(dirname(fixtureWorkflow), { recursive: true }),
+      mkdir(dirname(fixturePagesRollbackAuthority), { recursive: true }),
     ]);
     await Promise.all([
       writeFile(fixtureValidator, canonicalValidator, "utf8"),
       writeFile(fixturePackageScript, packageScript, "utf8"),
       writeFile(fixtureWorkflow, workflow, "utf8"),
       writeFile(fixturePagesWorkflow, pagesWorkflow, "utf8"),
+      writeFile(fixturePagesRollbackAuthority, pagesRollbackAuthority, "utf8"),
+      writeFile(fixturePagesLegacyContract, pagesLegacyContract, "utf8"),
+      writeFile(fixturePagesDeploymentAuthority, pagesDeploymentAuthority, "utf8"),
     ]);
     const childEnvironment = { ...process.env };
     for (const name of ["NODE_OPTIONS", "BASH_ENV", "ENV"]) {

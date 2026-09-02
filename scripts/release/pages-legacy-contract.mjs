@@ -354,8 +354,24 @@ const READBACK_FIELDS = Object.freeze([
   "report_sha256",
 ]);
 
-export function createLegacyPublicReadbackEvidence({
-  phase,
+const READBACK_PROJECTION_FIELDS = Object.freeze([
+  "repository",
+  "page_url",
+  "release_tag",
+  "tag_object_sha",
+  "snapshot_source_commit",
+  "deployment_id",
+  "identity_status",
+  "payloads",
+  "payload_set_sha256",
+  "tag_ref_api_readback_sha256",
+  "annotated_tag_api_readback_sha256",
+  "release_api_readback_sha256",
+  "deployment_api_readback_sha256",
+  "deployment_statuses_api_readback_sha256",
+]);
+
+function createLegacyPublicAuthorityProjection({
   repository,
   pageUrl,
   deploymentId,
@@ -369,31 +385,36 @@ export function createLegacyPublicReadbackEvidence({
   bindingsBytes,
   wasmBytes,
 }) {
-  if (!new Set(["initial", "preartifact"]).has(phase)) {
-    fail("legacy Pages public readback phase must be initial or preartifact");
-  }
-  if (typeof repository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) {
+  if (
+    typeof repository !== "string" ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)
+  ) {
     fail("legacy Pages public readback repository is invalid");
   }
   if (typeof pageUrl !== "string" || pageUrl !== "https://daejunnom.github.io/Clearra/") {
     fail("legacy Pages public readback URL differs from the approved site");
   }
-  requirePattern(String(deploymentId), DECIMAL_ID_PATTERN, "legacy Pages deployment ID");
+  const normalizedDeploymentId = requirePattern(
+    String(deploymentId),
+    DECIMAL_ID_PATTERN,
+    "legacy Pages deployment ID",
+  );
+  if (String(deployment?.id) !== normalizedDeploymentId) {
+    fail("legacy Pages deployment projection differs from its selected deployment");
+  }
   validateLegacyPagesPublicSnapshot({
     identityStatus,
     manifestBytes,
     bindingsBytes,
     wasmBytes,
   });
-  const report = sealCanonicalReport({
-    schema_id: LEGACY_PAGES_READBACK_SCHEMA,
-    phase,
+  return Object.freeze({
     repository,
     page_url: pageUrl,
     release_tag: LEGACY_PAGES_RELEASE_TAG,
     tag_object_sha: LEGACY_PAGES_TAG_OBJECT_SHA,
     snapshot_source_commit: LEGACY_PAGES_SNAPSHOT_SHA,
-    deployment_id: String(deploymentId),
+    deployment_id: normalizedDeploymentId,
     identity_status: identityStatus,
     payloads: LEGACY_PAGES_PAYLOADS.map((payload) => ({ ...payload })),
     payload_set_sha256: canonicalSha256(LEGACY_PAGES_PAYLOADS),
@@ -430,9 +451,119 @@ export function createLegacyPublicReadbackEvidence({
         }))
         : deploymentStatuses,
     ),
+  });
+}
+
+function legacyPublicAuthorityProjectionFromEvidence(evidence) {
+  return Object.freeze(Object.fromEntries(
+    READBACK_PROJECTION_FIELDS.map((field) => [field, evidence[field]]),
+  ));
+}
+
+export function createLegacyPublicReadbackEvidence({
+  phase,
+  repository,
+  pageUrl,
+  deploymentId,
+  identityStatus,
+  tagRef,
+  annotatedTag,
+  release,
+  deployment,
+  deploymentStatuses,
+  manifestBytes,
+  bindingsBytes,
+  wasmBytes,
+}) {
+  if (!new Set(["initial", "preartifact"]).has(phase)) {
+    fail("legacy Pages public readback phase must be initial or preartifact");
+  }
+  const projection = createLegacyPublicAuthorityProjection({
+    repository,
+    pageUrl,
+    deploymentId,
+    identityStatus,
+    tagRef,
+    annotatedTag,
+    release,
+    deployment,
+    deploymentStatuses,
+    manifestBytes,
+    bindingsBytes,
+    wasmBytes,
+  });
+  const report = sealCanonicalReport({
+    schema_id: LEGACY_PAGES_READBACK_SCHEMA,
+    phase,
+    ...projection,
     status: "verified",
   });
   return validateLegacyPublicReadbackEvidence(report, { expectedPhase: phase });
+}
+
+export function validateLegacyForwardPublicAuthority({
+  phase,
+  sealedReadback,
+  repository,
+  pageUrl,
+  identityStatus,
+  tagRef,
+  annotatedTag,
+  release,
+  deployment,
+  deploymentStatuses,
+  manifestBytes,
+  bindingsBytes,
+  wasmBytes,
+}) {
+  if (!new Set(["initial", "predeploy"]).has(phase)) {
+    fail("legacy Pages forward readback phase must be initial or predeploy");
+  }
+  const current = createLegacyPublicAuthorityProjection({
+    repository,
+    pageUrl,
+    deploymentId: sealedReadback?.deployment_id,
+    identityStatus,
+    tagRef,
+    annotatedTag,
+    release,
+    deployment,
+    deploymentStatuses,
+    manifestBytes,
+    bindingsBytes,
+    wasmBytes,
+  });
+  return validateLegacyForwardPublicAuthorityProjection({
+    phase,
+    sealedReadback,
+    currentProjection: current,
+  });
+}
+
+export function validateLegacyForwardPublicAuthorityProjection({
+  phase,
+  sealedReadback,
+  currentProjection,
+}) {
+  if (!new Set(["initial", "predeploy"]).has(phase)) {
+    fail("legacy Pages forward readback phase must be initial or predeploy");
+  }
+  const baseline = validateLegacyPublicReadbackEvidence(
+    sealedReadback,
+    { expectedPhase: "preartifact" },
+  );
+  requireExactKeys(
+    currentProjection,
+    READBACK_PROJECTION_FIELDS,
+    "legacy Pages forward public authority projection",
+  );
+  if (
+    canonicalJson(currentProjection) !==
+    canonicalJson(legacyPublicAuthorityProjectionFromEvidence(baseline))
+  ) {
+    fail("legacy Pages forward public authority changed since the sealed capture");
+  }
+  return Object.freeze({ phase, ...currentProjection });
 }
 
 export function validateLegacyPublicReadbackEvidence(value, { expectedPhase } = {}) {

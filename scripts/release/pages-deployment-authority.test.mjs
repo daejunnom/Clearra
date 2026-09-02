@@ -23,6 +23,7 @@ import {
 
 import {
   producePagesDeploymentAuthority,
+  publicBytesReader,
   validatePagesDeploymentAuthorityReport,
   writePagesDeploymentAuthorityReport,
 } from "./pages-deployment-authority.mjs";
@@ -30,8 +31,24 @@ import {
 const SOURCE = "1".repeat(40);
 const AUTHORITY = "2".repeat(40);
 const ARTIFACT_SHA256 = "3".repeat(64);
+const FORWARD_PAYLOADS = new Map([
+  ["index.html", Buffer.from("accepted index fixture\n", "utf8")],
+  ["wasm/clearra_wasm_bg.wasm", Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])],
+]);
 
-function identity(sourceCommit = SOURCE) {
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function forwardFileDescriptors() {
+  return [...FORWARD_PAYLOADS].map(([path, bytes]) => ({
+    path,
+    size: bytes.byteLength,
+    sha256: sha256(bytes),
+  }));
+}
+
+function identity(sourceCommit = SOURCE, files = forwardFileDescriptors()) {
   const base = {
     schema: "clearra.pages.identity.v2",
     sourceCommit,
@@ -46,10 +63,7 @@ function identity(sourceCommit = SOURCE) {
     acceptedRunId: "11111",
     acceptedRunAttempt: "2",
     basePath: "/Clearra",
-    files: [
-      { path: "index.html", size: 128, sha256: "4".repeat(64) },
-      { path: "wasm/clearra_wasm_bg.wasm", size: 256, sha256: "5".repeat(64) },
-    ],
+    files,
   };
 }
 
@@ -215,6 +229,16 @@ function fixture({ mode = "forward" } = {}) {
           : identity(SOURCE);
       },
       async fetchPublicBytes(url, _label, expectedSize) {
+        if (mode === "forward") {
+          const parsed = new URL(url);
+          assert.equal(parsed.origin, "https://daejunnom.github.io");
+          assert.match(parsed.search, /^\?authority=22222-3-1-[12]$/u);
+          const path = parsed.pathname.replace(/^\/Clearra\//u, "");
+          const payload = FORWARD_PAYLOADS.get(path);
+          assert.ok(payload, `unexpected forward payload read: ${path}`);
+          assert.equal(expectedSize, payload.byteLength);
+          return Buffer.from(payload);
+        }
         assert.match(url, /\/wasm\/clearra_wasm(?:_bg)?[./]/u);
         const descriptor = url.includes("manifest.json")
           ? LEGACY_PAGES_PAYLOAD.manifest
@@ -239,7 +263,7 @@ function fixture({ mode = "forward" } = {}) {
   };
 }
 
-test("seals forward artifact, run-attempt, deployment status, and live identity API readbacks", async () => {
+test("seals forward artifact, deployment, identity, and every live payload byte readback", async () => {
   const { input, dependencies } = fixture();
   const report = await producePagesDeploymentAuthority(input, dependencies);
   assert.equal(report.deployment_id, SOURCE);
@@ -315,6 +339,216 @@ test("rejects artifact digest, run attempt, deployment status, and public identi
       /differs from the deployed source contract/u,
     );
   }
+});
+
+test("forward live seal rejects missing, redirected, wrong-sized, and hash-drifted payloads", async () => {
+  for (const [message, reader, expected] of [
+    [
+      "missing",
+      async () => {
+        throw new Error("live Pages payload request failed with HTTP 404");
+      },
+      /HTTP 404/u,
+    ],
+    [
+      "redirected",
+      async () => {
+        throw new Error("live Pages payload redirect was rejected");
+      },
+      /redirect was rejected/u,
+    ],
+    [
+      "wrong-sized",
+      async (_url, _label, expectedSize) => Buffer.alloc(expectedSize + 1),
+      /exact byte length/u,
+    ],
+    [
+      "hash-drifted",
+      async (_url, _label, expectedSize) => Buffer.alloc(expectedSize, 0x78),
+      /identity SHA-256/u,
+    ],
+  ]) {
+    const { input, dependencies } = fixture();
+    dependencies.fetchPublicBytes = reader;
+    dependencies.attempts = 1;
+    await assert.rejects(
+      producePagesDeploymentAuthority(input, dependencies),
+      expected,
+      message,
+    );
+  }
+});
+
+test("forward live seal retries partial CDN convergence and only seals one complete generation", async () => {
+  const { input, dependencies } = fixture();
+  let sleeps = 0;
+  let payloadReads = 0;
+  dependencies.fetchPublicJson = async (url) => {
+    assert.match(url, /clearra-build-identity\.json\?authority=22222-3-[12]$/u);
+    return identity(SOURCE);
+  };
+  dependencies.fetchPublicBytes = async (url, _label, expectedSize) => {
+    payloadReads += 1;
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/^\/Clearra\//u, "");
+    const payload = FORWARD_PAYLOADS.get(path);
+    assert.ok(payload, `unexpected forward payload read: ${path}`);
+    assert.equal(expectedSize, payload.byteLength);
+    if (parsed.searchParams.get("authority") === "22222-3-1-1") {
+      return Buffer.alloc(expectedSize, 0x78);
+    }
+    return Buffer.from(payload);
+  };
+  dependencies.sleep = async () => {
+    sleeps += 1;
+  };
+  const report = await producePagesDeploymentAuthority(input, dependencies);
+  assert.equal(report.status, "active");
+  assert.equal(sleeps, 1);
+  assert.equal(payloadReads, 3);
+});
+
+test("forward identity manifest rejects duplicate, unsafe, excessive-count, and excessive-byte sets", async () => {
+  const descriptor = (path, size = 1) => ({
+    path,
+    size,
+    sha256: "d".repeat(64),
+  });
+  const rejectFiles = async (files, expected, message) => {
+    const { input, dependencies } = fixture();
+    dependencies.fetchPublicJson = async () => identity(SOURCE, files);
+    dependencies.fetchPublicBytes = async () => {
+      assert.fail("invalid identity file sets must fail before public payload reads");
+    };
+    dependencies.attempts = 1;
+    await assert.rejects(
+      producePagesDeploymentAuthority(input, dependencies),
+      expected,
+      message,
+    );
+  };
+
+  await rejectFiles(
+    [descriptor("index.html"), descriptor("index.html")],
+    /invalid or unsorted/u,
+    "duplicate path",
+  );
+  await rejectFiles(
+    [descriptor("b.js"), descriptor("a.js")],
+    /invalid or unsorted/u,
+    "unsorted path",
+  );
+  await rejectFiles(
+    [descriptor("assets"), descriptor("assets/entry.js")],
+    /invalid or unsorted/u,
+    "file and descendant collision",
+  );
+  await rejectFiles(
+    ["a", "a_", "a-", "a.", "a/x"].map((path) => descriptor(path)),
+    /invalid or unsorted/u,
+    "non-adjacent file and descendant collision",
+  );
+  for (const path of [
+    "../index.html",
+    "/index.html",
+    "assets//entry.js",
+    "assets/./entry.js",
+    "assets/%2e%2e/entry.js",
+    "assets/entry.js?stale=1",
+    "assets\\entry.js",
+    "https:entry.js",
+    "clearra-build-identity.json",
+  ]) {
+    await rejectFiles(
+      [descriptor(path)],
+      /invalid or unsorted/u,
+      `unsafe path ${path}`,
+    );
+  }
+
+  await rejectFiles(
+    Array.from({ length: 1_025 }, (_value, index) =>
+      descriptor(`assets/${String(index).padStart(4, "0")}.js`, 0)),
+    /file count exceeds/u,
+    "file count cap",
+  );
+  await rejectFiles(
+    [
+      descriptor("a.bin", 32 * 1024 * 1024 + 1),
+      descriptor("b.bin", 32 * 1024 * 1024),
+    ],
+    /payload bytes exceed/u,
+    "aggregate byte cap",
+  );
+  await rejectFiles(
+    [descriptor("too-large.bin", 64 * 1024 * 1024 + 1)],
+    /invalid or unsorted/u,
+    "per-file byte cap",
+  );
+});
+
+test("public byte reader enforces no-store, no-redirect, exact bounded streaming", async () => {
+  const payload = Buffer.from("ok", "utf8");
+  const result = await publicBytesReader(
+    "https://daejunnom.github.io/Clearra/index.html?authority=fixture",
+    "live Pages payload index.html",
+    payload.byteLength,
+    {
+      async fetchImpl(url, options) {
+        assert.match(url, /^https:\/\/daejunnom\.github\.io\/Clearra\//u);
+        assert.equal(options.method, "GET");
+        assert.equal(options.cache, "no-store");
+        assert.equal(options.redirect, "error");
+        assert.equal(options.headers.Accept, "application/octet-stream");
+        assert.ok(options.signal instanceof AbortSignal);
+        return new Response(payload, {
+          status: 200,
+          headers: { "content-length": String(payload.byteLength) },
+        });
+      },
+    },
+  );
+  assert.deepEqual(result, payload);
+
+  await assert.rejects(
+    publicBytesReader("https://example.invalid/missing", "missing payload", 2, {
+      async fetchImpl() {
+        return new Response("no", { status: 404 });
+      },
+    }),
+    /HTTP 404/u,
+  );
+  await assert.rejects(
+    publicBytesReader("https://example.invalid/redirect", "redirected payload", 2, {
+      async fetchImpl(_url, options) {
+        assert.equal(options.redirect, "error");
+        throw new TypeError("redirect rejected by fetch");
+      },
+    }),
+    /redirect rejected/u,
+  );
+  await assert.rejects(
+    publicBytesReader("https://example.invalid/oversize", "oversized payload", 2, {
+      async fetchImpl() {
+        return new Response("abc", {
+          status: 200,
+          headers: { "content-length": "3" },
+        });
+      },
+    }),
+    /Content-Length exceeds/u,
+  );
+  assert.deepEqual(
+    await publicBytesReader("https://example.invalid/empty", "empty payload", 0, {
+      async fetchImpl() {
+        return new Response(new Uint8Array(0), {
+          status: 200,
+          headers: { "content-length": "0" },
+        });
+      },
+    }),
+    Buffer.alloc(0),
+  );
 });
 
 test("restore late binding rejects report artifact substitution and public byte drift", async () => {

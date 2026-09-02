@@ -28,6 +28,8 @@ import {
   serializeLegacyReconstructedIdentity,
   validateLegacyPagesPublicSnapshot,
   validateLegacyPagesWasmManifest,
+  validateLegacyForwardPublicAuthority,
+  validateLegacyForwardPublicAuthorityProjection,
   validateLegacyPublicReadbackEvidence,
   validateLegacyReconstructedIdentity,
   validateLegacyReconstructedIdentityBytes,
@@ -81,6 +83,21 @@ function readbackEvidence(phase) {
     deployment_statuses_api_readback_sha256: "5".repeat(64),
     status: "verified",
   });
+}
+
+function readbackProjection(evidence) {
+  const {
+    schema_id: schemaId,
+    phase,
+    status,
+    report_sha256: reportSha256,
+    ...projection
+  } = evidence;
+  void schemaId;
+  void phase;
+  void status;
+  void reportSha256;
+  return projection;
 }
 
 test("approved legacy constants match the real annotated v0.7.4 git object", () => {
@@ -208,6 +225,80 @@ test("public identity or any public byte drift fails closed", () => {
   assert.throws(
     () => validateLegacyPagesWasmManifest(undefined, driftedManifest, "drifted manifest"),
     /approved v0\.7\.4 bytes/u,
+  );
+});
+
+test("legacy forward revalidates the sealed 404 and exact public authority projection", () => {
+  const sealedReadback = readbackEvidence("preartifact");
+  const currentProjection = readbackProjection(sealedReadback);
+  for (const phase of ["initial", "predeploy"]) {
+    const result = validateLegacyForwardPublicAuthorityProjection({
+      phase,
+      sealedReadback,
+      currentProjection,
+    });
+    assert.equal(result.phase, phase);
+    assert.equal(result.identity_status, 404);
+    assert.equal(result.deployment_id, "6181925865");
+  }
+});
+
+test("legacy forward rejects identity, byte, tag, release, deployment, and status drift", () => {
+  const sealedReadback = readbackEvidence("preartifact");
+  const baseline = readbackProjection(sealedReadback);
+  for (const [field, replacement] of [
+    ["identity_status", 200],
+    ["payload_set_sha256", "f".repeat(64)],
+    ["tag_ref_api_readback_sha256", "f".repeat(64)],
+    ["annotated_tag_api_readback_sha256", "f".repeat(64)],
+    ["release_api_readback_sha256", "f".repeat(64)],
+    ["deployment_api_readback_sha256", "f".repeat(64)],
+    ["deployment_statuses_api_readback_sha256", "f".repeat(64)],
+  ]) {
+    assert.throws(
+      () => validateLegacyForwardPublicAuthorityProjection({
+        phase: "initial",
+        sealedReadback,
+        currentProjection: { ...baseline, [field]: replacement },
+      }),
+      /changed since the sealed capture/u,
+      field,
+    );
+  }
+  assert.throws(
+    () => validateLegacyForwardPublicAuthorityProjection({
+      phase: "restore",
+      sealedReadback,
+      currentProjection: baseline,
+    }),
+    /phase must be initial or predeploy/u,
+  );
+  assert.throws(
+    () => validateLegacyForwardPublicAuthorityProjection({
+      phase: "predeploy",
+      sealedReadback,
+      currentProjection: { ...baseline, bypass: true },
+    }),
+    /closed schema/u,
+  );
+
+  assert.throws(
+    () => validateLegacyForwardPublicAuthority({
+      phase: "initial",
+      sealedReadback,
+      repository: "daejunnom/Clearra",
+      pageUrl: "https://daejunnom.github.io/Clearra/",
+      identityStatus: 404,
+      tagRef: {},
+      annotatedTag: {},
+      release: {},
+      deployment: { id: 6181925865 },
+      deploymentStatuses: [],
+      manifestBytes: exactManifestBytes(),
+      bindingsBytes: Buffer.alloc(1),
+      wasmBytes: Buffer.alloc(1),
+    }),
+    /bindings differs from the approved v0\.7\.4 bytes/u,
   );
 });
 

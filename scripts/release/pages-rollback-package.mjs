@@ -326,11 +326,23 @@ export async function validateRollbackPackageDirectory(
   });
 }
 
+export function validateRollbackPackageCaptureKind(captureReport, expectedCaptureKind) {
+  validateRollbackCaptureReport(captureReport);
+  if (!new Set(["legacy-v0.7.4", "modern-v2"]).has(expectedCaptureKind)) {
+    fail("Pages rollback expected capture kind is invalid");
+  }
+  if (captureReport.capture_kind !== expectedCaptureKind) {
+    fail("Pages rollback package capture kind differs from the required mutation kind");
+  }
+  return expectedCaptureKind;
+}
+
 async function main() {
   const directory = process.env.PAGES_ROLLBACK_PACKAGE_DIR;
   const expectedSha = process.env.SNAPSHOT_SHA;
   const expectedTarSha256 = process.env.SNAPSHOT_TAR_SHA256;
   const captureReportPath = process.env.PAGES_ROLLBACK_CAPTURE_REPORT_PATH;
+  const expectedCaptureKind = process.env.PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND;
   if (typeof directory !== "string" || directory.length === 0) {
     fail("PAGES_ROLLBACK_PACKAGE_DIR is required");
   }
@@ -338,6 +350,9 @@ async function main() {
     fail("PAGES_ROLLBACK_CAPTURE_REPORT_PATH is required");
   }
   const { report } = await readRollbackCaptureReport(captureReportPath);
+  if (typeof expectedCaptureKind === "string" && expectedCaptureKind.length > 0) {
+    validateRollbackPackageCaptureKind(report, expectedCaptureKind);
+  }
   await validateRollbackPackageDirectory(directory, {
     expectedSha,
     expectedTarSha256,

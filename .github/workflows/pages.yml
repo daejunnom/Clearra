@@ -26,6 +26,10 @@ concurrency:
 
 jobs:
   accepted-source:
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
     outputs:
       accepted_run_id: ${{ steps.accepted_run.outputs.accepted_run_id }}
       accepted_run_attempt: ${{ steps.accepted_run.outputs.accepted_run_attempt }}
@@ -160,6 +164,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      deployments: read
       pages: write
       id-token: write
     environment:
