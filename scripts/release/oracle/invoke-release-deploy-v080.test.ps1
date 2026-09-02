@@ -5,14 +5,37 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $wrapper = Join-Path $PSScriptRoot 'invoke-release-deploy-v080.ps1'
-$sourceCommit = '0123456789abcdef0123456789abcdef01234567'
-$scriptReleaseId = 'v0.8.0-0123456'
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
+$sourceCommit = @(& git -C $repositoryRoot rev-parse HEAD)
+if ($LASTEXITCODE -ne 0 -or $sourceCommit.Count -ne 1 -or
+    $sourceCommit[0] -cnotmatch '^[0-9a-f]{40}$') {
+    throw 'Oracle wrapper test could not resolve the accepted source commit.'
+}
+$sourceCommit = [string]$sourceCommit[0]
+$scriptReleaseId = "v0.8.0-$($sourceCommit.Substring(0, 7))"
 $scriptReleaseSha256 = 'b' * 64
 $deploymentNonce = 'a' * 64
-$candidateRevision = 'clearra-current-job-v080-0123456'
+$candidateRevision = "clearra-current-job-v080-$($sourceCommit.Substring(0, 7))"
 $candidateUrl = 'https://candidate.example.test'
 $verifiedAfter = '2026-08-30T00:00:00.000Z'
 $dummyIdentity = Join-Path $PSScriptRoot 'identity-must-not-be-read'
+
+function ssh-keygen {
+    $global:LASTEXITCODE = 0
+    '256 SHA256:mdw7bdzZOBrd6sCebPmMVuTaps+ct2OaOle/gaZMBKU 157.151.254.175 (ED25519)'
+}
+
+function wsl.exe {
+    $global:LASTEXITCODE = 0
+    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq '/usr/bin/wslpath') {
+        '/tmp/clearra-oracle-release-deploy-v080'
+        return
+    }
+    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq '/usr/bin/dash') {
+        return
+    }
+    throw 'Unexpected WSL invocation in Oracle evidence boundary test.'
+}
 
 function Invoke-ExtractedWrapperFunction {
     param(
@@ -124,20 +147,6 @@ $capture = @(& $wrapper `
     -IdentityFile $dummyIdentity `
     -AuditOnly)
 Assert-AuditResult -Output $capture -Operation 'capture-rollback-authority'
-
-$prestageCapture = @(& $wrapper `
-    -Operation capture-prestage-authority `
-    -PriorRevision 'clearra-current-job-v075-042ec21' `
-    -PriorRuntimeAuthorityKind 'clearra.rollback.legacy-health-no-runtime.v1' `
-    -DeploymentNonce $deploymentNonce `
-    -AuditOnly)
-Assert-AuditResult -Output $prestageCapture -Operation 'capture-prestage-authority'
-
-$prestageCleanup = @(& $wrapper `
-    -Operation cleanup-prestage-backup `
-    -DeploymentNonce $deploymentNonce `
-    -AuditOnly)
-Assert-AuditResult -Output $prestageCleanup -Operation 'cleanup-prestage-backup'
 
 $candidate = @(& $wrapper `
     -Operation verify-candidate `
@@ -289,11 +298,37 @@ foreach ($required in @(
     '[IO.FileShare]::None',
     '[Text.UTF8Encoding]::new($false)',
     '$stream.Flush($true)',
+    'create-prestage-helper-bundle.mjs',
+    '/usr/bin/systemd-run',
+    '--on-active=30m',
+    '/usr/bin/flock',
+    '/usr/bin/env',
+    "'/usr/bin/node', `$prestageMain",
+    'Root-owned prestage helper inventory',
+    'Oracle prestage helper upload digest differs',
+    "'-links', '1'",
+    'Oracle prestage helper cleanup failed',
+    'Oracle prestage helper cleanup watchdog failed closed.',
+    '$cleanupTimerMayExist -and $cleanupFailures.Count -eq 0',
+    'Invoke-ExactSshResult',
+    '$watchdogUnitsAfterTimerStop',
+    '"$cleanupService ", [StringComparison]::Ordinal',
+    '$cleanupServiceStop = Invoke-ExactSshResult',
+    '$cleanupTimer, $cleanupService',
+    "'--full', '--plain', '--no-legend'",
+    'cleanup watchdog state after timer stop is invalid',
+    'cleanup watchdog unit residue remains',
     "if (`$Operation -notin @('capture-prestage-authority', 'capture-rollback-authority', 'observe-candidate', 'classify-current-authority')) {"
 )) {
     if ($source.IndexOf($required, [StringComparison]::Ordinal) -lt 0) {
         throw "Typed invoker is missing pinned identity/SSH marker: $required"
     }
+}
+if ($source.Contains(
+    '/opt/clearra/current/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs',
+    [StringComparison]::Ordinal
+)) {
+    throw 'Prestage helper execution still depends on code from the active current release.'
 }
 if ($source -match '(?i)(Get-Content|Get-FileHash|ReadAllBytes|ReadAllText)[^\r\n]*\$IdentityFile') {
     throw 'Typed invoker reads or hashes the identity file.'
@@ -349,50 +384,752 @@ $realParentPath = Join-Path $evidenceRoot 'real-parent'
 $linkedParentPath = Join-Path $evidenceRoot 'linked-parent'
 $linkedEvidencePath = Join-Path $linkedParentPath 'evidence.json'
 $linkedEvidenceTargetPath = Join-Path $realParentPath 'evidence.json'
+$prestageFixtureRoot = [IO.Path]::Combine(
+    [IO.Path]::GetTempPath(),
+    "clearra-oracle-prestage-transport-$([Guid]::NewGuid().ToString('N'))"
+)
 $identityLock = $null
 $linkCreated = $false
+$prestageFixture = $null
 $global:clearraOracleTestMockOutput = $null
 $global:clearraOracleTestMockSshInvocationCount = 0
 $global:clearraOracleTestLockedIdentityPath = $lockedIdentityPath
+$global:clearraOraclePrestageRemote = $null
+$global:clearraOracleTestExpectedKnownHostsPath = Join-Path `
+    $PSScriptRoot 'clearra-oracle-known-hosts'
 
-function ssh-keygen {
-    $global:LASTEXITCODE = 0
-    '256 SHA256:mdw7bdzZOBrd6sCebPmMVuTaps+ct2OaOle/gaZMBKU 157.151.254.175 (ED25519)'
+function Test-ExactCommand {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Actual,
+        [Parameter(Mandatory = $true)][string[]] $Expected
+    )
+    if ($Actual.Count -ne $Expected.Count) { return $false }
+    for ($index = 0; $index -lt $Expected.Count; $index += 1) {
+        if ([string]$Actual[$index] -cne $Expected[$index]) { return $false }
+    }
+    return $true
 }
 
-function wsl.exe {
-    $global:LASTEXITCODE = 0
-    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq '/usr/bin/wslpath') {
-        '/tmp/clearra-oracle-release-deploy-v080'
-        return
+function Test-CommandPrefix {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Actual,
+        [Parameter(Mandatory = $true)][string[]] $Expected
+    )
+    if ($Actual.Count -lt $Expected.Count) { return $false }
+    for ($index = 0; $index -lt $Expected.Count; $index += 1) {
+        if ([string]$Actual[$index] -cne $Expected[$index]) { return $false }
     }
-    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq '/usr/bin/dash') {
-        return
+    return $true
+}
+
+function Get-ExpectedOracleCommonClientArguments {
+    param(
+        [Parameter(Mandatory = $true)][string] $SshConfigPath,
+        [Parameter(Mandatory = $true)][string] $IdentityFile,
+        [Parameter(Mandatory = $true)][string] $KnownHostsPath
+    )
+    return [string[]]@(
+        '-F', $SshConfigPath,
+        '-i', $IdentityFile,
+        '-o', 'BatchMode=yes',
+        '-o', 'IdentitiesOnly=yes',
+        '-o', 'IdentityAgent=none',
+        '-o', 'PreferredAuthentications=publickey',
+        '-o', 'PasswordAuthentication=no',
+        '-o', 'KbdInteractiveAuthentication=no',
+        '-o', 'GSSAPIAuthentication=no',
+        '-o', 'StrictHostKeyChecking=yes',
+        '-o', "UserKnownHostsFile=$KnownHostsPath",
+        '-o', "GlobalKnownHostsFile=$KnownHostsPath",
+        '-o', 'HostKeyAlgorithms=ssh-ed25519',
+        '-o', 'KexAlgorithms=curve25519-sha256',
+        '-o', 'ProxyCommand=none',
+        '-o', 'ProxyJump=none',
+        '-o', 'CanonicalizeHostname=no',
+        '-o', 'UpdateHostKeys=no',
+        '-o', 'ClearAllForwardings=yes',
+        '-o', 'RequestTTY=no',
+        '-o', 'NumberOfPasswordPrompts=0',
+        '-o', 'ControlMaster=no',
+        '-o', 'ControlPath=none',
+        '-o', 'ControlPersist=no',
+        '-o', 'PermitLocalCommand=no',
+        '-o', 'LogLevel=ERROR',
+        '-o', 'ConnectTimeout=15'
+    )
+}
+
+function Get-ExactOracleClientTail {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Actual,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedPrefix,
+        [Parameter(Mandatory = $true)][string] $Label,
+        [Parameter(Mandatory = $true)][int] $MinimumTailCount,
+        [int] $ExactTailCount = -1
+    )
+    if ($Actual.Count -lt ($ExpectedPrefix.Count + $MinimumTailCount)) {
+        throw "$Label omitted a fixed option or required tail argument."
     }
-    throw 'Unexpected WSL invocation in Oracle evidence boundary test.'
+    if ($ExactTailCount -ge 0 -and
+        $Actual.Count -ne ($ExpectedPrefix.Count + $ExactTailCount)) {
+        throw "$Label appended an option outside its exact fixed prefix."
+    }
+    for ($index = 0; $index -lt $ExpectedPrefix.Count; $index += 1) {
+        if ([string]$Actual[$index] -cne $ExpectedPrefix[$index]) {
+            throw "$Label fixed option prefix drifted at index $index."
+        }
+    }
+    return [object[]]@($Actual[$ExpectedPrefix.Count..($Actual.Count - 1)])
+}
+
+function Assert-OracleClientPrefixMutationRejected {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Actual,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedPrefix,
+        [Parameter(Mandatory = $true)][string] $Label,
+        [int] $MinimumTailCount = 1,
+        [int] $ExactTailCount = -1
+    )
+    $rejected = $false
+    try {
+        [void](Get-ExactOracleClientTail `
+            -Actual $Actual -ExpectedPrefix $ExpectedPrefix `
+            -Label $Label -MinimumTailCount $MinimumTailCount `
+            -ExactTailCount $ExactTailCount)
+    } catch {
+        $rejected = $_.Exception.Message -like "$Label*"
+    }
+    if (-not $rejected) {
+        throw "$Label mutation was accepted by the exact client-prefix boundary."
+    }
+}
+
+$clientProbeConfig = if (
+    [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Windows
+    )
+) { 'NUL' } else { '/dev/null' }
+[string[]]$clientProbeCommon = @(
+    Get-ExpectedOracleCommonClientArguments `
+        -SshConfigPath $clientProbeConfig `
+        -IdentityFile $lockedIdentityPath `
+        -KnownHostsPath $global:clearraOracleTestExpectedKnownHostsPath
+)
+[string[]]$clientProbeSshPrefix = $clientProbeCommon + @('ubuntu@157.151.254.175')
+[string[]]$clientProbeSsh = $clientProbeSshPrefix + @('/usr/bin/true')
+[object[]]$missingClientOption = @(
+    $clientProbeSsh[0..3] + $clientProbeSsh[6..($clientProbeSsh.Count - 1)]
+)
+Assert-OracleClientPrefixMutationRejected `
+    -Actual $missingClientOption -ExpectedPrefix $clientProbeSshPrefix `
+    -Label 'Missing Oracle SSH option'
+[object[]]$reorderedClientOptions = @($clientProbeSsh)
+$reorderedClientOptions[5] = $clientProbeSsh[7]
+$reorderedClientOptions[7] = $clientProbeSsh[5]
+Assert-OracleClientPrefixMutationRejected `
+    -Actual $reorderedClientOptions -ExpectedPrefix $clientProbeSshPrefix `
+    -Label 'Reordered Oracle SSH options'
+[object[]]$conflictingClientOption = @(
+    $clientProbeCommon + @(
+        '-o', 'StrictHostKeyChecking=no',
+        'ubuntu@157.151.254.175', '/usr/bin/true'
+    )
+)
+Assert-OracleClientPrefixMutationRejected `
+    -Actual $conflictingClientOption -ExpectedPrefix $clientProbeSshPrefix `
+    -Label 'Conflicting Oracle SSH option'
+[string[]]$clientProbeScpPrefix = @('-q') + $clientProbeCommon
+[object[]]$appendedScpOption = @(
+    $clientProbeScpPrefix + @(
+        '-o', 'StrictHostKeyChecking=no', '--', 'local',
+        'ubuntu@157.151.254.175:/home/ubuntu/remote'
+    )
+)
+Assert-OracleClientPrefixMutationRejected `
+    -Actual $appendedScpOption -ExpectedPrefix $clientProbeScpPrefix `
+    -Label 'Conflicting Oracle SCP option' -MinimumTailCount 3 -ExactTailCount 3
+
+function New-PrestageRemoteResult {
+    param(
+        [int] $ExitCode = 0,
+        [AllowEmptyCollection()][string[]] $Output = @()
+    )
+    $normalized = [Collections.Generic.List[string]]::new()
+    foreach ($line in @($Output)) {
+        if ($null -ne $line) { [void]$normalized.Add([string]$line) }
+    }
+    return [pscustomobject]@{
+        ExitCode = $ExitCode
+        Output = [string[]]@($normalized)
+    }
+}
+
+function New-PrestageRemoteModel {
+    param(
+        [Parameter(Mandatory = $true)][string] $Nonce,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('capture', 'cleanup')]
+        [string] $OperationSlug,
+        [ValidateSet('', 'root', 'upload')]
+        [string] $CleanupFailure = '',
+        [ValidateSet('single', 'duplicate')]
+        [string] $NodeOutputMode = 'single',
+        [ValidateSet('timer-only', 'service-loaded')]
+        [string] $WatchdogArmState = 'timer-only',
+        [ValidateSet('success', 'collected-before-stop', 'failed-still-loaded')]
+        [string] $ServiceStopBehavior = 'success'
+    )
+    $root = "/opt/clearra/.v080-prestage-helper-$Nonce-$OperationSlug"
+    $upload = "/home/ubuntu/.clearra-v080-prestage-helper-$Nonce-$OperationSlug"
+    $unit = "clearra-v080-prestage-helper-$Nonce-$OperationSlug-cleanup"
+    return [pscustomobject]@{
+        Nonce = $Nonce
+        OperationSlug = $OperationSlug
+        CleanupFailure = $CleanupFailure
+        NodeOutputMode = $NodeOutputMode
+        WatchdogArmState = $WatchdogArmState
+        ServiceStopBehavior = $ServiceStopBehavior
+        RootPath = $root
+        UploadRoot = $upload
+        CleanupTimer = "$unit.timer"
+        CleanupService = "$unit.service"
+        Paths = @{}
+        Units = @{}
+        Events = [Collections.Generic.List[string]]::new()
+        ArmEventIndex = -1
+        FirstTransportMutationEventIndex = -1
+        ScpCount = 0
+        UploadFileAuthorityChecks = 0
+        UploadFileMetadataChecks = 0
+        UploadFileDigestChecks = 0
+        RootFileAuthorityChecks = 0
+        RootFileMetadataChecks = 0
+        RootFileDigestChecks = 0
+        UploadInventoryChecks = 0
+        RootInventoryChecks = 0
+        NodeInvocationCount = 0
+        SharedFlockEnvObserved = $false
+        TimerStopInvocationCount = 0
+        ServiceStateReadbackCount = 0
+        ServiceStopInvocationCount = 0
+        WatchdogAbsenceReadbackCount = 0
+    }
+}
+
+function Add-PrestageRemoteEvent {
+    param(
+        [Parameter(Mandatory = $true)] $Model,
+        [Parameter(Mandatory = $true)][string] $Kind,
+        [Parameter(Mandatory = $true)][object[]] $Arguments
+    )
+    [string[]]$tokens = @($Arguments | ForEach-Object { [string]$_ })
+    [void]$Model.Events.Add("$Kind$([char]30)$($tokens -join [char]31)")
+    return $Model.Events.Count - 1
+}
+
+function Set-PrestageRemotePath {
+    param(
+        [Parameter(Mandatory = $true)] $Model,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Type,
+        [Parameter(Mandatory = $true)][int] $Uid,
+        [Parameter(Mandatory = $true)][int] $Gid,
+        [Parameter(Mandatory = $true)][string] $Mode,
+        [long] $Size = 0,
+        [string] $Sha256 = '',
+        [int] $Nlink = 1
+    )
+    $Model.Paths[$Path] = [pscustomobject]@{
+        Type = $Type
+        Uid = $Uid
+        Gid = $Gid
+        Mode = $Mode
+        Size = $Size
+        Sha256 = $Sha256
+        Nlink = $Nlink
+    }
+}
+
+function Remove-PrestageRemoteTree {
+    param(
+        [Parameter(Mandatory = $true)] $Model,
+        [Parameter(Mandatory = $true)][string] $Root
+    )
+    foreach ($path in @($Model.Paths.Keys)) {
+        if ($path -ceq $Root -or $path.StartsWith("$Root/", [StringComparison]::Ordinal)) {
+            [void]$Model.Paths.Remove($path)
+        }
+    }
+}
+
+function Get-PrestageImmediateChildren {
+    param(
+        [Parameter(Mandatory = $true)] $Model,
+        [Parameter(Mandatory = $true)][string] $Root
+    )
+    return @($Model.Paths.Keys | Where-Object {
+        if (-not $_.StartsWith("$Root/", [StringComparison]::Ordinal)) { return $false }
+        return $_.Substring($Root.Length + 1).IndexOf('/') -lt 0
+    })
+}
+
+function Invoke-PrestageRemoteCommand {
+    param([Parameter(Mandatory = $true)][object[]] $Command)
+    $model = $global:clearraOraclePrestageRemote
+    if ($null -eq $model) {
+        throw 'Prestage remote command model is not active.'
+    }
+    [string[]]$tokens = @($Command | ForEach-Object { [string]$_ })
+    $eventIndex = Add-PrestageRemoteEvent -Model $model -Kind 'ssh' -Arguments $tokens
+    $root = [string]$model.RootPath
+    $upload = [string]$model.UploadRoot
+    $timer = [string]$model.CleanupTimer
+    $service = [string]$model.CleanupService
+    $releaseLock = '/run/lock/clearra-oracle-release-deploy.lock'
+
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        'sudo', '-n', '/usr/bin/systemctl', 'list-units', '--all',
+        '--full', '--plain', '--no-legend', $timer, $service
+    )) {
+        $loaded = [Collections.Generic.List[string]]::new()
+        foreach ($unit in @($timer, $service)) {
+            if ($model.Units.ContainsKey($unit)) {
+                [void]$loaded.Add("$unit loaded active running")
+            }
+        }
+        if ($model.TimerStopInvocationCount -gt 0) {
+            if ($model.ServiceStateReadbackCount -eq 0) {
+                $model.ServiceStateReadbackCount += 1
+            } elseif ($loaded.Count -eq 0) {
+                $model.WatchdogAbsenceReadbackCount += 1
+            }
+        }
+        return New-PrestageRemoteResult -Output @($loaded)
+    }
+
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        'sudo', '-n', '/usr/bin/systemd-run', '--quiet', '--collect',
+        "--unit=$($timer.Substring(0, $timer.Length - 6))", '--on-active=30m',
+        '/usr/bin/flock', $releaseLock, '/usr/bin/rm', '-rf', '--', $root, $upload
+    )) {
+        if ($model.Paths.Count -ne 0 -or $model.Units.Count -ne 0) {
+            throw 'Prestage watchdog was not the first remote state mutation.'
+        }
+        $model.Units[$timer] = $true
+        if ($model.WatchdogArmState -ceq 'service-loaded') {
+            $model.Units[$service] = $true
+        }
+        $model.ArmEventIndex = $eventIndex
+        return New-PrestageRemoteResult
+    }
+
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        'sudo', '-n', '/usr/bin/systemctl', 'show', '--property=Id', '--value', $timer
+    )) {
+        if (-not $model.Units.ContainsKey($timer)) { return New-PrestageRemoteResult -ExitCode 4 }
+        return New-PrestageRemoteResult -Output @($timer)
+    }
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        'sudo', '-n', '/usr/bin/systemctl', 'show', '--property=ActiveState', '--value', $timer
+    )) {
+        if (-not $model.Units.ContainsKey($timer)) { return New-PrestageRemoteResult -ExitCode 4 }
+        return New-PrestageRemoteResult -Output @('active')
+    }
+
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        '/usr/bin/find', '/home/ubuntu', '-maxdepth', '1',
+        '-name', [IO.Path]::GetFileName($upload), '-print'
+    )) {
+        $output = if ($model.Paths.ContainsKey($upload)) { @($upload) } else { @() }
+        return New-PrestageRemoteResult -Output $output
+    }
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        'sudo', '-n', '/usr/bin/find', '/opt/clearra', '-maxdepth', '1',
+        '-name', [IO.Path]::GetFileName($root), '-print'
+    )) {
+        $output = if ($model.Paths.ContainsKey($root)) { @($root) } else { @() }
+        return New-PrestageRemoteResult -Output $output
+    }
+
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        '/usr/bin/mkdir', '-m', '0700', '--', $upload
+    )) {
+        if ($model.ArmEventIndex -lt 0 -or $model.Paths.ContainsKey($upload)) {
+            return New-PrestageRemoteResult -ExitCode 17
+        }
+        if ($model.FirstTransportMutationEventIndex -lt 0) {
+            $model.FirstTransportMutationEventIndex = $eventIndex
+        }
+        Set-PrestageRemotePath -Model $model -Path $upload -Type 'directory' `
+            -Uid 1001 -Gid 1001 -Mode '700'
+        return New-PrestageRemoteResult
+    }
+
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        '/usr/bin/stat', '-c', '%u:%g:%a', '--', $upload
+    )) {
+        $entry = $model.Paths[$upload]
+        if ($null -eq $entry -or $entry.Type -cne 'directory') {
+            return New-PrestageRemoteResult -ExitCode 2
+        }
+        return New-PrestageRemoteResult -Output @("$($entry.Uid):$($entry.Gid):$($entry.Mode)")
+    }
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        '/usr/bin/readlink', '-f', '--', $upload
+    )) {
+        if (-not $model.Paths.ContainsKey($upload)) { return New-PrestageRemoteResult -ExitCode 2 }
+        return New-PrestageRemoteResult -Output @($upload)
+    }
+
+    if ($tokens.Count -eq 4 -and
+        $tokens[0] -ceq '/usr/bin/chmod' -and $tokens[1] -ceq '0600' -and
+        $tokens[2] -ceq '--' -and $tokens[3].StartsWith("$upload/", [StringComparison]::Ordinal)) {
+        $path = $tokens[3]
+        $entry = $model.Paths[$path]
+        if ($null -eq $entry -or $entry.Type -cne 'file') {
+            return New-PrestageRemoteResult -ExitCode 2
+        }
+        $entry.Mode = '600'
+        return New-PrestageRemoteResult
+    }
+
+    if ($tokens.Count -eq 13 -and $tokens[0] -ceq '/usr/bin/find' -and
+        $tokens[1].StartsWith("$upload/", [StringComparison]::Ordinal)) {
+        $path = $tokens[1]
+        $expected = @(
+            '/usr/bin/find', $path, '-maxdepth', '0', '-type', 'f', '-links', '1',
+            '-uid', '1001', '-gid', '1001', '-print'
+        )
+        if (-not (Test-ExactCommand -Actual $tokens -Expected $expected)) {
+            throw 'Upload file authority command drifted.'
+        }
+        $entry = $model.Paths[$path]
+        if ($null -ne $entry -and $entry.Type -ceq 'file' -and
+            $entry.Nlink -eq 1 -and $entry.Uid -eq 1001 -and $entry.Gid -eq 1001) {
+            $model.UploadFileAuthorityChecks += 1
+            return New-PrestageRemoteResult -Output @($path)
+        }
+        return New-PrestageRemoteResult
+    }
+    if ($tokens.Count -eq 5 -and $tokens[0] -ceq '/usr/bin/stat' -and
+        $tokens[1] -ceq '-c' -and $tokens[2] -ceq '%u:%g:%a:%s:%h' -and
+        $tokens[3] -ceq '--' -and $tokens[4].StartsWith("$upload/", [StringComparison]::Ordinal)) {
+        $entry = $model.Paths[$tokens[4]]
+        if ($null -eq $entry) { return New-PrestageRemoteResult -ExitCode 2 }
+        $model.UploadFileMetadataChecks += 1
+        return New-PrestageRemoteResult -Output @(
+            "$($entry.Uid):$($entry.Gid):$($entry.Mode):$($entry.Size):$($entry.Nlink)"
+        )
+    }
+    if ($tokens.Count -eq 3 -and $tokens[0] -ceq '/usr/bin/sha256sum' -and
+        $tokens[1] -ceq '--' -and $tokens[2].StartsWith("$upload/", [StringComparison]::Ordinal)) {
+        $entry = $model.Paths[$tokens[2]]
+        if ($null -eq $entry) { return New-PrestageRemoteResult -ExitCode 2 }
+        $model.UploadFileDigestChecks += 1
+        return New-PrestageRemoteResult -Output @("$($entry.Sha256)  $($tokens[2])")
+    }
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        '/usr/bin/find', $upload, '-mindepth', '1', '-maxdepth', '1', '-print'
+    )) {
+        $model.UploadInventoryChecks += 1
+        return New-PrestageRemoteResult -Output @(
+            Get-PrestageImmediateChildren -Model $model -Root $upload
+        )
+    }
+
+    if ($tokens.Count -eq 7 -and $tokens[0] -ceq 'sudo' -and $tokens[1] -ceq '-n' -and
+        $tokens[2] -ceq '/usr/bin/mkdir' -and $tokens[3] -ceq '-m' -and
+        $tokens[5] -ceq '--' -and
+        ($tokens[6] -ceq $root -or $tokens[6].StartsWith("$root/", [StringComparison]::Ordinal))) {
+        $path = $tokens[6]
+        $mode = $tokens[4]
+        if (($path -ceq $root -and $mode -cne '0700') -or
+            ($path -cne $root -and $mode -cne '0755')) {
+            throw 'Root helper directory mode drifted.'
+        }
+        if ($model.FirstTransportMutationEventIndex -lt 0) {
+            $model.FirstTransportMutationEventIndex = $eventIndex
+        }
+        Set-PrestageRemotePath -Model $model -Path $path -Type 'directory' `
+            -Uid 0 -Gid 0 -Mode $(if ($path -ceq $root) { '700' } else { '755' })
+        return New-PrestageRemoteResult
+    }
+
+    if ($tokens.Count -eq 7 -and $tokens[0] -ceq 'sudo' -and $tokens[1] -ceq '-n' -and
+        $tokens[2] -ceq '/usr/bin/stat' -and $tokens[3] -ceq '-c' -and
+        $tokens[4] -ceq '%u:%g:%a' -and $tokens[5] -ceq '--') {
+        $entry = $model.Paths[$tokens[6]]
+        if ($null -eq $entry -or $entry.Type -cne 'directory') {
+            return New-PrestageRemoteResult -ExitCode 2
+        }
+        return New-PrestageRemoteResult -Output @("$($entry.Uid):$($entry.Gid):$($entry.Mode)")
+    }
+    if ($tokens.Count -eq 6 -and $tokens[0] -ceq 'sudo' -and $tokens[1] -ceq '-n' -and
+        $tokens[2] -ceq '/usr/bin/readlink' -and $tokens[3] -ceq '-f' -and
+        $tokens[4] -ceq '--') {
+        $path = $tokens[5]
+        if (-not $model.Paths.ContainsKey($path)) { return New-PrestageRemoteResult -ExitCode 2 }
+        return New-PrestageRemoteResult -Output @($path)
+    }
+
+    if ($tokens.Count -eq 12 -and $tokens[0] -ceq 'sudo' -and $tokens[1] -ceq '-n' -and
+        $tokens[2] -ceq '/usr/bin/install') {
+        $source = $tokens[10]
+        $destination = $tokens[11]
+        $expected = @(
+            'sudo', '-n', '/usr/bin/install', '-o', 'root', '-g', 'root',
+            '-m', '0644', '--', $source, $destination
+        )
+        if (-not (Test-ExactCommand -Actual $tokens -Expected $expected) -or
+            -not $source.StartsWith("$upload/", [StringComparison]::Ordinal) -or
+            -not $destination.StartsWith("$root/", [StringComparison]::Ordinal)) {
+            throw 'Root helper install command drifted.'
+        }
+        $entry = $model.Paths[$source]
+        if ($null -eq $entry -or $entry.Type -cne 'file' -or $entry.Mode -cne '600') {
+            return New-PrestageRemoteResult -ExitCode 2
+        }
+        Set-PrestageRemotePath -Model $model -Path $destination -Type 'file' `
+            -Uid 0 -Gid 0 -Mode '644' -Size $entry.Size -Sha256 $entry.Sha256
+        return New-PrestageRemoteResult
+    }
+
+    if ($tokens.Count -eq 15 -and $tokens[0] -ceq 'sudo' -and $tokens[1] -ceq '-n' -and
+        $tokens[2] -ceq '/usr/bin/find' -and
+        $tokens[3].StartsWith("$root/", [StringComparison]::Ordinal)) {
+        $path = $tokens[3]
+        $expected = @(
+            'sudo', '-n', '/usr/bin/find', $path, '-maxdepth', '0', '-type', 'f',
+            '-links', '1', '-uid', '0', '-gid', '0', '-print'
+        )
+        if (-not (Test-ExactCommand -Actual $tokens -Expected $expected)) {
+            throw 'Root file authority command drifted.'
+        }
+        $entry = $model.Paths[$path]
+        if ($null -ne $entry -and $entry.Type -ceq 'file' -and
+            $entry.Nlink -eq 1 -and $entry.Uid -eq 0 -and $entry.Gid -eq 0) {
+            $model.RootFileAuthorityChecks += 1
+            return New-PrestageRemoteResult -Output @($path)
+        }
+        return New-PrestageRemoteResult
+    }
+    if ($tokens.Count -eq 7 -and $tokens[0] -ceq 'sudo' -and $tokens[1] -ceq '-n' -and
+        $tokens[2] -ceq '/usr/bin/stat' -and $tokens[3] -ceq '-c' -and
+        $tokens[4] -ceq '%u:%g:%a:%s:%h' -and $tokens[5] -ceq '--') {
+        $entry = $model.Paths[$tokens[6]]
+        if ($null -eq $entry -or $entry.Type -cne 'file') {
+            return New-PrestageRemoteResult -ExitCode 2
+        }
+        $model.RootFileMetadataChecks += 1
+        return New-PrestageRemoteResult -Output @(
+            "$($entry.Uid):$($entry.Gid):$($entry.Mode):$($entry.Size):$($entry.Nlink)"
+        )
+    }
+    if ($tokens.Count -eq 5 -and $tokens[0] -ceq 'sudo' -and $tokens[1] -ceq '-n' -and
+        $tokens[2] -ceq '/usr/bin/sha256sum' -and $tokens[3] -ceq '--' -and
+        $tokens[4].StartsWith("$root/", [StringComparison]::Ordinal)) {
+        $entry = $model.Paths[$tokens[4]]
+        if ($null -eq $entry) { return New-PrestageRemoteResult -ExitCode 2 }
+        $model.RootFileDigestChecks += 1
+        return New-PrestageRemoteResult -Output @("$($entry.Sha256)  $($tokens[4])")
+    }
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        'sudo', '-n', '/usr/bin/find', $root, '-mindepth', '1', '-print'
+    )) {
+        $model.RootInventoryChecks += 1
+        return New-PrestageRemoteResult -Output @(
+            $model.Paths.Keys | Where-Object {
+                $_.StartsWith("$root/", [StringComparison]::Ordinal)
+            }
+        )
+    }
+
+    $main = "$root/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs"
+    $nodePrefix = @(
+        'sudo', '-n', '/usr/bin/flock', '-n', $releaseLock,
+        '/usr/bin/env', '-i',
+        'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+        'HOME=/root', '/usr/bin/node', $main
+    )
+    if (Test-CommandPrefix -Actual $tokens -Expected $nodePrefix) {
+        $entry = $model.Paths[$main]
+        if ($null -eq $entry -or $entry.Type -cne 'file' -or
+            $entry.Uid -ne 0 -or $entry.Gid -ne 0 -or $entry.Mode -cne '644' -or
+            $model.ScpCount -ne 4 -or $model.UploadFileAuthorityChecks -ne 4 -or
+            $model.UploadFileMetadataChecks -ne 4 -or
+            $model.UploadFileDigestChecks -ne 4 -or
+            $model.RootFileAuthorityChecks -ne 4 -or
+            $model.RootFileMetadataChecks -ne 4 -or
+            $model.RootFileDigestChecks -ne 4 -or
+            $model.UploadInventoryChecks -ne 1 -or $model.RootInventoryChecks -ne 1) {
+            throw 'Prestage Node execution preceded exact transport verification.'
+        }
+        [string[]]$operationArguments = @($tokens[$nodePrefix.Count..($tokens.Count - 1)])
+        if ($model.OperationSlug -ceq 'capture') {
+            $expectedArguments = @(
+                '--prior-revision', 'clearra-current-job-v075-042ec21',
+                '--prior-runtime-authority-kind', 'clearra.rollback.legacy-health-no-runtime.v1',
+                '--deployment-nonce', [string]$model.Nonce
+            )
+            if (-not (Test-ExactCommand -Actual $operationArguments -Expected $expectedArguments)) {
+                throw 'Prestage capture Node argument contract drifted.'
+            }
+            $payload = [ordered]@{
+                priorRevision = 'clearra-current-job-v075-042ec21'
+                priorOracleRelease = '/opt/clearra/releases/v0.7.4-042ec21'
+                priorOracleReleaseId = 'v0.7.4-042ec21'
+                priorOracleReleaseSha256 = ('d' * 64)
+                priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-v0.8.0-$($model.Nonce)"
+                priorOracleSettingsSha256 = ('e' * 64)
+                priorRuntimeAuthorityKind = 'clearra.rollback.legacy-health-no-runtime.v1'
+                priorRuntimeAuthoritySha256 = ('f' * 64)
+                priorJobUrl = 'https://prior.example.test/jobs'
+                deploymentNonce = [string]$model.Nonce
+            }
+        } else {
+            $expectedArguments = @('--cleanup-deployment-nonce', [string]$model.Nonce)
+            if (-not (Test-ExactCommand -Actual $operationArguments -Expected $expectedArguments)) {
+                throw 'Prestage cleanup Node argument contract drifted.'
+            }
+            $payload = [ordered]@{
+                deploymentNonce = [string]$model.Nonce
+                backupRemoved = $true
+            }
+        }
+        $model.NodeInvocationCount += 1
+        $model.SharedFlockEnvObserved = $true
+        $line = $payload | ConvertTo-Json -Compress
+        $output = if ($model.NodeOutputMode -ceq 'duplicate') { @($line, $line) } else { @($line) }
+        return New-PrestageRemoteResult -Output $output
+    }
+
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        'sudo', '-n', '/usr/bin/rm', '-rf', '--', $root
+    )) {
+        if ($model.CleanupFailure -ceq 'root') {
+            return New-PrestageRemoteResult -ExitCode 91
+        }
+        Remove-PrestageRemoteTree -Model $model -Root $root
+        return New-PrestageRemoteResult
+    }
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        '/usr/bin/rm', '-rf', '--', $upload
+    )) {
+        if ($model.CleanupFailure -ceq 'upload') {
+            return New-PrestageRemoteResult -ExitCode 92
+        }
+        Remove-PrestageRemoteTree -Model $model -Root $upload
+        return New-PrestageRemoteResult
+    }
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        'sudo', '-n', '/usr/bin/systemctl', 'stop', $timer
+    )) {
+        if (-not $model.Units.ContainsKey($timer)) {
+            return New-PrestageRemoteResult -ExitCode 5
+        }
+        $model.TimerStopInvocationCount += 1
+        [void]$model.Units.Remove($timer)
+        return New-PrestageRemoteResult
+    }
+    if (Test-ExactCommand -Actual $tokens -Expected @(
+        'sudo', '-n', '/usr/bin/systemctl', 'stop', $service
+    )) {
+        $model.ServiceStopInvocationCount += 1
+        if ($model.ServiceStopBehavior -ceq 'collected-before-stop') {
+            [void]$model.Units.Remove($service)
+            return New-PrestageRemoteResult -ExitCode 5
+        }
+        if ($model.ServiceStopBehavior -ceq 'failed-still-loaded') {
+            return New-PrestageRemoteResult -ExitCode 5
+        }
+        if (-not $model.Units.ContainsKey($service)) {
+            return New-PrestageRemoteResult -ExitCode 5
+        }
+        [void]$model.Units.Remove($service)
+        return New-PrestageRemoteResult
+    }
+
+    throw "Unexpected prestage remote command: $($tokens -join ' ')"
 }
 
 function ssh {
-    $sshConfigArgumentIndex = [Array]::IndexOf([object[]]$args, '-F')
     $expectedSshConfigPath = if (
         [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
             [Runtime.InteropServices.OSPlatform]::Windows
         )
     ) { 'NUL' } else { '/dev/null' }
-    if ($sshConfigArgumentIndex -lt 0 -or
-        $sshConfigArgumentIndex + 1 -ge $args.Count -or
-        [string]$args[$sshConfigArgumentIndex + 1] -cne $expectedSshConfigPath) {
-        throw 'Oracle wrapper did not assemble the host-specific SSH config path.'
-    }
-    $identityArgumentIndex = [Array]::IndexOf([object[]]$args, '-i')
-    if ($identityArgumentIndex -lt 0 -or
-        $identityArgumentIndex + 1 -ge $args.Count -or
-        [string]$args[$identityArgumentIndex + 1] -cne $global:clearraOracleTestLockedIdentityPath) {
-        throw 'Oracle wrapper did not pass the locked identity path only as an SSH argument.'
+    [string[]]$expectedPrefix = @(
+        Get-ExpectedOracleCommonClientArguments `
+            -SshConfigPath $expectedSshConfigPath `
+            -IdentityFile $global:clearraOracleTestLockedIdentityPath `
+            -KnownHostsPath $global:clearraOracleTestExpectedKnownHostsPath
+    ) + @('ubuntu@157.151.254.175')
+    [object[]]$remoteCommand = @(
+        Get-ExactOracleClientTail `
+            -Actual ([object[]]$args) -ExpectedPrefix $expectedPrefix `
+            -Label 'Oracle SSH invocation' -MinimumTailCount 1
+    )
+    if ($null -ne $global:clearraOraclePrestageRemote) {
+        $result = Invoke-PrestageRemoteCommand -Command $remoteCommand
+        $global:LASTEXITCODE = [int]$result.ExitCode
+        @($result.Output)
+        return
     }
     $global:clearraOracleTestMockSshInvocationCount += 1
     $global:LASTEXITCODE = 0
     $global:clearraOracleTestMockOutput
+}
+
+function scp {
+    if ($null -eq $global:clearraOraclePrestageRemote) {
+        throw 'Unexpected SCP invocation outside the prestage remote model.'
+    }
+    $expectedSshConfigPath = if (
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [Runtime.InteropServices.OSPlatform]::Windows
+        )
+    ) { 'NUL' } else { '/dev/null' }
+    [string[]]$expectedPrefix = @('-q') + @(
+        Get-ExpectedOracleCommonClientArguments `
+            -SshConfigPath $expectedSshConfigPath `
+            -IdentityFile $global:clearraOracleTestLockedIdentityPath `
+            -KnownHostsPath $global:clearraOracleTestExpectedKnownHostsPath
+    )
+    [object[]]$tail = @(
+        Get-ExactOracleClientTail `
+            -Actual ([object[]]$args) -ExpectedPrefix $expectedPrefix `
+            -Label 'Oracle SCP invocation' -MinimumTailCount 3 -ExactTailCount 3
+    )
+    if ($tail.Count -ne 3 -or [string]$tail[0] -cne '--') {
+        throw 'Prestage SCP invocation drifted from its exact shell-free boundary.'
+    }
+    $localPath = [string]$tail[1]
+    $destination = [string]$tail[2]
+    $match = [regex]::Match(
+        $destination,
+        '^ubuntu@157\.151\.254\.175:(/home/ubuntu/\.clearra-v080-prestage-helper-[0-9a-f]{64}-(?:capture|cleanup)/[A-Za-z0-9._-]{1,128})$'
+    )
+    if (-not $match.Success) {
+        throw 'Prestage SCP destination escaped its nonce namespace.'
+    }
+    $remotePath = $match.Groups[1].Value
+    $model = $global:clearraOraclePrestageRemote
+    if (-not $remotePath.StartsWith("$($model.UploadRoot)/", [StringComparison]::Ordinal) -or
+        -not $model.Paths.ContainsKey([string]$model.UploadRoot) -or
+        $model.Paths.ContainsKey($remotePath)) {
+        throw 'Prestage SCP state differs from the sealed upload root.'
+    }
+    $item = Get-Item -LiteralPath $localPath -Force
+    if ($item.PSIsContainer -or
+        (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw 'Prestage SCP source is not a regular non-link file.'
+    }
+    [void](Add-PrestageRemoteEvent -Model $model -Kind 'scp' -Arguments @($localPath, $remotePath))
+    Set-PrestageRemotePath -Model $model -Path $remotePath -Type 'file' `
+        -Uid 1001 -Gid 1001 -Mode '644' -Size $item.Length `
+        -Sha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $localPath).Hash.ToLowerInvariant()
+    $model.ScpCount += 1
+    $global:LASTEXITCODE = 0
 }
 
 function Invoke-CaptureEvidenceFile {
@@ -422,6 +1159,177 @@ function Assert-CaptureEvidencePathRejected {
     }
     if (-not $rejected) {
         throw "Oracle evidence output accepted $Label."
+    }
+}
+
+function Invoke-PrestageFixtureGit {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string[]] $GitArguments
+    )
+    $output = @(& git -C $Root @GitArguments)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Prestage fixture Git command failed: $($GitArguments[0])"
+    }
+    return $output
+}
+
+function New-PrestageGitFixture {
+    param(
+        [Parameter(Mandatory = $true)][string] $SourceRoot,
+        [Parameter(Mandatory = $true)][string] $TargetRoot
+    )
+    if ([IO.Directory]::Exists($TargetRoot) -or [IO.File]::Exists($TargetRoot)) {
+        throw 'Prestage fixture root must be new.'
+    }
+    [IO.Directory]::CreateDirectory($TargetRoot) | Out-Null
+    $fixtureFiles = @(
+        'scripts/release/oracle/invoke-release-deploy-v080.ps1',
+        'scripts/release/oracle/clearra-oracle-known-hosts',
+        'scripts/release/oracle/clearra-oracle-release-deploy-v080',
+        'scripts/release/oracle/create-prestage-helper-bundle.mjs',
+        'apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs',
+        'apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs',
+        'apps/clearra-discord-bot/scripts/release-tree-digest.mjs',
+        'apps/clearra-discord-bot/src/job-service/runtime-identity.mjs'
+    )
+    foreach ($relativePath in $fixtureFiles) {
+        $source = [IO.Path]::Combine($SourceRoot, $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar))
+        $destination = [IO.Path]::Combine($TargetRoot, $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar))
+        $parent = [IO.Path]::GetDirectoryName($destination)
+        [IO.Directory]::CreateDirectory($parent) | Out-Null
+        [IO.File]::Copy($source, $destination, $false)
+    }
+    [void](Invoke-PrestageFixtureGit -Root $TargetRoot -GitArguments @(
+        'init', '--quiet', '--initial-branch=main'
+    ))
+    foreach ($setting in @(
+        @('user.name', 'Clearra Prestage Test'),
+        @('user.email', 'clearra-prestage@example.invalid'),
+        @('commit.gpgSign', 'false'),
+        @('core.autocrlf', 'false'),
+        @('core.filemode', 'false')
+    )) {
+        [void](Invoke-PrestageFixtureGit -Root $TargetRoot -GitArguments @(
+            'config', [string]$setting[0], [string]$setting[1]
+        ))
+    }
+    [void](Invoke-PrestageFixtureGit -Root $TargetRoot -GitArguments @('add', '--', '.'))
+    [void](Invoke-PrestageFixtureGit -Root $TargetRoot -GitArguments @(
+        'commit', '--quiet', '-m', 'sealed prestage transport fixture'
+    ))
+    $commit = @(Invoke-PrestageFixtureGit -Root $TargetRoot -GitArguments @(
+        'rev-parse', 'HEAD'
+    ))
+    if ($commit.Count -ne 1 -or $commit[0] -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'Prestage fixture source commit is invalid.'
+    }
+    return [pscustomobject]@{
+        Root = $TargetRoot
+        Wrapper = Join-Path $TargetRoot 'scripts/release/oracle/invoke-release-deploy-v080.ps1'
+        SourceCommit = [string]$commit[0]
+    }
+}
+
+function Invoke-ModeledPrestageWrapper {
+    param(
+        [Parameter(Mandatory = $true)] $Fixture,
+        [Parameter(Mandatory = $true)] $Model,
+        [Parameter(Mandatory = $true)][string] $IdentityFile
+    )
+    $global:clearraOraclePrestageRemote = $Model
+    $previousKnownHostsPath = $global:clearraOracleTestExpectedKnownHostsPath
+    $global:clearraOracleTestExpectedKnownHostsPath = Join-Path `
+        $Fixture.Root 'scripts/release/oracle/clearra-oracle-known-hosts'
+    try {
+        if ($Model.OperationSlug -ceq 'capture') {
+            return @(& $Fixture.Wrapper `
+                -Operation capture-prestage-authority `
+                -SourceCommit $Fixture.SourceCommit `
+                -PriorRevision 'clearra-current-job-v075-042ec21' `
+                -PriorRuntimeAuthorityKind 'clearra.rollback.legacy-health-no-runtime.v1' `
+                -DeploymentNonce $Model.Nonce `
+                -IdentityFile $IdentityFile)
+        }
+        return @(& $Fixture.Wrapper `
+            -Operation cleanup-prestage-backup `
+            -SourceCommit $Fixture.SourceCommit `
+            -DeploymentNonce $Model.Nonce `
+            -IdentityFile $IdentityFile)
+    } finally {
+        $global:clearraOracleTestExpectedKnownHostsPath = $previousKnownHostsPath
+        $global:clearraOraclePrestageRemote = $null
+    }
+}
+
+function Assert-ModeledPrestageTransport {
+    param(
+        [Parameter(Mandatory = $true)] $Model,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+    if ($Model.ArmEventIndex -lt 0 -or
+        $Model.FirstTransportMutationEventIndex -lt 0 -or
+        $Model.ArmEventIndex -ge $Model.FirstTransportMutationEventIndex) {
+        throw "$Label did not arm its watchdog before the first transport-path mutation."
+    }
+    if ($Model.ScpCount -ne 4 -or
+        $Model.UploadFileAuthorityChecks -ne 4 -or
+        $Model.UploadFileMetadataChecks -ne 4 -or
+        $Model.UploadFileDigestChecks -ne 4 -or
+        $Model.RootFileAuthorityChecks -ne 4 -or
+        $Model.RootFileMetadataChecks -ne 4 -or
+        $Model.RootFileDigestChecks -ne 4 -or
+        $Model.UploadInventoryChecks -ne 1 -or
+        $Model.RootInventoryChecks -ne 1) {
+        throw "$Label did not verify the exact four-file remote inventory and authority."
+    }
+    if ($Model.NodeInvocationCount -ne 1 -or -not $Model.SharedFlockEnvObserved) {
+        throw "$Label did not execute once through the shared flock and clean environment."
+    }
+}
+
+function Assert-ModeledPrestageSuccess {
+    param(
+        [Parameter(Mandatory = $true)] $Model,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+    Assert-ModeledPrestageTransport -Model $Model -Label $Label
+    $expectedServiceStops = if ($Model.WatchdogArmState -ceq 'service-loaded') { 1 } else { 0 }
+    if ($Model.Paths.Count -ne 0 -or $Model.Units.Count -ne 0 -or
+        $Model.TimerStopInvocationCount -ne 1 -or
+        $Model.ServiceStateReadbackCount -ne 1 -or
+        $Model.ServiceStopInvocationCount -ne $expectedServiceStops -or
+        $Model.WatchdogAbsenceReadbackCount -ne 1) {
+        throw "$Label did not stop the timer first, conditionally stop its loaded service, and read back both watchdog units absent."
+    }
+}
+
+function Assert-ModeledPrestageCleanupFailure {
+    param(
+        [Parameter(Mandatory = $true)] $Model,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+    Assert-ModeledPrestageTransport -Model $Model -Label $Label
+    if ($Model.TimerStopInvocationCount -ne 0 -or
+        $Model.ServiceStateReadbackCount -ne 0 -or
+        $Model.ServiceStopInvocationCount -ne 0 -or
+        $Model.WatchdogAbsenceReadbackCount -ne 0 -or
+        -not $Model.Units.ContainsKey([string]$Model.CleanupTimer) -or
+        -not $Model.Units.ContainsKey([string]$Model.CleanupService)) {
+        throw "$Label changed its loaded timer or service after transport cleanup failed."
+    }
+    if ($Model.CleanupFailure -ceq 'root') {
+        if (-not $Model.Paths.ContainsKey([string]$Model.RootPath) -or
+            $Model.Paths.ContainsKey([string]$Model.UploadRoot)) {
+            throw "$Label did not preserve only the failed root residue for its armed watchdog."
+        }
+    } elseif ($Model.CleanupFailure -ceq 'upload') {
+        if ($Model.Paths.ContainsKey([string]$Model.RootPath) -or
+            -not $Model.Paths.ContainsKey([string]$Model.UploadRoot)) {
+            throw "$Label did not preserve only the failed upload residue for its armed watchdog."
+        }
+    } else {
+        throw "$Label does not declare a cleanup failure."
     }
 }
 
@@ -611,6 +1519,153 @@ try {
     if ($global:clearraOracleTestMockSshInvocationCount -ne 5) {
         throw 'Oracle evidence boundary test unexpectedly invoked the SSH command path.'
     }
+
+    $prestageFixture = New-PrestageGitFixture `
+        -SourceRoot $repositoryRoot -TargetRoot $prestageFixtureRoot
+
+    $prestageCapture = @(& $prestageFixture.Wrapper `
+        -Operation capture-prestage-authority `
+        -SourceCommit $prestageFixture.SourceCommit `
+        -PriorRevision 'clearra-current-job-v075-042ec21' `
+        -PriorRuntimeAuthorityKind 'clearra.rollback.legacy-health-no-runtime.v1' `
+        -DeploymentNonce $deploymentNonce `
+        -AuditOnly)
+    Assert-AuditResult -Output $prestageCapture -Operation 'capture-prestage-authority'
+
+    $prestageCleanup = @(& $prestageFixture.Wrapper `
+        -Operation cleanup-prestage-backup `
+        -SourceCommit $prestageFixture.SourceCommit `
+        -DeploymentNonce $deploymentNonce `
+        -AuditOnly)
+    Assert-AuditResult -Output $prestageCleanup -Operation 'cleanup-prestage-backup'
+
+    $modeledCapture = New-PrestageRemoteModel `
+        -Nonce ('1' * 64) -OperationSlug capture
+    $modeledCaptureOutput = @(
+        Invoke-ModeledPrestageWrapper `
+            -Fixture $prestageFixture -Model $modeledCapture `
+            -IdentityFile $lockedIdentityPath
+    )
+    if ($modeledCaptureOutput.Count -ne 1) {
+        throw 'Modeled prestage capture did not preserve one-line output cardinality.'
+    }
+    $modeledCaptureJson = $modeledCaptureOutput[0] | ConvertFrom-Json -DateKind String
+    if ($modeledCaptureJson.deploymentNonce -cne $modeledCapture.Nonce -or
+        $modeledCaptureJson.priorRevision -cne 'clearra-current-job-v075-042ec21') {
+        throw 'Modeled prestage capture output identity drifted.'
+    }
+    Assert-ModeledPrestageSuccess `
+        -Model $modeledCapture -Label 'Modeled prestage capture'
+
+    $modeledCleanup = New-PrestageRemoteModel `
+        -Nonce ('2' * 64) -OperationSlug cleanup
+    $modeledCleanupOutput = @(
+        Invoke-ModeledPrestageWrapper `
+            -Fixture $prestageFixture -Model $modeledCleanup `
+            -IdentityFile $lockedIdentityPath
+    )
+    if ($modeledCleanupOutput.Count -ne 1) {
+        throw 'Modeled prestage backup cleanup did not preserve one-line output cardinality.'
+    }
+    $modeledCleanupJson = $modeledCleanupOutput[0] | ConvertFrom-Json -DateKind String
+    if ($modeledCleanupJson.deploymentNonce -cne $modeledCleanup.Nonce -or
+        $modeledCleanupJson.backupRemoved -cne $true) {
+        throw 'Modeled prestage backup cleanup output identity drifted.'
+    }
+    Assert-ModeledPrestageSuccess `
+        -Model $modeledCleanup -Label 'Modeled prestage backup cleanup'
+
+    $loadedServiceModel = New-PrestageRemoteModel `
+        -Nonce ('6' * 64) -OperationSlug cleanup -WatchdogArmState service-loaded
+    $loadedServiceOutput = @(
+        Invoke-ModeledPrestageWrapper `
+            -Fixture $prestageFixture -Model $loadedServiceModel `
+            -IdentityFile $lockedIdentityPath
+    )
+    if ($loadedServiceOutput.Count -ne 1) {
+        throw 'Modeled loaded-service cleanup did not preserve one-line output cardinality.'
+    }
+    Assert-ModeledPrestageSuccess `
+        -Model $loadedServiceModel -Label 'Modeled loaded-service cleanup'
+
+    $collectedServiceModel = New-PrestageRemoteModel `
+        -Nonce ('7' * 64) -OperationSlug cleanup -WatchdogArmState service-loaded `
+        -ServiceStopBehavior collected-before-stop
+    $collectedServiceOutput = @(
+        Invoke-ModeledPrestageWrapper `
+            -Fixture $prestageFixture -Model $collectedServiceModel `
+            -IdentityFile $lockedIdentityPath
+    )
+    if ($collectedServiceOutput.Count -ne 1) {
+        throw 'Modeled collected-service cleanup did not preserve one-line output cardinality.'
+    }
+    Assert-ModeledPrestageSuccess `
+        -Model $collectedServiceModel -Label 'Modeled collected-service cleanup'
+
+    $failedServiceStopModel = New-PrestageRemoteModel `
+        -Nonce ('8' * 64) -OperationSlug cleanup -WatchdogArmState service-loaded `
+        -ServiceStopBehavior failed-still-loaded
+    $failedServiceStopMessage = $null
+    try {
+        [void]@(
+            Invoke-ModeledPrestageWrapper `
+                -Fixture $prestageFixture -Model $failedServiceStopModel `
+                -IdentityFile $lockedIdentityPath
+        )
+    } catch {
+        $failedServiceStopMessage = $_.Exception.Message
+    }
+    if ($failedServiceStopMessage -notlike
+        '*Oracle prestage helper cleanup failed*cleanup watchdog unit residue remains*' -or
+        $failedServiceStopModel.Paths.Count -ne 0 -or
+        $failedServiceStopModel.TimerStopInvocationCount -ne 1 -or
+        $failedServiceStopModel.ServiceStateReadbackCount -ne 1 -or
+        $failedServiceStopModel.ServiceStopInvocationCount -ne 1 -or
+        $failedServiceStopModel.WatchdogAbsenceReadbackCount -ne 0 -or
+        $failedServiceStopModel.Units.ContainsKey([string]$failedServiceStopModel.CleanupTimer) -or
+        -not $failedServiceStopModel.Units.ContainsKey([string]$failedServiceStopModel.CleanupService)) {
+        throw 'Modeled loaded-service stop failure did not fail closed on final unit residue.'
+    }
+
+    foreach ($failureKind in @('root', 'upload')) {
+        $failureNonce = if ($failureKind -ceq 'root') { '3' * 64 } else { '4' * 64 }
+        $failureModel = New-PrestageRemoteModel `
+            -Nonce $failureNonce -OperationSlug capture -CleanupFailure $failureKind `
+            -WatchdogArmState service-loaded
+        $failureMessage = $null
+        try {
+            [void]@(
+                Invoke-ModeledPrestageWrapper `
+                    -Fixture $prestageFixture -Model $failureModel `
+                    -IdentityFile $lockedIdentityPath
+            )
+        } catch {
+            $failureMessage = $_.Exception.Message
+        }
+        if ($failureMessage -notlike '*Oracle prestage helper cleanup failed*') {
+            throw "Modeled $failureKind cleanup failure did not fail closed."
+        }
+        Assert-ModeledPrestageCleanupFailure `
+            -Model $failureModel -Label "Modeled $failureKind cleanup failure"
+    }
+
+    $duplicateOutputModel = New-PrestageRemoteModel `
+        -Nonce ('5' * 64) -OperationSlug capture -NodeOutputMode duplicate
+    $duplicateOutputFailure = $null
+    try {
+        [void]@(
+            Invoke-ModeledPrestageWrapper `
+                -Fixture $prestageFixture -Model $duplicateOutputModel `
+                -IdentityFile $lockedIdentityPath
+        )
+    } catch {
+        $duplicateOutputFailure = $_.Exception.Message
+    }
+    if ($duplicateOutputFailure -notlike '*invalid output cardinality*') {
+        throw 'Modeled prestage capture accepted duplicate helper output.'
+    }
+    Assert-ModeledPrestageSuccess `
+        -Model $duplicateOutputModel -Label 'Modeled duplicate-output rejection'
 } finally {
     if ($null -ne $identityLock) {
         $identityLock.Dispose()
@@ -635,9 +1690,24 @@ try {
     if ([IO.Directory]::Exists($evidenceRoot)) {
         [IO.Directory]::Delete($evidenceRoot)
     }
+    if ([IO.Directory]::Exists($prestageFixtureRoot)) {
+        $canonicalFixtureRoot = [IO.Path]::GetFullPath($prestageFixtureRoot)
+        $canonicalTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        if (-not $canonicalFixtureRoot.StartsWith(
+                $canonicalTempRoot,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            [IO.Path]::GetFileName($canonicalFixtureRoot) -cnotmatch
+                '^clearra-oracle-prestage-transport-[0-9a-f]{32}$') {
+            throw 'Prestage fixture cleanup target escaped its exact temporary namespace.'
+        }
+        Remove-Item -LiteralPath $canonicalFixtureRoot -Recurse -Force
+    }
     Remove-Variable -Name clearraOracleTestMockOutput -Scope Global -ErrorAction SilentlyContinue
     Remove-Variable -Name clearraOracleTestMockSshInvocationCount -Scope Global -ErrorAction SilentlyContinue
     Remove-Variable -Name clearraOracleTestLockedIdentityPath -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name clearraOraclePrestageRemote -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name clearraOracleTestExpectedKnownHostsPath -Scope Global -ErrorAction SilentlyContinue
 }
 
 'oracle_release_deploy_wrapper_test=pass'

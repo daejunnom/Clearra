@@ -30,7 +30,8 @@ concurrency:
 jobs:
   authority:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'workflow_dispatch' &&
        github.event.workflow_run.head_branch == 'main' &&
@@ -543,6 +544,7 @@ jobs:
             $backupCaptureAttempted = $true
             & scripts/release/oracle/invoke-release-deploy-v080.ps1 `
               -Operation capture-prestage-authority `
+              -SourceCommit $env:SOURCE_COMMIT `
               -PriorRevision ([string]$prior.prior_revision) -PriorRuntimeAuthorityKind $priorKind `
               -DeploymentNonce $nonce -EvidenceOutput $rollbackPath `
               -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE
@@ -572,7 +574,8 @@ jobs:
             $captureFailure = $_
             if ($backupCaptureAttempted) {
               & scripts/release/oracle/invoke-release-deploy-v080.ps1 `
-                -Operation cleanup-prestage-backup -DeploymentNonce $nonce `
+                -Operation cleanup-prestage-backup -SourceCommit $env:SOURCE_COMMIT `
+                -DeploymentNonce $nonce `
                 -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE | Out-Null
               if ($LASTEXITCODE -ne 0) { throw 'prestage capture failed and its inert backup cleanup failed closed' }
             }

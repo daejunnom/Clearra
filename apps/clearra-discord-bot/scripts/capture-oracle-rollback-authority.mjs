@@ -11,7 +11,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
@@ -25,6 +25,8 @@ const RELEASE_ROOT = "/opt/clearra/releases";
 const CURRENT_LINK = "/opt/clearra/current";
 const SETTINGS_PATH = "/etc/clearra-gateway/settings";
 const SETTINGS_DIRECTORY = "/etc/clearra-gateway";
+const FINAL_BACKUP_PATH_PATTERN =
+  /^\/etc\/clearra-gateway\/settings\.pre-v0\.8\.0-[0-9a-f]{64}$/;
 const BACKUP_NAME_PATTERN = /^settings\.pre-v0\.8\.0-([0-9a-f]{64})(?:\.tmp)?$/;
 const MAX_STALE_BACKUPS = 16;
 
@@ -120,16 +122,9 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
 }
 
 function writeSettingsBackup(path, bytes) {
-  const backupPath = resolve(String(path));
-  if (
-    dirname(backupPath) !== "/etc/clearra-gateway" ||
-    !basename(backupPath).startsWith("settings.pre-v0.8.0-")
-  ) {
-    throw new Error(
-      "Oracle settings backup path is outside the approved namespace",
-    );
-  }
+  const backupPath = requireSettingsBackupPath(path);
   const temporaryPath = `${backupPath}.tmp`;
+  reconcileInterruptedSettingsBackup(backupPath);
   let descriptor;
   let finalCreated = false;
   let complete = false;
@@ -164,25 +159,21 @@ function writeSettingsBackup(path, bytes) {
 }
 
 function cleanupStaleSettingsBackups(currentBackupPath) {
-  const stale = readdirSync(SETTINGS_DIRECTORY, { withFileTypes: true })
+  const stale = [...new Set(readdirSync(SETTINGS_DIRECTORY, { withFileTypes: true })
     .filter((entry) => BACKUP_NAME_PATTERN.test(entry.name))
-    .map((entry) => resolve(SETTINGS_DIRECTORY, entry.name))
+    .map((entry) => `${SETTINGS_DIRECTORY}/${
+      entry.name.endsWith(".tmp") ? entry.name.slice(0, -4) : entry.name
+    }`)
     .filter((path) => path !== currentBackupPath)
-    .sort();
+  )].sort();
   if (stale.length > MAX_STALE_BACKUPS) {
     throw new Error("Oracle stale settings backup inventory exceeds its bound");
   }
   for (const path of stale) {
-    const metadata = lstatSync(path);
-    if (
-      !metadata.isFile() ||
-      metadata.isSymbolicLink() ||
-      metadata.uid !== 0 ||
-      metadata.nlink !== 1 ||
-      (metadata.mode & 0o777) !== 0o600
-    ) {
-      throw new Error("Oracle stale settings backup authority is invalid");
-    }
+    reconcileInterruptedSettingsBackup(path);
+    const metadata = optionalLstat(path, lstatSync);
+    if (metadata === null) continue;
+    requireRootBackupLeaf(metadata, 1, "Oracle stale settings backup");
     unlinkSync(path);
   }
   if (stale.length > 0) fsyncDirectory(SETTINGS_DIRECTORY);
@@ -195,27 +186,91 @@ export function cleanupOracleRollbackBackup(deploymentNonce) {
     "deployment nonce",
   );
   const backupPath = `${SETTINGS_DIRECTORY}/settings.pre-v0.8.0-${nonce}`;
-  let metadata;
-  try {
-    metadata = lstatSync(backupPath);
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return Object.freeze({ deploymentNonce: nonce, backupRemoved: false });
-    }
-    throw error;
+  reconcileInterruptedSettingsBackup(backupPath);
+  const metadata = optionalLstat(backupPath, lstatSync);
+  if (metadata === null) {
+    return Object.freeze({ deploymentNonce: nonce, backupRemoved: false });
   }
+  requireRootBackupLeaf(metadata, 1, "Oracle settings backup cleanup");
+  unlinkSync(backupPath);
+  fsyncDirectory(SETTINGS_DIRECTORY);
+  return Object.freeze({ deploymentNonce: nonce, backupRemoved: true });
+}
+
+export function reconcileOracleRollbackBackupInterruption(
+  deploymentNonce,
+  dependencies = {},
+) {
+  const nonce = requiredMatch(
+    deploymentNonce,
+    SHA256_PATTERN,
+    "deployment nonce",
+  );
+  return reconcileInterruptedSettingsBackup(
+    `${SETTINGS_DIRECTORY}/settings.pre-v0.8.0-${nonce}`,
+    dependencies,
+  );
+}
+
+function reconcileInterruptedSettingsBackup(path, dependencies = {}) {
+  const backupPath = requireSettingsBackupPath(path);
+  const temporaryPath = `${backupPath}.tmp`;
+  const inspect = dependencies.lstat ?? lstatSync;
+  const remove = dependencies.unlink ?? unlinkSync;
+  const syncDirectory = dependencies.fsyncDirectory ?? fsyncDirectory;
+  const temporary = optionalLstat(temporaryPath, inspect);
+  if (temporary === null) return false;
+
+  const final = optionalLstat(backupPath, inspect);
+  if (final === null) {
+    requireRootBackupLeaf(temporary, 1, "Interrupted Oracle settings backup temporary");
+    remove(temporaryPath);
+    syncDirectory(SETTINGS_DIRECTORY);
+    return true;
+  }
+
+  requireRootBackupLeaf(final, 2, "Interrupted Oracle settings backup final");
+  requireRootBackupLeaf(temporary, 2, "Interrupted Oracle settings backup temporary");
+  if (final.dev !== temporary.dev || final.ino !== temporary.ino) {
+    throw new Error("Interrupted Oracle settings backup hardlink authority is invalid");
+  }
+  remove(temporaryPath);
+  syncDirectory(SETTINGS_DIRECTORY);
+  const repaired = optionalLstat(backupPath, inspect);
+  if (repaired === null || repaired.dev !== final.dev || repaired.ino !== final.ino) {
+    throw new Error("Interrupted Oracle settings backup repair lost its final authority");
+  }
+  requireRootBackupLeaf(repaired, 1, "Repaired Oracle settings backup final");
+  return true;
+}
+
+function requireSettingsBackupPath(path) {
+  const backupPath = String(path);
+  if (!FINAL_BACKUP_PATH_PATTERN.test(backupPath)) {
+    throw new Error("Oracle settings backup path is outside the approved namespace");
+  }
+  return backupPath;
+}
+
+function requireRootBackupLeaf(metadata, expectedLinks, label) {
   if (
     !metadata.isFile() ||
     metadata.isSymbolicLink() ||
     metadata.uid !== 0 ||
-    metadata.nlink !== 1 ||
+    metadata.nlink !== expectedLinks ||
     (metadata.mode & 0o777) !== 0o600
   ) {
-    throw new Error("Oracle settings backup cleanup authority is invalid");
+    throw new Error(`${label} authority is invalid`);
   }
-  unlinkSync(backupPath);
-  fsyncDirectory(SETTINGS_DIRECTORY);
-  return Object.freeze({ deploymentNonce: nonce, backupRemoved: true });
+}
+
+function optionalLstat(path, inspect) {
+  try {
+    return inspect(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 function fsyncDirectory(path) {

@@ -22,6 +22,8 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/release/final-source-stage-evidence.test.mjs",
   "scripts/release/finalize-discord-production-checkpoint.test.mjs",
   "scripts/release/observe-production-surfaces.test.mjs",
+  "scripts/release/oracle/create-prestage-helper-bundle.test.mjs",
+  "scripts/release/oracle/invoke-release-deploy-v080.test.mjs",
   "scripts/release/pages-deployment-authority.test.mjs",
   "scripts/release/pages-legacy-contract.test.mjs",
   "scripts/release/pages-rollback-authority.test.mjs",

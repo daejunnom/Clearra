@@ -10,6 +10,10 @@ const recovery = await readFile(
   new URL("../../.github/workflows/discord-deploy-recovery.yml", import.meta.url),
   "utf8",
 );
+const recoveryAttemptCollector = await readFile(
+  new URL("./collect-discord-primary-attempt-catalog.sh", import.meta.url),
+  "utf8",
+);
 const release = await readFile(
   new URL("../../.github/workflows/release-cli.yml", import.meta.url),
   "utf8",
@@ -18,12 +22,25 @@ const releaseRegressions = await readFile(
   new URL("../tools/run-release-regression-tests.mjs", import.meta.url),
   "utf8",
 );
+const oracleDeployInvoker = await readFile(
+  new URL("./oracle/invoke-release-deploy-v080.ps1", import.meta.url),
+  "utf8",
+);
+const oraclePrestageBundle = await readFile(
+  new URL("./oracle/create-prestage-helper-bundle.mjs", import.meta.url),
+  "utf8",
+);
+const discordRuntimeRecovery = await readFile(
+  new URL("./invoke-discord-runtime-recovery-v080.ps1", import.meta.url),
+  "utf8",
+);
 
 test("primary has exact automatic/manual authority and explicit impact no-op", () => {
   for (const marker of [
     'workflows: ["Publish Product Release"]',
     "workflow_dispatch:",
     "accepted_sha:",
+    "github.ref == 'refs/heads/main'",
     "github.event.workflow_run.event == 'workflow_dispatch'",
     "github.event.workflow_run.head_branch == 'main'",
     "github.event.workflow_run.head_repository.full_name == github.repository",
@@ -103,6 +120,63 @@ test("prestage and live recovery artifacts bracket every protected runtime trans
   assert.match(primary, /discord-live-recovery-authority-\$\{\{ needs\.authority\.outputs\.source_commit \}\}-run-/u);
 });
 
+test("prestage capture executes an accepted-source helper bundle outside current", () => {
+  assert.match(
+    primary,
+    /-Operation capture-prestage-authority\s+`\n\s+-SourceCommit \$env:SOURCE_COMMIT/u,
+  );
+  assert.match(
+    primary,
+    /-Operation cleanup-prestage-backup -SourceCommit \$env:SOURCE_COMMIT/u,
+  );
+  assert.doesNotMatch(
+    oracleDeployInvoker,
+    /\/opt\/clearra\/current\/apps\/clearra-discord-bot\/scripts\/capture-oracle-rollback-authority\.mjs/u,
+  );
+  for (const marker of [
+    "create-prestage-helper-bundle.mjs",
+    "/usr/bin/systemd-run",
+    "--on-active=30m",
+    "/usr/bin/flock",
+    "/usr/bin/env",
+    "HOME=/root",
+    "Root-owned prestage helper inventory",
+    "Oracle prestage helper cleanup failed",
+    "$cleanupTimerMayExist -and $cleanupFailures.Count -eq 0",
+    "Invoke-ExactSshResult",
+    "$watchdogUnitsAfterTimerStop",
+    '"$cleanupService ", [StringComparison]::Ordinal',
+    "$cleanupServiceStop = Invoke-ExactSshResult",
+    "$cleanupTimer, $cleanupService",
+    "'--full', '--plain', '--no-legend'",
+    "cleanup watchdog state after timer stop is invalid",
+    "cleanup watchdog unit residue remains",
+  ]) assert.ok(oracleDeployInvoker.includes(marker), marker);
+  for (const marker of [
+    '"rev-parse", "HEAD"',
+    '"status", "--porcelain=v1"',
+    '"show", `${sourceCommit}:${path}`',
+    "prestage helper import closure drifted",
+    "prestage helper bundle exceeds its byte limit",
+  ]) assert.ok(oraclePrestageBundle.includes(marker), marker);
+});
+
+test("prestage recovery separates original deployment identity from trusted helper source", () => {
+  assert.match(recovery, /TRUSTED_HELPER_SOURCE_COMMIT: \$\{\{ github\.sha \}\}/u);
+  assert.equal(
+    (recovery.match(/-TrustedHelperSourceCommit \$env:TRUSTED_HELPER_SOURCE_COMMIT/gu) ?? []).length,
+    3,
+  );
+  assert.match(
+    discordRuntimeRecovery,
+    /-Operation cleanup-prestage-backup -SourceCommit \$TrustedHelperSourceCommit/u,
+  );
+  assert.doesNotMatch(
+    discordRuntimeRecovery,
+    /-Operation cleanup-prestage-backup -SourceCommit \$SourceCommit/u,
+  );
+});
+
 test("ordinary cancellation preserves in-job path and catalog compensation", () => {
   assert.match(primary, /promote:\n(?:\s+#.*\n)*\s+if: always\(\) && needs\.candidate\.result == 'success'/u);
   assert.match(primary, /sync-observe:\n(?:\s+#.*\n)*\s+if: always\(\) && needs\.promote\.result == 'success'/u);
@@ -114,7 +188,10 @@ test("ordinary cancellation preserves in-job path and catalog compensation", () 
 test("recovery executes only trusted default-branch code and exact current run-attempt authority", () => {
   assert.match(recovery, /workflow_run:\n\s+workflows: \["Deploy Discord Production"\]/u);
   assert.match(recovery, /workflow_dispatch:\n\s+inputs:\n\s+original_run_id:/u);
-  assert.match(recovery, /inputs\.expected_current_main == github\.sha/u);
+  assert.match(
+    recovery,
+    /github\.event_name == 'workflow_dispatch' &&\s+github\.ref == 'refs\/heads\/main' &&\s+inputs\.expected_current_main == github\.sha/u,
+  );
   assert.equal((recovery.match(/ref: \$\{\{ github\.sha \}\}/gu) ?? []).length, 2);
   assert.doesNotMatch(recovery, /ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/u);
   for (const marker of [
@@ -241,10 +318,20 @@ test("catalog preimage and checkpoint candidate are durable before their depende
 });
 
 test("primary and recovery enumerate every exact workflow rerun attempt", () => {
-  for (const workflow of [primary, recovery]) {
-    assert.match(workflow, /for \(\(attempt = 1; attempt <= max_attempt; attempt \+= 1\)\)/u);
-    assert.match(workflow, /actions\/runs\/\$run_id\/attempts\/\$attempt/u);
-  }
+  assert.match(primary, /for \(\(attempt = 1; attempt <= max_attempt; attempt \+= 1\)\)/u);
+  assert.match(primary, /actions\/runs\/\$run_id\/attempts\/\$attempt/u);
+  assert.match(
+    recoveryAttemptCollector,
+    /for \(\(attempt = 1; attempt <= max_attempt; attempt \+= 1\)\)/u,
+  );
+  assert.match(
+    recoveryAttemptCollector,
+    /actions\/runs\/\$run_id\/attempts\/\$attempt/u,
+  );
+  assert.equal(
+    (recovery.match(/collect-discord-primary-attempt-catalog\.sh/gu) ?? []).length,
+    2,
+  );
   assert.match(recovery, /--run-attempt-catalog/u);
   assert.match(recovery, /--run-job-catalog/u);
 });

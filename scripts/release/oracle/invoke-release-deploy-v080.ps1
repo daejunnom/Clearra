@@ -42,7 +42,10 @@ $hostName = '157.151.254.175'
 $userName = 'ubuntu'
 $knownHostsPath = Join-Path $PSScriptRoot 'clearra-oracle-known-hosts'
 $launcherPath = Join-Path $PSScriptRoot 'clearra-oracle-release-deploy-v080'
+$bundleManifestGeneratorPath = Join-Path $PSScriptRoot 'create-prestage-helper-bundle.mjs'
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $remoteLauncherPath = '/usr/local/sbin/clearra-oracle-release-deploy'
+$releaseDeployLockPath = '/run/lock/clearra-oracle-release-deploy.lock'
 $releaseIdPattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
 $candidateReleaseIdPattern = '^v0\.8\.0-[0-9a-f]{7}$'
 $sha256Pattern = '^[0-9a-f]{64}$'
@@ -169,6 +172,98 @@ function Get-TextSha256 {
         return [Convert]::ToHexString($algorithm.ComputeHash($bytes)).ToLowerInvariant()
     } finally {
         $algorithm.Dispose()
+    }
+}
+
+function Get-PrestageHelperBundleManifest {
+    param(
+        [Parameter(Mandatory = $true)][string] $SourceCommit,
+        [Parameter(Mandatory = $true)][string] $DeploymentNonce,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('capture-prestage-authority', 'cleanup-prestage-backup')]
+        [string] $Operation
+    )
+    $output = @(& node $bundleManifestGeneratorPath `
+        --repository-root $repositoryRoot `
+        --source-commit $SourceCommit `
+        --deployment-nonce $DeploymentNonce `
+        --operation $Operation)
+    if ($LASTEXITCODE -ne 0 -or $output.Count -ne 1) {
+        throw 'Oracle prestage helper manifest generation failed.'
+    }
+    try {
+        $manifest = $output[0] | ConvertFrom-Json -DateKind String
+    } catch {
+        throw 'Oracle prestage helper manifest is not valid JSON.'
+    }
+    $expectedKeys = @(
+        'schema_id', 'source_commit', 'deployment_nonce', 'operation',
+        'files', 'file_count', 'total_size', 'bundle_sha256'
+    )
+    $actualKeys = @($manifest.PSObject.Properties.Name)
+    if ($actualKeys.Count -ne $expectedKeys.Count -or
+        (Compare-Object -CaseSensitive -SyncWindow 0 $expectedKeys $actualKeys) -or
+        $manifest.schema_id -cne 'clearra.oracle.prestage-helper-bundle.v1' -or
+        $manifest.source_commit -cne $SourceCommit -or
+        $manifest.deployment_nonce -cne $DeploymentNonce -or
+        $manifest.operation -cne $Operation -or
+        $manifest.bundle_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        -not (Test-JsonSafePositiveInteger $manifest.file_count) -or
+        [long]$manifest.file_count -ne 4 -or
+        -not (Test-JsonSafePositiveInteger $manifest.total_size) -or
+        [long]$manifest.total_size -gt 4194304) {
+        throw 'Oracle prestage helper manifest has an invalid closed authority.'
+    }
+    $expectedPaths = @(
+        'apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs',
+        'apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs',
+        'apps/clearra-discord-bot/scripts/release-tree-digest.mjs',
+        'apps/clearra-discord-bot/src/job-service/runtime-identity.mjs'
+    )
+    $files = @($manifest.files)
+    if ($files.Count -ne $expectedPaths.Count) {
+        throw 'Oracle prestage helper manifest file count drifted.'
+    }
+    [long]$totalSize = 0
+    for ($index = 0; $index -lt $files.Count; $index += 1) {
+        $entry = $files[$index]
+        $entryKeys = @($entry.PSObject.Properties.Name)
+        $wantedEntryKeys = @('path', 'size', 'sha256', 'mode')
+        if ($entryKeys.Count -ne $wantedEntryKeys.Count -or
+            (Compare-Object -CaseSensitive -SyncWindow 0 $wantedEntryKeys $entryKeys) -or
+            $entry.path -cne $expectedPaths[$index] -or
+            $entry.mode -cne '0644' -or
+            -not (Test-JsonSafePositiveInteger $entry.size) -or
+            [long]$entry.size -gt 1048576 -or
+            $entry.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Oracle prestage helper manifest file authority drifted.'
+        }
+        $totalSize += [long]$entry.size
+    }
+    if ($totalSize -ne [long]$manifest.total_size) {
+        throw 'Oracle prestage helper manifest total size drifted.'
+    }
+    return $manifest
+}
+
+function Sort-OrdinalStrings {
+    param([Parameter(Mandatory = $true)][object[]] $Values)
+    [string[]]$result = @($Values | ForEach-Object { [string]$_ })
+    [Array]::Sort($result, [StringComparer]::Ordinal)
+    return $result
+}
+
+function Assert-ExactOrdinalSet {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Actual,
+        [Parameter(Mandatory = $true)][object[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+    [string[]]$actualSorted = @(Sort-OrdinalStrings -Values $Actual)
+    [string[]]$expectedSorted = @(Sort-OrdinalStrings -Values $Expected)
+    if ($actualSorted.Count -ne $expectedSorted.Count -or
+        (Compare-Object -CaseSensitive -SyncWindow 0 $expectedSorted $actualSorted)) {
+        throw "$Label differs from its closed set."
     }
 }
 
@@ -362,6 +457,7 @@ function Write-CanonicalEvidenceOutput {
 
 [void](Get-ExactLeaf -Path $knownHostsPath -Label 'Pinned Oracle host-key file')
 [void](Get-ExactLeaf -Path $launcherPath -Label 'Tracked Oracle deployment launcher')
+[void](Get-ExactLeaf -Path $bundleManifestGeneratorPath -Label 'Tracked prestage helper manifest generator')
 if ((Get-ExactSha256 -Path $knownHostsPath) -cne $expectedKnownHostsSha256) {
     throw 'Pinned Oracle host-key file digest does not match.'
 }
@@ -407,11 +503,11 @@ $operationValues = @{
     PriorRuntimeAuthoritySha256 = $PriorRuntimeAuthoritySha256
     PriorJobUrl = $PriorJobUrl
 }
-$remoteArguments = if ($Operation -in @('capture-prestage-authority', 'cleanup-prestage-backup')) {
-    @(
-        'sudo', '-n', '/usr/bin/node',
-        '/opt/clearra/current/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs'
-    )
+$usesPrestageHelperBundle = $Operation -in @(
+    'capture-prestage-authority', 'cleanup-prestage-backup'
+)
+$remoteArguments = if ($usesPrestageHelperBundle) {
+    @()
 } else {
     @(
         'sudo', '-n', $remoteLauncherPath,
@@ -424,8 +520,9 @@ $remoteArguments = if ($Operation -in @('capture-prestage-authority', 'cleanup-p
 switch ($Operation) {
     'capture-prestage-authority' {
         Assert-UnusedArguments -Values $operationValues -Allowed @(
-            'PriorRevision', 'PriorRuntimeAuthorityKind'
+            'PriorRevision', 'PriorRuntimeAuthorityKind', 'SourceCommit'
         )
+        [void](Require-Match -Value $SourceCommit -Pattern $commitPattern -Label 'Source commit')
         [void](Require-Match -Value $PriorRevision -Pattern $releaseIdPattern -Label 'Prior Cloud revision')
         if ($PriorRuntimeAuthorityKind -cnotin $runtimeAuthorityKinds) {
             throw 'Prior runtime authority kind is invalid.'
@@ -437,7 +534,8 @@ switch ($Operation) {
         )
     }
     'cleanup-prestage-backup' {
-        Assert-UnusedArguments -Values $operationValues -Allowed @()
+        Assert-UnusedArguments -Values $operationValues -Allowed @('SourceCommit')
+        [void](Require-Match -Value $SourceCommit -Pattern $commitPattern -Label 'Source commit')
         $remoteArguments += @('--cleanup-deployment-nonce', $DeploymentNonce)
     }
     'capture-rollback-authority' {
@@ -633,7 +731,33 @@ if (-not [string]::IsNullOrWhiteSpace($EvidenceOutput)) {
     $evidenceOutputPath = Assert-EvidenceOutputPath -Path $EvidenceOutput
 }
 
-foreach ($argument in $remoteArguments) {
+$prestageManifest = if ($usesPrestageHelperBundle) {
+    Get-PrestageHelperBundleManifest `
+        -SourceCommit $SourceCommit `
+        -DeploymentNonce $DeploymentNonce `
+        -Operation $Operation
+} else { $null }
+$prestageOperationSlug = if ($Operation -ceq 'capture-prestage-authority') {
+    'capture'
+} elseif ($Operation -ceq 'cleanup-prestage-backup') {
+    'cleanup'
+} else { $null }
+$prestageRoot = if ($usesPrestageHelperBundle) {
+    "/opt/clearra/.v080-prestage-helper-$DeploymentNonce-$prestageOperationSlug"
+} else { $null }
+$prestageMain = if ($usesPrestageHelperBundle) {
+    "$prestageRoot/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs"
+} else { $null }
+$auditedRemoteArguments = if ($usesPrestageHelperBundle) {
+    @(
+        'sudo', '-n', '/usr/bin/flock', '-n', $releaseDeployLockPath,
+        '/usr/bin/env', '-i',
+        'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+        'HOME=/root', '/usr/bin/node', $prestageMain
+    ) + $remoteArguments
+} else { $remoteArguments }
+
+foreach ($argument in $auditedRemoteArguments) {
     if ($argument -cnotmatch '^[A-Za-z0-9_./:%=@+-]{1,2048}$') {
         throw 'Oracle deployment argument is outside the non-secret token grammar.'
     }
@@ -642,8 +766,8 @@ foreach ($argument in $remoteArguments) {
 if ($AuditOnly) {
     'oracle_release_deploy_invoker=audit-ok'
     "oracle_operation=$Operation"
-    "oracle_remote_argument_count=$($remoteArguments.Count)"
-    "oracle_remote_arguments_sha256=$(Get-TextSha256 -Text (($remoteArguments -join "`n") + "`n"))"
+    "oracle_remote_argument_count=$($auditedRemoteArguments.Count)"
+    "oracle_remote_arguments_sha256=$(Get-TextSha256 -Text (($auditedRemoteArguments -join "`n") + "`n"))"
     return
 }
 
@@ -693,10 +817,359 @@ $commonSshOptions = @(
     '-o', 'ConnectTimeout=15'
 )
 $sshArguments = $commonSshOptions + @("$userName@$hostName")
-$output = @(& ssh @sshArguments @remoteArguments)
-if ($LASTEXITCODE -ne 0) {
-    throw "Oracle deployment command failed with exit code $LASTEXITCODE."
+$scpArguments = @('-q') + $commonSshOptions
+
+function Invoke-ExactSshResult {
+    param([Parameter(Mandatory = $true)][string[]] $RemoteArguments)
+    foreach ($argument in $RemoteArguments) {
+        if ($argument -cnotmatch '^[A-Za-z0-9_./:%=@+-]{1,2048}$') {
+            throw 'Oracle remote argument is outside the non-secret token grammar.'
+        }
+    }
+    $result = @(& ssh @sshArguments @RemoteArguments)
+    return [pscustomobject]@{
+        ExitCode = [int]$LASTEXITCODE
+        Output = [object[]]@($result)
+    }
 }
+
+function Invoke-ExactSsh {
+    param([Parameter(Mandatory = $true)][string[]] $RemoteArguments)
+    $invocation = Invoke-ExactSshResult -RemoteArguments $RemoteArguments
+    if ($invocation.ExitCode -ne 0) {
+        throw "Oracle deployment command failed with exit code $($invocation.ExitCode)."
+    }
+    return @($invocation.Output)
+}
+
+function Invoke-PrestageHelperBundle {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject] $Manifest,
+        [Parameter(Mandatory = $true)][string] $OperationSlug,
+        [Parameter(Mandatory = $true)][string] $RootPath,
+        [Parameter(Mandatory = $true)][string[]] $NodeArguments
+    )
+    if ($OperationSlug -cnotin @('capture', 'cleanup') -or
+        $RootPath -cne "/opt/clearra/.v080-prestage-helper-$DeploymentNonce-$OperationSlug") {
+        throw 'Oracle prestage helper transport identity is invalid.'
+    }
+    $uploadRoot = "/home/ubuntu/.clearra-v080-prestage-helper-$DeploymentNonce-$OperationSlug"
+    $uploadName = [IO.Path]::GetFileName($uploadRoot)
+    $rootName = [IO.Path]::GetFileName($RootPath)
+    $cleanupUnit = "clearra-v080-prestage-helper-$DeploymentNonce-$OperationSlug-cleanup"
+    $cleanupTimer = "$cleanupUnit.timer"
+    $cleanupService = "$cleanupUnit.service"
+    if ($uploadName -cnotmatch '^\.clearra-v080-prestage-helper-[0-9a-f]{64}-(capture|cleanup)$' -or
+        $rootName -cnotmatch '^\.v080-prestage-helper-[0-9a-f]{64}-(capture|cleanup)$') {
+        throw 'Oracle prestage helper transport paths are outside the nonce namespace.'
+    }
+
+    $localFiles = @()
+    $flatNames = @()
+    foreach ($entry in @($Manifest.files)) {
+        $localPath = [IO.Path]::GetFullPath((Join-Path $repositoryRoot ([string]$entry.path)))
+        if (-not $localPath.StartsWith("$repositoryRoot$([IO.Path]::DirectorySeparatorChar)", [StringComparison]::Ordinal)) {
+            throw 'Oracle prestage helper local path escapes the accepted source.'
+        }
+        $item = Get-ExactLeaf -Path $localPath -Label "Accepted prestage helper $($entry.path)"
+        if ($item.Length -ne [long]$entry.size -or
+            (Get-ExactSha256 -Path $localPath) -cne [string]$entry.sha256) {
+            throw 'Oracle prestage helper changed after manifest sealing.'
+        }
+        $flatName = [IO.Path]::GetFileName([string]$entry.path)
+        if ($flatName -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or $flatNames -ccontains $flatName) {
+            throw 'Oracle prestage helper upload leaf set is ambiguous.'
+        }
+        $flatNames += $flatName
+        $localFiles += [pscustomobject]@{
+            Entry = $entry
+            LocalPath = $localPath
+            FlatName = $flatName
+            UploadPath = "$uploadRoot/$flatName"
+            RootPath = "$RootPath/$($entry.path)"
+        }
+    }
+    if ($localFiles.Count -ne 4) {
+        throw 'Oracle prestage helper local file set is incomplete.'
+    }
+
+    $rootDirectories = @(
+        "$RootPath/apps",
+        "$RootPath/apps/clearra-discord-bot",
+        "$RootPath/apps/clearra-discord-bot/scripts",
+        "$RootPath/apps/clearra-discord-bot/src",
+        "$RootPath/apps/clearra-discord-bot/src/job-service"
+    )
+    $rootMayExist = $false
+    $uploadMayExist = $false
+    $cleanupTimerMayExist = $false
+    $primaryFailure = $null
+    $cleanupFailures = [Collections.Generic.List[string]]::new()
+    $result = @()
+    try {
+        $existingCleanupUnits = @(Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/systemctl', 'list-units', '--all',
+            '--full', '--plain', '--no-legend', $cleanupTimer, $cleanupService
+        ))
+        if ($existingCleanupUnits.Count -ne 0) {
+            throw 'Oracle prestage helper cleanup watchdog namespace already exists.'
+        }
+        # Arm a nonce-exact root cleanup before creating any transport path. If
+        # the runner or any one of the following SSH/SCP processes is killed,
+        # this transient unit eventually removes only this invocation's inert
+        # transport roots. The business settings backup is deliberately not a
+        # watchdog target.
+        [void](Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/systemd-run', '--quiet', '--collect',
+            "--unit=$cleanupUnit", '--on-active=30m',
+            '/usr/bin/flock', $releaseDeployLockPath,
+            '/usr/bin/rm', '-rf', '--', $RootPath, $uploadRoot
+        ))
+        $cleanupTimerMayExist = $true
+        $cleanupTimerId = @(Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/systemctl', 'show', '--property=Id',
+            '--value', $cleanupTimer
+        ))
+        $cleanupTimerState = @(Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/systemctl', 'show', '--property=ActiveState',
+            '--value', $cleanupTimer
+        ))
+        if ($cleanupTimerId.Count -ne 1 -or $cleanupTimerId[0] -cne $cleanupTimer -or
+            $cleanupTimerState.Count -ne 1 -or $cleanupTimerState[0] -cne 'active') {
+            throw 'Oracle prestage helper cleanup watchdog failed closed.'
+        }
+
+        $existingUpload = @(Invoke-ExactSsh @(
+            '/usr/bin/find', '/home/ubuntu', '-maxdepth', '1',
+            '-name', $uploadName, '-print'
+        ))
+        $existingRoot = @(Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/find', '/opt/clearra', '-maxdepth', '1',
+            '-name', $rootName, '-print'
+        ))
+        if ($existingUpload.Count -ne 0 -or $existingRoot.Count -ne 0) {
+            throw 'Oracle prestage helper nonce namespace already exists.'
+        }
+
+        $uploadMayExist = $true
+        [void](Invoke-ExactSsh @('/usr/bin/mkdir', '-m', '0700', '--', $uploadRoot))
+        $uploadMetadata = @(Invoke-ExactSsh @(
+            '/usr/bin/stat', '-c', '%u:%g:%a', '--', $uploadRoot
+        ))
+        $uploadResolved = @(Invoke-ExactSsh @('/usr/bin/readlink', '-f', '--', $uploadRoot))
+        if ($uploadMetadata.Count -ne 1 -or $uploadMetadata[0] -cne '1001:1001:700' -or
+            $uploadResolved.Count -ne 1 -or $uploadResolved[0] -cne $uploadRoot) {
+            throw 'Oracle prestage helper upload root authority differs.'
+        }
+
+        foreach ($file in $localFiles) {
+            $null = & scp @scpArguments '--' $file.LocalPath "${userName}@${hostName}:$($file.UploadPath)"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Oracle prestage helper upload failed: $($file.FlatName)"
+            }
+            [void](Invoke-ExactSsh @('/usr/bin/chmod', '0600', '--', $file.UploadPath))
+            $regularFile = @(Invoke-ExactSsh @(
+                '/usr/bin/find', $file.UploadPath, '-maxdepth', '0',
+                '-type', 'f', '-links', '1', '-uid', '1001', '-gid', '1001', '-print'
+            ))
+            $metadata = @(Invoke-ExactSsh @(
+                '/usr/bin/stat', '-c', '%u:%g:%a:%s:%h', '--', $file.UploadPath
+            ))
+            if ($regularFile.Count -ne 1 -or $regularFile[0] -cne $file.UploadPath -or
+                $metadata.Count -ne 1 -or
+                $metadata[0] -cne "1001:1001:600:$([long]$file.Entry.size):1") {
+                throw "Oracle prestage helper upload metadata differs: $($file.FlatName)"
+            }
+            $digest = @(Invoke-ExactSsh @('/usr/bin/sha256sum', '--', $file.UploadPath))
+            if ($digest.Count -ne 1 -or $digest[0] -cnotmatch '^([0-9a-f]{64})  /' -or
+                $Matches[1] -cne [string]$file.Entry.sha256) {
+                throw "Oracle prestage helper upload digest differs: $($file.FlatName)"
+            }
+        }
+        $uploadInventory = @(Invoke-ExactSsh @(
+            '/usr/bin/find', $uploadRoot, '-mindepth', '1', '-maxdepth', '1',
+            '-print'
+        ))
+        $expectedUploadInventory = @($localFiles | ForEach-Object {
+            $_.UploadPath
+        })
+        Assert-ExactOrdinalSet `
+            -Actual $uploadInventory -Expected $expectedUploadInventory `
+            -Label 'Oracle prestage helper upload inventory'
+
+        $rootMayExist = $true
+        [void](Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/mkdir', '-m', '0700', '--', $RootPath
+        ))
+        foreach ($directory in $rootDirectories) {
+            [void](Invoke-ExactSsh @(
+                'sudo', '-n', '/usr/bin/mkdir', '-m', '0755', '--', $directory
+            ))
+            $directoryMetadata = @(Invoke-ExactSsh @(
+                'sudo', '-n', '/usr/bin/stat', '-c', '%u:%g:%a', '--', $directory
+            ))
+            $directoryResolved = @(Invoke-ExactSsh @(
+                'sudo', '-n', '/usr/bin/readlink', '-f', '--', $directory
+            ))
+            if ($directoryMetadata.Count -ne 1 -or $directoryMetadata[0] -cne '0:0:755' -or
+                $directoryResolved.Count -ne 1 -or $directoryResolved[0] -cne $directory) {
+                throw 'Root-owned prestage helper directory authority differs.'
+            }
+        }
+        foreach ($file in $localFiles) {
+            [void](Invoke-ExactSsh @(
+                'sudo', '-n', '/usr/bin/install', '-o', 'root', '-g', 'root',
+                '-m', '0644', '--', $file.UploadPath, $file.RootPath
+            ))
+            $regularFile = @(Invoke-ExactSsh @(
+                'sudo', '-n', '/usr/bin/find', $file.RootPath, '-maxdepth', '0',
+                '-type', 'f', '-links', '1', '-uid', '0', '-gid', '0', '-print'
+            ))
+            $metadata = @(Invoke-ExactSsh @(
+                'sudo', '-n', '/usr/bin/stat', '-c', '%u:%g:%a:%s:%h', '--', $file.RootPath
+            ))
+            if ($regularFile.Count -ne 1 -or $regularFile[0] -cne $file.RootPath -or
+                $metadata.Count -ne 1 -or
+                $metadata[0] -cne "0:0:644:$([long]$file.Entry.size):1") {
+                throw "Root-owned prestage helper metadata differs: $($file.Entry.path)"
+            }
+            $digest = @(Invoke-ExactSsh @(
+                'sudo', '-n', '/usr/bin/sha256sum', '--', $file.RootPath
+            ))
+            if ($digest.Count -ne 1 -or $digest[0] -cnotmatch '^([0-9a-f]{64})  /' -or
+                $Matches[1] -cne [string]$file.Entry.sha256) {
+                throw "Root-owned prestage helper digest differs: $($file.Entry.path)"
+            }
+        }
+        $rootMetadata = @(Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/stat', '-c', '%u:%g:%a', '--', $RootPath
+        ))
+        $rootResolved = @(Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/readlink', '-f', '--', $RootPath
+        ))
+        $mainResolved = @(Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/readlink', '-f', '--', $prestageMain
+        ))
+        if ($rootMetadata.Count -ne 1 -or $rootMetadata[0] -cne '0:0:700' -or
+            $rootResolved.Count -ne 1 -or $rootResolved[0] -cne $RootPath -or
+            $mainResolved.Count -ne 1 -or $mainResolved[0] -cne $prestageMain) {
+            throw 'Root-owned prestage helper self path differs.'
+        }
+        $rootInventory = @(Invoke-ExactSsh @(
+            'sudo', '-n', '/usr/bin/find', $RootPath, '-mindepth', '1',
+            '-print'
+        ))
+        $expectedRootInventory = @($rootDirectories) + @($localFiles | ForEach-Object {
+            $_.RootPath
+        })
+        Assert-ExactOrdinalSet `
+            -Actual $rootInventory -Expected $expectedRootInventory `
+            -Label 'Root-owned prestage helper inventory'
+
+        $result = @(Invoke-ExactSsh $NodeArguments)
+    } catch {
+        $primaryFailure = $_
+    } finally {
+        if ($rootMayExist) {
+            try {
+                [void](Invoke-ExactSsh @(
+                    'sudo', '-n', '/usr/bin/rm', '-rf', '--', $RootPath
+                ))
+                $residue = @(Invoke-ExactSsh @(
+                    'sudo', '-n', '/usr/bin/find', '/opt/clearra', '-maxdepth', '1',
+                    '-name', $rootName, '-print'
+                ))
+                if ($residue.Count -ne 0) {
+                    throw 'root helper residue remains'
+                }
+            } catch {
+                $cleanupFailures.Add("root:$($_.Exception.Message)")
+            }
+        }
+        if ($uploadMayExist) {
+            try {
+                [void](Invoke-ExactSsh @('/usr/bin/rm', '-rf', '--', $uploadRoot))
+                $residue = @(Invoke-ExactSsh @(
+                    '/usr/bin/find', '/home/ubuntu', '-maxdepth', '1',
+                    '-name', $uploadName, '-print'
+                ))
+                if ($residue.Count -ne 0) {
+                    throw 'upload residue remains'
+                }
+            } catch {
+                $cleanupFailures.Add("upload:$($_.Exception.Message)")
+            }
+        }
+        # Disarm the remote fallback only after both transport namespaces were
+        # removed and their absence was read back. systemd-run initially loads
+        # the timer but may not load its paired service until the timer fires.
+        # Stop the timer first, then stop the service only when an exact unit
+        # readback says that it is loaded. If the service is collected between
+        # that readback and stop, final absence remains the authority. If either
+        # transport cleanup failed, leave both loaded units untouched so the
+        # nonce-exact watchdog can retry under the shared deployment lock.
+        if ($cleanupTimerMayExist -and $cleanupFailures.Count -eq 0) {
+            try {
+                [void](Invoke-ExactSsh @(
+                    'sudo', '-n', '/usr/bin/systemctl', 'stop',
+                    $cleanupTimer
+                ))
+                $watchdogUnitsAfterTimerStop = @(Invoke-ExactSsh @(
+                    'sudo', '-n', '/usr/bin/systemctl', 'list-units', '--all',
+                    '--full', '--plain', '--no-legend', $cleanupTimer, $cleanupService
+                ))
+                if ($watchdogUnitsAfterTimerStop.Count -gt 1 -or
+                    ($watchdogUnitsAfterTimerStop.Count -eq 1 -and
+                    -not ([string]$watchdogUnitsAfterTimerStop[0]).StartsWith(
+                        "$cleanupService ", [StringComparison]::Ordinal
+                    ))) {
+                    throw 'cleanup watchdog state after timer stop is invalid'
+                }
+                if ($watchdogUnitsAfterTimerStop.Count -eq 1) {
+                    # A transient service may finish and be collected after the
+                    # exact list-units readback. Record the stop result, but use
+                    # the final two-unit absence readback as the race-safe,
+                    # fail-closed authority.
+                    $cleanupServiceStop = Invoke-ExactSshResult @(
+                        'sudo', '-n', '/usr/bin/systemctl', 'stop',
+                        $cleanupService
+                    )
+                }
+                $watchdogResidue = @(Invoke-ExactSsh @(
+                    'sudo', '-n', '/usr/bin/systemctl', 'list-units', '--all',
+                    '--full', '--plain', '--no-legend', $cleanupTimer, $cleanupService
+                ))
+                if ($watchdogResidue.Count -ne 0) {
+                    throw 'cleanup watchdog unit residue remains'
+                }
+            } catch {
+                $cleanupFailures.Add("watchdog:$($_.Exception.Message)")
+            }
+        }
+    }
+    if ($cleanupFailures.Count -ne 0) {
+        $primaryMessage = if ($null -eq $primaryFailure) { 'none' } else {
+            $primaryFailure.Exception.Message
+        }
+        throw "Oracle prestage helper cleanup failed after '$primaryMessage': $($cleanupFailures -join ', ')"
+    }
+    if ($null -ne $primaryFailure) {
+        throw $primaryFailure
+    }
+    return $result
+}
+
+$output = @(
+    if ($usesPrestageHelperBundle) {
+        Invoke-PrestageHelperBundle `
+            -Manifest $prestageManifest `
+            -OperationSlug $prestageOperationSlug `
+            -RootPath $prestageRoot `
+            -NodeArguments $auditedRemoteArguments
+    } else {
+        Invoke-ExactSsh $remoteArguments
+    }
+)
 
 $validatedEvidence = $null
 switch ($Operation) {

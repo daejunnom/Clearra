@@ -578,6 +578,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $pagesRollback = Read-Text '.github/workflows/pages-rollback.yml'
     $discordDeployWorkflow = Read-Text '.github/workflows/discord-deploy.yml'
     $discordRecoveryWorkflow = Read-Text '.github/workflows/discord-deploy-recovery.yml'
+    $discordRecoveryCatalogCollector = Read-Text 'scripts/release/collect-discord-primary-attempt-catalog.sh'
     $discordRecoveryAuthority = Read-Text 'scripts/release/discord-deployment-recovery.mjs'
     $discordRuntimeRecovery = Read-Text 'scripts/release/invoke-discord-runtime-recovery-v080.ps1'
     $pagesRollbackAuthority = Read-Text 'scripts/release/pages-rollback-authority.mjs'
@@ -614,6 +615,9 @@ function Invoke-ReleaseIdentityGateValidation {
     $oracleDeployLauncher = Read-Text 'scripts/release/oracle/clearra-oracle-release-deploy-v080'
     $oracleDeployInvoker = Read-Text 'scripts/release/oracle/invoke-release-deploy-v080.ps1'
     $oracleDeployInvokerTest = Read-Text 'scripts/release/oracle/invoke-release-deploy-v080.test.ps1'
+    $oracleDeployInvokerNodeTest = Read-Text 'scripts/release/oracle/invoke-release-deploy-v080.test.mjs'
+    $oraclePrestageHelperBundle = Read-Text 'scripts/release/oracle/create-prestage-helper-bundle.mjs'
+    $oraclePrestageHelperBundleTest = Read-Text 'scripts/release/oracle/create-prestage-helper-bundle.test.mjs'
     $oracleCandidateSettings = Read-Text 'scripts/release/oracle/candidate-settings-v080.mjs'
     $oracleCandidateSettingsTest = Read-Text 'scripts/release/oracle/candidate-settings-v080.test.mjs'
     $oracleAcceptedLayerBuilder = Read-Text 'scripts/release/oracle/create-local-layers-v080.sh'
@@ -702,9 +706,12 @@ function Invoke-ReleaseIdentityGateValidation {
         'discord-prestage-recovery-authority-',
         'discord-live-recovery-authority-',
         '--gcs-source-staging-dir="gs://clearra-cloud_cloudbuild/source"',
+        'github.ref == ''refs/heads/main''',
         'if: always() && needs.candidate.result == ''success''',
         'if: always() && needs.promote.result == ''success''',
-        '-Operation cleanup-prestage-backup'
+        '-Operation cleanup-prestage-backup',
+        '-Operation capture-prestage-authority',
+        '-SourceCommit $env:SOURCE_COMMIT'
     )) {
         if ($discordDeployWorkflow.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Discord deploy cancellation/recovery contract is missing '$required'"
@@ -728,6 +735,9 @@ function Invoke-ReleaseIdentityGateValidation {
         '-RecoveryAuthorityPath',
         'contains(fromJSON(''["failure","cancelled","timed_out"]''), github.event.workflow_run.conclusion)',
         'GCP_COMMAND_SYNC_SERVICE_ACCOUNT',
+        'TRUSTED_HELPER_SOURCE_COMMIT: ${{ github.sha }}',
+        '-TrustedHelperSourceCommit $env:TRUSTED_HELPER_SOURCE_COMMIT',
+        'github.ref == ''refs/heads/main''',
         'force-cancel path'
     )) {
         if ($discordRecoveryWorkflow.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
@@ -741,6 +751,41 @@ function Invoke-ReleaseIdentityGateValidation {
         if ($discordRecoveryWorkflow.IndexOf($forbidden, [System.StringComparison]::Ordinal) -ge 0) {
             Add-ArchitectureError "Discord recovery workflow widens authority with '$forbidden'"
         }
+    }
+    if (([regex]::Matches(
+                $discordRecoveryWorkflow,
+                'bash scripts/release/collect-discord-primary-attempt-catalog\.sh'
+            )).Count -ne 2) {
+        Add-ArchitectureError 'Discord recovery must seal the run-attempt catalog in both authority phases'
+    }
+    foreach ($required in @(
+        'primary-run-catalog-before.json',
+        'primary-run-catalog-after.json',
+        'validate-run-catalog-snapshots',
+        'mv --no-clobber "$after" "$catalog"'
+    )) {
+        if ($discordRecoveryCatalogCollector.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Discord recovery catalog collector is missing TOCTOU seal '$required'"
+        }
+    }
+    $catalogEndpoint = 'actions/workflows/discord-deploy.yml/runs?branch=main&per_page=100'
+    if (([regex]::Matches(
+                $discordRecoveryCatalogCollector,
+                [regex]::Escape($catalogEndpoint)
+            )).Count -ne 2) {
+        Add-ArchitectureError 'Discord recovery catalog collector must read exactly two run-list snapshots'
+    }
+    $catalogBeforeIndex = $discordRecoveryCatalogCollector.IndexOf(
+        '> "$before"', [System.StringComparison]::Ordinal)
+    $catalogAttemptIndex = $discordRecoveryCatalogCollector.IndexOf(
+        'actions/runs/$run_id/attempts/$attempt', [System.StringComparison]::Ordinal)
+    $catalogAfterIndex = $discordRecoveryCatalogCollector.IndexOf(
+        '> "$after"', [System.StringComparison]::Ordinal)
+    $catalogSealIndex = $discordRecoveryCatalogCollector.IndexOf(
+        'validate-run-catalog-snapshots', [System.StringComparison]::Ordinal)
+    if ($catalogBeforeIndex -lt 0 -or $catalogAttemptIndex -le $catalogBeforeIndex -or
+        $catalogAfterIndex -le $catalogAttemptIndex -or $catalogSealIndex -le $catalogAfterIndex) {
+        Add-ArchitectureError 'Discord recovery catalog collector does not preserve snapshot-attempt-snapshot-seal order'
     }
     foreach ($required in @(
         'entry.run_number',
@@ -763,6 +808,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'preserved-latest-zero-traffic-tagless',
         'Cloud residue readback retains candidate traffic or a direct-routing tag',
         'recovery_authority=$RecoveryAuthorityPath',
+        '-Operation cleanup-prestage-backup -SourceCommit $TrustedHelperSourceCommit',
         '--stage prestage',
         '--stage live'
     )) {
@@ -2017,6 +2063,8 @@ function Invoke-ReleaseIdentityGateValidation {
                 'scripts/release/final-source-stage-evidence.test.mjs',
                 'scripts/release/finalize-discord-production-checkpoint.test.mjs',
                 'scripts/release/observe-production-surfaces.test.mjs',
+                'scripts/release/oracle/create-prestage-helper-bundle.test.mjs',
+                'scripts/release/oracle/invoke-release-deploy-v080.test.mjs',
                 'scripts/release/pages-deployment-authority.test.mjs',
                 'scripts/release/pages-legacy-contract.test.mjs',
                 'scripts/release/pages-rollback-authority.test.mjs',
@@ -4567,6 +4615,23 @@ function Invoke-ReleaseIdentityGateValidation {
         '$stream.Flush($true)',
         '$observation.freshOperationAt = Get-CanonicalTimestamp',
         '$observation.observedAt = Get-CanonicalTimestamp',
+        'create-prestage-helper-bundle.mjs',
+        '/usr/bin/systemd-run',
+        '--on-active=30m',
+        '/usr/bin/flock',
+        '/usr/bin/env',
+        'Root-owned prestage helper inventory',
+        "'-links', '1'",
+        'Oracle prestage helper cleanup watchdog failed closed.',
+        '$cleanupTimerMayExist -and $cleanupFailures.Count -eq 0',
+        'Invoke-ExactSshResult',
+        '$watchdogUnitsAfterTimerStop',
+        '"$cleanupService ", [StringComparison]::Ordinal',
+        '$cleanupServiceStop = Invoke-ExactSshResult',
+        '$cleanupTimer, $cleanupService',
+        "'--full', '--plain', '--no-legend'",
+        'cleanup watchdog state after timer stop is invalid',
+        'cleanup watchdog unit residue remains',
         'Oracle candidate observation timestamps are out of order.'
     )) {
         if ($oracleDeployInvoker.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
@@ -4575,6 +4640,34 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     if ($oracleDeployInvoker -match '(?im)(Get-Content|Get-FileHash|ReadAllBytes|ReadAllText)[^\r\n]*\$IdentityFile') {
         Add-ArchitectureError 'Typed Oracle release deploy invoker must never read or hash identity-file contents'
+    }
+    if ($oracleDeployInvoker.IndexOf(
+            '/opt/clearra/current/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs',
+            [System.StringComparison]::Ordinal
+        ) -ge 0) {
+        Add-ArchitectureError 'Oracle prestage capture must not execute helper code from the active current release'
+    }
+    foreach ($required in @(
+        '"rev-parse", "HEAD"',
+        '"status", "--porcelain=v1"',
+        '"show", `${sourceCommit}:${path}`',
+        'prestage helper import closure drifted',
+        'prestage helper bundle exceeds its byte limit'
+    )) {
+        if ($oraclePrestageHelperBundle.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle prestage accepted-source bundle is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'rejects foreign commits, dirty bytes, dynamic imports, and import-closure expansion',
+        '/exact accepted Git checkout/u',
+        '/dynamic dependency/u',
+        '/import closure drifted/u',
+        '/differs from the accepted checkout/u'
+    )) {
+        if ($oraclePrestageHelperBundleTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle prestage accepted-source mutation regression is missing '$required'"
+        }
     }
     foreach ($required in @(
         "Assert-AuditResult -Output `$observation -Operation 'observe-candidate'",
@@ -4588,10 +4681,29 @@ function Invoke-ReleaseIdentityGateValidation {
         'an observation before its operation',
         'Oracle evidence output changed after a rejected overwrite.',
         'Oracle evidence output accepted a linked parent path.',
+        'New-PrestageRemoteModel',
+        'Invoke-ModeledPrestageWrapper',
+        'Prestage watchdog was not the first remote state mutation.',
+        'Modeled prestage capture',
+        'Modeled prestage backup cleanup',
+        "foreach (`$failureKind in @('root', 'upload'))",
+        'disarmed its watchdog after transport cleanup failed.',
+        'Modeled prestage capture accepted duplicate helper output.',
         'oracle_release_deploy_wrapper_test=pass'
     )) {
         if ($oracleDeployInvokerTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Typed Oracle release deploy invoker regression is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'spawnSync(',
+        '"-NoLogo", "-NoProfile", "-NonInteractive", "-File", TEST_SCRIPT',
+        'shell: false',
+        'oracle_release_deploy_wrapper_test=pass',
+        'result.stdout.match('
+    )) {
+        if ($oracleDeployInvokerNodeTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle prestage shell-free Node regression wrapper is missing '$required'"
         }
     }
     foreach ($required in @(
@@ -4643,7 +4755,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'active Oracle job URL must be a credential-free HTTPS /jobs URL',
         '/etc/clearra-gateway/settings.pre-v0.8.0-',
         'openSync(temporaryPath, "wx", 0o600)',
-        'linkSync(temporaryPath, backupPath)'
+        'linkSync(temporaryPath, backupPath)',
+        'reconcileInterruptedSettingsBackup(backupPath)',
+        'final.dev !== temporary.dev || final.ino !== temporary.ino',
+        'requireRootBackupLeaf(repaired, 1, "Repaired Oracle settings backup final")'
     )) {
         if ($oracleRollbackCapture.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Oracle rollback capture is missing pre-mutation authority marker '$required'"
@@ -4738,6 +4853,7 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($testContract in @(
         @{ Name = 'capture'; Text = $oracleRollbackCaptureTest; Marker = 'freezes exact v0.7.4 legacy authority without inventing identity' },
         @{ Name = 'capture-v2'; Text = $oracleRollbackCaptureTest; Marker = 'rejects health or identity key drift before backup' },
+        @{ Name = 'capture-interrupted-backup'; Text = $oracleRollbackCaptureTest; Marker = 'repairs only exact interrupted publication states' },
         @{ Name = 'producer'; Text = $oracleProofProducerTest; Marker = 'rejects stale settings, process, and operation evidence' },
         @{ Name = 'producer-v2'; Text = $oracleProofProducerTest; Marker = 'preserves strict v2 runtime authority' },
         @{ Name = 'candidate'; Text = $oracleCandidateProofTest; Marker = 'rejects every stale deployment authority' },

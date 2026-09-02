@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { captureOracleRollbackAuthority } from "../scripts/capture-oracle-rollback-authority.mjs";
+import {
+  captureOracleRollbackAuthority,
+  reconcileOracleRollbackBackupInterruption,
+} from "../scripts/capture-oracle-rollback-authority.mjs";
 import {
   observePriorRuntimeAuthority,
   PRIOR_RUNTIME_IDENTITY_KIND,
@@ -108,6 +111,94 @@ test("rollback capture cleans bounded stale authority before writing the nonce-b
   );
   const expected = `/etc/clearra-gateway/settings.pre-v0.8.0-${nonce}`;
   assert.deepEqual(operations, [`cleanup:${expected}`, `write:${expected}`]);
+});
+
+test("rollback backup reconciliation repairs only exact interrupted publication states", () => {
+  const backupPath = `/etc/clearra-gateway/settings.pre-v0.8.0-${nonce}`;
+  const temporaryPath = `${backupPath}.tmp`;
+  const metadata = ({ ino, nlink = 1, uid = 0, mode = 0o100600, dev = 9 }) => ({
+    dev,
+    ino,
+    mode,
+    nlink,
+    uid,
+    isFile: () => true,
+    isSymbolicLink: () => false,
+  });
+  const fixture = ({ final, temporary }) => {
+    const entries = new Map();
+    if (final) entries.set(backupPath, final);
+    if (temporary) entries.set(temporaryPath, temporary);
+    const removed = [];
+    const synced = [];
+    return {
+      entries,
+      removed,
+      synced,
+      dependencies: {
+        lstat(path) {
+          if (entries.has(path)) return entries.get(path);
+          throw Object.assign(new Error("missing"), { code: "ENOENT" });
+        },
+        unlink(path) {
+          const removedMetadata = entries.get(path);
+          if (!removedMetadata) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+          entries.delete(path);
+          const survivor = entries.get(backupPath);
+          if (
+            path === temporaryPath && survivor &&
+            survivor.dev === removedMetadata.dev && survivor.ino === removedMetadata.ino
+          ) survivor.nlink -= 1;
+          removed.push(path);
+        },
+        fsyncDirectory(path) {
+          synced.push(path);
+        },
+      },
+    };
+  };
+
+  const final = metadata({ ino: 17, nlink: 2 });
+  const temporary = metadata({ ino: 17, nlink: 2 });
+  const interruptedAfterLink = fixture({ final, temporary });
+  assert.equal(
+    reconcileOracleRollbackBackupInterruption(
+      nonce,
+      interruptedAfterLink.dependencies,
+    ),
+    true,
+  );
+  assert.deepEqual(interruptedAfterLink.removed, [temporaryPath]);
+  assert.deepEqual(interruptedAfterLink.synced, ["/etc/clearra-gateway"]);
+  assert.equal(interruptedAfterLink.entries.get(backupPath).nlink, 1);
+
+  const interruptedBeforeLink = fixture({
+    temporary: metadata({ ino: 18 }),
+  });
+  assert.equal(
+    reconcileOracleRollbackBackupInterruption(
+      nonce,
+      interruptedBeforeLink.dependencies,
+    ),
+    true,
+  );
+  assert.deepEqual(interruptedBeforeLink.removed, [temporaryPath]);
+  assert.equal(interruptedBeforeLink.entries.size, 0);
+
+  for (const unsafe of [
+    fixture({
+      final: metadata({ ino: 19, nlink: 2 }),
+      temporary: metadata({ ino: 20, nlink: 2 }),
+    }),
+    fixture({ temporary: metadata({ ino: 21, nlink: 2 }) }),
+  ]) {
+    assert.throws(
+      () => reconcileOracleRollbackBackupInterruption(nonce, unsafe.dependencies),
+      /authority is invalid/u,
+    );
+    assert.deepEqual(unsafe.removed, []);
+    assert.deepEqual(unsafe.synced, []);
+  }
 });
 
 test("legacy authority excludes dynamic active-job count but binds worker capacity", () => {

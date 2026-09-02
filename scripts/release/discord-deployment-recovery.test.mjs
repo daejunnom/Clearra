@@ -9,6 +9,7 @@ import {
   DISCORD_RECOVERY_RESULT_SCHEMA_ID,
   resolveDiscordRecoveryAuthority,
   sealDiscordRecoveryResult,
+  validatePrimaryRunCatalogSnapshots,
   verifyDiscordRecoveryResult,
 } from "./discord-deployment-recovery.mjs";
 import { sealDiscordCatalogRecoveryDisposition } from
@@ -212,6 +213,85 @@ const options = {
   jobList: jobList(),
   runJobCatalog: runJobCatalog(),
 };
+
+test("recovery accepts GitHub list/exact-attempt updated-at projection skew", () => {
+  const authority = resolveDiscordRecoveryAuthority(
+    run(),
+    { total_count: 0, artifacts: [] },
+    {
+      ...options,
+      runList: {
+        total_count: 1,
+        workflow_runs: [run({ updated_at: "2026-08-31T00:00:19Z" })],
+      },
+    },
+  );
+  assert.equal(authority.recovery_required, false);
+  assert.equal(authority.freshness_proof.original_workflow_run_id, RUN_ID);
+});
+
+test("recovery run catalog snapshot seal rejects added, deleted, and hidden rerun drift", () => {
+  const snapshot = (...runs) => ({ total_count: runs.length, workflow_runs: runs });
+  assert.equal(
+    validatePrimaryRunCatalogSnapshots(snapshot(run()), snapshot(run()), REPOSITORY).size,
+    1,
+  );
+  const added = run({ id: 702, run_number: 42 });
+  assert.throws(
+    () => validatePrimaryRunCatalogSnapshots(snapshot(run()), snapshot(run(), added), REPOSITORY),
+    /changed during attempt collection/u,
+  );
+  assert.throws(
+    () => validatePrimaryRunCatalogSnapshots(snapshot(run(), added), snapshot(run()), REPOSITORY),
+    /changed during attempt collection/u,
+  );
+  assert.throws(
+    () => validatePrimaryRunCatalogSnapshots(
+      snapshot(run()),
+      snapshot(run({
+        run_attempt: 4,
+        run_started_at: "2026-08-31T00:01:00Z",
+        updated_at: "2026-08-31T00:01:20Z",
+      })),
+      REPOSITORY,
+    ),
+    /changed during attempt collection/u,
+  );
+  assert.throws(
+    () => validatePrimaryRunCatalogSnapshots(
+      snapshot(run()),
+      snapshot(run({ updated_at: "2026-08-31T00:00:21Z" })),
+      REPOSITORY,
+    ),
+    /changed during attempt collection/u,
+  );
+  assert.throws(
+    () => validatePrimaryRunCatalogSnapshots(
+      snapshot(run()),
+      snapshot(run({ event: "workflow_run" })),
+      REPOSITORY,
+    ),
+    /changed during attempt collection/u,
+  );
+});
+
+test("recovery attempt history requires completed prior attempts and one invariant event", () => {
+  for (const priorDrift of [
+    { status: "queued", conclusion: null, run_started_at: null },
+    { event: "workflow_run" },
+  ]) {
+    const catalog = runAttemptCatalog();
+    catalog.attempts[0] = { ...catalog.attempts[0], ...priorDrift };
+    assert.throws(
+      () => resolveDiscordRecoveryAuthority(
+        run(),
+        { total_count: 0, artifacts: [] },
+        { ...options, runAttemptCatalog: catalog },
+      ),
+      /ordering authority is inconsistent/u,
+    );
+  }
+});
 
 test("recovery authority binds the exact original run attempt and one immutable artifact", () => {
   const authority = resolveDiscordRecoveryAuthority(
@@ -619,6 +699,23 @@ test("recovery freshness ignores exact queued or completed no-op runs and blocks
     updated_at: "2026-08-31T00:01:20Z",
     conclusion: "success",
   });
+  const eventDriftCatalog = runAttemptCatalog([newer, run()]);
+  eventDriftCatalog.attempts[0] = {
+    ...eventDriftCatalog.attempts[0],
+    event: "workflow_run",
+  };
+  assert.throws(
+    () => resolveDiscordRecoveryAuthority(
+      run(),
+      { total_count: 0, artifacts: [] },
+      {
+        ...options,
+        runList: { total_count: 2, workflow_runs: [newer, run()] },
+        runAttemptCatalog: eventDriftCatalog,
+      },
+    ),
+    /ordering authority is inconsistent/u,
+  );
   assert.throws(
     () => resolveDiscordRecoveryAuthority(
       run(),

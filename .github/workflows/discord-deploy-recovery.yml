@@ -46,6 +46,7 @@ jobs:
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository) ||
       (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main' &&
        inputs.expected_current_main == github.sha)
     runs-on: ubuntu-latest
     outputs:
@@ -101,23 +102,8 @@ jobs:
           gh api --paginate --slurp --method GET \
             "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/attempts/$ORIGINAL_RUN_ATTEMPT/jobs?per_page=100" \
             > "$authority_root/original-jobs.json"
-          gh api --paginate --slurp --method GET \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/discord-deploy.yml/runs?branch=main&per_page=100" \
-            > "$authority_root/primary-run-catalog.json"
-          : > "$authority_root/primary-attempts.jsonl"
-          jq -r '.[] | .workflow_runs[] | [(.id | tostring), (.run_attempt | tostring)] | @tsv' \
-            "$authority_root/primary-run-catalog.json" | sort -u | \
-          while IFS=$'\t' read -r run_id max_attempt; do
-            [[ "$run_id" =~ ^[1-9][0-9]*$ && "$max_attempt" =~ ^[1-9][0-9]*$ ]]
-            for ((attempt = 1; attempt <= max_attempt; attempt += 1)); do
-              gh api --method GET \
-                "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt" \
-                >> "$authority_root/primary-attempts.jsonl"
-              printf '\n' >> "$authority_root/primary-attempts.jsonl"
-            done
-          done
-          jq -s '{schema_id:"clearra.discord-deployment-primary-attempt-catalog.v1",attempts:.}' \
-            "$authority_root/primary-attempts.jsonl" > "$authority_root/primary-attempts.json"
+          bash scripts/release/collect-discord-primary-attempt-catalog.sh \
+            "$GITHUB_REPOSITORY" "$authority_root"
           entries="$authority_root/run-job-entries.jsonl"
           : > "$entries"
           jq -r --slurpfile original "$authority_root/original-run.json" '
@@ -191,6 +177,7 @@ jobs:
       id-token: write
     env:
       SOURCE_COMMIT: ${{ needs.authority.outputs.source_commit }}
+      TRUSTED_HELPER_SOURCE_COMMIT: ${{ github.sha }}
       ORIGINAL_RUN_ID: ${{ needs.authority.outputs.workflow_run_id }}
       ORIGINAL_RUN_ATTEMPT: ${{ needs.authority.outputs.workflow_run_attempt }}
       RECOVERY_STAGE: ${{ needs.authority.outputs.recovery_stage }}
@@ -230,23 +217,8 @@ jobs:
           gh api --paginate --slurp --method GET \
             "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/attempts/$ORIGINAL_RUN_ATTEMPT/jobs?per_page=100" \
             > "$authority_root/original-jobs.json"
-          gh api --paginate --slurp --method GET \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/discord-deploy.yml/runs?branch=main&per_page=100" \
-            > "$authority_root/primary-run-catalog.json"
-          : > "$authority_root/primary-attempts.jsonl"
-          jq -r '.[] | .workflow_runs[] | [(.id | tostring), (.run_attempt | tostring)] | @tsv' \
-            "$authority_root/primary-run-catalog.json" | sort -u | \
-          while IFS=$'\t' read -r run_id max_attempt; do
-            [[ "$run_id" =~ ^[1-9][0-9]*$ && "$max_attempt" =~ ^[1-9][0-9]*$ ]]
-            for ((attempt = 1; attempt <= max_attempt; attempt += 1)); do
-              gh api --method GET \
-                "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt" \
-                >> "$authority_root/primary-attempts.jsonl"
-              printf '\n' >> "$authority_root/primary-attempts.jsonl"
-            done
-          done
-          jq -s '{schema_id:"clearra.discord-deployment-primary-attempt-catalog.v1",attempts:.}' \
-            "$authority_root/primary-attempts.jsonl" > "$authority_root/primary-attempts.json"
+          bash scripts/release/collect-discord-primary-attempt-catalog.sh \
+            "$GITHUB_REPOSITORY" "$authority_root"
           entries="$authority_root/run-job-entries.jsonl"
           : > "$entries"
           jq -r --slurpfile original "$authority_root/original-run.json" '
@@ -396,6 +368,7 @@ jobs:
             -Stage $env:RECOVERY_STAGE `
             -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-input') `
             -EvidenceRoot $evidenceRoot -SourceCommit $env:SOURCE_COMMIT `
+            -TrustedHelperSourceCommit $env:TRUSTED_HELPER_SOURCE_COMMIT `
             -OriginalWorkflowRunId $env:ORIGINAL_RUN_ID `
             -OriginalWorkflowRunAttempt $env:ORIGINAL_RUN_ATTEMPT `
             -RecoveryArtifactId $env:ARTIFACT_ID -RecoveryArtifactDigest $env:ARTIFACT_DIGEST `
@@ -441,6 +414,7 @@ jobs:
             -Stage $env:RECOVERY_STAGE `
             -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-input') `
             -EvidenceRoot $evidenceRoot -SourceCommit $env:SOURCE_COMMIT `
+            -TrustedHelperSourceCommit $env:TRUSTED_HELPER_SOURCE_COMMIT `
             -OriginalWorkflowRunId $env:ORIGINAL_RUN_ID `
             -OriginalWorkflowRunAttempt $env:ORIGINAL_RUN_ATTEMPT `
             -RecoveryArtifactId $env:ARTIFACT_ID -RecoveryArtifactDigest $env:ARTIFACT_DIGEST `
@@ -464,7 +438,9 @@ jobs:
             -Stage $env:RECOVERY_STAGE `
             -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-input') `
             -EvidenceRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-evidence') `
-            -SourceCommit $env:SOURCE_COMMIT -OriginalWorkflowRunId $env:ORIGINAL_RUN_ID `
+            -SourceCommit $env:SOURCE_COMMIT `
+            -TrustedHelperSourceCommit $env:TRUSTED_HELPER_SOURCE_COMMIT `
+            -OriginalWorkflowRunId $env:ORIGINAL_RUN_ID `
             -OriginalWorkflowRunAttempt $env:ORIGINAL_RUN_ATTEMPT `
             -RecoveryArtifactId $env:ARTIFACT_ID -RecoveryArtifactDigest $env:ARTIFACT_DIGEST `
             -RecoveryAuthorityPath (Join-Path $env:RUNNER_TEMP 'discord-recovery-protected-authority/recovery-authority.json') `

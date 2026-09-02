@@ -7,6 +7,7 @@ param(
     [Parameter(Mandatory = $true)][string] $ArtifactRoot,
     [Parameter(Mandatory = $true)][string] $EvidenceRoot,
     [Parameter(Mandatory = $true)][string] $SourceCommit,
+    [Parameter(Mandatory = $true)][string] $TrustedHelperSourceCommit,
     [Parameter(Mandatory = $true)][string] $OriginalWorkflowRunId,
     [Parameter(Mandatory = $true)][string] $OriginalWorkflowRunAttempt,
     [Parameter(Mandatory = $true)][string] $RecoveryArtifactId,
@@ -222,6 +223,7 @@ function Invoke-OracleClassification {
 
 [void](Get-ExactLeaf -Path $IdentityFile -Label 'Oracle identity')
 if ($SourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+    $TrustedHelperSourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
     $OriginalWorkflowRunId -cnotmatch '^[1-9][0-9]*$' -or
     $OriginalWorkflowRunAttempt -cnotmatch '^[1-9][0-9]*$' -or
     $RecoveryArtifactId -cnotmatch '^[1-9][0-9]*$' -or
@@ -298,7 +300,8 @@ if ($Stage -ceq 'prestage') {
         -ServiceOutputPath $cloudAfter -RevisionOutputPath $cloudRevisionAfter
     $oracleBackupCleanup = Join-Path $EvidenceRoot 'oracle-backup-cleanup.json'
     & scripts/release/oracle/invoke-release-deploy-v080.ps1 `
-        -Operation cleanup-prestage-backup -DeploymentNonce $nonce `
+        -Operation cleanup-prestage-backup -SourceCommit $TrustedHelperSourceCommit `
+        -DeploymentNonce $nonce `
         -IdentityFile $IdentityFile | Set-Content -LiteralPath $oracleBackupCleanup -Encoding utf8NoBOM
     if ($LASTEXITCODE -ne 0) { throw 'bounded Oracle rollback backup cleanup failed' }
     if ($RestoreOnly) {
