@@ -1,13 +1,15 @@
 //! Typed host boundary for the Tauri desktop product.
 //!
-//! The crate converts desktop form state into `clearra-app` requests, executes
-//! them through the application boundary, and exposes owned response/job models.
+//! The crate compiles complete desktop CLI argv envelopes into `clearra-app`
+//! requests, executes them through the application boundary, and exposes owned
+//! response/job models. Legacy GUI-form request assembly is test-only.
 
 pub mod desktop_host;
 pub mod display;
 pub mod host_language_resolver;
 pub mod job;
 pub mod model;
+#[cfg(test)]
 pub mod request;
 pub mod settings;
 pub mod validation;
@@ -37,11 +39,14 @@ pub use model::{
     GuiOutputForm, GuiOutputFormat, GuiProblemForm, GuiRenderForm, GuiScenarioPcForm, GuiScreen,
     GuiSetupSearchForm, GuiUserPreferences,
 };
+#[cfg(test)]
 pub use request::{
-    BackendRequestBuilder, CoverRequestBuilder, GuiAppRequestBuild, GuiOutputRequestBuild,
-    GuiToAppRequest, OutputRequestBuilder, PcRequestBuilder, RequestBuildError,
-    RequestBuildErrorCode, ScenarioRequestBuilder, SetupRequestBuilder,
+    BackendRequestBuilder, CoverRequestBuilder, GuiOutputRequestBuild, OutputRequestBuilder,
+    PcRequestBuilder, RequestBuildError, RequestBuildErrorCode, ScenarioRequestBuilder,
+    SetupRequestBuilder,
 };
+#[cfg(test)]
+pub use request::{GuiAppRequestBuild, GuiToAppRequest};
 pub use settings::{
     BackendSettings, LanguageSettings, LoadedSettings, OutputSettings, SettingsError,
     SettingsErrorCode, SettingsModel, SettingsStore, SettingsTheme, SETTINGS_SCHEMA_VERSION,

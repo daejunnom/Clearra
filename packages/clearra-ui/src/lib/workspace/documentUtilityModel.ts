@@ -2,12 +2,96 @@ import type {
   ClearraFieldDocumentPayload,
   ClearraRenderArtifactPayload
 } from '../wasm/wasmCommandClient';
+import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost';
+import {
+  cliCommandRequestForDesktop,
+  serializeCliCommandArguments
+} from './cliCommandModel';
 
 export const FIELD_DOCUMENT_MAX_INPUT_BYTES = 16 * 1024 * 1024;
 export const FIELD_DOCUMENT_MAX_PAGES = 4096;
 
 export type DocumentUtilityTool = 'parity' | 'fumen' | 'render' | 'to-gray' | 'mirror';
 export type FieldDocumentFormat = 'ctk3' | 'fumen';
+export type DocumentUtilityFumenTransform =
+  | 'roundtrip'
+  | 'combine'
+  | 'split'
+  | 'get-page'
+  | 'page-shift'
+  | 'clean-comments'
+  | 'preserve-comments'
+  | 'to-gray'
+  | 'mirror'
+  | 'text-to-fumen';
+
+export type DocumentUtilityCommandInput = {
+  tool: DocumentUtilityTool;
+  format: FieldDocumentFormat;
+  document: string;
+  transform: DocumentUtilityFumenTransform;
+  documents: readonly string[];
+  pageNumber: number;
+  pageShift: number;
+  comments: readonly string[];
+  artifactFormat: 'png' | 'gif';
+};
+
+export function buildDocumentUtilityCommandArguments(
+  input: DocumentUtilityCommandInput
+): string[] {
+  if (input.tool === 'parity') {
+    return [
+      'clearra', 'utility', 'parity',
+      '--format', input.format,
+      '--document', input.document
+    ];
+  }
+  if (input.tool === 'render') {
+    const arguments_ = [
+      'clearra', 'utility', 'render',
+      '--format', input.format,
+      '--document', input.document,
+      '--artifact-format', input.artifactFormat
+    ];
+    if (input.artifactFormat === 'png') {
+      arguments_.push('--page', String(input.pageNumber));
+    }
+    return arguments_;
+  }
+  if (input.tool === 'to-gray' || input.tool === 'mirror') {
+    return [
+      'clearra', 'utility', input.tool,
+      '--format', input.format,
+      '--document', input.document
+    ];
+  }
+  const arguments_ = ['clearra', 'utility', 'fumen', input.transform, '--format', 'fumen'];
+  if (input.transform !== 'text-to-fumen') {
+    for (const document of input.documents) arguments_.push('--document', document);
+  }
+  if (input.transform === 'get-page') {
+    arguments_.push('--page', String(input.pageNumber));
+  }
+  if (input.transform === 'page-shift') {
+    arguments_.push('--offset', String(input.pageShift));
+  }
+  if (input.transform === 'text-to-fumen') {
+    for (const comment of input.comments) arguments_.push('--comment', comment);
+  }
+  return arguments_;
+}
+
+export function buildDocumentUtilityCommand(input: DocumentUtilityCommandInput): string {
+  return serializeCliCommandArguments(buildDocumentUtilityCommandArguments(input));
+}
+
+export function documentUtilityRequestForDesktop(
+  input: DocumentUtilityCommandInput,
+  language: 'en' | 'ko'
+): ClearraDesktopCliCommandRequest {
+  return cliCommandRequestForDesktop(buildDocumentUtilityCommandArguments(input), language);
+}
 
 export function detectFieldDocumentFormat(source: string): FieldDocumentFormat | null {
   const normalized = source.trim();
@@ -37,14 +121,6 @@ export function fumenDocumentInputs(source: string, combine: boolean): string[] 
   return documents.every((document) => isBoundedCanonicalFieldDocument(document, 'fumen'))
     ? documents
     : [];
-}
-
-export function quoteWebCommandToken(value: string): string {
-  if (!value || /[\u0000-\u001f\u007f]/u.test(value)) {
-    throw new Error('web command values must be non-empty text without control characters');
-  }
-  if (!/\s|["\\]/u.test(value)) return value;
-  return `"${value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"')}"`;
 }
 
 export function validateFieldDocumentPayload(payload: ClearraFieldDocumentPayload): string | null {

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   buildWorkspaceCommand,
+  buildWorkspaceCommandArguments,
   createDefaultWorkspaceRequest,
   workspaceRequestForDesktop
 } from '../src/lib/workspace/solverWorkspaceModel.ts';
@@ -26,10 +27,7 @@ test('failed queue mode uses the reverse coverage command without scoring', () =
   assert.doesNotMatch(command, /--solution-probabilities/);
 
   const desktop = workspaceRequestForDesktop(request, 'en');
-  assert.equal(desktop.score_mode, 'failed-queue');
-  assert.equal(desktop.count_policy, 'all');
-  assert.equal(desktop.initial_b2b, 0);
-  assert.equal(desktop.solution_probabilities, false);
-  assert.equal(desktop.finesse, 'off');
-  assert.equal(desktop.pattern_knowledge, 'both');
+  assert.equal(desktop.app_request_model, 'clearra-cli/CommandRequest');
+  assert.equal(desktop.command, 'cli');
+  assert.deepEqual(desktop.arguments, buildWorkspaceCommandArguments(request));
 });

@@ -63,7 +63,7 @@ candidate generation, exact merge rules, or pruning.
   esbuild test path.
 - Forward exactness tests: 21 passed, including serial/parallel equality and
   actual-participant accounting.
-- Web-command compatibility tests: 68 passed.
+- CLI-command compatibility tests: 68 passed.
 - Setup-related `clearra-core-executor` native test executables compile.
 - Web TypeScript, desktop in-memory Svelte/TypeScript compile, Rust formatting,
   and the affected Rust crate checks pass.
@@ -251,7 +251,7 @@ reapplied in later optimization passes:
   validation only. PC/build enumeration, candidate generation, exact merge,
   scoring policy, and pruning were not changed.
 - The complete Discord suite passes all 122 tests. The 20 focused
-  `sfinder_compat` Rust tests, Rust formatting, the web-command test-target
+  `sfinder_compat` Rust tests, Rust formatting, the CLI-command test-target
   compile, and whitespace validation also pass; existing unrelated Rust
   dead-code/unused warnings remain warnings only.
 

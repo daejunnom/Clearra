@@ -51,6 +51,6 @@ A 64-entry worker-local exact reachability lock cache was measured and removed. 
 ## Validation
 
 - `cargo fmt --all -- --check` passes.
-- `cargo check -p clearra-forward-search -p clearra-wasm -p clearra-web-command -p clearra-app --all-targets` passes.
+- `cargo check -p clearra-forward-search -p clearra-wasm -p clearra-cli-command -p clearra-app --all-targets` passes.
 - The final WASM was rebuilt into `apps/clearra-web/static/wasm` and all measurements used the real browser Web Worker command surface.
 - Windows Application Control blocks newly built native test executables with OS error 4551. No bypass, alternate native execution surface, or signing workaround was used.

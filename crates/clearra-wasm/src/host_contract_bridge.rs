@@ -5,7 +5,7 @@ use clearra_host_contract::{
 
 use crate::wasm_worker_job::WasmWorkerJobEvent;
 
-// R2 flow marker: command text -> WebCommandParser -> AppRequest -> Web Worker
+// R2 flow marker: command text -> CliCommandParser -> AppRequest -> Web Worker
 // -> WASM CPU or WebGPU -> AppResponse / JobEvent.
 pub fn wasm_worker_event_to_host_contract(event: &WasmWorkerJobEvent) -> JobEvent {
     match event {

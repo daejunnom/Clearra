@@ -5,8 +5,12 @@ import {
   type RuleProfile,
   type SpinProfile
 } from './solverWorkspaceModel.ts';
-import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost.ts';
+import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
 import { isValidForwardChain, MAX_FORWARD_CHAIN } from './forwardSearchLimits.ts';
+import {
+  cliCommandRequestForDesktop,
+  serializeCliCommandArguments
+} from './cliCommandModel.ts';
 
 const MAX_DAMAGE = 0xffff_ffff;
 export const MAX_REN_QUEUE_PIECES = 22;
@@ -118,10 +122,10 @@ export function forwardSearchValidationCodes(
   return errors;
 }
 
-export function buildForwardSearchCommand(
+export function buildForwardSearchCommandArguments(
   request: ForwardSearchRequest,
   automaticWorkerLimit?: number
-): string {
+): string[] {
   const queue = parseBrowserQueueInput(request.queue);
   const tokens = [
     'clearra',
@@ -152,50 +156,27 @@ export function buildForwardSearchCommand(
     tokens.push('--auto-workers', String(Math.max(1, Math.trunc(automaticWorkerLimit))));
     if (request.useAllLogicalProcessors) tokens.push('--use-all-cpu-threads');
   }
-  return tokens.join(' ');
+  return tokens;
+}
+
+export function buildForwardSearchCommand(
+  request: ForwardSearchRequest,
+  automaticWorkerLimit?: number
+): string {
+  return serializeCliCommandArguments(
+    buildForwardSearchCommandArguments(request, automaticWorkerLimit)
+  );
 }
 
 export function forwardSearchRequestForDesktop(
   request: ForwardSearchRequest,
   language: 'en' | 'ko',
   workers: number
-): ClearraDesktopRequest {
-  const queue = parseBrowserQueueInput(request.queue);
-  const common = {
-    command: request.tool,
-    language,
-    visible_height: request.height,
-    board_mask: boardMaskHex(trimForwardBoardMask(request.boardMask, request.height)),
-    queue: queue?.kind === 'fixed' ? queue.source : '',
-    patterns: queue?.kind === 'pattern' ? queue.source : '',
-    hold_enabled: request.holdEnabled,
-    rule: request.rule,
-    spin_profile: request.tool === 'ren' ? 'disabled' : request.spinProfile,
-    preserve_b2b: request.tool === 'ren' ? false : request.preserveB2B,
-    workers: Math.max(1, Math.trunc(workers)),
-    use_all_logical_processors: request.useAllLogicalProcessors,
-    backend: 'cpu',
-    allow_backend_fallback: false
-  } as const;
-  if (request.tool === 'damage') {
-    return buildDesktopAppRequest({
-      ...common,
-      command: request.tool,
-      initial_combo: request.initialCombo,
-      initial_b2b: request.initialB2B,
-      damage_aggregation: request.damageAggregation,
-      ...(request.damageAggregation === 'at-least'
-        ? { minimum_damage: request.minimumDamage }
-        : {})
-    });
-  }
-  if (request.tool === 'spin-finder') return buildDesktopAppRequest({
-    ...common,
-    command: request.tool,
-    spin_lines: request.spinLines,
-    spin_category: request.spinCategory
-  });
-  return buildDesktopAppRequest({ ...common, command: 'ren' });
+): ClearraDesktopCliCommandRequest {
+  return cliCommandRequestForDesktop(
+    buildForwardSearchCommandArguments(request, workers),
+    language
+  );
 }
 
 export function forwardSourcePieceCount(request: ForwardSearchRequest): number | null {

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::WebCommandParser;
+use crate::CliCommandParser;
 
 const CONTRACT: &str = include_str!("../../../tests/fixtures/contracts/search_option_contract.tsv");
 
@@ -64,6 +64,8 @@ fn shared_contract_covers_each_semantic_family_without_duplicate_options() {
             "forward-damage",
             "forward-spin",
             "pc",
+            "sequence",
+            "sequence-dependencies",
             "setup",
             "spin-structure",
         ])
@@ -176,8 +178,14 @@ fn shared_contract_preserves_surface_defaults_and_discord_boundaries() {
     let pc_lines = find("pc", "lines");
     assert_eq!(pc_lines.discord_default, "auto");
     assert_eq!(pc_lines.native_default, "2");
-    assert_eq!(find("pc", "score-mode").discord_default, "off");
-    assert_eq!(find("pc", "score-mode").native_default, "off");
+    assert_eq!(
+        find("pc", "score-mode").discord_default,
+        "score-only-summary"
+    );
+    assert_eq!(
+        find("pc", "score-mode").native_default,
+        "score-only-summary"
+    );
 
     let aggregation = find("build", "aggregation");
     assert_eq!(aggregation.disposition, "named");
@@ -232,7 +240,7 @@ fn canonical_family_inputs_compile_to_normalized_app_requests() {
     ];
 
     for (expected_kind, input) in cases {
-        let parsed = WebCommandParser::parse(input).expect("canonical web command");
+        let parsed = CliCommandParser::parse(input).expect("canonical CLI command");
         let request = parsed.to_app_request().expect("normalized AppRequest");
         assert_eq!(request.command_kind().as_str(), expected_kind, "{input}");
     }

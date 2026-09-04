@@ -28,7 +28,6 @@
   $: tilingOnly = request.scoreMode === 'tiling';
   $: pathOnly = request.scoreMode === 'path';
   $: failedQueueOnly = request.scoreMode === 'failed-queue';
-  $: saveOnly = request.scoreMode === 'saves' || request.scoreMode === 'best-save';
   $: scoreFinderOnly = request.scoreMode === 'score-finder';
   $: fixedScoreProduct =
     request.scoreMode === 'summary' ||
@@ -101,7 +100,7 @@
       <span>{label('queueKnowledge')}</span>
       <select
         value={request.queueKnowledge}
-        disabled={tilingOnly || pathOnly || saveOnly || fixedScoreProduct}
+        disabled={tilingOnly || pathOnly || fixedScoreProduct}
         on:change={(event) => patch({
           queueKnowledge: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['queueKnowledge']
         })}
@@ -125,8 +124,6 @@
           <option value="summary">{label('scoreSummary')}</option>
           <option value="score-finder">{label('scoreFinder')}</option>
           <option value="score-minimals">{label('scoreMinimals')}</option>
-          <option value="saves">{label('saveGroups')}</option>
-          <option value="best-save">{label('bestSave')}</option>
           <option value="failed-queue">{label('failedQueues')}</option>
         </select>
       </label>
@@ -167,7 +164,7 @@
         <span>{label('spinProfile')}</span>
         <select
           value={scoreFinderOnly ? 't-spins' : request.spinProfile}
-          disabled={tilingOnly || pathOnly || saveOnly || scoreFinderOnly || (!fixedScoreProduct && !request.preserveB2B)}
+          disabled={tilingOnly || pathOnly || scoreFinderOnly || (!fixedScoreProduct && !request.preserveB2B)}
           on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['spinProfile'] })}
         >
           <option value="t-spins">T-Spins</option>
@@ -185,7 +182,7 @@
           <input
             type="checkbox"
             checked={request.preserveB2B}
-            disabled={tilingOnly || pathOnly || saveOnly || fixedScoreProduct}
+            disabled={tilingOnly || pathOnly || fixedScoreProduct}
             on:change={(event) => patch({ preserveB2B: (event.currentTarget as HTMLInputElement).checked })}
           />
           <span class="workspace-switch" aria-hidden="true"></span>
@@ -196,7 +193,7 @@
         <input
           type="checkbox"
           checked={request.solutionProbabilities}
-          disabled={tilingOnly || pathOnly || failedQueueOnly || saveOnly || scoreMinimalsOnly}
+          disabled={tilingOnly || pathOnly || failedQueueOnly || scoreMinimalsOnly}
           on:change={(event) => patch({ solutionProbabilities: (event.currentTarget as HTMLInputElement).checked })}
         />
         <span class="workspace-switch" aria-hidden="true"></span>
@@ -224,7 +221,7 @@
           <input
             type="checkbox"
             checked={request.tablebaseEnabled}
-            disabled={tilingOnly || pathOnly || saveOnly || fixedScoreProduct}
+            disabled={tilingOnly || pathOnly || fixedScoreProduct}
             on:change={(event) => patch({
               tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
             })}
@@ -242,7 +239,7 @@
           <input
             type="checkbox"
             checked={request.precomputeBuildDependencies}
-            disabled={tilingOnly || pathOnly || saveOnly || fixedScoreProduct}
+            disabled={tilingOnly || pathOnly || fixedScoreProduct}
             on:change={(event) => patch({
               precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
             })}

@@ -3,6 +3,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 import {
+  CLI_COMMAND_LOWERING_AUTHORITY,
+  CLI_COMPATIBILITY_LOWERING_AUTHORITY,
   assertDiscordGenericCompatibilityRoutes,
   assertProductCapabilityRegistry,
   discordGenericCompatibilityRouteProjection,
@@ -63,7 +65,22 @@ test("v0.8 capability registry separates problem, algorithm, timeout, form, and 
     assert.ok(Object.hasOwn(capability, "inputSchemaId"));
     assert.ok(Object.hasOwn(capability, "modalSchemaId"));
     assert.ok(Object.hasOwn(capability, "resultContractId"));
+    if (["search", "utility"].includes(capability.kind)) {
+      assert.equal(capability.loweringAuthority, CLI_COMMAND_LOWERING_AUTHORITY);
+    }
   }
+  assert.equal(
+    findProductCapability("meta.help").loweringAuthority,
+    "discord.help-registry-query.v1",
+  );
+  assert.equal(
+    findProductCapability("settings.channel").loweringAuthority,
+    "discord.channel-settings-handler.v1",
+  );
+  assert.equal(
+    findProductCapability("settings.server").loweringAuthority,
+    "discord.server-settings-handler.v1",
+  );
   const searchEntries = slashCommandCatalog.flatMap((command) => command.subcommands
     ? Object.values(command.subcommands)
     : command.kind === "search" ? [command] : []);
@@ -671,7 +688,7 @@ test("forward REN canonical slash and text ingress share one typed lowering rout
       options: ["next", "field", "height", "hold", "kicktable"],
     },
   );
-  assert.equal(catalog.loweringAuthority, "discord.typed-command-lowering.v1");
+  assert.equal(catalog.loweringAuthority, CLI_COMMAND_LOWERING_AUTHORITY);
   assert.equal(catalog.resultAuthorityId, "ren");
 
   const slashArguments = buildSlashCommandArguments(catalog, [
@@ -803,6 +820,13 @@ test("Discord capability IDs are exact members of the product authority", () => 
     "utf8",
   ));
   assert.equal(authority.schema_id, "clearra.product-capability-registry.v1");
+  const expectedRuntimeIds = authority.runtime_projection.current_capabilities
+    .map(({ id }) => id)
+    .sort();
+  const actualRuntimeIds = productCapabilityRegistry.map(({ id }) => id).sort();
+  assert.equal(expectedRuntimeIds.length, 46);
+  assert.equal(actualRuntimeIds.length, 46);
+  assert.deepEqual(actualRuntimeIds, expectedRuntimeIds);
   const stableIds = new Set(authority.capabilities.map(({ id }) => id));
   for (const capability of productCapabilityRegistry) {
     assert.equal(stableIds.has(capability.id), true, capability.id);
@@ -928,7 +952,10 @@ test("canonical PC scoring owns typed summary authority while legacy score stays
   );
   assert.equal(legacy.capabilityId, "discord.compat.score");
   assert.equal(genericRoute.telemetryIdentity, "discord.compat.score");
-  assert.equal(genericRoute.loweringAuthority, "discord.generic-compatibility-lowering.v1");
+  assert.equal(
+    genericRoute.loweringAuthority,
+    CLI_COMPATIBILITY_LOWERING_AUTHORITY,
+  );
   assert.notEqual(genericRoute.telemetryIdentity, capability.telemetryIdentity);
   assert.notEqual(genericRoute.loweringAuthority, capability.loweringAuthority);
   assert.equal(Object.hasOwn(genericRoute, "preset"), false);

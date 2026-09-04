@@ -3,7 +3,9 @@
 use std::{fmt, mem::size_of, sync::Arc};
 
 use clearra_core_domain::resource::ResourceReport;
-use clearra_core_executor::{CoreExecutionResult, WasmCpuTerminalResourceAuthority};
+use clearra_core_executor::{
+    CoreExecutionResult, PcScoreDistributedMergeEvidence, WasmCpuTerminalResourceAuthority,
+};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_objectives::policy::score_objective_policy::{
     ScoreObjectiveMode, ScoreProfileSelection, SpinProfileSelection,
@@ -24,9 +26,16 @@ use crate::{
         validate_pc_score_opening_request_contract, validate_pc_score_scenario_request_contract,
         PC_SCORE_EXTERNAL_RETAINED_UPPER_BOUND_BYTES,
     },
+    pc_score_field_result::{
+        PcScoreSolutionFieldAverageV1, PC_SCORE_OVERALL_SCORE_BASIS,
+        PC_SCORE_SOLUTION_FIELD_AVERAGE_BASIS, PC_SCORE_SOLUTION_FIELD_ORDERING,
+    },
     pc_score_minimum_cover_result::PcScoreMinimalsIngressOrigin,
     pc_score_postprocess::{score_profile_for_policy, PcScoreDerivation, PcScoreExecutionSource},
-    pc_score_winner_result::{PcScorePatternWinnerV1, PC_SCORE_INFORMATIONAL_ATTACK_BASIS},
+    pc_score_winner_result::{
+        canonical_score_winner, PcScorePatternWinnerV1, PC_SCORE_CANONICAL_SELECTION,
+        PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+    },
 };
 
 pub(crate) const PC_SCORE_RESULT_CONTRACT: &str = "pc-score-summary.v2";
@@ -307,6 +316,14 @@ pub struct PcScoreSummaryV2Result {
     best_score: Option<u64>,
     best_attack: Option<u32>,
     pattern_winners: Arc<Vec<PcScorePatternWinnerV1>>,
+    canonical_winner: Option<PcScorePatternWinnerV1>,
+    solution_field_averages: Arc<Vec<PcScoreSolutionFieldAverageV1>>,
+    score_evaluation_basis: &'static str,
+    score_evaluation_scope: &'static str,
+    solution_field_average_basis: &'static str,
+    overall_score_basis: &'static str,
+    overall_score_bits: u64,
+    overall_score: InlineScoreNumberText,
     covered_probability_bits: u64,
     covered_probability: InlineScoreNumberText,
     unconditional_expected_score_bits: u64,
@@ -340,6 +357,8 @@ impl PcScoreSummaryV2Result {
         best_score: Option<u64>,
         best_attack: Option<u32>,
         pattern_winners: Arc<Vec<PcScorePatternWinnerV1>>,
+        solution_field_averages: Arc<Vec<PcScoreSolutionFieldAverageV1>>,
+        overall_score: f64,
         covered_probability: f64,
         unconditional_expected_score: f64,
         unconditional_expected_attack: f64,
@@ -347,6 +366,10 @@ impl PcScoreSummaryV2Result {
         completeness: PcScoreCompletenessEvidence,
     ) -> Result<Self, PcScoreExecutionError> {
         let problem_preset = query.problem_preset();
+        // The typed App result owns the score-tie witness. Candidate ID is the
+        // only selector here; informational attack is deliberately not read by
+        // this projection or by downstream adapters.
+        let canonical_winner = canonical_score_winner(pattern_winners.as_slice());
         Ok(Self {
             contract_id: origin.result_contract(),
             origin,
@@ -372,6 +395,14 @@ impl PcScoreSummaryV2Result {
             best_score,
             best_attack,
             pattern_winners,
+            canonical_winner,
+            solution_field_averages,
+            score_evaluation_basis: "all-traces",
+            score_evaluation_scope: "full",
+            solution_field_average_basis: PC_SCORE_SOLUTION_FIELD_AVERAGE_BASIS,
+            overall_score_basis: PC_SCORE_OVERALL_SCORE_BASIS,
+            overall_score_bits: overall_score.to_bits(),
+            overall_score: InlineScoreNumberText::try_from_display(overall_score)?,
             covered_probability_bits: covered_probability.to_bits(),
             covered_probability: InlineScoreNumberText::try_from_display(covered_probability)?,
             unconditional_expected_score_bits: unconditional_expected_score.to_bits(),
@@ -492,6 +523,56 @@ impl PcScoreSummaryV2Result {
 
     pub fn pattern_winner_count(&self) -> usize {
         self.pattern_winners.len()
+    }
+
+    /// App-owned representative for a score-only winner family. Downstream
+    /// adapters must serialize this witness and must not choose another
+    /// representative themselves.
+    pub const fn canonical_winner(&self) -> Option<PcScorePatternWinnerV1> {
+        self.canonical_winner
+    }
+
+    pub const fn canonical_selection(&self) -> &'static str {
+        PC_SCORE_CANONICAL_SELECTION
+    }
+
+    /// Exactly one row per normalized solution field. Every row is averaged
+    /// over the whole materialized pattern universe; patterns that this field
+    /// cannot solve contribute zero.
+    pub fn solution_field_averages(&self) -> &[PcScoreSolutionFieldAverageV1] {
+        self.solution_field_averages.as_slice()
+    }
+
+    pub fn solution_field_count(&self) -> usize {
+        self.solution_field_averages.len()
+    }
+
+    pub const fn solution_field_ordering(&self) -> &'static str {
+        PC_SCORE_SOLUTION_FIELD_ORDERING
+    }
+
+    pub const fn score_evaluation_basis(&self) -> &'static str {
+        self.score_evaluation_basis
+    }
+
+    pub const fn score_evaluation_scope(&self) -> &'static str {
+        self.score_evaluation_scope
+    }
+
+    pub const fn solution_field_average_basis(&self) -> &'static str {
+        self.solution_field_average_basis
+    }
+
+    pub const fn overall_score_basis(&self) -> &'static str {
+        self.overall_score_basis
+    }
+
+    pub const fn overall_score_bits(&self) -> u64 {
+        self.overall_score_bits
+    }
+
+    pub fn overall_score(&self) -> &str {
+        self.overall_score.as_str()
     }
 
     pub const fn informational_attack_basis(&self) -> &'static str {
@@ -830,6 +911,52 @@ impl PcScoreCompiledAuthority {
         executed_problem: &Arc<SearchProblem>,
         result: &CoreExecutionResult,
     ) -> Result<(), PcScoreExecutionError> {
+        self.validate_wasm_execution_problem_and_batch(executed_problem, result)?;
+        if result.postprocess_score_profile_id().is_some()
+            || !result.postprocess_score_cells().is_empty()
+            || result.postprocess_score_cells_complete()
+            || result.pc_score_distributed_merge_evidence().is_some()
+        {
+            return Err(rejected("pc_score_distributed_cells_not_authoritative"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_distributed_wasm_execution(
+        &self,
+        executed_problem: &Arc<SearchProblem>,
+        result: &CoreExecutionResult,
+    ) -> Result<(), PcScoreExecutionError> {
+        self.validate_wasm_execution_problem_and_batch(executed_problem, result)?;
+        if result.pc_score_distributed_merge_evidence()
+            != Some(PcScoreDistributedMergeEvidence::WasmVerifiedMerger)
+            || !result.postprocess_score_cells_complete()
+            || result.postprocess_score_profile_id() != Some(self.score_profile_id.as_ref())
+        {
+            return Err(rejected("pc_score_distributed_merge_evidence_mismatch"));
+        }
+        let identities = result.normalized_solution_identities();
+        let cells = result.postprocess_score_cells();
+        if !cells.windows(2).all(|pair| pair[0] < pair[1])
+            || cells.iter().any(|cell| {
+                cell.pattern_id() >= self.materialized_pattern_count
+                    || identities
+                        .binary_search(&cell.candidate_identity())
+                        .is_err()
+                    || cell.trace_identity().is_empty()
+                    || cell.trace_identity().chars().any(char::is_control)
+            })
+        {
+            return Err(rejected("pc_score_distributed_cell_family_mismatch"));
+        }
+        Ok(())
+    }
+
+    fn validate_wasm_execution_problem_and_batch(
+        &self,
+        executed_problem: &Arc<SearchProblem>,
+        result: &CoreExecutionResult,
+    ) -> Result<(), PcScoreExecutionError> {
         if !Arc::ptr_eq(&self.problem, executed_problem) {
             return Err(rejected("pc_score_executed_problem_owner_mismatch"));
         }
@@ -838,11 +965,6 @@ impl PcScoreCompiledAuthority {
             .ok_or_else(|| rejected("pc_score_executed_problem_evidence_missing"))?;
         if !problem_evidence.matches_search_problem(self.problem.as_ref()) {
             return Err(rejected("pc_score_executed_problem_evidence_mismatch"));
-        }
-        if result.postprocess_score_profile_id().is_some()
-            || !result.postprocess_score_cells().is_empty()
-        {
-            return Err(rejected("pc_score_distributed_cells_not_authoritative"));
         }
         let [batch] = result.exact_scoring_execution_batches() else {
             return Err(rejected("pc_score_exact_wasm_batch_missing_or_ambiguous"));
@@ -909,11 +1031,27 @@ impl PcScoreCompiledAuthority {
         result: &CoreExecutionResult,
         derivation: &PcScoreDerivation,
     ) -> Result<ValidatedPcScoreExecutionEvidence, PcScoreExecutionError> {
+        let execution_source_matches = match derivation.source() {
+            PcScoreExecutionSource::WasmExactBatch => {
+                result.pc_score_distributed_merge_evidence().is_none()
+                    && result.unique_field("score_execution_distribution") == Some("coordinator")
+                    && result.unique_field("score_distributed_cell_count") == Some("0")
+            }
+            PcScoreExecutionSource::DistributedPrecomputedCells => {
+                result.pc_score_distributed_merge_evidence()
+                    == Some(PcScoreDistributedMergeEvidence::WasmVerifiedMerger)
+                    && result.unique_field("score_execution_distribution")
+                        == Some("worker-partitions")
+                    && result.usize_field("score_distributed_cell_count")
+                        == Some(result.postprocess_score_cells().len())
+            }
+            PcScoreExecutionSource::NativeLegacyReplay => false,
+        };
         if !Arc::ptr_eq(&self.problem, executed_problem)
             || !result
                 .pc_score_problem_evidence()
                 .is_some_and(|evidence| evidence.matches_search_problem(self.problem.as_ref()))
-            || derivation.source() != PcScoreExecutionSource::WasmExactBatch
+            || !execution_source_matches
             || !derivation.execution_source_complete()
         {
             return Err(rejected("pc_score_execution_evidence_source_mismatch"));
@@ -924,6 +1062,13 @@ impl PcScoreCompiledAuthority {
         require_result_field(result, "score_accuracy_level", PC_SCORE_ACCURACY_LEVEL)?;
         require_result_field(result, "score_accuracy_reason", PC_SCORE_ACCURACY_REASON)?;
         require_result_field(result, "score_profile_specific_exact", "false")?;
+        require_result_field(result, "score_evaluation_basis", "all-traces")?;
+        require_result_field(result, "score_evaluation_scope", "full")?;
+        require_result_field(
+            result,
+            "score_field_average_basis",
+            PC_SCORE_OVERALL_SCORE_BASIS,
+        )?;
         for key in [
             "score_evaluation_complete",
             "score_matrix_materialized",
@@ -992,6 +1137,7 @@ impl PcScoreCompiledAuthority {
             return Err(rejected("pc_score_summary_coverage_flag_mismatch"));
         }
         let covered_probability = strict_f64_result(result, "score_covered_probability")?;
+        let overall_score = strict_f64_result(result, "score_field_average_score")?;
         let unconditional_expected_score =
             strict_f64_result(result, "score_unconditional_expected_score")?;
         let unconditional_expected_attack =
@@ -999,6 +1145,7 @@ impl PcScoreCompiledAuthority {
         if !(0.0..=1.0).contains(&covered_probability)
             || unconditional_expected_score < 0.0
             || unconditional_expected_attack < 0.0
+            || overall_score.to_bits() != unconditional_expected_score.to_bits()
         {
             return Err(rejected("pc_score_summary_numeric_domain_mismatch"));
         }
@@ -1025,6 +1172,14 @@ impl PcScoreCompiledAuthority {
         ) {
             return Err(rejected("pc_score_pattern_winner_family_mismatch"));
         }
+        let solution_field_averages = Arc::clone(derivation.solution_field_average_owner());
+        if !solution_field_average_family_is_valid(
+            solution_field_averages.as_slice(),
+            result.normalized_solution_identities(),
+            self.materialized_pattern_count,
+        ) {
+            return Err(rejected("pc_score_solution_field_average_family_mismatch"));
+        }
 
         let report = PcScoreSummaryV2Result::new(
             self.product.score_execution_origin(),
@@ -1046,6 +1201,8 @@ impl PcScoreCompiledAuthority {
             best_score,
             best_attack,
             pattern_winners,
+            solution_field_averages,
+            overall_score,
             covered_probability,
             unconditional_expected_score,
             unconditional_expected_attack,
@@ -1112,6 +1269,25 @@ fn pattern_winner_family_is_valid(
         previous_identity = Some(identity);
     }
     distinct_pattern_count == pattern_optimal_count && observed_best_score == best_score
+}
+
+fn solution_field_average_family_is_valid(
+    fields: &[PcScoreSolutionFieldAverageV1],
+    solution_identities: &[clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity],
+    materialized_pattern_count: usize,
+) -> bool {
+    fields.len() == solution_identities.len()
+        && fields
+            .iter()
+            .zip(solution_identities)
+            .all(|(field, identity)| {
+                field.field_identity() == *identity
+                    && field.pattern_count() == materialized_pattern_count
+                    && field.covered_pattern_count() <= materialized_pattern_count
+                    && field.score_complete()
+                    && field.average_score().is_finite()
+                    && field.average_score() >= 0.0
+            })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1204,6 +1380,8 @@ fn score_result_matches_report(
         && result.unique_field("score_accuracy_reason") == Some(report.accuracy_reason())
         && result.unique_field("score_profile_specific_exact") == Some("false")
         && result.unique_field("score_evaluation_complete") == Some("true")
+        && result.unique_field("score_evaluation_basis") == Some(report.score_evaluation_basis())
+        && result.unique_field("score_evaluation_scope") == Some(report.score_evaluation_scope())
         && result.unique_field("score_matrix_materialized") == Some("true")
         && result.unique_field("score_matrix_complete") == Some("true")
         && parsed_result_field_eq(
@@ -1238,6 +1416,8 @@ fn score_result_matches_report(
             report.failed_pc_pattern_count(),
         )
         && parsed_result_field_eq(result, "score_failed_pc_pattern_score", 0_u64)
+        && result.unique_field("score_field_average_basis") == Some(report.overall_score_basis())
+        && result.unique_field("score_field_average_score") == Some(report.overall_score())
         && result.unique_field("score_covered_probability") == Some(report.covered_probability())
         && result.unique_field("score_unconditional_expected_score")
             == Some(report.unconditional_expected_score())

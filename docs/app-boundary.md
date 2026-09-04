@@ -2,12 +2,14 @@
 
 Clearra product hosts use one typed boundary:
 
-`CLI / GUI / WASM Command Runtime / Desktop host -> AppRequest -> clearra-app -> validation -> executor -> AppResponse`
+`CLI / GUI / WASM Command Runtime / Desktop host -> CLI command compiler -> AppRequest -> clearra-app -> validation -> executor -> AppResponse`
 
-CLI args, GUI forms, WASM command text, and desktop host JSON must build
-`AppRequest`. They must not call solver internals directly, spawn `clearra.exe`,
-parse CLI text as an intermediate GUI contract, or model browser execution as a
-native process/exit-code runtime.
+CLI args, GUI workspaces, WASM command text, and desktop host JSON must build
+`AppRequest` through the shared CLI-command grammar. Desktop GUI requests carry
+complete canonical argv arrays so values containing whitespace remain exact.
+They must not call solver internals directly, spawn `clearra.exe`, synthesize
+partial GUI form defaults, parse CLI text as an intermediate GUI contract, or
+model browser execution as a native process/exit-code runtime.
 
 ## AppRequest Contract
 
@@ -48,6 +50,9 @@ command set:
 - `UtilityToGray`
 - `UtilityMirror`
 
+Non-public maintenance variants remain source-governed and are omitted from
+this public command list.
+
 `pc-scenario` is a `Pc` command kind with a `PcScenario` query envelope.
 
 ## AppResponse Contract
@@ -86,7 +91,14 @@ product contract. Host-side event streams use
 
 WASM command runtime flow is:
 
-`command text -> WebCommandParser -> AppRequest -> clearra-wasm -> Web Worker -> WASM CPU or WebGPU -> AppResponse / JobEvent`
+`command text -> CliCommandParser -> AppRequest -> clearra-wasm -> Web Worker -> WASM CPU or WebGPU -> AppResponse / JobEvent`
+
+The command runtime does not assemble a second WASM-specific request model.
+`CliCommandParser` owns public `Pc` lowering and keeps maintenance-only variants
+inside the same typed boundary without making them public documentation. The
+runtime starts the bounded cooperative App execution with the resulting
+`AppRequest`. Only a completed `AppResponse` is projected into the WASM/host
+response.
 
 The browser worker forwards the Rust `start_job`, `advance_job(work_budget)`,
 `cancel_job`, and event-drain ABI. Each search slice preserves its Packing or
@@ -142,7 +154,7 @@ R completion markers: `cli_gui_wasm_share_app_request_schema`,
 Completion markers:
 
 - `cli_pc_builds_app_request`
-- `gui_form_builds_app_request`
+- `gui_cli_builds_app_request`
 - `wasm_command_builds_app_request`
 - `app_validation_runs_before_executor`
 - `app_error_does_not_execute_solver`

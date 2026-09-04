@@ -7,7 +7,12 @@ import {
   validDiscordTypedProductResult,
 } from "../src/discord/typed-product-result.mjs";
 
-test("pc.path selects one numeric-smallest canonical witness with its replay evidence", () => {
+test("pc.path displays the supplied numeric-smallest canonical witness with replay evidence", () => {
+  const witnesses = Array.from({ length: 30 }, (_, index) => pathWitness(
+    String(index + 1),
+    "0",
+    `trace-${String(index).padStart(2, "0")}`,
+  ));
   const result = envelope("pc-path-family.v2", {
     capability_id: "pc.path",
     witness_contract: "pc-path-witness.v2",
@@ -16,11 +21,9 @@ test("pc.path selects one numeric-smallest canonical witness with its replay evi
     materialized_pattern_count: "30",
     witness_count: "30",
     complete: true,
-    witnesses: Array.from({ length: 30 }, (_, index) => pathWitness(
-      String(index + 1),
-      "0",
-      `trace-${String(index).padStart(2, "0")}`,
-    )),
+    canonical_selection: "smallest-canonical-candidate-id",
+    canonical_witness: structuredClone(witnesses[0]),
+    witnesses,
   });
   const projected = projectDiscordTypedProductResult(result);
   assert.equal(projected.summary.canonical_selection, "smallest-canonical-candidate-id");
@@ -32,7 +35,37 @@ test("pc.path selects one numeric-smallest canonical witness with its replay evi
   assert.equal(validDiscordTypedProductResult(result), true);
 });
 
-test("pc.score-finder selects numeric smallest candidate ID without attack or tie data", () => {
+test("pc.path fails closed when the supplied canonical witness is missing or mismatched", () => {
+  const first = pathWitness("2", "0", "trace-0");
+  const second = pathWitness("9", "0", "trace-1");
+  const result = envelope("pc-path-family.v2", {
+    capability_id: "pc.path",
+    witness_contract: "pc-path-witness.v2",
+    ordering: "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending",
+    problem_id: "problem",
+    materialized_pattern_count: "2",
+    witness_count: "2",
+    complete: true,
+    canonical_selection: "smallest-canonical-candidate-id",
+    canonical_witness: structuredClone(first),
+    witnesses: [first, second],
+  });
+  assert.equal(validDiscordTypedProductResult(result), true);
+
+  const missing = structuredClone(result);
+  delete missing.summary.canonical_witness;
+  assert.equal(validDiscordTypedProductResult(missing), false);
+
+  const mismatched = structuredClone(result);
+  mismatched.summary.canonical_witness = structuredClone(second);
+  assert.equal(validDiscordTypedProductResult(mismatched), false);
+
+  const forged = structuredClone(result);
+  forged.summary.canonical_witness.trace_identity = "forged";
+  assert.equal(validDiscordTypedProductResult(forged), false);
+});
+
+test("pc.score-finder validates and displays the core-owned witness without attack or tie data", () => {
   const result = scoreFinder();
   const projected = projectDiscordTypedProductResult(result);
   assert.equal(projected.summary.canonical_selection, "smallest-canonical-candidate-id");
@@ -46,10 +79,38 @@ test("pc.score-finder selects numeric smallest candidate ID without attack or ti
   const reversedAttack = structuredClone(result);
   reversedAttack.summary.score_pattern_winners[0].informational_attack = "999";
   reversedAttack.summary.score_pattern_winners[1].informational_attack = "0";
+  reversedAttack.summary.score_pattern_canonical_winner.informational_attack = "0";
   assert.equal(
     projectDiscordTypedProductResult(reversedAttack).summary.canonical_winner.candidate_id,
     "2",
   );
+});
+
+test("pc.score-finder fails closed when the core-owned witness is absent or mismatched", () => {
+  const missingSelection = scoreFinder();
+  delete missingSelection.summary.score_pattern_canonical_selection;
+  assert.equal(validDiscordTypedProductResult(missingSelection), false);
+
+  const missingWitness = scoreFinder();
+  delete missingWitness.summary.score_pattern_canonical_winner;
+  assert.equal(validDiscordTypedProductResult(missingWitness), false);
+
+  const mismatchedWitness = scoreFinder();
+  mismatchedWitness.summary.score_pattern_canonical_winner.normalized_solution_key = "forged";
+  assert.equal(validDiscordTypedProductResult(mismatchedWitness), false);
+
+  const nonCanonicalExistingWinner = scoreFinder();
+  nonCanonicalExistingWinner.summary.score_pattern_canonical_winner = structuredClone(
+    nonCanonicalExistingWinner.summary.score_pattern_winners[0],
+  );
+  assert.equal(validDiscordTypedProductResult(nonCanonicalExistingWinner), false);
+
+  for (const candidateId of ["0", "18446744073709551616"]) {
+    const nonU64Witness = scoreFinder();
+    nonU64Witness.summary.score_pattern_winners[1].candidate_id = candidateId;
+    nonU64Witness.summary.score_pattern_canonical_winner.candidate_id = candidateId;
+    assert.equal(validDiscordTypedProductResult(nonU64Witness), false);
+  }
 });
 
 test("setup and spin ordinary product families remain bounded ordinary families", () => {
@@ -120,7 +181,7 @@ test("spin cover preserves canonical portfolio membership without alternative pa
   ]) assert.equal(Object.hasOwn(projected.summary, forbidden), false, forbidden);
 });
 
-test("pc.minimals exposes only its numeric smallest canonical member", () => {
+test("pc.minimals exposes only its supplied numeric-smallest canonical member", () => {
   const result = coverage("pc-minimum-cover.v2", "pc.minimals");
   const projected = projectDiscordTypedProductResult(result);
   assert.equal(projected.summary.canonical_candidate.candidate_id, "2");
@@ -130,19 +191,33 @@ test("pc.minimals exposes only its numeric smallest canonical member", () => {
 });
 
 test("pc.score preserves score-only evidence and strips informational attack", () => {
-  const result = envelope("pc-score-summary.v2", {
-    capability_id: "pc.score",
-    score_equality_basis: "score-only",
-    score_best_score: "1200",
-    score_best_attack: "9",
-    informational_attack_basis: "canonical-equal-score-trace",
-    score_summary_complete: true,
-    objective_complete: true,
-    probability_complete: true,
-  });
+  const result = scoreSummary();
   const projected = projectDiscordTypedProductResult(result);
-  assert.equal(projected.summary.score_best_score, "1200");
+  assert.equal(projected.summary.score_overall_score, "600");
+  assert.equal(projected.summary.score_solution_fields.length, 2);
   assert.equal(JSON.stringify(projected).toLowerCase().includes("attack"), false);
+});
+
+test("pc.score fails closed on stale, incomplete, or widened solution-field rows", () => {
+  const stale = scoreSummary();
+  stale.summary.payload_kind = "score-summary";
+  assert.equal(validDiscordTypedProductResult(stale), false);
+
+  const incomplete = scoreSummary();
+  incomplete.summary.score_solution_fields[0].score_complete = false;
+  assert.equal(validDiscordTypedProductResult(incomplete), false);
+
+  const widened = scoreSummary();
+  widened.summary.score_solution_fields[0].candidate_id = "1";
+  assert.equal(validDiscordTypedProductResult(widened), false);
+
+  const mismatchedRuntime = scoreSummary();
+  mismatchedRuntime.runtime_identity.engine_build_id = "different-build";
+  assert.equal(validDiscordTypedProductResult(mismatchedRuntime), false);
+
+  const widenedEnvelope = scoreSummary();
+  widenedEnvelope.resource_report = {};
+  assert.equal(validDiscordTypedProductResult(widenedEnvelope), false);
 });
 
 test("integrated canonical-only projection rejects widened metadata and rewrites stdout", () => {
@@ -170,13 +245,65 @@ function scoreFinder() {
     score_pattern_winner_ordering: "pattern-id-ascending-then-candidate-id-ascending",
     score_pattern_winner_equality: "score-only-attack-informational",
     score_informational_attack_basis: "canonical-equal-score-trace",
+    score_pattern_canonical_selection: "smallest-canonical-candidate-id",
     score_pattern_winner_count: "2",
     score_pattern_winner_complete: true,
     score_pattern_winners: [
       winner("0", "10", "9"),
       winner("1", "2", "1"),
     ],
+    score_pattern_canonical_winner: winner("1", "2", "1"),
   });
+}
+
+function scoreSummary() {
+  return {
+    ...envelope("pc-score-summary.v2", {
+      capability_id: "pc.score",
+      result_contract: "pc-score-summary.v2",
+      payload_kind: "pc-score-field-summary",
+      score_solution_field_contract: "pc-score-solution-field-average.v1",
+      score_solution_field_ordering: "normalized-solution-field-order",
+      score_solution_field_average_basis:
+        "whole-materialized-pattern-universe-failed-pc-zero",
+      score_evaluation_basis: "all-traces",
+      score_evaluation_scope: "full",
+      score_overall_basis: "all-materialized-patterns-failed-pc-zero",
+      piece_source_id: "1",
+      pattern_universe_id: "2",
+      pattern_weight_model_id: "3",
+      materialized_pattern_count: "2",
+      score_solution_field_count: "2",
+      score_success_pattern_count: "1",
+      score_failed_pc_pattern_count: "1",
+      score_covered_probability: "0.5",
+      score_overall_score: "600",
+      score_covered_pattern_conditional_average_score: "1200",
+      score_summary_complete: true,
+      score_solution_fields: [
+        scoreField("field-a", "600", "1"),
+        scoreField("field-b", "0", "0"),
+      ],
+    }),
+    schema_version: 2,
+    runtime_identity: {
+      engine_build_id: "unverified-local-build",
+      source_commit: "unverified-local-build",
+      contract_schema_version: "clearra.search.contract.v2",
+      supply_semantics_id: "clearra.supply.projected-terminal-lookahead.v1",
+      artifact_schema_version: "clearra.solution-data.v1",
+    },
+  };
+}
+
+function scoreField(normalizedFieldKey, averageScore, coveredPatternCount) {
+  return {
+    normalized_field_key: normalizedFieldKey,
+    average_score: averageScore,
+    covered_pattern_count: coveredPatternCount,
+    pattern_count: "2",
+    score_complete: true,
+  };
 }
 
 function winner(patternId, candidateId, attack) {
@@ -242,7 +369,11 @@ function spinFamily(kind, capabilityId, count) {
 }
 
 function coverage(kind, capabilityId) {
-  return envelope(kind, {
+  const members = [
+    { candidate_id: "2", normalized_solution_key: "spin-a" },
+    { candidate_id: "10", normalized_solution_key: "spin-z" },
+  ];
+  const summary = {
     capability_id: capabilityId,
     result_contract: kind,
     payload_kind: "coverage-portfolio",
@@ -258,12 +389,14 @@ function coverage(kind, capabilityId) {
     enumeration_complete: true,
     member_page_number: "1",
     total_member_pages: "1",
-    members: [
-      { candidate_id: "10", normalized_solution_key: "spin-z" },
-      { candidate_id: "2", normalized_solution_key: "spin-a" },
-    ],
+    members,
     page_handle_available: true,
-  });
+  };
+  if (capabilityId === "pc.minimals") {
+    summary.canonical_selection = "smallest-canonical-candidate-id";
+    summary.canonical_witness = structuredClone(members[0]);
+  }
+  return envelope(kind, summary);
 }
 
 function envelope(kind, summary) {

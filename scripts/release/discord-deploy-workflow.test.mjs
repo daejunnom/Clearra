@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 
 const primary = await readFile(
   new URL("../../.github/workflows/discord-deploy.yml", import.meta.url),
@@ -175,6 +176,17 @@ test("prestage recovery separates original deployment identity from trusted help
     discordRuntimeRecovery,
     /-Operation cleanup-prestage-backup -SourceCommit \$SourceCommit/u,
   );
+  assert.match(
+    discordRuntimeRecovery,
+    /& node @Arguments \| Out-Null/u,
+    "validator status output must not pollute PowerShell function return values",
+  );
+});
+
+test("Invoke-NodeExact discards validator stdout and preserves nonzero failure", () => {
+  const result = spawnSync("pwsh", ["-NoProfile", "-File", "scripts/release/invoke-discord-runtime-recovery-v080.test.ps1"], { encoding: "utf8" });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /discord_runtime_recovery_invoke_node_exact=passed/u);
 });
 
 test("ordinary cancellation preserves in-job path and catalog compensation", () => {

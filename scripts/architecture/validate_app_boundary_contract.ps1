@@ -25,7 +25,7 @@ foreach ($requiredFile in @(
         }
     }
 Assert-AppBoundaryTextContains "docs/app-boundary.md" @(
-        "CLI / GUI / WASM Command Runtime / Desktop host -> AppRequest -> clearra-app -> validation -> executor -> AppResponse",
+        "CLI / GUI / WASM Command Runtime / Desktop host -> CLI command compiler -> AppRequest -> clearra-app -> validation -> executor -> AppResponse",
         "AppCommandKind",
         "QueryEnvelope",
         "BackendPolicy",
@@ -34,11 +34,11 @@ Assert-AppBoundaryTextContains "docs/app-boundary.md" @(
         "LocalePolicy",
         "ResourceBudget",
         "PcScenario",
-        "VerifyKicks",
+        "Non-public maintenance variants remain source-governed and are omitted from",
         "Validation errors return",
         "Warnings may execute",
         "cli_pc_builds_app_request",
-        "gui_form_builds_app_request",
+        "gui_cli_builds_app_request",
         "wasm_command_builds_app_request",
         "app_validation_runs_before_executor",
         "app_error_does_not_execute_solver",
@@ -122,15 +122,20 @@ foreach ($requiredMarker in @(
             Add-ArchitectureError "CLI assembler must build typed AppRequest marker '$requiredMarker'"
         }
     }
-$guiRequestBuilder = Read-Text "crates/clearra-gui-host/src/request/gui_to_app_request.rs"
+$guiRequestBuilder = Read-Text "crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs"
+$guiDesktopClient = Read-Text "packages/clearra-ui/src/lib/host/clearraDesktopHost.ts"
+$guiDesktopStore = Read-Text "packages/clearra-ui/src/lib/stores/desktopJobStore.ts"
+$guiHostLibrary = Read-Text "crates/clearra-gui-host/src/lib.rs"
+$guiRequestModule = Read-Text "crates/clearra-gui-host/src/request/mod.rs"
 foreach ($requiredMarker in @(
-            "GuiFormValidator::validate_state",
-            "AppRequest::new(command)",
-            "with_language",
-            "with_output_policy"
+            "mod cli_request_parser",
+            '"clearra-cli/CommandRequest"',
+            "CliCommandParser::parse_tokens",
+            "to_app_request",
+            "with_language(language)"
         )) {
         if ($guiRequestBuilder -notlike "*$requiredMarker*") {
-            Add-ArchitectureError "gui_form_builds_app_request: GUI request builder must contain marker '$requiredMarker'"
+            Add-ArchitectureError "gui_cli_builds_app_request: GUI request bridge must contain marker '$requiredMarker'"
         }
     }
 foreach ($forbiddenMarker in @("std::process::Command", "clearra.exe", "CliParser", "serde_json::from_str::<AppRequest")) {
@@ -138,16 +143,28 @@ foreach ($forbiddenMarker in @("std::process::Command", "clearra.exe", "CliParse
             Add-ArchitectureError "GUI request builder must not use forbidden marker '$forbiddenMarker'"
         }
     }
-$wasmRuntime = (Read-PhysicalText "crates/clearra-wasm/src/wasm_command_runtime.rs") + (Read-PhysicalText "crates/clearra-web-command/src/web_command_request.rs")
+foreach ($forbiddenMarker in @("clearra-app/AppRequest", "buildDesktopAppRequest", "ClearraDesktopRequestInput", "Partial<ClearraDesktopRequest>")) {
+        if ($guiDesktopClient -like "*$forbiddenMarker*" -or $guiDesktopStore -like "*$forbiddenMarker*") {
+            Add-ArchitectureError "GUI TypeScript request boundary must not contain legacy marker '$forbiddenMarker'"
+        }
+    }
+if ($guiRequestModule -notmatch '(?s)#\[cfg\(test\)\]\s*mod gui_to_app_request;') {
+        Add-ArchitectureError "legacy GUI AppRequest assembler must be test-only"
+    }
+if ($guiHostLibrary -notmatch '(?s)#\[cfg\(test\)\]\s*pub mod request;') {
+        Add-ArchitectureError "legacy GUI request-builder layer must be absent from production builds"
+    }
+$wasmRuntime = (Read-PhysicalText "crates/clearra-wasm/src/wasm_command_runtime.rs") + (Read-PhysicalText "crates/clearra-cli-command/src/web_command_request.rs")
 foreach ($requiredMarker in @(
             "compile_command_text",
             "run_command_text",
-            "WebCommandParser::parse",
+            "execute_prepared",
+            "CliCommandParser::parse",
             "to_app_request",
-            "AppRequest::new(AppCommand::Pc",
-            "AppRequest::new(AppCommand::Verify",
-            "self.app_context.run(request)",
-            "into_host_app_response"
+            "AppCommand::Pc(command)",
+            "AppCommand::VerifyKicks",
+            "start_cooperative_execution",
+            "WasmExecutionResult::from_app_response"
         )) {
         if ($wasmRuntime -notlike "*$requiredMarker*") {
             Add-ArchitectureError "wasm_command_builds_app_request: WASM runtime must contain marker '$requiredMarker'"
@@ -164,7 +181,7 @@ foreach ($forbiddenMarker in @("PcCommand::run", "SetupCommand::run", "CoverComm
             Add-ArchitectureError "CLI verify command must not bypass AppRequest with marker '$forbiddenMarker'"
         }
     }
-$responseRenderer = Read-Text "crates/clearra-cli/src/output/app_response_renderer.rs"
+$responseRenderer = Read-PhysicalText "crates/clearra-cli/src/output/app_response_renderer.rs"
 foreach ($requiredMarker in @("AppResponse", "response.status()", "response.render_model()", "response.diagnostics()")) {
         if ($responseRenderer -notlike "*$requiredMarker*") {
             Add-ArchitectureError "output_consumes_app_response_only: AppResponseRenderer must contain marker '$requiredMarker'"

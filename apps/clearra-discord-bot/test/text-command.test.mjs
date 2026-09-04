@@ -237,7 +237,7 @@ test("pc score text is typed while top-level score remains independently generic
     assert.equal(legacy.command.telemetryIdentity, "discord.compat.score");
     assert.equal(
       legacy.command.loweringAuthority,
-      "discord.generic-compatibility-lowering.v1",
+      "clearra.cli-command.compatibility.v1",
     );
     assert.equal(legacy.command.compatibilityPreset, null);
     assert.equal(legacy.command.resultAuthorityId, "score");

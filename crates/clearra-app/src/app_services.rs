@@ -953,11 +953,7 @@ impl AppCoreExecutorService {
         mut memory_guard: impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
     ) -> Result<(CoreExecutionResult, ValidatedPcScoreExecutionEvidence), CoreExecutionError> {
         memory_guard(&result, 0)?;
-        authority
-            .validate_raw_wasm_execution(executed_problem, &result)
-            .map_err(|error| CoreExecutionError::RuntimeUnavailable {
-                component: error.component(),
-            })?;
+        validate_pc_score_wasm_execution_source(authority, executed_problem, &result)?;
         let result =
             apply_execution_constraints_with_memory_guard(result, control, &mut memory_guard)?;
         memory_guard(&result, 0)?;
@@ -967,10 +963,15 @@ impl AppCoreExecutorService {
             &mut memory_guard,
         )?
         .into_parts();
-        memory_guard(&result, 0)?;
         let derivation = derivation.ok_or(CoreExecutionError::RuntimeUnavailable {
             component: "pc_score_derivation_evidence_missing",
         })?;
+        let derivation_retained_bytes = derivation.checked_retained_capacity_bytes().ok_or(
+            CoreExecutionError::RuntimeUnavailable {
+                component: "pc_score_derivation_retained_memory_overflow",
+            },
+        )?;
+        memory_guard(&result, derivation_retained_bytes)?;
         let evidence = authority
             .validate_postprocessed_result(executed_problem, &result, &derivation)
             .map_err(|error| CoreExecutionError::RuntimeUnavailable {
@@ -978,6 +979,11 @@ impl AppCoreExecutorService {
             })?;
         let result = result
             .try_into_fail_closed_public_solution_surface_with_memory_guard(|live, future| {
+                let future = future.checked_add(derivation_retained_bytes).ok_or(
+                    CoreExecutionError::RuntimeUnavailable {
+                        component: "pc_score_derivation_future_memory_overflow",
+                    },
+                )?;
                 memory_guard(live, future)
             })
             .map_err(map_pc_score_public_surface_error)?;
@@ -986,7 +992,7 @@ impl AppCoreExecutorService {
                 component: "pc_score_public_surface_evidence_mismatch",
             });
         }
-        memory_guard(&result, 0)?;
+        memory_guard(&result, derivation_retained_bytes)?;
         Ok((result, evidence))
     }
 
@@ -1005,11 +1011,7 @@ impl AppCoreExecutorService {
         CoreExecutionError,
     > {
         memory_guard(&result, 0)?;
-        authority
-            .validate_raw_wasm_execution(executed_problem, &result)
-            .map_err(|error| CoreExecutionError::RuntimeUnavailable {
-                component: error.component(),
-            })?;
+        validate_pc_score_wasm_execution_source(authority, executed_problem, &result)?;
         let result =
             apply_execution_constraints_with_memory_guard(result, control, &mut memory_guard)?;
         memory_guard(&result, 0)?;
@@ -1019,10 +1021,15 @@ impl AppCoreExecutorService {
             &mut memory_guard,
         )?
         .into_parts();
-        memory_guard(&result, 0)?;
         let derivation = derivation.ok_or(CoreExecutionError::RuntimeUnavailable {
             component: "pc_score_minimals_derivation_evidence_missing",
         })?;
+        let derivation_retained_bytes = derivation.checked_retained_capacity_bytes().ok_or(
+            CoreExecutionError::RuntimeUnavailable {
+                component: "pc_score_minimals_derivation_retained_memory_overflow",
+            },
+        )?;
+        memory_guard(&result, derivation_retained_bytes)?;
         let score_execution = authority
             .validate_postprocessed_result(executed_problem, &result, &derivation)
             .map_err(|error| CoreExecutionError::RuntimeUnavailable {
@@ -1038,10 +1045,15 @@ impl AppCoreExecutorService {
             .ok_or(CoreExecutionError::RuntimeUnavailable {
                 component: "pc_score_minimals_retained_memory_overflow",
             })?;
-        memory_guard(&result, portfolio_retained_bytes)?;
+        let total_evidence_retained_bytes = derivation_retained_bytes
+            .checked_add(portfolio_retained_bytes)
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "pc_score_minimals_retained_memory_overflow",
+            })?;
+        memory_guard(&result, total_evidence_retained_bytes)?;
         let result = result
             .try_into_fail_closed_public_solution_surface_with_memory_guard(|live, future| {
-                let future = future.checked_add(portfolio_retained_bytes).ok_or(
+                let future = future.checked_add(total_evidence_retained_bytes).ok_or(
                     CoreExecutionError::RuntimeUnavailable {
                         component: "pc_score_minimals_future_memory_overflow",
                     },
@@ -1054,7 +1066,7 @@ impl AppCoreExecutorService {
                 component: "pc_score_minimals_public_surface_evidence_mismatch",
             });
         }
-        memory_guard(&result, portfolio_retained_bytes)?;
+        memory_guard(&result, total_evidence_retained_bytes)?;
         Ok((result, evidence))
     }
 
@@ -1091,6 +1103,21 @@ impl AppCoreExecutorService {
         }?;
         Ok(result)
     }
+}
+
+fn validate_pc_score_wasm_execution_source(
+    authority: &PcScoreCompiledAuthority,
+    executed_problem: &std::sync::Arc<SearchProblem>,
+    result: &CoreExecutionResult,
+) -> Result<(), CoreExecutionError> {
+    let validation = if result.pc_score_distributed_merge_evidence().is_some() {
+        authority.validate_distributed_wasm_execution(executed_problem, result)
+    } else {
+        authority.validate_raw_wasm_execution(executed_problem, result)
+    };
+    validation.map_err(|error| CoreExecutionError::RuntimeUnavailable {
+        component: error.component(),
+    })
 }
 
 fn app_error_from_pc_failed_queue_execution(

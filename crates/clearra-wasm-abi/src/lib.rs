@@ -3,6 +3,7 @@
 
 use std::{
     cell::RefCell,
+    fmt,
     sync::{Arc, Once},
 };
 
@@ -284,6 +285,21 @@ impl AbiTilingSolutionPageStore {
                     .is_some_and(|actual| actual <= *memory_limit_bytes));
                 true
             }
+        }
+    }
+
+    fn governed_output_fits(&self, output_capacity: usize) -> bool {
+        match self {
+            Self::Legacy(_) => true,
+            Self::Governed {
+                memory_limit_bytes,
+                producer_graph_bytes,
+                ..
+            } => producer_graph_bytes
+                .checked_add(core::mem::size_of::<Option<AbiTilingSolutionPageStore>>() as u128)
+                .and_then(|bytes| bytes.checked_add(core::mem::size_of::<String>() as u128))
+                .and_then(|bytes| bytes.checked_add(output_capacity as u128))
+                .is_some_and(|actual| actual <= *memory_limit_bytes),
         }
     }
 
@@ -1427,6 +1443,88 @@ pub extern "C" fn clearra_wasm_tiling_solution_count_exact() -> u32 {
     AbiU32Count::exact_or_false(tiling_solution_count())
 }
 
+struct CheckedJsonLength {
+    len: Option<usize>,
+}
+
+impl CheckedJsonLength {
+    fn new() -> Self {
+        Self { len: Some(0) }
+    }
+
+    fn finish(self) -> Result<usize, &'static str> {
+        self.len.ok_or("wasm_tiling_solution_page_size_overflow")
+    }
+}
+
+impl fmt::Write for CheckedJsonLength {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.len = self.len.and_then(|len| len.checked_add(value.len()));
+        self.len.map(|_| ()).ok_or(fmt::Error)
+    }
+}
+
+fn write_tiling_solution_page_json(
+    store: &TilingSolutionPageStore,
+    offset: usize,
+    limit: usize,
+    output: &mut impl fmt::Write,
+) -> Result<(), &'static str> {
+    output
+        .write_char('[')
+        .map_err(|_| "wasm_tiling_solution_page_serialize_failed")?;
+    let mut first = true;
+    let mut write_failed = false;
+    store.for_each_page_identity(offset, limit, |identity| {
+        if write_failed {
+            return;
+        }
+        let result = (|| {
+            if !first {
+                output.write_char(',')?;
+            }
+            first = false;
+            output.write_char('"')?;
+            identity.write_canonical(output)?;
+            output.write_char('"')
+        })();
+        write_failed = result.is_err();
+    })?;
+    if write_failed {
+        return Err("wasm_tiling_solution_page_serialize_failed");
+    }
+    output
+        .write_char(']')
+        .map_err(|_| "wasm_tiling_solution_page_serialize_failed")
+}
+
+fn checked_tiling_solution_page_json_len(
+    store: &TilingSolutionPageStore,
+    offset: usize,
+    limit: usize,
+) -> Result<usize, &'static str> {
+    let mut length = CheckedJsonLength::new();
+    write_tiling_solution_page_json(store, offset, limit, &mut length)?;
+    length.finish()
+}
+
+fn serialize_tiling_solution_page_json(
+    store: &TilingSolutionPageStore,
+    offset: usize,
+    limit: usize,
+    exact_len: usize,
+) -> Result<String, &'static str> {
+    let mut output = String::new();
+    output
+        .try_reserve_exact(exact_len)
+        .map_err(|_| "wasm_tiling_solution_page_storage_unavailable")?;
+    write_tiling_solution_page_json(store, offset, limit, &mut output)?;
+    if output.len() != exact_len {
+        return Err("wasm_tiling_solution_page_size_mismatch");
+    }
+    Ok(output)
+}
+
 #[no_mangle]
 pub extern "C" fn clearra_wasm_tiling_solution_page(offset: u32, limit: u32) -> i32 {
     const MAX_PAGE_SIZE: usize = 1_000;
@@ -1446,32 +1544,36 @@ pub extern "C" fn clearra_wasm_tiling_solution_page(offset: u32, limit: u32) -> 
             );
             return ABI_ERROR;
         };
-        // The legacy page API allocates a Vec and owned key Strings without an
-        // exact retained-memory admission seam. Keep governed page ownership
-        // intact and fail without creating a competing error/output buffer.
-        if store.is_governed() {
-            return ABI_ERROR;
-        }
-        let keys = match store
-            .store()
-            .page_keys(offset as usize, (limit as usize).min(MAX_PAGE_SIZE))
-        {
-            Ok(keys) => keys,
+        let governed = store.is_governed();
+        let offset = offset as usize;
+        let limit = (limit as usize).min(MAX_PAGE_SIZE);
+        let exact_len = match checked_tiling_solution_page_json_len(store.store(), offset, limit) {
+            Ok(exact_len) => exact_len,
             Err(reason) => {
-                state.set_error("E_WASM_TILING_PAGE", reason);
+                if !governed {
+                    state.set_error("E_WASM_TILING_PAGE", reason);
+                }
                 return ABI_ERROR;
             }
         };
-        let mut output = String::from("[");
-        for (index, key) in keys.iter().enumerate() {
-            if index != 0 {
-                output.push(',');
-            }
-            output.push('"');
-            output.push_str(key);
-            output.push('"');
+        if !store.governed_output_fits(exact_len) {
+            return ABI_ERROR;
         }
-        output.push(']');
+        let output =
+            match serialize_tiling_solution_page_json(store.store(), offset, limit, exact_len) {
+                Ok(output) => output,
+                Err(reason) => {
+                    if !governed {
+                        state.set_error("E_WASM_TILING_PAGE", reason);
+                    }
+                    return ABI_ERROR;
+                }
+            };
+        // `try_reserve_exact` may retain more than requested. Recheck the
+        // allocator-observed capacity before moving the page into ABI state.
+        if !store.governed_output_fits(output.capacity()) {
+            return ABI_ERROR;
+        }
         state.set_output(output);
         ABI_OK
     })
@@ -2444,8 +2546,8 @@ mod tests {
     const FINITE_GENERIC_TILING_COMMAND: &str = "clearra build-probability --base-mask 0x0 \
         --target-mask 0xf --height 4 --queue I --no-hold --no-mirror \
         --tiling-only --workers 1 --max-memory-mib 64";
-    const TYPED_PC_TILING_COMMAND: &str =
-        "clearra pc tiling --lines 4 --queue OTSZJLIOTI --no-hold --backend cpu --workers 1";
+    const TYPED_PC_TILING_COMMAND: &str = "clearra pc tiling --board-mask 0xf83e0f83e0 \
+        --height 4 --pieces 5 --lines 4 --patterns P5 --no-hold --backend cpu --workers 1";
     const TYPED_PC_MINIMALS_COMMAND: &str = "clearra pc minimals --lines 1 \
         --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus \
         --backend cpu --workers 1";
@@ -3020,7 +3122,7 @@ mod tests {
     }
 
     #[test]
-    fn governed_page_store_admits_workspace_at_exact_peak_and_rejects_peak_minus_one() {
+    fn governed_page_store_bounds_admission_and_continuation_output_peaks() {
         let store = typed_pc_tiling_page_store_fixture();
         let graph_bytes = store
             .checked_retained_capacity_bytes()
@@ -3077,7 +3179,6 @@ mod tests {
         assert_eq!(clearra_wasm_output_release(), ABI_OK);
         assert_eq!(clearra_wasm_tiling_solution_count_available(), 1);
         assert_ne!(clearra_wasm_tiling_solution_count(), u32::MAX);
-        assert_eq!(clearra_wasm_tiling_solution_page(0, 1), ABI_ERROR);
         assert_eq!(clearra_wasm_output_len(), 0);
         assert_eq!(clearra_wasm_input_resize(1), ABI_ERROR);
         assert_eq!(clearra_wasm_distributed_reset(), ABI_ERROR);
@@ -3087,6 +3188,83 @@ mod tests {
             assert!(state.borrow().tiling_solution_page_store.is_none());
         });
         assert_eq!(clearra_wasm_input_resize(1), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+
+        let store = typed_pc_tiling_page_store_fixture();
+        assert!(store.len() > 100);
+        let expected = store
+            .page_keys(100, 100)
+            .expect("canonical continuation-page fixture");
+        assert!(!expected.is_empty());
+        let exact_len = checked_tiling_solution_page_json_len(&store, 100, 100)
+            .expect("governed continuation-page JSON length");
+        let expected_output = serialize_tiling_solution_page_json(&store, 100, 100, exact_len)
+            .expect("governed continuation-page JSON fixture");
+        assert_eq!(expected_output, format!("[\"{}\"]", expected.join("\",\"")));
+        let output_peak = graph_bytes
+            .checked_add(storage_inline_bytes)
+            .and_then(|actual| actual.checked_add(core::mem::size_of::<String>() as u128))
+            .and_then(|actual| actual.checked_add(expected_output.capacity() as u128))
+            .expect("continuation output peak remains representable");
+        assert!(
+            output_peak <= actual_peak,
+            "the admitted projection workspace must also cover one bounded continuation page"
+        );
+
+        let denied_output_store = AbiTilingSolutionPageStore::Governed {
+            store: Arc::clone(&store),
+            memory_limit_bytes: output_peak - 1,
+            producer_graph_bytes: graph_bytes,
+        };
+        assert!(!denied_output_store.governed_output_fits(expected_output.capacity()));
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| {
+            state.borrow_mut().tiling_solution_page_store = Some(denied_output_store);
+        });
+        assert_eq!(clearra_wasm_tiling_solution_page(100, 100), ABI_ERROR);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.output.is_empty());
+            assert!(!state.output_outstanding);
+            assert!(state
+                .tiling_solution_page_store
+                .as_ref()
+                .is_some_and(AbiTilingSolutionPageStore::is_governed));
+        });
+        assert_eq!(clearra_wasm_tiling_solution_count_available(), 1);
+        assert_eq!(clearra_wasm_tiling_solution_release(), ABI_OK);
+
+        let exact_peak_store = AbiTilingSolutionPageStore::try_governed(
+            store,
+            actual_peak,
+            graph_bytes,
+            transition_inline_bytes,
+        )
+        .unwrap_or_else(|_| panic!("the exact measured peak must admit a continuation owner"));
+        assert!(exact_peak_store.governed_output_fits(expected_output.capacity()));
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| {
+            state.borrow_mut().tiling_solution_page_store = Some(exact_peak_store);
+        });
+        assert_eq!(clearra_wasm_tiling_solution_page(100, 100), ABI_OK);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            let page = String::from_utf8(state.output_bytes().to_vec())
+                .expect("continuation page remains UTF-8");
+            assert_eq!(page, expected_output);
+            assert!(state
+                .tiling_solution_page_store
+                .as_ref()
+                .is_some_and(AbiTilingSolutionPageStore::is_governed));
+        });
+        assert_eq!(
+            clearra_wasm_tiling_solution_page(200, 100),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_tiling_solution_release(), ABI_OK);
+        assert_eq!(clearra_wasm_tiling_solution_count_available(), 0);
         assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
     }
 

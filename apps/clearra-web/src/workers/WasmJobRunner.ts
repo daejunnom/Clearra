@@ -2,7 +2,10 @@ import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
 
 import type { ClearraWasmModule } from './clearraWasmRuntime';
 
-const SEARCH_WORK_BUDGET = 32768;
+// Keep one synchronous WASM entry comfortably below the browser host turn.
+// Canonical empty-board 4L minimals profiling measured a 2,048-step serial
+// slice below 1 ms on native debug builds versus about 8 ms at 32,768 steps.
+const SEARCH_WORK_BUDGET = 2_048;
 const EVENT_DRAIN_INTERVAL = 8;
 const HOST_YIELD_INTERVAL = 1;
 const yieldToWorkerHost = createWorkerHostYield();

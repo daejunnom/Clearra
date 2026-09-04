@@ -53,7 +53,6 @@
   let handleOwned = false;
   let pathPageIndex = 0;
   let scorePageIndex = 0;
-  let savePageIndex = 0;
   let buildCandidatePageIndex = 0;
   let buildScorePageIndex = 0;
   let setupRankedPageIndex = 0;
@@ -108,28 +107,6 @@
     ? scoreFamily.winners.slice(
         scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE,
         (scorePageIndex + 1) * PRODUCT_MEMBER_PAGE_SIZE
-      )
-    : [];
-  $: saveFamily = payload?.content.payload_kind === 'pc-save-groups'
-    ? payload.content.payload
-    : null;
-  $: bestSaveFamily = payload?.content.payload_kind === 'pc-best-save'
-    ? payload.content.payload
-    : null;
-  $: saveItemCount = saveFamily?.groups.length ?? bestSaveFamily?.winners.length ?? 0;
-  $: savePageCount = saveFamily || bestSaveFamily
-    ? Math.max(1, Math.ceil(saveItemCount / PRODUCT_MEMBER_PAGE_SIZE))
-    : 0;
-  $: saveGroups = saveFamily
-    ? saveFamily.groups.slice(
-        savePageIndex * PRODUCT_MEMBER_PAGE_SIZE,
-        (savePageIndex + 1) * PRODUCT_MEMBER_PAGE_SIZE
-      )
-    : [];
-  $: bestSaveWinners = bestSaveFamily
-    ? bestSaveFamily.winners.slice(
-        savePageIndex * PRODUCT_MEMBER_PAGE_SIZE,
-        (savePageIndex + 1) * PRODUCT_MEMBER_PAGE_SIZE
       )
     : [];
   $: buildV2 = payload?.content.payload_kind === 'build-v2'
@@ -241,7 +218,6 @@
     error = '';
     pathPageIndex = 0;
     scorePageIndex = 0;
-    savePageIndex = 0;
     buildCandidatePageIndex = 0;
     buildScorePageIndex = 0;
     setupRankedPageIndex = 0;
@@ -462,6 +438,15 @@
   function errorMessage(value: unknown): string {
     return value instanceof Error ? value.message : String(value);
   }
+
+  function memberOrdinal(pageNumber: string, memberIndex: number): string {
+    try {
+      return ((BigInt(pageNumber) - 1n) * BigInt(PRODUCT_MEMBER_PAGE_SIZE) +
+        BigInt(memberIndex + 1)).toString();
+    } catch {
+      return String(memberIndex + 1);
+    }
+  }
 </script>
 
 {#if payload && !error}
@@ -471,7 +456,9 @@
         <div>
           <strong>{buildPortfolioActive
             ? (korean ? 'Build 최적 포트폴리오 전체' : 'All optimal Build portfolios')
-            : (korean ? '동일 최소 크기의 전체 해법' : 'All equal minimum-size solutions')}</strong>
+            : scoreMinimalCoverage
+              ? (korean ? '최고 점수 최소 해법 집합 전체' : 'All minimum maximum-score solution sets')
+              : (korean ? '동일 최소 크기의 전체 해법' : 'All equal minimum-size solutions')}</strong>
           <span>{korean ? '해법' : 'Solution'} {coveragePage.alternative_index}{coveragePage.total_alternative_count ? ` / ${coveragePage.total_alternative_count}` : ''}</span>
           {#if scoreOnlyPortfolio}
             <span>{korean ? '점수만 동점·선정·정렬에 사용하며 공격력은 참고 정보입니다.' : 'Equality, membership, and ordering use score only; attack is informational.'}</span>
@@ -486,26 +473,31 @@
         <span>{korean ? '최소 해법 크기' : 'Minimum cardinality'}: {coveragePage.optimal_cardinality}</span>
         <span>{korean ? '구성원 페이지' : 'Member page'}: {memberPageNumber} / {coveragePage.total_member_pages}</span>
       </div>
-      <ol class="solution-preview-list">
-        {#each currentMembers as member (member.candidate_id)}
-          {@const preview = solutionBoardPreviewFromKey(member.normalized_solution_key, targetLines)}
-          <li class="solution-preview-row">
-            <div class="solution-preview-card">
-              <SolutionBoardPreview
-                board={preview.board}
-                ariaLabel={korean ? `해법 ID ${member.candidate_id} 보드` : `Solution ID ${member.candidate_id} board`}
-                invalidLabel={previewLabels.invalid}
-                rawKey={member.normalized_solution_key}
-                rawKeyDetailsLabel={previewLabels.rawDetails}
-                copyRawKeyLabel={previewLabels.copyRaw}
-                copiedRawKeyLabel={previewLabels.copiedRaw}
-                copyRawKeyFailedLabel={previewLabels.copyFailed}
-              />
-            </div>
-            <span>ID {member.candidate_id}</span>
-          </li>
-        {/each}
-      </ol>
+      {#if coveragePage.optimal_cardinality === '0'}
+        <p class="empty-result" role="status">
+          {korean
+            ? '요청한 패턴 집합에서 필요한 해법이 없습니다. 탐색은 정상적으로 완료되었습니다.'
+            : 'No solution is required for this pattern set. The search completed successfully.'}
+        </p>
+      {:else}
+        <ol class="solution-preview-list solution-gallery-list">
+          {#each currentMembers as member, memberIndex (member.candidate_id)}
+            {@const preview = solutionBoardPreviewFromKey(member.normalized_solution_key, targetLines)}
+            <li class="solution-preview-row">
+              <strong class="solution-number">{korean ? '해법' : 'Solution'} {memberOrdinal(memberPageNumber, memberIndex)}</strong>
+              <div class="solution-preview-card">
+                <SolutionBoardPreview
+                  board={preview.board}
+                  ariaLabel={korean
+                    ? `해법 ${memberOrdinal(memberPageNumber, memberIndex)} 보드`
+                    : `Solution ${memberOrdinal(memberPageNumber, memberIndex)} board`}
+                  invalidLabel={previewLabels.invalid}
+                />
+              </div>
+            </li>
+          {/each}
+        </ol>
+      {/if}
       <footer>
         <button type="button" disabled={loadingMember || navigatingOuter || memberPageNumber === '1'} on:click={() => showMemberPage(decrementCanonicalDecimal(memberPageNumber))}><ChevronLeft size={15} />{korean ? '이전 100개' : 'Previous 100'}</button>
         <button type="button" disabled={loadingMember || navigatingOuter || compareCanonicalDecimals(memberPageNumber, coveragePage.total_member_pages) >= 0} on:click={() => showMemberPage(incrementCanonicalDecimal(memberPageNumber))}>{korean ? '다음 100개' : 'Next 100'}<ChevronRight size={15} /></button>
@@ -789,82 +781,9 @@
                 board={preview.board}
                 ariaLabel={korean ? `패턴 ${winner.pattern_id} 최고 점수 보드` : `Pattern ${winner.pattern_id} maximum-score board`}
                 invalidLabel={previewLabels.invalid}
-                rawKey={winner.normalized_solution_key}
-                rawKeyDetailsLabel={previewLabels.rawDetails}
-                copyRawKeyLabel={previewLabels.copyRaw}
-                copiedRawKeyLabel={previewLabels.copiedRaw}
-                copyRawKeyFailedLabel={previewLabels.copyFailed}
               />
             </div>
-            <span>{korean ? '패턴' : 'Pattern'} {winner.pattern_id} · ID {winner.candidate_id} · {korean ? '점수' : 'Score'} {winner.score} · {korean ? '참고 공격력' : 'Informational attack'} {winner.informational_attack}</span>
-          </li>
-        {/each}
-      </ol>
-    </section>
-  {:else if payload.content.payload_kind === 'pc-save-groups' && saveFamily}
-    <section class="product-pager save-family" aria-label={korean ? '세이브 그룹 전체 결과' : 'Complete save groups'}>
-      <header>
-        <div>
-          <strong>{korean ? '세이브 그룹 전체' : 'All save groups'}</strong>
-          <span>{korean ? '전체 우주 확률과 PC 성공 조건부 확률은 서로 다른 값입니다.' : 'Whole-universe and conditional-on-PC probabilities are distinct.'}</span>
-        </div>
-        <nav aria-label={korean ? '세이브 그룹 페이지 이동' : 'Save group page navigation'}>
-          <button type="button" disabled={savePageIndex === 0} on:click={() => (savePageIndex -= 1)} aria-label={korean ? '이전 세이브 그룹 100개' : 'Previous 100 save groups'}><ChevronLeft size={16} /></button>
-          <span>{savePageIndex + 1} / {savePageCount}</span>
-          <button type="button" disabled={savePageIndex + 1 >= savePageCount} on:click={() => (savePageIndex += 1)} aria-label={korean ? '다음 세이브 그룹 100개' : 'Next 100 save groups'}><ChevronRight size={16} /></button>
-        </nav>
-      </header>
-      <div class="member-meta">
-        <span>{korean ? '그룹' : 'Groups'}: {saveFamily.group_count}</span>
-        <span>{korean ? '전체 PC 확률' : 'Overall PC probability'}: {saveFamily.metadata.pc_probability}</span>
-      </div>
-      <ol start={savePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
-        {#each saveGroups as group (group.identity.canonical_id)}
-          <li class="save-row">
-            <code>{group.identity.canonical_id}</code>
-            <span>{korean ? '전체 우주 확률' : 'Whole-universe probability'} {group.unconditional_probability} · {korean ? 'PC 조건부 확률' : 'Conditional on PC'} {group.conditional_probability_given_pc} · ID {group.canonical_candidate_id} · {korean ? '성공 패턴' : 'Successful patterns'} {group.successful_pattern_count}</span>
-            <details>
-              <summary>{korean ? '전체 증거 확인' : 'Inspect every witness'} ({group.witnesses.length})</summary>
-              <ul>
-                {#each group.witnesses as witness (witness.pattern_index)}
-                  <li><span>{korean ? '패턴' : 'Pattern'} {witness.pattern_index} · ID {witness.candidate_id} · {korean ? '추적' : 'Trace'} {witness.trace_identity} · {korean ? '홀드' : 'Hold'} {witness.terminal_hold ?? 'empty'} · {witness.active_bag_remainder.canonical_id}</span></li>
-                {/each}
-              </ul>
-            </details>
-          </li>
-        {/each}
-      </ol>
-    </section>
-  {:else if payload.content.payload_kind === 'pc-best-save' && bestSaveFamily}
-    <section class="product-pager save-family" aria-label={korean ? '최고 세이브 동점 전체 결과' : 'Complete best-save ties'}>
-      <header>
-        <div>
-          <strong>{korean ? '최고 세이브 동점 전체' : 'All exact best-save ties'}</strong>
-          <span>{korean ? 'GUI는 모든 동점 승자를 보존해 페이지로 표시합니다. Discord만 가장 작은 canonical candidate ID 하나를 선택합니다.' : 'The GUI preserves and pages every tied winner. Only Discord selects the smallest canonical candidate ID.'}</span>
-        </div>
-        <nav aria-label={korean ? '최고 세이브 동점 페이지 이동' : 'Best-save tie page navigation'}>
-          <button type="button" disabled={savePageIndex === 0} on:click={() => (savePageIndex -= 1)} aria-label={korean ? '이전 동점 100개' : 'Previous 100 ties'}><ChevronLeft size={16} /></button>
-          <span>{savePageIndex + 1} / {savePageCount}</span>
-          <button type="button" disabled={savePageIndex + 1 >= savePageCount} on:click={() => (savePageIndex += 1)} aria-label={korean ? '다음 동점 100개' : 'Next 100 ties'}><ChevronRight size={16} /></button>
-        </nav>
-      </header>
-      <div class="member-meta">
-        <span>{korean ? '동점 승자' : 'Tied winners'}: {bestSaveFamily.winner_count}</span>
-        <span>{korean ? '확률 기준' : 'Probability basis'}: {bestSaveFamily.probability_basis}</span>
-      </div>
-      <ol start={savePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
-        {#each bestSaveWinners as winner (winner.group.identity.canonical_id)}
-          <li class="save-row">
-            <code>{winner.group.identity.canonical_id}</code>
-            <span>{korean ? '가중 합계' : 'Weighted total'} {winner.weighted_total} · {korean ? '균형 J/L' : 'Balanced J/L'} {winner.balanced_jl_count} · {korean ? '전체 우주 확률' : 'Whole-universe probability'} {winner.exact_group_probability} · ID {winner.group.canonical_candidate_id}</span>
-            <details>
-              <summary>{korean ? '동점 승자 증거 확인' : 'Inspect tied-winner evidence'} ({winner.group.witnesses.length})</summary>
-              <ul>
-                {#each winner.group.witnesses as witness (witness.pattern_index)}
-                  <li><span>{korean ? '패턴' : 'Pattern'} {witness.pattern_index} · ID {witness.candidate_id} · {korean ? '추적' : 'Trace'} {witness.trace_identity}</span></li>
-                {/each}
-              </ul>
-            </details>
+            <span>{korean ? '패턴' : 'Pattern'} {winner.pattern_id} · {korean ? '점수' : 'Score'} {winner.score} · {korean ? '참고 공격력' : 'Informational attack'} {winner.informational_attack}</span>
           </li>
         {/each}
       </ol>
@@ -892,9 +811,13 @@
   footer { border-top: 1px solid #e3e8e5; justify-content: space-between; padding: 9px 15px; }
   .solution-preview-row { align-items: stretch; flex-direction: column; gap: 7px; }
   .solution-preview-card { max-width: 220px; width: 100%; }
+  .solution-number { color: #4d5955; font-size: 11px; }
+  .solution-gallery-list { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(154px, 1fr)); list-style: none; padding: 12px 15px; }
+  .solution-gallery-list > li { background: #f3f5f4; border: 1px solid #d7ded9; border-radius: 6px; padding: 10px; }
+  .solution-gallery-list .solution-preview-card { max-width: none; }
   .score-row { align-items: flex-start; flex-direction: column; gap: 3px; }
   .build-score-evidence { border-top: 1px solid #dce3df; }
-  .path-row, .save-row { align-items: stretch; flex-direction: column; gap: 4px; }
+  .path-row { align-items: stretch; flex-direction: column; gap: 4px; }
   details { color: #52615c; font-size: 11px; width: 100%; }
   summary { cursor: pointer; font-weight: 700; }
   details ul { list-style: none; margin-top: 5px; max-height: 180px; padding: 0 0 0 12px; }

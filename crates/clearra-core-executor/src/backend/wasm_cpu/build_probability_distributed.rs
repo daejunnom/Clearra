@@ -3104,6 +3104,22 @@ mod tests {
         expected_solution_count: usize,
     ) {
         for field in [
+            "piece_source_id",
+            "pattern_universe_id",
+            "pattern_weight_model_id",
+            "coverage_aggregation_contract",
+            "coverage_aggregation_availability",
+            "coverage_aggregation_complete",
+            "coverage_aggregation_source_row_count",
+            "covered_pattern_count",
+            "failed_pattern_count",
+            "coverage_probability",
+            "failed_coverage_probability",
+            "materialized_probability_mass",
+            "coverage_probability_denominator",
+            "success_conditional_probability_denominator",
+            "probability_complete",
+            "count_complete",
             "solution_probabilities_requested",
             "solution_probability_count",
             "solution_probability_complete",
@@ -3774,6 +3790,102 @@ mod tests {
             .expect_err("malformed worker partial must fail closed")
     }
 
+    fn foreign_u64_field(partial: &CoreExecutionResult, key: &str) -> String {
+        partial
+            .unique_field(key)
+            .expect("worker authority field")
+            .parse::<u64>()
+            .expect("canonical u64 authority")
+            .wrapping_add(1)
+            .to_string()
+    }
+
+    fn assert_distributed_coverage_authority_rejections(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+    ) {
+        assert_eq!(
+            rejected_partial_reason(problem, field, |partial| {
+                let foreign = foreign_u64_field(&partial, "piece_source_id");
+                partial.with_replaced_fields(vec![("piece_source_id".to_owned(), foreign)])
+            }),
+            "wasm_build_probability_distributed_piece_source_id_mismatch"
+        );
+        assert_eq!(
+            rejected_partial_reason(problem, field, |partial| {
+                // The word shape and pattern count remain unchanged. Only the
+                // ordered universe identity changes, modeling a foreign or
+                // reordered same-cardinality universe.
+                let foreign = foreign_u64_field(&partial, "pattern_universe_id");
+                partial.with_replaced_fields(vec![("pattern_universe_id".to_owned(), foreign)])
+            }),
+            "wasm_build_probability_distributed_pattern_universe_id_mismatch"
+        );
+        assert_eq!(
+            rejected_partial_reason(problem, field, |partial| {
+                let foreign = foreign_u64_field(&partial, "pattern_weight_model_id");
+                partial.with_replaced_fields(vec![("pattern_weight_model_id".to_owned(), foreign)])
+            }),
+            "wasm_build_probability_distributed_pattern_weight_model_id_mismatch"
+        );
+        assert_eq!(
+            rejected_partial_reason(problem, field, |partial| {
+                partial.with_additional_fields(vec![(
+                    "coverage_aggregation_contract".to_owned(),
+                    "pattern-coverage-aggregation.v1".to_owned(),
+                )])
+            }),
+            "wasm_build_probability_distributed_coverage_contract_invalid"
+        );
+        assert_eq!(
+            rejected_partial_reason(problem, field, |partial| {
+                partial.without_field_for_test("coverage_probability_denominator")
+            }),
+            "wasm_build_probability_distributed_coverage_denominator_invalid"
+        );
+        assert_eq!(
+            rejected_partial_reason(problem, field, |partial| {
+                partial.with_replaced_fields(vec![(
+                    "coverage_aggregation_complete".to_owned(),
+                    "false".to_owned(),
+                )])
+            }),
+            "wasm_build_probability_distributed_coverage_complete_mismatch"
+        );
+        assert_eq!(
+            rejected_partial_reason(problem, field, |partial| {
+                partial.with_replaced_fields(vec![(
+                    "build_probability_aggregation".to_owned(),
+                    "tiling".to_owned(),
+                )])
+            }),
+            "wasm_build_probability_distributed_aggregation_mismatch"
+        );
+        assert_eq!(
+            rejected_partial_reason(problem, field, |partial| {
+                partial
+                    .with_replaced_fields(vec![("coverage_probability".to_owned(), "0".to_owned())])
+            }),
+            "wasm_build_probability_distributed_coverage_probability_mismatch"
+        );
+    }
+
+    #[test]
+    fn compact_and_extended_partials_reject_foreign_or_ambiguous_coverage_authority() {
+        let compact_problem = exact_probability_problem(4, 1, PcSolutionProbabilityPolicy::Include);
+        let compact_field =
+            BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+                .expect("compact one-I field");
+        assert_distributed_coverage_authority_rejections(&compact_problem, compact_field);
+
+        let extended_problem =
+            exact_probability_problem(24, 1, PcSolutionProbabilityPolicy::Include);
+        let extended_field =
+            BuildProbabilityField::from_words_preserving_height(24, [0; 4], [0xf, 0, 0, 0])
+                .expect("extended one-I field");
+        assert_distributed_coverage_authority_rejections(&extended_problem, extended_field);
+    }
+
     #[test]
     fn compact_and_extended_fold_worker_completeness_without_masking_resource_state() {
         {
@@ -3816,10 +3928,17 @@ mod tests {
         let (mut extended_merger, extended_partial, extended_summary) =
             one_worker_partial_and_merger(&extended_problem, extended_field);
         extended_merger
-            .absorb(&extended_partial.with_replaced_fields(vec![(
-                "probability_complete".to_owned(),
-                "false".to_owned(),
-            )]))
+            .absorb(&extended_partial.with_replaced_fields(vec![
+                ("probability_complete".to_owned(), "false".to_owned()),
+                (
+                    "coverage_aggregation_complete".to_owned(),
+                    "false".to_owned(),
+                ),
+                (
+                    "coverage_aggregation_availability".to_owned(),
+                    "incomplete".to_owned(),
+                ),
+            ]))
             .expect("well-shaped incomplete extended worker result");
         let extended = extended_merger
             .finish(&extended_summary, 2)
@@ -4195,9 +4314,43 @@ mod tests {
             serial.normalized_solution_coverages()
         );
         assert_eq!(distributed.finesse_report(), serial.finesse_report());
+        for field in [
+            "piece_source_id",
+            "pattern_universe_id",
+            "pattern_weight_model_id",
+            "coverage_aggregation_contract",
+            "coverage_aggregation_availability",
+            "coverage_aggregation_complete",
+            "coverage_aggregation_source_row_count",
+            "covered_pattern_count",
+            "failed_pattern_count",
+            "coverage_probability",
+            "failed_coverage_probability",
+            "materialized_probability_mass",
+            "coverage_probability_denominator",
+            "success_conditional_probability_denominator",
+            "probability_complete",
+            "count_complete",
+        ] {
+            assert_eq!(
+                distributed.unique_field(field),
+                serial.unique_field(field),
+                "shared coverage aggregation field {field} must be serial/distributed exact"
+            );
+        }
         assert_eq!(serial.usize_field("coverage_pattern_count"), Some(2));
         assert_eq!(serial.usize_field("covered_pattern_count"), Some(1));
+        assert_eq!(serial.usize_field("failed_pattern_count"), Some(1));
         assert_eq!(serial.field("coverage_probability"), Some("0.5"));
+        assert_eq!(serial.field("failed_coverage_probability"), Some("0.5"));
+        assert_eq!(
+            serial.field("coverage_aggregation_contract"),
+            Some("pattern-coverage-aggregation.v1")
+        );
+        assert_eq!(
+            serial.field("coverage_aggregation_availability"),
+            Some("available")
+        );
         assert_eq!(serial.normalized_solution_coverages().len(), 1);
         assert_eq!(
             serial.normalized_solution_coverages()[0]

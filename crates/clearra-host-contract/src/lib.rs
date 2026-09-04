@@ -62,11 +62,12 @@ pub use product_result_payload::{
     CoveragePortfolioPagePayload, PcBestSavePayload, PcBestSaveWinnerPayload, PcPathFamilyPayload,
     PcPathStepPayload, PcPathWitnessPayload, PcSaveCompletenessPayload, PcSaveGroupPayload,
     PcSaveGroupsPayload, PcSavePieceMultisetPayload, PcSaveRunMetadataPayload,
-    PcSaveWitnessPayload, ProductCandidateMemberPayload, ProductResultPayload,
-    ProductResultPayloadContent, RankedFamilyPayloadError, ScorePatternWinnerFamilyPayload,
-    ScorePatternWinnerPayload, SetupRankedCandidatePayload, SetupRankedFamilyPayload,
-    SetupScoreCandidatePayload, SetupScoreRankingPayload, SetupScoreRankingPayloadError,
-    SpinStructureCandidatePayload, SpinStructureFamilyPayload,
+    PcSaveWitnessPayload, PcScoreFieldPayload, PcScoreFieldSummaryPayload,
+    ProductCandidateMemberPayload, ProductResultPayload, ProductResultPayloadContent,
+    RankedFamilyPayloadError, ScorePatternWinnerFamilyPayload, ScorePatternWinnerPayload,
+    SetupRankedCandidatePayload, SetupRankedFamilyPayload, SetupScoreCandidatePayload,
+    SetupScoreRankingPayload, SetupScoreRankingPayloadError, SpinStructureCandidatePayload,
+    SpinStructureFamilyPayload,
 };
 pub use query_envelope::QueryEnvelope;
 pub use render_capability_report::RenderCapabilityReport;

@@ -1,6 +1,10 @@
 import type { ClearraWasmSearchPathStep } from '../wasm/wasmCommandClient.ts';
-import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost.ts';
+import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
 import type { QueueKnowledge, RuleProfile } from './solverWorkspaceModel.ts';
+import {
+  cliCommandRequestForDesktop,
+  serializeCliCommandArguments
+} from './cliCommandModel.ts';
 
 export type SetupCandidatePriority = 'all' | 'build' | 'pc';
 export type SetupLengthPreference = 'auto' | 'longer' | 'shorter';
@@ -162,43 +166,57 @@ export function buildSetupFinderCommand(
   request: SetupFinderRequest,
   automaticWorkerLimit?: number
 ): string {
-  return buildSetupFinderCommandWithRoute(request, automaticWorkerLimit, true);
+  return serializeCliCommandArguments(
+    buildSetupFinderCommandArguments(request, automaticWorkerLimit)
+  );
 }
 
-function buildSetupFinderCommandWithRoute(
+export function buildSetupFinderCommandArguments(
+  request: SetupFinderRequest,
+  automaticWorkerLimit?: number
+): string[] {
+  return buildSetupFinderCommandArgumentsWithRoute(request, automaticWorkerLimit, true);
+}
+
+function buildSetupFinderCommandArgumentsWithRoute(
   request: SetupFinderRequest,
   automaticWorkerLimit: number | undefined,
   canonicalRankedRoute: boolean
-): string {
+): string[] {
   const remaining = normalizedSetupResidue(request.remaining);
   const tokens = [
-    canonicalRankedRoute
-      ? `clearra setup ${request.candidatePriority === 'all' ? 'joint' : request.candidatePriority}`
-      : 'clearra setup-finder',
-    `--remaining ${remaining}`,
-    request.searchMode === 'qb'
-      ? `--mode qb --qb ${normalizedSetupResidue(request.qbQueue)}`
-      : '',
-    `--queue-knowledge ${request.queueKnowledge}`,
-    normalizedSetupResidue(request.nextCycleRemaining)
-      ? `--next-cycle-remaining ${normalizedSetupResidue(request.nextCycleRemaining)}`
-      : '',
-    `--rule ${request.rule}`,
-    request.tablebaseEnabled ? '--tablebase' : '--no-tablebase',
-    canonicalRankedRoute || request.candidatePriority === 'all'
-      ? ''
-      : `--priority ${request.candidatePriority}`,
-    request.lengthPreference === 'auto' ? '' : `--setup-length ${request.lengthPreference}`,
-    `--max-setup-pieces ${request.maxSetupPieces}`,
-    automaticWorkerLimit === undefined
-      ? ''
-      : `--auto-workers ${Math.max(1, Math.trunc(automaticWorkerLimit))}`,
-    request.allowPostCycleBorrow ? '--allow-post-cycle-borrow' : ''
-  ].filter(Boolean);
+    'clearra',
+    ...(canonicalRankedRoute
+      ? ['setup', request.candidatePriority === 'all' ? 'joint' : request.candidatePriority]
+      : ['setup-finder']),
+    '--remaining',
+    remaining
+  ];
+  if (request.searchMode === 'qb') {
+    tokens.push('--mode', 'qb', '--qb', normalizedSetupResidue(request.qbQueue));
+  }
+  tokens.push('--queue-knowledge', request.queueKnowledge);
+  const nextCycleRemaining = normalizedSetupResidue(request.nextCycleRemaining);
+  if (nextCycleRemaining) {
+    tokens.push('--next-cycle-remaining', nextCycleRemaining);
+  }
+  tokens.push('--rule', request.rule);
+  tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
+  if (!canonicalRankedRoute && request.candidatePriority !== 'all') {
+    tokens.push('--priority', request.candidatePriority);
+  }
+  if (request.lengthPreference !== 'auto') {
+    tokens.push('--setup-length', request.lengthPreference);
+  }
+  tokens.push('--max-setup-pieces', String(request.maxSetupPieces));
+  if (automaticWorkerLimit !== undefined) {
+    tokens.push('--auto-workers', String(Math.max(1, Math.trunc(automaticWorkerLimit))));
+  }
+  if (request.allowPostCycleBorrow) tokens.push('--allow-post-cycle-borrow');
   if (request.useAllLogicalProcessors && automaticWorkerLimit !== undefined) {
     tokens.push('--use-all-cpu-threads');
   }
-  return tokens.join(' ');
+  return tokens;
 }
 
 export function buildSetupPathDetailCommand(
@@ -206,15 +224,27 @@ export function buildSetupPathDetailCommand(
   detail: SetupPathDetailRequest,
   automaticWorkerLimit?: number
 ): string {
+  return serializeCliCommandArguments(
+    buildSetupPathDetailCommandArguments(request, detail, automaticWorkerLimit)
+  );
+}
+
+export function buildSetupPathDetailCommandArguments(
+  request: SetupFinderRequest,
+  detail: SetupPathDetailRequest,
+  automaticWorkerLimit?: number
+): string[] {
   return [
-    buildSetupFinderCommandWithRoute(
+    ...buildSetupFinderCommandArgumentsWithRoute(
       { ...request, useAllLogicalProcessors: false },
       automaticWorkerLimit,
       false
     ),
-    `--paths-for ${detail.setupId}`,
-    `--condition ${detail.conditionId}`
-  ].join(' ');
+    '--paths-for',
+    detail.setupId,
+    '--condition',
+    detail.conditionId
+  ];
 }
 
 export function setupFinderRequestForDesktop(
@@ -222,31 +252,11 @@ export function setupFinderRequestForDesktop(
   language: 'en' | 'ko',
   workers: number,
   detail?: SetupPathDetailRequest
-): ClearraDesktopRequest {
-  const useAllLogicalProcessors = detail === undefined && request.useAllLogicalProcessors;
-  return buildDesktopAppRequest({
-    command: 'setup',
-    language,
-    rule: request.rule,
-    queue_knowledge: request.queueKnowledge,
-    // Full setup search shares the normalized worker budget used by Web argv.
-    // Path-detail lookup is not a parallel search and keeps the host sentinel.
-    workers: detail === undefined ? Math.max(1, Math.trunc(workers)) : 0,
-    use_all_logical_processors: useAllLogicalProcessors,
-    tablebase_requested: request.tablebaseEnabled,
-    setup_mode: request.searchMode,
-    setup_remaining: normalizedSetupResidue(request.remaining),
-    setup_qb: normalizedSetupResidue(request.qbQueue),
-    setup_next_cycle_remaining: normalizedSetupResidue(request.nextCycleRemaining),
-    setup_allow_post_cycle_borrow: request.allowPostCycleBorrow,
-    setup_priority: request.candidatePriority,
-    setup_length: request.lengthPreference,
-    setup_max_pieces: request.maxSetupPieces,
-    setup_path_setup_id: detail?.setupId,
-    setup_path_condition_id: detail?.conditionId,
-    backend: 'cpu',
-    allow_backend_fallback: false
-  });
+): ClearraDesktopCliCommandRequest {
+  const arguments_ = detail === undefined
+    ? buildSetupFinderCommandArguments(request, workers)
+    : buildSetupPathDetailCommandArguments(request, detail, workers);
+  return cliCommandRequestForDesktop(arguments_, language);
 }
 
 export function setupPathDetailKey(detail: SetupPathDetailRequest): string {

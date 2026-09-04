@@ -23,6 +23,11 @@
   } from '../wasm';
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
+    buildOperationDocumentCommand,
+    operationDocumentRequestForDesktop,
+    type OperationDocumentCommandInput
+  } from './operationDocumentCommandModel';
+  import {
     preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage
@@ -98,30 +103,19 @@
 
   async function run() {
     if (active || !validDocument || !validTimeout) return;
+    const commandInput: OperationDocumentCommandInput = {
+      capability: 'sequence',
+      document: normalizedDocument,
+      ruleProfile,
+      kickProfile,
+      timeoutSeconds
+    };
     if (runtime === 'web') {
-      updateWasmCommandText([
-        'clearra utility sequence',
-        '--document',
-        normalizedDocument,
-        '--rule-profile',
-        ruleProfile,
-        '--kick-profile',
-        kickProfile,
-        '--timeout-seconds',
-        String(timeoutSeconds)
-      ].join(' '));
+      updateWasmCommandText(buildOperationDocumentCommand(commandInput));
       workerController.run();
       return;
     }
-    updateDesktopRequest({
-      app_request_model: 'clearra-app/AppRequest',
-      command: 'utility-sequence',
-      language,
-      document: normalizedDocument,
-      rule_profile: ruleProfile,
-      kick_profile: kickProfile,
-      timeout_seconds: timeoutSeconds
-    });
+    updateDesktopRequest(operationDocumentRequestForDesktop(commandInput, language));
     await startDesktopJob();
   }
 

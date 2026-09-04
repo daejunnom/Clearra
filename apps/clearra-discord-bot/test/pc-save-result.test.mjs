@@ -37,26 +37,29 @@ test("Discord validates separate unconditional and conditional save probabilitie
   assert.equal(validDiscordPcSaveResult(legitimateSourceCursor, "saves"), true);
 });
 
-test("Discord selects one smallest canonical best-save candidate without portfolio metadata", () => {
+test("Discord displays the core-supplied smallest canonical best-save candidate", () => {
+  const winners = [
+    {
+      weighted_total: 6,
+      balanced_jl_count: 0,
+      exact_group_probability: 0.25,
+      group: group("9007199254740993", 0.25, 1 / 3),
+    },
+    {
+      weighted_total: 6,
+      balanced_jl_count: 0,
+      exact_group_probability: 0.25,
+      group: group("18446744073709551615", 0.25, 1 / 3),
+    },
+  ];
   const summary = {
     best_save_contract: "pc-best-save.v2",
     best_save_schema: "clearra-save-v1",
     best_save_probability_basis: "whole-universe-unconditional",
     best_save_pc_probability: 0.75,
-    best_save_winners: [
-      {
-        weighted_total: 6,
-        balanced_jl_count: 0,
-        exact_group_probability: 0.25,
-        group: group("18446744073709551615", 0.25, 1 / 3),
-      },
-      {
-        weighted_total: 6,
-        balanced_jl_count: 0,
-        exact_group_probability: 0.25,
-        group: group("9007199254740993", 0.25, 1 / 3),
-      },
-    ],
+    best_save_canonical_selection: "smallest-canonical-candidate-id",
+    best_save_canonical_winner: structuredClone(winners[0]),
+    best_save_winners: winners,
   };
   const structured = { kind: "pc-best-save.v2", summary };
   assert.equal(validDiscordPcSaveResult(structured, "best-save"), true);
@@ -73,6 +76,14 @@ test("Discord selects one smallest canonical best-save candidate without portfol
   const nestedForgery = structuredClone(structured);
   nestedForgery.summary.best_save_winners[0].group.alternative_cursor = "forged";
   assert.equal(validDiscordPcSaveResult(nestedForgery, "best-save"), false);
+
+  const missingWitness = structuredClone(structured);
+  delete missingWitness.summary.best_save_canonical_winner;
+  assert.equal(validDiscordPcSaveResult(missingWitness, "best-save"), false);
+
+  const mismatchedWitness = structuredClone(structured);
+  mismatchedWitness.summary.best_save_canonical_winner = structuredClone(winners[1]);
+  assert.equal(validDiscordPcSaveResult(mismatchedWitness, "best-save"), false);
 });
 
 test("Discord rejects non-canonical or out-of-range candidate-id transports", () => {
@@ -119,18 +130,21 @@ test("Discord requires group cardinality and canonical witness identity to agree
   assert.equal(validDiscordPcSaveResult(empty, "saves"), false);
 });
 
-test("Discord canonical best-save selection fails closed before BigInt sorting", () => {
+test("Discord canonical best-save display fails closed before reading an invalid supplied ID", () => {
+  const winner = {
+    weighted_total: 6,
+    balanced_jl_count: 0,
+    exact_group_probability: 1,
+    group: group("not-a-decimal", 1, 1),
+  };
   const summary = {
     best_save_contract: "pc-best-save.v2",
     best_save_schema: "clearra-save-v1",
     best_save_probability_basis: "whole-universe-unconditional",
     best_save_pc_probability: 1,
-    best_save_winners: [{
-      weighted_total: 6,
-      balanced_jl_count: 0,
-      exact_group_probability: 1,
-      group: group("not-a-decimal", 1, 1),
-    }],
+    best_save_canonical_selection: "smallest-canonical-candidate-id",
+    best_save_canonical_winner: structuredClone(winner),
+    best_save_winners: [winner],
   };
   assert.equal(selectDiscordBestSaveWinner(summary), null);
 });

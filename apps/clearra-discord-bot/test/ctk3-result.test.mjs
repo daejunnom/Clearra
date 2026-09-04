@@ -969,7 +969,7 @@ test("forward exact masks preserve cleared history colors and validate the final
   assert.equal(page.comment, "#7 | Q=IO | D=4 | T-spin 2L");
 });
 
-test("REN Discord projection keeps only the smallest canonical candidate ID", () => {
+test("REN Discord projection keeps only the core-supplied canonical candidate", () => {
   const outcome = (id, sourceQueue) => ({
     id,
     source_queue: sourceQueue,
@@ -986,20 +986,53 @@ test("REN Discord projection keeps only the smallest canonical candidate ID", ()
       board_after: words(0xfn),
     }],
   });
-  const result = buildCtk3Result({
+  const canonical = outcome("3", "I");
+  const secondary = outcome("9", "I");
+  const input = {
     kind: "ren",
     artifacts: {
       schema_version: ARTIFACT_SCHEMA,
       forward: {
         initial_board: words(0n),
-        outcomes: [outcome(9, "I"), outcome(3, "I")],
+        canonical_selection: "smallest-canonical-candidate-id",
+        canonical_outcome: structuredClone(canonical),
+        outcomes: [canonical, secondary],
       },
     },
-  });
+  };
+  const result = buildCtk3Result(input);
 
   assert.ok(result);
   assert.equal(result.pageCount, 1);
   assert.match(decodeCtk3(result.source).pages[0].comment, /^#3\b/);
+
+  const missing = structuredClone(input);
+  delete missing.artifacts.forward.canonical_outcome;
+  assert.throws(
+    () => buildCtk3Result(missing),
+    (error) => error instanceof Ctk3ResultError &&
+      error.code === "invalid-forward-canonical-witness",
+  );
+
+  const mismatched = structuredClone(input);
+  mismatched.artifacts.forward.canonical_outcome = structuredClone(secondary);
+  assert.throws(
+    () => buildCtk3Result(mismatched),
+    (error) => error instanceof Ctk3ResultError &&
+      error.code === "invalid-forward-canonical-witness",
+  );
+
+  for (const zeroId of ["0", 0]) {
+    const zeroCandidate = structuredClone(input);
+    zeroCandidate.artifacts.forward.canonical_outcome.id = zeroId;
+    zeroCandidate.artifacts.forward.outcomes[0].id = zeroId;
+    assert.throws(
+      () => buildCtk3Result(zeroCandidate),
+      (error) => error instanceof Ctk3ResultError &&
+        error.code === "invalid-forward-candidate-id",
+      `zero candidate id ${JSON.stringify(zeroId)} must fail closed`,
+    );
+  }
 });
 
 test("forward replay rejects board-after and final-mask mismatches", () => {

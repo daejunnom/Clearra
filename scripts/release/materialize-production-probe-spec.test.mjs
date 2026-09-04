@@ -16,6 +16,9 @@ import {
   sealCanonicalReport,
 } from "./canonical-release-evidence.mjs";
 import {
+  PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID,
+} from "./pages-deployment-authority.mjs";
+import {
   createCanonicalDiscordCatalog,
 } from "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
 
@@ -209,7 +212,7 @@ async function withAuthorityFiles(body) {
     await writeFile(syncReportPath, syncReportBytes, "utf8");
     await writeFile(smokeReportPath, "{}\n", "utf8");
     const pagesDeploymentReport = sealCanonicalReport({
-      schema_id: "clearra.pages.deployment-authority.v2",
+      schema_id: PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID,
       mode: "forward",
       repository: "daejunnom/Clearra",
       source_commit: COMMIT,
@@ -242,6 +245,10 @@ async function withAuthorityFiles(body) {
       rollback_report_artifact_digest: null,
       rollback_report_artifact_api_readback_sha256: null,
       rollback_report_file_sha256: null,
+      rollback_accepted_artifact_id: null,
+      rollback_accepted_artifact_name: null,
+      rollback_accepted_artifact_digest: null,
+      live_file_descriptor_set_sha256: null,
       status: "active",
     });
     const pagesDeploymentReportBytes = `${canonicalJson(pagesDeploymentReport)}\n`;

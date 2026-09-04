@@ -43,6 +43,7 @@ import {
   discordPcScoreMinimalsSummaryLines,
   validDiscordPcScoreMinimalsResult,
 } from "./discord/pc-score-minimals-result.mjs";
+import { validDiscordTypedProductResult } from "./discord/typed-product-result.mjs";
 import {
   findCommandModalCommand,
   readCommandModalLocale,
@@ -2014,113 +2015,7 @@ function requestedStructuredResultKind(structured, fallback, allspinExpectation)
 }
 
 function validPcScoreSummary(structured) {
-  if (
-    structured?.kind !== "pc-score-summary.v2" ||
-    structured?.contract?.command?.kind !== "pc-score-summary.v2" ||
-    !isPlainObject(structured?.summary) ||
-    !isPlainObject(structured?.resource_report) ||
-    structured.resource_report.probability_complete !== true ||
-    structured.resource_report.count_complete !== true ||
-    structured.resource_report.truncated !== false ||
-    structured.resource_report.truncation_reason !== null ||
-    structured.resource_report.count_truncated_reason !== null ||
-    structured.resource_report.materialized_probability_mass !== 1 ||
-    structured.resource_report.renormalized !== false
-  ) return false;
-  const summary = structured.summary;
-  const contractScoring = structured.contract?.pc?.scoring;
-  const executionScoring = structured.contract?.pc?.execution_report?.scoring;
-  if (
-    !validPcScoreContractProjection(contractScoring, summary) ||
-    !validPcScoreContractProjection(executionScoring, summary)
-  ) return false;
-  if (Object.keys(summary).some((key) =>
-    PC_SCORE_PRIVATE_SUMMARY_KEYS.has(key) ||
-    /^(?:private_|transient_|pc_score_.*evidence|exact_scoring_|postprocess_score_cells)/u
-      .test(key)
-  )) return false;
-  if (
-    summary.score_accuracy_level !== "basic-approximation" ||
-    summary.score_accuracy_reason !==
-      "profile-specific basic score/attack tables with configurable spin detection" ||
-    summary.score_profile_specific_exact !== false ||
-    summary.score_objective_mode !== "summary" ||
-    summary.score_matrix_accuracy_level !== "basic-approximation" ||
-    summary.count_truncated_reason !== "none" ||
-    summary.resource_truncation_reason !== "none" ||
-    summary.objective_incomplete_reason !== "none" ||
-    summary.score_matrix_incomplete_reason !== "none" ||
-    summary.score_summary_incomplete_reason !== "none" ||
-    summary.score_failed_pc_pattern_score !== 0
-  ) return false;
-  if ([...PC_SCORE_REQUIRED_TRUE_FIELDS].some((key) => summary[key] !== true)) {
-    return false;
-  }
-  if (
-    summary.resource_truncated !== false ||
-    summary.solution_probabilities_requested === true ||
-    !safeContractToken(summary.score_profile_requested) ||
-    !safeContractToken(summary.spin_profile_requested) ||
-    !safeContractToken(summary.score_profile) ||
-    summary.score_matrix_profile_id !== summary.score_profile
-  ) return false;
-  for (const key of PC_SCORE_REQUIRED_NON_NEGATIVE_INTEGERS) {
-    if (nonNegativeInteger(summary[key]) === null) return false;
-  }
-  if (
-    summary.materialized_pattern_count < 1 ||
-    summary.total_possible_pattern_count !== summary.materialized_pattern_count ||
-    summary.score_matrix_pattern_count !== summary.materialized_pattern_count ||
-    summary.score_pattern_optimal_count + summary.score_failed_pc_pattern_count !==
-      summary.materialized_pattern_count ||
-    summary.materialized_probability_mass !== 1 ||
-    unitProbability(summary.score_covered_probability) === null
-  ) return false;
-  for (const key of [
-    "score_unconditional_expected_score",
-    "score_unconditional_expected_attack",
-  ]) {
-    if (nonNegativeFiniteNumber(summary[key]) === null) return false;
-  }
-  for (const key of [
-    "score_best_score",
-    "score_best_attack",
-    "score_covered_pattern_conditional_average_score",
-  ]) {
-    if (
-      summary[key] !== null && summary[key] !== undefined &&
-      nonNegativeFiniteNumber(summary[key]) === null
-    ) return false;
-  }
-  return true;
-}
-
-function validPcScoreContractProjection(scoring, summary) {
-  if (!isPlainObject(scoring)) return false;
-  for (const key of [
-    "score_profile",
-    "score_matrix_profile_id",
-    "score_accuracy_level",
-    "score_matrix_accuracy_level",
-    "score_accuracy_reason",
-    "score_profile_specific_exact",
-    "score_evaluation_complete",
-    "score_matrix_materialized",
-    "score_matrix_complete",
-    "score_best_complete",
-    "score_summary_complete",
-    "score_all_universe_patterns_covered",
-    "score_matrix_incomplete_reason",
-    "score_summary_incomplete_reason",
-  ]) {
-    if (scoring[key] !== summary[key]) return false;
-  }
-  return scoring.score_profile_accuracy_mode === "basic-approximation";
-}
-
-function safeContractToken(value) {
-  return typeof value === "string" &&
-    value.length >= 1 && value.length <= 128 && /^[a-z0-9][a-z0-9+._-]*$/u.test(value);
+  return validDiscordTypedProductResult(structured);
 }
 
 function validAllspinSummary(summary, expectedContract, expectation) {
@@ -2711,9 +2606,13 @@ const RESULT_SUMMARY_FIELDS = Object.freeze([
   "minimum_placements",
   "maximum_damage",
   "maximum_ren",
-  "score_profile",
-  "score_accuracy_level",
-  "score_profile_specific_exact",
+  "score_solution_field_count",
+  "score_success_pattern_count",
+  "score_failed_pc_pattern_count",
+  "score_covered_probability",
+  "score_overall_score",
+  "score_covered_pattern_conditional_average_score",
+  "score_summary_complete",
   "pc_allspin_spin_profile",
   "pc_allspin_preserving_queue_count",
   "pc_allspin_original_queue_count",
@@ -2742,43 +2641,6 @@ const OPERATION_SEQUENCE_SUMMARY_FIELDS = Object.freeze([
   "kick_profile",
 ]);
 const OPERATION_SEQUENCE_TRACE_PREVIEW_LIMIT = 240;
-
-const PC_SCORE_REQUIRED_TRUE_FIELDS = new Set([
-  "probability_complete",
-  "resource_probability_complete",
-  "count_complete",
-  "objective_search_complete",
-  "objective_complete",
-  "postprocess_scoring_requested",
-  "score_evaluation_complete",
-  "score_matrix_materialized",
-  "score_matrix_complete",
-  "score_best_complete",
-  "score_summary_complete",
-  "score_all_universe_patterns_covered",
-]);
-
-const PC_SCORE_REQUIRED_NON_NEGATIVE_INTEGERS = Object.freeze([
-  "coverage_pattern_count",
-  "materialized_pattern_count",
-  "total_possible_pattern_count",
-  "score_initial_b2b",
-  "score_matrix_cell_count",
-  "score_matrix_pattern_count",
-  "score_pattern_optimal_count",
-  "score_failed_pc_pattern_count",
-]);
-
-const PC_SCORE_PRIVATE_SUMMARY_KEYS = new Set([
-  "origin",
-  "query",
-  "problem_owner",
-  "execution_authority",
-  "memory_evidence",
-  "pc_score_problem_evidence",
-  "exact_scoring_execution_batches",
-  "postprocess_score_cells",
-]);
 
 const PUBLIC_RESULT_KIND_CONTRACT = new Map([
   ["search", new Set([
@@ -2870,6 +2732,7 @@ const PROBABILITY_SUMMARY_FIELDS = new Set([
   "coverage_probability",
   "probability",
   "weighted_probability",
+  "score_covered_probability",
   "pc_allspin_preservation_probability",
   "save_pc_probability",
   "best_save_exact_group_probability",

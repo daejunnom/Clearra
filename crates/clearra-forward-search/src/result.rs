@@ -218,6 +218,32 @@ impl ForwardSearchOutcome {
     }
 }
 
+/// Complete producer-owned order used before assigning public candidate IDs.
+///
+/// The ID itself is deliberately excluded because it is derived from this
+/// order. Keeping the comparator beside the outcome contract prevents serial
+/// and distributed producers from silently assigning different canonical IDs
+/// to the same result family.
+pub(crate) fn compare_canonical_outcomes(
+    left: &ForwardSearchOutcome,
+    right: &ForwardSearchOutcome,
+) -> core::cmp::Ordering {
+    left.source_pattern_index()
+        .cmp(&right.source_pattern_index())
+        .then_with(|| left.source_queue().cmp(right.source_queue()))
+        .then_with(|| left.group().cmp(&right.group()))
+        .then_with(|| left.path().len().cmp(&right.path().len()))
+        .then_with(|| left.final_board().cmp(&right.final_board()))
+        .then_with(|| left.spin_piece().cmp(&right.spin_piece()))
+        .then_with(|| left.spin_mini().cmp(&right.spin_mini()))
+        .then_with(|| left.spin_lines().cmp(&right.spin_lines()))
+        .then_with(|| left.ren_count().cmp(&right.ren_count()))
+        .then_with(|| left.total_damage().cmp(&right.total_damage()))
+        .then_with(|| left.evidence_path_count().cmp(right.evidence_path_count()))
+        .then_with(|| left.evidence_complete().cmp(&right.evidence_complete()))
+        .then_with(|| left.path().cmp(right.path()))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForwardSearchReport {
     complete: bool,
@@ -270,6 +296,15 @@ impl ForwardSearchReport {
     }
     pub fn outcomes(&self) -> &[ForwardSearchOutcome] {
         &self.outcomes
+    }
+
+    /// Core-owned representative from the canonical outcome order.
+    ///
+    /// Search producers assign ascending numeric IDs in this order. Presenters
+    /// that need one witness must use this member and must not rank outcomes
+    /// again with host-local criteria.
+    pub fn canonical_outcome(&self) -> Option<&ForwardSearchOutcome> {
+        self.outcomes.first()
     }
 
     pub(crate) fn outcomes_mut(&mut self) -> &mut Vec<ForwardSearchOutcome> {

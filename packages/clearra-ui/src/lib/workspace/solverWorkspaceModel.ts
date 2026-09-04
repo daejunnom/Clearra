@@ -1,10 +1,13 @@
 import type { ClearraDesktopRequest } from '../host';
 import {
   searchExecutionCommandArguments,
-  searchExecutionDesktopFields,
   type SearchBackend,
   type SearchExecutionRequest
 } from './searchExecutionModel.ts';
+import {
+  cliCommandRequestForDesktop,
+  serializeCliCommandArguments
+} from './cliCommandModel.ts';
 
 export type { SearchBackend } from './searchExecutionModel.ts';
 
@@ -16,9 +19,7 @@ export type ScoreMode =
   | 'summary'
   | 'score-finder'
   | 'score-minimals'
-  | 'failed-queue'
-  | 'saves'
-  | 'best-save';
+  | 'failed-queue';
 export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
 export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x' | 'jstris-180';
 export type SpinProfile =
@@ -59,7 +60,6 @@ export type SolverWorkspaceRequest = {
 export type WorkspaceValidationCode =
   | 'queue_invalid'
   | 'visible-seven-minimum-cover-unsupported'
-  | 'pc-save-fixed-queue-unsupported'
   | 'pc-score-finder-fixed-queue-required'
   | 'target_lines_invalid'
   | 'scenario_not_tileable'
@@ -103,6 +103,7 @@ export function updateWorkspaceDraft(
 export function normalizeWorkspaceRequest(
   request: SolverWorkspaceRequest
 ): SolverWorkspaceRequest {
+  assertGuiScoreMode(request.scoreMode);
   if (request.scoreMode === 'tiling') {
     return {
       ...request,
@@ -150,19 +151,6 @@ export function normalizeWorkspaceRequest(
       tablebaseEnabled: false,
       precomputeBuildDependencies: false,
       maxPatterns: undefined
-    };
-  }
-  if (request.scoreMode === 'saves' || request.scoreMode === 'best-save') {
-    return {
-      ...request,
-      queueKnowledge: 'oracle',
-      scoreProfile: 'tetrio',
-      spinProfile: 't-spins',
-      preserveB2B: false,
-      initialB2B: 0,
-      solutionProbabilities: false,
-      tablebaseEnabled: false,
-      precomputeBuildDependencies: false
     };
   }
   if (request.scoreMode === 'minimum-cover') {
@@ -462,6 +450,7 @@ export function workspaceValidationCodes(
   request: SolverWorkspaceRequest,
   _runtime: 'web' | 'desktop'
 ): WorkspaceValidationCode[] {
+  assertGuiScoreMode(request.scoreMode);
   const errors: WorkspaceValidationCode[] = [];
   if (!Number.isInteger(request.lines) || request.lines < 1 || request.lines > 6) {
     errors.push('target_lines_invalid');
@@ -479,12 +468,6 @@ export function workspaceValidationCodes(
   if (request.scoreMode === 'score-finder' && parsedQueue?.kind !== 'fixed') {
     errors.push('pc-score-finder-fixed-queue-required');
   }
-  if (
-    (request.scoreMode === 'saves' || request.scoreMode === 'best-save') &&
-    parsedQueue?.kind === 'fixed'
-  ) {
-    errors.push('pc-save-fixed-queue-unsupported');
-  }
   const normalized = clearCompletedRows(request.boardMask, request.lines);
   const emptyCells = normalized.remainingLines * 10 - occupiedCellCount(normalized.boardMask);
   if (emptyCells === 0) errors.push('scenario_full');
@@ -501,8 +484,14 @@ export function workspaceValidationCodes(
   return [...new Set(errors)];
 }
 
-export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
+/**
+ * Projects the form into canonical Clearra CLI argv. The CLI command compiler
+ * owns defaults, validation, objective selection, and AppRequest lowering;
+ * this adapter only selects the user-visible command and explicit options.
+ */
+export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest): string[] {
   request = normalizeWorkspaceRequest(request);
+  const openingPreset = workspaceUsesOpeningPcPreset(request);
   const productSubcommand =
     request.scoreMode === 'tiling'
       ? 'tiling'
@@ -516,11 +505,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
             ? 'score-finder'
           : request.scoreMode === 'score-minimals'
             ? 'score-minimals'
-            : request.scoreMode === 'saves'
-              ? 'saves'
-              : request.scoreMode === 'best-save'
-                ? 'best-save'
-                : null;
+            : null;
   const tokens = [
     'clearra',
     request.scoreMode === 'failed-queue' ? 'failed-queue' : 'pc',
@@ -530,16 +515,18 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   ];
   const pieceWindow = scenarioPieceWindow(request);
   const parsedQueue = parseBrowserQueueInput(request.queue);
-  tokens.push(
-    '--board-mask',
-    boardMaskHex(trimBoardMask(request.boardMask, request.lines)),
-    '--height',
-    String(request.lines),
-    '--pieces',
-    String(pieceWindow ?? 1)
-  );
-  if (request.holdEnabled) tokens.push('--hold', request.holdPiece ?? 'empty');
-  else tokens.push('--no-hold');
+  if (!openingPreset) {
+    tokens.push(
+      '--board-mask',
+      boardMaskHex(trimBoardMask(request.boardMask, request.lines)),
+      '--height',
+      String(request.lines),
+      '--pieces',
+      String(pieceWindow ?? 1)
+    );
+    if (request.holdEnabled) tokens.push('--hold', request.holdPiece ?? 'empty');
+    else tokens.push('--no-hold');
+  }
   if (request.queue) {
     tokens.push(
       parsedQueue?.kind === 'pattern' ? '--patterns' : '--queue',
@@ -570,12 +557,6 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
     if (request.maxPatterns !== undefined) {
       tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
     }
-  } else if (request.scoreMode === 'saves' || request.scoreMode === 'best-save') {
-    tokens.push('--rule', request.rule);
-    tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
-    if (request.maxPatterns !== undefined) {
-      tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
-    }
   } else if (request.scoreMode !== 'tiling') {
     tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all');
     tokens.push('--rule', request.rule);
@@ -597,55 +578,30 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
   } else {
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
   }
-  return tokens.join(' ');
+  return tokens;
+}
+
+export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
+  return serializeCliCommandArguments(buildWorkspaceCommandArguments(request));
 }
 
 export function workspaceRequestForDesktop(
   request: SolverWorkspaceRequest,
   language: 'en' | 'ko'
 ): ClearraDesktopRequest {
-  request = normalizeWorkspaceRequest(request);
-  const parsedQueue = parseBrowserQueueInput(request.queue);
-  return {
-    app_request_model: 'clearra-app/AppRequest' as const,
-    command: 'pc-scenario' as const,
-    language,
-    lines: request.lines,
-    queue: parsedQueue?.kind === 'fixed' ? parsedQueue.source : '',
-    patterns: parsedQueue?.kind === 'pattern' ? parsedQueue.source : '',
-    hold_enabled: request.holdEnabled,
-    queue_knowledge: request.queueKnowledge,
-    hold_piece: request.holdEnabled ? request.holdPiece ?? 'empty' : 'empty',
-    ...searchExecutionDesktopFields(workspaceSearchExecution(request)),
-    rule: request.rule,
-    board_mask: boardMaskHex(trimBoardMask(request.boardMask, request.lines)),
-    visible_height: request.lines,
-    piece_window: scenarioPieceWindow(request),
-    count_policy:
-      request.scoreMode === 'off' ||
-      request.scoreMode === 'tiling' ||
-      request.scoreMode === 'minimum-cover'
-        ? ('unique' as const)
-        : ('all' as const),
-    score_mode: request.scoreMode,
-    score_profile: request.scoreProfile,
-    spin_profile: request.spinProfile,
-    preserve_b2b: request.preserveB2B,
-    precompute_build_dependencies: request.precomputeBuildDependencies,
-    tablebase_requested: request.tablebaseEnabled,
-    // The general PC/failed-queue workspace does not request finesse. Keep the
-    // new desktop bridge fields explicit so it cannot inherit a prior job's
-    // build-probability policy.
-    finesse: 'off' as const,
-    pattern_knowledge: 'both' as const,
-    initial_b2b: Math.max(0, Math.trunc(request.initialB2B)),
-    solution_probabilities: request.solutionProbabilities,
-    memory_budget_mb: 0,
-    candidate_budget: 10_000_000,
-    pattern_budget: request.maxPatterns === undefined
-      ? 5040
-      : Math.max(1, Math.trunc(request.maxPatterns))
-  };
+  return cliCommandRequestForDesktop(buildWorkspaceCommandArguments(request), language);
+}
+
+/**
+ * Owns the sole GUI lowering rule for the ordinary opening-PC preset.
+ * Scenario-only score finder, an occupied field/hold, and disabled hold keep
+ * their explicit scenario semantics even when another input is empty.
+ */
+export function workspaceUsesOpeningPcPreset(request: SolverWorkspaceRequest): boolean {
+  return request.scoreMode !== 'score-finder' &&
+    trimBoardMask(request.boardMask, request.lines) === 0n &&
+    request.holdEnabled &&
+    (request.holdPiece ?? 'empty') === 'empty';
 }
 
 function workspaceSearchExecution(request: SolverWorkspaceRequest): SearchExecutionRequest {
@@ -658,4 +614,21 @@ function workspaceSearchExecution(request: SolverWorkspaceRequest): SearchExecut
     cpuWarmup: true,
     gpuWarmup: true
   };
+}
+
+const GUI_SCORE_MODES = new Set<string>([
+  'tiling',
+  'path',
+  'off',
+  'minimum-cover',
+  'summary',
+  'score-finder',
+  'score-minimals',
+  'failed-queue'
+]);
+
+function assertGuiScoreMode(scoreMode: string): asserts scoreMode is ScoreMode {
+  if (!GUI_SCORE_MODES.has(scoreMode)) {
+    throw new Error(`Unsupported GUI PC result mode: ${scoreMode}`);
+  }
 }

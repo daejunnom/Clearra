@@ -34,6 +34,11 @@ required-features = ["native-c-core"]
 name = "forward_ren_contract"
 path = "tests/forward_ren_contract.rs"
 
+[[test]]
+name = "canonical_witness_contract"
+path = "tests/canonical_witness_contract.rs"
+required-features = ["wasm-cpu-runtime"]
+
 [dependencies]
 clearra-app = { path = "../clearra-app" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }
@@ -52,7 +57,7 @@ clearra-setup-search = { path = "../clearra-setup-search" }
 clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-supply = { path = "../clearra-supply" }
 clearra-validation = { path = "../clearra-validation" }
-clearra-web-command = { path = "../clearra-web-command" }
+clearra-cli-command = { path = "../clearra-cli-command" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 getrandom = "0.4.3"

@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 const TERMINAL_SUPPLY_MODE = "--validate-terminal-supply-json";
 const DISCORD_SCORE_MINIMALS_MODE =
   "--validate-discord-score-minimals-json";
+const DISCORD_CANONICAL_RESULT_MODE =
+  "--validate-discord-canonical-result-json";
 const TERMINAL_SUPPLY_EXPECTED_COUNT = 18;
 const TERMINAL_SUPPLY_EXPECTED_HASH = "cts1:8a7fc484d9b49994";
 const TERMINAL_SUPPLY_INITIAL_MASK = 0x1c0701c07n;
@@ -22,7 +24,50 @@ const U64_MASK = (1n << 64n) - 1n;
 
 const commandArguments = process.argv.slice(2);
 if (commandArguments.length > 0) {
-  if (commandArguments.length === 1 &&
+  if (commandArguments.length === 2 &&
+      commandArguments[0] === DISCORD_CANONICAL_RESULT_MODE) {
+    const raw = await readStandardInput();
+    const structured = JSON.parse(raw);
+    const publicKind = commandArguments[1];
+    if (["pc-path", "pc-minimals", "pc-score", "pc-score-finder"].includes(publicKind)) {
+      const { projectDiscordTypedProductResult } = await import(new URL(
+        "../../apps/clearra-discord-bot/src/discord/typed-product-result.mjs",
+        import.meta.url,
+      ));
+      const projection = projectDiscordTypedProductResult(structured);
+      if (projection === null) {
+        throw new Error(`Discord ${publicKind} canonical projection is unavailable`);
+      }
+    } else if (["pc-saves", "pc-best-save"].includes(publicKind)) {
+      const {
+        selectDiscordBestSaveWinner,
+        validDiscordPcSaveResult,
+      } = await import(new URL(
+        "../../apps/clearra-discord-bot/src/discord/pc-save-result.mjs",
+        import.meta.url,
+      ));
+      const saveKind = publicKind === "pc-saves" ? "saves" : "best-save";
+      if (!validDiscordPcSaveResult(structured, saveKind)) {
+        throw new Error(`release CLI ${publicKind} JSON is not a valid Discord result`);
+      }
+      if (saveKind === "best-save" && selectDiscordBestSaveWinner(structured.summary) === null) {
+        throw new Error("Discord best-save core-owned canonical winner is unavailable");
+      }
+    } else if (publicKind === "forward-ren") {
+      const { buildCtk3Result } = await import(new URL(
+        "../../apps/clearra-discord-bot/src/clearra/ctk3-result.mjs",
+        import.meta.url,
+      ));
+      const rendered = buildCtk3Result(structured);
+      if (rendered === null || rendered.pageCount !== 1) {
+        throw new Error("Discord REN core-owned canonical outcome did not render exactly once");
+      }
+    } else {
+      throw new Error(`unsupported Discord canonical result kind: ${publicKind}`);
+    }
+    console.log(`Discord ${publicKind} release asset JSON passed`);
+    process.exit(0);
+  } else if (commandArguments.length === 1 &&
       commandArguments[0] === DISCORD_SCORE_MINIMALS_MODE) {
     const raw = await readStandardInput();
     const structured = JSON.parse(raw);
@@ -550,6 +595,14 @@ requireText(
   "Linux terminal-supply validator mode",
 );
 for (const marker of [
+  DISCORD_CANONICAL_RESULT_MODE,
+  "pc-path",
+  "pc-minimals",
+  "pc-score",
+  "pc-score-finder",
+  "pc-saves",
+  "pc-best-save",
+  "forward-ren",
   DISCORD_SCORE_MINIMALS_MODE,
   '"kind":"pc-score-portfolio.v2"',
   '"score_minimals_score_equality":"score-only"',
@@ -833,6 +886,14 @@ for (const [name, job] of [
   ) {
     throw new Error(`${name} must have exactly one exact-SHA product cache contract`);
   }
+}
+if (
+  (packageScript.match(/--validate-discord-canonical-result-json/gu) ?? [])
+    .length !== 1
+) {
+  throw new Error(
+    "Linux release package must validate every actual core-owned Discord canonical result",
+  );
 }
 if (
   (windowsCliJob.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1 ||
@@ -1669,7 +1730,7 @@ for (const marker of [
   "verifyCurrentPagesAgainstCapture({",
   "validatedCaptureReport: captureReportRecord.report",
   'if (captureKind === "legacy-v0.7.4")',
-  'if (captureKind === "modern-v2")',
+  'if (captureKind === "canonical-v2")',
   "validateLegacyAuthority = validateLegacyForwardPublicAuthority",
   ').preartifact_public_readback',
   "`/deployments/${sealedDeploymentId}`",
@@ -1701,7 +1762,8 @@ for (const marker of [
   );
 }
 for (const marker of [
-  "        await validateLiveForwardPayloads({",
+  "        await validateLiveForwardPayloads({\n          files: liveIdentity.files,\n          pageUrl,",
+  "await validateLiveForwardPayloads({ files: liveIdentity.files, pageUrl, workflowRunId, workflowRunAttempt, attempt, fetchPublicBytes });",
   "MAX_FORWARD_PUBLIC_FILE_COUNT",
   "MAX_FORWARD_PUBLIC_TOTAL_BYTES",
   "MAX_FORWARD_PUBLIC_PATH_LENGTH",

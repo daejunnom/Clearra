@@ -4,6 +4,16 @@ use clearra_core_domain::solution::normalized_tiling_solution::{
 
 pub const PC_SCORE_PATTERN_WINNER_CONTRACT: &str = "pc-score-pattern-winner.v1";
 pub const PC_SCORE_INFORMATIONAL_ATTACK_BASIS: &str = "canonical-equal-score-trace";
+pub const PC_SCORE_CANONICAL_SELECTION: &str = "smallest-canonical-candidate-id";
+
+pub(crate) fn canonical_score_winner(
+    winners: &[PcScorePatternWinnerV1],
+) -> Option<PcScorePatternWinnerV1> {
+    winners
+        .iter()
+        .copied()
+        .min_by_key(PcScorePatternWinnerV1::candidate_id)
+}
 
 /// One candidate in the complete maximum-score family for a materialized
 /// supply pattern.
@@ -69,5 +79,27 @@ impl PcScorePatternWinnerV1 {
 
     pub const fn informational_attack_basis(&self) -> &'static str {
         PC_SCORE_INFORMATIONAL_ATTACK_BASIS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_score_winner, PcScorePatternWinnerV1};
+    use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
+
+    #[test]
+    fn canonical_score_winner_uses_numeric_candidate_id_and_never_attack() {
+        let identity = StandardBoard64TilingIdentity::from_placements(0, std::iter::empty())
+            .expect("empty identity");
+        let winners = [
+            PcScorePatternWinnerV1::new(0, 10, identity, 1_200, 0),
+            PcScorePatternWinnerV1::new(1, 2, identity, 1_200, 999),
+            PcScorePatternWinnerV1::new(2, 3, identity, 1_200, 1),
+        ];
+
+        assert_eq!(
+            canonical_score_winner(&winners).map(|winner| winner.candidate_id()),
+            Some(2)
+        );
     }
 }

@@ -256,7 +256,7 @@ than a claim that one policy attains both optima.
 The product route is:
 
 ```text
-CLI or web command
+shared CLI command
 -> SetupAppCommand
 -> setup validation
 -> WasmSetupSearchBackend

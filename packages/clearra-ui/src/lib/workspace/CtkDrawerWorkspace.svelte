@@ -57,8 +57,9 @@
     openFieldDocument
   } from './fieldInterchange';
   import {
+    buildDocumentUtilityCommand,
     decodeValidatedRenderArtifact,
-    quoteWebCommandToken
+    type DocumentUtilityCommandInput
   } from './documentUtilityModel';
   import { fieldImportFailureMessageKey } from './fieldImportFailure';
   import { validateProductResultPayload } from './productResultPager';
@@ -512,16 +513,18 @@
     try {
       const source = await encodeDocument('ctk', controller.signal);
       throwIfAborted(controller.signal);
-      updateWasmCommandText([
-        'clearra utility render',
-        '--format',
-        'ctk3',
-        '--document',
-        quoteWebCommandToken(source),
-        '--artifact-format',
-        renderFormat,
-        ...(renderFormat === 'png' ? ['--page', String(pageIndex + 1)] : [])
-      ].join(' '));
+      const commandInput: DocumentUtilityCommandInput = {
+        tool: 'render',
+        format: 'ctk3',
+        document: source,
+        transform: 'roundtrip',
+        documents: [],
+        pageNumber: pageIndex + 1,
+        pageShift: 0,
+        comments: [],
+        artifactFormat: renderFormat
+      };
+      updateWasmCommandText(buildDocumentUtilityCommand(commandInput));
       renderRequestedRevision = renderDocumentRevision;
       if (!renderWorkerController.run()) {
         throw new Error('the local browser render worker could not start');

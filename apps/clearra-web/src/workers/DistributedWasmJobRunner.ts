@@ -23,7 +23,11 @@ import {
   type SharedExecutionResourceLease
 } from './SharedExecutionResourceAuthority';
 
-const PRODUCER_WORK_BUDGET = 32768;
+// Canonical empty-board 4L minimals profiling put 32,768 producer steps at
+// roughly the entire 8 ms host-yield budget on native debug builds. A 2,048
+// step slice stayed below 1 ms there, leaving headroom for slower WASM/browser
+// execution while preserving the exact same resumable producer state.
+const PRODUCER_WORK_BUDGET = 2_048;
 const CANDIDATE_BATCH_SIZE = 256;
 const HOST_YIELD_BUDGET_MS = 8;
 const PROGRESS_REFRESH_MS = 50;
@@ -214,6 +218,7 @@ export class DistributedWasmJobRunner {
             plan.tilingGeometryParallel
           ),
           {
+            execution_mode: 'distributed',
             phase: progressPhase,
             producer_complete: producerComplete,
             geometry_nodes: producer.geometryNodes,

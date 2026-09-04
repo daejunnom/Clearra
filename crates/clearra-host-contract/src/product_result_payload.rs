@@ -70,6 +70,7 @@ pub enum ProductResultPayloadContent {
     SetupRankedFamily(SetupRankedFamilyPayload),
     SetupScoreRanking(SetupScoreRankingPayload),
     SpinStructureFamily(SpinStructureFamilyPayload),
+    PcScoreFieldSummary(PcScoreFieldSummaryPayload),
     ScorePatternWinnerFamily(ScorePatternWinnerFamilyPayload),
     PcPathFamily(PcPathFamilyPayload),
     PcSaveGroups(PcSaveGroupsPayload),
@@ -90,6 +91,7 @@ impl ProductResultPayloadContent {
             Self::SetupRankedFamily(payload) => payload.checked_retained_capacity_bytes(),
             Self::SetupScoreRanking(payload) => payload.checked_retained_capacity_bytes(),
             Self::SpinStructureFamily(payload) => payload.checked_retained_capacity_bytes(),
+            Self::PcScoreFieldSummary(payload) => payload.checked_retained_capacity_bytes(),
             Self::ScorePatternWinnerFamily(payload) => payload.checked_retained_capacity_bytes(),
             Self::PcPathFamily(payload) => payload.checked_retained_capacity_bytes(),
             Self::PcSaveGroups(payload) => payload.checked_retained_capacity_bytes(),
@@ -348,6 +350,8 @@ impl PcPathWitnessPayload {
 
 /// Complete ordinary path family. This is not an optimal-portfolio tie set and
 /// therefore deliberately carries no tie metadata or live alternative handle.
+/// The canonical pair is producer-owned so bounded presenters never re-rank
+/// otherwise equivalent witnesses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PcPathFamilyPayload {
@@ -357,6 +361,8 @@ pub struct PcPathFamilyPayload {
     materialized_pattern_count: String,
     witness_count: String,
     complete: bool,
+    canonical_selection: String,
+    canonical_witness: Option<PcPathWitnessPayload>,
     witnesses: Vec<PcPathWitnessPayload>,
 }
 
@@ -368,6 +374,8 @@ impl PcPathFamilyPayload {
         materialized_pattern_count: impl Into<String>,
         witness_count: impl Into<String>,
         complete: bool,
+        canonical_selection: impl Into<String>,
+        canonical_witness: Option<PcPathWitnessPayload>,
         witnesses: Vec<PcPathWitnessPayload>,
     ) -> Self {
         Self {
@@ -377,6 +385,8 @@ impl PcPathFamilyPayload {
             materialized_pattern_count: materialized_pattern_count.into(),
             witness_count: witness_count.into(),
             complete,
+            canonical_selection: canonical_selection.into(),
+            canonical_witness,
             witnesses,
         }
     }
@@ -399,6 +409,12 @@ impl PcPathFamilyPayload {
     pub const fn complete(&self) -> bool {
         self.complete
     }
+    pub fn canonical_selection(&self) -> &str {
+        &self.canonical_selection
+    }
+    pub const fn canonical_witness(&self) -> Option<&PcPathWitnessPayload> {
+        self.canonical_witness.as_ref()
+    }
     pub fn witnesses(&self) -> &[PcPathWitnessPayload] {
         &self.witnesses
     }
@@ -410,11 +426,15 @@ impl PcPathFamilyPayload {
             self.problem_id.capacity(),
             self.materialized_pattern_count.capacity(),
             self.witness_count.capacity(),
+            self.canonical_selection.capacity(),
         ]
         .into_iter()
         .try_fold(0_u128, |total, capacity| {
             total.checked_add(capacity as u128)
         })?;
+        if let Some(witness) = &self.canonical_witness {
+            bytes = bytes.checked_add(witness.checked_retained_capacity_bytes()?)?;
+        }
         bytes = bytes.checked_add(
             (self.witnesses.capacity() as u128)
                 .checked_mul(core::mem::size_of::<PcPathWitnessPayload>() as u128)?,
@@ -2391,8 +2411,8 @@ impl PcBestSaveWinnerPayload {
 /// Exact best-save ties as one ordinary, finite winner list.
 ///
 /// There is deliberately no portfolio id, alternative cursor, tie marker, or
-/// live page handle in this payload. GUI clients may page the array locally;
-/// Discord independently chooses its smallest canonical candidate id.
+/// live page handle in this payload. GUI clients may page the array locally.
+/// The App supplies the canonical pair for presenters that show one winner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PcBestSavePayload {
@@ -2402,6 +2422,8 @@ pub struct PcBestSavePayload {
     equality: String,
     page_size: String,
     winner_count: String,
+    canonical_selection: String,
+    canonical_winner: Option<PcBestSaveWinnerPayload>,
     metadata: PcSaveRunMetadataPayload,
     winners: Vec<PcBestSaveWinnerPayload>,
 }
@@ -2415,6 +2437,8 @@ impl PcBestSavePayload {
         equality: impl Into<String>,
         page_size: impl Into<String>,
         winner_count: impl Into<String>,
+        canonical_selection: impl Into<String>,
+        canonical_winner: Option<PcBestSaveWinnerPayload>,
         metadata: PcSaveRunMetadataPayload,
         winners: Vec<PcBestSaveWinnerPayload>,
     ) -> Self {
@@ -2425,6 +2449,8 @@ impl PcBestSavePayload {
             equality: equality.into(),
             page_size: page_size.into(),
             winner_count: winner_count.into(),
+            canonical_selection: canonical_selection.into(),
+            canonical_winner,
             metadata,
             winners,
         }
@@ -2454,6 +2480,14 @@ impl PcBestSavePayload {
         &self.winner_count
     }
 
+    pub fn canonical_selection(&self) -> &str {
+        &self.canonical_selection
+    }
+
+    pub const fn canonical_winner(&self) -> Option<&PcBestSaveWinnerPayload> {
+        self.canonical_winner.as_ref()
+    }
+
     pub const fn metadata(&self) -> &PcSaveRunMetadataPayload {
         &self.metadata
     }
@@ -2470,6 +2504,7 @@ impl PcBestSavePayload {
             self.equality.capacity(),
             self.page_size.capacity(),
             self.winner_count.capacity(),
+            self.canonical_selection.capacity(),
         ]
         .into_iter()
         .try_fold(0_u128, |total, capacity| {
@@ -2480,6 +2515,9 @@ impl PcBestSavePayload {
             (self.winners.capacity() as u128)
                 .checked_mul(core::mem::size_of::<PcBestSaveWinnerPayload>() as u128)?,
         )?;
+        if let Some(winner) = &self.canonical_winner {
+            bytes = bytes.checked_add(winner.checked_retained_capacity_bytes()?)?;
+        }
         for winner in &self.winners {
             bytes = bytes.checked_add(winner.checked_retained_capacity_bytes()?)?;
         }
@@ -2504,6 +2542,16 @@ pub struct CoveragePortfolioPagePayload {
     total_member_pages: String,
     members: Vec<ProductCandidateMemberPayload>,
     page_handle_available: bool,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    canonical_selection: Option<String>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    canonical_witness: Option<ProductCandidateMemberPayload>,
 }
 
 impl CoveragePortfolioPagePayload {
@@ -2539,7 +2587,21 @@ impl CoveragePortfolioPagePayload {
             total_member_pages: total_member_pages.into(),
             members,
             page_handle_available,
+            canonical_selection: None,
+            canonical_witness: None,
         }
+    }
+
+    /// Attaches a product-specific, upstream-selected witness without asking
+    /// any host adapter to choose again from `members`.
+    pub fn with_canonical_witness(
+        mut self,
+        selection: impl Into<String>,
+        witness: ProductCandidateMemberPayload,
+    ) -> Self {
+        self.canonical_selection = Some(selection.into());
+        self.canonical_witness = Some(witness);
+        self
     }
 
     pub fn set_contract(&self) -> &str {
@@ -2598,6 +2660,14 @@ impl CoveragePortfolioPagePayload {
         self.page_handle_available
     }
 
+    pub fn canonical_selection(&self) -> Option<&str> {
+        self.canonical_selection.as_deref()
+    }
+
+    pub const fn canonical_witness(&self) -> Option<&ProductCandidateMemberPayload> {
+        self.canonical_witness.as_ref()
+    }
+
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         let mut bytes = [
             self.set_contract.capacity(),
@@ -2617,6 +2687,12 @@ impl CoveragePortfolioPagePayload {
         })?;
         if let Some(total) = &self.total_alternative_count {
             bytes = bytes.checked_add(total.capacity() as u128)?;
+        }
+        if let Some(selection) = &self.canonical_selection {
+            bytes = bytes.checked_add(selection.capacity() as u128)?;
+        }
+        if let Some(witness) = &self.canonical_witness {
+            bytes = bytes.checked_add(witness.checked_retained_capacity_bytes()?)?;
         }
         bytes = bytes.checked_add(
             (self.members.capacity() as u128)
@@ -2661,6 +2737,222 @@ impl ProductCandidateMemberPayload {
     }
 }
 
+/// Closed Host payload for the ordinary `pc.score` field-average product.
+///
+/// It has exactly one row per normalized solution field. Each row averages
+/// that field over the whole materialized pattern universe, assigning zero to
+/// patterns the field cannot solve. Candidate IDs, attack values, trace
+/// selectors and portfolio membership are deliberately absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PcScoreFieldSummaryPayload {
+    field_contract: String,
+    ordering: String,
+    solution_field_average_basis: String,
+    score_evaluation_basis: String,
+    score_evaluation_scope: String,
+    overall_score_basis: String,
+    piece_source_id: String,
+    pattern_universe_id: String,
+    pattern_weight_model_id: String,
+    materialized_pattern_count: String,
+    solution_field_count: String,
+    scored_pattern_count: String,
+    failed_pc_pattern_count: String,
+    covered_probability: String,
+    overall_score: String,
+    score_covered_pattern_conditional_average_score: Option<String>,
+    complete: bool,
+    fields: Vec<PcScoreFieldPayload>,
+}
+
+impl PcScoreFieldSummaryPayload {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        field_contract: impl Into<String>,
+        ordering: impl Into<String>,
+        solution_field_average_basis: impl Into<String>,
+        score_evaluation_basis: impl Into<String>,
+        score_evaluation_scope: impl Into<String>,
+        overall_score_basis: impl Into<String>,
+        piece_source_id: impl Into<String>,
+        pattern_universe_id: impl Into<String>,
+        pattern_weight_model_id: impl Into<String>,
+        materialized_pattern_count: impl Into<String>,
+        solution_field_count: impl Into<String>,
+        scored_pattern_count: impl Into<String>,
+        failed_pc_pattern_count: impl Into<String>,
+        covered_probability: impl Into<String>,
+        overall_score: impl Into<String>,
+        score_covered_pattern_conditional_average_score: Option<String>,
+        complete: bool,
+        fields: Vec<PcScoreFieldPayload>,
+    ) -> Self {
+        Self {
+            field_contract: field_contract.into(),
+            ordering: ordering.into(),
+            solution_field_average_basis: solution_field_average_basis.into(),
+            score_evaluation_basis: score_evaluation_basis.into(),
+            score_evaluation_scope: score_evaluation_scope.into(),
+            overall_score_basis: overall_score_basis.into(),
+            piece_source_id: piece_source_id.into(),
+            pattern_universe_id: pattern_universe_id.into(),
+            pattern_weight_model_id: pattern_weight_model_id.into(),
+            materialized_pattern_count: materialized_pattern_count.into(),
+            solution_field_count: solution_field_count.into(),
+            scored_pattern_count: scored_pattern_count.into(),
+            failed_pc_pattern_count: failed_pc_pattern_count.into(),
+            covered_probability: covered_probability.into(),
+            overall_score: overall_score.into(),
+            score_covered_pattern_conditional_average_score,
+            complete,
+            fields,
+        }
+    }
+
+    pub fn field_contract(&self) -> &str {
+        &self.field_contract
+    }
+    pub fn ordering(&self) -> &str {
+        &self.ordering
+    }
+    pub fn solution_field_average_basis(&self) -> &str {
+        &self.solution_field_average_basis
+    }
+    pub fn score_evaluation_basis(&self) -> &str {
+        &self.score_evaluation_basis
+    }
+    pub fn score_evaluation_scope(&self) -> &str {
+        &self.score_evaluation_scope
+    }
+    pub fn overall_score_basis(&self) -> &str {
+        &self.overall_score_basis
+    }
+    pub fn piece_source_id(&self) -> &str {
+        &self.piece_source_id
+    }
+    pub fn pattern_universe_id(&self) -> &str {
+        &self.pattern_universe_id
+    }
+    pub fn pattern_weight_model_id(&self) -> &str {
+        &self.pattern_weight_model_id
+    }
+    pub fn materialized_pattern_count(&self) -> &str {
+        &self.materialized_pattern_count
+    }
+    pub fn solution_field_count(&self) -> &str {
+        &self.solution_field_count
+    }
+    pub fn scored_pattern_count(&self) -> &str {
+        &self.scored_pattern_count
+    }
+    pub fn failed_pc_pattern_count(&self) -> &str {
+        &self.failed_pc_pattern_count
+    }
+    pub fn covered_probability(&self) -> &str {
+        &self.covered_probability
+    }
+    pub fn overall_score(&self) -> &str {
+        &self.overall_score
+    }
+    pub fn score_covered_pattern_conditional_average_score(&self) -> Option<&str> {
+        self.score_covered_pattern_conditional_average_score
+            .as_deref()
+    }
+    pub const fn complete(&self) -> bool {
+        self.complete
+    }
+    pub fn fields(&self) -> &[PcScoreFieldPayload] {
+        &self.fields
+    }
+
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = [
+            &self.field_contract,
+            &self.ordering,
+            &self.solution_field_average_basis,
+            &self.score_evaluation_basis,
+            &self.score_evaluation_scope,
+            &self.overall_score_basis,
+            &self.piece_source_id,
+            &self.pattern_universe_id,
+            &self.pattern_weight_model_id,
+            &self.materialized_pattern_count,
+            &self.solution_field_count,
+            &self.scored_pattern_count,
+            &self.failed_pc_pattern_count,
+            &self.covered_probability,
+            &self.overall_score,
+        ]
+        .into_iter()
+        .try_fold(0_u128, |total, value| {
+            total.checked_add(value.capacity() as u128)
+        })?;
+        if let Some(value) = &self.score_covered_pattern_conditional_average_score {
+            bytes = bytes.checked_add(value.capacity() as u128)?;
+        }
+        bytes = bytes.checked_add(
+            (self.fields.capacity() as u128)
+                .checked_mul(core::mem::size_of::<PcScoreFieldPayload>() as u128)?,
+        )?;
+        for field in &self.fields {
+            bytes = bytes.checked_add(field.checked_retained_capacity_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PcScoreFieldPayload {
+    normalized_field_key: String,
+    average_score: String,
+    covered_pattern_count: String,
+    pattern_count: String,
+    score_complete: bool,
+}
+
+impl PcScoreFieldPayload {
+    pub fn new(
+        normalized_field_key: impl Into<String>,
+        average_score: impl Into<String>,
+        covered_pattern_count: impl Into<String>,
+        pattern_count: impl Into<String>,
+        score_complete: bool,
+    ) -> Self {
+        Self {
+            normalized_field_key: normalized_field_key.into(),
+            average_score: average_score.into(),
+            covered_pattern_count: covered_pattern_count.into(),
+            pattern_count: pattern_count.into(),
+            score_complete,
+        }
+    }
+
+    pub fn normalized_field_key(&self) -> &str {
+        &self.normalized_field_key
+    }
+    pub fn average_score(&self) -> &str {
+        &self.average_score
+    }
+    pub fn covered_pattern_count(&self) -> &str {
+        &self.covered_pattern_count
+    }
+    pub fn pattern_count(&self) -> &str {
+        &self.pattern_count
+    }
+    pub const fn score_complete(&self) -> bool {
+        self.score_complete
+    }
+
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        (self.normalized_field_key.capacity() as u128)
+            .checked_add(self.average_score.capacity() as u128)?
+            .checked_add(self.covered_pattern_count.capacity() as u128)?
+            .checked_add(self.pattern_count.capacity() as u128)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScorePatternWinnerFamilyPayload {
@@ -2670,6 +2962,8 @@ pub struct ScorePatternWinnerFamilyPayload {
     informational_attack_basis: String,
     page_size: String,
     winner_count: String,
+    canonical_selection: String,
+    canonical_winner: ScorePatternWinnerPayload,
     winners: Vec<ScorePatternWinnerPayload>,
 }
 
@@ -2681,6 +2975,8 @@ impl ScorePatternWinnerFamilyPayload {
         informational_attack_basis: impl Into<String>,
         page_size: impl Into<String>,
         winner_count: impl Into<String>,
+        canonical_selection: impl Into<String>,
+        canonical_winner: ScorePatternWinnerPayload,
         winners: Vec<ScorePatternWinnerPayload>,
     ) -> Self {
         Self {
@@ -2690,6 +2986,8 @@ impl ScorePatternWinnerFamilyPayload {
             informational_attack_basis: informational_attack_basis.into(),
             page_size: page_size.into(),
             winner_count: winner_count.into(),
+            canonical_selection: canonical_selection.into(),
+            canonical_winner,
             winners,
         }
     }
@@ -2718,6 +3016,14 @@ impl ScorePatternWinnerFamilyPayload {
         &self.winner_count
     }
 
+    pub fn canonical_selection(&self) -> &str {
+        &self.canonical_selection
+    }
+
+    pub const fn canonical_winner(&self) -> &ScorePatternWinnerPayload {
+        &self.canonical_winner
+    }
+
     pub fn winners(&self) -> &[ScorePatternWinnerPayload] {
         &self.winners
     }
@@ -2730,11 +3036,13 @@ impl ScorePatternWinnerFamilyPayload {
             self.informational_attack_basis.capacity(),
             self.page_size.capacity(),
             self.winner_count.capacity(),
+            self.canonical_selection.capacity(),
         ]
         .into_iter()
         .try_fold(0_u128, |total, capacity| {
             total.checked_add(capacity as u128)
         })?;
+        bytes = bytes.checked_add(self.canonical_winner.checked_retained_capacity_bytes()?)?;
         bytes = bytes.checked_add(
             (self.winners.capacity() as u128)
                 .checked_mul(core::mem::size_of::<ScorePatternWinnerPayload>() as u128)?,
@@ -3022,5 +3330,39 @@ mod tests {
             ),
             Err(BuildSetupFamilyPayloadError::CountMismatch)
         );
+    }
+
+    #[test]
+    fn score_winner_family_requires_and_round_trips_the_core_owned_witness() {
+        let canonical = ScorePatternWinnerPayload::new("0", "2", "solution-2", "1200", "9");
+        let family = ScorePatternWinnerFamilyPayload::new(
+            "pc-score-pattern-winner.v1",
+            "pattern-id-ascending-then-candidate-id-ascending",
+            "score-only-attack-informational",
+            "canonical-equal-score-trace",
+            "100",
+            "1",
+            "smallest-canonical-candidate-id",
+            canonical.clone(),
+            vec![canonical],
+        );
+        let value = serde_json::to_value(&family).expect("score winner family JSON");
+        assert_eq!(
+            serde_json::from_value::<ScorePatternWinnerFamilyPayload>(value.clone())
+                .expect("typed score winner family"),
+            family
+        );
+
+        for missing in ["canonical_selection", "canonical_winner"] {
+            let mut incomplete = value.clone();
+            incomplete
+                .as_object_mut()
+                .expect("family object")
+                .remove(missing);
+            assert!(
+                serde_json::from_value::<ScorePatternWinnerFamilyPayload>(incomplete).is_err(),
+                "{missing} must be mandatory"
+            );
+        }
     }
 }

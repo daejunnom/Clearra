@@ -40,6 +40,7 @@ mod pc_minimum_cover_result;
 mod pc_path_result;
 mod pc_result_projection;
 mod pc_save_result;
+mod pc_score_field_result;
 mod pc_score_minimum_cover_result;
 mod pc_score_postprocess;
 mod pc_score_summary_result;
@@ -140,6 +141,7 @@ pub use clearra_core_executor::{
 pub use clearra_core_executor::{
     FinesseReport, FinesseReportInput, FinesseReportPlacement, FinesseRepresentativeWitness,
 };
+pub use clearra_forward_search::ForwardSearchOutcome;
 pub use clearra_host_contract::{
     AppCommandKind, AppResult, BackendPolicy, BackendReport, CapabilityReport, ContinuationReport,
     DiagnosticsPolicy, LocalePolicy, OutputPolicy, ProductBuildIdentity, QueryEnvelope,
@@ -170,7 +172,8 @@ pub use distributed_forward_execution::{
     DistributedForwardPreparation, PreparedDistributedForwardSearch,
 };
 pub use distributed_search_execution::{
-    DistributedSearchPreparation, PreparedDistributedSearch, PreparedDistributedSearchCompletion,
+    DistributedSearchPreparation, PreparedDistributedPcScoreCompletion, PreparedDistributedSearch,
+    PreparedDistributedSearchCompletion,
 };
 pub use distributed_setup_execution::{
     DistributedSetupPreparation, PreparedDistributedSetupSearch,
@@ -196,13 +199,14 @@ pub use pc_failed_queue_result::{
 };
 pub use pc_minimum_cover_result::{
     PcMinimalsIngressOrigin, PcMinimumCoverCompletenessEvidence, PcMinimumCoverProblemPreset,
-    PcMinimumCoverQuerySnapshot, PcMinimumCoverV2Result, PC_MINIMUM_COVER_INPUT_CONTRACT,
-    PC_MINIMUM_COVER_PROBLEM_CONTRACT, PC_MINIMUM_COVER_RESULT_CONTRACT,
+    PcMinimumCoverQuerySnapshot, PcMinimumCoverV2Result, PC_MINIMUM_COVER_CANONICAL_SELECTION,
+    PC_MINIMUM_COVER_INPUT_CONTRACT, PC_MINIMUM_COVER_PROBLEM_CONTRACT,
+    PC_MINIMUM_COVER_RESULT_CONTRACT,
 };
 pub use pc_path_result::{
     PcPathCompletenessEvidence, PcPathFamilyV2Result, PcPathIngressOrigin, PcPathProblemPreset,
-    PcPathQuerySnapshot, PcPathStepV2, PcPathWitnessV2, PC_PATH_FAMILY_RESULT_CONTRACT,
-    PC_PATH_ORDERING, PC_PATH_WITNESS_CONTRACT,
+    PcPathQuerySnapshot, PcPathStepV2, PcPathWitnessV2, PC_PATH_CANONICAL_SELECTION,
+    PC_PATH_FAMILY_RESULT_CONTRACT, PC_PATH_ORDERING, PC_PATH_WITNESS_CONTRACT,
 };
 pub use pc_result_projection::{
     PcResultProjection, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
@@ -212,7 +216,13 @@ pub use pc_save_result::{
     PcBestSaveV2Result, PcBestSaveWinnerV2, PcSaveCompletenessEvidence, PcSaveExactProbability,
     PcSaveGroupV2, PcSaveGroupsV2Result, PcSaveIngressOrigin, PcSavePieceMultiset,
     PcSaveProblemPreset, PcSaveQuerySnapshot, PcSaveResultMode, PcSaveWitness,
-    PC_BEST_SAVE_RESULT_CONTRACT, PC_BEST_SAVE_SCHEMA, PC_SAVE_GROUPS_RESULT_CONTRACT,
+    PC_BEST_SAVE_CANONICAL_SELECTION, PC_BEST_SAVE_RESULT_CONTRACT, PC_BEST_SAVE_SCHEMA,
+    PC_SAVE_GROUPS_RESULT_CONTRACT,
+};
+pub use pc_score_field_result::{
+    PcScoreSolutionFieldAverageV1, PC_SCORE_OVERALL_SCORE_BASIS,
+    PC_SCORE_SOLUTION_FIELD_AVERAGE_BASIS, PC_SCORE_SOLUTION_FIELD_CONTRACT,
+    PC_SCORE_SOLUTION_FIELD_ORDERING,
 };
 pub use pc_score_minimum_cover_result::{
     PcScoreEligibleCandidateV2, PcScoreEligiblePatternV2, PcScoreMinimalsIngressOrigin,
@@ -224,7 +234,8 @@ pub use pc_score_summary_result::{
     PcScoreSummaryV2Result,
 };
 pub use pc_score_winner_result::{
-    PcScorePatternWinnerV1, PC_SCORE_INFORMATIONAL_ATTACK_BASIS, PC_SCORE_PATTERN_WINNER_CONTRACT,
+    PcScorePatternWinnerV1, PC_SCORE_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+    PC_SCORE_PATTERN_WINNER_CONTRACT,
 };
 pub use pc_tiling_family_result::{
     PcTilingCompletenessEvidence, PcTilingFamilyV1Result, PcTilingIngressOrigin,

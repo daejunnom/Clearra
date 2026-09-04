@@ -180,6 +180,7 @@ version = "0.8.0"
 dependencies = [
  "clearra-app",
  "clearra-build-coverage",
+ "clearra-cli-command",
  "clearra-core-domain",
  "clearra-coverage",
  "clearra-fumen",
@@ -196,11 +197,27 @@ dependencies = [
  "clearra-spin-structure-search",
  "clearra-supply",
  "clearra-validation",
- "clearra-web-command",
  "getrandom",
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "clearra-cli-command"
+version = "0.8.0"
+dependencies = [
+ "clearra-app",
+ "clearra-core-domain",
+ "clearra-forward-search",
+ "clearra-fumen",
+ "clearra-objectives",
+ "clearra-pc-graph",
+ "clearra-problem",
+ "clearra-rules",
+ "clearra-scoring",
+ "clearra-spin-structure-search",
+ "clearra-supply",
 ]
 
 [[package]]
@@ -313,6 +330,7 @@ version = "0.8.0"
 dependencies = [
  "clearra-app",
  "clearra-build-coverage",
+ "clearra-cli-command",
  "clearra-core-domain",
  "clearra-forward-search",
  "clearra-host-contract",
@@ -327,7 +345,6 @@ dependencies = [
  "clearra-ui-schema",
  "clearra-validation",
  "clearra-wasm",
- "clearra-web-command",
  "serde",
  "serde_json",
 ]
@@ -623,6 +640,7 @@ name = "clearra-wasm"
 version = "0.8.0"
 dependencies = [
  "clearra-app",
+ "clearra-cli-command",
  "clearra-core-domain",
  "clearra-core-executor",
  "clearra-coverage",
@@ -631,7 +649,6 @@ dependencies = [
  "clearra-pc-graph",
  "clearra-problem",
  "clearra-spin-structure-search",
- "clearra-web-command",
  "serde_json",
 ]
 
@@ -643,23 +660,6 @@ dependencies = [
  "clearra-wasm",
  "serde_json",
  "wasm-bindgen-futures",
-]
-
-[[package]]
-name = "clearra-web-command"
-version = "0.8.0"
-dependencies = [
- "clearra-app",
- "clearra-core-domain",
- "clearra-forward-search",
- "clearra-fumen",
- "clearra-objectives",
- "clearra-pc-graph",
- "clearra-problem",
- "clearra-rules",
- "clearra-scoring",
- "clearra-spin-structure-search",
- "clearra-supply",
 ]
 
 [[package]]

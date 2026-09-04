@@ -20,6 +20,7 @@ use crate::portfolio_alternative_store::{
 pub const PC_MINIMUM_COVER_PROBLEM_CONTRACT: &str = "pc-clear-to-empty.v2";
 pub const PC_MINIMUM_COVER_INPUT_CONTRACT: &str = "pc-pattern.v2";
 pub const PC_MINIMUM_COVER_RESULT_CONTRACT: &str = "pc-minimum-cover.v2";
+pub const PC_MINIMUM_COVER_CANONICAL_SELECTION: &str = "smallest-canonical-candidate-id";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PcMinimalsIngressOrigin {
@@ -171,6 +172,22 @@ impl PcMinimumCoverV2Result {
 
     pub fn portfolio_alternative_owner(&self) -> &Arc<CoveragePortfolioAlternativeSet> {
         &self.portfolio_alternatives
+    }
+
+    /// Canonical candidate selected by the exact-cover producer's stable
+    /// candidate-id order. Presenters consume this identity; they do not
+    /// re-rank the page locally.
+    pub fn canonical_candidate(&self) -> Option<(u64, &str)> {
+        let set = self.portfolio_alternatives();
+        let candidate_id = *set.canonical_page().portfolio().candidate_ids().first()?;
+        let index: usize = candidate_id.checked_sub(1)?.try_into().ok()?;
+        let candidate = set.candidates().get(index)?;
+        (candidate.candidate_id() == candidate_id)
+            .then_some((candidate_id, candidate.normalized_key()))
+    }
+
+    pub const fn canonical_selection(&self) -> &'static str {
+        PC_MINIMUM_COVER_CANONICAL_SELECTION
     }
 
     pub const fn completeness(&self) -> PcMinimumCoverCompletenessEvidence {

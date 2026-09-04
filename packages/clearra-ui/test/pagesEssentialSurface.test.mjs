@@ -43,6 +43,7 @@ test('Pages exposes the exact v0.7.5 essential navigation without deleting advan
 test('CTK owns the Pages render entry and executes it through the local browser worker', () => {
   const route = source('../../../apps/clearra-web/src/routes/+page.svelte');
   const ctk = source('../src/lib/workspace/CtkDrawerWorkspace.svelte');
+  const documentUtilityModel = source('../src/lib/workspace/documentUtilityModel.ts');
   const wasmRuntime = source('../../../apps/clearra-web/src/workers/clearraWasmRuntime.ts');
   const tablebaseAssets = source('../../../apps/clearra-web/src/workers/pc4TablebaseAssets.ts');
 
@@ -50,10 +51,13 @@ test('CTK owns the Pages render entry and executes it through the local browser 
   assert.match(route, /return new Worker\(new URL\('\.\.\/workers\/clearraWorker\.ts'/u);
   assert.match(ctk, /new WasmTerminalWorkerController\([\s\S]*?workerFactory/u);
   assert.match(ctk, /const source = await encodeDocument\('ctk', controller\.signal\)/u);
-  assert.match(ctk, /'clearra utility render'/u);
+  assert.match(ctk, /buildDocumentUtilityCommand\(commandInput\)/u);
+  assert.doesNotMatch(ctk, /quoteWebCommandToken|clearra utility render/u);
   assert.match(ctk, /updateWasmCommandText/u);
   assert.match(ctk, /renderWorkerController\.run\(\)/u);
-  assert.match(ctk, /renderFormat === 'png' \? \['--page', String\(pageIndex \+ 1\)\] : \[\]/u);
+  assert.match(documentUtilityModel, /buildDocumentUtilityCommandArguments/u);
+  assert.match(documentUtilityModel, /serializeCliCommandArguments\(buildDocumentUtilityCommandArguments\(input\)\)/u);
+  assert.match(documentUtilityModel, /input\.artifactFormat === 'png'[\s\S]*?arguments_\.push\('--page', String\(input\.pageNumber\)\)/u);
   assert.match(ctk, /decodeValidatedRenderArtifact/u);
   assert.doesNotMatch(ctk, /\bfetch\s*\(|\bWebSocket\b|\bXMLHttpRequest\b/u);
 

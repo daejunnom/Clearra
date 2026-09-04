@@ -164,6 +164,17 @@ run_json_smoke() {
         printf 'Clearra CLI %s smoke violated the Discord canonical projection contract\n' "$name" >&2
         exit 2
     fi
+    case "$name" in
+        pc-path|pc-minimals|pc-score|pc-score-finder|pc-saves|pc-best-save|forward-ren)
+            if ! printf '%s' "$json" | \
+                node "$ROOT/scripts/tools/validate-release-cli-smokes.mjs" \
+                    --validate-discord-canonical-result-json "$name"
+            then
+                printf 'Clearra CLI %s smoke violated the Discord core-owned canonical result contract\n' "$name" >&2
+                exit 2
+            fi
+            ;;
+    esac
 }
 
 run_json_smoke rules '{}' \
@@ -188,6 +199,34 @@ run_json_smoke pc-srs-x \
     '{"rule_profile":"srs-x","effective_kick_model":"srs-x","solution_found":true}' \
     --format json pc --lines 2 --queue IIOOO --fixed --no-hold \
     --rule srs-x --backend cpu --workers 1
+run_json_smoke pc-path \
+    '{"kind":"pc-path-family.v2","command_kind":"pc-path-family.v2","summary":{"capability_id":"pc.path","canonical_selection":"smallest-canonical-candidate-id","complete":true}}' \
+    --format json pc path \
+    --board-mask 0x3f0 --height 1 --pieces 1 --lines 1 --queue I
+run_json_smoke pc-minimals \
+    '{"kind":"pc-minimum-cover.v2","command_kind":"pc-minimum-cover.v2","summary":{"capability_id":"pc.minimals","canonical_selection":"smallest-canonical-candidate-id","alternative_index":"1","member_page_number":"1"}}' \
+    --format json pc minimals \
+    --board-mask 0x3f0 --height 1 --pieces 1 --lines 1 --queue I
+run_json_smoke pc-score \
+    '{"kind":"pc-score-summary.v2","command_kind":"pc-score-summary.v2","summary":{"capability_id":"pc.score","payload_kind":"pc-score-field-summary","score_solution_field_contract":"pc-score-solution-field-average.v1","score_solution_field_average_basis":"whole-materialized-pattern-universe-failed-pc-zero","score_overall_basis":"all-materialized-patterns-failed-pc-zero","score_summary_complete":true}}' \
+    --format json pc score \
+    --board-mask 0x3f0 --height 1 --pieces 1 --lines 1 --queue I
+run_json_smoke pc-score-finder \
+    '{"kind":"pc-fixed-score-witness.v2","command_kind":"pc-fixed-score-witness.v2","summary":{"capability_id":"pc.score-finder","score_pattern_canonical_selection":"smallest-canonical-candidate-id","score_pattern_winner_complete":true}}' \
+    --format json pc score-finder \
+    --board-mask 0x3f0 --height 1 --pieces 1 --lines 1 --queue I
+run_json_smoke pc-saves \
+    '{"kind":"pc-save-groups.v2","command_kind":"pc-save-groups.v2","summary":{"save_contract":"pc-save-groups.v2"}}' \
+    --format json pc saves \
+    --board-mask 0x3f0 --height 1 --pieces 1 --lines 1 --patterns I
+run_json_smoke pc-best-save \
+    '{"kind":"pc-best-save.v2","command_kind":"pc-best-save.v2","summary":{"best_save_contract":"pc-best-save.v2","best_save_canonical_selection":"smallest-canonical-candidate-id"}}' \
+    --format json pc best-save \
+    --board-mask 0x3f0 --height 1 --pieces 1 --lines 1 --patterns I
+run_json_smoke forward-ren \
+    '{"kind":"ren","command_kind":"ren","summary":{"complete":true,"maximum_ren":0}}' \
+    --format json --include-solution-data ren \
+    --board-mask 0x3f --height 4 --queue I --no-hold --workers 1
 run_json_smoke pc-score-minimals \
     '{"kind":"pc-score-portfolio.v2","summary":{"capability_id":"pc.score-minimals","result_contract":"pc-score-portfolio.v2","payload_kind":"coverage-portfolio","alternative_index":"1","member_page_number":"1","page_handle_available":true,"score_minimals_score_equality":"score-only","score_minimals_attack_role":"informational-only","score_minimals_canonical_selection":"smallest-canonical-candidate-id"},"resource_report":{"probability_complete":true,"count_complete":true,"truncated":false,"truncation_reason":null,"count_truncated_reason":null,"renormalized":false}}' \
     --format json pc score-minimals \

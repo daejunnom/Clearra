@@ -159,6 +159,42 @@ fn pc_allspin_subcommands_route_to_the_shared_product_boundary() {
 }
 
 #[test]
+fn gui_pc_full_solution_argv_routes_to_the_shared_compiler_and_keeps_legacy_pc_intact() {
+    let expected =
+        include_str!("../../../../tests/fixtures/contracts/gui_pc_full_solution_argv.tsv")
+            .trim_end()
+            .split('\t')
+            .collect::<Vec<_>>();
+
+    for count in ["unique", "all"] {
+        let mut arguments = expected.clone();
+        let count_index = arguments
+            .iter()
+            .position(|argument| *argument == "--count")
+            .expect("GUI PC argv count option")
+            + 1;
+        arguments[count_index] = count;
+        let parsed = CliParser::parse(arguments.iter().copied())
+            .unwrap_or_else(|error| panic!("canonical GUI PC argv: {error:?}"))
+            .into_command();
+        let ParsedCliCommand::Product(tokens) = parsed else {
+            panic!("GUI PC full-solution argv must use the shared CLI compiler");
+        };
+        assert_eq!(
+            tokens.iter().map(String::as_str).collect::<Vec<_>>(),
+            arguments
+        );
+    }
+
+    assert!(matches!(
+        CliParser::parse(["clearra", "pc", "--lines", "2", "--queue", "IOTSZ", "--fixed"])
+            .expect("v0.7.4 native PC compatibility invocation")
+            .into_command(),
+        ParsedCliCommand::Pc(_)
+    ));
+}
+
+#[test]
 fn pc_minimals_routes_only_the_grouped_canonical_spelling_to_product_help_and_tokens() {
     let help = CliParser::parse(["clearra", "pc", "minimals", "--help"])
         .expect("canonical pc minimals help")

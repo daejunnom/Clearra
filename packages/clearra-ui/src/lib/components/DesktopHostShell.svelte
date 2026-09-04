@@ -6,11 +6,9 @@
     desktopJobState,
     disposeDesktopJobPolling,
     resumeDesktopJobPolling,
-    startDesktopJob,
-    updateDesktopRequest
+    startDesktopJob
   } from '../stores';
   import RenderStatusPanel from '../render/RenderStatusPanel.svelte';
-  import QueueTextInput from './QueueTextInput.svelte';
 
   $: state = $desktopJobState;
   $: capability = state.result?.capability_report.render_capability ?? null;
@@ -31,7 +29,7 @@
         <p>{state.status}</p>
       </div>
       <div class="actions">
-        <button type="button" on:click={startDesktopJob} disabled={jobActive || !state.request.queue}>
+        <button type="button" on:click={startDesktopJob} disabled={jobActive}>
           Run
         </button>
         <button
@@ -46,80 +44,27 @@
     </header>
 
     <div class="layout">
-      <form class="panel" aria-label="PC request">
-        <label>
-          Lines
-          <input
-            type="number"
-            min="1"
-            max="6"
-            value={state.request.lines}
-            on:input={(event) =>
-              updateDesktopRequest({
-                lines: Number((event.currentTarget as HTMLInputElement).value)
-              })}
-          />
-        </label>
-
-        <label>
-          Fixed queue
-          <QueueTextInput
-            type="text"
-            value={state.request.queue}
-            placeholder="IIOOO"
-            on:value={(event) => updateDesktopRequest({ queue: event.detail })}
-          />
-        </label>
-
-        <label>
-          <input
-            type="checkbox"
-            checked={state.request.hold_enabled}
-            on:change={(event) =>
-              updateDesktopRequest({
-                hold_enabled: (event.currentTarget as HTMLInputElement).checked
-              })}
-          />
-          Hold enabled
-        </label>
-
-        <label>
-          Backend
-          <select
-            value={state.request.backend}
-            on:change={(event) =>
-              updateDesktopRequest({
-                backend: (event.currentTarget as HTMLSelectElement)
-                  .value as typeof state.request.backend
-              })}
-          >
-            <option value="auto">Auto</option>
-            <option value="cpu">CPU</option>
-            <option value="gpu">GPU</option>
-            <option value="hybrid">Hybrid</option>
-          </select>
-        </label>
-
-        <label>
-          Rule
-          <select
-            value={state.request.rule}
-            on:change={(event) =>
-              updateDesktopRequest({ rule: (event.currentTarget as HTMLSelectElement).value })}
-          >
-            <option value="srs-plus">SRS+</option>
-            <option value="srs">SRS</option>
-            <option value="no-kick">NoKick</option>
-          </select>
-        </label>
-      </form>
+      <section class="panel" aria-label="Canonical CLI request">
+        <h2>CLI request</h2>
+        <p class="request-command">{state.request.arguments.join(' ')}</p>
+        <dl>
+          <div>
+            <dt>Language</dt>
+            <dd>{state.request.language}</dd>
+          </div>
+          <div>
+            <dt>Arguments</dt>
+            <dd>{state.request.arguments.length}</dd>
+          </div>
+        </dl>
+      </section>
 
       <section class="panel" aria-label="Backend status">
         <h2>Backend</h2>
         <dl>
           <div>
             <dt>Requested</dt>
-            <dd>{state.backendStatus?.backend_requested ?? state.request.backend}</dd>
+            <dd>{state.backendStatus?.backend_requested ?? 'pending'}</dd>
           </div>
           <div>
             <dt>Selected</dt>
@@ -131,7 +76,7 @@
           </div>
           <div>
             <dt>Boundary</dt>
-            <dd>clearra-app/AppRequest</dd>
+            <dd>clearra-cli/CommandRequest</dd>
           </div>
           <div>
             <dt>Job</dt>
@@ -260,20 +205,6 @@
     margin-top: 16px;
   }
 
-  form {
-    display: grid;
-    gap: 14px;
-  }
-
-  label {
-    display: grid;
-    gap: 6px;
-    color: #d4d4d8;
-    font-size: 13px;
-  }
-
-  input,
-  select,
   button {
     border: 1px solid #3f424b;
     border-radius: 6px;

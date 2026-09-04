@@ -8,14 +8,16 @@ import {
   solutionPageResultIdentity
 } from '../src/lib/workspace/solutionPageSource.ts';
 
-test('paged solution export reads every key beyond the materialized first page', async () => {
-  const allKeys = Array.from({ length: 101 }, (_, index) => `key-${index}`);
-  let identity = 'hash:cts1:test:count:101';
+test('paged solution export reads every key beyond the materialized first hundred', async () => {
+  const allKeys = Array.from({ length: 201 }, (_, index) => `key-${index}`);
+  const requests = [];
+  let identity = 'hash:cts1:test:count:201';
   const loader = bindSolutionPageLoader({
     keyCount: allKeys.length,
     resultIdentity: identity,
     currentResultIdentity: () => identity,
     async loadPage(offset, limit) {
+      requests.push([offset, limit]);
       return {
         keys: allKeys.slice(offset, offset + limit),
         total: allKeys.length
@@ -25,10 +27,15 @@ test('paged solution export reads every key beyond the materialized first page',
   const source = createPagedSolutionExportKeySource({
     keyCount: allKeys.length,
     loadPage: loader,
-    pageSize: 37
+    pageSize: 100
   });
 
   assert.deepEqual(await source.readKeys(0, allKeys.length), allKeys);
+  assert.deepEqual(requests, [
+    [0, 100],
+    [100, 100],
+    [200, 1]
+  ]);
 });
 
 test('bound page loaders reject totals and ranges that do not match the result', async () => {

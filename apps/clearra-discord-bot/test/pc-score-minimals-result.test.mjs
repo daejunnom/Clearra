@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   discordPcScoreMinimalsResultProjection,
   discordPcScoreMinimalsSummaryLines,
+  projectDiscordPcScoreMinimalsCanonicalResult,
   validDiscordPcScoreMinimalsResult,
 } from "../src/discord/pc-score-minimals-result.mjs";
 
@@ -76,6 +77,49 @@ test("score-minimals validates a complete canonical portfolio but publishes only
   );
 });
 
+test("score-minimals rejects canonical candidate IDs outside the positive u64 domain", () => {
+  for (const candidateId of ["0", "18446744073709551616"]) {
+    const result = validResult();
+    result.summary.score_minimals_canonical_candidate_id = candidateId;
+    result.summary.members[0].candidate_id = candidateId;
+    assert.equal(validDiscordPcScoreMinimalsResult(result), false);
+  }
+});
+
+test("score-minimals canonical projection keeps one artifact by numeric ID and removes attack observations", () => {
+  const result = validResult();
+  result.summary.optimal_cardinality = "2";
+  result.summary.members.push({
+    candidate_id: "10",
+    normalized_solution_key: "pc:solution:10",
+    informational_attack: 999,
+  });
+  result.contract.artifacts = {
+    schema_version: "clearra.solution-data.v1",
+    solution_keys: ["pc:solution:10", "pc:solution:02"],
+    solution_classes: ["lexical-first", "numeric-first"],
+    solution_probabilities: [
+      { solution_key: "pc:solution:10", probability: 0.9 },
+      { solution_key: "pc:solution:02", probability: 0.1 },
+    ],
+  };
+
+  const projected = projectDiscordPcScoreMinimalsCanonicalResult(result);
+  assert.deepEqual(projected.contract.artifacts.solution_keys, ["pc:solution:02"]);
+  assert.deepEqual(projected.contract.artifacts.solution_classes, ["numeric-first"]);
+  assert.deepEqual(projected.contract.artifacts.solution_probabilities, [
+    { solution_key: "pc:solution:02", probability: 0.1 },
+  ]);
+  assert.equal(projected.summary.score_minimals_canonical_candidate_id, "2");
+  assert.equal(Object.hasOwn(projected.summary, "score_best_attack"), false);
+  assert.equal(Object.hasOwn(projected.summary.members[1], "informational_attack"), false);
+  assert.equal(validDiscordPcScoreMinimalsResult(projected), true);
+  assert.deepEqual(
+    projectDiscordPcScoreMinimalsCanonicalResult(projected),
+    projected,
+  );
+});
+
 test("score-minimals accepts an open canonical enumeration only with an unknown total", () => {
   const result = validResult();
   result.summary.enumeration_complete = false;
@@ -131,6 +175,8 @@ test("score-minimals fails closed on incomplete evidence and forged canonical fi
     (result) => { result.summary.score_minimals_canonical_candidate_id = "0"; },
     (result) => { result.summary.score_minimals_canonical_candidate_id = "02"; },
     (result) => { result.summary.score_minimals_canonical_solution_key = "@everyone"; },
+    (result) => { delete result.summary.score_minimals_canonical_candidate_id; },
+    (result) => { delete result.summary.score_minimals_canonical_solution_key; },
   ]) {
     const result = validResult();
     mutate(result);

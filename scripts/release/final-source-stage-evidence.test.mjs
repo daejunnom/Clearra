@@ -21,9 +21,18 @@ import {
   validateOracleRollbackCapture,
 } from "./final-source-stage-evidence.mjs";
 import { canonicalSha256, sealCanonicalReport } from "./canonical-release-evidence.mjs";
-import { createReleaseGateReports } from "./canonical-acceptance-evidence.mjs";
+import {
+  CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES,
+  createReleaseGateReports,
+} from "./canonical-acceptance-evidence.mjs";
 import { createCanonicalDiscordCatalog } from "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
-import { expectedCaptureArtifactName } from "./pages-rollback-authority.mjs";
+import {
+  PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID,
+} from "./pages-deployment-authority.mjs";
+import {
+  expectedCaptureArtifactName,
+  PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID,
+} from "./pages-rollback-authority.mjs";
 
 const COMMIT = "1".repeat(40);
 const HASH = "a".repeat(64);
@@ -319,21 +328,7 @@ function acceptanceEvidence(sourceCommit) {
     run_attempt: RUN_ATTEMPT,
     workflow_path: ".github/workflows/release-cli.yml",
     status: "passed",
-    jobs: [
-      "metadata",
-      "ctk3",
-      "linux-cli",
-      "discord-bot",
-      "release-acceptance-foundation-no-product-debt",
-      "release-acceptance-foundation-adversarial-correctness",
-      "release-acceptance-foundation-desktop-host",
-      "release-acceptance-sanitizer",
-      "release-acceptance-rust",
-      "release-acceptance-pages",
-      "release-acceptance",
-      "windows-cli",
-      "windows-gui",
-    ].map((name, index) => ({
+    jobs: CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES.map((name, index) => ({
       name,
       job_id: String(9000 + index),
       status: "passed",
@@ -535,7 +530,7 @@ function deploymentFixture() {
 
 function pagesAuthority() {
   return sealCanonicalReport({
-    schema_id: "clearra.pages.deployment-authority.v2",
+    schema_id: PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID,
     mode: "forward",
     repository: "daejunnom/Clearra",
     source_commit: COMMIT,
@@ -568,6 +563,10 @@ function pagesAuthority() {
     rollback_report_artifact_digest: null,
     rollback_report_artifact_api_readback_sha256: null,
     rollback_report_file_sha256: null,
+    rollback_accepted_artifact_id: null,
+    rollback_accepted_artifact_name: null,
+    rollback_accepted_artifact_digest: null,
+    live_file_descriptor_set_sha256: null,
     status: "active",
   });
 }
@@ -577,7 +576,7 @@ function pagesRollbackCapture() {
   const captureRunId = "777";
   const captureAttempt = "1";
   return sealCanonicalReport({
-    schema_id: "clearra.pages.rollback-capture-authority.v2",
+    schema_id: PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID,
     repository: "daejunnom/Clearra",
     snapshot_source_commit: snapshot,
     authority_source_commit: COMMIT,
@@ -601,10 +600,56 @@ function pagesRollbackCapture() {
     artifact_created_at: "2026-08-30T00:00:00.000Z",
     artifact_expires_at: "2026-11-28T00:00:00.000Z",
     retention_seconds: 90 * 24 * 60 * 60,
-    capture_kind: "modern-v2",
+    capture_kind: "canonical-v2",
     legacy_snapshot: null,
+    canonical_snapshot: canonicalPagesCapture(snapshot),
     status: "captured",
   });
+}
+
+function canonicalPagesCapture(snapshot) {
+  const payload = {
+    path: "index.html",
+    sha256: "3".repeat(64),
+    size: 128,
+  };
+  const identity = {
+    schema: "clearra.pages.identity.v2",
+    sourceCommit: snapshot,
+    engineBuildId: snapshot,
+    contractSchemaVersion: "clearra.search.contract.v2",
+    supplySemanticsId: "clearra.supply.projected-terminal-lookahead.v1",
+    artifactSchemaVersion: "clearra.solution-data.v1",
+    version: "0.8.0",
+    acceptedRunId: "779",
+    acceptedRunAttempt: "1",
+    basePath: "/Clearra",
+    files: [payload],
+  };
+  const identityBytes = Buffer.from(JSON.stringify(identity), "utf8");
+  const readback = {
+    identity_sha256: canonicalSha256(identity),
+    identity_bytes_sha256: createHash("sha256").update(identityBytes).digest("hex"),
+    identity_bytes_size: identityBytes.byteLength,
+    file_set_sha256: canonicalSha256(identity.files),
+    file_count: identity.files.length,
+    total_bytes: payload.size,
+  };
+  return {
+    accepted_run_id: identity.acceptedRunId,
+    accepted_run_attempt: identity.acceptedRunAttempt,
+    accepted_artifact_id: "780",
+    accepted_artifact_name:
+      `accepted-pages-build-${snapshot}-run-${identity.acceptedRunId}-attempt-1`,
+    accepted_artifact_digest: `sha256:${"4".repeat(64)}`,
+    accepted_artifact_api_readback_sha256: "5".repeat(64),
+    accepted_artifact_created_at: "2026-08-30T00:00:00.000Z",
+    accepted_artifact_expires_at: "2026-11-28T00:00:00.000Z",
+    identity,
+    ...readback,
+    initial_public_readback: { ...readback },
+    preartifact_public_readback: { ...readback },
+  };
 }
 
 function oracleRollbackCapture() {

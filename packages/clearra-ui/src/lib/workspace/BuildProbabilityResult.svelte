@@ -19,6 +19,7 @@
   } from './solutionPageSource';
   import { boardCellOccupied } from './solverWorkspaceModel';
   import { BUILD_PROBABILITY_PRIMARY_METRIC } from './buildProbabilityModel';
+  import { buildProbabilityAggregationAuthority } from './buildProbabilityAggregation';
   import {
     buildProbabilityFinesseView,
     formatFinesseInputCount
@@ -48,6 +49,8 @@
 
   $: rows = Array.from({ length: height }, (_, index) => height - index - 1);
   $: report = view.searchReport;
+  $: aggregationAuthority = buildProbabilityAggregationAuthority(report, aggregation);
+  $: effectiveAggregation = aggregationAuthority.effective ?? aggregation;
   $: solutionCount = workspaceSolutionCount(report);
   $: summary = Object.fromEntries(report?.summary_fields ?? []);
   $: solutionProbabilityByKey = Object.fromEntries(
@@ -169,8 +172,8 @@
   statusLabel={label(view.status)}
   elapsedLabel={label('elapsed')}
   elapsedText={`${(elapsedMs / 1000).toFixed(1)}s`}
-  progressProfile={aggregation === 'tiling' ? 'tiling' : 'build'}
-  progressMode={aggregation === 'spin' ? 'build-spin' : 'buildability'}
+  progressProfile={effectiveAggregation === 'tiling' ? 'tiling' : 'build'}
+  progressMode={effectiveAggregation === 'spin' ? 'build-spin' : 'buildability'}
   {language}
   progressLabel={(workspaceProgressLabel(language, view.progressTelemetry) ?? view.progressLabel) || label('idle')}
   progressDetail={workspaceProgressDetail(language, view.progressTelemetry)}
@@ -183,6 +186,10 @@
 >
     {#if !hasOutput && view.status === 'idle'}
       <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noBuildProbabilityResult')}</p></div>
+    {:else if view.status !== 'failed' && view.status !== 'terminated' && aggregationAuthority.state === 'rejected'}
+      <div class="aggregation-authority-error" role="alert">
+        <p>{label('buildProbabilityAggregationMismatch')}</p>
+      </div>
     {:else if view.status !== 'failed' && view.status !== 'terminated'}
       <div class="result-grid">
         <div class="preview-panel">
@@ -207,11 +214,11 @@
 
         <div class="metrics-panel">
           <div class="hero-metric">
-            {#if aggregation === 'tiling'}
+            {#if effectiveAggregation === 'tiling'}
               <span>{label('tilingCount')}</span>
               <strong>{solutionCount === null ? label('notCalculated') : number(solutionCount)}</strong>
               <small>{label('tilingOnlyWarning')}</small>
-            {:else if aggregation === 'spin'}
+            {:else if effectiveAggregation === 'spin'}
               <span>{label('spinSearchProbability')}</span>
               <strong>{workspaceProbability(language, summary.spin_search_probability)}</strong>
               <small>{number(summaryNumber(summary.spin_search_candidate_count))} {label('spinSearchBuilds')} · {label('spinAccuracy')}: {summary.spin_search_accuracy ?? '—'}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
@@ -245,7 +252,7 @@
               <small class="metric-footnote">{number(report?.covered_pattern_count)} / {number(report?.materialized_pattern_count)} {label('patterns')}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
             {/if}
           </div>
-          {#if aggregation === 'spin'}
+          {#if effectiveAggregation === 'spin'}
             <div class="spin-metric">
               <div class:with-averages={Boolean(finesseView?.policyResults.length)} class="probability-with-inputs">
                 <div
@@ -315,8 +322,8 @@
             </div>
           {/if}
           <dl>
-            <div><dt>{label(aggregation === 'tiling' ? 'tilingCount' : 'buildableTilings')}</dt><dd>{solutionCount === null ? label('notCalculated') : number(solutionCount)}</dd></div>
-            {#if aggregation !== 'tiling' && summary.build_mirror_included === 'true'}
+            <div><dt>{label(effectiveAggregation === 'tiling' ? 'tilingCount' : 'buildableTilings')}</dt><dd>{solutionCount === null ? label('notCalculated') : number(solutionCount)}</dd></div>
+            {#if effectiveAggregation !== 'tiling' && summary.build_mirror_included === 'true'}
               <div><dt>{label('originalBuildProbability')}</dt><dd>{workspaceProbability(language, summary.original_coverage_probability)}</dd></div>
               <div><dt>{label('mirrorAddedPatterns')}</dt><dd>{number(summaryNumber(summary.mirror_union_added_pattern_count))}</dd></div>
             {/if}
@@ -365,6 +372,8 @@
 <style>
   .empty-state { align-items: center; color: #87918d; display: flex; flex-direction: column; justify-content: center; min-height: 220px; text-align: center; }
   .empty-state p { font-size: 13px; margin: 12px 0 0; }
+  .aggregation-authority-error { background: #fff1ed; border-left: 3px solid #c45635; color: #8d3026; margin-top: 16px; padding: 12px 14px; }
+  .aggregation-authority-error p { font-size: 12px; margin: 0; }
   .result-grid { display: grid; gap: 28px; grid-template-columns: minmax(260px, 430px) minmax(0, 1fr); }
   h3 { color: #36423e; font-size: 12px; margin: 0 0 10px; }
   .board-frame { background: #101817; border: 1px solid #253330; border-radius: 6px; padding: 12px; }

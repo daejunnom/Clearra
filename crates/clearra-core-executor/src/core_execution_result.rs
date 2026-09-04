@@ -14,7 +14,9 @@ use crate::{
     core_postprocess_score_cell::CorePostProcessScoreCell,
     core_postprocess_spin_coverage::CorePostProcessSpinCoverage,
     finesse_report::FinesseReport,
-    pc_chance_coverage_evidence::{PcChanceCoverageEvidence, PcScoreProblemEvidence},
+    pc_chance_coverage_evidence::{
+        DistributedPcChanceCoverageRows, PcChanceCoverageEvidence, PcScoreProblemEvidence,
+    },
     result_views::{SearchExecutionReport, SearchExecutionReportBuildError},
     setup_finder_report::SetupFinderReport,
     solution_probability::{
@@ -113,6 +115,16 @@ pub enum PcTilingMemoryAdmissionEvidence {
     WasmTerminalAuthority,
 }
 
+/// Unforgeable evidence that the score-cell family was assembled by Core's
+/// verified distributed result merger, not decoded from a worker/wire result.
+///
+/// The value is readable by App, but the only attaching method is crate
+/// private. Public worker-partition setters deliberately clear this marker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PcScoreDistributedMergeEvidence {
+    WasmVerifiedMerger,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CoreExecutionResult {
     fields: Vec<(String, String)>,
@@ -127,6 +139,7 @@ pub struct CoreExecutionResult {
     representative_solution_identity: Option<StandardBoard64TilingIdentity>,
     coverage_pattern_words: Vec<u64>,
     pc_chance_coverage_evidence: Option<PcChanceCoverageEvidence>,
+    distributed_pc_chance_coverage_rows: Option<DistributedPcChanceCoverageRows>,
     pc_score_problem_evidence: Option<PcScoreProblemEvidence>,
     solution_coverages: Vec<SolutionCoverage>,
     normalized_solution_coverages: Vec<NormalizedSolutionCoverage>,
@@ -137,6 +150,7 @@ pub struct CoreExecutionResult {
     postprocess_score_cells: Vec<CorePostProcessScoreCell>,
     postprocess_score_cells_complete: bool,
     postprocess_score_profile_id: Option<String>,
+    pc_score_distributed_merge_evidence: Option<PcScoreDistributedMergeEvidence>,
     postprocess_spin_coverages: Vec<CorePostProcessSpinCoverage>,
     setup_finder_report: Option<SetupFinderReport>,
     finesse_report: Option<FinesseReport>,
@@ -150,6 +164,63 @@ pub struct CoreExecutionResult {
 impl CoreExecutionResult {
     pub fn new(fields: Vec<(String, String)>, path_steps: Vec<CorePathStep>) -> Self {
         let execution_report = SearchExecutionReport::from_summary_fields(&fields, path_steps);
+        Self::from_fields_and_execution_report(fields, execution_report)
+    }
+
+    /// Fallible constructor for untrusted wire owners. The callback observes
+    /// allocator-visible field/path/report capacity immediately after every
+    /// reserve and before another report allocation, so an outer authority can
+    /// account for sibling results and the borrowed wire at the same time.
+    pub fn try_new_with_memory_guard<E>(
+        fields: Vec<(String, String)>,
+        path_steps: Vec<CorePathStep>,
+        mut memory_guard: impl FnMut(u128, u128) -> Result<(), E>,
+    ) -> Result<Self, CoreResultFieldReplacementError<E>> {
+        let field_bytes = checked_field_storage_bytes(&fields, fields.capacity())
+            .ok_or(CoreResultFieldReplacementError::ProjectionOverflow)?;
+        let path_bytes = (path_steps.capacity() as u128)
+            .checked_mul(core::mem::size_of::<CorePathStep>() as u128)
+            .ok_or(CoreResultFieldReplacementError::ProjectionOverflow)?;
+        let base_bytes = field_bytes
+            .checked_add(path_bytes)
+            .ok_or(CoreResultFieldReplacementError::ProjectionOverflow)?;
+        let requested_report_bytes = checked_execution_report_string_bytes(&fields)
+            .ok_or(CoreResultFieldReplacementError::ProjectionOverflow)?;
+        memory_guard(base_bytes, requested_report_bytes)
+            .map_err(CoreResultFieldReplacementError::MemoryGuard)?;
+
+        let execution_report = SearchExecutionReport::try_from_summary_fields_with_memory_guard(
+            &fields,
+            path_steps,
+            |actual_string_bytes, remaining_requested_bytes| {
+                let actual_bytes = base_bytes
+                    .checked_add(actual_string_bytes)
+                    .ok_or(CoreResultFieldReplacementError::ProjectionOverflow)?;
+                memory_guard(actual_bytes, remaining_requested_bytes)
+                    .map_err(CoreResultFieldReplacementError::MemoryGuard)
+            },
+        )
+        .map_err(|error| match error {
+            SearchExecutionReportBuildError::ProjectionOverflow => {
+                CoreResultFieldReplacementError::ProjectionOverflow
+            }
+            SearchExecutionReportBuildError::AllocationFailed => {
+                CoreResultFieldReplacementError::AllocationFailed {
+                    required_future_bytes: requested_report_bytes,
+                }
+            }
+            SearchExecutionReportBuildError::MemoryGuard(error) => error,
+        })?;
+        Ok(Self::from_fields_and_execution_report(
+            fields,
+            execution_report,
+        ))
+    }
+
+    fn from_fields_and_execution_report(
+        fields: Vec<(String, String)>,
+        execution_report: SearchExecutionReport,
+    ) -> Self {
         Self {
             fields,
             execution_report,
@@ -163,6 +234,7 @@ impl CoreExecutionResult {
             representative_solution_identity: None,
             coverage_pattern_words: Vec::new(),
             pc_chance_coverage_evidence: None,
+            distributed_pc_chance_coverage_rows: None,
             pc_score_problem_evidence: None,
             solution_coverages: Vec::new(),
             normalized_solution_coverages: Vec::new(),
@@ -173,6 +245,7 @@ impl CoreExecutionResult {
             postprocess_score_cells: Vec::new(),
             postprocess_score_cells_complete: false,
             postprocess_score_profile_id: None,
+            pc_score_distributed_merge_evidence: None,
             postprocess_spin_coverages: Vec::new(),
             setup_finder_report: None,
             finesse_report: None,
@@ -183,6 +256,26 @@ impl CoreExecutionResult {
             solution_set_audit_report: None,
         }
     }
+}
+
+fn checked_execution_report_string_bytes(fields: &[(String, String)]) -> Option<u128> {
+    let value = |key: &str| field_value(fields, key);
+    [
+        value("backend_requested")
+            .or_else(|| value("requested_backend"))
+            .unwrap_or("none"),
+        value("backend_selected")
+            .or_else(|| value("selected_backend"))
+            .unwrap_or("none"),
+        value("backend_fallback_reason").unwrap_or("none"),
+        value("coverage_probability").unwrap_or("0.0"),
+        value("trace_retention_reason").unwrap_or("none"),
+        value("trace_retention_reason").unwrap_or("none"),
+    ]
+    .into_iter()
+    .try_fold(0_u128, |bytes, value| {
+        bytes.checked_add(value.len() as u128)
+    })
 }
 impl CoreExecutionResult {
     pub fn with_packing_candidate_keys(mut self, keys: Vec<String>) -> Self {
@@ -282,6 +375,17 @@ impl CoreExecutionResult {
         self
     }
 
+    /// Attaches decoded, untrusted distributed PC-chance rows. This transport
+    /// is never product authority; the coordinator must validate and rebind it
+    /// to the retained problem before constructing terminal chance evidence.
+    pub fn with_distributed_pc_chance_coverage_rows(
+        mut self,
+        rows: DistributedPcChanceCoverageRows,
+    ) -> Self {
+        self.distributed_pc_chance_coverage_rows = Some(rows);
+        self
+    }
+
     pub(crate) fn with_pc_score_problem_evidence(
         mut self,
         evidence: Option<PcScoreProblemEvidence>,
@@ -357,6 +461,23 @@ impl CoreExecutionResult {
         self.postprocess_score_cells = cells;
         self.postprocess_score_cells_complete = complete;
         self.postprocess_score_profile_id = Some(profile_id.into());
+        self.pc_score_distributed_merge_evidence = None;
+        self
+    }
+
+    /// Attaches the canonical merger-only provenance after every accepted
+    /// worker partition has crossed Core's distributed verifier.
+    pub(crate) fn with_verified_distributed_postprocess_score_cells(
+        mut self,
+        cells: Vec<CorePostProcessScoreCell>,
+        complete: bool,
+        profile_id: impl Into<String>,
+    ) -> Self {
+        self.postprocess_score_cells = cells;
+        self.postprocess_score_cells_complete = complete;
+        self.postprocess_score_profile_id = Some(profile_id.into());
+        self.pc_score_distributed_merge_evidence =
+            Some(PcScoreDistributedMergeEvidence::WasmVerifiedMerger);
         self
     }
 
@@ -364,6 +485,7 @@ impl CoreExecutionResult {
         self.postprocess_score_cells.clear();
         self.postprocess_score_cells_complete = false;
         self.postprocess_score_profile_id = None;
+        self.pc_score_distributed_merge_evidence = None;
         self
     }
 
@@ -412,6 +534,7 @@ impl CoreExecutionResult {
         self.normalized_solution_identities.clear();
         self.representative_solution_identity = None;
         self.pc_chance_coverage_evidence = None;
+        self.distributed_pc_chance_coverage_rows = None;
         self.pc_score_problem_evidence = None;
         self.solution_coverages.clear();
         self.normalized_solution_coverages.clear();
@@ -422,6 +545,7 @@ impl CoreExecutionResult {
         self.postprocess_score_cells.clear();
         self.postprocess_score_cells_complete = false;
         self.postprocess_score_profile_id = None;
+        self.pc_score_distributed_merge_evidence = None;
         self.postprocess_spin_coverages.clear();
         self.tiling_solution_page_store = None;
         self.pc_tiling_memory_admission_evidence = None;
@@ -506,6 +630,7 @@ impl CoreExecutionResult {
         self.normalized_solution_identities = Vec::new();
         self.representative_solution_identity = None;
         self.pc_chance_coverage_evidence = None;
+        self.distributed_pc_chance_coverage_rows = None;
         self.pc_score_problem_evidence = None;
         self.solution_coverages = Vec::new();
         self.normalized_solution_coverages = Vec::new();
@@ -516,6 +641,7 @@ impl CoreExecutionResult {
         self.postprocess_score_cells = Vec::new();
         self.postprocess_score_cells_complete = false;
         self.postprocess_score_profile_id = None;
+        self.pc_score_distributed_merge_evidence = None;
         self.postprocess_spin_coverages = Vec::new();
         self.tiling_solution_page_store = None;
         self.pc_tiling_memory_admission_evidence = None;
@@ -709,11 +835,13 @@ impl CoreExecutionResult {
     /// validate or drop the separately returned owner before public projection.
     pub fn into_pc_chance_transient_parts(mut self) -> (Self, Option<PcChanceCoverageEvidence>) {
         let evidence = self.pc_chance_coverage_evidence.take();
+        self.distributed_pc_chance_coverage_rows = None;
         (self, evidence)
     }
 
     pub fn without_pc_chance_transient_evidence(mut self) -> Self {
         self.pc_chance_coverage_evidence = None;
+        self.distributed_pc_chance_coverage_rows = None;
         self
     }
 
@@ -733,6 +861,7 @@ impl CoreExecutionResult {
         self.postprocess_score_cells.clear();
         self.postprocess_score_cells_complete = false;
         self.postprocess_score_profile_id = None;
+        self.pc_score_distributed_merge_evidence = None;
         self.postprocess_spin_coverages.clear();
         self
     }
@@ -781,6 +910,15 @@ impl CoreExecutionResult {
         self.fields
             .retain(|(key, _)| !fields.iter().any(|(replacement, _)| replacement == key));
         self.fields.extend(fields);
+        let path_steps = self.path_steps().to_vec();
+        self.execution_report =
+            SearchExecutionReport::from_summary_fields(&self.fields, path_steps);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn without_field_for_test(mut self, field: &str) -> Self {
+        self.fields.retain(|(key, _)| key != field);
         let path_steps = self.path_steps().to_vec();
         self.execution_report =
             SearchExecutionReport::from_summary_fields(&self.fields, path_steps);
@@ -1091,6 +1229,9 @@ impl CoreExecutionResult {
         if let Some(evidence) = &self.pc_chance_coverage_evidence {
             bytes = bytes.checked_add(evidence.checked_non_pattern_storage_retained_bytes()?)?;
         }
+        if let Some(rows) = &self.distributed_pc_chance_coverage_rows {
+            bytes = bytes.checked_add(rows.checked_non_pattern_storage_retained_bytes()?)?;
+        }
         if let Some(evidence) = &self.pc_score_problem_evidence {
             bytes = bytes.checked_add(evidence.checked_storage_retained_bytes()?)?;
         }
@@ -1206,6 +1347,12 @@ impl CoreExecutionResult {
                 self.pc_chance_coverage_evidence
                     .iter()
                     .flat_map(|evidence| evidence.rows().iter())
+                    .map(|row| row.coverage_bits()),
+            )
+            .chain(
+                self.distributed_pc_chance_coverage_rows
+                    .iter()
+                    .flat_map(|transport| transport.rows().iter())
                     .map(|row| row.coverage_bits()),
             )
     }
@@ -1607,6 +1754,10 @@ impl CoreExecutionResult {
         self.pc_chance_coverage_evidence.as_ref()
     }
 
+    pub fn distributed_pc_chance_coverage_rows(&self) -> Option<&DistributedPcChanceCoverageRows> {
+        self.distributed_pc_chance_coverage_rows.as_ref()
+    }
+
     pub fn pc_score_problem_evidence(&self) -> Option<&PcScoreProblemEvidence> {
         self.pc_score_problem_evidence.as_ref()
     }
@@ -1649,6 +1800,12 @@ impl CoreExecutionResult {
 
     pub fn postprocess_score_profile_id(&self) -> Option<&str> {
         self.postprocess_score_profile_id.as_deref()
+    }
+
+    pub const fn pc_score_distributed_merge_evidence(
+        &self,
+    ) -> Option<PcScoreDistributedMergeEvidence> {
+        self.pc_score_distributed_merge_evidence
     }
 
     pub fn postprocess_spin_coverages(&self) -> &[CorePostProcessSpinCoverage] {
@@ -1782,9 +1939,9 @@ mod tests {
     };
 
     use super::{
-        CoreExecutionResult, CorePathStep, CorePostProcessSpinCoverage,
-        CoreResultFieldReplacementError, FinesseReport, PcTilingMemoryAdmissionEvidence,
-        TilingSolutionPageStore,
+        CoreExecutionResult, CorePathStep, CorePostProcessScoreCell, CorePostProcessSpinCoverage,
+        CoreResultFieldReplacementError, FinesseReport, PcScoreDistributedMergeEvidence,
+        PcTilingMemoryAdmissionEvidence, TilingSolutionPageStore,
     };
 
     fn reserved(value: &str, capacity: usize) -> String {
@@ -1848,6 +2005,38 @@ mod tests {
             .without_tiling_solution_page_store()
             .tiling_solution_page_store()
             .is_none());
+    }
+
+    #[test]
+    fn distributed_score_marker_survives_clone_but_not_worker_or_public_boundaries() {
+        let identity = StandardBoard64TilingIdentity::from_placements(
+            0,
+            [PiecePlacementMask::new(PieceKind::I, 0xf)],
+        )
+        .expect("one-piece identity");
+        let cell = || CorePostProcessScoreCell::new(identity, 0, "trace", 100, 1);
+        let verified = CoreExecutionResult::default()
+            .with_verified_distributed_postprocess_score_cells(vec![cell()], true, "tetrio");
+        assert_eq!(
+            verified.pc_score_distributed_merge_evidence(),
+            Some(PcScoreDistributedMergeEvidence::WasmVerifiedMerger)
+        );
+        assert_eq!(
+            verified.clone().pc_score_distributed_merge_evidence(),
+            verified.pc_score_distributed_merge_evidence()
+        );
+
+        let worker_or_wire =
+            verified
+                .clone()
+                .with_postprocess_score_cells(vec![cell()], true, "tetrio");
+        assert_eq!(worker_or_wire.pc_score_distributed_merge_evidence(), None);
+        assert_eq!(
+            verified
+                .into_fail_closed_public_solution_surface()
+                .pc_score_distributed_merge_evidence(),
+            None
+        );
     }
 
     fn synthetic_pageable_pc_tiling_result() -> CoreExecutionResult {
@@ -2346,6 +2535,7 @@ mod tests {
             representative_solution_identity,
             coverage_pattern_words,
             pc_chance_coverage_evidence,
+            distributed_pc_chance_coverage_rows,
             pc_score_problem_evidence,
             solution_coverages,
             normalized_solution_coverages,
@@ -2356,6 +2546,7 @@ mod tests {
             postprocess_score_cells,
             postprocess_score_cells_complete,
             postprocess_score_profile_id,
+            pc_score_distributed_merge_evidence,
             postprocess_spin_coverages,
             setup_finder_report,
             finesse_report,
@@ -2384,6 +2575,7 @@ mod tests {
             representative_solution_identity,
             coverage_pattern_words,
             pc_chance_coverage_evidence,
+            distributed_pc_chance_coverage_rows,
             pc_score_problem_evidence,
             solution_coverages,
             normalized_solution_coverages,
@@ -2394,6 +2586,7 @@ mod tests {
             postprocess_score_cells,
             postprocess_score_cells_complete,
             postprocess_score_profile_id,
+            pc_score_distributed_merge_evidence,
             postprocess_spin_coverages,
             setup_finder_report,
             finesse_report,
@@ -2404,7 +2597,7 @@ mod tests {
             solution_set_audit_report,
         );
         assert!(inventory.0.is_empty());
-        assert!(inventory.23.is_none());
+        assert!(inventory.25.is_none());
     }
 
     #[test]

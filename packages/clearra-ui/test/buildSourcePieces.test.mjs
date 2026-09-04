@@ -16,6 +16,7 @@ const bundle = await build({
         BUILD_SOURCE_PIECES_MAX,
         BUILD_SOURCE_PIECES_MIN,
         buildProbabilityCommand,
+        buildProbabilityCommandArguments,
         buildProbabilityRequestForDesktop,
         buildProbabilityValidationCodes,
         createDefaultBuildProbabilityRequest,
@@ -42,7 +43,7 @@ function validBuildRequest(change = {}) {
 }
 
 function optionValue(command, option) {
-  const tokens = command.split(/\s+/u);
+  const tokens = Array.isArray(command) ? command : command.split(/\s+/u);
   const index = tokens.indexOf(option);
   return index === -1 ? null : tokens[index + 1];
 }
@@ -53,8 +54,10 @@ test('build source-pieces omission preserves the native automatic default', () =
   assert.equal(optionValue(production.buildProbabilityCommand(request), '--source-pieces'), null);
 
   const desktop = production.buildProbabilityRequestForDesktop(request, 'en');
-  assert.equal(Object.hasOwn(desktop, 'source_piece_count'), false);
-  assert.equal(Object.hasOwn(JSON.parse(JSON.stringify(desktop)), 'source_piece_count'), false);
+  assert.equal(desktop.app_request_model, 'clearra-cli/CommandRequest');
+  assert.equal(desktop.command, 'cli');
+  assert.deepEqual(desktop.arguments, production.buildProbabilityCommandArguments(request));
+  assert.equal(desktop.arguments.includes('--source-pieces'), false);
 });
 
 test('build source-pieces lowers exactly on command and typed desktop boundaries', () => {
@@ -65,8 +68,11 @@ test('build source-pieces lowers exactly on command and typed desktop boundaries
       String(sourcePieces)
     );
     assert.equal(
-      production.buildProbabilityRequestForDesktop(request, 'ko').source_piece_count,
-      sourcePieces
+      optionValue(
+        production.buildProbabilityRequestForDesktop(request, 'ko').arguments,
+        '--source-pieces'
+      ),
+      String(sourcePieces)
     );
   }
 });
@@ -77,8 +83,11 @@ test('tiling preserves, validates, and lowers the active source window', () => {
   assert.equal(production.normalizeBuildProbabilityRequest(draft).sourcePieces, 2);
   assert.equal(optionValue(production.buildProbabilityCommand(draft), '--source-pieces'), '2');
   assert.equal(
-    production.buildProbabilityRequestForDesktop(draft, 'en').source_piece_count,
-    2
+    optionValue(
+      production.buildProbabilityRequestForDesktop(draft, 'en').arguments,
+      '--source-pieces'
+    ),
+    '2'
   );
   assert.equal(
     production
@@ -140,7 +149,9 @@ test('build solution probabilities lower only when enabled and remain unavailabl
   assert.equal(defaultRequest.solutionProbabilities, false);
   assert.doesNotMatch(production.buildProbabilityCommand(defaultRequest), /--solution-probabilities/u);
   assert.equal(
-    production.buildProbabilityRequestForDesktop(defaultRequest, 'en').solution_probabilities,
+    production
+      .buildProbabilityRequestForDesktop(defaultRequest, 'en')
+      .arguments.includes('--solution-probabilities'),
     false
   );
 
@@ -153,7 +164,9 @@ test('build solution probabilities lower only when enabled and remain unavailabl
     1
   );
   assert.equal(
-    production.buildProbabilityRequestForDesktop(enabled, 'ko').solution_probabilities,
+    production
+      .buildProbabilityRequestForDesktop(enabled, 'ko')
+      .arguments.includes('--solution-probabilities'),
     true
   );
 
@@ -168,7 +181,9 @@ test('build solution probabilities lower only when enabled and remain unavailabl
   );
   assert.doesNotMatch(production.buildProbabilityCommand(tilingDraft), /--solution-probabilities/u);
   assert.equal(
-    production.buildProbabilityRequestForDesktop(tilingDraft, 'en').solution_probabilities,
+    production
+      .buildProbabilityRequestForDesktop(tilingDraft, 'en')
+      .arguments.includes('--solution-probabilities'),
     false
   );
 });

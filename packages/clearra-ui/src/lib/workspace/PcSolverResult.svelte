@@ -41,11 +41,33 @@
 
   $: report = view.searchReport;
   $: productResultPayload = view.response?.product_result_payload ?? null;
-  $: solutionKeys = report?.normalized_solution_keys ?? [];
+  $: pcScoreFieldSummary = productResultPayload?.content.payload_kind === 'pc-score-field-summary'
+    ? productResultPayload.content.payload
+    : null;
+  $: solutionKeys = pcScoreFieldSummary
+    ? pcScoreFieldSummary.fields.map((field) => field.normalized_field_key)
+    : (report?.normalized_solution_keys ?? []);
   $: summaryFields = Object.fromEntries(report?.summary_fields ?? []);
-  $: solutionPageAvailable = workspaceSolutionPageAvailable(report);
-  $: solutionKeysComplete = workspaceSolutionKeysComplete(report);
-  $: solutionCount = workspaceSolutionCount(report);
+  $: solutionProbabilityByKey = Object.fromEntries(
+    (report?.solution_probabilities ?? []).map((entry) => [entry.solution_key, entry])
+  );
+  $: solutionAverageScoreByKey = pcScoreFieldSummary
+    ? Object.fromEntries(
+        pcScoreFieldSummary.fields.map((field) => [field.normalized_field_key, field])
+      )
+    : Object.fromEntries(
+        (report?.solution_average_scores ?? []).map((entry) => [entry.solution_key, entry])
+      );
+  $: scoringRequested = summaryFields.score_requested === 'true';
+  $: solutionPageAvailable = pcScoreFieldSummary
+    ? false
+    : workspaceSolutionPageAvailable(report);
+  $: solutionKeysComplete = pcScoreFieldSummary
+    ? true
+    : workspaceSolutionKeysComplete(report);
+  $: solutionCount = pcScoreFieldSummary
+    ? pcScoreFieldSummary.fields.length
+    : workspaceSolutionCount(report);
   $: resultIncomplete = view.status === 'completed' && (
     report?.count_complete === false || view.resourceReport?.truncated === true
   );
@@ -136,6 +158,9 @@
       <div class="result-summary">
         <div><strong>{solutionCount === null ? label('notCalculated') : number(solutionCount)}</strong><span>{label('solutions')}</span></div>
         <div><strong>{workspaceProbability(language, report?.coverage_probability)}</strong><span>{label('coverage')}</span></div>
+        {#if scoringRequested || pcScoreFieldSummary}
+          <div><strong>{pcScoreFieldSummary?.overall_score ?? summaryFields.score_field_average_score ?? summaryFields.score_unconditional_expected_score ?? '—'}</strong><span>{pcScoreFieldSummary ? label('overallScore') : label('averageScore')}</span></div>
+        {/if}
         {#if solutionCount !== null}
           <SolutionCopyFormatControl
             bind:value={copyFormat}
@@ -157,19 +182,21 @@
       />
 
       {#if solutionCount === null}
-        <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('solutionSetNotCalculated')}</span></div>
-      {:else if solutionCount > 0}
-        <SolutionGallery
-          {solutionKeys}
-          {solutionCount}
-          loadSolutionPage={boundSolutionPageLoader}
-          solutionSetHash={report?.normalized_solution_set_hash ?? ''}
-          {targetLines}
-          {language}
-          {copyFormat}
-        />
-      {:else}
-        <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label(resultIncomplete ? 'playerFinderNoConclusion' : 'noSolutions')}</span></div>
+          <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('solutionSetNotCalculated')}</span></div>
+        {:else if solutionCount > 0}
+          <SolutionGallery
+            {solutionKeys}
+            {solutionCount}
+            loadSolutionPage={boundSolutionPageLoader}
+            solutionProbabilities={solutionProbabilityByKey}
+            solutionAverageScores={solutionAverageScoreByKey}
+            solutionSetHash={report?.normalized_solution_set_hash ?? ''}
+            {targetLines}
+            {language}
+            {copyFormat}
+          />
+        {:else}
+          <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label(resultIncomplete ? 'playerFinderNoConclusion' : 'noSolutions')}</span></div>
       {/if}
     {/if}
   </section>

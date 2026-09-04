@@ -22,19 +22,21 @@ use clearra_coverage::{
 };
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_pc_graph::request::RequestedSearchBackend;
-use clearra_problem::{SearchOutputPolicy, SearchProblem};
+use clearra_problem::{PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem};
 use clearra_replay::ExactScoringExecutionBatch;
 use clearra_rules::profile::rule_capability::RuleCapability;
 use clearra_supply::pattern_universe::PackingPatternMembershipKind;
 
 use crate::{
-    pc_chance_coverage_evidence::{PcChanceCoverageEvidence, PcScoreProblemEvidence},
+    pc_chance_coverage_evidence::{
+        strict_coverage_pattern_bitset_from_words, PcChanceCoverageEvidence, PcScoreProblemEvidence,
+    },
     performance::{ExecutorSearchStage, SearchStageSpan},
     resource::{
         admit_budget_bound_search_execution,
         admit_budget_bound_search_execution_under_terminal_authority, admit_search_execution,
-        DensePatternPreflight, ExecutionAdmission, ExecutionAdmissionPlan,
-        WasmCpuTerminalResourceAuthority,
+        shared_execution_resource_capacity, DensePatternPreflight, ExecutionAdmission,
+        ExecutionAdmissionPlan, ExecutionMemoryBound, WasmCpuTerminalResourceAuthority,
     },
     tiling_solution_store::{
         canonicalize_catalog_rows, pack_canonical_tiling_row_ids, read_packed_tiling_row,
@@ -91,6 +93,222 @@ fn try_empty_pattern_bitset(
     words.resize(word_count, 0_u64);
     PatternBitSet::from_words(pattern_count, words)
         .map_err(|_| WasmExactSearchError::InvalidProblem(unavailable_reason))
+}
+
+/// Reads one worker-owned scalar only when its summary representation is both
+/// unique and canonical. Distributed typed evidence is authority-bearing, so a
+/// first-match lookup must never make a duplicate or alternate spelling valid.
+fn exact_canonical_usize_field(result: &CoreExecutionResult, key: &str) -> Option<usize> {
+    let mut matches = result
+        .summary_field_entries()
+        .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+    let value = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let parsed = value.parse::<usize>().ok()?;
+    (parsed.to_string() == value).then_some(parsed)
+}
+
+fn exact_canonical_bool_field(result: &CoreExecutionResult, key: &str) -> Option<bool> {
+    let mut matches = result
+        .summary_field_entries()
+        .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+    let value = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn exact_canonical_u128_field(result: &CoreExecutionResult, key: &str) -> Option<u128> {
+    let mut matches = result
+        .summary_field_entries()
+        .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+    let value = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let parsed = value.parse::<u128>().ok()?;
+    (parsed.to_string() == value).then_some(parsed)
+}
+
+fn exact_canonical_optional_u64_field(
+    result: &CoreExecutionResult,
+    key: &str,
+) -> Option<Option<u64>> {
+    let mut matches = result
+        .summary_field_entries()
+        .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+    let value = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    if value.is_empty() {
+        return Some(None);
+    }
+    let parsed = value.parse::<u64>().ok()?;
+    (parsed.to_string() == value).then_some(Some(parsed))
+}
+
+fn exact_canonical_optional_u32_field(
+    result: &CoreExecutionResult,
+    key: &str,
+) -> Option<Option<u32>> {
+    let mut matches = result
+        .summary_field_entries()
+        .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+    let value = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    if value.is_empty() {
+        return Some(None);
+    }
+    let parsed = value.parse::<u32>().ok()?;
+    (parsed.to_string() == value).then_some(Some(parsed))
+}
+
+#[derive(Clone, Copy)]
+struct DistributedWorkerScalarEvidence {
+    packing_candidate_count: usize,
+    coverage_row_count: usize,
+    pattern_verified_execution_count: usize,
+    build_variant_count: u128,
+    count_complete: bool,
+    execution_constraint_materialized: bool,
+    peak_build_order_nodes: usize,
+    total_build_order_nodes: usize,
+    coverage_product_words: usize,
+    coverage_product_states: usize,
+    coverage_product_edge_checks: usize,
+    realization_feasibility_states: usize,
+    realization_feasibility_rejected_candidates: usize,
+    peak_reachability_states: usize,
+    total_reachability_states: usize,
+    resource_peak_cpu_bytes: usize,
+    piece_language_coverage_cache_hits: usize,
+    piece_language_coverage_cache_misses: usize,
+    standard_bag_symbolic_cache_hits: usize,
+    standard_bag_symbolic_cache_misses: usize,
+    reachability_lock_queries: usize,
+    reachability_harddrop_queries: usize,
+    reachability_harddrop_hits: usize,
+    reachability_cache_reachable_hits: usize,
+    reachability_cache_unreachable_hits: usize,
+    reachability_cache_key_misses: usize,
+    reachability_partial_searches: usize,
+    reachability_exhaustive_searches: usize,
+    representative_candidate_ordinal: Option<u64>,
+    representative_candidate_id: Option<u64>,
+    representative_pattern_id: Option<u32>,
+    resource_truncated: bool,
+}
+
+fn exact_distributed_worker_scalar_evidence(
+    result: &CoreExecutionResult,
+) -> Option<DistributedWorkerScalarEvidence> {
+    Some(DistributedWorkerScalarEvidence {
+        packing_candidate_count: exact_canonical_usize_field(result, "packing_candidate_count")?,
+        coverage_row_count: exact_canonical_usize_field(result, "coverage_row_count")?,
+        pattern_verified_execution_count: exact_canonical_usize_field(
+            result,
+            "pattern_verified_execution_count",
+        )?,
+        build_variant_count: exact_canonical_u128_field(result, "build_variant_count")?,
+        count_complete: exact_canonical_bool_field(result, "count_complete")?,
+        execution_constraint_materialized: exact_canonical_bool_field(
+            result,
+            "execution_constraint_materialized",
+        )?,
+        peak_build_order_nodes: exact_canonical_usize_field(result, "peak_build_order_nodes")?,
+        total_build_order_nodes: exact_canonical_usize_field(result, "total_build_order_nodes")?,
+        coverage_product_words: exact_canonical_usize_field(result, "coverage_product_words")?,
+        coverage_product_states: exact_canonical_usize_field(result, "coverage_product_states")?,
+        coverage_product_edge_checks: exact_canonical_usize_field(
+            result,
+            "coverage_product_edge_checks",
+        )?,
+        realization_feasibility_states: exact_canonical_usize_field(
+            result,
+            "realization_feasibility_states",
+        )?,
+        realization_feasibility_rejected_candidates: exact_canonical_usize_field(
+            result,
+            "realization_feasibility_rejected_candidates",
+        )?,
+        peak_reachability_states: exact_canonical_usize_field(result, "peak_reachability_states")?,
+        total_reachability_states: exact_canonical_usize_field(
+            result,
+            "total_reachability_states",
+        )?,
+        resource_peak_cpu_bytes: exact_canonical_usize_field(result, "resource_peak_cpu_bytes")?,
+        piece_language_coverage_cache_hits: exact_canonical_usize_field(
+            result,
+            "piece_language_coverage_cache_hits",
+        )?,
+        piece_language_coverage_cache_misses: exact_canonical_usize_field(
+            result,
+            "piece_language_coverage_cache_misses",
+        )?,
+        standard_bag_symbolic_cache_hits: exact_canonical_usize_field(
+            result,
+            "standard_bag_symbolic_cache_hits",
+        )?,
+        standard_bag_symbolic_cache_misses: exact_canonical_usize_field(
+            result,
+            "standard_bag_symbolic_cache_misses",
+        )?,
+        reachability_lock_queries: exact_canonical_usize_field(
+            result,
+            "reachability_lock_queries",
+        )?,
+        reachability_harddrop_queries: exact_canonical_usize_field(
+            result,
+            "reachability_harddrop_queries",
+        )?,
+        reachability_harddrop_hits: exact_canonical_usize_field(
+            result,
+            "reachability_harddrop_hits",
+        )?,
+        reachability_cache_reachable_hits: exact_canonical_usize_field(
+            result,
+            "reachability_cache_reachable_hits",
+        )?,
+        reachability_cache_unreachable_hits: exact_canonical_usize_field(
+            result,
+            "reachability_cache_unreachable_hits",
+        )?,
+        reachability_cache_key_misses: exact_canonical_usize_field(
+            result,
+            "reachability_cache_key_misses",
+        )?,
+        reachability_partial_searches: exact_canonical_usize_field(
+            result,
+            "reachability_partial_searches",
+        )?,
+        reachability_exhaustive_searches: exact_canonical_usize_field(
+            result,
+            "reachability_exhaustive_searches",
+        )?,
+        representative_candidate_ordinal: exact_canonical_optional_u64_field(
+            result,
+            "representative_candidate_ordinal",
+        )?,
+        representative_candidate_id: exact_canonical_optional_u64_field(
+            result,
+            "representative_candidate_id",
+        )?,
+        representative_pattern_id: exact_canonical_optional_u32_field(
+            result,
+            "representative_pattern_id",
+        )?,
+        resource_truncated: exact_canonical_bool_field(result, "resource_truncated")?,
+    })
 }
 
 #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
@@ -440,6 +658,7 @@ pub(crate) struct WasmExactSearchSession {
     coverage_rows: Vec<CoverageRow>,
     coverage_rows_complete: bool,
     pc_chance_coverage_evidence_available: bool,
+    distributed_minimum_cover_source_complete: bool,
     buildable_identities: ExactHashSet<TilingIdentityEntry>,
     compact_tiling_identities: Option<Vec<PackedTilingRows>>,
     distributed_tiling_root_runs: Option<Vec<DistributedTilingRootRun>>,
@@ -582,6 +801,71 @@ impl WasmExactSearchSession {
         Self::new_with_preacquired_execution_admission(
             problem,
             false,
+            SearchProblemRetention::ParentAuthorizedSharedInput {
+                checked_external_retained_upper_bound_bytes,
+            },
+            execution_admission,
+        )
+    }
+
+    /// Builds the coordinator-side geometry owner for a typed tiling request
+    /// under the same request-scoped terminal authority that will validate the
+    /// final pageable family. This is the distributed counterpart of
+    /// `new_shared_under_authority`: geometry is exported as root tasks, while
+    /// the finalizer retains the parent-authorized memory evidence.
+    pub fn new_shared_external_geometry_under_authority(
+        problem: Arc<SearchProblem>,
+        checked_external_retained_upper_bound_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::validate_tiling_session_problem(problem.as_ref())?;
+        if problem.output_policy() != SearchOutputPolicy::TilingOnly
+            || problem.objective().kind() != ObjectiveKind::Tiling
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_terminal_authority_requires_typed_tiling_geometry",
+            ));
+        }
+        let execution_admission = admit_budget_bound_search_execution_under_terminal_authority(
+            problem.as_ref(),
+            checked_external_retained_upper_bound_bytes,
+            authority,
+        )
+        .map_err(WasmExactSearchError::ResourceAdmission)?;
+        Self::new_with_preacquired_execution_admission(
+            problem,
+            true,
+            SearchProblemRetention::ParentAuthorizedSharedInput {
+                checked_external_retained_upper_bound_bytes,
+            },
+            execution_admission,
+        )
+    }
+
+    /// Builds a worker-side score verifier under the request-scoped terminal
+    /// authority. The geometry stream is supplied by the coordinator, so this
+    /// session owns only verification state and a compute child of the parent
+    /// lease; it never acquires a second global memory surface.
+    pub(crate) fn new_shared_external_verifier_under_authority(
+        problem: Arc<SearchProblem>,
+        checked_external_retained_upper_bound_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::validate_tiling_session_problem(problem.as_ref())?;
+        if !problem.objective().score().requested() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_terminal_authority_requires_typed_score_verifier",
+            ));
+        }
+        let execution_admission = admit_budget_bound_search_execution_under_terminal_authority(
+            problem.as_ref(),
+            checked_external_retained_upper_bound_bytes,
+            authority,
+        )
+        .map_err(WasmExactSearchError::ResourceAdmission)?;
+        Self::new_with_preacquired_execution_admission(
+            problem,
+            true,
             SearchProblemRetention::ParentAuthorizedSharedInput {
                 checked_external_retained_upper_bound_bytes,
             },
@@ -993,6 +1277,7 @@ impl WasmExactSearchSession {
                     .queue_observation_policy()
                     .requires_observation_policy(),
             pc_chance_coverage_evidence_available: retain_pc_chance_coverage_evidence,
+            distributed_minimum_cover_source_complete: false,
             buildable_identities: ExactHashSet::default(),
             compact_tiling_identities: compact_tiling_identity_supported.then(Vec::new),
             distributed_tiling_root_runs: None,
@@ -1753,6 +2038,52 @@ impl WasmExactSearchSession {
                 )
             })?;
         Ok(Some(limit))
+    }
+
+    pub(crate) fn validate_external_result_memory_with_future(
+        &self,
+        external_retained_bytes: u128,
+        checked_future_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        let checked_external_and_future = external_retained_bytes
+            .checked_add(checked_future_bytes)
+            .ok_or_else(|| {
+                self.memory_projection_unavailable(
+                    "checked distributed ingress memory projection overflow is unavailable",
+                )
+            })?;
+        if matches!(
+            self.problem_retention,
+            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+        ) {
+            return self.ensure_session_memory_bound(checked_external_and_future);
+        }
+
+        // Ordinary exact-search admission reserves the algorithm's projected
+        // dense state, which is intentionally much smaller than the bounded
+        // caller-owned wire + decoded-result ingress surface. Validate that
+        // transient whole-live surface against the request cap (or the finite
+        // host cap when no explicit cap was requested), while retaining the
+        // original execution lease as the algorithm allocation authority.
+        let cap_bytes = match self.problem.backend_request().max_memory_mib() {
+            Some(mib) => u128::from(mib).checked_mul(1024 * 1024).ok_or_else(|| {
+                self.memory_projection_unavailable(
+                    "checked distributed ingress memory cap overflow is unavailable",
+                )
+            })?,
+            None => u128::from(shared_execution_resource_capacity().memory_bytes),
+        };
+        let retained = self
+            .checked_allocation_guard_retained_bytes()
+            .ok_or_else(|| {
+                self.memory_projection_unavailable(
+                    "checked distributed ingress retained-byte overflow is unavailable",
+                )
+            })?;
+        ExecutionMemoryBound::unbounded_for_problem(self.problem.as_ref())
+            .and_then(|bound| bound.with_cap(cap_bytes))
+            .and_then(|bound| bound.ensure(retained, checked_external_and_future))
+            .map_err(WasmExactSearchError::ResourceAdmission)
     }
 
     pub(crate) fn validate_public_result_memory_with_future(
@@ -2563,22 +2894,54 @@ impl WasmExactSearchSession {
         &mut self,
         result: &CoreExecutionResult,
     ) -> Result<(), WasmExactSearchError> {
-        self.pc_chance_coverage_evidence_available = false;
-        self.coverage_rows_complete = false;
-        self.coverage_rows = Vec::new();
-        let pattern_count = result.usize_field("coverage_pattern_count").ok_or(
+        let scalar = exact_distributed_worker_scalar_evidence(result).ok_or(
+            WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_result_scalar_authority_invalid",
+            ),
+        )?;
+        let representative_identity = result.representative_solution_identity();
+        if scalar.representative_candidate_ordinal.is_some()
+            != scalar.representative_candidate_id.is_some()
+            || scalar.representative_candidate_ordinal.is_some()
+                != representative_identity.is_some()
+            || (scalar.representative_candidate_ordinal.is_none()
+                && (!result.path_steps().is_empty() || scalar.representative_pattern_id.is_some()))
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_result_representative_authority_invalid",
+            ));
+        }
+        let pattern_count = exact_canonical_usize_field(result, "coverage_pattern_count").ok_or(
             WasmExactSearchError::InvalidProblem("wasm_distributed_result_pattern_count_missing"),
         )?;
-        let coverage =
-            PatternBitSet::from_words(pattern_count, result.coverage_pattern_words().to_vec())
-                .map_err(|_| {
-                    WasmExactSearchError::InvalidProblem("wasm_distributed_result_coverage_invalid")
-                })?;
+        let coverage = strict_coverage_pattern_bitset_from_words(
+            pattern_count,
+            result.coverage_pattern_words(),
+        )
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_distributed_result_coverage_invalid")
+        })?;
+        let evidence_policy = self.problem.pc_chance_evidence_policy();
+        let distributed_minimum_cover = evidence_policy == PcChanceEvidencePolicy::PcMinimumCoverV2;
+        if distributed_minimum_cover {
+            self.absorb_distributed_minimum_cover_source(result, pattern_count, &coverage)?;
+        } else if evidence_policy == PcChanceEvidencePolicy::PcProbabilityV2 {
+            self.absorb_distributed_pc_chance_rows(result, pattern_count, &coverage)?;
+        } else {
+            self.pc_chance_coverage_evidence_available = false;
+            self.coverage_rows_complete = false;
+            self.coverage_rows = Vec::new();
+        }
+
         self.covered_patterns.union_with(&coverage).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_distributed_coverage_universe_mismatch")
         })?;
 
-        for identity in result.normalized_solution_identities() {
+        for identity in result
+            .normalized_solution_identities()
+            .iter()
+            .filter(|_| !distributed_minimum_cover)
+        {
             if !self.problem.output_policy().retains_solution_set() {
                 break;
             }
@@ -2607,14 +2970,18 @@ impl WasmExactSearchSession {
                 self.buildable_identities.insert(identity);
             }
         }
-        for solution_coverage in result.solution_coverages() {
+        for solution_coverage in result
+            .solution_coverages()
+            .iter()
+            .filter(|_| !distributed_minimum_cover)
+        {
             self.merge_solution_coverage(
                 solution_coverage.identity(),
                 solution_coverage.covered_patterns(),
             )?;
         }
 
-        let worker_candidates = result.usize_field("packing_candidate_count").unwrap_or(0);
+        let worker_candidates = scalar.packing_candidate_count;
         if worker_candidates != 0 {
             self.parallel_active_workers = self.parallel_active_workers.saturating_add(1);
             self.parallel_minimum_worker_candidates = self
@@ -2626,173 +2993,280 @@ impl WasmExactSearchSession {
         }
         self.coverage_row_count = self
             .coverage_row_count
-            .saturating_add(result.usize_field("coverage_row_count").unwrap_or(0));
-        self.pattern_verified_execution_count =
-            self.pattern_verified_execution_count.saturating_add(
-                result
-                    .usize_field("pattern_verified_execution_count")
-                    .unwrap_or(0),
-            );
-        let next_variants = result
-            .field("build_variant_count")
-            .and_then(|value| value.parse::<u128>().ok())
-            .and_then(|value| self.build_variant_count.checked_add(value));
+            .saturating_add(scalar.coverage_row_count);
+        self.pattern_verified_execution_count = self
+            .pattern_verified_execution_count
+            .saturating_add(scalar.pattern_verified_execution_count);
+        let next_variants = self
+            .build_variant_count
+            .checked_add(scalar.build_variant_count);
         self.build_variant_count = next_variants.unwrap_or(u128::MAX);
-        self.count_complete &=
-            next_variants.is_some() && result.bool_field("count_complete").unwrap_or(false);
+        self.count_complete &= next_variants.is_some() && scalar.count_complete;
         if self.problem.objective().execution_constraints().requested() {
-            self.distributed_execution_constraint_materialized &= result
-                .bool_field("execution_constraint_materialized")
-                .unwrap_or(false);
+            self.distributed_execution_constraint_materialized &=
+                scalar.execution_constraint_materialized;
         }
 
-        self.peak_build_nodes = self
-            .peak_build_nodes
-            .max(result.usize_field("peak_build_order_nodes").unwrap_or(0));
+        self.peak_build_nodes = self.peak_build_nodes.max(scalar.peak_build_order_nodes);
         self.total_build_nodes = self
             .total_build_nodes
-            .saturating_add(result.usize_field("total_build_order_nodes").unwrap_or(0));
+            .saturating_add(scalar.total_build_order_nodes);
         self.coverage_product_words = self
             .coverage_product_words
-            .saturating_add(result.usize_field("coverage_product_words").unwrap_or(0));
+            .saturating_add(scalar.coverage_product_words);
         self.coverage_product_states = self
             .coverage_product_states
-            .saturating_add(result.usize_field("coverage_product_states").unwrap_or(0));
-        self.coverage_product_edge_checks = self.coverage_product_edge_checks.saturating_add(
-            result
-                .usize_field("coverage_product_edge_checks")
-                .unwrap_or(0),
-        );
-        self.realization_feasibility_states = self.realization_feasibility_states.saturating_add(
-            result
-                .usize_field("realization_feasibility_states")
-                .unwrap_or(0),
-        );
+            .saturating_add(scalar.coverage_product_states);
+        self.coverage_product_edge_checks = self
+            .coverage_product_edge_checks
+            .saturating_add(scalar.coverage_product_edge_checks);
+        self.realization_feasibility_states = self
+            .realization_feasibility_states
+            .saturating_add(scalar.realization_feasibility_states);
         self.realization_feasibility_rejected_candidates = self
             .realization_feasibility_rejected_candidates
-            .saturating_add(
-                result
-                    .usize_field("realization_feasibility_rejected_candidates")
-                    .unwrap_or(0),
-            );
+            .saturating_add(scalar.realization_feasibility_rejected_candidates);
         self.peak_reachability_states = self
             .peak_reachability_states
-            .max(result.usize_field("peak_reachability_states").unwrap_or(0));
+            .max(scalar.peak_reachability_states);
         self.total_reachability_states = self
             .total_reachability_states
-            .saturating_add(result.usize_field("total_reachability_states").unwrap_or(0));
+            .saturating_add(scalar.total_reachability_states);
         self.parallel_worker_retained_bytes = self
             .parallel_worker_retained_bytes
-            .saturating_add(result.usize_field("resource_peak_cpu_bytes").unwrap_or(0));
-        self.parallel_piece_language_cache_hits =
-            self.parallel_piece_language_cache_hits.saturating_add(
-                result
-                    .usize_field("piece_language_coverage_cache_hits")
-                    .unwrap_or(0),
-            );
-        self.parallel_piece_language_cache_misses =
-            self.parallel_piece_language_cache_misses.saturating_add(
-                result
-                    .usize_field("piece_language_coverage_cache_misses")
-                    .unwrap_or(0),
-            );
-        self.parallel_standard_bag_cache_hits =
-            self.parallel_standard_bag_cache_hits.saturating_add(
-                result
-                    .usize_field("standard_bag_symbolic_cache_hits")
-                    .unwrap_or(0),
-            );
-        self.parallel_standard_bag_cache_misses =
-            self.parallel_standard_bag_cache_misses.saturating_add(
-                result
-                    .usize_field("standard_bag_symbolic_cache_misses")
-                    .unwrap_or(0),
-            );
+            .saturating_add(scalar.resource_peak_cpu_bytes);
+        self.parallel_piece_language_cache_hits = self
+            .parallel_piece_language_cache_hits
+            .saturating_add(scalar.piece_language_coverage_cache_hits);
+        self.parallel_piece_language_cache_misses = self
+            .parallel_piece_language_cache_misses
+            .saturating_add(scalar.piece_language_coverage_cache_misses);
+        self.parallel_standard_bag_cache_hits = self
+            .parallel_standard_bag_cache_hits
+            .saturating_add(scalar.standard_bag_symbolic_cache_hits);
+        self.parallel_standard_bag_cache_misses = self
+            .parallel_standard_bag_cache_misses
+            .saturating_add(scalar.standard_bag_symbolic_cache_misses);
         self.parallel_reachability_metrics.lock_queries = self
             .parallel_reachability_metrics
             .lock_queries
-            .saturating_add(result.usize_field("reachability_lock_queries").unwrap_or(0));
+            .saturating_add(scalar.reachability_lock_queries);
         self.parallel_reachability_metrics.harddrop_queries = self
             .parallel_reachability_metrics
             .harddrop_queries
-            .saturating_add(
-                result
-                    .usize_field("reachability_harddrop_queries")
-                    .unwrap_or(0),
-            );
+            .saturating_add(scalar.reachability_harddrop_queries);
         self.parallel_reachability_metrics.harddrop_hits = self
             .parallel_reachability_metrics
             .harddrop_hits
-            .saturating_add(
-                result
-                    .usize_field("reachability_harddrop_hits")
-                    .unwrap_or(0),
-            );
+            .saturating_add(scalar.reachability_harddrop_hits);
         self.parallel_reachability_metrics.cache_reachable_hits = self
             .parallel_reachability_metrics
             .cache_reachable_hits
-            .saturating_add(
-                result
-                    .usize_field("reachability_cache_reachable_hits")
-                    .unwrap_or(0),
-            );
+            .saturating_add(scalar.reachability_cache_reachable_hits);
         self.parallel_reachability_metrics.cache_unreachable_hits = self
             .parallel_reachability_metrics
             .cache_unreachable_hits
-            .saturating_add(
-                result
-                    .usize_field("reachability_cache_unreachable_hits")
-                    .unwrap_or(0),
-            );
+            .saturating_add(scalar.reachability_cache_unreachable_hits);
         self.parallel_reachability_metrics.cache_key_misses = self
             .parallel_reachability_metrics
             .cache_key_misses
-            .saturating_add(
-                result
-                    .usize_field("reachability_cache_key_misses")
-                    .unwrap_or(0),
-            );
+            .saturating_add(scalar.reachability_cache_key_misses);
         self.parallel_reachability_metrics.partial_searches = self
             .parallel_reachability_metrics
             .partial_searches
-            .saturating_add(
-                result
-                    .usize_field("reachability_partial_searches")
-                    .unwrap_or(0),
-            );
+            .saturating_add(scalar.reachability_partial_searches);
         self.parallel_reachability_metrics.exhaustive_searches = self
             .parallel_reachability_metrics
             .exhaustive_searches
-            .saturating_add(
-                result
-                    .usize_field("reachability_exhaustive_searches")
-                    .unwrap_or(0),
-            );
+            .saturating_add(scalar.reachability_exhaustive_searches);
 
         if self.problem.output_policy().retains_representative_trace() {
-            if let Some(rank) = result
-                .field("representative_candidate_ordinal")
-                .and_then(|value| value.parse::<u64>().ok())
-            {
+            if let Some(rank) = scalar.representative_candidate_ordinal {
                 if self
                     .representative_rank
                     .is_none_or(|current| rank < current)
                 {
                     self.representative_rank = Some(rank);
-                    self.representative_identity = result.representative_solution_identity();
-                    self.representative_candidate_id = result
-                        .field("representative_candidate_id")
-                        .and_then(|value| value.parse::<u64>().ok());
-                    self.representative_pattern_id = result
-                        .field("representative_pattern_id")
-                        .and_then(|value| value.parse::<u32>().ok());
+                    self.representative_identity = representative_identity;
+                    self.representative_candidate_id = scalar.representative_candidate_id;
+                    self.representative_pattern_id = scalar.representative_pattern_id;
                     self.representative_path = result.path_steps().to_vec();
                 }
             }
         }
-        if result.bool_field("resource_truncated").unwrap_or(true) {
+        if scalar.resource_truncated {
             self.mark_truncated("distributed_worker_incomplete");
         }
+        Ok(())
+    }
+
+    /// Validates an untrusted worker-row batch against the coordinator's
+    /// retained typed chance problem before committing any row. Missing
+    /// transport leaves the ordinary public aggregate usable but deliberately
+    /// removes typed chance authority, preserving fail-closed compatibility.
+    fn absorb_distributed_pc_chance_rows(
+        &mut self,
+        result: &CoreExecutionResult,
+        pattern_count: usize,
+        aggregate_coverage: &PatternBitSet,
+    ) -> Result<(), WasmExactSearchError> {
+        let Some(transport) = result.distributed_pc_chance_coverage_rows() else {
+            self.pc_chance_coverage_evidence_available = false;
+            self.coverage_rows_complete = false;
+            self.coverage_rows = Vec::new();
+            return Ok(());
+        };
+        if !self.pc_chance_coverage_evidence_available {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_chance_evidence_inconsistent",
+            ));
+        }
+        if !transport.complete()
+            || exact_canonical_bool_field(result, "count_complete") != Some(true)
+            || exact_canonical_bool_field(result, "probability_complete") != Some(true)
+            || exact_canonical_bool_field(result, "resource_probability_complete") != Some(true)
+            || exact_canonical_bool_field(result, "resource_truncated") != Some(false)
+            || exact_canonical_usize_field(result, "coverage_row_count")
+                != Some(transport.rows().len())
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_chance_evidence_incomplete",
+            ));
+        }
+        let source = self.problem.piece_source();
+        let universe =
+            source
+                .materialized_universe()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_source_not_materialized",
+                ))?;
+        if pattern_count != universe.pattern_count()
+            || transport.pattern_count() != pattern_count
+            || transport.piece_source_id() != source.id().get()
+            || transport.pattern_universe_id() != universe.pattern_universe_id()
+            || transport.pattern_weight_model_id() != universe.pattern_weight_model_id()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_chance_evidence_identity_mismatch",
+            ));
+        }
+
+        let mut row_union = try_empty_pattern_bitset(
+            pattern_count,
+            "wasm_distributed_pc_chance_union_storage_unavailable",
+        )?;
+        for row in transport.rows() {
+            row_union.union_with(row.coverage_bits()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_distributed_pc_chance_evidence_universe_mismatch",
+                )
+            })?;
+            if self
+                .coverage_rows
+                .binary_search_by_key(&row.candidate_id(), CoverageRow::candidate_id)
+                .is_ok()
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_distributed_pc_chance_candidate_duplicate",
+                ));
+            }
+        }
+        if &row_union != aggregate_coverage {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_chance_evidence_coverage_mismatch",
+            ));
+        }
+
+        self.coverage_rows
+            .try_reserve(transport.rows().len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_distributed_pc_chance_row_storage_unavailable",
+                )
+            })?;
+        self.coverage_rows.extend(transport.rows().iter().cloned());
+        self.coverage_rows
+            .sort_unstable_by_key(CoverageRow::candidate_id);
+        Ok(())
+    }
+
+    /// Rebuilds the minimum-cover producer evidence from the same canonical
+    /// per-solution coverage dictionary that App validates at the terminal.
+    /// Workers never transport a second private row matrix: the coordinator
+    /// binds these rows to its retained prepared problem after validating the
+    /// complete flags and exact aggregate union in one linear pass.
+    fn absorb_distributed_minimum_cover_source(
+        &mut self,
+        result: &CoreExecutionResult,
+        pattern_count: usize,
+        aggregate_coverage: &PatternBitSet,
+    ) -> Result<(), WasmExactSearchError> {
+        let source = result.solution_coverages();
+        if exact_canonical_bool_field(result, "count_complete") != Some(true)
+            || exact_canonical_bool_field(result, "probability_complete") != Some(true)
+            || exact_canonical_bool_field(result, "resource_probability_complete") != Some(true)
+            || exact_canonical_bool_field(result, "resource_truncated") != Some(false)
+            || exact_canonical_usize_field(result, "minimum_cover_source_solution_count")
+                != Some(source.len())
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_minimum_source_incomplete",
+            ));
+        }
+        let universe = self.problem.piece_source().materialized_universe().ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+        )?;
+        if pattern_count != universe.pattern_count() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_minimum_source_universe_mismatch",
+            ));
+        }
+
+        let mut source_union = PatternBitSet::new(pattern_count);
+        let mut previous_identity: Option<StandardBoard64TilingIdentity> = None;
+        for entry in source {
+            let identity = entry.identity();
+            if previous_identity.is_some_and(|previous| previous >= identity)
+                || entry.covered_patterns().pattern_count() != pattern_count
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_distributed_pc_minimum_source_not_canonical",
+                ));
+            }
+            source_union
+                .union_with(entry.covered_patterns())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_distributed_pc_minimum_source_universe_mismatch",
+                    )
+                })?;
+            previous_identity = Some(identity);
+        }
+        if &source_union != aggregate_coverage {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_minimum_source_coverage_mismatch",
+            ));
+        }
+
+        // Commit only after the entire borrowed partial has passed its closed
+        // flag, identity-order, universe-shape, and aggregate-union checks.
+        // A forged trailing row therefore cannot leave accepted coordinator
+        // authority behind before the partial is rejected.
+        for entry in source {
+            let identity = entry.identity();
+            let identity_entry = TilingIdentityEntry::new(identity);
+            if !self.buildable_identities.contains(&identity_entry) {
+                self.buildable_identities.try_reserve(1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_distributed_solution_storage_unavailable",
+                    )
+                })?;
+                self.buildable_identities.insert(identity_entry);
+            }
+            self.merge_solution_coverage(identity, entry.covered_patterns())?;
+        }
+
+        self.distributed_minimum_cover_source_complete = true;
         Ok(())
     }
 
@@ -3426,6 +3900,30 @@ impl WasmExactSearchSession {
                 coverage.covered_patterns().clone(),
             )
         }));
+        if include_normalized_keys && self.distributed_minimum_cover_source_complete {
+            self.coverage_rows.clear();
+            self.coverage_rows
+                .try_reserve_exact(solution_coverages.len())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_distributed_pc_minimum_source_storage_unavailable",
+                    )
+                })?;
+            let piece_source_id = self.problem.piece_source().id().get();
+            let pattern_universe_id = universe.pattern_universe_id();
+            let pattern_weight_model_id = universe.pattern_weight_model_id();
+            self.coverage_rows
+                .extend(solution_coverages.iter().map(|coverage| {
+                    CoverageRow::new_with_piece_source(
+                        coverage.identity().bucket_hash(),
+                        CoverageRowKind::Build,
+                        piece_source_id,
+                        pattern_universe_id,
+                        pattern_weight_model_id,
+                        coverage.covered_patterns().clone(),
+                    )
+                }));
+        }
         let observation_policy = self.problem.queue_observation_policy();
         let visible_seven_policy = observation_policy.requires_observation_policy();
         let minimum_cover_requested =
@@ -4289,47 +4787,56 @@ impl WasmExactSearchSession {
         } else {
             None
         };
-        let pc_chance_coverage_evidence =
-            if tiling_only || !self.pc_chance_coverage_evidence_available {
-                None
+        let pc_chance_coverage_evidence = if tiling_only
+            || !self.pc_chance_coverage_evidence_available
+        {
+            None
+        } else {
+            self.coverage_rows
+                .sort_unstable_by_key(CoverageRow::candidate_id);
+            let mut row_union = if matches!(
+                self.problem_retention,
+                SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+            ) {
+                try_empty_pattern_bitset(
+                    universe.pattern_count(),
+                    "wasm_pc_chance_coverage_row_union_storage_unavailable",
+                )?
             } else {
-                let mut row_union = if matches!(
-                    self.problem_retention,
-                    SearchProblemRetention::ParentAuthorizedSharedInput { .. }
-                ) {
-                    try_empty_pattern_bitset(
-                        universe.pattern_count(),
-                        "wasm_pc_chance_coverage_row_union_storage_unavailable",
-                    )?
-                } else {
-                    PatternBitSet::new(universe.pattern_count())
-                };
-                for row in &self.coverage_rows {
-                    row_union.union_with(row.coverage_bits()).map_err(|_| {
-                        WasmExactSearchError::InvalidProblem(
-                            "wasm_pc_chance_coverage_row_union_mismatch",
-                        )
-                    })?;
-                }
-                let complete = self.coverage_rows_complete
-                    && probability_complete
-                    && count_complete
-                    && non_score_objective_complete
-                    && self.coverage_rows.len() == self.coverage_row_count
-                    && row_union == self.covered_patterns;
-                Some(
-                    PcChanceCoverageEvidence::from_problem_rows(
-                        &self.problem,
-                        core::mem::take(&mut self.coverage_rows),
-                        complete,
-                    )
-                    .map_err(|_| {
-                        WasmExactSearchError::InvalidProblem(
-                            "wasm_pc_chance_coverage_evidence_identity_mismatch",
-                        )
-                    })?,
-                )
+                PatternBitSet::new(universe.pattern_count())
             };
+            for row in &self.coverage_rows {
+                row_union.union_with(row.coverage_bits()).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_pc_chance_coverage_row_union_mismatch",
+                    )
+                })?;
+            }
+            let distributed_minimum_cover_partition_complete = !include_normalized_keys
+                && self.problem.pc_chance_evidence_policy()
+                    == PcChanceEvidencePolicy::PcMinimumCoverV2
+                && count_complete
+                && probability_complete;
+            let complete = self.coverage_rows_complete
+                && probability_complete
+                && count_complete
+                && (non_score_objective_complete || distributed_minimum_cover_partition_complete)
+                && (self.distributed_minimum_cover_source_complete
+                    || self.coverage_rows.len() == self.coverage_row_count)
+                && row_union == self.covered_patterns;
+            Some(
+                PcChanceCoverageEvidence::from_problem_rows(
+                    &self.problem,
+                    core::mem::take(&mut self.coverage_rows),
+                    complete,
+                )
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_pc_chance_coverage_evidence_identity_mismatch",
+                    )
+                })?,
+            )
+        };
         let mut coverage_pattern_words = Vec::new();
         coverage_pattern_words
             .try_reserve_exact(self.covered_patterns.words().len())
@@ -4408,6 +4915,8 @@ fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityM
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
     use super::{
         checked_typed_problem_evidence_upper_bound, packed_rows_are_valid,
         DistributedTilingRootRun, ExactSearchAdvance, WasmExactSearchSession, MAX_BOARD64_PIECES,
@@ -4424,8 +4933,8 @@ mod tests {
         pack_tiling_row_ids, read_packed_tiling_row, PackedTilingRows, PACKED_TILING_MAX_ROW_ID,
     };
     use crate::{
-        CoreExecutionResult, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
-        WasmCpuSearchBackend, WasmDistributedVerifier,
+        CoreExecutionResult, DistributedPcChanceCoverageRows, WasmCandidateProducerAdvance,
+        WasmCpuCandidateProducer, WasmCpuSearchBackend, WasmDistributedVerifier,
     };
     use clearra_core_domain::{
         execution_cancellation::ExecutionControl,
@@ -4436,6 +4945,7 @@ mod tests {
             PiecePlacementMask, StandardBoard64TilingIdentity,
         },
     };
+    use clearra_coverage::row::{coverage_row::CoverageRow, coverage_row_kind::CoverageRowKind};
     use clearra_objectives::policy::{
         objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
     };
@@ -4763,6 +5273,308 @@ mod tests {
         assert!(result.pc_chance_coverage_evidence().is_none());
     }
 
+    fn distributed_worker_scalar_fields(
+        coverage_row_count: usize,
+        packing_candidate_count: usize,
+        build_variant_count: u128,
+    ) -> Vec<(String, String)> {
+        [
+            ("coverage_pattern_count", "1".to_owned()),
+            ("coverage_row_count", coverage_row_count.to_string()),
+            (
+                "packing_candidate_count",
+                packing_candidate_count.to_string(),
+            ),
+            ("pattern_verified_execution_count", "0".to_owned()),
+            ("build_variant_count", build_variant_count.to_string()),
+            ("count_complete", "true".to_owned()),
+            ("execution_constraint_materialized", "true".to_owned()),
+            ("peak_build_order_nodes", "0".to_owned()),
+            ("total_build_order_nodes", "0".to_owned()),
+            ("coverage_product_words", "0".to_owned()),
+            ("coverage_product_states", "0".to_owned()),
+            ("coverage_product_edge_checks", "0".to_owned()),
+            ("realization_feasibility_states", "0".to_owned()),
+            (
+                "realization_feasibility_rejected_candidates",
+                "0".to_owned(),
+            ),
+            ("peak_reachability_states", "0".to_owned()),
+            ("total_reachability_states", "0".to_owned()),
+            ("resource_peak_cpu_bytes", "0".to_owned()),
+            ("piece_language_coverage_cache_hits", "0".to_owned()),
+            ("piece_language_coverage_cache_misses", "0".to_owned()),
+            ("standard_bag_symbolic_cache_hits", "0".to_owned()),
+            ("standard_bag_symbolic_cache_misses", "0".to_owned()),
+            ("reachability_lock_queries", "0".to_owned()),
+            ("reachability_harddrop_queries", "0".to_owned()),
+            ("reachability_harddrop_hits", "0".to_owned()),
+            ("reachability_cache_reachable_hits", "0".to_owned()),
+            ("reachability_cache_unreachable_hits", "0".to_owned()),
+            ("reachability_cache_key_misses", "0".to_owned()),
+            ("reachability_partial_searches", "0".to_owned()),
+            ("reachability_exhaustive_searches", "0".to_owned()),
+            ("representative_candidate_ordinal", String::new()),
+            ("representative_candidate_id", String::new()),
+            ("representative_pattern_id", String::new()),
+            ("resource_truncated", "false".to_owned()),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect()
+    }
+
+    fn typed_chance_worker_fixture() -> (clearra_problem::SearchProblem, CoreExecutionResult) {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique);
+        let problem = ProblemCompiler::compile_scenario_percent(&query)
+            .expect("problem")
+            .with_pc_chance_probability_v2_evidence();
+        let source = problem.piece_source();
+        let universe = source
+            .materialized_universe()
+            .expect("materialized chance universe");
+        let rows = vec![CoverageRow::new_with_piece_source(
+            7,
+            CoverageRowKind::Build,
+            source.id().get(),
+            universe.pattern_universe_id(),
+            universe.pattern_weight_model_id(),
+            clearra_coverage::pattern::pattern_bitset::PatternBitSet::from_words(
+                universe.pattern_count(),
+                vec![1],
+            )
+            .expect("one-pattern chance row"),
+        )];
+        let transport = DistributedPcChanceCoverageRows::try_from_untrusted_rows(
+            source.id().get(),
+            universe.pattern_universe_id(),
+            universe.pattern_weight_model_id(),
+            universe.pattern_count(),
+            rows,
+            true,
+        )
+        .expect("valid worker transport");
+        let mut fields = distributed_worker_scalar_fields(1, 1, 1);
+        fields.extend([
+            ("probability_complete".to_owned(), "true".to_owned()),
+            (
+                "resource_probability_complete".to_owned(),
+                "true".to_owned(),
+            ),
+        ]);
+        (
+            problem,
+            CoreExecutionResult::new(fields, Vec::new())
+                .with_coverage_pattern_words(vec![1])
+                .with_distributed_pc_chance_coverage_rows(transport),
+        )
+    }
+
+    fn typed_chance_distributed_test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn distributed_typed_chance_rows_rebind_to_the_coordinator_problem() {
+        let _guard = typed_chance_distributed_test_guard();
+        let (problem, worker) = typed_chance_worker_fixture();
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("coordinator");
+        coordinator
+            .absorb_distributed_result(&worker)
+            .expect("identity-bound worker rows");
+        let result = match coordinator
+            .complete_external_geometry(0, 0)
+            .expect("complete coordinator")
+        {
+            ExactSearchAdvance::Completed(result) => result,
+            ExactSearchAdvance::Pending | ExactSearchAdvance::Cancelled => {
+                panic!("coordinator must complete")
+            }
+        };
+        let evidence = result
+            .pc_chance_coverage_evidence()
+            .expect("coordinator-bound chance evidence");
+        assert!(evidence.complete());
+        assert!(evidence.problem().matches_search_problem(&problem));
+        assert_eq!(
+            evidence.coverage_union().words(),
+            result.coverage_pattern_words()
+        );
+    }
+
+    #[test]
+    fn distributed_typed_chance_rows_reject_foreign_incomplete_and_duplicate_batches() {
+        let _guard = typed_chance_distributed_test_guard();
+        let (problem, worker) = typed_chance_worker_fixture();
+        let transport = worker
+            .distributed_pc_chance_coverage_rows()
+            .expect("worker transport");
+
+        let foreign_universe =
+            clearra_coverage::universe::pattern_universe_id::PatternUniverseId::new(
+                transport.pattern_universe_id().get().saturating_add(1),
+            );
+        let foreign_rows = transport
+            .rows()
+            .iter()
+            .map(|row| {
+                CoverageRow::new_with_piece_source(
+                    row.candidate_id(),
+                    CoverageRowKind::Build,
+                    row.piece_source_id(),
+                    foreign_universe,
+                    row.pattern_weight_model_id(),
+                    row.coverage_bits().clone(),
+                )
+            })
+            .collect();
+        let foreign = DistributedPcChanceCoverageRows::try_from_untrusted_rows(
+            transport.piece_source_id(),
+            foreign_universe,
+            transport.pattern_weight_model_id(),
+            transport.pattern_count(),
+            foreign_rows,
+            true,
+        )
+        .expect("well-formed foreign transport");
+        let foreign_worker = worker
+            .clone()
+            .without_pc_chance_transient_evidence()
+            .with_distributed_pc_chance_coverage_rows(foreign);
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("foreign coordinator");
+        assert!(matches!(
+            coordinator.absorb_distributed_result(&foreign_worker),
+            Err(super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_chance_evidence_identity_mismatch"
+            ))
+        ));
+        drop(coordinator);
+
+        let incomplete = DistributedPcChanceCoverageRows::try_from_untrusted_rows(
+            transport.piece_source_id(),
+            transport.pattern_universe_id(),
+            transport.pattern_weight_model_id(),
+            transport.pattern_count(),
+            transport.rows().to_vec(),
+            false,
+        )
+        .expect("well-formed incomplete transport");
+        let incomplete_worker = worker
+            .clone()
+            .without_pc_chance_transient_evidence()
+            .with_distributed_pc_chance_coverage_rows(incomplete);
+        let mut coordinator = WasmExactSearchSession::new_external_geometry(&problem)
+            .expect("incomplete coordinator");
+        assert!(matches!(
+            coordinator.absorb_distributed_result(&incomplete_worker),
+            Err(super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_chance_evidence_incomplete"
+            ))
+        ));
+        drop(coordinator);
+
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("duplicate coordinator");
+        coordinator
+            .absorb_distributed_result(&worker)
+            .expect("first batch");
+        assert!(matches!(
+            coordinator.absorb_distributed_result(&worker),
+            Err(super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_chance_candidate_duplicate"
+            ))
+        ));
+        drop(coordinator);
+
+        let duplicate_authority = worker
+            .clone()
+            .with_additional_fields(vec![("count_complete".to_owned(), "true".to_owned())]);
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("duplicate authority");
+        assert!(matches!(
+            coordinator.absorb_distributed_result(&duplicate_authority),
+            Err(super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_result_scalar_authority_invalid"
+            ))
+        ));
+        drop(coordinator);
+
+        let missing_scalar = worker
+            .clone()
+            .without_field_for_test("resource_peak_cpu_bytes");
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("missing scalar");
+        assert!(matches!(
+            coordinator.absorb_distributed_result(&missing_scalar),
+            Err(super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_result_scalar_authority_invalid"
+            ))
+        ));
+        assert_eq!(coordinator.covered_patterns.count_ones(), 0);
+        drop(coordinator);
+
+        let missing_authority = worker
+            .clone()
+            .without_field_for_test("resource_probability_complete");
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("missing authority");
+        assert!(matches!(
+            coordinator.absorb_distributed_result(&missing_authority),
+            Err(super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_chance_evidence_incomplete"
+            ))
+        ));
+        drop(coordinator);
+
+        let noncanonical_count = replace_worker_field(worker.clone(), "coverage_row_count", "01");
+        let mut coordinator = WasmExactSearchSession::new_external_geometry(&problem)
+            .expect("noncanonical authority");
+        assert!(matches!(
+            coordinator.absorb_distributed_result(&noncanonical_count),
+            Err(super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_result_scalar_authority_invalid"
+            ))
+        ));
+        drop(coordinator);
+
+        let dirty_aggregate = worker
+            .clone()
+            .with_coverage_pattern_words(vec![1 | (1_u64 << 63)]);
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("dirty aggregate");
+        assert!(matches!(
+            coordinator.absorb_distributed_result(&dirty_aggregate),
+            Err(super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_result_coverage_invalid"
+            ))
+        ));
+        drop(coordinator);
+
+        let duplicate_pattern_count = worker
+            .clone()
+            .with_additional_fields(vec![("coverage_pattern_count".to_owned(), "1".to_owned())]);
+        let mut coordinator = WasmExactSearchSession::new_external_geometry(&problem)
+            .expect("duplicate pattern count");
+        assert!(matches!(
+            coordinator.absorb_distributed_result(&duplicate_pattern_count),
+            Err(super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_result_pattern_count_missing"
+            ))
+        ));
+    }
+
     #[test]
     fn distributed_aggregate_never_synthesizes_missing_typed_chance_rows() {
         let query = PcScenarioQuery::new(
@@ -4778,18 +5590,9 @@ mod tests {
             .with_pc_chance_probability_v2_evidence();
         let mut coordinator =
             WasmExactSearchSession::new_external_geometry(&problem).expect("coordinator");
-        let worker = CoreExecutionResult::new(
-            vec![
-                ("coverage_pattern_count".to_owned(), "1".to_owned()),
-                ("coverage_row_count".to_owned(), "1".to_owned()),
-                ("packing_candidate_count".to_owned(), "1".to_owned()),
-                ("build_variant_count".to_owned(), "1".to_owned()),
-                ("count_complete".to_owned(), "true".to_owned()),
-                ("resource_truncated".to_owned(), "false".to_owned()),
-            ],
-            Vec::new(),
-        )
-        .with_coverage_pattern_words(vec![1]);
+        let worker =
+            CoreExecutionResult::new(distributed_worker_scalar_fields(1, 1, 1), Vec::new())
+                .with_coverage_pattern_words(vec![1]);
 
         coordinator
             .absorb_distributed_result(&worker)
@@ -4806,6 +5609,191 @@ mod tests {
 
         assert_eq!(result.coverage_pattern_words(), &[1]);
         assert!(result.pc_chance_coverage_evidence().is_none());
+    }
+
+    fn minimum_cover_worker_fixture() -> (clearra_problem::SearchProblem, CoreExecutionResult) {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::minimum_cover());
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .expect("minimum-cover problem")
+            .with_pc_minimum_cover_v2_evidence();
+        let worker =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("minimum-cover worker result");
+        (problem, worker)
+    }
+
+    fn replace_worker_field(
+        worker: CoreExecutionResult,
+        key: &str,
+        value: &str,
+    ) -> CoreExecutionResult {
+        let mut fields = worker.summary_fields();
+        fields
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .expect("worker field")
+            .1 = value.to_owned();
+        worker.with_replaced_fields(fields)
+    }
+
+    #[test]
+    fn distributed_minimum_cover_rebuilds_problem_bound_rows_from_canonical_source() {
+        let (problem, worker) = minimum_cover_worker_fixture();
+        let source_count = worker.normalized_solution_coverages().len();
+        assert_ne!(source_count, 0, "fixture owns a canonical source row");
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("coordinator");
+
+        coordinator
+            .absorb_distributed_result(&worker)
+            .expect("canonical source coverage is coordinator-replayable");
+        let result = match coordinator
+            .complete_external_geometry(0, 0)
+            .expect("complete coordinator")
+        {
+            ExactSearchAdvance::Completed(result) => result,
+            ExactSearchAdvance::Pending | ExactSearchAdvance::Cancelled => {
+                panic!("coordinator must complete")
+            }
+        };
+        let merged = result
+            .pc_chance_coverage_evidence()
+            .expect("coordinator-owned typed coverage evidence");
+        assert!(merged.complete());
+        assert_eq!(merged.row_count(), source_count);
+        assert_eq!(
+            merged.coverage_union().words(),
+            worker.coverage_pattern_words()
+        );
+    }
+
+    #[test]
+    fn distributed_minimum_cover_rejects_incomplete_worker_source() {
+        let (problem, worker) = minimum_cover_worker_fixture();
+        let worker = replace_worker_field(worker, "count_complete", "false");
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("coordinator");
+
+        let error = coordinator
+            .absorb_distributed_result(&worker)
+            .expect_err("incomplete worker source must fail closed");
+
+        assert!(matches!(
+            error,
+            super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_minimum_source_incomplete"
+            )
+        ));
+    }
+
+    #[test]
+    fn distributed_minimum_cover_rejects_source_union_tamper() {
+        let (problem, worker) = minimum_cover_worker_fixture();
+        let (source_identity, source_pattern_count) = worker
+            .solution_coverages()
+            .first()
+            .map(|source| (source.identity(), source.covered_patterns().pattern_count()))
+            .expect("source coverage");
+        let worker = worker.with_solution_coverages(vec![crate::SolutionCoverage::new(
+            source_identity,
+            clearra_coverage::pattern::pattern_bitset::PatternBitSet::new(source_pattern_count),
+        )]);
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("coordinator");
+
+        let error = coordinator
+            .absorb_distributed_result(&worker)
+            .expect_err("source union tamper must fail closed");
+
+        assert!(matches!(
+            error,
+            super::WasmExactSearchError::InvalidProblem(
+                "wasm_distributed_pc_minimum_source_coverage_mismatch"
+            )
+        ));
+        assert!(
+            coordinator.buildable_identities.is_empty(),
+            "a rejected partial must not commit candidate identity authority"
+        );
+        assert!(
+            coordinator
+                .solution_coverage
+                .as_ref()
+                .is_some_and(|coverage| coverage.is_empty()),
+            "a rejected partial must not commit candidate coverage authority"
+        );
+        assert_eq!(
+            coordinator.covered_patterns.count_ones(),
+            0,
+            "a rejected partial must not commit aggregate coverage"
+        );
+    }
+
+    #[test]
+    fn distributed_minimum_cover_accepts_complete_empty_filtered_standard_bag_source() {
+        // The empty supplied-solution allow-list makes the producer source
+        // deterministically empty. This fixture exercises the coordinator's
+        // complete zero-row boundary; it must not depend on whether an
+        // unrestricted two-line opening happens to have a legal PC.
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::minimum_cover())
+        .with_allowed_colored_solution_identities(std::iter::empty());
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .expect("filtered one-piece Standard7Bag scenario")
+            .with_pc_minimum_cover_v2_evidence();
+        let worker =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("complete empty filtered worker result");
+        assert!(worker.solution_coverages().is_empty());
+        assert!(worker.normalized_solution_coverages().is_empty());
+        assert_eq!(
+            worker.usize_field("minimum_cover_source_solution_count"),
+            Some(0)
+        );
+        assert_eq!(
+            worker
+                .coverage_pattern_words()
+                .iter()
+                .copied()
+                .fold(0, |union, word| union | word),
+            0
+        );
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("coordinator");
+
+        coordinator
+            .absorb_distributed_result(&worker)
+            .expect("complete empty source remains authoritative");
+        let result = match coordinator
+            .complete_external_geometry(0, 0)
+            .expect("complete empty coordinator")
+        {
+            ExactSearchAdvance::Completed(result) => result,
+            ExactSearchAdvance::Pending | ExactSearchAdvance::Cancelled => {
+                panic!("empty coordinator must complete")
+            }
+        };
+        let evidence = result
+            .pc_chance_coverage_evidence()
+            .expect("complete empty evidence");
+        assert!(evidence.complete());
+        assert!(evidence.rows().is_empty());
+        assert_eq!(evidence.coverage_union().count_ones(), 0);
     }
 
     #[test]

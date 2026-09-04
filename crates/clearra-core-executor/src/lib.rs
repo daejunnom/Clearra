@@ -60,7 +60,8 @@ pub use clearra_replay::{
     SpinCoverageExecutionGraph,
 };
 pub use core_execution_result::{
-    CoreExecutionResult, CorePathStep, PcTilingMemoryAdmissionEvidence,
+    CoreExecutionResult, CorePathStep, PcScoreDistributedMergeEvidence,
+    PcTilingMemoryAdmissionEvidence,
 };
 pub use core_executor::{CoreExecutionError, CoreExecutor};
 pub use core_postprocess_execution::CorePostProcessExecution;
@@ -73,8 +74,10 @@ pub use finesse_report::{
 pub use memory::ScopeGuard;
 pub use packing::{PackingExecutionPlan, PackingRunResult, PackingRunner, PackingState};
 pub use pc_chance_coverage_evidence::{
-    canonical_probability_v2, strict_coverage_pattern_bitset_from_words, PcChanceCoverageEvidence,
-    PcChanceProblemEvidence, PcScoreProblemEvidence, StrictCoveragePatternWordsError,
+    canonical_probability_v2, strict_coverage_pattern_bitset_from_words,
+    DistributedPcChanceCoverageRows, DistributedPcChanceCoverageRowsError,
+    PcChanceCoverageEvidence, PcChanceProblemEvidence, PcScoreProblemEvidence,
+    StrictCoveragePatternWordsError,
 };
 pub use pc_failed_queue_evidence::{
     PcFailedQueueEvidence, PcFailedQueueEvidenceError, PcFailedQueueExampleEvidence,

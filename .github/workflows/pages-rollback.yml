@@ -55,6 +55,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       legacy_initial_evidence_base64: ${{ steps.authority.outputs.legacy_evidence_base64 }}
+      accepted_run_id: ${{ steps.authority.outputs.accepted_run_id }}
+      accepted_artifact_id: ${{ steps.authority.outputs.accepted_artifact_id }}
+      accepted_artifact_name: ${{ steps.authority.outputs.accepted_artifact_name }}
+      canonical_artifact_authority_base64: ${{ steps.authority.outputs.canonical_artifact_authority_base64 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,10 +93,12 @@ jobs:
       # The published v0.7.4 WASM embeds Cargo registry source paths in panic
       # data. Its authority run used the ubuntu-24.04 20260823.283 image,
       # rustc 1.98.0, and /home/runner/.cargo. Keep that producer contract
-      # exact for the one legacy reconstruction; modern captures follow stable.
+      # exact for the one legacy reconstruction. Regular canonical captures
+      # skip every toolchain and build step.
       RUSTUP_TOOLCHAIN: ${{ inputs.mode == 'bootstrap-capture' && '1.98.0' || 'stable' }}
     steps:
       - uses: actions/checkout@v4
+        if: ${{ inputs.mode == 'bootstrap-capture' }}
         with:
           ref: ${{ inputs.snapshot_sha }}
           path: snapshot-source
@@ -101,11 +107,13 @@ jobs:
           ref: ${{ inputs.expected_current_main }}
           path: authority-source
       - uses: actions/setup-node@v4
+        if: ${{ inputs.mode == 'bootstrap-capture' }}
         with:
           node-version: ${{ inputs.mode == 'bootstrap-capture' && '22.23.2' || '22' }}
           cache: npm
           cache-dependency-path: snapshot-source/package-lock.json
       - uses: actions/cache@v4
+        if: ${{ inputs.mode == 'bootstrap-capture' }}
         with:
           path: |
             ~/.cargo/bin/wasm-bindgen
@@ -114,6 +122,7 @@ jobs:
             ~/.cache/Clearra/build/cargo-target-wasm
           key: pages-rollback-wasm-${{ runner.os }}-rust-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('snapshot-source/Cargo.lock') }}-bindgen-0.2.126
       - name: Prepare Rust WASM toolchain
+        if: ${{ inputs.mode == 'bootstrap-capture' }}
         env:
           CAPTURE_MODE: ${{ inputs.mode }}
         run: |
@@ -127,11 +136,13 @@ jobs:
             cargo install wasm-bindgen-cli --version 0.2.126 --locked
           fi
       - name: Install GUI dependencies
+        if: ${{ inputs.mode == 'bootstrap-capture' }}
         working-directory: snapshot-source
         run: npm ci --ignore-scripts
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Build previous Pages source
+        if: ${{ inputs.mode == 'bootstrap-capture' }}
         working-directory: snapshot-source
         env:
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
@@ -140,47 +151,25 @@ jobs:
           CLEARRA_SOURCE_COMMIT="$SNAPSHOT_SHA" \
           CLEARRA_ENGINE_BUILD_ID="$SNAPSHOT_SHA" \
           npm run build --workspace apps/clearra-web
-      - name: Prepare exact rollback manifest contract
+      - name: Download exact accepted Pages build without rebuilding
         if: ${{ inputs.mode == 'capture' }}
-        env:
-          PAGES_AUTHORITY_MODE: prepare-manifests
-          PAGES_CAPTURE_MODE: ${{ inputs.mode }}
-          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
-          STATIC_MANIFEST_PATH: snapshot-source/apps/clearra-web/static/wasm/clearra_wasm.manifest.json
-          BUILD_MANIFEST_PATH: snapshot-source/apps/clearra-web/build/wasm/clearra_wasm.manifest.json
-        run: node authority-source/scripts/release/pages-rollback-authority.mjs
-      - name: Stamp exact rollback identity
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.capture-authority.outputs.accepted_artifact_id }}
+          run-id: ${{ needs.capture-authority.outputs.accepted_run_id }}
+          github-token: ${{ github.token }}
+          path: canonical-pages-build
+      - name: Prove accepted build and current public bytes before capture
         if: ${{ inputs.mode == 'capture' }}
+        id: canonical-initial
         env:
+          CANONICAL_BUILD_PATH: canonical-pages-build
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for manifest in \
-            snapshot-source/apps/clearra-web/static/wasm/clearra_wasm.manifest.json \
-            snapshot-source/apps/clearra-web/build/wasm/clearra_wasm.manifest.json; do
-            jq -e --arg sha "$SNAPSHOT_SHA" '
-              .build.runtime_identity.source_commit == $sha and
-              .build.runtime_identity.engine_build_id == $sha and
-              .build.runtime_identity.contract_schema_version == "clearra.search.contract.v2" and
-              .build.runtime_identity.supply_semantics_id == "clearra.supply.projected-terminal-lookahead.v1" and
-              .build.runtime_identity.artifact_schema_version == "clearra.solution-data.v1"
-            ' "$manifest" >/dev/null
-          done
-          version="$(cd snapshot-source && node scripts/release/validate-release-metadata.mjs)"
-          jq -n --arg sourceCommit "$SNAPSHOT_SHA" \
-            --arg engineBuildId "$SNAPSHOT_SHA" \
-            --arg version "$version" \
-            '{schema:"clearra.pages.identity.v2",sourceCommit:$sourceCommit,engineBuildId:$engineBuildId,contractSchemaVersion:"clearra.search.contract.v2",supplySemanticsId:"clearra.supply.projected-terminal-lookahead.v1",artifactSchemaVersion:"clearra.solution-data.v1",version:$version}' \
-            > snapshot-source/apps/clearra-web/build/clearra-build-identity.json
-          jq -e --arg sha "$SNAPSHOT_SHA" '
-            .schema == "clearra.pages.identity.v2" and
-            .sourceCommit == $sha and .engineBuildId == $sha and
-            .contractSchemaVersion == "clearra.search.contract.v2" and
-            .supplySemanticsId == "clearra.supply.projected-terminal-lookahead.v1" and
-            .artifactSchemaVersion == "clearra.solution-data.v1" and
-            (.version | type == "string" and length > 0)
-          ' snapshot-source/apps/clearra-web/build/clearra-build-identity.json >/dev/null
+          ACCEPTED_RUN_ID: ${{ needs.capture-authority.outputs.accepted_run_id }}
+          PAGES_BASE_PATH: /${{ github.event.repository.name }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          PAGES_AUTHORITY_PHASE: initial
+        run: node authority-source/scripts/release/pages-canonical-capture.mjs verify-public
       - name: Stamp separate reconstructed v0.7.4 identity
         if: ${{ inputs.mode == 'bootstrap-capture' }}
         env:
@@ -191,6 +180,7 @@ jobs:
           LEGACY_BUILD_ROOT: snapshot-source/apps/clearra-web/build
         run: node authority-source/scripts/release/pages-legacy-contract.mjs
       - name: Validate portable rollback tree
+        if: ${{ inputs.mode == 'bootstrap-capture' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -222,12 +212,23 @@ jobs:
         run: |
           node authority-source/scripts/release/pages-rollback-authority.mjs
           echo "artifact_name=clearra-pages-rollback-${SNAPSHOT_SHA}-authority-${AUTHORITY_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - name: Reprove accepted build and public bytes immediately before sealing
+        if: ${{ inputs.mode == 'capture' }}
+        id: canonical-preartifact
+        env:
+          CANONICAL_BUILD_PATH: canonical-pages-build
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+          ACCEPTED_RUN_ID: ${{ needs.capture-authority.outputs.accepted_run_id }}
+          PAGES_BASE_PATH: /${{ github.event.repository.name }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          PAGES_AUTHORITY_PHASE: preartifact
+        run: node authority-source/scripts/release/pages-canonical-capture.mjs verify-public
       - name: Upload durable Pages rollback artifact
         id: snapshot
         uses: actions/upload-pages-artifact@v3
         with:
           name: ${{ steps.artifact-authority.outputs.artifact_name }}
-          path: snapshot-source/apps/clearra-web/build
+          path: ${{ inputs.mode == 'capture' && 'canonical-pages-build' || 'snapshot-source/apps/clearra-web/build' }}
           retention-days: 90
       - name: Download uploaded rollback artifact by exact run-bound name
         uses: actions/download-artifact@v4
@@ -249,6 +250,9 @@ jobs:
           LEGACY_IDENTITY_PATH: ${{ inputs.mode == 'bootstrap-capture' && 'snapshot-source/apps/clearra-web/build/clearra-build-identity.json' || '' }}
           LEGACY_INITIAL_EVIDENCE_BASE64: ${{ needs.capture-authority.outputs.legacy_initial_evidence_base64 }}
           LEGACY_PREARTIFACT_EVIDENCE_BASE64: ${{ steps.artifact-authority.outputs.legacy_evidence_base64 }}
+          CANONICAL_ARTIFACT_AUTHORITY_BASE64: ${{ needs.capture-authority.outputs.canonical_artifact_authority_base64 }}
+          CANONICAL_INITIAL_EVIDENCE_BASE64: ${{ steps.canonical-initial.outputs.canonical_readback_base64 }}
+          CANONICAL_PREARTIFACT_EVIDENCE_BASE64: ${{ steps.canonical-preartifact.outputs.canonical_readback_base64 }}
         run: node authority-source/scripts/release/pages-rollback-authority.mjs
       - name: Verify downloaded rollback package against sealed capture report
         env:
@@ -275,6 +279,7 @@ jobs:
     outputs:
       artifact_name: ${{ steps.authority.outputs.capture_artifact_name }}
       tar_sha256: ${{ steps.authority.outputs.capture_tar_sha256 }}
+      capture_kind: ${{ steps.authority.outputs.capture_kind }}
       report_artifact_id: ${{ steps.rollback-report.outputs.report_artifact_id }}
       report_artifact_name: ${{ steps.rollback-report.outputs.report_artifact_name }}
       report_artifact_digest: ${{ steps.rollback-report.outputs.report_artifact_digest }}
@@ -328,6 +333,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       artifact_id: ${{ steps.restored-pages-artifact.outputs.artifact-id }}
+      capture_kind: ${{ steps.package-authority.outputs.capture_kind }}
+      canonical_identity_sha256: ${{ steps.package-authority.outputs.canonical_identity_sha256 }}
+      canonical_file_set_sha256: ${{ steps.package-authority.outputs.canonical_file_set_sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -350,12 +358,13 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.snapshot_run_id }}
       - name: Verify downloaded rollback package
+        id: package-authority
         env:
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
           SNAPSHOT_TAR_SHA256: ${{ needs.restore-authority.outputs.tar_sha256 }}
           PAGES_ROLLBACK_PACKAGE_DIR: rollback-package
           PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-capture-report-package/pages-rollback-capture-authority.json
-          PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND: legacy-v0.7.4
+          PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND: ${{ needs.restore-authority.outputs.capture_kind }}
         run: node authority-source/scripts/release/pages-rollback-package.mjs
       - name: Upload exact rollback Pages artifact
         id: restored-pages-artifact
@@ -431,6 +440,7 @@ jobs:
           CAPTURE_REPORT_ARTIFACT_NAME: ${{ needs.restore-authority.outputs.report_artifact_name }}
           CAPTURE_REPORT_ARTIFACT_DIGEST: ${{ needs.restore-authority.outputs.report_artifact_digest }}
           CAPTURE_REPORT_FILE_SHA256: ${{ steps.predeploy-authority.outputs.capture_report_file_sha256 }}
+          RESTORED_CAPTURE_KIND: ${{ needs.restore-package.outputs.capture_kind }}
           PAGES_AUTHORITY_REPORT_PATH: ${{ runner.temp }}/pages-restore-deployment-authority.json
         run: node authority-source/scripts/release/pages-deployment-authority.mjs
       - name: Upload sealed Pages restore authority

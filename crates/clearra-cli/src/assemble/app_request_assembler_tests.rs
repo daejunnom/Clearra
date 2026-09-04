@@ -189,6 +189,60 @@ fn every_native_build_v2_form_requires_exactly_one_queue_source() {
 }
 
 #[test]
+fn gui_pc_full_solution_argv_has_native_web_app_request_and_result_family_parity() {
+    let canonical_arguments =
+        include_str!("../../../../tests/fixtures/contracts/gui_pc_full_solution_argv.tsv")
+            .trim_end()
+            .split('\t')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+    for (count, expected_count, expected_objective) in [
+        (
+            "unique",
+            PcCountPolicy::CountUnique,
+            ObjectivePolicy::unique(),
+        ),
+        ("all", PcCountPolicy::CountAll, ObjectivePolicy::all()),
+    ] {
+        let mut arguments = canonical_arguments.clone();
+        let count_index = arguments
+            .iter()
+            .position(|argument| argument == "--count")
+            .expect("GUI PC argv count option")
+            + 1;
+        arguments[count_index] = count.to_owned();
+        let invocation = CliParser::parse(arguments.iter().map(String::as_str))
+            .expect("native CLI accepts the complete GUI PC argv envelope");
+        let ParsedCliCommand::Product(forwarded) = invocation.into_command() else {
+            panic!("GUI PC argv must reach the shared CLI compiler");
+        };
+
+        let native_request = CliAppRequestAssembler::assemble(
+            ParsedCliCommand::Product(forwarded.clone()),
+            RenderFormat::Json,
+        )
+        .expect("native CLI GUI PC AppRequest")
+        .request();
+        let browser_request = clearra_cli_command::CliCommandParser::parse(&forwarded.join(" "))
+            .and_then(|request| request.to_app_request())
+            .expect("Web command-text GUI PC AppRequest");
+        let desktop_request = clearra_cli_command::CliCommandParser::parse_tokens(&forwarded)
+            .and_then(|request| request.to_app_request())
+            .expect("Desktop argv GUI PC AppRequest");
+        assert_eq!(native_request, browser_request);
+        assert_eq!(native_request, desktop_request);
+        assert_eq!(native_request.product_capability_contract(), None);
+
+        let AppCommand::Scenario(command) = native_request.command() else {
+            panic!("field-backed GUI PC argv must preserve the Scenario result family");
+        };
+        assert_eq!(command.result_projection(), PcResultProjection::Standard);
+        assert_eq!(command.query().count_policy(), expected_count);
+        assert_eq!(command.query().objective(), expected_objective);
+    }
+}
+
+#[test]
 fn cli_pc_builds_app_request() {
     let assembly =
         CliAppRequestAssembler::assemble(ParsedCliCommand::Pc(PcArgs::new(2)), RenderFormat::Text)

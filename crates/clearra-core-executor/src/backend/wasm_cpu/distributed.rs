@@ -1,8 +1,13 @@
+use std::sync::Arc;
+
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_problem::SearchProblem;
 use sha2::{Digest, Sha256};
 
-use crate::{CoreExecutionResult, CorePostProcessScoreCell, WasmCpuSearchError};
+use crate::{
+    CoreExecutionResult, CorePostProcessScoreCell, WasmCpuSearchError,
+    WasmCpuTerminalResourceAuthority,
+};
 
 use super::{
     mix_digest,
@@ -212,6 +217,30 @@ impl WasmCpuCandidateProducer {
         })
     }
 
+    pub fn new_shared_under_terminal_authority(
+        problem: Arc<SearchProblem>,
+        checked_external_retained_upper_bound_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, WasmCpuSearchError> {
+        if !problem.objective().score().requested() {
+            return Err(WasmCpuSearchError::InvalidProblem {
+                reason: "wasm_terminal_authority_requires_typed_score_producer",
+            });
+        }
+        Ok(Self {
+            session: WasmExactSearchSession::new_shared_under_authority(
+                problem,
+                checked_external_retained_upper_bound_bytes,
+                authority,
+            )
+            .map_err(map_typed_error)?,
+            candidate_count: 0,
+            candidate_digest: 0,
+            verification_required: true,
+            finished: false,
+        })
+    }
+
     pub fn advance(
         &mut self,
         control: &ExecutionControl,
@@ -315,6 +344,22 @@ impl WasmDistributedVerifier {
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
         Ok(Self {
             session: WasmExactSearchSession::new_external_geometry(problem).map_err(map_error)?,
+            finished: false,
+        })
+    }
+
+    pub fn new_shared_under_terminal_authority(
+        problem: Arc<SearchProblem>,
+        checked_external_retained_upper_bound_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, &'static str> {
+        Ok(Self {
+            session: WasmExactSearchSession::new_shared_external_verifier_under_authority(
+                problem,
+                checked_external_retained_upper_bound_bytes,
+                authority,
+            )
+            .map_err(map_error)?,
             finished: false,
         })
     }
@@ -474,6 +519,36 @@ impl WasmDistributedResultMerger {
             .map_err(map_error)
     }
 
+    /// Validates borrowed wire/result owners against the merger's live search
+    /// session. The caller supplies every external owner that coexists with
+    /// decode or absorb plus any not-yet-allocated checked future bytes.
+    pub fn validate_external_result_memory(
+        &self,
+        external_retained_bytes: u128,
+        checked_future_bytes: u128,
+    ) -> Result<(), &'static str> {
+        self.session
+            .validate_external_result_memory_with_future(
+                external_retained_bytes,
+                checked_future_bytes,
+            )
+            .map_err(map_error)
+    }
+
+    /// Validates a terminal public result while this merger still owns the
+    /// request-scoped child execution lease. Typed App post-processing uses
+    /// this guard for every intermediate/future allocation, then destroys the
+    /// merger before constructing the rich host response.
+    pub fn validate_public_result_memory_with_future(
+        &self,
+        result: &CoreExecutionResult,
+        checked_future_bytes: u128,
+    ) -> Result<(), &'static str> {
+        self.session
+            .validate_public_result_memory_with_future(result, checked_future_bytes)
+            .map_err(map_error)
+    }
+
     pub fn finish(
         &mut self,
         summary: &WasmDistributedGeometrySummary,
@@ -502,7 +577,7 @@ impl WasmDistributedResultMerger {
         self.score_cells.sort_unstable();
         self.score_cells.dedup();
         Ok(match self.score_profile_id.take() {
-            Some(profile_id) => result.with_postprocess_score_cells(
+            Some(profile_id) => result.with_verified_distributed_postprocess_score_cells(
                 core::mem::take(&mut self.score_cells),
                 self.score_cells_complete,
                 profile_id,

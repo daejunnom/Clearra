@@ -454,18 +454,6 @@
               aria-pressed={request.scoreMode === 'score-minimals'}
               on:click={() => updateRequest({ ...request, scoreMode: 'score-minimals' })}
             >{label('scoreMinimals')}</button>
-            <button
-              type="button"
-              class:active={request.scoreMode === 'saves'}
-              aria-pressed={request.scoreMode === 'saves'}
-              on:click={() => updateRequest({ ...request, scoreMode: 'saves' })}
-            >{label('saveGroups')}</button>
-            <button
-              type="button"
-              class:active={request.scoreMode === 'best-save'}
-              aria-pressed={request.scoreMode === 'best-save'}
-              on:click={() => updateRequest({ ...request, scoreMode: 'best-save' })}
-            >{label('bestSave')}</button>
           </div>
         </fieldset>
 

@@ -1,7 +1,4 @@
-import {
-  buildDesktopBuildV2Request,
-  type ClearraDesktopBuildV2Request
-} from '../host/clearraDesktopHost.ts';
+import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
 import {
   boardMaskHex,
   defaultWorkerCount,
@@ -9,9 +6,30 @@ import {
   parseBrowserQueueInput,
   type RuleProfile
 } from './solverWorkspaceModel.ts';
+import {
+  cliCommandRequestForDesktop,
+  serializeCliCommandArguments
+} from './cliCommandModel.ts';
 
-export type BuildV2Capability = ClearraDesktopBuildV2Request['capability_id'];
-export type BuildV2Objective = ClearraDesktopBuildV2Request['objective'];
+export type BuildV2Capability =
+  | 'build.cover'
+  | 'build.setup'
+  | 'build.congruent'
+  | 'build.congruent-cover'
+  | 'build.setup-cover'
+  | 'build.setup-cover-percent'
+  | 'build.setup-cover-score'
+  | 'build.evaluate.cover'
+  | 'build.evaluate.minimals'
+  | 'build.evaluate.score'
+  | 'build.evaluate.b2b-cover'
+  | 'build.evaluate.cover-percent';
+export type BuildV2Objective =
+  | 'all'
+  | 'unique'
+  | 'min-cover'
+  | 'max-probability-minimum'
+  | 'max-score-cover';
 export type BuildV2DocumentFormat = 'ctk3' | 'fumen';
 export type BuildV2ScoreProfile = 'tetrio' | 'guideline' | 'jstris-ultra';
 export type BuildV2SourceKind = 'mask' | 'target-document' | 'solution-document';
@@ -28,7 +46,7 @@ export type BuildV2Request = {
   solutionDocument: string;
   queue: string;
   holdEnabled: boolean;
-  holdPiece: ClearraDesktopBuildV2Request['hold_piece'];
+  holdPiece: 'empty' | 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
   queueKnowledge: 'oracle' | 'visible-7';
   objective: BuildV2Objective;
   scoreProfile: BuildV2ScoreProfile;
@@ -227,7 +245,7 @@ export function buildV2ValidationCodes(request: BuildV2Request): BuildV2Validati
   return [...new Set(errors)];
 }
 
-export function buildV2Command(request: BuildV2Request): string {
+export function buildV2CommandArguments(request: BuildV2Request): string[] {
   request = normalizeBuildV2Request(request);
   const tokens = ['clearra', 'build', ...buildV2CommandPath(request.capability)];
   const source = buildV2SourceKind(request.capability);
@@ -248,20 +266,20 @@ export function buildV2Command(request: BuildV2Request): string {
       '--target-format',
       request.targetFormat,
       '--target-document',
-      quoteBuildV2Token(request.targetDocument.trim())
+      request.targetDocument.trim()
     );
   } else {
     tokens.push(
       '--solution-format',
       request.solutionFormat,
       '--solution-document',
-      quoteBuildV2Token(request.solutionDocument.trim())
+      request.solutionDocument.trim()
     );
   }
   const parsedQueue = parseBrowserQueueInput(request.queue);
   tokens.push(
     parsedQueue?.kind === 'pattern' ? '--patterns' : '--queue',
-    quoteBuildV2Token(parsedQueue?.source ?? request.queue.trim())
+    parsedQueue?.source ?? request.queue.trim()
   );
   if (request.holdEnabled) tokens.push('--hold', request.holdPiece);
   else tokens.push('--no-hold');
@@ -288,50 +306,18 @@ export function buildV2Command(request: BuildV2Request): string {
       String(request.initialB2B)
     );
   }
-  return tokens.join(' ');
+  return tokens;
+}
+
+export function buildV2Command(request: BuildV2Request): string {
+  return serializeCliCommandArguments(buildV2CommandArguments(request));
 }
 
 export function buildV2RequestForDesktop(
   request: BuildV2Request,
   language: 'en' | 'ko'
-): ClearraDesktopBuildV2Request {
-  request = normalizeBuildV2Request(request);
-  const parsedQueue = parseBrowserQueueInput(request.queue);
-  const source = buildV2SourceKind(request.capability);
-  return buildDesktopBuildV2Request({
-    language,
-    capability_id: request.capability,
-    ...(source === 'mask'
-      ? {
-          base_mask: boardMaskHex(trimBuildV2Mask(request.baseMask, request.height)),
-          target_mask: boardMaskHex(trimBuildV2Mask(request.targetMask, request.height)),
-          visible_height: request.height,
-          ...(request.sourcePieceCount === null
-            ? {}
-            : { source_piece_count: request.sourcePieceCount })
-        }
-      : source === 'target-document'
-        ? {
-            target_format: request.targetFormat,
-            target_document: request.targetDocument.trim()
-          }
-        : {
-            solution_format: request.solutionFormat,
-            solution_document: request.solutionDocument.trim()
-          }),
-    queue: parsedQueue?.kind === 'fixed' ? parsedQueue.source : '',
-    patterns: parsedQueue?.kind === 'pattern' ? parsedQueue.source : '',
-    queue_knowledge: request.queueKnowledge,
-    hold_enabled: request.holdEnabled,
-    hold_piece: request.holdPiece,
-    objective: request.objective,
-    ...(buildV2ScoreCapable(request.capability)
-      ? { score_profile: request.scoreProfile, initial_b2b: request.initialB2B }
-      : {}),
-    rule: request.rule,
-    workers: request.workers,
-    use_all_logical_processors: request.useAllLogicalProcessors
-  });
+): ClearraDesktopCliCommandRequest {
+  return cliCommandRequestForDesktop(buildV2CommandArguments(request), language);
 }
 
 export function trimBuildV2Mask(mask: bigint, height: number): bigint {
@@ -351,10 +337,4 @@ function validBuildV2Document(format: BuildV2DocumentFormat, document: string): 
   return format === 'ctk3'
     ? /^ctk3(?:b_|_|@)/u.test(value)
     : /^(?:v115|[Ddm]115)@/u.test(value);
-}
-
-function quoteBuildV2Token(value: string): string {
-  return /^[^\s"'\\]+$/u.test(value)
-    ? value
-    : `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }

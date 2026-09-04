@@ -24,8 +24,18 @@ const SHA = "1".repeat(40);
 const AUTHORITY = "2".repeat(40);
 
 function captureReport(tarSha256, tarSize) {
+  const canonicalIdentity = identity();
+  const identityBytes = Buffer.from(JSON.stringify(canonicalIdentity));
+  const evidence = {
+    accepted_run_id: "12345", accepted_run_attempt: "1", accepted_artifact_id: "77777",
+    accepted_artifact_name: `accepted-pages-build-${SHA}-run-12345-attempt-1`, accepted_artifact_digest: `sha256:${"a".repeat(64)}`,
+    accepted_artifact_api_readback_sha256: "b".repeat(64), accepted_artifact_created_at: "2026-08-28T00:00:00.000Z", accepted_artifact_expires_at: "2026-11-26T00:00:00.000Z",
+    identity: canonicalIdentity, identity_sha256: canonicalSha256(canonicalIdentity), identity_bytes_sha256: createHash("sha256").update(identityBytes).digest("hex"), identity_bytes_size: identityBytes.byteLength,
+    file_set_sha256: canonicalSha256(canonicalIdentity.files), file_count: canonicalIdentity.files.length, total_bytes: canonicalIdentity.files.reduce((sum, file) => sum + file.size, 0),
+  };
+  const readback = { identity_sha256: evidence.identity_sha256, identity_bytes_sha256: evidence.identity_bytes_sha256, identity_bytes_size: evidence.identity_bytes_size, file_set_sha256: evidence.file_set_sha256, file_count: evidence.file_count, total_bytes: evidence.total_bytes };
   return sealCanonicalReport({
-    schema_id: "clearra.pages.rollback-capture-authority.v2",
+    schema_id: "clearra.pages.rollback-capture-authority.v3",
     repository: "daejunnom/Clearra",
     snapshot_source_commit: SHA,
     authority_source_commit: AUTHORITY,
@@ -49,8 +59,9 @@ function captureReport(tarSha256, tarSize) {
     artifact_created_at: "2026-08-28T00:00:00.000Z",
     artifact_expires_at: "2026-11-26T00:00:00.000Z",
     retention_seconds: 90 * 24 * 60 * 60,
-    capture_kind: "modern-v2",
+    capture_kind: "canonical-v2",
     legacy_snapshot: null,
+    canonical_snapshot: { ...evidence, initial_public_readback: readback, preartifact_public_readback: readback },
     status: "captured",
   });
 }
@@ -85,7 +96,7 @@ function legacyCaptureReport(tarSha256, tarSize) {
     captureRunAttempt: "1",
   });
   return sealCanonicalReport({
-    schema_id: "clearra.pages.rollback-capture-authority.v2",
+    schema_id: "clearra.pages.rollback-capture-authority.v3",
     repository: "daejunnom/Clearra",
     snapshot_source_commit: LEGACY_PAGES_SNAPSHOT_SHA,
     authority_source_commit: AUTHORITY,
@@ -118,19 +129,28 @@ function legacyCaptureReport(tarSha256, tarSize) {
       rebuilt_payloads: LEGACY_PAGES_PAYLOADS.map((payload) => ({ ...payload })),
       rebuilt_payload_set_sha256: canonicalSha256(LEGACY_PAGES_PAYLOADS),
     },
+    canonical_snapshot: null,
     status: "captured",
   });
 }
 
-test("restore package admits only a sealed legacy capture kind before deployment", () => {
+test("restore package admits either exact sealed capture kind and rejects cross-kind substitution", () => {
   const modern = captureReport("1".repeat(64), 1024);
   const legacy = legacyCaptureReport("2".repeat(64), 1024);
   assert.equal(
     validateRollbackPackageCaptureKind(legacy, "legacy-v0.7.4"),
     "legacy-v0.7.4",
   );
+  assert.equal(
+    validateRollbackPackageCaptureKind(modern, "canonical-v2"),
+    "canonical-v2",
+  );
   assert.throws(
     () => validateRollbackPackageCaptureKind(modern, "legacy-v0.7.4"),
+    /differs from the required mutation kind/u,
+  );
+  assert.throws(
+    () => validateRollbackPackageCaptureKind(legacy, "canonical-v2"),
     /differs from the required mutation kind/u,
   );
   assert.throws(
@@ -140,6 +160,7 @@ test("restore package admits only a sealed legacy capture kind before deployment
 });
 
 function identity() {
+  const manifestBytes = Buffer.from(JSON.stringify(manifest()));
   return {
     schema: "clearra.pages.identity.v2",
     sourceCommit: SHA,
@@ -147,7 +168,11 @@ function identity() {
     contractSchemaVersion: "clearra.search.contract.v2",
     supplySemanticsId: "clearra.supply.projected-terminal-lookahead.v1",
     artifactSchemaVersion: "clearra.solution-data.v1",
-    version: "0.7.5",
+    version: "0.8.0",
+    acceptedRunId: "12345",
+    acceptedRunAttempt: "1",
+    basePath: "/Clearra",
+    files: [{ path: "wasm/clearra_wasm.manifest.json", size: manifestBytes.byteLength, sha256: createHash("sha256").update(manifestBytes).digest("hex") }],
   };
 }
 
@@ -239,6 +264,9 @@ test("validates the exact tar hash and both complete identity documents", () => 
   });
   assert.equal(result.actualDigest, expectedTarSha256);
   assert.equal(result.entries.get("clearra-build-identity.json").type, "0");
+  assert.equal(result.captureKind, "canonical-v2");
+  assert.equal(result.identitySha256, canonicalSha256(identity()));
+  assert.equal(result.fileSetSha256, canonicalSha256(identity().files));
 });
 
 test("rejects an incorrect tar authority before reading identity", () => {

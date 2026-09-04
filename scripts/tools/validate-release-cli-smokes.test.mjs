@@ -928,10 +928,10 @@ for (const [name, mutate] of [
   });
 }
 
-test("rejects legacy Pages forward fallback to the modern identity route", async () => {
+test("rejects canonical Pages forward fallback to the diagnostic-only modern-v2 route", async () => {
   const weakenedAuthority = replaceExactlyOnce(
     normalizedPagesRollbackAuthority,
-    '    if (captureKind === "legacy-v0.7.4")',
+    '    if (captureKind === "canonical-v2")',
     '    if (captureKind === "modern-v2")',
   );
   const result = await runValidator(
@@ -941,6 +941,16 @@ test("rejects legacy Pages forward fallback to the modern identity route", async
     weakenedAuthority,
     normalizedPagesLegacyContract,
   );
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects a Linux release package without core-owned Discord canonical result validation", async () => {
+  const weakenedPackageScript = replaceExactlyOnce(
+    canonicalPackageScript,
+    "                    --validate-discord-canonical-result-json \"$name\"\n",
+    "                    --validate-terminal-supply-json \"$name\"\n",
+  );
+  const result = await runValidator(normalizedWorkflow, weakenedPackageScript);
   assert.notEqual(result.status, 0, diagnostic(result));
 });
 
@@ -979,8 +989,8 @@ test("rejects legacy Pages forward without sealed projection equality", async ()
 test("rejects deployed Pages sealing without every identity-listed public byte", async () => {
   const weakenedDeploymentAuthority = replaceExactlyOnce(
     normalizedPagesDeploymentAuthority,
-    "        await validateLiveForwardPayloads({",
-    "        await Promise.resolve({",
+    "        await validateLiveForwardPayloads({\n          files: liveIdentity.files,\n          pageUrl,",
+    "        await Promise.resolve({\n          files: liveIdentity.files,\n          pageUrl,",
   );
   const result = await runValidator(
     normalizedWorkflow,

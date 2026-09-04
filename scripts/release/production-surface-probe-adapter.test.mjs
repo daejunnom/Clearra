@@ -12,6 +12,9 @@ import {
   sealCanonicalReport,
 } from "./canonical-release-evidence.mjs";
 import {
+  PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID,
+} from "./pages-deployment-authority.mjs";
+import {
   probeCloudProductionSurface,
   probeDiscordProductionSurface,
   probePagesProductionSurface,
@@ -434,7 +437,7 @@ function pagesIdentityFixture() {
 
 function pagesDeploymentReportFixture(liveIdentity = pagesIdentityFixture()) {
   return sealCanonicalReport({
-    schema_id: "clearra.pages.deployment-authority.v2",
+    schema_id: PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID,
     mode: "forward",
     repository: "daejunnom/Clearra",
     source_commit: COMMIT,
@@ -467,6 +470,10 @@ function pagesDeploymentReportFixture(liveIdentity = pagesIdentityFixture()) {
     rollback_report_artifact_digest: null,
     rollback_report_artifact_api_readback_sha256: null,
     rollback_report_file_sha256: null,
+    rollback_accepted_artifact_id: null,
+    rollback_accepted_artifact_name: null,
+    rollback_accepted_artifact_digest: null,
+    live_file_descriptor_set_sha256: null,
     status: "active",
   });
 }

@@ -41,7 +41,11 @@ function Get-ExactLeaf {
 
 function Invoke-NodeExact {
     param([Parameter(ValueFromRemainingArguments = $true)][object[]] $Arguments)
-    & node @Arguments
+    # Validators are authority side effects, not function return values.  Letting
+    # their status text escape into PowerShell's success stream turns callers
+    # such as Verify-PrestageAuthority into Object[] values and makes strict
+    # property access fail before the bounded protected restore can begin.
+    & node @Arguments | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'tracked recovery validator failed' }
 }
 

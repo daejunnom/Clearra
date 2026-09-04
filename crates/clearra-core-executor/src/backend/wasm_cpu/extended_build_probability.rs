@@ -1,7 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
-use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use clearra_coverage::{
+    pattern::pattern_bitset::PatternBitSet,
+    reducer::pattern_coverage_aggregation::{
+        PatternCoverageAggregation, PatternCoverageCompleteness,
+    },
+};
 use clearra_finesse::{
     CostedGeometryEdge, CostedGeometryLanguage, GeometryLanguageNode, GeometryNodeId,
 };
@@ -17,10 +22,11 @@ use crate::{
 
 use super::{
     build_probability::{
-        costed_finesse_language, exact_bool_field, exact_solution_probabilities_requested,
-        exact_usize_field, solution_coverage_union_matches_global,
-        validate_worker_partial_probability_surface, BuildProbabilityAdvance,
-        FinesseSearchMaterial,
+        build_pattern_coverage_aggregation, costed_finesse_language, exact_bool_field,
+        exact_solution_probabilities_requested, exact_usize_field,
+        solution_coverage_union_matches_global, validate_distributed_coverage_aggregation_surface,
+        validate_distributed_coverage_authority, validate_worker_partial_probability_surface,
+        BuildProbabilityAdvance, FinesseSearchMaterial,
     },
     buildup::{representative_pattern_path, PreparedFinesseLanguage},
     coverage_product::CoverageProductEvaluator,
@@ -90,6 +96,7 @@ struct ExtendedDistributedPartial {
     count_complete: bool,
     probability_complete: bool,
     resource_truncated: bool,
+    coverage_source_row_count: usize,
 }
 
 impl ExtendedBuildProbabilitySession {
@@ -961,6 +968,14 @@ impl ExtendedBuildProbabilitySession {
                 "wasm_extended_distributed_coverage_invalid",
             ));
         }
+        validate_distributed_coverage_aggregation_surface(
+            &self.problem,
+            self.aggregation,
+            result,
+            &coverage,
+            partial.coverage_source_row_count,
+            partial.probability_complete,
+        )?;
         self.covered_patterns.union_with(&coverage).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_extended_distributed_coverage_mismatch")
         })?;
@@ -1222,6 +1237,14 @@ impl ExtendedBuildProbabilitySession {
             "unique_solution_count",
             "wasm_extended_distributed_solution_count_invalid",
         )?;
+        let coverage_source_row_count = validate_distributed_coverage_authority(
+            &self.problem,
+            self.aggregation,
+            result,
+            pattern_count,
+            probability_complete,
+            self.supply_projection_complete && count_complete && !resource_truncated,
+        )?;
         if !result.normalized_solution_identities().is_empty()
             || !result.solution_coverages().is_empty()
         {
@@ -1300,11 +1323,17 @@ impl ExtendedBuildProbabilitySession {
             ));
         }
         validate_worker_partial_probability_surface(result)?;
+        if coverage_source_row_count != worker_solution_count {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_coverage_source_count_mismatch",
+            ));
+        }
 
         Ok(ExtendedDistributedPartial {
             count_complete,
             probability_complete,
             resource_truncated,
+            coverage_source_row_count,
         })
     }
 
@@ -1593,21 +1622,42 @@ impl ExtendedBuildProbabilitySession {
             .piece_source()
             .materialized_universe()
             .expect("extended build probability requires a materialized universe");
-        let probability = if tiling_only {
-            "not-calculated".to_owned()
-        } else {
-            universe
-                .weights()
-                .covered_weight(&self.covered_patterns)
-                .expect("coverage belongs to the materialized universe")
-                .get()
-                .to_string()
-        };
         let count_complete = self.supply_projection_complete
             && self.distributed_count_complete
             && self.truncated_reason.is_none();
-        let probability_complete =
-            !tiling_only && count_complete && self.distributed_probability_complete;
+        let coverage_source_row_count = self
+            .buildable_tilings
+            .len()
+            .checked_add(self.distributed_solution_keys.len())
+            .and_then(|count| count.checked_add(usize::from(self.trivial_target)))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_coverage_source_count_overflow",
+            ))?;
+        let coverage_aggregation = if tiling_only {
+            None
+        } else {
+            Some(build_pattern_coverage_aggregation(
+                &self.problem,
+                coverage_source_row_count,
+                &self.covered_patterns,
+                PatternCoverageCompleteness::new(
+                    self.supply_projection_complete,
+                    self.distributed_count_complete
+                        && self.truncated_reason.is_none()
+                        && self.distributed_probability_complete,
+                    true,
+                ),
+            )?)
+        };
+        let probability = coverage_aggregation.as_ref().map_or_else(
+            || "not-calculated".to_owned(),
+            |summary| {
+                super::build_probability::probability_text(summary.success_probability().get())
+            },
+        );
+        let probability_complete = coverage_aggregation
+            .as_ref()
+            .is_some_and(|summary| summary.completeness().is_complete());
         let execution_constraints = self.problem.objective().execution_constraints();
         let execution_evidence_requested =
             self.aggregation.requests_spin_coverage() || execution_constraints.requested();
@@ -1873,15 +1923,71 @@ impl ExtendedBuildProbabilitySession {
             field("build_path_multiplicity_counted", false),
             field("materialized_pattern_count", universe.pattern_count()),
             field("coverage_pattern_count", universe.pattern_count()),
+            field("piece_source_id", self.problem.piece_source().id().get()),
+            field("pattern_universe_id", universe.pattern_universe_id().get()),
+            field(
+                "pattern_weight_model_id",
+                universe.pattern_weight_model_id().get(),
+            ),
+            field(
+                "coverage_aggregation_contract",
+                PatternCoverageAggregation::CONTRACT_ID,
+            ),
+            field(
+                "coverage_aggregation_availability",
+                coverage_aggregation
+                    .as_ref()
+                    .map_or("not-calculated", |summary| summary.availability().as_str()),
+            ),
+            field("coverage_aggregation_complete", probability_complete),
+            field(
+                "coverage_aggregation_source_row_count",
+                coverage_source_row_count,
+            ),
             field(
                 "covered_pattern_count",
-                if tiling_only {
-                    0
-                } else {
-                    self.covered_patterns.count_ones()
-                },
+                coverage_aggregation
+                    .as_ref()
+                    .map_or(0, PatternCoverageAggregation::success_pattern_count),
+            ),
+            field(
+                "failed_pattern_count",
+                coverage_aggregation.as_ref().map_or_else(
+                    || "not-calculated".to_owned(),
+                    |summary| summary.failed_pattern_count().to_string(),
+                ),
             ),
             field("coverage_probability", probability),
+            field(
+                "failed_coverage_probability",
+                coverage_aggregation.as_ref().map_or_else(
+                    || "not-calculated".to_owned(),
+                    |summary| {
+                        super::build_probability::probability_text(
+                            summary.failed_probability().get(),
+                        )
+                    },
+                ),
+            ),
+            field(
+                "materialized_probability_mass",
+                super::build_probability::probability_text(universe.weights().total_weight().get()),
+            ),
+            field(
+                "coverage_probability_denominator",
+                "full-materialized-pattern-universe",
+            ),
+            field(
+                "success_conditional_probability_denominator",
+                coverage_aggregation.as_ref().map_or_else(
+                    || "not-calculated".to_owned(),
+                    |summary| {
+                        super::build_probability::probability_text(
+                            summary.success_probability().get(),
+                        )
+                    },
+                ),
+            ),
             field("probability_complete", probability_complete),
             field("count_complete", count_complete),
             field(

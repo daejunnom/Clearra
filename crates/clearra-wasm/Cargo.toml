@@ -20,7 +20,7 @@ clearra-host-contract = { path = "../clearra-host-contract", default-features = 
 clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-problem = { path = "../clearra-problem" }
 clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
-clearra-web-command = { path = "../clearra-web-command" }
+clearra-cli-command = { path = "../clearra-cli-command" }
 
 [lib]
 doctest = false

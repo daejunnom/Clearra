@@ -6,8 +6,8 @@ use clearra_app::{
     FinesseReportPlacement, FinesseRepresentativeWitness, ProductCapabilityContract,
     ProductCapabilityResultKind,
 };
+use clearra_cli_command::CliCommandParser;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
-use clearra_web_command::WebCommandParser;
 
 use crate::{args::CliParser, assemble::CliAppRequestAssembler, output::RenderFormatSelector};
 
@@ -270,7 +270,7 @@ fn setup_score_executes_actual_coverage_and_score_and_renders_the_closed_payload
 
 fn render_forward(command: &str, format: RenderFormat) -> String {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
-    let request = WebCommandParser::parse_with_worker_limit(command, 8)
+    let request = CliCommandParser::parse_with_worker_limit(command, 8)
         .expect("forward CLI command")
         .to_app_request()
         .expect("typed app request");
@@ -726,6 +726,34 @@ fn pc_fixed_score_witness_v2_json_kind_requires_the_closed_product_pair() {
 }
 
 #[test]
+fn score_finder_renderer_rejects_a_noncanonical_supplied_witness() {
+    use clearra_host_contract::{ScorePatternWinnerFamilyPayload, ScorePatternWinnerPayload};
+
+    let candidate_ten = ScorePatternWinnerPayload::new("0", "10", "solution-10", "1200", "0");
+    let candidate_two = ScorePatternWinnerPayload::new("1", "2", "solution-2", "1200", "999");
+    let family = |canonical| {
+        ScorePatternWinnerFamilyPayload::new(
+            "pc-score-pattern-winner.v1",
+            "pattern-id-ascending-then-candidate-id-ascending",
+            "score-only-attack-informational",
+            "canonical-equal-score-trace",
+            "100",
+            "2",
+            "smallest-canonical-candidate-id",
+            canonical,
+            vec![candidate_ten.clone(), candidate_two.clone()],
+        )
+    };
+
+    assert!(valid_score_pattern_canonical_witness(&family(
+        candidate_two.clone()
+    )));
+    assert!(!valid_score_pattern_canonical_witness(&family(
+        candidate_ten.clone()
+    )));
+}
+
+#[test]
 fn pc_failed_queue_v2_json_kind_requires_the_closed_product_pair() {
     let typed_kind = public_success_render_kind(
         Some((
@@ -862,7 +890,7 @@ fn canonical_pc_failed_queue_cli_json_uses_v2_while_legacy_stays_percent() {
             "percent",
         ),
     ] {
-        let request = WebCommandParser::parse_with_worker_limit(source, 2)
+        let request = CliCommandParser::parse_with_worker_limit(source, 2)
             .unwrap_or_else(|_| panic!("parse {source}"))
             .to_app_request()
             .unwrap_or_else(|_| panic!("assemble {source}"));
@@ -1129,7 +1157,7 @@ fn finesse_renderer_preserves_the_typed_representative_witness() {
 #[test]
 fn fixed_queue_finesse_score_cli_json_preserves_the_typed_public_contract() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
-    let request = WebCommandParser::parse_with_worker_limit(
+    let request = CliCommandParser::parse_with_worker_limit(
         "clearra finesse score --initial-mask 0 --height 4 \
          --placements O:spawn:4:0 --queue O --no-hold --pattern-knowledge both \
          --rule srs-plus --workers 2",
@@ -1248,7 +1276,7 @@ fn damage_and_spin_text_profiles_report_the_two_requested_workers() {
 #[test]
 fn spin_structure_json_exposes_the_closed_public_family_payload() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
-    let request = WebCommandParser::parse_with_worker_limit(STRUCTURE_TWO_WORKERS, 8)
+    let request = CliCommandParser::parse_with_worker_limit(STRUCTURE_TWO_WORKERS, 8)
         .expect("structure CLI command")
         .to_app_request()
         .expect("typed app request");
@@ -1322,7 +1350,7 @@ fn spin_structure_json_exposes_the_closed_public_family_payload() {
 #[test]
 fn spin_structure_ctk3_keys_start_from_the_line_cleared_input_board() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
-    let request = WebCommandParser::parse_with_worker_limit(STRUCTURE_WITH_COMPLETED_INPUT_ROW, 8)
+    let request = CliCommandParser::parse_with_worker_limit(STRUCTURE_WITH_COMPLETED_INPUT_ROW, 8)
         .expect("structure CLI command")
         .to_app_request()
         .expect("typed app request");
@@ -1371,7 +1399,7 @@ fn every_spin_structure_product_route_executes_and_renders_its_closed_public_pay
         let command = format!(
             "clearra spin-structure {route} --board-mask 0x14000043ff --height 4 --pieces T --spin-profile t-spins --lines any --fill-top 4 --max-placements 1 --workers 2"
         );
-        let request = WebCommandParser::parse_with_worker_limit(&command, 8)
+        let request = CliCommandParser::parse_with_worker_limit(&command, 8)
             .unwrap_or_else(|error| panic!("parse {command}: {error:?}"))
             .to_app_request()
             .unwrap_or_else(|error| panic!("lower {command}: {error:?}"));

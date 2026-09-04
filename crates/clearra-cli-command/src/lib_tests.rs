@@ -31,7 +31,7 @@ use crate::web_command_parser::{PC_SCORE_MAX_ARGUMENT_BYTES, PC_SCORE_MAX_ARGUME
 
 #[test]
 fn request_structural_profiles_are_request_local_and_canonical() {
-    let parsed = WebCommandParser::parse(
+    let parsed = CliCommandParser::parse(
         "clearra pc --lines 2 --backend cpu --board-profile standard-10 --piece-profile standard-tetrominoes --bag-profile standard-7-bag",
     )
     .expect("canonical structural profiles");
@@ -51,8 +51,8 @@ fn request_structural_profiles_reject_unknown_or_duplicate_values_without_fallba
         "clearra pc --lines 2 --bag-profile history-6-rolls",
         "clearra pc --lines 2 --bag-profile standard-7-bag --bag-profile standard-7-bag",
     ] {
-        let error = WebCommandParser::parse(command).expect_err("profile must fail closed");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(command).expect_err("profile must fail closed");
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 }
 
@@ -63,15 +63,15 @@ fn request_semantic_profiles_reject_unverified_or_unknown_values_without_fallbac
         "clearra pc --lines 2 --spin-profile unverified-spin",
         "clearra pc --lines 2 --score-profile classic-score",
     ] {
-        let result = WebCommandParser::parse(command).and_then(|request| request.to_app_request());
+        let result = CliCommandParser::parse(command).and_then(|request| request.to_app_request());
         assert!(result.is_err(), "{command} must fail closed");
     }
 }
 
 #[test]
 fn wasm_command_compiles_to_app_request() {
-    let request = WebCommandParser::parse("clearra pc --lines 2 --backend cpu")
-        .expect("web command")
+    let request = CliCommandParser::parse("clearra pc --lines 2 --backend cpu")
+        .expect("CLI command")
         .to_app_request()
         .expect("AppRequest");
 
@@ -86,7 +86,7 @@ fn wasm_command_compiles_to_app_request() {
 
 #[test]
 fn pc_minimals_canonical_and_internal_alias_bind_one_typed_v2_contract() {
-    let canonical = WebCommandParser::parse(
+    let canonical = CliCommandParser::parse(
         "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus",
     )
     .expect("canonical pc minimals")
@@ -112,19 +112,24 @@ fn pc_minimals_canonical_and_internal_alias_bind_one_typed_v2_contract() {
         command.query().queue_observation_policy(),
         QueueObservationPolicy::FullQueueOracle
     );
+    assert_eq!(
+        command.query().count_policy(),
+        PcCountPolicy::CountUnique,
+        "pc.minimals owns normalized field/coverage identity, not build-path multiplicity"
+    );
 
     let alias_tokens =
         "clearra sfinder minimals --field-mask-v1 000000000000003f --queue I --lines 1"
             .split_whitespace()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-    let alias = WebCommandParser::parse_tokens_internal_typed_candidate(&alias_tokens)
+    let alias = CliCommandParser::parse_tokens_internal_typed_candidate(&alias_tokens)
         .expect("internal minimals alias")
         .to_app_request()
         .expect("typed alias AppRequest");
     assert_eq!(alias, canonical);
 
-    let generic = WebCommandParser::parse(
+    let generic = CliCommandParser::parse(
         "clearra pc --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --objective minimum-cover",
     )
     .expect("generic advanced minimum-cover")
@@ -148,8 +153,8 @@ fn pc_minimals_rejects_semantic_overrides_and_unaccounted_memory_caps() {
         let command = format!(
             "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty {suffix}"
         );
-        let error = WebCommandParser::parse(&command).expect_err(&command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 }
 
@@ -159,7 +164,7 @@ fn pc_path_binds_the_complete_replay_family_contract_without_score_or_ties() {
         "clearra pc path --lines 1 --board-mask 0x3f0 --height 1 ",
         "--pieces 1 --queue I --hold empty --rule srs-plus"
     );
-    let parsed = WebCommandParser::parse(source).expect(source);
+    let parsed = CliCommandParser::parse(source).expect(source);
     assert_eq!(
         parsed.product_capability_contract(),
         Some(ProductCapabilityContract::PcPath)
@@ -182,7 +187,7 @@ fn pc_path_binds_the_complete_replay_family_contract_without_score_or_ties() {
     assert!(!command.query().objective().score().requested());
     assert_eq!(command.query().retained_trace_limit(), 1);
 
-    let generic = WebCommandParser::parse(
+    let generic = CliCommandParser::parse(
         "clearra pc --lines 1 --board-mask 0x3f0 --height 1 --pieces 1 --queue I --hold empty --objective all --count all",
     )
     .expect("generic all-path-capable request");
@@ -207,22 +212,22 @@ fn pc_path_rejects_semantic_and_resource_overrides() {
             "clearra pc path --lines 1 --board-mask 0x3f0 --height 1 --pieces 1 --queue I --hold empty {suffix}"
         );
         assert_eq!(
-            WebCommandParser::parse(&source).expect_err(&source).code(),
-            WebCommandErrorCode::InvalidValue,
+            CliCommandParser::parse(&source).expect_err(&source).code(),
+            CliCommandErrorCode::InvalidValue,
             "{source}"
         );
     }
 }
 
 #[test]
-fn web_build_queue_shapes_have_measurable_typed_request_memory() {
+fn cli_build_queue_shapes_have_measurable_typed_request_memory() {
     for command in [
         "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --max-memory-mib 1",
         "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 --patterns I --no-hold --no-mirror --max-memory-mib 1",
         "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 --no-hold --no-mirror --max-memory-mib 1",
     ] {
-        let request = WebCommandParser::parse(command)
-            .expect("Web Build command")
+        let request = CliCommandParser::parse(command)
+            .expect("CLI Build command")
             .to_app_request()
             .expect("typed Build AppRequest");
 
@@ -230,14 +235,14 @@ fn web_build_queue_shapes_have_measurable_typed_request_memory() {
             request
                 .checked_build_probability_retained_capacity_bytes()
                 .is_some(),
-            "Web Build ingress must remain within the measured queue contract: {command}"
+            "CLI Build ingress must remain within the measured queue contract: {command}"
         );
     }
 }
 
 #[test]
-fn bare_web_pc_preserves_the_web_surface_defaults_through_app_projection() {
-    let parsed = WebCommandParser::parse("clearra pc").expect("bare web pc command");
+fn bare_cli_pc_preserves_shared_surface_defaults_through_app_projection() {
+    let parsed = CliCommandParser::parse("clearra pc").expect("bare web pc command");
     assert_eq!(parsed.lines(), 4);
     assert_eq!(parsed.backend().as_str(), "auto");
     assert!(parsed.allow_backend_fallback());
@@ -260,7 +265,7 @@ fn bare_web_pc_preserves_the_web_surface_defaults_through_app_projection() {
 
 #[test]
 fn percent_command_compiles_to_coverage_summary_request() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra percent I --fixed --min-len 1 --max-patterns 8 --failed-count 3",
     )
     .expect("web percent command")
@@ -281,7 +286,7 @@ fn percent_command_compiles_to_coverage_summary_request() {
 
 #[test]
 fn percent_command_keeps_queue_materialization_separate_from_one_piece_geometry() {
-    let request = WebCommandParser::parse("clearra percent IOT --bag-aligned --min-len 3")
+    let request = CliCommandParser::parse("clearra percent IOT --bag-aligned --min-len 3")
         .expect("web percent command")
         .to_app_request()
         .expect("percent AppRequest");
@@ -298,7 +303,7 @@ fn percent_command_keeps_queue_materialization_separate_from_one_piece_geometry(
 
 #[test]
 fn percent_observed_minimum_len_below_queue_length_still_compiles() {
-    let request = WebCommandParser::parse("clearra percent IOT --observed --min-len 1")
+    let request = CliCommandParser::parse("clearra percent IOT --observed --min-len 1")
         .expect("web percent command")
         .to_app_request()
         .expect("percent AppRequest");
@@ -315,7 +320,7 @@ fn percent_observed_minimum_len_below_queue_length_still_compiles() {
 
 #[test]
 fn failed_queue_command_reuses_the_reverse_scenario_contract() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra failed-queue --lines 4 --board-mask 0 --height 4 --pieces 10 \
          --patterns P7P3 --hold empty --rule srs-plus --backend cpu --failed-count 17",
     )
@@ -341,16 +346,16 @@ fn failed_queue_command_reuses_the_reverse_scenario_contract() {
 #[test]
 fn public_failed_queue_spellings_remain_whole_request_equivalent_and_generic() {
     let suffix = "--lines 2 --patterns P5 --backend cpu --failed-count 4";
-    let hyphen = WebCommandParser::parse(&format!("clearra failed-queue {suffix}"))
+    let hyphen = CliCommandParser::parse(&format!("clearra failed-queue {suffix}"))
         .expect("public failed-queue")
         .to_app_request()
         .expect("public failed-queue AppRequest");
-    let underscore = WebCommandParser::parse(&format!("clearra failed_queue {suffix}"))
+    let underscore = CliCommandParser::parse(&format!("clearra failed_queue {suffix}"))
         .expect("public failed_queue")
         .to_app_request()
         .expect("public failed_queue AppRequest");
     let internal_hyphen =
-        WebCommandParser::parse_internal_typed_candidate(&format!("clearra failed-queue {suffix}"))
+        CliCommandParser::parse_internal_typed_candidate(&format!("clearra failed-queue {suffix}"))
             .expect("internal hyphen remains legacy")
             .to_app_request()
             .expect("internal hyphen legacy AppRequest");
@@ -381,9 +386,9 @@ fn canonical_and_internal_underscore_failed_queue_preserve_closed_typed_origins(
         ),
     ] {
         let parsed = if internal {
-            WebCommandParser::parse_internal_typed_candidate(&source).expect(&source)
+            CliCommandParser::parse_internal_typed_candidate(&source).expect(&source)
         } else {
-            WebCommandParser::parse(&source).expect(&source)
+            CliCommandParser::parse(&source).expect(&source)
         };
         assert_eq!(parsed.command_kind(), "failed-queue", "{source}");
         assert_eq!(
@@ -413,20 +418,20 @@ fn canonical_and_internal_underscore_failed_queue_preserve_closed_typed_origins(
 
 #[test]
 fn pc_failed_queue_rejects_underscore_and_unbound_typed_state() {
-    let error = WebCommandParser::parse("clearra pc failed_queue --lines 2 --patterns P5")
+    let error = CliCommandParser::parse("clearra pc failed_queue --lines 2 --patterns P5")
         .expect_err("pc failed_queue is not canonical");
-    assert_eq!(error.code(), WebCommandErrorCode::UnsupportedCommand);
+    assert_eq!(error.code(), CliCommandErrorCode::UnsupportedCommand);
     assert!(error
         .message()
         .contains("not an authorized canonical spelling"));
 
-    let unbound = WebCommandParser::parse("clearra failed-queue --lines 2 --patterns P5")
+    let unbound = CliCommandParser::parse("clearra failed-queue --lines 2 --patterns P5")
         .expect("legacy failed-queue")
         .with_product_capability_contract_for_test(ProductCapabilityContract::PcFailedQueue);
     let error = unbound
         .to_app_request()
         .expect_err("unbound failed-queue product claim");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     assert!(error
         .message()
         .contains("requires a closed failed-queue origin"));
@@ -434,7 +439,7 @@ fn pc_failed_queue_rejects_underscore_and_unbound_typed_state() {
 
 #[test]
 fn failed_queue_keeps_b2b_constraints_without_enabling_scoring() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra failed-queue --lines 2 --patterns P5 --preserve-b2b \
          --spin-profile all-mini-plus --backend cpu --failed-count 4",
     )
@@ -465,14 +470,14 @@ fn failed_queue_rejects_scoring_options() {
         "--spin-profile all-mini-plus",
     ] {
         let command = format!("clearra failed-queue --lines 2 --patterns P5 {option}");
-        let error = WebCommandParser::parse(&command).expect_err(option);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        let error = CliCommandParser::parse(&command).expect_err(option);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     }
 }
 
 #[test]
 fn tiling_only_preserves_hold_supply_projection() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra pc --lines 2 --board-mask 0 --height 2 --pieces 5 \
          --queue IOTZ --hold S --tiling-only --backend cpu",
     )
@@ -503,14 +508,14 @@ fn tiling_only_rejects_buildup_and_probability_options() {
         "--build-dependency-dag",
     ] {
         let command = format!("clearra pc --lines 2 --queue IIOOO --tiling-only {option}");
-        let error = WebCommandParser::parse(&command).expect_err(option);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        let error = CliCommandParser::parse(&command).expect_err(option);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     }
 }
 
 #[test]
-fn browser_tablebase_is_opt_in_for_pc_and_setup() {
-    let default_pc = WebCommandParser::parse("clearra pc --lines 4 --backend cpu")
+fn shared_cli_tablebase_is_opt_in_for_pc_and_setup() {
+    let default_pc = CliCommandParser::parse("clearra pc --lines 4 --backend cpu")
         .expect("default PC command")
         .to_app_request()
         .expect("default PC request");
@@ -519,7 +524,7 @@ fn browser_tablebase_is_opt_in_for_pc_and_setup() {
     };
     assert!(!command.query().execution_policy().tablebase_requested());
 
-    let enabled_pc = WebCommandParser::parse("clearra pc --lines 4 --backend cpu --tb")
+    let enabled_pc = CliCommandParser::parse("clearra pc --lines 4 --backend cpu --tb")
         .expect("TB PC command")
         .to_app_request()
         .expect("TB PC request");
@@ -528,7 +533,7 @@ fn browser_tablebase_is_opt_in_for_pc_and_setup() {
     };
     assert!(command.query().execution_policy().tablebase_requested());
 
-    let enabled_setup = WebCommandParser::parse("clearra setup --remaining IOTSZJL --tablebase")
+    let enabled_setup = CliCommandParser::parse("clearra setup --remaining IOTSZJL --tablebase")
         .expect("TB setup command")
         .to_app_request()
         .expect("TB setup request");
@@ -538,7 +543,7 @@ fn browser_tablebase_is_opt_in_for_pc_and_setup() {
     assert!(command.query().tablebase_requested());
 
     let disabled_setup =
-        WebCommandParser::parse("clearra setup --remaining IOTSZJL --no-tablebase")
+        CliCommandParser::parse("clearra setup --remaining IOTSZJL --no-tablebase")
             .expect("disabled TB setup command")
             .to_app_request()
             .expect("disabled TB setup request");
@@ -549,8 +554,8 @@ fn browser_tablebase_is_opt_in_for_pc_and_setup() {
 }
 
 #[test]
-fn browser_build_dependency_dag_is_opt_in_for_pc() {
-    let default_pc = WebCommandParser::parse("clearra pc --lines 4 --backend cpu")
+fn shared_cli_build_dependency_dag_is_opt_in_for_pc() {
+    let default_pc = CliCommandParser::parse("clearra pc --lines 4 --backend cpu")
         .expect("default PC command")
         .to_app_request()
         .expect("default PC request");
@@ -563,7 +568,7 @@ fn browser_build_dependency_dag_is_opt_in_for_pc() {
         .precompute_build_dependencies());
 
     let enabled_pc =
-        WebCommandParser::parse("clearra pc --lines 4 --backend cpu --build-dependency-dag")
+        CliCommandParser::parse("clearra pc --lines 4 --backend cpu --build-dependency-dag")
             .expect("dependency DAG PC command")
             .to_app_request()
             .expect("dependency DAG PC request");
@@ -576,7 +581,7 @@ fn browser_build_dependency_dag_is_opt_in_for_pc() {
         .precompute_build_dependencies());
 
     let disabled_pc =
-        WebCommandParser::parse("clearra pc --lines 4 --backend cpu --no-build-dependency-dag")
+        CliCommandParser::parse("clearra pc --lines 4 --backend cpu --no-build-dependency-dag")
             .expect("disabled dependency DAG PC command")
             .to_app_request()
             .expect("disabled dependency DAG PC request");
@@ -591,8 +596,8 @@ fn browser_build_dependency_dag_is_opt_in_for_pc() {
 
 #[test]
 fn pc_queue_knowledge_defaults_to_full_future_oracle() {
-    let request = WebCommandParser::parse("clearra pc --lines 4 --patterns P7P4")
-        .expect("web command")
+    let request = CliCommandParser::parse("clearra pc --lines 4 --patterns P7P4")
+        .expect("CLI command")
         .to_app_request()
         .expect("AppRequest");
     let AppCommand::Pc(command) = request.command() else {
@@ -608,8 +613,8 @@ fn pc_queue_knowledge_defaults_to_full_future_oracle() {
 #[test]
 fn pc_command_accepts_visible_seven_queue_knowledge() {
     let request =
-        WebCommandParser::parse("clearra pc --lines 4 --patterns P7P4 --queue-knowledge visible-7")
-            .expect("web command")
+        CliCommandParser::parse("clearra pc --lines 4 --patterns P7P4 --queue-knowledge visible-7")
+            .expect("CLI command")
             .to_app_request()
             .expect("AppRequest");
     let AppCommand::Pc(command) = request.command() else {
@@ -624,11 +629,11 @@ fn pc_command_accepts_visible_seven_queue_knowledge() {
 
 #[test]
 fn scenario_pc_command_accepts_visible_seven_queue_knowledge() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra pc --lines 4 --patterns P7P4 --board-mask 0 \
          --height 4 --pieces 10 --queue-knowledge visible-7",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
     let AppCommand::Scenario(command) = request.command() else {
@@ -647,9 +652,9 @@ fn pc_and_scenario_commands_reject_visible_seven_minimum_cover() {
         "clearra pc --lines 4 --patterns P7P4 --queue-knowledge visible-7 --objective minimum-cover",
         "clearra pc --lines 4 --patterns P7P4 --board-mask 0 --height 4 --pieces 10 --queue-knowledge visible-7 --objective minimum-cover",
     ] {
-        let error = WebCommandParser::parse(command)
+        let error = CliCommandParser::parse(command)
             .expect_err("visible-7 minimum-cover must fail before AppRequest construction");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
         assert!(error
             .message()
             .contains("visible-seven-minimum-cover-unsupported"));
@@ -658,8 +663,8 @@ fn pc_and_scenario_commands_reject_visible_seven_minimum_cover() {
 
 #[test]
 fn opening_pc_command_preserves_observed_source_piece_count() {
-    let request = WebCommandParser::parse("clearra pc --lines 4 --backend cpu --source-pieces 10")
-        .expect("web command")
+    let request = CliCommandParser::parse("clearra pc --lines 4 --backend cpu --source-pieces 10")
+        .expect("CLI command")
         .to_app_request()
         .expect("AppRequest");
 
@@ -674,7 +679,7 @@ fn opening_pc_command_preserves_observed_source_piece_count() {
 
 #[test]
 fn setup_command_compiles_residue_hold_and_cycle_boundary_policy() {
-    let request = WebCommandParser::parse("clearra setup --remaining IOTS")
+    let request = CliCommandParser::parse("clearra setup --remaining IOTS")
         .expect("setup command")
         .to_app_request()
         .expect("AppRequest");
@@ -695,7 +700,7 @@ fn setup_command_compiles_residue_hold_and_cycle_boundary_policy() {
     );
 
     let cycle_boundary =
-        WebCommandParser::parse("clearra setup --remaining IOT --allow-post-cycle-borrow")
+        CliCommandParser::parse("clearra setup --remaining IOT --allow-post-cycle-borrow")
             .expect("cycle-seven setup command")
             .to_app_request()
             .expect("AppRequest");
@@ -711,7 +716,7 @@ fn setup_command_compiles_residue_hold_and_cycle_boundary_policy() {
 
 #[test]
 fn setup_command_accepts_the_complete_cycle_one_pattern_domain() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra setup-finder --remaining IOTSZJL --priority pc --setup-length longer --max-setup-pieces 5",
     )
     .expect("cycle one setup command")
@@ -740,7 +745,7 @@ fn setup_command_accepts_the_complete_cycle_one_pattern_domain() {
 #[test]
 fn setup_command_accepts_visible_seven_queue_knowledge() {
     let request =
-        WebCommandParser::parse("clearra setup --remaining IOTS --queue-knowledge visible-7")
+        CliCommandParser::parse("clearra setup --remaining IOTS --queue-knowledge visible-7")
             .expect("setup command")
             .to_app_request()
             .expect("AppRequest");
@@ -760,14 +765,14 @@ fn queue_knowledge_rejects_unknown_values() {
         "clearra pc --lines 4 --queue-knowledge clairvoyant",
         "clearra setup --remaining IOTS --queue-knowledge clairvoyant",
     ] {
-        let error = WebCommandParser::parse(command).expect_err("invalid policy must fail");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        let error = CliCommandParser::parse(command).expect_err("invalid policy must fail");
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     }
 }
 
 #[test]
 fn setup_command_preserves_single_remaining_piece_as_a_guaranteed_prefix() {
-    let request = WebCommandParser::parse("clearra setup --remaining I")
+    let request = CliCommandParser::parse("clearra setup --remaining I")
         .expect("setup command")
         .to_app_request()
         .expect("AppRequest");
@@ -797,7 +802,7 @@ fn setup_command_preserves_candidate_priority() {
             clearra_problem::SetupCandidatePriority::PcProbabilityFirst,
         ),
     ] {
-        let request = WebCommandParser::parse(&format!(
+        let request = CliCommandParser::parse(&format!(
             "clearra setup --remaining IOTS --priority {keyword}"
         ))
         .expect("setup command")
@@ -823,7 +828,7 @@ fn canonical_setup_ranked_family_paths_fix_their_typed_priority() {
             clearra_problem::SetupCandidatePriority::PcProbabilityFirst,
         ),
     ] {
-        let request = WebCommandParser::parse(&format!(
+        let request = CliCommandParser::parse(&format!(
             "clearra setup {family} --remaining IOTS --priority {}",
             expected.keyword()
         ))
@@ -846,8 +851,8 @@ fn canonical_setup_ranked_family_paths_reject_cross_family_and_path_detail_optio
         "clearra setup pc --remaining IOTS --priority all",
         "clearra setup joint --remaining IOTS --paths-for 0x1 --condition hold-empty",
     ] {
-        let error = WebCommandParser::parse(command).expect_err("closed family must reject drift");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(command).expect_err("closed family must reject drift");
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 }
 
@@ -864,7 +869,7 @@ fn setup_score_ctk3_document() -> String {
 #[test]
 fn canonical_setup_score_lowers_to_the_nominal_app_command() {
     let document = setup_score_ctk3_document();
-    let request = WebCommandParser::parse_with_worker_limit(
+    let request = CliCommandParser::parse_with_worker_limit(
         &format!(
             "clearra setup score --document-format ctk3 --document {document} --setup-queue I --solution-queue OTSJ --clear 2 --no-hold --score-profile guideline --initial-b2b 2 --rule srs --max-patterns 64 --workers 2 --backend cpu --no-backend-fallback"
         ),
@@ -890,7 +895,7 @@ fn canonical_setup_score_lowers_to_the_nominal_app_command() {
 #[test]
 fn canonical_setup_score_accepts_the_two_independent_pattern_sources() {
     let document = setup_score_ctk3_document();
-    let request = WebCommandParser::parse(&format!(
+    let request = CliCommandParser::parse(&format!(
         "clearra setup score --document-format ctk3 --document {document} --setup-patterns P1 --solution-patterns P4 --clear-height 2 --hold"
     ))
     .expect("pattern Setup score command")
@@ -920,8 +925,8 @@ fn canonical_setup_score_rejects_cross_family_and_ungoverned_options() {
         "--hold --no-hold",
     ] {
         let command = format!("{base} {suffix}");
-        let error = WebCommandParser::parse(&command).expect_err(&command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 }
 
@@ -932,7 +937,7 @@ fn setup_command_preserves_setup_length_preference() {
         ("longer", clearra_problem::SetupLengthPreference::Longer),
         ("shorter", clearra_problem::SetupLengthPreference::Shorter),
     ] {
-        let request = WebCommandParser::parse(&format!(
+        let request = CliCommandParser::parse(&format!(
             "clearra setup --remaining IOTS --setup-length {keyword}"
         ))
         .expect("setup command")
@@ -947,7 +952,7 @@ fn setup_command_preserves_setup_length_preference() {
 
 #[test]
 fn setup_command_preserves_selected_kick_table() {
-    let request = WebCommandParser::parse("clearra setup --remaining IOTS --rule srs-x")
+    let request = CliCommandParser::parse("clearra setup --remaining IOTS --rule srs-x")
         .expect("setup command")
         .to_app_request()
         .expect("AppRequest");
@@ -963,7 +968,7 @@ fn setup_command_preserves_selected_kick_table() {
 
 #[test]
 fn setup_command_preserves_selected_jstris_180_kick_table() {
-    let request = WebCommandParser::parse("clearra setup --remaining IOTS --rule jstris-180")
+    let request = CliCommandParser::parse("clearra setup --remaining IOTS --rule jstris-180")
         .expect("setup command")
         .to_app_request()
         .expect("AppRequest");
@@ -979,7 +984,7 @@ fn setup_command_preserves_selected_jstris_180_kick_table() {
 
 #[test]
 fn setup_command_preserves_the_complete_pc_piece_limit() {
-    let request = WebCommandParser::parse("clearra setup --remaining IOTS --max-setup-pieces 10")
+    let request = CliCommandParser::parse("clearra setup --remaining IOTS --max-setup-pieces 10")
         .expect("setup command")
         .to_app_request()
         .expect("AppRequest");
@@ -992,7 +997,7 @@ fn setup_command_preserves_the_complete_pc_piece_limit() {
 
 #[test]
 fn setup_command_separates_residue_and_observed_qb_pieces() {
-    let request = WebCommandParser::parse("clearra setup --remaining TI --mode qb --qb OS")
+    let request = CliCommandParser::parse("clearra setup --remaining TI --mode qb --qb OS")
         .expect("QB setup command")
         .to_app_request()
         .expect("AppRequest");
@@ -1023,7 +1028,7 @@ fn setup_command_separates_residue_and_observed_qb_pieces() {
 #[test]
 fn setup_command_accepts_next_cycle_inventory_in_oracle_mode() {
     let request =
-        WebCommandParser::parse("clearra setup --remaining TI --next-cycle-remaining OOSITZ")
+        CliCommandParser::parse("clearra setup --remaining TI --next-cycle-remaining OOSITZ")
             .expect("oracle setup command")
             .to_app_request()
             .expect("AppRequest");
@@ -1052,7 +1057,7 @@ fn setup_command_accepts_next_cycle_inventory_in_oracle_mode() {
 
 #[test]
 fn setup_command_combines_observed_qb_and_next_cycle_inventory() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra setup --remaining TI --qb OS --next-cycle-remaining OOSITZ",
     )
     .expect("combined setup command")
@@ -1082,7 +1087,7 @@ fn setup_command_combines_observed_qb_and_next_cycle_inventory() {
 
 #[test]
 fn setup_command_preserves_exact_path_detail_selection() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra setup --remaining TI --mode qb --qb OS \
          --paths-for setup-00080719e6-0003-000000000000000000000000000001 \
          --condition hold-empty",
@@ -1103,26 +1108,26 @@ fn setup_command_preserves_exact_path_detail_selection() {
 
 #[test]
 fn setup_command_requires_both_path_detail_options() {
-    let error = WebCommandParser::parse(
+    let error = CliCommandParser::parse(
         "clearra setup --remaining TI \
          --paths-for setup-00080719e6-0000-000000000000000000000000000001",
     )
     .expect_err("missing condition must fail");
 
-    assert_eq!(error.code(), WebCommandErrorCode::MissingValue);
+    assert_eq!(error.code(), CliCommandErrorCode::MissingValue);
 }
 
 #[test]
 fn setup_command_requires_observed_pieces_in_queue_based_mode() {
-    let error = WebCommandParser::parse("clearra setup --remaining TI --mode qb")
+    let error = CliCommandParser::parse("clearra setup --remaining TI --mode qb")
         .expect_err("QB mode without observations must fail at the parser boundary");
 
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
 }
 
 #[test]
 fn setup_command_separates_one_duplicate_as_automatic_initial_hold_without_changing_cycle() {
-    let request = WebCommandParser::parse("clearra setup --remaining IOTSS")
+    let request = CliCommandParser::parse("clearra setup --remaining IOTSS")
         .expect("setup command")
         .to_app_request()
         .expect("AppRequest");
@@ -1151,8 +1156,8 @@ fn setup_command_rejects_oracle_mode_with_observed_qb_pieces() {
         "clearra setup --remaining TI --qb OS --mode oracle",
     ] {
         let error =
-            WebCommandParser::parse(command).expect_err("oracle and QB observations must conflict");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+            CliCommandParser::parse(command).expect_err("oracle and QB observations must conflict");
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     }
 }
 
@@ -1171,8 +1176,8 @@ fn setup_mode_qb_borrow_and_next_cycle_pairs_fail_closed_at_the_parser_boundary(
         "clearra setup --remaining IOT --next-cycle-remaining I --allow-post-cycle-borrow",
     ];
     for command in invalid {
-        let error = WebCommandParser::parse(command).expect_err(command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(command).expect_err(command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 
     for command in [
@@ -1181,7 +1186,7 @@ fn setup_mode_qb_borrow_and_next_cycle_pairs_fail_closed_at_the_parser_boundary(
         "clearra setup --remaining IOT --allow-post-cycle-borrow --next-cycle-remaining IOTSZJL",
         "clearra setup --next-cycle-remaining IOTSZJL --allow-post-cycle-borrow --remaining IOT",
     ] {
-        WebCommandParser::parse(command)
+        CliCommandParser::parse(command)
             .unwrap_or_else(|error| panic!("failed to parse '{command}': {error:?}"))
             .to_app_request()
             .unwrap_or_else(|error| panic!("failed to project '{command}': {error:?}"));
@@ -1237,7 +1242,7 @@ fn setup_mode_qb_borrow_and_next_cycle_cartesian_matrix_reaches_the_real_parser(
                                     ordered.join(" ")
                                 )
                             };
-                            match WebCommandParser::parse(&command) {
+                            match CliCommandParser::parse(&command) {
                                 Ok(parsed) if expected_valid => {
                                     parsed.to_app_request().unwrap_or_else(|error| {
                                         panic!("failed to project '{command}': {error:?}")
@@ -1246,7 +1251,7 @@ fn setup_mode_qb_borrow_and_next_cycle_cartesian_matrix_reaches_the_real_parser(
                                 Err(error) if !expected_valid => {
                                     assert_eq!(
                                         error.code(),
-                                        WebCommandErrorCode::InvalidValue,
+                                        CliCommandErrorCode::InvalidValue,
                                         "{command}"
                                     );
                                 }
@@ -1265,23 +1270,23 @@ fn setup_mode_qb_borrow_and_next_cycle_cartesian_matrix_reaches_the_real_parser(
 
 #[test]
 fn setup_command_rejects_unknown_product_options() {
-    let error = WebCommandParser::parse("clearra setup --remaining IOTSZJL --online-policy")
+    let error = CliCommandParser::parse("clearra setup --remaining IOTSZJL --online-policy")
         .expect_err("unfinished online policy must not enter the product contract");
 
-    assert_eq!(error.code(), WebCommandErrorCode::UnsupportedCommand);
+    assert_eq!(error.code(), CliCommandErrorCode::UnsupportedCommand);
 }
 
 #[test]
 fn setup_command_keeps_initial_hold_on_the_cli_only_surface() {
-    let error = WebCommandParser::parse("clearra setup --remaining SIOS --initial-hold S")
-        .expect_err("product web command must not expose the CLI-only initial hold");
+    let error = CliCommandParser::parse("clearra setup --remaining SIOS --initial-hold S")
+        .expect_err("product CLI command must not expose the CLI-only initial hold");
 
-    assert_eq!(error.code(), WebCommandErrorCode::UnsupportedCommand);
+    assert_eq!(error.code(), CliCommandErrorCode::UnsupportedCommand);
 }
 
 #[test]
-fn setup_browser_command_defaults_to_reserved_multithread_worker_count() {
-    let request = WebCommandParser::parse_with_worker_limit("clearra setup --remaining IOTS", 12)
+fn setup_cli_command_defaults_to_reserved_multithread_worker_count() {
+    let request = CliCommandParser::parse_with_worker_limit("clearra setup --remaining IOTS", 12)
         .expect("setup command")
         .to_app_request()
         .expect("AppRequest");
@@ -1291,10 +1296,10 @@ fn setup_browser_command_defaults_to_reserved_multithread_worker_count() {
 
 #[test]
 fn pc_back_to_back_preservation_is_an_execution_constraint_not_a_score_request() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra pc --lines 2 --queue IOTSL --preserve-b2b --spin-profile all-mini-plus",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
 
@@ -1312,10 +1317,10 @@ fn pc_back_to_back_preservation_is_an_execution_constraint_not_a_score_request()
 
 #[test]
 fn pc_score_table_selection_is_independent_from_rotation_rule() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra pc --lines 2 --queue IOTSL --score --score-profile jstris-ultra --rule srs-plus",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
 
@@ -1331,10 +1336,10 @@ fn pc_score_table_selection_is_independent_from_rotation_rule() {
 
 #[test]
 fn build_probability_back_to_back_preservation_reaches_the_core_query() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --preserve-b2b --spin-profile t-spins-plus",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
 
@@ -1364,7 +1369,7 @@ fn build_queue_knowledge_is_closed_and_reaches_the_actual_build_query() {
             QueueObservationPolicy::VisibleSeven,
         ),
     ] {
-        let request = WebCommandParser::parse(&format!("{base}{suffix}"))
+        let request = CliCommandParser::parse(&format!("{base}{suffix}"))
             .expect("Build queue-knowledge command")
             .to_app_request()
             .expect("Build AppRequest");
@@ -1379,19 +1384,19 @@ fn build_queue_knowledge_is_closed_and_reaches_the_actual_build_query() {
     }
 
     for rejected in ["full-future", "seven-visible", "online", "visible-seven"] {
-        let error = WebCommandParser::parse(&format!("{base} --queue-knowledge {rejected}"))
+        let error = CliCommandParser::parse(&format!("{base} --queue-knowledge {rejected}"))
             .expect_err(rejected);
         assert_eq!(
             error.code(),
-            WebCommandErrorCode::InvalidValue,
+            CliCommandErrorCode::InvalidValue,
             "{rejected}"
         );
     }
-    let duplicate = WebCommandParser::parse(&format!(
+    let duplicate = CliCommandParser::parse(&format!(
         "{base} --queue-knowledge oracle --queue-knowledge oracle"
     ))
     .expect_err("duplicate Build queue knowledge");
-    assert_eq!(duplicate.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(duplicate.code(), CliCommandErrorCode::InvalidValue);
 }
 
 #[test]
@@ -1401,12 +1406,12 @@ fn build_visible_seven_rejects_tiling_before_app_execution() {
         format!("{base} --tiling-only --queue-knowledge visible-7"),
         format!("{base} --queue-knowledge visible-7 --tiling-only"),
     ] {
-        let error = WebCommandParser::parse(&command).expect_err(&command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
         assert!(error.message().contains("tiling-only"));
     }
 
-    let error = WebCommandRequest::build_probability(
+    let error = CliCommandRequest::build_probability(
         WebBuildProbabilityInput::new(0, 0xf, 4)
             .with_aggregation(BuildProbabilityAggregation::TilingOnly),
     )
@@ -1415,15 +1420,15 @@ fn build_visible_seven_rejects_tiling_before_app_execution() {
     .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
     .to_app_request()
     .expect_err("programmatic visible-seven tiling");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
 }
 
 #[test]
 fn build_probability_dependency_dag_is_opt_in_and_reaches_the_core_policy() {
-    let enabled = WebCommandParser::parse(
+    let enabled = CliCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --build-dependency-dag",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
     let AppCommand::BuildProbability(enabled) = enabled.command() else {
@@ -1435,10 +1440,10 @@ fn build_probability_dependency_dag_is_opt_in_and_reaches_the_core_policy() {
         .execution_policy()
         .precompute_build_dependencies());
 
-    let disabled = WebCommandParser::parse(
+    let disabled = CliCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
     let AppCommand::BuildProbability(disabled) = disabled.command() else {
@@ -1453,11 +1458,11 @@ fn build_probability_dependency_dag_is_opt_in_and_reaches_the_core_policy() {
 
 #[test]
 fn build_probability_memory_limit_is_one_exact_query_and_app_request_authority() {
-    let finite = WebCommandParser::parse(
+    let finite = CliCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 \
          --queue I --no-hold --no-mirror --workers 2 --max-memory-mib 64",
     )
-    .expect("finite Build web command")
+    .expect("finite Build CLI command")
     .to_app_request()
     .expect("finite Build AppRequest");
     let AppCommand::BuildProbability(command) = finite.command() else {
@@ -1474,11 +1479,11 @@ fn build_probability_memory_limit_is_one_exact_query_and_app_request_authority()
     assert_eq!(finite.resource_budget().max_memory_mib(), Some(64));
     assert_eq!(finite.resource_budget().memory_mib(), Some(64));
 
-    let unlimited = WebCommandParser::parse(
+    let unlimited = CliCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 \
          --queue I --no-hold --no-mirror",
     )
-    .expect("unlimited Build web command")
+    .expect("unlimited Build CLI command")
     .to_app_request()
     .expect("unlimited Build AppRequest");
     let AppCommand::BuildProbability(command) = unlimited.command() else {
@@ -1503,19 +1508,19 @@ fn build_probability_memory_limit_rejects_lossy_app_authority_projection() {
          --queue I --no-hold --no-mirror --max-memory-mib {}",
         u64::from(u32::MAX) + 1
     );
-    let error = WebCommandParser::parse(&command)
-        .expect("the Web parser accepts the u64 option domain")
+    let error = CliCommandParser::parse(&command)
+        .expect("the CLI parser accepts the u64 option domain")
         .to_app_request()
         .expect_err("the App request authority must not truncate the memory limit");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     assert!(error.message().contains("authority range"));
 }
 
 #[test]
 fn build_probability_solution_probabilities_are_opt_in_and_reach_the_typed_query() {
     let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror";
-    let included = WebCommandParser::parse(&format!("{base} --solution-probabilities"))
-        .expect("web command")
+    let included = CliCommandParser::parse(&format!("{base} --solution-probabilities"))
+        .expect("CLI command")
         .to_app_request()
         .expect("AppRequest");
     let AppCommand::BuildProbability(included) = included.command() else {
@@ -1526,8 +1531,8 @@ fn build_probability_solution_probabilities_are_opt_in_and_reach_the_typed_query
         BuildSolutionProbabilityPolicy::Include
     );
 
-    let omitted = WebCommandParser::parse(base)
-        .expect("web command")
+    let omitted = CliCommandParser::parse(base)
+        .expect("CLI command")
         .to_app_request()
         .expect("AppRequest");
     let AppCommand::BuildProbability(omitted) = omitted.command() else {
@@ -1542,11 +1547,11 @@ fn build_probability_solution_probabilities_are_opt_in_and_reach_the_typed_query
 #[test]
 fn build_probability_solution_probabilities_reject_duplicates_and_tiling() {
     let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror";
-    let duplicate = WebCommandParser::parse(&format!(
+    let duplicate = CliCommandParser::parse(&format!(
         "{base} --solution-probabilities --solution-probabilities"
     ))
     .expect_err("duplicate solution probability request");
-    assert_eq!(duplicate.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(duplicate.code(), CliCommandErrorCode::InvalidValue);
 
     for command in [
         format!("{base} --tiling-only --solution-probabilities"),
@@ -1554,12 +1559,12 @@ fn build_probability_solution_probabilities_reject_duplicates_and_tiling() {
         format!("{base} --aggregate tiling --solution-probabilities"),
         format!("{base} --solution-probabilities --aggregate tiling"),
     ] {
-        let error = WebCommandParser::parse(&command).expect_err(&command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 
     let finesse =
-        WebCommandParser::parse(&format!("{base} --finesse inputs --solution-probabilities"))
+        CliCommandParser::parse(&format!("{base} --finesse inputs --solution-probabilities"))
             .expect("ordinary finesse plus solution probabilities")
             .to_app_request()
             .expect("AppRequest");
@@ -1582,7 +1587,7 @@ fn programmatic_build_probability_rejects_solution_probabilities_with_finesse_sc
         0,
     )])
     .expect("one placement score request");
-    let error = WebCommandRequest::build_probability(WebBuildProbabilityInput::new(0, 0xf, 4))
+    let error = CliCommandRequest::build_probability(WebBuildProbabilityInput::new(0, 0xf, 4))
         .with_queue("I")
         .with_hold_enabled(false)
         .with_finesse_score(score)
@@ -1590,10 +1595,10 @@ fn programmatic_build_probability_rejects_solution_probabilities_with_finesse_sc
         .to_app_request()
         .expect_err("solution probabilities plus finesse score");
 
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     assert!(error.message().contains("finesse score"));
 
-    let error = WebCommandRequest::build_probability(
+    let error = CliCommandRequest::build_probability(
         WebBuildProbabilityInput::new(0, 0xf, 4)
             .with_aggregation(BuildProbabilityAggregation::TilingOnly),
     )
@@ -1602,7 +1607,7 @@ fn programmatic_build_probability_rejects_solution_probabilities_with_finesse_sc
     .with_solution_probabilities(true)
     .to_app_request()
     .expect_err("programmatic tiling plus solution probabilities");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     assert!(error.message().contains("tiling aggregation"));
 }
 
@@ -1610,7 +1615,7 @@ fn programmatic_build_probability_rejects_solution_probabilities_with_finesse_sc
 fn finesse_search_accepts_the_discord_fixed_queue_contract() {
     let base = "0".repeat(60);
     let target = format!("{}f", "0".repeat(59));
-    let request = WebCommandParser::parse(&format!(
+    let request = CliCommandParser::parse(&format!(
         "finesse search --base-mask {base} --target-mask {target} --height 1 \
          --queue I --hold empty --pattern-knowledge both --rule srs-x"
     ))
@@ -1652,7 +1657,7 @@ fn finesse_search_accepts_the_discord_fixed_queue_contract() {
 fn finesse_search_accepts_the_discord_pattern_policy_contract() {
     let base = "0".repeat(60);
     let target = format!("{}f", "0".repeat(59));
-    let request = WebCommandParser::parse(&format!(
+    let request = CliCommandParser::parse(&format!(
         "finesse search --base-mask {base} --target-mask {target} --height 1 \
          --patterns [TI]! --no-hold --pattern-knowledge visible-7"
     ))
@@ -1681,7 +1686,7 @@ fn finesse_search_accepts_the_discord_pattern_policy_contract() {
 
 #[test]
 fn finesse_search_preserves_the_declared_spawn_height() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "finesse search --base-mask 0 --target-mask 0xf --height 8 \
          --queue I --no-hold --pattern-knowledge oracle",
     )
@@ -1716,7 +1721,7 @@ fn finesse_score_accepts_the_discord_ctk3_canonical_contract() {
         "--pattern-knowledge".to_owned(),
         "oracle".to_owned(),
     ];
-    let request = WebCommandParser::parse_tokens(&tokens)
+    let request = CliCommandParser::parse_tokens(&tokens)
         .expect("Discord CTK3 finesse score command")
         .to_app_request()
         .expect("CTK3 finesse score AppRequest");
@@ -1755,7 +1760,7 @@ fn finesse_score_accepts_the_discord_ctk3_canonical_contract() {
 
 #[test]
 fn finesse_score_command_text_accepts_multiple_comma_separated_placements() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "finesse score --initial-mask 0 --height 4 \
          --placements O:spawn:0:0,O:spawn:2:0 \
          --queue OO --no-hold --pattern-knowledge both",
@@ -1798,7 +1803,7 @@ fn finesse_score_accepts_the_discord_fumen_canonical_contract() {
         "--rule".to_owned(),
         "srs-plus".to_owned(),
     ];
-    let request = WebCommandParser::parse_tokens(&tokens)
+    let request = CliCommandParser::parse_tokens(&tokens)
         .expect("Discord Fumen finesse score command")
         .to_app_request()
         .expect("Fumen finesse score AppRequest");
@@ -1845,65 +1850,65 @@ fn finesse_parser_rejects_raw_documents_and_malformed_contracts() {
     let initial = "0".repeat(60);
     let valid_placement = "T:spawn:4:1";
     let cases = [
-        ("finesse".to_owned(), WebCommandErrorCode::MissingValue),
+        ("finesse".to_owned(), CliCommandErrorCode::MissingValue),
         (
             "finesse other".to_owned(),
-            WebCommandErrorCode::InvalidValue,
+            CliCommandErrorCode::InvalidValue,
         ),
         (
             format!(
                 "finesse score --document v115@vhAAgH --initial-mask {initial} \
                  --height 4 --placements {valid_placement} --queue T"
             ),
-            WebCommandErrorCode::UnsupportedCommand,
+            CliCommandErrorCode::UnsupportedCommand,
         ),
         (
             format!("finesse score --height 4 --placements {valid_placement} --queue T"),
-            WebCommandErrorCode::MissingValue,
+            CliCommandErrorCode::MissingValue,
         ),
         (
             format!("finesse score --initial-mask {initial} --height 4 --queue T"),
-            WebCommandErrorCode::MissingValue,
+            CliCommandErrorCode::MissingValue,
         ),
         (
             format!(
                 "finesse score --initial-mask {initial} --height 4 \
                  --placements T:up:4:1 --queue T"
             ),
-            WebCommandErrorCode::InvalidValue,
+            CliCommandErrorCode::InvalidValue,
         ),
         (
             format!(
                 "finesse score --initial-mask {initial} --height 4 \
                  --placements {valid_placement} --placements {valid_placement} --queue T"
             ),
-            WebCommandErrorCode::InvalidValue,
+            CliCommandErrorCode::InvalidValue,
         ),
         (
             format!(
                 "finesse score --initial-mask {initial} --height 4 \
                  --placements O:spawn:0:0|O:spawn:2:0 --queue OO"
             ),
-            WebCommandErrorCode::ProcessSemantics,
+            CliCommandErrorCode::ProcessSemantics,
         ),
         (
             format!(
                 "finesse search --base-mask {initial} --target-mask {initial} --height 4 \
                  --queue T --patterns [T]!"
             ),
-            WebCommandErrorCode::InvalidValue,
+            CliCommandErrorCode::InvalidValue,
         ),
         (
             format!(
                 "finesse search --base-mask {initial} --target-mask {initial} --height 4 \
                  --queue T --pattern-knowledge private"
             ),
-            WebCommandErrorCode::InvalidValue,
+            CliCommandErrorCode::InvalidValue,
         ),
     ];
 
     for (command, expected_code) in cases {
-        let error = WebCommandParser::parse(&command).expect_err(&command);
+        let error = CliCommandParser::parse(&command).expect_err(&command);
         assert_eq!(error.code(), expected_code, "{command}");
     }
 }
@@ -1926,16 +1931,16 @@ fn finesse_score_rejects_more_than_sixty_typed_placements() {
         "[T]!".to_owned(),
     ];
 
-    let error = WebCommandParser::parse_tokens(&tokens).expect_err("placement limit");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    let error = CliCommandParser::parse_tokens(&tokens).expect_err("placement limit");
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
 }
 
 #[test]
 fn build_probability_preserves_rule_spin_profile_and_initial_hold() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --hold T --no-mirror --aggregate spin --rule srs-x --spin-profile all-mini-plus",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
 
@@ -1963,20 +1968,20 @@ fn build_probability_preserves_rule_spin_profile_and_initial_hold() {
 }
 
 #[test]
-fn canonical_setup_finder_matches_legacy_web_alias() {
-    let canonical = WebCommandParser::parse("clearra setup-finder --remaining IOTS --workers 1")
+fn canonical_setup_finder_matches_legacy_compatibility_alias() {
+    let canonical = CliCommandParser::parse("clearra setup-finder --remaining IOTS --workers 1")
         .expect("canonical setup finder command");
-    let legacy = WebCommandParser::parse("clearra setup --remaining IOTS --workers 1")
+    let legacy = CliCommandParser::parse("clearra setup --remaining IOTS --workers 1")
         .expect("legacy setup alias");
     assert_eq!(canonical, legacy);
 }
 
 #[test]
 fn build_probability_tiling_only_preserves_hold_supply_and_sets_tiling_objective() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue IO --hold T --no-mirror --tiling-only",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
 
@@ -2007,7 +2012,7 @@ fn build_probability_tiling_only_rejects_buildup_only_options() {
         let command = format!(
             "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --tiling-only {option}"
         );
-        assert!(WebCommandParser::parse(&command).is_err(), "{option}");
+        assert!(CliCommandParser::parse(&command).is_err(), "{option}");
     }
 }
 
@@ -2027,8 +2032,8 @@ fn build_probability_tiling_rejects_explicit_inactive_options_in_either_order() 
             format!("{base} --tiling-only {option}"),
             format!("{base} {option} --tiling-only"),
         ] {
-            let error = WebCommandParser::parse(&command).expect_err(&command);
-            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            let error = CliCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
         }
     }
 }
@@ -2045,8 +2050,8 @@ fn build_probability_rejects_conflicting_aggregation_selectors_in_either_order()
             format!("{base} {left} {right}"),
             format!("{base} {right} {left}"),
         ] {
-            let error = WebCommandParser::parse(&command).expect_err(&command);
-            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            let error = CliCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
         }
     }
 
@@ -2055,8 +2060,8 @@ fn build_probability_rejects_conflicting_aggregation_selectors_in_either_order()
         format!("{base} --tiling-only --tiling-only"),
         format!("{base} --aggregate spin --aggregate spin"),
     ] {
-        let error = WebCommandParser::parse(&command).expect_err(&command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 }
 
@@ -2068,8 +2073,8 @@ fn build_probability_rejects_orphan_spin_and_pattern_knowledge_options_in_either
             format!("{base} --aggregate buildability {option}"),
             format!("{base} {option} --aggregate buildability"),
         ] {
-            let error = WebCommandParser::parse(&command).expect_err(&command);
-            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            let error = CliCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
         }
     }
 
@@ -2081,7 +2086,7 @@ fn build_probability_rejects_orphan_spin_and_pattern_knowledge_options_in_either
         format!("{base} --finesse inputs --pattern-knowledge visible-7"),
         format!("{base} --pattern-knowledge visible-7 --finesse inputs"),
     ] {
-        WebCommandParser::parse(&command)
+        CliCommandParser::parse(&command)
             .unwrap_or_else(|error| panic!("failed to parse '{command}': {error:?}"))
             .to_app_request()
             .unwrap_or_else(|error| panic!("failed to project '{command}': {error:?}"));
@@ -2089,21 +2094,21 @@ fn build_probability_rejects_orphan_spin_and_pattern_knowledge_options_in_either
 }
 
 #[test]
-fn browser_command_accepts_completed_group_followed_by_bag_permutation() {
-    WebCommandParser::parse(
+fn cli_command_accepts_completed_group_followed_by_bag_permutation() {
+    CliCommandParser::parse(
         "clearra pc --lines 2 --backend cpu --patterns [^TSZ]!P4 --max-patterns 20160",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
 }
 
 #[test]
 fn scenario_initial_hold_remains_independent_from_p7_queue() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra pc --lines 4 --board-mask 0x80787 --height 4 --pieces 8 --patterns P7 --hold S --backend cpu",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
 
@@ -2122,11 +2127,11 @@ fn scenario_initial_hold_remains_independent_from_p7_queue() {
 }
 
 #[test]
-fn web_command_preserves_cpu_pool_options_in_the_typed_request() {
-    let request = WebCommandParser::parse(
+fn cli_command_preserves_cpu_pool_options_in_the_typed_request() {
+    let request = CliCommandParser::parse(
         "clearra pc --lines 2 --backend cpu --workers 1 --use-all-cpu-threads --cpu-warmup",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
 
@@ -2141,7 +2146,7 @@ fn web_command_preserves_cpu_pool_options_in_the_typed_request() {
 
 #[test]
 fn public_sfinder_percent_preserves_adaptive_workers_without_a_product_claim() {
-    let request = WebCommandParser::parse_with_worker_limit(
+    let request = CliCommandParser::parse_with_worker_limit(
         "clearra sfinder percent v115@vhAAgH P7P3 4 --auto-workers 3",
         8,
     )
@@ -2166,7 +2171,7 @@ fn public_chance_compatibility_spellings_remain_generic() {
         "clearra sfinder chance v115@vhAAgH P7P3 4",
         "clearra sfinder percent v115@vhAAgH P7P3 4",
     ] {
-        let parsed = WebCommandParser::parse(source).expect(source);
+        let parsed = CliCommandParser::parse(source).expect(source);
         assert_eq!(
             parsed.pc_result_projection(),
             PcResultProjection::Standard,
@@ -2190,7 +2195,7 @@ fn public_chance_compatibility_spellings_remain_generic() {
         assert_eq!(objective.kind(), ObjectiveKind::Unique, "{source}");
     }
 
-    let canonical = WebCommandParser::parse("clearra pc chance --lines 2 --patterns [TI]!")
+    let canonical = CliCommandParser::parse("clearra pc chance --lines 2 --patterns [TI]!")
         .expect("canonical pc chance");
     assert_eq!(
         canonical.pc_result_projection(),
@@ -2226,7 +2231,7 @@ fn pc_saves_and_best_save_bind_distinct_typed_contracts_across_native_and_compat
             ProductCapabilityContract::PcBestSave,
         ),
     ] {
-        let parsed = WebCommandParser::parse(source).expect(source);
+        let parsed = CliCommandParser::parse(source).expect(source);
         assert_eq!(
             parsed.pc_result_projection(),
             expected_projection,
@@ -2279,8 +2284,8 @@ fn pc_save_ingress_fails_closed_without_fixed_bag_boundary_authority() {
         "clearra sfinder saves --fumen v115@vhAAgH --queue IOTSZJLIOTS --lines 4",
         "clearra sfinder best-save --fumen v115@vhAAgH --queue IOTSZJLIOTS --lines 4",
     ] {
-        let error = WebCommandParser::parse(source).expect_err(source);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{source}");
+        let error = CliCommandParser::parse(source).expect_err(source);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{source}");
         assert!(
             error.message().contains("bag-boundary")
                 || error
@@ -2301,14 +2306,14 @@ fn pc_save_ingress_fails_closed_without_fixed_bag_boundary_authority() {
         "--build-dependency-dag",
     ] {
         let source = format!("clearra pc saves --lines 2 --patterns P7 {forbidden}");
-        let error = WebCommandParser::parse(&source).expect_err(&source);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{source}");
+        let error = CliCommandParser::parse(&source).expect_err(&source);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{source}");
     }
 }
 
 #[test]
 fn canonical_pc_tiling_binds_the_closed_projection_but_generic_tiling_does_not() {
-    let canonical = WebCommandParser::parse(
+    let canonical = CliCommandParser::parse(
         "clearra pc tiling --lines 2 --queue IIOOO --no-hold --backend cpu --workers 2 --max-memory-mib 64",
     )
     .expect("canonical pc tiling")
@@ -2335,7 +2340,7 @@ fn canonical_pc_tiling_binds_the_closed_projection_but_generic_tiling_does_not()
         "clearra pc --lines 2 --queue IIOOO --no-hold --objective tiling",
         "clearra pc --lines 2 --queue IIOOO --no-hold --tiling-only",
     ] {
-        let generic = WebCommandParser::parse(source)
+        let generic = CliCommandParser::parse(source)
             .expect(source)
             .to_app_request()
             .expect(source);
@@ -2349,7 +2354,7 @@ fn canonical_pc_tiling_binds_the_closed_projection_but_generic_tiling_does_not()
 
 #[test]
 fn canonical_scenario_pc_tiling_preserves_unique_family_counting() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra pc tiling --board-mask 0 --height 2 --pieces 5 --lines 2 --queue IIOOO --no-hold",
     )
     .expect("canonical scenario pc tiling")
@@ -2389,7 +2394,7 @@ fn internal_pc_chance_candidates_preserve_all_closed_origins_and_typed_contract(
             PcChanceIngressOrigin::CompatibilityPercent,
         ),
     ] {
-        let parsed = WebCommandParser::parse_internal_typed_candidate(source).expect(source);
+        let parsed = CliCommandParser::parse_internal_typed_candidate(source).expect(source);
         assert_eq!(
             parsed.pc_result_projection(),
             PcResultProjection::ChanceProbabilityV2(expected_origin),
@@ -2422,7 +2427,7 @@ fn internal_pc_chance_candidates_preserve_all_closed_origins_and_typed_contract(
 
 #[test]
 fn native_percent_and_ordinary_unique_do_not_inherit_pc_chance() {
-    let percent = WebCommandParser::parse("clearra percent I --fixed --min-len 1")
+    let percent = CliCommandParser::parse("clearra percent I --fixed --min-len 1")
         .expect("native percent")
         .to_app_request()
         .expect("native percent AppRequest");
@@ -2430,7 +2435,7 @@ fn native_percent_and_ordinary_unique_do_not_inherit_pc_chance() {
     assert_eq!(percent.product_capability_contract(), None);
 
     let unique =
-        WebCommandParser::parse("clearra pc --lines 2 --patterns [TI]! --objective unique")
+        CliCommandParser::parse("clearra pc --lines 2 --patterns [TI]! --objective unique")
             .expect("ordinary unique PC");
     assert_eq!(unique.pc_result_projection(), PcResultProjection::Standard);
     assert_eq!(unique.product_capability_contract(), None);
@@ -2441,14 +2446,14 @@ fn native_percent_and_ordinary_unique_do_not_inherit_pc_chance() {
 #[test]
 fn pc_chance_rejects_conflicting_objective_but_accepts_its_matching_fixed_value() {
     let conflicting =
-        WebCommandParser::parse("clearra pc chance --lines 2 --patterns [TI]! --objective all")
+        CliCommandParser::parse("clearra pc chance --lines 2 --patterns [TI]! --objective all")
             .expect("syntactically valid conflicting objective")
             .to_app_request()
             .expect_err("pc chance owns its fixed probability semantics");
-    assert_eq!(conflicting.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(conflicting.code(), CliCommandErrorCode::InvalidValue);
 
     let matching =
-        WebCommandParser::parse("clearra pc chance --lines 2 --patterns [TI]! --objective unique")
+        CliCommandParser::parse("clearra pc chance --lines 2 --patterns [TI]! --objective unique")
             .expect("matching fixed objective")
             .to_app_request()
             .expect("matching fixed objective AppRequest");
@@ -2464,7 +2469,7 @@ fn public_score_compatibility_spellings_keep_fixed_jstris_semantics_without_a_pr
         "clearra score v115@vhAAgH P7P3 4",
         "clearra sfinder score v115@vhAAgH P7P3 4",
     ] {
-        let parsed = WebCommandParser::parse(source).expect(source);
+        let parsed = CliCommandParser::parse(source).expect(source);
         assert_eq!(
             parsed.pc_result_projection(),
             PcResultProjection::Standard,
@@ -2499,7 +2504,7 @@ fn public_score_compatibility_spellings_keep_fixed_jstris_semantics_without_a_pr
         assert!(!objective.execution_constraints().requested(), "{source}");
     }
 
-    let canonical = WebCommandParser::parse("clearra pc score --lines 2 --patterns [TIOSZ]!")
+    let canonical = CliCommandParser::parse("clearra pc score --lines 2 --patterns [TIOSZ]!")
         .expect("canonical pc score");
     assert_eq!(
         canonical.pc_result_projection(),
@@ -2530,7 +2535,7 @@ fn internal_pc_score_candidates_preserve_closed_origin_profile_and_typed_contrac
             ScoreProfileSelection::JstrisUltra,
         ),
     ] {
-        let parsed = WebCommandParser::parse_internal_typed_candidate(source).expect(source);
+        let parsed = CliCommandParser::parse_internal_typed_candidate(source).expect(source);
         assert_eq!(
             parsed.pc_result_projection(),
             PcResultProjection::ScoreSummaryV2(expected_origin),
@@ -2586,7 +2591,7 @@ fn canonical_pc_score_minimals_binds_the_score_only_exact_portfolio_contract() {
         "clearra pc score-minimals --board-mask 0x3f0 --height 1 --pieces 1 ",
         "--lines 1 --queue I --hold empty --rule srs-plus"
     );
-    let parsed = WebCommandParser::parse(source).expect(source);
+    let parsed = CliCommandParser::parse(source).expect(source);
     assert_eq!(
         parsed.pc_result_projection(),
         PcResultProjection::ScorePortfolioV2(
@@ -2635,10 +2640,10 @@ fn canonical_pc_score_minimals_binds_the_score_only_exact_portfolio_contract() {
     ] {
         let command = format!("{source} {suffix}");
         assert_eq!(
-            WebCommandParser::parse(&command)
+            CliCommandParser::parse(&command)
                 .expect_err(&command)
                 .code(),
-            WebCommandErrorCode::InvalidValue,
+            CliCommandErrorCode::InvalidValue,
             "{command}"
         );
     }
@@ -2650,7 +2655,7 @@ fn generic_score_flags_and_neighboring_compatibility_commands_do_not_inherit_pc_
         "clearra pc --lines 2 --patterns [TIOSZ]! --objective all --score",
         "clearra sfinder score-minimals v115@vhAAgH P7P3 4",
     ] {
-        let parsed = WebCommandParser::parse(source).expect(source);
+        let parsed = CliCommandParser::parse(source).expect(source);
         assert_eq!(
             parsed.pc_result_projection(),
             PcResultProjection::Standard,
@@ -2669,8 +2674,8 @@ fn pc_score_rejects_authority_overrides_and_unaccounted_resource_limits() {
         "clearra pc score --lines 2 --patterns [TIOSZ]! --score",
         "clearra pc score --lines 2 --patterns [TIOSZ]! --count unique",
     ] {
-        let error = WebCommandParser::parse(source).expect_err(source);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{source}");
+        let error = CliCommandParser::parse(source).expect_err(source);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{source}");
     }
 
     for suffix in [
@@ -2695,8 +2700,8 @@ fn pc_score_rejects_authority_overrides_and_unaccounted_resource_limits() {
         "--max-memory-mib 64",
     ] {
         let source = format!("clearra pc score --lines 2 --patterns [TIOSZ]! {suffix}");
-        let error = WebCommandParser::parse(&source).expect_err(&source);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{source}");
+        let error = CliCommandParser::parse(&source).expect_err(&source);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{source}");
         assert!(error.message().contains("execution override"), "{source}");
     }
 }
@@ -2705,9 +2710,9 @@ fn pc_score_rejects_authority_overrides_and_unaccounted_resource_limits() {
 fn pc_score_bounds_canonical_tokens_before_compatibility_translation() {
     let mut too_many = vec!["clearra".to_owned(), "pc".to_owned(), "score".to_owned()];
     too_many.extend((0..=PC_SCORE_MAX_ARGUMENT_TOKENS).map(|index| format!("argument-{index}")));
-    let token_error = WebCommandParser::parse_tokens(&too_many)
+    let token_error = CliCommandParser::parse_tokens(&too_many)
         .expect_err("score argument count must fail before compatibility translation");
-    assert_eq!(token_error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(token_error.code(), CliCommandErrorCode::InvalidValue);
     assert!(token_error.message().contains("argument tokens"));
 
     let too_large = vec![
@@ -2716,18 +2721,18 @@ fn pc_score_bounds_canonical_tokens_before_compatibility_translation() {
         "score".to_owned(),
         "x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + 1),
     ];
-    let byte_error = WebCommandParser::parse_tokens(&too_large)
+    let byte_error = CliCommandParser::parse_tokens(&too_large)
         .expect_err("score argument bytes must fail before compatibility translation");
-    assert_eq!(byte_error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(byte_error.code(), CliCommandErrorCode::InvalidValue);
     assert!(byte_error.message().contains("argument bytes"));
 
     let oversized_raw = format!(
         "clearra pc score {}",
         "x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + PC_SCORE_MAX_ARGUMENT_TOKENS + 1)
     );
-    let raw_error = WebCommandParser::parse(&oversized_raw)
+    let raw_error = CliCommandParser::parse(&oversized_raw)
         .expect_err("oversized raw score text must fail before tokenization");
-    assert_eq!(raw_error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(raw_error.code(), CliCommandErrorCode::InvalidValue);
     assert!(raw_error.message().contains("command text"));
 }
 
@@ -2759,9 +2764,9 @@ fn pc_score_bounds_internal_compatibility_before_translation_clones() {
             .collect::<Vec<_>>();
         too_many
             .extend((0..=PC_SCORE_MAX_ARGUMENT_TOKENS).map(|index| format!("argument-{index}")));
-        let error = WebCommandParser::parse_tokens_internal_typed_candidate(&too_many)
+        let error = CliCommandParser::parse_tokens_internal_typed_candidate(&too_many)
             .expect_err("compatibility score token count must fail before translation clones");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
         assert!(error.message().contains("argument tokens"));
 
         let mut too_large = prefix
@@ -2769,9 +2774,9 @@ fn pc_score_bounds_internal_compatibility_before_translation_clones() {
             .map(|token| (*token).to_owned())
             .collect::<Vec<_>>();
         too_large.push("x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + 1));
-        let error = WebCommandParser::parse_tokens_internal_typed_candidate(&too_large)
+        let error = CliCommandParser::parse_tokens_internal_typed_candidate(&too_large)
             .expect_err("compatibility score bytes must fail before translation clones");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
         assert!(error.message().contains("argument bytes"));
     }
 
@@ -2779,18 +2784,18 @@ fn pc_score_bounds_internal_compatibility_before_translation_clones() {
         "clearra sfinder score {}",
         "x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + PC_SCORE_MAX_ARGUMENT_TOKENS + 1)
     );
-    let error = WebCommandParser::parse_internal_typed_candidate(&oversized_raw)
+    let error = CliCommandParser::parse_internal_typed_candidate(&oversized_raw)
         .expect_err("compatibility score raw text must fail before tokenization");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     assert!(error.message().contains("command text"));
 
     let oversized_direct_raw = format!(
         "clearra score {}",
         "x".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + PC_SCORE_MAX_ARGUMENT_TOKENS + 1)
     );
-    let error = WebCommandParser::parse_internal_typed_candidate(&oversized_direct_raw)
+    let error = CliCommandParser::parse_internal_typed_candidate(&oversized_direct_raw)
         .expect_err("direct compatibility score raw text must fail before tokenization");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     assert!(error.message().contains("command text"));
 }
 
@@ -2798,47 +2803,47 @@ fn pc_score_bounds_internal_compatibility_before_translation_clones() {
 fn pc_score_bounds_pattern_and_fixed_queue_sources() {
     let pattern_at_limit = format!("P1{}", ",".repeat(PC_SCORE_MAX_PATTERN_BYTES - 2));
     assert_eq!(pattern_at_limit.len(), PC_SCORE_MAX_PATTERN_BYTES);
-    WebCommandParser::parse(&format!(
+    CliCommandParser::parse(&format!(
         "clearra pc score --lines 2 --patterns {pattern_at_limit}"
     ))
     .expect("128-byte single factorized expression");
 
     let pattern_over_limit = format!("{pattern_at_limit},");
-    let pattern_error = WebCommandParser::parse(&format!(
+    let pattern_error = CliCommandParser::parse(&format!(
         "clearra pc score --lines 2 --patterns {pattern_over_limit}"
     ))
     .expect_err("129-byte pattern must be rejected");
-    assert_eq!(pattern_error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(pattern_error.code(), CliCommandErrorCode::InvalidValue);
     assert!(pattern_error.message().contains("128 UTF-8 bytes"));
 
-    let alternatives = WebCommandParser::parse("clearra pc score --lines 2 --patterns P7;P7")
+    let alternatives = CliCommandParser::parse("clearra pc score --lines 2 --patterns P7;P7")
         .expect_err("score accepts one factorized expression");
-    assert_eq!(alternatives.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(alternatives.code(), CliCommandErrorCode::InvalidValue);
     assert!(alternatives.message().contains("without alternatives"));
 
     let queue_at_limit = "IOTSZJLIOTSZJLIO";
     assert_eq!(queue_at_limit.len(), PC_SCORE_MAX_SOURCE_PIECES);
-    WebCommandParser::parse(&format!(
+    CliCommandParser::parse(&format!(
         "clearra pc score --lines 2 --queue {queue_at_limit}"
     ))
     .expect("16-piece fixed source");
-    let queue_error = WebCommandParser::parse(&format!(
+    let queue_error = CliCommandParser::parse(&format!(
         "clearra pc score --lines 2 --queue {queue_at_limit}T"
     ))
     .expect_err("17-piece fixed source must be rejected");
-    assert_eq!(queue_error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(queue_error.code(), CliCommandErrorCode::InvalidValue);
     assert!(queue_error.message().contains("16 source pieces"));
 
     let window_error =
-        WebCommandParser::parse("clearra pc score --lines 2 --patterns P7 --source-pieces 17")
+        CliCommandParser::parse("clearra pc score --lines 2 --patterns P7 --source-pieces 17")
             .expect_err("17-piece source window must be rejected");
-    assert_eq!(window_error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(window_error.code(), CliCommandErrorCode::InvalidValue);
     assert!(window_error.message().contains("16 source pieces"));
 }
 
 #[test]
 fn pc_score_accepts_six_line_factorized_source_with_fixed_product_policy() {
-    let request = WebCommandParser::parse("clearra pc score --lines 6 --patterns P7P7P2")
+    let request = CliCommandParser::parse("clearra pc score --lines 6 --patterns P7P7P2")
         .expect("bounded six-line factorized score source")
         .to_app_request()
         .expect("typed score AppRequest");
@@ -2859,11 +2864,11 @@ fn pc_score_accepts_six_line_factorized_source_with_fixed_product_policy() {
 }
 
 #[test]
-fn pc_chance_web_boundary_rejects_supplied_solution_count_memory_and_observation_overrides() {
+fn pc_chance_cli_boundary_rejects_supplied_solution_count_memory_and_observation_overrides() {
     let selected_identity = StandardBoard64ColoredTilingIdentity::from_piece_masks(0, [0; 7])
         .expect("empty colored identity");
     let base = || {
-        WebCommandRequest::pc(1, RequestedSearchBackend::Cpu)
+        CliCommandRequest::pc(1, RequestedSearchBackend::Cpu)
             .with_patterns("[I]!")
             .with_scenario(WebPcScenarioInput::new(0x3f0, 1, 1).with_allow_hold(false))
             .with_hold_enabled(false)
@@ -2877,8 +2882,8 @@ fn pc_chance_web_boundary_rejects_supplied_solution_count_memory_and_observation
                 .with_allowed_colored_solution_identities([selected_identity]),
         )
         .to_app_request()
-        .expect_err("pc chance must reject supplied colored solutions at Web ingress");
-    assert_eq!(colored.code(), WebCommandErrorCode::InvalidValue);
+        .expect_err("pc chance must reject supplied colored solutions at CLI ingress");
+    assert_eq!(colored.code(), CliCommandErrorCode::InvalidValue);
     assert!(colored.message().contains("supplied colored solution"));
 
     let count = base()
@@ -2889,25 +2894,25 @@ fn pc_chance_web_boundary_rejects_supplied_solution_count_memory_and_observation
         )
         .to_app_request()
         .expect_err("pc chance must reject an inner scenario count override");
-    assert_eq!(count.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(count.code(), CliCommandErrorCode::InvalidValue);
     assert!(count.message().contains("unique solution counting"));
 
     let scenario_memory = base()
         .with_max_memory_mib(64)
         .to_app_request()
         .expect_err("scenario pc chance must reject unaccounted transient proof memory");
-    assert_eq!(scenario_memory.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(scenario_memory.code(), CliCommandErrorCode::InvalidValue);
     assert!(scenario_memory
         .message()
         .contains("transient proof memory is accounted"));
 
-    let opening_memory = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+    let opening_memory = CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
         .with_patterns("[TIOSZ]!")
         .with_max_memory_mib(64)
         .with_pc_chance_product_capability(PcChanceIngressOrigin::CanonicalPcChance)
         .to_app_request()
         .expect_err("opening pc chance must reject unaccounted transient proof memory");
-    assert_eq!(opening_memory.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(opening_memory.code(), CliCommandErrorCode::InvalidValue);
     assert!(opening_memory
         .message()
         .contains("transient proof memory is accounted"));
@@ -2918,11 +2923,11 @@ fn pc_chance_web_boundary_rejects_supplied_solution_count_memory_and_observation
         .expect_err("scenario pc chance must reject visible-seven semantics");
     assert_eq!(
         scenario_observation.code(),
-        WebCommandErrorCode::InvalidValue
+        CliCommandErrorCode::InvalidValue
     );
     assert!(scenario_observation.message().contains("full-queue oracle"));
 
-    let opening_observation = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+    let opening_observation = CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
         .with_patterns("[TIOSZ]!")
         .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
         .with_pc_chance_product_capability(PcChanceIngressOrigin::CanonicalPcChance)
@@ -2930,7 +2935,7 @@ fn pc_chance_web_boundary_rejects_supplied_solution_count_memory_and_observation
         .expect_err("opening pc chance must reject visible-seven semantics");
     assert_eq!(
         opening_observation.code(),
-        WebCommandErrorCode::InvalidValue
+        CliCommandErrorCode::InvalidValue
     );
     assert!(opening_observation.message().contains("full-queue oracle"));
 }
@@ -2938,16 +2943,16 @@ fn pc_chance_web_boundary_rejects_supplied_solution_count_memory_and_observation
 #[test]
 fn sfinder_structural_spin_fails_closed_while_setup_reaches_the_worker_budget() {
     for command in ["spin", "spin-cover", "spincover"] {
-        let error = WebCommandParser::parse_with_worker_limit(
+        let error = CliCommandParser::parse_with_worker_limit(
             &format!("clearra sfinder {command} v115@vhAAgH TI TSS --auto-workers 2"),
             8,
         )
         .expect_err("structural Sfinder spin must not become ordered forward spin");
-        assert_eq!(error.code(), WebCommandErrorCode::UnsupportedCommand);
+        assert_eq!(error.code(), CliCommandErrorCode::UnsupportedCommand);
         assert!(error.message().contains("distinct result contract"));
     }
 
-    let setup = WebCommandParser::parse_with_worker_limit(
+    let setup = CliCommandParser::parse_with_worker_limit(
         "clearra sfinder pc-setup IOTS --auto-workers 2",
         8,
     )
@@ -2960,25 +2965,25 @@ fn sfinder_structural_spin_fails_closed_while_setup_reaches_the_worker_budget() 
 
 #[test]
 fn product_worker_modes_are_mutually_exclusive() {
-    let error = WebCommandParser::parse_with_worker_limit(
+    let error = CliCommandParser::parse_with_worker_limit(
         "clearra pc --lines 4 --workers 2 --auto-workers 3",
         8,
     )
     .expect_err("fixed and adaptive workers conflict");
 
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
 }
 
 #[test]
 fn directly_constructed_typed_requests_obey_reserved_and_hardware_worker_limits() {
-    let reserved = WebCommandRequest::setup(vec![PieceKind::I], false)
+    let reserved = CliCommandRequest::setup(vec![PieceKind::I], false)
         .with_worker_hardware_limit(8)
         .with_workers(usize::MAX)
         .to_app_request()
         .expect("reserved-core setup request");
     assert_eq!(reserved.resource_budget().workers(), 7);
 
-    let all = WebCommandRequest::setup(vec![PieceKind::I], false)
+    let all = CliCommandRequest::setup(vec![PieceKind::I], false)
         .with_worker_hardware_limit(8)
         .with_use_all_logical_processors(true)
         .with_workers(usize::MAX)
@@ -2986,7 +2991,7 @@ fn directly_constructed_typed_requests_obey_reserved_and_hardware_worker_limits(
         .expect("all-logical-processors setup request");
     assert_eq!(all.resource_budget().workers(), 8);
 
-    let automatically_capped = WebCommandRequest::setup(vec![PieceKind::I], false)
+    let automatically_capped = CliCommandRequest::setup(vec![PieceKind::I], false)
         .with_worker_hardware_limit(8)
         .with_automatic_worker_limit(3)
         .to_app_request()
@@ -2995,11 +3000,11 @@ fn directly_constructed_typed_requests_obey_reserved_and_hardware_worker_limits(
 }
 
 #[test]
-fn web_command_preserves_gpu_device_and_warmup_in_the_typed_request() {
-    let request = WebCommandParser::parse(
+fn cli_command_preserves_gpu_device_and_warmup_in_the_typed_request() {
+    let request = CliCommandParser::parse(
         "clearra pc --lines 2 --backend gpu --gpu-device 3 --gpu-warmup --allow-backend-fallback",
     )
-    .expect("web command")
+    .expect("CLI command")
     .to_app_request()
     .expect("AppRequest");
 
@@ -3060,8 +3065,8 @@ fn pc_and_build_reject_conflicting_backend_fallback_flags_in_either_order() {
             "--no-backend-fallback --backend auto --no-backend-fallback",
         ] {
             let command = backend_fallback_command(family, arguments);
-            let error = WebCommandParser::parse(&command).expect_err(&command);
-            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            let error = CliCommandParser::parse(&command).expect_err(&command);
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
         }
     }
 }
@@ -3073,7 +3078,7 @@ fn assert_backend_fallback_policy(
     expected_fallback: bool,
 ) {
     let command = backend_fallback_command(family, arguments);
-    let parsed = WebCommandParser::parse(&command)
+    let parsed = CliCommandParser::parse(&command)
         .unwrap_or_else(|error| panic!("failed to parse '{command}': {error:?}"));
     assert_eq!(
         parsed.allow_backend_fallback(),
@@ -3108,36 +3113,36 @@ fn backend_fallback_command(family: &str, arguments: &str) -> String {
 }
 
 #[test]
-fn web_command_requires_opt_in_for_the_reserved_logical_processor() {
+fn cli_command_requires_opt_in_for_the_reserved_logical_processor() {
     let hardware = clearra_pc_graph::request::WorkerPolicy::hardware_worker_limit();
     if hardware <= 1 {
         return;
     }
     let command = format!("clearra pc --lines 2 --workers {hardware}");
     assert_eq!(
-        WebCommandParser::parse(&command)
+        CliCommandParser::parse(&command)
             .expect_err("reserved processor requires opt-in")
             .code(),
-        WebCommandErrorCode::InvalidValue
+        CliCommandErrorCode::InvalidValue
     );
-    WebCommandParser::parse(&format!("{command} --use-all-cpu-threads"))
+    CliCommandParser::parse(&format!("{command} --use-all-cpu-threads"))
         .expect("explicit all-CPU command");
 }
 
 #[test]
 fn wasm_runtime_does_not_use_native_path_semantics() {
-    let error = WebCommandParser::parse("clearra pc --input C:\\temp\\field.txt")
+    let error = CliCommandParser::parse("clearra pc --input C:\\temp\\field.txt")
         .expect_err("native path is rejected");
 
-    assert_eq!(error.code(), WebCommandErrorCode::NativePathSemantics);
+    assert_eq!(error.code(), CliCommandErrorCode::NativePathSemantics);
 }
 
 #[test]
 fn wasm_runtime_does_not_spawn_process() {
-    let error = WebCommandParser::parse("clearra pc --lines 2 | clearra verify")
+    let error = CliCommandParser::parse("clearra pc --lines 2 | clearra verify")
         .expect_err("process syntax is rejected");
 
-    assert_eq!(error.code(), WebCommandErrorCode::ProcessSemantics);
+    assert_eq!(error.code(), CliCommandErrorCode::ProcessSemantics);
 }
 
 #[test]
@@ -3154,12 +3159,12 @@ fn virtual_file_handle_rejects_native_paths() {
     let error = WebVirtualFileHandle::new("bad", "C:\\secret\\field.json", "text/plain", 8)
         .expect_err("native paths forbidden");
 
-    assert_eq!(error.code(), WebCommandErrorCode::NativePathSemantics);
+    assert_eq!(error.code(), CliCommandErrorCode::NativePathSemantics);
 }
 
 #[test]
 fn damage_command_compiles_to_typed_forward_search() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra damage --board-mask 0x0 --height 4 --queue TI --no-hold --rule srs-plus --spin-profile t-spins --initial-b2b 2",
     )
     .expect("damage command")
@@ -3185,7 +3190,7 @@ fn damage_command_compiles_to_typed_forward_search() {
 
 #[test]
 fn ren_command_compiles_to_its_isolated_typed_forward_search() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra ren --board-mask 0x3f --height 4 --queue TI --no-hold --rule srs-plus",
     )
     .expect("REN command")
@@ -3209,17 +3214,17 @@ fn ren_command_compiles_to_its_isolated_typed_forward_search() {
 #[test]
 fn ren_command_enforces_the_fixed_queue_and_twenty_two_piece_boundary() {
     let maximum_queue = "I".repeat(MAX_REN_QUEUE_PIECES);
-    WebCommandParser::parse(&format!(
+    CliCommandParser::parse(&format!(
         "clearra ren --board-mask 0 --height 4 --queue {maximum_queue}"
     ))
     .expect("22-piece REN queue");
 
     let overlong_queue = "I".repeat(MAX_REN_QUEUE_PIECES + 1);
-    let overlong = WebCommandParser::parse(&format!(
+    let overlong = CliCommandParser::parse(&format!(
         "clearra ren --board-mask 0 --height 4 --queue {overlong_queue}"
     ))
     .expect_err("23-piece REN queue");
-    assert_eq!(overlong.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(overlong.code(), CliCommandErrorCode::InvalidValue);
 
     for unsupported in [
         "--patterns [TI]",
@@ -3229,17 +3234,17 @@ fn ren_command_enforces_the_fixed_queue_and_twenty_two_piece_boundary() {
         "--initial-b2b 1",
         "--preserve-b2b",
     ] {
-        let error = WebCommandParser::parse(&format!(
+        let error = CliCommandParser::parse(&format!(
             "clearra ren --board-mask 0 --height 4 --queue TI {unsupported}"
         ))
         .expect_err("REN must reject damage and spin semantics");
-        assert_eq!(error.code(), WebCommandErrorCode::UnsupportedCommand);
+        assert_eq!(error.code(), CliCommandErrorCode::UnsupportedCommand);
     }
 }
 
 #[test]
 fn damage_command_preserves_minimum_damage_enumeration_policy() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra damage --board-mask 0x0 --height 4 --queue TI --minimum-damage 6",
     )
     .expect("damage threshold command")
@@ -3254,7 +3259,7 @@ fn damage_command_preserves_minimum_damage_enumeration_policy() {
 
 #[test]
 fn damage_command_default_spin_profile_matches_the_gui_contract() {
-    let request = WebCommandParser::parse("clearra damage --board-mask 0 --queue T")
+    let request = CliCommandParser::parse("clearra damage --board-mask 0 --queue T")
         .expect("default damage command")
         .to_app_request()
         .expect("default damage AppRequest");
@@ -3269,7 +3274,7 @@ fn damage_command_default_spin_profile_matches_the_gui_contract() {
 #[test]
 fn damage_command_accepts_the_canonical_empty_board_mask_at_height_eight() {
     let mask = "0".repeat(60);
-    let request = WebCommandParser::parse(&format!("damage --board-mask-v1 {mask} --queue I"))
+    let request = CliCommandParser::parse(&format!("damage --board-mask-v1 {mask} --queue I"))
         .expect("canonical empty damage board");
     let query = request.forward_search_query().expect("forward query");
 
@@ -3280,7 +3285,7 @@ fn damage_command_accepts_the_canonical_empty_board_mask_at_height_eight() {
 #[test]
 fn damage_command_preserves_the_top_bit_of_the_twenty_fourth_row() {
     let mask = format!("8{}", "0".repeat(59));
-    let request = WebCommandParser::parse(&format!("damage --board-mask-v1 {mask} --queue I"))
+    let request = CliCommandParser::parse(&format!("damage --board-mask-v1 {mask} --queue I"))
         .expect("canonical 24-row damage board");
     let query = request.forward_search_query().expect("forward query");
 
@@ -3291,9 +3296,9 @@ fn damage_command_preserves_the_top_bit_of_the_twenty_fourth_row() {
 #[test]
 fn damage_command_rejects_noncanonical_and_conflicting_board_masks() {
     for mask in ["0".repeat(59), format!("{}A", "0".repeat(59))] {
-        let error = WebCommandParser::parse(&format!("damage --board-mask-v1 {mask} --queue I"))
+        let error = CliCommandParser::parse(&format!("damage --board-mask-v1 {mask} --queue I"))
             .expect_err("noncanonical damage mask");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     }
 
     let canonical = "0".repeat(60);
@@ -3301,25 +3306,25 @@ fn damage_command_rejects_noncanonical_and_conflicting_board_masks() {
         format!("damage --board-mask 0x0 --board-mask-v1 {canonical} --queue I"),
         format!("damage --board-mask-v1 {canonical} --board-mask-v1 {canonical} --queue I"),
     ] {
-        let error = WebCommandParser::parse(&command).expect_err("conflicting damage masks");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        let error = CliCommandParser::parse(&command).expect_err("conflicting damage masks");
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     }
 }
 
 #[test]
 fn canonical_damage_mask_rejects_an_explicit_height_below_its_visible_rows() {
     let mask = format!("8{}", "0".repeat(59));
-    let error = WebCommandParser::parse(&format!(
+    let error = CliCommandParser::parse(&format!(
         "damage --board-mask-v1 {mask} --height 23 --queue I"
     ))
     .expect_err("height below canonical field");
 
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
 }
 
 #[test]
 fn spin_finder_command_preserves_profile_and_target_group() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra spin-finder --board-mask 0x0 --height 8 --queue J --hold --rule srs-x --spin-profile all-mini-plus --lines 2 --spin-category other",
     )
     .expect("spin command")
@@ -3344,7 +3349,7 @@ fn spin_finder_command_preserves_profile_and_target_group() {
 
 #[test]
 fn spin_finder_cli_accepts_patterns_beyond_the_gui_piece_limit() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra spin-finder --patterns P7P1 --spin-profile t-spins --lines any",
     )
     .expect("eight-piece pattern");
@@ -3354,7 +3359,7 @@ fn spin_finder_cli_accepts_patterns_beyond_the_gui_piece_limit() {
     assert_eq!(query.piece_source().sequence_len(), 8);
 
     let longer =
-        WebCommandParser::parse("clearra spin-finder --patterns IOTSZLJIO --spin-profile t-spins")
+        CliCommandParser::parse("clearra spin-finder --patterns IOTSZLJIO --spin-profile t-spins")
             .expect("CLI pattern length is not a product limit");
     assert_eq!(
         longer
@@ -3365,11 +3370,11 @@ fn spin_finder_cli_accepts_patterns_beyond_the_gui_piece_limit() {
         9
     );
 
-    let damage_pattern = WebCommandParser::parse("clearra damage --patterns [TI]")
+    let damage_pattern = CliCommandParser::parse("clearra damage --patterns [TI]")
         .expect_err("damage pattern must be rejected");
     assert_eq!(
         damage_pattern.code(),
-        WebCommandErrorCode::UnsupportedCommand
+        CliCommandErrorCode::UnsupportedCommand
     );
 }
 
@@ -3519,7 +3524,7 @@ fn assert_forward_contract_projection(
     expected_valid: bool,
 ) {
     let command = forward_contract_command(family, selections);
-    match WebCommandParser::parse_with_worker_limit(&command, 65) {
+    match CliCommandParser::parse_with_worker_limit(&command, 65) {
         Ok(parsed) if expected_valid => {
             let request = parsed
                 .to_app_request()
@@ -3554,7 +3559,7 @@ fn assert_forward_contract_projection(
             }
         }
         Err(error) if !expected_valid => {
-            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
         }
         Ok(_) => panic!("expected parser rejection: {command}"),
         Err(error) => panic!("unexpected parser rejection for '{command}': {error:?}"),
@@ -3567,7 +3572,7 @@ fn damage_fixture_exposed_options_reach_every_single_and_ordered_pair_cartesian_
         forward_contract_values("damage", "damage-mode"),
         ["maximum", "at-least"]
     );
-    let default = WebCommandParser::parse("clearra damage --board-mask 0 --queue T")
+    let default = CliCommandParser::parse("clearra damage --board-mask 0 --queue T")
         .expect("default maximum-damage command")
         .to_app_request()
         .expect("maximum-damage AppRequest");
@@ -3765,14 +3770,14 @@ fn forward_fixture_dependency_contradictions_are_invalid_in_both_orders() {
     }
 
     for (family, expected_code) in [
-        ("damage", WebCommandErrorCode::UnsupportedCommand),
-        ("spin-finder", WebCommandErrorCode::InvalidValue),
+        ("damage", CliCommandErrorCode::UnsupportedCommand),
+        ("spin-finder", CliCommandErrorCode::InvalidValue),
     ] {
         for command in [
             format!("clearra {family} --board-mask 0 --queue T --patterns P1"),
             format!("clearra {family} --board-mask 0 --patterns P1 --queue T"),
         ] {
-            let error = WebCommandParser::parse(&command).expect_err(&command);
+            let error = CliCommandParser::parse(&command).expect_err(&command);
             assert_eq!(error.code(), expected_code, "{command}");
         }
     }
@@ -3814,51 +3819,51 @@ fn forward_fixture_invalid_representatives_fail_at_the_authoritative_parser_boun
             let (command, expected_code) = match (family, option, value) {
                 ("damage", "source", "pattern") => (
                     "clearra damage --board-mask 0 --patterns P1".to_owned(),
-                    WebCommandErrorCode::UnsupportedCommand,
+                    CliCommandErrorCode::UnsupportedCommand,
                 ),
                 (_, "source", "both") => (
                     format!("clearra {family} --board-mask 0 --queue T --patterns P1"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 (_, "source", "empty") => (
                     format!("clearra {family} --board-mask 0 --queue Q"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 (_, "height", value) => (
                     format!("clearra {family} --board-mask 0 --queue T --height {value}"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 (_, "spin-profile", value) => (
                     format!("clearra {family} --board-mask 0 --queue T --spin-profile {value}"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 (_, "minimum-damage", value) => (
                     format!("clearra {family} --board-mask 0 --queue T --minimum-damage {value}"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 (_, "initial-combo", value) => (
                     format!("clearra {family} --board-mask 0 --queue T --initial-combo {value}"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 (_, "initial-b2b", value) => (
                     format!("clearra {family} --board-mask 0 --queue T --initial-b2b {value}"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 (_, "lines", value) => (
                     format!("clearra {family} --board-mask 0 --queue T --lines {value}"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 (_, "category", value) => (
                     format!("clearra {family} --board-mask 0 --queue T --spin-category {value}"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 (_, "workers", value) => (
                     format!("clearra {family} --board-mask 0 --queue T --workers {value}"),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                 ),
                 _ => panic!("unmapped invalid fixture representative {family}.{option}={value}"),
             };
-            let error = WebCommandParser::parse(&command).expect_err(&command);
+            let error = CliCommandParser::parse(&command).expect_err(&command);
             assert_eq!(error.code(), expected_code, "{family}.{option}={value}");
             cases += 1;
             if family == "damage" {
@@ -3889,8 +3894,8 @@ struct SearchContractSelection<'a> {
     value: &'a str,
 }
 
-fn project_contract_command(command: &str) -> Result<clearra_app::AppRequest, WebCommandError> {
-    WebCommandParser::parse_with_worker_limit(command, 65)?.to_app_request()
+fn project_contract_command(command: &str) -> Result<clearra_app::AppRequest, CliCommandError> {
+    CliCommandParser::parse_with_worker_limit(command, 65)?.to_app_request()
 }
 
 fn assert_order_independent_contract_projection(
@@ -3927,7 +3932,7 @@ fn assert_order_independent_contract_projection(
                 reverse.message(),
                 "{family}: error message"
             );
-            assert_eq!(forward.code(), WebCommandErrorCode::InvalidValue);
+            assert_eq!(forward.code(), CliCommandErrorCode::InvalidValue);
         }
         (forward, reverse) => panic!(
             "{family} option order changed acceptance: {forward_command} => {forward:?}; \
@@ -3937,13 +3942,22 @@ fn assert_order_independent_contract_projection(
 }
 
 fn pc_contract_command(selections: &[SearchContractSelection<'_>]) -> String {
-    let failed_queue = selections
-        .iter()
-        .any(|selection| selection.option == "score-mode" && selection.value == "failed-queue");
-    let mut tokens = vec![
-        "clearra".to_owned(),
-        if failed_queue { "failed-queue" } else { "pc" }.to_owned(),
-    ];
+    let score_product = matches!(
+        selection_value(selections, "score-mode"),
+        Some("score-only-summary" | "score-only-minimum-cover")
+    );
+    let mut tokens = match selection_value(selections, "score-mode") {
+        Some("failed-queue") => vec!["clearra".to_owned(), "failed-queue".to_owned()],
+        Some("score-only-summary") => {
+            vec!["clearra".to_owned(), "pc".to_owned(), "score".to_owned()]
+        }
+        Some("score-only-minimum-cover") => vec![
+            "clearra".to_owned(),
+            "pc".to_owned(),
+            "score-minimals".to_owned(),
+        ],
+        _ => vec!["clearra".to_owned(), "pc".to_owned()],
+    };
     let scenario_height = selection_value(selections, "lines")
         .filter(|lines| *lines == "1")
         .or_else(|| {
@@ -3976,16 +3990,33 @@ fn pc_contract_command(selections: &[SearchContractSelection<'_>]) -> String {
         .iter()
         .any(|selection| selection.option == "source")
     {
-        tokens.extend(["--queue".to_owned(), "IOTSZJLIOTSZJLIOTSZJL".to_owned()]);
+        tokens.extend([
+            "--queue".to_owned(),
+            if score_product {
+                "IOTSZJLIOTSZJLIO"
+            } else {
+                "IOTSZJLIOTSZJLIOTSZJL"
+            }
+            .to_owned(),
+        ]);
     }
     for selection in selections {
         match (selection.option, selection.value) {
             ("lines", value) => tokens.extend(["--lines".to_owned(), value.to_owned()]),
-            ("source", "fixed") => {
-                tokens.extend(["--queue".to_owned(), "IOTSZJLIOTSZJLIOTSZJL".to_owned()])
-            }
+            ("source", "fixed") => tokens.extend([
+                "--queue".to_owned(),
+                if score_product {
+                    "IOTSZJLIOTSZJLIO"
+                } else {
+                    "IOTSZJLIOTSZJLIOTSZJL"
+                }
+                .to_owned(),
+            ]),
             ("source", "pattern") => {
-                tokens.extend(["--patterns".to_owned(), "P7P7P7".to_owned()]);
+                tokens.extend([
+                    "--patterns".to_owned(),
+                    if score_product { "P7P7P2" } else { "P7P7P7" }.to_owned(),
+                ]);
             }
             ("source", "empty") => {}
             ("hold", "disabled") => tokens.push("--no-hold".to_owned()),
@@ -3996,13 +4027,10 @@ fn pc_contract_command(selections: &[SearchContractSelection<'_>]) -> String {
             ("queue-knowledge", value) => {
                 tokens.extend(["--queue-knowledge".to_owned(), value.to_owned()]);
             }
-            ("score-mode", "off" | "failed-queue") => {}
-            ("score-mode", "score") => tokens.push("--score".to_owned()),
-            ("score-mode", "minimum-cover") => {
-                tokens.extend(["--objective".to_owned(), "minimum-cover".to_owned()]);
-            }
-            ("score-mode", "summary") => tokens.push("--score".to_owned()),
-            ("score-mode", "tiling") => tokens.push("--tiling-only".to_owned()),
+            (
+                "score-mode",
+                "off" | "failed-queue" | "score-only-summary" | "score-only-minimum-cover",
+            ) => {}
             ("rule", value) => tokens.extend(["--rule".to_owned(), value.to_owned()]),
             ("spin-profile", value) => {
                 tokens.extend(["--spin-profile".to_owned(), value.to_owned()]);
@@ -4198,7 +4226,7 @@ fn setup_contract_command(selections: &[SearchContractSelection<'_>]) -> String 
             }
             ("qb", value) => tokens.extend(["--qb".to_owned(), value.to_owned()]),
             // The public full-queue spelling intentionally projects to the
-            // authoritative Web parser's equivalent oracle policy.
+            // authoritative CLI parser's equivalent oracle policy.
             ("queue-knowledge", "full-queue") => {
                 tokens.extend(["--queue-knowledge".to_owned(), "oracle".to_owned()]);
             }
@@ -4290,7 +4318,7 @@ fn assert_complete_contract_matrix(
                 (Ok(_), true) => {}
                 (Err(error), false) => assert_eq!(
                     error.code(),
-                    WebCommandErrorCode::InvalidValue,
+                    CliCommandErrorCode::InvalidValue,
                     "{family}.{option}={value}: {invocation}"
                 ),
                 (Ok(_), false) => panic!("{family} singleton should be rejected: {invocation}"),
@@ -4373,6 +4401,24 @@ fn pc_contract_case_is_valid(selections: &[SearchContractSelection<'_>]) -> bool
     let preserves_b2b = selection_enabled(selections, "preserve-b2b");
     let has_spin_profile = selection_value(selections, "spin-profile").is_some();
     let has_initial_b2b = selection_value(selections, "initial-b2b").is_some();
+
+    if matches!(mode, "score-only-summary" | "score-only-minimum-cover") {
+        if selection_enabled(selections, "preserve-b2b")
+            || selection_enabled(selections, "solution-probabilities")
+            || selection_value(selections, "backend").is_some()
+            || selection_value(selections, "workers").is_some()
+            || selection_value(selections, "tablebase").is_some()
+            || selection_value(selections, "dependency-dag").is_some()
+            || selection_value(selections, "gpu-device").is_some()
+            || matches!(
+                selection_value(selections, "fallback"),
+                Some("allow" | "deny")
+            )
+        {
+            return false;
+        }
+        return selection_value(selections, "queue-knowledge") != Some("visible-7");
+    }
 
     if mode == "tiling" {
         return selection_value(selections, "rule").is_none()
@@ -4611,7 +4657,7 @@ fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_pa
                 _ => panic!("unmapped invalid PC fixture value {option}={value}"),
             };
             let error = project_contract_command(&command).expect_err(&command);
-            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
             pc_cases += 1;
         }
     }
@@ -4652,7 +4698,7 @@ fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_pa
                 _ => panic!("unmapped invalid build fixture value {option}={value}"),
             };
             let error = project_contract_command(&command).expect_err(&command);
-            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
             build_cases += 1;
         }
     }
@@ -4696,7 +4742,7 @@ fn pc_build_and_spin_structure_invalid_fixture_values_reach_the_authoritative_pa
                 _ => unreachable!(),
             };
             let error = project_contract_command(&command).expect_err(&command);
-            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
             structure_cases += 1;
         }
     }
@@ -4740,7 +4786,7 @@ fn setup_invalid_fixture_values_reach_the_authoritative_parser() {
                 _ => unreachable!(),
             };
             let error = project_contract_command(&command).expect_err(&command);
-            assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
             cases += 1;
         }
     }
@@ -4749,7 +4795,7 @@ fn setup_invalid_fixture_values_reach_the_authoritative_parser() {
 
 #[test]
 fn spin_structure_compiles_to_an_independent_typed_command() {
-    let request = WebCommandParser::parse_with_worker_limit(
+    let request = CliCommandParser::parse_with_worker_limit(
         "clearra spin-structure --pieces iOtSz --height 7 --fill-bottom 0 --fill-top 5 --spin-profile t-spins --lines 1+ --rule srs --minimality subset-minimal --workers 8 --use-all-cpu-threads",
         8,
     )
@@ -4774,12 +4820,12 @@ fn spin_structure_compiles_to_an_independent_typed_command() {
 #[test]
 fn canonical_spin_structure_search_path_lowers_to_the_existing_typed_search_command() {
     let canonical =
-        WebCommandParser::parse("clearra spin-structure search --pieces IOT --height 7 --lines 1+")
+        CliCommandParser::parse("clearra spin-structure search --pieces IOT --height 7 --lines 1+")
             .expect("canonical structure search")
             .to_app_request()
             .expect("canonical AppRequest");
     let legacy =
-        WebCommandParser::parse("clearra spin-structure --pieces IOT --height 7 --lines 1+")
+        CliCommandParser::parse("clearra spin-structure --pieces IOT --height 7 --lines 1+")
             .expect("legacy structure search")
             .to_app_request()
             .expect("legacy AppRequest");
@@ -4794,7 +4840,7 @@ fn canonical_spin_structure_search_path_lowers_to_the_existing_typed_search_comm
 
 #[test]
 fn canonical_spin_structure_cover_and_guaranteed_lower_to_distinct_typed_modes() {
-    let cover = WebCommandParser::parse(
+    let cover = CliCommandParser::parse(
         "clearra spin-structure cover --pieces IOT --height 7 --lines 1+ --objective min-cover --max-patterns 42",
     )
     .expect("canonical structure cover")
@@ -4808,7 +4854,7 @@ fn canonical_spin_structure_cover_and_guaranteed_lower_to_distinct_typed_modes()
         SpinStructureProductMode::Cover { max_patterns: 42 }
     );
 
-    let guaranteed = WebCommandParser::parse(
+    let guaranteed = CliCommandParser::parse(
         "clearra spin-structure guaranteed --pieces IOT --height 7 --lines 1+ --final-piece T --max-patterns 43 --dependency-report",
     )
     .expect("canonical structure guaranteed")
@@ -4843,15 +4889,15 @@ fn spin_structure_product_routes_reject_cross_route_and_ungoverned_options() {
         "clearra spin-structure guaranteed --pieces IO --spin-profile t-spins --final-piece I",
         "clearra spin-structure guaranteed --pieces T --dependency-report --no-dependency-report",
     ] {
-        let error = WebCommandParser::parse(command).expect_err(command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(command).expect_err(command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 }
 
 #[test]
 fn spin_structure_accepts_all_six_profiles_without_using_forward_mode() {
     for mode in SpinStructureMode::ALL {
-        let parsed = WebCommandParser::parse(&format!(
+        let parsed = CliCommandParser::parse(&format!(
             "spin-structure --pieces TIO --spin-profile {}",
             mode.as_str()
         ))
@@ -4864,11 +4910,11 @@ fn spin_structure_accepts_all_six_profiles_without_using_forward_mode() {
     }
 
     for invalid in ["disabled", "t-spin-simple", "unknown"] {
-        let error = WebCommandParser::parse(&format!(
+        let error = CliCommandParser::parse(&format!(
             "spin-structure --pieces T --spin-profile {invalid}"
         ))
         .expect_err("invalid structure profile");
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     }
 }
 
@@ -4876,23 +4922,23 @@ fn spin_structure_accepts_all_six_profiles_without_using_forward_mode() {
 fn spin_structure_preserves_a_canonical_wide_board_and_rejects_conflicts() {
     let mask = format!("8{}", "0".repeat(59));
     let request =
-        WebCommandParser::parse(&format!("spin-structure --board-mask-v1 {mask} --pieces T"))
+        CliCommandParser::parse(&format!("spin-structure --board-mask-v1 {mask} --pieces T"))
             .expect("wide structure board");
     let query = request.spin_structure_query().expect("structure query");
     assert_eq!(query.height, 24);
     assert_eq!(query.initial_board.words(), [0, 0, 0, 1_u64 << 47]);
 
-    let error = WebCommandParser::parse(&format!(
+    let error = CliCommandParser::parse(&format!(
         "spin-structure --board-mask 0 --board-mask-v1 {} --pieces T",
         "0".repeat(60)
     ))
     .expect_err("conflicting board options");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
 }
 
 #[test]
 fn pc_allspin_exact_queue_lowers_to_typed_existential_b2b_without_scoring() {
-    let parsed = WebCommandParser::parse_with_worker_limit(
+    let parsed = CliCommandParser::parse_with_worker_limit(
         "clearra pc allspin-sol --lines 2 --queue IOTSZ --spin-profile all-spin-plus --no-hold --rule srs --workers 3",
         8,
     )
@@ -4929,7 +4975,7 @@ fn pc_allspin_exact_queue_lowers_to_typed_existential_b2b_without_scoring() {
 
 #[test]
 fn pc_allspin_pattern_chance_preserves_pattern_universe_projection() {
-    let parsed = WebCommandParser::parse(
+    let parsed = CliCommandParser::parse(
         "clearra pc allspin-pres-chance --lines 4 --patterns [TI]! --spin-profile all-mini-plus --max-patterns 5040",
     )
     .expect("PC All-Spin preservation chance");
@@ -4965,8 +5011,8 @@ fn pc_allspin_forms_require_their_distinct_input_and_explicit_profile() {
         "clearra pc allspin-pres-chance --patterns P7",
         "clearra pc allspin-pres-chance --spin-profile all-spin-plus",
     ] {
-        let error = WebCommandParser::parse(command).expect_err(command);
-        assert_eq!(error.code(), WebCommandErrorCode::MissingValue, "{command}");
+        let error = CliCommandParser::parse(command).expect_err(command);
+        assert_eq!(error.code(), CliCommandErrorCode::MissingValue, "{command}");
     }
 
     for command in [
@@ -4977,8 +5023,8 @@ fn pc_allspin_forms_require_their_distinct_input_and_explicit_profile() {
         "clearra pc allspin-pres-chance --queue IOTS --spin-profile all-spin-plus",
         "clearra pc allspin-sol --queue IOTS --spin-profile all-spins",
     ] {
-        let error = WebCommandParser::parse(command).expect_err(command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(command).expect_err(command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 }
 
@@ -4992,7 +5038,7 @@ fn pc_allspin_forms_accept_each_explicit_clearra_spin_profile() {
         "all-mini",
         "all-mini-plus",
     ] {
-        let parsed = WebCommandParser::parse(&format!(
+        let parsed = CliCommandParser::parse(&format!(
             "clearra pc allspin-sol --queue IOTS --spin-profile {profile}"
         ))
         .expect(profile);
@@ -5005,7 +5051,7 @@ fn pc_allspin_forms_accept_each_explicit_clearra_spin_profile() {
 
 #[test]
 fn pc_allspin_exact_and_pattern_forms_preserve_a_nonempty_initial_field() {
-    let exact = WebCommandParser::parse(
+    let exact = CliCommandParser::parse(
         "clearra pc allspin-sol --lines 2 --board-mask 1 --height 2 --pieces 5 --queue IOTSZ --spin-profile all-spin-plus --no-hold",
     )
     .expect("exact initial-field All-Spin")
@@ -5025,7 +5071,7 @@ fn pc_allspin_exact_and_pattern_forms_preserve_a_nonempty_initial_field() {
     assert!(!exact.query().allow_hold());
     assert_eq!(exact.query().completion_goal().as_str(), "clear-to-empty");
 
-    let chance = WebCommandParser::parse(
+    let chance = CliCommandParser::parse(
         "clearra pc allspin-pres-chance --board-mask 1 --height 1 --pieces 1 --patterns [TI]! --spin-profile all-mini-plus",
     )
     .expect("pattern initial-field All-Spin")
@@ -5046,7 +5092,7 @@ fn pc_allspin_exact_and_pattern_forms_preserve_a_nonempty_initial_field() {
 
 #[test]
 fn pc_allspin_parser_preserves_typed_product_identity_into_app_request() {
-    let exact = WebCommandParser::parse(
+    let exact = CliCommandParser::parse(
         "clearra pc allspin-sol --lines 2 --queue IOTSZ --spin-profile all-spin-plus",
     )
     .expect("exact All-Spin web request");
@@ -5060,7 +5106,7 @@ fn pc_allspin_parser_preserves_typed_product_identity_into_app_request() {
         Some(ProductCapabilityContract::PcAllSpinSolution)
     );
 
-    let chance = WebCommandParser::parse(
+    let chance = CliCommandParser::parse(
         "clearra pc allspin-pres-chance --lines 2 --patterns [TI]! --spin-profile all-mini-plus",
     )
     .expect("chance All-Spin web request");
@@ -5076,27 +5122,27 @@ fn pc_allspin_parser_preserves_typed_product_identity_into_app_request() {
 }
 
 #[test]
-fn web_typed_identity_mismatch_is_rejected_and_ordinary_pc_cannot_inherit_it() {
+fn cli_typed_identity_mismatch_is_rejected_and_ordinary_pc_cannot_inherit_it() {
     let profile = SpinProfileSelection::AllSpinPlus;
-    let mismatch = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+    let mismatch = CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
         .with_patterns("[TI]!")
         .with_objective(ObjectivePolicy::unique().with_back_to_back_preservation(profile))
         .with_pc_result_projection(PcResultProjection::AllSpinPreservationChance(profile))
         .with_product_capability_contract_for_test(ProductCapabilityContract::PcAllSpinSolution)
         .to_app_request()
         .expect_err("typed identity cannot bypass its projection validator");
-    assert_eq!(mismatch.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(mismatch.code(), CliCommandErrorCode::InvalidValue);
 
-    let standard_with_identity = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+    let standard_with_identity = CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
         .with_product_capability_contract_for_test(ProductCapabilityContract::PcAllSpinSolution)
         .to_app_request()
         .expect_err("standard projection cannot inherit a typed target identity");
     assert_eq!(
         standard_with_identity.code(),
-        WebCommandErrorCode::InvalidValue
+        CliCommandErrorCode::InvalidValue
     );
 
-    let ordinary = WebCommandParser::parse("clearra pc --lines 2 --backend cpu")
+    let ordinary = CliCommandParser::parse("clearra pc --lines 2 --backend cpu")
         .expect("ordinary PC web request");
     assert_eq!(ordinary.product_capability_contract(), None);
     assert_eq!(
@@ -5125,15 +5171,15 @@ fn pc_allspin_initial_field_is_atomic_unique_and_line_height_consistent() {
     ] {
         let command =
             format!("clearra pc allspin-sol --queue IOTSZ --spin-profile all-spin-plus {suffix}");
-        let error = WebCommandParser::parse(&command).expect_err(&command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 
-    let target = WebCommandParser::parse(
+    let target = CliCommandParser::parse(
         "clearra pc allspin-sol --queue IOTSZ --spin-profile all-spin-plus --target-mask 1",
     )
     .expect_err("target fields are not accepted");
-    assert_eq!(target.code(), WebCommandErrorCode::UnsupportedCommand);
+    assert_eq!(target.code(), CliCommandErrorCode::UnsupportedCommand);
 }
 
 #[test]
@@ -5160,8 +5206,8 @@ fn pc_allspin_forms_reject_target_file_score_multiplicity_and_observation_overri
     ] {
         let command =
             format!("clearra pc allspin-sol --queue IOTS --spin-profile all-spin-plus {forbidden}");
-        let error = WebCommandParser::parse(&command).expect_err(&command);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{command}");
+        let error = CliCommandParser::parse(&command).expect_err(&command);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
 }
 
@@ -5171,7 +5217,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
     let chance = PcResultProjection::AllSpinPreservationChance(profile);
     let b2b = || ObjectivePolicy::unique().with_back_to_back_preservation(profile);
     let exact_request = || {
-        WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+        CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
             .with_queue("IOTSZ")
             .with_objective(b2b())
             .with_pc_allspin_product_capability(
@@ -5180,7 +5226,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
             )
     };
     let chance_request = || {
-        WebCommandRequest::pc(4, RequestedSearchBackend::Cpu)
+        CliCommandRequest::pc(4, RequestedSearchBackend::Cpu)
             .with_patterns("[TI]!")
             .with_objective(b2b())
             .with_pc_allspin_product_capability(
@@ -5191,7 +5237,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
 
     assert!(exact_request().to_app_request().is_ok());
     assert!(chance_request().to_app_request().is_ok());
-    assert!(WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+    assert!(CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
         .with_patterns("P7")
         .with_objective(b2b())
         .with_pc_allspin_product_capability(
@@ -5200,14 +5246,14 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         )
         .to_app_request()
         .is_ok());
-    assert!(WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+    assert!(CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
         .with_queue("IOTSZ")
         .with_scenario(WebPcScenarioInput::new(1, 2, 5))
         .with_objective(b2b())
         .with_pc_allspin_product_capability(ProductCapabilityContract::PcAllSpinSolution, profile,)
         .to_app_request()
         .is_ok());
-    assert!(WebCommandRequest::pc(1, RequestedSearchBackend::Cpu)
+    assert!(CliCommandRequest::pc(1, RequestedSearchBackend::Cpu)
         .with_patterns("[TI]!")
         .with_scenario(WebPcScenarioInput::new(1, 1, 1).with_allow_hold(false))
         .with_hold_enabled(false)
@@ -5219,13 +5265,13 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         .to_app_request()
         .is_ok());
 
-    let missing_contract = WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+    let missing_contract = CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
         .with_patterns("[TI]!")
         .with_objective(b2b())
         .with_pc_result_projection(chance)
         .to_app_request()
         .expect_err("public projection-only builder cannot bypass typed identity");
-    assert_eq!(missing_contract.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(missing_contract.code(), CliCommandErrorCode::InvalidValue);
 
     let selected_identity = StandardBoard64ColoredTilingIdentity::from_piece_masks(0, [0; 7])
         .expect("empty colored identity");
@@ -5234,7 +5280,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
     let invalid = vec![
         (
             "exact-pattern-supply",
-            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+            CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
                 .with_patterns("[TI]!")
                 .with_objective(b2b())
                 .with_pc_allspin_product_capability(
@@ -5244,7 +5290,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         ),
         (
             "chance-fixed-supply",
-            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+            CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
                 .with_queue("IOTSZ")
                 .with_objective(b2b())
                 .with_pc_allspin_product_capability(
@@ -5258,7 +5304,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         ),
         (
             "missing-supply",
-            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+            CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
                 .with_objective(b2b())
                 .with_pc_allspin_product_capability(
                     ProductCapabilityContract::PcAllSpinSolution,
@@ -5267,7 +5313,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         ),
         (
             "opening-line-domain",
-            WebCommandRequest::pc(8, RequestedSearchBackend::Cpu)
+            CliCommandRequest::pc(8, RequestedSearchBackend::Cpu)
                 .with_queue("IOTSZ")
                 .with_objective(b2b())
                 .with_pc_allspin_product_capability(
@@ -5341,7 +5387,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         ),
         (
             "exact-scenario-lines-height-mismatch",
-            WebCommandRequest::pc(4, RequestedSearchBackend::Cpu)
+            CliCommandRequest::pc(4, RequestedSearchBackend::Cpu)
                 .with_queue("IOTSZ")
                 .with_scenario(WebPcScenarioInput::new(1, 2, 5))
                 .with_objective(b2b())
@@ -5352,7 +5398,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         ),
         (
             "chance-scenario-lines-height-mismatch",
-            WebCommandRequest::pc(4, RequestedSearchBackend::Cpu)
+            CliCommandRequest::pc(4, RequestedSearchBackend::Cpu)
                 .with_patterns("[TI]!")
                 .with_scenario(WebPcScenarioInput::new(1, 1, 1).with_allow_hold(false))
                 .with_hold_enabled(false)
@@ -5364,7 +5410,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         ),
         (
             "outer-no-hold-inner-hold",
-            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+            CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
                 .with_queue("IOTSZ")
                 .with_scenario(WebPcScenarioInput::new(1, 2, 5))
                 .with_hold_enabled(false)
@@ -5376,7 +5422,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         ),
         (
             "outer-hold-inner-no-hold",
-            WebCommandRequest::pc(2, RequestedSearchBackend::Cpu)
+            CliCommandRequest::pc(2, RequestedSearchBackend::Cpu)
                 .with_queue("IOTSZ")
                 .with_scenario(WebPcScenarioInput::new(1, 2, 5).with_allow_hold(false))
                 .with_objective(b2b())
@@ -5411,7 +5457,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
         ),
         (
             "non-pc-command",
-            WebCommandRequest::setup(vec![PieceKind::I], false).with_pc_allspin_product_capability(
+            CliCommandRequest::setup(vec![PieceKind::I], false).with_pc_allspin_product_capability(
                 ProductCapabilityContract::PcAllSpinSolution,
                 profile,
             ),
@@ -5419,7 +5465,7 @@ fn direct_typed_pc_allspin_requests_fail_closed_before_or_after_lowering() {
     ];
     for (name, request) in invalid {
         let error = request.to_app_request().expect_err(name);
-        assert_eq!(error.code(), WebCommandErrorCode::InvalidValue, "{name}");
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{name}");
     }
 }
 #[test]
@@ -5503,7 +5549,7 @@ fn parse_fixture_app_request(
     source: &str,
 ) -> clearra_app::app_request::AppRequest {
     // Discord text owns the representation-only `--format text` suffix.  The
-    // web parser owns the semantic argv which precedes it, so remove exactly
+    // CLI parser owns the semantic argv which precedes it, so remove exactly
     // that frozen terminal transport option before constructing AppRequest.
     let semantic_source = if surface == "discord-text" {
         source.strip_suffix(" --format text").unwrap_or_else(|| {
@@ -5516,9 +5562,19 @@ fn parse_fixture_app_request(
         );
         source
     };
-    WebCommandParser::parse(semantic_source)
+    // The redesigned Discord text route no longer injects these execution
+    // flags into closed PC product subcommands. The frozen compatibility
+    // fixture still records them, so project the same retired transport-era
+    // flags away as the Discord fixture test before asking the CLI authority
+    // to validate semantic argv.
+    let semantic_source = semantic_source
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "--no-tablebase" | "--no-build-dependency-dag"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    CliCommandParser::parse(&semantic_source)
         .unwrap_or_else(|error| {
-            panic!("{id}/{surface}/{variant}: WebCommandParser rejected fixture: {error}")
+            panic!("{id}/{surface}/{variant}: CliCommandParser rejected fixture: {error}")
         })
         .to_app_request()
         .unwrap_or_else(|error| {
@@ -5544,9 +5600,9 @@ fn fixture_string<'a>(block: &'a str, field: &str) -> &'a str {
 
 fn expected_alias_families(capability_id: &str) -> (&'static str, &'static str) {
     match capability_id {
-        "pc.path" | "pc.minimals" | "pc.score-minimals" | "pc.score-finder" => {
-            ("pc-clear-to-empty", "pc-scenario")
-        }
+        "pc.path" | "pc.score-finder" => ("pc-clear-to-empty", "pc-scenario"),
+        "pc.minimals" => ("pc-clear-to-empty.v2", "pc-minimum-cover.v2"),
+        "pc.score-minimals" => ("pc-clear-to-empty.v2", "pc-score-portfolio.v2"),
         "pc.allspin-sol" => ("pc-b2b-preservation.v1", "pc-b2b-preserving-witness.v1"),
         "pc.allspin-pres-chance" => (
             "pc-b2b-preservation.v1",
@@ -5574,7 +5630,7 @@ fn typed_document_utilities_require_explicit_format_and_lower_to_closed_app_comm
         )],
     ))
     .unwrap();
-    let parity = WebCommandParser::parse(&format!(
+    let parity = CliCommandParser::parse(&format!(
         "clearra utility parity --format ctk3 --document {document}"
     ))
     .unwrap();
@@ -5582,7 +5638,7 @@ fn typed_document_utilities_require_explicit_format_and_lower_to_closed_app_comm
         parity.to_app_request().unwrap().command(),
         clearra_app::AppCommand::UtilityParity(_)
     ));
-    let render = WebCommandParser::parse(&format!(
+    let render = CliCommandParser::parse(&format!(
         "clearra utility render --format ctk3 --document {document} --artifact-format png --page 1"
     ))
     .unwrap();
@@ -5590,7 +5646,7 @@ fn typed_document_utilities_require_explicit_format_and_lower_to_closed_app_comm
         render.to_app_request().unwrap().command(),
         clearra_app::AppCommand::UtilityRender(_)
     ));
-    let to_gray = WebCommandParser::parse(&format!(
+    let to_gray = CliCommandParser::parse(&format!(
         "clearra utility to-gray --format ctk3 --document {document}"
     ))
     .unwrap();
@@ -5599,7 +5655,7 @@ fn typed_document_utilities_require_explicit_format_and_lower_to_closed_app_comm
         to_gray.to_app_request().unwrap().command(),
         clearra_app::AppCommand::UtilityToGray(_)
     ));
-    let mirror = WebCommandParser::parse(&format!(
+    let mirror = CliCommandParser::parse(&format!(
         "clearra utility mirror --format ctk3 --document {document}"
     ))
     .unwrap();
@@ -5609,16 +5665,16 @@ fn typed_document_utilities_require_explicit_format_and_lower_to_closed_app_comm
         clearra_app::AppCommand::UtilityMirror(_)
     ));
     assert!(
-        WebCommandParser::parse(&format!("clearra utility parity --document {document}")).is_err()
+        CliCommandParser::parse(&format!("clearra utility parity --document {document}")).is_err()
     );
-    assert!(WebCommandParser::parse(&format!(
+    assert!(CliCommandParser::parse(&format!(
         "clearra utility parity --format ctk3 --document {document} --workers 2"
     ))
     .is_err());
     assert!(
-        WebCommandParser::parse(&format!("clearra utility to-gray --document {document}")).is_err()
+        CliCommandParser::parse(&format!("clearra utility to-gray --document {document}")).is_err()
     );
-    assert!(WebCommandParser::parse(&format!(
+    assert!(CliCommandParser::parse(&format!(
         "clearra utility mirror --format ctk3 --document {document} --queue T"
     ))
     .is_err());
@@ -5626,7 +5682,7 @@ fn typed_document_utilities_require_explicit_format_and_lower_to_closed_app_comm
 
 #[test]
 fn typed_document_text_comments_preserve_quoted_spaces_without_shell_semantics() {
-    let request = WebCommandParser::parse(
+    let request = CliCommandParser::parse(
         "clearra utility fumen text-to-fumen --format fumen --comment \"first comment\" --comment second",
     )
     .unwrap()
@@ -5636,10 +5692,89 @@ fn typed_document_text_comments_preserve_quoted_spaces_without_shell_semantics()
         panic!("expected utility fumen command")
     };
     assert_eq!(command.comments(), ["first comment", "second"]);
-    assert!(WebCommandParser::parse(
+    assert!(CliCommandParser::parse(
         "clearra utility fumen text-to-fumen --format fumen --comment \"unterminated",
     )
     .is_err());
 }
+
+#[test]
+fn quoted_cli_literals_preserve_process_markers_and_c0_whitespace_fieldwise() {
+    let comment = "literal | && ` $(x) > < ; &\tline\nquote\" slash\\ bell\u{0007}";
+    let encoded_comment = comment.replace('\\', "\\\\").replace('"', "\\\"");
+    let command_text = format!(
+        "clearra utility fumen text-to-fumen --format fumen --comment \"{encoded_comment}\""
+    );
+    let from_text = CliCommandParser::parse(&command_text).expect("quoted browser command text");
+    let arguments = [
+        "clearra",
+        "utility",
+        "fumen",
+        "text-to-fumen",
+        "--format",
+        "fumen",
+        "--comment",
+        comment,
+    ]
+    .map(str::to_owned);
+    let from_arguments =
+        CliCommandParser::parse_tokens(&arguments).expect("exact Desktop/native CLI argv");
+
+    assert_eq!(from_text, from_arguments);
+    let app_request = from_text.to_app_request().expect("typed fumen request");
+    let AppCommand::UtilityFumen(command) = app_request.command() else {
+        panic!("expected utility fumen command")
+    };
+    assert_eq!(command.comments(), [comment]);
+}
+
+#[test]
+fn unquoted_process_semantics_and_nul_fail_closed_before_cli_lowering() {
+    for marker in ["|", "&", ";", "`", "$(", ">", "<", "\r", "\n"] {
+        let command_text = format!(
+            "clearra utility fumen text-to-fumen --format fumen --comment left{marker}right"
+        );
+        let error = CliCommandParser::parse(&command_text)
+            .expect_err("unquoted shell/process syntax must fail closed");
+        assert_eq!(
+            error.code(),
+            CliCommandErrorCode::ProcessSemantics,
+            "{marker:?}"
+        );
+    }
+
+    CliCommandParser::parse(
+        "clearra pc tiling --lines 4 --board-mask 0xfc3f --height 4 --pieces 7 \
+         --patterns IOOOOOO;OOOOOOO --no-hold --backend cpu",
+    )
+    .expect("an in-token semicolon is the public queue-pattern alternative grammar");
+    let error = CliCommandParser::parse(
+        "clearra pc tiling --lines 4 --board-mask 0xfc3f --height 4 --pieces 7 \
+         --patterns IOOOOOO; clearra verify",
+    )
+    .expect_err("a separated semicolon remains process syntax");
+    assert_eq!(error.code(), CliCommandErrorCode::ProcessSemantics);
+
+    let error = CliCommandParser::parse(
+        "clearra utility fumen text-to-fumen --format fumen --comment \"left\0right\"",
+    )
+    .expect_err("NUL must not cross the command-text boundary");
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
+
+    let arguments = [
+        "clearra",
+        "utility",
+        "fumen",
+        "text-to-fumen",
+        "--format",
+        "fumen",
+        "--comment",
+        "left\0right",
+    ]
+    .map(str::to_owned);
+    let error = CliCommandParser::parse_tokens(&arguments)
+        .expect_err("NUL must not cross the exact-argv boundary");
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
+}
 // SRP rationale: this module has one behavior-level change reason: verifying the complete public
-// web command grammar reaches the intended typed Clearra request contracts.
+// CLI command grammar reaches the intended typed Clearra request contracts.

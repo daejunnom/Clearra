@@ -7,6 +7,7 @@ import test from "node:test";
 import { canonicalSha256, sealCanonicalReport } from "./canonical-release-evidence.mjs";
 import {
   expectedCaptureArtifactName,
+  PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID,
   validateRollbackCaptureReport,
 } from "./pages-rollback-authority.mjs";
 import {
@@ -358,7 +359,7 @@ test("sealed v0.7.4 fixture is bound end-to-end across capture package and deplo
     captureRunAttempt,
   });
   const capture = sealCanonicalReport({
-    schema_id: "clearra.pages.rollback-capture-authority.v2",
+    schema_id: PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID,
     repository: "daejunnom/Clearra",
     snapshot_source_commit: LEGACY_PAGES_SNAPSHOT_SHA,
     authority_source_commit: AUTHORITY,
@@ -391,6 +392,7 @@ test("sealed v0.7.4 fixture is bound end-to-end across capture package and deplo
       rebuilt_payloads: LEGACY_PAGES_PAYLOADS.map((payload) => ({ ...payload })),
       rebuilt_payload_set_sha256: canonicalSha256(LEGACY_PAGES_PAYLOADS),
     },
+    canonical_snapshot: null,
     status: "captured",
   });
   assert.equal(

@@ -13,7 +13,7 @@ const bundle = await build({
     contents: `
       export { createPlayerEngine } from './src/lib/workspace/player/playerEngine.ts';
       export { buildPlayerPcQueuePattern, preparePlayerPcFinder, preparePlayerSetupFinder } from './src/lib/workspace/player/playerFinderModel.ts';
-      export { buildWorkspaceCommand, workspaceRequestForDesktop } from './src/lib/workspace/solverWorkspaceModel.ts';
+      export { buildWorkspaceCommand, buildWorkspaceCommandArguments, workspaceRequestForDesktop } from './src/lib/workspace/solverWorkspaceModel.ts';
     `,
     loader: 'ts',
     resolveDir: fileURLToPath(new URL('..', import.meta.url))
@@ -25,6 +25,7 @@ const contract = await import(
 );
 const {
   buildWorkspaceCommand,
+  buildWorkspaceCommandArguments,
   buildPlayerPcQueuePattern,
   createPlayerEngine,
   preparePlayerPcFinder,
@@ -49,7 +50,12 @@ test('finder state exposes a full six-row PC source without widening the render 
   assert.equal(prepared.targetLines, 4);
   assert.match(prepared.request.queue, /^.{7}P4$/);
   assert.equal(prepared.request.holdPiece, 'empty');
-  assert.match(buildWorkspaceCommand(prepared.request), /--hold empty .*--patterns/);
+  assert.doesNotMatch(buildWorkspaceCommand(prepared.request), /--hold/u);
+  assert.match(buildWorkspaceCommand(prepared.request), /--patterns/u);
+  const desktop = workspaceRequestForDesktop(prepared.request, 'en');
+  assert.equal(desktop.command, 'cli');
+  assert.equal(desktop.arguments[1], 'pc');
+  assert.deepEqual(desktop.arguments, buildWorkspaceCommandArguments(prepared.request));
 });
 
 test('queue-unknown and queue-based modes compile the exact conditioned example', () => {
@@ -130,9 +136,10 @@ test('queue visibility changes decisions only and never rewrites the generated p
   assert.equal(unknown.request.queueKnowledge, 'oracle');
   assert.match(buildWorkspaceCommand(visible.request), /--patterns .*--queue-knowledge visible-7/);
   const desktop = workspaceRequestForDesktop(visible.request, 'en');
-  assert.equal(desktop.patterns, visible.request.queue);
-  assert.equal(desktop.queue_knowledge, 'visible-7');
-  assert.equal(desktop.pattern_budget, visible.request.maxPatterns);
+  assert.deepEqual(desktop.arguments, buildWorkspaceCommandArguments(visible.request));
+  assert.equal(desktop.arguments.includes('--patterns'), true);
+  assert.equal(desktop.arguments.includes('--queue-knowledge'), true);
+  assert.equal(desktop.arguments.includes('visible-7'), true);
 });
 
 test('occupied Player hold is passed separately after its turn cooldown ends', () => {
@@ -147,7 +154,10 @@ test('occupied Player hold is passed separately after its turn cooldown ends', (
   assert.equal(prepared.ok, true);
   assert.equal(prepared.request.holdPiece, heldPiece);
   assert.match(buildWorkspaceCommand(prepared.request), new RegExp(`--hold ${heldPiece}`));
-  assert.equal(workspaceRequestForDesktop(prepared.request, 'en').hold_piece, heldPiece);
+  assert.deepEqual(
+    workspaceRequestForDesktop(prepared.request, 'en').arguments,
+    buildWorkspaceCommandArguments(prepared.request)
+  );
   assert.equal(engine.getFinderState().holdBagId !== null, true);
 });
 

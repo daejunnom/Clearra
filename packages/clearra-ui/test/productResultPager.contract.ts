@@ -30,6 +30,20 @@ assert.equal(validateProductResultPayload(oversized), 'invalid coverage portfoli
 const leadingZero = coveragePayload(1);
 leadingZero.content.payload.members[0]!.candidate_id = '01';
 assert.equal(validateProductResultPayload(leadingZero), 'invalid coverage portfolio payload');
+const completeEmpty = emptyCoveragePayload();
+assert.equal(
+  validateProductResultPayload(completeEmpty),
+  null,
+  'a complete zero-cardinality portfolio is a successful empty result'
+);
+const incompleteEmpty = structuredClone(completeEmpty);
+incompleteEmpty.content.payload.enumeration_complete = false;
+incompleteEmpty.content.payload.total_alternative_count = null;
+assert.equal(
+  validateProductResultPayload(incompleteEmpty),
+  'invalid coverage portfolio payload',
+  'an empty page cannot claim success without sealed enumeration authority'
+);
 assert.equal(isCanonicalDecimal('184467440737095516160'), true);
 assert.equal(isCanonicalDecimal('00'), false);
 assert.equal(isCanonicalProbability('0.14285714285714285'), true);
@@ -202,6 +216,72 @@ const score: ClearraProductResultPayload = {
   contract: 'pc.score',
   result_kind: 'pc-score-summary.v2',
   content: {
+    payload_kind: 'pc-score-field-summary',
+    payload: {
+      field_contract: 'pc-score-solution-field-average.v1',
+      ordering: 'normalized-solution-field-order',
+      solution_field_average_basis: 'whole-materialized-pattern-universe-failed-pc-zero',
+      score_evaluation_basis: 'all-traces',
+      score_evaluation_scope: 'full',
+      overall_score_basis: 'all-materialized-patterns-failed-pc-zero',
+      piece_source_id: '101',
+      pattern_universe_id: '202',
+      pattern_weight_model_id: '303',
+      materialized_pattern_count: '2',
+      solution_field_count: '2',
+      scored_pattern_count: '2',
+      failed_pc_pattern_count: '0',
+      covered_probability: '1',
+      overall_score: '75',
+      score_covered_pattern_conditional_average_score: '75',
+      complete: true,
+      fields: [
+        {
+          normalized_field_key:
+            'ctk1|initial=0000000000000000|placements=I:000000000000000f',
+          average_score: '50',
+          covered_pattern_count: '1',
+          pattern_count: '2',
+          score_complete: true
+        },
+        {
+          normalized_field_key:
+            'ctk1|initial=0000000000000000|placements=O:0000000000000033',
+          average_score: '25',
+          covered_pattern_count: '1',
+          pattern_count: '2',
+          score_complete: true
+        }
+      ]
+    }
+  }
+};
+assert.equal(validateProductResultPayload(score), null);
+assert.deepEqual(
+  score.content.payload.fields.map((field) => [field.normalized_field_key, field.average_score]),
+  [
+    ['ctk1|initial=0000000000000000|placements=I:000000000000000f', '50'],
+    ['ctk1|initial=0000000000000000|placements=O:0000000000000033', '25']
+  ],
+  'ordinary score keeps every normalized field and its whole-universe average'
+);
+assert.ok(
+  Number(score.content.payload.overall_score) >
+    Math.max(...score.content.payload.fields.map((field) => Number(field.average_score))),
+  'the whole-result score is the per-pattern optimum across all fields, not one field average'
+);
+assert.match(productResultIdentity(score), /^pc\.score:pc-score-summary\.v2:202:303:2:75$/u);
+const forgedFieldUniverse = structuredClone(score);
+forgedFieldUniverse.content.payload.fields[1]!.pattern_count = '1';
+assert.equal(
+  validateProductResultPayload(forgedFieldUniverse),
+  'invalid PC score field summary payload'
+);
+
+const scoreFinder: ClearraProductResultPayload = {
+  contract: 'pc.score-finder',
+  result_kind: 'pc-fixed-score-witness.v2',
+  content: {
     payload_kind: 'score-pattern-winner-family',
     payload: {
       winner_contract: 'pc-score-pattern-winner.v1',
@@ -229,16 +309,6 @@ const score: ClearraProductResultPayload = {
     }
   }
 };
-assert.equal(validateProductResultPayload(score), null);
-assert.deepEqual(
-  score.content.payload.winners.map((winner) => [winner.candidate_id, winner.score]),
-  [['1', '100'], ['2', '100']],
-  'different attack values cannot remove equal-score winners'
-);
-
-const scoreFinder = structuredClone(score);
-scoreFinder.contract = 'pc.score-finder';
-scoreFinder.result_kind = 'pc-fixed-score-witness.v2';
 assert.equal(validateProductResultPayload(scoreFinder), null);
 assert.deepEqual(
   scoreFinder.content.payload.winners.map((winner) => [
@@ -252,10 +322,10 @@ assert.deepEqual(
   ],
   'score-finder is a normal score-only family and does not use attack to remove winners'
 );
-const forgedScoreFinderPair = structuredClone(scoreFinder);
+const forgedScoreFinderPair = structuredClone(scoreFinder) as unknown as { result_kind: string };
 forgedScoreFinderPair.result_kind = 'pc-score-summary.v2';
 assert.equal(
-  validateProductResultPayload(forgedScoreFinderPair),
+  validateProductResultPayload(forgedScoreFinderPair as unknown as ClearraProductResultPayload),
   'invalid score winner family payload'
 );
 
@@ -281,57 +351,12 @@ assert.equal(
   'invalid pc.path replay family payload'
 );
 
-const wrongOrdering = structuredClone(score);
+const wrongOrdering = structuredClone(scoreFinder);
 if (wrongOrdering.content.payload_kind === 'score-pattern-winner-family') {
   (wrongOrdering.content.payload as { ordering: string }).ordering =
     'score-descending-then-candidate-id-ascending';
 }
 assert.equal(validateProductResultPayload(wrongOrdering), 'invalid score winner family payload');
-
-const saveGroups = saveGroupsPayload(PRODUCT_MEMBER_PAGE_SIZE + 1);
-assert.equal(validateProductResultPayload(saveGroups), null);
-assert.equal(saveGroups.content.payload.groups.slice(0, PRODUCT_MEMBER_PAGE_SIZE).length, 100);
-assert.equal(saveGroups.content.payload.groups.slice(PRODUCT_MEMBER_PAGE_SIZE).length, 1);
-assert.equal(
-  saveGroups.content.payload.groups[0]!.unconditional_probability ===
-    saveGroups.content.payload.groups[0]!.conditional_probability_given_pc,
-  false,
-  'whole-universe and conditional-on-PC probabilities remain distinct fields'
-);
-assert.match(productResultIdentity(saveGroups), /:101$/u);
-
-const forgedCanonicalWinner = structuredClone(saveGroups);
-forgedCanonicalWinner.content.payload.groups[0]!.canonical_candidate_id = '999';
-assert.equal(
-  validateProductResultPayload(forgedCanonicalWinner),
-  'invalid pc save groups payload'
-);
-
-const bestSave = bestSavePayload(PRODUCT_MEMBER_PAGE_SIZE + 1);
-assert.equal(validateProductResultPayload(bestSave), null);
-assert.equal(bestSave.content.payload.winners.slice(0, PRODUCT_MEMBER_PAGE_SIZE).length, 100);
-assert.equal(bestSave.content.payload.winners.slice(PRODUCT_MEMBER_PAGE_SIZE).length, 1);
-assert.deepEqual(
-  bestSave.content.payload.winners.map((winner) => winner.group.canonical_candidate_id),
-  Array.from({ length: 101 }, (_, index) => (index + 1).toString()),
-  'the GUI payload retains the complete canonical-ID-ordered tied family'
-);
-
-const forgedTieCursor = structuredClone(bestSave) as unknown as {
-  content: { payload: Record<string, unknown> };
-};
-forgedTieCursor.content.payload.tie_cursor = '2';
-assert.equal(
-  validateProductResultPayload(forgedTieCursor as unknown as ClearraProductResultPayload),
-  'invalid pc best-save payload'
-);
-
-const forgedWinnerProbability = structuredClone(bestSave);
-forgedWinnerProbability.content.payload.winners[0]!.exact_group_probability = '0.5';
-assert.equal(
-  validateProductResultPayload(forgedWinnerProbability),
-  'invalid pc best-save payload'
-);
 
 const parity: ClearraProductResultPayload = {
   contract: 'parity-report.v1',
@@ -556,6 +581,21 @@ function buildCoveragePortfolioPayload(): Extract<
       }
     }
   };
+}
+
+function emptyCoveragePayload(): Extract<
+  ClearraProductResultPayload,
+  { content: { payload_kind: 'coverage-portfolio' } }
+> {
+  const payload = coveragePayload(1);
+  payload.content.payload.optimal_cardinality = '0';
+  payload.content.payload.known_alternative_count = '1';
+  payload.content.payload.total_alternative_count = '1';
+  payload.content.payload.enumeration_complete = true;
+  payload.content.payload.member_page_number = '1';
+  payload.content.payload.total_member_pages = '1';
+  payload.content.payload.members = [];
+  return payload;
 }
 
 function buildSetupFamilyPayload(): Extract<
@@ -884,120 +924,6 @@ function pcPathFamilyPayload(): Extract<
         witnesses: [witness('1', '0', 'trace-a'), witness('2', '1', 'trace-b')]
       }
     }
-  };
-}
-
-function saveGroupsPayload(groupCount: number): Extract<
-  ClearraProductResultPayload,
-  { content: { payload_kind: 'pc-save-groups' } }
-> {
-  return {
-    contract: 'pc.saves',
-    result_kind: 'pc-save-groups.v2',
-    content: {
-      payload_kind: 'pc-save-groups',
-      payload: {
-        schema_id: 'clearra-save-v1',
-        page_size: '100',
-        group_count: groupCount.toString(),
-        metadata: saveMetadata('canonical-pc-saves', groupCount),
-        groups: Array.from({ length: groupCount }, (_, index) => saveGroup(index))
-      }
-    }
-  };
-}
-
-function bestSavePayload(winnerCount: number): Extract<
-  ClearraProductResultPayload,
-  { content: { payload_kind: 'pc-best-save' } }
-> {
-  return {
-    contract: 'pc.best-save',
-    result_kind: 'pc-best-save.v2',
-    content: {
-      payload_kind: 'pc-best-save',
-      payload: {
-        schema_id: 'clearra-save-v1',
-        probability_basis: 'whole-universe-unconditional',
-        ordering:
-          'weighted-total-descending-then-balanced-jl-descending-then-unconditional-probability-descending-then-canonical-candidate-id-ascending',
-        equality: 'weighted-total-balanced-jl-and-exact-unconditional-probability',
-        page_size: '100',
-        winner_count: winnerCount.toString(),
-        metadata: saveMetadata('canonical-pc-best-save', winnerCount),
-        winners: Array.from({ length: winnerCount }, (_, index) => ({
-          weighted_total: '7',
-          balanced_jl_count: '1',
-          exact_group_probability: '0.25',
-          group: saveGroup(index)
-        }))
-      }
-    }
-  };
-}
-
-function saveMetadata(origin: string, patternCount: number) {
-  return {
-    origin,
-    problem_preset: 'scenario-pc' as const,
-    problem_id: 'pc-save-test-problem',
-    piece_source_id: 'standard-7-bag',
-    pattern_universe_id: 'test-universe',
-    pattern_weight_model_id: 'uniform',
-    materialized_pattern_count: patternCount.toString(),
-    pc_success_pattern_count: patternCount.toString(),
-    pc_probability: '0.5',
-    completeness: {
-      source_universe_complete: true,
-      fixed_bag_boundary_proven: true,
-      execution_batch_complete: true,
-      pattern_weights_complete: true,
-      count_complete: true,
-      probability_complete: true,
-      complete: true
-    }
-  };
-}
-
-function saveGroup(index: number) {
-  const candidateId = (index + 1).toString();
-  return {
-    identity_contract: 'terminal-hold-plus-active-bag-remainder-multiset.v1' as const,
-    identity: {
-      canonical_id: `T${index}I0O0J0L0S0Z0`,
-      t: index,
-      i: 0,
-      o: 0,
-      j: 0,
-      l: 0,
-      s: 0,
-      z: 0,
-      total_count: index
-    },
-    successful_pattern_count: '1',
-    unconditional_probability: '0.25',
-    conditional_probability_given_pc: '0.5',
-    canonical_candidate_id: candidateId,
-    witnesses: [
-      {
-        pattern_index: index.toString(),
-        candidate_id: candidateId,
-        trace_identity: `trace-${candidateId}`,
-        source_cursor: '1',
-        terminal_hold: null,
-        active_bag_remainder: {
-          canonical_id: 'T0I0O0J0L0S0Z0',
-          t: 0,
-          i: 0,
-          o: 0,
-          j: 0,
-          l: 0,
-          s: 0,
-          z: 0,
-          total_count: 0
-        }
-      }
-    ]
   };
 }
 
@@ -1383,6 +1309,5 @@ console.log(JSON.stringify({
   member_page_boundary: PRODUCT_MEMBER_PAGE_SIZE,
   decimal_identity: 'string-exact',
   score_tie_equality: 'attack-independent',
-  pc_save_family_paging: 'finite-100',
-  pc_best_save_ties: 'ordinary-complete-list'
+  retired_product_surface: 'absent'
 }));

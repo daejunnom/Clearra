@@ -13,6 +13,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES,
+} from "./canonical-acceptance-evidence.mjs";
+import {
   canonicalJson,
   canonicalSha256,
   sealCanonicalReport,
@@ -302,15 +305,7 @@ function createAcceptanceEvidence(ctk3ManifestSha256) {
     run_attempt: RUN_ATTEMPT,
     workflow_path: ".github/workflows/release-cli.yml",
     status: "passed",
-    jobs: [
-      "metadata",
-      "ctk3",
-      "linux-cli",
-      "discord-bot",
-      "release-acceptance",
-      "windows-cli",
-      "windows-gui",
-    ].map((name, index) => ({
+    jobs: CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES.map((name, index) => ({
       name,
       job_id: String(9000 + index),
       status: "passed",

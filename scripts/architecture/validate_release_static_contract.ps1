@@ -283,7 +283,7 @@ function Invoke-ReleaseForbiddenApiValidation {
     }
 
     $wasmSurface = Get-ReleaseSourceSurface @(
-        'crates/clearra-wasm/src', 'crates/clearra-web-command/src',
+        'crates/clearra-wasm/src', 'crates/clearra-cli-command/src',
         'apps/clearra-web', 'packages/clearra-ui/src/lib/wasm'
     )
     foreach ($forbidden in @(
@@ -2594,12 +2594,9 @@ function Invoke-ReleaseIdentityGateValidation {
         'rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal',
         'rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown',
         'wasm-bindgen-cli --version 0.2.126 --locked',
-        'Prepare exact rollback manifest contract',
-        'PAGES_AUTHORITY_MODE: prepare-manifests',
-        'PAGES_CAPTURE_MODE: ${{ inputs.mode }}',
-        'STATIC_MANIFEST_PATH: snapshot-source/apps/clearra-web/static/wasm/clearra_wasm.manifest.json',
-        'BUILD_MANIFEST_PATH: snapshot-source/apps/clearra-web/build/wasm/clearra_wasm.manifest.json',
-        'Stamp exact rollback identity',
+        'Download exact accepted Pages build without rebuilding',
+        'Prove accepted build and current public bytes before capture',
+        'Reprove accepted build and public bytes immediately before sealing',
         'Stamp separate reconstructed v0.7.4 identity',
         'PAGES_LEGACY_CONTRACT_MODE: stamp',
         'node authority-source/scripts/release/pages-legacy-contract.mjs',
@@ -2631,7 +2628,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'run-id: ${{ inputs.snapshot_run_id }}',
         'Download sealed rollback capture report for package validation',
         'PAGES_ROLLBACK_CAPTURE_REPORT_PATH: rollback-capture-report-package/pages-rollback-capture-authority.json',
-        'PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND: legacy-v0.7.4',
+        'PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND: ${{ needs.restore-authority.outputs.capture_kind }}',
+        'capture_kind: ${{ steps.package-authority.outputs.capture_kind }}',
+        'canonical_identity_sha256: ${{ steps.package-authority.outputs.canonical_identity_sha256 }}',
+        'canonical_file_set_sha256: ${{ steps.package-authority.outputs.canonical_file_set_sha256 }}',
         'node authority-source/scripts/release/pages-rollback-package.mjs',
         'Upload exact rollback Pages artifact',
         'name: github-pages',
@@ -2727,8 +2727,8 @@ function Invoke-ReleaseIdentityGateValidation {
                 Add-ArchitectureError 'Pages bootstrap Rust producer must scope natural runner-path checks inside bootstrap before pinned toolchain setup'
             }
         }
-        $modernPrepareStart = $captureSection.IndexOf('- name: Prepare exact rollback manifest contract', [System.StringComparison]::Ordinal)
-        $modernStampStart = $captureSection.IndexOf('- name: Stamp exact rollback identity', [System.StringComparison]::Ordinal)
+        $modernPrepareStart = $captureSection.IndexOf('- name: Download exact accepted Pages build without rebuilding', [System.StringComparison]::Ordinal)
+        $modernStampStart = $captureSection.IndexOf('- name: Prove accepted build and current public bytes before capture', [System.StringComparison]::Ordinal)
         $legacyStampStart = $captureSection.IndexOf('- name: Stamp separate reconstructed v0.7.4 identity', [System.StringComparison]::Ordinal)
         $portableTreeStart = $captureSection.IndexOf('- name: Validate portable rollback tree', [System.StringComparison]::Ordinal)
         if ($modernPrepareStart -lt 0 -or
@@ -2743,7 +2743,7 @@ function Invoke-ReleaseIdentityGateValidation {
             if ($modernPrepareStep.IndexOf("if: `${{ inputs.mode == 'capture' }}", [System.StringComparison]::Ordinal) -lt 0 -or
                 $modernStampStep.IndexOf("if: `${{ inputs.mode == 'capture' }}", [System.StringComparison]::Ordinal) -lt 0 -or
                 $legacyStampStep.IndexOf("if: `${{ inputs.mode == 'bootstrap-capture' }}", [System.StringComparison]::Ordinal) -lt 0) {
-                Add-ArchitectureError 'Pages capture must keep modern manifest/identity stamping disjoint from legacy reconstruction'
+                Add-ArchitectureError 'Pages capture must keep accepted artifact verification disjoint from legacy reconstruction'
             }
             if ($legacyStampStep.IndexOf('snapshot-source/scripts/release', [System.StringComparison]::Ordinal) -ge 0) {
                 Add-ArchitectureError 'Pages legacy reconstruction must never invoke a modern helper from the v0.7.4 snapshot'
@@ -2765,15 +2765,21 @@ function Invoke-ReleaseIdentityGateValidation {
         'MINIMUM_RETENTION_MS',
         'forward and restore mutations require a fresh workflow dispatch, not a rerun',
         'clearra-pages-rollback-${snapshot}-authority-${authority}-run-${runId}-attempt-${attempt}',
-        'clearra.pages.rollback-capture-authority.v2',
+        'clearra.pages.rollback-capture-authority.v3',
         '"capture_kind"',
         '"legacy_snapshot"',
+        '"canonical_snapshot"',
         'const captureKind = input.captureMode === "bootstrap-capture"',
         'capture_kind: captureKind',
         'legacy_snapshot: legacySnapshot === null ? null : structuredClone(legacySnapshot)',
         'downloaded capture artifact must contain exactly one artifact.tar',
         'capture_report_file_sha256=${captureReportRecord.file_sha256}',
+        'capture_kind=${captureReportRecord.report.capture_kind}',
         'resolveCaptureReportArtifact',
+        'consumerAuthoritySha = authoritySha',
+        'capture authority must be current main or its strict ancestor',
+        'current Pages must equal main or be its ancestor',
+        'restore target must differ from the current Pages authority',
         'readRollbackCaptureReport',
         'capture run must contain exactly one sealed report artifact',
         'validateLivePagesIdentity(identity, manifest, currentPagesSha)',
@@ -2786,7 +2792,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'verifyCurrentPagesAgainstCapture',
         'validatedCaptureReport: captureReportRecord.report',
         'if (captureKind === "legacy-v0.7.4")',
-        'if (captureKind === "modern-v2")',
+        'if (captureKind === "canonical-v2")',
         'sealedReadback:',
         'preartifact_public_readback',
         '`/deployments/${sealedDeploymentId}`',
@@ -2795,7 +2801,8 @@ function Invoke-ReleaseIdentityGateValidation {
         'validateCompleteDeploymentStatuses',
         'second page must be exactly empty',
         'validatePagesMutationCaptureKind',
-        'Pages restore requires a sealed v0.7.4 capture report',
+        'new Set(["forward", "restore"]).has(mode)',
+        'Pages ${mode} capture report kind is unsupported',
         'validatePagesAuthorityPhase',
         'complete page with total_count equal to its array length',
         'validatePagesCaptureRequestInputs',
@@ -2902,11 +2909,11 @@ function Invoke-ReleaseIdentityGateValidation {
         'LEGACY_PAGES_PAYLOAD.manifest.path',
         'LEGACY_PAGES_PAYLOAD.bindings.path',
         'LEGACY_PAGES_PAYLOAD.wasm.path',
-        'captureReport.capture_kind !== "modern-v2"',
+        'captureReport.capture_kind !== "canonical-v2"',
         'Pages rollback capture report kind is unsupported',
         'clearra-build-identity.json',
         'wasm/clearra_wasm.manifest.json',
-        'validatePagesIdentity(identity, manifest, sha)'
+        'Pages tar regular file set differs from the accepted identity'
     )) {
         if ($pagesRollbackPackage.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Pages rollback package verifier is missing exact-package contract '$required'"
@@ -2968,7 +2975,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'regular capture verifies manifests without rewriting them and rejects missing or wrong identity',
         'legacy manifest handling is excluded from the modern preparation path',
         'authority phases are closed for capture and mutation modes',
-        'forward capture kinds are explicit and restore rejects modern capture before mutation',
+        'forward and restore reject old modern-v2 and admit canonical-v2',
         'current Pages routing never falls back between legacy bytes and modern identity',
         'Pages rollback workflow keeps bootstrap capture read-only and reuses the sealed capture path',
         'canonical acceptance query pins the main branch and a non-truncating exact SHA page',
@@ -2984,7 +2991,7 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
-        'restore package admits only a sealed legacy capture kind before deployment',
+        'restore package admits either exact sealed capture kind and rejects cross-kind substitution',
         'validates the exact tar hash and both complete identity documents',
         'rejects an incorrect tar authority before reading identity',
         'rejects traversal, links, duplicate identities, and forged identity',
@@ -2996,11 +3003,11 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     $manifestPreparationIndex = $pagesRollback.IndexOf(
-        'Prepare exact rollback manifest contract',
+        'Download exact accepted Pages build without rebuilding',
         [System.StringComparison]::Ordinal
     )
     $identityStampIndex = $pagesRollback.IndexOf(
-        'Stamp exact rollback identity',
+        'Prove accepted build and current public bytes before capture',
         [System.StringComparison]::Ordinal
     )
     $legacyIdentityStampIndex = $pagesRollback.IndexOf(
@@ -3040,7 +3047,7 @@ function Invoke-ReleaseIdentityGateValidation {
         $captureReadbackIndex -le $captureDownloadIndex -or
         $capturePackageValidationIndex -le $captureReadbackIndex -or
         $captureReportUploadIndex -le $capturePackageValidationIndex) {
-        Add-ArchitectureError 'Pages rollback capture must preserve modern or legacy manifests, stamp a separate identity, read back the exact Pages tar, seal it, validate its payloads, and upload the sealed report in order'
+        Add-ArchitectureError 'Pages rollback capture must verify the accepted build or reconstruct legacy, read back the exact Pages tar, seal it, validate all payloads, and upload the sealed report in order'
     } else {
         $captureDownloadStep = $pagesRollback.Substring($captureDownloadIndex, $captureReadbackIndex - $captureDownloadIndex)
         foreach ($required in @(
@@ -3175,7 +3182,7 @@ function Invoke-ReleaseIdentityGateValidation {
         Add-ArchitectureError 'Pages rollback must download the tar and sealed report, validate, re-upload, redownload the report, revalidate, deploy, seal, and upload the exact snapshot authority in order'
     }
     foreach ($required in @(
-        'clearra.pages.deployment-authority.v2',
+        'clearra.pages.deployment-authority.v3',
         'validateWorkflowRun',
         '/pages/deployments/${encodeURIComponent(deploymentId)}',
         'artifact_api_readback_sha256',
@@ -3194,10 +3201,13 @@ function Invoke-ReleaseIdentityGateValidation {
         'validateRollbackCaptureReport',
         'expectedCaptureReportArtifactName',
         'validateCaptureReportArtifact',
-        'rollbackCaptureReport.capture_kind !== "legacy-v0.7.4"',
+        'new Set(["legacy-v0.7.4", "canonical-v2"]).has(rollbackCaptureReport.capture_kind)',
+        'restored Pages package kind differs from the sealed capture report',
+        'rollback capture authority must be workflow main or its strict ancestor',
+        'live restored identity differs from the full accepted identity',
         'rollback capture run differs from the sealed capture report',
         'rollback report artifact name differs from the sealed capture authority',
-        'restored legacy Pages authority requires a public byte reader',
+        'restored Pages authority requires a public byte reader',
         'forward Pages authority requires a public byte reader',
         'MAX_FORWARD_PUBLIC_FILE_COUNT',
         'MAX_FORWARD_PUBLIC_TOTAL_BYTES',
@@ -3224,6 +3234,7 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($required in @(
         'seals forward artifact, deployment, identity, and every live payload byte readback',
         'restore authority derives accepted identity and queries the deploy action workflow SHA',
+        'canonical-v2 restore binds every live file to the accepted rollback package',
         'rejects artifact digest, run attempt, deployment status, and public identity drift',
         'forward live seal rejects missing, redirected, wrong-sized, and hash-drifted payloads',
         'forward live seal retries partial CDN convergence and only seals one complete generation',

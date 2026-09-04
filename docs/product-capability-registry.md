@@ -316,7 +316,7 @@ the completed v0.8 product decisions to executable evidence:
   Complete lazy enumeration of all optimal public portfolios is the separate
   accepted `REQ-V080-021` and does not reopen `REQ-V080-012`.
 
-`build.source-pieces` is implemented across the native Web command and desktop
+`build.source-pieces` is implemented across the native CLI command and desktop
 lowering, GUI request/control code, Discord named-option lowering, and the
 cross-surface option contract. Omission retains the native automatic supply
 window, while an explicit positive value is preserved fieldwise through every
@@ -439,13 +439,13 @@ the migration target, not as canonical typed `pc.score`, and is never compared
 as raw argv with TETR.IO-default `/pc score`.
 
 The Rust fixture test feeds each frozen canonical and alias argv for both
-surfaces through the authoritative `WebCommandParser`, converts both into typed
+surfaces through the authoritative `CliCommandParser`, converts both into typed
 `AppRequest`s, and compares the `AppCommand` family, query envelope, complete
 normalized command, and request policy fields. The text transport's exact
 terminal `--format text` option is asserted and removed before semantic parsing
 because output formatting is not an `AppCommand` field. This yields 15 logical
 cases times two surfaces, or 30 typed comparisons, and also fail-closes
-problem/result-family drift. Separate public Web tests prove that top-level
+problem/result-family drift. Separate public CLI-command tests prove that top-level
 `chance`/`percent` and `score` retain no Product claim while canonical
 `pc chance` and `pc score` do.
 The focused Rust proof compiles and passes on the current exact fixture bytes.
@@ -640,5 +640,5 @@ the authority for post-source production events.
 The fieldwise slash/text compatibility proof is reproducible with:
 
 ```powershell
-cargo test -p clearra-web-command legacy_alias_fixture_parses_30_surface_pairs_to_identical_public_app_requests
+cargo test -p clearra-cli-command legacy_alias_fixture_parses_30_surface_pairs_to_identical_public_app_requests
 ```

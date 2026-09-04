@@ -1,8 +1,9 @@
-import {
-  buildDesktopSpinStructureRequest,
-  type ClearraDesktopSpinStructureRequest
-} from '../host/clearraDesktopHost.ts';
+import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
 import { defaultWorkerCount } from './solverWorkspaceModel.ts';
+import {
+  cliCommandRequestForDesktop,
+  serializeCliCommandArguments
+} from './cliCommandModel.ts';
 
 export type SpinStructureMode = 'search' | 'cover' | 'guaranteed';
 export type SpinStructureProfile =
@@ -141,7 +142,7 @@ export function spinStructureValidationCodes(
   return [...new Set(errors)];
 }
 
-export function buildSpinStructureCommand(request: SpinStructureRequest): string {
+export function buildSpinStructureCommandArguments(request: SpinStructureRequest): string[] {
   const tokens = [
     'clearra',
     'spin-structure',
@@ -183,49 +184,18 @@ export function buildSpinStructureCommand(request: SpinStructureRequest): string
   } else {
     tokens.push('--workers', String(request.workers));
   }
-  return tokens.join(' ');
+  return tokens;
+}
+
+export function buildSpinStructureCommand(request: SpinStructureRequest): string {
+  return serializeCliCommandArguments(buildSpinStructureCommandArguments(request));
 }
 
 export function spinStructureRequestForDesktop(
   request: SpinStructureRequest,
   language: 'en' | 'ko'
-): ClearraDesktopSpinStructureRequest {
-  const common = {
-    language,
-    board_mask_v1: request.boardMaskV1.trim(),
-    visible_height: request.visibleHeight,
-    inventory: normalizedSpinInventory(request.inventory),
-    spin_profile: request.spinProfile,
-    lines: request.lines,
-    fill_bottom: request.fillBottom,
-    fill_top: request.fillTop,
-    rule: request.rule,
-    max_placements: request.maxPlacements,
-    minimality: request.minimality,
-    workers: request.workers,
-    use_all_logical_processors: request.useAllLogicalProcessors
-  } as const;
-  if (request.mode === 'cover') {
-    return buildDesktopSpinStructureRequest({
-      ...common,
-      capability_id: 'spin-structure.cover',
-      objective: 'min-cover',
-      max_patterns: request.maxPatterns
-    });
-  }
-  if (request.mode === 'guaranteed') {
-    return buildDesktopSpinStructureRequest({
-      ...common,
-      capability_id: 'spin-structure.guaranteed',
-      max_patterns: request.maxPatterns,
-      final_piece: request.finalPiece,
-      dependency_report: request.dependencyReport
-    });
-  }
-  return buildDesktopSpinStructureRequest({
-    ...common,
-    capability_id: 'spin-structure.search'
-  });
+): ClearraDesktopCliCommandRequest {
+  return cliCommandRequestForDesktop(buildSpinStructureCommandArguments(request), language);
 }
 
 export function normalizedSpinInventory(value: string): string {

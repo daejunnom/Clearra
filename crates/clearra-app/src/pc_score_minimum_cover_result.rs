@@ -11,7 +11,8 @@ use crate::{
     pc_score_postprocess::PcScoreDerivation,
     pc_score_summary_result::ValidatedPcScoreExecutionEvidence, CoveragePortfolioAlternativeSet,
     PcScoreIngressOrigin, PcScorePatternWinnerV1, PcScoreProblemPreset, PcScoreQuerySnapshot,
-    PcScoreSummaryV2Result, PortfolioAlternativeSetIdentity, PC_SCORE_MAX_PATTERNS,
+    PcScoreSummaryV2Result, PortfolioAlternativeSetIdentity, PC_SCORE_CANONICAL_SELECTION,
+    PC_SCORE_MAX_PATTERNS,
 };
 
 pub const PC_SCORE_PORTFOLIO_RESULT_CONTRACT: &str = "pc-score-portfolio.v2";
@@ -165,6 +166,8 @@ pub struct PcScorePortfolioV2Result {
     score_eligibility_sha256: String,
     selected_score_candidate_ids: Vec<u64>,
     selected_solution_keys: Vec<String>,
+    canonical_score_candidate_id: u64,
+    canonical_solution_identity: StandardBoard64TilingIdentity,
     portfolio_alternatives: Arc<CoveragePortfolioAlternativeSet>,
     completeness: PcScorePortfolioCompletenessEvidence,
 }
@@ -230,6 +233,23 @@ impl PcScorePortfolioV2Result {
 
     pub fn selected_solution_keys(&self) -> &[String] {
         &self.selected_solution_keys
+    }
+
+    /// App-owned representative of the canonical minimum portfolio for
+    /// constrained downstream consumers. Numeric candidate identity is the
+    /// only selector; score ties never read informational attack.
+    pub const fn canonical_score_candidate_id(&self) -> u64 {
+        self.canonical_score_candidate_id
+    }
+
+    pub const fn canonical_selection(&self) -> &'static str {
+        PC_SCORE_CANONICAL_SELECTION
+    }
+
+    pub fn canonical_solution_key(&self) -> NormalizedTilingSolutionKey {
+        NormalizedTilingSolutionKey::from_standard_board64_identity(
+            self.canonical_solution_identity,
+        )
     }
 
     pub fn portfolio_alternatives(&self) -> &CoveragePortfolioAlternativeSet {
@@ -542,6 +562,18 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
         .iter()
         .map(|index| eligible_candidates[*index].score_candidate_id)
         .collect::<Vec<_>>();
+    let canonical_candidate = selection
+        .row_indices()
+        .iter()
+        .copied()
+        .min_by_key(|index| eligible_candidates[*index].score_candidate_id)
+        .and_then(|index| eligible_candidates.get(index))
+        .ok_or(PcScorePortfolioValidationError::CoverageIncomplete)?;
+    let canonical_score_candidate_id = canonical_candidate.score_candidate_id;
+    let canonical_solution_identity = candidate_identities
+        .get(&canonical_score_candidate_id)
+        .copied()
+        .ok_or(PcScorePortfolioValidationError::CandidateIdentityMismatch)?;
 
     let eligible_candidate_map_sha256 = eligible_candidate_map_digest(&eligible_candidates);
     let score_eligibility_sha256 = score_eligibility_digest(
@@ -585,6 +617,8 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
         score_eligibility_sha256,
         selected_score_candidate_ids,
         selected_solution_keys,
+        canonical_score_candidate_id,
+        canonical_solution_identity,
         portfolio_alternatives,
         completeness: PcScorePortfolioCompletenessEvidence {
             source_universe_complete: true,

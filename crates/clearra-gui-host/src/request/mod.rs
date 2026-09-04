@@ -1,5 +1,6 @@
 mod backend_request_builder;
 mod cover_request_builder;
+#[cfg(test)]
 mod gui_to_app_request;
 mod output_request_builder;
 mod pc_request_builder;
@@ -9,6 +10,7 @@ mod setup_request_builder;
 
 pub use backend_request_builder::BackendRequestBuilder;
 pub use cover_request_builder::CoverRequestBuilder;
+#[cfg(test)]
 pub use gui_to_app_request::{GuiAppRequestBuild, GuiToAppRequest};
 pub use output_request_builder::{GuiOutputRequestBuild, OutputRequestBuilder};
 pub use pc_request_builder::PcRequestBuilder;

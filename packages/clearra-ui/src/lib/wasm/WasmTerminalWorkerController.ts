@@ -36,6 +36,13 @@ import {
 } from './wasmWorkerStore';
 
 const COOPERATIVE_CANCEL_GRACE_MS = 100;
+const PREPARATION_PROGRESS_STALL_TIMEOUT_MS = 120_000;
+const SEARCH_PROGRESS_STALL_TIMEOUT_MS = 120_000;
+
+export type WasmTerminalWorkerControllerOptions = {
+  preparationProgressStallTimeoutMs?: number;
+  searchProgressStallTimeoutMs?: number;
+};
 
 type RuntimePrewarmWorkerEvent = {
   type: 'runtime_prewarm';
@@ -56,6 +63,14 @@ export class WasmTerminalWorkerController {
   private prewarmDeferred = false;
   private cancelFallback: ReturnType<typeof setTimeout> | null = null;
   private cancellingJobId: number | null = null;
+  private progressWatchdog: ReturnType<typeof setTimeout> | null = null;
+  private progressWorker: Worker | null = null;
+  private progressJobId: number | null = null;
+  private progressFingerprint: string | null = null;
+  private progressPhaseKind: 'preparation' | 'search' | null = null;
+  private runningJobId: number | null = null;
+  private readonly preparationProgressStallTimeoutMs: number;
+  private readonly searchProgressStallTimeoutMs: number;
   private nextSolutionPageRequestId = 1;
   private nextProductPageRequestId = 1;
   private solutionPageRequests = new Map<
@@ -77,10 +92,19 @@ export class WasmTerminalWorkerController {
 
   constructor(
     private workerFactory: (() => Worker) | null,
-    hostCapabilitySnapshot: HostCapabilitySnapshot = sharedBrowserHostCapabilitySnapshot()
+    hostCapabilitySnapshot: HostCapabilitySnapshot = sharedBrowserHostCapabilitySnapshot(),
+    options: WasmTerminalWorkerControllerOptions = {}
   ) {
     this.hostCapabilitySnapshot = hostCapabilitySnapshot;
     this.workerAuthority = resolveWorkerAuthority(hostCapabilitySnapshot, 1);
+    this.preparationProgressStallTimeoutMs = positiveTimeout(
+      options.preparationProgressStallTimeoutMs,
+      PREPARATION_PROGRESS_STALL_TIMEOUT_MS
+    );
+    this.searchProgressStallTimeoutMs = positiveTimeout(
+      options.searchProgressStallTimeoutMs,
+      SEARCH_PROGRESS_STALL_TIMEOUT_MS
+    );
   }
 
   setWorkerFactory(workerFactory: (() => Worker) | null) {
@@ -137,6 +161,8 @@ export class WasmTerminalWorkerController {
     }
     this.rejectSolutionPages(new Error('a new search replaced the previous solution pages'));
     this.rejectProductPages(new Error('a new search replaced the previous product pages'));
+    this.clearProgressWatchdog();
+    this.runningJobId = null;
     try {
       postReleaseProductPages(worker);
     } catch {}
@@ -206,6 +232,7 @@ export class WasmTerminalWorkerController {
       return;
     }
     this.rejectProductPages(new Error('product page runtime was cancelled'));
+    this.clearProgressWatchdog();
     try {
       postReleaseProductPages(worker);
     } catch {}
@@ -447,6 +474,7 @@ export class WasmTerminalWorkerController {
           }
         }
         const terminal = isTerminalWorkerEvent(message.data);
+        this.observeBoundedProgress(worker, message.data);
         if (terminal) this.runInFlight = false;
         applyWasmWorkerEvent(message.data);
         if (
@@ -502,6 +530,87 @@ export class WasmTerminalWorkerController {
     this.releaseWorker(worker, 'worker-failure');
     this.emitFailure(code, message);
     this.flushDeferredPrewarm();
+  }
+
+  /**
+   * Arms when the foreground runtime starts, then follows its preparation and
+   * concrete serial/distributed execution progress. A preparation deadline is
+   * independent from the long-running search deadline, so module/catalog or
+   * worker initialization cannot leave the GUI loading forever. Only changed
+   * bounded-work evidence renews a deadline; periodic identical heartbeats
+   * cannot hide a synchronous WASM call that no longer returns to the host.
+   */
+  private observeBoundedProgress(worker: Worker, event: ClearraWasmWorkerEvent) {
+    if (isTerminalWorkerEvent(event)) {
+      this.clearProgressWatchdog();
+      this.runningJobId = null;
+      return;
+    }
+    if (!this.runInFlight || this.cancellingWorker === worker) return;
+    if (event.event === 'started') this.runningJobId = event.job_id;
+    if (event.event !== 'started' && event.event !== 'progress') return;
+    if (this.runningJobId !== event.job_id) return;
+    const telemetry = event.event === 'progress' ? event.progress.telemetry : undefined;
+    const phaseKind =
+      event.event === 'started' ||
+      telemetry?.phase === 'preparing' ||
+      telemetry?.phase === 'initializing'
+        ? 'preparation'
+        : 'search';
+    const explicitlyBounded =
+      event.event === 'started' ||
+      phaseKind === 'preparation' ||
+      telemetry?.execution_mode === 'serial' ||
+      telemetry?.execution_mode === 'distributed';
+    const ownsActiveRun =
+      this.progressWorker === worker && this.progressJobId === event.job_id;
+    if (!explicitlyBounded && !ownsActiveRun) return;
+
+    const fingerprint = event.event === 'started'
+      ? 'runtime-started'
+      : boundedProgressFingerprint(event);
+    if (
+      ownsActiveRun &&
+      phaseKind === this.progressPhaseKind &&
+      fingerprint === this.progressFingerprint
+    ) {
+      return;
+    }
+    this.clearProgressWatchdog();
+    this.progressWorker = worker;
+    this.progressJobId = event.job_id;
+    this.progressFingerprint = fingerprint;
+    this.progressPhaseKind = phaseKind;
+    const timeoutMs = phaseKind === 'preparation'
+      ? this.preparationProgressStallTimeoutMs
+      : this.searchProgressStallTimeoutMs;
+    this.progressWatchdog = setTimeout(() => {
+      if (
+        this.worker !== worker ||
+        this.progressWorker !== worker ||
+        this.progressJobId !== event.job_id ||
+        this.progressPhaseKind !== phaseKind ||
+        !this.runInFlight
+      ) {
+        return;
+      }
+      const jobId = event.job_id;
+      this.runInFlight = false;
+      this.releaseWorker(worker, 'worker-failure');
+      this.emitForcedTermination(
+        jobId,
+        'worker-failure',
+        phaseKind === 'preparation'
+          ? 'E_WASM_PREPARATION_PROGRESS_STALLED'
+          : 'E_WASM_SEARCH_PROGRESS_STALLED',
+        phaseKind === 'preparation'
+          ? `WASM preparation did not complete within ${timeoutMs} ms; the worker tree was force-terminated.`
+          : `The WASM search made no bounded progress for ${timeoutMs} ms; the worker tree was force-terminated.`
+      );
+      this.flushDeferredPrewarm();
+    }, timeoutMs);
+    const nodeTimer = this.progressWatchdog as unknown as { unref?: () => void };
+    nodeTimer.unref?.();
   }
 
   private emitFailure(code: string, message: string) {
@@ -562,6 +671,7 @@ export class WasmTerminalWorkerController {
     this.rejectProductPages(new Error('product page runtime was released'));
     if (this.worker !== worker) return;
     this.clearCancelFallback();
+    this.clearProgressWatchdog();
     if (this.prewarmingWorker === worker) this.prewarmingWorker = null;
     worker.onmessage = null;
     worker.onerror = null;
@@ -575,6 +685,7 @@ export class WasmTerminalWorkerController {
     this.rejectProductPages(new Error('product page runtime was disposed'));
     if (this.worker !== worker) return;
     this.clearCancelFallback();
+    this.clearProgressWatchdog();
     if (this.prewarmingWorker === worker) this.prewarmingWorker = null;
     worker.onmessage = null;
     worker.onerror = null;
@@ -638,6 +749,16 @@ export class WasmTerminalWorkerController {
     this.cancellingWorker = null;
     this.cancellingJobId = null;
   }
+
+  private clearProgressWatchdog() {
+    if (this.progressWatchdog !== null) clearTimeout(this.progressWatchdog);
+    this.progressWatchdog = null;
+    this.progressWorker = null;
+    this.progressJobId = null;
+    this.progressFingerprint = null;
+    this.progressPhaseKind = null;
+    if (!this.runInFlight) this.runningJobId = null;
+  }
 }
 
 function solutionPageAbortError(signal: AbortSignal | undefined): Error {
@@ -692,4 +813,40 @@ function isTablebaseWarmupWorkerEvent(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function positiveTimeout(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
+  return Math.max(1, Math.floor(value));
+}
+
+function boundedProgressFingerprint(
+  event: Extract<ClearraWasmWorkerEvent, { event: 'progress' }>
+): string {
+  const telemetry = event.progress.telemetry;
+  return JSON.stringify([
+    event.progress.done,
+    event.progress.total,
+    event.progress.label,
+    telemetry?.execution_mode ?? null,
+    telemetry?.phase ?? null,
+    telemetry?.producer_complete ?? null,
+    telemetry?.geometry_nodes ?? null,
+    telemetry?.candidates_emitted ?? null,
+    telemetry?.geometry_family_count ?? null,
+    telemetry?.candidates_verified ?? null,
+    telemetry?.producer_build_nodes ?? null,
+    telemetry?.producer_coverage_checks ?? null,
+    telemetry?.build_nodes ?? null,
+    telemetry?.coverage_checks ?? null,
+    telemetry?.ready_workers ?? null,
+    telemetry?.active_workers ?? null,
+    telemetry?.worker_count ?? null,
+    telemetry?.pass_index ?? null,
+    telemetry?.pass_count ?? null,
+    telemetry?.layer_index ?? null,
+    telemetry?.layer_count ?? null,
+    telemetry?.layer_done ?? null,
+    telemetry?.layer_total ?? null
+  ]);
 }

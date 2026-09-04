@@ -1,4 +1,4 @@
-// SRP rationale: this module has one change reason: lowering curated web commands into typed application requests.
+// SRP rationale: this module has one change reason: lowering canonical CLI commands into typed application requests.
 use clearra_app::{
     AppCommand, AppRequest, BuildProbabilityAppCommand, DamageAppCommand,
     FieldDocumentTransformAppCommand, FieldDocumentTransformKind, FumenAppCommand,
@@ -1483,7 +1483,7 @@ impl WebCommandRequest {
         ) {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::UnsupportedCommand,
-                format!("unsupported web command '{}'", self.command_kind),
+                format!("unsupported CLI command '{}'", self.command_kind),
             ));
         }
         let mut policy = PcExecutionPolicy::mvp_default()

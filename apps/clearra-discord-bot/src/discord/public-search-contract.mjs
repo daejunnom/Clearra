@@ -6,8 +6,10 @@ import {
 
 /**
  * Result projection is generated from typed product capabilities plus the
- * separately governed generic-compatibility routes. Route authority IDs keep
- * identical user-facing labels from cross-accepting engine result kinds.
+ * separately governed generic-compatibility routes. Discord owns ingress and
+ * bounded presentation; executable semantics lower through the CLI command
+ * authority. Route authority IDs keep identical user-facing labels from
+ * cross-accepting engine result kinds.
  */
 export const DISCORD_PUBLIC_SEARCH_CONTRACT = Object.freeze(
   resultRows(

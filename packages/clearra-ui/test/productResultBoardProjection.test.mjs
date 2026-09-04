@@ -60,7 +60,7 @@ test('path witnesses project their last replay placement to board cells', () => 
   assert.equal(preview.board?.cells.filter((cell) => cell === 'G').length, 6);
 });
 
-test('product result UI renders boards first and keeps internal keys in collapsed details', () => {
+test('product result UI renders existing-field boards before any internal key details', () => {
   const pager = source('../src/lib/workspace/ProductResultPager.svelte');
   const preview = source('../src/lib/workspace/SolutionBoardPreview.svelte');
   const gallery = source('../src/lib/workspace/SolutionGallery.svelte');
@@ -83,6 +83,50 @@ test('product result UI renders boards first and keeps internal keys in collapse
 
   assert.match(gallery, /<SolutionBoardPreview/u);
   assert.match(gallery, /solutionBoardPreviewFromKey\(key, lines\)/u);
+  assert.doesNotMatch(gallery, /rawKey=/u);
+  assert.match(gallery, /solutionAverageScores\[solution\.key\]/u);
   assert.match(resultWorkspace, /<ProductResultPager[\s\S]*?\{targetLines\}/u);
   assert.match(pcResult, /<ProductResultPager[\s\S]*?\{targetLines\}/u);
+});
+
+test('field average score keeps the v0.7.4 per-field and whole-score presentation', () => {
+  const pager = source('../src/lib/workspace/ProductResultPager.svelte');
+  const resultWorkspace = source('../src/lib/workspace/ResultWorkspace.svelte');
+  const pcResult = source('../src/lib/workspace/PcSolverResult.svelte');
+
+  assert.doesNotMatch(pager, /score-field-summary/u);
+  assert.doesNotMatch(pager, /Per-pattern field scores/u);
+  assert.doesNotMatch(pager, /field\.candidate_id/u);
+  assert.match(
+    resultWorkspace,
+    /pcScoreFieldSummary\.fields\.map\(\(field\) => \[field\.normalized_field_key, field\]\)/u
+  );
+  assert.match(
+    pcResult,
+    /pcScoreFieldSummary\.fields\.map\(\(field\) => \[field\.normalized_field_key, field\]\)/u
+  );
+  assert.match(resultWorkspace, /pcScoreFieldSummary\?\.overall_score/u);
+  assert.match(resultWorkspace, /label\('overallScore'\)/u);
+  assert.doesNotMatch(resultWorkspace, /\{#if !pcScoreFieldSummary\}/u);
+  assert.match(resultWorkspace, /<SolutionGallery[\s\S]*?solutionAverageScores=\{solutionAverageScoreByKey\}/u);
+  assert.match(pcResult, /pcScoreFieldSummary\?\.overall_score/u);
+  assert.match(pcResult, /label\('overallScore'\)/u);
+  assert.doesNotMatch(pcResult, /\{#if !pcScoreFieldSummary\}/u);
+  assert.match(pcResult, /<SolutionGallery[\s\S]*?solutionAverageScores=\{solutionAverageScoreByKey\}/u);
+});
+
+test('score-minimals pages ordinary solution boards without candidate IDs or ctk keys', () => {
+  const pager = source('../src/lib/workspace/ProductResultPager.svelte');
+  const start = pager.indexOf('{#if coveragePage.optimal_cardinality');
+  const end = pager.indexOf('<footer>', start);
+  assert.ok(start >= 0 && end > start, 'coverage member branch');
+  const members = pager.slice(start, end);
+
+  assert.match(members, /solutionBoardPreviewFromKey\(member\.normalized_solution_key, targetLines\)/u);
+  assert.match(members, /<SolutionBoardPreview/u);
+  assert.match(members, /memberOrdinal\(memberPageNumber, memberIndex\)/u);
+  assert.match(pager, /최고 점수 최소 해법 집합 전체/u);
+  assert.doesNotMatch(members, /rawKey=/u);
+  assert.doesNotMatch(members, /ID \{member\.candidate_id\}/u);
+  assert.doesNotMatch(members, /<code>/u);
 });

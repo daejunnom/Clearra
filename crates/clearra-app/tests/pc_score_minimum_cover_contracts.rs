@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
+use clearra_core_domain::solution::normalized_tiling_solution::{
+    NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
+};
 
 pub use clearra_app::{CoveragePortfolioAlternativeSet, PortfolioAlternativeSetIdentity};
 
 pub const PC_SCORE_MAX_PATTERNS: usize = 1_066_867_200;
+pub const PC_SCORE_CANONICAL_SELECTION: &str = "smallest-canonical-candidate-id";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PcScoreIngressOrigin {
@@ -415,7 +418,7 @@ fn authority_fixture(
 
 #[test]
 fn b_option_keeps_every_score_tie_and_enumerates_every_minimum_cover() {
-    let winners = two_by_two_winners([1, 900, 3, 700]);
+    let winners = two_by_two_winners([900, 1, 700, 3]);
     let mut reordered = winners.clone();
     reordered.reverse();
     let (summary, derivation) = authority_fixture(winners, reordered, 2);
@@ -434,6 +437,11 @@ fn b_option_keeps_every_score_tie_and_enumerates_every_minimum_cover() {
         [1, 2, 3, 4]
     );
     assert_eq!(result.selected_score_candidate_ids(), &[1, 3]);
+    assert_eq!(result.canonical_score_candidate_id(), 1);
+    assert_eq!(
+        result.canonical_solution_key().to_string(),
+        NormalizedTilingSolutionKey::from_standard_board64_identity(identity(1)).to_string()
+    );
     assert_eq!(
         result
             .portfolio_alternatives()

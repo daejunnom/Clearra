@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
-use clearra_core_executor::{CoreExecutionError, CoreExecutionResult};
+use clearra_core_executor::{
+    CoreExecutionError, CoreExecutionResult, WasmCpuTerminalResourceAuthority,
+    WasmTilingRootProducer,
+};
 use clearra_host_contract::{AppCommandKind, ResourceBudget};
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildSolutionProbabilityPolicy,
@@ -21,9 +24,13 @@ use crate::{
     build_solution_probability_result::build_probability_response_is_authorized,
     commands::core_execution_error_response,
     cooperative_execution::{
-        compile_search_command, response_from_search, CooperativeSearchResponseKind,
+        compile_search_command, response_from_search, CooperativePcScoreProduct,
+        CooperativeSearchResponseKind,
     },
+    pc_score_minimum_cover_result::ValidatedPcScorePortfolioExecutionEvidence,
+    pc_score_summary_result::ValidatedPcScoreExecutionEvidence,
     product_capability_contract::ValidatedProductCapabilityContract,
+    render::AppRenderModel,
 };
 
 pub enum DistributedSearchPreparation {
@@ -58,6 +65,27 @@ pub struct PreparedDistributedSearchCompletion {
     result: Result<CoreExecutionResult, CoreExecutionError>,
 }
 
+/// Retains the typed score request authority until the Core merger has been
+/// destroyed. The public App response is deliberately materialized only by
+/// [`PreparedDistributedPcScoreCompletion::complete`], after the caller has
+/// dropped the merger that guarded all score derivation allocations.
+pub struct PreparedDistributedPcScoreCompletion {
+    context: AppContext,
+    response_kind: CooperativeSearchResponseKind,
+    command_kind: AppCommandKind,
+    output_policy: AppOutputPolicy,
+    validation_report: DiagnosticReport,
+    product_capability_contract: Option<ValidatedProductCapabilityContract>,
+    result: Result<CoreExecutionResult, CoreExecutionError>,
+    evidence: Option<PreparedDistributedPcScoreEvidence>,
+    scenario: bool,
+}
+
+enum PreparedDistributedPcScoreEvidence {
+    Summary(ValidatedPcScoreExecutionEvidence),
+    Portfolio(ValidatedPcScorePortfolioExecutionEvidence),
+}
+
 enum CompletedDistributedResponse {
     Compatibility(AppResponse),
     Governed(GovernedAppResponse),
@@ -75,19 +103,6 @@ impl AppContext {
                 }
             };
         let command_kind = command.kind();
-        if product_capability_contract.is_some() {
-            return DistributedSearchPreparation::Ready(self.finalize_response(
-                AppResponse::failed(
-                    AppStatus::ValidationFailed,
-                    AppError::new(
-                        AppErrorCode::InvalidInput,
-                        "distributed product capability result binding is unavailable",
-                    ),
-                ),
-                command_kind,
-                &output_policy,
-            ));
-        }
         let validation_report = command.validate();
         if validation_report.has_errors() {
             let response = command
@@ -116,6 +131,24 @@ impl AppContext {
                 );
             }
         };
+        if product_capability_contract
+            .as_ref()
+            .is_some_and(|contract| {
+                !distributed_product_capability_matches_response_kind(contract, &response_kind)
+            })
+        {
+            return DistributedSearchPreparation::Ready(self.finalize_response(
+                AppResponse::failed(
+                    AppStatus::ValidationFailed,
+                    AppError::new(
+                        AppErrorCode::InvalidInput,
+                        "distributed product capability result binding is unavailable",
+                    ),
+                ),
+                command_kind,
+                &output_policy,
+            ));
+        }
         DistributedSearchPreparation::Search(PreparedDistributedSearch {
             context: self.clone(),
             problem,
@@ -129,9 +162,136 @@ impl AppContext {
     }
 }
 
+fn distributed_product_capability_matches_response_kind(
+    contract: &ValidatedProductCapabilityContract,
+    response_kind: &CooperativeSearchResponseKind,
+) -> bool {
+    response_kind.distributed_product_capability() == Some(contract.contract())
+}
+
 impl PreparedDistributedSearch {
     pub fn problem(&self) -> &SearchProblem {
         &self.problem
+    }
+
+    pub fn is_pc_score(&self) -> bool {
+        matches!(
+            &self.response_kind,
+            CooperativeSearchResponseKind::PcScore { .. }
+                | CooperativeSearchResponseKind::ScenarioScore { .. }
+        )
+    }
+
+    pub fn problem_arc(&self) -> Arc<SearchProblem> {
+        Arc::clone(&self.problem)
+    }
+
+    /// Returns the request-scoped terminal authority only for the typed PC
+    /// tiling family. The checked external envelope includes every App-owned
+    /// value retained beside the coordinator finalizer; Core then owns all
+    /// producer/result allocations below the returned parent authority.
+    pub fn pc_tiling_terminal_resource_authority(
+        &self,
+    ) -> Result<Option<(&WasmCpuTerminalResourceAuthority, u128)>, &'static str> {
+        let authority = match &self.response_kind {
+            CooperativeSearchResponseKind::PcTiling { authority, .. }
+            | CooperativeSearchResponseKind::ScenarioTiling { authority, .. } => authority,
+            _ => return Ok(None),
+        };
+        let producer_retained_bytes =
+            WasmTilingRootProducer::checked_shared_external_retained_upper_bound(&self.problem)
+                .ok_or("pc_tiling_distributed_producer_retained_projection_unavailable")?;
+        let output_retained_bytes = self
+            .output_policy
+            .checked_retained_capacity_bytes()
+            .ok_or("pc_tiling_distributed_output_retained_projection_unavailable")?;
+        let concurrent_retained_bytes = (core::mem::size_of::<Self>() as u128)
+            .checked_add(producer_retained_bytes)
+            .and_then(|bytes| bytes.checked_add(output_retained_bytes))
+            .and_then(|bytes| {
+                self.validation_report
+                    .checked_retained_capacity_bytes()
+                    .and_then(|validation| bytes.checked_add(validation))
+            })
+            .ok_or("pc_tiling_distributed_retained_projection_unavailable")?;
+        let checked_external_retained_upper_bound_bytes = authority
+            .checked_external_retained_upper_bound_bytes(concurrent_retained_bytes)
+            .map_err(|error| error.component())?;
+        let terminal_resource_authority = authority
+            .terminal_resource_authority()
+            .ok_or("pc_tiling_distributed_terminal_authority_missing")?;
+        Ok(Some((
+            terminal_resource_authority,
+            checked_external_retained_upper_bound_bytes,
+        )))
+    }
+
+    /// Returns the score authority shared by the distributed geometry producer
+    /// and terminal reducer. The product proof is checked here so an ordinary
+    /// score-shaped request cannot borrow the typed product's memory lease.
+    pub fn pc_score_terminal_resource_authority(
+        &self,
+    ) -> Result<Option<(&WasmCpuTerminalResourceAuthority, u128)>, &'static str> {
+        let (authority, product) = match &self.response_kind {
+            CooperativeSearchResponseKind::PcScore {
+                authority, product, ..
+            }
+            | CooperativeSearchResponseKind::ScenarioScore {
+                authority, product, ..
+            } => (authority, *product),
+            _ => return Ok(None),
+        };
+        if !self
+            .product_capability_contract
+            .as_ref()
+            .is_some_and(|contract| contract.contract() == product.capability())
+        {
+            return Err("pc_score_distributed_external_product_proof_missing");
+        }
+        let execution_evidence_inline_bytes = match product {
+            crate::cooperative_execution::CooperativePcScoreProduct::Summary
+            | crate::cooperative_execution::CooperativePcScoreProduct::ScoreFinder => {
+                core::mem::size_of::<
+                    crate::pc_score_summary_result::ValidatedPcScoreExecutionEvidence,
+                >() as u128
+            }
+            crate::cooperative_execution::CooperativePcScoreProduct::Portfolio => core::mem::size_of::<
+                crate::pc_score_minimum_cover_result::ValidatedPcScorePortfolioExecutionEvidence,
+            >()
+                as u128,
+        };
+        let concurrent_retained_bytes = (core::mem::size_of::<Self>() as u128)
+            .checked_add(execution_evidence_inline_bytes)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    core::mem::size_of::<crate::pc_score_postprocess::PcScoreDerivation>() as u128,
+                )
+            })
+            .and_then(|bytes| {
+                self.output_policy
+                    .checked_retained_capacity_bytes()
+                    .and_then(|output| bytes.checked_add(output))
+            })
+            .and_then(|bytes| {
+                self.validation_report
+                    .checked_retained_capacity_bytes()
+                    .and_then(|validation| bytes.checked_add(validation))
+            })
+            .ok_or("pc_score_distributed_retained_projection_unavailable")?;
+        let checked_external_retained_upper_bound_bytes = authority
+            .checked_external_retained_upper_bound_bytes(concurrent_retained_bytes)
+            .map_err(|error| error.component())?;
+        Ok(Some((
+            authority.terminal_resource_authority(),
+            checked_external_retained_upper_bound_bytes,
+        )))
+    }
+
+    /// Moves the compiled worker problem out after request/product validation,
+    /// releasing App response authorities before a standalone worker acquires
+    /// its own execution surface.
+    pub fn into_worker_problem(self) -> Arc<SearchProblem> {
+        self.problem
     }
 
     pub fn build_probability_request(
@@ -175,10 +335,21 @@ impl PreparedDistributedSearch {
     }
 
     pub fn complete(self, result: CoreExecutionResult, control: &ExecutionControl) -> AppResponse {
+        if self.is_pc_score() {
+            return self.fail(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_pc_score_requires_memory_guarded_completion",
+            });
+        }
         let result =
             decorate_distributed_build_probability_tiling_result(&self.response_kind, result);
         let core_executor = self.context.services().core_executor();
         let result = match &self.response_kind {
+            CooperativeSearchResponseKind::PcTiling { .. }
+            | CooperativeSearchResponseKind::ScenarioTiling { .. } => Ok(result),
+            CooperativeSearchResponseKind::PcChance { .. }
+            | CooperativeSearchResponseKind::ScenarioChance { .. } => {
+                core_executor.postprocess_pc_chance_result_before_public_surface(result, control)
+            }
             CooperativeSearchResponseKind::BuildProbability {
                 solution_probability_policy,
                 ..
@@ -204,6 +375,100 @@ impl PreparedDistributedSearch {
             &self.output_policy,
             self.product_capability_contract,
         )
+    }
+
+    /// Performs the typed score post-process while the caller's distributed
+    /// merger still owns the child execution lease. The returned completion
+    /// retains the parent product authority but cannot expose an App response;
+    /// the caller must first destroy the merger and then call `complete`.
+    pub fn complete_pc_score_with_memory_guard(
+        self,
+        result: CoreExecutionResult,
+        control: &ExecutionControl,
+        mut memory_guard: impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
+    ) -> PreparedDistributedPcScoreCompletion {
+        let PreparedDistributedSearch {
+            context,
+            problem,
+            response_kind,
+            command_kind,
+            output_policy,
+            resource_budget: _,
+            validation_report,
+            product_capability_contract,
+        } = self;
+
+        // `response_kind` owns the canonical typed problem/authority pair. The
+        // duplicate compiled problem is no longer needed after workers finish
+        // and must not inflate the terminal live set.
+        drop(problem);
+
+        let scenario = matches!(
+            &response_kind,
+            CooperativeSearchResponseKind::ScenarioScore { .. }
+        );
+        let core_executor = context.services().core_executor();
+        let (result, evidence) = match &response_kind {
+            CooperativeSearchResponseKind::PcScore {
+                authority,
+                expected_problem,
+                product,
+            }
+            | CooperativeSearchResponseKind::ScenarioScore {
+                authority,
+                expected_problem,
+                product,
+            } => match product {
+                CooperativePcScoreProduct::Summary | CooperativePcScoreProduct::ScoreFinder => {
+                    match core_executor.postprocess_pc_score_wasm_result_with_memory_guard(
+                        authority,
+                        expected_problem,
+                        result,
+                        control,
+                        &mut memory_guard,
+                    ) {
+                        Ok((result, evidence)) => (
+                            Ok(result),
+                            Some(PreparedDistributedPcScoreEvidence::Summary(evidence)),
+                        ),
+                        Err(error) => (Err(error), None),
+                    }
+                }
+                CooperativePcScoreProduct::Portfolio => {
+                    match core_executor.postprocess_pc_score_minimals_wasm_result_with_memory_guard(
+                        authority,
+                        expected_problem,
+                        result,
+                        control,
+                        &mut memory_guard,
+                    ) {
+                        Ok((result, evidence)) => (
+                            Ok(result),
+                            Some(PreparedDistributedPcScoreEvidence::Portfolio(evidence)),
+                        ),
+                        Err(error) => (Err(error), None),
+                    }
+                }
+            },
+            _ => (
+                Err(CoreExecutionError::RuntimeUnavailable {
+                    component: "distributed_pc_score_completion_kind_mismatch",
+                }),
+                None,
+            ),
+        };
+
+        PreparedDistributedPcScoreCompletion {
+            context,
+            response_kind,
+            command_kind,
+            output_policy,
+            validation_report,
+            product_capability_contract,
+            result,
+            evidence,
+            scenario,
+        }
     }
 
     /// Completes only the terminal Core materialization while retaining the
@@ -405,6 +670,53 @@ impl PreparedDistributedSearch {
             self.command_kind,
             &self.output_policy,
             self.product_capability_contract,
+        )
+    }
+}
+
+impl PreparedDistributedPcScoreCompletion {
+    /// Materializes the typed score response only after the distributed child
+    /// lease has been dropped by the caller. Dropping `response_kind` first
+    /// releases the parent authority, so no rich host allocation overlaps an
+    /// execution lease whose accounting surface cannot observe it.
+    pub fn complete(self) -> AppResponse {
+        let PreparedDistributedPcScoreCompletion {
+            context,
+            response_kind,
+            command_kind,
+            output_policy,
+            validation_report,
+            product_capability_contract,
+            result,
+            evidence,
+            scenario,
+        } = self;
+        drop(response_kind);
+
+        let mut response = match result {
+            Ok(result) if scenario => AppResponse::success(AppRenderModel::Scenario(result)),
+            Ok(result) => AppResponse::success(AppRenderModel::Pc(result)),
+            Err(error) => core_execution_error_response(error),
+        };
+        match evidence {
+            Some(PreparedDistributedPcScoreEvidence::Summary(evidence)) => {
+                response = response.with_pc_score_execution_evidence(evidence);
+            }
+            Some(PreparedDistributedPcScoreEvidence::Portfolio(evidence)) => {
+                response = response.with_pc_score_portfolio_execution_evidence(evidence);
+            }
+            None => {}
+        }
+        let response = if validation_report.is_empty() {
+            response
+        } else {
+            response.with_validation_diagnostics(validation_report)
+        };
+        context.finalize_response_with_product_capability(
+            response,
+            command_kind,
+            &output_policy,
+            product_capability_contract,
         )
     }
 }

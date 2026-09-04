@@ -8,10 +8,9 @@ import {
   type RuleProfile,
   type SpinProfile
 } from './solverWorkspaceModel.ts';
-import { buildDesktopAppRequest, type ClearraDesktopRequest } from '../host/clearraDesktopHost.ts';
+import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
 import {
   buildProbabilityFinesseCommandArguments,
-  buildProbabilityFinesseDesktopFields,
   DEFAULT_BUILD_PROBABILITY_FINESSE,
   DEFAULT_BUILD_PROBABILITY_PATTERN_KNOWLEDGE,
   type BuildProbabilityFinesseMetric,
@@ -19,9 +18,12 @@ import {
 } from './buildProbabilityFinesse.ts';
 import {
   searchExecutionCommandArguments,
-  searchExecutionDesktopFields,
   type SearchExecutionRequest
 } from './searchExecutionModel.ts';
+import {
+  cliCommandRequestForDesktop,
+  serializeCliCommandArguments
+} from './cliCommandModel.ts';
 
 export type BuildProbabilityRequest = {
   height: number;
@@ -152,7 +154,7 @@ export function buildProbabilityValidationCodes(
   return [...new Set(errors)];
 }
 
-export function buildProbabilityCommand(request: BuildProbabilityRequest): string {
+export function buildProbabilityCommandArguments(request: BuildProbabilityRequest): string[] {
   request = normalizeBuildProbabilityRequest(request);
   const existing = trimBuildProbabilityMask(request.existingMask, request.height);
   const target = trimBuildProbabilityMask(request.targetMask, request.height);
@@ -199,40 +201,18 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
   );
   tokens.push(...searchExecutionCommandArguments(buildProbabilitySearchExecution(request)));
   tokens.push(...buildProbabilityFinesseCommandArguments(request.finesse, request.patternKnowledge));
-  return tokens.join(' ');
+  return tokens;
+}
+
+export function buildProbabilityCommand(request: BuildProbabilityRequest): string {
+  return serializeCliCommandArguments(buildProbabilityCommandArguments(request));
 }
 
 export function buildProbabilityRequestForDesktop(
   request: BuildProbabilityRequest,
   language: 'en' | 'ko'
-): ClearraDesktopRequest {
-  request = normalizeBuildProbabilityRequest(request);
-  const existing = trimBuildProbabilityMask(request.existingMask, request.height);
-  const target = trimBuildProbabilityMask(request.targetMask, request.height);
-  const parsedQueue = parseBrowserQueueInput(request.queue);
-  return buildDesktopAppRequest({
-    command: 'build-probability',
-    language,
-    visible_height: request.height,
-    base_mask: boardMaskHex(existing),
-    target_mask: boardMaskHex(target),
-    queue: parsedQueue?.kind === 'fixed' ? parsedQueue.source : '',
-    patterns: parsedQueue?.kind === 'pattern' ? parsedQueue.source : '',
-    hold_enabled: request.holdEnabled,
-    ...(request.sourcePieces == null ? {} : { source_piece_count: request.sourcePieces }),
-    build_aggregation: request.aggregation,
-    rule: request.rule,
-    spin_profile: request.spinProfile,
-    preserve_b2b: request.preserveB2B,
-    solution_probabilities: request.solutionProbabilities,
-    precompute_build_dependencies: request.precomputeBuildDependencies,
-    ...buildProbabilityFinesseDesktopFields(request.finesse, request.patternKnowledge),
-    include_horizontal_mirror: mirrorBoardMask(existing, request.height) === existing,
-    ...searchExecutionDesktopFields(buildProbabilitySearchExecution(request)),
-    memory_budget_mb: 0,
-    candidate_budget: 0,
-    pattern_budget: 0
-  });
+): ClearraDesktopCliCommandRequest {
+  return cliCommandRequestForDesktop(buildProbabilityCommandArguments(request), language);
 }
 
 function buildProbabilitySearchExecution(

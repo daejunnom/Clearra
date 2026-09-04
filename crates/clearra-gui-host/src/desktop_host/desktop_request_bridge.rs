@@ -114,12 +114,423 @@ mod error {
 
     impl std::error::Error for DesktopTauriCommandError {}
 }
-mod form_parser {
+mod cli_request_parser {
+    use clearra_app::AppRequest;
+    use clearra_cli_command::CliCommandParser;
+    use clearra_i18n::LanguageId;
+    use serde_json::Value;
+
+    use super::error::DesktopTauriCommandError;
+
+    const DESKTOP_CLI_COMMAND_FIELDS: &[&str] =
+        &["app_request_model", "command", "language", "arguments"];
+    const DESKTOP_CLI_ARGUMENT_TOKEN_LIMIT: usize = 512;
+    const DESKTOP_CLI_ARGUMENT_BYTES_LIMIT: usize = 64 << 20;
+    const DESKTOP_CLI_SINGLE_ARGUMENT_BYTES_LIMIT: usize = 16 << 20;
+
+    /// Compiles the complete canonical argv emitted by the GUI through the
+    /// frontend-neutral CLI grammar. No other desktop request model is a
+    /// production ingress path.
+    pub(super) fn desktop_request_builds_app_request(
+        request_json: &str,
+    ) -> Result<AppRequest, DesktopTauriCommandError> {
+        let value: Value = serde_json::from_str(request_json)
+            .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))?;
+        build_cli_command_app_request(&value)
+    }
+
+    fn build_cli_command_app_request(
+        value: &Value,
+    ) -> Result<AppRequest, DesktopTauriCommandError> {
+        let object = value.as_object().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request("desktop CLI request must be a JSON object")
+        })?;
+        if let Some(field) = object
+            .keys()
+            .find(|field| !DESKTOP_CLI_COMMAND_FIELDS.contains(&field.as_str()))
+        {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop CLI request does not accept field '{field}'"
+            )));
+        }
+        if object.get("app_request_model").and_then(Value::as_str)
+            != Some("clearra-cli/CommandRequest")
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop CLI request requires clearra-cli/CommandRequest",
+            ));
+        }
+        if object.get("command").and_then(Value::as_str) != Some("cli") {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop CLI request command must be 'cli'",
+            ));
+        }
+        let language = object
+            .get("language")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop CLI request requires a string language",
+                )
+            })
+            .and_then(|language| {
+                LanguageId::parse(language).ok_or_else(|| {
+                    DesktopTauriCommandError::invalid_request(format!(
+                        "invalid desktop language '{language}'"
+                    ))
+                })
+            })?;
+        let argument_values = object
+            .get("arguments")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop CLI request requires a string arguments array",
+                )
+            })?;
+        if argument_values.len() < 2 || argument_values.len() > DESKTOP_CLI_ARGUMENT_TOKEN_LIMIT {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop CLI arguments must contain between 2 and {DESKTOP_CLI_ARGUMENT_TOKEN_LIMIT} tokens"
+            )));
+        }
+        let mut arguments = Vec::with_capacity(argument_values.len());
+        let mut argument_bytes = 0usize;
+        for value in argument_values {
+            let argument = value.as_str().ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop CLI arguments must contain only strings",
+                )
+            })?;
+            if argument.contains('\0') || argument.len() > DESKTOP_CLI_SINGLE_ARGUMENT_BYTES_LIMIT {
+                return Err(DesktopTauriCommandError::invalid_request(
+                    "desktop CLI argument exceeds its size limit or contains NUL",
+                ));
+            }
+            argument_bytes = argument_bytes.checked_add(argument.len()).ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop CLI argument byte count overflowed",
+                )
+            })?;
+            arguments.push(argument.to_owned());
+        }
+        if argument_bytes > DESKTOP_CLI_ARGUMENT_BYTES_LIMIT {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop CLI arguments exceed {DESKTOP_CLI_ARGUMENT_BYTES_LIMIT} bytes"
+            )));
+        }
+        if arguments.first().map(String::as_str) != Some("clearra") {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop CLI arguments must begin with the canonical 'clearra' token",
+            ));
+        }
+        let root = arguments.get(1).map(String::as_str).unwrap_or_default();
+        if !matches!(
+            root,
+            "pc" | "failed-queue"
+                | "build-probability"
+                | "build"
+                | "finesse"
+                | "setup-finder"
+                | "setup"
+                | "damage"
+                | "spin-finder"
+                | "ren"
+                | "spin-structure"
+                | "utility"
+        ) {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop GUI does not expose CLI command root '{root}'"
+            )));
+        }
+        if root == "pc"
+            && matches!(
+                arguments.get(2).map(String::as_str),
+                Some("saves" | "best-save")
+            )
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop GUI does not expose pc saves or pc best-save",
+            ));
+        }
+
+        let parsed = CliCommandParser::parse_tokens(&arguments).map_err(|error| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "invalid canonical desktop CLI arguments: {error}"
+            ))
+        })?;
+        parsed
+            .to_app_request()
+            .map(|request| request.with_language(language))
+            .map_err(|error| {
+                DesktopTauriCommandError::validation(format!(
+                    "desktop CLI request failed typed lowering: {error}"
+                ))
+            })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use clearra_app::{
+            AppCommand, PcMinimalsIngressOrigin, PcResultProjection, ProductCapabilityContract,
+        };
+        use clearra_cli_command::CliCommandParser;
+        use clearra_i18n::LanguageId;
+        use clearra_pc_graph::request::PcCountPolicy;
+        use serde_json::json;
+
+        use super::desktop_request_builds_app_request;
+
+        #[test]
+        fn production_desktop_parser_is_identical_to_shared_cli_lowering() {
+            let arguments = vec![
+                "clearra".to_owned(),
+                "pc".to_owned(),
+                "tiling".to_owned(),
+                "--lines".to_owned(),
+                "2".to_owned(),
+                "--patterns".to_owned(),
+                "P7".to_owned(),
+            ];
+            let desktop = desktop_request_builds_app_request(
+                &json!({
+                    "app_request_model": "clearra-cli/CommandRequest",
+                    "command": "cli",
+                    "language": "ko",
+                    "arguments": arguments,
+                })
+                .to_string(),
+            )
+            .expect("canonical desktop CLI request");
+            let direct = CliCommandParser::parse_tokens(&arguments)
+                .expect("shared CLI parser")
+                .to_app_request()
+                .expect("shared CLI lowering")
+                .with_language(LanguageId::Ko);
+
+            assert_eq!(desktop, direct);
+        }
+
+        #[test]
+        fn production_minimals_web_text_desktop_argv_and_cli_tokens_have_one_typed_authority() {
+            let arguments = vec![
+                "clearra".to_owned(),
+                "pc".to_owned(),
+                "minimals".to_owned(),
+                "--lines".to_owned(),
+                "2".to_owned(),
+                "--board-mask".to_owned(),
+                "0".to_owned(),
+                "--height".to_owned(),
+                "2".to_owned(),
+                "--pieces".to_owned(),
+                "5".to_owned(),
+                "--queue".to_owned(),
+                "IIOOO".to_owned(),
+                "--no-hold".to_owned(),
+                "--rule".to_owned(),
+                "srs-plus".to_owned(),
+                "--backend".to_owned(),
+                "cpu".to_owned(),
+                "--workers".to_owned(),
+                "1".to_owned(),
+            ];
+            let desktop = desktop_request_builds_app_request(
+                &json!({
+                    "app_request_model": "clearra-cli/CommandRequest",
+                    "command": "cli",
+                    "language": "en",
+                    "arguments": arguments,
+                })
+                .to_string(),
+            )
+            .expect("canonical Desktop minimals argv");
+            let cli = CliCommandParser::parse_tokens(&arguments)
+                .expect("canonical CLI minimals tokens")
+                .to_app_request()
+                .expect("typed CLI minimals request")
+                .with_language(LanguageId::En);
+            let web = CliCommandParser::parse(&arguments.join(" "))
+                .expect("canonical Web minimals command text")
+                .to_app_request()
+                .expect("typed Web minimals request")
+                .with_language(LanguageId::En);
+
+            assert_eq!(desktop, cli);
+            assert_eq!(web, cli);
+            assert_eq!(
+                cli.product_capability_contract(),
+                Some(ProductCapabilityContract::PcMinimals)
+            );
+            let AppCommand::Scenario(command) = cli.command() else {
+                panic!("field-backed pc minimals must be the shared Scenario command")
+            };
+            assert_eq!(command.query().count_policy(), PcCountPolicy::CountUnique);
+            assert_eq!(
+                command.result_projection(),
+                PcResultProjection::MinimumCoverV2(PcMinimalsIngressOrigin::CanonicalPcMinimals)
+            );
+
+            let extra_dto_authority = json!({
+                "app_request_model": "clearra-cli/CommandRequest",
+                "command": "cli",
+                "language": "en",
+                "arguments": arguments,
+                "count_policy": "unique",
+            });
+            assert!(desktop_request_builds_app_request(&extra_dto_authority.to_string()).is_err());
+        }
+
+        #[cfg(feature = "wasm-cpu-runtime")]
+        #[test]
+        fn production_minimals_ingresses_execute_the_same_complete_iiooo_portfolio() {
+            use clearra_app::{AppContext, AppCoreExecutorService, AppServices, AppStatus};
+
+            let arguments = vec![
+                "clearra",
+                "pc",
+                "minimals",
+                "--lines",
+                "2",
+                "--board-mask",
+                "0",
+                "--height",
+                "2",
+                "--pieces",
+                "5",
+                "--queue",
+                "IIOOO",
+                "--no-hold",
+                "--rule",
+                "srs-plus",
+                "--backend",
+                "cpu",
+                "--workers",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+            let desktop = desktop_request_builds_app_request(
+                &json!({
+                    "app_request_model": "clearra-cli/CommandRequest",
+                    "command": "cli",
+                    "language": "en",
+                    "arguments": arguments,
+                })
+                .to_string(),
+            )
+            .expect("canonical Desktop minimals argv");
+            let cli = CliCommandParser::parse_tokens(&arguments)
+                .expect("canonical CLI minimals tokens")
+                .to_app_request()
+                .expect("typed CLI minimals request")
+                .with_language(LanguageId::En);
+            let web = CliCommandParser::parse(&arguments.join(" "))
+                .expect("canonical Web minimals text")
+                .to_app_request()
+                .expect("typed Web minimals request")
+                .with_language(LanguageId::En);
+            let context = AppContext::new(
+                AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+            );
+            let responses = [context.run(web), context.run(desktop), context.run(cli)];
+            assert!(responses
+                .iter()
+                .all(|response| response.status() == AppStatus::Success));
+            let sets = responses
+                .iter()
+                .map(|response| {
+                    response
+                        .product_capability_result()
+                        .and_then(|result| result.pc_minimum_cover_v2())
+                        .expect("complete typed minimum-cover result")
+                        .portfolio_alternatives()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(sets[0], sets[1]);
+            assert_eq!(sets[1], sets[2]);
+            assert_eq!(sets[0].candidates().len(), 4);
+            assert_eq!(sets[0].coverage_rows().len(), 4);
+            assert_eq!(sets[0].optimal_cardinality(), 1);
+
+            for set in sets {
+                let mut store = set.open_store().expect("exact alternative store");
+                let mut portfolios =
+                    vec![set.canonical_page().portfolio().candidate_ids().to_vec()];
+                loop {
+                    let advance = store
+                        .next_page(u64::MAX, &mut || false)
+                        .expect("next exact alternative");
+                    if let Some(page) = advance.page() {
+                        portfolios.push(page.portfolio().candidate_ids().to_vec());
+                    }
+                    if advance.checkpoint().enumeration_complete() {
+                        assert_eq!(advance.checkpoint().known_alternative_count_decimal(), "4");
+                        break;
+                    }
+                }
+                assert_eq!(portfolios, [vec![1], vec![2], vec![3], vec![4]]);
+            }
+        }
+
+        #[test]
+        fn production_desktop_parser_rejects_legacy_partial_and_extra_envelopes() {
+            for request in [
+                json!({
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc",
+                    "lines": 2,
+                }),
+                json!({
+                    "app_request_model": "clearra-cli/CommandRequest",
+                    "command": "cli",
+                    "language": "en",
+                }),
+                json!({
+                    "app_request_model": "clearra-cli/CommandRequest",
+                    "command": "cli",
+                    "language": "en",
+                    "arguments": ["clearra", "pc", "tiling", "--lines", "2"],
+                    "lines": 2,
+                }),
+                json!({
+                    "app_request_model": "clearra-cli/CommandRequest",
+                    "command": "cli",
+                    "language": "en",
+                    "arguments": ["clearra", "pc", "minimals", "--lines", "2"],
+                    "count_policy": "unique",
+                }),
+            ] {
+                assert!(desktop_request_builds_app_request(&request.to_string()).is_err());
+            }
+        }
+    }
+}
+
+#[cfg(not(test))]
+mod active_request_parser {
+    pub(super) use super::cli_request_parser::desktop_request_builds_app_request;
+}
+
+#[cfg(test)]
+mod active_request_parser {
+    // The legacy form compiler survives only to preserve its historical unit
+    // coverage. Product builds cannot name or reach this module.
+    pub(super) use super::legacy_form_parser::desktop_request_builds_app_request;
+}
+
+#[cfg(test)]
+mod legacy_form_parser {
     use clearra_app::{
         AppCommand, AppRequest, BuildObjective, BuildQueueKnowledge, BuildScoreProfile,
         FieldDocumentFormat, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
         FumenAppCommand, FumenTransformKind, ParityAppCommand, RenderAppCommand,
         RenderArtifactFormat, RequestStructuralProfiles,
+    };
+    use clearra_cli_command::{
+        operation_sequence_request_from_document, sequence_dependencies_request_from_document,
+        CliCommandParser, CliCommandRequest, WebBuildProbabilityInput, WebBuildV2Capability,
+        WebBuildV2Input, WebSetupScoreInput, WebSetupScoreQueueInput,
     };
     use clearra_core_domain::{
         board::standard_pc_board::Board256Mask, objective::objective_kind::ObjectiveKind,
@@ -143,11 +554,6 @@ mod form_parser {
     };
     use clearra_scoring::profile::SpinProfileId;
     use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
-    use clearra_web_command::{
-        operation_sequence_request_from_document, sequence_dependencies_request_from_document,
-        WebBuildProbabilityInput, WebBuildV2Capability, WebBuildV2Input, WebCommandParser,
-        WebCommandRequest, WebSetupScoreInput, WebSetupScoreQueueInput,
-    };
     use serde_json::Value;
 
     use crate::{
@@ -165,6 +571,11 @@ mod form_parser {
     ) -> Result<AppRequest, DesktopTauriCommandError> {
         let value: Value = serde_json::from_str(request_json)
             .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))?;
+        if value.get("app_request_model").and_then(Value::as_str)
+            == Some("clearra-cli/CommandRequest")
+        {
+            return build_cli_command_app_request(&value);
+        }
         validate_app_request_envelope(&value)?;
         let request_structural_profiles = parse_request_structural_profiles(&value)?;
         let command = text_or_default(&value, &["command"], "pc")?;
@@ -207,6 +618,145 @@ mod form_parser {
             .map_err(|error| {
                 DesktopTauriCommandError::invalid_request(format!(
                     "invalid desktop request profile selection: {error}"
+                ))
+            })
+    }
+
+    const DESKTOP_CLI_COMMAND_FIELDS: &[&str] =
+        &["app_request_model", "command", "language", "arguments"];
+    const DESKTOP_CLI_ARGUMENT_TOKEN_LIMIT: usize = 512;
+    const DESKTOP_CLI_ARGUMENT_BYTES_LIMIT: usize = 64 << 20;
+    const DESKTOP_CLI_SINGLE_ARGUMENT_BYTES_LIMIT: usize = 16 << 20;
+
+    /// Compiles the exact canonical argv emitted by the GUI through the same
+    /// frontend-neutral grammar used by native CLI and browser WASM. This
+    /// transport owns only a closed JSON envelope; it must not reconstruct
+    /// product defaults or split an escaped command string.
+    fn build_cli_command_app_request(
+        value: &Value,
+    ) -> Result<AppRequest, DesktopTauriCommandError> {
+        let object = value.as_object().ok_or_else(|| {
+            DesktopTauriCommandError::invalid_request("desktop CLI request must be a JSON object")
+        })?;
+        if let Some(field) = object
+            .keys()
+            .find(|field| !DESKTOP_CLI_COMMAND_FIELDS.contains(&field.as_str()))
+        {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop CLI request does not accept field '{field}'"
+            )));
+        }
+        if object.get("app_request_model").and_then(Value::as_str)
+            != Some("clearra-cli/CommandRequest")
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop CLI request requires clearra-cli/CommandRequest",
+            ));
+        }
+        if object.get("command").and_then(Value::as_str) != Some("cli") {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop CLI request command must be 'cli'",
+            ));
+        }
+        let language = object
+            .get("language")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop CLI request requires a string language",
+                )
+            })
+            .and_then(|language| {
+                LanguageId::parse(language).ok_or_else(|| {
+                    DesktopTauriCommandError::invalid_request(format!(
+                        "invalid desktop language '{language}'"
+                    ))
+                })
+            })?;
+        let argument_values = object
+            .get("arguments")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop CLI request requires a string arguments array",
+                )
+            })?;
+        if argument_values.len() < 2 || argument_values.len() > DESKTOP_CLI_ARGUMENT_TOKEN_LIMIT {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop CLI arguments must contain between 2 and {DESKTOP_CLI_ARGUMENT_TOKEN_LIMIT} tokens"
+            )));
+        }
+        let mut arguments = Vec::with_capacity(argument_values.len());
+        let mut argument_bytes = 0usize;
+        for value in argument_values {
+            let argument = value.as_str().ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop CLI arguments must contain only strings",
+                )
+            })?;
+            if argument.contains('\0') || argument.len() > DESKTOP_CLI_SINGLE_ARGUMENT_BYTES_LIMIT {
+                return Err(DesktopTauriCommandError::invalid_request(
+                    "desktop CLI argument is empty-safe text but exceeds its size limit or contains NUL",
+                ));
+            }
+            argument_bytes = argument_bytes.checked_add(argument.len()).ok_or_else(|| {
+                DesktopTauriCommandError::invalid_request(
+                    "desktop CLI argument byte count overflowed",
+                )
+            })?;
+            arguments.push(argument.to_owned());
+        }
+        if argument_bytes > DESKTOP_CLI_ARGUMENT_BYTES_LIMIT {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop CLI arguments exceed {DESKTOP_CLI_ARGUMENT_BYTES_LIMIT} bytes"
+            )));
+        }
+        if arguments.first().map(String::as_str) != Some("clearra") {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop CLI arguments must begin with the canonical 'clearra' token",
+            ));
+        }
+        let root = arguments.get(1).map(String::as_str).unwrap_or_default();
+        if !matches!(
+            root,
+            "pc" | "failed-queue"
+                | "build-probability"
+                | "build"
+                | "finesse"
+                | "setup-finder"
+                | "setup"
+                | "damage"
+                | "spin-finder"
+                | "ren"
+                | "spin-structure"
+                | "utility"
+        ) {
+            return Err(DesktopTauriCommandError::invalid_request(format!(
+                "desktop GUI does not expose CLI command root '{root}'"
+            )));
+        }
+        if root == "pc"
+            && matches!(
+                arguments.get(2).map(String::as_str),
+                Some("saves" | "best-save")
+            )
+        {
+            return Err(DesktopTauriCommandError::invalid_request(
+                "desktop GUI does not expose pc saves or pc best-save",
+            ));
+        }
+
+        let parsed = CliCommandParser::parse_tokens(&arguments).map_err(|error| {
+            DesktopTauriCommandError::invalid_request(format!(
+                "invalid canonical desktop CLI arguments: {error}"
+            ))
+        })?;
+        parsed
+            .to_app_request()
+            .map(|request| request.with_language(language))
+            .map_err(|error| {
+                DesktopTauriCommandError::validation(format!(
+                    "desktop CLI request failed typed lowering: {error}"
                 ))
             })
     }
@@ -437,7 +987,7 @@ mod form_parser {
             _ => unreachable!("closed spin-structure route"),
         }
 
-        WebCommandParser::parse_tokens_with_worker_limit(
+        CliCommandParser::parse_tokens_with_worker_limit(
             &tokens,
             WorkerPolicy::hardware_worker_limit(),
         )
@@ -606,7 +1156,7 @@ mod form_parser {
             .with_initial_b2b(initial_b2b);
         let rule = parse_rule_profile(required_string("rule")?)
             .map_err(|error| DesktopTauriCommandError::invalid_request(error.to_string()))?;
-        let mut request = WebCommandRequest::setup_score(input)
+        let mut request = CliCommandRequest::setup_score(input)
             .with_rule(rule)
             .with_hold_enabled(hold_enabled)
             .with_backend(RequestedSearchBackend::Cpu)
@@ -617,7 +1167,7 @@ mod form_parser {
         if workers > 0 {
             request = request.with_workers(workers);
         }
-        typed_web_request_to_app_request("setup-score", request)
+        typed_cli_request_to_app_request("setup-score", request)
     }
 
     fn build_parity_app_request(value: &Value) -> Result<AppRequest, DesktopTauriCommandError> {
@@ -1184,7 +1734,7 @@ mod form_parser {
             &["setup_allow_post_cycle_borrow", "allow_post_cycle_borrow"],
         )?
         .unwrap_or(false);
-        let mut request = WebCommandRequest::setup(remaining, allow_post_cycle_borrow)
+        let mut request = CliCommandRequest::setup(remaining, allow_post_cycle_borrow)
             .with_rule(parse_desktop_rule(value)?);
 
         let search_mode = optional_text(value, &["setup_mode", "search_mode", "mode"])?
@@ -1291,7 +1841,7 @@ mod form_parser {
         }
 
         request = apply_worker_policy(request, value)?;
-        typed_web_request_to_app_request("setup", request)
+        typed_cli_request_to_app_request("setup", request)
     }
 
     fn build_probability_app_request(
@@ -1411,7 +1961,7 @@ mod form_parser {
             input = input.with_source_piece_count(source_piece_count);
         }
 
-        let mut request = WebCommandRequest::build_probability(input)
+        let mut request = CliCommandRequest::build_probability(input)
             .with_rule(parse_desktop_rule(value)?)
             .with_hold_enabled(hold_enabled)
             .with_precompute_build_dependencies(precompute_build_dependencies)
@@ -1448,7 +1998,7 @@ mod form_parser {
             );
         }
         request = apply_pc_resource_limits(request, value)?;
-        typed_web_request_to_app_request("build-probability", request)
+        typed_cli_request_to_app_request("build-probability", request)
     }
 
     const DESKTOP_BUILD_V2_FIELDS: &[&str] = &[
@@ -1644,7 +2194,7 @@ mod form_parser {
             ));
         }
 
-        let mut request = WebCommandRequest::build_v2(input)
+        let mut request = CliCommandRequest::build_v2(input)
             .with_rule(rule)
             .with_hold_enabled(hold_enabled)
             .with_backend(RequestedSearchBackend::Cpu)
@@ -1659,7 +2209,7 @@ mod form_parser {
         if workers > 0 {
             request = request.with_workers(workers);
         }
-        typed_web_request_to_app_request("build-v2", request)
+        typed_cli_request_to_app_request("build-v2", request)
     }
 
     fn validate_build_v2_fields(value: &Value) -> Result<(), DesktopTauriCommandError> {
@@ -1940,13 +2490,13 @@ mod form_parser {
             mode,
         )
         .with_line_clear_policy(line_clear_policy);
-        let request = apply_worker_policy(WebCommandRequest::forward(command, query), value)?;
-        typed_web_request_to_app_request(command, request)
+        let request = apply_worker_policy(CliCommandRequest::forward(command, query), value)?;
+        typed_cli_request_to_app_request(command, request)
     }
 
-    fn typed_web_request_to_app_request(
+    fn typed_cli_request_to_app_request(
         command: &str,
-        request: WebCommandRequest,
+        request: CliCommandRequest,
     ) -> Result<AppRequest, DesktopTauriCommandError> {
         request.to_app_request().map_err(|error| {
             DesktopTauriCommandError::invalid_request(format!(
@@ -2015,9 +2565,9 @@ mod form_parser {
     }
 
     fn apply_queue(
-        mut request: WebCommandRequest,
+        mut request: CliCommandRequest,
         value: &Value,
-    ) -> Result<WebCommandRequest, DesktopTauriCommandError> {
+    ) -> Result<CliCommandRequest, DesktopTauriCommandError> {
         let queue = optional_nonempty_text(value, &["queue"])?;
         let patterns = optional_nonempty_text(value, &["patterns"])?;
         match (queue, patterns) {
@@ -2037,9 +2587,9 @@ mod form_parser {
     }
 
     fn apply_worker_policy(
-        mut request: WebCommandRequest,
+        mut request: CliCommandRequest,
         value: &Value,
-    ) -> Result<WebCommandRequest, DesktopTauriCommandError> {
+    ) -> Result<CliCommandRequest, DesktopTauriCommandError> {
         let native_hardware_limit = WorkerPolicy::hardware_worker_limit();
         let workers = optional_usize_any(value, &["workers"])?
             .and_then(|workers| (workers > 0).then_some(workers));
@@ -2084,9 +2634,9 @@ mod form_parser {
     }
 
     fn apply_pc_resource_limits(
-        mut request: WebCommandRequest,
+        mut request: CliCommandRequest,
         value: &Value,
-    ) -> Result<WebCommandRequest, DesktopTauriCommandError> {
+    ) -> Result<CliCommandRequest, DesktopTauriCommandError> {
         request = apply_worker_policy(request, value)?;
         if let Some(limit) = optional_usize_any(value, &["max_patterns", "pattern_budget"])? {
             if limit > 0 {
@@ -3401,8 +3951,8 @@ mod run_request {
     use clearra_host_contract::HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES;
 
     use super::{
+        active_request_parser::desktop_request_builds_app_request,
         bridge::DesktopTauriCommandBridge, error::DesktopTauriCommandError,
-        form_parser::desktop_request_builds_app_request,
     };
 
     impl DesktopTauriCommandBridge {
@@ -3422,8 +3972,8 @@ mod start_job {
     use crate::GuiJobRunner;
 
     use super::{
+        active_request_parser::desktop_request_builds_app_request,
         bridge::DesktopTauriCommandBridge, error::DesktopTauriCommandError,
-        form_parser::desktop_request_builds_app_request,
     };
 
     impl DesktopTauriCommandBridge {
@@ -3482,8 +4032,8 @@ mod validate_request {
     use serde_json::json;
 
     use super::{
+        active_request_parser::desktop_request_builds_app_request,
         bridge::DesktopTauriCommandBridge, error::DesktopTauriCommandError,
-        form_parser::desktop_request_builds_app_request,
     };
 
     impl DesktopTauriCommandBridge {
@@ -3519,14 +4069,14 @@ mod validate_request {
     #[cfg(test)]
     mod tests {
         use clearra_app::AppRequest;
-        use clearra_web_command::WebCommandParser;
+        use clearra_cli_command::CliCommandParser;
         use serde_json::Value;
 
         use super::DesktopTauriCommandBridge;
 
         #[test]
         fn desktop_validate_endpoint_rejects_missing_product_capability_contract() {
-            let attached = WebCommandParser::parse(
+            let attached = CliCommandParser::parse(
                 "clearra pc allspin-pres-chance --lines 2 --patterns [TI]! --spin-profile all-mini-plus",
             )
             .expect("typed PC product request")
@@ -3566,12 +4116,14 @@ mod tests {
         PcTilingIngressOrigin, ProductCapabilityContract, QueryEnvelope, SpinStructureProductMode,
         PC_SCORE_MAX_PATTERNS,
     };
+    use clearra_cli_command::CliCommandParser;
     use clearra_core_domain::{
         objective::objective_kind::ObjectiveKind, piece::piece_kind::PieceKind,
     };
     use clearra_forward_search::{
         ForwardLineClearPolicy, ForwardSearchMode, ForwardSpinCategory, ForwardSpinLineRequirement,
     };
+    use clearra_i18n::LanguageId;
     use clearra_pc_graph::request::{
         GpuDeviceSelection, PcCountPolicy, RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
     };
@@ -3580,13 +4132,12 @@ mod tests {
         SetupLengthPreference, SetupSearchMode,
     };
     use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
-    use clearra_web_command::WebCommandParser;
     use serde_json::{json, Value};
 
     use crate::GuiProblemForm;
 
     use super::{
-        form_parser::{desktop_form_builds_app_request, desktop_request_builds_app_request},
+        legacy_form_parser::{desktop_form_builds_app_request, desktop_request_builds_app_request},
         DesktopTauriCommandBridge,
     };
 
@@ -4689,7 +5240,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_backend_omission_defaults_match_web_for_all_four_backends() {
+    fn desktop_backend_omission_defaults_match_cli_authority_for_all_four_backends() {
         for (backend, expected_fallback) in [
             ("auto", true),
             ("cpu", false),
@@ -4706,10 +5257,10 @@ mod tests {
             );
             let desktop = desktop_request_builds_app_request(&desktop_json)
                 .expect("desktop backend-default request");
-            let web = WebCommandParser::parse(&format!("clearra pc --lines 2 --backend {backend}"))
-                .expect("web backend-default request")
+            let cli = CliCommandParser::parse(&format!("clearra pc --lines 2 --backend {backend}"))
+                .expect("CLI backend-default request")
                 .to_app_request()
-                .expect("web backend-default AppRequest");
+                .expect("CLI backend-default AppRequest");
 
             assert_eq!(
                 desktop.backend_policy().allow_backend_fallback(),
@@ -4718,8 +5269,8 @@ mod tests {
             );
             assert_eq!(
                 desktop.backend_policy(),
-                web.backend_policy(),
-                "Desktop/Web backend projection for {backend}"
+                cli.backend_policy(),
+                "Desktop/CLI backend projection for {backend}"
             );
         }
     }
@@ -6258,6 +6809,128 @@ mod tests {
             let error = desktop_request_builds_app_request(&request)
                 .expect_err("desktop typed bridge must reject CLI text");
             assert!(error.to_string().contains("does not parse CLI text"));
+        }
+    }
+
+    #[test]
+    fn desktop_cli_argv_envelope_is_fieldwise_identical_to_the_shared_compiler() {
+        let arguments = vec![
+            "clearra".to_owned(),
+            "pc".to_owned(),
+            "path".to_owned(),
+            "--lines".to_owned(),
+            "2".to_owned(),
+            "--patterns".to_owned(),
+            "P7".to_owned(),
+            "--no-hold".to_owned(),
+        ];
+        let desktop = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-cli/CommandRequest",
+                "command": "cli",
+                "language": "ko",
+                "arguments": arguments,
+            })
+            .to_string(),
+        )
+        .expect("closed canonical CLI argv envelope");
+        let direct = CliCommandParser::parse_tokens(&arguments)
+            .expect("shared CLI parser")
+            .to_app_request()
+            .expect("shared typed lowering")
+            .with_language(LanguageId::Ko);
+
+        assert_eq!(desktop, direct);
+        assert!(matches!(
+            desktop.command(),
+            AppCommand::Pc(command)
+                if matches!(command.result_projection(), PcResultProjection::PathFamilyV2(_))
+        ));
+    }
+
+    #[test]
+    fn desktop_cli_argv_envelope_admits_gui_document_utilities_without_reparsing_text() {
+        let arguments = vec![
+            "clearra".to_owned(),
+            "utility".to_owned(),
+            "fumen".to_owned(),
+            "text-to-fumen".to_owned(),
+            "--format".to_owned(),
+            "fumen".to_owned(),
+            "--comment".to_owned(),
+            "comment with spaces".to_owned(),
+        ];
+        let desktop = desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-cli/CommandRequest",
+                "command": "cli",
+                "language": "en",
+                "arguments": arguments,
+            })
+            .to_string(),
+        )
+        .expect("desktop utility argv envelope");
+        let direct = CliCommandParser::parse_tokens(&arguments)
+            .expect("shared utility parser")
+            .to_app_request()
+            .expect("shared utility lowering")
+            .with_language(LanguageId::En);
+
+        assert_eq!(desktop, direct);
+    }
+
+    #[test]
+    fn desktop_cli_argv_envelope_fails_closed_before_semantic_lowering() {
+        let base = json!({
+            "app_request_model": "clearra-cli/CommandRequest",
+            "command": "cli",
+            "language": "en",
+            "arguments": ["clearra", "pc", "--lines", "2"],
+        });
+        let cases = [
+            ("extra transport field", {
+                let mut value = base.clone();
+                value["score_mode"] = json!("off");
+                value
+            }),
+            ("non-string token", {
+                let mut value = base.clone();
+                value["arguments"] = json!(["clearra", "pc", "--lines", 2]);
+                value
+            }),
+            ("non-GUI command root", {
+                let mut value = base.clone();
+                value["arguments"] = json!(["clearra", "verify"]);
+                value
+            }),
+            ("removed save groups surface", {
+                let mut value = base.clone();
+                value["arguments"] =
+                    json!(["clearra", "pc", "saves", "--lines", "2", "--patterns", "P7"]);
+                value
+            }),
+            ("removed best-save surface", {
+                let mut value = base.clone();
+                value["arguments"] = json!([
+                    "clearra",
+                    "pc",
+                    "best-save",
+                    "--lines",
+                    "2",
+                    "--patterns",
+                    "P7"
+                ]);
+                value
+            }),
+            ("malformed canonical option", {
+                let mut value = base.clone();
+                value["arguments"] = json!(["clearra", "pc", "--lines", "not-a-number"]);
+                value
+            }),
+        ];
+
+        for (label, value) in cases {
+            desktop_request_builds_app_request(&value.to_string()).expect_err(label);
         }
     }
 

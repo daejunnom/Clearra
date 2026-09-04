@@ -200,7 +200,7 @@ impl CliAppRequestAssembler {
                 ))
             }
             ParsedCliCommand::Product(tokens) => {
-                let request = clearra_web_command::WebCommandParser::parse_tokens(&tokens)
+                let request = clearra_cli_command::CliCommandParser::parse_tokens(&tokens)
                     .and_then(|request| request.to_app_request())
                     .map_err(|error| {
                         CliOutput::error(

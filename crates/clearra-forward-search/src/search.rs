@@ -24,7 +24,10 @@ use crate::{
         ForwardSpinLineRequirement, ForwardSpinTarget,
     },
     reachability::ReachabilityWorkspace,
-    result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup},
+    result::{
+        compare_canonical_outcomes, ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport,
+        ForwardSpinGroup,
+    },
     t_spin_acceleration::TSpinAcceleration,
     MAX_REN_QUEUE_PIECES,
 };
@@ -1358,11 +1361,7 @@ impl ForwardQueueSession {
                         })?;
                     }
                 }
-                outcomes.sort_by(|left, right| {
-                    left.path()
-                        .cmp(right.path())
-                        .then_with(|| left.final_board().cmp(&right.final_board()))
-                });
+                outcomes.sort_by(compare_canonical_outcomes);
                 for (index, outcome) in outcomes.iter_mut().enumerate() {
                     outcome.assign_id(index as u64 + 1);
                 }

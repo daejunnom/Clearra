@@ -5,7 +5,9 @@ is not an executable and does not own a second desktop shell.
 
 Its responsibilities are:
 
-- map GUI form state to typed `clearra-app/AppRequest` values;
+- accept only complete `clearra-cli/CommandRequest` argv envelopes from GUI workspaces;
+- compile that argv through the shared CLI-command grammar into typed
+  `clearra-app/AppRequest` values;
 - run GUI validation before application execution;
 - call `clearra-app` through `AppContext`;
 - convert the application result to the shared host `AppResponse` contract;
@@ -16,19 +18,23 @@ Its responsibilities are:
 It must not:
 
 - spawn `clearra.exe` or any CLI subprocess;
-- create CLI text and parse it again;
+- create or split CLI text;
+- reconstruct command defaults from partial GUI fields;
 - import raw C core pointers or call C ABI functions;
 - manufacture preview, fixture, placeholder, or example final responses;
 - claim renderer, GPU, or solver execution when that capability did not run.
 
 ## Request Route
 
-`DesktopTauriCommandBridge::run_request` parses the desktop form envelope and
-builds a typed `AppRequest`. PC and PC-scenario retain the GUI form builder;
-setup, build probability, damage, and spin finder are translated through their
-typed web-command inputs. No route creates CLI text. `validate_request` and
-`start_job` use the same dispatcher, so validation and execution cannot disagree
-about the command family.
+`DesktopTauriCommandBridge::run_request` validates the closed desktop envelope
+(`app_request_model`, `command`, `language`, and `arguments` only), then passes
+the exact argv array to `CliCommandParser::parse_tokens`. Every GUI capability,
+including PC, setup, build probability, forward search, and document utilities,
+uses this route. No production route accepts the former
+`clearra-app/AppRequest` form JSON or synthesizes missing fields. The historical
+form compiler is compiled only under `cfg(test)` for compatibility coverage.
+`validate_request` and `start_job` use the same dispatcher, so validation and
+execution cannot disagree about the command family.
 
 ## Job Route
 

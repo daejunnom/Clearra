@@ -14,7 +14,10 @@ use crate::{
         ForwardSpinLineRequirement, ForwardSpinTarget,
     },
     reachability::ReachabilityWorkspace,
-    result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup},
+    result::{
+        compare_canonical_outcomes, ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport,
+        ForwardSpinGroup,
+    },
     search::{
         expand_search_node, validate_query, CanonicalLockOutcomeKey, ExpandedAction,
         ForwardQueueSession, ForwardSearchConfig, ForwardSearchError, StateKey,
@@ -913,36 +916,7 @@ fn canonicalize_outcomes(
     if control.is_cancelled() {
         return Err(ForwardSearchError::Cancelled);
     }
-    outcomes.sort_by(|left, right| {
-        (
-            left.source_pattern_index(),
-            left.source_queue(),
-            left.group(),
-            left.path().len(),
-            left.final_board(),
-            left.spin_piece(),
-            left.spin_mini(),
-            left.spin_lines(),
-            left.total_damage(),
-            left.evidence_path_count(),
-            left.evidence_complete(),
-            left.path(),
-        )
-            .cmp(&(
-                right.source_pattern_index(),
-                right.source_queue(),
-                right.group(),
-                right.path().len(),
-                right.final_board(),
-                right.spin_piece(),
-                right.spin_mini(),
-                right.spin_lines(),
-                right.total_damage(),
-                right.evidence_path_count(),
-                right.evidence_complete(),
-                right.path(),
-            ))
-    });
+    outcomes.sort_by(compare_canonical_outcomes);
     if control.is_cancelled() {
         return Err(ForwardSearchError::Cancelled);
     }
@@ -954,6 +928,7 @@ fn canonicalize_outcomes(
             && left.spin_piece() == right.spin_piece()
             && left.spin_mini() == right.spin_mini()
             && left.spin_lines() == right.spin_lines()
+            && left.ren_count() == right.ren_count()
             && left.total_damage() == right.total_damage()
             && left.evidence_path_count() == right.evidence_path_count()
             && left.evidence_complete() == right.evidence_complete()
@@ -2092,6 +2067,30 @@ mod tests {
             None,
             ForwardSearchMode::MaximumDamage,
         ));
+    }
+
+    #[test]
+    fn ren_public_candidate_ids_match_without_posthoc_serial_reordering() {
+        let query = ForwardSearchQuery::new(
+            Board256Mask::from_words([0x3fd, 0, 0, 0]),
+            4,
+            vec![PieceKind::T, PieceKind::I, PieceKind::I, PieceKind::I],
+            false,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::Disabled,
+            None,
+            None,
+            ForwardSearchMode::MaximumRen,
+        );
+        let serial = run_serial(query.clone());
+        let parallel = run_parallel(query, 4);
+
+        assert!(
+            serial.outcomes().len() > 1,
+            "fixture must exercise a tie family"
+        );
+        assert_eq!(serial.outcomes(), parallel.outcomes());
+        assert_eq!(serial.canonical_outcome(), parallel.canonical_outcome());
     }
 
     #[test]

@@ -379,6 +379,14 @@ fn direct_wasm_pc_path_returns_every_query_bound_replay_with_supply_and_line_cle
             pair[1].normalized_trace_key(),
         )
     }));
+    let canonical_witness = report
+        .canonical_witness()
+        .expect("pc.path core-owned canonical witness");
+    assert_eq!(Some(canonical_witness), report.witnesses().first());
+    assert!(report
+        .witnesses()
+        .iter()
+        .all(|witness| witness.candidate_id() >= canonical_witness.candidate_id()));
     let witness = &report.witnesses()[0];
     assert_eq!(witness.pattern_id(), 0);
     assert_eq!(witness.steps().len(), 1);
@@ -403,6 +411,8 @@ fn direct_wasm_pc_path_returns_every_query_bound_replay_with_supply_and_line_cle
         payload.witness_count(),
         payload.witnesses().len().to_string()
     );
+    assert_eq!(payload.canonical_selection(), report.canonical_selection());
+    assert_eq!(payload.canonical_witness(), payload.witnesses().first());
 }
 
 #[test]
@@ -462,6 +472,32 @@ fn direct_wasm_pc_minimals_returns_one_query_bound_exact_minimum_cover_wrapper()
         .source_identity()
         .ends_with(alternatives.identity().query_identity()));
     assert!(alternatives.checked_retained_capacity_bytes().is_some());
+
+    let (canonical_candidate_id, canonical_solution_key) = report
+        .canonical_candidate()
+        .expect("pc.minimals core-owned canonical witness");
+    let payload = wrapper
+        .public_result_payload()
+        .expect("public pc.minimals payload");
+    let ProductResultPayloadContent::CoveragePortfolio(payload) = payload.content() else {
+        panic!("expected pc.minimals coverage portfolio payload")
+    };
+    assert_eq!(
+        payload.canonical_selection(),
+        Some(report.canonical_selection())
+    );
+    let canonical_witness = payload
+        .canonical_witness()
+        .expect("pc.minimals payload canonical witness");
+    assert_eq!(
+        canonical_witness.candidate_id(),
+        canonical_candidate_id.to_string()
+    );
+    assert_eq!(
+        canonical_witness.normalized_solution_key(),
+        canonical_solution_key
+    );
+    assert_eq!(Some(canonical_witness), payload.members().first());
 
     let core = response
         .render_model()
@@ -524,7 +560,88 @@ fn direct_wasm_pc_minimals_enumerates_every_iiooo_single_member_tie() {
 }
 
 #[test]
-fn pc_minimals_rejects_unaccounted_caps_and_distribution_but_uses_cooperative_worker_binding() {
+fn pc_minimals_unique_execution_preserves_the_v074_count_all_public_field_identity() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let unique_query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(2, 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::O,
+        ])),
+        PieceWindow::new(5),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(5))
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_objective(ObjectivePolicy::minimum_cover());
+    let count_all_query = unique_query
+        .clone()
+        .with_count_policy(PcCountPolicy::CountAll);
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let legacy = context.run(AppRequest::new(AppCommand::Scenario(
+        ScenarioAppCommand::new(count_all_query),
+    )));
+    let canonical = context.run(multi_candidate_minimals_request());
+    let legacy_core = legacy
+        .render_model()
+        .and_then(crate::AppRenderModel::core_result)
+        .expect("v0.7.4-style count-all minimum-cover public result");
+    let report = canonical
+        .product_capability_result()
+        .and_then(|result| result.pc_minimum_cover_v2())
+        .expect("canonical pc.minimals product report");
+    let alternatives = report.portfolio_alternatives();
+    assert_eq!(alternatives.optimal_cardinality(), 1);
+    let candidate_keys = alternatives
+        .candidates()
+        .iter()
+        .map(|candidate| candidate.normalized_key())
+        .collect::<Vec<_>>();
+    assert_eq!(candidate_keys, legacy_core.normalized_solution_keys());
+    assert_eq!(
+        candidate_keys,
+        vec![
+            "ctk1|initial=0000000000000000|placements=I:000000000000000f,I:0000000000003c00,O:000000000000c030,O:00000000000300c0,O:00000000000c0300",
+            "ctk1|initial=0000000000000000|placements=I:000000000000003c,I:000000000000f000,O:0000000000000c03,O:00000000000300c0,O:00000000000c0300",
+            "ctk1|initial=0000000000000000|placements=I:00000000000000f0,I:000000000003c000,O:0000000000000c03,O:000000000000300c,O:00000000000c0300",
+            "ctk1|initial=0000000000000000|placements=I:00000000000003c0,I:00000000000f0000,O:0000000000000c03,O:000000000000300c,O:000000000000c030",
+        ]
+    );
+    assert_eq!(alternatives.coverage_rows().len(), 4);
+    assert!(alternatives
+        .coverage_rows()
+        .iter()
+        .all(|row| row == alternatives.required_patterns()));
+    let mut store = alternatives
+        .open_store()
+        .expect("canonical exact alternative enumerator");
+    let mut portfolios = vec![alternatives
+        .canonical_page()
+        .portfolio()
+        .candidate_ids()
+        .to_vec()];
+    loop {
+        let advance = store
+            .next_page(u64::MAX, &mut || false)
+            .expect("next canonical exact alternative");
+        if let Some(page) = advance.page() {
+            portfolios.push(page.portfolio().candidate_ids().to_vec());
+        }
+        if advance.checkpoint().enumeration_complete() {
+            assert_eq!(advance.checkpoint().known_alternative_count_decimal(), "4");
+            break;
+        }
+    }
+    assert_eq!(portfolios, [vec![1], vec![2], vec![3], vec![4]]);
+}
+
+#[test]
+fn pc_minimals_rejects_unaccounted_caps_and_binds_both_distributed_and_cooperative_workers() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let base = minimals_command().query().clone();
     let capped = base.clone().with_execution_policy(
@@ -544,15 +661,14 @@ fn pc_minimals_rejects_unaccounted_caps_and_distribution_but_uses_cooperative_wo
             if reason.contains("exact replay scratch is accounted")
     ));
 
-    let DistributedSearchPreparation::Ready(distributed) =
+    let DistributedSearchPreparation::Search(distributed) =
         AppContext::default().prepare_distributed_search(minimals_request())
     else {
-        panic!("typed pc minimals must not enter distributed search");
+        panic!("typed pc minimals must bind its distributed product identity");
     };
-    assert_eq!(distributed.status(), AppStatus::ValidationFailed);
-    assert!(distributed.error().is_some_and(|error| error
-        .message()
-        .contains("distributed product capability result binding is unavailable")));
+    assert!(!distributed.is_pc_score());
+    assert_eq!(distributed.problem().exact_pieces(), Some(5));
+    drop(distributed);
 
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
@@ -2099,6 +2215,26 @@ fn direct_wasm_pc_score_finalizes_one_basic_approximation_wrapper() {
     );
     assert!(!score.profile_specific_exact());
     assert!(score.completeness().complete());
+    let [field] = score.solution_field_averages() else {
+        panic!("one normalized solution must retain exactly one field-average row")
+    };
+    assert!(field.average_score() > 0.0);
+    assert_eq!(field.covered_pattern_count(), 1);
+    assert_eq!(field.pattern_count(), 1);
+    assert!(field.score_complete());
+    assert_eq!(score.overall_score_bits(), field.average_score_bits());
+    let payload = wrapper
+        .public_result_payload()
+        .expect("ordinary pc.score field-summary payload");
+    let ProductResultPayloadContent::PcScoreFieldSummary(summary) = payload.content() else {
+        panic!("ordinary pc.score must not publish a candidate winner family")
+    };
+    assert_eq!(summary.fields().len(), 1);
+    assert_eq!(summary.overall_score(), score.overall_score());
+    assert_eq!(
+        summary.overall_score_basis(),
+        "all-materialized-patterns-failed-pc-zero"
+    );
     let core = response
         .render_model()
         .and_then(|model| model.core_result())
@@ -2150,6 +2286,18 @@ fn direct_wasm_pc_score_finder_returns_the_complete_score_only_witness_family() 
         SpinProfileSelection::TSpins
     );
     assert_eq!(report.initial_b2b(), 1);
+    let canonical_winner = report
+        .canonical_winner()
+        .expect("score-finder core-owned canonical witness");
+    assert_eq!(
+        canonical_winner.candidate_id(),
+        report
+            .pattern_winners()
+            .iter()
+            .map(|winner| winner.candidate_id())
+            .min()
+            .expect("non-empty score-finder winner family")
+    );
     assert!(report
         .pattern_winners()
         .windows(2)
@@ -2169,6 +2317,15 @@ fn direct_wasm_pc_score_finder_returns_the_complete_score_only_witness_family() 
         panic!("score-finder must publish a normal score witness family")
     };
     assert_eq!(family.equality(), "score-only-attack-informational");
+    assert_eq!(family.canonical_selection(), report.canonical_selection());
+    assert_eq!(
+        family.canonical_winner().candidate_id(),
+        canonical_winner.candidate_id().to_string()
+    );
+    assert_eq!(
+        family.canonical_winner().normalized_solution_key(),
+        canonical_winner.normalized_solution_key().to_string()
+    );
     assert_eq!(
         family.informational_attack_basis(),
         "canonical-equal-score-trace"
@@ -2243,6 +2400,12 @@ fn direct_wasm_pc_score_minimals_finalizes_distinct_original_id_portfolio() {
     let ProductResultPayloadContent::CoveragePortfolio(payload) = payload.content() else {
         panic!("score-minimals payload must use the coverage portfolio DTO")
     };
+    assert_eq!(payload.canonical_selection(), None);
+    assert_eq!(payload.canonical_witness(), None);
+    assert_eq!(
+        report.canonical_selection(),
+        crate::PC_SCORE_CANONICAL_SELECTION
+    );
     assert!(payload.page_handle_available());
     assert!(payload.members().iter().all(|member| {
         let parsed = member.candidate_id().parse::<u64>().ok();
@@ -2621,6 +2784,25 @@ fn pc_score_zero_solution_matrix_is_complete_and_not_reclassified_as_missing() {
     assert_eq!(score.best_score(), None);
     assert_eq!(score.best_attack(), None);
     assert_eq!(score.covered_probability_bits(), 0.0_f64.to_bits());
+    assert_eq!(score.overall_score_bits(), 0.0_f64.to_bits());
+    assert_eq!(score.covered_pattern_conditional_average_score(), None);
+    assert!(score.solution_field_averages().is_empty());
+    let payload = response
+        .product_capability_result()
+        .and_then(|result| result.public_result_payload())
+        .expect("failed input field-summary payload");
+    let ProductResultPayloadContent::PcScoreFieldSummary(summary) = payload.content() else {
+        panic!("failed ordinary pc.score still uses the field-summary payload")
+    };
+    assert_eq!(summary.scored_pattern_count(), "0");
+    assert_eq!(summary.failed_pc_pattern_count(), "1");
+    assert_eq!(summary.overall_score(), "0");
+    assert_eq!(
+        summary.score_covered_pattern_conditional_average_score(),
+        None
+    );
+    assert_eq!(summary.solution_field_count(), "0");
+    assert!(summary.fields().is_empty());
     assert!(score.completeness().matrix_complete());
     assert!(score.completeness().summary_complete());
 }
@@ -2721,7 +2903,7 @@ fn cooperative_pc_score_uses_the_same_closed_evidence_and_honors_cancellation() 
 }
 
 #[test]
-fn pc_score_native_and_distributed_paths_fail_closed_before_claiming_authority() {
+fn pc_score_native_fails_closed_while_distributed_binds_typed_authority() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let origin = PcScoreIngressOrigin::CanonicalPcScore;
     let request = score_request(origin, PieceKind::I);
@@ -2736,48 +2918,40 @@ fn pc_score_native_and_distributed_paths_fail_closed_before_claiming_authority()
         .message()
         .contains("pc_score_native_executed_problem_evidence_unavailable"));
 
-    let DistributedSearchPreparation::Ready(distributed) =
+    let DistributedSearchPreparation::Search(distributed) =
         AppContext::default().prepare_distributed_search(request)
     else {
-        panic!("typed distributed score must stop before compilation");
+        panic!("typed distributed score must bind its compiled authority");
     };
-    assert_eq!(distributed.status(), AppStatus::ValidationFailed);
-    assert!(distributed.product_capability_result().is_none());
-    assert!(distributed.pc_score_execution_evidence().is_none());
-    assert!(distributed.render_model().is_none());
+    assert!(distributed.is_pc_score());
     assert!(distributed
-        .error()
-        .expect("typed distributed score rejection")
-        .message()
-        .contains("distributed product capability result binding is unavailable"));
+        .pc_score_terminal_resource_authority()
+        .expect("typed score distributed authority projection")
+        .is_some());
 }
 
 #[test]
-fn distributed_typed_request_is_unavailable_until_result_identity_is_bound() {
+fn distributed_typed_minimals_request_binds_result_identity_before_search() {
     let context = AppContext::default();
-    let DistributedSearchPreparation::Ready(response) =
-        context.prepare_distributed_search(chance_request())
+    let DistributedSearchPreparation::Search(prepared) =
+        context.prepare_distributed_search(minimals_request())
     else {
-        panic!("typed distributed request must stop before search preparation");
+        panic!("typed distributed minimals request must bind before search preparation");
     };
-    assert_typed_request_rejected(
-        &response,
-        "distributed product capability result binding is unavailable",
-    );
+    assert!(!prepared.is_pc_score());
+    assert!(prepared.problem().exact_pieces().is_some());
 }
 
 #[test]
-fn distributed_pc_chance_is_rejected_before_compilation_or_solver_creation() {
+fn distributed_pc_chance_binds_product_identity_before_solver_creation() {
     let context = AppContext::default();
-    let DistributedSearchPreparation::Ready(response) = context.prepare_distributed_search(
+    let DistributedSearchPreparation::Search(prepared) = context.prepare_distributed_search(
         probability_request(PcChanceIngressOrigin::CanonicalPcChance),
     ) else {
-        panic!("typed pc chance must stop before distributed search preparation");
+        panic!("typed pc chance must bind before distributed search preparation");
     };
-    assert_typed_request_rejected(
-        &response,
-        "distributed product capability result binding is unavailable",
-    );
+    assert!(!prepared.is_pc_score());
+    assert!(prepared.problem().exact_pieces().is_some());
 }
 
 fn assert_typed_request_rejected(response: &AppResponse, expected: &str) {

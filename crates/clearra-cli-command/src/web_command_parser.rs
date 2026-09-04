@@ -213,6 +213,7 @@ impl WebCommandParser {
         worker_hardware_limit: usize,
         compatibility_authority: WebCompatibilityAuthority,
     ) -> Result<WebCommandRequest, WebCommandError> {
+        reject_nul_tokens(tokens)?;
         validate_pretranslation_pc_score_tokens(tokens, compatibility_authority)?;
         let translated =
             crate::sfinder_compat::translate_command_with_origin(tokens, compatibility_authority)?;
@@ -229,7 +230,7 @@ impl WebCommandParser {
         }
 
         let command = tokens.get(cursor).ok_or_else(|| {
-            WebCommandError::new(WebCommandErrorCode::EmptyCommand, "empty web command")
+            WebCommandError::new(WebCommandErrorCode::EmptyCommand, "empty CLI command")
         })?;
         cursor += 1;
         let request = match command.as_str() {
@@ -376,7 +377,7 @@ impl WebCommandParser {
             "utility" => parse_utility_command(&tokens[cursor..]),
             _ => Err(WebCommandError::new(
                 WebCommandErrorCode::UnsupportedCommand,
-                format!("unsupported web command '{command}'"),
+                format!("unsupported CLI command '{command}'"),
             )),
         }?;
         Ok(request.with_request_structural_profiles(request_structural_profiles))
@@ -4410,13 +4411,13 @@ fn parse_pc_command(
             flag if flag.starts_with("--") => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::UnsupportedCommand,
-                    format!("unsupported web command option '{flag}'"),
+                    format!("unsupported CLI command option '{flag}'"),
                 ));
             }
             value => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
-                    format!("unexpected web command token '{value}'"),
+                    format!("unexpected CLI command token '{value}'"),
                 ));
             }
         }
@@ -4730,7 +4731,7 @@ fn parse_board_words(value: &str, option: &str) -> Result<[u64; 4], WebCommandEr
         .or_else(|| value.strip_prefix("0X"));
     // Discord's canonical 10 x 24 field contract is a fixed-width 240-bit
     // hexadecimal value without a prefix. Keep shorter unprefixed values on
-    // the established decimal path so existing web commands remain stable.
+    // the established decimal path so existing CLI commands remain stable.
     let canonical_field_hex =
         (value.len() == 60 && value.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(value);
     if let Some(hex) = prefixed_hex.or(canonical_field_hex) {
@@ -4841,6 +4842,16 @@ fn next_value<'a>(
     Ok(value)
 }
 
+fn reject_nul_tokens(tokens: &[String]) -> Result<(), WebCommandError> {
+    if tokens.iter().any(|token| token.contains('\0')) {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "CLI command values must not contain NUL",
+        ));
+    }
+    Ok(())
+}
+
 fn tokenize(command_text: &str) -> Result<Vec<String>, WebCommandError> {
     let mut tokens = Vec::new();
     let mut token = String::new();
@@ -4848,12 +4859,18 @@ fn tokenize(command_text: &str) -> Result<Vec<String>, WebCommandError> {
     let mut quoted = false;
     let mut escaped = false;
     for character in command_text.chars() {
+        if character == '\0' {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "CLI command values must not contain NUL",
+            ));
+        }
         if quoted {
             if escaped {
                 if !matches!(character, '"' | '\\') {
                     return Err(WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
-                        "web command quoted values only escape quote or backslash",
+                        "CLI command quoted values only escape quote or backslash",
                     ));
                 }
                 token.push(character);
@@ -4883,7 +4900,7 @@ fn tokenize(command_text: &str) -> Result<Vec<String>, WebCommandError> {
     if quoted || escaped {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
-            "web command contains an unterminated quoted value",
+            "CLI command contains an unterminated quoted value",
         ));
     }
     if token_started {
@@ -4892,21 +4909,94 @@ fn tokenize(command_text: &str) -> Result<Vec<String>, WebCommandError> {
     if tokens.is_empty() {
         return Err(WebCommandError::new(
             WebCommandErrorCode::EmptyCommand,
-            "empty web command",
+            "empty CLI command",
         ));
     }
     Ok(tokens)
 }
 
 fn reject_process_semantics(command_text: &str) -> Result<(), WebCommandError> {
-    for marker in ["|", "&&", "`", "$(", ">", "<"] {
-        if command_text.contains(marker) {
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut token = String::new();
+    let mut token_started = false;
+    let mut current_is_pattern_value = false;
+    let mut next_is_pattern_value = false;
+    let mut characters = command_text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if quoted {
+            if escaped {
+                token.push(character);
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            } else {
+                token.push(character);
+            }
+            continue;
+        }
+        if character == '"' {
+            if !token_started {
+                token_started = true;
+                current_is_pattern_value = next_is_pattern_value;
+                next_is_pattern_value = false;
+            }
+            quoted = true;
+            continue;
+        }
+
+        if matches!(character, '\r' | '\n') {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::ProcessSemantics,
                 "web runtime does not accept shell or process control syntax",
             ));
         }
+        if character.is_whitespace() {
+            if token_started {
+                next_is_pattern_value = is_pattern_expression_option(&token);
+                token.clear();
+                token_started = false;
+                current_is_pattern_value = false;
+            }
+            continue;
+        }
+
+        if !token_started {
+            token_started = true;
+            current_is_pattern_value = next_is_pattern_value;
+            next_is_pattern_value = false;
+        }
+        // A semicolon is part of Clearra's queue-pattern grammar when it joins
+        // two alternatives in the value of a pattern option. It is not process
+        // control there: this parser owns the text and never invokes a shell.
+        // Require both adjacent alternative fragments to stay in the same raw
+        // token so `--patterns P7; clearra ...` remains fail-closed.
+        let pattern_alternative_separator = character == ';'
+            && current_is_pattern_value
+            && !token.is_empty()
+            && characters
+                .peek()
+                .is_some_and(|next| !next.is_whitespace() && *next != '"');
+        let process_semantics =
+            matches!(character, '|' | '&' | ';' | '`' | '>' | '<' | '\r' | '\n')
+                || (character == '$' && characters.peek() == Some(&'('));
+        if process_semantics && !pattern_alternative_separator {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::ProcessSemantics,
+                "web runtime does not accept shell or process control syntax",
+            ));
+        }
+        token.push(character);
     }
     Ok(())
 }
-// SRP rationale: this module has one behavior-level change reason: parsing the complete public web command grammar into typed requests.
+
+fn is_pattern_expression_option(token: &str) -> bool {
+    matches!(
+        token,
+        "--patterns" | "--pattern" | "-p" | "--setup-patterns" | "--solution-patterns"
+    )
+}
+// SRP rationale: this module has one behavior-level change reason: parsing the complete public CLI command grammar into typed requests.

@@ -145,7 +145,9 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         }
     }
     foreach ($requiredMarker in @(
-        "GuiToAppRequest::build",
+        "CliCommandParser::parse_tokens",
+        '"clearra-cli/CommandRequest"',
+        "mod active_request_parser",
         "self.app_context.run(request)",
         "response.to_host_response_with_solution_set_artifact",
         "serde_json::to_string",
@@ -157,6 +159,8 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         }
     }
     foreach ($requiredMarker in @(
+        "ClearraDesktopRequest = ClearraDesktopCliCommandRequest",
+        "app_request_model: 'clearra-cli/CommandRequest'",
         "invoke<string>('run_request'",
         "JSON.parse(response)",
         "invoke<number>('start_job'",
@@ -170,6 +174,7 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
     }
     foreach ($requiredMarker in @(
         "getJobEvents",
+        "requireCompleteDesktopCliRequest",
         "events.reduce",
         "isTerminalEvent",
         "startDesktopJob",
@@ -283,6 +288,16 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
     )) {
         if ($productSurface -like "*$forbiddenMarker*") {
             Add-ArchitectureError "U6 desktop product contains forbidden marker '$forbiddenMarker'"
+        }
+    }
+    foreach ($forbiddenMarker in @(
+        "clearra-app/AppRequest",
+        "buildDesktopAppRequest",
+        "ClearraDesktopRequestInput",
+        "Partial<ClearraDesktopRequest>"
+    )) {
+        if ($desktopClient -like "*$forbiddenMarker*" -or $desktopStore -like "*$forbiddenMarker*") {
+            Add-ArchitectureError "U6 desktop TypeScript boundary contains legacy request marker '$forbiddenMarker'"
         }
     }
     if ($productSurface -match "(?m)\bget_job_event\b" -or

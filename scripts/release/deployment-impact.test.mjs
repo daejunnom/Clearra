@@ -168,7 +168,7 @@ test("runtime-consumer exceptions select the exact deployment surfaces", () => {
       cli: false,
     },
     {
-      path: "crates/clearra-web-command/src/web_command_parser.rs",
+      path: "crates/clearra-cli-command/src/web_command_parser.rs",
       scope: "pages+discord+gui+cli",
       pages: true,
       discord: true,

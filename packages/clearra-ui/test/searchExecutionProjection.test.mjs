@@ -14,6 +14,7 @@ const bundle = await build({
     contents: `
       export {
         buildProbabilityCommand,
+        buildProbabilityCommandArguments,
         buildProbabilityRequestForDesktop,
         buildProbabilityValidationCodes,
         createDefaultBuildProbabilityRequest,
@@ -21,9 +22,11 @@ const bundle = await build({
       } from './src/lib/workspace/buildProbabilityModel.ts';
       export {
         buildWorkspaceCommand,
+        buildWorkspaceCommandArguments,
         createDefaultWorkspaceRequest,
         normalizeWorkspaceRequest,
         workspaceRequestForDesktop,
+        workspaceUsesOpeningPcPreset,
         workspaceValidationCodes
       } from './src/lib/workspace/solverWorkspaceModel.ts';
       export {
@@ -31,15 +34,17 @@ const bundle = await build({
         searchExecutionDesktopFields
       } from './src/lib/workspace/searchExecutionModel.ts';
       export {
+        buildForwardSearchCommandArguments,
         createDefaultForwardSearchRequest,
         forwardSearchRequestForDesktop,
         spinCategoryOptions
       } from './src/lib/workspace/forwardSearchModel.ts';
       export {
+        buildSetupFinderCommandArguments,
+        buildSetupPathDetailCommandArguments,
         createDefaultSetupFinderRequest,
         setupFinderRequestForDesktop
       } from './src/lib/workspace/setupFinderModel.ts';
-      export { buildDesktopAppRequest } from './src/lib/host/clearraDesktopHost.ts';
     `,
     loader: 'ts',
     resolveDir: fileURLToPath(new URL('..', import.meta.url))
@@ -97,6 +102,51 @@ function optionValue(tokens, option) {
   assert.notEqual(index, -1, `missing ${option}`);
   return tokens[index + 1];
 }
+
+function assertDesktopCliParity(request, label = 'desktop CLI parity') {
+  const desktop = production.workspaceRequestForDesktop(request, 'en');
+  const expected = production.buildWorkspaceCommandArguments(request);
+  assert.equal(desktop.app_request_model, 'clearra-cli/CommandRequest', label);
+  assert.equal(desktop.command, 'cli', label);
+  assert.deepEqual(desktop.arguments, expected, label);
+  return desktop.arguments;
+}
+
+test('Desktop production boundary accepts complete CLI argv envelopes only', () => {
+  const client = readFileSync(
+    new URL('../src/lib/host/clearraDesktopHost.ts', import.meta.url),
+    'utf8'
+  );
+  const store = readFileSync(
+    new URL('../src/lib/stores/desktopJobStore.ts', import.meta.url),
+    'utf8'
+  );
+  const bridge = readFileSync(
+    new URL('../../../crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs', import.meta.url),
+    'utf8'
+  );
+  const rustRequestModule = readFileSync(
+    new URL('../../../crates/clearra-gui-host/src/request/mod.rs', import.meta.url),
+    'utf8'
+  );
+  const rustHostLibrary = readFileSync(
+    new URL('../../../crates/clearra-gui-host/src/lib.rs', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(client, /ClearraDesktopRequest\s*=\s*ClearraDesktopCliCommandRequest/u);
+  assert.match(store, /requireCompleteDesktopCliRequest/u);
+  for (const source of [client, store]) {
+    assert.doesNotMatch(source, /clearra-app\/AppRequest/u);
+    assert.doesNotMatch(source, /buildDesktopAppRequest/u);
+    assert.doesNotMatch(source, /Partial<ClearraDesktopRequest>/u);
+  }
+  assert.match(bridge, /mod cli_request_parser/u);
+  assert.match(bridge, /#\[cfg\(not\(test\)\)\]\s*mod active_request_parser/u);
+  assert.match(bridge, /CliCommandParser::parse_tokens/u);
+  assert.match(rustRequestModule, /#\[cfg\(test\)\]\s*mod gui_to_app_request;/u);
+  assert.match(rustHostLibrary, /#\[cfg\(test\)\]\s*pub mod request;/u);
+});
 
 const BUILD_TILING_RISKS = [
   {
@@ -248,15 +298,13 @@ function assertBuildTilingProjection(request, label) {
   assert.match(command, /--backend cpu --no-backend-fallback/u, label);
 
   const desktop = production.buildProbabilityRequestForDesktop(request, 'en');
-  assert.equal(desktop.build_aggregation, 'tiling', label);
-  assert.equal(desktop.rule, 'srs-plus', label);
-  assert.equal(desktop.spin_profile, 't-spins', label);
-  assert.equal(desktop.preserve_b2b, false, label);
-  assert.equal(desktop.precompute_build_dependencies, false, label);
-  assert.equal(desktop.finesse, 'off', label);
-  assert.equal(desktop.pattern_knowledge, 'both', label);
-  assert.equal(desktop.backend, 'cpu', label);
-  assert.equal(desktop.allow_backend_fallback, false, label);
+  assert.equal(desktop.app_request_model, 'clearra-cli/CommandRequest', label);
+  assert.equal(desktop.command, 'cli', label);
+  assert.deepEqual(
+    desktop.arguments,
+    production.buildProbabilityCommandArguments(request),
+    label
+  );
 }
 
 function assertPcTilingProjection(request, label) {
@@ -294,16 +342,7 @@ function assertPcTilingProjection(request, label) {
     assert.equal(hasOption(tokens, option), false, `${label}: leaked ${option}`);
   }
 
-  const desktop = production.workspaceRequestForDesktop(request, 'en');
-  assert.equal(desktop.score_mode, 'tiling', label);
-  assert.equal(desktop.queue_knowledge, 'oracle', label);
-  assert.equal(desktop.rule, 'srs-plus', label);
-  assert.equal(desktop.score_profile, 'tetrio', label);
-  assert.equal(desktop.spin_profile, 't-spins', label);
-  assert.equal(desktop.preserve_b2b, false, label);
-  assert.equal(desktop.initial_b2b, 0, label);
-  assert.equal(desktop.solution_probabilities, false, label);
-  assert.equal(desktop.precompute_build_dependencies, false, label);
+  assertDesktopCliParity(request, label);
 }
 
 function applyRisk(request, risk, representative) {
@@ -332,12 +371,7 @@ test('shared fixture defaults remain explicit beside the actual Web/Desktop proj
   assert.match(pcCommand, /--lines 4/u);
   assert.match(pcCommand, /--count unique/u);
   assert.match(pcCommand, /--backend auto --allow-backend-fallback/u);
-  const pcDesktop = production.workspaceRequestForDesktop(pc, 'en');
-  assert.equal(pcDesktop.lines, 4);
-  assert.equal(pcDesktop.count_policy, 'unique');
-  assert.equal(pcDesktop.backend, 'auto');
-  assert.equal(pcDesktop.allow_backend_fallback, true);
-  assert.equal(Number(optionValue(commandTokens(pcCommand), '--workers')), pcDesktop.workers);
+  assertDesktopCliParity(pc);
 
   const buildRequest = {
     ...production.createDefaultBuildProbabilityRequest(),
@@ -349,12 +383,15 @@ test('shared fixture defaults remain explicit beside the actual Web/Desktop proj
   assert.match(buildCommand, /--aggregate buildability/u);
   assert.match(buildCommand, /--backend cpu --no-backend-fallback/u);
   const buildDesktop = production.buildProbabilityRequestForDesktop(buildRequest, 'en');
-  assert.equal(buildDesktop.build_aggregation, 'buildability');
-  assert.equal(buildDesktop.backend, 'cpu');
-  assert.equal(buildDesktop.allow_backend_fallback, false);
+  assert.equal(buildDesktop.app_request_model, 'clearra-cli/CommandRequest');
+  assert.equal(buildDesktop.command, 'cli');
+  assert.deepEqual(
+    buildDesktop.arguments,
+    production.buildProbabilityCommandArguments(buildRequest)
+  );
   assert.equal(
     Number(optionValue(commandTokens(buildCommand), '--workers')),
-    buildDesktop.workers
+    Number(optionValue(buildDesktop.arguments, '--workers'))
   );
 });
 
@@ -403,7 +440,7 @@ test('fixture backend by fallback Cartesian representatives preserve argv and ty
     };
     const expectedAllow = backend === 'auto';
     const command = production.buildWorkspaceCommand(pc);
-    const desktop = production.workspaceRequestForDesktop(pc, 'en');
+    const desktopTokens = assertDesktopCliParity(pc, `PC ${backend}`);
     assert.equal(
       hasOption(commandTokens(command), expectedAllow
         ? '--allow-backend-fallback'
@@ -411,13 +448,11 @@ test('fixture backend by fallback Cartesian representatives preserve argv and ty
       true,
       `PC ${backend}`
     );
-    assert.equal(desktop.allow_backend_fallback, expectedAllow, `PC ${backend}`);
-    assert.equal(desktop.gpu_device, backend === 'cpu' ? 'auto' : '2', `PC ${backend}`);
-    assert.equal(
-      Number(optionValue(commandTokens(command), '--workers')),
-      desktop.workers,
-      `PC ${backend}`
-    );
+    if (backend === 'cpu') {
+      assert.equal(hasOption(desktopTokens, '--gpu-device'), false, `PC ${backend}`);
+    } else {
+      assert.equal(optionValue(desktopTokens, '--gpu-device'), '2', `PC ${backend}`);
+    }
   }
 });
 
@@ -446,20 +481,7 @@ test('PC scenario validation preserves odd-height fields and enforces the docume
   );
 });
 
-test('desktop request helper defaults fallback from the final backend instead of a global true', () => {
-  for (const backend of ['auto', 'cpu', 'gpu', 'hybrid']) {
-    const request = production.buildDesktopAppRequest({ backend });
-    assert.equal(request.backend, backend);
-    assert.equal(request.allow_backend_fallback, backend === 'auto', backend);
-  }
-  assert.equal(
-    production.buildDesktopAppRequest({ backend: 'gpu', allow_backend_fallback: true })
-      .allow_backend_fallback,
-    true
-  );
-});
-
-test('Desktop forward projection is command-discriminated and preserves normalized workers', () => {
+test('Desktop forward projection preserves the canonical command-discriminated CLI argv', () => {
   const stale = {
     ...production.createDefaultForwardSearchRequest('damage'),
     queue: 'TIO',
@@ -473,14 +495,15 @@ test('Desktop forward projection is command-discriminated and preserves normaliz
   const damage = JSON.parse(JSON.stringify(
     production.forwardSearchRequestForDesktop(stale, 'en', 11)
   ));
-  assert.equal(damage.workers, 11);
-  assert.equal(damage.initial_combo, 2);
-  assert.equal(damage.initial_b2b, 3);
-  assert.equal(damage.damage_aggregation, 'at-least');
-  assert.equal(damage.minimum_damage, 6);
-  for (const key of ['spin_lines', 'spin_category']) {
-    assert.equal(Object.hasOwn(damage, key), false, `damage leaked ${key}`);
-  }
+  assert.equal(damage.app_request_model, 'clearra-cli/CommandRequest');
+  assert.equal(damage.command, 'cli');
+  assert.deepEqual(damage.arguments, production.buildForwardSearchCommandArguments(stale, 11));
+  assert.equal(optionValue(damage.arguments, '--auto-workers'), '11');
+  assert.equal(optionValue(damage.arguments, '--initial-combo'), '2');
+  assert.equal(optionValue(damage.arguments, '--initial-b2b'), '3');
+  assert.equal(optionValue(damage.arguments, '--minimum-damage'), '6');
+  assert.equal(hasOption(damage.arguments, '--lines'), false);
+  assert.equal(hasOption(damage.arguments, '--spin-category'), false);
 
   const spin = JSON.parse(JSON.stringify(
     production.forwardSearchRequestForDesktop(
@@ -489,17 +512,14 @@ test('Desktop forward projection is command-discriminated and preserves normaliz
       12
     )
   ));
-  assert.equal(spin.workers, 12);
-  assert.equal(spin.spin_lines, '2+');
-  assert.equal(spin.spin_category, 't');
-  for (const key of [
-    'initial_combo',
-    'initial_b2b',
-    'damage_aggregation',
-    'minimum_damage'
-  ]) {
-    assert.equal(Object.hasOwn(spin, key), false, `spin-finder leaked ${key}`);
-  }
+  const spinRequest = { ...stale, tool: 'spin-finder', queue: '[TIO]!' };
+  assert.deepEqual(spin.arguments, production.buildForwardSearchCommandArguments(spinRequest, 12));
+  assert.equal(optionValue(spin.arguments, '--auto-workers'), '12');
+  assert.equal(optionValue(spin.arguments, '--lines'), '2+');
+  assert.equal(optionValue(spin.arguments, '--spin-category'), 't');
+  assert.equal(hasOption(spin.arguments, '--initial-combo'), false);
+  assert.equal(hasOption(spin.arguments, '--initial-b2b'), false);
+  assert.equal(hasOption(spin.arguments, '--minimum-damage'), false);
 
   const ren = JSON.parse(JSON.stringify(
     production.forwardSearchRequestForDesktop(
@@ -508,36 +528,14 @@ test('Desktop forward projection is command-discriminated and preserves normaliz
       13
     )
   ));
-  assert.equal(ren.command, 'ren');
-  assert.equal(ren.queue, 'TI');
-  assert.equal(ren.hold_enabled, false);
-  assert.equal(ren.spin_profile, 'disabled');
-  assert.equal(ren.preserve_b2b, false);
-  assert.equal(ren.workers, 13);
-  for (const key of [
-    'initial_combo',
-    'initial_b2b',
-    'damage_aggregation',
-    'minimum_damage',
-    'spin_lines',
-    'spin_category'
-  ]) {
-    assert.equal(Object.hasOwn(ren, key), false, `REN leaked ${key}`);
-  }
-
-  for (const command of ['setup', 'build-probability']) {
-    const projected = JSON.parse(JSON.stringify(production.buildDesktopAppRequest({ command })));
-    for (const key of [
-      'initial_combo',
-      'initial_b2b',
-      'damage_aggregation',
-      'minimum_damage',
-      'spin_lines',
-      'spin_category'
-    ]) {
-      assert.equal(Object.hasOwn(projected, key), false, `${command} leaked ${key}`);
-    }
-  }
+  const renRequest = { ...stale, tool: 'ren', queue: 'TI', holdEnabled: false };
+  assert.deepEqual(ren.arguments, production.buildForwardSearchCommandArguments(renRequest, 13));
+  assert.deepEqual(ren.arguments.slice(0, 2), ['clearra', 'ren']);
+  assert.equal(optionValue(ren.arguments, '--queue'), 'TI');
+  assert.equal(hasOption(ren.arguments, '--no-hold'), true);
+  assert.equal(hasOption(ren.arguments, '--spin-profile'), false);
+  assert.equal(hasOption(ren.arguments, '--preserve-b2b'), false);
+  assert.equal(optionValue(ren.arguments, '--auto-workers'), '13');
 });
 
 test('forward spin category choices expose non-T spins for every all-piece profile', () => {
@@ -549,21 +547,32 @@ test('forward spin category choices expose non-T spins for every all-piece profi
   }
 });
 
-test('Desktop setup search shares normalized workers while path detail keeps the host sentinel', () => {
+test('Desktop setup search and path detail preserve their canonical CLI argv', () => {
   const request = {
     ...production.createDefaultSetupFinderRequest(),
     useAllLogicalProcessors: true
   };
   const search = production.setupFinderRequestForDesktop(request, 'en', 12);
-  assert.equal(search.workers, 12);
-  assert.equal(search.use_all_logical_processors, true);
+  assert.equal(search.app_request_model, 'clearra-cli/CommandRequest');
+  assert.equal(search.command, 'cli');
+  assert.deepEqual(search.arguments, production.buildSetupFinderCommandArguments(request, 12));
+  assert.equal(optionValue(search.arguments, '--auto-workers'), '12');
+  assert.equal(hasOption(search.arguments, '--use-all-cpu-threads'), true);
 
   const detail = production.setupFinderRequestForDesktop(request, 'en', 12, {
     setupId: 'setup-1',
     conditionId: 'condition-1'
   });
-  assert.equal(detail.workers, 0);
-  assert.equal(detail.use_all_logical_processors, false);
+  assert.deepEqual(
+    detail.arguments,
+    production.buildSetupPathDetailCommandArguments(
+      request,
+      { setupId: 'setup-1', conditionId: 'condition-1' },
+      12
+    )
+  );
+  assert.equal(optionValue(detail.arguments, '--auto-workers'), '12');
+  assert.equal(hasOption(detail.arguments, '--use-all-cpu-threads'), false);
 });
 
 test('PC score mode transitions canonicalize inactive Desktop profiles', () => {
@@ -582,10 +591,7 @@ test('PC score mode transitions canonicalize inactive Desktop profiles', () => {
     assert.equal(normalized.scoreProfile, 'tetrio', scoreMode);
     assert.equal(normalized.spinProfile, 't-spins', scoreMode);
     assert.equal(normalized.initialB2B, 0, scoreMode);
-    const desktop = production.workspaceRequestForDesktop(request, 'en');
-    assert.equal(desktop.score_profile, 'tetrio', scoreMode);
-    assert.equal(desktop.spin_profile, 't-spins', scoreMode);
-    assert.equal(desktop.initial_b2b, 0, scoreMode);
+    assertDesktopCliParity(request, scoreMode);
     const tokens = commandTokens(production.buildWorkspaceCommand(request));
     for (const option of ['--score-profile', '--spin-profile', '--initial-b2b']) {
       assert.equal(hasOption(tokens, option), false, `${scoreMode} leaked ${option}`);
@@ -618,11 +624,7 @@ test('PC minimum-cover and score GUI modes lower only to their canonical product
   ]) {
     assert.equal(hasOption(minimalsTokens, option), false, `pc.minimals leaked ${option}`);
   }
-  const minimalsDesktop = production.workspaceRequestForDesktop(minimals, 'en');
-  assert.equal(minimalsDesktop.score_mode, 'minimum-cover');
-  assert.equal(minimalsDesktop.count_policy, 'unique');
-  assert.equal(minimalsDesktop.tablebase_requested, false);
-  assert.equal(minimalsDesktop.precompute_build_dependencies, false);
+  assertDesktopCliParity(minimals, 'pc.minimals desktop parity');
 
   const score = {
     ...base,
@@ -663,14 +665,7 @@ test('PC minimum-cover and score GUI modes lower only to their canonical product
   ]) {
     assert.equal(hasOption(scoreTokens, option), false, `pc.score leaked ${option}`);
   }
-  const scoreDesktop = production.workspaceRequestForDesktop(score, 'en');
-  assert.equal(scoreDesktop.score_mode, 'summary');
-  assert.equal(scoreDesktop.backend, 'cpu');
-  assert.equal(scoreDesktop.workers, 1);
-  assert.equal(scoreDesktop.use_all_logical_processors, false);
-  assert.equal(scoreDesktop.allow_backend_fallback, false);
-  assert.equal(scoreDesktop.preserve_b2b, false);
-  assert.equal(scoreDesktop.solution_probabilities, false);
+  assertDesktopCliParity(score, 'pc.score desktop parity');
 });
 
 test('PC path GUI mode lowers to the complete ordinary replay-family contract', () => {
@@ -721,17 +716,7 @@ test('PC path GUI mode lowers to the complete ordinary replay-family contract', 
     assert.equal(hasOption(tokens, option), false, `pc.path leaked ${option}`);
   }
 
-  const desktop = production.workspaceRequestForDesktop(request, 'en');
-  assert.equal(desktop.score_mode, 'path');
-  assert.equal(desktop.count_policy, 'all');
-  assert.equal(desktop.queue_knowledge, 'oracle');
-  assert.equal(desktop.score_profile, 'tetrio');
-  assert.equal(desktop.spin_profile, 't-spins');
-  assert.equal(desktop.initial_b2b, 0);
-  assert.equal(desktop.preserve_b2b, false);
-  assert.equal(desktop.solution_probabilities, false);
-  assert.equal(desktop.tablebase_requested, false);
-  assert.equal(desktop.precompute_build_dependencies, false);
+  assertDesktopCliParity(request, 'pc.path desktop parity');
 });
 
 test('PC score-finder GUI mode owns one fixed queue and its fixed score policy', () => {
@@ -801,19 +786,7 @@ test('PC score-finder GUI mode owns one fixed queue and its fixed score policy',
     assert.equal(hasOption(tokens, option), false, `pc.score-finder leaked ${option}`);
   }
 
-  const desktop = production.workspaceRequestForDesktop(request, 'en');
-  assert.equal(desktop.score_mode, 'score-finder');
-  assert.equal(desktop.count_policy, 'all');
-  assert.equal(desktop.queue, 'I');
-  assert.equal(desktop.patterns, '');
-  assert.equal(desktop.queue_knowledge, 'oracle');
-  assert.equal(desktop.score_profile, 'jstris-ultra');
-  assert.equal(desktop.spin_profile, 't-spins');
-  assert.equal(desktop.initial_b2b, 1);
-  assert.equal(desktop.backend, 'cpu');
-  assert.equal(desktop.workers, 1);
-  assert.equal(desktop.use_all_logical_processors, false);
-  assert.equal(desktop.allow_backend_fallback, false);
+  assertDesktopCliParity(request, 'pc.score-finder desktop parity');
 
   for (const queue of ['', 'P7', '[IOSZ]p2']) {
     const invalid = { ...request, queue };
@@ -890,77 +863,84 @@ test('PC score-minimals GUI mode binds score-only minimum cover without runtime 
     assert.equal(hasOption(tokens, option), false, `pc.score-minimals leaked ${option}`);
   }
 
-  const desktop = production.workspaceRequestForDesktop(request, 'en');
-  assert.equal(desktop.score_mode, 'score-minimals');
-  assert.equal(desktop.count_policy, 'all');
-  assert.equal(desktop.queue_knowledge, 'oracle');
-  assert.equal(desktop.backend, 'cpu');
-  assert.equal(desktop.workers, 1);
-  assert.equal(desktop.use_all_logical_processors, false);
-  assert.equal(desktop.allow_backend_fallback, false);
-  assert.equal(desktop.preserve_b2b, false);
-  assert.equal(desktop.solution_probabilities, false);
-  assert.equal(desktop.pattern_budget, 5040);
+  assertDesktopCliParity(request, 'pc.score-minimals desktop parity');
 });
 
-test('PC save GUI modes lower to distinct canonical products without fixed-boundary overrides', () => {
-  const base = {
-    ...production.createDefaultWorkspaceRequest(),
-    lines: 2,
-    boardMask: 0xf3fcfn,
-    queue: 'P7',
-    holdEnabled: false,
-    queueKnowledge: 'visible-7',
-    scoreProfile: 'guideline',
-    spinProfile: 'all-mini-plus',
-    preserveB2B: true,
-    initialB2B: 9,
-    solutionProbabilities: true,
-    tablebaseEnabled: true,
-    precomputeBuildDependencies: true
-  };
-  for (const [scoreMode, subcommand] of [
-    ['saves', 'saves'],
-    ['best-save', 'best-save']
-  ]) {
-    const request = { ...base, scoreMode };
-    const normalized = production.normalizeWorkspaceRequest(request);
-    assert.equal(normalized.queueKnowledge, 'oracle', scoreMode);
-    assert.equal(normalized.preserveB2B, false, scoreMode);
-    assert.equal(normalized.solutionProbabilities, false, scoreMode);
-    assert.equal(normalized.tablebaseEnabled, false, scoreMode);
-    assert.equal(normalized.precomputeBuildDependencies, false, scoreMode);
+test('retired PC products have no GUI producer or consumer and forged legacy modes fail closed', () => {
+  const controls = readFileSync(
+    new URL('../src/lib/workspace/SearchControls.svelte', import.meta.url),
+    'utf8'
+  );
+  const standalone = readFileSync(
+    new URL('../src/lib/workspace/PcSolverStandalone.svelte', import.meta.url),
+    'utf8'
+  );
+  const model = readFileSync(
+    new URL('../src/lib/workspace/solverWorkspaceModel.ts', import.meta.url),
+    'utf8'
+  );
+  const resultPresenter = readFileSync(
+    new URL('../src/lib/workspace/ProductResultPager.svelte', import.meta.url),
+    'utf8'
+  );
+  const resultModel = readFileSync(
+    new URL('../src/lib/workspace/productResultPager.ts', import.meta.url),
+    'utf8'
+  );
+  const wasmTransport = readFileSync(
+    new URL('../src/lib/wasm/wasmCommandClient.ts', import.meta.url),
+    'utf8'
+  );
+  const messages = readFileSync(
+    new URL('../src/lib/workspace/workspaceI18n.ts', import.meta.url),
+    'utf8'
+  );
 
-    const tokens = commandTokens(production.buildWorkspaceCommand(request));
-    assert.deepEqual(tokens.slice(0, 3), ['clearra', 'pc', subcommand], scoreMode);
-    assert.equal(optionValue(tokens, '--patterns'), 'P7', scoreMode);
-    for (const option of [
-      '--queue',
-      '--objective',
-      '--count',
-      '--solution-probabilities',
-      '--queue-knowledge',
-      '--preserve-b2b',
-      '--tablebase',
-      '--no-tablebase',
-      '--build-dependency-dag',
-      '--no-build-dependency-dag',
-      '--max-memory-mib'
-    ]) {
-      assert.equal(hasOption(tokens, option), false, `${scoreMode} leaked ${option}`);
+  const retiredProductMarkers = [
+    ['pc', 'save', 'groups'].join('-'),
+    ['pc', 'best', 'save'].join('-'),
+    ['pc', 'saves'].join('.'),
+    ['pc', 'best', 'save'].join('.')
+  ];
+  for (const source of [controls, standalone, model, resultPresenter, resultModel, wasmTransport]) {
+    for (const marker of retiredProductMarkers) {
+      assert.equal(source.includes(marker), false, `GUI source retained ${marker}`);
     }
+  }
+  for (const label of [
+    ['Save', 'groups'].join(' '),
+    ['Best', 'save'].join(' '),
+    ['세이브', '그룹'].join(' '),
+    ['최고', '세이브'].join(' ')
+  ]) {
+    assert.equal(resultPresenter.includes(label), false, `GUI result retained ${label}`);
+  }
+  for (const key of [['save', 'Groups'].join(''), ['best', 'Save'].join('')]) {
+    assert.equal(new RegExp(`\\b${key}\\s*:`, 'u').test(messages), false, key);
+  }
+  assert.equal(messages.includes(['pc', 'save', 'fixed', 'queue', 'unsupported'].join('-')), false);
 
-    const desktop = production.workspaceRequestForDesktop(request, 'en');
-    assert.equal(desktop.score_mode, scoreMode);
-    assert.equal(desktop.count_policy, 'all');
-    assert.equal(desktop.queue, '');
-    assert.equal(desktop.patterns, 'P7');
-    assert.equal(desktop.queue_knowledge, 'oracle');
-    assert.equal(desktop.preserve_b2b, false);
-    assert.equal(desktop.solution_probabilities, false);
-    assert.equal(desktop.memory_budget_mb, 0);
-    assert.equal(desktop.tablebase_requested, false);
-    assert.equal(desktop.precompute_build_dependencies, false);
+  for (const scoreMode of ['saves', ['best', 'save'].join('-')]) {
+    assert.doesNotMatch(controls, new RegExp(`value=["']${scoreMode}["']`, 'u'), scoreMode);
+    assert.doesNotMatch(standalone, new RegExp(`scoreMode:\\s*["']${scoreMode}["']`, 'u'), scoreMode);
+    assert.doesNotMatch(model, new RegExp(`\\|\\s*["']${scoreMode}["']`, 'u'), scoreMode);
+
+    const forgedRequest = {
+      ...production.createDefaultWorkspaceRequest(),
+      scoreMode
+    };
+    assert.throws(
+      () => production.normalizeWorkspaceRequest(forgedRequest),
+      new RegExp(`Unsupported GUI PC result mode: ${scoreMode}`, 'u')
+    );
+    assert.throws(
+      () => production.workspaceValidationCodes(forgedRequest, 'web'),
+      new RegExp(`Unsupported GUI PC result mode: ${scoreMode}`, 'u')
+    );
+    assert.throws(
+      () => production.buildWorkspaceCommand(forgedRequest),
+      new RegExp(`Unsupported GUI PC result mode: ${scoreMode}`, 'u')
+    );
   }
 });
 
@@ -985,9 +965,10 @@ test('build mode transitions canonicalize inactive spin and finesse policies', (
   assert.equal(normalized.spinProfile, 't-spins');
   assert.equal(normalized.patternKnowledge, 'both');
   const desktop = production.buildProbabilityRequestForDesktop(transitioned, 'en');
-  assert.equal(desktop.spin_profile, 't-spins');
-  assert.equal(desktop.finesse, 'off');
-  assert.equal(desktop.pattern_knowledge, 'both');
+  assert.deepEqual(
+    desktop.arguments,
+    production.buildProbabilityCommandArguments(transitioned)
+  );
   const tokens = commandTokens(production.buildProbabilityCommand(transitioned));
   assert.equal(hasOption(tokens, '--spin-profile'), false);
   assert.equal(hasOption(tokens, '--finesse'), false);
@@ -1005,16 +986,19 @@ test('empty PC and build sources normalize to the shared Standard7Bag projection
   const pcTokens = commandTokens(production.buildWorkspaceCommand(pc));
   assert.equal(hasOption(pcTokens, '--queue'), false);
   assert.equal(hasOption(pcTokens, '--patterns'), false);
+  for (const scenarioOption of ['--board-mask', '--height', '--pieces', '--hold', '--no-hold']) {
+    assert.equal(hasOption(pcTokens, scenarioOption), false, `opening leaked ${scenarioOption}`);
+  }
+  assert.equal(production.workspaceUsesOpeningPcPreset(pc), true);
   const pcDesktop = production.workspaceRequestForDesktop(pc, 'en');
-  assert.equal(pcDesktop.queue, '');
-  assert.equal(pcDesktop.patterns, '');
-  assert.equal(pcDesktop.tablebase_requested, false);
+  assert.deepEqual(pcDesktop.arguments, pcTokens);
+  assert.equal(hasOption(pcDesktop.arguments, '--tablebase'), false);
 
   const tablebase = production.workspaceRequestForDesktop(
     { ...pc, tablebaseEnabled: true },
     'en'
   );
-  assert.equal(tablebase.tablebase_requested, true);
+  assert.equal(hasOption(tablebase.arguments, '--tablebase'), true);
 
   const build = {
     ...production.createDefaultBuildProbabilityRequest(),
@@ -1028,8 +1012,39 @@ test('empty PC and build sources normalize to the shared Standard7Bag projection
   assert.equal(hasOption(buildTokens, '--queue'), false);
   assert.equal(hasOption(buildTokens, '--patterns'), false);
   const buildDesktop = production.buildProbabilityRequestForDesktop(build, 'en');
-  assert.equal(buildDesktop.queue, '');
-  assert.equal(buildDesktop.patterns, '');
+  assert.equal(hasOption(buildDesktop.arguments, '--queue'), false);
+  assert.equal(hasOption(buildDesktop.arguments, '--patterns'), false);
+});
+
+test('only a true empty-field empty-hold PC request lowers to the opening preset', () => {
+  const opening = {
+    ...production.createDefaultWorkspaceRequest(),
+    lines: 4,
+    boardMask: 0n,
+    queue: 'IOTSZLJIO',
+    holdEnabled: true,
+    holdPiece: 'empty'
+  };
+  const scenarios = [
+    { label: 'occupied field', request: { ...opening, boardMask: 1n } },
+    { label: 'occupied hold', request: { ...opening, holdPiece: 'I' } },
+    { label: 'hold disabled', request: { ...opening, holdEnabled: false } },
+    { label: 'scenario-only score finder', request: { ...opening, scoreMode: 'score-finder' } }
+  ];
+
+  for (const { label, request } of scenarios) {
+    assert.equal(production.workspaceUsesOpeningPcPreset(request), false, label);
+    const tokens = commandTokens(production.buildWorkspaceCommand(request));
+    assert.equal(hasOption(tokens, '--board-mask'), true, label);
+    assert.equal(hasOption(tokens, '--height'), true, label);
+    assert.equal(hasOption(tokens, '--pieces'), true, label);
+    assert.equal(
+      hasOption(tokens, request.holdEnabled ? '--hold' : '--no-hold'),
+      true,
+      label
+    );
+    assertDesktopCliParity(request, label);
+  }
 });
 
 test('build tiling canonicalizes fixture-derived singles and every ordered option-pair Cartesian value', () => {

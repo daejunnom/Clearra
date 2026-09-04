@@ -351,40 +351,68 @@ mod tests {
 
             if expected_kind == "pc-score-summary.v2" {
                 assert_eq!(
-                    value["summary"]["score_accuracy_level"], "basic-approximation",
+                    value["summary"]["payload_kind"], "pc-score-field-summary",
                     "{source}"
                 );
                 assert_eq!(
-                    value["summary"]["score_profile_specific_exact"], false,
+                    value["summary"]["score_solution_field_contract"],
+                    "pc-score-solution-field-average.v1",
                     "{source}"
                 );
-                assert!(
-                    value["summary"]["score_accuracy_reason"].is_string(),
+                assert_eq!(
+                    value["summary"]["score_solution_field_ordering"],
+                    "normalized-solution-field-order",
                     "{source}"
                 );
-                for field in [
-                    "score_evaluation_complete",
-                    "score_matrix_complete",
-                    "score_summary_complete",
-                    "probability_complete",
-                    "resource_probability_complete",
+                assert_eq!(
+                    value["summary"]["score_solution_field_average_basis"],
+                    "whole-materialized-pattern-universe-failed-pc-zero",
+                    "{source}"
+                );
+                assert_eq!(
+                    value["summary"]["score_evaluation_basis"],
+                    "all-traces",
+                    "{source}"
+                );
+                assert_eq!(value["summary"]["score_evaluation_scope"], "full", "{source}");
+                assert_eq!(
+                    value["summary"]["score_overall_basis"],
+                    "all-materialized-patterns-failed-pc-zero",
+                    "{source}"
+                );
+                assert_eq!(value["summary"]["score_summary_complete"], true, "{source}");
+                for decimal in [
+                    "materialized_pattern_count",
+                    "score_solution_field_count",
+                    "score_success_pattern_count",
+                    "score_failed_pc_pattern_count",
+                    "score_covered_probability",
+                    "score_overall_score",
                 ] {
-                    assert_eq!(value["summary"][field], true, "{source}: {field}");
+                    assert!(value["summary"][decimal].is_string(), "{source}: {decimal}");
                 }
-                assert!(
-                    value["summary"]["score_failed_pc_pattern_count"].is_number(),
-                    "{source}"
-                );
-                assert!(
-                    value["summary"]["score_failed_pc_pattern_score"].is_number(),
-                    "{source}"
-                );
-                for numeric in [
-                    "score_unconditional_expected_score",
-                    "score_unconditional_expected_attack",
-                ] {
-                    assert!(value["summary"][numeric].is_number(), "{source}: {numeric}");
-                }
+                let materialized_count = value["summary"]["materialized_pattern_count"]
+                    .as_str()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .expect("materialized pattern count");
+                let solution_field_count = value["summary"]["score_solution_field_count"]
+                    .as_str()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .expect("normalized solution field count");
+                let rows = value["summary"]["score_solution_fields"]
+                    .as_array()
+                    .expect("ordinary pc.score field rows");
+                assert_eq!(rows.len(), solution_field_count, "{source}");
+                assert!(rows.iter().all(|row| {
+                    row["normalized_field_key"].is_string()
+                        && row["average_score"].is_string()
+                        && row["covered_pattern_count"].is_string()
+                        && row["pattern_count"] == materialized_count.to_string()
+                        && row["score_complete"] == true
+                        && row.get("input_pattern").is_none()
+                        && row.get("candidate_id").is_none()
+                        && row.get("informational_attack").is_none()
+                }));
                 let rendered = output.stdout();
                 assert!(!rendered.contains("score_pattern_winners"), "{source}");
                 assert!(!rendered.contains("portfolio_alternative_page"), "{source}");
@@ -411,10 +439,28 @@ mod tests {
                 );
                 assert_eq!(summary["score_pattern_winner_complete"], true);
                 assert!(summary["score_pattern_winner_count"].is_string());
+                assert_eq!(
+                    summary["score_pattern_canonical_selection"],
+                    "smallest-canonical-candidate-id"
+                );
+                let canonical = summary["score_pattern_canonical_winner"]
+                    .as_object()
+                    .expect("core-owned score-finder canonical winner");
                 let winners = summary["score_pattern_winners"]
                     .as_array()
                     .expect("default fixed-score winner family");
                 assert!(!winners.is_empty());
+                assert!(winners.iter().any(|winner| winner.as_object() == Some(canonical)));
+                let canonical_candidate_id = canonical["candidate_id"]
+                    .as_str()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .expect("canonical candidate ID");
+                assert!(winners.iter().all(|winner| {
+                    winner["candidate_id"]
+                        .as_str()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .is_some_and(|candidate_id| candidate_id >= canonical_candidate_id)
+                }));
                 assert!(winners.iter().all(|winner| {
                     winner["candidate_id"].is_string()
                         && winner["score"].is_string()
@@ -476,6 +522,11 @@ mod tests {
             .as_array()
             .expect("explicit score winners");
         assert!(!winners.is_empty());
+        assert_eq!(
+            score_surface["score_pattern_canonical_selection"],
+            "smallest-canonical-candidate-id"
+        );
+        assert!(score_surface["score_pattern_canonical_winner"].is_object());
         assert!(winners
             .iter()
             .all(|winner| winner["candidate_id"].is_string()));

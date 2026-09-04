@@ -192,6 +192,7 @@ pub struct WasmTilingRootProducer {
     build_probability: Option<TilingBuildProbabilityMerge>,
     root_count: usize,
     finished: bool,
+    shared_external_retained_upper_bound_bytes: Option<u128>,
 }
 
 struct TilingRootProducerPass {
@@ -212,6 +213,28 @@ pub struct WasmTilingRootResultMerger {
 }
 
 impl WasmTilingRootProducer {
+    /// Allocation-free conservative projection for the producer-owned surface
+    /// retained outside the shared exact-search session. The typed App
+    /// authority includes this value in its fixed external envelope before the
+    /// child session is admitted.
+    pub fn checked_shared_external_retained_upper_bound(problem: &SearchProblem) -> Option<u128> {
+        let universe = problem.piece_source().materialized_universe()?;
+        let root_count = universe
+            .checked_packing_multiset_family_build_projection(
+                problem.exact_pieces()?,
+                problem.initial_hold(),
+                problem.supply().hold_enabled(),
+                super::packing_hold_projection(problem),
+                1,
+            )?
+            .max_group_count;
+        (core::mem::size_of::<Self>() as u128)
+            .checked_add(core::mem::size_of::<WasmTilingRootResultMerger>() as u128)?
+            .checked_add(core::mem::size_of::<TilingRootProducerPass>() as u128)?
+            .checked_add(core::mem::size_of::<WasmDistributedResultMerger>() as u128)?
+            .checked_add(root_count.checked_mul(core::mem::size_of::<u32>() as u128)?)
+    }
+
     pub fn build_probability_root_count(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -243,7 +266,28 @@ impl WasmTilingRootProducer {
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
         let session = WasmExactSearchSession::new_external_geometry(problem)
             .map_err(super::distributed::map_error)?;
-        Self::from_sessions(vec![session], None)
+        Self::from_sessions(vec![session], None, None)
+    }
+
+    pub fn new_shared_under_authority(
+        problem: std::sync::Arc<SearchProblem>,
+        checked_external_retained_upper_bound_bytes: u128,
+        authority: &crate::WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, &'static str> {
+        let shared_external_retained_upper_bound_bytes =
+            Self::checked_shared_external_retained_upper_bound(problem.as_ref())
+                .ok_or("wasm_tiling_root_external_retained_projection_unavailable")?;
+        let session = WasmExactSearchSession::new_shared_external_geometry_under_authority(
+            problem,
+            checked_external_retained_upper_bound_bytes,
+            authority,
+        )
+        .map_err(super::distributed::map_error)?;
+        Self::from_sessions(
+            vec![session],
+            None,
+            Some(shared_external_retained_upper_bound_bytes),
+        )
     }
 
     pub fn new_for_build_probability(
@@ -275,6 +319,7 @@ impl WasmTilingRootProducer {
                 mirror_distinct,
                 pattern_weights,
             }),
+            None,
         )
     }
 
@@ -299,6 +344,7 @@ impl WasmTilingRootProducer {
     fn from_sessions(
         sessions: Vec<WasmExactSearchSession>,
         build_probability: Option<TilingBuildProbabilityMerge>,
+        shared_external_retained_upper_bound_bytes: Option<u128>,
     ) -> Result<Self, &'static str> {
         let mut passes = Vec::new();
         passes
@@ -328,13 +374,55 @@ impl WasmTilingRootProducer {
                 next_root: 0,
             });
         }
-        Ok(Self {
+        let producer = Self {
             passes,
             next_pass: 0,
             build_probability,
             root_count,
             finished: false,
-        })
+            shared_external_retained_upper_bound_bytes,
+        };
+        producer.validate_shared_external_retained_bytes(0)?;
+        Ok(producer)
+    }
+
+    fn checked_shared_external_retained_bytes(
+        &self,
+        future_merger_capacity: usize,
+    ) -> Option<u128> {
+        let mut bytes = (core::mem::size_of::<Self>() as u128)
+            .checked_add(core::mem::size_of::<WasmTilingRootResultMerger>() as u128)?
+            .checked_add(
+                (self.passes.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<TilingRootProducerPass>() as u128)?,
+            )?
+            .checked_add(
+                (future_merger_capacity as u128)
+                    .checked_mul(core::mem::size_of::<WasmDistributedResultMerger>() as u128)?,
+            )?;
+        for pass in &self.passes {
+            bytes = bytes.checked_add(
+                (pass.root_order.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<u32>() as u128)?,
+            )?;
+        }
+        Some(bytes)
+    }
+
+    fn validate_shared_external_retained_bytes(
+        &self,
+        future_merger_capacity: usize,
+    ) -> Result<(), &'static str> {
+        let Some(limit) = self.shared_external_retained_upper_bound_bytes else {
+            return Ok(());
+        };
+        let retained = self
+            .checked_shared_external_retained_bytes(future_merger_capacity)
+            .ok_or("wasm_tiling_root_external_retained_projection_overflow")?;
+        if retained > limit {
+            return Err("wasm_tiling_root_external_retained_envelope_exceeded");
+        }
+        Ok(())
     }
 
     pub fn advance(
@@ -388,9 +476,22 @@ impl WasmTilingRootProducer {
         if !self.finished {
             return Err("wasm_tiling_root_producer_not_finished");
         }
+        let mut mergers = Vec::new();
+        mergers
+            .try_reserve_exact(self.passes.len())
+            .map_err(|_| "wasm_tiling_root_merger_storage_unavailable")?;
+        self.validate_shared_external_retained_bytes(mergers.capacity())?;
+        let Self {
+            passes,
+            build_probability,
+            ..
+        } = self;
+        for pass in passes {
+            mergers.push(pass.merger);
+        }
         Ok(WasmTilingRootResultMerger {
-            passes: self.passes.into_iter().map(|pass| pass.merger).collect(),
-            build_probability: self.build_probability,
+            passes: mergers,
+            build_probability,
         })
     }
 

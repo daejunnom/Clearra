@@ -466,10 +466,27 @@ impl TilingSolutionPageStore {
         if begin == end {
             return Ok(identities);
         }
-        for index in begin..end {
-            identities.push(self.identity_at(index)?);
-        }
+        self.for_each_page_identity(begin, end - begin, |identity| identities.push(identity))?;
         Ok(identities)
+    }
+
+    /// Visits one bounded canonical page without allocating a page vector.
+    ///
+    /// The immutable store retains ownership of paging and index validation;
+    /// transports can independently count or encode identities without
+    /// materializing competing `Vec<String>` allocations.
+    pub fn for_each_page_identity(
+        &self,
+        offset: usize,
+        limit: usize,
+        mut visit: impl FnMut(StandardBoard64TilingIdentity),
+    ) -> Result<(), &'static str> {
+        let begin = offset.min(self.identity_count);
+        let end = begin.saturating_add(limit).min(self.identity_count);
+        for index in begin..end {
+            visit(self.identity_at(index)?);
+        }
+        Ok(())
     }
 
     /// Allocation-free comparison of a canonical prefix page against public
@@ -1199,6 +1216,11 @@ mod tests {
         );
         assert_eq!(store.page_keys(1, 1).expect("second page").len(), 1);
         assert!(store.page_keys(2, 1).expect("empty page").is_empty());
+        let mut visited = Vec::new();
+        store
+            .for_each_page_identity(1, 1, |identity| visited.push(identity))
+            .expect("allocation-free second page");
+        assert_eq!(visited, identities[1..].to_vec());
     }
 
     #[test]

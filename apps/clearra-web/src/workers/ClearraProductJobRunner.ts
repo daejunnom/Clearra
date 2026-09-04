@@ -45,6 +45,7 @@ export class ClearraProductJobRunner {
         return await distributed.run(commandText, plan, onEvent);
       }
       distributed.resetPreparedCoordinatorForSerial();
+      onEvent(serialExecutionProgressEvent(this.jobId));
       const serial = new WasmJobRunner(this.wasm);
       this.activeRunner = serial;
       try {
@@ -70,6 +71,56 @@ export class ClearraProductJobRunner {
     this.activeRunner?.dispose();
     this.activeRunner = null;
   }
+}
+
+function serialExecutionProgressEvent(jobId: number): ClearraWasmWorkerEvent {
+  return {
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    event: 'progress',
+    job_id: jobId,
+    progress: {
+      done: 1,
+      total: 5,
+      label: 'Serial exact search running',
+      budget_status: { state: 'within-budget', used: 0, limit: null },
+      backend_status: {
+        backend_requested: 'cpu',
+        backend_selected: 'wasm-cpu',
+        fallback_used: false,
+        fallback_reason: null
+      },
+      memory_status: {
+        state: 'wasm-computation-scope-active',
+        raw_pointer_exposed: false
+      },
+      telemetry: {
+        execution_mode: 'serial',
+        phase: 'searching',
+        producer_complete: false,
+        geometry_nodes: 0,
+        candidates_emitted: 0,
+        geometry_family_count: null,
+        candidates_verified: 0,
+        producer_build_nodes: 0,
+        producer_coverage_checks: 0,
+        build_nodes: 0,
+        coverage_checks: 0,
+        ready_workers: 1,
+        active_workers: 1,
+        worker_count: 1,
+        oldest_batch_ms: 0,
+        pass_index: 0,
+        pass_count: 1,
+        layer_index: 0,
+        layer_count: 0,
+        layer_done: 0,
+        layer_total: 0,
+        availability: serialExecutionTelemetryFlags(),
+        exactness: serialExecutionTelemetryFlags()
+      }
+    }
+  };
 }
 
 function preparationProgressEvent(jobId: number): ClearraWasmWorkerEvent {
@@ -122,6 +173,29 @@ function preparationProgressEvent(jobId: number): ClearraWasmWorkerEvent {
 }
 
 function preparationTelemetryFlags(): ClearraSearchProgressTelemetryFlags {
+  return {
+    geometry_nodes: false,
+    candidates_emitted: false,
+    geometry_family_count: false,
+    candidates_verified: false,
+    producer_build_nodes: false,
+    producer_coverage_checks: false,
+    build_nodes: false,
+    coverage_checks: false,
+    ready_workers: true,
+    active_workers: true,
+    worker_count: true,
+    oldest_batch_ms: true,
+    pass_index: false,
+    pass_count: false,
+    layer_index: false,
+    layer_count: false,
+    layer_done: false,
+    layer_total: false
+  };
+}
+
+function serialExecutionTelemetryFlags(): ClearraSearchProgressTelemetryFlags {
   return {
     geometry_nodes: false,
     candidates_emitted: false,

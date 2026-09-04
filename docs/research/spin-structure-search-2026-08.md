@@ -227,7 +227,7 @@ provenance is a legal and reproducibility record, not a user-facing engine name.
 
 ## Implementation and Benchmark Status
 
-The independent crate, typed application route, CLI/web-command boundary, and
+The independent crate, typed application route, shared CLI-command boundary, and
 Discord `/spin-structure` surface are implemented. Existing `damage` and
 `spin-finder` dispatch remain separate. The crate release suite contains 41
 tests, including target-first versus exhaustive exact-oracle comparisons for all

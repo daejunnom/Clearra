@@ -10,12 +10,18 @@ use clearra_app::{
     app_response::GovernedAppResponse, AppCommand, AppContext, AppCoreExecutorService,
     AppErrorCode, AppRequest, AppServices, CooperativeAppAdvance, CooperativeAppExecution,
     ExecutionControl, FiniteCooperativeCallerMemory, FiniteCooperativeCallerMemoryRejection,
-    PcPathFamilyV2Result, PcSaveCompletenessEvidence, PcSaveGroupV2, PcSavePieceMultiset,
-    PcSaveWitness, ProductCapabilityContract, ProductCapabilityResultKind, ProductPageSourceOwner,
-    PC_BEST_SAVE_SCHEMA, PC_SCORE_INFORMATIONAL_ATTACK_BASIS, PC_SCORE_PATTERN_WINNER_CONTRACT,
+    PcBestSaveWinnerV2, PcPathFamilyV2Result, PcPathWitnessV2, PcSaveCompletenessEvidence,
+    PcSaveGroupV2, PcSavePieceMultiset, PcSaveWitness, ProductCapabilityContract,
+    ProductCapabilityResultKind, ProductPageSourceOwner, PC_BEST_SAVE_SCHEMA,
+    PC_PATH_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+    PC_SCORE_PATTERN_WINNER_CONTRACT, PC_SCORE_SOLUTION_FIELD_CONTRACT,
     PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
 };
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_cli_command::{CliCommandError, CliCommandParser, CliCommandRequest};
+use clearra_core_domain::{
+    piece::piece_kind::PieceKind,
+    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
+};
 use clearra_core_executor::{
     CoreExecutionResult, PcTilingMemoryAdmissionEvidence, TilingSolutionPageStore,
 };
@@ -26,16 +32,15 @@ use clearra_host_contract::{
     Diagnostic, DiagnosticReport, ExecutionAvailabilityReport, PcBestSavePayload,
     PcBestSaveWinnerPayload, PcPathFamilyPayload, PcPathStepPayload, PcPathWitnessPayload,
     PcSaveCompletenessPayload, PcSaveGroupPayload, PcSaveGroupsPayload, PcSavePieceMultisetPayload,
-    PcSaveRunMetadataPayload, PcSaveWitnessPayload, ProductBuildIdentity,
-    ProductCandidateMemberPayload, ProductResultPayload, ProductResultPayloadContent,
-    RenderCapabilityReport, ResourceReport, ScorePatternWinnerFamilyPayload,
-    ScorePatternWinnerPayload, SetupRankedCandidatePayload, SetupRankedFamilyPayload,
-    SetupScoreCandidatePayload, SetupScoreRankingPayload, SpinStructureCandidatePayload,
-    SpinStructureFamilyPayload, ARTIFACT_SCHEMA_VERSION, COMPILED_ENGINE_BUILD_ID,
-    COMPILED_SOURCE_COMMIT, CONTRACT_SCHEMA_VERSION, HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
-    SUPPLY_SEMANTICS_ID,
+    PcSaveRunMetadataPayload, PcSaveWitnessPayload, PcScoreFieldPayload,
+    PcScoreFieldSummaryPayload, ProductBuildIdentity, ProductCandidateMemberPayload,
+    ProductResultPayload, ProductResultPayloadContent, RenderCapabilityReport, ResourceReport,
+    ScorePatternWinnerFamilyPayload, ScorePatternWinnerPayload, SetupRankedCandidatePayload,
+    SetupRankedFamilyPayload, SetupScoreCandidatePayload, SetupScoreRankingPayload,
+    SpinStructureCandidatePayload, SpinStructureFamilyPayload, ARTIFACT_SCHEMA_VERSION,
+    COMPILED_ENGINE_BUILD_ID, COMPILED_SOURCE_COMMIT, CONTRACT_SCHEMA_VERSION,
+    HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES, SUPPLY_SEMANTICS_ID,
 };
-use clearra_web_command::{WebCommandError, WebCommandParser, WebCommandRequest};
 
 use crate::{WasmHostCapabilities, WebGpuBackendOutcomeState, WebGpuBackendReport};
 
@@ -385,6 +390,8 @@ pub struct WasmSearchReport {
     pub summary_fields: Vec<(String, String)>,
     pub forward_search_kind: Option<String>,
     pub forward_initial_board_mask: Option<String>,
+    pub forward_canonical_selection: Option<String>,
+    pub canonical_forward_outcome: Option<WasmForwardSearchOutcome>,
     pub maximum_damage: Option<u32>,
     pub maximum_ren: Option<u8>,
     pub forward_outcomes: Vec<WasmForwardSearchOutcome>,
@@ -829,6 +836,7 @@ impl WasmSearchReport {
             &self.representative_candidate_id,
             &self.forward_search_kind,
             &self.forward_initial_board_mask,
+            &self.forward_canonical_selection,
         ] {
             bytes = checked_optional_string_capacity(bytes, value)?;
         }
@@ -857,6 +865,9 @@ impl WasmSearchReport {
         }
         bytes = bytes.checked_add(checked_vec_capacity_bytes(&self.forward_outcomes)?)?;
         for outcome in &self.forward_outcomes {
+            bytes = bytes.checked_add(outcome.checked_retained_capacity_bytes()?)?;
+        }
+        if let Some(outcome) = &self.canonical_forward_outcome {
             bytes = bytes.checked_add(outcome.checked_retained_capacity_bytes()?)?;
         }
         if let Some(setup) = &self.setup_report {
@@ -1039,6 +1050,7 @@ impl WasmSearchReport {
             });
         }
         if let Some(result) = render_model.forward_search_result() {
+            let forward_kind = render_model.kind();
             let outcomes = result
                 .outcomes()
                 .iter()
@@ -1085,6 +1097,14 @@ impl WasmSearchReport {
                         .collect(),
                 })
                 .collect::<Vec<_>>();
+            let canonical_forward_outcome = if forward_kind == clearra_app::AppResultKind::Ren {
+                match result.canonical_outcome() {
+                    Some(_) => outcomes.first().cloned(),
+                    None => None,
+                }
+            } else {
+                None
+            };
             return Some(Self {
                 backend_selected: "wasm-cpu-forward-search".to_owned(),
                 workers_used: result.workers_used(),
@@ -1106,8 +1126,11 @@ impl WasmSearchReport {
                 probability_complete: result.complete(),
                 searched_nodes: usize::try_from(result.visited_states()).unwrap_or(usize::MAX),
                 peak_frontier_states: result.peak_frontier(),
-                forward_search_kind: Some(render_model.kind().as_str().to_owned()),
+                forward_search_kind: Some(forward_kind.as_str().to_owned()),
                 forward_initial_board_mask: Some(board_words_hex(result.initial_board())),
+                forward_canonical_selection: (forward_kind == clearra_app::AppResultKind::Ren)
+                    .then(|| "smallest-canonical-candidate-id".to_owned()),
+                canonical_forward_outcome,
                 maximum_damage: result.maximum_damage(),
                 maximum_ren: result.maximum_ren(),
                 forward_outcomes: outcomes,
@@ -1453,6 +1476,8 @@ impl WasmSearchReport {
             summary_fields: result.fail_closed_solution_summary_fields(),
             forward_search_kind: None,
             forward_initial_board_mask: None,
+            forward_canonical_selection: None,
+            canonical_forward_outcome: None,
             maximum_damage: None,
             maximum_ren: None,
             forward_outcomes: Vec::new(),
@@ -1870,6 +1895,13 @@ fn try_host_product_result_payload(
             let page = set.canonical_page();
             let member_count = page.portfolio().candidate_ids().len();
             let member_end = member_count.min(PORTFOLIO_MEMBER_PAGE_SIZE);
+            let (canonical_candidate_id, canonical_solution_key) = report
+                .canonical_candidate()
+                .ok_or_else(finite_projection_error)?;
+            let canonical_witness = ProductCandidateMemberPayload::new(
+                try_decimal_u128(canonical_candidate_id as u128, ledger)?,
+                try_owned_string(canonical_solution_key, ledger)?,
+            );
             let members = try_owned_vec(
                 &page.portfolio().candidate_ids()[..member_end],
                 ledger,
@@ -1892,25 +1924,31 @@ fn try_host_product_result_payload(
             Ok(Some(ProductResultPayload::new(
                 try_owned_string(product.contract().as_str(), ledger)?,
                 try_owned_string(product.result_kind().as_str(), ledger)?,
-                ProductResultPayloadContent::CoveragePortfolio(CoveragePortfolioPagePayload::new(
-                    try_owned_string(set.contract_id(), ledger)?,
-                    try_owned_string(page.contract_id(), ledger)?,
-                    try_owned_string(PORTFOLIO_MEMBER_PAGE_CONTRACT, ledger)?,
-                    try_owned_string(set.set_identity_sha256(), ledger)?,
-                    try_owned_string(set.candidate_map_sha256(), ledger)?,
-                    try_owned_string(page.alternative_index_decimal(), ledger)?,
-                    try_decimal_u128(page.optimal_cardinality() as u128, ledger)?,
-                    try_owned_string(page.known_alternative_count_decimal(), ledger)?,
-                    try_optional_owned_string(page.total_alternative_count_decimal(), ledger)?,
-                    page.enumeration_complete(),
-                    try_owned_string("1", ledger)?,
-                    try_decimal_u128(
-                        member_count.div_ceil(PORTFOLIO_MEMBER_PAGE_SIZE).max(1) as u128,
-                        ledger,
-                    )?,
-                    members,
-                    true,
-                )),
+                ProductResultPayloadContent::CoveragePortfolio(
+                    CoveragePortfolioPagePayload::new(
+                        try_owned_string(set.contract_id(), ledger)?,
+                        try_owned_string(page.contract_id(), ledger)?,
+                        try_owned_string(PORTFOLIO_MEMBER_PAGE_CONTRACT, ledger)?,
+                        try_owned_string(set.set_identity_sha256(), ledger)?,
+                        try_owned_string(set.candidate_map_sha256(), ledger)?,
+                        try_owned_string(page.alternative_index_decimal(), ledger)?,
+                        try_decimal_u128(page.optimal_cardinality() as u128, ledger)?,
+                        try_owned_string(page.known_alternative_count_decimal(), ledger)?,
+                        try_optional_owned_string(page.total_alternative_count_decimal(), ledger)?,
+                        page.enumeration_complete(),
+                        try_owned_string("1", ledger)?,
+                        try_decimal_u128(
+                            member_count.div_ceil(PORTFOLIO_MEMBER_PAGE_SIZE).max(1) as u128,
+                            ledger,
+                        )?,
+                        members,
+                        true,
+                    )
+                    .with_canonical_witness(
+                        try_owned_string(report.canonical_selection(), ledger)?,
+                        canonical_witness,
+                    ),
+                ),
             )))
         }
         (
@@ -1982,14 +2020,66 @@ fn try_host_product_result_payload(
                 )?),
             )))
         }
-        (ProductCapabilityContract::PcScore, ProductCapabilityResultKind::PcScoreSummaryV2)
-        | (
+        (ProductCapabilityContract::PcScore, ProductCapabilityResultKind::PcScoreSummaryV2) => {
+            let report = product
+                .pc_score_summary_v2()
+                .ok_or_else(finite_projection_error)?;
+            let fields =
+                try_owned_vec(report.solution_field_averages(), ledger, |field, ledger| {
+                    Ok(PcScoreFieldPayload::new(
+                        try_pc_score_field_key(field.field_identity(), ledger)?,
+                        try_display_string(field.average_score(), ledger)?,
+                        try_decimal_u128(field.covered_pattern_count() as u128, ledger)?,
+                        try_decimal_u128(field.pattern_count() as u128, ledger)?,
+                        field.score_complete(),
+                    ))
+                })?;
+            Ok(Some(ProductResultPayload::new(
+                try_owned_string(product.contract().as_str(), ledger)?,
+                try_owned_string(product.result_kind().as_str(), ledger)?,
+                ProductResultPayloadContent::PcScoreFieldSummary(PcScoreFieldSummaryPayload::new(
+                    try_owned_string(PC_SCORE_SOLUTION_FIELD_CONTRACT, ledger)?,
+                    try_owned_string(report.solution_field_ordering(), ledger)?,
+                    try_owned_string(report.solution_field_average_basis(), ledger)?,
+                    try_owned_string(report.score_evaluation_basis(), ledger)?,
+                    try_owned_string(report.score_evaluation_scope(), ledger)?,
+                    try_owned_string(report.overall_score_basis(), ledger)?,
+                    try_decimal_u128(report.piece_source_id() as u128, ledger)?,
+                    try_decimal_u128(report.pattern_universe_id() as u128, ledger)?,
+                    try_decimal_u128(report.pattern_weight_model_id() as u128, ledger)?,
+                    try_decimal_u128(report.materialized_pattern_count() as u128, ledger)?,
+                    try_decimal_u128(report.solution_field_count() as u128, ledger)?,
+                    try_decimal_u128(report.pattern_optimal_count() as u128, ledger)?,
+                    try_decimal_u128(report.failed_pc_pattern_count() as u128, ledger)?,
+                    try_owned_string(report.covered_probability(), ledger)?,
+                    try_owned_string(report.overall_score(), ledger)?,
+                    try_optional_owned_string(
+                        report.covered_pattern_conditional_average_score(),
+                        ledger,
+                    )?,
+                    report.completeness().complete(),
+                    fields,
+                )),
+            )))
+        }
+        (
             ProductCapabilityContract::PcScoreFinder,
             ProductCapabilityResultKind::PcFixedScoreWitnessV2,
         ) => {
             let report = product
                 .pc_score_summary_v2()
                 .ok_or_else(finite_projection_error)?;
+            let canonical_winner = report
+                .canonical_winner()
+                .ok_or_else(finite_projection_error)?;
+            let canonical_solution_key = canonical_winner.normalized_solution_key();
+            let canonical_winner_payload = ScorePatternWinnerPayload::new(
+                try_decimal_u128(canonical_winner.pattern_id() as u128, ledger)?,
+                try_decimal_u128(canonical_winner.candidate_id() as u128, ledger)?,
+                try_owned_string(canonical_solution_key.as_str(), ledger)?,
+                try_decimal_u128(canonical_winner.score() as u128, ledger)?,
+                try_decimal_u128(canonical_winner.informational_attack() as u128, ledger)?,
+            );
             let winners = try_owned_vec(report.pattern_winners(), ledger, |winner, ledger| {
                 let normalized_key = winner.normalized_solution_key();
                 Ok(ScorePatternWinnerPayload::new(
@@ -2014,6 +2104,8 @@ fn try_host_product_result_payload(
                         try_owned_string(PC_SCORE_INFORMATIONAL_ATTACK_BASIS, ledger)?,
                         try_decimal_u128(PORTFOLIO_MEMBER_PAGE_SIZE as u128, ledger)?,
                         try_decimal_u128(report.pattern_winners().len() as u128, ledger)?,
+                        try_owned_string(report.canonical_selection(), ledger)?,
+                        canonical_winner_payload,
                         winners,
                     ),
                 ),
@@ -2053,13 +2145,12 @@ fn try_host_product_result_payload(
                 .pc_best_save_v2()
                 .ok_or_else(finite_projection_error)?;
             let winners = try_owned_vec(report.winners(), ledger, |winner, ledger| {
-                Ok(PcBestSaveWinnerPayload::new(
-                    try_decimal_u128(winner.weighted_total() as u128, ledger)?,
-                    try_decimal_u128(winner.balanced_jl_count() as u128, ledger)?,
-                    try_owned_string(winner.exact_group_probability().decimal(), ledger)?,
-                    try_pc_save_group_payload(winner.group(), ledger)?,
-                ))
+                try_pc_best_save_winner_payload(winner, ledger)
             })?;
+            let canonical_winner = report
+                .canonical_winner()
+                .map(|winner| try_pc_best_save_winner_payload(winner, ledger))
+                .transpose()?;
             Ok(Some(ProductResultPayload::new(
                 try_owned_string(product.contract().as_str(), ledger)?,
                 try_owned_string(product.result_kind().as_str(), ledger)?,
@@ -2076,6 +2167,8 @@ fn try_host_product_result_payload(
                     )?,
                     try_decimal_u128(PORTFOLIO_MEMBER_PAGE_SIZE as u128, ledger)?,
                     try_decimal_u128(report.winners().len() as u128, ledger)?,
+                    try_owned_string(report.canonical_selection(), ledger)?,
+                    canonical_winner,
                     try_pc_save_run_metadata(
                         report.origin().as_str(),
                         report.problem_preset().as_str(),
@@ -2104,6 +2197,42 @@ fn try_clone_public_product_result_payload(
     let contract = try_owned_string(source.contract(), ledger)?;
     let result_kind = try_owned_string(source.result_kind(), ledger)?;
     let content = match source.content() {
+        ProductResultPayloadContent::CoveragePortfolio(payload) => {
+            let members = try_owned_vec(payload.members(), ledger, |member, ledger| {
+                Ok(ProductCandidateMemberPayload::new(
+                    try_owned_string(member.candidate_id(), ledger)?,
+                    try_owned_string(member.normalized_solution_key(), ledger)?,
+                ))
+            })?;
+            let cloned = CoveragePortfolioPagePayload::new(
+                try_owned_string(payload.set_contract(), ledger)?,
+                try_owned_string(payload.page_contract(), ledger)?,
+                try_owned_string(payload.member_page_contract(), ledger)?,
+                try_owned_string(payload.set_identity_sha256(), ledger)?,
+                try_owned_string(payload.candidate_map_sha256(), ledger)?,
+                try_owned_string(payload.alternative_index(), ledger)?,
+                try_owned_string(payload.optimal_cardinality(), ledger)?,
+                try_owned_string(payload.known_alternative_count(), ledger)?,
+                try_optional_owned_string(payload.total_alternative_count(), ledger)?,
+                payload.enumeration_complete(),
+                try_owned_string(payload.member_page_number(), ledger)?,
+                try_owned_string(payload.total_member_pages(), ledger)?,
+                members,
+                payload.page_handle_available(),
+            );
+            let cloned = match (payload.canonical_selection(), payload.canonical_witness()) {
+                (Some(selection), Some(witness)) => cloned.with_canonical_witness(
+                    try_owned_string(selection, ledger)?,
+                    ProductCandidateMemberPayload::new(
+                        try_owned_string(witness.candidate_id(), ledger)?,
+                        try_owned_string(witness.normalized_solution_key(), ledger)?,
+                    ),
+                ),
+                (None, None) => cloned,
+                _ => return Err(finite_projection_error()),
+            };
+            ProductResultPayloadContent::CoveragePortfolio(cloned)
+        }
         ProductResultPayloadContent::BuildV2(payload) => ProductResultPayloadContent::BuildV2(
             try_clone_build_v2_product_payload(payload, ledger)?,
         ),
@@ -2199,7 +2328,49 @@ fn try_clone_public_product_result_payload(
                 .map_err(|_| finite_projection_error())?,
             )
         }
+        ProductResultPayloadContent::PcScoreFieldSummary(payload) => {
+            let fields = try_owned_vec(payload.fields(), ledger, |field, ledger| {
+                Ok(PcScoreFieldPayload::new(
+                    try_owned_string(field.normalized_field_key(), ledger)?,
+                    try_owned_string(field.average_score(), ledger)?,
+                    try_owned_string(field.covered_pattern_count(), ledger)?,
+                    try_owned_string(field.pattern_count(), ledger)?,
+                    field.score_complete(),
+                ))
+            })?;
+            ProductResultPayloadContent::PcScoreFieldSummary(PcScoreFieldSummaryPayload::new(
+                try_owned_string(payload.field_contract(), ledger)?,
+                try_owned_string(payload.ordering(), ledger)?,
+                try_owned_string(payload.solution_field_average_basis(), ledger)?,
+                try_owned_string(payload.score_evaluation_basis(), ledger)?,
+                try_owned_string(payload.score_evaluation_scope(), ledger)?,
+                try_owned_string(payload.overall_score_basis(), ledger)?,
+                try_owned_string(payload.piece_source_id(), ledger)?,
+                try_owned_string(payload.pattern_universe_id(), ledger)?,
+                try_owned_string(payload.pattern_weight_model_id(), ledger)?,
+                try_owned_string(payload.materialized_pattern_count(), ledger)?,
+                try_owned_string(payload.solution_field_count(), ledger)?,
+                try_owned_string(payload.scored_pattern_count(), ledger)?,
+                try_owned_string(payload.failed_pc_pattern_count(), ledger)?,
+                try_owned_string(payload.covered_probability(), ledger)?,
+                try_owned_string(payload.overall_score(), ledger)?,
+                try_optional_owned_string(
+                    payload.score_covered_pattern_conditional_average_score(),
+                    ledger,
+                )?,
+                payload.complete(),
+                fields,
+            ))
+        }
         ProductResultPayloadContent::ScorePatternWinnerFamily(payload) => {
+            let canonical_winner = payload.canonical_winner();
+            let canonical_winner = ScorePatternWinnerPayload::new(
+                try_owned_string(canonical_winner.pattern_id(), ledger)?,
+                try_owned_string(canonical_winner.candidate_id(), ledger)?,
+                try_owned_string(canonical_winner.normalized_solution_key(), ledger)?,
+                try_owned_string(canonical_winner.score(), ledger)?,
+                try_owned_string(canonical_winner.informational_attack(), ledger)?,
+            );
             let winners = try_owned_vec(payload.winners(), ledger, |winner, ledger| {
                 Ok(ScorePatternWinnerPayload::new(
                     try_owned_string(winner.pattern_id(), ledger)?,
@@ -2217,6 +2388,8 @@ fn try_clone_public_product_result_payload(
                     try_owned_string(payload.informational_attack_basis(), ledger)?,
                     try_owned_string(payload.page_size(), ledger)?,
                     try_owned_string(payload.winner_count(), ledger)?,
+                    try_owned_string(payload.canonical_selection(), ledger)?,
+                    canonical_winner,
                     winners,
                 ),
             )
@@ -2317,47 +2490,11 @@ fn try_pc_path_family_payload(
     report: &PcPathFamilyV2Result,
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<PcPathFamilyPayload, WasmCommandRuntimeError> {
-    let witnesses = try_owned_vec(report.witnesses(), ledger, |witness, ledger| {
-        let steps = try_owned_vec(witness.steps(), ledger, |step, ledger| {
-            Ok(PcPathStepPayload::new(
-                try_decimal_u128(step.step_index() as u128, ledger)?,
-                try_decimal_u128(step.operation_id() as u128, ledger)?,
-                try_owned_string(piece_name(step.active_piece()), ledger)?,
-                try_decimal_u128(step.input_cursor() as u128, ledger)?,
-                try_decimal_u128(step.output_cursor() as u128, ledger)?,
-                step.input_hold_piece()
-                    .map(|piece| try_owned_string(piece_name(piece), ledger))
-                    .transpose()?,
-                step.output_hold_piece()
-                    .map(|piece| try_owned_string(piece_name(piece), ledger))
-                    .transpose()?,
-                try_owned_string(step.hold_decision(), ledger)?,
-                try_decimal_u128(step.rotation() as u128, ledger)?,
-                try_decimal_u128(step.x() as u128, ledger)?,
-                try_decimal_u128(step.y() as u128, ledger)?,
-                try_hex_mask(step.placement_mask(), ledger)?,
-                try_hex_mask(step.board_before_mask(), ledger)?,
-                try_hex_mask(step.board_after_placement_mask(), ledger)?,
-                try_hex_mask(step.board_after_line_clear_mask(), ledger)?,
-                try_hex_mask(step.cleared_row_mask(), ledger)?,
-                try_decimal_u128(step.cleared_lines() as u128, ledger)?,
-                try_owned_string(step.line_clear_identity(), ledger)?,
-            ))
-        })?;
-        Ok(PcPathWitnessPayload::new(
-            try_decimal_u128(witness.candidate_id() as u128, ledger)?,
-            try_decimal_u128(witness.producer_candidate_id() as u128, ledger)?,
-            try_decimal_u128(witness.pattern_id() as u128, ledger)?,
-            try_owned_string(witness.trace_identity(), ledger)?,
-            try_owned_string(witness.normalized_trace_key(), ledger)?,
-            try_decimal_u128(witness.consumed_piece_count() as u128, ledger)?,
-            witness
-                .terminal_hold_piece()
-                .map(|piece| try_owned_string(piece_name(piece), ledger))
-                .transpose()?,
-            steps,
-        ))
-    })?;
+    let witnesses = try_owned_vec(report.witnesses(), ledger, try_pc_path_witness_payload)?;
+    let canonical_witness = report
+        .canonical_witness()
+        .map(|witness| try_pc_path_witness_payload(witness, ledger))
+        .transpose()?;
     Ok(PcPathFamilyPayload::new(
         try_owned_string(report.witness_contract(), ledger)?,
         try_owned_string(report.ordering(), ledger)?,
@@ -2365,7 +2502,54 @@ fn try_pc_path_family_payload(
         try_decimal_u128(report.materialized_pattern_count() as u128, ledger)?,
         try_decimal_u128(report.witnesses().len() as u128, ledger)?,
         report.completeness().complete(),
+        try_owned_string(report.canonical_selection(), ledger)?,
+        canonical_witness,
         witnesses,
+    ))
+}
+
+fn try_pc_path_witness_payload(
+    witness: &PcPathWitnessV2,
+    ledger: &mut WasmFiniteMemoryLedger,
+) -> Result<PcPathWitnessPayload, WasmCommandRuntimeError> {
+    let steps = try_owned_vec(witness.steps(), ledger, |step, ledger| {
+        Ok(PcPathStepPayload::new(
+            try_decimal_u128(step.step_index() as u128, ledger)?,
+            try_decimal_u128(step.operation_id() as u128, ledger)?,
+            try_owned_string(piece_name(step.active_piece()), ledger)?,
+            try_decimal_u128(step.input_cursor() as u128, ledger)?,
+            try_decimal_u128(step.output_cursor() as u128, ledger)?,
+            step.input_hold_piece()
+                .map(|piece| try_owned_string(piece_name(piece), ledger))
+                .transpose()?,
+            step.output_hold_piece()
+                .map(|piece| try_owned_string(piece_name(piece), ledger))
+                .transpose()?,
+            try_owned_string(step.hold_decision(), ledger)?,
+            try_decimal_u128(step.rotation() as u128, ledger)?,
+            try_decimal_u128(step.x() as u128, ledger)?,
+            try_decimal_u128(step.y() as u128, ledger)?,
+            try_hex_mask(step.placement_mask(), ledger)?,
+            try_hex_mask(step.board_before_mask(), ledger)?,
+            try_hex_mask(step.board_after_placement_mask(), ledger)?,
+            try_hex_mask(step.board_after_line_clear_mask(), ledger)?,
+            try_hex_mask(step.cleared_row_mask(), ledger)?,
+            try_decimal_u128(step.cleared_lines() as u128, ledger)?,
+            try_owned_string(step.line_clear_identity(), ledger)?,
+        ))
+    })?;
+    Ok(PcPathWitnessPayload::new(
+        try_decimal_u128(witness.candidate_id() as u128, ledger)?,
+        try_decimal_u128(witness.producer_candidate_id() as u128, ledger)?,
+        try_decimal_u128(witness.pattern_id() as u128, ledger)?,
+        try_owned_string(witness.trace_identity(), ledger)?,
+        try_owned_string(witness.normalized_trace_key(), ledger)?,
+        try_decimal_u128(witness.consumed_piece_count() as u128, ledger)?,
+        witness
+            .terminal_hold_piece()
+            .map(|piece| try_owned_string(piece_name(piece), ledger))
+            .transpose()?,
+        steps,
     ))
 }
 
@@ -2373,40 +2557,21 @@ fn try_clone_pc_path_family_payload(
     source: &PcPathFamilyPayload,
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<PcPathFamilyPayload, WasmCommandRuntimeError> {
-    let witnesses = try_owned_vec(source.witnesses(), ledger, |witness, ledger| {
-        let steps = try_owned_vec(witness.steps(), ledger, |step, ledger| {
-            Ok(PcPathStepPayload::new(
-                try_owned_string(step.step_index(), ledger)?,
-                try_owned_string(step.operation_id(), ledger)?,
-                try_owned_string(step.active_piece(), ledger)?,
-                try_owned_string(step.input_cursor(), ledger)?,
-                try_owned_string(step.output_cursor(), ledger)?,
-                try_optional_owned_string(step.input_hold_piece(), ledger)?,
-                try_optional_owned_string(step.output_hold_piece(), ledger)?,
-                try_owned_string(step.hold_decision(), ledger)?,
-                try_owned_string(step.rotation(), ledger)?,
-                try_owned_string(step.x(), ledger)?,
-                try_owned_string(step.y(), ledger)?,
-                try_owned_string(step.placement_mask(), ledger)?,
-                try_owned_string(step.board_before_mask(), ledger)?,
-                try_owned_string(step.board_after_placement_mask(), ledger)?,
-                try_owned_string(step.board_after_line_clear_mask(), ledger)?,
-                try_owned_string(step.cleared_row_mask(), ledger)?,
-                try_owned_string(step.cleared_lines(), ledger)?,
-                try_owned_string(step.line_clear_identity(), ledger)?,
-            ))
-        })?;
-        Ok(PcPathWitnessPayload::new(
-            try_owned_string(witness.candidate_id(), ledger)?,
-            try_owned_string(witness.producer_candidate_id(), ledger)?,
-            try_owned_string(witness.pattern_id(), ledger)?,
-            try_owned_string(witness.trace_identity(), ledger)?,
-            try_owned_string(witness.normalized_trace_key(), ledger)?,
-            try_owned_string(witness.consumed_piece_count(), ledger)?,
-            try_optional_owned_string(witness.terminal_hold_piece(), ledger)?,
-            steps,
-        ))
-    })?;
+    if source.canonical_selection() != PC_PATH_CANONICAL_SELECTION {
+        return Err(finite_projection_error());
+    }
+    let canonical_witness = match (source.canonical_witness(), source.witnesses().first()) {
+        (Some(canonical), Some(first)) if canonical == first => {
+            Some(try_clone_pc_path_witness_payload(canonical, ledger)?)
+        }
+        (None, None) => None,
+        _ => return Err(finite_projection_error()),
+    };
+    let witnesses = try_owned_vec(
+        source.witnesses(),
+        ledger,
+        try_clone_pc_path_witness_payload,
+    )?;
     Ok(PcPathFamilyPayload::new(
         try_owned_string(source.witness_contract(), ledger)?,
         try_owned_string(source.ordering(), ledger)?,
@@ -2414,7 +2579,47 @@ fn try_clone_pc_path_family_payload(
         try_owned_string(source.materialized_pattern_count(), ledger)?,
         try_owned_string(source.witness_count(), ledger)?,
         source.complete(),
+        try_owned_string(source.canonical_selection(), ledger)?,
+        canonical_witness,
         witnesses,
+    ))
+}
+
+fn try_clone_pc_path_witness_payload(
+    witness: &PcPathWitnessPayload,
+    ledger: &mut WasmFiniteMemoryLedger,
+) -> Result<PcPathWitnessPayload, WasmCommandRuntimeError> {
+    let steps = try_owned_vec(witness.steps(), ledger, |step, ledger| {
+        Ok(PcPathStepPayload::new(
+            try_owned_string(step.step_index(), ledger)?,
+            try_owned_string(step.operation_id(), ledger)?,
+            try_owned_string(step.active_piece(), ledger)?,
+            try_owned_string(step.input_cursor(), ledger)?,
+            try_owned_string(step.output_cursor(), ledger)?,
+            try_optional_owned_string(step.input_hold_piece(), ledger)?,
+            try_optional_owned_string(step.output_hold_piece(), ledger)?,
+            try_owned_string(step.hold_decision(), ledger)?,
+            try_owned_string(step.rotation(), ledger)?,
+            try_owned_string(step.x(), ledger)?,
+            try_owned_string(step.y(), ledger)?,
+            try_owned_string(step.placement_mask(), ledger)?,
+            try_owned_string(step.board_before_mask(), ledger)?,
+            try_owned_string(step.board_after_placement_mask(), ledger)?,
+            try_owned_string(step.board_after_line_clear_mask(), ledger)?,
+            try_owned_string(step.cleared_row_mask(), ledger)?,
+            try_owned_string(step.cleared_lines(), ledger)?,
+            try_owned_string(step.line_clear_identity(), ledger)?,
+        ))
+    })?;
+    Ok(PcPathWitnessPayload::new(
+        try_owned_string(witness.candidate_id(), ledger)?,
+        try_owned_string(witness.producer_candidate_id(), ledger)?,
+        try_owned_string(witness.pattern_id(), ledger)?,
+        try_owned_string(witness.trace_identity(), ledger)?,
+        try_owned_string(witness.normalized_trace_key(), ledger)?,
+        try_owned_string(witness.consumed_piece_count(), ledger)?,
+        try_optional_owned_string(witness.terminal_hold_piece(), ledger)?,
+        steps,
     ))
 }
 
@@ -2469,6 +2674,18 @@ fn try_pc_save_group_payload(
     ))
 }
 
+fn try_pc_best_save_winner_payload(
+    winner: &PcBestSaveWinnerV2,
+    ledger: &mut WasmFiniteMemoryLedger,
+) -> Result<PcBestSaveWinnerPayload, WasmCommandRuntimeError> {
+    Ok(PcBestSaveWinnerPayload::new(
+        try_decimal_u128(winner.weighted_total() as u128, ledger)?,
+        try_decimal_u128(winner.balanced_jl_count() as u128, ledger)?,
+        try_owned_string(winner.exact_group_probability().decimal(), ledger)?,
+        try_pc_save_group_payload(winner.group(), ledger)?,
+    ))
+}
+
 fn try_pc_save_witness_payload(
     witness: &PcSaveWitness,
     ledger: &mut WasmFiniteMemoryLedger,
@@ -2513,6 +2730,61 @@ const fn piece_name(piece: PieceKind) -> &'static str {
         PieceKind::J => "J",
         PieceKind::L => "L",
     }
+}
+
+// A normalized Board64 key has a documented maximum of 362 bytes and a
+// finite-f64 Display form can require more than 300 decimal bytes. Format both
+// on the stack so the WASM ledger authorizes the only retained allocation.
+const INLINE_PROJECTION_TEXT_CAPACITY: usize = 384;
+
+struct InlineProjectionText {
+    bytes: [u8; INLINE_PROJECTION_TEXT_CAPACITY],
+    len: usize,
+}
+
+impl InlineProjectionText {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; INLINE_PROJECTION_TEXT_CAPACITY],
+            len: 0,
+        }
+    }
+
+    fn as_str(&self) -> Result<&str, WasmCommandRuntimeError> {
+        core::str::from_utf8(&self.bytes[..self.len]).map_err(|_| finite_projection_error())
+    }
+}
+
+impl fmt::Write for InlineProjectionText {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let end = self.len.checked_add(value.len()).ok_or(fmt::Error)?;
+        let target = self.bytes.get_mut(self.len..end).ok_or(fmt::Error)?;
+        target.copy_from_slice(value.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+fn try_display_string(
+    value: impl fmt::Display,
+    ledger: &mut WasmFiniteMemoryLedger,
+) -> Result<String, WasmCommandRuntimeError> {
+    use fmt::Write;
+
+    let mut text = InlineProjectionText::new();
+    write!(&mut text, "{value}").map_err(|_| finite_projection_error())?;
+    try_owned_string(text.as_str()?, ledger)
+}
+
+fn try_pc_score_field_key(
+    identity: StandardBoard64TilingIdentity,
+    ledger: &mut WasmFiniteMemoryLedger,
+) -> Result<String, WasmCommandRuntimeError> {
+    let mut text = InlineProjectionText::new();
+    identity
+        .write_canonical(&mut text)
+        .map_err(|_| finite_projection_error())?;
+    try_owned_string(text.as_str()?, ledger)
 }
 
 fn try_decimal_u128(
@@ -3083,6 +3355,8 @@ fn try_build_search_report(
         summary_fields,
         forward_search_kind: None,
         forward_initial_board_mask: None,
+        forward_canonical_selection: None,
+        canonical_forward_outcome: None,
         maximum_damage: None,
         maximum_ren: None,
         forward_outcomes: Vec::new(),
@@ -3456,7 +3730,7 @@ impl WasmCommandRuntime {
             .parse_command(command_text)?
             .with_runtime_webgpu_available(self.host_capabilities.webgpu_available())
             .to_app_request()
-            .map_err(WasmCommandRuntimeError::from_web_command)?;
+            .map_err(WasmCommandRuntimeError::from_cli_command)?;
         validate_build_memory_authorities(&request)?;
         Ok(request)
     }
@@ -3535,7 +3809,7 @@ impl WasmCommandRuntime {
         let request = parsed
             .with_runtime_webgpu_available(self.host_capabilities.webgpu_available())
             .to_app_request()
-            .map_err(WasmCommandRuntimeError::from_web_command)?;
+            .map_err(WasmCommandRuntimeError::from_cli_command)?;
         validate_build_memory_authorities(&request)?;
         Ok(PreparedWasmCommand {
             request,
@@ -3546,25 +3820,13 @@ impl WasmCommandRuntime {
     fn parse_command(
         &self,
         command_text: &str,
-    ) -> Result<WebCommandRequest, WasmCommandRuntimeError> {
-        let request = WebCommandParser::parse_with_worker_limit(
+    ) -> Result<CliCommandRequest, WasmCommandRuntimeError> {
+        let request = CliCommandParser::parse_with_worker_limit(
             command_text,
             self.host_capabilities.logical_processor_count(),
         )
-        .map_err(WasmCommandRuntimeError::from_web_command)?;
-        // The retained pc.tiling family is bound to the cooperative
-        // single-session App authority in WASM. Lower that execution request
-        // itself, not only the distributed plan label; every other typed
-        // product keeps its existing worker contract.
-        Ok(
-            if request.product_capability_contract() == Some(ProductCapabilityContract::PcTiling) {
-                request
-                    .with_use_all_logical_processors(false)
-                    .with_workers(1)
-            } else {
-                request
-            },
-        )
+        .map_err(WasmCommandRuntimeError::from_cli_command)?;
+        Ok(request)
     }
 
     pub(crate) fn execute_prepared(
@@ -3871,7 +4133,7 @@ pub struct WasmCommandRuntimeError {
 }
 
 impl WasmCommandRuntimeError {
-    fn from_web_command(error: WebCommandError) -> Self {
+    fn from_cli_command(error: CliCommandError) -> Self {
         Self::new(error.code().as_diagnostic_code(), error.message())
     }
 

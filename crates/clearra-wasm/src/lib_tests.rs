@@ -18,6 +18,7 @@ use clearra_host_contract::{
 };
 use clearra_problem::ProblemCompiler;
 use serde_json::Value;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::wasm_command_runtime::solution_page_store_is_public;
 
@@ -436,6 +437,23 @@ fn browser_worker_pc_save_products_keep_distinct_full_typed_families() {
             assert_eq!(winners.len(), 1);
             assert_eq!(payload["schema_id"], "clearra-save-v1");
             assert_eq!(payload["probability_basis"], "whole-universe-unconditional");
+            assert_eq!(
+                payload["canonical_selection"],
+                "smallest-canonical-candidate-id"
+            );
+            assert_eq!(payload["canonical_winner"], winners[0]);
+            let canonical_candidate_id = payload["canonical_winner"]["group"]
+                ["canonical_candidate_id"]
+                .as_str()
+                .expect("canonical best-save candidate ID")
+                .parse::<u64>()
+                .expect("numeric canonical best-save candidate ID");
+            assert!(winners
+                .iter()
+                .all(|winner| winner["group"]["canonical_candidate_id"]
+                    .as_str()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .is_some_and(|candidate_id| candidate_id >= canonical_candidate_id)));
             assert!(winners[0]["group"]["canonical_candidate_id"].is_string());
             assert!(!json.contains("portfolio"));
             assert!(!json.contains("tie_cursor"));
@@ -582,6 +600,8 @@ fn wasm_pc_score_minimals_returns_the_score_only_portfolio_and_live_page_owner()
     assert_eq!(page.alternative_index(), "1");
     assert_eq!(page.member_page_number(), "1");
     assert!(!page.members().is_empty());
+    assert_eq!(page.canonical_selection(), None);
+    assert_eq!(page.canonical_witness(), None);
     assert!(page
         .members()
         .iter()
@@ -619,6 +639,106 @@ fn wasm_pc_minimals_returns_the_exact_portfolio_and_live_page_owner() {
 }
 
 #[test]
+fn canonical_minimals_preserves_the_legacy_count_all_coverage_identity_set() {
+    let runtime = WasmCommandRuntime::default();
+    // v0.7.4's GUI lowered minimum-cover through the generic count-all route.
+    // The canonical command uses count-unique because path multiplicity is not
+    // part of a coverage portfolio; the exact candidate identity/coverage set
+    // must nevertheless remain identical.
+    let legacy = runtime
+        .run_command_text(
+            "clearra pc --lines 2 --queue IIOOO --count all \
+             --objective minimum-cover --backend cpu --workers 1",
+        )
+        .expect("legacy v0.7.4-style minimum-cover result");
+    let canonical = runtime
+        .run_command_text(
+            "clearra pc minimals --lines 2 --queue IIOOO \
+             --backend cpu --workers 1",
+        )
+        .expect("canonical minimum-cover result");
+    let legacy_report = legacy.search_report().expect("legacy search report");
+    let canonical_report = canonical.search_report().expect("canonical search report");
+
+    assert_eq!(
+        canonical_report.unique_solution_count,
+        legacy_report.unique_solution_count
+    );
+    assert_eq!(
+        canonical_report.normalized_solution_keys,
+        legacy_report.normalized_solution_keys
+    );
+    assert_eq!(
+        canonical_report.normalized_solution_set_hash,
+        legacy_report.normalized_solution_set_hash
+    );
+    assert_eq!(
+        canonical_report.covered_pattern_count,
+        legacy_report.covered_pattern_count
+    );
+    assert_eq!(
+        canonical_report.total_possible_pattern_count,
+        legacy_report.total_possible_pattern_count
+    );
+    assert_eq!(
+        canonical_report.coverage_probability,
+        legacy_report.coverage_probability
+    );
+}
+
+#[test]
+fn two_line_distinct_bag_is_complete_empty_but_duplicate_fixed_queue_is_not() {
+    let runtime = WasmCommandRuntime::default();
+    // A two-line PC consumes five tetrominoes. Every Standard7Bag/P7 prefix has
+    // five distinct pieces, and exhaustive exact-cover enumeration has no such
+    // tiling. IIOOO deliberately contains duplicates and therefore belongs to
+    // a different fixed-queue universe with four exact solution identities.
+    let opening = runtime
+        .run_command_text("clearra pc --lines 2 --backend cpu --workers 1")
+        .expect("two-line Standard7Bag opening result");
+    let explicit_p7 = runtime
+        .run_command_text("clearra pc --lines 2 --patterns P7 --backend cpu --workers 1")
+        .expect("two-line P7 result");
+    let fixed = runtime
+        .run_command_text("clearra pc --lines 2 --queue IIOOO --backend cpu --workers 1")
+        .expect("two-line duplicate fixed-queue result");
+    let opening_report = opening.search_report().expect("opening report");
+    let p7_report = explicit_p7.search_report().expect("P7 report");
+    let fixed_report = fixed.search_report().expect("fixed queue report");
+
+    assert_eq!(opening_report.total_possible_pattern_count, "5040");
+    assert_eq!(opening_report.unique_solution_count, 0);
+    assert_eq!(opening_report.covered_pattern_count, 0);
+    assert_eq!(p7_report.unique_solution_count, 0);
+    assert_eq!(p7_report.covered_pattern_count, 0);
+    assert_eq!(fixed_report.unique_solution_count, 4);
+    assert_eq!(fixed_report.covered_pattern_count, 1);
+}
+
+#[test]
+fn canonical_minimals_complete_empty_payload_is_not_a_validation_failure() {
+    let result = WasmCommandRuntime::default()
+        .run_command_text("clearra pc minimals --lines 2 --backend cpu --workers 1")
+        .expect("complete-empty canonical minimum-cover result");
+
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    let payload = result
+        .app_response()
+        .product_result_payload()
+        .expect("minimum-cover payload");
+    let ProductResultPayloadContent::CoveragePortfolio(page) = payload.content() else {
+        panic!("expected complete-empty coverage portfolio")
+    };
+    assert_eq!(page.optimal_cardinality(), "0");
+    assert_eq!(page.known_alternative_count(), "1");
+    assert_eq!(page.total_alternative_count(), Some("1"));
+    assert!(page.enumeration_complete());
+    assert_eq!(page.member_page_number(), "1");
+    assert_eq!(page.total_member_pages(), "1");
+    assert!(page.members().is_empty());
+}
+
+#[test]
 fn wasm_pc_path_returns_the_complete_normal_replay_family_without_a_page_owner() {
     let result = WasmCommandRuntime::default()
         .run_command_text(
@@ -651,6 +771,11 @@ fn wasm_pc_path_returns_the_complete_normal_replay_family_without_a_page_owner()
     assert!(family.complete());
     assert_eq!(family.witness_count(), family.witnesses().len().to_string());
     assert!(!family.witnesses().is_empty());
+    assert_eq!(
+        family.canonical_selection(),
+        "smallest-canonical-candidate-id"
+    );
+    assert_eq!(family.canonical_witness(), family.witnesses().first());
     assert!(family.witnesses().windows(2).all(|pair| {
         (
             pair[0].candidate_id(),
@@ -673,11 +798,11 @@ fn wasm_pc_path_returns_the_complete_normal_replay_family_without_a_page_owner()
 }
 
 #[test]
-fn wasm_pc_score_returns_the_score_only_attack_informational_winner_family() {
+fn wasm_pc_score_returns_every_normalized_field_with_its_whole_universe_average() {
     let result = WasmCommandRuntime::default()
         .run_command_text(
-            "clearra pc score --lines 1 --board-mask 0x3f --height 1 \
-             --pieces 1 --queue I --hold empty --score-profile tetrio \
+            "clearra pc score --lines 2 --patterns [IO][IO][IO][IO][IO] \
+             --score-profile tetrio \
              --spin-profile t-spins --initial-b2b 0",
         )
         .expect("canonical WASM pc score search");
@@ -690,20 +815,69 @@ fn wasm_pc_score_returns_the_score_only_attack_informational_winner_family() {
         .expect("pc score product payload");
     assert_eq!(payload.contract(), "pc.score");
     assert_eq!(payload.result_kind(), "pc-score-summary.v2");
-    let ProductResultPayloadContent::ScorePatternWinnerFamily(family) = payload.content() else {
-        panic!("expected pc score winner-family payload")
+    let ProductResultPayloadContent::PcScoreFieldSummary(summary) = payload.content() else {
+        panic!("expected pc score field-summary payload")
     };
-    assert_eq!(family.winner_contract(), "pc-score-pattern-winner.v1");
     assert_eq!(
-        family.ordering(),
-        "pattern-id-ascending-then-candidate-id-ascending"
+        summary.field_contract(),
+        "pc-score-solution-field-average.v1"
     );
-    assert_eq!(family.equality(), "score-only-attack-informational");
+    assert_eq!(summary.ordering(), "normalized-solution-field-order");
     assert_eq!(
-        family.informational_attack_basis(),
-        "canonical-equal-score-trace"
+        summary.solution_field_average_basis(),
+        "whole-materialized-pattern-universe-failed-pc-zero"
     );
-    assert_eq!(family.winner_count(), family.winners().len().to_string());
+    assert_eq!(summary.score_evaluation_basis(), "all-traces");
+    assert_eq!(summary.score_evaluation_scope(), "full");
+    assert_eq!(
+        summary.overall_score_basis(),
+        "all-materialized-patterns-failed-pc-zero"
+    );
+    assert_eq!(summary.materialized_pattern_count(), "32");
+    assert_eq!(summary.scored_pattern_count(), "16");
+    assert_eq!(summary.failed_pc_pattern_count(), "16");
+    assert!(summary.complete());
+    assert_eq!(
+        summary.solution_field_count(),
+        summary.fields().len().to_string()
+    );
+    assert_eq!(summary.fields().len(), 8);
+    let maximum_field_average = summary
+        .fields()
+        .iter()
+        .map(|field| {
+            assert!(field.normalized_field_key().starts_with("ctk1|"));
+            assert_eq!(field.pattern_count(), "32");
+            assert!(field.score_complete());
+            field
+                .average_score()
+                .parse::<f64>()
+                .expect("finite field average")
+        })
+        .fold(0.0_f64, f64::max);
+    assert_eq!(maximum_field_average.to_bits(), 1140.625_f64.to_bits());
+    assert!(summary.fields().iter().any(|field| {
+        field.covered_pattern_count() == "1"
+            && field
+                .average_score()
+                .parse::<f64>()
+                .is_ok_and(|score| score.to_bits() == 109.375_f64.to_bits())
+    }));
+    let overall_score = summary
+        .overall_score()
+        .parse::<f64>()
+        .expect("finite all-pattern score");
+    assert_eq!(overall_score.to_bits(), 1820.3125_f64.to_bits());
+    assert!(overall_score > maximum_field_average);
+    assert_eq!(
+        summary
+            .score_covered_pattern_conditional_average_score()
+            .expect("covered queue conditional average")
+            .parse::<f64>()
+            .expect("finite conditional average")
+            .to_bits(),
+        3640.625_f64.to_bits()
+    );
 }
 
 #[test]
@@ -737,6 +911,22 @@ fn wasm_pc_score_finder_returns_the_complete_normal_score_only_witness_family() 
         "canonical-equal-score-trace"
     );
     assert_eq!(family.winner_count(), family.winners().len().to_string());
+    assert_eq!(
+        family.canonical_selection(),
+        "smallest-canonical-candidate-id"
+    );
+    assert!(family
+        .winners()
+        .iter()
+        .any(|winner| winner == family.canonical_winner()));
+    let canonical_candidate_id = family
+        .canonical_winner()
+        .candidate_id()
+        .parse::<u64>()
+        .expect("canonical candidate ID");
+    assert!(family.winners().iter().all(|winner| {
+        winner.candidate_id().parse::<u64>().expect("candidate ID") >= canonical_candidate_id
+    }));
     assert!(family
         .winners()
         .windows(2)
@@ -2477,12 +2667,29 @@ fn search_summary_field<'a>(report: &'a WasmSearchReport, key: &str) -> &'a str 
         .unwrap_or_else(|| panic!("missing search summary field {key}"))
 }
 
+// These four typed PC regressions intentionally exercise the process-global
+// terminal resource authority. Keep only this resource-sharing family serial;
+// unrelated distributed tests must remain free to run in parallel.
+static TYPED_PC_DISTRIBUTED_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn typed_pc_distributed_test_guard() -> MutexGuard<'static, ()> {
+    TYPED_PC_DISTRIBUTED_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecutionResult {
     let preparation =
         WasmDistributedCoordinator::prepare(runtime, command).expect("distributed preparation");
     let mut coordinator = match preparation {
         WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
-        _ => panic!("two-worker request must use the distributed product path"),
+        WasmDistributedPreparation::Serial => {
+            panic!("two-worker request unexpectedly selected the serial product path")
+        }
+        WasmDistributedPreparation::Ready(result) => panic!(
+            "two-worker request completed during preparation: {:?}",
+            result.app_response()
+        ),
     };
     let mut verifier = coordinator
         .prepare_in_process_verifier(runtime, command)
@@ -2537,78 +2744,236 @@ fn visible_seven_pc_uses_the_global_serial_policy_finalizer() {
 }
 
 #[test]
-fn typed_pc_tiling_with_multiple_workers_stays_on_the_serial_product_authority() {
+fn typed_pc_score_products_keep_the_cli_single_session_policy() {
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
-    let command = "clearra pc tiling --lines 4 --queue OTSZJLIOTI --no-hold \
-                   --backend cpu --workers 2";
+    for product in ["score", "score-minimals"] {
+        let command = format!(
+            "clearra pc {product} --lines 4 --board-mask 0xfc3f --height 4 \
+             --pieces 7 --patterns IOOOOOO --no-hold \
+             --score-profile tetrio --spin-profile t-spins --initial-b2b 0"
+        );
+        let preparation = WasmDistributedCoordinator::prepare(&runtime, &command)
+            .unwrap_or_else(|error| panic!("typed pc {product} preparation: {error:?}"));
+        assert!(
+            matches!(preparation, WasmDistributedPreparation::Serial),
+            "typed pc {product} must remain a single CLI session"
+        );
 
-    let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
-        .expect("typed pc tiling distributed plan");
-    assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+        let error = match WasmDistributedCoordinator::prepare(
+            &runtime,
+            &format!("{command} --workers 2"),
+        ) {
+            Ok(_) => panic!("typed score products must reject a CLI worker override"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "E_WASM_COMMAND_INVALID_VALUE");
+        assert!(error
+            .message()
+            .contains("does not accept an explicit --workers execution override"));
+    }
+}
+
+#[test]
+fn typed_pc_tiling_preserves_cli_workers_and_uses_product_neutral_distribution() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let command = "clearra pc tiling --lines 4 --board-mask 0xfc3f --height 4 \
+                   --pieces 7 --patterns IOOOOOO;OOOOOOO --no-hold \
+                   --backend cpu --workers 2";
 
     let request = runtime
         .compile_command_text(command)
         .expect("typed pc tiling request");
     assert!(request.product_capability_contract().is_some());
-    assert_eq!(request.resource_budget().workers(), 1);
-    let response = runtime.app_context().run(request);
+    let workers = match request.command() {
+        AppCommand::Pc(command) => command.query().execution_policy().workers(),
+        AppCommand::Scenario(command) => command.query().execution_policy().workers(),
+        other => panic!("typed pc tiling must lower to a PC search command: {other:?}"),
+    };
+    assert_eq!(workers, 2);
+    drop(request);
+
+    let distributed = run_distributed_cpu(&runtime, command);
+    let response = distributed.app_response();
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
     assert_eq!(
-        response.status(),
-        clearra_app::AppStatus::Success,
-        "{response:?}"
+        response
+            .result()
+            .map(clearra_host_contract::AppResult::kind),
+        Some("pc-tiling-family.v1")
     );
-    let report_json = serialize_search_report_from_app_response(&response)
-        .expect("typed pc tiling WASM JSON report");
-    let report_value: Value =
-        serde_json::from_str(&report_json).expect("typed pc tiling JSON value");
-    assert_eq!(report_value["workers_used"], 1);
-    let family = response
-        .product_capability_result()
-        .and_then(|result| result.pc_tiling_family_v1())
-        .expect("pc-tiling-family.v1 wrapper");
-    let core = response
-        .render_model()
-        .and_then(AppRenderModel::core_result)
-        .expect("typed pc tiling core result");
-    assert!(family.normalized_solution_count() > family.initial_page_limit());
+    let report = distributed
+        .search_report()
+        .expect("typed distributed pc tiling WASM report");
+    assert_eq!(report.workers_used, 2);
+    assert!(report.cpu_parallel_execution);
+    assert!(report.unique_solution_count > 0);
     assert_eq!(
-        family.initial_page_keys().len(),
-        family.initial_page_limit()
-    );
-    assert_eq!(
-        report_value["unique_solution_count"],
-        family.normalized_solution_count()
-    );
-    assert_eq!(report_value["solution_keys_materialized_count"], 100);
-    assert_eq!(report_value["solution_keys_complete"], false);
-    assert_eq!(report_value["solution_page_available"], true);
-    assert_eq!(
-        report_value["normalized_solution_set_hash"],
-        family.normalized_solution_set_hash()
+        report.solution_keys_materialized_count,
+        report
+            .unique_solution_count
+            .min(clearra_app::PC_TILING_INITIAL_PAGE_LIMIT)
     );
     assert_eq!(
-        report_value["normalized_solution_keys"]
-            .as_array()
-            .map(Vec::len),
-        Some(100)
-    );
-    assert!(core.pc_tiling_family_publication_contract_is_valid());
-    assert!(solution_page_store_is_public(core));
-    let generic_trace = core.clone().with_replaced_fields(vec![(
-        "search_output_policy".to_owned(),
-        "trace".to_owned(),
-    )]);
-    assert!(!generic_trace.pc_tiling_family_publication_contract_is_valid());
-    assert!(!solution_page_store_is_public(&generic_trace));
-    assert_eq!(
-        core.usize_field("normalized_unique_solution_count"),
-        Some(family.normalized_solution_count())
+        report.solution_keys_complete,
+        report.unique_solution_count <= clearra_app::PC_TILING_INITIAL_PAGE_LIMIT
     );
     assert_eq!(
-        core.field("normalized_solution_set_hash"),
-        Some(family.normalized_solution_set_hash())
+        report.solution_page_available,
+        report.unique_solution_count > clearra_app::PC_TILING_INITIAL_PAGE_LIMIT
     );
+    assert_eq!(
+        report.normalized_solution_keys.len(),
+        report.solution_keys_materialized_count
+    );
+    if report.solution_page_available {
+        let store = distributed
+            .tiling_solution_page_store()
+            .expect("typed distributed pc tiling page source");
+        assert_eq!(store.len(), report.unique_solution_count);
+    } else {
+        assert!(distributed.tiling_solution_page_store().is_none());
+    }
+}
+
+#[test]
+fn typed_pc_minimals_distributed_geometry_completes_with_the_same_exact_family() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    const COMMAND: &str = "clearra pc minimals --lines 4 --board-mask 0xfc3f --height 4 \
+        --pieces 7 --patterns IOOOOOO;OOOOOOO --no-hold --backend cpu";
+
+    let serial = runtime
+        .run_command_text(&format!("{COMMAND} --workers 1"))
+        .expect("serial typed pc minimals result");
+    let distributed = run_distributed_cpu(&runtime, &format!("{COMMAND} --workers 2"));
+    let serial_report = serial.search_report().expect("serial minimals report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed minimals report");
+
+    assert_eq!(distributed.app_response().status(), AppStatus::Success);
+    assert_eq!(distributed_report.workers_used, 2);
+    assert!(distributed_report.cpu_parallel_execution);
+    assert_eq!(
+        distributed_report.normalized_solution_set_hash,
+        serial_report.normalized_solution_set_hash
+    );
+    assert_eq!(
+        distributed_report.unique_solution_count,
+        serial_report.unique_solution_count
+    );
+    assert!(distributed.product_page_source_owner().is_some());
+    let payload = distributed
+        .app_response()
+        .product_result_payload()
+        .expect("distributed minimals product payload");
+    assert_eq!(payload.contract(), "pc.minimals");
+    assert_eq!(payload.result_kind(), "pc-minimum-cover.v2");
+}
+
+#[test]
+fn typed_pc_path_distributed_geometry_preserves_the_complete_replay_family() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    const COMMAND: &str = "clearra pc path --lines 4 --board-mask 0xfc3f --height 4 \
+        --pieces 7 --patterns IOOOOOO;OOOOOOO --no-hold --backend cpu";
+
+    let serial = runtime
+        .run_command_text(&format!("{COMMAND} --workers 1"))
+        .expect("serial typed pc path result");
+    let distributed = run_distributed_cpu(&runtime, &format!("{COMMAND} --workers 2"));
+    assert_eq!(
+        distributed.app_response().status(),
+        AppStatus::Success,
+        "{:?}",
+        distributed.app_response()
+    );
+
+    let serial_report = serial.search_report().expect("serial pc.path report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed pc.path report");
+    assert_build_probability_semantics_match(serial_report, distributed_report);
+    assert_eq!(distributed_report.workers_used, 2);
+    assert!(distributed_report.cpu_parallel_execution);
+
+    let serial_payload = serial
+        .app_response()
+        .product_result_payload()
+        .expect("serial pc.path product payload");
+    let distributed_payload = distributed
+        .app_response()
+        .product_result_payload()
+        .expect("distributed pc.path product payload");
+    assert_eq!(serial_payload.contract(), "pc.path");
+    assert_eq!(serial_payload.result_kind(), "pc-path-family.v2");
+    assert_eq!(distributed_payload.contract(), serial_payload.contract());
+    assert_eq!(
+        distributed_payload.result_kind(),
+        serial_payload.result_kind()
+    );
+    assert_eq!(distributed_payload.content(), serial_payload.content());
+
+    let ProductResultPayloadContent::PcPathFamily(family) = distributed_payload.content() else {
+        panic!("distributed pc.path must retain its complete replay-family payload")
+    };
+    assert!(family.complete());
+    assert_eq!(family.witness_count(), family.witnesses().len().to_string());
+    assert_eq!(family.canonical_witness(), family.witnesses().first());
+}
+
+#[test]
+fn typed_pc_chance_distributed_completion_preserves_probability_evidence() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    const COMMAND: &str = "clearra pc chance --lines 4 --board-mask 0xfc3f --height 4 \
+        --pieces 7 --patterns IOOOOOO;OOOOOOO --no-hold --backend cpu";
+
+    let serial = runtime
+        .run_command_text(&format!("{COMMAND} --workers 1"))
+        .expect("serial typed pc chance result");
+    let distributed = run_distributed_cpu(&runtime, &format!("{COMMAND} --workers 2"));
+    assert_eq!(
+        distributed.app_response().status(),
+        AppStatus::Success,
+        "{:?}",
+        distributed.app_response()
+    );
+    let serial_report = serial.search_report().expect("serial chance report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed chance report");
+
+    assert_build_probability_semantics_match(serial_report, distributed_report);
+
+    assert_eq!(
+        distributed
+            .app_response()
+            .result()
+            .map(clearra_host_contract::AppResult::kind),
+        Some("pc-probability.v2")
+    );
+    assert_eq!(distributed_report.workers_used, 2);
+    assert!(distributed_report.cpu_parallel_execution);
+    assert_eq!(
+        distributed_report.coverage_probability,
+        serial_report.coverage_probability
+    );
+    assert_eq!(
+        distributed_report.covered_pattern_count,
+        serial_report.covered_pattern_count
+    );
+    assert_eq!(
+        distributed_report.total_possible_pattern_count,
+        serial_report.total_possible_pattern_count
+    );
+    assert!(distributed_report.probability_complete);
 }
 
 #[test]

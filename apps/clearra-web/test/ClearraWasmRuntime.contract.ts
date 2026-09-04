@@ -241,6 +241,20 @@ assert.doesNotMatch(
   />>>\s*0/u,
   'product page coordinates must never be silently truncated or wrapped'
 );
+const tilingPageAdapter = runtimeSource.slice(
+  runtimeSource.indexOf('tiling_solution_page(offset, limit) {'),
+  runtimeSource.indexOf('tiling_solution_release() {')
+);
+assert.match(
+  tilingPageAdapter,
+  /clearra_wasm_tiling_solution_page\(offset, limit\)/u,
+  'the browser adapter forwards continuation offsets beyond the initial hundred'
+);
+assert.doesNotMatch(
+  tilingPageAdapter,
+  />>>\s*0|&\s*0x/u,
+  'tiling page coordinates must not be narrowed before the governed ABI call'
+);
 assert.match(
   runtimeSource.slice(
     runtimeSource.indexOf('product_page_get(alternativeIndex, memberPageNumber) {'),

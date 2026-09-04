@@ -547,7 +547,7 @@ dependencies = [
  "clearra-ui-schema",
  "clearra-validation",
  "clearra-wasm",
- "clearra-web-command",
+ "clearra-cli-command",
  "serde",
  "serde_json",
 ]
@@ -789,11 +789,11 @@ dependencies = [
  "clearra-pc-graph",
  "clearra-problem",
  "clearra-spin-structure-search",
- "clearra-web-command",
+ "clearra-cli-command",
 ]
 
 [[package]]
-name = "clearra-web-command"
+name = "clearra-cli-command"
 version = "0.8.0"
 dependencies = [
  "clearra-app",

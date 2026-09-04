@@ -49,6 +49,7 @@ function projectPcPath(structured) {
     summary.witness_contract !== "pc-path-witness.v2" ||
     summary.ordering !==
       "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending" ||
+    summary.canonical_selection !== CANONICAL_SELECTION ||
     summary.complete !== true ||
     !canonicalDecimal(summary.witness_count) ||
     !canonicalDecimal(summary.materialized_pattern_count) ||
@@ -57,12 +58,11 @@ function projectPcPath(structured) {
   ) throw invalid("pc.path", "family evidence");
 
   let previous = null;
-  let canonical = null;
   for (const witness of summary.witnesses) {
     if (
       !plainObject(witness) ||
-      !canonicalDecimal(witness.candidate_id) ||
-      !canonicalDecimal(witness.producer_candidate_id) ||
+      !canonicalPositiveDecimalU64(witness.candidate_id) ||
+      !canonicalPositiveDecimalU64(witness.producer_candidate_id) ||
       !canonicalDecimal(witness.pattern_id) ||
       !safeText(witness.trace_identity) ||
       !safeText(witness.normalized_trace_key) ||
@@ -75,10 +75,22 @@ function projectPcPath(structured) {
     if (previous !== null && comparePathKey(previous, key) > 0) {
       throw invalid("pc.path", "ordering");
     }
-    if (canonical === null || comparePathKey(key, canonical.key) < 0) {
-      canonical = { key, witness };
-    }
     previous = key;
+  }
+  const suppliedCanonical = summary.canonical_witness;
+  if (summary.witnesses.length === 0) {
+    if (suppliedCanonical !== null) {
+      throw invalid("pc.path", "core-owned canonical witness");
+    }
+  } else {
+    if (
+      !plainObject(suppliedCanonical) ||
+      !samePlainValue(suppliedCanonical, summary.witnesses[0])
+    ) throw invalid("pc.path", "core-owned canonical witness");
+    const suppliedCandidateId = BigInt(suppliedCanonical.candidate_id);
+    if (summary.witnesses.some((witness) =>
+      BigInt(witness.candidate_id) < suppliedCandidateId
+    )) throw invalid("pc.path", "core-owned canonical witness");
   }
   rejectAlternativeMetadata(structured);
   const projected = clonePlain(structured);
@@ -88,10 +100,12 @@ function projectPcPath(structured) {
     payload_kind: "canonical-pc-path-witness",
     witness_contract: "pc-path-witness.v2",
     ordering: summary.ordering,
-    canonical_selection: CANONICAL_SELECTION,
+    canonical_selection: summary.canonical_selection,
     problem_id: summary.problem_id,
     complete: true,
-    canonical_witness: canonical === null ? null : clonePlain(canonical.witness),
+    canonical_witness: suppliedCanonical === null
+      ? null
+      : clonePlain(suppliedCanonical),
   };
   return deepFreeze(projected);
 }
@@ -132,6 +146,7 @@ function projectPcScoreFinder(structured) {
     summary.score_pattern_winner_ordering !==
       "pattern-id-ascending-then-candidate-id-ascending" ||
     summary.score_pattern_winner_equality !== SCORE_ONLY_EQUALITY ||
+    summary.score_pattern_canonical_selection !== CANONICAL_SELECTION ||
     summary.score_pattern_winner_complete !== true ||
     !canonicalDecimal(summary.score_pattern_winner_count) ||
     !Array.isArray(summary.score_pattern_winners) ||
@@ -140,20 +155,25 @@ function projectPcScoreFinder(structured) {
     summary.score_pattern_winners.length === 0
   ) throw invalid("pc.score-finder", "winner family evidence");
 
-  let canonical = null;
+  const suppliedCanonical = summary.score_pattern_canonical_winner;
+  validateScorePatternWinner(suppliedCanonical);
+  let previous = null;
+  let suppliedWitnessMatches = 0;
+  const suppliedCandidateId = BigInt(suppliedCanonical.candidate_id);
   for (const winner of summary.score_pattern_winners) {
-    if (
-      !plainObject(winner) ||
-      winner.contract !== "pc-score-pattern-winner.v1" ||
-      !canonicalDecimal(winner.pattern_id) ||
-      !canonicalDecimal(winner.candidate_id) ||
-      !canonicalInteger(winner.score) ||
-      !safeText(winner.normalized_solution_key)
-    ) throw invalid("pc.score-finder", "winner");
-    if (
-      canonical === null ||
-      BigInt(winner.candidate_id) < BigInt(canonical.candidate_id)
-    ) canonical = winner;
+    validateScorePatternWinner(winner);
+    const identity = [BigInt(winner.pattern_id), BigInt(winner.candidate_id)];
+    if (previous !== null && compareBigIntPair(previous, identity) >= 0) {
+      throw invalid("pc.score-finder", "winner ordering");
+    }
+    if (BigInt(winner.candidate_id) < suppliedCandidateId) {
+      throw invalid("pc.score-finder", "core-owned canonical winner");
+    }
+    if (sameScorePatternWinner(winner, suppliedCanonical)) suppliedWitnessMatches += 1;
+    previous = identity;
+  }
+  if (suppliedWitnessMatches !== 1) {
+    throw invalid("pc.score-finder", "core-owned canonical winner");
   }
   rejectAlternativeMetadata(structured, new Set([
     "score_pattern_winner_contract",
@@ -170,22 +190,131 @@ function projectPcScoreFinder(structured) {
     winner_contract: "pc-score-pattern-winner.v1",
     ordering: "candidate-id-ascending",
     score_equality: SCORE_ONLY_SUMMARY_EQUALITY,
-    canonical_selection: CANONICAL_SELECTION,
+    canonical_selection: summary.score_pattern_canonical_selection,
     complete: true,
-    canonical_winner: stripAttackFields(clonePlain(canonical)),
+    canonical_winner: stripAttackFields(clonePlain(suppliedCanonical)),
   };
   return deepFreeze(stripAttackFields(projected));
+}
+
+function validateScorePatternWinner(winner) {
+  if (
+    !plainObject(winner) ||
+    winner.contract !== "pc-score-pattern-winner.v1" ||
+    !canonicalDecimal(winner.pattern_id) ||
+    !canonicalPositiveDecimalU64(winner.candidate_id) ||
+    !canonicalInteger(winner.score) ||
+    !canonicalDecimal(winner.informational_attack) ||
+    winner.informational_attack_basis !== "canonical-equal-score-trace" ||
+    !safeText(winner.normalized_solution_key)
+  ) throw invalid("pc.score-finder", "winner");
+}
+
+function sameScorePatternWinner(left, right) {
+  return left.contract === right.contract &&
+    left.pattern_id === right.pattern_id &&
+    left.candidate_id === right.candidate_id &&
+    left.normalized_solution_key === right.normalized_solution_key &&
+    left.score === right.score &&
+    left.informational_attack === right.informational_attack &&
+    left.informational_attack_basis === right.informational_attack_basis;
+}
+
+function compareBigIntPair(left, right) {
+  if (left[0] < right[0]) return -1;
+  if (left[0] > right[0]) return 1;
+  if (left[1] < right[1]) return -1;
+  if (left[1] > right[1]) return 1;
+  return 0;
 }
 
 function projectPcScore(structured) {
   const summary = assertEnvelope(structured, "pc-score-summary.v2", "pc.score");
   if (
-    summary.score_equality_basis !== SCORE_ONLY_SUMMARY_EQUALITY ||
+    !exactKeys(structured, [
+      "schema_version",
+      "kind",
+      "summary",
+      "contract",
+      "runtime_identity",
+    ]) ||
+    structured.schema_version !== 2 ||
+    !validTerminalRuntimeIdentity(structured.runtime_identity) ||
+    !exactKeys(summary, [
+      "capability_id",
+      "result_contract",
+      "payload_kind",
+      "score_solution_field_contract",
+      "score_solution_field_ordering",
+      "score_solution_field_average_basis",
+      "score_evaluation_basis",
+      "score_evaluation_scope",
+      "score_overall_basis",
+      "piece_source_id",
+      "pattern_universe_id",
+      "pattern_weight_model_id",
+      "materialized_pattern_count",
+      "score_solution_field_count",
+      "score_success_pattern_count",
+      "score_failed_pc_pattern_count",
+      "score_covered_probability",
+      "score_overall_score",
+      "score_covered_pattern_conditional_average_score",
+      "score_summary_complete",
+      "score_solution_fields",
+    ]) ||
+    summary.payload_kind !== "pc-score-field-summary" ||
+    summary.result_contract !== "pc-score-summary.v2" ||
+    summary.score_solution_field_contract !== "pc-score-solution-field-average.v1" ||
+    summary.score_solution_field_ordering !== "normalized-solution-field-order" ||
+    summary.score_solution_field_average_basis !==
+      "whole-materialized-pattern-universe-failed-pc-zero" ||
+    summary.score_evaluation_basis !== "all-traces" ||
+    summary.score_evaluation_scope !== "full" ||
+    summary.score_overall_basis !== "all-materialized-patterns-failed-pc-zero" ||
     summary.score_summary_complete !== true ||
-    summary.objective_complete !== true ||
-    summary.probability_complete !== true ||
-    !canonicalInteger(summary.score_best_score)
-  ) throw invalid("pc.score", "score-only completeness");
+    !canonicalPositiveDecimalU64(summary.piece_source_id) ||
+    !canonicalPositiveDecimalU64(summary.pattern_universe_id) ||
+    !canonicalPositiveDecimalU64(summary.pattern_weight_model_id) ||
+    !canonicalDecimal(summary.materialized_pattern_count) ||
+    !canonicalDecimal(summary.score_solution_field_count) ||
+    !canonicalDecimal(summary.score_success_pattern_count) ||
+    !canonicalDecimal(summary.score_failed_pc_pattern_count) ||
+    !canonicalUnitDecimal(summary.score_covered_probability) ||
+    !canonicalNonNegativeNumber(summary.score_overall_score) ||
+    !optionalCanonicalNonNegativeNumber(
+      summary.score_covered_pattern_conditional_average_score,
+    ) ||
+    !Array.isArray(summary.score_solution_fields) ||
+    BigInt(summary.score_solution_field_count) !==
+      BigInt(summary.score_solution_fields.length) ||
+    BigInt(summary.score_success_pattern_count) +
+      BigInt(summary.score_failed_pc_pattern_count) !==
+      BigInt(summary.materialized_pattern_count)
+  ) throw invalid("pc.score", "all-solution field score evidence");
+  let previousFieldKey = null;
+  for (const field of summary.score_solution_fields) {
+    if (
+      !plainObject(field) ||
+      !exactKeys(field, [
+        "normalized_field_key",
+        "average_score",
+        "covered_pattern_count",
+        "pattern_count",
+        "score_complete",
+      ]) ||
+      !safeText(field.normalized_field_key) ||
+      !canonicalNonNegativeNumber(field.average_score) ||
+      !canonicalDecimal(field.covered_pattern_count) ||
+      field.pattern_count !== summary.materialized_pattern_count ||
+      field.score_complete !== true ||
+      BigInt(field.covered_pattern_count) > BigInt(field.pattern_count) ||
+      (previousFieldKey !== null &&
+        previousFieldKey.localeCompare(field.normalized_field_key, "en") >= 0)
+    ) throw invalid("pc.score", "solution field score row");
+    previousFieldKey = field.normalized_field_key;
+  }
+  rejectLegacyPrivateMetadata(structured);
   rejectAlternativeMetadata(structured);
   return deepFreeze(stripAttackFields(clonePlain(structured)));
 }
@@ -194,16 +323,22 @@ function projectPcMinimals(structured) {
   const summary = assertEnvelope(structured, "pc-minimum-cover.v2", "pc.minimals");
   const members = canonicalPortfolioMembers(summary, "pc.minimals");
   if (members.length === 0) throw invalid("pc.minimals", "empty canonical portfolio");
-  const canonical = members.reduce((left, right) =>
-    BigInt(right.candidate_id) < BigInt(left.candidate_id) ? right : left
-  );
+  if (
+    summary.canonical_selection !== CANONICAL_SELECTION ||
+    !plainObject(summary.canonical_witness) ||
+    !samePlainValue(summary.canonical_witness, members[0])
+  ) throw invalid("pc.minimals", "core-owned canonical witness");
+  const suppliedCandidateId = BigInt(summary.canonical_witness.candidate_id);
+  if (members.some((member) => BigInt(member.candidate_id) < suppliedCandidateId)) {
+    throw invalid("pc.minimals", "core-owned canonical witness");
+  }
   const projected = clonePlain(structured);
   projected.summary = {
     capability_id: "pc.minimals",
     result_contract: "pc-minimum-cover.v2",
     payload_kind: "canonical-minimum-cover-candidate",
-    canonical_selection: CANONICAL_SELECTION,
-    canonical_candidate: clonePlain(canonical),
+    canonical_selection: summary.canonical_selection,
+    canonical_candidate: clonePlain(summary.canonical_witness),
   };
   return deepFreeze(projected);
 }
@@ -334,7 +469,7 @@ function canonicalPortfolioMembers(summary, capabilityId) {
   for (const member of summary.members) {
     if (
       !plainObject(member) ||
-      !canonicalDecimal(member.candidate_id) ||
+      !canonicalPositiveDecimalU64(member.candidate_id) ||
       !safeText(member.normalized_solution_key)
     ) throw invalid(capabilityId, "portfolio member");
   }
@@ -392,6 +527,36 @@ function rejectAlternativeMetadata(value, allowed = new Set()) {
   visit(value);
 }
 
+function rejectLegacyPrivateMetadata(value) {
+  const legacyPrivateKeys = new Set([
+    "execution_authority",
+    "exact_scoring_execution_batches",
+    "memory_evidence",
+    "pc_score_problem_evidence",
+    "postprocess_score_cells",
+    "problem_owner",
+    "score_accuracy_level",
+    "score_profile_specific_exact",
+  ]);
+  const visit = (nested, path = []) => {
+    if (Array.isArray(nested)) {
+      nested.forEach((entry, index) => visit(entry, [...path, index]));
+      return;
+    }
+    if (!plainObject(nested)) return;
+    for (const [key, child] of Object.entries(nested)) {
+      const normalized = key.toLowerCase().replaceAll("-", "_");
+      if (
+        normalized.startsWith("private_") ||
+        normalized.startsWith("transient_") ||
+        legacyPrivateKeys.has(normalized)
+      ) throw new Error(`${[...path, key].join(".")} is not exposed by Discord.`);
+      visit(child, [...path, key]);
+    }
+  };
+  visit(value);
+}
+
 function stripAttackFields(value) {
   if (Array.isArray(value)) return value.map(stripAttackFields);
   if (!plainObject(value)) return value;
@@ -412,6 +577,65 @@ function canonicalDecimal(value) {
 
 function canonicalInteger(value) {
   return typeof value === "string" && /^(?:0|-?[1-9][0-9]*)$/u.test(value);
+}
+
+function canonicalPositiveDecimalU64(value) {
+  return typeof value === "string" && /^[1-9][0-9]*$/u.test(value) &&
+    BigInt(value) <= 18_446_744_073_709_551_615n;
+}
+
+function canonicalNonNegativeNumber(value) {
+  return typeof value === "string" &&
+    /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/u.test(value) &&
+    Number.isFinite(Number(value));
+}
+
+function optionalCanonicalNonNegativeNumber(value) {
+  return value === null || canonicalNonNegativeNumber(value);
+}
+
+function canonicalUnitDecimal(value) {
+  return canonicalNonNegativeNumber(value) && Number(value) <= 1;
+}
+
+function validTerminalRuntimeIdentity(identity) {
+  return plainObject(identity) &&
+    exactKeys(identity, [
+      "engine_build_id",
+      "source_commit",
+      "contract_schema_version",
+      "supply_semantics_id",
+      "artifact_schema_version",
+    ]) &&
+    safeText(identity.engine_build_id) &&
+    identity.engine_build_id === identity.source_commit &&
+    identity.contract_schema_version === "clearra.search.contract.v2" &&
+    identity.supply_semantics_id ===
+      "clearra.supply.projected-terminal-lookahead.v1" &&
+    identity.artifact_schema_version === "clearra.solution-data.v1";
+}
+
+function exactKeys(value, expected) {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => hasOwn(value, key));
+}
+
+function samePlainValue(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => samePlainValue(value, right[index]));
+  }
+  if (!plainObject(left) || !plainObject(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => hasOwn(right, key) && samePlainValue(left[key], right[key]));
+}
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function safeText(value) {

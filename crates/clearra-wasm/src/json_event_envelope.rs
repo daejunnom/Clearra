@@ -16,8 +16,9 @@ use clearra_host_contract::{
 use crate::wasm_worker_job::GovernedWasmWorkerEvents;
 use crate::{
     BackendStatus, BudgetStatus, JobProgress, MemoryStatus, WasmCommandRuntimeError,
-    WasmSearchReport, WasmWorkerJobEvent, WebGpuBackendOutcomeState, WebGpuBackendReport,
-    WebGpuLimitsReport, WebGpuMemoryReport, WebGpuReportTrustState, WebGpuShaderReport,
+    WasmForwardSearchOutcome, WasmSearchReport, WasmWorkerJobEvent, WebGpuBackendOutcomeState,
+    WebGpuBackendReport, WebGpuLimitsReport, WebGpuMemoryReport, WebGpuReportTrustState,
+    WebGpuShaderReport,
 };
 
 impl WasmCommandRuntimeError {
@@ -952,6 +953,16 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                     })
                 });
                 page_object.boolean("page_handle_available", page.page_handle_available());
+                if let Some(selection) = page.canonical_selection() {
+                    page_object.string("canonical_selection", selection);
+                }
+                if let Some(witness) = page.canonical_witness() {
+                    page_object.object("canonical_witness", |witness_object| {
+                        witness_object.string("candidate_id", witness.candidate_id());
+                        witness_object
+                            .string("normalized_solution_key", witness.normalized_solution_key());
+                    });
+                }
             });
         }
         ProductResultPayloadContent::BuildCoveragePortfolioV2(portfolio) => {
@@ -1157,6 +1168,46 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                 });
             });
         }
+        ProductResultPayloadContent::PcScoreFieldSummary(summary) => {
+            nested.string("payload_kind", "pc-score-field-summary");
+            nested.object("payload", |summary_object| {
+                summary_object.string("field_contract", summary.field_contract());
+                summary_object.string("ordering", summary.ordering());
+                summary_object.string(
+                    "solution_field_average_basis",
+                    summary.solution_field_average_basis(),
+                );
+                summary_object.string("score_evaluation_basis", summary.score_evaluation_basis());
+                summary_object.string("score_evaluation_scope", summary.score_evaluation_scope());
+                summary_object.string("overall_score_basis", summary.overall_score_basis());
+                summary_object.string("piece_source_id", summary.piece_source_id());
+                summary_object.string("pattern_universe_id", summary.pattern_universe_id());
+                summary_object.string("pattern_weight_model_id", summary.pattern_weight_model_id());
+                summary_object.string(
+                    "materialized_pattern_count",
+                    summary.materialized_pattern_count(),
+                );
+                summary_object.string("solution_field_count", summary.solution_field_count());
+                summary_object.string("scored_pattern_count", summary.scored_pattern_count());
+                summary_object.string("failed_pc_pattern_count", summary.failed_pc_pattern_count());
+                summary_object.string("covered_probability", summary.covered_probability());
+                summary_object.string("overall_score", summary.overall_score());
+                summary_object.optional_string(
+                    "score_covered_pattern_conditional_average_score",
+                    summary.score_covered_pattern_conditional_average_score(),
+                );
+                summary_object.boolean("complete", summary.complete());
+                summary_object.array("fields", |output| {
+                    write_object_array(output, summary.fields(), |field_object, field| {
+                        field_object.string("normalized_field_key", field.normalized_field_key());
+                        field_object.string("average_score", field.average_score());
+                        field_object.string("covered_pattern_count", field.covered_pattern_count());
+                        field_object.string("pattern_count", field.pattern_count());
+                        field_object.boolean("score_complete", field.score_complete());
+                    })
+                });
+            });
+        }
         ProductResultPayloadContent::ScorePatternWinnerFamily(family) => {
             nested.string("payload_kind", "score-pattern-winner-family");
             nested.object("payload", |family_object| {
@@ -1169,6 +1220,16 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                 );
                 family_object.string("page_size", family.page_size());
                 family_object.string("winner_count", family.winner_count());
+                family_object.string("canonical_selection", family.canonical_selection());
+                family_object.object("canonical_winner", |winner_object| {
+                    let winner = family.canonical_winner();
+                    winner_object.string("pattern_id", winner.pattern_id());
+                    winner_object.string("candidate_id", winner.candidate_id());
+                    winner_object
+                        .string("normalized_solution_key", winner.normalized_solution_key());
+                    winner_object.string("score", winner.score());
+                    winner_object.string("informational_attack", winner.informational_attack());
+                });
                 family_object.array("winners", |output| {
                     write_object_array(output, family.winners(), |winner_object, winner| {
                         winner_object.string("pattern_id", winner.pattern_id());
@@ -1193,51 +1254,14 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                 );
                 family_object.string("witness_count", family.witness_count());
                 family_object.boolean("complete", family.complete());
+                family_object.string("canonical_selection", family.canonical_selection());
+                family_object.optional_object(
+                    "canonical_witness",
+                    family.canonical_witness(),
+                    write_pc_path_witness,
+                );
                 family_object.array("witnesses", |output| {
-                    write_object_array(output, family.witnesses(), |witness_object, witness| {
-                        witness_object.string("candidate_id", witness.candidate_id());
-                        witness_object
-                            .string("producer_candidate_id", witness.producer_candidate_id());
-                        witness_object.string("pattern_id", witness.pattern_id());
-                        witness_object.string("trace_identity", witness.trace_identity());
-                        witness_object
-                            .string("normalized_trace_key", witness.normalized_trace_key());
-                        witness_object
-                            .string("consumed_piece_count", witness.consumed_piece_count());
-                        witness_object
-                            .optional_string("terminal_hold_piece", witness.terminal_hold_piece());
-                        witness_object.array("steps", |step_output| {
-                            write_object_array(step_output, witness.steps(), |step_object, step| {
-                                step_object.string("step_index", step.step_index());
-                                step_object.string("operation_id", step.operation_id());
-                                step_object.string("active_piece", step.active_piece());
-                                step_object.string("input_cursor", step.input_cursor());
-                                step_object.string("output_cursor", step.output_cursor());
-                                step_object
-                                    .optional_string("input_hold_piece", step.input_hold_piece());
-                                step_object
-                                    .optional_string("output_hold_piece", step.output_hold_piece());
-                                step_object.string("hold_decision", step.hold_decision());
-                                step_object.string("rotation", step.rotation());
-                                step_object.string("x", step.x());
-                                step_object.string("y", step.y());
-                                step_object.string("placement_mask", step.placement_mask());
-                                step_object.string("board_before_mask", step.board_before_mask());
-                                step_object.string(
-                                    "board_after_placement_mask",
-                                    step.board_after_placement_mask(),
-                                );
-                                step_object.string(
-                                    "board_after_line_clear_mask",
-                                    step.board_after_line_clear_mask(),
-                                );
-                                step_object.string("cleared_row_mask", step.cleared_row_mask());
-                                step_object.string("cleared_lines", step.cleared_lines());
-                                step_object
-                                    .string("line_clear_identity", step.line_clear_identity());
-                            })
-                        });
-                    })
+                    write_object_array(output, family.witnesses(), write_pc_path_witness)
                 });
             });
         }
@@ -1264,19 +1288,17 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                 family_object.string("equality", family.equality());
                 family_object.string("page_size", family.page_size());
                 family_object.string("winner_count", family.winner_count());
+                family_object.string("canonical_selection", family.canonical_selection());
+                family_object.optional_object(
+                    "canonical_winner",
+                    family.canonical_winner(),
+                    write_pc_best_save_winner,
+                );
                 family_object.object("metadata", |metadata_object| {
                     write_pc_save_metadata(metadata_object, family.metadata())
                 });
                 family_object.array("winners", |output| {
-                    write_object_array(output, family.winners(), |winner_object, winner| {
-                        winner_object.string("weighted_total", winner.weighted_total());
-                        winner_object.string("balanced_jl_count", winner.balanced_jl_count());
-                        winner_object
-                            .string("exact_group_probability", winner.exact_group_probability());
-                        winner_object.object("group", |group_object| {
-                            write_pc_save_group(group_object, winner.group())
-                        });
-                    })
+                    write_object_array(output, family.winners(), write_pc_best_save_winner)
                 });
             });
         }
@@ -1493,6 +1515,59 @@ fn write_pc_save_metadata(
         completeness_object.boolean("count_complete", completeness.count_complete());
         completeness_object.boolean("probability_complete", completeness.probability_complete());
         completeness_object.boolean("complete", completeness.complete());
+    });
+}
+
+fn write_pc_path_witness(
+    object: &mut JsonObject<'_>,
+    witness: &clearra_host_contract::PcPathWitnessPayload,
+) {
+    object.string("candidate_id", witness.candidate_id());
+    object.string("producer_candidate_id", witness.producer_candidate_id());
+    object.string("pattern_id", witness.pattern_id());
+    object.string("trace_identity", witness.trace_identity());
+    object.string("normalized_trace_key", witness.normalized_trace_key());
+    object.string("consumed_piece_count", witness.consumed_piece_count());
+    object.optional_string("terminal_hold_piece", witness.terminal_hold_piece());
+    object.array("steps", |output| {
+        write_object_array(output, witness.steps(), |step_object, step| {
+            step_object.string("step_index", step.step_index());
+            step_object.string("operation_id", step.operation_id());
+            step_object.string("active_piece", step.active_piece());
+            step_object.string("input_cursor", step.input_cursor());
+            step_object.string("output_cursor", step.output_cursor());
+            step_object.optional_string("input_hold_piece", step.input_hold_piece());
+            step_object.optional_string("output_hold_piece", step.output_hold_piece());
+            step_object.string("hold_decision", step.hold_decision());
+            step_object.string("rotation", step.rotation());
+            step_object.string("x", step.x());
+            step_object.string("y", step.y());
+            step_object.string("placement_mask", step.placement_mask());
+            step_object.string("board_before_mask", step.board_before_mask());
+            step_object.string(
+                "board_after_placement_mask",
+                step.board_after_placement_mask(),
+            );
+            step_object.string(
+                "board_after_line_clear_mask",
+                step.board_after_line_clear_mask(),
+            );
+            step_object.string("cleared_row_mask", step.cleared_row_mask());
+            step_object.string("cleared_lines", step.cleared_lines());
+            step_object.string("line_clear_identity", step.line_clear_identity());
+        })
+    });
+}
+
+fn write_pc_best_save_winner(
+    object: &mut JsonObject<'_>,
+    winner: &clearra_host_contract::PcBestSaveWinnerPayload,
+) {
+    object.string("weighted_total", winner.weighted_total());
+    object.string("balanced_jl_count", winner.balanced_jl_count());
+    object.string("exact_group_probability", winner.exact_group_probability());
+    object.object("group", |group_object| {
+        write_pc_save_group(group_object, winner.group())
     });
 }
 
@@ -2001,6 +2076,15 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
         "forward_initial_board_mask",
         report.forward_initial_board_mask.as_deref(),
     );
+    object.optional_string(
+        "forward_canonical_selection",
+        report.forward_canonical_selection.as_deref(),
+    );
+    object.optional_object(
+        "canonical_forward_outcome",
+        report.canonical_forward_outcome.as_ref(),
+        write_forward_search_outcome,
+    );
     object.optional_number("maximum_damage", report.maximum_damage);
     object.optional_number("maximum_ren", report.maximum_ren);
     object.array("forward_outcomes", |output| {
@@ -2010,42 +2094,7 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
                 output.push(',');
             }
             let mut nested = JsonObject::begin(output);
-            nested.string("id", &outcome.id);
-            nested.number("source_pattern_index", outcome.source_pattern_index);
-            nested.string("source_queue", &outcome.source_queue);
-            nested.optional_string("group", outcome.group.as_deref());
-            nested.string("final_board_mask", &outcome.final_board_mask);
-            nested.optional_string("spin_piece", outcome.spin_piece.as_deref());
-            nested.boolean("spin_mini", outcome.spin_mini);
-            nested.number("spin_lines", outcome.spin_lines);
-            nested.optional_number("ren_count", outcome.ren_count);
-            nested.number("total_damage", outcome.total_damage);
-            nested.string("evidence_path_count", &outcome.evidence_path_count);
-            nested.boolean("evidence_complete", outcome.evidence_complete);
-            nested.array("path", |output| {
-                output.push('[');
-                for (step_index, step) in outcome.path.iter().enumerate() {
-                    if step_index != 0 {
-                        output.push(',');
-                    }
-                    let mut step_object = JsonObject::begin(output);
-                    step_object.string("piece", &step.piece);
-                    step_object.number("rotation", step.rotation);
-                    step_object.number("x", step.x);
-                    step_object.number("y", step.y);
-                    step_object.string("hold", &step.hold);
-                    step_object.number("cleared_lines", step.cleared_lines);
-                    step_object.optional_string("spin_piece", step.spin_piece.as_deref());
-                    step_object.boolean("spin_mini", step.spin_mini);
-                    step_object.number("damage", step.damage);
-                    step_object.number("total_damage", step.total_damage);
-                    step_object.string("placement_mask", &step.placement_mask);
-                    step_object.number("cleared_row_mask", step.cleared_row_mask);
-                    step_object.string("board_after_mask", &step.board_after_mask);
-                    step_object.finish();
-                }
-                output.push(']');
-            });
+            write_forward_search_outcome(&mut nested, outcome);
             nested.finish();
         }
         output.push(']');
@@ -2319,6 +2368,45 @@ fn write_search_report(object: &mut JsonObject<'_>, report: &WasmSearchReport) {
             }
         },
     );
+}
+
+fn write_forward_search_outcome(object: &mut JsonObject<'_>, outcome: &WasmForwardSearchOutcome) {
+    object.string("id", &outcome.id);
+    object.number("source_pattern_index", outcome.source_pattern_index);
+    object.string("source_queue", &outcome.source_queue);
+    object.optional_string("group", outcome.group.as_deref());
+    object.string("final_board_mask", &outcome.final_board_mask);
+    object.optional_string("spin_piece", outcome.spin_piece.as_deref());
+    object.boolean("spin_mini", outcome.spin_mini);
+    object.number("spin_lines", outcome.spin_lines);
+    object.optional_number("ren_count", outcome.ren_count);
+    object.number("total_damage", outcome.total_damage);
+    object.string("evidence_path_count", &outcome.evidence_path_count);
+    object.boolean("evidence_complete", outcome.evidence_complete);
+    object.array("path", |output| {
+        output.push('[');
+        for (step_index, step) in outcome.path.iter().enumerate() {
+            if step_index != 0 {
+                output.push(',');
+            }
+            let mut step_object = JsonObject::begin(output);
+            step_object.string("piece", &step.piece);
+            step_object.number("rotation", step.rotation);
+            step_object.number("x", step.x);
+            step_object.number("y", step.y);
+            step_object.string("hold", &step.hold);
+            step_object.number("cleared_lines", step.cleared_lines);
+            step_object.optional_string("spin_piece", step.spin_piece.as_deref());
+            step_object.boolean("spin_mini", step.spin_mini);
+            step_object.number("damage", step.damage);
+            step_object.number("total_damage", step.total_damage);
+            step_object.string("placement_mask", &step.placement_mask);
+            step_object.number("cleared_row_mask", step.cleared_row_mask);
+            step_object.string("board_after_mask", &step.board_after_mask);
+            step_object.finish();
+        }
+        output.push(']');
+    });
 }
 
 fn write_spin_structure_operation(

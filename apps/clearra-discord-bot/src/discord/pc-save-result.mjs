@@ -1,5 +1,6 @@
 const SAVE_GROUPS_KIND = "pc-save-groups.v2";
 const BEST_SAVE_KIND = "pc-best-save.v2";
+const CANONICAL_SELECTION = "smallest-canonical-candidate-id";
 
 export function validDiscordPcSaveResult(structured, publicKind) {
   if (!plainObject(structured) || !plainObject(structured.summary)) return false;
@@ -15,35 +16,42 @@ export function validDiscordPcSaveResult(structured, publicKind) {
   }
   return publicKind === "best-save" &&
     structured.kind === BEST_SAVE_KIND &&
-    summary.best_save_contract === BEST_SAVE_KIND &&
-    summary.best_save_schema === "clearra-save-v1" &&
-    summary.best_save_probability_basis === "whole-universe-unconditional" &&
-    unitProbability(summary.best_save_pc_probability) &&
-    Array.isArray(summary.best_save_winners) &&
-    summary.best_save_winners.length > 0 &&
-    summary.best_save_winners.every((winner) =>
-      validBestSaveWinner(winner, summary.best_save_pc_probability));
+    validBestSaveSummary(summary);
 }
 
-// Discord deliberately presents one exact tie representative. The engine and
-// CLI retain the unmodified ordinary winner list.
+// Discord presents the exact representative supplied by the typed App/CLI
+// boundary. It validates membership and canonical order but never ranks the
+// ordinary winner list itself.
 export function selectDiscordBestSaveWinner(summary) {
+  return validBestSaveSummary(summary)
+    ? summary.best_save_canonical_winner
+    : null;
+}
+
+function validBestSaveSummary(summary) {
   if (
     !plainObject(summary) ||
+    summary.best_save_contract !== BEST_SAVE_KIND ||
+    summary.best_save_schema !== "clearra-save-v1" ||
+    summary.best_save_probability_basis !== "whole-universe-unconditional" ||
+    summary.best_save_canonical_selection !== CANONICAL_SELECTION ||
     !unitProbability(summary.best_save_pc_probability) ||
     !Array.isArray(summary.best_save_winners) ||
     summary.best_save_winners.length === 0 ||
     !summary.best_save_winners.every((winner) =>
-      validBestSaveWinner(winner, summary.best_save_pc_probability))
-  ) return null;
-  return [...summary.best_save_winners].sort((left, right) => {
-    const leftCandidateId = BigInt(left.group.canonical_candidate_id);
-    const rightCandidateId = BigInt(right.group.canonical_candidate_id);
-    const candidateOrder = leftCandidateId < rightCandidateId
-      ? -1
-      : leftCandidateId > rightCandidateId ? 1 : 0;
-    return candidateOrder || left.group.identity.localeCompare(right.group.identity, "en");
-  })[0] ?? null;
+      validBestSaveWinner(winner, summary.best_save_pc_probability)) ||
+    !plainObject(summary.best_save_canonical_winner) ||
+    !samePlainValue(
+      summary.best_save_canonical_winner,
+      summary.best_save_winners[0],
+    )
+  ) return false;
+  const suppliedCandidateId = BigInt(
+    summary.best_save_canonical_winner.group.canonical_candidate_id,
+  );
+  return summary.best_save_winners.every((winner) =>
+    BigInt(winner.group.canonical_candidate_id) >= suppliedCandidateId
+  );
 }
 
 function validBestSaveWinner(winner, pcProbability) {
@@ -73,12 +81,11 @@ function validSaveGroup(group, pcProbability) {
   }
   if (group.successful_pattern_count !== group.witnesses.length) return false;
   if (group.unconditional_probability > pcProbability) return false;
-  const smallestWitnessCandidateId = group.witnesses.reduce((smallest, witness) => {
-    const candidateId = BigInt(witness.candidate_id);
-    return smallest === null || candidateId < smallest ? candidateId : smallest;
-  }, null);
-  return smallestWitnessCandidateId !== null &&
-    BigInt(group.canonical_candidate_id) === smallestWitnessCandidateId;
+  const canonicalCandidateId = BigInt(group.canonical_candidate_id);
+  return group.witnesses[0].candidate_id === group.canonical_candidate_id &&
+    group.witnesses.every((witness) =>
+      BigInt(witness.candidate_id) >= canonicalCandidateId
+    );
 }
 
 function containsForbiddenTieMetadata(value) {
@@ -105,6 +112,20 @@ function nonNegativeSafeInteger(value) {
 function canonicalPositiveDecimalU64(value) {
   if (typeof value !== "string" || !/^[1-9]\d*$/u.test(value)) return false;
   return BigInt(value) <= 18_446_744_073_709_551_615n;
+}
+
+function samePlainValue(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => samePlainValue(value, right[index]));
+  }
+  if (!plainObject(left) || !plainObject(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => Object.hasOwn(right, key) && samePlainValue(left[key], right[key]));
 }
 
 function plainObject(value) {

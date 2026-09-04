@@ -2,17 +2,20 @@
 
 use clearra_app::{
     setup_ranked_candidate_id, spin_structure_search_candidate_id, AppErrorCode, AppRenderModel,
-    AppResponse, AppResultKind, AppStatus, PcSaveCompletenessEvidence, PcSaveGroupV2,
-    PcSavePieceMultiset, PcSaveWitness, ProductCapabilityContract, ProductCapabilityResult,
-    ProductCapabilityResultKind, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+    AppResponse, AppResultKind, AppStatus, ForwardSearchOutcome, PcBestSaveWinnerV2,
+    PcSaveCompletenessEvidence, PcSaveGroupV2, PcSavePieceMultiset, PcSaveWitness,
+    ProductCapabilityContract, ProductCapabilityResult, ProductCapabilityResultKind,
+    PC_BEST_SAVE_CANONICAL_SELECTION, PC_MINIMUM_COVER_CANONICAL_SELECTION,
+    PC_PATH_CANONICAL_SELECTION, PC_SCORE_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
     PC_SCORE_PATTERN_WINNER_CONTRACT,
 };
 use clearra_host_contract::{
     BuildCoveragePortfolioV2Payload, BuildSetupFamilyV1Payload, BuildV2PayloadKind,
     BuildV2ProductPayload, CoveragePortfolioPagePayload, ExecutionAvailabilityState,
-    ExecutionCompletenessState, PcPathFamilyPayload, ProductResultPayload,
-    ProductResultPayloadContent, ScorePatternWinnerFamilyPayload, SetupRankedFamilyPayload,
-    SetupScoreRankingPayload, SpinStructureFamilyPayload,
+    ExecutionCompletenessState, PcPathFamilyPayload, PcPathWitnessPayload,
+    PcScoreFieldSummaryPayload, ProductResultPayload, ProductResultPayloadContent,
+    ScorePatternWinnerFamilyPayload, SetupRankedFamilyPayload, SetupScoreRankingPayload,
+    SpinStructureFamilyPayload,
 };
 use clearra_spin_structure_search::{SpinStructureOutcome, SpinStructureQuery, StructureOperation};
 
@@ -371,6 +374,7 @@ fn render_success(
             format,
             explicit_portfolio,
             product_result,
+            include_score_winner_family,
             default_error,
         ) {
             return output;
@@ -382,6 +386,7 @@ fn render_success(
             format,
             explicit_portfolio,
             product_result,
+            include_score_winner_family,
             default_error,
         ) {
             return output;
@@ -835,112 +840,124 @@ fn render_success(
                 SolutionDataStatus::for_request(include_solution_data, true, result.complete());
             append_solution_data_contract(&mut fields, solution_data_status, format);
             if solution_data_status.exposes_artifacts() {
-                fields.extend([RenderField::new(
-                    "forward_solution_data",
+                let forward_solution_outcome_value = |outcome: &ForwardSearchOutcome| {
                     RenderFieldValue::object([
+                        ("id", RenderFieldValue::string(outcome.id().to_string())),
                         (
-                            "initial_board",
-                            RenderFieldValue::string(board_mask_hex(result.initial_board())),
+                            "source_pattern_index",
+                            RenderFieldValue::from(outcome.source_pattern_index()),
                         ),
                         (
-                            "outcomes",
-                            RenderFieldValue::array(result.outcomes().iter().map(|outcome| {
+                            "source_queue",
+                            RenderFieldValue::string(
+                                outcome
+                                    .source_queue()
+                                    .iter()
+                                    .map(|piece| piece.as_ascii())
+                                    .collect::<String>(),
+                            ),
+                        ),
+                        (
+                            "group",
+                            outcome.group().map_or(RenderFieldValue::Null, |group| {
+                                RenderFieldValue::string(group.as_str())
+                            }),
+                        ),
+                        (
+                            "spin_piece",
+                            outcome
+                                .spin_piece()
+                                .map_or(RenderFieldValue::Null, |piece| {
+                                    RenderFieldValue::string(piece.as_ascii().to_string())
+                                }),
+                        ),
+                        ("spin_mini", RenderFieldValue::bool(outcome.spin_mini())),
+                        ("spin_lines", RenderFieldValue::from(outcome.spin_lines())),
+                        (
+                            "ren_count",
+                            outcome
+                                .ren_count()
+                                .map_or(RenderFieldValue::Null, RenderFieldValue::from),
+                        ),
+                        (
+                            "total_damage",
+                            RenderFieldValue::from(outcome.total_damage()),
+                        ),
+                        (
+                            "evidence_path_count",
+                            RenderFieldValue::string(outcome.evidence_path_count()),
+                        ),
+                        (
+                            "evidence_complete",
+                            RenderFieldValue::bool(outcome.evidence_complete()),
+                        ),
+                        (
+                            "final_board",
+                            RenderFieldValue::string(board_mask_hex(outcome.final_board())),
+                        ),
+                        (
+                            "path",
+                            RenderFieldValue::array(outcome.path().iter().map(|step| {
                                 RenderFieldValue::object([
-                                    ("id", RenderFieldValue::from(outcome.id())),
                                     (
-                                        "source_pattern_index",
-                                        RenderFieldValue::from(outcome.source_pattern_index()),
-                                    ),
-                                    (
-                                        "source_queue",
+                                        "piece",
                                         RenderFieldValue::string(
-                                            outcome
-                                                .source_queue()
-                                                .iter()
-                                                .map(|piece| piece.as_ascii())
-                                                .collect::<String>(),
+                                            step.piece().as_ascii().to_string(),
                                         ),
                                     ),
                                     (
-                                        "group",
-                                        outcome.group().map_or(RenderFieldValue::Null, |group| {
-                                            RenderFieldValue::string(group.as_str())
-                                        }),
-                                    ),
-                                    (
-                                        "spin_piece",
-                                        outcome.spin_piece().map_or(
-                                            RenderFieldValue::Null,
-                                            |piece| {
-                                                RenderFieldValue::string(
-                                                    piece.as_ascii().to_string(),
-                                                )
-                                            },
-                                        ),
-                                    ),
-                                    ("spin_mini", RenderFieldValue::bool(outcome.spin_mini())),
-                                    ("spin_lines", RenderFieldValue::from(outcome.spin_lines())),
-                                    (
-                                        "ren_count",
-                                        outcome
-                                            .ren_count()
-                                            .map_or(RenderFieldValue::Null, RenderFieldValue::from),
-                                    ),
-                                    (
-                                        "total_damage",
-                                        RenderFieldValue::from(outcome.total_damage()),
-                                    ),
-                                    (
-                                        "evidence_path_count",
-                                        RenderFieldValue::string(outcome.evidence_path_count()),
-                                    ),
-                                    (
-                                        "evidence_complete",
-                                        RenderFieldValue::bool(outcome.evidence_complete()),
-                                    ),
-                                    (
-                                        "final_board",
+                                        "placement_mask",
                                         RenderFieldValue::string(board_mask_hex(
-                                            outcome.final_board(),
+                                            step.placement_mask(),
                                         )),
                                     ),
                                     (
-                                        "path",
-                                        RenderFieldValue::array(outcome.path().iter().map(
-                                            |step| {
-                                                RenderFieldValue::object([
-                                                    (
-                                                        "piece",
-                                                        RenderFieldValue::string(
-                                                            step.piece().as_ascii().to_string(),
-                                                        ),
-                                                    ),
-                                                    (
-                                                        "placement_mask",
-                                                        RenderFieldValue::string(board_mask_hex(
-                                                            step.placement_mask(),
-                                                        )),
-                                                    ),
-                                                    (
-                                                        "cleared_row_mask",
-                                                        RenderFieldValue::from(
-                                                            step.cleared_row_mask(),
-                                                        ),
-                                                    ),
-                                                    (
-                                                        "board_after",
-                                                        RenderFieldValue::string(board_mask_hex(
-                                                            step.board_after(),
-                                                        )),
-                                                    ),
-                                                ])
-                                            },
+                                        "cleared_row_mask",
+                                        RenderFieldValue::from(step.cleared_row_mask()),
+                                    ),
+                                    (
+                                        "board_after",
+                                        RenderFieldValue::string(board_mask_hex(
+                                            step.board_after(),
                                         )),
                                     ),
                                 ])
                             })),
                         ),
-                    ]),
+                    ])
+                };
+                let artifact_outcomes = result
+                    .outcomes()
+                    .iter()
+                    .map(&forward_solution_outcome_value)
+                    .collect::<Vec<_>>();
+                let mut forward_fields = vec![
+                    (
+                        "initial_board",
+                        RenderFieldValue::string(board_mask_hex(result.initial_board())),
+                    ),
+                    (
+                        "outcomes",
+                        RenderFieldValue::array(artifact_outcomes.iter().cloned()),
+                    ),
+                ];
+                if model.kind() == AppResultKind::Ren {
+                    forward_fields.extend([
+                        (
+                            "canonical_selection",
+                            RenderFieldValue::string("smallest-canonical-candidate-id"),
+                        ),
+                        (
+                            "canonical_outcome",
+                            result
+                                .canonical_outcome()
+                                .map_or(RenderFieldValue::Null, &forward_solution_outcome_value),
+                        ),
+                    ]);
+                }
+                fields.extend([RenderField::new(
+                    "forward_solution_data",
+                    RenderFieldValue::object(forward_fields),
                 )]);
             }
             CommandRenderer::render_output(model.kind().as_str(), fields, format)
@@ -1266,11 +1283,15 @@ fn render_public_build_result(
     format: RenderFormat,
     explicit_portfolio: Option<&ExplicitPortfolioOutput>,
     product_result: Option<&ProductCapabilityResult>,
+    include_score_winner_family: bool,
     default_error: CliErrorCode,
 ) -> Option<CliOutput> {
     let mut fields = match payload.content() {
         ProductResultPayloadContent::CoveragePortfolio(page) => {
-            coverage_portfolio_fields(payload.contract(), payload.result_kind(), page)
+            match coverage_portfolio_fields(payload.contract(), payload.result_kind(), page) {
+                Ok(fields) => fields,
+                Err(reason) => return Some(CliOutput::error(default_error, reason)),
+            }
         }
         ProductResultPayloadContent::BuildV2(build) => build_v2_fields(build),
         ProductResultPayloadContent::BuildCoveragePortfolioV2(build) => {
@@ -1286,12 +1307,23 @@ fn render_public_build_result(
         ProductResultPayloadContent::SpinStructureFamily(family) => {
             spin_structure_family_fields(payload.contract(), family)
         }
+        ProductResultPayloadContent::PcScoreFieldSummary(summary)
+            if payload.contract() == ProductCapabilityContract::PcScore.as_str() =>
+        {
+            pc_score_field_summary_fields(payload, summary)
+        }
         ProductResultPayloadContent::ScorePatternWinnerFamily(family)
             if payload.contract() == ProductCapabilityContract::PcScoreFinder.as_str() =>
         {
-            score_pattern_winner_family_fields(payload, family)
+            match score_pattern_winner_family_fields(payload, family) {
+                Ok(fields) => fields,
+                Err(reason) => return Some(CliOutput::error(default_error, reason)),
+            }
         }
-        ProductResultPayloadContent::PcPathFamily(family) => pc_path_fields(family),
+        ProductResultPayloadContent::PcPathFamily(family) => match pc_path_fields(family) {
+            Ok(fields) => fields,
+            Err(reason) => return Some(CliOutput::error(default_error, reason)),
+        },
         _ => return None,
     };
     if let Err(reason) = append_pc_score_minimals_resource_report(&mut fields, product_result) {
@@ -1302,6 +1334,13 @@ fn render_public_build_result(
     }
     if let Err(reason) = append_pc_score_minimals_fields(&mut fields, product_result) {
         return Some(CliOutput::error(default_error, reason));
+    }
+    if include_score_winner_family
+        && payload.contract() == ProductCapabilityContract::PcScore.as_str()
+    {
+        if let Err(reason) = append_pc_score_winner_family(&mut fields, product_result) {
+            return Some(CliOutput::error(default_error, reason));
+        }
     }
     Some(CommandRenderer::render_output(
         payload.result_kind(),
@@ -1351,11 +1390,84 @@ fn append_pc_score_minimals_resource_report(
     Ok(())
 }
 
+fn pc_score_field_summary_fields(
+    payload: &ProductResultPayload,
+    summary: &PcScoreFieldSummaryPayload,
+) -> Vec<RenderField> {
+    vec![
+        RenderField::new("capability_id", payload.contract()),
+        RenderField::new("result_contract", payload.result_kind()),
+        RenderField::new("payload_kind", "pc-score-field-summary"),
+        RenderField::new("score_solution_field_contract", summary.field_contract()),
+        RenderField::new("score_solution_field_ordering", summary.ordering()),
+        RenderField::new(
+            "score_solution_field_average_basis",
+            summary.solution_field_average_basis(),
+        ),
+        RenderField::new("score_evaluation_basis", summary.score_evaluation_basis()),
+        RenderField::new("score_evaluation_scope", summary.score_evaluation_scope()),
+        RenderField::new("score_overall_basis", summary.overall_score_basis()),
+        RenderField::new("piece_source_id", summary.piece_source_id()),
+        RenderField::new("pattern_universe_id", summary.pattern_universe_id()),
+        RenderField::new("pattern_weight_model_id", summary.pattern_weight_model_id()),
+        RenderField::new(
+            "materialized_pattern_count",
+            summary.materialized_pattern_count(),
+        ),
+        RenderField::new("score_solution_field_count", summary.solution_field_count()),
+        RenderField::new(
+            "score_success_pattern_count",
+            summary.scored_pattern_count(),
+        ),
+        RenderField::new(
+            "score_failed_pc_pattern_count",
+            summary.failed_pc_pattern_count(),
+        ),
+        RenderField::new("score_covered_probability", summary.covered_probability()),
+        RenderField::new("score_overall_score", summary.overall_score()),
+        RenderField::new(
+            "score_covered_pattern_conditional_average_score",
+            optional_string_value(summary.score_covered_pattern_conditional_average_score()),
+        ),
+        RenderField::new("score_summary_complete", summary.complete()),
+        RenderField::new(
+            "score_solution_fields",
+            RenderFieldValue::array(summary.fields().iter().map(|field| {
+                RenderFieldValue::object([
+                    (
+                        "normalized_field_key",
+                        RenderFieldValue::string(field.normalized_field_key()),
+                    ),
+                    (
+                        "average_score",
+                        RenderFieldValue::string(field.average_score()),
+                    ),
+                    (
+                        "covered_pattern_count",
+                        RenderFieldValue::string(field.covered_pattern_count()),
+                    ),
+                    (
+                        "pattern_count",
+                        RenderFieldValue::string(field.pattern_count()),
+                    ),
+                    (
+                        "score_complete",
+                        RenderFieldValue::bool(field.score_complete()),
+                    ),
+                ])
+            })),
+        ),
+    ]
+}
+
 fn score_pattern_winner_family_fields(
     payload: &ProductResultPayload,
     family: &ScorePatternWinnerFamilyPayload,
-) -> Vec<RenderField> {
-    vec![
+) -> Result<Vec<RenderField>, &'static str> {
+    if !valid_score_pattern_canonical_witness(family) {
+        return Err("pc score-finder canonical witness was invalid");
+    }
+    Ok(vec![
         RenderField::new("capability_id", payload.contract()),
         RenderField::new("result_contract", payload.result_kind()),
         RenderField::new("payload_kind", "score-pattern-winner-family"),
@@ -1369,43 +1481,103 @@ fn score_pattern_winner_family_fields(
         RenderField::new("score_pattern_winner_count", family.winner_count()),
         RenderField::new("score_pattern_winner_complete", true),
         RenderField::new(
-            "score_pattern_winners",
-            RenderFieldValue::array(family.winners().iter().map(|winner| {
-                RenderFieldValue::object([
-                    (
-                        "contract",
-                        RenderFieldValue::string(family.winner_contract()),
-                    ),
-                    ("pattern_id", RenderFieldValue::string(winner.pattern_id())),
-                    (
-                        "candidate_id",
-                        RenderFieldValue::string(winner.candidate_id()),
-                    ),
-                    (
-                        "normalized_solution_key",
-                        RenderFieldValue::string(winner.normalized_solution_key()),
-                    ),
-                    ("score", RenderFieldValue::string(winner.score())),
-                    (
-                        "informational_attack",
-                        RenderFieldValue::string(winner.informational_attack()),
-                    ),
-                    (
-                        "informational_attack_basis",
-                        RenderFieldValue::string(family.informational_attack_basis()),
-                    ),
-                ])
-            })),
+            "score_pattern_canonical_selection",
+            family.canonical_selection(),
         ),
-    ]
+        RenderField::new(
+            "score_pattern_canonical_winner",
+            score_pattern_winner_value(family.canonical_winner(), family),
+        ),
+        RenderField::new(
+            "score_pattern_winners",
+            RenderFieldValue::array(
+                family
+                    .winners()
+                    .iter()
+                    .map(|winner| score_pattern_winner_value(winner, family)),
+            ),
+        ),
+    ])
+}
+
+fn valid_score_pattern_canonical_witness(family: &ScorePatternWinnerFamilyPayload) -> bool {
+    if family.canonical_selection() != PC_SCORE_CANONICAL_SELECTION
+        || family.winner_count().parse::<usize>().ok() != Some(family.winners().len())
+    {
+        return false;
+    }
+    let canonical = family.canonical_winner();
+    let Some(canonical_candidate_id) = canonical_decimal_u64(canonical.candidate_id()) else {
+        return false;
+    };
+    if canonical_candidate_id == 0 {
+        return false;
+    }
+    let mut witness_matches = 0_usize;
+    for winner in family.winners() {
+        let Some(candidate_id) = canonical_decimal_u64(winner.candidate_id()) else {
+            return false;
+        };
+        if candidate_id < canonical_candidate_id {
+            return false;
+        }
+        if winner == canonical {
+            witness_matches += 1;
+        }
+    }
+    witness_matches == 1
+}
+
+fn canonical_decimal_u64(value: &str) -> Option<u64> {
+    let parsed = value.parse::<u64>().ok()?;
+    (parsed.to_string() == value).then_some(parsed)
+}
+
+fn score_pattern_winner_value(
+    winner: &clearra_host_contract::ScorePatternWinnerPayload,
+    family: &ScorePatternWinnerFamilyPayload,
+) -> RenderFieldValue {
+    RenderFieldValue::object([
+        (
+            "contract",
+            RenderFieldValue::string(family.winner_contract()),
+        ),
+        ("pattern_id", RenderFieldValue::string(winner.pattern_id())),
+        (
+            "candidate_id",
+            RenderFieldValue::string(winner.candidate_id()),
+        ),
+        (
+            "normalized_solution_key",
+            RenderFieldValue::string(winner.normalized_solution_key()),
+        ),
+        ("score", RenderFieldValue::string(winner.score())),
+        (
+            "informational_attack",
+            RenderFieldValue::string(winner.informational_attack()),
+        ),
+        (
+            "informational_attack_basis",
+            RenderFieldValue::string(family.informational_attack_basis()),
+        ),
+    ])
 }
 
 fn coverage_portfolio_fields(
     capability_id: &str,
     result_contract: &str,
     payload: &CoveragePortfolioPagePayload,
-) -> Vec<RenderField> {
-    vec![
+) -> Result<Vec<RenderField>, &'static str> {
+    let expected_canonical_selection = match capability_id {
+        "pc.minimals" => Some(PC_MINIMUM_COVER_CANONICAL_SELECTION),
+        _ => None,
+    };
+    if expected_canonical_selection
+        .is_some_and(|selection| !valid_coverage_portfolio_canonical_witness(payload, selection))
+    {
+        return Err("PC portfolio canonical witness was missing or mismatched");
+    }
+    let mut fields = vec![
         RenderField::new("capability_id", capability_id),
         RenderField::new("result_contract", result_contract),
         RenderField::new("payload_kind", "coverage-portfolio"),
@@ -1426,21 +1598,67 @@ fn coverage_portfolio_fields(
         RenderField::new("total_member_pages", payload.total_member_pages()),
         RenderField::new(
             "members",
-            RenderFieldValue::array(payload.members().iter().map(|member| {
-                RenderFieldValue::object([
-                    (
-                        "candidate_id",
-                        RenderFieldValue::string(member.candidate_id()),
-                    ),
-                    (
-                        "normalized_solution_key",
-                        RenderFieldValue::string(member.normalized_solution_key()),
-                    ),
-                ])
-            })),
+            RenderFieldValue::array(payload.members().iter().map(product_candidate_member_value)),
         ),
         RenderField::new("page_handle_available", payload.page_handle_available()),
-    ]
+    ];
+    if expected_canonical_selection.is_some() {
+        fields.extend([
+            RenderField::new(
+                "canonical_selection",
+                optional_string_value(payload.canonical_selection()),
+            ),
+            RenderField::new(
+                "canonical_witness",
+                payload
+                    .canonical_witness()
+                    .map_or(RenderFieldValue::Null, product_candidate_member_value),
+            ),
+        ]);
+    }
+    Ok(fields)
+}
+
+fn valid_coverage_portfolio_canonical_witness(
+    payload: &CoveragePortfolioPagePayload,
+    expected_selection: &str,
+) -> bool {
+    if payload.canonical_selection() != Some(expected_selection) {
+        return false;
+    }
+    let (Some(canonical), Some(first)) = (payload.canonical_witness(), payload.members().first())
+    else {
+        return false;
+    };
+    if canonical != first {
+        return false;
+    }
+    let mut previous = None;
+    for member in payload.members() {
+        let Some(candidate_id) = canonical_decimal_u64(member.candidate_id()) else {
+            return false;
+        };
+        if candidate_id == 0 || previous.is_some_and(|previous| candidate_id <= previous) {
+            return false;
+        }
+        previous = Some(candidate_id);
+    }
+    true
+}
+
+fn product_candidate_member_value(
+    member: &clearra_host_contract::ProductCandidateMemberPayload,
+) -> RenderFieldValue {
+    RenderFieldValue::object([
+        (
+            "candidate_id",
+            RenderFieldValue::string(member.candidate_id()),
+        ),
+        (
+            "normalized_solution_key",
+            RenderFieldValue::string(member.normalized_solution_key()),
+        ),
+    ])
 }
 
 fn setup_ranked_family_fields(
@@ -1549,8 +1767,11 @@ fn spin_structure_family_fields(
     ]
 }
 
-fn pc_path_fields(payload: &PcPathFamilyPayload) -> Vec<RenderField> {
-    vec![
+fn pc_path_fields(payload: &PcPathFamilyPayload) -> Result<Vec<RenderField>, &'static str> {
+    if !valid_pc_path_canonical_witness(payload) {
+        return Err("PC path canonical witness was missing or mismatched");
+    }
+    Ok(vec![
         RenderField::new("capability_id", "pc.path"),
         RenderField::new("witness_contract", payload.witness_contract()),
         RenderField::new("ordering", payload.ordering()),
@@ -1561,106 +1782,137 @@ fn pc_path_fields(payload: &PcPathFamilyPayload) -> Vec<RenderField> {
         ),
         RenderField::new("witness_count", payload.witness_count()),
         RenderField::new("complete", payload.complete()),
+        RenderField::new("canonical_selection", payload.canonical_selection()),
+        RenderField::new(
+            "canonical_witness",
+            payload
+                .canonical_witness()
+                .map_or(RenderFieldValue::Null, pc_path_witness_value),
+        ),
         RenderField::new(
             "witnesses",
-            RenderFieldValue::array(payload.witnesses().iter().map(|witness| {
+            RenderFieldValue::array(payload.witnesses().iter().map(pc_path_witness_value)),
+        ),
+    ])
+}
+
+fn valid_pc_path_canonical_witness(payload: &PcPathFamilyPayload) -> bool {
+    if payload.canonical_selection() != PC_PATH_CANONICAL_SELECTION {
+        return false;
+    }
+    match (payload.canonical_witness(), payload.witnesses().first()) {
+        (None, None) => true,
+        (Some(canonical), Some(first)) if canonical == first => {
+            let Some(canonical_id) = canonical_decimal_u64(canonical.candidate_id()) else {
+                return false;
+            };
+            if canonical_id == 0 {
+                return false;
+            }
+            payload.witnesses().iter().all(|witness| {
+                canonical_decimal_u64(witness.candidate_id())
+                    .is_some_and(|candidate_id| candidate_id >= canonical_id)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn pc_path_witness_value(witness: &PcPathWitnessPayload) -> RenderFieldValue {
+    RenderFieldValue::object([
+        (
+            "candidate_id",
+            RenderFieldValue::string(witness.candidate_id()),
+        ),
+        (
+            "producer_candidate_id",
+            RenderFieldValue::string(witness.producer_candidate_id()),
+        ),
+        ("pattern_id", RenderFieldValue::string(witness.pattern_id())),
+        (
+            "trace_identity",
+            RenderFieldValue::string(witness.trace_identity()),
+        ),
+        (
+            "normalized_trace_key",
+            RenderFieldValue::string(witness.normalized_trace_key()),
+        ),
+        (
+            "consumed_piece_count",
+            RenderFieldValue::string(witness.consumed_piece_count()),
+        ),
+        (
+            "terminal_hold_piece",
+            optional_string_value(witness.terminal_hold_piece()),
+        ),
+        (
+            "steps",
+            RenderFieldValue::array(witness.steps().iter().map(|step| {
                 RenderFieldValue::object([
+                    ("step_index", RenderFieldValue::string(step.step_index())),
                     (
-                        "candidate_id",
-                        RenderFieldValue::string(witness.candidate_id()),
+                        "operation_id",
+                        RenderFieldValue::string(step.operation_id()),
                     ),
                     (
-                        "producer_candidate_id",
-                        RenderFieldValue::string(witness.producer_candidate_id()),
-                    ),
-                    ("pattern_id", RenderFieldValue::string(witness.pattern_id())),
-                    (
-                        "trace_identity",
-                        RenderFieldValue::string(witness.trace_identity()),
+                        "active_piece",
+                        RenderFieldValue::string(step.active_piece()),
                     ),
                     (
-                        "normalized_trace_key",
-                        RenderFieldValue::string(witness.normalized_trace_key()),
+                        "input_cursor",
+                        RenderFieldValue::string(step.input_cursor()),
                     ),
                     (
-                        "consumed_piece_count",
-                        RenderFieldValue::string(witness.consumed_piece_count()),
+                        "output_cursor",
+                        RenderFieldValue::string(step.output_cursor()),
                     ),
                     (
-                        "terminal_hold_piece",
-                        optional_string_value(witness.terminal_hold_piece()),
+                        "input_hold_piece",
+                        optional_string_value(step.input_hold_piece()),
                     ),
                     (
-                        "steps",
-                        RenderFieldValue::array(witness.steps().iter().map(|step| {
-                            RenderFieldValue::object([
-                                ("step_index", RenderFieldValue::string(step.step_index())),
-                                (
-                                    "operation_id",
-                                    RenderFieldValue::string(step.operation_id()),
-                                ),
-                                (
-                                    "active_piece",
-                                    RenderFieldValue::string(step.active_piece()),
-                                ),
-                                (
-                                    "input_cursor",
-                                    RenderFieldValue::string(step.input_cursor()),
-                                ),
-                                (
-                                    "output_cursor",
-                                    RenderFieldValue::string(step.output_cursor()),
-                                ),
-                                (
-                                    "input_hold_piece",
-                                    optional_string_value(step.input_hold_piece()),
-                                ),
-                                (
-                                    "output_hold_piece",
-                                    optional_string_value(step.output_hold_piece()),
-                                ),
-                                (
-                                    "hold_decision",
-                                    RenderFieldValue::string(step.hold_decision()),
-                                ),
-                                ("rotation", RenderFieldValue::string(step.rotation())),
-                                ("x", RenderFieldValue::string(step.x())),
-                                ("y", RenderFieldValue::string(step.y())),
-                                (
-                                    "placement_mask",
-                                    RenderFieldValue::string(step.placement_mask()),
-                                ),
-                                (
-                                    "board_before_mask",
-                                    RenderFieldValue::string(step.board_before_mask()),
-                                ),
-                                (
-                                    "board_after_placement_mask",
-                                    RenderFieldValue::string(step.board_after_placement_mask()),
-                                ),
-                                (
-                                    "board_after_line_clear_mask",
-                                    RenderFieldValue::string(step.board_after_line_clear_mask()),
-                                ),
-                                (
-                                    "cleared_row_mask",
-                                    RenderFieldValue::string(step.cleared_row_mask()),
-                                ),
-                                (
-                                    "cleared_lines",
-                                    RenderFieldValue::string(step.cleared_lines()),
-                                ),
-                                (
-                                    "line_clear_identity",
-                                    RenderFieldValue::string(step.line_clear_identity()),
-                                ),
-                            ])
-                        })),
+                        "output_hold_piece",
+                        optional_string_value(step.output_hold_piece()),
+                    ),
+                    (
+                        "hold_decision",
+                        RenderFieldValue::string(step.hold_decision()),
+                    ),
+                    ("rotation", RenderFieldValue::string(step.rotation())),
+                    ("x", RenderFieldValue::string(step.x())),
+                    ("y", RenderFieldValue::string(step.y())),
+                    (
+                        "placement_mask",
+                        RenderFieldValue::string(step.placement_mask()),
+                    ),
+                    (
+                        "board_before_mask",
+                        RenderFieldValue::string(step.board_before_mask()),
+                    ),
+                    (
+                        "board_after_placement_mask",
+                        RenderFieldValue::string(step.board_after_placement_mask()),
+                    ),
+                    (
+                        "board_after_line_clear_mask",
+                        RenderFieldValue::string(step.board_after_line_clear_mask()),
+                    ),
+                    (
+                        "cleared_row_mask",
+                        RenderFieldValue::string(step.cleared_row_mask()),
+                    ),
+                    (
+                        "cleared_lines",
+                        RenderFieldValue::string(step.cleared_lines()),
+                    ),
+                    (
+                        "line_clear_identity",
+                        RenderFieldValue::string(step.line_clear_identity()),
                     ),
                 ])
             })),
         ),
-    ]
+    ])
 }
 
 fn setup_score_fields(payload: &SetupScoreRankingPayload) -> Vec<RenderField> {
@@ -2088,6 +2340,9 @@ fn append_pc_score_winner_family(
         })
         .and_then(ProductCapabilityResult::pc_score_summary_v2)
         .ok_or("pc score result did not include its typed winner-family report")?;
+    let canonical_winner = report
+        .canonical_winner()
+        .ok_or("pc score-finder canonical winner was missing")?;
     fields.extend([
         RenderField::new(
             "score_pattern_winner_contract",
@@ -2104,6 +2359,42 @@ fn append_pc_score_winner_family(
         RenderField::new(
             "score_informational_attack_basis",
             PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+        ),
+        RenderField::new(
+            "score_pattern_canonical_selection",
+            report.canonical_selection(),
+        ),
+        RenderField::new(
+            "score_pattern_canonical_winner",
+            RenderFieldValue::object([
+                (
+                    "contract",
+                    RenderFieldValue::string(PC_SCORE_PATTERN_WINNER_CONTRACT),
+                ),
+                (
+                    "pattern_id",
+                    RenderFieldValue::from(canonical_winner.pattern_id()),
+                ),
+                (
+                    "candidate_id",
+                    RenderFieldValue::string(canonical_winner.candidate_id().to_string()),
+                ),
+                (
+                    "normalized_solution_key",
+                    RenderFieldValue::string(
+                        canonical_winner.normalized_solution_key().to_string(),
+                    ),
+                ),
+                ("score", RenderFieldValue::from(canonical_winner.score())),
+                (
+                    "informational_attack",
+                    RenderFieldValue::from(canonical_winner.informational_attack()),
+                ),
+                (
+                    "informational_attack_basis",
+                    RenderFieldValue::string(PC_SCORE_INFORMATIONAL_ATTACK_BASIS),
+                ),
+            ]),
         ),
         RenderField::new(
             "score_pattern_winners",
@@ -2229,21 +2520,15 @@ fn append_pc_score_minimals_fields(
     if !report.completeness().complete() {
         return Err("pc score-minimals typed portfolio report was incomplete");
     }
-    let canonical_candidate_id = report
+    let canonical_candidate_id = report.canonical_score_candidate_id();
+    let canonical_solution_key = report.canonical_solution_key().to_string();
+    if !report
         .selected_score_candidate_ids()
         .iter()
-        .copied()
-        .min()
-        .ok_or("pc score-minimals canonical portfolio was empty")?;
-    let candidate = report
-        .eligible_candidates()
-        .iter()
-        .find(|candidate| candidate.score_candidate_id() == canonical_candidate_id)
-        .ok_or("pc score-minimals canonical candidate identity was missing")?;
-    if !report
-        .selected_solution_keys()
-        .iter()
-        .any(|key| key == candidate.normalized_solution_key())
+        .zip(report.selected_solution_keys())
+        .any(|(candidate_id, solution_key)| {
+            *candidate_id == canonical_candidate_id && solution_key == &canonical_solution_key
+        })
     {
         return Err("pc score-minimals canonical candidate was outside the selected portfolio");
     }
@@ -2253,7 +2538,7 @@ fn append_pc_score_minimals_fields(
         RenderField::new("score_minimals_attack_role", "informational-only"),
         RenderField::new(
             "score_minimals_canonical_selection",
-            "smallest-canonical-candidate-id",
+            report.canonical_selection(),
         ),
         RenderField::new(
             "score_minimals_canonical_candidate_id",
@@ -2261,7 +2546,7 @@ fn append_pc_score_minimals_fields(
         ),
         RenderField::new(
             "score_minimals_canonical_solution_key",
-            candidate.normalized_solution_key(),
+            canonical_solution_key,
         ),
     ]);
     Ok(())
@@ -2333,32 +2618,47 @@ fn append_pc_save_product_fields(
                     pc_save_completeness_value(report.completeness()),
                 ),
                 RenderField::new(
+                    "best_save_canonical_selection",
+                    report.canonical_selection(),
+                ),
+                RenderField::new(
+                    "best_save_canonical_winner",
+                    report
+                        .canonical_winner()
+                        .map_or(RenderFieldValue::Null, pc_best_save_winner_value),
+                ),
+                RenderField::new(
                     "best_save_winners",
-                    RenderFieldValue::array(report.winners().iter().map(|winner| {
-                        RenderFieldValue::object([
-                            (
-                                "weighted_total",
-                                RenderFieldValue::from(winner.weighted_total()),
-                            ),
-                            (
-                                "balanced_jl_count",
-                                RenderFieldValue::from(winner.balanced_jl_count()),
-                            ),
-                            (
-                                "exact_group_probability",
-                                RenderFieldValue::number(
-                                    winner.exact_group_probability().decimal(),
-                                ),
-                            ),
-                            ("group", pc_save_group_value(winner.group())),
-                        ])
-                    })),
+                    RenderFieldValue::array(report.winners().iter().map(pc_best_save_winner_value)),
                 ),
             ]);
+            if report.canonical_selection() != PC_BEST_SAVE_CANONICAL_SELECTION
+                || report.canonical_winner() != report.winners().first()
+            {
+                return Err("pc best-save canonical winner was missing or mismatched");
+            }
             Ok(())
         }
         _ => Ok(()),
     }
+}
+
+fn pc_best_save_winner_value(winner: &PcBestSaveWinnerV2) -> RenderFieldValue {
+    RenderFieldValue::object([
+        (
+            "weighted_total",
+            RenderFieldValue::from(winner.weighted_total()),
+        ),
+        (
+            "balanced_jl_count",
+            RenderFieldValue::from(winner.balanced_jl_count()),
+        ),
+        (
+            "exact_group_probability",
+            RenderFieldValue::number(winner.exact_group_probability().decimal()),
+        ),
+        ("group", pc_save_group_value(winner.group())),
+    ])
 }
 
 fn pc_save_group_value(group: &PcSaveGroupV2) -> RenderFieldValue {

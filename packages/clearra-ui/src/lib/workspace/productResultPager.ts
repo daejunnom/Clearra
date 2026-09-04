@@ -1,11 +1,6 @@
 // SRP rationale: this module has one change reason: fail-closed paging models for typed product results.
 import type {
   ClearraCoveragePortfolioRuntimePage,
-  ClearraPcBestSavePayload,
-  ClearraPcSaveGroupPayload,
-  ClearraPcSaveGroupsPayload,
-  ClearraPcSavePieceMultisetPayload,
-  ClearraPcSaveRunMetadataPayload,
   ClearraProductPageWorkerPayload,
   ClearraProductResultPayload,
   ClearraSolutionSetArtifactPayload
@@ -82,7 +77,7 @@ export function validateCoveragePortfolioRuntimePage(
     page.alternative_index !== expectation.alternativeIndex ||
     page.member_page_number !== expectation.memberPageNumber ||
     !positiveCanonicalDecimal(page.alternative_index) ||
-    !positiveCanonicalDecimal(page.optimal_cardinality) ||
+    !canonicalNonNegativeDecimal(page.optimal_cardinality) ||
     !positiveCanonicalDecimal(page.known_alternative_count) ||
     !positiveCanonicalDecimal(page.member_page_number) ||
     !positiveCanonicalDecimal(page.total_member_pages) ||
@@ -104,15 +99,31 @@ export function validateCoveragePortfolioRuntimePage(
   const memberPageNumber = BigInt(page.member_page_number);
   const totalMemberPages = BigInt(page.total_member_pages);
   const pageSize = BigInt(PRODUCT_MEMBER_PAGE_SIZE);
-  const expectedTotalMemberPages = (cardinality + pageSize - 1n) / pageSize;
+  // An exact cover of an empty required universe has one canonical empty
+  // alternative. Core exposes that alternative as member page 1/1 with zero
+  // members; it is a successful empty result, not a malformed page.
+  const emptyPortfolio = cardinality === 0n;
+  const expectedTotalMemberPages = emptyPortfolio
+    ? 1n
+    : (cardinality + pageSize - 1n) / pageSize;
   const memberStart = (memberPageNumber - 1n) * pageSize;
   const remainingMembers = cardinality - memberStart;
-  const expectedMemberCount = remainingMembers < pageSize ? remainingMembers : pageSize;
+  const expectedMemberCount = emptyPortfolio
+    ? 0n
+    : remainingMembers < pageSize
+      ? remainingMembers
+      : pageSize;
   if (
     knownAlternativeCount < alternativeIndex ||
     totalMemberPages !== expectedTotalMemberPages ||
     memberPageNumber > totalMemberPages ||
-    remainingMembers <= 0n ||
+    (!emptyPortfolio && remainingMembers <= 0n) ||
+    (emptyPortfolio &&
+      (alternativeIndex !== 1n ||
+        knownAlternativeCount !== 1n ||
+        totalAlternativeCount !== 1n ||
+        !page.enumeration_complete ||
+        memberPageNumber !== 1n)) ||
     BigInt(page.members.length) !== expectedMemberCount ||
     (page.enumeration_complete
       ? totalAlternativeCount !== knownAlternativeCount
@@ -528,6 +539,10 @@ function positiveCanonicalDecimal(value: string): boolean {
   return /^(?:[1-9][0-9]*)$/u.test(value);
 }
 
+function canonicalNonNegativeDecimal(value: string): boolean {
+  return /^(?:0|[1-9][0-9]*)$/u.test(value);
+}
+
 export function incrementCanonicalDecimal(value: string): string {
   return (BigInt(value) + 1n).toString();
 }
@@ -579,6 +594,17 @@ export function productResultIdentity(payload: ClearraProductResultPayload | nul
       page.candidate_map_sha256
     ].join(':');
   }
+  if (payload.content.payload_kind === 'pc-score-field-summary') {
+    const summary = payload.content.payload;
+    return [
+      payload.contract,
+      payload.result_kind,
+      summary.pattern_universe_id,
+      summary.pattern_weight_model_id,
+      summary.materialized_pattern_count,
+      summary.overall_score
+    ].join(':');
+  }
   if (payload.content.payload_kind === 'score-pattern-winner-family') {
     const family = payload.content.payload;
     return [
@@ -595,26 +621,6 @@ export function productResultIdentity(payload: ClearraProductResultPayload | nul
       payload.result_kind,
       family.problem_id,
       family.witness_count
-    ].join(':');
-  }
-  if (payload.content.payload_kind === 'pc-save-groups') {
-    const family = payload.content.payload;
-    return [
-      payload.contract,
-      payload.result_kind,
-      family.metadata.problem_id,
-      family.metadata.pattern_universe_id,
-      family.group_count
-    ].join(':');
-  }
-  if (payload.content.payload_kind === 'pc-best-save') {
-    const family = payload.content.payload;
-    return [
-      payload.contract,
-      payload.result_kind,
-      family.metadata.problem_id,
-      family.metadata.pattern_universe_id,
-      family.winner_count
     ].join(':');
   }
   if (payload.content.payload_kind === 'setup-ranked-family') {
@@ -861,12 +867,18 @@ export function validateProductResultPayload(
     }
     return null;
   }
+  if (payload.content.payload_kind === 'pc-score-field-summary') {
+    return validatePcScoreFieldSummary(
+      payload.contract,
+      payload.result_kind,
+      payload.content.payload
+    );
+  }
   if (payload.content.payload_kind === 'score-pattern-winner-family') {
     const family = payload.content.payload;
     const expectedPair =
-      (payload.contract === 'pc.score' && payload.result_kind === 'pc-score-summary.v2') ||
-      (payload.contract === 'pc.score-finder' &&
-        payload.result_kind === 'pc-fixed-score-witness.v2');
+      payload.contract === 'pc.score-finder' &&
+      payload.result_kind === 'pc-fixed-score-witness.v2';
     if (
       !expectedPair ||
       family.ordering !== 'pattern-id-ascending-then-candidate-id-ascending' ||
@@ -893,28 +905,6 @@ export function validateProductResultPayload(
       payload.result_kind,
       payload.content.payload
     );
-  }
-  if (payload.content.payload_kind === 'pc-save-groups') {
-    const family = payload.content.payload;
-    if (
-      payload.contract !== 'pc.saves' ||
-      payload.result_kind !== 'pc-save-groups.v2' ||
-      !validatePcSaveGroups(family)
-    ) {
-      return 'invalid pc save groups payload';
-    }
-    return null;
-  }
-  if (payload.content.payload_kind === 'pc-best-save') {
-    const family = payload.content.payload;
-    if (
-      payload.contract !== 'pc.best-save' ||
-      payload.result_kind !== 'pc-best-save.v2' ||
-      !validatePcBestSave(family)
-    ) {
-      return 'invalid pc best-save payload';
-    }
-    return null;
   }
   if (payload.content.payload_kind === 'parity-report-page') {
     const page = payload.content.payload;
@@ -950,6 +940,82 @@ export function validateProductResultPayload(
       (artifact.artifact_format === 'gif' && artifact.media_type === 'image/gif'))
     ? null
     : 'invalid render artifact payload';
+}
+
+function validatePcScoreFieldSummary(
+  outerContract: string,
+  outerResultKind: string,
+  summary: Extract<
+    ClearraProductResultPayload,
+    { content: { payload_kind: 'pc-score-field-summary' } }
+  >['content']['payload']
+): string | null {
+  const materializedCount = isCanonicalDecimal(summary.materialized_pattern_count)
+    ? BigInt(summary.materialized_pattern_count)
+    : null;
+  const solutionFieldCount = isCanonicalDecimal(summary.solution_field_count)
+    ? BigInt(summary.solution_field_count)
+    : null;
+  const scoredCount = isCanonicalDecimal(summary.scored_pattern_count)
+    ? BigInt(summary.scored_pattern_count)
+    : null;
+  const failedCount = isCanonicalDecimal(summary.failed_pc_pattern_count)
+    ? BigInt(summary.failed_pc_pattern_count)
+    : null;
+  const observedKeys = new Set<string>();
+  const fieldsValid = summary.fields.every((field) => {
+    if (
+      !validPcScoreFieldKey(field.normalized_field_key) ||
+      observedKeys.has(field.normalized_field_key) ||
+      !finiteInRange(field.average_score, 0, Number.MAX_VALUE) ||
+      !isCanonicalDecimal(field.covered_pattern_count) ||
+      !isCanonicalDecimal(field.pattern_count) ||
+      field.score_complete !== true
+    ) {
+      return false;
+    }
+    observedKeys.add(field.normalized_field_key);
+    const coveredPatternCount = BigInt(field.covered_pattern_count);
+    const patternCount = BigInt(field.pattern_count);
+    return (
+      materializedCount !== null &&
+      patternCount === materializedCount &&
+      coveredPatternCount <= patternCount
+    );
+  });
+  const conditionalAverage = summary.score_covered_pattern_conditional_average_score;
+  const valid =
+    outerContract === 'pc.score' &&
+    outerResultKind === 'pc-score-summary.v2' &&
+    summary.field_contract === 'pc-score-solution-field-average.v1' &&
+    summary.ordering === 'normalized-solution-field-order' &&
+    summary.solution_field_average_basis ===
+      'whole-materialized-pattern-universe-failed-pc-zero' &&
+    summary.score_evaluation_basis === 'all-traces' &&
+    summary.score_evaluation_scope === 'full' &&
+    summary.overall_score_basis === 'all-materialized-patterns-failed-pc-zero' &&
+    summary.piece_source_id.length > 0 &&
+    summary.pattern_universe_id.length > 0 &&
+    summary.pattern_weight_model_id.length > 0 &&
+    materializedCount !== null &&
+    solutionFieldCount !== null &&
+    scoredCount !== null &&
+    failedCount !== null &&
+    solutionFieldCount === BigInt(summary.fields.length) &&
+    scoredCount + failedCount === materializedCount &&
+    isCanonicalProbability(summary.covered_probability) &&
+    finiteInRange(summary.overall_score, 0, Number.MAX_VALUE) &&
+    (conditionalAverage === null ||
+      finiteInRange(conditionalAverage, 0, Number.MAX_VALUE)) &&
+    summary.complete === true &&
+    fieldsValid;
+  return valid ? null : 'invalid PC score field summary payload';
+}
+
+function validPcScoreFieldKey(value: string): boolean {
+  return /^ctk1\|initial=[0-9a-f]{16}\|placements=[IOTSZJL]:[0-9a-f]{16}(?:,[IOTSZJL]:[0-9a-f]{16})*$/u.test(
+    value
+  );
 }
 
 function validatePcPathFamily(
@@ -1502,152 +1568,6 @@ function canonicalBuildCandidateRows(
 function strictlySortedNonempty(values: readonly string[]): boolean {
   return values.every(
     (value, index) => Boolean(value) && (index === 0 || values[index - 1]! < value)
-  );
-}
-
-function validatePcSaveGroups(family: ClearraPcSaveGroupsPayload): boolean {
-  return (
-    family.schema_id === 'clearra-save-v1' &&
-    family.page_size === PRODUCT_MEMBER_PAGE_SIZE.toString() &&
-    isCanonicalDecimal(family.group_count) &&
-    family.group_count === family.groups.length.toString() &&
-    validatePcSaveMetadata(family.metadata, ['canonical-pc-saves', 'compatibility-saves']) &&
-    family.groups.every(validatePcSaveGroup)
-  );
-}
-
-function validatePcBestSave(family: ClearraPcBestSavePayload): boolean {
-  const forbiddenKeys = [
-    'portfolio',
-    'portfolio_id',
-    'tie_cursor',
-    'tie_metadata',
-    'set_identity_sha256',
-    'page_handle_available'
-  ];
-  if (forbiddenKeys.some((key) => Object.prototype.hasOwnProperty.call(family, key))) {
-    return false;
-  }
-  if (
-    family.schema_id !== 'clearra-save-v1' ||
-    family.probability_basis !== 'whole-universe-unconditional' ||
-    family.ordering !==
-      'weighted-total-descending-then-balanced-jl-descending-then-unconditional-probability-descending-then-canonical-candidate-id-ascending' ||
-    family.equality !== 'weighted-total-balanced-jl-and-exact-unconditional-probability' ||
-    family.page_size !== PRODUCT_MEMBER_PAGE_SIZE.toString() ||
-    !isCanonicalDecimal(family.winner_count) ||
-    family.winner_count !== family.winners.length.toString() ||
-    !validatePcSaveMetadata(family.metadata, [
-      'canonical-pc-best-save',
-      'compatibility-best-save'
-    ]) ||
-    family.winners.some(
-      (winner) =>
-        !isCanonicalDecimal(winner.weighted_total) ||
-        !isCanonicalDecimal(winner.balanced_jl_count) ||
-        !isCanonicalProbability(winner.exact_group_probability) ||
-        winner.exact_group_probability !== winner.group.unconditional_probability ||
-        !validatePcSaveGroup(winner.group)
-    )
-  ) {
-    return false;
-  }
-  const first = family.winners[0];
-  if (
-    first &&
-    family.winners.some(
-      (winner) =>
-        winner.weighted_total !== first.weighted_total ||
-        winner.balanced_jl_count !== first.balanced_jl_count ||
-        winner.exact_group_probability !== first.exact_group_probability
-    )
-  ) {
-    return false;
-  }
-  return family.winners.every(
-    (winner, index) =>
-      index === 0 ||
-      compareCanonicalDecimals(
-        family.winners[index - 1]!.group.canonical_candidate_id,
-        winner.group.canonical_candidate_id
-      ) <= 0
-  );
-}
-
-function validatePcSaveMetadata(
-  metadata: ClearraPcSaveRunMetadataPayload,
-  origins: readonly string[]
-): boolean {
-  const complete = metadata.completeness;
-  return (
-    origins.includes(metadata.origin) &&
-    (metadata.problem_preset === 'opening-pc' || metadata.problem_preset === 'scenario-pc') &&
-    Boolean(metadata.problem_id) &&
-    Boolean(metadata.piece_source_id) &&
-    Boolean(metadata.pattern_universe_id) &&
-    Boolean(metadata.pattern_weight_model_id) &&
-    isCanonicalDecimal(metadata.materialized_pattern_count) &&
-    isCanonicalDecimal(metadata.pc_success_pattern_count) &&
-    isCanonicalProbability(metadata.pc_probability) &&
-    complete.source_universe_complete === true &&
-    complete.fixed_bag_boundary_proven === true &&
-    complete.execution_batch_complete === true &&
-    complete.pattern_weights_complete === true &&
-    complete.count_complete === true &&
-    complete.probability_complete === true &&
-    complete.complete === true
-  );
-}
-
-function validatePcSaveGroup(group: ClearraPcSaveGroupPayload): boolean {
-  if (
-    group.identity_contract !== 'terminal-hold-plus-active-bag-remainder-multiset.v1' ||
-    !validatePcSaveMultiset(group.identity) ||
-    !isCanonicalDecimal(group.successful_pattern_count) ||
-    group.successful_pattern_count !== group.witnesses.length.toString() ||
-    !isCanonicalProbability(group.unconditional_probability) ||
-    !isCanonicalProbability(group.conditional_probability_given_pc) ||
-    !isCanonicalDecimal(group.canonical_candidate_id) ||
-    group.witnesses.length === 0
-  ) {
-    return false;
-  }
-  const candidateIds: string[] = [];
-  for (const witness of group.witnesses) {
-    if (
-      !isCanonicalDecimal(witness.pattern_index) ||
-      !isCanonicalDecimal(witness.candidate_id) ||
-      !isCanonicalDecimal(witness.source_cursor) ||
-      !witness.trace_identity ||
-      (witness.terminal_hold !== null && !/^[IOTSZJL]$/u.test(witness.terminal_hold)) ||
-      !validatePcSaveMultiset(witness.active_bag_remainder)
-    ) {
-      return false;
-    }
-    candidateIds.push(witness.candidate_id);
-  }
-  candidateIds.sort(compareCanonicalDecimals);
-  return group.canonical_candidate_id === candidateIds[0];
-}
-
-function validatePcSaveMultiset(multiset: ClearraPcSavePieceMultisetPayload): boolean {
-  const counts = [
-    multiset.t,
-    multiset.i,
-    multiset.o,
-    multiset.j,
-    multiset.l,
-    multiset.s,
-    multiset.z
-  ];
-  return (
-    counts.every((count) => Number.isInteger(count) && count >= 0 && count <= 0xff) &&
-    Number.isInteger(multiset.total_count) &&
-    multiset.total_count >= 0 &&
-    multiset.total_count <= 0xff &&
-    counts.reduce((sum, count) => sum + count, 0) === multiset.total_count &&
-    multiset.canonical_id ===
-      `T${multiset.t}I${multiset.i}O${multiset.o}J${multiset.j}L${multiset.l}S${multiset.s}Z${multiset.z}`
   );
 }
 

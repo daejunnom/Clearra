@@ -10,8 +10,15 @@ use clearra_core_domain::{
         NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
     },
 };
-use clearra_coverage::pattern::{
-    pattern_bitset::PatternBitSet, pattern_id::PatternId, weighted_pattern_set::WeightedPatternSet,
+use clearra_coverage::{
+    pattern::{
+        pattern_bitset::PatternBitSet, pattern_id::PatternId,
+        weighted_pattern_set::WeightedPatternSet,
+    },
+    reducer::pattern_coverage_aggregation::{
+        PatternCoverageAggregation, PatternCoverageCompleteness,
+    },
+    universe::coverage_universe_guard::CoverageUniverseGuard,
 };
 use clearra_finesse::{
     aggregate_unique_queue_costs, union_costed_geometry_languages, ClassicInputAction,
@@ -947,6 +954,43 @@ pub(super) fn merge_symmetry_results_with_memory_guard(
             ));
         }
     }
+    if pattern_weights.len() != pattern_count {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_pattern_weights_missing",
+        ));
+    }
+    let pattern_universe_id = exact_u64_field(
+        primary_source,
+        "pattern_universe_id",
+        "wasm_build_probability_symmetry_pattern_universe_id_invalid",
+    )?;
+    let pattern_weight_model_id = exact_u64_field(
+        primary_source,
+        "pattern_weight_model_id",
+        "wasm_build_probability_symmetry_pattern_weight_model_id_invalid",
+    )?;
+    for result in &results[1..] {
+        if exact_u64_field(
+            result,
+            "pattern_universe_id",
+            "wasm_build_probability_symmetry_pattern_universe_id_invalid",
+        )? != pattern_universe_id
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_symmetry_pattern_universe_id_mismatch",
+            ));
+        }
+        if exact_u64_field(
+            result,
+            "pattern_weight_model_id",
+            "wasm_build_probability_symmetry_pattern_weight_model_id_invalid",
+        )? != pattern_weight_model_id
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_symmetry_pattern_weight_model_id_mismatch",
+            ));
+        }
+    }
     let source_retained_bytes = checked_core_result_vec_retained_bytes(&results).ok_or(
         WasmExactSearchError::InvalidProblem(
             "wasm_build_probability_symmetry_memory_projection_overflow",
@@ -976,31 +1020,6 @@ pub(super) fn merge_symmetry_results_with_memory_guard(
             *union |= incoming;
         }
     }
-
-    let original_covered = count_coverage_words(&original_words, pattern_count);
-    let union_covered = count_coverage_words(&union_words, pattern_count);
-    let mirrored_covered = if mirror_included {
-        results.first().map_or(original_covered, |result| {
-            count_coverage_words(result.coverage_pattern_words(), pattern_count)
-        })
-    } else {
-        0
-    };
-    let original_probability =
-        probability_for_coverage_words(pattern_weights, &original_words, pattern_count)?;
-    let union_probability =
-        probability_for_coverage_words(pattern_weights, &union_words, pattern_count)?;
-    let mirrored_probability = if mirror_included {
-        results.first().map_or(Ok(original_probability), |result| {
-            probability_for_coverage_words(
-                pattern_weights,
-                result.coverage_pattern_words(),
-                pattern_count,
-            )
-        })?
-    } else {
-        0.0
-    };
 
     let probability_complete = exact_bool_field(
         &primary,
@@ -1038,6 +1057,117 @@ pub(super) fn merge_symmetry_results_with_memory_guard(
             "wasm_build_probability_symmetry_count_complete_invalid",
         )?;
     }
+    let coverage_completeness =
+        PatternCoverageCompleteness::new(probability_complete, true, !tiling_only);
+    let guard = CoverageUniverseGuard::new(
+        clearra_coverage::universe::pattern_universe_id::PatternUniverseId::new(
+            pattern_universe_id,
+        ),
+        clearra_coverage::universe::pattern_weight_model_id::PatternWeightModelId::new(
+            pattern_weight_model_id,
+        ),
+        pattern_count,
+    );
+    let original_coverage =
+        crate::strict_coverage_pattern_bitset_from_words(pattern_count, &original_words).map_err(
+            |_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_symmetry_original_coverage_invalid",
+                )
+            },
+        )?;
+    let union_coverage =
+        crate::strict_coverage_pattern_bitset_from_words(pattern_count, &union_words).map_err(
+            |_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_symmetry_union_coverage_invalid",
+                )
+            },
+        )?;
+    let original_aggregation = PatternCoverageAggregation::from_success_coverage(
+        guard,
+        exact_usize_field(
+            &primary,
+            "coverage_aggregation_source_row_count",
+            "wasm_build_probability_symmetry_coverage_source_count_invalid",
+        )?,
+        &original_coverage,
+        pattern_weights,
+        coverage_completeness,
+    )
+    .map_err(|_| {
+        WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_symmetry_original_aggregation_invalid",
+        )
+    })?;
+    let union_source_row_count =
+        core::iter::once(&primary)
+            .chain(results.iter())
+            .try_fold(0_usize, |count, result| {
+                count
+                    .checked_add(exact_usize_field(
+                        result,
+                        "coverage_aggregation_source_row_count",
+                        "wasm_build_probability_symmetry_coverage_source_count_invalid",
+                    )?)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_symmetry_coverage_source_count_overflow",
+                    ))
+            })?;
+    let union_aggregation = PatternCoverageAggregation::from_success_coverage(
+        guard,
+        union_source_row_count,
+        &union_coverage,
+        pattern_weights,
+        coverage_completeness,
+    )
+    .map_err(|_| {
+        WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_symmetry_union_aggregation_invalid",
+        )
+    })?;
+    let mirror_aggregation = if mirror_included {
+        let mirror = results.first().unwrap_or(&primary);
+        let coverage = crate::strict_coverage_pattern_bitset_from_words(
+            pattern_count,
+            mirror.coverage_pattern_words(),
+        )
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_symmetry_mirror_coverage_invalid",
+            )
+        })?;
+        Some(
+            PatternCoverageAggregation::from_success_coverage(
+                guard,
+                exact_usize_field(
+                    mirror,
+                    "coverage_aggregation_source_row_count",
+                    "wasm_build_probability_symmetry_coverage_source_count_invalid",
+                )?,
+                &coverage,
+                pattern_weights,
+                coverage_completeness,
+            )
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_build_probability_symmetry_mirror_aggregation_invalid",
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+    let original_covered = original_aggregation.success_pattern_count();
+    let union_covered = union_aggregation.success_pattern_count();
+    let mirrored_covered = mirror_aggregation
+        .as_ref()
+        .map_or(0, PatternCoverageAggregation::success_pattern_count);
+    let original_probability = original_aggregation.success_probability().get();
+    let union_probability = union_aggregation.success_probability().get();
+    let mirrored_probability = mirror_aggregation
+        .as_ref()
+        .map_or(0.0, |summary| summary.success_probability().get());
     let resource_truncated = exact_bool_field(
         &primary,
         "resource_truncated",
@@ -1255,11 +1385,60 @@ pub(super) fn merge_symmetry_results_with_memory_guard(
             if tiling_only { 0 } else { union_covered },
         ),
         field(
+            "failed_pattern_count",
+            if tiling_only {
+                "not-calculated".to_owned()
+            } else {
+                union_aggregation.failed_pattern_count().to_string()
+            },
+        ),
+        field(
             "coverage_probability",
             if tiling_only {
                 "not-calculated".to_owned()
             } else {
                 probability_text(union_probability)
+            },
+        ),
+        field(
+            "failed_coverage_probability",
+            if tiling_only {
+                "not-calculated".to_owned()
+            } else {
+                probability_text(union_aggregation.failed_probability().get())
+            },
+        ),
+        field(
+            "materialized_probability_mass",
+            probability_text(union_aggregation.materialized_probability_mass().get()),
+        ),
+        field(
+            "coverage_aggregation_contract",
+            PatternCoverageAggregation::CONTRACT_ID,
+        ),
+        field(
+            "coverage_aggregation_availability",
+            if tiling_only {
+                "not-calculated"
+            } else {
+                union_aggregation.availability().as_str()
+            },
+        ),
+        field("coverage_aggregation_complete", probability_complete),
+        field(
+            "coverage_aggregation_source_row_count",
+            union_source_row_count,
+        ),
+        field(
+            "coverage_probability_denominator",
+            "full-materialized-pattern-universe",
+        ),
+        field(
+            "success_conditional_probability_denominator",
+            if tiling_only {
+                "not-calculated".to_owned()
+            } else {
+                probability_text(union_aggregation.success_probability().get())
             },
         ),
         field("probability_complete", probability_complete),
@@ -1438,50 +1617,270 @@ pub(super) fn normalized_string_solution_set_hash(keys: &[String]) -> String {
     normalized_tiling_solution_key_set_hash_from_sorted_strings(keys)
 }
 
-fn count_coverage_words(words: &[u64], pattern_count: usize) -> usize {
-    words
-        .iter()
-        .enumerate()
-        .map(|(index, word)| {
-            let remaining = pattern_count.saturating_sub(index * u64::BITS as usize);
-            if remaining >= u64::BITS as usize {
-                word.count_ones() as usize
-            } else if remaining == 0 {
-                0
-            } else {
-                (word & ((1_u64 << remaining) - 1)).count_ones() as usize
-            }
-        })
-        .sum()
-}
-
-fn probability_for_coverage_words(
-    weights: &WeightedPatternSet,
-    words: &[u64],
-    pattern_count: usize,
-) -> Result<f64, WasmExactSearchError> {
-    if weights.len() != pattern_count {
-        return Err(WasmExactSearchError::InvalidProblem(
-            "wasm_build_probability_pattern_weights_missing",
-        ));
-    }
-    let coverage = PatternBitSet::from_words(pattern_count, words.to_vec()).map_err(|_| {
-        WasmExactSearchError::InvalidProblem("wasm_build_probability_coverage_words_invalid")
-    })?;
-    weights
-        .covered_weight(&coverage)
-        .map(|probability| probability.get())
-        .ok_or(WasmExactSearchError::InvalidProblem(
-            "wasm_build_probability_pattern_weight_mismatch",
-        ))
-}
-
-fn probability_text(probability: f64) -> String {
+pub(super) fn probability_text(probability: f64) -> String {
     if probability == 0.0 {
         "0".to_owned()
     } else {
         probability.to_string()
     }
+}
+
+pub(super) fn build_pattern_coverage_aggregation(
+    problem: &SearchProblem,
+    source_row_count: usize,
+    success_coverage: &PatternBitSet,
+    completeness: PatternCoverageCompleteness,
+) -> Result<PatternCoverageAggregation, WasmExactSearchError> {
+    let universe = problem.piece_source().materialized_universe().ok_or(
+        WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+    )?;
+    PatternCoverageAggregation::from_success_coverage(
+        CoverageUniverseGuard::new(
+            universe.pattern_universe_id(),
+            universe.pattern_weight_model_id(),
+            universe.pattern_count(),
+        ),
+        source_row_count,
+        success_coverage,
+        universe.weights(),
+        completeness,
+    )
+    .map_err(|_| {
+        WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_shared_coverage_aggregation_invalid",
+        )
+    })
+}
+
+fn validate_exact_text_field(
+    result: &CoreExecutionResult,
+    key: &str,
+    expected: &str,
+    invalid_reason: &'static str,
+    mismatch_reason: &'static str,
+) -> Result<(), WasmExactSearchError> {
+    if result.field_occurrence_count(key) != 1 {
+        return Err(WasmExactSearchError::InvalidProblem(invalid_reason));
+    }
+    if result.unique_field(key) != Some(expected) {
+        return Err(WasmExactSearchError::InvalidProblem(mismatch_reason));
+    }
+    Ok(())
+}
+
+/// Validates the worker-owned Build coverage authority against the retained
+/// coordinator problem. Shape alone is insufficient: two universes can have
+/// the same pattern count while assigning every bit to a different pattern or
+/// weight. The caller must complete the value/bitset validation below before
+/// committing the worker coverage with OR-union.
+pub(super) fn validate_distributed_coverage_authority(
+    problem: &SearchProblem,
+    aggregation: BuildProbabilityAggregation,
+    result: &CoreExecutionResult,
+    pattern_count: usize,
+    probability_complete: bool,
+    coordinator_coverage_can_be_complete: bool,
+) -> Result<usize, WasmExactSearchError> {
+    let universe = problem.piece_source().materialized_universe().ok_or(
+        WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+    )?;
+    if pattern_count != universe.pattern_count() {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_distributed_pattern_universe_shape_mismatch",
+        ));
+    }
+    if exact_usize_field(
+        result,
+        "materialized_pattern_count",
+        "wasm_build_probability_distributed_materialized_pattern_count_invalid",
+    )? != pattern_count
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_distributed_materialized_pattern_count_mismatch",
+        ));
+    }
+    if exact_u64_field(
+        result,
+        "piece_source_id",
+        "wasm_build_probability_distributed_piece_source_id_invalid",
+    )? != problem.piece_source().id().get()
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_distributed_piece_source_id_mismatch",
+        ));
+    }
+    if exact_u64_field(
+        result,
+        "pattern_universe_id",
+        "wasm_build_probability_distributed_pattern_universe_id_invalid",
+    )? != universe.pattern_universe_id().get()
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_distributed_pattern_universe_id_mismatch",
+        ));
+    }
+    if exact_u64_field(
+        result,
+        "pattern_weight_model_id",
+        "wasm_build_probability_distributed_pattern_weight_model_id_invalid",
+    )? != universe.pattern_weight_model_id().get()
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_distributed_pattern_weight_model_id_mismatch",
+        ));
+    }
+    validate_exact_text_field(
+        result,
+        "build_probability_aggregation",
+        aggregation.as_str(),
+        "wasm_build_probability_distributed_aggregation_invalid",
+        "wasm_build_probability_distributed_aggregation_mismatch",
+    )?;
+    validate_exact_text_field(
+        result,
+        "coverage_aggregation_contract",
+        PatternCoverageAggregation::CONTRACT_ID,
+        "wasm_build_probability_distributed_coverage_contract_invalid",
+        "wasm_build_probability_distributed_coverage_contract_mismatch",
+    )?;
+    validate_exact_text_field(
+        result,
+        "coverage_probability_denominator",
+        "full-materialized-pattern-universe",
+        "wasm_build_probability_distributed_coverage_denominator_invalid",
+        "wasm_build_probability_distributed_coverage_denominator_mismatch",
+    )?;
+
+    let coverage_complete = exact_bool_field(
+        result,
+        "coverage_aggregation_complete",
+        "wasm_build_probability_distributed_coverage_complete_invalid",
+    )?;
+    if coverage_complete != probability_complete
+        || (probability_complete && !coordinator_coverage_can_be_complete)
+        || (aggregation.is_tiling_only() && probability_complete)
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_distributed_coverage_complete_mismatch",
+        ));
+    }
+    let expected_availability = if aggregation.is_tiling_only() {
+        "not-calculated"
+    } else if probability_complete {
+        "available"
+    } else {
+        "incomplete"
+    };
+    validate_exact_text_field(
+        result,
+        "coverage_aggregation_availability",
+        expected_availability,
+        "wasm_build_probability_distributed_coverage_availability_invalid",
+        "wasm_build_probability_distributed_coverage_availability_mismatch",
+    )?;
+
+    let source_row_count = exact_usize_field(
+        result,
+        "coverage_aggregation_source_row_count",
+        "wasm_build_probability_distributed_coverage_source_count_invalid",
+    )?;
+    Ok(source_row_count)
+}
+
+/// Recomputes every derived Build coverage value from the coordinator's
+/// retained universe and the validated worker bitset. This must run before the
+/// caller mutates its aggregate coverage.
+pub(super) fn validate_distributed_coverage_aggregation_surface(
+    problem: &SearchProblem,
+    aggregation: BuildProbabilityAggregation,
+    result: &CoreExecutionResult,
+    coverage: &PatternBitSet,
+    source_row_count: usize,
+    probability_complete: bool,
+) -> Result<(), WasmExactSearchError> {
+    let universe = problem.piece_source().materialized_universe().ok_or(
+        WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+    )?;
+    validate_exact_text_field(
+        result,
+        "materialized_probability_mass",
+        probability_text(universe.weights().total_weight().get()).as_str(),
+        "wasm_build_probability_distributed_materialized_probability_mass_invalid",
+        "wasm_build_probability_distributed_materialized_probability_mass_mismatch",
+    )?;
+
+    if aggregation.is_tiling_only() {
+        if coverage.count_ones() != 0
+            || exact_usize_field(
+                result,
+                "covered_pattern_count",
+                "wasm_build_probability_distributed_covered_pattern_count_invalid",
+            )? != 0
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_tiling_coverage_mismatch",
+            ));
+        }
+        for key in [
+            "failed_pattern_count",
+            "coverage_probability",
+            "failed_coverage_probability",
+            "success_conditional_probability_denominator",
+        ] {
+            validate_exact_text_field(
+                result,
+                key,
+                "not-calculated",
+                "wasm_build_probability_distributed_tiling_coverage_field_invalid",
+                "wasm_build_probability_distributed_tiling_coverage_field_mismatch",
+            )?;
+        }
+        return Ok(());
+    }
+
+    let summary = build_pattern_coverage_aggregation(
+        problem,
+        source_row_count,
+        coverage,
+        PatternCoverageCompleteness::new(true, probability_complete, true),
+    )?;
+    if exact_usize_field(
+        result,
+        "covered_pattern_count",
+        "wasm_build_probability_distributed_covered_pattern_count_invalid",
+    )? != summary.success_pattern_count()
+        || exact_usize_field(
+            result,
+            "failed_pattern_count",
+            "wasm_build_probability_distributed_failed_pattern_count_invalid",
+        )? != summary.failed_pattern_count()
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_distributed_coverage_count_mismatch",
+        ));
+    }
+    let success_probability = probability_text(summary.success_probability().get());
+    validate_exact_text_field(
+        result,
+        "coverage_probability",
+        success_probability.as_str(),
+        "wasm_build_probability_distributed_coverage_probability_invalid",
+        "wasm_build_probability_distributed_coverage_probability_mismatch",
+    )?;
+    validate_exact_text_field(
+        result,
+        "failed_coverage_probability",
+        probability_text(summary.failed_probability().get()).as_str(),
+        "wasm_build_probability_distributed_failed_probability_invalid",
+        "wasm_build_probability_distributed_failed_probability_mismatch",
+    )?;
+    validate_exact_text_field(
+        result,
+        "success_conditional_probability_denominator",
+        success_probability.as_str(),
+        "wasm_build_probability_distributed_success_denominator_invalid",
+        "wasm_build_probability_distributed_success_denominator_mismatch",
+    )
 }
 
 pub(super) fn exact_solution_probabilities_requested(
@@ -1553,6 +1952,15 @@ pub(super) fn exact_u128_field(
         return Err(WasmExactSearchError::InvalidProblem(invalid_reason));
     }
     Ok(value)
+}
+
+pub(super) fn exact_u64_field(
+    result: &CoreExecutionResult,
+    key: &str,
+    invalid_reason: &'static str,
+) -> Result<u64, WasmExactSearchError> {
+    let value = exact_u128_field(result, key, invalid_reason)?;
+    u64::try_from(value).map_err(|_| WasmExactSearchError::InvalidProblem(invalid_reason))
 }
 
 pub(super) fn solution_coverage_union_matches_global<T>(
@@ -1655,12 +2063,14 @@ struct CompactDistributedPartial {
     probability_complete: bool,
     resource_truncated: bool,
     build_variant_count: u128,
+    coverage_source_row_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompactBuildProbabilitySharedCatalogKey {
     piece_source_id: u64,
     pattern_universe_id: u64,
+    pattern_weight_model_id: u64,
     pattern_count: usize,
     target_piece_count: usize,
     initial_hold: HoldAutomatonState,
@@ -1926,6 +2336,7 @@ impl CompactBuildProbabilitySession {
         let shared_key = CompactBuildProbabilitySharedCatalogKey {
             piece_source_id: problem.piece_source().id().get(),
             pattern_universe_id: universe.pattern_universe_id().get(),
+            pattern_weight_model_id: universe.pattern_weight_model_id().get(),
             pattern_count: universe.pattern_count(),
             target_piece_count,
             initial_hold: problem.initial_hold(),
@@ -2590,6 +3001,14 @@ impl CompactBuildProbabilitySession {
                 "wasm_build_probability_distributed_coverage_invalid",
             ));
         }
+        validate_distributed_coverage_aggregation_surface(
+            &self.problem,
+            self.aggregation,
+            result,
+            &coverage,
+            partial.coverage_source_row_count,
+            partial.probability_complete,
+        )?;
         self.covered_patterns.union_with(&coverage).map_err(|_| {
             WasmExactSearchError::InvalidProblem(
                 "wasm_build_probability_distributed_coverage_mismatch",
@@ -2827,6 +3246,17 @@ impl CompactBuildProbabilitySession {
             "build_variant_count",
             "wasm_build_probability_distributed_variant_count_invalid",
         )?;
+        let universe = self.problem.piece_source().materialized_universe().ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+        )?;
+        let coverage_source_row_count = validate_distributed_coverage_authority(
+            &self.problem,
+            self.aggregation,
+            result,
+            pattern_count,
+            probability_complete,
+            universe.complete() && !resource_truncated,
+        )?;
 
         let identities = result.normalized_solution_identities();
         let keys = result.normalized_solution_keys();
@@ -2927,12 +3357,18 @@ impl CompactBuildProbabilitySession {
             ));
         }
         validate_worker_partial_probability_surface(result)?;
+        if coverage_source_row_count != worker_solution_count {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_coverage_source_count_mismatch",
+            ));
+        }
 
         Ok(CompactDistributedPartial {
             count_complete,
             probability_complete,
             resource_truncated,
             build_variant_count,
+            coverage_source_row_count,
         })
     }
 
@@ -3247,23 +3683,37 @@ impl CompactBuildProbabilitySession {
             .piece_source()
             .materialized_universe()
             .expect("build probability requires a materialized supply");
-        let probability = if tiling_only {
-            "not-calculated".to_owned()
-        } else {
-            universe
-                .weights()
-                .covered_weight(&self.covered_patterns)
-                .expect("build probability coverage belongs to its supply universe")
-                .get()
-                .to_string()
-        };
-        let probability_complete = !tiling_only
-            && universe.complete()
-            && self.distributed_probability_complete
-            && self.truncated_reason.is_none();
         let count_complete = self.count_complete
             && self.truncated_reason.is_none()
             && (!tiling_only || self.shared_supply_catalog.supply_projection_complete);
+        let coverage_source_row_count = self
+            .buildable_tilings
+            .len()
+            .checked_add(usize::from(self.trivial_target))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_coverage_source_count_overflow",
+            ))?;
+        let coverage_aggregation = if tiling_only {
+            None
+        } else {
+            Some(build_pattern_coverage_aggregation(
+                &self.problem,
+                coverage_source_row_count,
+                &self.covered_patterns,
+                PatternCoverageCompleteness::new(
+                    universe.complete(),
+                    self.distributed_probability_complete && self.truncated_reason.is_none(),
+                    true,
+                ),
+            )?)
+        };
+        let probability = coverage_aggregation.as_ref().map_or_else(
+            || "not-calculated".to_owned(),
+            |summary| probability_text(summary.success_probability().get()),
+        );
+        let probability_complete = coverage_aggregation
+            .as_ref()
+            .is_some_and(|summary| summary.completeness().is_complete());
         let build_variant_count_exact = !tiling_only
             && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll
             && count_complete;
@@ -3462,15 +3912,63 @@ impl CompactBuildProbabilitySession {
             field("build_path_multiplicity_counted", false),
             field("materialized_pattern_count", universe.pattern_count()),
             field("coverage_pattern_count", universe.pattern_count()),
+            field("piece_source_id", self.problem.piece_source().id().get()),
+            field("pattern_universe_id", universe.pattern_universe_id().get()),
+            field(
+                "pattern_weight_model_id",
+                universe.pattern_weight_model_id().get(),
+            ),
+            field(
+                "coverage_aggregation_contract",
+                PatternCoverageAggregation::CONTRACT_ID,
+            ),
+            field(
+                "coverage_aggregation_availability",
+                coverage_aggregation
+                    .as_ref()
+                    .map_or("not-calculated", |summary| summary.availability().as_str()),
+            ),
+            field("coverage_aggregation_complete", probability_complete),
+            field(
+                "coverage_aggregation_source_row_count",
+                coverage_source_row_count,
+            ),
             field(
                 "covered_pattern_count",
-                if tiling_only {
-                    0
-                } else {
-                    self.covered_patterns.count_ones()
-                },
+                coverage_aggregation
+                    .as_ref()
+                    .map_or(0, PatternCoverageAggregation::success_pattern_count),
+            ),
+            field(
+                "failed_pattern_count",
+                coverage_aggregation.as_ref().map_or_else(
+                    || "not-calculated".to_owned(),
+                    |summary| summary.failed_pattern_count().to_string(),
+                ),
             ),
             field("coverage_probability", probability),
+            field(
+                "failed_coverage_probability",
+                coverage_aggregation.as_ref().map_or_else(
+                    || "not-calculated".to_owned(),
+                    |summary| probability_text(summary.failed_probability().get()),
+                ),
+            ),
+            field(
+                "materialized_probability_mass",
+                probability_text(universe.weights().total_weight().get()),
+            ),
+            field(
+                "coverage_probability_denominator",
+                "full-materialized-pattern-universe",
+            ),
+            field(
+                "success_conditional_probability_denominator",
+                coverage_aggregation.as_ref().map_or_else(
+                    || "not-calculated".to_owned(),
+                    |summary| probability_text(summary.success_probability().get()),
+                ),
+            ),
             field("probability_complete", probability_complete),
             field("count_complete", count_complete),
             field(
@@ -5788,6 +6286,13 @@ mod finesse_integration_tests {
     ) -> CoreExecutionResult {
         let mut fields = vec![
             ("coverage_pattern_count".to_owned(), "1".to_owned()),
+            ("piece_source_id".to_owned(), "1".to_owned()),
+            ("pattern_universe_id".to_owned(), "2".to_owned()),
+            ("pattern_weight_model_id".to_owned(), "3".to_owned()),
+            (
+                "coverage_aggregation_source_row_count".to_owned(),
+                "1".to_owned(),
+            ),
             (
                 "build_probability_aggregation".to_owned(),
                 "buildability".to_owned(),
@@ -5940,6 +6445,27 @@ mod finesse_integration_tests {
         assert_eq!(
             invalid_problem_reason(mismatch),
             "wasm_build_probability_symmetry_pattern_count_mismatch"
+        );
+    }
+
+    #[test]
+    fn symmetry_merge_rejects_a_foreign_pattern_weight_authority() {
+        let weights = WeightedPatternSet::uniform(1).expect("uniform weights");
+        let foreign = symmetry_input(Some("false"), false)
+            .with_replaced_fields(vec![("pattern_weight_model_id".to_owned(), "4".to_owned())]);
+
+        let error = merge_symmetry_results(
+            vec![symmetry_input(Some("false"), false), foreign],
+            true,
+            true,
+            &weights,
+            false,
+        )
+        .expect_err("foreign pattern weights must not enter the symmetry OR-union");
+
+        assert_eq!(
+            invalid_problem_reason(error),
+            "wasm_build_probability_symmetry_pattern_weight_model_id_mismatch"
         );
     }
 
@@ -6555,6 +7081,13 @@ mod finesse_integration_tests {
         let input = CoreExecutionResult::new(
             vec![
                 ("coverage_pattern_count".to_owned(), "1".to_owned()),
+                ("piece_source_id".to_owned(), "1".to_owned()),
+                ("pattern_universe_id".to_owned(), "2".to_owned()),
+                ("pattern_weight_model_id".to_owned(), "3".to_owned()),
+                (
+                    "coverage_aggregation_source_row_count".to_owned(),
+                    "101".to_owned(),
+                ),
                 (
                     "build_probability_aggregation".to_owned(),
                     "buildability".to_owned(),

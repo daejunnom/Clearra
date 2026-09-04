@@ -36,8 +36,8 @@ use crate::{
     },
     pc_allspin_result::project_pc_allspin_result,
     pc_chance_probability_result::PcChanceCompiledAuthority,
-    pc_result_projection::ValidatedPcResultProjection,
-    pc_save_result::{PcSaveCompiledAuthority, PcSaveCompiledAuthorityError},
+    pc_result_projection::{PcResultProjection, ValidatedPcResultProjection},
+    pc_save_result::{PcSaveCompiledAuthority, PcSaveCompiledAuthorityError, PcSaveResultMode},
     pc_score_summary_result::{
         PcScoreCompiledAuthority, PcScoreCompiledAuthorityError, PcScoreExecutionError,
     },
@@ -602,7 +602,7 @@ pub(crate) enum CooperativePcScoreProduct {
 }
 
 impl CooperativePcScoreProduct {
-    const fn capability(self) -> ProductCapabilityContract {
+    pub(crate) const fn capability(self) -> ProductCapabilityContract {
         match self {
             Self::Summary => ProductCapabilityContract::PcScore,
             Self::ScoreFinder => ProductCapabilityContract::PcScoreFinder,
@@ -662,6 +662,54 @@ pub(crate) enum CooperativeSearchResponseKind {
     Damage,
     SpinFinder,
     Ren,
+}
+
+impl CooperativeSearchResponseKind {
+    /// Closed mapping for product families whose distributed terminal has a
+    /// dedicated evidence merger or coordinator-owned exact replay.
+    pub(crate) fn distributed_product_capability(&self) -> Option<ProductCapabilityContract> {
+        match self {
+            Self::PcTiling { .. } | Self::ScenarioTiling { .. } => {
+                Some(ProductCapabilityContract::PcTiling)
+            }
+            Self::PcChance { .. } | Self::ScenarioChance { .. } => {
+                Some(ProductCapabilityContract::PcChance)
+            }
+            Self::PcScore { product, .. } | Self::ScenarioScore { product, .. } => {
+                Some(product.capability())
+            }
+            Self::Pc(projection)
+            | Self::Scenario {
+                result_projection: projection,
+                ..
+            } => match projection.projection() {
+                PcResultProjection::MinimumCoverV2(_) => {
+                    Some(ProductCapabilityContract::PcMinimals)
+                }
+                PcResultProjection::PathFamilyV2(_) => Some(ProductCapabilityContract::PcPath),
+                PcResultProjection::AllSpinSolution(_) => {
+                    Some(ProductCapabilityContract::PcAllSpinSolution)
+                }
+                PcResultProjection::AllSpinPreservationChance(_) => {
+                    Some(ProductCapabilityContract::PcAllSpinPreservationChance)
+                }
+                PcResultProjection::Standard
+                | PcResultProjection::ChanceProbabilityV2(_)
+                | PcResultProjection::ScoreSummaryV2(_)
+                | PcResultProjection::ScorePortfolioV2(_)
+                | PcResultProjection::SaveGroupsV2(_)
+                | PcResultProjection::BestSaveV2(_)
+                | PcResultProjection::TilingFamilyV1(_) => None,
+            },
+            Self::PcSave { authority, .. } | Self::ScenarioSave { authority, .. } => {
+                Some(match authority.mode() {
+                    PcSaveResultMode::SaveGroups => ProductCapabilityContract::PcSaves,
+                    PcSaveResultMode::BestSave => ProductCapabilityContract::PcBestSave,
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 impl AppContext {

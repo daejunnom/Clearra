@@ -1,0 +1,1 @@
+clearra	pc	--lines	1	--board-mask	0x000000000000003f	--height	1	--pieces	1	--no-hold	--patterns	[I]	--count	unique	--rule	srs-plus	--no-tablebase	--no-build-dependency-dag	--queue-knowledge	oracle	--backend	cpu	--no-backend-fallback	--workers	1	--cpu-warmup

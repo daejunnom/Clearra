@@ -30,6 +30,7 @@ import {
 
 const SOURCE = "1".repeat(40);
 const AUTHORITY = "2".repeat(40);
+const LATER_AUTHORITY = "4".repeat(40);
 const ARTIFACT_SHA256 = "3".repeat(64);
 const FORWARD_PAYLOADS = new Map([
   ["index.html", Buffer.from("accepted index fixture\n", "utf8")],
@@ -67,6 +68,30 @@ function identity(sourceCommit = SOURCE, files = forwardFileDescriptors()) {
   };
 }
 
+function reconstructedIdentity(sourceCommit = SOURCE) {
+  const { acceptedRunId, acceptedRunAttempt, basePath, files, ...reconstructed } =
+    identity(sourceCommit);
+  void acceptedRunId;
+  void acceptedRunAttempt;
+  void basePath;
+  void files;
+  return reconstructed;
+}
+
+function modernManifest(sourceCommit = SOURCE) {
+  return {
+    build: {
+      runtime_identity: {
+        source_commit: sourceCommit,
+        engine_build_id: sourceCommit,
+        contract_schema_version: "clearra.search.contract.v2",
+        supply_semantics_id: "clearra.supply.projected-terminal-lookahead.v1",
+        artifact_schema_version: "clearra.solution-data.v1",
+      },
+    },
+  };
+}
+
 function legacyReadback(phase) {
   return sealCanonicalReport({
     schema_id: LEGACY_PAGES_READBACK_SCHEMA,
@@ -99,7 +124,7 @@ function legacyCaptureReport() {
     captureRunAttempt,
   });
   return sealCanonicalReport({
-    schema_id: "clearra.pages.rollback-capture-authority.v2",
+    schema_id: "clearra.pages.rollback-capture-authority.v3",
     repository: "daejunnom/Clearra",
     snapshot_source_commit: LEGACY_PAGES_SNAPSHOT_SHA,
     authority_source_commit: AUTHORITY,
@@ -132,13 +157,65 @@ function legacyCaptureReport() {
       rebuilt_payloads: LEGACY_PAGES_PAYLOADS.map((payload) => ({ ...payload })),
       rebuilt_payload_set_sha256: canonicalSha256(LEGACY_PAGES_PAYLOADS),
     },
+    canonical_snapshot: null,
     status: "captured",
   });
 }
 
-function fixture({ mode = "forward" } = {}) {
-  const rollbackCaptureReport = mode === "restore" ? legacyCaptureReport() : null;
-  const sourceCommit = mode === "restore" ? LEGACY_PAGES_SNAPSHOT_SHA : SOURCE;
+function modernCaptureReport() {
+  const captureRunId = "12345";
+  const captureRunAttempt = "1";
+  const acceptedIdentity = { ...identity(), acceptedRunAttempt: "1" };
+  const identityBytes = Buffer.from(JSON.stringify(acceptedIdentity));
+  const readback = {
+    identity_sha256: canonicalSha256(acceptedIdentity), identity_bytes_sha256: sha256(identityBytes), identity_bytes_size: identityBytes.byteLength,
+    file_set_sha256: canonicalSha256(acceptedIdentity.files), file_count: acceptedIdentity.files.length,
+    total_bytes: acceptedIdentity.files.reduce((sum, file) => sum + file.size, 0),
+  };
+  return sealCanonicalReport({
+    schema_id: "clearra.pages.rollback-capture-authority.v3",
+    repository: "daejunnom/Clearra",
+    snapshot_source_commit: SOURCE,
+    authority_source_commit: AUTHORITY,
+    capture_run_id: captureRunId,
+    capture_run_attempt: captureRunAttempt,
+    workflow_path: ".github/workflows/pages-rollback.yml",
+    workflow_run_api_readback_sha256: "6".repeat(64),
+    artifact_id: "67890",
+    artifact_name: expectedCaptureArtifactName({
+      snapshotSha: SOURCE,
+      authoritySha: AUTHORITY,
+      captureRunId,
+      captureRunAttempt,
+    }),
+    artifact_digest: `sha256:${"7".repeat(64)}`,
+    artifact_sha256: "7".repeat(64),
+    artifact_archive_size_bytes: 6_000_000,
+    artifact_tar_sha256: "8".repeat(64),
+    artifact_tar_size_bytes: 8_000_000,
+    artifact_api_readback_sha256: "9".repeat(64),
+    artifact_created_at: "2026-08-28T00:00:00.000Z",
+    artifact_expires_at: "2026-11-26T00:00:00.000Z",
+    retention_seconds: 90 * 24 * 60 * 60,
+    capture_kind: "canonical-v2",
+    legacy_snapshot: null,
+    canonical_snapshot: {
+      accepted_run_id: "11111", accepted_run_attempt: "1", accepted_artifact_id: "77777",
+      accepted_artifact_name: `accepted-pages-build-${SOURCE}-run-11111-attempt-1`, accepted_artifact_digest: `sha256:${"c".repeat(64)}`,
+      accepted_artifact_api_readback_sha256: "d".repeat(64), accepted_artifact_created_at: "2026-08-28T00:00:00.000Z", accepted_artifact_expires_at: "2026-11-26T00:00:00.000Z",
+      identity: acceptedIdentity, ...readback, initial_public_readback: readback, preartifact_public_readback: readback,
+    },
+    status: "captured",
+  });
+}
+
+function fixture({ mode = "forward", restoreKind = "legacy-v0.7.4" } = {}) {
+  const rollbackCaptureReport = mode === "restore"
+    ? restoreKind === "canonical-v2" ? modernCaptureReport() : legacyCaptureReport()
+    : null;
+  const sourceCommit = mode === "restore"
+    ? rollbackCaptureReport.snapshot_source_commit
+    : SOURCE;
   const workflowSourceCommit = mode === "forward" ? SOURCE : AUTHORITY;
   const workflowPath = mode === "forward"
     ? ".github/workflows/pages.yml"
@@ -171,6 +248,7 @@ function fixture({ mode = "forward" } = {}) {
       ? `sha256:${"a".repeat(64)}`
       : undefined,
     rollbackReportFileSha256: mode === "restore" ? "b".repeat(64) : undefined,
+    restoredCaptureKind: mode === "restore" ? restoreKind : undefined,
   };
   const responses = {
     "/actions/runs/22222": {
@@ -222,7 +300,11 @@ function fixture({ mode = "forward" } = {}) {
         assert.ok(Object.hasOwn(responses, path), `unexpected GitHub read: ${path}`);
         return structuredClone(responses[path]);
       },
-      async fetchPublicJson(url) {
+      async fetchPublicJson(url, label) {
+        if (mode === "restore" && restoreKind === "canonical-v2") {
+          assert.match(url, /clearra-build-identity\.json\?authority=22222-3-1$/u);
+          return structuredClone(rollbackCaptureReport.canonical_snapshot.identity);
+        }
         assert.match(url, /clearra-build-identity\.json\?authority=22222-3-1$/u);
         return mode === "restore"
           ? structuredClone(rollbackCaptureReport.legacy_snapshot.identity)
@@ -238,6 +320,10 @@ function fixture({ mode = "forward" } = {}) {
           assert.ok(payload, `unexpected forward payload read: ${path}`);
           assert.equal(expectedSize, payload.byteLength);
           return Buffer.from(payload);
+        }
+        if (restoreKind === "canonical-v2") {
+          const path = new URL(url).pathname.replace(/^\/Clearra\//u, "");
+          return Buffer.from(FORWARD_PAYLOADS.get(path));
         }
         assert.match(url, /\/wasm\/clearra_wasm(?:_bg)?[./]/u);
         const descriptor = url.includes("manifest.json")
@@ -339,6 +425,46 @@ test("rejects artifact digest, run attempt, deployment status, and public identi
       /differs from the deployed source contract/u,
     );
   }
+});
+
+test("canonical-v2 restore binds every live file to the accepted rollback package", async () => {
+  const { input, dependencies } = fixture({
+    mode: "restore",
+    restoreKind: "canonical-v2",
+  });
+  const report = await producePagesDeploymentAuthority(input, dependencies);
+  assert.equal(report.source_commit, SOURCE);
+  assert.equal(report.accepted_run_id, "11111");
+  assert.equal(report.live_payload_set_sha256, canonicalSha256(input.rollbackCaptureReport.canonical_snapshot.identity.files));
+  validatePagesDeploymentAuthorityReport(report);
+
+  const drift = fixture({ mode: "restore", restoreKind: "canonical-v2" });
+  drift.dependencies.fetchPublicJson = async () => identity(SOURCE);
+  drift.dependencies.attempts = 1;
+  await assert.rejects(
+    producePagesDeploymentAuthority(drift.input, drift.dependencies),
+    /differs from the full accepted identity/u,
+  );
+
+  const later = fixture({ mode: "restore", restoreKind: "canonical-v2" });
+  later.input.workflowSourceCommit = LATER_AUTHORITY;
+  later.responses["/actions/runs/22222"].head_sha = LATER_AUTHORITY;
+  later.responses["/actions/artifacts/33333"].workflow_run.head_sha = LATER_AUTHORITY;
+  delete later.responses[`/pages/deployments/${AUTHORITY}`];
+  later.responses[`/pages/deployments/${LATER_AUTHORITY}`] = { status: "succeed" };
+  later.responses[`/compare/${AUTHORITY}...${LATER_AUTHORITY}`] = { status: "ahead" };
+  const laterReport = await producePagesDeploymentAuthority(
+    later.input,
+    later.dependencies,
+  );
+  assert.equal(laterReport.workflow_source_commit, LATER_AUTHORITY);
+  assert.equal(laterReport.deployment_id, LATER_AUTHORITY);
+
+  later.responses[`/compare/${AUTHORITY}...${LATER_AUTHORITY}`] = { status: "diverged" };
+  await assert.rejects(
+    producePagesDeploymentAuthority(later.input, later.dependencies),
+    /capture authority must be workflow main or its strict ancestor/u,
+  );
 });
 
 test("forward live seal rejects missing, redirected, wrong-sized, and hash-drifted payloads", async () => {

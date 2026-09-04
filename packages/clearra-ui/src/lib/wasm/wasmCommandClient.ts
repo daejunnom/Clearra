@@ -281,6 +281,35 @@ export type ClearraScorePatternWinnerPayload = {
   informational_attack: string;
 };
 
+export type ClearraPcScoreFieldPayload = {
+  normalized_field_key: string;
+  average_score: string;
+  covered_pattern_count: string;
+  pattern_count: string;
+  score_complete: boolean;
+};
+
+export type ClearraPcScoreFieldSummaryPayload = {
+  field_contract: 'pc-score-solution-field-average.v1';
+  ordering: 'normalized-solution-field-order';
+  solution_field_average_basis: 'whole-materialized-pattern-universe-failed-pc-zero';
+  score_evaluation_basis: 'all-traces';
+  score_evaluation_scope: 'full';
+  overall_score_basis: 'all-materialized-patterns-failed-pc-zero';
+  piece_source_id: string;
+  pattern_universe_id: string;
+  pattern_weight_model_id: string;
+  materialized_pattern_count: string;
+  solution_field_count: string;
+  scored_pattern_count: string;
+  failed_pc_pattern_count: string;
+  covered_probability: string;
+  overall_score: string;
+  score_covered_pattern_conditional_average_score: string | null;
+  complete: true;
+  fields: ClearraPcScoreFieldPayload[];
+};
+
 export type ClearraPcPathStepPayload = {
   step_index: string;
   operation_id: string;
@@ -321,86 +350,6 @@ export type ClearraPcPathFamilyPayload = {
   witness_count: string;
   complete: true;
   witnesses: ClearraPcPathWitnessPayload[];
-};
-
-export type ClearraPcSaveCompletenessPayload = {
-  source_universe_complete: boolean;
-  fixed_bag_boundary_proven: boolean;
-  execution_batch_complete: boolean;
-  pattern_weights_complete: boolean;
-  count_complete: boolean;
-  probability_complete: boolean;
-  complete: boolean;
-};
-
-export type ClearraPcSaveRunMetadataPayload = {
-  origin: string;
-  problem_preset: 'opening-pc' | 'scenario-pc';
-  problem_id: string;
-  piece_source_id: string;
-  pattern_universe_id: string;
-  pattern_weight_model_id: string;
-  materialized_pattern_count: string;
-  pc_success_pattern_count: string;
-  pc_probability: string;
-  completeness: ClearraPcSaveCompletenessPayload;
-};
-
-export type ClearraPcSavePieceMultisetPayload = {
-  canonical_id: string;
-  t: number;
-  i: number;
-  o: number;
-  j: number;
-  l: number;
-  s: number;
-  z: number;
-  total_count: number;
-};
-
-export type ClearraPcSaveWitnessPayload = {
-  pattern_index: string;
-  candidate_id: string;
-  trace_identity: string;
-  source_cursor: string;
-  terminal_hold: 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L' | null;
-  active_bag_remainder: ClearraPcSavePieceMultisetPayload;
-};
-
-export type ClearraPcSaveGroupPayload = {
-  identity_contract: 'terminal-hold-plus-active-bag-remainder-multiset.v1';
-  identity: ClearraPcSavePieceMultisetPayload;
-  successful_pattern_count: string;
-  unconditional_probability: string;
-  conditional_probability_given_pc: string;
-  canonical_candidate_id: string;
-  witnesses: ClearraPcSaveWitnessPayload[];
-};
-
-export type ClearraPcSaveGroupsPayload = {
-  schema_id: 'clearra-save-v1';
-  page_size: string;
-  group_count: string;
-  metadata: ClearraPcSaveRunMetadataPayload;
-  groups: ClearraPcSaveGroupPayload[];
-};
-
-export type ClearraPcBestSaveWinnerPayload = {
-  weighted_total: string;
-  balanced_jl_count: string;
-  exact_group_probability: string;
-  group: ClearraPcSaveGroupPayload;
-};
-
-export type ClearraPcBestSavePayload = {
-  schema_id: 'clearra-save-v1';
-  probability_basis: 'whole-universe-unconditional';
-  ordering: 'weighted-total-descending-then-balanced-jl-descending-then-unconditional-probability-descending-then-canonical-candidate-id-ascending';
-  equality: 'weighted-total-balanced-jl-and-exact-unconditional-probability';
-  page_size: string;
-  winner_count: string;
-  metadata: ClearraPcSaveRunMetadataPayload;
-  winners: ClearraPcBestSaveWinnerPayload[];
 };
 
 export type ClearraParityReportPagePayload = {
@@ -523,22 +472,6 @@ export type ClearraProductResultPayload =
       };
     }
   | {
-      contract: 'pc.saves';
-      result_kind: 'pc-save-groups.v2';
-      content: {
-        payload_kind: 'pc-save-groups';
-        payload: ClearraPcSaveGroupsPayload;
-      };
-    }
-  | {
-      contract: 'pc.best-save';
-      result_kind: 'pc-best-save.v2';
-      content: {
-        payload_kind: 'pc-best-save';
-        payload: ClearraPcBestSavePayload;
-      };
-    }
-  | {
       contract: 'pc.minimals';
       result_kind: 'pc-minimum-cover.v2';
       content: {
@@ -563,8 +496,16 @@ export type ClearraProductResultPayload =
       };
     }
   | {
-      contract: string;
-      result_kind: string;
+      contract: 'pc.score';
+      result_kind: 'pc-score-summary.v2';
+      content: {
+        payload_kind: 'pc-score-field-summary';
+        payload: ClearraPcScoreFieldSummaryPayload;
+      };
+    }
+  | {
+      contract: 'pc.score-finder';
+      result_kind: 'pc-fixed-score-witness.v2';
       content: {
         payload_kind: 'score-pattern-winner-family';
         payload: {
@@ -1006,6 +947,12 @@ type ClearraWasmWorkerEventBase = {
 };
 
 export type ClearraSearchProgressTelemetry = {
+  /**
+   * Runtime-selected execution path. The browser owner uses this explicit
+   * authority marker to keep a serial-search watchdog separate from worker
+   * startup/prewarm and from the distributed verifier watchdog.
+   */
+  execution_mode?: 'serial' | 'distributed';
   phase:
     | 'preparing'
     | 'initializing'

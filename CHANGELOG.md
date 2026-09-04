@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.8.0 - 2026-09-02
+## 0.8.0 - 2026-09-05
 
 - Added actual typed product paths for all twelve Build v2 capabilities,
   including colored target and congruence generation, exact coverage
@@ -12,6 +12,30 @@
   families with full-result authority, deterministic canonical identities,
   strict distinction between ordinary solution families and alternative
   optimal portfolios, and fail-closed incomplete-result handling.
+- Restored the PC inverse lock-clear execution path across serial and browser
+  worker modes so path, chance, minimum-cover, and complete solution families
+  leave Geometry preparation, retain their typed results, and page every
+  materialized field instead of exposing internal bitfield identifiers.
+- Made the shared CLI command compiler the product-semantic authority for
+  native CLI, Pages/WASM, desktop, and Discord adapters. The redesigned
+  Discord slash, text, modal, localization, and help surface is preserved,
+  while the simplified GUI no longer exposes PC save groups or best-save;
+  those two capabilities remain available from CLI and Discord.
+- Restored the v0.7.4 `pc.score` meaning: every normalized solution field is
+  listed with its whole-universe average score, unsolved patterns contribute
+  zero, and the overall score stays separate from score-optimal minimum-cover
+  portfolios. Canonical ties use the smallest candidate ID and never use
+  informational attack as a selector.
+- Reused only the product-neutral pattern-universe, OR-union, probability,
+  failure-count, and completeness aggregation primitives between PC and Build
+  Probability. Build-only placement and objective semantics remain isolated,
+  and option-generation/cache mismatches now fail closed instead of relabeling
+  an earlier result.
+- Hardened distributed PC and Build result admission: worker authorities are
+  rebound to the coordinator's exact source, universe, and weight model before
+  union; duplicate fields and non-zero bitset padding are rejected; and actual
+  allocator capacity is re-authorized against the whole live-memory peak before
+  external rows are read or populated.
 - Added exact, restartable portfolio-alternative enumeration. GUI, Web, and
   desktop results page through every tied optimal portfolio; CLI exposes only
   explicit durable tie snapshots and continuation; Discord publishes the

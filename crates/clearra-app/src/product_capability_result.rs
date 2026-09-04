@@ -9,8 +9,9 @@ use clearra_host_contract::{
     PcBestSavePayload, PcBestSaveWinnerPayload, PcPathFamilyPayload, PcPathStepPayload,
     PcPathWitnessPayload, PcSaveCompletenessPayload, PcSaveGroupPayload, PcSaveGroupsPayload,
     PcSavePieceMultisetPayload, PcSaveRunMetadataPayload, PcSaveWitnessPayload,
-    ProductCandidateMemberPayload, ProductResultPayload, ProductResultPayloadContent,
-    QueryEnvelope, ScorePatternWinnerFamilyPayload, ScorePatternWinnerPayload,
+    PcScoreFieldPayload, PcScoreFieldSummaryPayload, ProductCandidateMemberPayload,
+    ProductResultPayload, ProductResultPayloadContent, QueryEnvelope,
+    ScorePatternWinnerFamilyPayload, ScorePatternWinnerPayload,
 };
 
 use crate::{
@@ -355,6 +356,12 @@ impl ProductCapabilityResult {
                         candidate.normalized_key(),
                     ));
                 }
+                let (canonical_candidate_id, canonical_solution_key) =
+                    report.canonical_candidate()?;
+                let canonical_witness = ProductCandidateMemberPayload::new(
+                    canonical_candidate_id.to_string(),
+                    canonical_solution_key,
+                );
                 Some(ProductResultPayload::new(
                     self.contract.as_str(),
                     self.result_kind.as_str(),
@@ -378,7 +385,8 @@ impl ProductCapabilityResult {
                                 .to_string(),
                             members,
                             true,
-                        ),
+                        )
+                        .with_canonical_witness(report.canonical_selection(), canonical_witness),
                     ),
                 ))
             }
@@ -430,6 +438,10 @@ impl ProductCapabilityResult {
                         )
                     })
                     .collect::<Vec<_>>();
+                let canonical_witness = match report.canonical_witness() {
+                    Some(_) => Some(witnesses.first()?.clone()),
+                    None => None,
+                };
                 Some(ProductResultPayload::new(
                     self.contract.as_str(),
                     self.result_kind.as_str(),
@@ -440,16 +452,69 @@ impl ProductCapabilityResult {
                         report.materialized_pattern_count().to_string(),
                         witnesses.len().to_string(),
                         report.completeness().complete(),
+                        report.canonical_selection(),
+                        canonical_witness,
                         witnesses,
                     )),
                 ))
             }
-            (ProductCapabilityContract::PcScore, ProductCapabilityResultKind::PcScoreSummaryV2)
-            | (
+            (ProductCapabilityContract::PcScore, ProductCapabilityResultKind::PcScoreSummaryV2) => {
+                let report = self.pc_score_summary_v2.as_ref()?;
+                let fields = report
+                    .solution_field_averages()
+                    .iter()
+                    .map(|field| {
+                        PcScoreFieldPayload::new(
+                            field.normalized_field_key().as_str(),
+                            field.average_score().to_string(),
+                            field.covered_pattern_count().to_string(),
+                            field.pattern_count().to_string(),
+                            field.score_complete(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Some(ProductResultPayload::new(
+                    self.contract.as_str(),
+                    self.result_kind.as_str(),
+                    ProductResultPayloadContent::PcScoreFieldSummary(
+                        PcScoreFieldSummaryPayload::new(
+                            crate::PC_SCORE_SOLUTION_FIELD_CONTRACT,
+                            report.solution_field_ordering(),
+                            report.solution_field_average_basis(),
+                            report.score_evaluation_basis(),
+                            report.score_evaluation_scope(),
+                            report.overall_score_basis(),
+                            report.piece_source_id().to_string(),
+                            report.pattern_universe_id().to_string(),
+                            report.pattern_weight_model_id().to_string(),
+                            report.materialized_pattern_count().to_string(),
+                            report.solution_field_count().to_string(),
+                            report.pattern_optimal_count().to_string(),
+                            report.failed_pc_pattern_count().to_string(),
+                            report.covered_probability(),
+                            report.overall_score(),
+                            report
+                                .covered_pattern_conditional_average_score()
+                                .map(ToOwned::to_owned),
+                            report.completeness().complete(),
+                            fields,
+                        ),
+                    ),
+                ))
+            }
+            (
                 ProductCapabilityContract::PcScoreFinder,
                 ProductCapabilityResultKind::PcFixedScoreWitnessV2,
             ) => {
                 let report = self.pc_score_summary_v2.as_ref()?;
+                let canonical_winner = report.canonical_winner()?;
+                let canonical_winner_payload = ScorePatternWinnerPayload::new(
+                    canonical_winner.pattern_id().to_string(),
+                    canonical_winner.candidate_id().to_string(),
+                    canonical_winner.normalized_solution_key().to_string(),
+                    canonical_winner.score().to_string(),
+                    canonical_winner.informational_attack().to_string(),
+                );
                 let winners = report
                     .pattern_winners()
                     .iter()
@@ -474,6 +539,8 @@ impl ProductCapabilityResult {
                             crate::PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
                             crate::PORTFOLIO_MEMBER_PAGE_SIZE.to_string(),
                             winners.len().to_string(),
+                            report.canonical_selection(),
+                            canonical_winner_payload,
                             winners,
                         ),
                     ),
@@ -574,6 +641,10 @@ impl ProductCapabilityResult {
                         )
                     })
                     .collect::<Vec<_>>();
+                let canonical_winner = match report.canonical_winner() {
+                    Some(_) => Some(winners.first()?.clone()),
+                    None => None,
+                };
                 Some(ProductResultPayload::new(
                     self.contract.as_str(),
                     self.result_kind.as_str(),
@@ -584,6 +655,8 @@ impl ProductCapabilityResult {
                         "weighted-total-balanced-jl-and-exact-unconditional-probability",
                         crate::PORTFOLIO_MEMBER_PAGE_SIZE.to_string(),
                         winners.len().to_string(),
+                        report.canonical_selection(),
+                        canonical_winner,
                         pc_save_run_metadata(
                             report.origin().as_str(),
                             report.problem_preset().as_str(),

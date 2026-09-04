@@ -9,10 +9,16 @@ use clearra_core_executor::{
     core_execution_result::CoreResultFieldReplacementError,
     encode_canonical_wasm_candidate_packet_batch, tiling_solution_store::PackedTilingRows,
     CoreExecutionResult, CorePathStep, CorePostProcessScoreCell, CorePostProcessSpinCoverage,
-    NormalizedSolutionCoverage, SolutionCoverage, WasmCandidatePacket, WasmPackedTilingIdentity,
-    WasmTilingRootChunk,
+    DistributedPcChanceCoverageRows, NormalizedSolutionCoverage, SolutionCoverage,
+    WasmCandidatePacket, WasmPackedTilingIdentity, WasmTilingRootChunk,
 };
-use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use clearra_coverage::{
+    pattern::pattern_bitset::PatternBitSet,
+    row::{coverage_row::CoverageRow, coverage_row_kind::CoverageRowKind},
+    universe::{
+        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+    },
+};
 use std::sync::Arc;
 
 const CANDIDATE_MAGIC: u32 = 0x4342_4131;
@@ -56,6 +62,12 @@ struct PartialBatchDecodeProjection {
     result_count: usize,
     nested_retained_bytes: u128,
     constructor_extra_bytes: u128,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PartialDecodeContract {
+    General,
+    BuildProbability,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -759,6 +771,88 @@ fn emit_partial_result(
         checked_put_u128(output, coverage.witnessed_pattern_count())?;
         checked_put_u8(output, u8::from(coverage.complete()))?;
     }
+    let typed_chance_evidence = result.pc_chance_coverage_evidence().filter(|evidence| {
+        evidence
+            .problem()
+            .pc_chance_evidence_policy()
+            .retains_pc_probability_v2_evidence()
+    });
+    let transported_chance_rows = result.distributed_pc_chance_coverage_rows();
+    if typed_chance_evidence.is_some() && transported_chance_rows.is_some() {
+        return Err(DistributedWireError("partial_pc_chance_evidence_ambiguous"));
+    }
+    let chance_rows = typed_chance_evidence
+        .map(|evidence| {
+            (
+                evidence.piece_source_id(),
+                evidence.pattern_universe_id(),
+                evidence.pattern_weight_model_id(),
+                evidence.pattern_count(),
+                evidence.rows(),
+                evidence.complete(),
+            )
+        })
+        .or_else(|| {
+            transported_chance_rows.map(|transport| {
+                (
+                    transport.piece_source_id(),
+                    transport.pattern_universe_id(),
+                    transport.pattern_weight_model_id(),
+                    transport.pattern_count(),
+                    transport.rows(),
+                    transport.complete(),
+                )
+            })
+        });
+    match chance_rows {
+        None => checked_put_u8(output, 0)?,
+        Some((
+            piece_source_id,
+            pattern_universe_id,
+            pattern_weight_model_id,
+            pattern_count,
+            rows,
+            complete,
+        )) => {
+            if piece_source_id == 0
+                || pattern_universe_id.get() == 0
+                || pattern_weight_model_id.get() == 0
+            {
+                return Err(DistributedWireError("partial_pc_chance_identity_invalid"));
+            }
+            checked_put_u8(output, 1)?;
+            checked_put_u64(output, piece_source_id)?;
+            checked_put_u64(output, pattern_universe_id.get())?;
+            checked_put_u64(output, pattern_weight_model_id.get())?;
+            checked_put_count(output, pattern_count)?;
+            checked_put_u8(output, u8::from(complete))?;
+            checked_put_count(output, rows.len())?;
+            let mut previous_candidate_id = None;
+            for row in rows {
+                if row.row_kind() != &CoverageRowKind::Build
+                    || row.piece_source_id() != piece_source_id
+                    || row.pattern_universe_id() != pattern_universe_id
+                    || row.pattern_weight_model_id() != pattern_weight_model_id
+                    || row.pattern_count() != pattern_count
+                {
+                    return Err(DistributedWireError(
+                        "partial_pc_chance_row_identity_invalid",
+                    ));
+                }
+                if previous_candidate_id.is_some_and(|previous| previous >= row.candidate_id()) {
+                    return Err(DistributedWireError(
+                        "partial_pc_chance_candidate_order_invalid",
+                    ));
+                }
+                checked_put_u64(output, row.candidate_id())?;
+                checked_put_count(output, row.coverage_bits().word_count())?;
+                for word_index in 0..row.coverage_bits().word_count() {
+                    checked_put_u64(output, row.coverage_bits().word_at(word_index))?;
+                }
+                previous_candidate_id = Some(row.candidate_id());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -840,6 +934,16 @@ pub fn encode_partial_results_with_memory_guard<E>(
 fn checked_partial_batch_decode_projection(
     input: &[u8],
 ) -> Result<PartialBatchDecodeProjection, DistributedWireError> {
+    checked_partial_batch_decode_projection_for_contract(
+        input,
+        PartialDecodeContract::BuildProbability,
+    )
+}
+
+fn checked_partial_batch_decode_projection_for_contract(
+    input: &[u8],
+    contract: PartialDecodeContract,
+) -> Result<PartialBatchDecodeProjection, DistributedWireError> {
     let mut reader = Reader::new(input);
     reader.require_header(PARTIAL_BATCH_MAGIC)?;
     let result_count = reader.count()?;
@@ -848,7 +952,8 @@ fn checked_partial_batch_decode_projection(
     for _ in 0..result_count {
         let length = reader.byte_length()?;
         let result_input = reader.take(length)?;
-        let projection = checked_partial_result_decode_projection(result_input)?;
+        let projection =
+            checked_partial_result_decode_projection_for_contract(result_input, contract)?;
         nested_retained_bytes = nested_retained_bytes
             .checked_add(projection.nested_retained_bytes)
             .ok_or(DistributedWireError(
@@ -866,6 +971,16 @@ fn checked_partial_batch_decode_projection(
 
 fn checked_partial_result_decode_projection(
     input: &[u8],
+) -> Result<PartialResultDecodeProjection, DistributedWireError> {
+    checked_partial_result_decode_projection_for_contract(
+        input,
+        PartialDecodeContract::BuildProbability,
+    )
+}
+
+fn checked_partial_result_decode_projection_for_contract(
+    input: &[u8],
+    contract: PartialDecodeContract,
 ) -> Result<PartialResultDecodeProjection, DistributedWireError> {
     let mut reader = Reader::new(input);
     reader.require_header(PARTIAL_MAGIC)?;
@@ -911,7 +1026,7 @@ fn checked_partial_result_decode_projection(
     constructor_extra_bytes = constructor_extra_bytes.max(field_slot_bytes);
 
     let path_count = reader.count()?;
-    if path_count != 0 {
+    if contract == PartialDecodeContract::BuildProbability && path_count != 0 {
         return Err(DistributedWireError(
             "build_probability_partial_path_invalid",
         ));
@@ -1064,6 +1179,60 @@ fn checked_partial_result_decode_projection(
         match reader.u8()? {
             0 | 1 => {}
             _ => return Err(DistributedWireError("partial_spin_complete_flag_invalid")),
+        }
+    }
+    match reader.u8()? {
+        0 => {}
+        1 => {
+            if contract == PartialDecodeContract::BuildProbability {
+                // BuildProbability has a distinct closed result contract and
+                // must reject product-private PC chance transport before any
+                // allocation or caller-memory admission.
+                return Err(DistributedWireError(
+                    "build_probability_partial_pc_chance_evidence_invalid",
+                ));
+            }
+            let piece_source_id = reader.u64()?;
+            let pattern_universe_id = reader.u64()?;
+            let pattern_weight_model_id = reader.u64()?;
+            if piece_source_id == 0 || pattern_universe_id == 0 || pattern_weight_model_id == 0 {
+                return Err(DistributedWireError("partial_pc_chance_identity_invalid"));
+            }
+            let pattern_count = reader.count()?;
+            match reader.u8()? {
+                0 | 1 => {}
+                _ => {
+                    return Err(DistributedWireError(
+                        "partial_pc_chance_complete_flag_invalid",
+                    ))
+                }
+            }
+            let row_count = reader.count()?;
+            checked_add_slots::<CoverageRow>(&mut nested_retained_bytes, row_count)?;
+            let mut previous_candidate_id = None;
+            for _ in 0..row_count {
+                let candidate_id = reader.u64()?;
+                if previous_candidate_id.is_some_and(|previous| previous >= candidate_id) {
+                    return Err(DistributedWireError(
+                        "partial_pc_chance_candidate_order_invalid",
+                    ));
+                }
+                let word_count = reader.count()?;
+                let (storage_bytes, extra_bytes) = checked_pattern_decode_projection(
+                    &mut reader,
+                    pattern_count,
+                    word_count,
+                    "partial_pc_chance_coverage_shape_invalid",
+                )?;
+                checked_add_u128(&mut nested_retained_bytes, storage_bytes)?;
+                constructor_extra_bytes = constructor_extra_bytes.max(extra_bytes);
+                previous_candidate_id = Some(candidate_id);
+            }
+        }
+        _ => {
+            return Err(DistributedWireError(
+                "partial_pc_chance_evidence_flag_invalid",
+            ))
         }
     }
     reader.finish()?;
@@ -1412,10 +1581,11 @@ fn checked_owned_field_storage_bytes(fields: &Vec<(String, String)>) -> Option<u
     Some(bytes)
 }
 
-fn decode_build_probability_partial_result_with_memory_guard<E>(
+fn decode_partial_result_with_memory_guard<E>(
     input: &[u8],
     base_bytes: u128,
     requested_nested_bytes: u128,
+    contract: PartialDecodeContract,
     memory_guard: &mut impl FnMut(u128) -> Result<(), E>,
 ) -> Result<CoreExecutionResult, GuardedDistributedWireError<E>> {
     let mut reader = Reader::new(input);
@@ -1455,10 +1625,38 @@ fn decode_build_probability_partial_result_with_memory_guard<E>(
     }
 
     let path_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
-    if path_count != 0 {
+    if contract == PartialDecodeContract::BuildProbability && path_count != 0 {
         return Err(GuardedDistributedWireError::Wire(DistributedWireError(
             "build_probability_partial_path_invalid",
         )));
+    }
+    let mut path = Vec::new();
+    guarded_reserve_exact(
+        &mut path,
+        path_count,
+        "partial_path_allocation_failed",
+        base_bytes,
+        &mut local_bytes,
+        &mut remaining_requested_bytes,
+        memory_guard,
+    )?;
+    for _ in 0..path_count {
+        let piece = piece_from_code(reader.u8().map_err(GuardedDistributedWireError::Wire)?)
+            .map_err(GuardedDistributedWireError::Wire)?;
+        let rotation = reader.u8().map_err(GuardedDistributedWireError::Wire)?;
+        let cleared_lines = reader.u8().map_err(GuardedDistributedWireError::Wire)?;
+        let hold = hold_from_code(reader.u8().map_err(GuardedDistributedWireError::Wire)?)
+            .map_err(GuardedDistributedWireError::Wire)?;
+        let x = reader.i32().map_err(GuardedDistributedWireError::Wire)?;
+        let y = reader.i32().map_err(GuardedDistributedWireError::Wire)?;
+        path.push(CorePathStep::new(
+            piece,
+            rotation,
+            x,
+            y,
+            hold,
+            cleared_lines,
+        ));
     }
 
     let identity_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
@@ -1748,42 +1946,137 @@ fn decode_build_probability_partial_result_with_memory_guard<E>(
             complete,
         ));
     }
+    let distributed_pc_chance_rows = match reader.u8().map_err(GuardedDistributedWireError::Wire)? {
+        0 => None,
+        1 => {
+            if contract == PartialDecodeContract::BuildProbability {
+                return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                    "build_probability_partial_pc_chance_evidence_invalid",
+                )));
+            }
+            let piece_source_id = reader.u64().map_err(GuardedDistributedWireError::Wire)?;
+            let pattern_universe_id =
+                PatternUniverseId::new(reader.u64().map_err(GuardedDistributedWireError::Wire)?);
+            let pattern_weight_model_id =
+                PatternWeightModelId::new(reader.u64().map_err(GuardedDistributedWireError::Wire)?);
+            if piece_source_id == 0
+                || pattern_universe_id.get() == 0
+                || pattern_weight_model_id.get() == 0
+            {
+                return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                    "partial_pc_chance_identity_invalid",
+                )));
+            }
+            let pattern_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+            let complete = match reader.u8().map_err(GuardedDistributedWireError::Wire)? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                        "partial_pc_chance_complete_flag_invalid",
+                    )))
+                }
+            };
+            let row_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+            let mut rows = Vec::new();
+            guarded_reserve_exact(
+                &mut rows,
+                row_count,
+                "partial_pc_chance_rows_allocation_failed",
+                base_bytes,
+                &mut local_bytes,
+                &mut remaining_requested_bytes,
+                memory_guard,
+            )?;
+            let mut previous_candidate_id = None;
+            for _ in 0..row_count {
+                let candidate_id = reader.u64().map_err(GuardedDistributedWireError::Wire)?;
+                if previous_candidate_id.is_some_and(|previous| previous >= candidate_id) {
+                    return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                        "partial_pc_chance_candidate_order_invalid",
+                    )));
+                }
+                let word_count = reader.count().map_err(GuardedDistributedWireError::Wire)?;
+                let coverage = guarded_decode_pattern_bitset(
+                    &mut reader,
+                    pattern_count,
+                    word_count,
+                    "partial_pc_chance_coverage_shape_invalid",
+                    "partial_pc_chance_coverage_allocation_failed",
+                    base_bytes,
+                    &mut local_bytes,
+                    &mut remaining_requested_bytes,
+                    memory_guard,
+                )?;
+                rows.push(CoverageRow::new_with_piece_source(
+                    candidate_id,
+                    CoverageRowKind::Build,
+                    piece_source_id,
+                    pattern_universe_id,
+                    pattern_weight_model_id,
+                    coverage,
+                ));
+                previous_candidate_id = Some(candidate_id);
+            }
+            Some(
+                DistributedPcChanceCoverageRows::try_from_untrusted_rows(
+                    piece_source_id,
+                    pattern_universe_id,
+                    pattern_weight_model_id,
+                    pattern_count,
+                    rows,
+                    complete,
+                )
+                .map_err(|_| {
+                    GuardedDistributedWireError::Wire(DistributedWireError(
+                        "partial_pc_chance_evidence_invalid",
+                    ))
+                })?,
+            )
+        }
+        _ => {
+            return Err(GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_pc_chance_evidence_flag_invalid",
+            )))
+        }
+    };
     reader.finish().map_err(GuardedDistributedWireError::Wire)?;
 
     let field_bytes = checked_owned_field_storage_bytes(&fields).ok_or_else(|| {
         GuardedDistributedWireError::Wire(DistributedWireError::decode_memory_projection_overflow())
     })?;
-    let other_local_bytes = local_bytes.checked_sub(field_bytes).ok_or_else(|| {
-        GuardedDistributedWireError::Wire(DistributedWireError::decode_memory_projection_overflow())
-    })?;
-    let empty_result = CoreExecutionResult::default();
-    let rebuilt_report_requested_bytes = empty_result
-        .checked_field_replacement_projection(&fields)
-        .map(|projection| projection.rebuilt_report_bytes)
+    let path_bytes = (path.capacity() as u128)
+        .checked_mul(core::mem::size_of::<CorePathStep>() as u128)
         .ok_or_else(|| {
             GuardedDistributedWireError::Wire(
                 DistributedWireError::decode_memory_projection_overflow(),
             )
         })?;
-    if remaining_requested_bytes != rebuilt_report_requested_bytes {
-        return Err(GuardedDistributedWireError::Wire(
-            DistributedWireError::decode_memory_projection_overflow(),
-        ));
-    }
-    let result = empty_result
-        .try_with_replaced_fields_with_memory_guard(fields, |live, checked_future_bytes| {
-            let live_nested_bytes = live
-                .checked_resource_retained_bytes()
-                .and_then(|bytes| {
-                    bytes.checked_sub(core::mem::size_of::<CoreExecutionResult>() as u128)
-                })
-                .ok_or_else(|| {
-                    GuardedDistributedWireError::Wire(
+    let constructor_owned_bytes = field_bytes.checked_add(path_bytes).ok_or_else(|| {
+        GuardedDistributedWireError::Wire(DistributedWireError::decode_memory_projection_overflow())
+    })?;
+    let other_local_bytes = local_bytes
+        .checked_sub(constructor_owned_bytes)
+        .ok_or_else(|| {
+            GuardedDistributedWireError::Wire(
+                DistributedWireError::decode_memory_projection_overflow(),
+            )
+        })?;
+    let mut first_constructor_guard = true;
+    let mut result = CoreExecutionResult::try_new_with_memory_guard(
+        fields,
+        path,
+        |live_constructor_bytes, checked_future_bytes| {
+            if first_constructor_guard {
+                first_constructor_guard = false;
+                if checked_future_bytes != remaining_requested_bytes {
+                    return Err(GuardedDistributedWireError::Wire(
                         DistributedWireError::decode_memory_projection_overflow(),
-                    )
-                })?;
+                    ));
+                }
+            }
             let construction_bytes = other_local_bytes
-                .checked_add(live_nested_bytes)
+                .checked_add(live_constructor_bytes)
                 .ok_or_else(|| {
                     GuardedDistributedWireError::Wire(
                         DistributedWireError::decode_memory_projection_overflow(),
@@ -1795,41 +2088,36 @@ fn decode_build_probability_partial_result_with_memory_guard<E>(
                 checked_future_bytes,
                 memory_guard,
             )
-        })
-        .map_err(|error| match error {
-            CoreResultFieldReplacementError::ProjectionOverflow => {
-                GuardedDistributedWireError::Wire(
-                    DistributedWireError::decode_memory_projection_overflow(),
-                )
-            }
-            CoreResultFieldReplacementError::AllocationFailed { .. } => {
-                GuardedDistributedWireError::Wire(DistributedWireError(
-                    "partial_report_allocation_failed",
-                ))
-            }
-            CoreResultFieldReplacementError::MemoryGuard(error) => error,
-        })?
-        .with_normalized_solution_keys(normalized_keys)
-        .with_normalized_solution_identities(identities)
-        .with_representative_solution_identity(representative)
-        .with_coverage_pattern_words(coverage)
-        .with_solution_coverages(solution_coverage)
-        .with_normalized_solution_coverages(normalized_solution_coverage)
-        .with_postprocess_spin_coverages(spin_coverages);
+        },
+    )
+    .map_err(|error| match error {
+        CoreResultFieldReplacementError::ProjectionOverflow => GuardedDistributedWireError::Wire(
+            DistributedWireError::decode_memory_projection_overflow(),
+        ),
+        CoreResultFieldReplacementError::AllocationFailed { .. } => {
+            GuardedDistributedWireError::Wire(DistributedWireError(
+                "partial_report_allocation_failed",
+            ))
+        }
+        CoreResultFieldReplacementError::MemoryGuard(error) => error,
+    })?
+    .with_normalized_solution_keys(normalized_keys)
+    .with_normalized_solution_identities(identities)
+    .with_representative_solution_identity(representative)
+    .with_coverage_pattern_words(coverage)
+    .with_solution_coverages(solution_coverage)
+    .with_normalized_solution_coverages(normalized_solution_coverage)
+    .with_postprocess_spin_coverages(spin_coverages);
+    if let Some(rows) = distributed_pc_chance_rows {
+        result = result.with_distributed_pc_chance_coverage_rows(rows);
+    }
     let result = match score_shard {
         Some((profile_id, complete, cells)) => {
             result.with_postprocess_score_cells(cells, complete, profile_id)
         }
         None => result,
     };
-    remaining_requested_bytes = remaining_requested_bytes
-        .checked_sub(rebuilt_report_requested_bytes)
-        .ok_or_else(|| {
-            GuardedDistributedWireError::Wire(
-                DistributedWireError::decode_memory_projection_overflow(),
-            )
-        })?;
-    debug_assert_eq!(remaining_requested_bytes, 0);
+    debug_assert!(!first_constructor_guard);
     let result_nested_bytes = result
         .checked_resource_retained_bytes()
         .and_then(|bytes| bytes.checked_sub(core::mem::size_of::<CoreExecutionResult>() as u128))
@@ -2066,8 +2354,93 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
             complete,
         ));
     }
+    let distributed_pc_chance_rows = match reader.u8()? {
+        0 => None,
+        1 => {
+            let piece_source_id = reader.u64()?;
+            let pattern_universe_id = PatternUniverseId::new(reader.u64()?);
+            let pattern_weight_model_id = PatternWeightModelId::new(reader.u64()?);
+            if piece_source_id == 0
+                || pattern_universe_id.get() == 0
+                || pattern_weight_model_id.get() == 0
+            {
+                return Err(DistributedWireError("partial_pc_chance_identity_invalid"));
+            }
+            let pattern_count = reader.count()?;
+            let complete = match reader.u8()? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(DistributedWireError(
+                        "partial_pc_chance_complete_flag_invalid",
+                    ))
+                }
+            };
+            let row_count = reader.count()?;
+            let mut rows = Vec::new();
+            rows.try_reserve_exact(row_count)
+                .map_err(|_| DistributedWireError("partial_pc_chance_rows_allocation_failed"))?;
+            let mut previous_candidate_id = None;
+            for _ in 0..row_count {
+                let candidate_id = reader.u64()?;
+                if previous_candidate_id.is_some_and(|previous| previous >= candidate_id) {
+                    return Err(DistributedWireError(
+                        "partial_pc_chance_candidate_order_invalid",
+                    ));
+                }
+                let word_count = reader.count()?;
+                if word_count != pattern_count.div_ceil(u64::BITS as usize) {
+                    return Err(DistributedWireError(
+                        "partial_pc_chance_coverage_shape_invalid",
+                    ));
+                }
+                let mut words = Vec::new();
+                words.try_reserve_exact(word_count).map_err(|_| {
+                    DistributedWireError("partial_pc_chance_coverage_allocation_failed")
+                })?;
+                for word_index in 0..word_count {
+                    let word = reader.u64()?;
+                    validate_pattern_tail_word(
+                        pattern_count,
+                        word_index,
+                        word_count,
+                        word,
+                        "partial_pc_chance_coverage_shape_invalid",
+                    )?;
+                    words.push(word);
+                }
+                let coverage = PatternBitSet::from_words(pattern_count, words)
+                    .map_err(|_| DistributedWireError("partial_pc_chance_coverage_invalid"))?;
+                rows.push(CoverageRow::new_with_piece_source(
+                    candidate_id,
+                    CoverageRowKind::Build,
+                    piece_source_id,
+                    pattern_universe_id,
+                    pattern_weight_model_id,
+                    coverage,
+                ));
+                previous_candidate_id = Some(candidate_id);
+            }
+            Some(
+                DistributedPcChanceCoverageRows::try_from_untrusted_rows(
+                    piece_source_id,
+                    pattern_universe_id,
+                    pattern_weight_model_id,
+                    pattern_count,
+                    rows,
+                    complete,
+                )
+                .map_err(|_| DistributedWireError("partial_pc_chance_evidence_invalid"))?,
+            )
+        }
+        _ => {
+            return Err(DistributedWireError(
+                "partial_pc_chance_evidence_flag_invalid",
+            ))
+        }
+    };
     reader.finish()?;
-    let result = CoreExecutionResult::new(fields, path)
+    let mut result = CoreExecutionResult::new(fields, path)
         .with_normalized_solution_keys(normalized_keys)
         .with_normalized_solution_identities(identities)
         .with_representative_solution_identity(representative)
@@ -2075,6 +2448,9 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
         .with_solution_coverages(solution_coverage)
         .with_normalized_solution_coverages(normalized_solution_coverage)
         .with_postprocess_spin_coverages(spin_coverages);
+    if let Some(rows) = distributed_pc_chance_rows {
+        result = result.with_distributed_pc_chance_coverage_rows(rows);
+    }
     Ok(match score_shard {
         Some((profile_id, complete, cells)) => {
             result.with_postprocess_score_cells(cells, complete, profile_id)
@@ -2110,9 +2486,36 @@ pub fn decode_partial_results(
 /// materialized result while all decoded siblings remain live.
 pub fn decode_build_probability_partial_results_with_memory_guard<E>(
     input: &[u8],
+    memory_guard: impl FnMut(u128) -> Result<(), E>,
+) -> Result<Vec<CoreExecutionResult>, GuardedDistributedWireError<E>> {
+    decode_partial_results_with_memory_guard_for_contract(
+        input,
+        PartialDecodeContract::BuildProbability,
+        memory_guard,
+    )
+}
+
+/// General distributed-result ingress with the same two-pass, whole-live
+/// admission discipline as BuildProbability. Unlike the Build contract it
+/// admits path/report state and typed PC-chance rows, while still rejecting
+/// malformed counts and canonicality before any reserve.
+pub fn decode_partial_results_with_memory_guard<E>(
+    input: &[u8],
+    memory_guard: impl FnMut(u128) -> Result<(), E>,
+) -> Result<Vec<CoreExecutionResult>, GuardedDistributedWireError<E>> {
+    decode_partial_results_with_memory_guard_for_contract(
+        input,
+        PartialDecodeContract::General,
+        memory_guard,
+    )
+}
+
+fn decode_partial_results_with_memory_guard_for_contract<E>(
+    input: &[u8],
+    contract: PartialDecodeContract,
     mut memory_guard: impl FnMut(u128) -> Result<(), E>,
 ) -> Result<Vec<CoreExecutionResult>, GuardedDistributedWireError<E>> {
-    let projection = checked_partial_batch_decode_projection(input)
+    let projection = checked_partial_batch_decode_projection_for_contract(input, contract)
         .map_err(GuardedDistributedWireError::Wire)?;
     let requested_outer_bytes = (projection.result_count as u128)
         .checked_mul(core::mem::size_of::<CoreExecutionResult>() as u128)
@@ -2166,8 +2569,9 @@ pub fn decode_build_probability_partial_results_with_memory_guard<E>(
         let result_input = reader
             .take(length)
             .map_err(GuardedDistributedWireError::Wire)?;
-        let result_projection = checked_partial_result_decode_projection(result_input)
-            .map_err(GuardedDistributedWireError::Wire)?;
+        let result_projection =
+            checked_partial_result_decode_projection_for_contract(result_input, contract)
+                .map_err(GuardedDistributedWireError::Wire)?;
         let decoded_before =
             checked_decoded_result_vec_retained_bytes(&results).ok_or_else(|| {
                 GuardedDistributedWireError::Wire(DistributedWireError(
@@ -2198,10 +2602,11 @@ pub fn decode_build_probability_partial_results_with_memory_guard<E>(
                     DistributedWireError::decode_memory_projection_overflow(),
                 )
             })?;
-        let result = decode_build_probability_partial_result_with_memory_guard(
+        let result = decode_partial_result_with_memory_guard(
             result_input,
             result_base_bytes,
             result_projection.nested_retained_bytes,
+            contract,
             &mut memory_guard,
         )?;
         remaining_requested_nested_bytes = remaining_after_result;
@@ -2681,6 +3086,207 @@ mod tests {
 
         assert_eq!(decoded.solution_coverages(), result.solution_coverages());
         assert!(decoded.normalized_solution_coverages().is_empty());
+    }
+
+    fn typed_chance_transport_fixture() -> CoreExecutionResult {
+        let piece_source_id = 11;
+        let pattern_universe_id = PatternUniverseId::new(12);
+        let pattern_weight_model_id = PatternWeightModelId::new(13);
+        let rows = vec![
+            CoverageRow::new_with_piece_source(
+                7,
+                CoverageRowKind::Build,
+                piece_source_id,
+                pattern_universe_id,
+                pattern_weight_model_id,
+                PatternBitSet::from_words(2, vec![0b01]).expect("first chance row"),
+            ),
+            CoverageRow::new_with_piece_source(
+                11,
+                CoverageRowKind::Build,
+                piece_source_id,
+                pattern_universe_id,
+                pattern_weight_model_id,
+                PatternBitSet::from_words(2, vec![0b10]).expect("second chance row"),
+            ),
+        ];
+        let transport = DistributedPcChanceCoverageRows::try_from_untrusted_rows(
+            piece_source_id,
+            pattern_universe_id,
+            pattern_weight_model_id,
+            2,
+            rows,
+            true,
+        )
+        .expect("typed chance transport");
+        CoreExecutionResult::new(Vec::new(), Vec::new())
+            .with_coverage_pattern_words(vec![0b11])
+            .with_distributed_pc_chance_coverage_rows(transport)
+    }
+
+    #[test]
+    fn typed_chance_partial_wire_round_trips_byte_exact_with_closed_rows() {
+        let result = typed_chance_transport_fixture();
+        let encoded = encode_partial_result(&result).expect("encode typed chance partial");
+        let decoded = decode_partial_result(&encoded).expect("decode typed chance partial");
+
+        assert_eq!(
+            decoded.distributed_pc_chance_coverage_rows(),
+            result.distributed_pc_chance_coverage_rows()
+        );
+        assert!(decoded.pc_chance_coverage_evidence().is_none());
+        assert_eq!(
+            encode_partial_result(&decoded).expect("re-encode typed chance partial"),
+            encoded
+        );
+    }
+
+    #[test]
+    fn typed_chance_guarded_batch_round_trips_and_counts_all_live_siblings() {
+        let result = typed_chance_transport_fixture().with_path_steps(vec![CorePathStep::new(
+            PieceKind::I,
+            0,
+            3,
+            0,
+            "none",
+            0,
+        )]);
+        let encoded = encode_partial_results(&[result.clone(), result])
+            .expect("encode typed chance sibling batch");
+        let mut observations = Vec::new();
+        let decoded = decode_partial_results_with_memory_guard(&encoded, |observed| {
+            observations.push(observed);
+            Ok::<(), ()>(())
+        })
+        .expect("guarded typed chance decode");
+        let actual = checked_decoded_result_vec_retained_bytes(&decoded)
+            .expect("checked typed chance result storage");
+
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(observations.last(), Some(&actual));
+        assert_eq!(
+            encode_partial_results(&decoded).expect("re-encode guarded chance batch"),
+            encoded
+        );
+        assert!(
+            actual
+                > decoded[0]
+                    .checked_resource_retained_bytes()
+                    .expect("single chance result storage"),
+            "outer result capacity and the decoded sibling must remain admitted"
+        );
+    }
+
+    #[test]
+    fn guarded_reserve_rejection_happens_before_prefill() {
+        let mut values = Vec::<u64>::new();
+        let mut local_bytes = 0_u128;
+        let mut remaining_requested_bytes = (4 * core::mem::size_of::<u64>()) as u128;
+        let mut calls = 0_usize;
+        let error = guarded_reserve_exact(
+            &mut values,
+            4,
+            "test_allocation_failed",
+            0,
+            &mut local_bytes,
+            &mut remaining_requested_bytes,
+            &mut |_| {
+                let call = calls;
+                calls += 1;
+                if call == 1 {
+                    Err(call)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("post-reserve admission must be able to reject");
+
+        assert!(matches!(error, GuardedDistributedWireError::MemoryGuard(1)));
+        assert_eq!(calls, 2, "no later allocation may follow the rejection");
+        assert_eq!(values.len(), 0, "reserved storage must not be filled first");
+        assert!(values.capacity() >= 4, "the rejected call is post-reserve");
+    }
+
+    #[test]
+    fn typed_chance_partial_wire_rejects_missing_duplicate_and_dirty_row_bytes() {
+        let mut encoded =
+            encode_partial_result(&typed_chance_transport_fixture()).expect("typed chance wire");
+        let (flag_offset, complete_offset, second_candidate_offset, first_word_offset) = {
+            let mut reader = Reader::new(&encoded);
+            reader
+                .require_header(PARTIAL_MAGIC)
+                .expect("partial header");
+            assert_eq!(reader.count().expect("fields"), 0);
+            assert_eq!(reader.count().expect("path"), 0);
+            assert_eq!(reader.count().expect("identities"), 0);
+            assert_eq!(reader.count().expect("keys"), 0);
+            assert_eq!(reader.u8().expect("representative"), 0);
+            assert_eq!(reader.count().expect("aggregate words"), 1);
+            reader.u64().expect("aggregate word");
+            assert_eq!(reader.count().expect("solution coverage"), 0);
+            assert_eq!(reader.count().expect("normalized coverage"), 0);
+            assert_eq!(reader.u8().expect("score shard"), 0);
+            assert_eq!(reader.count().expect("spin coverage"), 0);
+            let flag_offset = reader.cursor;
+            assert_eq!(reader.u8().expect("chance flag"), 1);
+            reader.u64().expect("piece source");
+            reader.u64().expect("pattern universe");
+            reader.u64().expect("weight model");
+            assert_eq!(reader.count().expect("pattern count"), 2);
+            let complete_offset = reader.cursor;
+            assert_eq!(reader.u8().expect("complete"), 1);
+            assert_eq!(reader.count().expect("row count"), 2);
+            assert_eq!(reader.u64().expect("first candidate"), 7);
+            assert_eq!(reader.count().expect("first row words"), 1);
+            let first_word_offset = reader.cursor;
+            reader.u64().expect("first row word");
+            let second_candidate_offset = reader.cursor;
+            assert_eq!(reader.u64().expect("second candidate"), 11);
+            assert_eq!(reader.count().expect("second row words"), 1);
+            reader.u64().expect("second row word");
+            reader.finish().expect("complete chance wire");
+            (
+                flag_offset,
+                complete_offset,
+                second_candidate_offset,
+                first_word_offset,
+            )
+        };
+
+        assert!(matches!(
+            decode_partial_result(&encoded[..flag_offset]),
+            Err(DistributedWireError("distributed_wire_truncated"))
+        ));
+
+        encoded[second_candidate_offset..second_candidate_offset + 8]
+            .copy_from_slice(&7_u64.to_le_bytes());
+        assert!(matches!(
+            decode_partial_result(&encoded),
+            Err(DistributedWireError(
+                "partial_pc_chance_candidate_order_invalid"
+            ))
+        ));
+
+        let mut invalid_complete =
+            encode_partial_result(&typed_chance_transport_fixture()).expect("chance complete wire");
+        invalid_complete[complete_offset] = 2;
+        assert!(matches!(
+            decode_partial_result(&invalid_complete),
+            Err(DistributedWireError(
+                "partial_pc_chance_complete_flag_invalid"
+            ))
+        ));
+
+        let mut dirty_tail =
+            encode_partial_result(&typed_chance_transport_fixture()).expect("chance tail wire");
+        dirty_tail[first_word_offset + 7] |= 0x80;
+        assert!(matches!(
+            decode_partial_result(&dirty_tail),
+            Err(DistributedWireError(
+                "partial_pc_chance_coverage_shape_invalid"
+            ))
+        ));
     }
 
     #[test]

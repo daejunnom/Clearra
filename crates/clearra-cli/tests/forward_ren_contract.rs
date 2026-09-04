@@ -38,7 +38,15 @@ fn forward_ren_cli_e2e_emits_typed_exact_chain_results() {
         output.stdout()
     );
     let outcome = &value["contract"]["artifacts"]["forward"]["outcomes"][0];
-    assert_eq!(outcome["id"], 1);
+    assert_eq!(
+        value["contract"]["artifacts"]["forward"]["canonical_selection"],
+        "smallest-canonical-candidate-id"
+    );
+    assert_eq!(
+        value["contract"]["artifacts"]["forward"]["canonical_outcome"],
+        *outcome
+    );
+    assert_eq!(outcome["id"], "1");
     assert_eq!(outcome["source_queue"], "I");
     assert_eq!(outcome["ren_count"], 0);
     assert_eq!(

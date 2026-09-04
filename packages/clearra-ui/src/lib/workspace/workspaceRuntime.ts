@@ -2,7 +2,6 @@ import type {
   ClearraDiagnostic,
   ClearraHostAppResponse,
   ClearraSearchProgressTelemetry,
-  ClearraWasmSearchReport,
   ClearraWebGpuBackendReport
 } from '../wasm/wasmCommandClient';
 import type { WasmWorkerState } from '../wasm/wasmWorkerStore';
@@ -13,6 +12,10 @@ import type {
 } from '../host/clearraDesktopHost';
 import type { DesktopJobState } from '../stores/desktopJobStore';
 import type { RenderCapabilityReport } from '../render/renderCapabilityReport';
+import {
+  projectWorkspaceSearchReport,
+  type WorkspaceSearchReport
+} from './workspaceSearchReport';
 
 export type WorkspaceRuntimeKind = 'web' | 'desktop';
 export type WorkspaceRuntimeStatus =
@@ -44,7 +47,7 @@ export type WorkspaceRuntimeView = {
   progressTelemetry: ClearraSearchProgressTelemetry | null;
   diagnostics: WorkspaceRuntimeDiagnostic[];
   response: ClearraHostAppResponse | ClearraDesktopAppResponse | null;
-  searchReport: ClearraWasmSearchReport | null;
+  searchReport: WorkspaceSearchReport | null;
   webgpuReport: ClearraWebGpuBackendReport | null;
   backendReport: ClearraHostAppResponse['backend_report'] | ClearraDesktopBackendStatus | null;
   resourceReport: ClearraHostAppResponse['resource_report'] | ClearraDesktopResourceStatus | null;
@@ -66,7 +69,11 @@ export function workspaceViewFromWasm(state: WasmWorkerState): WorkspaceRuntimeV
     progressTelemetry: state.progressTelemetry,
     diagnostics: state.diagnostics.map(normalizeDiagnostic),
     response: state.response,
-    searchReport: state.searchReport,
+    searchReport: projectWorkspaceSearchReport(
+      state.searchReport,
+      state.executionAvailability,
+      state.resultCompleteness
+    ),
     webgpuReport: state.webgpuBackend,
     backendReport: state.response?.backend_report ?? null,
     resourceReport: state.resourceReport,
@@ -76,6 +83,7 @@ export function workspaceViewFromWasm(state: WasmWorkerState): WorkspaceRuntimeV
 }
 
 export function workspaceViewFromDesktop(state: DesktopJobState): WorkspaceRuntimeView {
+  const resourceReport = state.resourceStatus ?? state.result?.resource_report ?? null;
   return {
     kind: 'desktop',
     status: state.status,
@@ -92,10 +100,14 @@ export function workspaceViewFromDesktop(state: DesktopJobState): WorkspaceRunti
       message: diagnostic.code
     })),
     response: state.result,
-    searchReport: state.searchReport,
+    searchReport: projectWorkspaceSearchReport(
+      state.searchReport,
+      resourceReport?.execution_availability,
+      resourceReport?.result_completeness
+    ),
     webgpuReport: null,
     backendReport: state.backendStatus ?? state.result?.backend_report ?? null,
-    resourceReport: state.resourceStatus ?? state.result?.resource_report ?? null,
+    resourceReport,
     renderCapability: state.result?.capability_report.render_capability ?? null,
     error: state.error
   };

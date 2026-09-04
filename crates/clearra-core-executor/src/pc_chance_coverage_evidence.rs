@@ -1334,6 +1334,113 @@ pub enum StrictCoveragePatternWordsError {
     InvalidBitSet(PatternBitSetError),
 }
 
+/// Untrusted, problem-detached PC-chance rows carried between distributed
+/// workers and their coordinator.
+///
+/// This is transport input, not product authority. The coordinator must bind
+/// every identity and row to its retained `SearchProblem` before constructing
+/// `PcChanceCoverageEvidence` for App validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistributedPcChanceCoverageRows {
+    piece_source_id: u64,
+    pattern_universe_id: PatternUniverseId,
+    pattern_weight_model_id: PatternWeightModelId,
+    pattern_count: usize,
+    rows: Vec<CoverageRow>,
+    complete: bool,
+}
+
+impl DistributedPcChanceCoverageRows {
+    /// Validates and owns one decoded worker-row batch. Sorting in place makes
+    /// duplicate detection allocation-free and gives the coordinator a closed,
+    /// canonical candidate order regardless of byte arrival order.
+    pub fn try_from_untrusted_rows(
+        piece_source_id: u64,
+        pattern_universe_id: PatternUniverseId,
+        pattern_weight_model_id: PatternWeightModelId,
+        pattern_count: usize,
+        mut rows: Vec<CoverageRow>,
+        complete: bool,
+    ) -> Result<Self, DistributedPcChanceCoverageRowsError> {
+        if piece_source_id == 0
+            || pattern_universe_id.get() == 0
+            || pattern_weight_model_id.get() == 0
+        {
+            return Err(DistributedPcChanceCoverageRowsError::ZeroIdentity);
+        }
+        for (row_index, row) in rows.iter().enumerate() {
+            if row.row_kind() != &CoverageRowKind::Build {
+                return Err(DistributedPcChanceCoverageRowsError::RowKindMismatch { row_index });
+            }
+            if row.piece_source_id() != piece_source_id
+                || row.pattern_universe_id() != pattern_universe_id
+                || row.pattern_weight_model_id() != pattern_weight_model_id
+            {
+                return Err(DistributedPcChanceCoverageRowsError::RowIdentityMismatch {
+                    row_index,
+                });
+            }
+            if row.pattern_count() != pattern_count {
+                return Err(DistributedPcChanceCoverageRowsError::PatternCountMismatch {
+                    row_index,
+                });
+            }
+        }
+        rows.sort_unstable_by_key(CoverageRow::candidate_id);
+        if rows
+            .windows(2)
+            .any(|pair| pair[0].candidate_id() == pair[1].candidate_id())
+        {
+            return Err(DistributedPcChanceCoverageRowsError::DuplicateCandidate);
+        }
+        Ok(Self {
+            piece_source_id,
+            pattern_universe_id,
+            pattern_weight_model_id,
+            pattern_count,
+            rows,
+            complete,
+        })
+    }
+
+    pub const fn piece_source_id(&self) -> u64 {
+        self.piece_source_id
+    }
+
+    pub const fn pattern_universe_id(&self) -> PatternUniverseId {
+        self.pattern_universe_id
+    }
+
+    pub const fn pattern_weight_model_id(&self) -> PatternWeightModelId {
+        self.pattern_weight_model_id
+    }
+
+    pub const fn pattern_count(&self) -> usize {
+        self.pattern_count
+    }
+
+    pub fn rows(&self) -> &[CoverageRow] {
+        &self.rows
+    }
+
+    pub const fn complete(&self) -> bool {
+        self.complete
+    }
+
+    pub(crate) fn checked_non_pattern_storage_retained_bytes(&self) -> Option<u128> {
+        (self.rows.capacity() as u128).checked_mul(core::mem::size_of::<CoverageRow>() as u128)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DistributedPcChanceCoverageRowsError {
+    ZeroIdentity,
+    RowKindMismatch { row_index: usize },
+    RowIdentityMismatch { row_index: usize },
+    PatternCountMismatch { row_index: usize },
+    DuplicateCandidate,
+}
+
 /// Constructs a bitset from an external aggregate without canonicalizing malformed input.
 ///
 /// `PatternBitSet::from_words` intentionally masks high padding bits. Product validation must

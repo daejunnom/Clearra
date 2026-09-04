@@ -5,7 +5,7 @@ use clearra_app::{
 use clearra_pc_graph::request::RequestedSearchBackend;
 
 use crate::{
-    WebBuildV2Capability, WebBuildV2Input, WebCommandErrorCode, WebCommandParser, WebCommandRequest,
+    CliCommandErrorCode, CliCommandParser, CliCommandRequest, WebBuildV2Capability, WebBuildV2Input,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,7 +119,7 @@ fn canonical_commands() -> Vec<(String, WebBuildV2Capability, ExpectedRequest)> 
 #[test]
 fn every_canonical_build_v2_path_lowers_to_its_exact_app_request_variant() {
     for (command_text, expected_capability, expected_request) in canonical_commands() {
-        let parsed = WebCommandParser::parse(&command_text)
+        let parsed = CliCommandParser::parse(&command_text)
             .unwrap_or_else(|error| panic!("parse {command_text}: {error:?}"));
         assert_eq!(
             parsed
@@ -156,7 +156,7 @@ fn build_v2_semantic_profiles_bind_to_the_actual_app_request_without_fallback() 
          --objective max-score-cover --rule srs-x \
          --score-profile guideline"
     );
-    let request = WebCommandParser::parse(&command_text)
+    let request = CliCommandParser::parse(&command_text)
         .expect("Build v2 profile command")
         .to_app_request()
         .expect("profile-bound Build v2 AppRequest");
@@ -170,11 +170,11 @@ fn build_v2_semantic_profiles_bind_to_the_actual_app_request_without_fallback() 
          --target-document {document} --queue I --no-hold \
          --objective max-score-cover --rule custom --score-profile tetrio"
     );
-    let error = WebCommandParser::parse(&unsupported)
+    let error = CliCommandParser::parse(&unsupported)
         .expect("custom remains syntactically recognized")
         .to_app_request()
         .expect_err("unverified Build v2 rule must fail closed at App authority");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     assert!(error.message().contains("unverified or unsupported"));
 }
 
@@ -198,11 +198,11 @@ fn request_kind(request: &BuildV2AppRequest) -> ExpectedRequest {
 #[test]
 fn build_v2_rejects_unowned_memory_authority_on_every_canonical_path() {
     for (command_text, _, _) in canonical_commands() {
-        let error = WebCommandParser::parse(&format!("{command_text} --max-memory-mib 64"))
+        let error = CliCommandParser::parse(&format!("{command_text} --max-memory-mib 64"))
             .expect_err("Build v2 max-memory-mib must fail closed");
         assert_eq!(
             error.code(),
-            WebCommandErrorCode::InvalidValue,
+            CliCommandErrorCode::InvalidValue,
             "{command_text}"
         );
         assert!(error.message().contains("does not accept max-memory-mib"));
@@ -210,12 +210,12 @@ fn build_v2_rejects_unowned_memory_authority_on_every_canonical_path() {
 
     let input = WebBuildV2Input::cover([0; 4], [15, 0, 0, 0], 4, BuildObjective::MinCover)
         .expect("nominal programmatic Build v2 input");
-    let error = WebCommandRequest::build_v2(input)
+    let error = CliCommandRequest::build_v2(input)
         .with_queue("I")
         .with_max_memory_mib(1)
         .to_app_request()
         .expect_err("programmatic max-memory authority must also fail closed");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
 }
 
 #[test]
@@ -253,13 +253,13 @@ fn build_v2_parser_rejects_cross_capability_documents_and_option_conflicts() {
             .to_owned(),
     ];
     for command_text in invalid {
-        let error = WebCommandParser::parse(&command_text).expect_err(&command_text);
+        let error = CliCommandParser::parse(&command_text).expect_err(&command_text);
         assert!(
             matches!(
                 error.code(),
-                WebCommandErrorCode::InvalidValue
-                    | WebCommandErrorCode::MissingValue
-                    | WebCommandErrorCode::UnsupportedCommand
+                CliCommandErrorCode::InvalidValue
+                    | CliCommandErrorCode::MissingValue
+                    | CliCommandErrorCode::UnsupportedCommand
             ),
             "{command_text}: {error:?}",
         );
@@ -268,7 +268,7 @@ fn build_v2_parser_rejects_cross_capability_documents_and_option_conflicts() {
 
 #[test]
 fn build_v2_accepts_only_cpu_even_when_the_redundant_backend_is_explicit() {
-    let parsed = WebCommandParser::parse(
+    let parsed = CliCommandParser::parse(
         "clearra build cover --base-mask 0 --target-mask 15 --height 4 --queue I --backend cpu",
     )
     .expect("explicit fixed CPU backend");
@@ -276,10 +276,10 @@ fn build_v2_accepts_only_cpu_even_when_the_redundant_backend_is_explicit() {
     assert_eq!(request.backend_policy().backend_requested(), "cpu");
 
     let input = WebBuildV2Input::cover([0; 4], [15, 0, 0, 0], 4, BuildObjective::MinCover).unwrap();
-    let error = WebCommandRequest::build_v2(input)
+    let error = CliCommandRequest::build_v2(input)
         .with_queue("I")
         .with_backend(RequestedSearchBackend::Gpu)
         .to_app_request()
         .expect_err("programmatic GPU Build v2 request");
-    assert_eq!(error.code(), WebCommandErrorCode::InvalidValue);
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
 }

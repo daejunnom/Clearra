@@ -19,6 +19,9 @@ import {
   validateReleasePublicationEvidence,
   validateReleasePublicationReceipt,
 } from "./release-publication-evidence.mjs";
+import {
+  CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES,
+} from "./canonical-acceptance-evidence.mjs";
 import { canonicalJson, sealCanonicalReport } from "./canonical-release-evidence.mjs";
 
 const COMMIT = "1".repeat(40);
@@ -558,22 +561,11 @@ function acceptanceEvidence() {
     run_attempt: "1",
     workflow_path: ".github/workflows/release-cli.yml",
     status: "passed",
-    jobs: [
-      "metadata",
-      "ctk3",
-      "linux-cli",
-      "discord-bot",
-      "release-acceptance-foundation-no-product-debt",
-      "release-acceptance-foundation-adversarial-correctness",
-      "release-acceptance-foundation-desktop-host",
-      "release-acceptance-sanitizer",
-      "release-acceptance-rust",
-      "release-acceptance-pages",
-      "release-acceptance",
-      "windows-cli",
-      "windows-gui",
-    ]
-      .map((name, index) => ({ name, job_id: String(index + 1), status: "passed" })),
+    jobs: CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES.map((name, index) => ({
+      name,
+      job_id: String(index + 1),
+      status: "passed",
+    })),
     accepted_inputs: {
       ctk3_manifest_sha256: "6".repeat(64),
       pages_identity_sha256: "7".repeat(64),

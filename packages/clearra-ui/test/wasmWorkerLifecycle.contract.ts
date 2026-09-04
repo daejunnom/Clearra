@@ -132,6 +132,105 @@ async function duplicateRunIsRejectedBeforePosting() {
   controller.dispose();
 }
 
+async function boundedProgressWatchdogCoversPreparationAndSerialSearchStalls() {
+  resetState();
+  const startupWorker = new FakeWorker();
+  const startupController = new WasmTerminalWorkerController(
+    () => startupWorker as unknown as Worker,
+    undefined,
+    { preparationProgressStallTimeoutMs: 20, searchProgressStallTimeoutMs: 20 }
+  );
+  assert.equal(startupController.run(), true);
+  startupWorker.emit(started(15));
+  await delay(35);
+  let state = get(wasmWorkerState);
+  assert.equal(state.status, 'terminated');
+  assert.equal(state.diagnostics[0]?.code, 'E_WASM_PREPARATION_PROGRESS_STALLED');
+  assert.equal(
+    startupWorker.terminateCount,
+    1,
+    'a started runtime that never reaches preparation progress must fail closed'
+  );
+
+  resetState();
+  const preparationWorker = new FakeWorker();
+  const preparationController = new WasmTerminalWorkerController(
+    () => preparationWorker as unknown as Worker,
+    undefined,
+    { preparationProgressStallTimeoutMs: 20, searchProgressStallTimeoutMs: 1_000 }
+  );
+  assert.equal(preparationController.run(), true);
+  preparationWorker.emit(started(16));
+  preparationWorker.emit(progress(16, 'preparing', 0));
+  await delay(35);
+
+  state = get(wasmWorkerState);
+  assert.equal(state.status, 'terminated');
+  assert.equal(state.terminationReason, 'worker-failure');
+  assert.equal(state.diagnostics[0]?.code, 'E_WASM_PREPARATION_PROGRESS_STALLED');
+  assert.equal(preparationWorker.terminateCount, 1);
+
+  resetState();
+  const stalledWorker = new FakeWorker();
+  const stalledController = new WasmTerminalWorkerController(
+    () => stalledWorker as unknown as Worker,
+    undefined,
+    { searchProgressStallTimeoutMs: 20 }
+  );
+  assert.equal(stalledController.run(), true);
+  stalledWorker.emit(started(17));
+  stalledWorker.emit(progress(17, 'searching', 1, 'serial'));
+  await delay(35);
+
+  state = get(wasmWorkerState);
+  assert.equal(state.status, 'terminated');
+  assert.equal(state.terminationReason, 'worker-failure');
+  assert.equal(state.diagnostics[0]?.code, 'E_WASM_SEARCH_PROGRESS_STALLED');
+  assert.equal(stalledWorker.terminateCount, 1);
+}
+
+async function boundedProgressWatchdogRequiresAndAcceptsChangedDistributedWork() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = new WasmTerminalWorkerController(
+    () => worker as unknown as Worker,
+    undefined,
+    { searchProgressStallTimeoutMs: 30 }
+  );
+  assert.equal(controller.run(), true);
+  worker.emit(started(18));
+  worker.emit(progress(18, 'searching', 1, 'distributed'));
+  await delay(20);
+  worker.emit(progress(18, 'searching', 1, 'distributed'));
+  await delay(20);
+
+  assert.equal(
+    worker.terminateCount,
+    1,
+    'an unchanged heartbeat must not renew the bounded-progress lease'
+  );
+
+  resetState();
+  const progressingWorker = new FakeWorker();
+  const progressingController = new WasmTerminalWorkerController(
+    () => progressingWorker as unknown as Worker,
+    undefined,
+    { searchProgressStallTimeoutMs: 30 }
+  );
+  assert.equal(progressingController.run(), true);
+  progressingWorker.emit(started(19));
+  progressingWorker.emit(progress(19, 'searching', 1, 'distributed'));
+  await delay(20);
+  progressingWorker.emit(progress(19, 'searching', 2, 'distributed'));
+  await delay(20);
+  assert.equal(
+    progressingWorker.terminateCount,
+    0,
+    'changed distributed bounded-work evidence must renew the progress lease'
+  );
+  progressingController.dispose();
+}
+
 async function workerCreationFailureBecomesTerminalFailure() {
   resetState();
   const controller = new WasmTerminalWorkerController(() => {
@@ -635,6 +734,40 @@ function cancelled(jobId: number): ClearraWasmWorkerEvent {
   };
 }
 
+function progress(
+  jobId: number,
+  phase: 'preparing' | 'searching',
+  done: number,
+  executionMode?: 'serial' | 'distributed'
+): ClearraWasmWorkerEvent {
+  return {
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    event: 'progress',
+    job_id: jobId,
+    progress: {
+      done,
+      total: 5,
+      label: phase,
+      budget_status: { state: 'within-budget', used: 0, limit: null },
+      backend_status: {
+        backend_requested: 'cpu',
+        backend_selected: 'wasm-cpu',
+        fallback_used: false,
+        fallback_reason: null
+      },
+      memory_status: {
+        state: 'wasm-computation-scope-active',
+        raw_pointer_exposed: false
+      },
+      telemetry: {
+        execution_mode: executionMode,
+        phase
+      }
+    }
+  } as unknown as ClearraWasmWorkerEvent;
+}
+
 function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -666,6 +799,8 @@ try {
   await ownerDisposalIsForceTermination();
   await ownerTerminationReachesDescendants();
   await duplicateRunIsRejectedBeforePosting();
+  await boundedProgressWatchdogCoversPreparationAndSerialSearchStalls();
+  await boundedProgressWatchdogRequiresAndAcceptsChangedDistributedWork();
   await workerCreationFailureBecomesTerminalFailure();
   await nonSuccessFinalResponseRemainsFailure();
   await failedResponsePreservesTypedResourceEvidence();
@@ -687,6 +822,9 @@ console.log(
   JSON.stringify({
     cooperative_cancel: 'cancelled',
     cancel_timeout: 'terminated',
+    preparation_progress_stall: 'terminated',
+    serial_progress_stall: 'terminated',
+    distributed_progress_stall: 'terminated-with-changed-progress-renewal',
     terminal_race: 'preserved',
     descendant_release_signal: 'delivered',
     duplicate_run: 'rejected',

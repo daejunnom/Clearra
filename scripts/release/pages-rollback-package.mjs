@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, lstat } from "node:fs/promises";
+import { appendFile, readdir, lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -7,9 +7,9 @@ import {
   MAX_PAGES_ROLLBACK_TAR_BYTES,
   readBoundedRegularFile,
   readRollbackCaptureReport,
-  validatePagesIdentity,
   validateRollbackCaptureReport,
 } from "./pages-rollback-authority.mjs";
+import { canonicalJson, canonicalSha256 } from "./canonical-release-evidence.mjs";
 import {
   LEGACY_PAGES_PAYLOAD,
   legacyReconstructedIdentitySha256,
@@ -289,13 +289,37 @@ export function validateRollbackPackageBuffer(buffer, {
     });
     return { actualDigest, entries, identity, captureKind: captureReport.capture_kind };
   }
-  if (captureReport.capture_kind !== "modern-v2") {
+  if (captureReport.capture_kind !== "canonical-v2") {
     fail("Pages rollback capture report kind is unsupported");
   }
   const identity = parseRequiredJson(entries, REQUIRED_IDENTITY_PATH, "Pages identity");
-  const manifest = parseRequiredJson(entries, REQUIRED_MANIFEST_PATH, "Pages WASM manifest");
-  validatePagesIdentity(identity, manifest, sha);
-  return { actualDigest, entries, identity, captureKind: captureReport.capture_kind };
+  const canonical = captureReport.canonical_snapshot;
+  if (canonicalJson(identity) !== canonicalJson(canonical.identity)) {
+    fail("Pages tar identity differs from the full sealed accepted identity");
+  }
+  const expectedFiles = new Map(identity.files.map((file) => [file.path, file]));
+  const regularPaths = [...entries]
+    .filter(([, entry]) => entry.type === "0")
+    .map(([path]) => path)
+    .sort();
+  const expectedPaths = [REQUIRED_IDENTITY_PATH, ...identity.files.map((file) => file.path)].sort();
+  if (canonicalJson(regularPaths) !== canonicalJson(expectedPaths)) {
+    fail("Pages tar regular file set differs from the accepted identity");
+  }
+  for (const [path, descriptor] of expectedFiles) {
+    const content = requireFileEntry(entries, path, `accepted Pages file ${path}`);
+    if (content.byteLength !== descriptor.size || createHash("sha256").update(content).digest("hex") !== descriptor.sha256) {
+      fail(`Pages tar file differs from accepted identity: ${path}`);
+    }
+  }
+  return {
+    actualDigest,
+    entries,
+    identity,
+    identitySha256: canonicalSha256(identity),
+    fileSetSha256: canonicalSha256(identity.files),
+    captureKind: captureReport.capture_kind,
+  };
 }
 
 export async function validateRollbackPackageDirectory(
@@ -328,7 +352,7 @@ export async function validateRollbackPackageDirectory(
 
 export function validateRollbackPackageCaptureKind(captureReport, expectedCaptureKind) {
   validateRollbackCaptureReport(captureReport);
-  if (!new Set(["legacy-v0.7.4", "modern-v2"]).has(expectedCaptureKind)) {
+  if (!new Set(["legacy-v0.7.4", "canonical-v2"]).has(expectedCaptureKind)) {
     fail("Pages rollback expected capture kind is invalid");
   }
   if (captureReport.capture_kind !== expectedCaptureKind) {
@@ -353,11 +377,20 @@ async function main() {
   if (typeof expectedCaptureKind === "string" && expectedCaptureKind.length > 0) {
     validateRollbackPackageCaptureKind(report, expectedCaptureKind);
   }
-  await validateRollbackPackageDirectory(directory, {
+  const validated = await validateRollbackPackageDirectory(directory, {
     expectedSha,
     expectedTarSha256,
     captureReport: report,
   });
+  const githubOutput = process.env.GITHUB_OUTPUT;
+  if (typeof githubOutput === "string" && githubOutput.length > 0) {
+    await appendFile(githubOutput, [
+      `capture_kind=${validated.captureKind}`,
+      `canonical_identity_sha256=${validated.captureKind === "canonical-v2" ? validated.identitySha256 : ""}`,
+      `canonical_file_set_sha256=${validated.captureKind === "canonical-v2" ? validated.fileSetSha256 : ""}`,
+      "",
+    ].join("\n"), "utf8");
+  }
   console.log("pages_rollback_package=passed");
 }
 

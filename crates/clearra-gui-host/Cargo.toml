@@ -27,7 +27,7 @@ clearra-supply = { path = "../clearra-supply" }
 clearra-ui-schema = { path = "../clearra-ui-schema" }
 clearra-validation = { path = "../clearra-validation" }
 clearra-wasm = { path = "../clearra-wasm", optional = true }
-clearra-web-command = { path = "../clearra-web-command" }
+clearra-cli-command = { path = "../clearra-cli-command" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 

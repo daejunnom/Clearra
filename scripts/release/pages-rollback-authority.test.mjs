@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { canonicalSha256, sealCanonicalReport } from "./canonical-release-evidence.mjs";
 import {
   LEGACY_BOOTSTRAP_RELEASE_TAG,
   captureArtifactAuthoritySha256,
@@ -26,6 +27,7 @@ import {
   validatePagesIdentity,
   validatePagesMutationCaptureKind,
   validateRollbackCaptureReport,
+  validateRollbackCaptureReportDiagnostic,
   validateRunAttemptPolicy,
   verifyCurrentPagesAgainstCapture,
   writeRollbackCaptureReport,
@@ -467,10 +469,9 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
     "LEGACY_RELEASE_TAG: ${{ inputs.legacy_release_tag }}",
     "REQUESTED_CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}",
     "Build previous Pages source",
-    "Prepare exact rollback manifest contract",
-    "PAGES_AUTHORITY_MODE: prepare-manifests",
-    "PAGES_CAPTURE_MODE: ${{ inputs.mode }}",
-    "Stamp exact rollback identity",
+    "Download exact accepted Pages build without rebuilding",
+    "Prove accepted build and current public bytes before capture",
+    "Reprove accepted build and public bytes immediately before sealing",
     "Stamp separate reconstructed v0.7.4 identity",
     "node authority-source/scripts/release/pages-legacy-contract.mjs",
     "legacy_initial_evidence_base64",
@@ -499,16 +500,7 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
     (captureJobs.match(/actions\/upload-pages-artifact@v3/gu) ?? []).length,
     1,
   );
-  assert.ok(
-    captureJobs.indexOf("Prepare exact rollback manifest contract") <
-      captureJobs.indexOf("Stamp exact rollback identity"),
-    "manifest preparation must finish before the shared identity verification and stamp",
-  );
-  const modernStamp = captureJobs.slice(
-    captureJobs.indexOf("- name: Stamp exact rollback identity"),
-    captureJobs.indexOf("- name: Stamp separate reconstructed v0.7.4 identity"),
-  );
-  assert.match(modernStamp, /if: \$\{\{ inputs\.mode == 'capture' \}\}/u);
+  assert.doesNotMatch(captureJobs, /Prepare exact rollback manifest contract|Stamp exact rollback identity/u);
   const legacyStamp = captureJobs.slice(
     captureJobs.indexOf("- name: Stamp separate reconstructed v0.7.4 identity"),
     captureJobs.indexOf("- name: Validate portable rollback tree"),
@@ -526,8 +518,10 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
   );
   assert.match(
     restorePackage,
-    /PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND: legacy-v0\.7\.4/u,
+    /PAGES_ROLLBACK_EXPECTED_CAPTURE_KIND: \$\{\{ needs\.restore-authority\.outputs\.capture_kind \}\}/u,
   );
+  assert.match(restorePackage, /canonical_identity_sha256/u);
+  assert.match(restorePackage, /canonical_file_set_sha256/u);
   const restoreDeploy = workflow.slice(workflow.indexOf("\n  deploy-restore:"));
   for (const permission of [
     "contents: read",
@@ -562,27 +556,45 @@ test("authority phases are closed for capture and mutation modes", () => {
   }
 });
 
-test("forward capture kinds are explicit and restore rejects modern capture before mutation", () => {
+test("forward and restore reject old modern-v2 and admit canonical-v2", () => {
   assert.equal(
     validatePagesMutationCaptureKind("forward", "legacy-v0.7.4"),
     "legacy-v0.7.4",
   );
   assert.equal(
-    validatePagesMutationCaptureKind("forward", "modern-v2"),
-    "modern-v2",
+    validatePagesMutationCaptureKind("forward", "canonical-v2"),
+    "canonical-v2",
   );
   assert.equal(
     validatePagesMutationCaptureKind("restore", "legacy-v0.7.4"),
     "legacy-v0.7.4",
   );
-  assert.throws(
-    () => validatePagesMutationCaptureKind("restore", "modern-v2"),
-    /restore requires a sealed v0\.7\.4 capture report/u,
+  assert.equal(
+    validatePagesMutationCaptureKind("restore", "canonical-v2"),
+    "canonical-v2",
   );
+  assert.throws(() => validatePagesMutationCaptureKind("forward", "modern-v2"), /unsupported/u);
+  assert.throws(() => validatePagesMutationCaptureKind("restore", "modern-v2"), /unsupported/u);
   assert.throws(
     () => validatePagesMutationCaptureKind("forward", "unknown"),
     /forward capture report kind is unsupported/u,
   );
+});
+
+test("old modern-v2 capture report is diagnostic-only and never mutation authority", () => {
+  const diagnostic = sealCanonicalReport({
+    schema_id: "clearra.pages.rollback-capture-authority.v2", repository: "daejunnom/Clearra",
+    snapshot_source_commit: SNAPSHOT, authority_source_commit: AUTHORITY, capture_run_id: "12345", capture_run_attempt: "1",
+    workflow_path: ".github/workflows/pages-rollback.yml", workflow_run_api_readback_sha256: "1".repeat(64), artifact_id: "2",
+    artifact_name: expectedCaptureArtifactName({ snapshotSha: SNAPSHOT, authoritySha: AUTHORITY, captureRunId: "12345", captureRunAttempt: "1" }),
+    artifact_digest: `sha256:${"2".repeat(64)}`, artifact_sha256: "2".repeat(64), artifact_archive_size_bytes: 1,
+    artifact_tar_sha256: "3".repeat(64), artifact_tar_size_bytes: 1, artifact_api_readback_sha256: "4".repeat(64),
+    artifact_created_at: "2026-08-01T00:00:00.000Z", artifact_expires_at: "2026-10-30T00:00:00.000Z", retention_seconds: 90 * 24 * 60 * 60,
+    capture_kind: "modern-v2", legacy_snapshot: null, status: "captured",
+  });
+  assert.equal(validateRollbackCaptureReportDiagnostic(diagnostic), diagnostic);
+  assert.throws(() => validateRollbackCaptureReport(diagnostic), /closed schema|schema is invalid/u);
+  assert.throws(() => validatePagesMutationCaptureKind("restore", diagnostic.capture_kind), /unsupported/u);
 });
 
 test("current Pages routing never falls back between legacy bytes and modern identity", async () => {
@@ -649,63 +661,24 @@ test("current Pages routing never falls back between legacy bytes and modern ide
     validated: 1,
   });
 
-  const modern = pagesIdentity();
-  const modernCalls = { json: 0, status: 0, bytes: 0, github: 0 };
-  await verifyCurrentPagesAgainstCapture({
-    mode: "forward",
-    phase: "predeploy",
-    validatedCaptureReport: { capture_kind: "modern-v2" },
-    repository: "daejunnom/Clearra",
-    pageUrl: "https://daejunnom.github.io/Clearra",
-    cacheBuster: "forward-predeploy-12345",
-    currentPagesSha: SNAPSHOT,
-  }, {
-    async getGithubJson() {
-      modernCalls.github += 1;
-      assert.fail("modern forward must not read legacy GitHub projection");
-    },
-    async readPublicJson(_url, label) {
-      modernCalls.json += 1;
-      return label === "live Pages identity"
-        ? structuredClone(modern.identity)
-        : structuredClone(modern.manifest);
-    },
-    async readPublicStatus() {
-      modernCalls.status += 1;
-      assert.fail("modern forward must not probe legacy 404 status");
-    },
-    async readPublicBytes() {
-      modernCalls.bytes += 1;
-      assert.fail("modern forward must not read legacy fixed bytes");
-    },
-  });
-  assert.deepEqual(modernCalls, { json: 2, status: 0, bytes: 0, github: 0 });
-
-  const rejectedCalls = { json: 0, status: 0, bytes: 0, github: 0 };
-  const rejectBeforeRead = Object.fromEntries(
-    Object.keys(rejectedCalls).map((name) => [name, async () => {
-      rejectedCalls[name] += 1;
-      assert.fail("restore modern capture must reject before public read");
-    }]),
-  );
-  await assert.rejects(
-    verifyCurrentPagesAgainstCapture({
-      mode: "restore",
-      phase: "initial",
+  for (const mode of ["forward", "restore"]) {
+    let reads = 0;
+    await assert.rejects(verifyCurrentPagesAgainstCapture({
+      mode,
+      phase: mode === "forward" ? "predeploy" : "initial",
       validatedCaptureReport: { capture_kind: "modern-v2" },
       repository: "daejunnom/Clearra",
       pageUrl: "https://daejunnom.github.io/Clearra",
-      cacheBuster: "restore-initial-12345",
-      currentPagesSha: AUTHORITY,
+      cacheBuster: `${mode}-old-modern`,
+      currentPagesSha: SNAPSHOT,
     }, {
-      getGithubJson: rejectBeforeRead.github,
-      readPublicJson: rejectBeforeRead.json,
-      readPublicStatus: rejectBeforeRead.status,
-      readPublicBytes: rejectBeforeRead.bytes,
-    }),
-    /restore requires a sealed v0\.7\.4 capture report/u,
-  );
-  assert.deepEqual(rejectedCalls, { json: 0, status: 0, bytes: 0, github: 0 });
+      async readPublicJson() { reads += 1; },
+      async readPublicBytes() { reads += 1; },
+      async readPublicStatus() { reads += 1; },
+      async getGithubJson() { reads += 1; },
+    }), /unsupported/u);
+    assert.equal(reads, 0, "old modern-v2 must fail before any mutation precondition read");
+  }
 });
 
 test("deployment status readback proves pagination completeness", () => {
@@ -925,6 +898,23 @@ test("capture report seals actual artifact ID, digest, run attempt, tar hash, an
     });
     const tarPath = join(root, "artifact.tar");
     await writeFile(tarPath, "exact-pages-tar", "utf8");
+    const acceptedIdentity = pagesIdentity(SNAPSHOT).identity;
+    const identityBytes = Buffer.from(JSON.stringify(acceptedIdentity));
+    const canonicalReadback = {
+      identity_sha256: canonicalSha256(acceptedIdentity),
+      identity_bytes_sha256: createHash("sha256").update(identityBytes).digest("hex"),
+      identity_bytes_size: identityBytes.byteLength,
+      file_set_sha256: canonicalSha256(acceptedIdentity.files),
+      file_count: acceptedIdentity.files.length,
+      total_bytes: acceptedIdentity.files.reduce((sum, file) => sum + file.size, 0),
+    };
+    const canonicalSnapshot = {
+      accepted_run_id: "12345", accepted_run_attempt: "1", accepted_artifact_id: "77777",
+      accepted_artifact_name: `accepted-pages-build-${SNAPSHOT}-run-12345-attempt-1`, accepted_artifact_digest: `sha256:${"a".repeat(64)}`,
+      accepted_artifact_api_readback_sha256: "b".repeat(64), accepted_artifact_created_at: "2026-08-28T00:00:00.000Z", accepted_artifact_expires_at: "2026-11-26T00:00:00.000Z",
+      identity: acceptedIdentity, ...canonicalReadback,
+      initial_public_readback: canonicalReadback, preartifact_public_readback: canonicalReadback,
+    };
     const responses = {
       [`/actions/runs/${runId}`]: {
         id: Number(runId),
@@ -961,6 +951,7 @@ test("capture report seals actual artifact ID, digest, run attempt, tar hash, an
       artifactId,
       artifactName,
       artifactTarPath: tarPath,
+      canonicalSnapshot,
     }, {
       async getGithubJson(path) {
         assert.ok(Object.hasOwn(responses, path), `unexpected GitHub read: ${path}`);
@@ -1153,6 +1144,18 @@ test("resolves exactly one durable sealed report artifact from the completed cap
     report_artifact_name: reportName,
     report_artifact_digest: `sha256:${"8".repeat(64)}`,
   });
+
+  const laterConsumer = structuredClone(input);
+  laterConsumer.consumerAuthoritySha = "3".repeat(40);
+  laterConsumer.consumerRun.head_sha = laterConsumer.consumerAuthoritySha;
+  assert.deepEqual(resolveCaptureReportArtifact(laterConsumer), resolved);
+  assert.throws(
+    () => resolveCaptureReportArtifact({
+      ...laterConsumer,
+      consumerAuthoritySha: AUTHORITY,
+    }),
+    /independent active exact-main/u,
+  );
 
   const duplicate = structuredClone(input);
   duplicate.captureArtifacts.artifacts.push(structuredClone(reportArtifact));

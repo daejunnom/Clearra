@@ -1,5 +1,5 @@
 // SRP rationale: this integration test has one behavior-level change reason:
-// preserving the finite terminal-hold solution set across the public Web/App/WASM boundary.
+// preserving the finite terminal-hold solution set across the public CLI/App/WASM boundary.
 
 use clearra_app::{AppCommand, AppContext, AppCoreExecutorService, AppServices, AppStatus};
 use clearra_core_domain::{
@@ -43,10 +43,10 @@ fn assert_terminal_supply_solution_set(keys: &[String]) {
 }
 
 #[test]
-fn terminal_supply_p0_web_app_and_wasm_json_preserve_the_exact_solution_set() {
+fn terminal_supply_p0_cli_app_and_wasm_json_preserve_the_exact_solution_set() {
     let request = WasmCommandRuntime::default()
         .compile_command_text(TERMINAL_SUPPLY_P0_COMMAND)
-        .expect("terminal-supply Web command must compile");
+        .expect("terminal-supply CLI command must compile");
 
     let scenario = match request.command() {
         AppCommand::Scenario(command) => command.query(),

@@ -58,22 +58,67 @@ foreach ($requiredMarker in @(
         Add-ArchitectureError "clearra-ui-schema must expose MVP2 schema snapshot marker '$requiredMarker'"
     }
 }
-$kickEditor = Read-Text "crates/clearra-ui-schema/src/rule_editor/kick_table_editor_schema.rs"
-foreach ($requiredMarker in @("KickProfileRegistry::builtin_profiles", "KickTablePreviewSchema", "KickTableImportExportSchema", "KickTableVerificationSchema", "KickImport", "KickProfileVerificationReport", "supports_exact_180", "c_compact_descriptor_ready", "unsupported_backend_reason", "unsupported_kick_profiles_carry_diagnostic_disabled_reason", "kick_table_editor_schema_exposes_registry_preview_and_import_export")) {
+$kickEditor = Read-PhysicalText "crates/clearra-ui-schema/src/rule_editor/kick_table_editor_schema.rs"
+$kickEditorTests = Read-PhysicalText "crates/clearra-ui-schema/src/rule_editor/kick_table_editor_schema_tests.rs"
+$kickPreviewSchema = Read-PhysicalText "crates/clearra-ui-schema/src/rule_editor/kick_table_preview_schema.rs"
+$kickImportExportSchema = Read-PhysicalText "crates/clearra-ui-schema/src/rule_editor/kick_table_import_export_schema.rs"
+$kickVerificationSchema = Read-PhysicalText "crates/clearra-ui-schema/src/rule_editor/kick_table_verification_schema.rs"
+foreach ($requiredMarker in @("KickProfileRegistry::builtin_profiles", "KickTablePreviewSchema", "KickTableImportExportSchema", "KickTableVerificationSchema")) {
     if ($kickEditor -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "KickTableEditorSchema must expose MVP2 kick preview/import/export/verification marker '$requiredMarker'"
+        Add-ArchitectureError "KickTableEditorSchema must compose split MVP2 kick schema marker '$requiredMarker'"
+    }
+}
+foreach ($requiredMarker in @("pub struct KickTablePreviewSchema", "KickProfileVerificationReport::verify_imported_profile", "KickTableVerificationSchema::from_report", "supports_exact_180", "c_compact_descriptor_ready", "unsupported_backend_reason", "UiDisabledReason::new", "DiagnosticCode::ERuleUnsupportedMvp")) {
+    if ($kickPreviewSchema -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "KickTablePreviewSchema must own preview/capability marker '$requiredMarker'"
+    }
+}
+foreach ($requiredMarker in @("pub struct KickTableImportExportSchema", "clearra-rules::KickImport", "kick_table_json_adapter_marker")) {
+    if ($kickImportExportSchema -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "KickTableImportExportSchema must own import/export marker '$requiredMarker'"
+    }
+}
+foreach ($requiredMarker in @("pub struct KickTableVerificationSchema", "pub fn from_report(report: KickProfileVerificationReport)", "missing_transition_count", "duplicate_transition_count", "unsupported_annotation_count", "transition_complete")) {
+    if ($kickVerificationSchema -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "KickTableVerificationSchema must own typed verification marker '$requiredMarker'"
+    }
+}
+foreach ($requiredMarker in @("kick_table_editor_schema_exposes_registry_preview_and_import_export", "exact_and_unsupported_kick_profiles_expose_current_backend_capabilities", "DiagnosticCode::ERuleUnsupportedMvp")) {
+    if ($kickEditorTests -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "Kick table editor tests must preserve split schema contract marker '$requiredMarker'"
     }
 }
 $ruleEditor = Read-Text "crates/clearra-ui-schema/src/rule_editor/rule_editor_schema.rs"
-$customRuleEditorSchema = Read-Text "crates/clearra-ui-schema/src/rule_editor/custom_rule_editor_schema.rs"
+$customRuleEditorSchema = Read-PhysicalText "crates/clearra-ui-schema/src/rule_editor/custom_rule_editor_schema.rs"
+$customRuleEditorTests = Read-PhysicalText "crates/clearra-ui-schema/src/rule_editor/custom_rule_editor_schema_tests.rs"
+$customRuleModel = Read-PhysicalText "crates/clearra-rules/src/custom_rule/custom_rule_editor_schema.rs"
+$ruleEditorValidator = @(
+    Read-PhysicalText "crates/clearra-validation/src/validators/rule_editor_validator.rs"
+    Read-PhysicalText "crates/clearra-validation/src/validators/rule_editor_validator_tests.rs"
+) -join "`n"
 foreach ($requiredMarker in @("KickProfileRegistry::builtin_profiles", "custom_rule().id().as_str()", "CustomRuleEditorSchema::mvp3_guarded", "custom_rule_editor", "disabled_rule_editor_features_expose_diagnostic_codes_for_unsupported_profiles", "rule_presets_use_canonical_rule_ids")) {
     if ($ruleEditor -notlike "*$requiredMarker*") {
         Add-ArchitectureError "RuleEditorSchema must use canonical rule/kick registry source marker '$requiredMarker'"
     }
 }
-foreach ($requiredMarker in @("CustomRuleEditorSchema", "CustomRuleEditorSectionSchema", "raw_editor_schema_type", "validation_adapter", "verified_profile_type", "search_capability_report_type", "search_input_allowed", "CustomRuleEditorDraft", "CustomRuleValidator::validate_editor_draft", "VerifiedCustomRuleProfile", "CustomRuleSearchCapabilityReport", "kick-table", "spawn-profile", "rotation-system", "lock-reachability", "line-clear-policy", "custom_rule_editor_schema_exposes_raw_validate_verify_capability_pipeline")) {
+foreach ($requiredMarker in @("CustomRuleEditorSchema", "CustomRuleEditorSectionSchema", "raw_editor_schema_type", "validation_adapter", "verified_profile_type", "search_capability_report_type", "search_input_allowed", "clearra-validation::RuleEditorValidator::validate_custom_rule_editor_schema", "clearra-rules::VerifiedCustomRuleProfile", "clearra-rules::CustomRuleSearchCapabilityReport", "rotation-states", "spawn-rules", "kick-transitions", "first-success-order", "180-support", "piece-specific-overrides", "line-clear-policy", "lock-reachability-mode", "verification-report")) {
     if ($customRuleEditorSchema -notlike "*$requiredMarker*") {
-        Add-ArchitectureError "CustomRuleEditorSchema must expose MVP3 raw->validation->verified->capability editor pipeline marker '$requiredMarker'"
+        Add-ArchitectureError "UI CustomRuleEditorSchema must expose current section/adapter marker '$requiredMarker'"
+    }
+}
+foreach ($requiredMarker in @("custom_rule_editor_schema_exposes_raw_validate_verify_capability_pipeline", "custom_rule_editor_sections_cover_rotation_spawn_kicks_reachability_and_line_clear")) {
+    if ($customRuleEditorTests -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "UI CustomRuleEditorSchema tests must preserve current editor contract marker '$requiredMarker'"
+    }
+}
+foreach ($requiredMarker in @("pub struct CustomRuleEditorSchema", "pub struct CustomRuleEditorDraft", "pub fn from_editor_draft", "rotation_states", "spawn_rules", "kick_table_profile", "first_success_order", "piece_specific_overrides", "line_clear_policy", "lock_reachability_mode")) {
+    if ($customRuleModel -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "canonical CustomRuleEditorSchema model must own marker '$requiredMarker'"
+    }
+}
+foreach ($requiredMarker in @("pub struct RuleEditorValidator", "pub fn validate_custom_rule_editor_schema", "CustomRuleValidator::validate_editor_schema", "VerifiedCustomRuleProfile", "RuleEditorValidator::validate_custom_rule_editor_schema")) {
+    if ($ruleEditorValidator -notlike "*$requiredMarker*") {
+        Add-ArchitectureError "RuleEditorValidator must own raw->validated->verified marker '$requiredMarker'"
     }
 }
 $scoreEditor = @(
@@ -166,6 +211,28 @@ $guiHostCargo = Read-PhysicalText "crates/clearra-gui-host/Cargo.toml"
 $tauriCommands = Read-PhysicalText "apps/clearra-desktop/src-tauri/src/commands.rs"
 $desktopBridge = Read-PhysicalText "crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs"
 $desktopClient = Read-PhysicalText "packages/clearra-ui/src/lib/host/clearraDesktopHost.ts"
+$retiredPcProductGuiSurface = @(
+    Read-PhysicalText "packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts"
+    Read-PhysicalText "packages/clearra-ui/src/lib/workspace/productResultPager.ts"
+    Read-PhysicalText "packages/clearra-ui/src/lib/workspace/ProductResultPager.svelte"
+    Read-PhysicalText "packages/clearra-ui/src/lib/workspace/solverWorkspaceModel.ts"
+    Read-PhysicalText "packages/clearra-ui/src/lib/workspace/SearchControls.svelte"
+    Read-PhysicalText "packages/clearra-ui/src/lib/workspace/PcSolverStandalone.svelte"
+    Read-PhysicalText "packages/clearra-ui/src/lib/workspace/workspaceI18n.ts"
+) -join "`n"
+
+foreach ($removedGuiProductMarker in @(
+    "pc-save-groups",
+    "pc-best-save",
+    "pc.saves",
+    "pc.best-save",
+    "ClearraPcSave",
+    "ClearraPcBestSave"
+)) {
+    if ($retiredPcProductGuiSurface -like "*$removedGuiProductMarker*") {
+        Add-ArchitectureError "retired PC save product leaked into the GUI producer/consumer surface: '$removedGuiProductMarker'"
+    }
+}
 
 foreach ($forbiddenMarker in @(
     "CLEARRA_BUILD_GUI",
@@ -177,7 +244,12 @@ foreach ($forbiddenMarker in @(
         Add-ArchitectureError "root CMake retains removed GUI marker '$forbiddenMarker'"
     }
 }
-if ($guiHostCargo -like "*[[bin]]*") {
+$guiHostBinaryTablePattern = '(?m)^\s*\[\[bin\]\]\s*(?:#.*)?$'
+if (-not ([regex]::IsMatch("[[bin]]", $guiHostBinaryTablePattern)) -or
+    [regex]::IsMatch("[lib]`nname = 'clearra-gui-host'", $guiHostBinaryTablePattern)) {
+    Add-ArchitectureError "workspace GUI host [[bin]] matcher failed its positive/negative regression contract"
+}
+if ([regex]::IsMatch($guiHostCargo, $guiHostBinaryTablePattern)) {
     Add-ArchitectureError "clearra-gui-host must be a library-only Tauri host"
 }
 
@@ -197,7 +269,8 @@ foreach ($requiredMarker in @(
     "self.app_context.run(request)",
     "response.to_host_response_with_solution_set_artifact",
     "serde_json::to_string",
-    "GuiToAppRequest::build"
+    "CliCommandParser::parse_tokens",
+    '"clearra-cli/CommandRequest"'
 )) {
     if ($desktopBridge -notlike "*$requiredMarker*") {
         Add-ArchitectureError "desktop bridge does not execute the typed AppRequest path '$requiredMarker'"

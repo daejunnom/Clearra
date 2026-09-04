@@ -654,7 +654,6 @@ mod search_execution_report {
                 owned
                     .try_reserve_exact(value.len())
                     .map_err(|_| SearchExecutionReportBuildError::AllocationFailed)?;
-                owned.push_str(value);
                 *remaining_requested_bytes = remaining_requested_bytes
                     .checked_sub(value.len() as u128)
                     .ok_or(SearchExecutionReportBuildError::ProjectionOverflow)?;
@@ -663,6 +662,7 @@ mod search_execution_report {
                     .ok_or(SearchExecutionReportBuildError::ProjectionOverflow)?;
                 memory_guard(*actual_string_bytes, *remaining_requested_bytes)
                     .map_err(SearchExecutionReportBuildError::MemoryGuard)?;
+                owned.push_str(value);
                 Ok(owned)
             }
 

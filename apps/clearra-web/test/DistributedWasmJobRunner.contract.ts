@@ -56,9 +56,13 @@ const pool = {
 };
 
 let workersUsed = 0;
+const distributedProducerCalls: Array<{ workBudget: number; batchSize: number }> = [];
 const wasm = {
   compiled_module: () => ({}) as WebAssembly.Module,
-  distributed_produce: () => ({ status: 'completed' as const }),
+  distributed_produce: (workBudget: number, batchSize: number) => {
+    distributedProducerCalls.push({ workBudget, batchSize });
+    return { status: 'completed' as const };
+  },
   distributed_progress: () => ({
     geometryNodes: 1,
     candidateCount: 2,
@@ -115,7 +119,21 @@ await new DistributedWasmJobRunner(
     transferByteCap: 32 * 1024 * 1024
   },
   pool as never
-).run('clearra pc --lines 1', plan, (event) => events.push(event));
+).run(
+  'clearra pc minimals --lines 4 --backend cpu --workers 2',
+  plan,
+  (event) => events.push(event)
+);
+
+const distributedSearching = events.find(
+  (event) => event.event === 'progress' && event.progress.telemetry?.phase === 'searching'
+);
+assert.ok(distributedSearching && distributedSearching.event === 'progress');
+assert.equal(
+  distributedSearching.progress.telemetry?.execution_mode,
+  'distributed',
+  'distributed search progress must identify its execution mode for the shared UI watchdog'
+);
 
 const merging = events.find(
   (event) => event.event === 'progress' && event.progress.telemetry?.phase === 'merging'
@@ -129,6 +147,11 @@ assert.equal(merging.progress.telemetry?.exactness.candidates_verified, true);
 assert.equal(merging.progress.telemetry?.active_workers, 0);
 assert.equal(merging.progress.telemetry?.worker_count, 1);
 assert.equal(workersUsed, 2);
+assert.deepEqual(
+  distributedProducerCalls,
+  [{ workBudget: 2_048, batchSize: 256 }],
+  'the browser coordinator must return to the host between bounded geometry slices'
+);
 
 const U32_MAX = normalizeWasmU32(-1);
 assert.equal(U32_MAX, 0xffff_ffff);
@@ -400,7 +423,13 @@ const serialWasm = {
     );
     return 46;
   },
-  advance_job() {
+  advance_job(jobId: number, workBudget: number) {
+    assert.equal(jobId, 46);
+    assert.equal(
+      workBudget,
+      2_048,
+      'the serial browser fallback must use the same bounded host-sized work slice'
+    );
     assert.deepEqual(
       serialAuthority.snapshot().used,
       sharedCapacity,
@@ -421,6 +450,7 @@ const serialWasm = {
   },
   cancel_job() {}
 } as unknown as ClearraWasmModule;
+const serialEvents: ClearraWasmWorkerEvent[] = [];
 const serialTerminal = await new ClearraProductJobRunner(
   serialWasm,
   46,
@@ -433,10 +463,92 @@ const serialTerminal = await new ClearraProductJobRunner(
   },
   serialAuthority,
   100
-).run('clearra pc --lines 1', () => undefined);
+).run('clearra pc --lines 1', (event) => serialEvents.push(event));
 assert.equal(serialTerminal.event, 'failed');
 assert.equal(serialResetCount, 1, 'preparation coordinator resets exactly once');
+assert.deepEqual(
+  serialEvents
+    .filter((event) => event.event === 'progress')
+    .map((event) => event.progress.telemetry?.phase),
+  ['preparing', 'searching'],
+  'serial handoff must leave preparing before the synchronous exact search starts'
+);
+const serialSearching = serialEvents.find(
+  (event) => event.event === 'progress' && event.progress.telemetry?.phase === 'searching'
+);
+assert.ok(serialSearching && serialSearching.event === 'progress');
+assert.equal(serialSearching.progress.telemetry?.active_workers, 1);
+assert.equal(serialSearching.progress.telemetry?.worker_count, 1);
+assert.equal(serialEvents.at(-1)?.event, 'failed', 'serial execution must converge on a terminal event');
 assert.deepEqual(serialAuthority.snapshot().available, sharedCapacity);
+
+const serialCancellationAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
+let observeSerialAdvance: () => void = () => undefined;
+const serialAdvanceObserved = new Promise<void>((resolve) => {
+  observeSerialAdvance = resolve;
+});
+let serialCancellationRequested = false;
+let serialCancellationTerminalEmitted = false;
+const serialCancellationWasm = {
+  ...serialWasm,
+  start_job() {
+    return 48;
+  },
+  advance_job() {
+    observeSerialAdvance();
+    return 'pending' as const;
+  },
+  cancel_job(jobId: number) {
+    assert.equal(jobId, 48);
+    serialCancellationRequested = true;
+  },
+  drain_job_events_json() {
+    if (!serialCancellationRequested || serialCancellationTerminalEmitted) return '[]';
+    serialCancellationTerminalEmitted = true;
+    return JSON.stringify([{
+      schema_version: 1,
+      runtime: 'clearra-wasm',
+      event: 'cancelled',
+      job_id: 48,
+      reason: 'cancelled-by-caller'
+    }]);
+  }
+} as unknown as ClearraWasmModule;
+const serialCancellationRunner = new ClearraProductJobRunner(
+  serialCancellationWasm,
+  48,
+  'serial-product-cancellation-runner',
+  {
+    logicalProcessorCount: 2,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  },
+  serialCancellationAuthority,
+  100
+);
+const serialCancellationEvents: ClearraWasmWorkerEvent[] = [];
+const serialCancellationRun = serialCancellationRunner.run(
+  'clearra pc --lines 1',
+  (event) => serialCancellationEvents.push(event)
+);
+await serialAdvanceObserved;
+// The production worker itself keeps the event loop alive. This Node contract
+// uses an unref'd MessageChannel, so retain one bounded handle while the
+// cancellation turn crosses that host-yield boundary.
+const serialCancellationKeepAlive = setTimeout(() => undefined, 1_000);
+serialCancellationRunner.cancel();
+const serialCancellationTerminal = await serialCancellationRun;
+clearTimeout(serialCancellationKeepAlive);
+assert.equal(serialCancellationTerminal.event, 'cancelled');
+assert.equal(serialCancellationEvents.at(-1)?.event, 'cancelled');
+assert.ok(
+  serialCancellationEvents.some(
+    (event) => event.event === 'progress' && event.progress.telemetry?.phase === 'searching'
+  ),
+  'the serial handoff exposes a cancellable running phase before terminal convergence'
+);
+assert.deepEqual(serialCancellationAuthority.snapshot().available, sharedCapacity);
 
 const lateGrantAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
 let settleLateGrant: () => void = () => undefined;

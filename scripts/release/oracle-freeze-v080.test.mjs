@@ -250,8 +250,18 @@ test("v0.8 Oracle freeze helper seals uploads and preserves the active authority
 
   const seal = text.indexOf('/usr/bin/chown root:root -- "$upload_root"');
   const validation = text.indexOf("layer_counts=$(validate_layers)");
+  const baselineCapture = text.indexOf("\ncapture_baseline\n", seal);
+  const baselineBeforeLayers = text.indexOf(
+    "\nrequire_baseline_unchanged\n",
+    baselineCapture,
+  );
   assert.ok(seal >= 0 && validation > seal, "uploads must be sealed before validation");
-  assert.match(text, /require_baseline_unchanged\n\nlayer_counts=/u);
+  assert.ok(
+    baselineCapture >= 0 &&
+      baselineBeforeLayers > baselineCapture &&
+      validation > baselineBeforeLayers,
+    "the active runtime must remain unchanged before frozen layer validation",
+  );
   assert.match(text, /assemble_candidate "\$candidate_root" "\$release_id"\nrequire_baseline_unchanged/u);
   assert.match(text, /apps\/clearra-discord-bot\/src\/admin\/config\.mjs/u);
   assert.match(text, /candidate_files0755" = 8/u);

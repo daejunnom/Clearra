@@ -6,6 +6,9 @@ import test from "node:test";
 
 import { sealCanonicalReport } from "./canonical-release-evidence.mjs";
 import {
+  PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID,
+} from "./pages-deployment-authority.mjs";
+import {
   resolvePagesDeploymentRun,
   validatePagesDeploymentRunList,
   verifyPagesDeploymentReport,
@@ -80,7 +83,7 @@ test("verifies canonical Pages report against run and acceptance bindings", asyn
   const root = await mkdtemp(join(tmpdir(), "clearra-pages-run-"));
   try {
     const report = sealCanonicalReport({
-      schema_id: "clearra.pages.deployment-authority.v2",
+      schema_id: PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID,
       mode: "forward",
       repository: REPOSITORY,
       source_commit: SOURCE,
@@ -113,6 +116,10 @@ test("verifies canonical Pages report against run and acceptance bindings", asyn
       rollback_report_artifact_digest: null,
       rollback_report_artifact_api_readback_sha256: null,
       rollback_report_file_sha256: null,
+      rollback_accepted_artifact_id: null,
+      rollback_accepted_artifact_name: null,
+      rollback_accepted_artifact_digest: null,
+      live_file_descriptor_set_sha256: null,
       status: "active",
     });
     const path = join(root, "pages-deployment-authority.json");

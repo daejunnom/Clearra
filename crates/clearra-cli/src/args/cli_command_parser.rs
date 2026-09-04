@@ -26,6 +26,9 @@ pub(crate) fn parse_command(
                 command_args,
             )))
         }
+        "pc" if uses_shared_pc_command_boundary(command_args) && !has_help(command_args) => Ok(
+            ParsedCliCommand::Product(product_tokens(command, command_args)),
+        ),
         "pc" => parse_pc(command_args),
         "pc-scenario" => parse_pc_scenario(command_args),
         "pc-replay" | "path" => parse_path(command_args),
@@ -130,6 +133,19 @@ fn has_help(command_args: &[String]) -> bool {
     command_args
         .iter()
         .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+}
+
+// These options belong to the canonical Web/Desktop PC grammar and are not
+// part of the v0.7.4 native compatibility grammar. Preserve that legacy parser
+// for legacy-only invocations while sending complete GUI/native argv envelopes
+// through the same CLI compiler that owns Web lowering and validation.
+fn uses_shared_pc_command_boundary(command_args: &[String]) -> bool {
+    command_args.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "--count" | "--patterns" | "--pattern" | "--board-mask" | "--height" | "--pieces"
+        )
+    })
 }
 
 fn product_help_topic(command: &str) -> super::ProductHelpTopic {

@@ -116,7 +116,7 @@ ROOT=$(wslpath -a ${shellQuote(root)})
 DESTINATION=$(wslpath -a ${shellQuote(stagingDir)})
 TARGET_ROOT="\${CLEARRA_WSL_CARGO_TARGET_DIR:-\${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build/cargo-target-wasm}"
 mkdir -p "$TARGET_ROOT" "$DESTINATION"
-${options.verify ? `${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-web-command --lib --tests
+${options.verify ? `${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-cli-command --lib --tests
 ${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --lib --tests
 ${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo test --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --test wasm_host_contract` : ''}
 ${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --manifest-path "$ROOT/Cargo.toml" --target wasm32-unknown-unknown --release -p clearra-wasm-abi${cargoFeatures}
@@ -143,7 +143,7 @@ async function buildNative() {
   if (options.verify) {
     await run('cargo', [
       'check', '--manifest-path', resolve(root, 'Cargo.toml'),
-      '--package', 'clearra-web-command', '--lib', '--tests'
+      '--package', 'clearra-cli-command', '--lib', '--tests'
     ], { CARGO_TARGET_DIR: targetRoot });
     await run('cargo', [
       'check', '--manifest-path', resolve(root, 'Cargo.toml'),

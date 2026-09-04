@@ -100,9 +100,9 @@ export function classifyDeploymentImpact(paths) {
       gui = true;
       continue;
     }
-    // The web-command crate is used by browser WASM, the desktop host, and
+    // The shared CLI-command crate is used by browser WASM, the desktop host, and
     // the native CLI. Discord's current-job image builds that native CLI.
-    if (path.startsWith("crates/clearra-web-command/")) {
+    if (path.startsWith("crates/clearra-cli-command/")) {
       pages = true;
       discord = true;
       gui = true;

@@ -17,6 +17,10 @@ import {
   resolveCanonicalAcceptanceHistory,
   validateCanonicalAcceptanceLookup,
 } from "./canonical-acceptance-run.mjs";
+import {
+  resolveAcceptedPagesArtifact,
+  validateCanonicalCaptureEvidence,
+} from "./pages-canonical-capture.mjs";
 
 import {
   LEGACY_PAGES_RELEASE_TAG,
@@ -93,7 +97,7 @@ const RUNTIME_IDENTITY_FIELDS = Object.freeze([
   "artifact_schema_version",
 ]);
 export const PAGES_ROLLBACK_CAPTURE_REPORT_SCHEMA_ID =
-  "clearra.pages.rollback-capture-authority.v2";
+  "clearra.pages.rollback-capture-authority.v3";
 const CAPTURE_REPORT_FIELDS = Object.freeze([
   "schema_id",
   "repository",
@@ -116,9 +120,13 @@ const CAPTURE_REPORT_FIELDS = Object.freeze([
   "retention_seconds",
   "capture_kind",
   "legacy_snapshot",
+  "canonical_snapshot",
   "status",
   "report_sha256",
 ]);
+const DIAGNOSTIC_V2_CAPTURE_REPORT_FIELDS = Object.freeze(
+  CAPTURE_REPORT_FIELDS.filter((field) => field !== "canonical_snapshot"),
+);
 
 function fail(message) {
   throw new Error(message);
@@ -725,13 +733,19 @@ export function validateRollbackCaptureReport(report, {
       captureRunId: runId,
       captureRunAttempt: runAttempt,
     });
-  } else if (report.capture_kind === "modern-v2") {
+    if (report.canonical_snapshot !== null) {
+      fail("legacy Pages capture report must not contain canonical snapshot authority");
+    }
+  } else if (report.capture_kind === "canonical-v2") {
     if (snapshot === LEGACY_PAGES_SNAPSHOT_SHA) {
       fail("approved v0.7.4 snapshot must not be fabricated as a modern Pages capture");
     }
     if (report.legacy_snapshot !== null) {
-      fail("modern Pages capture report must not contain legacy snapshot authority");
+      fail("canonical Pages capture report must not contain legacy snapshot authority");
     }
+    validateCanonicalCaptureEvidence(report.canonical_snapshot, { sourceCommit: snapshot });
+  } else if (report.capture_kind === "modern-v2") {
+    fail("old modern-v2 capture reports are diagnostic-only and cannot satisfy v3 authority");
   } else {
     fail("Pages rollback capture report kind is invalid");
   }
@@ -771,7 +785,7 @@ export async function produceRollbackCaptureReport(input, {
   const captureKind = input.captureMode === "bootstrap-capture"
     ? "legacy-v0.7.4"
     : input.captureMode === "capture"
-      ? "modern-v2"
+      ? "canonical-v2"
       : fail("capture report mode must be capture or bootstrap-capture");
   const legacySnapshot = captureKind === "legacy-v0.7.4"
     ? validateLegacySnapshotEvidence(input.legacySnapshot, {
@@ -781,7 +795,7 @@ export async function produceRollbackCaptureReport(input, {
       captureRunAttempt: runAttempt,
     })
     : null;
-  if (captureKind === "modern-v2" && input.legacySnapshot != null) {
+  if (captureKind === "canonical-v2" && input.legacySnapshot != null) {
     fail("regular capture must not supply legacy snapshot authority");
   }
   const artifactName = expectedCaptureArtifactName({
@@ -902,6 +916,9 @@ export async function produceRollbackCaptureReport(input, {
     retention_seconds: retentionSeconds,
     capture_kind: captureKind,
     legacy_snapshot: legacySnapshot === null ? null : structuredClone(legacySnapshot),
+    canonical_snapshot: captureKind === "canonical-v2"
+      ? validateCanonicalCaptureEvidence(input.canonicalSnapshot, { sourceCommit: snapshot })
+      : null,
     status: "captured",
   });
   validateRollbackCaptureReport(report, {
@@ -926,16 +943,25 @@ export async function writeRollbackCaptureReport(path, report) {
   return createHash("sha256").update(bytes, "utf8").digest("hex");
 }
 
-export function validatePagesMutationCaptureKind(mode, captureKind) {
-  if (mode === "forward") {
-    if (!new Set(["legacy-v0.7.4", "modern-v2"]).has(captureKind)) {
-      fail("Pages forward capture report kind is unsupported");
-    }
-    return captureKind;
+export function validateRollbackCaptureReportDiagnostic(report) {
+  if (report?.schema_id !== "clearra.pages.rollback-capture-authority.v2") {
+    return validateRollbackCaptureReport(report);
   }
-  if (mode === "restore") {
-    if (captureKind !== "legacy-v0.7.4") {
-      fail("Pages restore requires a sealed v0.7.4 capture report");
+  requireExactKeys(report, DIAGNOSTIC_V2_CAPTURE_REPORT_FIELDS, "diagnostic Pages rollback capture report");
+  verifyCanonicalReportHash(report, "diagnostic Pages rollback capture report");
+  if (report.capture_kind !== "modern-v2") fail("only old modern-v2 is admitted by the diagnostic v2 reader");
+  requireSha(report.snapshot_source_commit, "diagnostic snapshot source commit");
+  requireSha(report.authority_source_commit, "diagnostic authority source commit");
+  requireDecimalId(report.capture_run_id, "diagnostic capture run ID");
+  if (report.status !== "captured") fail("diagnostic Pages capture report is not captured");
+  rejectSecretMaterial(report, "diagnostic Pages rollback capture report");
+  return report;
+}
+
+export function validatePagesMutationCaptureKind(mode, captureKind) {
+  if (new Set(["forward", "restore"]).has(mode)) {
+    if (!new Set(["legacy-v0.7.4", "canonical-v2"]).has(captureKind)) {
+      fail(`Pages ${mode} capture report kind is unsupported`);
     }
     return captureKind;
   }
@@ -1030,6 +1056,7 @@ export async function readRollbackCaptureReport(path) {
 export function resolveCaptureReportArtifact({
   snapshotSha,
   authoritySha,
+  consumerAuthoritySha = authoritySha,
   captureRunId,
   captureRun,
   captureArtifacts,
@@ -1037,6 +1064,10 @@ export function resolveCaptureReportArtifact({
 }) {
   const snapshot = requireSha(snapshotSha, "snapshot SHA");
   const authority = requireSha(authoritySha, "authority SHA");
+  const consumerAuthority = requireSha(
+    consumerAuthoritySha,
+    "consumer authority SHA",
+  );
   const runId = requireDecimalId(String(captureRunId), "capture run ID");
   const run = requireObject(captureRun, "capture run");
   const runAttempt = requireDecimalId(String(run.run_attempt), "capture run attempt");
@@ -1089,7 +1120,7 @@ export function resolveCaptureReportArtifact({
   validateIndependentConsumerRun(consumerRun, {
     captureRunId: runId,
     captureCompletedAt: run.updated_at,
-    authoritySha: authority,
+    authoritySha: consumerAuthority,
   });
   return Object.freeze({
     capture_run_attempt: runAttempt,
@@ -1208,6 +1239,7 @@ export function validatePagesCaptureRequestInputs(value) {
 export function validateCaptureAuthority({
   snapshotSha,
   authoritySha,
+  consumerAuthoritySha = authoritySha,
   captureRunId,
   captureArtifactId,
   captureArtifactName,
@@ -1220,6 +1252,10 @@ export function validateCaptureAuthority({
 }) {
   const snapshot = requireSha(snapshotSha, "snapshot SHA");
   const authority = requireSha(authoritySha, "authority SHA");
+  const consumerAuthority = requireSha(
+    consumerAuthoritySha,
+    "consumer authority SHA",
+  );
   const runId = requireDecimalId(String(captureRunId), "capture run ID");
   const artifactId = requireDecimalId(String(captureArtifactId), "capture artifact ID");
   const digest = requirePattern(captureArtifactDigest, DIGEST_PATTERN, "capture artifact digest");
@@ -1291,7 +1327,7 @@ export function validateCaptureAuthority({
       String(consumer.id) === runId ||
       consumer.event !== "workflow_dispatch" ||
       consumer.head_branch !== "main" ||
-      consumer.head_sha !== authority
+      consumer.head_sha !== consumerAuthority
     ) {
       fail("consumer run is not an independent exact-main workflow_dispatch run");
     }
@@ -1470,7 +1506,7 @@ export function canonicalAcceptanceQuery(sha) {
 
 async function canonicalRuns(api, sha, label) {
   const query = canonicalAcceptanceQuery(sha);
-  await resolveCanonicalAcceptanceHistory({
+  return resolveCanonicalAcceptanceHistory({
     sourceCommit: sha,
     expectedCount: 1,
     label,
@@ -1517,12 +1553,26 @@ async function validateSealedCaptureConsumerAuthority({
   currentRun,
 }) {
   const { report, file_sha256: reportFileSha256 } = reportRecord;
+  const captureAuthoritySha = requireSha(
+    report.authority_source_commit,
+    "capture authority SHA",
+  );
   validateCaptureReportConsumerBinding(report, {
     repository,
     snapshotSha,
-    authoritySha,
+    authoritySha: captureAuthoritySha,
     captureRunId: reportFields.captureRunId,
   });
+  if (captureAuthoritySha !== authoritySha) {
+    const lineage = await api.get(
+      `/compare/${captureAuthoritySha}...${authoritySha}`,
+      "capture authority ancestry",
+    );
+    if (lineage?.status !== "ahead") {
+      fail("capture authority must be current main or its strict ancestor");
+    }
+    await canonicalRuns(api, captureAuthoritySha, "capture authority canonical runs");
+  }
   const captureRunId = requireDecimalId(report.capture_run_id, "capture run ID");
   const captureArtifactId = requireDecimalId(report.artifact_id, "capture artifact ID");
   const reportArtifactId = requireDecimalId(
@@ -1542,7 +1592,8 @@ async function validateSealedCaptureConsumerAuthority({
     ]);
   const resolvedReportArtifact = resolveCaptureReportArtifact({
     snapshotSha,
-    authoritySha,
+    authoritySha: captureAuthoritySha,
+    consumerAuthoritySha: authoritySha,
     captureRunId,
     captureRun,
     captureArtifacts,
@@ -1565,7 +1616,8 @@ async function validateSealedCaptureConsumerAuthority({
   });
   validateCaptureAuthority({
     snapshotSha,
-    authoritySha,
+    authoritySha: captureAuthoritySha,
+    consumerAuthoritySha: authoritySha,
     captureRunId,
     captureArtifactId,
     captureArtifactName: report.artifact_name,
@@ -1692,6 +1744,32 @@ async function verifyModernPagesPublicAuthority({
   validateLivePagesIdentity(identity, manifest, currentPagesSha);
 }
 
+async function verifyCanonicalPagesPublicAuthority({ pageUrl, cacheBuster, canonicalSnapshot }, {
+  readPublicBytes = fetchPublicBytes,
+} = {}) {
+  const sealed = validateCanonicalCaptureEvidence(canonicalSnapshot);
+  const identityBytes = await readPublicBytes(
+    `${pageUrl}/clearra-build-identity.json?authority=${cacheBuster}-identity`,
+    "live canonical Pages identity",
+    sealed.identity_bytes_size,
+  );
+  if (createHash("sha256").update(identityBytes).digest("hex") !== sealed.identity_bytes_sha256) {
+    fail("live canonical Pages identity bytes differ from capture");
+  }
+  let identity;
+  try { identity = JSON.parse(Buffer.from(identityBytes).toString("utf8")); } catch { fail("live canonical Pages identity is invalid JSON"); }
+  if (canonicalJson(identity) !== canonicalJson(sealed.identity)) fail("live canonical Pages identity differs from capture");
+  for (const [index, file] of sealed.identity.files.entries()) {
+    const bytes = await readPublicBytes(
+      `${pageUrl}/${file.path}?authority=${cacheBuster}-${index}`,
+      `live canonical Pages file ${file.path}`,
+      file.size,
+    );
+    if (bytes.byteLength !== file.size || createHash("sha256").update(bytes).digest("hex") !== file.sha256) fail(`live canonical Pages file differs from capture: ${file.path}`);
+  }
+  return sealed;
+}
+
 export async function verifyCurrentPagesAgainstCapture({
   mode,
   phase,
@@ -1717,20 +1795,15 @@ export async function verifyCurrentPagesAgainstCapture({
         ).preartifact_public_readback,
       }, dependencies);
     }
-    if (captureKind === "modern-v2") {
-      return verifyModernPagesPublicAuthority({
-        pageUrl,
-        cacheBuster,
-        currentPagesSha,
-      }, dependencies);
+    if (captureKind === "canonical-v2") {
+      return verifyCanonicalPagesPublicAuthority({ pageUrl, cacheBuster, canonicalSnapshot: report.canonical_snapshot }, dependencies);
     }
     fail("Pages forward capture report kind is unsupported");
   }
-  return verifyModernPagesPublicAuthority({
-    pageUrl,
-    cacheBuster,
-    currentPagesSha,
-  }, dependencies);
+  if (captureKind === "legacy-v0.7.4") {
+    return verifyLegacyForwardPublicAuthority({ repository, pageUrl, cacheBuster, phase, sealedReadback: report.legacy_snapshot.preartifact_public_readback }, dependencies);
+  }
+  return verifyCanonicalPagesPublicAuthority({ pageUrl, cacheBuster, canonicalSnapshot: report.canonical_snapshot }, dependencies);
 }
 
 async function captureReportMain() {
@@ -1746,6 +1819,7 @@ async function captureReportMain() {
   assertExact(requireSha(env("GITHUB_SHA"), "workflow SHA"), authoritySha, "workflow SHA");
   const captureMode = env("PAGES_CAPTURE_MODE");
   let legacySnapshot = null;
+  let canonicalSnapshot = null;
   if (captureMode === "bootstrap-capture") {
     const identity = await readLegacyReconstructedIdentity(env("LEGACY_IDENTITY_PATH"));
     legacySnapshot = {
@@ -1770,6 +1844,41 @@ async function captureReportMain() {
     ]) {
       assertEmpty(env(name, { optional: true }), name);
     }
+    const artifactAuthority = JSON.parse(Buffer.from(
+      env("CANONICAL_ARTIFACT_AUTHORITY_BASE64"), "base64",
+    ).toString("utf8"));
+    const initial = JSON.parse(Buffer.from(
+      env("CANONICAL_INITIAL_EVIDENCE_BASE64"), "base64",
+    ).toString("utf8"));
+    const preartifact = JSON.parse(Buffer.from(
+      env("CANONICAL_PREARTIFACT_EVIDENCE_BASE64"), "base64",
+    ).toString("utf8"));
+    canonicalSnapshot = {
+      ...artifactAuthority,
+      identity: initial.identity,
+      identity_sha256: initial.identity_sha256,
+      identity_bytes_sha256: initial.identity_bytes_sha256,
+      identity_bytes_size: initial.identity_bytes_size,
+      file_set_sha256: initial.file_set_sha256,
+      file_count: initial.file_count,
+      total_bytes: initial.total_bytes,
+      initial_public_readback: {
+        identity_sha256: initial.identity_sha256,
+        identity_bytes_sha256: initial.identity_bytes_sha256,
+        identity_bytes_size: initial.identity_bytes_size,
+        file_set_sha256: initial.file_set_sha256,
+        file_count: initial.file_count,
+        total_bytes: initial.total_bytes,
+      },
+      preartifact_public_readback: {
+        identity_sha256: preartifact.identity_sha256,
+        identity_bytes_sha256: preartifact.identity_bytes_sha256,
+        identity_bytes_size: preartifact.identity_bytes_size,
+        file_set_sha256: preartifact.file_set_sha256,
+        file_count: preartifact.file_count,
+        total_bytes: preartifact.total_bytes,
+      },
+    };
   } else {
     fail("PAGES_CAPTURE_MODE must be capture or bootstrap-capture for capture report sealing");
   }
@@ -1777,6 +1886,7 @@ async function captureReportMain() {
     repository,
     captureMode,
     legacySnapshot,
+    canonicalSnapshot,
     snapshotSha: env("SNAPSHOT_SHA"),
     authoritySha,
     captureRunId: env("GITHUB_RUN_ID"),
@@ -1852,9 +1962,24 @@ async function resolveCaptureReportMain(mode) {
       "capture run artifacts",
     ),
   ]);
+  const captureAuthoritySha = requireSha(
+    captureRun?.head_sha,
+    "capture authority SHA",
+  );
+  if (captureAuthoritySha !== authoritySha) {
+    const lineage = await api.get(
+      `/compare/${captureAuthoritySha}...${authoritySha}`,
+      "capture authority ancestry",
+    );
+    if (lineage?.status !== "ahead") {
+      fail("capture authority must be current main or its strict ancestor");
+    }
+    await canonicalRuns(api, captureAuthoritySha, "capture authority canonical runs");
+  }
   const resolved = resolveCaptureReportArtifact({
     snapshotSha,
-    authoritySha,
+    authoritySha: captureAuthoritySha,
+    consumerAuthoritySha: authoritySha,
     captureRunId,
     captureRun,
     captureArtifacts,
@@ -1937,10 +2062,10 @@ async function main() {
 
   assertExact(githubRef, "refs/heads/main", "workflow ref");
   assertExact(githubSha, authoritySha, "workflow SHA");
-  if (mode === "restore") {
-    assertExact(currentPagesSha, authoritySha, "restore current Pages SHA");
-  } else {
+  if (mode !== "restore") {
     assertExact(currentPagesSha, snapshotSha, `${mode} current Pages SHA`);
+  } else if (currentPagesSha === snapshotSha) {
+    fail("restore target must differ from the current Pages authority");
   }
 
   const api = apiClient({ repository, token, apiUrl });
@@ -1959,16 +2084,56 @@ async function main() {
     fail("current workflow run is not bound to the exact main authority");
   }
 
-  const comparison = await api.get(
-    `/compare/${snapshotSha}...${authoritySha}`,
-    "snapshot ancestry",
-  );
-  if (!new Set(["ahead", "identical"]).has(comparison.status)) {
-    fail("snapshot SHA must be the authority main SHA or its ancestor");
+  if (mode === "restore") {
+    const targetToCurrent = await api.get(`/compare/${snapshotSha}...${currentPagesSha}`, "restore target-to-current lineage");
+    if (targetToCurrent?.status !== "ahead") fail("restore target must be a strict ancestor of current Pages");
+    const currentToMain = await api.get(`/compare/${currentPagesSha}...${authoritySha}`, "restore current-to-main lineage");
+    if (!new Set(["identical", "ahead"]).has(currentToMain?.status)) fail("current Pages must equal main or be its ancestor");
+  } else {
+    const comparison = await api.get(`/compare/${snapshotSha}...${authoritySha}`, "snapshot ancestry");
+    if (!new Set(["ahead", "identical"]).has(comparison.status)) fail("snapshot SHA must be the authority main SHA or its ancestor");
   }
-  await canonicalRuns(api, snapshotSha, "snapshot canonical runs");
-  if (authoritySha !== snapshotSha) {
-    await canonicalRuns(api, authoritySha, "authority canonical runs");
+  for (const sha of new Set([
+    snapshotSha,
+    authoritySha,
+    ...(mode === "restore" ? [currentPagesSha] : []),
+  ])) {
+    await canonicalRuns(api, sha, "Pages authority canonical runs");
+  }
+
+  if (mode === "capture") {
+    const accepted = await canonicalRuns(api, snapshotSha, "capture accepted source");
+    const artifactPages = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const value = await api.get(
+        `/actions/runs/${accepted.id}/artifacts?per_page=100&page=${page}`,
+        `accepted Pages artifacts page ${page}`,
+      );
+      artifactPages.push(value);
+      if (Array.isArray(value?.artifacts) && value.artifacts.length === 0) break;
+      if (page === 20) fail("accepted Pages artifact pagination exceeds the closed limit");
+    }
+    const artifactAuthority = resolveAcceptedPagesArtifact({
+      sourceCommit: snapshotSha,
+      acceptedRun: {
+        id: accepted.id,
+        run_attempt: accepted.attempt,
+        head_sha: accepted.sourceCommit,
+        status: accepted.status,
+        conclusion: accepted.conclusion,
+        event: accepted.event,
+        head_branch: accepted.branch,
+        path: accepted.path,
+      },
+      artifactPages,
+    });
+    await appendFile(env("GITHUB_OUTPUT"), [
+      `accepted_run_id=${artifactAuthority.accepted_run_id}`,
+      `accepted_artifact_id=${artifactAuthority.accepted_artifact_id}`,
+      `accepted_artifact_name=${artifactAuthority.accepted_artifact_name}`,
+      `canonical_artifact_authority_base64=${Buffer.from(canonicalJson(artifactAuthority)).toString("base64")}`,
+      "",
+    ].join("\n"), "utf8");
   }
 
   const pages = await api.get("/pages", "Pages configuration");
@@ -2001,6 +2166,7 @@ async function main() {
       `capture_artifact_name=${captureReportRecord.report.artifact_name}`,
       `capture_artifact_digest=${captureReportRecord.report.artifact_digest}`,
       `capture_tar_sha256=${captureReportRecord.report.artifact_tar_sha256}`,
+      `capture_kind=${captureReportRecord.report.capture_kind}`,
       `capture_report_file_sha256=${captureReportRecord.file_sha256}`,
       "",
     ].join("\n"), "utf8");

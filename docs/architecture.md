@@ -1107,7 +1107,7 @@ queue approximation. Oracle remains the default for compatibility.
 
 The only product entry is:
 
-`CLI or web command -> SetupAppCommand -> validation -> WasmSetupSearchBackend -> SetupFinderReport`
+`shared CLI command -> SetupAppCommand -> validation -> WasmSetupSearchBackend -> SetupFinderReport`
 
 The old `SetupSearchService`, deterministic shelf packing, and per-candidate
 post-PC continuation path do not exist in the product source.

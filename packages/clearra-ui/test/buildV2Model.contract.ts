@@ -4,6 +4,7 @@ import {
   BUILD_V2_CAPABILITIES,
   buildV2AllowedObjectives,
   buildV2Command,
+  buildV2CommandArguments,
   buildV2DefaultObjective,
   buildV2RequestForDesktop,
   buildV2SourceKind,
@@ -24,28 +25,29 @@ for (const capability of BUILD_V2_CAPABILITIES) {
   assert.match(command, new RegExp(commandPath(capability), 'u'));
 
   const desktop = buildV2RequestForDesktop(request, 'ko');
-  assert.equal(desktop.app_request_model, 'clearra-app/AppRequest');
-  assert.equal(desktop.command, 'build-v2');
-  assert.equal(desktop.capability_id, capability);
-  assert.equal(desktop.backend, 'cpu');
-  assert.equal(desktop.allow_backend_fallback, false);
+  assert.equal(desktop.app_request_model, 'clearra-cli/CommandRequest');
+  assert.equal(desktop.command, 'cli');
+  assert.equal(desktop.language, 'ko');
+  assert.deepEqual(desktop.arguments, buildV2CommandArguments(request));
+  assert.equal(optionValue(desktop.arguments, '--backend'), 'cpu');
+  assert.equal(desktop.arguments.includes('--no-backend-fallback'), true);
   assert.equal('memory_budget_mb' in desktop, false);
   assert.equal('max_memory_mib' in desktop, false);
 
   if (buildV2SourceKind(capability) === 'target-document') {
     assert.match(command, / --target-format ctk3 --target-document ctk3_test /u);
-    assert.equal(desktop.target_document, 'ctk3_test');
-    assert.equal('solution_document' in desktop, false);
+    assert.equal(optionValue(desktop.arguments, '--target-document'), 'ctk3_test');
+    assert.equal(desktop.arguments.includes('--solution-document'), false);
   } else if (buildV2SourceKind(capability) === 'solution-document') {
     assert.match(command, / --solution-format ctk3 --solution-document ctk3_test /u);
-    assert.equal(desktop.solution_document, 'ctk3_test');
-    assert.equal('target_document' in desktop, false);
+    assert.equal(optionValue(desktop.arguments, '--solution-document'), 'ctk3_test');
+    assert.equal(desktop.arguments.includes('--target-document'), false);
   } else {
     assert.match(
       command,
       / --base-mask 0x0000000000000000 --target-mask 0x000000000000000f --height 4 /u
     );
-    assert.equal(desktop.target_mask, '0x000000000000000f');
+    assert.equal(optionValue(desktop.arguments, '--target-mask'), '0x000000000000000f');
   }
 }
 
@@ -63,11 +65,25 @@ invalidNominalTarget.targetDocument = 'v115@wrong-nominal-format';
 assert.deepEqual(buildV2ValidationCodes(invalidNominalTarget), ['target_document_invalid']);
 
 const score = buildV2RequestForDesktop(validRequest('build.evaluate.score'), 'en');
-assert.equal(score.score_profile, 'tetrio');
-assert.equal(score.initial_b2b, 0);
+assert.equal(optionValue(score.arguments, '--score-profile'), 'tetrio');
+assert.equal(optionValue(score.arguments, '--initial-b2b'), '0');
 const nonScore = buildV2RequestForDesktop(validRequest('build.evaluate.cover'), 'en');
-assert.equal('score_profile' in nonScore, false);
-assert.equal('initial_b2b' in nonScore, false);
+assert.equal(nonScore.arguments.includes('--score-profile'), false);
+assert.equal(nonScore.arguments.includes('--initial-b2b'), false);
+
+const spacedDocument = {
+  ...validRequest('build.setup'),
+  targetDocument: 'ctk3_test with-space'
+};
+assert.equal(
+  optionValue(buildV2CommandArguments(spacedDocument), '--target-document'),
+  'ctk3_test with-space'
+);
+assert.match(buildV2Command(spacedDocument), /--target-document "ctk3_test with-space"/u);
+assert.deepEqual(
+  buildV2RequestForDesktop(spacedDocument, 'en').arguments,
+  buildV2CommandArguments(spacedDocument)
+);
 
 function validRequest(capability: BuildV2Capability): BuildV2Request {
   return {
@@ -85,6 +101,11 @@ function commandPath(capability: BuildV2Capability): string {
   return capability.startsWith('build.evaluate.')
     ? `build evaluate ${capability.slice('build.evaluate.'.length)}`
     : `build ${capability.slice('build.'.length)}`;
+}
+
+function optionValue(arguments_: readonly string[], option: string): string | undefined {
+  const index = arguments_.indexOf(option);
+  return index < 0 ? undefined : arguments_[index + 1];
 }
 
 assert.equal(BUILD_V2_CAPABILITIES.length, 12);

@@ -53,14 +53,25 @@
 
   $: report = view.searchReport;
   $: productResultPayload = view.response?.product_result_payload ?? null;
-  $: solutionCount = workspaceSolutionCount(report);
-  $: canonicalSolutionKeys = report?.normalized_solution_keys ?? [];
+  $: pcScoreFieldSummary = productResultPayload?.content.payload_kind === 'pc-score-field-summary'
+    ? productResultPayload.content.payload
+    : null;
+  $: solutionCount = pcScoreFieldSummary
+    ? pcScoreFieldSummary.fields.length
+    : workspaceSolutionCount(report);
+  $: canonicalSolutionKeys = pcScoreFieldSummary
+    ? pcScoreFieldSummary.fields.map((field) => field.normalized_field_key)
+    : (report?.normalized_solution_keys ?? []);
   $: solutionProbabilityByKey = Object.fromEntries(
     (report?.solution_probabilities ?? []).map((entry) => [entry.solution_key, entry])
   );
-  $: solutionAverageScoreByKey = Object.fromEntries(
-    (report?.solution_average_scores ?? []).map((entry) => [entry.solution_key, entry])
-  );
+  $: solutionAverageScoreByKey = pcScoreFieldSummary
+    ? Object.fromEntries(
+        pcScoreFieldSummary.fields.map((field) => [field.normalized_field_key, field])
+      )
+    : Object.fromEntries(
+        (report?.solution_average_scores ?? []).map((entry) => [entry.solution_key, entry])
+      );
   $: solutionCommentByKey = buildSolutionComments(
     canonicalSolutionKeys,
     language,
@@ -69,7 +80,7 @@
   );
   $: solutionCommentsAvailable =
     (report?.solution_probabilities.length ?? 0) > 0 ||
-    (report?.solution_average_scores.length ?? 0) > 0;
+    (pcScoreFieldSummary?.fields.length ?? report?.solution_average_scores.length ?? 0) > 0;
   $: solutionKeys = canonicalSolutionKeys
     .map((key, canonicalIndex) => ({
       canonicalIndex,
@@ -95,8 +106,12 @@
     failedQueueCopyComplete = false;
   }
   $: tilingOnly = summaryFields.objective === 'tiling';
-  $: solutionPageAvailable = workspaceSolutionPageAvailable(report);
-  $: solutionKeysComplete = workspaceSolutionKeysComplete(report);
+  $: solutionPageAvailable = pcScoreFieldSummary
+    ? false
+    : workspaceSolutionPageAvailable(report);
+  $: solutionKeysComplete = pcScoreFieldSummary
+    ? true
+    : workspaceSolutionKeysComplete(report);
   $: solutionResultIdentity = solutionPageResultIdentity(
     report?.normalized_solution_set_hash,
     solutionCount,
@@ -344,9 +359,9 @@
         {/if}
       </div>
 
-      {#if scoringRequested}
+      {#if scoringRequested || pcScoreFieldSummary}
         <div class="metric-grid score-metrics">
-          <article><span>{label('averageScore')}</span><strong>{summaryFields.score_field_average_score ?? summaryFields.score_unconditional_expected_score ?? '—'}</strong></article>
+          <article><span>{pcScoreFieldSummary ? label('overallScore') : label('averageScore')}</span><strong>{pcScoreFieldSummary?.overall_score ?? summaryFields.score_field_average_score ?? summaryFields.score_unconditional_expected_score ?? '—'}</strong></article>
         </div>
       {/if}
 

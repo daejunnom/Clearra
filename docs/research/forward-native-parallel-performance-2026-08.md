@@ -105,10 +105,10 @@ paths. The numbers must not be ranked without normalizing those semantics first.
 
 - `clearra-forward-search`: 24/24 tests passed, including reversed result arrival, compact placement
   rotation, bounded reorder backpressure, cancellation, and serial/parallel equality.
-- `clearra-web-command`: 91/91 tests passed.
+- `clearra-cli-command`: 91/91 tests passed.
 - Discord bot: 336/336 tests passed.
 - Native AppContext focused tests: 6/6 passed; CLI renderer focused tests: 2/2 passed.
-- Native `clearra-app`, `clearra-cli`, and `clearra-web-command` all-target checks passed.
+- Native `clearra-app`, `clearra-cli`, and `clearra-cli-command` all-target checks passed.
 - `clearra-wasm --features stage-profiling --target wasm32-unknown-unknown` check passed.
 
 Initial core SHA-256 values were

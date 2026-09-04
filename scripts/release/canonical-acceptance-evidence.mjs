@@ -218,6 +218,9 @@ const REQUIRED_JOBS = Object.freeze(new Map([
     "Upload Windows GUI artifact",
   ])],
 ]));
+export const CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES = Object.freeze([
+  ...REQUIRED_JOBS.keys(),
+]);
 
 export function createReleaseGateReports(authority, toolchains) {
   const identity = validateAuthority(authority);
@@ -668,12 +671,15 @@ export function validateCanonicalAcceptanceEvidence(report, authorityValue) {
   ) {
     throw new Error("canonical acceptance evidence differs from the bound run attempt");
   }
-  if (!Array.isArray(report.jobs) || report.jobs.length !== REQUIRED_JOBS.size) {
+  if (
+    !Array.isArray(report.jobs) ||
+    report.jobs.length !== CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES.length
+  ) {
     throw new Error("canonical acceptance evidence has an invalid job set");
   }
   const jobNames = report.jobs.map((job) => job?.name);
   if (
-    jobNames.join(",") !== [...REQUIRED_JOBS.keys()].join(",") ||
+    jobNames.join(",") !== CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES.join(",") ||
     report.jobs.some((job) => job?.status !== "passed" || !DECIMAL_ID.test(job?.job_id))
   ) {
     throw new Error("canonical acceptance evidence job identities are invalid");

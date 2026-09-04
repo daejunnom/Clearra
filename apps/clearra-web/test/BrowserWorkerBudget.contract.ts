@@ -22,6 +22,11 @@ import {
   workspaceRequestForDesktop
 } from '../../../packages/clearra-ui/src/lib/workspace/solverWorkspaceModel.ts';
 
+function optionValue(arguments_: readonly string[], option: string): string | undefined {
+  const index = arguments_.indexOf(option);
+  return index === -1 ? undefined : arguments_[index + 1];
+}
+
 const setup = createDefaultSetupFinderRequest();
 assert.match(buildSetupFinderCommand(setup, 11), /--auto-workers 11(?:\s|$)/);
 assert.doesNotMatch(buildSetupFinderCommand(setup, 11), /--use-all-cpu-threads/);
@@ -59,14 +64,16 @@ assert.match(buildForwardSearchCommand(fullForward, 12), /--use-all-cpu-threads(
 const pc = { ...createDefaultWorkspaceRequest(), useAllLogicalProcessors: true, workers: 12 };
 assert.match(buildWorkspaceCommand(pc), /--workers 12(?:\s|$)/);
 assert.match(buildWorkspaceCommand(pc), /--use-all-cpu-threads(?:\s|$)/);
-assert.equal(workspaceRequestForDesktop(pc, 'en').workers, pc.workers);
-assert.equal(workspaceRequestForDesktop(pc, 'en').use_all_logical_processors, true);
+const pcDesktop = workspaceRequestForDesktop(pc, 'en');
+assert.equal(optionValue(pcDesktop.arguments, '--workers'), String(pc.workers));
+assert.equal(pcDesktop.arguments.includes('--use-all-cpu-threads'), true);
+const defaultPcDesktop = workspaceRequestForDesktop(createDefaultWorkspaceRequest(), 'en');
 assert.equal(
-  workspaceRequestForDesktop(createDefaultWorkspaceRequest(), 'en').workers,
-  createDefaultWorkspaceRequest().workers
+  optionValue(defaultPcDesktop.arguments, '--workers'),
+  String(createDefaultWorkspaceRequest().workers)
 );
 assert.equal(
-  workspaceRequestForDesktop(createDefaultWorkspaceRequest(), 'en').use_all_logical_processors,
+  defaultPcDesktop.arguments.includes('--use-all-cpu-threads'),
   false
 );
 
@@ -77,40 +84,48 @@ const build = {
 };
 assert.match(buildProbabilityCommand(build), /--workers 12(?:\s|$)/);
 assert.match(buildProbabilityCommand(build), /--use-all-cpu-threads(?:\s|$)/);
-assert.equal(buildProbabilityRequestForDesktop(build, 'en').workers, build.workers);
-assert.equal(buildProbabilityRequestForDesktop(build, 'en').use_all_logical_processors, true);
+const buildDesktop = buildProbabilityRequestForDesktop(build, 'en');
+assert.equal(optionValue(buildDesktop.arguments, '--workers'), String(build.workers));
+assert.equal(buildDesktop.arguments.includes('--use-all-cpu-threads'), true);
 assert.equal(
-  buildProbabilityRequestForDesktop(createDefaultBuildProbabilityRequest(), 'en').workers,
-  createDefaultBuildProbabilityRequest().workers
+  optionValue(
+    buildProbabilityRequestForDesktop(createDefaultBuildProbabilityRequest(), 'en').arguments,
+    '--workers'
+  ),
+  String(createDefaultBuildProbabilityRequest().workers)
 );
 
-assert.equal(setupFinderRequestForDesktop(fullSetup, 'en', 12).workers, 12);
+const fullSetupDesktop = setupFinderRequestForDesktop(fullSetup, 'en', 12);
+assert.equal(optionValue(fullSetupDesktop.arguments, '--auto-workers'), '12');
 assert.equal(
-  setupFinderRequestForDesktop(fullSetup, 'en', 12).use_all_logical_processors,
+  fullSetupDesktop.arguments.includes('--use-all-cpu-threads'),
   true
 );
-assert.equal(setupFinderRequestForDesktop(setup, 'en', 11).workers, 11);
 assert.equal(
-  setupFinderRequestForDesktop(
-    fullSetup,
-    'en',
-    1,
-    { setupId: 'setup-1', conditionId: 'condition-1' }
-  ).workers,
-  0
+  optionValue(setupFinderRequestForDesktop(setup, 'en', 11).arguments, '--auto-workers'),
+  '11'
+);
+const setupPathDesktop = setupFinderRequestForDesktop(
+  fullSetup,
+  'en',
+  1,
+  { setupId: 'setup-1', conditionId: 'condition-1' }
 );
 assert.equal(
-  setupFinderRequestForDesktop(
-    fullSetup,
-    'en',
-    1,
-    { setupId: 'setup-1', conditionId: 'condition-1' }
-  ).use_all_logical_processors,
+  optionValue(setupPathDesktop.arguments, '--auto-workers'),
+  '1'
+);
+assert.equal(
+  setupPathDesktop.arguments.includes('--use-all-cpu-threads'),
   false
 );
-assert.equal(forwardSearchRequestForDesktop(fullForward, 'en', 12).workers, 12);
+const fullForwardDesktop = forwardSearchRequestForDesktop(fullForward, 'en', 12);
+assert.equal(optionValue(fullForwardDesktop.arguments, '--auto-workers'), '12');
 assert.equal(
-  forwardSearchRequestForDesktop(fullForward, 'en', 12).use_all_logical_processors,
+  fullForwardDesktop.arguments.includes('--use-all-cpu-threads'),
   true
 );
-assert.equal(forwardSearchRequestForDesktop(forward, 'en', 11).workers, 11);
+assert.equal(
+  optionValue(forwardSearchRequestForDesktop(forward, 'en', 11).arguments, '--auto-workers'),
+  '11'
+);

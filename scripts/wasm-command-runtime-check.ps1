@@ -77,9 +77,9 @@ $script:Scope = New-ClearraProgressScope `
 Push-Location $Root
 try {
     Invoke-CheckedCommand `
-        -Label "cargo check -p clearra-web-command" `
+        -Label "cargo check -p clearra-cli-command" `
         -FileName $CargoPath `
-        -Arguments @("check", "-p", "clearra-web-command")
+        -Arguments @("check", "-p", "clearra-cli-command")
 
     Invoke-CheckedCommand `
         -Label "cargo check -p clearra-wasm" `

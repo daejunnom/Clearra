@@ -37,12 +37,13 @@ export function validDiscordPcScoreMinimalsResult(structured) {
     summary.score_minimals_score_equality !== SCORE_ONLY_EQUALITY ||
     summary.score_minimals_attack_role !== INFORMATIONAL_ATTACK ||
     summary.score_minimals_canonical_selection !== CANONICAL_SELECTION ||
-    !positiveCanonicalDecimal(summary.score_minimals_canonical_candidate_id) ||
+    !canonicalPositiveDecimalU64(summary.score_minimals_canonical_candidate_id) ||
     !safeCanonicalSolutionKey(summary.score_minimals_canonical_solution_key) ||
     !validCanonicalCoveragePortfolio(summary)
   ) return false;
 
-  return hasOnlyCanonicalPortfolioCandidates(structured) &&
+  return validCanonicalArtifacts(structured) &&
+    hasOnlyCanonicalPortfolioCandidates(structured) &&
     !containsUnexpectedTieMetadata(structured);
 }
 
@@ -54,6 +55,34 @@ export function discordPcScoreMinimalsResultProjection(structured) {
     scoreEquality: SCORE_ONLY_EQUALITY,
     attackRole: INFORMATIONAL_ATTACK,
   });
+}
+
+/**
+ * Retains the complete CLI evidence envelope for downstream contract checks,
+ * while reducing Discord's renderable solution artifact to its one governed
+ * canonical witness. Numeric candidate identity, never attack, owns this
+ * selection.
+ */
+export function projectDiscordPcScoreMinimalsCanonicalResult(structured) {
+  const selection = discordPcScoreMinimalsResultProjection(structured);
+  if (selection === null) return null;
+
+  const projected = clonePlain(structured);
+  const artifacts = projected.contract?.artifacts;
+  if (isPlainObject(artifacts)) {
+    const sourceKeys = artifacts.solution_keys;
+    const canonicalIndex = sourceKeys.indexOf(selection.canonicalSolutionKey);
+    artifacts.solution_keys = [selection.canonicalSolutionKey];
+    if (Array.isArray(artifacts.solution_classes)) {
+      artifacts.solution_classes = [artifacts.solution_classes[canonicalIndex]];
+    }
+    if (Array.isArray(artifacts.solution_probabilities)) {
+      artifacts.solution_probabilities = artifacts.solution_probabilities.filter(
+        (entry) => entry.solution_key === selection.canonicalSolutionKey,
+      );
+    }
+  }
+  return deepFreeze(stripAttackObservations(projected));
 }
 
 export function discordPcScoreMinimalsSummaryLines(structured, locale = "en") {
@@ -136,16 +165,20 @@ function validCanonicalCoveragePortfolio(summary) {
   for (const member of summary.members) {
     if (
       !isPlainObject(member) ||
-      !positiveCanonicalDecimal(member.candidate_id) ||
+      !canonicalPositiveDecimalU64(member.candidate_id) ||
       !safeCanonicalSolutionKey(member.normalized_solution_key)
     ) return false;
     const candidateId = BigInt(member.candidate_id);
     if (candidateId <= previousCandidateId) return false;
     previousCandidateId = candidateId;
   }
-  const canonical = summary.members[0];
-  return canonical.candidate_id === summary.score_minimals_canonical_candidate_id &&
-    canonical.normalized_solution_key === summary.score_minimals_canonical_solution_key;
+  const suppliedCandidateId = BigInt(summary.score_minimals_canonical_candidate_id);
+  const suppliedWitness = summary.members.find((member) =>
+    member.candidate_id === summary.score_minimals_canonical_candidate_id
+  );
+  return suppliedWitness !== undefined &&
+    suppliedWitness.normalized_solution_key === summary.score_minimals_canonical_solution_key &&
+    summary.members.every((member) => BigInt(member.candidate_id) >= suppliedCandidateId);
 }
 
 function hasOnlyCanonicalPortfolioCandidates(value, path = []) {
@@ -170,7 +203,10 @@ function hasOnlyCanonicalPortfolioCandidates(value, path = []) {
         "summary.score_minimals_canonical_solution_key";
       const canonicalMember =
         /^summary\.members\.[0-9]+\.normalized_solution_key$/u.test(childPathText);
-      if (!canonicalField && !canonicalMember) {
+      const solutionArtifact = childPathText === "contract.artifacts.solution_keys" ||
+        /^contract\.artifacts\.solution_probabilities\.[0-9]+\.solution_key$/u
+          .test(childPathText);
+      if (!canonicalField && !canonicalMember && !solutionArtifact) {
         return false;
       }
     }
@@ -193,12 +229,63 @@ function containsUnexpectedTieMetadata(value, path = []) {
   });
 }
 
+function validCanonicalArtifacts(structured) {
+  const artifacts = structured.contract?.artifacts;
+  if (artifacts === undefined) return true;
+  if (
+    !isPlainObject(artifacts) ||
+    artifacts.schema_version !== "clearra.solution-data.v1" ||
+    !Array.isArray(artifacts.solution_keys) ||
+    artifacts.solution_keys.length === 0 ||
+    artifacts.solution_keys.some((key) => !safeCanonicalSolutionKey(key)) ||
+    new Set(artifacts.solution_keys).size !== artifacts.solution_keys.length
+  ) return false;
+
+  const canonicalKey = structured.summary.score_minimals_canonical_solution_key;
+  if (!artifacts.solution_keys.includes(canonicalKey)) return false;
+  if (
+    artifacts.solution_classes !== undefined &&
+    (!Array.isArray(artifacts.solution_classes) ||
+      artifacts.solution_classes.length !== artifacts.solution_keys.length)
+  ) return false;
+  if (artifacts.solution_probabilities !== undefined) {
+    if (!Array.isArray(artifacts.solution_probabilities)) return false;
+    const sourceKeys = new Set(artifacts.solution_keys);
+    for (const probability of artifacts.solution_probabilities) {
+      if (
+        !isPlainObject(probability) ||
+        !safeCanonicalSolutionKey(probability.solution_key) ||
+        !sourceKeys.has(probability.solution_key)
+      ) return false;
+    }
+  }
+  return true;
+}
+
+function stripAttackObservations(value, path = []) {
+  if (Array.isArray(value)) {
+    return value.map((entry, index) => stripAttackObservations(entry, [...path, index]));
+  }
+  if (!isPlainObject(value)) return value;
+  return Object.fromEntries(Object.entries(value).flatMap(([key, child]) => {
+    const childPath = [...path, key];
+    const policyField = childPath.join(".") === "summary.score_minimals_attack_role";
+    if (key.toLowerCase().includes("attack") && !policyField) return [];
+    return [[key, stripAttackObservations(child, childPath)]];
+  }));
+}
+
 function canonicalDecimal(value) {
   return typeof value === "string" && /^(?:0|[1-9][0-9]*)$/u.test(value);
 }
 
 function positiveCanonicalDecimal(value) {
   return canonicalDecimal(value) && value !== "0";
+}
+
+function canonicalPositiveDecimalU64(value) {
+  return positiveCanonicalDecimal(value) &&
+    BigInt(value) <= 18_446_744_073_709_551_615n;
 }
 
 function safeCanonicalSolutionKey(value) {
@@ -212,4 +299,20 @@ function safeCanonicalSolutionKey(value) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function clonePlain(value) {
+  if (Array.isArray(value)) return value.map(clonePlain);
+  if (isPlainObject(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, clonePlain(nested)]),
+    );
+  }
+  return value;
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  return Object.freeze(value);
 }

@@ -5,8 +5,7 @@
 
   import {
     loadNextProductPage as loadNextDesktopProductPage,
-    releaseProductPages as releaseDesktopProductPages,
-    type ClearraFumenTransform
+    releaseProductPages as releaseDesktopProductPages
   } from '../host';
   import {
     cancelDesktopJob,
@@ -32,12 +31,15 @@
   } from '../wasm';
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
+    buildDocumentUtilityCommand,
     decodeValidatedRenderArtifact,
     detectFieldDocumentFormat,
+    documentUtilityRequestForDesktop,
     fumenDocumentInputs,
     isBoundedCanonicalFieldDocument,
-    quoteWebCommandToken,
     validateFieldDocumentPayload,
+    type DocumentUtilityCommandInput,
+    type DocumentUtilityFumenTransform,
     type DocumentUtilityTool
   } from './documentUtilityModel';
   import { validateProductResultPayload } from './productResultPager';
@@ -52,7 +54,7 @@
   export let workerFactory: (() => Worker) | null = null;
   export let runtime: 'web' | 'desktop' = 'web';
 
-  const transforms: ClearraFumenTransform[] = [
+  const transforms: DocumentUtilityFumenTransform[] = [
     'roundtrip',
     'combine',
     'split',
@@ -71,7 +73,7 @@
 
   let language: WorkspaceLanguage = 'en';
   let document = '';
-  let transform: ClearraFumenTransform = 'roundtrip';
+  let transform: DocumentUtilityFumenTransform = 'roundtrip';
   let pageNumber = 1;
   let pageShift = 0;
   let comments = '';
@@ -158,78 +160,28 @@
     if (active || !validInput) return;
     await releasePageOwner();
     clearAcceptedResult();
+    const commandInput = documentUtilityCommandInput();
     if (runtime === 'web') {
-      updateWasmCommandText(webCommand());
+      updateWasmCommandText(buildDocumentUtilityCommand(commandInput));
       workerController.run();
       return;
     }
-    if (tool === 'parity') {
-      updateDesktopRequest({
-        command: 'utility-parity',
-        language,
-        format: detectedFormat ?? 'ctk3',
-        document: normalizedDocument
-      });
-    } else if (tool === 'fumen') {
-      updateDesktopRequest({
-        command: 'utility-fumen',
-        language,
-        format: 'fumen',
-        transform,
-        documents: transform === 'text-to-fumen' ? [] : fumenDocuments,
-        page_number: transform === 'get-page' ? pageNumber : undefined,
-        page_shift: transform === 'page-shift' ? pageShift : undefined,
-        comments: transform === 'text-to-fumen' ? commentValues : []
-      });
-    } else if (tool === 'render') {
-      updateDesktopRequest({
-        command: 'utility-render',
-        language,
-        format: detectedFormat ?? 'ctk3',
-        document: normalizedDocument,
-        artifact_format: artifactFormat,
-        page_number: artifactFormat === 'png' ? pageNumber : undefined
-      });
-    } else {
-      updateDesktopRequest({
-        command: tool === 'to-gray' ? 'utility-to-gray' : 'utility-mirror',
-        language,
-        format: detectedFormat ?? 'ctk3',
-        document: normalizedDocument
-      });
-    }
+    updateDesktopRequest(documentUtilityRequestForDesktop(commandInput, language));
     await startDesktopJob();
   }
 
-  function webCommand(): string {
-    if (tool === 'parity') {
-      return `clearra utility parity --format ${detectedFormat} --document ${quoteWebCommandToken(normalizedDocument)}`;
-    }
-    if (tool === 'render') {
-      return [
-        'clearra utility render',
-        '--format',
-        detectedFormat ?? 'ctk3',
-        '--document',
-        quoteWebCommandToken(normalizedDocument),
-        '--artifact-format',
-        artifactFormat,
-        ...(artifactFormat === 'png' ? ['--page', String(pageNumber)] : [])
-      ].join(' ');
-    }
-    if (tool === 'to-gray' || tool === 'mirror') {
-      return `clearra utility ${tool} --format ${detectedFormat ?? 'ctk3'} --document ${quoteWebCommandToken(normalizedDocument)}`;
-    }
-    const values = ['clearra utility fumen', transform, '--format', 'fumen'];
-    for (const value of transform === 'text-to-fumen' ? [] : fumenDocuments) {
-      values.push('--document', quoteWebCommandToken(value));
-    }
-    if (transform === 'get-page') values.push('--page', String(pageNumber));
-    if (transform === 'page-shift') values.push('--offset', String(pageShift));
-    for (const value of transform === 'text-to-fumen' ? commentValues : []) {
-      values.push('--comment', quoteWebCommandToken(value));
-    }
-    return values.join(' ');
+  function documentUtilityCommandInput(): DocumentUtilityCommandInput {
+    return {
+      tool,
+      format: detectedFormat ?? 'ctk3',
+      document: normalizedDocument,
+      transform,
+      documents: fumenDocuments,
+      pageNumber,
+      pageShift,
+      comments: commentValues,
+      artifactFormat
+    };
   }
 
   async function cancel() {

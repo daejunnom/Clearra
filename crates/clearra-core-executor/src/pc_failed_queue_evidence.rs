@@ -7,9 +7,13 @@ use clearra_core_domain::{
 };
 use clearra_coverage::{
     pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId},
+    reducer::pattern_coverage_aggregation::{
+        PatternCoverageAggregation, PatternCoverageCompleteness,
+    },
     row::{coverage_row::CoverageRow, coverage_row_kind::CoverageRowKind},
     universe::{
-        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+        coverage_universe_guard::CoverageUniverseGuard, pattern_universe_id::PatternUniverseId,
+        pattern_weight_model_id::PatternWeightModelId,
     },
 };
 use clearra_problem::{SearchProblem, SearchProblemPreset};
@@ -455,10 +459,22 @@ fn produce_from_raw_rows<R: RawFailedQueueCoverageRow>(
     }
     validate_raw_words(usize::MAX, pattern_count, word_count, &union_words)?;
 
-    let success_pattern_count = checked_success_count(&union_words)?;
-    let failed_pattern_count = checked_failed_count(pattern_count, success_pattern_count)?;
-    let (success_probability, failed_probability, materialized_probability_mass) =
-        directly_sum_probabilities(universe.weights(), &union_words, pattern_count)?;
+    let shared_union_words: Arc<[u64]> = union_words.into();
+    let success_coverage = PatternBitSet::from_shared_words(pattern_count, shared_union_words)
+        .map_err(PcFailedQueueEvidenceError::InvalidCoverageBitSet)?;
+    let aggregation = PatternCoverageAggregation::from_success_coverage(
+        CoverageUniverseGuard::new(pattern_universe_id, pattern_weight_model_id, pattern_count),
+        rows.len(),
+        &success_coverage,
+        universe.weights(),
+        PatternCoverageCompleteness::complete(),
+    )
+    .map_err(|_| PcFailedQueueEvidenceError::SharedCoverageAggregationInvalid)?;
+    let success_pattern_count = aggregation.success_pattern_count();
+    let failed_pattern_count = aggregation.failed_pattern_count();
+    let success_probability = aggregation.success_probability();
+    let failed_probability = aggregation.failed_probability();
+    let materialized_probability_mass = aggregation.materialized_probability_mass();
     validate_complete_materialized_probability_mass(materialized_probability_mass)?;
 
     let example_count = example_limit.min(failed_pattern_count);
@@ -468,7 +484,7 @@ fn produce_from_raw_rows<R: RawFailedQueueCoverageRow>(
         if remaining_examples == 0 {
             break;
         }
-        if word_contains(&union_words, pattern_index) {
+        if success_coverage.contains(PatternId::new(pattern_index)) {
             continue;
         }
         example_piece_count = example_piece_count
@@ -492,9 +508,6 @@ fn produce_from_raw_rows<R: RawFailedQueueCoverageRow>(
     admission.ensure(exact_peak_bytes)?;
     admitted_producer_peak_bytes = admitted_producer_peak_bytes.max(exact_peak_bytes);
 
-    let shared_union_words: Arc<[u64]> = union_words.into();
-    let success_coverage = PatternBitSet::from_shared_words(pattern_count, shared_union_words)
-        .map_err(PcFailedQueueEvidenceError::InvalidCoverageBitSet)?;
     let producer_base_peak_bytes = source_word_materialization_upper_bound_bytes
         .checked_add(union_constructor_peak_bytes)
         .ok_or(PcFailedQueueEvidenceError::MemoryProjectionOverflow)?;
@@ -674,16 +687,7 @@ fn validate_raw_words(
     Ok(())
 }
 
-fn checked_success_count(words: &[u64]) -> Result<usize, PcFailedQueueEvidenceError> {
-    words.iter().try_fold(0_usize, |count, word| {
-        let word_count = usize::try_from(word.count_ones())
-            .map_err(|_| PcFailedQueueEvidenceError::CountOverflow)?;
-        count
-            .checked_add(word_count)
-            .ok_or(PcFailedQueueEvidenceError::CountOverflow)
-    })
-}
-
+#[cfg(test)]
 fn checked_failed_count(
     pattern_count: usize,
     success_pattern_count: usize,
@@ -696,6 +700,7 @@ fn checked_failed_count(
     )
 }
 
+#[cfg(test)]
 fn directly_sum_probabilities(
     weights: &clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet,
     success_words: &[u64],
@@ -763,6 +768,7 @@ fn directly_sum_probabilities(
     ))
 }
 
+#[cfg(test)]
 fn checked_probability_from_direct_sum(
     class: PcFailedQueueProbabilityClass,
     value: f64,
@@ -805,6 +811,7 @@ fn validate_complete_materialized_probability_mass(
     )
 }
 
+#[cfg(test)]
 fn summation_tolerance(term_count: usize) -> f64 {
     (f64::EPSILON * term_count.max(1) as f64 * 2.0).min(1.0e-9)
 }
@@ -1062,6 +1069,7 @@ pub enum PcFailedQueueEvidenceError {
     MemoryAdmission(ResourceReport),
     AllocationUnavailable,
     InvalidCoverageBitSet(clearra_coverage::pattern::pattern_bitset::PatternBitSetError),
+    SharedCoverageAggregationInvalid,
 }
 
 #[cfg(test)]

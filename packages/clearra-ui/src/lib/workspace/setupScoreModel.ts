@@ -1,11 +1,12 @@
-import {
-  buildDesktopSetupScoreRequest,
-  type ClearraDesktopSetupScoreRequest
-} from '../host/clearraDesktopHost.ts';
+import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
 import {
   defaultWorkerCount,
   parseBrowserQueueInput
 } from './solverWorkspaceModel.ts';
+import {
+  cliCommandRequestForDesktop,
+  serializeCliCommandArguments
+} from './cliCommandModel.ts';
 
 export type SetupScoreDocumentFormat = 'ctk3' | 'fumen';
 export type SetupScoreSourceKind = 'queue' | 'patterns';
@@ -100,7 +101,7 @@ export function setupScoreValidationCodes(
   return [...new Set(errors)];
 }
 
-export function buildSetupScoreCommand(request: SetupScoreRequest): string {
+export function buildSetupScoreCommandArguments(request: SetupScoreRequest): string[] {
   const tokens = [
     'clearra',
     'setup',
@@ -108,11 +109,11 @@ export function buildSetupScoreCommand(request: SetupScoreRequest): string {
     '--document-format',
     request.documentFormat,
     '--document',
-    quoteCommandToken(request.document.trim()),
+    request.document.trim(),
     request.setupSourceKind === 'queue' ? '--setup-queue' : '--setup-patterns',
-    quoteCommandToken(normalizedSetupScoreSource(request.setupSource)),
+    normalizedSetupScoreSource(request.setupSource),
     request.solutionSourceKind === 'queue' ? '--solution-queue' : '--solution-patterns',
-    quoteCommandToken(normalizedSetupScoreSource(request.solutionSource)),
+    normalizedSetupScoreSource(request.solutionSource),
     '--clear',
     String(request.clearHeight),
     request.holdEnabled ? '--hold' : '--no-hold',
@@ -133,32 +134,18 @@ export function buildSetupScoreCommand(request: SetupScoreRequest): string {
   } else {
     tokens.push('--workers', String(request.workers));
   }
-  return tokens.join(' ');
+  return tokens;
+}
+
+export function buildSetupScoreCommand(request: SetupScoreRequest): string {
+  return serializeCliCommandArguments(buildSetupScoreCommandArguments(request));
 }
 
 export function setupScoreRequestForDesktop(
   request: SetupScoreRequest,
   language: 'en' | 'ko'
-): ClearraDesktopSetupScoreRequest {
-  const setupSource = normalizedSetupScoreSource(request.setupSource);
-  const solutionSource = normalizedSetupScoreSource(request.solutionSource);
-  return buildDesktopSetupScoreRequest({
-    language,
-    document_format: request.documentFormat,
-    document: request.document.trim(),
-    setup_queue: request.setupSourceKind === 'queue' ? setupSource : '',
-    setup_patterns: request.setupSourceKind === 'patterns' ? setupSource : '',
-    solution_queue: request.solutionSourceKind === 'queue' ? solutionSource : '',
-    solution_patterns: request.solutionSourceKind === 'patterns' ? solutionSource : '',
-    clear_height: request.clearHeight,
-    hold_enabled: request.holdEnabled,
-    score_profile: request.scoreProfile,
-    initial_b2b: request.initialB2B,
-    rule: request.rule,
-    max_patterns: request.maxPatterns,
-    workers: request.useAllLogicalProcessors ? 0 : request.workers,
-    use_all_logical_processors: request.useAllLogicalProcessors
-  });
+): ClearraDesktopCliCommandRequest {
+  return cliCommandRequestForDesktop(buildSetupScoreCommandArguments(request), language);
 }
 
 function validSetupScoreDocument(
@@ -186,10 +173,4 @@ function validSetupScoreSource(
 
 function normalizedSetupScoreSource(source: string): string {
   return parseBrowserQueueInput(source)?.source ?? source.trim();
-}
-
-function quoteCommandToken(value: string): string {
-  return /^[^\s"'\\]+$/u.test(value)
-    ? value
-    : `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }

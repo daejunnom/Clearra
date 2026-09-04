@@ -5,6 +5,9 @@ import {
   runtimeIdentityMatches,
 } from "../job-service/runtime-identity.mjs";
 import { projectDiscordBuildV2Result } from "../discord/build-v2-result.mjs";
+import {
+  projectDiscordPcScoreMinimalsCanonicalResult,
+} from "../discord/pc-score-minimals-result.mjs";
 import { projectDiscordTypedProductResult } from "../discord/typed-product-result.mjs";
 
 const JOB_PROTOCOL = "clearra.job.v1";
@@ -478,10 +481,17 @@ export function assertDiscordCanonicalOnlyResult(result) {
     ? projectDiscordTypedProductResult(payload)
     : null;
   if (typedProjection !== null) payload = typedProjection;
-  if (containsForbiddenAlternativeMetadata(payload)) {
+  const scoreMinimalsProjection = buildProjection === null && typedProjection === null
+    ? projectDiscordPcScoreMinimalsCanonicalResult(payload)
+    : null;
+  if (scoreMinimalsProjection !== null) payload = scoreMinimalsProjection;
+  if (
+    scoreMinimalsProjection === null &&
+    containsForbiddenAlternativeMetadata(payload)
+  ) {
     throw new Error("Clearra returned alternative-result metadata that Discord cannot expose.");
   }
-  const projection = buildProjection ?? typedProjection;
+  const projection = buildProjection ?? typedProjection ?? scoreMinimalsProjection;
   if (projection === null) return result;
   return Object.freeze({
     ...result,

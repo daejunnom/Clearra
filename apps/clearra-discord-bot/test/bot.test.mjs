@@ -1910,8 +1910,9 @@ test("bot execution keeps typed pc score separate from the generic score preset"
   assert.deepEqual(invocations[1].slice(0, 2), ["sfinder", "score"]);
   assert.equal(invocations[0].includes("--objective"), false);
   assert.equal(invocations[0].includes("--score"), false);
-  assert.match(edits[0], /Score accuracy: basic-approximation/);
-  assert.match(edits[0], /Profile-specific exact: No/);
+  assert.match(edits[0], /Solution fields: 1/);
+  assert.match(edits[0], /PC coverage: 100%/);
+  assert.match(edits[0], /Overall score: 800/);
   assert.equal(edits.every((message) => !/inconsistent result/i.test(message)), true);
 });
 
@@ -1958,17 +1959,16 @@ test("pc score rejects cross-contract and semantically incomplete typed results"
 
   const malformed = [
     (value) => { delete value.contract.command.kind; },
-    (value) => { delete value.summary.score_accuracy_level; },
-    (value) => { value.summary.score_accuracy_level = "profile-exact"; },
-    (value) => { value.summary.score_profile_specific_exact = true; },
+    (value) => { delete value.summary.score_solution_field_contract; },
+    (value) => { value.summary.score_solution_field_contract = "legacy"; },
     (value) => { value.summary.score_summary_complete = false; },
-    (value) => { delete value.summary.resource_probability_complete; },
-    (value) => { delete value.resource_report; },
-    (value) => { value.resource_report.truncated = true; },
-    (value) => { value.contract.pc.scoring.score_accuracy_level = "profile-exact"; },
-    (value) => { delete value.contract.pc.execution_report.scoring; },
-    (value) => { value.summary.resource_truncated = true; },
-    (value) => { value.summary.solution_probabilities_requested = true; },
+    (value) => { value.summary.score_solution_fields[0].score_complete = false; },
+    (value) => { value.summary.score_solution_fields[0].candidate_id = "1"; },
+    (value) => { delete value.schema_version; },
+    (value) => { value.runtime_identity.engine_build_id = "different-build"; },
+    (value) => { value.runtime_identity.contract_schema_version = "legacy"; },
+    (value) => { value.summary.score_solution_field_count = "2"; },
+    (value) => { value.summary.score_success_pattern_count = "2"; },
     (value) => { value.summary.problem_owner = "private"; },
     (value) => { value.summary.transient_worker_owner = "private"; },
   ];
@@ -3895,88 +3895,49 @@ function executableSearchArguments(route, options = {}) {
 
 function validPcScoreStructured(overrides = {}) {
   const summary = {
-    search_output_policy: "trace",
-    coverage_pattern_count: 1,
-    materialized_pattern_count: 1,
-    total_possible_pattern_count: 1,
-    materialized_probability_mass: 1,
-    probability_complete: true,
-    resource_probability_complete: true,
-    count_complete: true,
-    count_truncated_reason: "none",
-    resource_truncated: false,
-    resource_truncation_reason: "none",
-    objective_search_complete: true,
-    objective_complete: true,
-    objective_incomplete_reason: "none",
-    postprocess_scoring_requested: true,
-    score_objective_mode: "summary",
-    score_profile_requested: "tetrio",
-    spin_profile_requested: "t-spins",
-    score_initial_b2b: 0,
-    score_profile: "tetrio-basic",
-    score_accuracy_level: "basic-approximation",
-    score_accuracy_reason:
-      "profile-specific basic score/attack tables with configurable spin detection",
-    score_profile_specific_exact: false,
-    score_evaluation_complete: true,
-    score_matrix_materialized: true,
-    score_matrix_complete: true,
-    score_matrix_cell_count: 1,
-    score_matrix_pattern_count: 1,
-    score_matrix_profile_id: "tetrio-basic",
-    score_matrix_accuracy_level: "basic-approximation",
-    score_matrix_incomplete_reason: "none",
-    score_best_complete: true,
+    capability_id: "pc.score",
+    result_contract: "pc-score-summary.v2",
+    payload_kind: "pc-score-field-summary",
+    score_solution_field_contract: "pc-score-solution-field-average.v1",
+    score_solution_field_ordering: "normalized-solution-field-order",
+    score_solution_field_average_basis:
+      "whole-materialized-pattern-universe-failed-pc-zero",
+    score_evaluation_basis: "all-traces",
+    score_evaluation_scope: "full",
+    score_overall_basis: "all-materialized-patterns-failed-pc-zero",
+    piece_source_id: "1",
+    pattern_universe_id: "2",
+    pattern_weight_model_id: "3",
+    materialized_pattern_count: "1",
+    score_solution_field_count: "1",
+    score_success_pattern_count: "1",
+    score_failed_pc_pattern_count: "0",
+    score_covered_probability: "1",
+    score_overall_score: "800",
+    score_covered_pattern_conditional_average_score: "800",
     score_summary_complete: true,
-    score_summary_incomplete_reason: "none",
-    score_all_universe_patterns_covered: true,
-    score_pattern_optimal_count: 1,
-    score_failed_pc_pattern_count: 0,
-    score_failed_pc_pattern_score: 0,
-    score_covered_probability: 1,
-    score_unconditional_expected_score: 800,
-    score_unconditional_expected_attack: 2,
-    score_best_score: 800,
-    score_best_attack: 2,
-    score_covered_pattern_conditional_average_score: 800,
-    solution_probabilities_requested: false,
+    score_solution_fields: [{
+      normalized_field_key:
+        "ctk1|initial=0000000000000000|placements=I:000000000000000f",
+      average_score: "800",
+      covered_pattern_count: "1",
+      pattern_count: "1",
+      score_complete: true,
+    }],
     ...overrides,
   };
-  const scoring = {
-    score_profile: summary.score_profile,
-    score_matrix_profile_id: summary.score_matrix_profile_id,
-    score_accuracy_level: summary.score_accuracy_level,
-    score_matrix_accuracy_level: summary.score_matrix_accuracy_level,
-    score_profile_accuracy_mode: "basic-approximation",
-    score_accuracy_reason: summary.score_accuracy_reason,
-    score_profile_specific_exact: summary.score_profile_specific_exact,
-    score_evaluation_complete: summary.score_evaluation_complete,
-    score_matrix_materialized: summary.score_matrix_materialized,
-    score_matrix_complete: summary.score_matrix_complete,
-    score_best_complete: summary.score_best_complete,
-    score_summary_complete: summary.score_summary_complete,
-    score_all_universe_patterns_covered: summary.score_all_universe_patterns_covered,
-    score_matrix_incomplete_reason: summary.score_matrix_incomplete_reason,
-    score_summary_incomplete_reason: summary.score_summary_incomplete_reason,
-  };
   return {
+    schema_version: 2,
     kind: "pc-score-summary.v2",
     contract: {
       command: { kind: "pc-score-summary.v2" },
-      pc: {
-        scoring: { ...scoring },
-        execution_report: { scoring: { ...scoring } },
-      },
     },
-    resource_report: {
-      probability_complete: true,
-      count_complete: true,
-      truncated: false,
-      truncation_reason: null,
-      count_truncated_reason: null,
-      materialized_probability_mass: 1,
-      renormalized: false,
+    runtime_identity: {
+      engine_build_id: "unverified-local-build",
+      source_commit: "unverified-local-build",
+      contract_schema_version: "clearra.search.contract.v2",
+      supply_semantics_id: "clearra.supply.projected-terminal-lookahead.v1",
+      artifact_schema_version: "clearra.solution-data.v1",
     },
     summary,
   };
@@ -4056,6 +4017,12 @@ function validPcSaveGroupsStructured() {
 
 function validPcBestSaveStructured() {
   const group = validPcSaveGroup();
+  const winner = {
+    weighted_total: 6,
+    balanced_jl_count: 0,
+    exact_group_probability: group.unconditional_probability,
+    group,
+  };
   return {
     kind: "pc-best-save.v2",
     summary: {
@@ -4063,12 +4030,9 @@ function validPcBestSaveStructured() {
       best_save_schema: "clearra-save-v1",
       best_save_probability_basis: "whole-universe-unconditional",
       best_save_pc_probability: 1 / 7,
-      best_save_winners: [{
-        weighted_total: 6,
-        balanced_jl_count: 0,
-        exact_group_probability: group.unconditional_probability,
-        group,
-      }],
+      best_save_canonical_selection: "smallest-canonical-candidate-id",
+      best_save_canonical_winner: structuredClone(winner),
+      best_save_winners: [winner],
     },
   };
 }

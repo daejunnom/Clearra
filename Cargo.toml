@@ -35,7 +35,7 @@ members = [
     "crates/clearra-host-contract",
     "crates/clearra-app",
     "crates/clearra-gui-host",
-    "crates/clearra-web-command",
+    "crates/clearra-cli-command",
     "crates/clearra-webgpu",
     "crates/clearra-wasm",
     "crates/clearra-wasm-abi",

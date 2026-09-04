@@ -344,7 +344,7 @@ function buildPlan(artifacts, resultKind) {
     const outcomes = requiredArray(value, "outcomes", "artifacts.forward.outcomes");
     forward = {
       value,
-      outcomes: resultKind === "ren" ? smallestCanonicalForwardOutcome(outcomes) : outcomes,
+      outcomes: resultKind === "ren" ? suppliedCanonicalForwardOutcome(value, outcomes) : outcomes,
     };
   }
 
@@ -394,33 +394,78 @@ function optionalResultKind(value) {
     : null;
 }
 
-function smallestCanonicalForwardOutcome(outcomes) {
-  if (outcomes.length < 2) return outcomes;
-  let winner = outcomes[0];
-  let winnerId = canonicalForwardOutcomeId(winner, 0);
-  for (let index = 1; index < outcomes.length; index += 1) {
-    const candidateId = canonicalForwardOutcomeId(outcomes[index], index);
-    if (candidateId < winnerId) {
-      winner = outcomes[index];
-      winnerId = candidateId;
+function suppliedCanonicalForwardOutcome(forward, outcomes) {
+  if (forward.canonical_selection !== "smallest-canonical-candidate-id") {
+    fail(
+      "invalid-forward-canonical-witness",
+      "artifacts.forward.canonical_selection",
+      "expected the core-owned canonical selection contract",
+    );
+  }
+  if (outcomes.length === 0) {
+    if (forward.canonical_outcome !== null) {
+      fail(
+        "invalid-forward-canonical-witness",
+        "artifacts.forward.canonical_outcome",
+        "an empty outcome family requires a null canonical witness",
+      );
+    }
+    return outcomes;
+  }
+  if (!isRecord(forward.canonical_outcome)) {
+    fail(
+      "invalid-forward-canonical-witness",
+      "artifacts.forward.canonical_outcome",
+      "expected the core-owned canonical outcome object",
+    );
+  }
+  const supplied = forward.canonical_outcome;
+  if (!samePlainValue(supplied, outcomes[0])) {
+    fail(
+      "invalid-forward-canonical-witness",
+      "artifacts.forward.canonical_outcome",
+      "the supplied witness must exactly match the first canonical member",
+    );
+  }
+  const suppliedId = canonicalForwardOutcomeId(supplied, 0);
+  for (let index = 0; index < outcomes.length; index += 1) {
+    if (canonicalForwardOutcomeId(outcomes[index], index) < suppliedId) {
+      fail(
+        "invalid-forward-canonical-witness",
+        `artifacts.forward.outcomes[${index}].id`,
+        "an outcome precedes the supplied canonical witness",
+      );
     }
   }
-  return [winner];
+  return [supplied];
 }
 
 function canonicalForwardOutcomeId(outcome, index) {
-  const value = requireRecord(outcome, `artifacts.forward.outcomes[${index}]`).id;
+  const path = `artifacts.forward.outcomes[${index}]`;
+  const value = requireRecord(outcome, path).id;
+  return canonicalForwardOutcomeIdValue(value, `${path}.id`);
+}
+
+function canonicalForwardOutcomeIdValue(value, path) {
   if (
-    (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) &&
-    (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value))
+    (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) &&
+    (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value))
   ) {
     fail(
       "invalid-forward-candidate-id",
-      `artifacts.forward.outcomes[${index}].id`,
-      "expected a non-negative canonical integer ID",
+      path,
+      "expected a positive canonical integer ID",
     );
   }
-  return BigInt(value);
+  const parsed = BigInt(value);
+  if (parsed > 18_446_744_073_709_551_615n) {
+    fail(
+      "invalid-forward-candidate-id",
+      path,
+      "canonical candidate ID exceeds u64",
+    );
+  }
+  return parsed;
 }
 
 function finesseReportComments(plan, state) {
@@ -1471,7 +1516,7 @@ function forwardOutcomePage(initialMask, outcome, path) {
 function forwardOutcomeComment(outcome, path) {
   const parts = [];
   if (hasOwn(outcome, "id")) {
-    parts.push(`#${requiredInteger(outcome, "id", `${path}.id`, 0, Number.MAX_SAFE_INTEGER)}`);
+    parts.push(`#${canonicalForwardOutcomeIdValue(outcome.id, `${path}.id`)}`);
   }
   if (hasOwn(outcome, "source_queue")) {
     const queue = requiredString(outcome, "source_queue", `${path}.source_queue`);
@@ -1924,6 +1969,20 @@ function isRecord(value) {
 
 function hasOwn(owner, key) {
   return Object.prototype.hasOwnProperty.call(owner, key);
+}
+
+function samePlainValue(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => samePlainValue(value, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => hasOwn(right, key) && samePlainValue(left[key], right[key]));
 }
 
 function fail(code, path, message) {

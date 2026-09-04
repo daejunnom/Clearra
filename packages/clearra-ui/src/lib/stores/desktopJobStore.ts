@@ -1,7 +1,6 @@
 import { get, writable } from 'svelte/store';
 
 import {
-  buildDesktopAppRequest,
   cancelJob,
   getJobEvents,
   prewarmSearchBackend,
@@ -12,7 +11,6 @@ import {
   type ClearraDesktopJobEvent,
   type ClearraDesktopMemoryStatus,
   type ClearraDesktopRequest,
-  type ClearraDesktopRequestInput,
   type ClearraDesktopResourceStatus
 } from '../host';
 import type { ClearraWasmSearchReport } from '../wasm';
@@ -36,7 +34,12 @@ export type DesktopJobState = {
 };
 
 const desktopJobInitialState: DesktopJobState = {
-  request: buildDesktopAppRequest({}),
+  request: {
+    app_request_model: 'clearra-cli/CommandRequest',
+    command: 'cli',
+    language: 'en',
+    arguments: ['clearra', 'pc', 'tiling', '--lines', '2']
+  },
   jobId: null,
   status: 'idle',
   progressLabel: '',
@@ -87,14 +90,11 @@ export function clearDesktopTerminalResult() {
   });
 }
 
-export function updateDesktopRequest(patch: Partial<ClearraDesktopRequest>) {
+export function updateDesktopRequest(nextRequest: ClearraDesktopRequest) {
+  const request = requireCompleteDesktopCliRequest(nextRequest);
   desktopJobState.update((state) => {
-    const merged = { ...state.request, ...patch };
-    const request = isNominalDesktopRequest(merged)
-      ? (merged as ClearraDesktopRequest)
-      : buildDesktopAppRequest(merged as ClearraDesktopRequestInput);
-    const commandChanged = request.command !== state.request.command;
-    if (!commandChanged || state.status === 'running' || state.status === 'cancelling') {
+    const requestChanged = !desktopCliRequestsEqual(request, state.request);
+    if (!requestChanged || state.status === 'running' || state.status === 'cancelling') {
       return { ...state, request };
     }
     return {
@@ -115,17 +115,43 @@ export function updateDesktopRequest(patch: Partial<ClearraDesktopRequest>) {
   });
 }
 
-function isNominalDesktopRequest(
-  request: { command?: string }
-): request is
-  | Extract<ClearraDesktopRequest, { command: 'build-v2' }>
-  | Extract<ClearraDesktopRequest, { command: 'setup-score' }>
-  | Extract<ClearraDesktopRequest, { command: 'spin-structure' }> {
-  return (
-    request.command === 'build-v2' ||
-    request.command === 'setup-score' ||
-    request.command === 'spin-structure'
-  );
+function requireCompleteDesktopCliRequest(request: ClearraDesktopRequest): ClearraDesktopRequest {
+  const value = request as unknown;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('Desktop requests must be complete clearra-cli/CommandRequest objects');
+  }
+  const record = value as Record<string, unknown>;
+  const expectedFields = ['app_request_model', 'command', 'language', 'arguments'];
+  const unexpectedField = Object.keys(record).find((field) => !expectedFields.includes(field));
+  if (unexpectedField !== undefined) {
+    throw new TypeError(`Desktop CLI request does not accept field '${unexpectedField}'`);
+  }
+  if (
+    record.app_request_model !== 'clearra-cli/CommandRequest' ||
+    record.command !== 'cli' ||
+    (record.language !== 'en' && record.language !== 'ko') ||
+    !Array.isArray(record.arguments) ||
+    record.arguments.length < 2 ||
+    record.arguments.some((argument) => typeof argument !== 'string') ||
+    record.arguments[0] !== 'clearra'
+  ) {
+    throw new TypeError('Desktop requests require a complete canonical CLI argv envelope');
+  }
+  return {
+    app_request_model: 'clearra-cli/CommandRequest',
+    command: 'cli',
+    language: record.language,
+    arguments: [...record.arguments]
+  };
+}
+
+function desktopCliRequestsEqual(
+  left: ClearraDesktopRequest,
+  right: ClearraDesktopRequest
+): boolean {
+  return left.language === right.language &&
+    left.arguments.length === right.arguments.length &&
+    left.arguments.every((argument, index) => argument === right.arguments[index]);
 }
 
 export async function validateDesktopRequest() {
@@ -242,16 +268,7 @@ export function resumeDesktopJobPolling() {
 
 export async function prewarmDesktopSearchBackend() {
   const request = get(desktopJobState).request;
-  if (
-    request.command === 'utility-sequence' ||
-    request.command === 'utility-sequence-dependencies' ||
-    request.command === 'utility-parity' ||
-    request.command === 'utility-fumen' ||
-    request.command === 'utility-render' ||
-    request.command === 'utility-to-gray' ||
-    request.command === 'utility-mirror' ||
-    !requestsGpu(request.backend)
-  ) {
+  if (!requestsGpu(desktopRequestBackend(request))) {
     return;
   }
   await beginDesktopSearchBackendPrewarm();
@@ -273,6 +290,16 @@ function beginDesktopSearchBackendPrewarm(): Promise<void> {
       gpuWarmupPromise = null;
     });
   return gpuWarmupPromise;
+}
+
+function desktopRequestBackend(
+  request: ClearraDesktopRequest
+): 'auto' | 'cpu' | 'gpu' | 'hybrid' | undefined {
+  const optionIndex = request.arguments.lastIndexOf('--backend');
+  const value = optionIndex >= 0 ? request.arguments[optionIndex + 1] : undefined;
+  return value === 'auto' || value === 'cpu' || value === 'gpu' || value === 'hybrid'
+    ? value
+    : undefined;
 }
 
 function requestsGpu(backend: 'auto' | 'cpu' | 'gpu' | 'hybrid' | undefined): boolean {

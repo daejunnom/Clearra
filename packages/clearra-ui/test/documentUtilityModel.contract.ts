@@ -1,15 +1,21 @@
 import assert from 'node:assert/strict';
 
 import type { ClearraRenderArtifactPayload } from '../src/lib/wasm/wasmCommandClient';
-import { buildDesktopAppRequest } from '../src/lib/host/clearraDesktopHost';
 import {
+  buildDocumentUtilityCommand,
+  buildDocumentUtilityCommandArguments,
   decodeValidatedRenderArtifact,
   detectFieldDocumentFormat,
+  documentUtilityRequestForDesktop,
   fumenDocumentInputs,
   isBoundedCanonicalFieldDocument,
-  quoteWebCommandToken,
   validateFieldDocumentPayload
 } from '../src/lib/workspace/documentUtilityModel';
+import {
+  buildOperationDocumentCommand,
+  buildOperationDocumentCommandArguments,
+  operationDocumentRequestForDesktop
+} from '../src/lib/workspace/operationDocumentCommandModel';
 
 assert.equal(detectFieldDocumentFormat('ctk3_w0kCERPPgGduYXRpdmWycg'), 'ctk3');
 assert.equal(detectFieldDocumentFormat('v115@vhAAgH'), 'fumen');
@@ -19,8 +25,46 @@ assert.deepEqual(
   fumenDocumentInputs('v115@vhAAgH\nv115@vhAAQH', true),
   ['v115@vhAAgH', 'v115@vhAAQH']
 );
-assert.equal(quoteWebCommandToken('first comment'), '"first comment"');
-assert.equal(quoteWebCommandToken('quote"slash\\'), '"quote\\"slash\\\\"');
+const utilityInput = {
+  tool: 'fumen' as const,
+  format: 'fumen' as const,
+  document: '',
+  transform: 'text-to-fumen' as const,
+  documents: [],
+  pageNumber: 1,
+  pageShift: 0,
+  comments: ['comment with spaces', 'literal | && ` $(x) > < ; & quote"slash\\'],
+  artifactFormat: 'png' as const
+};
+const utilityArguments = buildDocumentUtilityCommandArguments(utilityInput);
+assert.equal(optionValue(utilityArguments, '--comment'), 'comment with spaces');
+assert.match(buildDocumentUtilityCommand(utilityInput), /--comment "comment with spaces"/u);
+assert.deepEqual(
+  documentUtilityRequestForDesktop(utilityInput, 'ko'),
+  {
+    app_request_model: 'clearra-cli/CommandRequest',
+    command: 'cli',
+    language: 'ko',
+    arguments: utilityArguments
+  }
+);
+
+for (const capability of ['sequence', 'sequence-dependencies'] as const) {
+  const operationInput = {
+    capability,
+    document: 'ctk3_document with-space',
+    ruleProfile: 'srs-plus',
+    kickProfile: 'srs-x',
+    timeoutSeconds: 12
+  };
+  const arguments_ = buildOperationDocumentCommandArguments(operationInput);
+  assert.equal(optionValue(arguments_, '--document'), 'ctk3_document with-space');
+  assert.match(buildOperationDocumentCommand(operationInput), /--document "ctk3_document with-space"/u);
+  assert.deepEqual(
+    operationDocumentRequestForDesktop(operationInput, 'en').arguments,
+    arguments_
+  );
+}
 assert.equal(
   validateFieldDocumentPayload({
     format: 'ctk3',
@@ -33,17 +77,18 @@ assert.equal(
 );
 
 for (const command of ['utility-to-gray', 'utility-mirror'] as const) {
-  assert.deepEqual(buildDesktopAppRequest({
-    command,
-    language: 'ko',
-    format: 'fumen',
+  const tool: 'to-gray' | 'mirror' = command === 'utility-to-gray' ? 'to-gray' : 'mirror';
+  const input = {
+    ...utilityInput,
+    tool,
+    format: 'fumen' as const,
     document: 'v115@vhAAgH'
-  }), {
-    app_request_model: 'clearra-app/AppRequest',
-    command,
+  };
+  assert.deepEqual(documentUtilityRequestForDesktop(input, 'ko'), {
+    app_request_model: 'clearra-cli/CommandRequest',
+    command: 'cli',
     language: 'ko',
-    format: 'fumen',
-    document: 'v115@vhAAgH'
+    arguments: buildDocumentUtilityCommandArguments(input)
   });
 }
 
@@ -76,6 +121,11 @@ await assert.rejects(
   decodeValidatedRenderArtifact({ ...artifact, bytes_base64: btoa('not-png!') }),
   /signature|byte length/u
 );
+
+function optionValue(arguments_: readonly string[], option: string): string | undefined {
+  const index = arguments_.indexOf(option);
+  return index < 0 ? undefined : arguments_[index + 1];
+}
 
 console.log(JSON.stringify({
   document_authority: 'canonical-prefix-only',

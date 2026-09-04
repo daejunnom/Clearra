@@ -14,7 +14,10 @@ use clearra_core_executor::{
 };
 use clearra_coverage::{
     pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId},
-    probability::union_probability::union_probability,
+    reducer::pattern_coverage_aggregation::{
+        PatternCoverageAggregation, PatternCoverageCompleteness,
+    },
+    universe::coverage_universe_guard::CoverageUniverseGuard,
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
@@ -28,6 +31,7 @@ use clearra_supply::{mixed::supply_provenance::BagBoundaryEvidence, QueueObserva
 pub const PC_SAVE_GROUPS_RESULT_CONTRACT: &str = "pc-save-groups.v2";
 pub const PC_BEST_SAVE_RESULT_CONTRACT: &str = "pc-best-save.v2";
 pub const PC_BEST_SAVE_SCHEMA: &str = "clearra-save-v1";
+pub const PC_BEST_SAVE_CANONICAL_SELECTION: &str = "smallest-canonical-candidate-id";
 const SAVE_GROUP_IDENTITY_CONTRACT: &str = "terminal-hold-plus-active-bag-remainder-multiset.v1";
 const BEST_SAVE_PROBABILITY_BASIS: &str = "whole-universe-unconditional";
 
@@ -245,6 +249,37 @@ pub struct PcSaveGroupV2 {
 }
 
 impl PcSaveGroupV2 {
+    fn new(
+        identity: PcSavePieceMultiset,
+        successful_pattern_count: usize,
+        unconditional_probability: PcSaveExactProbability,
+        conditional_probability_given_pc: PcSaveExactProbability,
+        mut witnesses: Vec<PcSaveWitness>,
+    ) -> Result<Self, PcSaveExecutionError> {
+        witnesses.sort_by(|left, right| witness_order_key(left).cmp(&witness_order_key(right)));
+        let canonical_candidate_id = witnesses
+            .first()
+            .map(PcSaveWitness::candidate_id)
+            .filter(|candidate_id| *candidate_id != 0)
+            .ok_or_else(|| rejected("pc_save_group_has_no_canonical_witness"))?;
+        if witnesses.len() != successful_pattern_count
+            || witnesses
+                .iter()
+                .any(|witness| witness.candidate_id() < canonical_candidate_id)
+        {
+            return Err(rejected("pc_save_group_canonical_witness_invalid"));
+        }
+        Ok(Self {
+            identity_contract: SAVE_GROUP_IDENTITY_CONTRACT,
+            identity,
+            successful_pattern_count,
+            unconditional_probability,
+            conditional_probability_given_pc,
+            canonical_candidate_id,
+            witnesses,
+        })
+    }
+
     pub const fn identity_contract(&self) -> &'static str {
         self.identity_contract
     }
@@ -496,6 +531,15 @@ impl PcBestSaveV2Result {
         &self.winners
     }
 
+    /// Core-owned representative from the already canonicalized exact tie set.
+    pub fn canonical_winner(&self) -> Option<&PcBestSaveWinnerV2> {
+        self.winners.first()
+    }
+
+    pub const fn canonical_selection(&self) -> &'static str {
+        PC_BEST_SAVE_CANONICAL_SELECTION
+    }
+
     pub const fn completeness(&self) -> PcSaveCompletenessEvidence {
         self.completeness
     }
@@ -579,6 +623,10 @@ impl PcSaveCompiledAuthority {
 
     pub(crate) fn problem_arc(&self) -> Arc<SearchProblem> {
         Arc::clone(&self.problem)
+    }
+
+    pub(crate) const fn mode(&self) -> PcSaveResultMode {
+        self.origin.mode()
     }
 
     pub(crate) fn validate_execution_result(
@@ -849,28 +897,38 @@ fn project_save_report(
         }
     }
 
-    let pc_probability_value = probability_for_patterns(&pc_patterns, universe.weights())?;
-    let pc_probability = PcSaveExactProbability::from_value(pc_probability_value);
+    let pc_coverage = pattern_bitset_for_patterns(&pc_patterns, pattern_count)?;
+    let coverage_aggregation = PatternCoverageAggregation::from_success_coverage(
+        CoverageUniverseGuard::new(
+            universe.pattern_universe_id(),
+            universe.pattern_weight_model_id(),
+            pattern_count,
+        ),
+        canonical_candidate_ids.len(),
+        &pc_coverage,
+        universe.weights(),
+        PatternCoverageCompleteness::complete(),
+    )
+    .map_err(|_| rejected("pc_save_shared_coverage_aggregation_invalid"))?;
+    let pc_probability =
+        PcSaveExactProbability::from_value(coverage_aggregation.success_probability());
     let mut group_rows = Vec::with_capacity(groups.len());
     for (identity, pattern_witnesses) in groups {
         let pattern_ids = pattern_witnesses.keys().copied().collect::<BTreeSet<_>>();
-        let unconditional = probability_for_patterns(&pattern_ids, universe.weights())?;
-        let conditional = conditional_probability(unconditional, pc_probability_value)?;
+        let group_coverage = pattern_bitset_for_patterns(&pattern_ids, pattern_count)?;
+        let probabilities = coverage_aggregation
+            .probabilities_for_success_subset(&group_coverage, universe.weights())
+            .map_err(|_| rejected("pc_save_group_coverage_aggregation_invalid"))?;
         let witnesses = pattern_witnesses.into_values().collect::<Vec<_>>();
-        let canonical_candidate_id = witnesses
-            .iter()
-            .map(PcSaveWitness::candidate_id)
-            .min()
-            .ok_or_else(|| rejected("pc_save_group_has_no_witness"))?;
-        group_rows.push(PcSaveGroupV2 {
-            identity_contract: SAVE_GROUP_IDENTITY_CONTRACT,
+        group_rows.push(PcSaveGroupV2::new(
             identity,
-            successful_pattern_count: witnesses.len(),
-            unconditional_probability: PcSaveExactProbability::from_value(unconditional),
-            conditional_probability_given_pc: PcSaveExactProbability::from_value(conditional),
-            canonical_candidate_id,
+            probabilities.success_pattern_count(),
+            PcSaveExactProbability::from_value(probabilities.unconditional_probability()),
+            PcSaveExactProbability::from_value(
+                probabilities.conditional_probability_given_success(),
+            ),
             witnesses,
-        });
+        )?);
     }
     group_rows.sort_by(|left, right| left.identity.cmp(&right.identity));
 
@@ -892,7 +950,7 @@ fn project_save_report(
         pattern_universe_id: universe.pattern_universe_id().get(),
         pattern_weight_model_id: universe.pattern_weight_model_id().get(),
         materialized_pattern_count: pattern_count,
-        pc_success_pattern_count: pc_patterns.len(),
+        pc_success_pattern_count: coverage_aggregation.success_pattern_count(),
         pc_probability,
         completeness,
     };
@@ -1058,32 +1116,12 @@ fn u64_field(result: &CoreExecutionResult, key: &str) -> Option<u64> {
     result.field(key)?.parse().ok()
 }
 
-fn probability_for_patterns(
+fn pattern_bitset_for_patterns(
     patterns: &BTreeSet<usize>,
-    weights: &clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet,
-) -> Result<ProbabilityValue, PcSaveExecutionError> {
-    let bits =
-        PatternBitSet::from_patterns(weights.len(), patterns.iter().copied().map(PatternId::new))
-            .map_err(|_| rejected("pc_save_pattern_probability_bitset_invalid"))?;
-    union_probability(&bits, weights).map_err(|_| rejected("pc_save_pattern_probability_invalid"))
-}
-
-fn conditional_probability(
-    group: ProbabilityValue,
-    pc: ProbabilityValue,
-) -> Result<ProbabilityValue, PcSaveExecutionError> {
-    if group == ProbabilityValue::ZERO {
-        return Ok(ProbabilityValue::ZERO);
-    }
-    if pc == ProbabilityValue::ZERO {
-        return Err(rejected("pc_save_conditional_probability_denominator_zero"));
-    }
-    let value = if group.get().to_bits() == pc.get().to_bits() {
-        1.0
-    } else {
-        group.get() / pc.get()
-    };
-    ProbabilityValue::new(value).map_err(|_| rejected("pc_save_conditional_probability_invalid"))
+    pattern_count: usize,
+) -> Result<PatternBitSet, PcSaveExecutionError> {
+    PatternBitSet::from_patterns(pattern_count, patterns.iter().copied().map(PatternId::new))
+        .map_err(|_| rejected("pc_save_pattern_probability_bitset_invalid"))
 }
 
 fn best_save_winners(groups: Vec<PcSaveGroupV2>) -> Vec<PcBestSaveWinnerV2> {
@@ -1141,8 +1179,24 @@ fn exact_best_save_key_matches(left: (u16, u8, u64), right: (u16, u8, u64)) -> b
     left.0 == right.0 && left.1 == right.1 && left.2 == right.2
 }
 
-fn witness_order_key(witness: &PcSaveWitness) -> (u64, &str) {
-    (witness.candidate_id(), witness.trace_identity())
+fn witness_order_key(
+    witness: &PcSaveWitness,
+) -> (
+    u64,
+    usize,
+    &str,
+    usize,
+    Option<PieceKind>,
+    &PcSavePieceMultiset,
+) {
+    (
+        witness.candidate_id(),
+        witness.pattern_index(),
+        witness.trace_identity(),
+        witness.source_cursor(),
+        witness.terminal_hold(),
+        witness.active_bag_remainder(),
+    )
 }
 
 const fn piece_index(piece: PieceKind) -> usize {
@@ -1185,4 +1239,61 @@ fn hash_piece(hash: &mut u64, piece: PieceKind) {
 
 fn hash_optional_piece(hash: &mut u64, piece: Option<PieceKind>) {
     hash_u64(hash, piece.map_or(0, |piece| piece_index(piece) as u64 + 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_group_orders_the_numeric_canonical_witness_before_an_earlier_pattern() {
+        let identity = PcSavePieceMultiset::from_counts([0; 7]).expect("empty save identity");
+        let probability = PcSaveExactProbability::from_value(
+            ProbabilityValue::new(0.5).expect("test probability"),
+        );
+        let group = PcSaveGroupV2::new(
+            identity.clone(),
+            2,
+            probability.clone(),
+            probability,
+            vec![
+                PcSaveWitness {
+                    pattern_index: 0,
+                    candidate_id: 2,
+                    trace_identity: "candidate-2-pattern-0".to_owned(),
+                    source_cursor: 1,
+                    terminal_hold: Some(PieceKind::I),
+                    active_bag_remainder: identity.clone(),
+                },
+                PcSaveWitness {
+                    pattern_index: 1,
+                    candidate_id: 1,
+                    trace_identity: "candidate-1-pattern-1".to_owned(),
+                    source_cursor: 1,
+                    terminal_hold: Some(PieceKind::O),
+                    active_bag_remainder: identity,
+                },
+            ],
+        )
+        .expect("canonical save group");
+
+        assert_eq!(group.canonical_candidate_id(), 1);
+        assert_eq!(
+            group
+                .witnesses()
+                .iter()
+                .map(PcSaveWitness::candidate_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            group
+                .witnesses()
+                .iter()
+                .map(PcSaveWitness::pattern_index)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 1]),
+            "sorting must preserve one witness for every successful pattern"
+        );
+    }
 }

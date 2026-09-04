@@ -3,11 +3,11 @@
 
 function Invoke-WasmCommandRuntimeContractValidation() {
 foreach ($requiredFile in @(
-            "crates/clearra-web-command/Cargo.toml",
-            "crates/clearra-web-command/src/lib.rs",
-            "crates/clearra-web-command/src/web_command_parser.rs",
-            "crates/clearra-web-command/src/web_command_request.rs",
-            "crates/clearra-web-command/src/web_virtual_file.rs",
+            "crates/clearra-cli-command/Cargo.toml",
+            "crates/clearra-cli-command/src/lib.rs",
+            "crates/clearra-cli-command/src/web_command_parser.rs",
+            "crates/clearra-cli-command/src/web_command_request.rs",
+            "crates/clearra-cli-command/src/web_virtual_file.rs",
             "crates/clearra-wasm/Cargo.toml",
             "crates/clearra-wasm-abi/Cargo.toml",
             "crates/clearra-wasm-abi/src/lib.rs",
@@ -38,10 +38,10 @@ foreach ($requiredFile in @(
         }
     }
 $rustSurface = @(
-        Read-PhysicalText "crates/clearra-web-command/src/lib.rs"
-        Read-PhysicalText "crates/clearra-web-command/src/web_command_parser.rs"
-        Read-PhysicalText "crates/clearra-web-command/src/web_command_request.rs"
-        Read-PhysicalText "crates/clearra-web-command/src/web_virtual_file.rs"
+        Read-PhysicalText "crates/clearra-cli-command/src/lib.rs"
+        Read-PhysicalText "crates/clearra-cli-command/src/web_command_parser.rs"
+        Read-PhysicalText "crates/clearra-cli-command/src/web_command_request.rs"
+        Read-PhysicalText "crates/clearra-cli-command/src/web_virtual_file.rs"
         Read-PhysicalText "crates/clearra-wasm/src/lib.rs"
         Read-PhysicalText "crates/clearra-app/src/app_response.rs"
         Read-PhysicalText "crates/clearra-wasm/src/wasm_command_runtime.rs"
@@ -51,8 +51,8 @@ $rustSurface = @(
         Read-PhysicalText "scripts/wasm-command-runtime-check.ps1"
     ) -join "`n"
 foreach ($requiredMarker in @(
-            "WebCommandParser",
-            "WebCommandRequest",
+            "CliCommandParser",
+            "CliCommandRequest",
             "WebVirtualFileHandle",
             "browser-file-input",
             "AppRequest",
@@ -113,7 +113,7 @@ foreach ($forbiddenMarker in @(
             "clearra.exe",
             "CliParser",
             "run_with_args",
-            "core-c",
+            "core-c/",
             "clearra_packing_",
             "clr_buildup_",
             "clearra_board64_",

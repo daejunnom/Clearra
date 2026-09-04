@@ -29,7 +29,7 @@ import {
 } from "./pages-legacy-contract.mjs";
 
 export const PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID =
-  "clearra.pages.deployment-authority.v2";
+  "clearra.pages.deployment-authority.v3";
 
 const DECIMAL_ID = /^[1-9][0-9]*$/u;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
@@ -77,6 +77,10 @@ const REPORT_FIELDS = Object.freeze([
   "rollback_report_artifact_digest",
   "rollback_report_artifact_api_readback_sha256",
   "rollback_report_file_sha256",
+  "rollback_accepted_artifact_id",
+  "rollback_accepted_artifact_name",
+  "rollback_accepted_artifact_digest",
+  "live_file_descriptor_set_sha256",
   "status",
   "report_sha256",
 ]);
@@ -119,11 +123,11 @@ export function validatePagesDeploymentAuthorityReport(report, {
   }
   requirePattern(report.workflow_run_id, DECIMAL_ID, "Pages workflow run ID");
   requirePattern(report.workflow_run_attempt, DECIMAL_ID, "Pages workflow run attempt");
-  if (report.mode === "forward") {
+  if (report.mode === "forward" || report.rollback_accepted_artifact_id !== null) {
     requirePattern(report.accepted_run_id, DECIMAL_ID, "Pages accepted run ID");
     requirePattern(report.accepted_run_attempt, DECIMAL_ID, "Pages accepted run attempt");
   } else if (report.accepted_run_id !== null || report.accepted_run_attempt !== null) {
-    throw new Error("restored legacy Pages authority must not invent accepted run identity");
+    throw new Error("restored Pages authority must not invent accepted run identity");
   }
   requirePattern(report.artifact_id, DECIMAL_ID, "Pages artifact ID");
   if (report.artifact_name !== "github-pages") {
@@ -149,15 +153,12 @@ export function validatePagesDeploymentAuthorityReport(report, {
   }
   if (report.mode === "restore") {
     for (const [field, label] of [
-      ["live_payload_set_sha256", "live legacy Pages payload-set SHA-256"],
+      ["live_payload_set_sha256", "live restored Pages payload-set SHA-256"],
       ["rollback_capture_report_sha256", "rollback capture report SHA-256"],
       ["rollback_artifact_sha256", "rollback artifact SHA-256"],
       ["rollback_tar_sha256", "rollback tar SHA-256"],
     ]) {
       requireSha256(report[field], label);
-    }
-    if (report.live_payload_set_sha256 !== canonicalSha256(LEGACY_PAGES_PAYLOADS)) {
-      throw new Error("live legacy Pages payload-set SHA-256 differs from v0.7.4");
     }
     requirePattern(report.rollback_capture_run_id, DECIMAL_ID, "rollback capture run ID");
     requirePattern(report.rollback_report_artifact_id, DECIMAL_ID, "rollback report artifact ID");
@@ -172,6 +173,14 @@ export function validatePagesDeploymentAuthorityReport(report, {
       "rollback report artifact API readback SHA-256",
     );
     requireSha256(report.rollback_report_file_sha256, "rollback report file SHA-256");
+    if (report.rollback_accepted_artifact_id !== null) {
+      requirePattern(report.rollback_accepted_artifact_id, DECIMAL_ID, "rollback accepted artifact ID");
+      requireNonEmptyString(report.rollback_accepted_artifact_name, "rollback accepted artifact name");
+      requirePattern(report.rollback_accepted_artifact_digest, ARTIFACT_DIGEST, "rollback accepted artifact digest");
+    } else if (report.rollback_accepted_artifact_name !== null || report.rollback_accepted_artifact_digest !== null) {
+      throw new Error("rollback accepted artifact authority must be all-null or complete");
+    }
+    requireSha256(report.live_file_descriptor_set_sha256, "live restored file descriptor-set SHA-256");
   } else if (
     report.live_payload_set_sha256 !== null ||
     report.rollback_capture_report_sha256 !== null ||
@@ -182,7 +191,11 @@ export function validatePagesDeploymentAuthorityReport(report, {
     report.rollback_report_artifact_name !== null ||
     report.rollback_report_artifact_digest !== null ||
     report.rollback_report_artifact_api_readback_sha256 !== null ||
-    report.rollback_report_file_sha256 !== null
+    report.rollback_report_file_sha256 !== null ||
+    report.rollback_accepted_artifact_id !== null ||
+    report.rollback_accepted_artifact_name !== null ||
+    report.rollback_accepted_artifact_digest !== null ||
+    report.live_file_descriptor_set_sha256 !== null
   ) {
     throw new Error("forward Pages authority must not invent rollback capture bindings");
   }
@@ -225,7 +238,7 @@ export async function producePagesDeploymentAuthority(input, {
   }
   if (typeof fetchPublicBytes !== "function") {
     if (mode === "restore") {
-      throw new Error("restored legacy Pages authority requires a public byte reader");
+      throw new Error("restored Pages authority requires a public byte reader");
     }
     throw new Error("forward Pages authority requires a public byte reader");
   }
@@ -268,13 +281,31 @@ export async function producePagesDeploymentAuthority(input, {
   let rollbackReportArtifactName = null;
   let rollbackReportArtifactDigest = null;
   let rollbackReportFileSha256 = null;
+  let restoredCaptureKind = null;
   if (mode === "restore") {
     rollbackCaptureReport = validateRollbackCaptureReport(
       input.rollbackCaptureReport,
-      { expectedSnapshotSha: sourceCommit, expectedAuthoritySha: workflowSourceCommit },
+      { expectedSnapshotSha: sourceCommit },
     );
-    if (rollbackCaptureReport.capture_kind !== "legacy-v0.7.4") {
-      throw new Error("restored Pages deployment requires sealed v0.7.4 capture authority");
+    const captureAuthoritySha = rollbackCaptureReport.authority_source_commit;
+    if (captureAuthoritySha !== workflowSourceCommit) {
+      const lineage = await getGithubJson(
+        `/compare/${captureAuthoritySha}...${workflowSourceCommit}`,
+        "rollback capture authority ancestry",
+      );
+      if (lineage?.status !== "ahead") {
+        throw new Error("rollback capture authority must be workflow main or its strict ancestor");
+      }
+    }
+    if (!new Set(["legacy-v0.7.4", "canonical-v2"]).has(rollbackCaptureReport.capture_kind)) {
+      throw new Error("restored Pages deployment capture kind is unsupported");
+    }
+    restoredCaptureKind = requireNonEmptyString(
+      input.restoredCaptureKind,
+      "restored Pages capture kind",
+    );
+    if (restoredCaptureKind !== rollbackCaptureReport.capture_kind) {
+      throw new Error("restored Pages package kind differs from the sealed capture report");
     }
     rollbackCaptureRunId = requirePattern(
       String(input.rollbackCaptureRunId ?? ""),
@@ -350,6 +381,7 @@ export async function producePagesDeploymentAuthority(input, {
 
   let deploymentReadback;
   let liveIdentity;
+  let livePayloadSetSha256 = null;
   let finalError;
   for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
     try {
@@ -382,7 +414,7 @@ export async function producePagesDeploymentAuthority(input, {
           attempt,
           fetchPublicBytes,
         });
-      } else {
+      } else if (restoredCaptureKind === "legacy-v0.7.4") {
         const legacyPublicUrl = (path) => {
           const url = new URL(path, pageUrl);
           url.searchParams.set(
@@ -415,6 +447,20 @@ export async function producePagesDeploymentAuthority(input, {
           bindingsBytes,
           wasmBytes,
         });
+        livePayloadSetSha256 = canonicalSha256(LEGACY_PAGES_PAYLOADS);
+      } else {
+        const canonical = rollbackCaptureReport.canonical_snapshot;
+        if (canonicalJson(liveIdentity) !== canonicalJson(canonical.identity)) {
+          throw new Error("live restored identity differs from the full accepted identity");
+        }
+        validateLiveIdentity(liveIdentity, {
+          sourceCommit,
+          basePath,
+          expectedAcceptedRunId: canonical.accepted_run_id,
+          expectedAcceptedRunAttempt: "1",
+        });
+        await validateLiveForwardPayloads({ files: liveIdentity.files, pageUrl, workflowRunId, workflowRunAttempt, attempt, fetchPublicBytes });
+        livePayloadSetSha256 = canonicalSha256(liveIdentity.files);
       }
       finalError = undefined;
       break;
@@ -434,8 +480,8 @@ export async function producePagesDeploymentAuthority(input, {
     workflow_run_id: workflowRunId,
     workflow_run_attempt: workflowRunAttempt,
     workflow_path: workflowPath,
-    accepted_run_id: mode === "forward" ? String(liveIdentity.acceptedRunId) : null,
-    accepted_run_attempt: mode === "forward"
+    accepted_run_id: mode === "forward" || restoredCaptureKind === "canonical-v2" ? String(liveIdentity.acceptedRunId) : null,
+    accepted_run_attempt: mode === "forward" || restoredCaptureKind === "canonical-v2"
       ? String(liveIdentity.acceptedRunAttempt)
       : null,
     artifact_id: artifactId,
@@ -451,9 +497,7 @@ export async function producePagesDeploymentAuthority(input, {
     base_path: basePath,
     pages_configuration_api_readback_sha256: canonicalSha256(pagesConfiguration),
     live_identity_sha256: canonicalSha256(liveIdentity),
-    live_payload_set_sha256: mode === "restore"
-      ? canonicalSha256(LEGACY_PAGES_PAYLOADS)
-      : null,
+    live_payload_set_sha256: mode === "restore" ? livePayloadSetSha256 : null,
     rollback_capture_report_sha256: mode === "restore"
       ? rollbackCaptureReport.report_sha256
       : null,
@@ -473,6 +517,10 @@ export async function producePagesDeploymentAuthority(input, {
       ? canonicalSha256(rollbackReportArtifact)
       : null,
     rollback_report_file_sha256: mode === "restore" ? rollbackReportFileSha256 : null,
+    rollback_accepted_artifact_id: restoredCaptureKind === "canonical-v2" ? rollbackCaptureReport.canonical_snapshot.accepted_artifact_id : null,
+    rollback_accepted_artifact_name: restoredCaptureKind === "canonical-v2" ? rollbackCaptureReport.canonical_snapshot.accepted_artifact_name : null,
+    rollback_accepted_artifact_digest: restoredCaptureKind === "canonical-v2" ? rollbackCaptureReport.canonical_snapshot.accepted_artifact_digest : null,
+    live_file_descriptor_set_sha256: mode === "restore" ? livePayloadSetSha256 : null,
     status: "active",
   });
   validatePagesDeploymentAuthorityReport(report, { expectedSourceCommit: sourceCommit });
@@ -817,6 +865,7 @@ async function main() {
     rollbackReportArtifactName: env("CAPTURE_REPORT_ARTIFACT_NAME", { optional: true }),
     rollbackReportArtifactDigest: env("CAPTURE_REPORT_ARTIFACT_DIGEST", { optional: true }),
     rollbackReportFileSha256: rollbackCaptureReadback?.file_sha256,
+    restoredCaptureKind: env("RESTORED_CAPTURE_KIND", { optional: true }),
   }, {
     getGithubJson: githubReader({
       repository,

@@ -321,7 +321,12 @@ impl StandardBoard64TilingIdentity {
         output
     }
 
-    fn write_canonical(self, output: &mut impl fmt::Write) -> fmt::Result {
+    /// Writes the canonical key without allocating an intermediate `String`.
+    ///
+    /// Bounded transports use this seam to count and serialize one page under
+    /// their own memory authority while this domain type remains the sole
+    /// owner of the canonical key format.
+    pub fn write_canonical(self, output: &mut impl fmt::Write) -> fmt::Result {
         write!(
             output,
             "ctk1|initial={:016x}|placements=",

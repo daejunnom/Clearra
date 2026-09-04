@@ -11,6 +11,7 @@ use clearra_problem::{ProblemCompiler, SearchOutputPolicy, SearchProblem, Search
 
 pub const PC_PATH_FAMILY_RESULT_CONTRACT: &str = "pc-path-family.v2";
 pub const PC_PATH_WITNESS_CONTRACT: &str = "pc-path-witness.v2";
+pub const PC_PATH_CANONICAL_SELECTION: &str = "smallest-canonical-candidate-id";
 pub const PC_PATH_ORDERING: &str =
     "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending";
 
@@ -260,6 +261,18 @@ impl PcPathFamilyV2Result {
 
     pub fn witnesses(&self) -> &[PcPathWitnessV2] {
         &self.witnesses
+    }
+
+    /// Core-owned representative for hosts that expose only one witness.
+    ///
+    /// Validation materializes this family in canonical candidate-id order, so
+    /// adapters must consume the first member instead of re-ranking the family.
+    pub fn canonical_witness(&self) -> Option<&PcPathWitnessV2> {
+        self.witnesses.first()
+    }
+
+    pub const fn canonical_selection(&self) -> &'static str {
+        PC_PATH_CANONICAL_SELECTION
     }
 
     pub const fn completeness(&self) -> PcPathCompletenessEvidence {
