@@ -49,6 +49,124 @@ function Invoke-NodeExact {
     if ($LASTEXITCODE -ne 0) { throw 'tracked recovery validator failed' }
 }
 
+function Get-CloudObjectProperty {
+    param(
+        [AllowNull()][object] $Object,
+        [string] $Name
+    )
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Get-CloudOptionalTextProperty {
+    param(
+        [AllowNull()][object] $Object,
+        [string] $Name,
+        [string] $Label
+    )
+    $value = Get-CloudObjectProperty -Object $Object -Name $Name
+    if ($null -eq $value) { return $null }
+    if ($value -isnot [string]) { throw "$Label must be text" }
+    return [string]$value
+}
+
+function Get-CloudRequiredTextProperty {
+    param(
+        [AllowNull()][object] $Object,
+        [string] $Name,
+        [string] $Label
+    )
+    $value = Get-CloudOptionalTextProperty -Object $Object -Name $Name -Label $Label
+    if ([string]::IsNullOrWhiteSpace($value)) { throw "$Label is unavailable" }
+    return $value
+}
+
+function Get-CloudServiceStatus {
+    param([AllowNull()][object] $Service)
+    $status = Get-CloudObjectProperty -Object $Service -Name 'status'
+    if ($null -eq $status) { throw 'Cloud service status is unavailable' }
+    return $status
+}
+
+function Get-CloudTrafficEntries {
+    param([AllowNull()][object] $Service)
+    $status = Get-CloudServiceStatus -Service $Service
+    $trafficValue = Get-CloudObjectProperty -Object $status -Name 'traffic'
+    if ($null -eq $trafficValue) { throw 'Cloud service traffic readback is unavailable' }
+    $traffic = @($trafficValue)
+    if ($traffic.Count -eq 0 -or @($traffic | Where-Object { $null -eq $_ }).Count -ne 0) {
+        throw 'Cloud service traffic readback is empty or malformed'
+    }
+    return $traffic
+}
+
+function Get-CloudTrafficPercent {
+    param([AllowNull()][object] $Entry)
+    $value = Get-CloudObjectProperty -Object $Entry -Name 'percent'
+    # Cloud Run omits percent on tag-only, non-routed entries. Such entries are
+    # zero traffic, but an explicit non-integral value remains malformed.
+    if ($null -eq $value) { return 0 }
+    $percent = 0
+    if (-not [int]::TryParse(
+        [string]$value,
+        [Globalization.NumberStyles]::Integer,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$percent
+    ) -or $percent -lt 0 -or $percent -gt 100) {
+        throw 'Cloud traffic percent is invalid'
+    }
+    return $percent
+}
+
+function Get-ExactActiveCloudRevision {
+    param([AllowNull()][object] $Service)
+    $traffic = @(Get-CloudTrafficEntries -Service $Service)
+    $active = @($traffic | Where-Object { (Get-CloudTrafficPercent -Entry $_) -gt 0 })
+    if ($active.Count -ne 1 -or (Get-CloudTrafficPercent -Entry $active[0]) -ne 100) {
+        throw 'Cloud traffic is not one exact 100-percent revision'
+    }
+    # status.traffic can retain latestRevision metadata, but revisionName is the
+    # resolved immutable readback authority. A latest-only target fails closed.
+    return Get-CloudRequiredTextProperty -Object $active[0] -Name 'revisionName' `
+        -Label 'Cloud active traffic revisionName'
+}
+
+function Get-ValidatedCandidateTagEntryCount {
+    param(
+        [object[]] $Traffic,
+        [string] $CandidateTag,
+        [string] $CandidateRevision
+    )
+    $tagEntries = @($Traffic | Where-Object {
+        (Get-CloudOptionalTextProperty -Object $_ -Name 'tag' -Label 'Cloud traffic tag') -ceq $CandidateTag
+    })
+    if ($tagEntries.Count -gt 1) {
+        throw 'Cloud candidate tag differs from the sealed candidate residue'
+    }
+    if ($tagEntries.Count -eq 1) {
+        $tagRevision = Get-CloudRequiredTextProperty -Object $tagEntries[0] -Name 'revisionName' `
+            -Label 'Cloud candidate tag revisionName'
+        if ($tagRevision -cne $CandidateRevision) {
+            throw 'Cloud candidate tag differs from the sealed candidate residue'
+        }
+    }
+    return $tagEntries.Count
+}
+
+function Test-CloudTrafficEntryMatchesCandidate {
+    param(
+        [AllowNull()][object] $Entry,
+        [string] $CandidateTag,
+        [string] $CandidateRevision
+    )
+    $revision = Get-CloudOptionalTextProperty -Object $Entry -Name 'revisionName' `
+        -Label 'Cloud traffic revisionName'
+    $tag = Get-CloudOptionalTextProperty -Object $Entry -Name 'tag' -Label 'Cloud traffic tag'
+    return $revision -ceq $CandidateRevision -or $tag -ceq $CandidateTag
+}
+
 function Get-ActiveCloudRevision {
     param([string] $OutputPath)
     gcloud run services describe clearra-current-job `
@@ -56,11 +174,7 @@ function Get-ActiveCloudRevision {
         Set-Content -LiteralPath $OutputPath -Encoding utf8NoBOM
     if ($LASTEXITCODE -ne 0) { throw 'Cloud service authority readback failed' }
     $service = Get-Content -LiteralPath $OutputPath -Raw | ConvertFrom-Json
-    $active = @($service.status.traffic | Where-Object { [int]$_.percent -gt 0 })
-    if ($active.Count -ne 1 -or [int]$active[0].percent -ne 100) {
-        throw 'Cloud traffic is not one exact 100-percent revision'
-    }
-    return [string]$active[0].revisionName
+    return Get-ExactActiveCloudRevision -Service $service
 }
 
 function Seal-ExactCandidateCloudResidue {
@@ -87,15 +201,12 @@ function Seal-ExactCandidateCloudResidue {
 
     [void](Get-ActiveCloudRevision -OutputPath $ServiceOutputPath)
     $serviceBefore = Get-Content -LiteralPath $ServiceOutputPath -Raw | ConvertFrom-Json
-    $candidateTagEntries = @($serviceBefore.status.traffic | Where-Object {
-        $_.tag -ceq [string]$Intent.cloud_candidate_tag
-    })
-    if ($candidateTagEntries.Count -gt 1 -or
-        ($candidateTagEntries.Count -eq 1 -and
-         [string]$candidateTagEntries[0].revisionName -cne [string]$Intent.cloud_candidate_revision)) {
-        throw 'Cloud candidate tag differs from the sealed candidate residue'
-    }
-    if ($candidateTagEntries.Count -eq 1) {
+    $trafficBefore = @(Get-CloudTrafficEntries -Service $serviceBefore)
+    $candidateTagEntryCount = Get-ValidatedCandidateTagEntryCount `
+        -Traffic $trafficBefore `
+        -CandidateTag ([string]$Intent.cloud_candidate_tag) `
+        -CandidateRevision ([string]$Intent.cloud_candidate_revision)
+    if ($candidateTagEntryCount -eq 1) {
         $candidateTag = [string]$Intent.cloud_candidate_tag
         gcloud run services update-traffic clearra-current-job `
             --project=$GcpProjectId --region=$GcpRegion `
@@ -107,9 +218,12 @@ function Seal-ExactCandidateCloudResidue {
         throw 'Cloud residue readback differs from the exact prior authority'
     }
     $service = Get-Content -LiteralPath $ServiceOutputPath -Raw | ConvertFrom-Json
-    if (@($service.status.traffic | Where-Object {
-        $_.revisionName -ceq [string]$Intent.cloud_candidate_revision -or
-        $_.tag -ceq [string]$Intent.cloud_candidate_tag
+    $trafficAfter = @(Get-CloudTrafficEntries -Service $service)
+    if (@($trafficAfter | Where-Object {
+        Test-CloudTrafficEntryMatchesCandidate `
+            -Entry $_ `
+            -CandidateTag ([string]$Intent.cloud_candidate_tag) `
+            -CandidateRevision ([string]$Intent.cloud_candidate_revision)
     }).Count -ne 0) {
         throw 'Cloud residue readback retains candidate traffic or a direct-routing tag'
     }
@@ -122,7 +236,10 @@ function Seal-ExactCandidateCloudResidue {
     if ($revisionReadback.Count -ne $revisions.Count) {
         throw 'Cloud candidate residue changed during guarded recovery'
     }
-    $latestCreated = [string]$service.status.latestCreatedRevisionName
+    $latestCreated = Get-CloudRequiredTextProperty `
+        -Object (Get-CloudServiceStatus -Service $service) `
+        -Name 'latestCreatedRevisionName' `
+        -Label 'Cloud latest-created revisionName'
     $disposition = 'exact-candidate-absent'
     if ($revisionReadback.Count -eq 1) {
         $revision = $revisionReadback[0]

@@ -1,3 +1,8 @@
+// SRP rationale: this module has one behavior-level change reason: the canonical
+// App-level distributed-search lifecycle contract changes. Request preparation,
+// typed producer/merger handoff, governed completion, and boundary memory
+// validation form one fail-closed PC/Build state transition that adapters cannot
+// bypass when materializing the canonical App response.
 use std::sync::Arc;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;

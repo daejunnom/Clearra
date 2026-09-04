@@ -186,6 +186,7 @@ test("prestage recovery separates original deployment identity from trusted help
 test("Invoke-NodeExact discards validator stdout and preserves nonzero failure", () => {
   const result = spawnSync("pwsh", ["-NoProfile", "-File", "scripts/release/invoke-discord-runtime-recovery-v080.test.ps1"], { encoding: "utf8" });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /discord_runtime_recovery_traffic_shape=passed/u);
   assert.match(result.stdout, /discord_runtime_recovery_invoke_node_exact=passed/u);
 });
 
