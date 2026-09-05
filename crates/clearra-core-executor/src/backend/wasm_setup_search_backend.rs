@@ -9,6 +9,8 @@ use super::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Completed setup results move directly across the public backend boundary.
+#[allow(clippy::large_enum_variant)]
 pub enum WasmSetupSearchAdvance {
     Pending,
     Completed(CoreExecutionResult),
@@ -96,7 +98,7 @@ fn map_error(error: super::wasm_cpu::WasmExactSearchError) -> WasmCpuSearchError
             WasmCpuSearchError::InvalidProblem { reason }
         }
         super::wasm_cpu::WasmExactSearchError::ResourceAdmission(resource_report) => {
-            WasmCpuSearchError::ResourceAdmission { resource_report }
+            WasmCpuSearchError::resource_admission(*resource_report)
         }
         super::wasm_cpu::WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
     }

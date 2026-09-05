@@ -60,30 +60,6 @@ fn expected_scenario_solution_count() -> usize {
     }
 }
 
-fn expected_setup_tiling_variant_count() -> &'static str {
-    if native_core_enabled() {
-        "tiling_variant_count: 0"
-    } else {
-        "tiling_variant_count: 1"
-    }
-}
-
-fn expected_setup_build_variant_count() -> &'static str {
-    if native_core_enabled() {
-        "build_variant_count: 0"
-    } else {
-        "build_variant_count: 1"
-    }
-}
-
-fn expected_setup_covered_pattern_count() -> &'static str {
-    "covered_pattern_count: 0"
-}
-
-fn expected_setup_coverage_probability() -> &'static str {
-    "coverage_probability: 0%"
-}
-
 fn expected_scenario_coverage_probability_json() -> &'static str {
     if native_core_enabled() {
         "\"coverage_probability\":1.0"

@@ -22,10 +22,10 @@ impl RepresentativeTraceSelection {
     }
 }
 impl RepresentativeTraceSelection {
-    pub(crate) fn selected_variant<'a>(
+    pub(crate) fn selected_variant(
         self,
-        variants: &'a [CBuildVariantView],
-    ) -> Option<&'a CBuildVariantView> {
+        variants: &[CBuildVariantView],
+    ) -> Option<&CBuildVariantView> {
         variants.get(self.selected_index)
     }
 }

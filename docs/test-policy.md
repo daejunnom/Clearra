@@ -64,6 +64,45 @@ Focused passes are development feedback, not release authority. They may be
 repeated while a patch is changing. The full matrix remains intact but runs at
 the frozen predeployment boundary described below.
 
+### Fast Fix Qualification boundary
+
+`Fast Fix Qualification` is an explicit, manual qualification layer; it is not
+a production deployment workflow and it does not publish a GitHub Release,
+update Pages, change Cloud/Oracle traffic, or synchronize Discord commands. It
+requires attempt 1 on the exact current `main` SHA and rejects every second run
+for that SHA, including a fresh dispatch after failure. Before classification it
+automatically resolves and verifies the latest successful attempt-1 accepted
+component ledger, then calculates only the exact
+`ledger.source_commit..candidate` diff. The ledger kind, source, workflow,
+run/attempt and report SHA-256 are part of the sealed impact plan. This prevents
+an earlier fast fix from being counted again merely because it is newer than the
+last version tag. `deployment-impact.mjs` selects one of three closed modes:
+
+- `none` for documentation, test snapshot, or `scripts/windows/**` local
+  watchdog-only changes. No product component job runs.
+- `focused` only for a Pages-only v0.8 change. The Pages qualification job runs
+  and every unselected job must be `skipped` at fan-in.
+- `full` for Desktop, CLI, Discord, PC4, shared/common product contracts,
+  performance/core paths, unknown paths, or release infrastructure. The
+  qualification workflow requests the existing canonical `Publish Product
+  Release` dispatch and emits only a non-mutating dispatch-request receipt.
+
+Focused and no-product modes require an unexpired attempt-1
+`clearra.accepted-component-ledger.v1` artifact from an accepted ancestor. The
+ledger covers all eight component-vector entries and binds each entry's
+accepted digest, accepted receipt hash, and deployment receipt hash. Changed
+entries end as `qualified-not-deployed` with only a qualification receipt and
+null accepted/deployment fields; unchanged
+entries preserve the prior receipt byte identity. The first such ledger must be
+bootstrapped from the canonical acceptance plus actual Pages/CLI/GUI/Discord/
+Cloud deployment receipts before this path may be connected to production.
+Missing bootstrap evidence fails closed; it must not be replaced with a locally
+authored or manually asserted digest. When no accepted ledger exists, a
+production-tag diff may dispatch the canonical workflow only if it classifies
+as `full`; `focused` and `none` stop with a bootstrap-required error. The
+optional baseline inputs are exact pins for the automatically discovered latest
+ledger, not authority to select an older run.
+
 ## Single Full Gate Per Exact Commit
 
 The `Publish Product Release` workflow has two deliberately different modes:
@@ -110,6 +149,14 @@ packaged CLI smokes remain serial where their process-global state, shared build
 surface, exact output evidence, or ordered product contract requires it. Their
 Cargo/CMake compilation continues to receive the bounded runner CPU count; this
 metadata optimization does not weaken deterministic execution evidence.
+
+Canonical Actions builds the verified WASM product once in the dedicated
+`release-acceptance-wasm-build` producer. Its receipt closes the complete file
+set and binds the manifest and payload digests, source SHA, run ID/attempt, and
+producer toolchains. The Pages shard downloads and verifies those exact bytes;
+it does not restore the Cargo build cache or rebuild WASM. The six acceptance
+shards and their eight-stage semantic order remain unchanged, and final
+canonical evidence additionally requires the producer job and receipt.
 
 The successful dispatch also retains its exact Pages-ready Web/WASM build. A
 later Pages deployment verifies and reuses that accepted artifact; it does not

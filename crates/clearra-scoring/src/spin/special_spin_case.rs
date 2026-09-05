@@ -230,11 +230,7 @@ impl SpecialSpinCase {
 impl SpecialSpinCase {
     pub fn classify(&self, input: &SpinClassificationInput) -> SpinClassification {
         let mini = self.mini_override.unwrap_or(false);
-        let spin_kind = if mini {
-            SpinKind::ProfileSpecific(self.id.profile_specific_kind_id())
-        } else {
-            SpinKind::ProfileSpecific(self.id.profile_specific_kind_id())
-        };
+        let spin_kind = SpinKind::ProfileSpecific(self.id.profile_specific_kind_id());
         let regular_allowed = self.regular_override.unwrap_or(true);
         if !mini && !regular_allowed {
             return SpinClassification::new(

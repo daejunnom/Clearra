@@ -12,6 +12,8 @@ pub struct NormalizedSolutionKey {
 }
 
 impl NormalizedSolutionKey {
+    // The constructor mirrors the independent components of the canonical key contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         initial_board_mask: u64,
         final_board_mask: u64,

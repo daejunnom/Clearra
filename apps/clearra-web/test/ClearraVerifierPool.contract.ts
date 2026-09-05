@@ -365,6 +365,105 @@ assert.equal(
   2
 );
 
+class ProgressiveInitializationVerifierWorker extends FakeVerifierWorker {
+  private heldInitialization: WorkerMessage | null = null;
+  consumePostCount = 0;
+
+  constructor(private readonly initializeImmediately: boolean) {
+    super(false);
+  }
+
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'initialize' && !this.initializeImmediately) {
+      this.heldInitialization = message;
+      return;
+    }
+    if (message.type === 'consume') this.consumePostCount += 1;
+    super.postMessage(message);
+  }
+
+  releaseInitialization() {
+    const message = this.heldInitialization;
+    this.heldInitialization = null;
+    if (message) super.postMessage(message);
+  }
+}
+
+const progressiveInitializationWorkers: ProgressiveInitializationVerifierWorker[] = [];
+const progressiveInitializationPool = new ClearraVerifierPool(() => {
+  const worker = new ProgressiveInitializationVerifierWorker(
+    progressiveInitializationWorkers.length === 0
+  );
+  progressiveInitializationWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+const progressiveInitialization = progressiveInitializationPool.initialize(
+  new ArrayBuffer(0),
+  2,
+  undefined,
+  'progressive-initialization-contract-owner',
+  'atomic-task'
+);
+let completeInitializationSettled = false;
+void progressiveInitialization.then(() => {
+  completeInitializationSettled = true;
+});
+await bounded(
+  'first ready verifier consumes before full initialization',
+  progressiveInitializationPool.enqueue(Uint8Array.of(5).buffer, () => undefined)
+);
+await bounded(
+  'progressive verifier first batch',
+  progressiveInitializationPool.waitForIdle()
+);
+assert.equal(completeInitializationSettled, false);
+assert.equal(progressiveInitializationWorkers[0].consumePostCount, 1);
+assert.equal(progressiveInitializationWorkers[1].consumePostCount, 0);
+assert.equal(progressiveInitializationPool.progressSnapshot().readyWorkers, 1);
+progressiveInitializationWorkers[1].releaseInitialization();
+await bounded('progressive verifier full initialization', progressiveInitialization);
+assert.equal(progressiveInitializationPool.progressSnapshot().readyWorkers, 2);
+await bounded(
+  'progressive verifier finish',
+  progressiveInitializationPool.finish(() => undefined)
+);
+
+const terminalSubsetWorkers: ProgressiveInitializationVerifierWorker[] = [];
+const terminalSubsetPool = new ClearraVerifierPool(() => {
+  const worker = new ProgressiveInitializationVerifierWorker(
+    terminalSubsetWorkers.length === 0
+  );
+  terminalSubsetWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+const terminalSubsetInitialization = terminalSubsetPool.initialize(
+  new ArrayBuffer(0),
+  2,
+  undefined,
+  'terminal-subset-contract-owner',
+  'atomic-task'
+);
+await bounded(
+  'terminal subset first ready verifier consumes',
+  terminalSubsetPool.enqueue(Uint8Array.of(7).buffer, () => undefined)
+);
+await bounded('terminal subset first batch', terminalSubsetPool.waitForIdle());
+assert.equal(terminalSubsetPool.progressSnapshot().readyWorkers, 1);
+assert.equal(
+  await bounded(
+    'terminal subset finish does not wait for a never-ready initializer',
+    terminalSubsetPool.finish(() => undefined, { readySubset: true })
+  ),
+  1
+);
+await bounded('retired terminal initializer settles', terminalSubsetInitialization);
+assert.equal(terminalSubsetWorkers[0].terminated, false);
+assert.equal(
+  terminalSubsetWorkers[1].terminated,
+  true,
+  'producer completion retires only the verifier that never became ready'
+);
+
 class PrewarmGateVerifierWorker extends FakeVerifierWorker {
   constructor() {
     super(false);

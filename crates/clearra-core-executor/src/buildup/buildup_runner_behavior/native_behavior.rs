@@ -157,7 +157,6 @@ mod case_pc_save_marker_materializes_complete_postprocess_batch {
 }
 
 #[cfg(feature = "native-c-core")]
-
 mod case_setup_preset_promotes_packing_candidates_to_buildup_variants {
     use super::*;
 

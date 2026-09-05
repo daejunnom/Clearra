@@ -32,6 +32,10 @@
     patch({ aggregation });
   }
 
+  function setResultMode(resultMode: BuildProbabilityRequest['resultMode']) {
+    patch({ resultMode });
+  }
+
   function setSourcePieces(input: HTMLInputElement) {
     patch({ sourcePieces: input.value === '' ? null : input.valueAsNumber });
   }
@@ -82,19 +86,38 @@
       <label class="workspace-field">
         <span>{label('scoreMode')}</span>
         <select
-          value={request.aggregation}
+          value={request.resultMode}
+          on:change={(event) => setResultMode((event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['resultMode'])}
+        >
+          <option value="all-solutions">{label('scoreOff')}</option>
+          <option value="complete-replay-paths">{label('pathFamily')}</option>
+          <option value="minimum-solutions">{label('minimumSolutions')}</option>
+          <option value="field-average-score">{label('scoreSummary')}</option>
+          <option value="fixed-queue-maximum-score">{label('scoreFinder')}</option>
+          <option value="highest-score-minimum-set">{label('scoreMinimals')}</option>
+          <option value="failed-queues">{label('failedQueues')}</option>
+        </select>
+      </label>
+      <label class="workspace-field">
+        <span>{label('buildEngineAggregation')}</span>
+        <select
+          value={request.resultMode === 'all-solutions' ? request.aggregation : 'buildability'}
+          disabled={request.resultMode !== 'all-solutions'}
           on:change={(event) => setAggregation((event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['aggregation'])}
         >
           <option value="tiling">{label('tilingOnly')}</option>
           <option value="buildability">{label('buildProbability')}</option>
           <option value="spin">{label('spinSearch')}</option>
         </select>
+        {#if request.resultMode !== 'all-solutions'}
+          <small class="workspace-field-help">{label('buildResultModeCompatibility')}</small>
+        {/if}
       </label>
       <label class="workspace-field">
         <span>{label('rule')}</span>
         <select
           value={request.rule}
-          disabled={request.aggregation === 'tiling'}
+          disabled={request.resultMode === 'all-solutions' && request.aggregation === 'tiling'}
           on:change={(event) => patch({ rule: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['rule'] })}
         >
           <option value="srs-plus">SRS+</option>
@@ -107,7 +130,7 @@
         <span>{label('spinProfile')}</span>
         <select
           value={request.spinProfile}
-          disabled={request.aggregation === 'tiling' || (request.aggregation === 'buildability' && !request.preserveB2B)}
+          disabled={request.resultMode !== 'all-solutions' || request.aggregation === 'tiling' || (request.aggregation === 'buildability' && !request.preserveB2B)}
           on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['spinProfile'] })}
         >
           <option value="t-spins">T-Spins</option>
@@ -118,11 +141,48 @@
           <option value="all-mini-plus">All-Mini+</option>
         </select>
       </label>
+      {#if ['field-average-score', 'fixed-queue-maximum-score', 'highest-score-minimum-set'].includes(request.resultMode)}
+        <label class="workspace-field">
+          <span>{label('scoreProfile')}</span>
+          <select
+            value={request.scoreProfile}
+            on:change={(event) => patch({ scoreProfile: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['scoreProfile'] })}
+          >
+            <option value="tetrio">{label('scoreProfileTetrio')}</option>
+            <option value="guideline">{label('scoreProfileGuideline')}</option>
+            <option value="jstris-ultra">{label('scoreProfileJstrisUltra')}</option>
+          </select>
+      </label>
+        <label class="workspace-field">
+          <span>{label('initialB2B')}</span>
+          <input
+            type="number"
+            min="0"
+            max="65535"
+            step="1"
+            value={request.initialB2B}
+            on:input={(event) => patch({ initialB2B: (event.currentTarget as HTMLInputElement).valueAsNumber })}
+          />
+        </label>
+      {/if}
+      {#if request.resultMode === 'failed-queues'}
+        <label class="workspace-field">
+          <span>{label('failedQueueLimit')}</span>
+          <input
+            type="number"
+            min="1"
+            max="1000"
+            step="1"
+            value={request.failedPatternLimit}
+            on:input={(event) => patch({ failedPatternLimit: (event.currentTarget as HTMLInputElement).valueAsNumber })}
+          />
+        </label>
+      {/if}
       <label class="workspace-field">
         <span>{label('finesseCalculation')}</span>
         <select
           value={request.finesse}
-          disabled={request.aggregation === 'tiling'}
+          disabled={request.resultMode !== 'all-solutions' || request.aggregation === 'tiling'}
           on:change={(event) => patch({ finesse: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['finesse'] })}
         >
           <option value="off">{label('finesseOff')}</option>
@@ -133,7 +193,7 @@
         <span>{label('finessePatternKnowledge')}</span>
         <select
           value={request.patternKnowledge}
-          disabled={request.aggregation === 'tiling' || request.finesse === 'off'}
+          disabled={request.resultMode !== 'all-solutions' || request.aggregation === 'tiling' || request.finesse === 'off'}
           on:change={(event) => patch({ patternKnowledge: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['patternKnowledge'] })}
         >
           <option value="both">{label('finessePatternBoth')}</option>
@@ -144,19 +204,20 @@
       </label>
     </div>
     <div class="b2b-preservation-control">
-      <label class="workspace-switch-label">
+        <label class="workspace-switch-label">
         <input
           type="checkbox"
           checked={request.preserveB2B}
-          disabled={request.aggregation === 'tiling'}
+          disabled={request.resultMode !== 'all-solutions' || request.aggregation === 'tiling'}
           on:change={(event) => patch({ preserveB2B: (event.currentTarget as HTMLInputElement).checked })}
         />
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('preserveB2B')}</span>
-      </label>
+        </label>
     </div>
     <div class="solution-probabilities-control">
-      <label class="workspace-switch-label">
+      <fieldset disabled={request.resultMode !== 'all-solutions'}>
+        <label class="workspace-switch-label">
         <input
           type="checkbox"
           checked={request.solutionProbabilities}
@@ -167,7 +228,8 @@
         />
         <span class="workspace-switch" aria-hidden="true"></span>
         <span>{label('solutionProbabilities')}</span>
-      </label>
+        </label>
+      </fieldset>
     </div>
     <div class="worker-policy-control">
       <label class="workspace-switch-label">
@@ -188,7 +250,7 @@
         <input
           type="checkbox"
           checked={request.precomputeBuildDependencies}
-          disabled={request.aggregation === 'tiling'}
+          disabled={request.resultMode !== 'all-solutions' || request.aggregation === 'tiling'}
           on:change={(event) => patch({
             precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
           })}
@@ -210,6 +272,7 @@
 <style>
   .b2b-preservation-control { display: grid; gap: 5px; margin-top: 14px; }
   .solution-probabilities-control { display: grid; gap: 5px; margin-top: 14px; }
+  .solution-probabilities-control fieldset { border: 0; margin: 0; min-width: 0; padding: 0; }
   .worker-policy-control { display: grid; gap: 5px; margin-top: 14px; }
   .dependency-analysis-control { display: grid; gap: 5px; margin-top: 14px; }
 </style>

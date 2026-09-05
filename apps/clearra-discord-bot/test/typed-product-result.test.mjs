@@ -33,6 +33,11 @@ test("pc.path displays the supplied numeric-smallest canonical witness with repl
   assert.equal(Object.hasOwn(projected.summary, "witnesses"), false);
   assert.equal(JSON.stringify(projected).toLowerCase().includes("tie"), false);
   assert.equal(validDiscordTypedProductResult(result), true);
+
+  const crossRelabeledBuildTerminal = structuredClone(result);
+  crossRelabeledBuildTerminal.summary.target_terminal_board_mask =
+    "0x0000000000000000";
+  assert.equal(validDiscordTypedProductResult(crossRelabeledBuildTerminal), false);
 });
 
 test("pc.path fails closed when the supplied canonical witness is missing or mismatched", () => {
@@ -65,6 +70,43 @@ test("pc.path fails closed when the supplied canonical witness is missing or mis
   assert.equal(validDiscordTypedProductResult(forged), false);
 });
 
+test("Build replay accepts only its declared terminal, including a full-clear zero terminal", () => {
+  const first = pathWitness("1", "0", "trace-build");
+  first.steps.at(-1).board_after_line_clear_mask = "0x000000000000000f";
+  const result = envelope("build-path-family.v1", {
+    capability_id: "build.complete-replay-paths",
+    witness_contract: "build-path-witness.v1",
+    ordering: "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending",
+    problem_id: "build-problem",
+    target_terminal_board_mask: "0x000000000000000f",
+    materialized_pattern_count: "1",
+    witness_count: "1",
+    complete: true,
+    canonical_selection: "smallest-canonical-candidate-id",
+    canonical_witness: structuredClone(first),
+    witnesses: [first],
+  });
+  const projected = projectDiscordTypedProductResult(result);
+  assert.equal(projected.summary.payload_kind, "canonical-build-path-witness");
+  assert.equal(projected.summary.target_terminal_board_mask, "0x000000000000000f");
+
+  const forged = structuredClone(result);
+  forged.summary.target_terminal_board_mask = "0x0000000000000033";
+  assert.equal(validDiscordTypedProductResult(forged), false);
+
+  const fullClear = structuredClone(result);
+  fullClear.summary.target_terminal_board_mask = "0x0000000000000000";
+  fullClear.summary.canonical_witness.steps.at(-1).board_after_line_clear_mask =
+    "0x0000000000000000";
+  fullClear.summary.witnesses[0].steps.at(-1).board_after_line_clear_mask =
+    "0x0000000000000000";
+  const fullClearProjected = projectDiscordTypedProductResult(fullClear);
+  assert.equal(
+    fullClearProjected.summary.target_terminal_board_mask,
+    "0x0000000000000000",
+  );
+});
+
 test("pc.score-finder validates and displays the core-owned witness without attack or tie data", () => {
   const result = scoreFinder();
   const projected = projectDiscordTypedProductResult(result);
@@ -77,8 +119,8 @@ test("pc.score-finder validates and displays the core-owned witness without atta
   assert.equal(JSON.stringify(projected).toLowerCase().includes("tie"), false);
 
   const reversedAttack = structuredClone(result);
-  reversedAttack.summary.score_pattern_winners[0].informational_attack = "999";
-  reversedAttack.summary.score_pattern_winners[1].informational_attack = "0";
+  reversedAttack.summary.score_pattern_winners[0].informational_attack = "0";
+  reversedAttack.summary.score_pattern_winners[1].informational_attack = "999";
   reversedAttack.summary.score_pattern_canonical_winner.informational_attack = "0";
   assert.equal(
     projectDiscordTypedProductResult(reversedAttack).summary.canonical_winner.candidate_id,
@@ -101,7 +143,7 @@ test("pc.score-finder fails closed when the core-owned witness is absent or mism
 
   const nonCanonicalExistingWinner = scoreFinder();
   nonCanonicalExistingWinner.summary.score_pattern_canonical_winner = structuredClone(
-    nonCanonicalExistingWinner.summary.score_pattern_winners[0],
+    nonCanonicalExistingWinner.summary.score_pattern_winners[1],
   );
   assert.equal(validDiscordTypedProductResult(nonCanonicalExistingWinner), false);
 
@@ -111,6 +153,26 @@ test("pc.score-finder fails closed when the core-owned witness is absent or mism
     nonU64Witness.summary.score_pattern_canonical_winner.candidate_id = candidateId;
     assert.equal(validDiscordTypedProductResult(nonU64Witness), false);
   }
+});
+
+test("Build fixed-queue score preserves score-only ties but Discord selects one numeric-smallest candidate", () => {
+  const result = scoreFinder();
+  result.kind = "build-fixed-score-witness.v1";
+  result.contract.command.kind = "build-fixed-score-witness.v1";
+  result.summary.capability_id = "build.fixed-queue-maximum-score";
+  result.summary.result_contract = "build-fixed-score-witness.v1";
+  result.summary.score_pattern_winner_contract = "build-score-pattern-winner.v1";
+  result.summary.score_pattern_winners.forEach((winner) => {
+    winner.contract = "build-score-pattern-winner.v1";
+  });
+  result.summary.score_pattern_canonical_winner.contract = "build-score-pattern-winner.v1";
+  const projected = projectDiscordTypedProductResult(result);
+  assert.equal(projected.summary.canonical_winner.candidate_id, "2");
+  assert.equal(JSON.stringify(projected).toLowerCase().includes("attack"), false);
+
+  const crossRelabeled = structuredClone(result);
+  crossRelabeled.summary.score_pattern_winner_contract = "pc-score-pattern-winner.v1";
+  assert.equal(validDiscordTypedProductResult(crossRelabeled), false);
 });
 
 test("setup and spin ordinary product families remain bounded ordinary families", () => {
@@ -198,6 +260,23 @@ test("pc.score preserves score-only evidence and strips informational attack", (
   assert.equal(JSON.stringify(projected).toLowerCase().includes("attack"), false);
 });
 
+test("Build field-average score stays nominally separate while preserving per-field and overall scores", () => {
+  const result = scoreSummary();
+  result.kind = "build-field-average-score.v1";
+  result.contract.command.kind = "build-field-average-score.v1";
+  result.summary.capability_id = "build.field-average-score";
+  result.summary.result_contract = "build-field-average-score.v1";
+  result.summary.score_solution_field_contract = "build-solution-field-average.v1";
+  const projected = projectDiscordTypedProductResult(result);
+  assert.equal(projected.summary.score_overall_score, "600");
+  assert.equal(projected.summary.score_solution_fields.length, 2);
+
+  const crossRelabeled = structuredClone(result);
+  crossRelabeled.summary.capability_id = "pc.score";
+  crossRelabeled.summary.result_contract = "pc-score-summary.v2";
+  assert.equal(validDiscordTypedProductResult(crossRelabeled), false);
+});
+
 test("pc.score fails closed on stale, incomplete, or widened solution-field rows", () => {
   const stale = scoreSummary();
   stale.summary.payload_kind = "score-summary";
@@ -249,10 +328,10 @@ function scoreFinder() {
     score_pattern_winner_count: "2",
     score_pattern_winner_complete: true,
     score_pattern_winners: [
+      winner("0", "2", "1"),
       winner("0", "10", "9"),
-      winner("1", "2", "1"),
     ],
-    score_pattern_canonical_winner: winner("1", "2", "1"),
+    score_pattern_canonical_winner: winner("0", "2", "1"),
   });
 }
 
@@ -342,7 +421,7 @@ function pathWitness(candidateId, patternId, traceKey) {
       placement_mask: "000000000000000f",
       board_before_mask: "0000000000000000",
       board_after_placement_mask: "000000000000000f",
-      board_after_line_clear_mask: "0000000000000000",
+      board_after_line_clear_mask: "0x0000000000000000",
       cleared_row_mask: "0000000000000001",
       cleared_lines: "1",
       line_clear_identity: "rows:0000000000000001:count:1",

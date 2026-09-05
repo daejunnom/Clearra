@@ -105,9 +105,11 @@ type PoolWaiter = {
 
 type VerifierWorkerFactory = () => Worker;
 
-const VERIFIER_INITIALIZATION_TIMEOUT_MS = 90_000;
-const VERIFIER_REQUEST_STALL_TIMEOUT_MS = 120_000;
-const VERIFIER_FINISH_STALL_TIMEOUT_MS = 600_000;
+// Browser computation has no platform execution deadline. Explicit fixture
+// options can still bound initialization and work without capping real searches.
+const VERIFIER_INITIALIZATION_TIMEOUT_MS = 0;
+const VERIFIER_REQUEST_STALL_TIMEOUT_MS = 0;
+const VERIFIER_FINISH_STALL_TIMEOUT_MS = 0;
 const VERIFIER_WATCHDOG_MAX_SCAN_INTERVAL_MS = 1_000;
 
 export type ClearraVerifierPoolOptions = {
@@ -115,6 +117,16 @@ export type ClearraVerifierPoolOptions = {
   requestStallTimeoutMs?: number;
   finishStallTimeoutMs?: number;
   delegationAuthority?: DurableDelegationAuthority | Promise<DurableDelegationAuthority>;
+};
+
+export type ClearraVerifierPoolFinishOptions = {
+  /**
+   * Producer-terminal boundary: finish every verifier that became usable and
+   * retire initializers that never became ready. At least one ready verifier
+   * remains mandatory, and an ordinary initializer failure still fails the
+   * pool closed.
+   */
+  readySubset?: boolean;
 };
 
 class VerifierCommitError extends Error {
@@ -128,6 +140,13 @@ class VerifierTransportError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = 'VerifierTransportError';
+  }
+}
+
+class VerifierRetiredError extends Error {
+  constructor() {
+    super('distributed verifier initializer retired after producer completion');
+    this.name = 'VerifierRetiredError';
   }
 }
 
@@ -449,6 +468,10 @@ class VerifierClient {
     this.release(new Error('distributed verifier terminated'));
   }
 
+  retireInitializer() {
+    this.release(new VerifierRetiredError());
+  }
+
   dispose() {
     this.release(new Error('distributed verifier disposed'));
   }
@@ -728,7 +751,8 @@ class VerifierClient {
   }
 
   private requestStallDeadline(operation: PendingRequest['operation']): number {
-    return performance.now() + this.requestStallTimeout(operation);
+    const timeoutMs = this.requestStallTimeout(operation);
+    return timeoutMs > 0 ? performance.now() + timeoutMs : Number.POSITIVE_INFINITY;
   }
 
   private requestStallTimeout(operation: PendingRequest['operation']): number {
@@ -739,6 +763,7 @@ class VerifierClient {
 
   private ensureRequestWatchdogScan() {
     if (this.requestWatchdogScan !== null) return;
+    if (this.requestStallTimeoutMs === 0 && this.finishStallTimeoutMs === 0) return;
     this.requestWatchdogScan = setInterval(() => {
       if (this.pending.size === 0) return;
       const now = performance.now();
@@ -820,6 +845,10 @@ export class ClearraVerifierPool {
   private leasedClients = new Set<VerifierClient>();
   private targetWorkerCount = 0;
   private generation = 0;
+  private readySubsetFinalization: {
+    generation: number;
+    retiredClients: Set<VerifierClient>;
+  } | null = null;
   private active = false;
   private failure: Error | null = null;
   private readonly jobId = uniqueDelegationUuid();
@@ -888,6 +917,7 @@ export class ClearraVerifierPool {
     hostCapabilities?: ClearraWasmHostCapabilities
   ) {
     const generation = ++this.generation;
+    this.readySubsetFinalization = null;
     this.active = true;
     this.failure = null;
     // All durable v0.8 modes seal an immutable task result before merger
@@ -902,20 +932,38 @@ export class ClearraVerifierPool {
       while (this.clients.length < size) {
         this.clients.push(this.createClient());
       }
-      await Promise.all(
-        this.clients.map((client) =>
-          withTimeout(
-            client.initialize(
-              initialization,
-              compiledModule,
-              lifecycleOwnerId,
-              hostCapabilities
-            ),
-            this.initializationTimeoutMs,
-            'distributed verifier initialization'
-          )
-        )
-      );
+      const initializations = this.clients.map(async (client) => {
+        const initializationTask = withTimeout(
+          client.initialize(
+            initialization,
+            compiledModule,
+            lifecycleOwnerId,
+            hostCapabilities
+          ),
+          this.initializationTimeoutMs,
+          'distributed verifier initialization'
+        );
+        void initializationTask.then(
+          () => {
+            // Initialization is intentionally progressive. The producer may
+            // already have a batch waiting, so make this worker schedulable as
+            // soon as its own executable is ready instead of waiting for the
+            // slowest member of the requested pool.
+            if (this.active && generation === this.generation) {
+              this.wakeNextWaiter();
+            }
+          },
+          () => undefined
+        );
+        try {
+          await initializationTask;
+        } catch (error) {
+          if (this.isRetiredInitializer(generation, client, error)) return;
+          throw error;
+        }
+      });
+      await Promise.all(initializations);
+      if (this.isReadySubsetFinalization(generation)) return;
       this.assertActive(generation);
     } catch (error) {
       this.fail(error);
@@ -949,9 +997,14 @@ export class ClearraVerifierPool {
     void operation.then(succeeded, failed);
   }
 
-  async finish(consumePartial: (partial: ArrayBuffer) => void): Promise<number> {
+  async finish(
+    consumePartial: (partial: ArrayBuffer) => void,
+    options: ClearraVerifierPoolFinishOptions = {}
+  ): Promise<number> {
     const generation = this.generation;
     await this.waitForIdle();
+    this.assertActive(generation);
+    if (options.readySubset) await this.retainReadySubset(generation);
     this.assertActive(generation);
     const finished = await Promise.all(
       this.clients.map((client) => this.finishClient(client, generation))
@@ -1021,6 +1074,7 @@ export class ClearraVerifierPool {
     this.active = false;
     this.failure = null;
     this.generation++;
+    this.readySubsetFinalization = null;
     for (const client of this.clients) client.terminate();
     this.clients = [];
     this.inFlight.clear();
@@ -1035,6 +1089,44 @@ export class ClearraVerifierPool {
       (candidate) =>
         candidate.isReady() && !candidate.busy && !this.leasedClients.has(candidate)
     );
+  }
+
+  private async retainReadySubset(generation: number): Promise<void> {
+    while (!this.clients.some((client) => client.isReady())) {
+      await new Promise<void>((resolve, reject) =>
+        this.waiters.push({ generation, resolve, reject })
+      );
+      this.assertActive(generation);
+    }
+
+    const readyClients = this.clients.filter((client) => client.isReady());
+    if (readyClients.length === 0) {
+      throw new Error('distributed verifier pool completed without a ready worker');
+    }
+    const retiredClients = this.clients.filter((client) => !client.isReady());
+    if (retiredClients.length === 0) return;
+
+    this.readySubsetFinalization = {
+      generation,
+      retiredClients: new Set(retiredClients)
+    };
+    this.clients = readyClients;
+    this.targetWorkerCount = readyClients.length;
+    for (const client of retiredClients) client.retireInitializer();
+  }
+
+  private isReadySubsetFinalization(generation: number): boolean {
+    return this.readySubsetFinalization?.generation === generation;
+  }
+
+  private isRetiredInitializer(
+    generation: number,
+    client: VerifierClient,
+    error: unknown
+  ): boolean {
+    return this.readySubsetFinalization?.generation === generation &&
+      this.readySubsetFinalization.retiredClients.has(client) &&
+      error instanceof VerifierRetiredError;
   }
 
   private async consumeLease(
@@ -1074,6 +1166,7 @@ export class ClearraVerifierPool {
     this.failure = error instanceof Error ? error : new Error(String(error));
     this.active = false;
     this.generation++;
+    this.readySubsetFinalization = null;
     for (const client of this.clients) client.terminate();
     this.clients = [];
     this.inFlight.clear();
@@ -1198,15 +1291,18 @@ function uniqueDelegationUuid(): string {
 let nextFallbackDelegationId = 1;
 
 function positiveTimeout(value: number | undefined, fallback: number): number {
-  if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
-  return Math.max(1, Math.floor(value));
+  if (value === undefined || !Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
 }
 
 function watchdogScanInterval(
   requestStallTimeoutMs: number,
   finishStallTimeoutMs: number
 ): number {
-  const shortestTimeoutMs = Math.min(requestStallTimeoutMs, finishStallTimeoutMs);
+  const shortestTimeoutMs = Math.min(
+    requestStallTimeoutMs > 0 ? requestStallTimeoutMs : Number.POSITIVE_INFINITY,
+    finishStallTimeoutMs > 0 ? finishStallTimeoutMs : Number.POSITIVE_INFINITY
+  );
   return Math.min(
     VERIFIER_WATCHDOG_MAX_SCAN_INTERVAL_MS,
     Math.max(1, Math.floor(shortestTimeoutMs / 4))
@@ -1214,6 +1310,7 @@ function watchdogScanInterval(
 }
 
 function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (timeoutMs === 0) return operation;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     operation,

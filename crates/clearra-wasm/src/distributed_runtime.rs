@@ -42,7 +42,23 @@ use crate::{
     WasmWorkerJobEvent, WasmWorkerJobId,
 };
 
-const MIN_DISTRIBUTED_TARGET_PIECES: usize = 7;
+const PC_GEOMETRY_STEPS_PER_PRODUCE: usize = 8;
+const SETUP_WORKER_PREPARATION_BUDGET: usize = 8_192;
+
+fn bounded_producer_work_budget(
+    requested: usize,
+    pc_geometry: bool,
+    target_preparation_pending: bool,
+) -> usize {
+    let requested = requested.max(1);
+    if target_preparation_pending {
+        1
+    } else if pc_geometry {
+        requested.min(PC_GEOMETRY_STEPS_PER_PRODUCE)
+    } else {
+        requested
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -69,6 +85,9 @@ pub enum WasmDistributedFallbackReason {
     GpuDeviceNotFound = 2,
 }
 
+// Preparation transfers exactly one owned runtime state to the browser; keep
+// the established public variants inline without adding a per-job allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum WasmDistributedPreparation {
     Serial,
     Ready(WasmExecutionResult),
@@ -102,6 +121,9 @@ pub struct WasmDistributedCoordinator {
     control: ExecutionControl,
 }
 
+// One producer backend is active for the lifetime of a distributed job. Its
+// state stays inline to avoid allocation and pointer chasing in each advance.
+#[allow(clippy::large_enum_variant)]
 enum DistributedCandidateProducer {
     Cpu(WasmCpuCandidateProducer),
     Tiling(WasmTilingRootProducer),
@@ -122,6 +144,9 @@ pub struct WasmDistributedVerifierRuntime {
     control: ExecutionControl,
 }
 
+// Verifier backends are mutually exclusive worker state and are consumed in
+// the hot batch loop, where an extra allocation would provide no size benefit.
+#[allow(clippy::large_enum_variant)]
 enum DistributedVerifier {
     Pc(WasmDistributedVerifier),
     Tiling(WasmTilingRootWorker),
@@ -130,6 +155,9 @@ enum DistributedVerifier {
     Setup(WasmSetupParallelWorker),
 }
 
+// A coordinator owns one merger for the whole job; keeping it inline avoids a
+// heap allocation at every distributed result boundary.
+#[allow(clippy::large_enum_variant)]
 enum DistributedResultMerger {
     Pc(WasmDistributedResultMerger),
     Tiling(WasmTilingRootResultMerger),
@@ -137,6 +165,9 @@ enum DistributedResultMerger {
     Forward(ForwardParallelCoordinator),
 }
 
+// Prepared searches are one-shot ownership values whose concrete variant is
+// consumed directly when the coordinator starts.
+#[allow(clippy::large_enum_variant)]
 enum DistributedPreparedSearch {
     Core(PreparedDistributedSearch),
     Forward(PreparedDistributedForwardSearch),
@@ -217,12 +248,13 @@ impl WasmDistributedCoordinator {
         }
         if matches!(
             request.command(),
-            AppCommand::Damage(_) | AppCommand::SpinFinder(_)
+            AppCommand::Damage(_) | AppCommand::SpinFinder(_) | AppCommand::Ren(_)
         ) {
             let workers = usize::from(request.resource_budget().workers()).max(1);
             let query = match request.command() {
                 AppCommand::Damage(command) => command.query(),
                 AppCommand::SpinFinder(command) => command.query(),
+                AppCommand::Ren(command) => command.query(),
                 _ => {
                     return Err(distributed_error(
                         "E_WASM_DISTRIBUTED_STATE",
@@ -269,6 +301,15 @@ impl WasmDistributedCoordinator {
         if !request_needs_distributed_execution(&request) {
             return Ok(WasmDistributedPreparation::Serial);
         }
+        let score_coordinator_worker_count = score_product_worker_count(&request);
+        let request = if score_coordinator_worker_count.is_some() {
+            runtime
+                .prepare_distributed_score_child_command_text(command_text)?
+                .into_parts()
+                .0
+        } else {
+            request
+        };
         let prepared = match runtime.app_context().prepare_distributed_search(request) {
             DistributedSearchPreparation::Ready(response) => {
                 return Ok(WasmDistributedPreparation::Ready(
@@ -297,12 +338,16 @@ impl WasmDistributedCoordinator {
             // passed the normal BuildUp verifier, so keep this combination serial.
             return Ok(WasmDistributedPreparation::Serial);
         }
-        let worker_count = problem.backend_policy().workers();
-        let distributed_worthwhile = build_probability_request.map_or_else(
-            || WasmCpuSearchBackend::distributed_execution_is_worthwhile(problem),
-            |(field, _)| build_probability_distributed_execution_is_worthwhile(field, worker_count),
-        );
-        if worker_count < 2 || !distributed_worthwhile {
+        let worker_count =
+            score_coordinator_worker_count.unwrap_or_else(|| problem.backend_policy().workers());
+        let distributed_worthwhile =
+            WasmCpuSearchBackend::distributed_execution_is_worthwhile(problem);
+        let pc_tiling_terminal_resource_authority = prepared
+            .pc_tiling_terminal_resource_authority()
+            .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
+        let typed_pc_tiling_requires_coordinator =
+            worker_count >= 2 && pc_tiling_terminal_resource_authority.is_some();
+        if worker_count < 2 || (!distributed_worthwhile && !typed_pc_tiling_requires_coordinator) {
             return Ok(WasmDistributedPreparation::Serial);
         }
         let requested_backend = problem.backend_policy().requested_backend();
@@ -380,10 +425,7 @@ impl WasmDistributedCoordinator {
             == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
             && selected_product_backend == Some(WasmProductSearchBackend::Cpu)
         {
-            let producer = match prepared
-                .pc_tiling_terminal_resource_authority()
-                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?
-            {
+            let producer = match pc_tiling_terminal_resource_authority {
                 Some((authority, checked_external_retained_upper_bound_bytes)) => {
                     WasmTilingRootProducer::new_shared_under_authority(
                         prepared.problem_arc(),
@@ -394,10 +436,17 @@ impl WasmDistributedCoordinator {
                 None => WasmTilingRootProducer::new(problem),
             }
             .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
-            if producer.root_count() < 2 {
-                return Ok(WasmDistributedPreparation::Serial);
+            let root_count = producer.root_count();
+            // `WasmTilingRootProducer::from_sessions` rejects every empty root
+            // order, so a constructed producer has at least one root. Preserve
+            // that invariant fail-closed if the producer contract ever changes.
+            if root_count == 0 {
+                return Err(distributed_error(
+                    "E_WASM_DISTRIBUTED_START",
+                    "wasm_tiling_root_set_empty",
+                ));
             }
-            let worker_count = worker_count.min(producer.root_count().saturating_add(1));
+            let worker_count = worker_count.min(root_count.saturating_add(1));
             (
                 DistributedCandidateProducer::Tiling(producer),
                 WasmDistributedMode::CpuMulti,
@@ -457,6 +506,18 @@ impl WasmDistributedCoordinator {
             }
         };
         let verification_required = producer.verification_required();
+        // Geometry remains streaming, so an exact candidate-family size is not
+        // always available without blocking synchronous preparation. When a
+        // producer already owns an exact size, avoid starting verifier workers
+        // that can never receive a distinct task. Unknown sizes keep the
+        // compile-time work estimate above and are dispatched progressively by
+        // the browser pool as batches become ready.
+        let worker_count = producer
+            .known_parallel_session_capacity()
+            .map_or(worker_count, |capacity| worker_count.min(capacity));
+        if worker_count < 2 {
+            return Ok(WasmDistributedPreparation::Serial);
+        }
         Ok(WasmDistributedPreparation::Coordinator(Self {
             prepared: Some(DistributedPreparedSearch::Core(prepared)),
             producer: Some(producer),
@@ -625,7 +686,9 @@ impl WasmDistributedCoordinator {
             .as_ref()
             .or(self.pending_build_completion_summary.as_ref())
             .map_or(self.completed_progress, |summary| WasmDistributedProgress {
-                geometry_nodes: summary.expanded_nodes,
+                geometry_nodes: summary
+                    .expanded_nodes
+                    .max(self.completed_progress.geometry_nodes),
                 candidates: summary.candidate_count,
                 candidate_family_count: summary.candidate_family_count,
                 pass_count: 1,
@@ -737,7 +800,19 @@ impl WasmDistributedCoordinator {
             batch_capacity.max(1)
         };
         reserve_candidate_batch_storage(producer, &mut candidates, batch_capacity)?;
-        for _ in 0..work_budget.max(1) {
+        let (pc_geometry, target_preparation_pending) = match &*producer {
+            DistributedCandidateProducer::Cpu(producer) => {
+                (true, producer.target_preparation_pending())
+            }
+            #[cfg(feature = "webgpu-search")]
+            DistributedCandidateProducer::WebGpu(producer) => {
+                (true, producer.target_preparation_pending())
+            }
+            _ => (false, false),
+        };
+        let work_budget =
+            bounded_producer_work_budget(work_budget, pc_geometry, target_preparation_pending);
+        for _ in 0..work_budget {
             let external_candidate_bytes = if let DistributedCandidateProducer::BuildProbability(
                 build_producer,
             ) = &*producer
@@ -766,6 +841,7 @@ impl WasmDistributedCoordinator {
                     }
                 }
                 WasmCandidateProducerAdvance::Completed(mut summary) => {
+                    self.completed_progress = producer.progress();
                     if let Some(execution) = self.backend_execution_override.clone() {
                         summary.backend_execution = execution;
                     }
@@ -1325,6 +1401,7 @@ impl BuildProbabilityPartialIngressAuthority for WasmBuildProbabilityDistributed
     }
 }
 
+#[cfg(test)]
 fn absorb_build_probability_partial_batch<A>(
     input: &[u8],
     authority: &mut A,
@@ -1506,6 +1583,19 @@ impl From<RequestedSearchBackend> for WasmDistributedRequestedBackend {
 }
 
 impl DistributedCandidateProducer {
+    fn known_parallel_session_capacity(&self) -> Option<usize> {
+        let candidate_family_count = match self {
+            Self::Cpu(producer) => producer.progress().candidate_family_count,
+            Self::Tiling(producer) => Some(producer.root_count() as u128),
+            Self::BuildProbability(producer) => producer.progress().candidate_family_count,
+            Self::Forward(_) | Self::Setup(_) => None,
+            #[cfg(feature = "webgpu-search")]
+            Self::WebGpu(producer) => producer.progress().candidate_family_count,
+        }?;
+        let verifier_capacity = usize::try_from(candidate_family_count).unwrap_or(usize::MAX);
+        Some(verifier_capacity.saturating_add(1))
+    }
+
     fn verification_required(&self) -> bool {
         match self {
             Self::Cpu(producer) => producer.verification_required(),
@@ -1514,13 +1604,6 @@ impl DistributedCandidateProducer {
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.verification_required(),
         }
-    }
-
-    fn advance(
-        &mut self,
-        control: &ExecutionControl,
-    ) -> Result<WasmCandidateProducerAdvance, WasmCpuSearchError> {
-        self.advance_with_external_retained(control, 0)
     }
 
     fn advance_with_external_retained(
@@ -1611,20 +1694,6 @@ impl DistributedCandidateProducer {
 }
 
 impl DistributedVerifier {
-    fn consume(
-        &mut self,
-        candidate: &WasmCandidatePacket,
-        control: &ExecutionControl,
-    ) -> Result<(), &'static str> {
-        match self {
-            Self::Pc(verifier) => verifier.consume(candidate, control),
-            Self::Tiling(_) => Err("tiling_verifier_requires_root_task_batch"),
-            Self::BuildProbability(verifier) => verifier.consume(candidate, control),
-            Self::Forward(_) => Err("forward_verifier_requires_forward_task_wire"),
-            Self::Setup(_) => Err("setup_verifier_requires_setup_task_wire"),
-        }
-    }
-
     fn finish(&mut self) -> Result<Vec<clearra_core_executor::CoreExecutionResult>, &'static str> {
         match self {
             Self::Pc(verifier) => verifier.finish().map(|result| vec![result]),
@@ -1768,6 +1837,14 @@ impl WasmDistributedVerifierRuntime {
     ) -> Result<Self, WasmCommandRuntimeError> {
         let prepared = runtime.prepare_command_text(command_text)?;
         let (request, _) = prepared.into_parts();
+        let request = if score_product_worker_count(&request).is_some() {
+            runtime
+                .prepare_distributed_score_child_command_text(command_text)?
+                .into_parts()
+                .0
+        } else {
+            request
+        };
         let prepared = match runtime.app_context().prepare_distributed_search(request) {
             DistributedSearchPreparation::Search(prepared) => prepared,
             DistributedSearchPreparation::Ready(_) => {
@@ -1913,15 +1990,10 @@ impl WasmDistributedVerifierRuntime {
             });
         }
         if let DistributedVerifier::Setup(verifier) = &mut self.verifier {
-            let (candidate_count, partial) =
-                verifier.consume(input, &self.control).map_err(|error| {
-                    distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFY", error.reason())
-                })?;
-            return Ok(WasmDistributedVerifierConsume {
-                candidate_count,
-                partial: Some(partial),
-                has_pending_work: false,
-            });
+            verifier.enqueue(input).map_err(|error| {
+                distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFY", error.reason())
+            })?;
+            return advance_setup_worker(verifier, &self.control);
         }
         if let DistributedVerifier::BuildProbability(verifier) = &mut self.verifier {
             if external_retained_bytes < input.len() as u128 {
@@ -2006,9 +2078,26 @@ impl WasmDistributedVerifierRuntime {
 
         let candidate = &self.pending_candidates[self.pending_candidate_cursor];
         match &mut self.verifier {
-            DistributedVerifier::Pc(verifier) => verifier
-                .consume(candidate, &self.control)
-                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY", reason))?,
+            DistributedVerifier::Pc(verifier) => {
+                if verifier.preparation_pending() {
+                    verifier
+                        .advance_preparation(&self.control)
+                        .map_err(|reason| {
+                            distributed_error("E_WASM_DISTRIBUTED_VERIFY_PREPARE", reason)
+                        })?;
+                    // Even the step that commits the final index yields before
+                    // candidate verification, keeping cancellation and worker
+                    // heartbeat delivery observable at the phase boundary.
+                    return Ok(WasmDistributedVerifierConsume {
+                        candidate_count: 0,
+                        partial: None,
+                        has_pending_work: true,
+                    });
+                }
+                verifier
+                    .consume(candidate, &self.control)
+                    .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY", reason))?;
+            }
             DistributedVerifier::BuildProbability(verifier) => verifier
                 .consume_with_external_retained(
                     candidate,
@@ -2045,18 +2134,23 @@ impl WasmDistributedVerifierRuntime {
         if self.has_pending_candidates() {
             return self.advance_pending_candidate();
         }
-        let DistributedVerifier::Tiling(verifier) = &mut self.verifier else {
-            return Err(distributed_error(
+        match &mut self.verifier {
+            DistributedVerifier::Setup(verifier) if verifier.has_pending_work() => {
+                advance_setup_worker(verifier, &self.control)
+            }
+            DistributedVerifier::Tiling(verifier) => {
+                let (partial, has_pending_work) = advance_tiling_worker(verifier, &self.control)?;
+                Ok(WasmDistributedVerifierConsume {
+                    candidate_count: 0,
+                    partial,
+                    has_pending_work,
+                })
+            }
+            _ => Err(distributed_error(
                 "E_WASM_DISTRIBUTED_STATE",
                 "distributed verifier has no resumable work",
-            ));
-        };
-        let (partial, has_pending_work) = advance_tiling_worker(verifier, &self.control)?;
-        Ok(WasmDistributedVerifierConsume {
-            candidate_count: 0,
-            partial,
-            has_pending_work,
-        })
+            )),
+        }
     }
 
     pub fn progress(&self) -> WasmDistributedProgress {
@@ -2080,6 +2174,15 @@ impl WasmDistributedVerifierRuntime {
             self.verifier,
             DistributedVerifier::Forward(_) | DistributedVerifier::Setup(_)
         ) {
+            if matches!(
+                &self.verifier,
+                DistributedVerifier::Setup(verifier) if verifier.has_pending_work()
+            ) {
+                return Err(distributed_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "distributed setup verifier cannot finish with pending work",
+                ));
+            }
             return Ok(Vec::new());
         }
         if matches!(&self.verifier, DistributedVerifier::BuildProbability(_)) {
@@ -2257,6 +2360,20 @@ fn build_worker_memory_projection_error(
         .expect_err("overflow-sized build worker terminal storage is unavailable")
 }
 
+fn advance_setup_worker(
+    verifier: &mut WasmSetupParallelWorker,
+    control: &ExecutionControl,
+) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
+    let step = verifier
+        .continue_work(SETUP_WORKER_PREPARATION_BUDGET, control)
+        .map_err(|error| distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFY", error.reason()))?;
+    Ok(WasmDistributedVerifierConsume {
+        candidate_count: step.candidate_count,
+        partial: step.partial,
+        has_pending_work: step.has_pending_work,
+    })
+}
+
 fn advance_tiling_worker(
     verifier: &mut WasmTilingRootWorker,
     control: &ExecutionControl,
@@ -2319,7 +2436,7 @@ fn distributed_search_error(
     let reason = error.reason();
     match error {
         WasmCpuSearchError::ResourceAdmission { resource_report } => {
-            WasmCommandRuntimeError::new(code, reason).with_resource_report(resource_report)
+            WasmCommandRuntimeError::new(code, reason).with_resource_report(*resource_report)
         }
         _ => WasmCommandRuntimeError::new(code, reason),
     }
@@ -2338,49 +2455,37 @@ const fn invalid_search_error(reason: &'static str) -> WasmCpuSearchError {
 }
 
 fn request_needs_distributed_execution(request: &AppRequest) -> bool {
-    if matches!(
-        request.product_capability_contract(),
-        Some(ProductCapabilityContract::PcScore | ProductCapabilityContract::PcScoreMinimals)
-    ) {
-        return false;
-    }
-    let (workers, required_piece_count) = match request.command() {
-        AppCommand::Pc(command) => (
-            command.query().execution_policy().workers(),
-            usize::from(command.query().target().lines()) * 10 / 4,
-        ),
-        AppCommand::Path(command) => (
-            command.query().execution_policy().workers(),
-            usize::from(command.query().target().lines()) * 10 / 4,
-        ),
-        AppCommand::Scenario(command) => {
-            let query = command.query();
-            let board = query.initial_board();
-            let board_cells = usize::from(board.width()) * usize::from(board.visible_height());
-            let required_cells =
-                board_cells.saturating_sub(board.occupied_mask().count_ones() as usize);
-            (
-                query.execution_policy().workers(),
-                query.exact_pieces().unwrap_or(required_cells / 4),
-            )
-        }
+    let workers = match request.command() {
+        AppCommand::Pc(command) => command.query().execution_policy().workers(),
+        AppCommand::Path(command) => command.query().execution_policy().workers(),
+        AppCommand::Scenario(command) => command.query().execution_policy().workers(),
         AppCommand::BuildProbability(command) => {
             if command.query().finesse_score().is_some() {
                 return false;
             }
-            return command.query().core_query().execution_policy().workers() >= 2
-                && command.query().target_piece_count() >= MIN_DISTRIBUTED_TARGET_PIECES;
+            command.query().core_query().execution_policy().workers()
         }
         _ => return false,
     };
-    workers >= 2 && required_piece_count >= 7
+    workers >= 2
 }
 
-fn build_probability_distributed_execution_is_worthwhile(
-    field: clearra_problem::BuildProbabilityField,
-    worker_count: usize,
-) -> bool {
-    worker_count >= 2 && field.target_piece_count() >= MIN_DISTRIBUTED_TARGET_PIECES
+fn score_product_worker_count(request: &AppRequest) -> Option<usize> {
+    if !matches!(
+        request.product_capability_contract(),
+        Some(
+            ProductCapabilityContract::PcScore
+                | ProductCapabilityContract::PcScoreFinder
+                | ProductCapabilityContract::PcScoreMinimals
+        )
+    ) {
+        return None;
+    }
+    match request.command() {
+        AppCommand::Pc(command) => Some(command.query().execution_policy().workers()),
+        AppCommand::Scenario(command) => Some(command.query().execution_policy().workers()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -2396,6 +2501,15 @@ mod build_probability_partial_ingress_tests {
     use clearra_core_executor::CoreExecutionResult;
 
     use super::*;
+
+    #[test]
+    fn pc_geometry_producer_budget_is_bounded_but_other_products_keep_their_budget() {
+        assert_eq!(bounded_producer_work_budget(0, true, false), 1);
+        assert_eq!(bounded_producer_work_budget(8, true, false), 8);
+        assert_eq!(bounded_producer_work_budget(2_048, true, false), 8);
+        assert_eq!(bounded_producer_work_budget(2_048, false, false), 2_048);
+        assert_eq!(bounded_producer_work_budget(2_048, true, true), 1);
+    }
 
     struct RecordingIngressAuthority {
         cap_bytes: u128,

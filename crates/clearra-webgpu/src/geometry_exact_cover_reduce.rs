@@ -549,6 +549,8 @@ impl<const STATE_WORDS: usize> ExactFrontierReducer<STATE_WORDS> {
     }
 }
 
+// The reducer's reusable scratch buffers stay separate to avoid per-layer allocation.
+#[allow(clippy::too_many_arguments)]
 fn extend_sharded<const STATE_WORDS: usize>(
     reducers: &mut [ExactFrontierReducer<STATE_WORDS>],
     state_words: &[u32],
@@ -741,9 +743,11 @@ fn state_hash<const STATE_WORDS: usize>(state: &[u32; STATE_WORDS]) -> u64 {
 mod tests {
     use super::*;
 
+    type CanonicalFrontier = Vec<(Vec<u32>, Vec<(u32, u32)>)>;
+
     fn canonical_frontier<const STATE_WORDS: usize>(
         frontier: ReducedFrontier<STATE_WORDS>,
-    ) -> Vec<(Vec<u32>, Vec<(u32, u32)>)> {
+    ) -> CanonicalFrontier {
         let mut canonical = Vec::new();
         let mut global_index = 0usize;
         for segment in &frontier.state_segments {

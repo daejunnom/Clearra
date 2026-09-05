@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -9,6 +9,11 @@ import {
   createClearraWasmBuildContract,
   serializeClearraWasmManifest,
 } from './clearra-wasm-build-contract.mjs';
+import {
+  CLEARRA_WASM_GENERATION_HISTORY_FILE,
+  captureClearraWasmGenerationRetention,
+  retainPublishedClearraWasmGenerations,
+} from './clearra-wasm-generation-retention.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { finesseSourceSnapshot } from '../benchmark/finesse-source-snapshot.mjs';
 
@@ -262,6 +267,7 @@ async function writeManifest(outputDir, buildContract) {
 }
 
 async function publishArtifacts(manifest) {
+  const retentionSnapshot = await captureClearraWasmGenerationRetention(destinationDir);
   for (const name of [
     manifest.bindings.path,
     manifest.wasm.path,
@@ -282,7 +288,26 @@ async function publishArtifacts(manifest) {
   } else {
     await rm(resolve(destinationDir, BENCHMARK_PROVENANCE_FILE), { force: true });
   }
-  await removeStaleVersionedArtifacts(manifest);
+  const retention = await retainPublishedClearraWasmGenerations({
+    destinationDir,
+    currentManifest: manifest,
+    snapshot: retentionSnapshot,
+    publishHistory: async (serializedHistory) => {
+      const stagedHistory = resolve(stagingDir, CLEARRA_WASM_GENERATION_HISTORY_FILE);
+      await writeFile(stagedHistory, serializedHistory, 'utf8');
+      await replaceFileAtomically(
+        stagedHistory,
+        resolve(destinationDir, CLEARRA_WASM_GENERATION_HISTORY_FILE)
+      );
+    },
+  });
+  if (retention.status === 'skipped') {
+    console.warn(`wasm_generation_cleanup=skipped reason=${retention.reason}`);
+  } else {
+    console.log(
+      `wasm_generation_cleanup=retained generations=${retention.retainedGenerationCount} deleted_files=${retention.deleted.length}`
+    );
+  }
 }
 
 async function writeBenchmarkProvenance(outputDir, manifest, snapshot, toolchain, producer) {
@@ -380,21 +405,6 @@ function stableJson(value) {
     ).join(',')}}`;
   }
   return JSON.stringify(value);
-}
-
-async function removeStaleVersionedArtifacts(manifest) {
-  const retained = new Set([manifest.bindings.path, manifest.wasm.path]);
-  for (const name of await readdir(destinationDir)) {
-    if (retained.has(name) || !isVersionedArtifactName(name)) continue;
-    await rm(resolve(destinationDir, name), { force: true });
-  }
-}
-
-function isVersionedArtifactName(name) {
-  return (
-    /^clearra_wasm\.[0-9a-f]{20,64}\.js$/.test(name) ||
-    /^clearra_wasm_bg\.[0-9a-f]{20,64}\.wasm$/.test(name)
-  );
 }
 
 async function replaceFileAtomically(source, destination) {

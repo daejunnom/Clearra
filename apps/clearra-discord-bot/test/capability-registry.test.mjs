@@ -571,7 +571,8 @@ test("PC save groups and best-save are distinct fixed-boundary Discord products"
   ]);
   assert.match(formatSlashCommandHelp("pc saves", "en"), /unconditional probability/i);
   assert.match(formatSlashCommandHelp("pc saves", "en"), /conditional probability given/i);
-  assert.match(formatSlashCommandHelp("pc best-save", "en"), /smallest canonical candidate ID/i);
+  assert.match(formatSlashCommandHelp("pc best-save", "en"), /first result in deterministic order/i);
+  assert.doesNotMatch(formatSlashCommandHelp("pc best-save", "en"), /canonical candidate ID/i);
   assert.doesNotMatch(formatSlashCommandHelp("pc saves", "ko"), /같은 기능/u);
   assert.doesNotMatch(formatSlashCommandHelp("pc best-save", "ko"), /같은 기능/u);
 });
@@ -586,6 +587,7 @@ test("canonical slash topology uses family-specific subcommands and keeps compat
       ["pc", ["path", "chance", "minimals", "score", "saves", "best-save", "score-minimals", "tiling", "failed-queue", "score-finder", "allspin-sol", "allspin-pres-chance"]],
       ["build", [
         "cover",
+        "probability",
         "finesse-score",
         "setup",
         "congruent",
@@ -824,8 +826,8 @@ test("Discord capability IDs are exact members of the product authority", () => 
     .map(({ id }) => id)
     .sort();
   const actualRuntimeIds = productCapabilityRegistry.map(({ id }) => id).sort();
-  assert.equal(expectedRuntimeIds.length, 46);
-  assert.equal(actualRuntimeIds.length, 46);
+  assert.equal(expectedRuntimeIds.length, 47);
+  assert.equal(actualRuntimeIds.length, 47);
   assert.deepEqual(actualRuntimeIds, expectedRuntimeIds);
   const stableIds = new Set(authority.capabilities.map(({ id }) => id));
   for (const capability of productCapabilityRegistry) {

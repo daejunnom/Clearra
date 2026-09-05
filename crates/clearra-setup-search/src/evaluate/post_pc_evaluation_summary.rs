@@ -29,6 +29,8 @@ pub struct PostPcEvaluationSummary {
 }
 
 impl PostPcEvaluationSummary {
+    // Constructor fields mirror the persisted post-PC summary contract explicitly.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         solution_found: bool,
         completion_goal: PcCompletionGoal,

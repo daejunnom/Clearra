@@ -185,7 +185,7 @@ impl NativeParallelPackingExecutor {
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .into_candidates();
-        let mut resource_report = catalog.compile_resource_report().clone();
+        let mut resource_report = *catalog.compile_resource_report();
         let shared_catalog_bytes = resource_report.peak_cpu_bytes;
         for (_, outcome) in shard_results {
             let mut worker_report = outcome.resource_report;

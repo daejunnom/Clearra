@@ -73,6 +73,8 @@ impl HybridBackpressureReport {
     }
 }
 impl HybridBackpressureReport {
+    // Mirrors the serialized U2 telemetry contract field-for-field.
+    #[allow(clippy::too_many_arguments)]
     pub const fn with_u2_contract(
         mut self,
         candidate_queue_len: u16,

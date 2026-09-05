@@ -66,6 +66,11 @@ wgpu-hal = { path = "tools/vendor/wgpu-hal" }
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
+[workspace.lints.clippy]
+# A debug assertion is compiled out of release builds together with every
+# argument evaluation. Keep all required state transitions outside it.
+debug_assert_with_mut_call = "deny"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

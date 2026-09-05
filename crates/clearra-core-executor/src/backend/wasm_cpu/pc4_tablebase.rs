@@ -375,7 +375,7 @@ impl Pc4CompactTablebase {
         if placed_field == FULL_FIELD {
             return Pc4TablebaseLookup::ExactResolved;
         }
-        if placed_field & !FULL_FIELD != 0 || placed_field.count_ones() % 4 != 0 {
+        if placed_field & !FULL_FIELD != 0 || !placed_field.count_ones().is_multiple_of(4) {
             return Pc4TablebaseLookup::ExactDead;
         }
         if self.exact_dead_fields.binary_search(&placed_field).is_ok() {
@@ -396,7 +396,9 @@ impl Pc4CompactTablebase {
         if piece_mask & !ALL_PIECES_MASK != 0 {
             return Pc4TablebaseLookup::Unknown;
         }
-        if piece_mask == 0 || placed_field & !FULL_FIELD != 0 || placed_field.count_ones() % 4 != 0
+        if piece_mask == 0
+            || placed_field & !FULL_FIELD != 0
+            || !placed_field.count_ones().is_multiple_of(4)
         {
             return Pc4TablebaseLookup::ExactDead;
         }
@@ -409,10 +411,11 @@ impl Pc4CompactTablebase {
         else {
             return Pc4TablebaseLookup::Unknown;
         };
-        self.exact_piece_mask_dead_groups[group_index]
-            .contains(piece_mask)
-            .then_some(Pc4TablebaseLookup::ExactDead)
-            .unwrap_or(Pc4TablebaseLookup::Unknown)
+        if self.exact_piece_mask_dead_groups[group_index].contains(piece_mask) {
+            Pc4TablebaseLookup::ExactDead
+        } else {
+            Pc4TablebaseLookup::Unknown
+        }
     }
 
     pub fn certifies_target_counts(&self, counts: [u8; 7]) -> bool {
@@ -428,13 +431,13 @@ impl Pc4CompactTablebase {
         remaining_counts: [u8; 7],
     ) -> Pc4TablebaseLookup {
         if placed_field == FULL_FIELD {
-            return remaining_counts
-                .iter()
-                .all(|count| *count == 0)
-                .then_some(Pc4TablebaseLookup::ExactResolved)
-                .unwrap_or(Pc4TablebaseLookup::ExactDead);
+            return if remaining_counts.iter().all(|count| *count == 0) {
+                Pc4TablebaseLookup::ExactResolved
+            } else {
+                Pc4TablebaseLookup::ExactDead
+            };
         }
-        if placed_field & !FULL_FIELD != 0 || placed_field.count_ones() % 4 != 0 {
+        if placed_field & !FULL_FIELD != 0 || !placed_field.count_ones().is_multiple_of(4) {
             return Pc4TablebaseLookup::ExactDead;
         }
         let Some(signature) = pack_piece_count_signature(remaining_counts) else {
@@ -450,10 +453,11 @@ impl Pc4CompactTablebase {
         else {
             return Pc4TablebaseLookup::Unknown;
         };
-        self.exact_piece_count_dead_groups[group_index]
-            .contains(signature)
-            .then_some(Pc4TablebaseLookup::ExactDead)
-            .unwrap_or(Pc4TablebaseLookup::Unknown)
+        if self.exact_piece_count_dead_groups[group_index].contains(signature) {
+            Pc4TablebaseLookup::ExactDead
+        } else {
+            Pc4TablebaseLookup::Unknown
+        }
     }
 
     pub const fn certified_state_count(&self) -> u32 {
@@ -1568,14 +1572,14 @@ fn piece_mask_dead_key_valid(key: u64) -> bool {
         && placed_field != 0
         && placed_field != FULL_FIELD
         && placed_field & !FULL_FIELD == 0
-        && placed_field.count_ones() % 4 == 0
+        && placed_field.count_ones().is_multiple_of(4)
 }
 
 fn piece_mask_dead_group_valid(group: ExactPieceMaskDeadGroup) -> bool {
     group.placed_field != 0
         && group.placed_field != FULL_FIELD
         && group.placed_field & !FULL_FIELD == 0
-        && group.placed_field.count_ones() % 4 == 0
+        && group.placed_field.count_ones().is_multiple_of(4)
         && group.proof_count() != 0
         && group.mask_bits[0] & 1 == 0
         && group.mask_bits[1] & (1_u64 << 63) == 0
@@ -1585,7 +1589,7 @@ fn piece_count_dead_group_valid(group: &ExactPieceCountDeadGroup) -> bool {
     if group.placed_field == 0
         || group.placed_field == FULL_FIELD
         || group.placed_field & !FULL_FIELD != 0
-        || group.placed_field.count_ones() % 4 != 0
+        || !group.placed_field.count_ones().is_multiple_of(4)
         || group.proof_count() == 0
         || !piece_count_bitmap_padding_clear(group.count_bits.as_ref())
     {
@@ -1599,10 +1603,7 @@ fn piece_count_dead_group_valid(group: &ExactPieceCountDeadGroup) -> bool {
 fn section_payload_length_valid(payload_len: usize, state_count: usize) -> bool {
     state_count != 0
         && payload_len >= state_count
-        && payload_len
-            <= state_count
-                .checked_mul(MAX_DELTA_VARINT_BYTES)
-                .unwrap_or(usize::MAX)
+        && payload_len <= state_count.saturating_mul(MAX_DELTA_VARINT_BYTES)
 }
 
 fn grouped_payload_length_valid(
@@ -1909,9 +1910,7 @@ mod tests {
             }
         }
 
-        assert!(cycle_targets
-            .iter()
-            .any(|counts| counts.iter().any(|count| *count == 4)));
+        assert!(cycle_targets.iter().any(|counts| counts.contains(&4)));
         for counts in cycle_targets {
             assert!(
                 tablebase.certifies_target_counts(counts),

@@ -130,6 +130,7 @@ struct ColoredTargetBoard {
     visible_height: u8,
 }
 
+#[cfg(test)]
 pub(crate) fn translate_command(tokens: &[String]) -> Result<Vec<String>, WebCommandError> {
     translate_command_with_origin(tokens, WebCompatibilityAuthority::PublicLegacyCompatibility)
         .map(TranslatedWebCommand::into_tokens)
@@ -169,6 +170,7 @@ impl TranslatedWebCommand {
         self.pc_save_origin
     }
 
+    #[cfg(test)]
     fn into_tokens(self) -> Vec<String> {
         self.tokens
     }
@@ -474,7 +476,7 @@ fn translate_pc(
         )));
     }
     let empty = target & !normalized_board_mask;
-    if empty.count_ones() % 4 != 0 {
+    if !empty.count_ones().is_multiple_of(4) {
         return Err(invalid(
             "the target field does not contain a whole number of tetrominoes",
         ));
@@ -944,7 +946,7 @@ fn translate_score_finder(args: &[String], rule: &str) -> Result<Vec<String>, We
         )));
     }
     let empty = target & !normalized_board_mask;
-    if empty.count_ones() == 0 || empty.count_ones() % 4 != 0 {
+    if empty.count_ones() == 0 || !empty.count_ones().is_multiple_of(4) {
         return Err(invalid(
             "the score-finder target must require a positive whole number of tetrominoes",
         ));

@@ -39,6 +39,8 @@ impl GpuWorkerBackpressure {
     }
 }
 impl GpuWorkerBackpressure {
+    // Mirrors the U2 telemetry contract field-for-field at the reporting boundary.
+    #[allow(clippy::too_many_arguments)]
     pub const fn with_u2_contract(
         self,
         candidate_queue_len: u16,

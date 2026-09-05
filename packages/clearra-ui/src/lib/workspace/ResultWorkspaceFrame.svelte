@@ -1,10 +1,8 @@
 <script lang="ts">
   import { AlertTriangle, CheckCircle2, Search } from '@lucide/svelte';
 
-  import type {
-    ClearraDiagnostic,
-    ClearraSearchProgressTelemetry
-  } from '../wasm/wasmCommandClient';
+  import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import WorkspaceProgressStatus from './WorkspaceProgressStatus.svelte';
   import type { WorkspaceLanguage } from './workspaceI18n';
   import type {
@@ -12,6 +10,7 @@
     WorkspaceProgressProfile
   } from './workspaceProgressModel';
   import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
+  import type { WorkspacePublicFailure } from './workspacePublicFailure';
 
   export let ariaLabel: string;
   export let status: WorkspaceRuntimeStatus;
@@ -29,8 +28,7 @@
   export let showWorkerMetrics = true;
   export let forwardPatternDone = 0;
   export let forwardPatternTotal = 0;
-  export let failureDiagnostics: ClearraDiagnostic[] = [];
-  export let failureMessage = '';
+  export let publicFailures: WorkspacePublicFailure[] = [];
 
   let displayedTelemetry: ClearraSearchProgressTelemetry | null = null;
   let rememberedStatus = status;
@@ -46,10 +44,6 @@
   ) {
     displayedTelemetry = progressTelemetry;
   }
-  $: failureMessages = Array.from(new Set([
-    ...(failureMessage ? [failureMessage] : []),
-    ...failureDiagnostics.map((diagnostic) => diagnostic.message).filter(Boolean)
-  ]));
 </script>
 
 <section class="result-workspace" aria-label={ariaLabel}>
@@ -89,15 +83,7 @@
     />
 
     {#if status === 'failed' || status === 'terminated'}
-      <div class="failure-banner" role="alert">
-        <AlertTriangle size={18} strokeWidth={2} />
-        <div>
-          <strong>{statusLabel}</strong>
-          {#each failureMessages as message}
-            <p>{message}</p>
-          {/each}
-        </div>
-      </div>
+      <WorkspaceFailureNotice failures={publicFailures} {language} heading={statusLabel} />
     {/if}
   </div>
 
@@ -159,29 +145,6 @@
   .heading-metrics strong {
     color: #26322e;
     margin-left: 5px;
-  }
-
-  .failure-banner {
-    align-items: start;
-    background: #fff1ed;
-    border: 1px solid #e5b2a4;
-    color: #8d3026;
-    display: grid;
-    gap: 10px;
-    grid-template-columns: auto minmax(0, 1fr);
-    margin-top: 16px;
-    padding: 12px 14px;
-  }
-
-  .failure-banner strong,
-  .failure-banner p {
-    margin: 0;
-  }
-
-  .failure-banner p {
-    font-size: 12px;
-    margin-top: 4px;
-    overflow-wrap: anywhere;
   }
 
   .result-body {

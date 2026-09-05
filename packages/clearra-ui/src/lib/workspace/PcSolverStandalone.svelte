@@ -161,25 +161,23 @@
 
   function updateRequest(next: SolverWorkspaceRequest) {
     invalidSharedLink = false;
-    const scorePolicyFixed =
+    const scoreCpuOnly =
       next.scoreMode === 'summary' ||
       next.scoreMode === 'score-finder' ||
       next.scoreMode === 'score-minimals';
-    const requestedUseAll = scorePolicyFixed ? false : next.useAllLogicalProcessors;
+    const requestedUseAll = next.useAllLogicalProcessors;
     const useAllChanged = requestedUseAll !== request.useAllLogicalProcessors;
     const scoreModeChanged = next.scoreMode !== request.scoreMode;
     request = withAutomaticTarget({
       ...next,
-      workers: scorePolicyFixed
-        ? 1
-        : useAllChanged
-          ? automaticWorkerAuthority(
-              hostCapabilitySnapshot,
-              requestedUseAll
-            ).workersEffective
-          : next.workers,
+      workers: useAllChanged
+        ? automaticWorkerAuthority(
+            hostCapabilitySnapshot,
+            requestedUseAll
+          ).workersEffective
+        : next.workers,
       useAllLogicalProcessors: requestedUseAll,
-      backend: scorePolicyFixed ? 'cpu' : 'auto',
+      backend: scoreCpuOnly ? 'cpu' : 'auto',
       gpuDevice: 'auto',
       tablebaseEnabled: false,
       precomputeBuildDependencies: false
@@ -338,13 +336,14 @@
       progressDone: 0,
       progressTotal: 0,
       progressTelemetry: null,
-      diagnostics: [],
+      publicFailures: [],
+      developerDiagnostics: [],
       response: null,
       searchReport: null,
       webgpuReport: null,
       backendReport: null,
       resourceReport: null,
-      error: null
+      developerError: null
     };
   }
 </script>
@@ -480,7 +479,6 @@
             role="switch"
             aria-label={label('useAllThreads')}
             aria-checked={request.useAllLogicalProcessors}
-            disabled={request.scoreMode === 'summary' || request.scoreMode === 'score-finder' || request.scoreMode === 'score-minimals'}
             on:click={() => updateRequest({
               ...request,
               useAllLogicalProcessors: !request.useAllLogicalProcessors

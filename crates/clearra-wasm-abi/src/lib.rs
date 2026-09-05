@@ -12,28 +12,35 @@ use clearra_pc_graph::request::GpuDeviceSelection;
 use clearra_wasm::prewarm_gpu_search_async;
 #[cfg(feature = "stage-profiling")]
 use clearra_wasm::ExecutorSearchProfileSession;
-#[cfg(test)]
-use clearra_wasm::WasmWorkerJobStatus;
 use clearra_wasm::{
     install_pc4_compact_tablebase, release_pc4_compact_tablebase,
-    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_page_exact,
+    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
     serialize_coverage_portfolio_retained_page, serialize_distributed_final_events,
     serialize_parity_report_exhausted, serialize_parity_report_page, GovernedWasmJson,
-    GpuSearchWarmupReport, ProductPageSourceOwner, ProductPageStore, TilingSolutionPageStore,
-    WasmCommandRuntimeError, WasmDistributedCoordinator, WasmDistributedFallbackReason,
-    WasmDistributedMode, WasmDistributedPreparation, WasmDistributedProducerAdvance,
-    WasmDistributedRequestedBackend, WasmDistributedVerifierRuntime, WasmHostCapabilities,
-    WasmWorkerAdvanceStatus, WasmWorkerJobId, WasmWorkerJobRuntime,
-    PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT,
+    GpuSearchWarmupReport, PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore,
+    TilingSolutionPageStore, WasmCommandRuntimeError, WasmDistributedCoordinator,
+    WasmDistributedFallbackReason, WasmDistributedMode, WasmDistributedPreparation,
+    WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
+    WasmDistributedVerifierRuntime, WasmHostCapabilities, WasmWorkerAdvanceStatus, WasmWorkerJobId,
+    WasmWorkerJobRuntime,
 };
+#[cfg(test)]
+use clearra_wasm::{WasmWorkerJobStatus, PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT};
 
 const ABI_VERSION: u32 = 1;
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const PRODUCT_PAGE_REQUEST_CONTRACT: &str = "portfolio-page-request.v1";
+const PRODUCT_PAGE_REQUEST_CONTRACT_V2: &str = "portfolio-page-request.v2";
+const DEFAULT_PRODUCT_PAGE_WORK_STEPS: u64 = 10_000;
 const MAX_TRANSFER_BYTES: usize = 512 * 1024 * 1024;
 const ABI_OK: i32 = 0;
 const ABI_ERROR: i32 = -1;
 const ABI_OUTPUT_NOT_RELEASED: i32 = -2;
+// The public distributed-mode values 0..=2 are owned by `WasmDistributedMode`.
+// Preparation can also complete at the App boundary before a coordinator exists;
+// this ABI-only mode tells hosts to consume that terminal owner via
+// `clearra_wasm_distributed_finish` instead of replaying the command serially.
+const ABI_DISTRIBUTED_READY: i32 = 3;
 const HOST_CAPABILITY_WEBGPU: u32 = 1 << 0;
 const HOST_CAPABILITY_CROSS_ORIGIN_ISOLATED: u32 = 1 << 1;
 
@@ -46,6 +53,7 @@ struct WasmAbiState {
     governed_output: Option<GovernedWasmJson>,
     output_outstanding: bool,
     distributed_coordinator: Option<WasmDistributedCoordinator>,
+    distributed_ready_result: Option<clearra_wasm::WasmExecutionResult>,
     distributed_verifier: Option<WasmDistributedVerifierRuntime>,
     distributed_verifier_partial_available: bool,
     distributed_verifier_pending_work: bool,
@@ -201,6 +209,21 @@ impl AbiProductPageStore {
                 .and_then(|bytes| bytes.checked_add(request_capacity as u128))
                 .is_some_and(|actual| actual <= *memory_limit_bytes),
         }
+    }
+
+    /// Admits a whole-live App page-store peak under the finite worker's
+    /// original authority. The App callback already includes every persistent
+    /// and transient owner below `ProductPageStore`; this boundary adds only
+    /// the ABI carrier and request allocation that remain live above it.
+    fn governed_app_peak_fits(
+        memory_limit_bytes: u128,
+        app_whole_live_bytes: u128,
+        additional_live_capacity: usize,
+    ) -> bool {
+        app_whole_live_bytes
+            .checked_add(core::mem::size_of::<Option<AbiProductPageStore>>() as u128)
+            .and_then(|bytes| bytes.checked_add(additional_live_capacity as u128))
+            .is_some_and(|actual| actual <= memory_limit_bytes)
     }
 
     #[cfg(test)]
@@ -430,6 +453,7 @@ impl WasmAbiState {
             }
         };
         self.distributed_coordinator.is_some()
+            || self.distributed_ready_result.is_some()
             || self.distributed_verifier.is_some()
             || self.gpu_warmup.is_some()
             || profile_active
@@ -662,6 +686,7 @@ impl WasmAbiState {
 
     fn reset_distributed_state(&mut self) {
         self.distributed_coordinator = None;
+        self.distributed_ready_result = None;
         self.distributed_verifier = None;
         self.distributed_verifier_partial_available = false;
         self.distributed_verifier_pending_work = false;
@@ -792,9 +817,7 @@ pub extern "C" fn clearra_wasm_configure_host(
 pub extern "C" fn clearra_wasm_gpu_warmup_start(device_index: i32) -> i32 {
     let warmup = ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        if let Err(status) = state.require_mutation_admission() {
-            return Err(status);
-        }
+        state.require_mutation_admission()?;
         if state.gpu_warmup.is_some() {
             return Ok(None);
         }
@@ -1045,14 +1068,17 @@ pub extern "C" fn clearra_wasm_distributed_prepare() -> i32 {
             }
         };
         state.distributed_coordinator = None;
+        state.distributed_ready_result = None;
         let preparation = WasmDistributedCoordinator::prepare(
             state.runtime.command_runtime(),
             command_text.as_str(),
         );
         drop(command_text);
         match preparation {
-            Ok(WasmDistributedPreparation::Serial) | Ok(WasmDistributedPreparation::Ready(_)) => {
-                WasmDistributedMode::Serial as i32
+            Ok(WasmDistributedPreparation::Serial) => WasmDistributedMode::Serial as i32,
+            Ok(WasmDistributedPreparation::Ready(result)) => {
+                state.distributed_ready_result = Some(result);
+                ABI_DISTRIBUTED_READY
             }
             Ok(WasmDistributedPreparation::Coordinator(coordinator)) => {
                 let mode = coordinator.mode() as i32;
@@ -1396,18 +1422,32 @@ pub extern "C" fn clearra_wasm_distributed_finish(job_id: u32, workers_used: u32
         if let Err(status) = state.require_mutation_admission() {
             return status;
         }
-        let Some(coordinator) = state.distributed_coordinator.take() else {
-            state.set_error(
-                "E_WASM_DISTRIBUTED_STATE",
-                "distributed coordinator is not active",
-            );
-            return ABI_ERROR;
-        };
-        let result = match coordinator.finish(workers_used as usize) {
-            Ok(result) => result,
-            Err(error) => {
-                state.set_runtime_error(&error);
+        let result = if state.distributed_ready_result.is_some() {
+            if workers_used != 0 {
+                state.set_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "prepared terminal result requires zero distributed workers",
+                );
                 return ABI_ERROR;
+            }
+            state
+                .distributed_ready_result
+                .take()
+                .expect("ready result presence checked above")
+        } else {
+            let Some(coordinator) = state.distributed_coordinator.take() else {
+                state.set_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "distributed coordinator is not active",
+                );
+                return ABI_ERROR;
+            };
+            match coordinator.finish(workers_used as usize) {
+                Ok(result) => result,
+                Err(error) => {
+                    state.set_runtime_error(&error);
+                    return ABI_ERROR;
+                }
             }
         };
         let output = match serialize_distributed_final_events(job_id.into(), &result) {
@@ -1649,15 +1689,36 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
             .is_some_and(|store| store.store().parity_report().is_some());
         let output = if coverage_portfolio {
             let (advance, retained_slot) = {
-                let Some(store) = state
-                    .product_page_store
-                    .as_mut()
-                    .and_then(|store| store.store_mut().coverage_portfolio_mut())
-                else {
-                    return ABI_ERROR;
+                let advance_result = match state.product_page_store.as_mut() {
+                    Some(AbiProductPageStore::Legacy(store)) => {
+                        let Some(store) = store.coverage_portfolio_mut() else {
+                            return ABI_ERROR;
+                        };
+                        store.next_page(maximum_work_steps.max(1) as u64, &mut || false)
+                    }
+                    Some(AbiProductPageStore::Governed {
+                        store,
+                        memory_limit_bytes,
+                    }) => {
+                        let memory_limit_bytes = *memory_limit_bytes;
+                        let Some(store) = store.coverage_portfolio_mut() else {
+                            return ABI_ERROR;
+                        };
+                        store.next_page_with_memory_guard(
+                            maximum_work_steps.max(1) as u64,
+                            &mut |app_whole_live| {
+                                AbiProductPageStore::governed_app_peak_fits(
+                                    memory_limit_bytes,
+                                    app_whole_live,
+                                    0,
+                                )
+                            },
+                            &mut || false,
+                        )
+                    }
+                    None => return ABI_ERROR,
                 };
-                let advance = match store.next_page(maximum_work_steps.max(1) as u64, &mut || false)
-                {
+                let advance = match advance_result {
                     Ok(advance) => advance,
                     Err(error) => {
                         if governed {
@@ -1668,9 +1729,15 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
                         return ABI_ERROR;
                     }
                 };
-                let retained_slot = advance
-                    .page()
-                    .and_then(|page| store.retained_page_slot(page.alternative_index_decimal()));
+                let retained_slot = advance.page().and_then(|page| {
+                    state
+                        .product_page_store
+                        .as_ref()
+                        .and_then(|store| store.store().coverage_portfolio())
+                        .and_then(|store| {
+                            store.retained_page_slot(page.alternative_index_decimal())
+                        })
+                });
                 (advance, retained_slot)
             };
             if state
@@ -1754,7 +1821,9 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
                 ABI_OK
             }
             Err(error) => {
-                if !governed {
+                if governed {
+                    state.product_page_store = None;
+                } else {
                     state.set_runtime_error(&error);
                 }
                 ABI_ERROR
@@ -1772,17 +1841,21 @@ pub extern "C" fn clearra_wasm_product_page_get(
 ) -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        let alternative_index_decimal = outer_page_number.to_string();
+        let additional_live_capacity = alternative_index_decimal.capacity();
         product_page_get_from_state(
             &mut state,
-            &outer_page_number.to_string(),
+            &alternative_index_decimal,
             member_page_number as usize,
-            0,
+            DEFAULT_PRODUCT_PAGE_WORK_STEPS,
+            additional_live_capacity,
         )
     })
 }
 
 /// Loads a product/member page from canonical positive decimal identities in
-/// the request buffer: `portfolio-page-request.v1\n<outer>\n<member>`.
+/// either the compatibility v1 request or the bounded v2 request:
+/// `portfolio-page-request.v2\n<outer>\n<member>\n<maximum-work-steps>`.
 #[no_mangle]
 pub extern "C" fn clearra_wasm_product_page_get_exact() -> i32 {
     ABI_STATE.with(|state| {
@@ -1797,7 +1870,7 @@ pub extern "C" fn clearra_wasm_product_page_get_exact() -> i32 {
             Ok(request) => request,
             Err(_) => return ABI_ERROR,
         };
-        let (alternative_index_decimal, member_page_number) =
+        let (alternative_index_decimal, member_page_number, maximum_work_steps) =
             match parse_product_page_request(&request) {
                 Ok(request) => request,
                 Err(_) => return ABI_ERROR,
@@ -1806,6 +1879,7 @@ pub extern "C" fn clearra_wasm_product_page_get_exact() -> i32 {
             &mut state,
             alternative_index_decimal,
             member_page_number,
+            maximum_work_steps,
             request.capacity(),
         )
     })
@@ -1815,6 +1889,7 @@ fn product_page_get_from_state(
     state: &mut WasmAbiState,
     alternative_index_decimal: &str,
     member_page_number: usize,
+    maximum_work_steps: u64,
     additional_live_capacity: usize,
 ) -> i32 {
     if let Err(status) = state.require_released_output() {
@@ -1831,35 +1906,108 @@ fn product_page_get_from_state(
         .product_page_store
         .as_ref()
         .is_some_and(AbiProductPageStore::is_governed);
-    let output = if let Some(store) = state
+    if state
         .product_page_store
-        .as_mut()
-        .and_then(|store| store.store_mut().coverage_portfolio_mut())
+        .as_ref()
+        .is_some_and(|store| !store.governed_request_fits(additional_live_capacity))
     {
-        serialize_coverage_portfolio_page_exact(
-            store,
-            alternative_index_decimal,
-            member_page_number,
-            &mut || false,
-        )
+        state.product_page_store = None;
+        return ABI_ERROR;
+    }
+    let coverage_portfolio = state
+        .product_page_store
+        .as_ref()
+        .is_some_and(|store| store.store().coverage_portfolio().is_some());
+    let output = if coverage_portfolio {
+        let load_advance_result = match state.product_page_store.as_mut() {
+            Some(AbiProductPageStore::Legacy(store)) => {
+                let Some(store) = store.coverage_portfolio_mut() else {
+                    return ABI_ERROR;
+                };
+                store.load_page_by_alternative_index_slice(
+                    alternative_index_decimal,
+                    maximum_work_steps,
+                    &mut || false,
+                )
+            }
+            Some(AbiProductPageStore::Governed {
+                store,
+                memory_limit_bytes,
+            }) => {
+                let memory_limit_bytes = *memory_limit_bytes;
+                let Some(store) = store.coverage_portfolio_mut() else {
+                    return ABI_ERROR;
+                };
+                store.load_page_by_alternative_index_slice_with_memory_guard(
+                    alternative_index_decimal,
+                    maximum_work_steps,
+                    &mut |app_whole_live| {
+                        AbiProductPageStore::governed_app_peak_fits(
+                            memory_limit_bytes,
+                            app_whole_live,
+                            additional_live_capacity,
+                        )
+                    },
+                    &mut || false,
+                )
+            }
+            None => return ABI_ERROR,
+        };
+        let load_advance = match load_advance_result {
+            Ok(load_advance) => load_advance,
+            Err(error) => {
+                if governed {
+                    state.product_page_store = None;
+                } else {
+                    state.set_error("E_WASM_PRODUCT_PAGE", error.as_str());
+                }
+                return ABI_ERROR;
+            }
+        };
+        if state.product_page_store.as_ref().is_some_and(|store| {
+            !store.governed_store_fits() || !store.governed_request_fits(additional_live_capacity)
+        }) {
+            state.product_page_store = None;
+            return ABI_ERROR;
+        }
+        let Some(store) = state
+            .product_page_store
+            .as_ref()
+            .and_then(|store| store.store().coverage_portfolio())
+        else {
+            return ABI_ERROR;
+        };
+        match load_advance.state() {
+            PortfolioPageLoadState::Page => {
+                let Some(retained_slot) = load_advance.retained_slot() else {
+                    return ABI_ERROR;
+                };
+                serialize_coverage_portfolio_retained_page(store, retained_slot, member_page_number)
+            }
+            PortfolioPageLoadState::WorkBudgetExhausted | PortfolioPageLoadState::Cancelled => {
+                serialize_coverage_portfolio_load_advance_state(store, load_advance)
+            }
+        }
     } else if let Some(store) = state
         .product_page_store
         .as_ref()
         .and_then(|store| store.store().parity_report())
     {
-        let outer_page_number = parse_canonical_positive_usize(alternative_index_decimal);
-        if member_page_number != 1 || outer_page_number.is_none() {
-            Err(WasmCommandRuntimeError::new(
+        match (
+            member_page_number,
+            parse_canonical_positive_usize(alternative_index_decimal),
+        ) {
+            (1, Some(outer_page_number)) => match store.page(outer_page_number) {
+                Ok(page) => serialize_parity_report_page(&page),
+                Err(error) => Err(WasmCommandRuntimeError::new(
+                    "E_WASM_PRODUCT_PAGE",
+                    error.as_str(),
+                )),
+            },
+            _ => Err(WasmCommandRuntimeError::new(
                 "E_WASM_PRODUCT_PAGE",
                 "invalid-member-page",
-            ))
-        } else {
-            store
-                .page(outer_page_number.expect("validated positive page"))
-                .map_err(|error| {
-                    WasmCommandRuntimeError::new("E_WASM_PRODUCT_PAGE", error.as_str())
-                })
-                .and_then(|page| serialize_parity_report_page(&page))
+            )),
         }
     } else {
         if !governed {
@@ -1889,7 +2037,9 @@ fn product_page_get_from_state(
             ABI_OK
         }
         Err(error) => {
-            if !governed {
+            if governed {
+                state.product_page_store = None;
+            } else {
                 state.set_runtime_error(&error);
             }
             ABI_ERROR
@@ -1897,20 +2047,41 @@ fn product_page_get_from_state(
     }
 }
 
-fn parse_product_page_request(request: &str) -> Result<(&str, usize), &'static str> {
+fn parse_product_page_request(request: &str) -> Result<(&str, usize, u64), &'static str> {
     let mut fields = request.split('\n');
     let contract = fields.next().ok_or("missing-contract")?;
     let alternative_index_decimal = fields.next().ok_or("missing-alternative-index")?;
     let member_page_decimal = fields.next().ok_or("missing-member-page")?;
-    if fields.next().is_some()
-        || contract != PRODUCT_PAGE_REQUEST_CONTRACT
-        || !is_canonical_positive_decimal(alternative_index_decimal)
-    {
+    if !is_canonical_positive_decimal(alternative_index_decimal) {
         return Err("invalid-product-page-request");
     }
     let member_page_number =
         parse_canonical_positive_usize(member_page_decimal).ok_or("invalid-member-page")?;
-    Ok((alternative_index_decimal, member_page_number))
+    let maximum_work_steps = match contract {
+        PRODUCT_PAGE_REQUEST_CONTRACT => {
+            if fields.next().is_some() {
+                return Err("invalid-product-page-request");
+            }
+            DEFAULT_PRODUCT_PAGE_WORK_STEPS
+        }
+        PRODUCT_PAGE_REQUEST_CONTRACT_V2 => {
+            let work_steps_decimal = fields.next().ok_or("missing-work-steps")?;
+            if fields.next().is_some() || !is_canonical_positive_decimal(work_steps_decimal) {
+                return Err("invalid-product-page-request");
+            }
+            work_steps_decimal
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value != 0)
+                .ok_or("invalid-work-steps")?
+        }
+        _ => return Err("invalid-product-page-request"),
+    };
+    Ok((
+        alternative_index_decimal,
+        member_page_number,
+        maximum_work_steps,
+    ))
 }
 
 fn parse_canonical_positive_usize(value: &str) -> Option<usize> {
@@ -1945,10 +2116,11 @@ pub extern "C" fn clearra_wasm_product_page_release() -> i32 {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_cancel() -> i32 {
     ABI_STATE.with(|state| {
-        let state = state.borrow();
+        let mut state = state.borrow_mut();
         if let Err(status) = state.require_mutation_admission() {
             return status;
         }
+        state.distributed_ready_result = None;
         if let Some(coordinator) = state.distributed_coordinator.as_ref() {
             coordinator.cancel();
         }
@@ -2551,6 +2723,8 @@ mod tests {
     const TYPED_PC_MINIMALS_COMMAND: &str = "clearra pc minimals --lines 1 \
         --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus \
         --backend cpu --workers 1";
+    const MULTI_ALTERNATIVE_PC_MINIMALS_COMMAND: &str = "clearra pc minimals --lines 2 \
+        --queue IIOOO --backend cpu --workers 1";
     const TYPED_PARITY_COMMAND: &str = "clearra utility parity --format ctk3 \
         --document ctk3_w0kCERPPgGduYXRpdmWycg";
 
@@ -2588,8 +2762,85 @@ mod tests {
             .clone()
     }
 
+    fn multi_alternative_pc_minimals_product_source_fixture() -> ProductPageSourceOwner {
+        static SOURCE: OnceLock<ProductPageSourceOwner> = OnceLock::new();
+        SOURCE
+            .get_or_init(|| {
+                let execution = clearra_wasm::WasmCommandRuntime::default()
+                    .run_command_text(MULTI_ALTERNATIVE_PC_MINIMALS_COMMAND)
+                    .expect("multi-alternative typed pc minimals fixture");
+                execution
+                    .product_page_source_owner()
+                    .cloned()
+                    .expect("multi-alternative pc minimals has a public product page source")
+            })
+            .clone()
+    }
+
     fn reset_abi_state_for_test() {
         ABI_STATE.with(|state| *state.borrow_mut() = WasmAbiState::default());
+    }
+
+    #[test]
+    fn typed_pc_minimals_runtime_completes_on_two_mib_stack() {
+        std::thread::Builder::new()
+            .name("typed-pc-minimals-two-mib-stack".to_owned())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let execution = clearra_wasm::WasmCommandRuntime::default()
+                    .run_command_text(TYPED_PC_MINIMALS_COMMAND)
+                    .expect("typed pc minimals completes within the explicit stack boundary");
+                assert!(execution.product_page_source_owner().is_some());
+            })
+            .expect("two-MiB stack test thread starts")
+            .join()
+            .expect("typed pc minimals does not overflow or panic");
+    }
+
+    #[test]
+    fn distributed_ready_preparation_is_finished_once_without_serial_reexecution() {
+        const COMMAND: &str = "clearra pc --lines 4 --board-mask 0 --height 4 \
+            --pieces 10 --queue IOTSZJL --hold empty --backend cpu --workers 2";
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| {
+            state.borrow_mut().input = COMMAND.as_bytes().to_vec();
+        });
+
+        assert_eq!(
+            clearra_wasm_distributed_prepare(),
+            3,
+            "an App-terminal preparation needs a distinct ABI mode"
+        );
+        ABI_STATE.with(|state| {
+            state.borrow_mut().input = COMMAND.as_bytes().to_vec();
+        });
+        assert_eq!(
+            clearra_wasm_start_job(),
+            0,
+            "the retained App result must block a serial replay owner"
+        );
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.distributed_ready_result.is_some());
+            assert!(!state.input.is_empty(), "rejected replay input stays owned");
+        });
+        assert_eq!(clearra_wasm_distributed_finish(71, 0), ABI_OK);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            let output = std::str::from_utf8(state.output_bytes()).expect("terminal UTF-8");
+            assert!(output.contains("\"event\":\"final_response\""), "{output}");
+            assert!(output.contains("\"job_id\":71"), "{output}");
+            assert!(output.contains("piece window cannot exceed"), "{output}");
+        });
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+
+        assert_eq!(
+            clearra_wasm_distributed_finish(72, 0),
+            ABI_ERROR,
+            "the prepared App response must have one terminal owner"
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
     }
 
     fn install_exact_product_page_request(alternative_index: &str, member_page: &str) {
@@ -2604,37 +2855,31 @@ mod tests {
         });
     }
 
-    fn complete_finite_job(command: &str) -> u32 {
+    fn reject_unaccounted_finite_worker_job(command: &str) -> String {
         reset_abi_state_for_test();
         ABI_STATE.with(|state| {
             state.borrow_mut().input = command.as_bytes().to_vec();
         });
-        let job_id = clearra_wasm_start_job();
-        assert_ne!(job_id, 0, "finite Build job must be admitted");
-        for _ in 0..10_000 {
-            match clearra_wasm_advance_job(job_id, 100_000) {
-                0 | 4 => {}
-                1 => {
-                    ABI_STATE.with(|state| {
-                        let state = state.borrow();
-                        assert!(state.runtime.has_completed_governed_events());
-                        assert!(state.tiling_solution_page_store.is_none());
-                    });
-                    return job_id;
-                }
-                status => {
-                    let output = ABI_STATE.with(|state| {
-                        String::from_utf8_lossy(state.borrow().output_bytes()).into_owned()
-                    });
-                    panic!("finite Build job failed with status {status}: {output}");
-                }
-            }
-        }
-        panic!("finite Build job did not complete within the bounded advance loop");
-    }
-
-    fn complete_finite_build_job() -> u32 {
-        complete_finite_job(FINITE_BUILD_COMMAND)
+        assert_eq!(
+            clearra_wasm_start_job(),
+            0,
+            "the raw worker must reject finite memory without a retained authority"
+        );
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(!state.runtime.has_active_finite_job());
+            assert!(!state.runtime.has_completed_governed_events());
+            assert!(state.input.is_empty());
+            assert_eq!(state.input.capacity(), 0);
+            assert!(state.transfer_input.is_empty());
+            assert_eq!(state.transfer_input.capacity(), 0);
+            assert!(state.tiling_solution_page_store.is_none());
+            assert!(state.product_page_source_owner.is_none());
+            assert!(state.product_page_store.is_none());
+            assert!(state.governed_output.is_none());
+            assert!(state.output_outstanding);
+            String::from_utf8_lossy(state.output_bytes()).into_owned()
+        })
     }
 
     fn complete_legacy_job(command: &str) -> u32 {
@@ -2663,22 +2908,6 @@ mod tests {
             }
         }
         panic!("legacy worker job did not complete within the bounded advance loop");
-    }
-
-    fn start_active_finite_job() -> u32 {
-        reset_abi_state_for_test();
-        ABI_STATE.with(|state| {
-            state.borrow_mut().input = FINITE_BUILD_COMMAND.as_bytes().to_vec();
-        });
-        let job_id = clearra_wasm_start_job();
-        assert_ne!(job_id, 0, "finite Build job must be admitted");
-        assert_eq!(clearra_wasm_advance_job(job_id, 1), 0);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_active_finite_job());
-            assert!(!state.runtime.has_completed_governed_events());
-        });
-        job_id
     }
 
     #[test]
@@ -2750,87 +2979,14 @@ mod tests {
     }
 
     #[test]
-    fn active_finite_job_rejects_preterminal_drain_and_unrelated_mutation_without_output() {
-        let job_id = start_active_finite_job();
-        let mut command = Vec::with_capacity(257);
-        command.extend_from_slice(b"preserve-command-owner");
-        let command_pointer = command.as_ptr();
-        let command_capacity = command.capacity();
-        let mut transfer = Vec::with_capacity(521);
-        transfer.extend_from_slice(b"preserve-transfer-owner");
-        let transfer_pointer = transfer.as_ptr();
-        let transfer_capacity = transfer.capacity();
-        ABI_STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            state.input = command;
-            state.transfer_input = transfer;
-            let generation = state.begin_gpu_warmup().expect("late callback fixture");
-            assert!(!state.accepts_gpu_warmup_completion(generation));
-            state.cancel_gpu_warmup();
-        });
+    fn finite_memory_worker_start_is_fail_closed_without_retained_authority() {
+        let output = reject_unaccounted_finite_worker_job(FINITE_BUILD_COMMAND);
+        assert_eq!(output, "E_WASM_FINITE_AUTHORITY_UNAVAILABLE: ");
 
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_ERROR);
-        assert_eq!(clearra_wasm_configure_host(u32::MAX, u32::MAX), ABI_ERROR);
-        assert_eq!(clearra_wasm_gpu_warmup_start(i32::MAX), ABI_ERROR);
-        assert_eq!(clearra_wasm_gpu_warmup_cancel(), ABI_ERROR);
-        assert_eq!(clearra_wasm_gpu_warmup_advance(), ABI_ERROR);
-        assert_eq!(clearra_wasm_input_resize(u32::MAX), ABI_ERROR);
-        assert_eq!(clearra_wasm_transfer_resize(u32::MAX), ABI_ERROR);
-        assert_eq!(clearra_wasm_tablebase_install(), ABI_ERROR);
-        assert_eq!(clearra_wasm_tablebase_release(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_prepare(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_worker_initialization(), ABI_ERROR);
-        assert_eq!(
-            clearra_wasm_distributed_produce(u32::MAX, u32::MAX),
-            ABI_ERROR
-        );
-        assert_eq!(clearra_wasm_distributed_merge_partial(), ABI_ERROR);
-        assert_eq!(
-            clearra_wasm_distributed_finish(u32::MAX, u32::MAX),
-            ABI_ERROR
-        );
-        assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_forward_verifier_start(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_verifier_consume(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_verifier_continue(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_verifier_finish(), ABI_ERROR);
-        assert_eq!(
-            clearra_wasm_tiling_solution_page(u32::MAX, u32::MAX),
-            ABI_ERROR
-        );
-        assert_eq!(clearra_wasm_tiling_solution_release(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_cancel(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_reset(), ABI_ERROR);
-        assert_eq!(clearra_wasm_start_job(), 0);
-        #[cfg(feature = "stage-profiling")]
-        {
-            assert_eq!(clearra_wasm_profile_start(), ABI_ERROR);
-            assert_eq!(clearra_wasm_profile_finish(), ABI_ERROR);
-        }
-
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_active_finite_job());
-            assert!(!state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.as_ptr(), command_pointer);
-            assert_eq!(state.input.capacity(), command_capacity);
-            assert_eq!(state.transfer_input.as_ptr(), transfer_pointer);
-            assert_eq!(state.transfer_input.capacity(), transfer_capacity);
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(state.governed_output.is_none());
-            assert!(!state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_cancel_job(job_id), ABI_OK);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(!state.runtime.has_active_finite_job());
-            assert_eq!(
-                state.runtime.status(WasmWorkerJobId::new(job_id.into())),
-                Some(WasmWorkerJobStatus::Cancelled)
-            );
-        });
+        assert_eq!(clearra_wasm_input_resize(1), ABI_OUTPUT_NOT_RELEASED);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OUTPUT_NOT_RELEASED);
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
     }
 
     #[test]
@@ -2960,164 +3116,21 @@ mod tests {
     }
 
     #[test]
-    fn governed_drain_preserves_wrong_job_owner_then_leases_exact_abi_output_until_release() {
-        let job_id = complete_finite_build_job();
-        let wrong_job_id = if job_id == u32::MAX {
-            job_id - 1
-        } else {
-            job_id + 1
-        };
-
-        ABI_STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            let generation = state.begin_gpu_warmup().expect("late callback fixture");
-            assert!(!state.accepts_gpu_warmup_completion(generation));
-        });
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            assert!(state.runtime.has_completed_governed_events());
-            assert!(matches!(state.gpu_warmup, Some(GpuWarmupState::Pending)));
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(!state.output_outstanding);
-            state.cancel_gpu_warmup();
-        });
-        assert_eq!(clearra_wasm_tiling_solution_page(0, 1), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(state.governed_output.is_none());
-            assert!(!state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_drain_job_events(wrong_job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(state.governed_output.is_none());
-            assert!(!state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_input_resize(1), ABI_ERROR);
-        assert_eq!(clearra_wasm_transfer_resize(1), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_prepare(), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.capacity(), 0);
-            assert_eq!(state.transfer_input.capacity(), 0);
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(!state.output_outstanding);
-        });
-
-        let mut next_command = Vec::with_capacity(FINITE_BUILD_COMMAND.len() + 37);
-        next_command.extend_from_slice(FINITE_BUILD_COMMAND.as_bytes());
-        let next_command_ptr = next_command.as_ptr();
-        let next_command_capacity = next_command.capacity();
-        ABI_STATE.with(|state| state.borrow_mut().input = next_command);
-        assert_eq!(clearra_wasm_start_job(), 0);
-        assert_eq!(clearra_wasm_advance_job(wrong_job_id, 1), ABI_ERROR);
-        assert_eq!(clearra_wasm_cancel_job(wrong_job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.as_ptr(), next_command_ptr);
-            assert_eq!(state.input.capacity(), next_command_capacity);
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(!state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.as_ptr(), next_command_ptr);
-            assert_eq!(state.input.capacity(), next_command_capacity);
-            assert!(state.governed_output.is_none());
-        });
-        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.capacity(), 0);
-            assert_eq!(state.transfer_input.capacity(), 0);
-        });
-
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_OK);
-        let (output_ptr, output_len, output_actual, output_limit) = ABI_STATE.with(|state| {
-            let state = state.borrow();
-            let output = state
-                .governed_output
-                .as_ref()
-                .expect("correct job drains the governed JSON owner into ABI state");
-            let output_actual = WasmAbiState::governed_output_storage_actual_bytes(output)
-                .expect("governed ABI storage bytes remain representable");
-            assert!(WasmAbiState::governed_output_storage_fits(
-                output,
-                output_actual
-            ));
-            assert!(output_actual > 0);
-            assert!(!WasmAbiState::governed_output_storage_fits(
-                output,
-                output_actual - 1
-            ));
-            assert!(output_actual <= output.memory_limit_bytes());
-            assert_eq!(state.output_retained_capacity_bytes(), output_actual);
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(state.output_outstanding);
-            (
-                output.json().as_ptr(),
-                output.json().len(),
-                output_actual,
-                output.memory_limit_bytes(),
-            )
-        });
-        assert_eq!(clearra_wasm_output_ptr(), output_ptr as usize as u32);
-        assert_eq!(clearra_wasm_output_len(), output_len as u32);
-        assert_eq!(clearra_wasm_output_len_exact(), 1);
-        assert!(output_actual <= output_limit);
-
-        assert_eq!(clearra_wasm_input_resize(1), ABI_OUTPUT_NOT_RELEASED);
-        assert_eq!(clearra_wasm_distributed_reset(), ABI_OUTPUT_NOT_RELEASED);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            let output = state
-                .governed_output
-                .as_ref()
-                .expect("the next operation cannot consume the output owner");
-            assert_eq!(output.json().as_ptr(), output_ptr);
-            assert_eq!(output.json().len(), output_len);
-            assert_eq!(state.output_retained_capacity_bytes(), output_actual);
-            assert!(state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+    fn finite_memory_worker_rejection_never_creates_a_governed_event_lease() {
+        let output = reject_unaccounted_finite_worker_job(FINITE_BUILD_COMMAND);
+        assert_eq!(output, "E_WASM_FINITE_AUTHORITY_UNAVAILABLE: ");
         ABI_STATE.with(|state| {
             let state = state.borrow();
             assert!(state.governed_output.is_none());
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert_eq!(state.output_retained_capacity_bytes(), 0);
-            assert!(!state.output_outstanding);
-        });
-        assert_eq!(clearra_wasm_output_release(), ABI_OK);
-        assert_eq!(clearra_wasm_drain_job_events(wrong_job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
             assert!(!state.runtime.has_completed_governed_events());
-            assert!(!state.output.is_empty());
-            assert!(state.output_outstanding);
+            assert!(state.tiling_solution_page_store.is_none());
+            assert!(state.product_page_source_owner.is_none());
+            assert!(state.product_page_store.is_none());
         });
+        assert_eq!(clearra_wasm_drain_job_events(1), ABI_OUTPUT_NOT_RELEASED);
         assert_eq!(clearra_wasm_output_release(), ABI_OK);
-        assert_eq!(clearra_wasm_input_resize(1), ABI_OK);
+        assert_eq!(clearra_wasm_drain_job_events(1), ABI_ERROR);
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
         assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
     }
 
@@ -3367,12 +3380,142 @@ mod tests {
     }
 
     #[test]
+    fn governed_product_advance_denial_is_an_abi_error_without_a_false_page_state() {
+        let source = typed_pc_minimals_product_source_fixture();
+        let mut probe = ProductPageStore::from_source(source.clone()).expect("probe page store");
+        let mut trace = Vec::new();
+        probe
+            .coverage_portfolio_mut()
+            .expect("coverage portfolio")
+            .next_page_with_memory_guard(
+                10_000,
+                &mut |whole_live| {
+                    trace.push(whole_live);
+                    true
+                },
+                &mut || false,
+            )
+            .expect("measure one guarded advance");
+        let abi_inline = core::mem::size_of::<Option<AbiProductPageStore>>() as u128;
+        let denied_limit = trace
+            .iter()
+            .copied()
+            .max()
+            .expect("advance reports a whole-live peak")
+            .checked_add(abi_inline)
+            .and_then(|peak| peak.checked_sub(1))
+            .expect("peak-minus-one limit");
+
+        let denied_store = ProductPageStore::from_source(source).expect("denied page store");
+        let retained_before = denied_store
+            .checked_retained_capacity_bytes()
+            .expect("retained bytes");
+        assert!(retained_before + abi_inline <= denied_limit);
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| {
+            state.borrow_mut().product_page_store = Some(AbiProductPageStore::Governed {
+                store: denied_store,
+                memory_limit_bytes: denied_limit,
+            });
+        });
+
+        assert_eq!(clearra_wasm_product_page_next(10_000), ABI_ERROR);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.product_page_store.is_none());
+            assert!(state.output.is_empty());
+            assert!(!state.output_outstanding);
+        });
+    }
+
+    #[test]
+    fn governed_product_cache_replay_denial_is_fail_closed_at_the_abi_boundary() {
+        fn fully_advanced(source: ProductPageSourceOwner) -> ProductPageStore {
+            let mut store = ProductPageStore::from_source(source).expect("page store");
+            let coverage = store.coverage_portfolio_mut().expect("coverage portfolio");
+            loop {
+                let advance = coverage
+                    .next_page(u64::MAX, &mut || false)
+                    .expect("advance all alternatives");
+                if advance.checkpoint().enumeration_complete() {
+                    break;
+                }
+            }
+            assert!(coverage.retained_page_slot("1").is_none());
+            store
+        }
+
+        let source = multi_alternative_pc_minimals_product_source_fixture();
+        let mut probe = fully_advanced(source.clone());
+        let mut trace = Vec::new();
+        probe
+            .coverage_portfolio_mut()
+            .expect("coverage portfolio")
+            .load_page_by_alternative_index_slice_with_memory_guard(
+                "1",
+                DEFAULT_PRODUCT_PAGE_WORK_STEPS,
+                &mut |whole_live| {
+                    trace.push(whole_live);
+                    true
+                },
+                &mut || false,
+            )
+            .expect("measure guarded cache replay");
+        let abi_inline = core::mem::size_of::<Option<AbiProductPageStore>>() as u128;
+        let requested_alternative_index = "1".to_owned();
+        let request_capacity = requested_alternative_index.capacity();
+        let denied_limit = trace
+            .iter()
+            .copied()
+            .max()
+            .expect("replay reports a whole-live peak")
+            .checked_add(abi_inline)
+            .and_then(|peak| peak.checked_add(request_capacity as u128))
+            .and_then(|peak| peak.checked_sub(1))
+            .expect("peak-minus-one limit");
+        let denied_store = fully_advanced(source);
+        let retained_before = denied_store
+            .checked_retained_capacity_bytes()
+            .expect("retained bytes");
+        assert!(retained_before + abi_inline + request_capacity as u128 <= denied_limit);
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| {
+            state.borrow_mut().product_page_store = Some(AbiProductPageStore::Governed {
+                store: denied_store,
+                memory_limit_bytes: denied_limit,
+            });
+        });
+
+        let status = ABI_STATE.with(|state| {
+            product_page_get_from_state(
+                &mut state.borrow_mut(),
+                &requested_alternative_index,
+                1,
+                DEFAULT_PRODUCT_PAGE_WORK_STEPS,
+                request_capacity,
+            )
+        });
+        assert_eq!(status, ABI_ERROR);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.product_page_store.is_none());
+            assert!(state.output.is_empty());
+            assert!(!state.output_outstanding);
+        });
+    }
+
+    #[test]
     fn exact_product_page_request_preserves_indices_beyond_js_and_u32_ranges() {
         let request = format!("{PRODUCT_PAGE_REQUEST_CONTRACT}\n184467440737095516160\n1");
-        let (alternative_index, member_page) =
+        let (alternative_index, member_page, maximum_work_steps) =
             parse_product_page_request(&request).expect("exact decimal request");
         assert_eq!(alternative_index, "184467440737095516160");
         assert_eq!(member_page, 1);
+        assert_eq!(maximum_work_steps, DEFAULT_PRODUCT_PAGE_WORK_STEPS);
+        let bounded = format!("{PRODUCT_PAGE_REQUEST_CONTRACT_V2}\n184467440737095516160\n1\n17");
+        let (_, _, maximum_work_steps) =
+            parse_product_page_request(&bounded).expect("bounded exact decimal request");
+        assert_eq!(maximum_work_steps, 17);
         assert!(
             parse_product_page_request("portfolio-page-request.v1\n9007199254740992\n01").is_err()
         );
@@ -3483,17 +3626,15 @@ mod tests {
     }
 
     #[test]
-    fn governed_generic_tiling_does_not_forge_pc_tiling_page_authority() {
-        let job_id = complete_finite_job(FINITE_GENERIC_TILING_COMMAND);
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_OK);
+    fn rejected_finite_generic_tiling_does_not_forge_pc_tiling_page_authority() {
+        let output = reject_unaccounted_finite_worker_job(FINITE_GENERIC_TILING_COMMAND);
+        assert_eq!(output, "E_WASM_FINITE_AUTHORITY_UNAVAILABLE: ");
         ABI_STATE.with(|state| {
             let state = state.borrow();
-            let output = state
-                .governed_output
-                .as_ref()
-                .expect("finite Build drains through the governed JSON route");
-            assert!(output.completed_tiling_solution_page_store().is_none());
             assert!(state.tiling_solution_page_store.is_none());
+            assert!(state.product_page_source_owner.is_none());
+            assert!(state.product_page_store.is_none());
+            assert!(state.governed_output.is_none());
             assert!(state.output_outstanding);
         });
 
@@ -3769,7 +3910,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_build_verifier_admission_exports_typed_not_executed_report() {
+    fn standalone_build_verifier_rejects_unaccounted_finite_authority() {
         reset_abi_state_for_test();
         ABI_STATE.with(|state| {
             state.borrow_mut().input = b"clearra build-probability --base-mask 0x0 \
@@ -3786,15 +3927,15 @@ mod tests {
             assert_eq!(state.input.capacity(), 0);
             let output = std::str::from_utf8(&state.output).expect("typed UTF-8 error");
             assert!(output.starts_with('{'), "output={output}");
-            assert!(output.contains("\"code\":\"E_WASM_DISTRIBUTED_VERIFIER_START\""));
-            assert!(output.contains("\"solver_executed\":false"));
-            assert!(output.contains("\"state\":\"exhausted\""));
-            assert!(output.contains("\"reason\":\"memory-budget-exceeded\""));
-            assert!(output.contains("\"descriptor_pattern_count\":\"1058400\""));
-            assert!(output.contains("\"dense_pattern_count\":\"1058400\""));
-            assert!(output.contains("\"required_dense_bytes\":\"132304\""));
-            assert!(output.contains("\"required_memory_bytes\":\"17066704\""));
-            assert!(output.contains("\"result_completeness\":\"not-executed\""));
+            assert!(
+                output.contains("\"code\":\"E_WASM_FINITE_AUTHORITY_UNAVAILABLE\""),
+                "output={output}"
+            );
+            assert!(
+                output.contains("\"resource_report\":null"),
+                "output={output}"
+            );
+            assert!(state.output_outstanding);
         });
         assert_eq!(clearra_wasm_output_release(), ABI_OK);
         assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);

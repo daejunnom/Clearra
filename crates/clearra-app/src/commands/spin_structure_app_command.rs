@@ -20,8 +20,9 @@ use crate::{
     spin_structure_search_result::SpinStructureSearchResult,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SpinStructureProductMode {
+    #[default]
     Search,
     Cover {
         max_patterns: usize,
@@ -31,12 +32,6 @@ pub enum SpinStructureProductMode {
         max_patterns: usize,
         dependency_report: bool,
     },
-}
-
-impl Default for SpinStructureProductMode {
-    fn default() -> Self {
-        Self::Search
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,6 +91,10 @@ impl RunnableAppCommand for SpinStructureAppCommand {
             Ok(query) => query,
             Err(error) => return render_error(error),
         };
+        // The browser path is currently a synchronous in-worker search and has
+        // no cooperative-control entry point; retain the shared command seam.
+        #[cfg(target_arch = "wasm32")]
+        let _ = context;
         #[cfg(target_arch = "wasm32")]
         let result = SpinStructureSearcher::run(query.clone());
         #[cfg(not(target_arch = "wasm32"))]

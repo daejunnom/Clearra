@@ -27,6 +27,7 @@ doctest = false
 crate-type = ["rlib"]
 
 [dev-dependencies]
+clearra-coverage = { path = "../clearra-coverage", features = ["diagnostic-probes"] }
 clearra-host-contract = { path = "../clearra-host-contract", features = ["serde"] }
 serde_json.workspace = true
 

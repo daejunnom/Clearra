@@ -121,7 +121,7 @@ impl RunnableAppCommand for PcAppCommand {
                         clearra_core_executor::CoreExecutionError::resource_incomplete(
                             "execution-admission",
                             0,
-                            resource_report,
+                            *resource_report,
                         ),
                     )
                 }
@@ -221,7 +221,7 @@ impl RunnableAppCommand for PcAppCommand {
                         clearra_core_executor::CoreExecutionError::resource_incomplete(
                             "execution-admission",
                             0,
-                            resource_report,
+                            *resource_report,
                         ),
                     )
                 }
@@ -266,7 +266,7 @@ impl RunnableAppCommand for PcAppCommand {
                         clearra_core_executor::CoreExecutionError::resource_incomplete(
                             "execution-admission",
                             0,
-                            resource_report,
+                            *resource_report,
                         ),
                     )
                 }

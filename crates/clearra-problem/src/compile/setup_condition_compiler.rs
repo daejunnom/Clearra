@@ -235,9 +235,11 @@ const fn piece_index(piece: PieceKind) -> usize {
     }
 }
 
+type SetupConditionInputs = (u8, Vec<PieceKind>, Vec<Option<PieceKind>>);
+
 fn setup_condition_inputs(
     query: &SetupSearchQuery,
-) -> Result<(u8, Vec<PieceKind>, Vec<Option<PieceKind>>), SetupConditionCompileError> {
+) -> Result<SetupConditionInputs, SetupConditionCompileError> {
     let cycle = crate::query::setup_residue_input::cycle_for_remaining_count(
         query.residue().remaining_count(),
     )

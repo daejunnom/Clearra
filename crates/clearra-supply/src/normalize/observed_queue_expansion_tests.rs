@@ -12,12 +12,10 @@ fn observed_queue_expands_multiple_suffix_patterns_instead_of_deterministic_comp
     assert!(expansion.boundary_report().candidates().len() > 1);
     assert!(expansion.pattern_count() > 1);
     assert!(expansion.patterns().iter().any(|pattern| {
-        pattern.queue_pattern().pieces()
-            == &[PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S]
+        pattern.queue_pattern().pieces() == [PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S]
     }));
     assert!(expansion.patterns().iter().any(|pattern| {
-        pattern.queue_pattern().pieces()
-            == &[PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::Z]
+        pattern.queue_pattern().pieces() == [PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::Z]
     }));
 }
 
@@ -127,11 +125,9 @@ fn observed_queue_expansion_uses_custom_multiset_bag_profile() {
         .expect("custom bag expansion");
 
     assert_eq!(expansion.boundary_report().bag_size(), 4);
-    assert!(expansion
-        .patterns()
-        .iter()
-        .any(|pattern| pattern.queue_pattern().pieces()
-            == &[PieceKind::I, PieceKind::I, PieceKind::O, PieceKind::T]));
+    assert!(expansion.patterns().iter().any(|pattern| {
+        pattern.queue_pattern().pieces() == [PieceKind::I, PieceKind::I, PieceKind::O, PieceKind::T]
+    }));
     assert!(expansion.pattern_count() > 1);
 }
 

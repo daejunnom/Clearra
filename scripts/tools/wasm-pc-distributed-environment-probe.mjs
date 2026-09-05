@@ -8,8 +8,13 @@ import {
   parentPort,
   workerData,
 } from 'node:worker_threads';
+import {
+  decodeWasmDistributedPreparationMode,
+  dispatchWasmDistributedPreparation,
+} from './wasm-distributed-preparation-mode.mjs';
 
 const DISTRIBUTED_BATCH_CAPACITY = 16;
+const SERIAL_EVENT_DRAIN_INTERVAL = 8;
 
 async function runProbe() {
   const [bindingsPath, commandText, workBudgetText = '8192'] = process.argv.slice(2);
@@ -29,13 +34,22 @@ async function runProbe() {
   const prepareStarted = performance.now();
   const distributedMode = api.distributedPrepare();
   requireStatus(api, distributedMode);
+  const preparationMode = decodeWasmDistributedPreparationMode(distributedMode);
   const prepareElapsedMs = performance.now() - prepareStarted;
   const requestedBackend = api.distributedRequestedBackend();
   const preparationFallbackReason = api.distributedFallbackReason();
   const searchStarted = performance.now();
-  const outcome = distributedMode === 0
-    ? runSerial(api, commandText, workBudget)
-    : await runDistributed(api, bindingsPath, commandText, workBudget, logicalProcessors);
+  const outcome = await dispatchWasmDistributedPreparation(preparationMode, {
+    serial: () => runSerial(api, commandText, workBudget),
+    ready: () => finishPreparedResult(api),
+    distributed: () => runDistributed(
+      api,
+      bindingsPath,
+      commandText,
+      workBudget,
+      logicalProcessors,
+    ),
+  });
   const searchElapsedMs = performance.now() - searchStarted;
   const finalEvent = outcome.events.find((event) => event.event === 'final_response') ?? null;
   const failedEvent = outcome.events.find((event) => event.event === 'failed') ?? null;
@@ -53,7 +67,7 @@ async function runProbe() {
     search_elapsed_ms: searchElapsedMs,
     advance_calls: outcome.advanceCalls,
     work_budget: workBudget,
-    distributed_mode: ['serial', 'cpu-multi', 'gpu-multi'][distributedMode] ?? 'invalid',
+    distributed_mode: preparationMode.label,
     requested_backend_code: requestedBackend,
     preparation_fallback_reason_code: preparationFallbackReason,
     command: commandText,
@@ -80,6 +94,9 @@ function runSerial(api, commandText, workBudget) {
   if (jobId === 0) throw new Error(readOutput(api));
   let status = 0;
   let advanceCalls = 0;
+  let advancesSinceDrain = 0;
+  const terminalEvents = [];
+  drainSerialEvents(api, jobId, terminalEvents);
   while (status === 0 || status === 4) {
     status = api.advanceJob(jobId, workBudget);
     requireStatus(api, status);
@@ -87,11 +104,46 @@ function runSerial(api, commandText, workBudget) {
       throw new Error(`invalid Clearra WASM job status ${status}`);
     }
     advanceCalls += 1;
+    advancesSinceDrain += 1;
+    if (
+      status === 4 ||
+      (status !== 0 && status !== 4) ||
+      advancesSinceDrain >= SERIAL_EVENT_DRAIN_INTERVAL
+    ) {
+      drainSerialEvents(api, jobId, terminalEvents);
+      advancesSinceDrain = 0;
+    }
   }
+  return {
+    events: terminalEvents,
+    advanceCalls,
+    verifierMemoryBytes: 0,
+  };
+}
+
+function drainSerialEvents(api, jobId, terminalEvents) {
   requireStatus(api, api.drainJobEvents(jobId));
+  const events = JSON.parse(readOutput(api));
+  if (!Array.isArray(events)) {
+    throw new Error('Clearra WASM serial job returned a non-array event payload');
+  }
+  for (const event of events) {
+    if (
+      event?.event === 'final_response' ||
+      event?.event === 'failed' ||
+      event?.event === 'cancelled' ||
+      event?.event === 'terminated'
+    ) {
+      terminalEvents.push(event);
+    }
+  }
+}
+
+function finishPreparedResult(api) {
+  requireStatus(api, api.distributedFinish(1, 0));
   return {
     events: JSON.parse(readOutput(api)),
-    advanceCalls,
+    advanceCalls: 0,
     verifierMemoryBytes: 0,
   };
 }

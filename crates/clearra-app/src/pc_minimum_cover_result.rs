@@ -2,10 +2,13 @@ use std::sync::Arc;
 
 use clearra_core_domain::solution::normalized_tiling_solution::{
     normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
-    NormalizedTilingSolutionKey, NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
+    NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
+    NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
 };
-use clearra_core_executor::CoreExecutionResult;
-use clearra_coverage::{cover::exact_minimum_cover, pattern::pattern_bitset::PatternBitSet};
+use clearra_core_executor::{
+    normalized_solution_probability_reports, CoreExecutionResult, SolutionProbabilityReport,
+};
+use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcScenarioQuery, PcSolutionProbabilityPolicy,
@@ -14,7 +17,8 @@ use clearra_problem::{ProblemCompiler, SearchOutputPolicy, SearchProblemPreset};
 use clearra_supply::QueueObservationPolicy;
 
 use crate::portfolio_alternative_store::{
-    CoveragePortfolioAlternativeSet, PortfolioAlternativeSetIdentity,
+    CoveragePortfolioAlternativeSet, CoveragePortfolioAlternativeSetPreparation,
+    CoveragePortfolioAlternativeSetPreparationAdvance, PortfolioAlternativeSetIdentity,
 };
 
 pub const PC_MINIMUM_COVER_PROBLEM_CONTRACT: &str = "pc-clear-to-empty.v2";
@@ -117,6 +121,7 @@ pub struct PcMinimumCoverV2Result {
     required_pattern_count: usize,
     normalized_solution_set_hash: String,
     selected_solution_keys: Vec<String>,
+    selected_solution_probabilities: Vec<SolutionProbabilityReport>,
     portfolio_alternatives: Arc<CoveragePortfolioAlternativeSet>,
     completeness: PcMinimumCoverCompletenessEvidence,
 }
@@ -166,6 +171,10 @@ impl PcMinimumCoverV2Result {
         &self.selected_solution_keys
     }
 
+    pub fn selected_solution_probabilities(&self) -> &[SolutionProbabilityReport] {
+        &self.selected_solution_probabilities
+    }
+
     pub fn portfolio_alternatives(&self) -> &CoveragePortfolioAlternativeSet {
         self.portfolio_alternatives.as_ref()
     }
@@ -174,7 +183,7 @@ impl PcMinimumCoverV2Result {
         &self.portfolio_alternatives
     }
 
-    /// Canonical candidate selected by the exact-cover producer's stable
+    /// Canonical candidate selected by the App-owned exact set's stable dense
     /// candidate-id order. Presenters consume this identity; they do not
     /// re-rank the page locally.
     pub fn canonical_candidate(&self) -> Option<(u64, &str)> {
@@ -198,6 +207,140 @@ impl PcMinimumCoverV2Result {
 pub(crate) enum PcMinimumCoverQueryBinding<'a> {
     Opening(&'a Arc<OpeningPcSearchQuery>),
     Scenario(&'a Arc<PcScenarioQuery>),
+}
+
+/// Query-bound source evidence retained while the product coordinator proves
+/// the optimum and selects the first original-row canonical portfolio.
+///
+/// Construction performs every producer/query/identity/probability check once.
+/// Exact-cover code cannot construct this value and presenters cannot bypass
+/// it, so a cooperative continuation never has to replay the trust boundary.
+pub(crate) struct ValidatedPcMinimumCoverSource {
+    query: PcMinimumCoverQuerySnapshot,
+    origin: PcMinimalsIngressOrigin,
+    preset: PcMinimumCoverProblemPreset,
+    source_solution_count: usize,
+    required_pattern_count: usize,
+    candidate_keys: Vec<String>,
+    required_patterns: PatternBitSet,
+    rows: Vec<PatternBitSet>,
+    source_solution_identities: Vec<StandardBoard64TilingIdentity>,
+    expected_source_probabilities: Vec<SolutionProbabilityReport>,
+    portfolio_identity: PortfolioAlternativeSetIdentity,
+}
+
+impl ValidatedPcMinimumCoverSource {
+    pub(crate) fn into_portfolio_input(
+        self,
+    ) -> (
+        PcMinimumCoverResultProjection,
+        PortfolioAlternativeSetIdentity,
+        Vec<String>,
+        PatternBitSet,
+        Vec<PatternBitSet>,
+    ) {
+        let projection = PcMinimumCoverResultProjection {
+            query: self.query,
+            origin: self.origin,
+            preset: self.preset,
+            source_solution_count: self.source_solution_count,
+            required_pattern_count: self.required_pattern_count,
+            source_solution_identities: self.source_solution_identities,
+            expected_source_probabilities: self.expected_source_probabilities,
+        };
+        (
+            projection,
+            self.portfolio_identity,
+            self.candidate_keys,
+            self.required_patterns,
+            self.rows,
+        )
+    }
+}
+
+pub(crate) struct PcMinimumCoverResultProjection {
+    query: PcMinimumCoverQuerySnapshot,
+    origin: PcMinimalsIngressOrigin,
+    preset: PcMinimumCoverProblemPreset,
+    source_solution_count: usize,
+    required_pattern_count: usize,
+    source_solution_identities: Vec<StandardBoard64TilingIdentity>,
+    expected_source_probabilities: Vec<SolutionProbabilityReport>,
+}
+
+#[derive(Debug)]
+pub(crate) enum PcMinimumCoverV2PreparationAdvance {
+    Pending { work_steps: u64 },
+    Completed(PcMinimumCoverV2Result),
+    Cancelled { work_steps: u64 },
+}
+
+pub(crate) struct PcMinimumCoverV2Preparation {
+    projection: Option<PcMinimumCoverResultProjection>,
+    portfolio: CoveragePortfolioAlternativeSetPreparation,
+}
+
+impl PcMinimumCoverV2Preparation {
+    pub(crate) fn new(source: ValidatedPcMinimumCoverSource) -> Result<Self, &'static str> {
+        let (projection, identity, candidate_keys, required_patterns, rows) =
+            source.into_portfolio_input();
+        let portfolio = CoveragePortfolioAlternativeSetPreparation::new(
+            identity,
+            candidate_keys,
+            required_patterns,
+            rows,
+        )
+        .map_err(|_| "pc minimals portfolio alternative set validation failed")?;
+        Ok(Self {
+            projection: Some(projection),
+            portfolio,
+        })
+    }
+
+    pub(crate) fn advance(
+        &mut self,
+        maximum_work_steps: u64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PcMinimumCoverV2PreparationAdvance, &'static str> {
+        match self
+            .portfolio
+            .advance(maximum_work_steps, cancelled)
+            .map_err(|_| "pc minimals portfolio alternative set validation failed")?
+        {
+            CoveragePortfolioAlternativeSetPreparationAdvance::Pending { work_steps } => {
+                Ok(PcMinimumCoverV2PreparationAdvance::Pending { work_steps })
+            }
+            CoveragePortfolioAlternativeSetPreparationAdvance::Completed(portfolio) => {
+                let projection = self
+                    .projection
+                    .take()
+                    .ok_or("pc minimals product preparation completed more than once")?;
+                finish_pc_minimum_cover_v2_result(projection, Arc::new(portfolio))
+                    .map(PcMinimumCoverV2PreparationAdvance::Completed)
+            }
+            CoveragePortfolioAlternativeSetPreparationAdvance::Cancelled { work_steps } => {
+                self.projection = None;
+                Ok(PcMinimumCoverV2PreparationAdvance::Cancelled { work_steps })
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete(mut self) -> Result<PcMinimumCoverV2Result, &'static str> {
+        loop {
+            match self.advance(u64::MAX, &mut || false)? {
+                PcMinimumCoverV2PreparationAdvance::Pending { work_steps } => {
+                    if work_steps == 0 {
+                        return Err("pc minimals product preparation made no progress");
+                    }
+                }
+                PcMinimumCoverV2PreparationAdvance::Completed(result) => return Ok(result),
+                PcMinimumCoverV2PreparationAdvance::Cancelled { .. } => {
+                    return Err("pc minimals product preparation was cancelled")
+                }
+            }
+        }
+    }
 }
 
 impl PcMinimumCoverQueryBinding<'_> {
@@ -225,11 +368,21 @@ impl PcMinimumCoverQueryBinding<'_> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn validate_pc_minimum_cover_v2_result(
     query: PcMinimumCoverQueryBinding<'_>,
     origin: PcMinimalsIngressOrigin,
     result: &CoreExecutionResult,
 ) -> Result<PcMinimumCoverV2Result, &'static str> {
+    let source = validate_pc_minimum_cover_v2_source(query, origin, result)?;
+    PcMinimumCoverV2Preparation::new(source)?.complete()
+}
+
+pub(crate) fn validate_pc_minimum_cover_v2_source(
+    query: PcMinimumCoverQueryBinding<'_>,
+    origin: PcMinimalsIngressOrigin,
+    result: &CoreExecutionResult,
+) -> Result<ValidatedPcMinimumCoverSource, &'static str> {
     let expected_problem = query.compile_expected()?;
     let preset = query.preset();
     if expected_problem.preset()
@@ -267,8 +420,8 @@ pub(crate) fn validate_pc_minimum_cover_v2_result(
     for (key, expected) in [
         ("search_output_policy", "trace"),
         ("objective", "minimum-cover"),
-        ("minimum_cover_incomplete_reason", "none"),
-        ("objective_incomplete_reason", "none"),
+        ("minimum_cover_incomplete_reason", "deferred-to-coordinator"),
+        ("objective_incomplete_reason", "deferred-to-coordinator"),
         (
             "normalized_solution_key_algorithm",
             NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
@@ -280,11 +433,8 @@ pub(crate) fn validate_pc_minimum_cover_v2_result(
     }
     for key in [
         "minimum_cover_requested",
-        "minimum_cover_complete",
-        "minimum_cover_proven_minimum",
         "count_complete",
         "objective_search_complete",
-        "objective_complete",
         "probability_complete",
         "resource_probability_complete",
         "solution_count_calculated",
@@ -296,7 +446,14 @@ pub(crate) fn validate_pc_minimum_cover_v2_result(
     ] {
         require_unique_bool(result, key, true)?;
     }
-    require_unique_bool(result, "resource_truncated", false)?;
+    for key in [
+        "minimum_cover_complete",
+        "minimum_cover_proven_minimum",
+        "objective_complete",
+        "resource_truncated",
+    ] {
+        require_unique_bool(result, key, false)?;
+    }
 
     let required_patterns = producer.coverage_union();
     if result.coverage_pattern_words() != required_patterns.words() {
@@ -335,90 +492,60 @@ pub(crate) fn validate_pc_minimum_cover_v2_result(
         return Err("pc minimals source rows do not cover the producer-required union");
     }
 
-    let selection = exact_minimum_cover(&required_patterns, &rows)
-        .map_err(|_| "pc minimals exact minimum-cover replay failed")?;
-    if !selection.complete() || selection.covered_patterns() != &required_patterns {
-        return Err("pc minimals exact minimum-cover replay is incomplete");
-    }
-    let selected_solution_keys = selection
-        .row_indices()
-        .iter()
-        .map(|index| source[*index].solution_key().to_owned())
-        .collect::<Vec<_>>();
-    if result.normalized_solution_keys() != selected_solution_keys.as_slice() {
-        return Err("pc minimals selected solution keys do not match exact replay");
-    }
-    let selected_solution_count = selected_solution_keys.len();
-    require_unique_usize(
-        result,
-        "minimum_cover_selected_solution_count",
-        selected_solution_count,
-    )?;
-    require_unique_usize(
-        result,
-        "normalized_unique_solution_count",
-        selected_solution_count,
-    )?;
-    require_unique_usize(
-        result,
-        "solution_keys_materialized_count",
-        selected_solution_count,
-    )?;
-
-    if result.normalized_solution_identities().len() != selected_solution_count
-        || result.solution_coverages().len() != selected_solution_count
+    // The deferred producer must expose one complete, canonical source
+    // dictionary. Its provisional result fields describe that full source;
+    // none of them are accepted as a minimum-cover selection authority.
+    let source_solution_count = source.len();
+    if result.normalized_solution_keys() != candidate_keys.as_slice()
+        || result.normalized_solution_identities().len() != source_solution_count
+        || result.solution_coverages().len() != source_solution_count
     {
-        return Err("pc minimals selected identity evidence count mismatch");
+        return Err("pc minimals deferred source identity evidence count mismatch");
     }
-    for ((expected_key, identity), coverage) in selected_solution_keys
+    for (((key, normalized), identity), coverage) in candidate_keys
         .iter()
+        .zip(source)
         .zip(result.normalized_solution_identities())
         .zip(result.solution_coverages())
     {
-        let identity_key = NormalizedTilingSolutionKey::from_standard_board64_identity(*identity);
-        let coverage_key =
-            NormalizedTilingSolutionKey::from_standard_board64_identity(coverage.identity());
-        let source_coverage = source
-            .binary_search_by(|candidate| candidate.solution_key().cmp(expected_key))
-            .ok()
-            .map(|index| source[index].covered_patterns());
-        if identity_key.as_str() != expected_key
-            || coverage_key.as_str() != expected_key
-            || source_coverage != Some(coverage.covered_patterns())
+        let parsed = NormalizedTilingSolutionKey::parse_canonical(key)
+            .map_err(|_| "pc minimals deferred source key is not canonical")?;
+        if parsed.standard_board64_identity().ok() != Some(*identity)
+            || coverage.identity() != *identity
+            || normalized.covered_patterns() != coverage.covered_patterns()
         {
-            return Err("pc minimals selected identity and coverage evidence mismatch");
+            return Err("pc minimals deferred source identity and coverage evidence mismatch");
         }
     }
+    for key in [
+        "minimum_cover_selected_solution_count",
+        "unique_solution_count",
+        "normalized_unique_solution_count",
+        "solution_keys_materialized_count",
+    ] {
+        require_unique_usize(result, key, source_solution_count)?;
+    }
 
-    let normalized_solution_set_hash =
-        normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
-            result.normalized_solution_identities(),
-        );
-    require_unique_field(
-        result,
-        "normalized_solution_set_hash",
-        &normalized_solution_set_hash,
-    )?;
-    require_unique_field(
-        result,
-        "actual_normalized_solution_set_hash",
-        &normalized_solution_set_hash,
-    )?;
+    let source_hash = normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
+        result.normalized_solution_identities(),
+    );
+    require_unique_field(result, "normalized_solution_set_hash", &source_hash)?;
+    require_unique_field(result, "actual_normalized_solution_set_hash", &source_hash)?;
 
-    let expected_probability_rows =
+    let expected_source_probabilities =
         if expected_problem.solution_probability_policy() == PcSolutionProbabilityPolicy::Include {
-            selected_solution_count
+            let weights = expected_problem
+                .piece_source()
+                .materialized_universe()
+                .ok_or("pc minimals expected probability universe is missing")?
+                .weights();
+            normalized_solution_probability_reports(&candidate_keys, source, weights, true)
+                .map_err(|_| "pc minimals deferred source probability replay failed")?
         } else {
-            0
+            Vec::new()
         };
-    if result.solution_probabilities().len() != expected_probability_rows
-        || result
-            .solution_probabilities()
-            .iter()
-            .zip(&selected_solution_keys)
-            .any(|(probability, key)| probability.solution_key() != key)
-    {
-        return Err("pc minimals per-solution probability evidence mismatch");
+    if result.solution_probabilities() != expected_source_probabilities.as_slice() {
+        return Err("pc minimals deferred source probability evidence mismatch");
     }
 
     let product_build = clearra_host_contract::ProductBuildIdentity::current();
@@ -445,29 +572,84 @@ pub(crate) fn validate_pc_minimum_cover_v2_result(
         product_build_identity_component(&product_build),
     )
     .map_err(|_| "pc minimals portfolio identity is invalid")?;
-    let portfolio_alternatives = Arc::new(
-        CoveragePortfolioAlternativeSet::new(
-            portfolio_identity,
-            candidate_keys,
-            required_patterns,
-            rows,
-            &selected_solution_keys,
-        )
-        .map_err(|_| "pc minimals portfolio alternative set validation failed")?,
+
+    Ok(ValidatedPcMinimumCoverSource {
+        query: query.snapshot(),
+        origin,
+        preset,
+        source_solution_count,
+        required_pattern_count,
+        candidate_keys,
+        required_patterns,
+        rows,
+        source_solution_identities: result.normalized_solution_identities().to_vec(),
+        expected_source_probabilities,
+        portfolio_identity,
+    })
+}
+
+pub(crate) fn finish_pc_minimum_cover_v2_result(
+    projection: PcMinimumCoverResultProjection,
+    portfolio_alternatives: Arc<CoveragePortfolioAlternativeSet>,
+) -> Result<PcMinimumCoverV2Result, &'static str> {
+    // Only the App-owned exact set can select the public portfolio. Candidate
+    // IDs index the already validated source dictionary, so the selected hash
+    // and optional probability reports are projections rather than producer
+    // claims or a second proof.
+    let canonical_ids = portfolio_alternatives
+        .canonical_page()
+        .portfolio()
+        .candidate_ids();
+    let selected_solution_count = canonical_ids.len();
+    let mut selected_solution_keys = Vec::with_capacity(selected_solution_count);
+    let mut selected_solution_identities = Vec::with_capacity(selected_solution_count);
+    let mut selected_solution_probabilities = Vec::with_capacity(
+        projection
+            .expected_source_probabilities
+            .len()
+            .min(selected_solution_count),
     );
+    for candidate_id in canonical_ids {
+        let index = candidate_id
+            .checked_sub(1)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or("pc minimals canonical candidate id is invalid")?;
+        let candidate = portfolio_alternatives
+            .candidates()
+            .get(index)
+            .ok_or("pc minimals canonical candidate is outside the source")?;
+        if candidate.candidate_id() != *candidate_id {
+            return Err("pc minimals canonical candidate map is inconsistent");
+        }
+        selected_solution_keys.push(candidate.normalized_key().to_owned());
+        selected_solution_identities.push(projection.source_solution_identities[index]);
+        if let Some(probability) = projection.expected_source_probabilities.get(index) {
+            selected_solution_probabilities.push(probability.clone());
+        }
+    }
+    if !projection.expected_source_probabilities.is_empty()
+        && selected_solution_probabilities.len() != selected_solution_count
+    {
+        return Err("pc minimals selected probability projection is incomplete");
+    }
+    let normalized_solution_set_hash =
+        normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
+            &selected_solution_identities,
+        );
 
     Ok(PcMinimumCoverV2Result {
         contract_id: PC_MINIMUM_COVER_RESULT_CONTRACT,
         problem_contract_id: PC_MINIMUM_COVER_PROBLEM_CONTRACT,
         input_contract_id: PC_MINIMUM_COVER_INPUT_CONTRACT,
-        origin,
-        query: query.snapshot(),
-        problem_preset: preset,
-        source_solution_count: source.len(),
+        origin: projection.origin,
+        query: projection.query,
+        problem_preset: projection.preset,
+        source_solution_count: projection.source_solution_count,
         selected_solution_count,
-        required_pattern_count,
+        required_pattern_count: projection.required_pattern_count,
         normalized_solution_set_hash,
         selected_solution_keys,
+        selected_solution_probabilities,
         portfolio_alternatives,
         completeness: PcMinimumCoverCompletenessEvidence {
             source_universe_complete: true,

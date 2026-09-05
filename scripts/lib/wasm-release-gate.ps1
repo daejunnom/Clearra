@@ -12,6 +12,148 @@ function Invoke-WasmReleaseCommand {
     Write-Output "wasm_stage=$Label status=passed"
 }
 
+function Assert-WasmReleaseArtifacts([string]$WasmDirectory) {
+    $artifacts = @(
+        (Join-Path $WasmDirectory 'clearra_wasm.js'),
+        (Join-Path $WasmDirectory 'clearra_wasm_bg.wasm'),
+        (Join-Path $WasmDirectory 'clearra_wasm.manifest.json')
+    )
+    foreach ($artifact in $artifacts) {
+        if (-not (Test-Path -LiteralPath $artifact -PathType Leaf) -or
+            (Get-Item -LiteralPath $artifact).Length -le 0) {
+            throw "Bound WASM release artifact is missing or empty: $artifact"
+        }
+    }
+}
+
+function Invoke-WasmProductArtifactBuild {
+    param(
+        [string]$Root,
+        [string]$CargoPath,
+        [string]$NodePath,
+        [string]$Destination
+    )
+
+    Invoke-WasmReleaseCommand $CargoPath @(
+        'test', '--locked', '-p', 'clearra-wasm',
+        '--test', 'terminal_supply_public_contract',
+        '--', '--test-threads=1'
+    ) 'clearra-wasm terminal-supply public contract'
+    Invoke-WasmReleaseCommand $NodePath @(
+        '--test',
+        (Join-Path $Root 'scripts/tools/wasm-product-terminal-contract.test.mjs')
+    ) 'clearra-wasm product terminal contract'
+    Invoke-WasmReleaseCommand $NodePath @(
+        (Join-Path $Root 'scripts/tools/build-clearra-wasm.mjs'),
+        '--verify',
+        '--destination', $Destination
+    ) 'clearra-wasm verified product build'
+    Assert-WasmReleaseArtifacts $Destination
+}
+
+function Invoke-WasmBuildProducerGate {
+    param(
+        [string]$Root,
+        [string]$CargoPath,
+        [string]$CargoTargetDir
+    )
+
+    $outputDirectory = $env:CLEARRA_ACCEPTED_WASM_OUTPUT_DIR
+    if ([string]::IsNullOrWhiteSpace($outputDirectory)) {
+        throw 'WASM producer requires CLEARRA_ACCEPTED_WASM_OUTPUT_DIR'
+    }
+    foreach ($entry in @(
+            @{ Name = 'CLEARRA_SOURCE_COMMIT'; Value = $env:CLEARRA_SOURCE_COMMIT },
+            @{ Name = 'CLEARRA_ACCEPTED_RUN_ID'; Value = $env:CLEARRA_ACCEPTED_RUN_ID },
+            @{ Name = 'CLEARRA_ACCEPTED_RUN_ATTEMPT'; Value = $env:CLEARRA_ACCEPTED_RUN_ATTEMPT }
+        )) {
+        if ([string]::IsNullOrWhiteSpace($entry.Value)) {
+            throw "WASM producer requires $($entry.Name)"
+        }
+    }
+
+    $nodeCommand = Get-Command 'node' -ErrorAction SilentlyContinue
+    if ($null -eq $nodeCommand) {
+        throw 'WASM producer requires node on PATH'
+    }
+    New-Item -ItemType Directory -Force -Path $CargoTargetDir | Out-Null
+    $outputDirectory = [System.IO.Path]::GetFullPath($outputDirectory)
+    New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+    if (@(Get-ChildItem -LiteralPath $outputDirectory -Force).Count -ne 0) {
+        throw "WASM producer output must start empty: $outputDirectory"
+    }
+
+    $previousCargoTargetDir = $env:CARGO_TARGET_DIR
+    try {
+        $env:CARGO_TARGET_DIR = Assert-ClearraCanonicalCargoTargetDir $CargoTargetDir
+        Invoke-WasmProductArtifactBuild `
+            -Root $Root `
+            -CargoPath $CargoPath `
+            -NodePath $nodeCommand.Source `
+            -Destination $outputDirectory
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            (Join-Path $Root 'scripts/release/accepted-wasm-build.mjs'),
+            '--seal', $outputDirectory,
+            '--source-commit', $env:CLEARRA_SOURCE_COMMIT,
+            '--run-id', $env:CLEARRA_ACCEPTED_RUN_ID,
+            '--run-attempt', $env:CLEARRA_ACCEPTED_RUN_ATTEMPT
+        ) 'clearra-wasm accepted producer seal'
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            (Join-Path $Root 'scripts/release/accepted-wasm-build.mjs'),
+            '--verify', $outputDirectory,
+            '--expected-source-commit', $env:CLEARRA_SOURCE_COMMIT,
+            '--expected-run-id', $env:CLEARRA_ACCEPTED_RUN_ID,
+            '--expected-run-attempt', $env:CLEARRA_ACCEPTED_RUN_ATTEMPT
+        ) 'clearra-wasm accepted producer verification'
+        Write-Output 'wasm_build_producer=passed build_count=1 artifact=sealed source_bound=true run_bound=true'
+    }
+    finally {
+        if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
+            Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+        } else {
+            $env:CARGO_TARGET_DIR = $previousCargoTargetDir
+        }
+    }
+}
+
+function Import-AcceptedWasmBuild {
+    param(
+        [string]$Root,
+        [string]$NodePath,
+        [string]$SourceDirectory,
+        [string]$DestinationDirectory
+    )
+
+    foreach ($entry in @(
+            @{ Name = 'CLEARRA_SOURCE_COMMIT'; Value = $env:CLEARRA_SOURCE_COMMIT },
+            @{ Name = 'CLEARRA_ACCEPTED_RUN_ID'; Value = $env:CLEARRA_ACCEPTED_RUN_ID },
+            @{ Name = 'CLEARRA_ACCEPTED_RUN_ATTEMPT'; Value = $env:CLEARRA_ACCEPTED_RUN_ATTEMPT }
+        )) {
+        if ([string]::IsNullOrWhiteSpace($entry.Value)) {
+            throw "Accepted WASM consumer requires $($entry.Name)"
+        }
+    }
+    $source = [System.IO.Path]::GetFullPath($SourceDirectory)
+    Invoke-WasmReleaseCommand $NodePath @(
+        (Join-Path $Root 'scripts/release/accepted-wasm-build.mjs'),
+        '--verify', $source,
+        '--expected-source-commit', $env:CLEARRA_SOURCE_COMMIT,
+        '--expected-run-id', $env:CLEARRA_ACCEPTED_RUN_ID,
+        '--expected-run-attempt', $env:CLEARRA_ACCEPTED_RUN_ATTEMPT
+    ) 'clearra-wasm accepted producer input'
+
+    Get-ChildItem -LiteralPath $source -File | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $DestinationDirectory -Force
+    }
+    Invoke-WasmReleaseCommand $NodePath @(
+        (Join-Path $Root 'scripts/release/accepted-wasm-build.mjs'),
+        '--verify', $DestinationDirectory,
+        '--expected-source-commit', $env:CLEARRA_SOURCE_COMMIT,
+        '--expected-run-id', $env:CLEARRA_ACCEPTED_RUN_ID,
+        '--expected-run-attempt', $env:CLEARRA_ACCEPTED_RUN_ATTEMPT
+    ) 'clearra-wasm accepted staged input'
+}
+
 function Invoke-WasmBuildTestGate {
     param(
         [string]$Root,
@@ -39,33 +181,29 @@ function Invoke-WasmBuildTestGate {
                 Copy-Item -LiteralPath $_.FullName -Destination $webPublicDir -Recurse -Force
             }
         }
-        Invoke-WasmReleaseCommand $CargoPath @(
-            'test', '--locked', '-p', 'clearra-wasm',
-            '--test', 'terminal_supply_public_contract',
-            '--', '--test-threads=1'
-        ) 'clearra-wasm terminal-supply public contract'
         $stagedWasm = Join-Path $webPublicDir 'wasm'
         New-Item -ItemType Directory -Force -Path $stagedWasm | Out-Null
         Get-ChildItem -LiteralPath $stagedWasm -File -ErrorAction SilentlyContinue |
             Remove-Item -Force
-        Invoke-WasmReleaseCommand $nodeCommand.Source @(
-            '--test',
-            (Join-Path $Root 'scripts/tools/wasm-product-terminal-contract.test.mjs')
-        ) 'clearra-wasm product terminal contract'
-        Invoke-WasmReleaseCommand $nodeCommand.Source @(
-            (Join-Path $Root 'scripts/tools/build-clearra-wasm.mjs'),
-            '--verify',
-            '--destination', $stagedWasm
-        ) 'clearra-wasm verified product build'
+        $acceptedWasmDirectory = $env:CLEARRA_ACCEPTED_WASM_DIR
+        $acceptedProducer = -not [string]::IsNullOrWhiteSpace($acceptedWasmDirectory)
+        if ($acceptedProducer) {
+            Import-AcceptedWasmBuild `
+                -Root $Root `
+                -NodePath $nodeCommand.Source `
+                -SourceDirectory $acceptedWasmDirectory `
+                -DestinationDirectory $stagedWasm
+        } else {
+            Invoke-WasmProductArtifactBuild `
+                -Root $Root `
+                -CargoPath $CargoPath `
+                -NodePath $nodeCommand.Source `
+                -Destination $stagedWasm
+        }
         $wasmBindings = Join-Path $stagedWasm 'clearra_wasm.js'
         $boundWasm = Join-Path $stagedWasm 'clearra_wasm_bg.wasm'
         $wasmManifest = Join-Path $stagedWasm 'clearra_wasm.manifest.json'
-        foreach ($artifact in @($wasmBindings, $boundWasm, $wasmManifest)) {
-            if (-not (Test-Path -LiteralPath $artifact -PathType Leaf) -or
-                (Get-Item -LiteralPath $artifact).Length -le 0) {
-                throw "Bound WASM release artifact is missing or empty: $artifact"
-            }
-        }
+        Assert-WasmReleaseArtifacts $stagedWasm
         $expectedSourceCommit = if ([string]::IsNullOrWhiteSpace($env:CLEARRA_SOURCE_COMMIT)) {
             'unverified-local-build'
         } else {
@@ -101,7 +239,8 @@ function Invoke-WasmBuildTestGate {
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'apps/clearra-web/scripts/prepare-pages-fallback.mjs')
         ) 'clearra-web Pages fallback'
-        Write-Output 'wasm_build_test=passed host_tests=executed runtime_tests=executed wasm32=compiled bindgen_runtime=staged frontend=built'
+        $buildSource = if ($acceptedProducer) { 'accepted-producer' } else { 'inline' }
+        Write-Output "wasm_build_test=passed host_tests=executed runtime_tests=executed wasm32=compiled bindgen_runtime=staged frontend=built build_source=$buildSource"
     }
     finally {
         if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {

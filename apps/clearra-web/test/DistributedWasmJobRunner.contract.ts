@@ -153,6 +153,86 @@ assert.deepEqual(
   'the browser coordinator must return to the host between bounded geometry slices'
 );
 
+const progressiveInitializationGate = new Promise<void>(() => undefined);
+let observeProgressiveEnqueue: () => void = () => undefined;
+const progressiveEnqueueObserved = new Promise<void>((resolve) => {
+  observeProgressiveEnqueue = resolve;
+});
+let progressiveProducerStep = 0;
+const progressivePool = {
+  initialize() {
+    return progressiveInitializationGate;
+  },
+  async enqueue() {
+    observeProgressiveEnqueue();
+  },
+  async waitForIdle() {},
+  async finish(
+    _consumePartial: (partial: ArrayBuffer) => void,
+    options?: { readySubset?: boolean }
+  ) {
+    assert.equal(
+      options?.readySubset,
+      true,
+      'producer completion must finish the ready verifier subset'
+    );
+    return 1;
+  },
+  progressSnapshot() {
+    return completedProgress;
+  },
+  cancel() {}
+};
+const progressiveWasm = {
+  ...wasm,
+  distributed_produce() {
+    progressiveProducerStep += 1;
+    return progressiveProducerStep === 1
+      ? { status: 'batch' as const, batch: new ArrayBuffer(0) }
+      : { status: 'completed' as const };
+  }
+} as unknown as ClearraWasmModule;
+const progressiveRun = new DistributedWasmJobRunner(
+  progressiveWasm,
+  42,
+  'progressive-initialization-owner',
+  {
+    logicalProcessorCount: 2,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  },
+  progressivePool as never
+).run(
+  'clearra pc --lines 4 --backend cpu --workers 2',
+  plan,
+  () => undefined
+);
+let progressiveEnqueueTimeout: ReturnType<typeof setTimeout> | undefined;
+try {
+  await Promise.race([
+    progressiveEnqueueObserved,
+    new Promise<never>((_, reject) => {
+      progressiveEnqueueTimeout = setTimeout(
+        () => reject(new Error('ready verifier did not receive work during pool initialization')),
+        2_000
+      );
+    })
+  ]);
+} finally {
+  if (progressiveEnqueueTimeout !== undefined) clearTimeout(progressiveEnqueueTimeout);
+}
+await Promise.race([
+  progressiveRun,
+  new Promise<never>((_, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error('a never-ready verifier extended the terminal tail')),
+      2_000
+    );
+    (timeout as unknown as { unref?: () => void }).unref?.();
+  })
+]);
+
 const U32_MAX = normalizeWasmU32(-1);
 assert.equal(U32_MAX, 0xffff_ffff);
 let saturatedPoolFinished = false;
@@ -481,6 +561,73 @@ assert.equal(serialSearching.progress.telemetry?.active_workers, 1);
 assert.equal(serialSearching.progress.telemetry?.worker_count, 1);
 assert.equal(serialEvents.at(-1)?.event, 'failed', 'serial execution must converge on a terminal event');
 assert.deepEqual(serialAuthority.snapshot().available, sharedCapacity);
+
+const readyAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
+let readyFinishCount = 0;
+let readyResetCount = 0;
+let readySerialStartCount = 0;
+const readyPlan: ClearraDistributedPlan = {
+  ...serialPlan,
+  mode: 'ready'
+};
+const readyWasm = {
+  ...wasm,
+  distributed_prepare() {
+    return readyPlan;
+  },
+  distributed_finish(jobId: number, workersUsed: number) {
+    readyFinishCount += 1;
+    assert.equal(jobId, 47);
+    assert.equal(workersUsed, 0, 'an App-terminal preparation did not run distributed workers');
+    return JSON.stringify([
+      {
+        schema_version: 1,
+        runtime: 'clearra-wasm',
+        event: 'progress',
+        job_id: jobId,
+        progress: { done: 2, total: 2, label: 'AppResponse completed' }
+      },
+      {
+        schema_version: 1,
+        runtime: 'clearra-wasm',
+        event: 'final_response',
+        job_id: jobId,
+        response: { status: 'validation-failed' }
+      }
+    ]);
+  },
+  distributed_reset() {
+    readyResetCount += 1;
+  },
+  start_job() {
+    readySerialStartCount += 1;
+    throw new Error('a prepared App response must not be replayed serially');
+  }
+} as unknown as ClearraWasmModule;
+const readyEvents: ClearraWasmWorkerEvent[] = [];
+const readyTerminal = await new ClearraProductJobRunner(
+  readyWasm,
+  47,
+  'ready-product-runner',
+  {
+    logicalProcessorCount: 2,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  },
+  readyAuthority,
+  100
+).run('clearra pc --lines 4 --workers 2', (event) => readyEvents.push(event));
+assert.equal(readyTerminal.event, 'final_response');
+assert.equal(readyFinishCount, 1, 'the prepared App response has one terminal consumer');
+assert.equal(readySerialStartCount, 0, 'the CLI command must not execute a second time');
+assert.equal(readyResetCount, 1, 'the prepared terminal owner resets exactly once');
+assert.deepEqual(
+  readyEvents.map((event) => event.event),
+  ['progress', 'started', 'progress', 'final_response'],
+  'preparation, lifecycle start, and the authoritative terminal envelope are emitted once in order'
+);
+assert.deepEqual(readyAuthority.snapshot().available, sharedCapacity);
 
 const serialCancellationAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
 let observeSerialAdvance: () => void = () => undefined;

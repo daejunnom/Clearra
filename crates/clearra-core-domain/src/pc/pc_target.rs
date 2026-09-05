@@ -8,7 +8,7 @@ impl PcTarget {
         if lines == 0 {
             return Err(PcTargetError::ZeroLines);
         }
-        if lines % 2 != 0 {
+        if !lines.is_multiple_of(2) {
             return Err(PcTargetError::OddLineCount { lines });
         }
         if lines > STANDARD_PC_MAX_LINES {

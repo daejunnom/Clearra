@@ -28,6 +28,10 @@ import {
   type ClearraWasmForcedTerminationReason
 } from './wasmWorkerLifecycle';
 import {
+  currentWasmArtifactGeneration,
+  isCurrentWasmArtifactGeneration
+} from './wasmArtifactGeneration';
+import {
   applyTablebaseWarmupEvent,
   applyWasmWorkerEvent,
   cancelWasmCommand,
@@ -36,12 +40,16 @@ import {
 } from './wasmWorkerStore';
 
 const COOPERATIVE_CANCEL_GRACE_MS = 100;
-const PREPARATION_PROGRESS_STALL_TIMEOUT_MS = 120_000;
-const SEARCH_PROGRESS_STALL_TIMEOUT_MS = 120_000;
+// Local searches and lazy portfolio pages can legitimately take minutes.
+// Deadlines are opt-in for bounded fixtures; cancellation remains available.
+const PREPARATION_PROGRESS_STALL_TIMEOUT_MS = 0;
+const SEARCH_PROGRESS_STALL_TIMEOUT_MS = 0;
+const PRODUCT_PAGE_STALL_TIMEOUT_MS = 0;
 
 export type WasmTerminalWorkerControllerOptions = {
   preparationProgressStallTimeoutMs?: number;
   searchProgressStallTimeoutMs?: number;
+  productPageStallTimeoutMs?: number;
 };
 
 type RuntimePrewarmWorkerEvent = {
@@ -52,6 +60,7 @@ type RuntimePrewarmWorkerEvent = {
 
 export class WasmTerminalWorkerController {
   private worker: Worker | null = null;
+  private workerArtifactGeneration: string | null = null;
   private cancellingWorker: Worker | null = null;
   private prewarmingWorker: Worker | null = null;
   private prewarmWorkerCount = 1;
@@ -71,6 +80,8 @@ export class WasmTerminalWorkerController {
   private runningJobId: number | null = null;
   private readonly preparationProgressStallTimeoutMs: number;
   private readonly searchProgressStallTimeoutMs: number;
+  private readonly productPageStallTimeoutMs: number;
+  private productPageGeneration = 0;
   private nextSolutionPageRequestId = 1;
   private nextProductPageRequestId = 1;
   private solutionPageRequests = new Map<
@@ -87,6 +98,7 @@ export class WasmTerminalWorkerController {
     {
       resolve: (value: ClearraProductPageWorkerPayload) => void;
       reject: (reason: Error) => void;
+      generation: number;
     }
   >();
 
@@ -104,6 +116,10 @@ export class WasmTerminalWorkerController {
     this.searchProgressStallTimeoutMs = positiveTimeout(
       options.searchProgressStallTimeoutMs,
       SEARCH_PROGRESS_STALL_TIMEOUT_MS
+    );
+    this.productPageStallTimeoutMs = positiveTimeout(
+      options.productPageStallTimeoutMs,
+      PRODUCT_PAGE_STALL_TIMEOUT_MS
     );
   }
 
@@ -136,6 +152,7 @@ export class WasmTerminalWorkerController {
     ) {
       return false;
     }
+    this.replaceStaleWorkerForNewRun();
     let worker: Worker | null;
     try {
       worker = this.ensureWorker();
@@ -160,6 +177,7 @@ export class WasmTerminalWorkerController {
       return false;
     }
     this.rejectSolutionPages(new Error('a new search replaced the previous solution pages'));
+    this.productPageGeneration += 1;
     this.rejectProductPages(new Error('a new search replaced the previous product pages'));
     this.clearProgressWatchdog();
     this.runningJobId = null;
@@ -306,7 +324,8 @@ export class WasmTerminalWorkerController {
   loadProductMemberPage(
     alternativeIndex: string,
     memberPageNumber: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    maximumWorkSteps = 10_000
   ): Promise<ClearraProductPageWorkerPayload> {
     return this.requestProductPage(
       (worker, requestId) =>
@@ -314,7 +333,8 @@ export class WasmTerminalWorkerController {
           worker,
           requestId,
           alternativeIndex,
-          memberPageNumber
+          memberPageNumber,
+          maximumWorkSteps
         ),
       signal
     );
@@ -322,6 +342,7 @@ export class WasmTerminalWorkerController {
 
   releaseProductPages() {
     const worker = this.worker;
+    this.productPageGeneration += 1;
     if (worker && this.productPageRequests.size > 0) {
       this.releaseWorker(worker, 'owner-disposed');
       return;
@@ -336,13 +357,23 @@ export class WasmTerminalWorkerController {
     signal?: AbortSignal
   ): Promise<ClearraProductPageWorkerPayload> {
     const worker = this.worker;
-    if (!worker || this.runInFlight || this.cancellingWorker !== null) {
+    if (
+      !worker ||
+      this.runInFlight ||
+      this.cancellingWorker !== null
+    ) {
       return Promise.reject(new Error('product page runtime is not available'));
     }
     if (signal?.aborted) return Promise.reject(productPageAbortError(signal));
     const requestId = this.nextProductPageRequestId++;
+    const generation = this.productPageGeneration;
     return new Promise((resolve, reject) => {
-      const cleanup = () => signal?.removeEventListener('abort', onAbort);
+      let stallTimer: ReturnType<typeof setTimeout> | null = null;
+      const cleanup = () => {
+        signal?.removeEventListener('abort', onAbort);
+        if (stallTimer !== null) clearTimeout(stallTimer);
+        stallTimer = null;
+      };
       const onAbort = () => {
         if (!this.productPageRequests.delete(requestId)) return;
         cleanup();
@@ -357,9 +388,32 @@ export class WasmTerminalWorkerController {
         reject: (reason) => {
           cleanup();
           reject(reason);
-        }
+        },
+        generation
       });
       signal?.addEventListener('abort', onAbort, { once: true });
+      if (this.productPageStallTimeoutMs > 0) {
+        stallTimer = setTimeout(() => {
+        const pending = this.productPageRequests.get(requestId);
+        if (
+          !pending ||
+          pending.generation !== generation ||
+          this.productPageGeneration !== generation ||
+          this.worker !== worker
+        ) {
+          return;
+        }
+        this.productPageRequests.delete(requestId);
+        pending.reject(
+          new Error(
+            `Product page work did not return within ${this.productPageStallTimeoutMs} ms.`
+          )
+        );
+        this.releaseWorker(worker, 'worker-failure');
+      }, this.productPageStallTimeoutMs);
+        const nodeTimer = stallTimer as unknown as { unref?: () => void };
+        nodeTimer.unref?.();
+      }
       try {
         post(worker, requestId);
       } catch (error) {
@@ -382,8 +436,13 @@ export class WasmTerminalWorkerController {
     ) {
       return null;
     }
+    if (!isCurrentWasmArtifactGeneration(this.workerArtifactGeneration)) {
+      this.disposeOwnedWorker(this.worker);
+      return null;
+    }
     const worker = this.worker;
     this.worker = null;
+    this.workerArtifactGeneration = null;
     worker.onmessage = null;
     worker.onerror = null;
     worker.onmessageerror = null;
@@ -419,6 +478,7 @@ export class WasmTerminalWorkerController {
     if (!this.worker && this.workerFactory) {
       const worker = this.workerFactory();
       this.worker = worker;
+      this.workerArtifactGeneration = currentWasmArtifactGeneration();
       worker.onmessage = (
         message: MessageEvent<
           | ClearraWasmWorkerEvent
@@ -584,6 +644,7 @@ export class WasmTerminalWorkerController {
     const timeoutMs = phaseKind === 'preparation'
       ? this.preparationProgressStallTimeoutMs
       : this.searchProgressStallTimeoutMs;
+    if (timeoutMs === 0) return;
     this.progressWatchdog = setTimeout(() => {
       if (
         this.worker !== worker ||
@@ -668,6 +729,7 @@ export class WasmTerminalWorkerController {
 
   private releaseWorker(worker: Worker, reason: ClearraWasmForcedTerminationReason) {
     this.rejectSolutionPages(new Error('solution page runtime was released'));
+    this.productPageGeneration += 1;
     this.rejectProductPages(new Error('product page runtime was released'));
     if (this.worker !== worker) return;
     this.clearCancelFallback();
@@ -678,10 +740,12 @@ export class WasmTerminalWorkerController {
     worker.onmessageerror = null;
     terminateOwnedWasmWorker(worker, reason);
     this.worker = null;
+    this.workerArtifactGeneration = null;
   }
 
   private disposeOwnedWorker(worker: Worker) {
     this.rejectSolutionPages(new Error('solution page runtime was disposed'));
+    this.productPageGeneration += 1;
     this.rejectProductPages(new Error('product page runtime was disposed'));
     if (this.worker !== worker) return;
     this.clearCancelFallback();
@@ -691,10 +755,25 @@ export class WasmTerminalWorkerController {
     worker.onerror = null;
     worker.onmessageerror = null;
     this.worker = null;
+    this.workerArtifactGeneration = null;
     try {
       worker.postMessage({ type: 'dispose_runtime' });
     } catch {}
     terminateOwnedWasmWorker(worker, 'owner-disposed');
+  }
+
+  private replaceStaleWorkerForNewRun() {
+    const worker = this.worker;
+    if (
+      !worker ||
+      isCurrentWasmArtifactGeneration(this.workerArtifactGeneration)
+    ) {
+      return;
+    }
+    // A new run already invalidates retained solution/product pages. Rotate at
+    // this boundary instead of on the update event so a result that is being
+    // inspected or copied is never destroyed underneath the user.
+    this.disposeOwnedWorker(worker);
   }
 
   private runtimeAuthority() {
@@ -731,6 +810,10 @@ export class WasmTerminalWorkerController {
     const pending = this.productPageRequests.get(event.request_id);
     if (!pending) return;
     this.productPageRequests.delete(event.request_id);
+    if (pending.generation !== this.productPageGeneration) {
+      pending.reject(new Error('stale product page generation was discarded'));
+      return;
+    }
     if (event.type === 'product_page_failed') {
       pending.reject(new Error(event.message));
     } else {
@@ -816,8 +899,8 @@ function errorMessage(error: unknown): string {
 }
 
 function positiveTimeout(value: number | undefined, fallback: number): number {
-  if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
-  return Math.max(1, Math.floor(value));
+  if (value === undefined || !Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
 }
 
 function boundedProgressFingerprint(

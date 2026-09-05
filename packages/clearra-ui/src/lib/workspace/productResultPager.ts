@@ -1,8 +1,11 @@
 // SRP rationale: this module has one change reason: fail-closed paging models for typed product results.
 import type {
+  ClearraBuildPathFamilyPayload,
   ClearraCoveragePortfolioRuntimePage,
+  ClearraPcPathFamilyPayload,
   ClearraProductPageWorkerPayload,
   ClearraProductResultPayload,
+  ClearraScorePatternWinnerPayload,
   ClearraSolutionSetArtifactPayload
 } from '../wasm/wasmCommandClient';
 
@@ -15,14 +18,26 @@ export type ProductNextPageLoader = (
 export type ProductMemberPageLoader = (
   alternativeIndex: string,
   memberPageNumber: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  maximumWorkSteps?: number
 ) => Promise<ClearraProductPageWorkerPayload>;
 
 export type ProductPageRelease = () => void | Promise<void>;
 
+export type CoveragePortfolioExactPageLoadOptions = {
+  loadMemberPage: ProductMemberPageLoader;
+  alternativeIndex: string;
+  memberPageNumber: string;
+  expectation: CoveragePortfolioPageExpectation;
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
+  maximumWorkSteps?: number;
+};
+
 const PORTFOLIO_PAGE_CONTRACT = 'portfolio-alternative-page.v1';
 const PORTFOLIO_MEMBER_PAGE_CONTRACT = 'portfolio-member-page.v1';
 const MAX_RETAINED_PORTFOLIO_PAGES = 2;
+const PRODUCT_PAGE_WORK_SLICE = 10_000;
 
 export type CoveragePortfolioPageExpectation = {
   setIdentitySha256: string;
@@ -201,6 +216,7 @@ export class CoveragePortfolioPagerController {
   private error = '';
   private generation = 0;
   private abortController = new AbortController();
+  private autoPrefetchEnabled = false;
 
   constructor(options: CoveragePortfolioPagerControllerOptions) {
     this.loadNextPage = options.loadNextPage;
@@ -226,7 +242,7 @@ export class CoveragePortfolioPagerController {
   reset(
     identity: string,
     initialPage: ClearraCoveragePortfolioRuntimePage | null,
-    { autoPrefetch = true }: { autoPrefetch?: boolean } = {}
+    { autoPrefetch = false }: { autoPrefetch?: boolean } = {}
   ): void {
     this.abortController.abort();
     this.abortController = new AbortController();
@@ -240,6 +256,7 @@ export class CoveragePortfolioPagerController {
     this.highestMaterializedAlternativeIndex = null;
     this.navigating = false;
     this.error = '';
+    this.autoPrefetchEnabled = autoPrefetch;
     if (initialPage) {
       const validationError = validateCoveragePortfolioRuntimePage(initialPage, {
         setIdentitySha256: initialPage.set_identity_sha256,
@@ -266,7 +283,8 @@ export class CoveragePortfolioPagerController {
     this.navigating = false;
   }
 
-  startPrefetch(): void {
+  startPrefetch(force = false): void {
+    if (!force && !this.autoPrefetchEnabled) return;
     if (
       this.prefetchPromise ||
       this.prefetchedPage ||
@@ -397,7 +415,7 @@ export class CoveragePortfolioPagerController {
       return await this.reloadOuterPage(nextAlternativeIndex, 'next', generation);
     }
 
-    this.startPrefetch();
+    this.startPrefetch(true);
     const pending = this.prefetchPromise;
     if (pending) await pending;
     if (generation !== this.generation) return null;
@@ -436,15 +454,22 @@ export class CoveragePortfolioPagerController {
       : null;
     if (!referencePage) return null;
     const signal = this.abortController.signal;
-    const response = await this.loadMemberPage(alternativeIndex, '1', signal);
-    if (!this.isCurrent(generation, signal)) return null;
-    const page = requireCoveragePortfolioPageResponse(response, {
-      setIdentitySha256: referencePage.set_identity_sha256,
-      candidateMapSha256: referencePage.candidate_map_sha256,
+    const page = await loadCoveragePortfolioExactPage({
+      loadMemberPage: this.loadMemberPage,
       alternativeIndex,
       memberPageNumber: '1',
-      referencePage
+      signal,
+      isCurrent: () => this.isCurrent(generation, signal),
+      maximumWorkSteps: PRODUCT_PAGE_WORK_SLICE,
+      expectation: {
+        setIdentitySha256: referencePage.set_identity_sha256,
+        candidateMapSha256: referencePage.candidate_map_sha256,
+        alternativeIndex,
+        memberPageNumber: '1',
+        referencePage
+      }
     });
+    if (!page) return null;
     this.pages =
       direction === 'previous'
         ? [page, ...this.pages].slice(0, MAX_RETAINED_PORTFOLIO_PAGES)
@@ -477,9 +502,15 @@ export class CoveragePortfolioPagerController {
       ) {
         throw new Error('product page kind does not match the active coverage result');
       }
-      if (response.state === 'work-budget-exhausted') continue;
-      if (response.state === 'sealed' || response.state === 'cancelled') {
+      if (response.state === 'work-budget-exhausted') {
+        requirePositiveWorkProgress(response);
+        continue;
+      }
+      if (response.state === 'sealed') {
         return { page: null, sealed: true };
+      }
+      if (response.state === 'cancelled') {
+        return { page: null, sealed: false };
       }
       return {
         page: requireCoveragePortfolioPageResponse(response, {
@@ -518,6 +549,50 @@ export class CoveragePortfolioPagerController {
   }
 }
 
+/**
+ * Resolves one exact coverage-portfolio/member coordinate through the bounded
+ * App replay contract. Every UI consumer uses this helper so a normal
+ * work-budget stop is resumed instead of being misreported as a missing page.
+ * Cancellation or generation replacement returns `null` without publishing a
+ * stale page; malformed or zero-progress responses still fail closed.
+ */
+export async function loadCoveragePortfolioExactPage(
+  options: CoveragePortfolioExactPageLoadOptions
+): Promise<ClearraCoveragePortfolioRuntimePage | null> {
+  const maximumWorkSteps = options.maximumWorkSteps ?? PRODUCT_PAGE_WORK_SLICE;
+  if (!Number.isSafeInteger(maximumWorkSteps) || maximumWorkSteps <= 0) {
+    throw new RangeError('product page work slice must be a positive safe integer');
+  }
+  let replayCursor = '1';
+  while (exactPageLoadIsCurrent(options.signal, options.isCurrent)) {
+    const response = await options.loadMemberPage(
+      options.alternativeIndex,
+      options.memberPageNumber,
+      options.signal,
+      maximumWorkSteps
+    );
+    if (!exactPageLoadIsCurrent(options.signal, options.isCurrent)) return null;
+    requireCoveragePortfolioResponseEnvelope(response);
+    if (response.state === 'work-budget-exhausted') {
+      replayCursor = requireReplayProgress(response, replayCursor);
+      continue;
+    }
+    if (response.state === 'cancelled') return null;
+    if (response.state === 'sealed') {
+      throw new Error('exact product page replay sealed before the requested page');
+    }
+    return requireCoveragePortfolioPageResponse(response, options.expectation);
+  }
+  return null;
+}
+
+function exactPageLoadIsCurrent(
+  signal: AbortSignal | undefined,
+  isCurrent: (() => boolean) | undefined
+): boolean {
+  return !signal?.aborted && (isCurrent?.() ?? true);
+}
+
 export function requireCoveragePortfolioPageResponse(
   response: ClearraProductPageWorkerPayload,
   expectation: CoveragePortfolioPageExpectation
@@ -533,6 +608,59 @@ export function requireCoveragePortfolioPageResponse(
   const validationError = validateCoveragePortfolioRuntimePage(response.page, expectation);
   if (validationError) throw new Error(validationError);
   return response.page;
+}
+
+function requireCoveragePortfolioResponseEnvelope(
+  response: ClearraProductPageWorkerPayload
+): asserts response is Extract<
+  ClearraProductPageWorkerPayload,
+  { product_page_kind: 'coverage-portfolio' }
+> {
+  if (
+    response.schema_version !== 1 ||
+    !['clearra-wasm', 'clearra-desktop'].includes(response.runtime) ||
+    response.product_page_kind !== 'coverage-portfolio'
+  ) {
+    throw new Error('product page kind does not match the active coverage result');
+  }
+}
+
+function requireReplayProgress(
+  response: Extract<
+    ClearraProductPageWorkerPayload,
+    { product_page_kind: 'coverage-portfolio'; known_alternative_count: string }
+  >,
+  previousCursor: string
+): string {
+  if (positiveWorkSteps(response.work_steps)) {
+    return positiveCanonicalDecimal(response.replay_cursor_alternative_index ?? '')
+      ? response.replay_cursor_alternative_index!
+      : previousCursor;
+  }
+  const cursor = response.replay_cursor_alternative_index;
+  if (
+    !cursor ||
+    !positiveCanonicalDecimal(cursor) ||
+    compareCanonicalDecimals(cursor, previousCursor) <= 0
+  ) {
+    throw new Error('product page replay returned no bounded progress');
+  }
+  return cursor;
+}
+
+function requirePositiveWorkProgress(
+  response: Extract<
+    ClearraProductPageWorkerPayload,
+    { product_page_kind: 'coverage-portfolio'; known_alternative_count: string }
+  >
+): void {
+  if (!positiveWorkSteps(response.work_steps)) {
+    throw new Error('product page enumeration returned no bounded progress');
+  }
+}
+
+function positiveWorkSteps(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
 }
 
 function positiveCanonicalDecimal(value: string): boolean {
@@ -611,10 +739,20 @@ export function productResultIdentity(payload: ClearraProductResultPayload | nul
       payload.contract,
       payload.result_kind,
       family.winner_contract,
-      family.winner_count
+      family.winner_count,
+      ...family.winners.flatMap((winner) => [
+        winner.pattern_id,
+        winner.candidate_id,
+        winner.normalized_solution_key,
+        winner.score,
+        winner.informational_attack
+      ].map((value) => `${value.length}:${value}`))
     ].join(':');
   }
-  if (payload.content.payload_kind === 'pc-path-family') {
+  if (
+    payload.content.payload_kind === 'pc-path-family' ||
+    payload.content.payload_kind === 'build-path-family'
+  ) {
     const family = payload.content.payload;
     return [
       payload.contract,
@@ -669,6 +807,26 @@ export function productResultIdentity(payload: ClearraProductResultPayload | nul
     ].join(':');
   }
   return [payload.contract, payload.result_kind, payload.content.payload.sha256].join(':');
+}
+
+/**
+ * True when the typed product payload, rather than the generic search report,
+ * owns the normalized solution-field presentation and export controls.
+ */
+export function productResultOwnsSolutionPage(
+  payload: ClearraProductResultPayload | null | undefined
+): boolean {
+  if (!payload) return false;
+  if (
+    payload.content.payload_kind === 'coverage-portfolio' ||
+    payload.content.payload_kind === 'build-coverage-portfolio-v2' ||
+    payload.content.payload_kind === 'build-setup-family-v1' ||
+    payload.content.payload_kind === 'score-pattern-winner-family'
+  ) {
+    return true;
+  }
+  return payload.content.payload_kind === 'build-v2' &&
+    payload.content.payload.kind !== 'probability';
 }
 
 export function isCanonicalDecimal(value: string): boolean {
@@ -861,6 +1019,7 @@ export function validateProductResultPayload(
     if (
       !expectedPair ||
       page.set_contract !== 'portfolio-alternative-set.v1' ||
+      typeof page.page_handle_available !== 'boolean' ||
       pageValidationError
     ) {
       return 'invalid coverage portfolio payload';
@@ -876,16 +1035,26 @@ export function validateProductResultPayload(
   }
   if (payload.content.payload_kind === 'score-pattern-winner-family') {
     const family = payload.content.payload;
-    const expectedPair =
+    const expectedWinnerContract =
       payload.contract === 'pc.score-finder' &&
-      payload.result_kind === 'pc-fixed-score-witness.v2';
+      payload.result_kind === 'pc-fixed-score-witness.v2'
+        ? 'pc-score-pattern-winner.v1'
+        : payload.contract === 'build.fixed-queue-maximum-score' &&
+            payload.result_kind === 'build-fixed-score-witness.v1'
+          ? 'build-score-pattern-winner.v1'
+          : null;
     if (
-      !expectedPair ||
+      expectedWinnerContract === null ||
+      family.winner_contract !== expectedWinnerContract ||
       family.ordering !== 'pattern-id-ascending-then-candidate-id-ascending' ||
       family.equality !== 'score-only-attack-informational' ||
       family.page_size !== PRODUCT_MEMBER_PAGE_SIZE.toString() ||
       !isCanonicalDecimal(family.winner_count) ||
       family.winner_count !== family.winners.length.toString() ||
+      family.winners.length === 0 ||
+      !scorePatternWinnersAreStrictlyCanonical(family.winners) ||
+      family.canonical_selection !== 'smallest-canonical-candidate-id' ||
+      !scorePatternWinnerIsCanonical(family.canonical_winner, family.winners) ||
       family.winners.some(
         (winner) =>
           !isCanonicalDecimal(winner.pattern_id) ||
@@ -900,10 +1069,19 @@ export function validateProductResultPayload(
     return null;
   }
   if (payload.content.payload_kind === 'pc-path-family') {
-    return validatePcPathFamily(
+    return validatePathFamily(
       payload.contract,
       payload.result_kind,
-      payload.content.payload
+      payload.content.payload,
+      'pc'
+    );
+  }
+  if (payload.content.payload_kind === 'build-path-family') {
+    return validatePathFamily(
+      payload.contract,
+      payload.result_kind,
+      payload.content.payload,
+      'build'
     );
   }
   if (payload.content.payload_kind === 'parity-report-page') {
@@ -963,10 +1141,12 @@ function validatePcScoreFieldSummary(
     ? BigInt(summary.failed_pc_pattern_count)
     : null;
   const observedKeys = new Set<string>();
+  let previousFieldKey: string | null = null;
   const fieldsValid = summary.fields.every((field) => {
     if (
       !validPcScoreFieldKey(field.normalized_field_key) ||
       observedKeys.has(field.normalized_field_key) ||
+      (previousFieldKey !== null && previousFieldKey >= field.normalized_field_key) ||
       !finiteInRange(field.average_score, 0, Number.MAX_VALUE) ||
       !isCanonicalDecimal(field.covered_pattern_count) ||
       !isCanonicalDecimal(field.pattern_count) ||
@@ -975,6 +1155,9 @@ function validatePcScoreFieldSummary(
       return false;
     }
     observedKeys.add(field.normalized_field_key);
+    // The ctk1 identity uses fixed-width lowercase hexadecimal fields, so its
+    // serialized lexical order is the Rust StandardBoard64TilingIdentity order.
+    previousFieldKey = field.normalized_field_key;
     const coveredPatternCount = BigInt(field.covered_pattern_count);
     const patternCount = BigInt(field.pattern_count);
     return (
@@ -985,9 +1168,12 @@ function validatePcScoreFieldSummary(
   });
   const conditionalAverage = summary.score_covered_pattern_conditional_average_score;
   const valid =
-    outerContract === 'pc.score' &&
-    outerResultKind === 'pc-score-summary.v2' &&
-    summary.field_contract === 'pc-score-solution-field-average.v1' &&
+    ((outerContract === 'pc.score' &&
+      outerResultKind === 'pc-score-summary.v2' &&
+      summary.field_contract === 'pc-score-solution-field-average.v1') ||
+      (outerContract === 'build.field-average-score' &&
+        outerResultKind === 'build-field-average-score.v1' &&
+        summary.field_contract === 'build-solution-field-average.v1')) &&
     summary.ordering === 'normalized-solution-field-order' &&
     summary.solution_field_average_basis ===
       'whole-materialized-pattern-universe-failed-pc-zero' &&
@@ -1012,19 +1198,76 @@ function validatePcScoreFieldSummary(
   return valid ? null : 'invalid PC score field summary payload';
 }
 
+function scorePatternWinnersAreStrictlyCanonical(
+  winners: Extract<
+    ClearraProductResultPayload,
+    { content: { payload_kind: 'score-pattern-winner-family' } }
+  >['content']['payload']['winners']
+): boolean {
+  let previousPatternId: bigint | null = null;
+  let previousCandidateId: bigint | null = null;
+  for (const winner of winners) {
+    if (!isCanonicalDecimal(winner.pattern_id) || !isCanonicalDecimal(winner.candidate_id)) {
+      return false;
+    }
+    const patternId = BigInt(winner.pattern_id);
+    const candidateId = BigInt(winner.candidate_id);
+    if (
+      previousPatternId !== null &&
+      (patternId < previousPatternId ||
+        (patternId === previousPatternId &&
+          previousCandidateId !== null &&
+          candidateId <= previousCandidateId))
+    ) {
+      return false;
+    }
+    previousPatternId = patternId;
+    previousCandidateId = candidateId;
+  }
+  return true;
+}
+
+function scorePatternWinnerIsCanonical(
+  canonical: ClearraScorePatternWinnerPayload,
+  winners: readonly ClearraScorePatternWinnerPayload[]
+): boolean {
+  const firstCandidateId = winners.reduce(
+    (smallest, winner) =>
+      compareCanonicalDecimals(winner.candidate_id, smallest.candidate_id) < 0
+        ? winner
+        : smallest,
+    winners[0]!
+  );
+  return sameScorePatternWinner(canonical, firstCandidateId) &&
+    winners.filter((winner) => sameScorePatternWinner(winner, canonical)).length === 1 &&
+    winners.every(
+      (winner) =>
+        winner.pattern_id === canonical.pattern_id && winner.score === canonical.score
+    );
+}
+
+function sameScorePatternWinner(
+  left: ClearraScorePatternWinnerPayload,
+  right: ClearraScorePatternWinnerPayload
+): boolean {
+  return left.pattern_id === right.pattern_id &&
+    left.candidate_id === right.candidate_id &&
+    left.normalized_solution_key === right.normalized_solution_key &&
+    left.score === right.score &&
+    left.informational_attack === right.informational_attack;
+}
+
 function validPcScoreFieldKey(value: string): boolean {
   return /^ctk1\|initial=[0-9a-f]{16}\|placements=[IOTSZJL]:[0-9a-f]{16}(?:,[IOTSZJL]:[0-9a-f]{16})*$/u.test(
     value
   );
 }
 
-function validatePcPathFamily(
+function validatePathFamily(
   outerContract: string,
   outerResultKind: string,
-  family: Extract<
-    ClearraProductResultPayload,
-    { content: { payload_kind: 'pc-path-family' } }
-  >['content']['payload']
+  family: ClearraPcPathFamilyPayload | ClearraBuildPathFamilyPayload,
+  semantics: 'pc' | 'build'
 ): string | null {
   let previousOrderKey: readonly [string, string, string] | null = null;
   const witnessesValid = family.witnesses.every((witness) => {
@@ -1073,19 +1316,36 @@ function validatePcPathFamily(
       )
     );
   });
-  return outerContract === 'pc.path' &&
-    outerResultKind === 'pc-path-family.v2' &&
-    family.witness_contract === 'pc-path-witness.v2' &&
+  const expectedOuter = semantics === 'pc'
+    ? outerContract === 'pc.path' &&
+      outerResultKind === 'pc-path-family.v2' &&
+      family.witness_contract === 'pc-path-witness.v2' &&
+      !('target_terminal_board_mask' in family)
+    : outerContract === 'build.complete-replay-paths' &&
+      outerResultKind === 'build-path-family.v1' &&
+      family.witness_contract === 'build-path-witness.v1' &&
+      'target_terminal_board_mask' in family &&
+      /^0x[0-9a-f]{16}$/u.test(family.target_terminal_board_mask) &&
+      family.witnesses.every((witness) =>
+        witness.steps.at(-1)?.board_after_line_clear_mask ===
+          family.target_terminal_board_mask
+      );
+  return expectedOuter &&
     family.ordering ===
       'candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending' &&
     family.problem_id.length > 0 &&
     isCanonicalDecimal(family.materialized_pattern_count) &&
     isCanonicalDecimal(family.witness_count) &&
     family.witness_count === family.witnesses.length.toString() &&
+    family.canonical_selection === 'smallest-canonical-candidate-id' &&
+    ((family.canonical_witness === null && family.witnesses.length === 0) ||
+      (family.canonical_witness !== null &&
+        family.witnesses.length > 0 &&
+        JSON.stringify(family.canonical_witness) === JSON.stringify(family.witnesses[0]))) &&
     family.complete === true &&
     witnessesValid
     ? null
-    : 'invalid pc.path replay family payload';
+    : `invalid ${semantics === 'pc' ? 'pc.path' : 'Build'} replay family payload`;
 }
 
 function isCanonicalSignedDecimal(value: string): boolean {
@@ -1388,6 +1648,11 @@ function validateBuildV2(
     'build.evaluate.score': [
       'score-portfolio',
       'build-supplied-score.v1',
+      ['max-score-cover']
+    ],
+    'build.highest-score-minimum-set': [
+      'score-portfolio',
+      'build-probability-score-minimum.v1',
       ['max-score-cover']
     ]
   };

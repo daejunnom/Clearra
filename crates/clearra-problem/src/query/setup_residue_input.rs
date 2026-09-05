@@ -1,15 +1,10 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SetupCycleResetBorrowPolicy {
+    #[default]
     ForbidPostCyclePieceUse,
     AllowPostCyclePieceUse,
-}
-
-impl Default for SetupCycleResetBorrowPolicy {
-    fn default() -> Self {
-        Self::ForbidPostCyclePieceUse
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

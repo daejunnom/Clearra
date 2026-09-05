@@ -21,11 +21,36 @@ import {
   createDefaultWorkspaceRequest,
   workspaceRequestForDesktop
 } from '../../../packages/clearra-ui/src/lib/workspace/solverWorkspaceModel.ts';
+import {
+  automaticWorkerAuthority,
+  createHostCapabilitySnapshot
+} from '../../../packages/clearra-ui/src/lib/wasm/hostCapabilitySnapshot.ts';
 
 function optionValue(arguments_: readonly string[], option: string): string | undefined {
   const index = arguments_.indexOf(option);
   return index === -1 ? undefined : arguments_[index + 1];
 }
+
+const eightLogicalProcessors = createHostCapabilitySnapshot({
+  snapshotId: 'browser-worker-budget-eight',
+  source: 'host-provided',
+  reportedLogicalProcessors: 8,
+  reportedDeviceMemoryGiB: 4
+});
+assert.deepEqual(automaticWorkerAuthority(eightLogicalProcessors), {
+  snapshotId: 'browser-worker-budget-eight',
+  reportedLogicalProcessors: 8,
+  workersRequested: 7,
+  workersEffective: 7,
+  reason: 'reserved-main-thread'
+});
+assert.deepEqual(automaticWorkerAuthority(eightLogicalProcessors, true), {
+  snapshotId: 'browser-worker-budget-eight',
+  reportedLogicalProcessors: 8,
+  workersRequested: 8,
+  workersEffective: 8,
+  reason: 'all-logical-processors'
+});
 
 const setup = createDefaultSetupFinderRequest();
 assert.match(buildSetupFinderCommand(setup, 11), /--auto-workers 11(?:\s|$)/);
@@ -64,9 +89,11 @@ assert.match(buildForwardSearchCommand(fullForward, 12), /--use-all-cpu-threads(
 const pc = { ...createDefaultWorkspaceRequest(), useAllLogicalProcessors: true, workers: 12 };
 assert.match(buildWorkspaceCommand(pc), /--workers 12(?:\s|$)/);
 assert.match(buildWorkspaceCommand(pc), /--use-all-cpu-threads(?:\s|$)/);
+assert.doesNotMatch(buildWorkspaceCommand(pc), /--cpu-warmup(?:\s|$)/);
 const pcDesktop = workspaceRequestForDesktop(pc, 'en');
 assert.equal(optionValue(pcDesktop.arguments, '--workers'), String(pc.workers));
 assert.equal(pcDesktop.arguments.includes('--use-all-cpu-threads'), true);
+assert.equal(pcDesktop.arguments.includes('--cpu-warmup'), false);
 const defaultPcDesktop = workspaceRequestForDesktop(createDefaultWorkspaceRequest(), 'en');
 assert.equal(
   optionValue(defaultPcDesktop.arguments, '--workers'),
@@ -76,6 +103,7 @@ assert.equal(
   defaultPcDesktop.arguments.includes('--use-all-cpu-threads'),
   false
 );
+assert.equal(defaultPcDesktop.arguments.includes('--cpu-warmup'), false);
 
 const build = {
   ...createDefaultBuildProbabilityRequest(),

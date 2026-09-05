@@ -16,6 +16,9 @@ pub struct NativePackingExecutorRegistry {
     gpu: NativeGpuPackingExecutor,
 }
 
+// Test builds carry configured executor fields whose defaults encode backend identity;
+// the production zero-sized registry intentionally shares that same constructor.
+#[allow(clippy::derivable_impls)]
 impl Default for NativePackingExecutorRegistry {
     fn default() -> Self {
         Self {

@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+# Native ignored probes may opt into non-authoritative solver telemetry. The
+# production dependency graph never enables this feature.
+diagnostic-probes = []
+
 [dependencies]
 clearra-core-domain = { path = "../clearra-core-domain" }
 

@@ -141,6 +141,8 @@ impl RenderBoard {
     }
 }
 
+// Accessor impls intentionally follow the focused constructor tests in this module.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use core::mem::size_of;

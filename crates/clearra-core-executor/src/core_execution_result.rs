@@ -2602,8 +2602,7 @@ mod tests {
 
     #[test]
     fn guarded_field_replacement_rejects_one_byte_short_before_internal_growth() {
-        let mut existing = Vec::with_capacity(1);
-        existing.push(("keep".to_owned(), "old".to_owned()));
+        let existing = vec![("keep".to_owned(), "old".to_owned())];
         let result = CoreExecutionResult::new(
             existing,
             vec![CorePathStep::new(PieceKind::I, 0, 0, 0, "none", 0)],

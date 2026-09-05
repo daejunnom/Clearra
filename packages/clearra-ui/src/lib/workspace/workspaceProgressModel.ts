@@ -188,6 +188,8 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   const geometry = stage(stages, 'geometry');
   const verify = stage(stages, 'verify');
   const finalize = stage(stages, 'finalize');
+  // Verification consumes streamed candidates concurrently. Its counters do not
+  // prove that the Geometry producer has finished enumerating candidates.
   const producerDone =
     telemetry.producer_complete || isFinalizingPhase(phase) || phase === 'draining';
   const predictedCandidates = predictedCandidateTotal(telemetry);
@@ -204,22 +206,10 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
     ) ||
       telemetryPositive(telemetry, 'coverage_checks', telemetry.coverage_checks) ||
       producerDone);
-  const verificationCompletionEvidence =
-    verify !== undefined &&
-    (telemetryExactPositive(
-      telemetry,
-      'candidates_verified',
-      telemetry.candidates_verified
-    ) ||
-      telemetryExactPositive(
-        telemetry,
-        'coverage_checks',
-        telemetry.coverage_checks
-      ));
 
   if (geometry) {
     geometry.status =
-      producerDone || verificationCompletionEvidence
+      producerDone
         ? 'complete'
         : phase === 'searching'
           ? 'running'
@@ -689,7 +679,10 @@ function applyCoarseProgress(
     return;
   }
 
-  if (input.progressLabel === 'postprocess') {
+  if (
+    input.progressLabel === 'postprocess' ||
+    input.progressLabel === 'pc-minimals-finalize'
+  ) {
     const finalStageIndex = Math.max(
       0,
       stages.findIndex((candidate) =>

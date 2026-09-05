@@ -7,6 +7,7 @@ pub mod app_request;
 pub mod app_response;
 pub mod app_services;
 mod build_colored_target_document;
+mod build_probability_product_result;
 mod build_setup_product_projection;
 mod build_solution_probability_result;
 mod build_v2_product_projection;
@@ -99,6 +100,11 @@ pub use app_services::{
 pub use build_colored_target_document::{
     BuildColoredTargetDocument, BuildColoredTargetDocumentError,
 };
+pub use build_probability_product_result::{
+    BUILD_FIELD_AVERAGE_CAPABILITY, BUILD_FIELD_AVERAGE_RESULT_CONTRACT,
+    BUILD_FIXED_SCORE_CAPABILITY, BUILD_FIXED_SCORE_RESULT_CONTRACT,
+    BUILD_FIXED_SCORE_WINNER_CONTRACT, BUILD_PATH_CANONICAL_SELECTION,
+};
 pub use build_setup_product_projection::{
     project_build_setup_v1, BuildSetupProductProjectionError,
 };
@@ -152,15 +158,15 @@ pub use clearra_output::{
     Ctk3PageFlags, Ctk3Piece, Ctk3Rotation,
 };
 pub use commands::{
-    BuildProbabilityAppCommand, BuildV2AppCommand, BuildV2AppRequest, ContinueAppCommand,
-    ConvertAppCommand, CoverAppCommand, DamageAppCommand, FieldDocumentTransformAppCommand,
-    FieldDocumentTransformAppCommandError, FieldDocumentTransformKind, FumenAppCommand,
-    FumenAppCommandError, FumenTransformKind, InspectUnsupportedAppCommand,
-    OperationSequenceAppCommand, ParityAppCommand, PathAppCommand, PcAppCommand, PercentAppCommand,
-    RenAppCommand, RenderAppCommand, RenderAppCommandError, RenderArtifactFormat, RulesAppCommand,
-    ScenarioAppCommand, ScenarioAppExpected, ScenarioAppRenderContract, ScoringAppCommand,
-    SequenceDependenciesAppCommand, SetupAppCommand, SetupScoreAppCommand,
-    SetupScoreAppCommandError, SpinFinderAppCommand, SpinStructureAppCommand,
+    BuildProbabilityAppCommand, BuildProbabilityResultMode, BuildV2AppCommand, BuildV2AppRequest,
+    ContinueAppCommand, ConvertAppCommand, CoverAppCommand, DamageAppCommand,
+    FieldDocumentTransformAppCommand, FieldDocumentTransformAppCommandError,
+    FieldDocumentTransformKind, FumenAppCommand, FumenAppCommandError, FumenTransformKind,
+    InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand, PathAppCommand,
+    PcAppCommand, PercentAppCommand, RenAppCommand, RenderAppCommand, RenderAppCommandError,
+    RenderArtifactFormat, RulesAppCommand, ScenarioAppCommand, ScenarioAppExpected,
+    ScenarioAppRenderContract, ScoringAppCommand, SequenceDependenciesAppCommand, SetupAppCommand,
+    SetupScoreAppCommand, SetupScoreAppCommandError, SpinFinderAppCommand, SpinStructureAppCommand,
     SpinStructureProductMode, VerifyAppCommand, SETUP_SCORE_INPUT_CONTRACT,
     SETUP_SCORE_PROBLEM_CONTRACT, SETUP_SCORE_RESULT_CONTRACT,
 };
@@ -247,8 +253,9 @@ pub use portfolio_alternative_store::{
     PortfolioAlternative, PortfolioAlternativeAdvance, PortfolioAlternativeCheckpoint,
     PortfolioAlternativeError, PortfolioAlternativePage, PortfolioAlternativeSetIdentity,
     PortfolioCandidate, PortfolioEnumerationStop, PortfolioMember, PortfolioMemberPage,
-    ProductPageSourceOwner, ProductPageStore, PORTFOLIO_ALTERNATIVE_PAGE_CONTRACT,
-    PORTFOLIO_ALTERNATIVE_SET_CONTRACT, PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
+    PortfolioPageLoadAdvance, PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore,
+    PORTFOLIO_ALTERNATIVE_PAGE_CONTRACT, PORTFOLIO_ALTERNATIVE_SET_CONTRACT,
+    PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
     PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT, PORTFOLIO_SNAPSHOT_CONTRACT,
 };
 pub use product_capability_contract::{ProductCapabilityContract, ProductCapabilityContractError};

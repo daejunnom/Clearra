@@ -6,6 +6,7 @@ import {
   occupiedCellCount,
   parseBrowserQueueInput,
   type RuleProfile,
+  type ScoreProfile,
   type SpinProfile
 } from './solverWorkspaceModel.ts';
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
@@ -33,6 +34,17 @@ export type BuildProbabilityRequest = {
   holdEnabled: boolean;
   sourcePieces: number | null;
   aggregation: 'buildability' | 'tiling' | 'spin';
+  resultMode:
+    | 'all-solutions'
+    | 'complete-replay-paths'
+    | 'minimum-solutions'
+    | 'field-average-score'
+    | 'fixed-queue-maximum-score'
+    | 'highest-score-minimum-set'
+    | 'failed-queues';
+  failedPatternLimit: number;
+  scoreProfile: ScoreProfile;
+  initialB2B: number;
   rule: RuleProfile;
   spinProfile: SpinProfile;
   preserveB2B: boolean;
@@ -51,6 +63,10 @@ export type BuildProbabilityValidationCode =
   | 'build_target_not_tileable'
   | 'build_target_overlap'
   | 'source_pieces_invalid'
+  | 'build_paths_height_invalid'
+  | 'fixed_queue_required'
+  | 'failed_pattern_limit_invalid'
+  | 'initial_b2b_invalid'
   | 'worker_count_invalid';
 
 // The native option is a positive usize. Browser commands execute in wasm32,
@@ -74,6 +90,10 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     holdEnabled: true,
     sourcePieces: null,
     aggregation: 'buildability',
+    resultMode: 'all-solutions',
+    failedPatternLimit: 100,
+    scoreProfile: 'tetrio',
+    initialB2B: 0,
     rule: 'srs-plus',
     spinProfile: 't-spins',
     preserveB2B: false,
@@ -97,6 +117,18 @@ export function updateBuildProbabilityDraft(
 export function normalizeBuildProbabilityRequest(
   request: BuildProbabilityRequest
 ): BuildProbabilityRequest {
+  if (request.resultMode !== 'all-solutions') {
+    return {
+      ...request,
+      aggregation: 'buildability',
+      spinProfile: 't-spins',
+      preserveB2B: false,
+      solutionProbabilities: false,
+      precomputeBuildDependencies: false,
+      finesse: 'off',
+      patternKnowledge: 'both'
+    };
+  }
   if (request.aggregation === 'tiling') {
     return {
       ...request,
@@ -128,6 +160,11 @@ export function buildProbabilityValidationCodes(
   request: BuildProbabilityRequest
 ): BuildProbabilityValidationCode[] {
   const errors: BuildProbabilityValidationCode[] = [];
+  const scoreResultMode = [
+    'field-average-score',
+    'fixed-queue-maximum-score',
+    'highest-score-minimum-set'
+  ].includes(request.resultMode);
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) {
     errors.push('target_lines_invalid');
   }
@@ -148,6 +185,29 @@ export function buildProbabilityValidationCodes(
   ) {
     errors.push('source_pieces_invalid');
   }
+  if (request.resultMode === 'complete-replay-paths' && request.height > 6) {
+    errors.push('build_paths_height_invalid');
+  }
+  if (
+    request.resultMode === 'fixed-queue-maximum-score' &&
+    parseBrowserQueueInput(request.queue)?.kind !== 'fixed'
+  ) {
+    errors.push('fixed_queue_required');
+  }
+  if (
+    request.resultMode === 'failed-queues' &&
+    (!Number.isInteger(request.failedPatternLimit) ||
+      request.failedPatternLimit < 1 ||
+      request.failedPatternLimit > 1000)
+  ) {
+    errors.push('failed_pattern_limit_invalid');
+  }
+  if (
+    scoreResultMode &&
+    (!Number.isInteger(request.initialB2B) || request.initialB2B < 0 || request.initialB2B > 65_535)
+  ) {
+    errors.push('initial_b2b_invalid');
+  }
   if (!Number.isInteger(request.workers) || request.workers < 1) {
     errors.push('worker_count_invalid');
   }
@@ -159,7 +219,19 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
   const existing = trimBuildProbabilityMask(request.existingMask, request.height);
   const target = trimBuildProbabilityMask(request.targetMask, request.height);
   const parsedQueue = parseBrowserQueueInput(request.queue);
-  const tokens = [
+  const tokens = request.resultMode === 'minimum-solutions'
+    ? [
+        'clearra',
+        'build',
+        'cover',
+        '--base-mask',
+        boardMaskHex(existing),
+        '--target-mask',
+        boardMaskHex(target),
+        '--height',
+        String(request.height)
+      ]
+    : [
     'clearra',
     'build-probability',
     '--base-mask',
@@ -180,7 +252,9 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
       parsedQueue?.source ?? request.queue
     );
   }
-  if (request.aggregation === 'tiling') {
+  if (request.resultMode === 'minimum-solutions') {
+    tokens.push('--queue-knowledge', 'oracle', '--objective', 'min-cover', '--rule', request.rule);
+  } else if (request.aggregation === 'tiling') {
     tokens.push('--tiling-only');
   } else {
     tokens.push('--aggregate', request.aggregation);
@@ -196,9 +270,48 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
         : '--no-build-dependency-dag'
     );
   }
-  tokens.push(
-    mirrorBoardMask(existing, request.height) === existing ? '--include-mirror' : '--no-mirror'
-  );
+  if (request.resultMode === 'complete-replay-paths') {
+    tokens.push('--result-mode', 'complete-replay-paths');
+  } else if (request.resultMode === 'field-average-score') {
+    tokens.push(
+      '--result-mode',
+      'field-average-score',
+      '--score-profile',
+      request.scoreProfile,
+      '--initial-b2b',
+      String(request.initialB2B)
+    );
+  } else if (request.resultMode === 'fixed-queue-maximum-score') {
+    tokens.push(
+      '--result-mode',
+      'fixed-queue-maximum-score',
+      '--score-profile',
+      request.scoreProfile,
+      '--initial-b2b',
+      String(request.initialB2B)
+    );
+  } else if (request.resultMode === 'highest-score-minimum-set') {
+    tokens.push(
+      '--result-mode',
+      'highest-score-minimum-set',
+      '--score-profile',
+      request.scoreProfile,
+      '--initial-b2b',
+      String(request.initialB2B)
+    );
+  } else if (request.resultMode === 'failed-queues') {
+    tokens.push(
+      '--result-mode',
+      'failed-queues',
+      '--failed-count',
+      String(request.failedPatternLimit)
+    );
+  }
+  if (request.resultMode !== 'minimum-solutions') {
+    tokens.push(
+      mirrorBoardMask(existing, request.height) === existing ? '--include-mirror' : '--no-mirror'
+    );
+  }
   tokens.push(...searchExecutionCommandArguments(buildProbabilitySearchExecution(request)));
   tokens.push(...buildProbabilityFinesseCommandArguments(request.finesse, request.patternKnowledge));
   return tokens;
@@ -224,7 +337,10 @@ function buildProbabilitySearchExecution(
     workers: request.workers,
     useAllLogicalProcessors: request.useAllLogicalProcessors,
     allowBackendFallback: false,
-    cpuWarmup: true,
+    // Workspace prewarm owns asynchronous worker preparation. A hidden command
+    // warmup would make the search wait for every worker instead of dispatching
+    // to the first ready worker.
+    cpuWarmup: false,
     gpuWarmup: false
   };
 }

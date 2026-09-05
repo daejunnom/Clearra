@@ -146,8 +146,6 @@ export function normalizeWorkspaceRequest(
       solutionProbabilities: false,
       backend: 'cpu',
       gpuDevice: 'auto',
-      workers: 1,
-      useAllLogicalProcessors: false,
       tablebaseEnabled: false,
       precomputeBuildDependencies: false,
       maxPatterns: undefined
@@ -536,11 +534,13 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
   if (request.scoreMode === 'score-finder') {
     tokens.push('--rule', request.rule);
     tokens.push('--initial-b2b', String(request.initialB2B));
+    tokens.push(...workspaceScoreWorkerCommandArguments(request));
   } else if (request.scoreMode === 'summary' || request.scoreMode === 'score-minimals') {
     tokens.push('--rule', request.rule);
     tokens.push('--score-profile', request.scoreProfile);
     tokens.push('--spin-profile', request.spinProfile);
     tokens.push('--initial-b2b', String(Math.max(0, Math.trunc(request.initialB2B))));
+    tokens.push(...workspaceScoreWorkerCommandArguments(request));
   } else if (request.scoreMode === 'path') {
     tokens.push('--rule', request.rule);
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
@@ -577,6 +577,9 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
     }
   } else {
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
+    if (request.maxPatterns !== undefined) {
+      tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
+    }
   }
   return tokens;
 }
@@ -614,6 +617,16 @@ function workspaceSearchExecution(request: SolverWorkspaceRequest): SearchExecut
     cpuWarmup: true,
     gpuWarmup: true
   };
+}
+
+function workspaceScoreWorkerCommandArguments(request: SolverWorkspaceRequest): string[] {
+  const tokens = [
+    '--workers',
+    String(Math.max(1, Math.trunc(request.workers))),
+    '--cpu-warmup'
+  ];
+  if (request.useAllLogicalProcessors) tokens.push('--use-all-cpu-threads');
+  return tokens;
 }
 
 const GUI_SCORE_MODES = new Set<string>([

@@ -1,5 +1,9 @@
 import type { ClearraWasmSearchPathStep } from '../wasm/wasmCommandClient.ts';
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
+import type {
+  WorkspaceDeveloperFailureEvidence,
+  WorkspacePublicFailure
+} from './workspacePublicFailure';
 import type { QueueKnowledge, RuleProfile } from './solverWorkspaceModel.ts';
 import {
   cliCommandRequestForDesktop,
@@ -48,7 +52,8 @@ export type SetupPathDetailState = {
   status: 'loading' | 'complete' | 'failed';
   paths: ClearraWasmSearchPathStep[][];
   complete: boolean;
-  error: string | null;
+  publicFailures: WorkspacePublicFailure[];
+  developerFailure: WorkspaceDeveloperFailureEvidence | null;
 };
 
 const PIECES = 'IOTSZJL';

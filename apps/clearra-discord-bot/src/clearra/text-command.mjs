@@ -93,6 +93,7 @@ const OPTION_ALIASES = new Map([
   ["--source-pieces", "source-pieces"],
   ["--aggregate", "aggregation"],
   ["--aggregation", "aggregation"],
+  ["--result-mode", "result-mode"],
   ["--scope", "scope"],
   ["--image", "image"],
   ["--document", "document"],

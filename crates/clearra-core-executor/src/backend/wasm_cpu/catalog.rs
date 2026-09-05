@@ -179,7 +179,7 @@ impl GeometryCatalog {
             ));
         }
         let required_cells = all_cells & !initial_board;
-        if required_cells.count_ones() % 4 != 0 {
+        if !required_cells.count_ones().is_multiple_of(4) {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_required_fill_area_not_tetromino_aligned",
             ));
@@ -239,7 +239,7 @@ impl GeometryCatalog {
                 "wasm_build_target_overlaps_initial_board",
             ));
         }
-        if required_cells.count_ones() % 4 != 0 {
+        if !required_cells.count_ones().is_multiple_of(4) {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_required_fill_area_not_tetromino_aligned",
             ));

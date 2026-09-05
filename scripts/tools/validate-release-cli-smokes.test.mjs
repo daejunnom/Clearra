@@ -435,6 +435,33 @@ for (const [name, mutate] of [
       ),
   ],
   [
+    "rejects Pages acceptance without its accepted WASM producer dependency",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "  release-acceptance-pages:\n    if: github.event_name == 'workflow_dispatch'\n    needs: [metadata, release-acceptance-wasm-build]\n",
+        "  release-acceptance-pages:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n",
+      ),
+  ],
+  [
+    "rejects an unbound accepted WASM producer artifact name",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      - name: Upload accepted WASM build\n        uses: actions/upload-artifact@v4\n        with:\n          name: accepted-wasm-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}\n          path: ${{ runner.temp }}/clearra-accepted-wasm\n",
+        "      - name: Upload accepted WASM build\n        uses: actions/upload-artifact@v4\n        with:\n          name: accepted-wasm-build-unbound\n          path: ${{ runner.temp }}/clearra-accepted-wasm\n",
+      ),
+  ],
+  [
+    "rejects Pages acceptance that rebuilds the accepted WASM payload",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      - name: Download accepted WASM build\n",
+        "      - name: Rebuild accepted WASM payload\n        run: node scripts/tools/build-clearra-wasm.mjs\n      - name: Download accepted WASM build\n",
+      ),
+  ],
+  [
     "rejects an accepted Pages build without run-attempt binding",
     (source) =>
       source.replaceAll(
@@ -746,6 +773,24 @@ for (const [name, mutate] of [
         "          archive_owned=true\n          node scripts/release/create-exact-source-archive.mjs \\\n",
       );
     },
+  ],
+  [
+    "rejects restoring Cargo payload in the sanitizer-only cache",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "          path: ~/AppData/Local/Clearra/build\n          key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}\n",
+        "          path: |\n            ~/.cargo/registry\n            ~/AppData/Local/Clearra/build\n          key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}\n",
+      ),
+  ],
+  [
+    "rejects a sanitizer cache without its dedicated source-bound key",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "          key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}\n",
+        "          key: release-acceptance-sanitizer-${{ runner.os }}\n",
+      ),
   ],
 ]) {
   test(name, async () => {

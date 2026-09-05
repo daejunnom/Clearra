@@ -63,10 +63,11 @@ impl WebGpuShaderReport {
 
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         let mut bytes = self.shader_compile_status.capacity() as u128;
-        for value in [&self.shader_hash, &self.shader_version] {
-            if let Some(value) = value {
-                bytes = bytes.checked_add(value.capacity() as u128)?;
-            }
+        for value in [&self.shader_hash, &self.shader_version]
+            .into_iter()
+            .flatten()
+        {
+            bytes = bytes.checked_add(value.capacity() as u128)?;
         }
         Some(bytes)
     }
@@ -237,10 +238,11 @@ impl WebGpuBackendReport {
             &self.expected_digest,
             &self.actual_digest,
             &self.fallback_backend,
-        ] {
-            if let Some(value) = value {
-                bytes = bytes.checked_add(value.capacity() as u128)?;
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes = bytes.checked_add(value.capacity() as u128)?;
         }
         bytes = bytes.checked_add(self.shader.checked_retained_capacity_bytes()?)?;
         bytes = bytes.checked_add(self.memory.checked_retained_capacity_bytes()?)?;

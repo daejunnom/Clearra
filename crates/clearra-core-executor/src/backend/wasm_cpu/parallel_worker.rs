@@ -140,6 +140,8 @@ impl WorkerAggregate {
         Ok(())
     }
 
+    // Worker telemetry mirrors the shared progress contract without allocation.
+    #[allow(clippy::too_many_arguments)]
     fn observe(
         &mut self,
         branch_index: usize,

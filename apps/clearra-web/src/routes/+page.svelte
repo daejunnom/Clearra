@@ -9,6 +9,7 @@
   } from '@clearra/ui/wasm';
   import { onMount, setContext } from 'svelte';
   import { resolveCtkViewerQuery } from '../lib/ctkViewerQuery';
+  import { installWasmArtifactHotUpdate } from '../lib/wasmArtifactHotUpdate';
 
   function workerFactory() {
     return new Worker(new URL('../workers/clearraWorker.ts', import.meta.url), {
@@ -28,9 +29,11 @@
     $page.url.searchParams.get('tool') ?? (ctkViewer.document ? 'ctk' : null);
 
   onMount(() => {
+    const removeWasmArtifactHotUpdate = installWasmArtifactHotUpdate(import.meta.hot);
     if (!['pc', 'setup', 'setup-score', 'spin-structure', 'build', 'build-probability', 'sequence', 'sequence-dependencies', 'parity', 'fumen', 'render', 'to-gray', 'mirror', 'damage', 'spin-finder', 'ren', 'ctk', 'player'].includes(selectedTool ?? '')) {
       void goto(`${base}/?tool=pc`, { replaceState: true, noScroll: true, keepFocus: true });
     }
+    return removeWasmArtifactHotUpdate;
   });
 </script>
 

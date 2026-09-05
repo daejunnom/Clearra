@@ -255,13 +255,13 @@ impl KickProfileRegistry {
                 RuleProfileId::SrsX,
                 "SRS-X",
                 KickProfileSourceKind::BuiltInExact,
-                "Clearra built-in TETR.IO SRS-X: SRS 90 with Nullpomino/Heboris-style 180 kicks",
+                "Clearra built-in TETR.IO SRS-X: exact ordered tetrio.js standard-piece transitions",
                 KickProfileCapability::new(true, true, true, false, true, None),
             )
             .with_profile_contract(
-                80,
+                84,
                 true,
-                "TETR.IO SRS-X contract: SRS 90 with Nullpomino/Heboris-style 180 kicks",
+                "TETR.IO SRS-X contract: tetrio.js kicks/i_kicks plus standard O origin-only rotation",
                 true,
             ),
             KickProfileDescriptor::new(
@@ -346,7 +346,7 @@ mod tests {
         assert!(srs_plus.capability().supports_180());
         assert!(srs_plus.capability().supports_exact_180());
         assert!(srs_x.capability().supports_180());
-        assert_eq!(srs_x.transition_count(), 80);
+        assert_eq!(srs_x.transition_count(), 84);
         assert_eq!(srs_x.source_kind(), KickProfileSourceKind::BuiltInExact);
         assert!(srs_x.capability().supports_exact_180());
         assert!(srs_x.capability().search_backend_supported());

@@ -77,7 +77,8 @@ test('Desktop page abort sends release while the exact replay invoke is pending'
     );
     assert.deepEqual(calls[0].arguments_, {
       alternativeIndex: '184467440737095516160',
-      memberPageNumber: '1'
+      memberPageNumber: '1',
+      maximumWorkSteps: 10_000
     });
   } finally {
     delete globalThis.__clearraDesktopInvoke;

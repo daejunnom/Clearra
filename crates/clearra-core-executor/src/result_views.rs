@@ -56,6 +56,8 @@ mod backend_report {
                 .checked_add(self.backend_fallback_reason.capacity() as u128)
         }
 
+        // Memory-accounting adapter retained for zero-copy result projections.
+        #[allow(dead_code)]
         pub(super) fn checked_clone_nested_bytes(&self) -> Option<u128> {
             (self.backend_requested.len() as u128)
                 .checked_add(self.backend_selected.len() as u128)?
@@ -120,6 +122,8 @@ mod build_variant_view {
                 .checked_add(self.score_event_basis.capacity() as u128)
         }
 
+        // Memory-accounting adapter retained for zero-copy result projections.
+        #[allow(dead_code)]
         pub(super) fn checked_clone_nested_bytes(&self) -> Option<u128> {
             (self.variant_id.len() as u128)
                 .checked_add(self.coverage_probability.len() as u128)?
@@ -244,6 +248,8 @@ mod coverage_result {
             Some(bytes)
         }
 
+        // Memory-accounting adapter retained for zero-copy result projections.
+        #[allow(dead_code)]
         pub(super) fn checked_clone_nested_bytes(&self) -> Option<u128> {
             let mut bytes = (self.rows.len() as u128)
                 .checked_mul(core::mem::size_of::<CoverageRowView>() as u128)?
@@ -296,6 +302,8 @@ mod coverage_row_view {
                 .checked_add(self.coverage_probability.capacity() as u128)
         }
 
+        // Memory-accounting adapter retained for zero-copy result projections.
+        #[allow(dead_code)]
         pub(super) fn checked_clone_nested_bytes(&self) -> Option<u128> {
             (self.row_id.len() as u128).checked_add(self.coverage_probability.len() as u128)
         }
@@ -379,6 +387,8 @@ mod objective_result {
             Some(self.trace_retention_reason.capacity() as u128)
         }
 
+        // Memory-accounting adapter retained for zero-copy result projections.
+        #[allow(dead_code)]
         pub(super) fn checked_clone_nested_bytes(&self) -> Option<u128> {
             Some(self.trace_retention_reason.len() as u128)
         }
@@ -424,6 +434,8 @@ mod packing_candidate_view {
             Some(self.candidate_id.capacity() as u128)
         }
 
+        // Memory-accounting adapter retained for zero-copy result projections.
+        #[allow(dead_code)]
         pub(super) fn checked_clone_nested_bytes(&self) -> Option<u128> {
             Some(self.candidate_id.len() as u128)
         }
@@ -470,6 +482,8 @@ mod packing_result {
             Some(bytes)
         }
 
+        // Memory-accounting adapter retained for zero-copy result projections.
+        #[allow(dead_code)]
         pub(super) fn checked_clone_nested_bytes(&self) -> Option<u128> {
             let mut bytes = (self.candidates.len() as u128)
                 .checked_mul(core::mem::size_of::<PackingCandidateView>() as u128)?;
@@ -544,6 +558,8 @@ mod replay_trace {
                 .checked_add(self.trace_retention_reason.capacity() as u128)
         }
 
+        // Memory-accounting adapter retained for zero-copy result projections.
+        #[allow(dead_code)]
         pub(super) fn checked_clone_nested_bytes(&self) -> Option<u128> {
             (self.steps.len() as u128)
                 .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?
@@ -807,6 +823,8 @@ mod search_execution_report {
             Some(bytes)
         }
 
+        // Memory-accounting adapters are retained for external result projection guards.
+        #[allow(dead_code)]
         pub(crate) fn checked_clone_nested_bytes(&self) -> Option<u128> {
             let mut bytes = self.backend_report.checked_clone_nested_bytes()?;
             bytes = bytes.checked_add(self.packing_result.checked_clone_nested_bytes()?)?;
@@ -819,6 +837,7 @@ mod search_execution_report {
             Some(bytes)
         }
 
+        #[allow(dead_code)]
         pub(crate) fn checked_clone_peak_bytes(&self) -> Option<u128> {
             (core::mem::size_of::<Self>() as u128)
                 .checked_add(self.checked_nested_retained_bytes()?)?
@@ -830,6 +849,7 @@ mod search_execution_report {
         /// `from_summary_fields` will request. The constructor only creates the
         /// six strings enumerated here and takes ownership of a path vector
         /// whose exact target length is supplied by the caller.
+        #[allow(dead_code)]
         pub(crate) fn checked_from_summary_fields_nested_bytes(
             fields: &[(String, String)],
             path_step_count: usize,
@@ -1345,10 +1365,7 @@ mod resource_projection_tests {
 
         let mut expected_remaining = requested_total;
         let mut prior_actual = 0_u128;
-        for ((actual, remaining), requested) in observations
-            .iter()
-            .copied()
-            .zip(requested_lengths.into_iter())
+        for ((actual, remaining), requested) in observations.iter().copied().zip(requested_lengths)
         {
             expected_remaining -= requested;
             assert_eq!(remaining, expected_remaining);

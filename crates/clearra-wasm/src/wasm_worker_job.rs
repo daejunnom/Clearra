@@ -187,6 +187,9 @@ pub struct CancelRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Events cross the worker boundary once and retain the established host
+// contract shape; boxing successful responses would add per-result allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum WasmWorkerJobEvent {
     Started {
         job_id: WasmWorkerJobId,
@@ -514,6 +517,9 @@ impl GovernedWasmWorkerEvents {
         )
     }
 
+    // Retained as the product-neutral prefix adapter while worker storage uses
+    // the stricter storage-specific route below.
+    #[allow(dead_code)]
     pub(crate) fn try_from_final_result_with_prefix(
         job_id: WasmWorkerJobId,
         governed: GovernedWasmExecutionResult,
@@ -861,12 +867,14 @@ impl Drop for WasmComputationScope {
 /// used until `PreparedWasmExecution` exposes the direct finite authority that
 /// can account for its own retained owner graph.
 #[derive(Debug)]
+#[cfg(test)]
 struct WasmFiniteComputationScope {
     cancellation: WasmCancellationToken,
     control: ExecutionControl,
     released: bool,
 }
 
+#[cfg(test)]
 impl WasmFiniteComputationScope {
     fn new(partition: ExecutionPartition) -> Self {
         let cancellation = WasmCancellationToken::new();
@@ -894,6 +902,7 @@ impl WasmFiniteComputationScope {
     }
 }
 
+#[cfg(test)]
 impl Drop for WasmFiniteComputationScope {
     fn drop(&mut self) {
         self.release();
@@ -905,10 +914,12 @@ impl Drop for WasmFiniteComputationScope {
 /// capacity to account for.  Public finite activation remains gated until the
 /// direct prepared-execution authority is available.
 #[derive(Debug, Default)]
+#[cfg(test)]
 struct FiniteOwnerSlot<T> {
     owner: Option<T>,
 }
 
+#[cfg(test)]
 impl<T> FiniteOwnerSlot<T> {
     fn is_occupied(&self) -> bool {
         self.owner.is_some()
@@ -924,10 +935,6 @@ impl<T> FiniteOwnerSlot<T> {
 
     fn as_ref(&self) -> Option<&T> {
         self.owner.as_ref()
-    }
-
-    fn take(&mut self) -> Option<T> {
-        self.owner.take()
     }
 }
 

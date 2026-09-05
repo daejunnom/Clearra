@@ -1,6 +1,7 @@
 mod backend_fallback_policy {
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub enum BackendFallbackPolicy {
+        #[default]
         Allow,
         Deny,
     }
@@ -16,12 +17,6 @@ mod backend_fallback_policy {
                 Self::Allow => "allow",
                 Self::Deny => "deny",
             }
-        }
-    }
-
-    impl Default for BackendFallbackPolicy {
-        fn default() -> Self {
-            Self::Allow
         }
     }
 }
@@ -428,9 +423,10 @@ mod requested_search_backend {
     }
 }
 mod worker_policy {
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub enum WorkerPolicy {
         Fixed(usize),
+        #[default]
         Auto,
     }
 
@@ -515,12 +511,6 @@ mod worker_policy {
                 Self::Fixed(workers) => workers.to_string(),
                 Self::Auto => "auto".to_owned(),
             }
-        }
-    }
-
-    impl Default for WorkerPolicy {
-        fn default() -> Self {
-            Self::Auto
         }
     }
 }

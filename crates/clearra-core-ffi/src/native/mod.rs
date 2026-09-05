@@ -84,7 +84,7 @@ pub const C_BUILDUP_MAX_KICK_EVIDENCE_PER_VARIANT: usize =
     C_NATIVE_BUILDUP_MAX_KICK_EVIDENCE_PER_VARIANT;
 pub const CLEARRA_CORE_ABI_VERSION_EXPECTED: i32 = crate::version::CLEARRA_CORE_ABI_VERSION;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeCoreError {
     Unavailable,
     AbiMismatch {
@@ -94,7 +94,7 @@ pub enum NativeCoreError {
     PackingStatus(i32),
     PackingIncomplete {
         status: i32,
-        resource_report: clearra_core_domain::resource::ResourceReport,
+        resource_report: Box<clearra_core_domain::resource::ResourceReport>,
     },
     BuildUpStatus(i32),
     InvalidPruningLedger(NativePruningLedgerError),
@@ -103,15 +103,23 @@ pub enum NativeCoreError {
 }
 
 impl NativeCoreError {
+    pub fn packing_incomplete(
+        status: i32,
+        resource_report: clearra_core_domain::resource::ResourceReport,
+    ) -> Self {
+        Self::PackingIncomplete {
+            status,
+            resource_report: Box::new(resource_report),
+        }
+    }
+
+    #[cfg(feature = "native-c-core")]
     pub(crate) fn packing_with_resource_report(
         status: i32,
         resource_report: clearra_core_domain::resource::ResourceReport,
     ) -> Self {
         if resource_report.truncated || !resource_report.probability_complete {
-            Self::PackingIncomplete {
-                status,
-                resource_report,
-            }
+            Self::packing_incomplete(status, resource_report)
         } else {
             Self::PackingStatus(status)
         }

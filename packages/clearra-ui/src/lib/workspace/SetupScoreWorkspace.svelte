@@ -252,7 +252,7 @@
       <label class="check-row"><input type="checkbox" checked={request.holdEnabled} on:change={(event) => updateRequest({ holdEnabled: (event.currentTarget as HTMLInputElement).checked })} /><span>{korean ? 'Setup Hold 사용' : 'Enable setup hold'}</span></label>
       <label class="check-row"><input type="checkbox" checked={request.useAllLogicalProcessors} on:change={(event) => updateRequest({ useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked })} /><span>{korean ? '모든 논리 프로세서' : 'All logical processors'}</span></label>
     </div>
-    <p class="authority">{korean ? 'Setup score는 CPU 전용이며 fallback과 memory/GPU 옵션을 노출하지 않습니다. 동일 score는 일반 순위 안에서 canonical candidate ID로 정렬하며 attack을 혼합하지 않습니다.' : 'Setup score is CPU-only and exposes no fallback, memory, or GPU option. Equal scores stay in the ordinary ranking and use canonical candidate ID ordering without mixing attack.'}</p>
+    <p class="authority">{korean ? 'Setup score는 CPU 전용이며 fallback과 memory/GPU 옵션을 노출하지 않습니다. 동일 score는 안정적인 순서로 표시하며 attack을 혼합하지 않습니다.' : 'Setup score is CPU-only and exposes no fallback, memory, or GPU option. Equal scores use a stable display order without mixing attack.'}</p>
     {#if validationCodes.length}
       <ul class="errors" aria-live="polite">{#each validationCodes as code}<li>{errorLabel(code)}</li>{/each}</ul>
     {/if}

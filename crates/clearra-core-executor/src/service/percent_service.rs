@@ -27,7 +27,7 @@ use crate::{
     service::field,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PercentServiceError {
     UnsupportedPreset,
     EmptyPatternUniverse,
@@ -78,7 +78,7 @@ impl PcFailedQueueExecution {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcFailedQueueExecutionError {
     Percent(PercentServiceError),
     Evidence(PcFailedQueueEvidenceError),
@@ -102,7 +102,7 @@ impl PercentServiceError {
             Self::Packing(PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
                 status,
                 resource_report,
-            })) => Some(("packing", *status, *resource_report)),
+            })) => Some(("packing", *status, **resource_report)),
             _ => None,
         }
     }
@@ -233,7 +233,7 @@ fn execute_parts(
         && buildup.count_complete()
         && buildup.objective_complete();
     let truncation_reason = truncation_reason(problem, &packing, &buildup);
-    let mut resource_report = packing.resource_report().clone();
+    let mut resource_report = *packing.resource_report();
     resource_report.coverage_rows_emitted = buildup.coverage_row_count();
     resource_report.peak_cpu_bytes = resource_report
         .peak_cpu_bytes

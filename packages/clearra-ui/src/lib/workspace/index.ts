@@ -27,6 +27,7 @@ export * from './setupFinderModel';
 export * from './setupScoreModel';
 export * from './spinStructureModel';
 export * from './workspaceI18n';
+export * from './workspacePublicFailure';
 export * from './workspaceNavigation';
 export * from './ctk3Codec';
 export * from './ctk3File';

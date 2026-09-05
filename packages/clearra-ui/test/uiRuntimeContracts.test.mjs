@@ -38,6 +38,10 @@ const bundle = await build({
       } from './src/lib/workspace/buildProbabilityModel.ts';
       export { workspaceMessage } from './src/lib/workspace/workspaceI18n.ts';
       export {
+        projectWorkspacePublicFailure,
+        workspacePublicFailureMessage
+      } from './src/lib/workspace/workspacePublicFailure.ts';
+      export {
         ClearraWasmTransferLimitError,
         assertWasmTransferWithinHostCap
       } from '../../apps/clearra-web/src/workers/clearraWasmRuntime.ts';
@@ -106,8 +110,112 @@ test('PC path and score-finder are reachable on both Web PC entry surfaces', () 
   assert.match(standalone, /scoreMode: 'path'/u);
   assert.match(standalone, /scoreMode: 'score-finder'/u);
   assert.match(pager, /payload\.content\.payload_kind === 'pc-path-family'/u);
-  assert.match(pager, /complete ordinary solution family, not a portfolio tie/u);
-  assert.match(pager, /Inspect every replay step/u);
+  assert.match(pager, /pathPageCount = pathCandidateGroups\.length/u);
+  assert.match(pager, /pathCandidateGroup = pathCandidateGroups\[pathPageIndex\] \?\? null/u);
+  assert.match(pager, /Every path can be copied; one representative replay is shown for each solution/u);
+  assert.match(pager, /Inspect representative replay steps/u);
+  assert.match(pager, /<PcPathReplayGif/u);
+  assert.match(pager, /pathCandidateGroup\.distinctPatternCount/u);
+  assert.match(pager, /pathCandidateGroup\.witnessCount/u);
+  assert.match(pager, /pcPathCandidateGroupExportPages\([\s\S]*?pathCandidateGroup,[\s\S]*?targetLines,[\s\S]*?target_terminal_board_mask/u);
+  assert.doesNotMatch(pager, /\{pathFamily\.problem_id\}|\{witness\.pattern_id\}|\{step\.line_clear_identity\}/u);
+});
+
+test('workspace failure projection keeps raw identifiers in developer evidence only', () => {
+  const sentinel =
+    'ctk1|initial=deadbeef candidate_id=81 pattern_id=7 problem_id=private trace_identity=raw';
+  const projection = production.projectWorkspacePublicFailure({
+    status: 'failed',
+    responseStatus: 'execution-failed',
+    error: sentinel,
+    diagnostics: [{
+      code: 'E_SCHEMA_IDENTITY_MISMATCH_candidate_id_81',
+      severity: 'error',
+      message: sentinel
+    }]
+  });
+
+  assert.equal(projection.developerEvidence.error, sentinel);
+  assert.equal(projection.developerEvidence.diagnostics[0].message, sentinel);
+  assert.ok(projection.publicFailures.length > 0);
+  const publicText = ['en', 'ko']
+    .flatMap((language) => projection.publicFailures.map((failure) =>
+      production.workspacePublicFailureMessage(language, failure)
+    ))
+    .join('\n');
+  for (const privateToken of [
+    'ctk1',
+    'candidate_id',
+    'pattern_id',
+    'problem_id',
+    'trace_identity',
+    'E_SCHEMA_IDENTITY_MISMATCH'
+  ]) {
+    assert.doesNotMatch(publicText, new RegExp(privateToken, 'iu'));
+  }
+
+  const runtime = readFileSync(
+    new URL('../src/lib/workspace/workspaceRuntime.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(runtime, /projectWorkspacePublicFailure\(\{/u);
+  assert.match(runtime, /publicFailures: failure\.publicFailures/u);
+  assert.match(runtime, /developerDiagnostics: failure\.developerEvidence\.diagnostics/u);
+  assert.match(runtime, /developerError: failure\.developerEvidence\.error/u);
+  assert.doesNotMatch(
+    runtime,
+    /(?:publicFailures|developerDiagnostics|developerError):\s*state\.(?:diagnostics|error)/u
+  );
+});
+
+test('normal workspace failure DOM surfaces use the shared public notice only', () => {
+  for (const file of [
+    'ResultWorkspaceFrame.svelte',
+    'ProductResultPager.svelte',
+    'ProductFamilyResult.svelte',
+    'BuildV2Result.svelte',
+    'PcSolverResult.svelte',
+    'SetupFinderResult.svelte',
+    'OperationSequenceWorkspace.svelte',
+    'SequenceDependenciesWorkspace.svelte',
+    'DocumentUtilityWorkspace.svelte',
+    'CtkDrawerWorkspace.svelte'
+  ]) {
+    const source = readFileSync(
+      new URL(`../src/lib/workspace/${file}`, import.meta.url),
+      'utf8'
+    );
+    assert.match(source, /WorkspaceFailureNotice/u, file);
+    assert.doesNotMatch(
+      source,
+      /\b(?:view|runtimeView|renderRuntimeView)\.(?:error|diagnostics)\b|diagnostic\.(?:code|message)/u,
+      file
+    );
+  }
+
+  const setupWorkspace = readFileSync(
+    new URL('../src/lib/workspace/SetupFinderWorkspace.svelte', import.meta.url),
+    'utf8'
+  );
+  assert.match(setupWorkspace, /developerFailure: projection\.developerEvidence/u);
+  assert.doesNotMatch(
+    setupWorkspace,
+    /diagnostics\.map\(\(diagnostic\) => diagnostic\.message\)|event\.message\s*\|\|\s*label/u
+  );
+
+  const pager = readFileSync(
+    new URL('../src/lib/workspace/ProductResultPager.svelte', import.meta.url),
+    'utf8'
+  );
+  assert.match(pager, /projectWorkspacePublicFailure\(\{/u);
+  assert.doesNotMatch(pager, />\{error\}</u);
+
+  const replay = readFileSync(
+    new URL('../src/lib/workspace/PcPathReplayGif.svelte', import.meta.url),
+    'utf8'
+  );
+  assert.match(replay, /\{:else if renderError\}[\s\S]*?\{invalidLabel\}/u);
+  assert.doesNotMatch(replay, /title=\{renderError\}|>\{renderError\}</u);
 });
 
 test('Build result UI separates ordinary families from exact portfolio paging', () => {
@@ -120,6 +228,12 @@ test('Build result UI separates ordinary families from exact portfolio paging', 
   assert.match(pager, /payload_kind === 'build-coverage-portfolio-v2'/u);
   assert.match(pager, /payload_kind === 'build-setup-family-v1'/u);
   assert.match(pager, /loadInitialBuildPortfolioPage/u);
+  const initialBuildLoaderStart = pager.indexOf('async function loadInitialBuildPortfolioPage');
+  const initialBuildLoaderEnd = pager.indexOf('\n  function releaseHandle', initialBuildLoaderStart);
+  const initialBuildLoader = pager.slice(initialBuildLoaderStart, initialBuildLoaderEnd);
+  assert.ok(initialBuildLoaderStart >= 0 && initialBuildLoaderEnd > initialBuildLoaderStart);
+  assert.match(initialBuildLoader, /await loadCoveragePortfolioExactPage\(/u);
+  assert.match(initialBuildLoader, /isCurrent: \(\) => activeIdentity === payloadIdentity/u);
   assert.match(pager, /All optimal Build portfolios/u);
   assert.match(pager, /ordinary result family, not a portfolio tie/u);
   assert.match(pager, /Attack is informational/u);

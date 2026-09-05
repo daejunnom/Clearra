@@ -3,10 +3,12 @@
 
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import ProductResultPager from './ProductResultPager.svelte';
-  import type {
-    ProductMemberPageLoader,
-    ProductNextPageLoader,
-    ProductPageRelease
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
+  import {
+    productResultOwnsSolutionPage,
+    type ProductMemberPageLoader,
+    type ProductNextPageLoader,
+    type ProductPageRelease
   } from './productResultPager';
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
@@ -41,6 +43,7 @@
 
   $: report = view.searchReport;
   $: productResultPayload = view.response?.product_result_payload ?? null;
+  $: productSolutionPageActive = productResultOwnsSolutionPage(productResultPayload);
   $: pcScoreFieldSummary = productResultPayload?.content.payload_kind === 'pc-score-field-summary'
     ? productResultPayload.content.payload
     : null;
@@ -103,10 +106,6 @@
   $: progressPercent = view.progressTotal > 0
     ? Math.max(0, Math.min(100, (view.progressDone / view.progressTotal) * 100))
     : 0;
-  $: failureMessages = Array.from(new Set([
-    ...(view.error ? [view.error] : []),
-    ...view.diagnostics.map((diagnostic) => diagnostic.message).filter(Boolean)
-  ]));
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
@@ -148,9 +147,7 @@
     {/if}
 
     {#if view.status === 'failed' || view.status === 'terminated'}
-      <div class="failure" role="alert">
-        {#each failureMessages as message}<p>{message}</p>{/each}
-      </div>
+      <WorkspaceFailureNotice failures={view.publicFailures} {language} compact />
     {:else if view.status === 'completed'}
       {#if resultIncomplete}
         <p class="incomplete" role="status">{label('playerFinderResultsIncomplete')}</p>
@@ -161,7 +158,7 @@
         {#if scoringRequested || pcScoreFieldSummary}
           <div><strong>{pcScoreFieldSummary?.overall_score ?? summaryFields.score_field_average_score ?? summaryFields.score_unconditional_expected_score ?? '—'}</strong><span>{pcScoreFieldSummary ? label('overallScore') : label('averageScore')}</span></div>
         {/if}
-        {#if solutionCount !== null}
+        {#if solutionCount !== null && !productSolutionPageActive}
           <SolutionCopyFormatControl
             bind:value={copyFormat}
             {language}
@@ -181,22 +178,24 @@
         releasePages={releaseProductPages}
       />
 
-      {#if solutionCount === null}
-          <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('solutionSetNotCalculated')}</span></div>
-        {:else if solutionCount > 0}
-          <SolutionGallery
-            {solutionKeys}
-            {solutionCount}
-            loadSolutionPage={boundSolutionPageLoader}
-            solutionProbabilities={solutionProbabilityByKey}
-            solutionAverageScores={solutionAverageScoreByKey}
-            solutionSetHash={report?.normalized_solution_set_hash ?? ''}
-            {targetLines}
-            {language}
-            {copyFormat}
-          />
-        {:else}
-          <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label(resultIncomplete ? 'playerFinderNoConclusion' : 'noSolutions')}</span></div>
+      {#if !productSolutionPageActive}
+        {#if solutionCount === null}
+            <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('solutionSetNotCalculated')}</span></div>
+          {:else if solutionCount > 0}
+            <SolutionGallery
+              {solutionKeys}
+              {solutionCount}
+              loadSolutionPage={boundSolutionPageLoader}
+              solutionProbabilities={solutionProbabilityByKey}
+              solutionAverageScores={solutionAverageScoreByKey}
+              solutionSetHash={report?.normalized_solution_set_hash ?? ''}
+              {targetLines}
+              {language}
+              {copyFormat}
+            />
+          {:else}
+            <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label(resultIncomplete ? 'playerFinderNoConclusion' : 'noSolutions')}</span></div>
+        {/if}
       {/if}
     {/if}
   </section>
@@ -212,9 +211,6 @@
   .progress { background: #e5ebe7; height: 3px; margin-top: 14px; overflow: hidden; position: relative; }
   .progress i { background: #16877d; display: block; height: 100%; transition: width 120ms linear; }
   .progress.indeterminate i { animation: sweep 1.1s ease-in-out infinite; left: -30%; position: absolute; width: 30% !important; }
-  .failure { background: #fff1ed; border-left: 3px solid #c45635; color: #8d3026; margin-top: 16px; padding: 10px 13px; }
-  .failure p { font-size: 12px; margin: 0; overflow-wrap: anywhere; }
-  .failure p + p { margin-top: 4px; }
   .incomplete { background: #fff7df; border-left: 3px solid #c89b2f; color: #654a0e; font-size: 11px; line-height: 1.5; margin: 16px 0 0; padding: 9px 11px; }
   .result-summary { border-bottom: 1px solid #e0e5e2; gap: 28px; margin: 18px 0; padding-bottom: 16px; }
   .result-summary > div { gap: 7px; }

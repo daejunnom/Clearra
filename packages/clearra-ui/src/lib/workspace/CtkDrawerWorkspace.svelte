@@ -71,6 +71,7 @@
     sourceFromCtk3File
   } from './ctk3File';
   import WorkspaceShell from './WorkspaceShell.svelte';
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import {
     preferredWorkspaceLanguage,
     workspaceMessage,
@@ -78,6 +79,7 @@
     type WorkspaceMessageKey
   } from './workspaceI18n';
   import { workspaceViewFromWasm } from './workspaceRuntime';
+  import { workspacePublicFailure } from './workspacePublicFailure';
 
   type CopyState = 'idle' | 'loading' | 'copied' | 'failed';
   export let initialDocument: string | undefined = undefined;
@@ -145,6 +147,9 @@
   $: renderActive = renderPreparing ||
     renderRuntimeView.status === 'running' ||
     renderRuntimeView.status === 'cancelling';
+  $: publicRenderFailures = renderError
+    ? [workspacePublicFailure('result-invalid')]
+    : renderRuntimeView.publicFailures;
   $: renderPayload = renderRuntimeView.response?.product_result_payload ?? null;
   $: if (renderPayload !== renderObservedPayload) acceptRenderPayload(renderPayload);
   $: hasImport = pendingImportSource !== null || importValue.trim().length > 0;
@@ -1159,7 +1164,7 @@
   <section
     slot="result"
     class="render-result"
-    class:hidden={!workerFactory || !(renderActive || renderArtifact || renderError || renderRuntimeView.error)}
+    class:hidden={!workerFactory || !(renderActive || renderArtifact || publicRenderFailures.length)}
     aria-live="polite"
   >
     {#if workerFactory}
@@ -1174,8 +1179,8 @@
         <button class="render-download" type="button" on:click={downloadRenderArtifact}>
           <Download size={15} />{language === 'ko' ? '렌더 다운로드' : 'Download render'}
         </button>
-      {:else if renderError || renderRuntimeView.error}
-        <p class="error" role="alert">{renderError || renderRuntimeView.error}</p>
+      {:else if publicRenderFailures.length}
+        <WorkspaceFailureNotice failures={publicRenderFailures} {language} compact />
       {:else}
         <p class="render-pending">{language === 'ko' ? '로컬 렌더를 준비하고 있습니다.' : 'Preparing the local render.'}</p>
       {/if}
@@ -1234,7 +1239,7 @@
   .render-result { margin: 0 auto; max-width: 1460px; padding: 8px 24px 40px; }
   .render-result.hidden { display: none; }
   .render-result h2 { font-size: 17px; margin: 0 0 14px; }
-  .render-result figure, .render-pending, .render-result > .error {
+  .render-result figure, .render-pending {
     background: #fff;
     border: 1px solid #d5dcd7;
     border-radius: 7px;

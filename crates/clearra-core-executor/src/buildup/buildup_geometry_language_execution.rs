@@ -124,7 +124,11 @@ pub(super) fn try_execute_candidate(
 
     let success = evaluation.covered();
     let pattern_verified_execution_count = evaluation.covered_pattern_count();
-    let mut cleared_lines = success.then_some(candidate.cleared_lines()).unwrap_or(0);
+    let mut cleared_lines = if success {
+        candidate.cleared_lines()
+    } else {
+        0
+    };
     let mut retained_variants = Vec::new();
     let first_pattern = evaluation.coverage_bits().first_pattern();
     let coverage_verifications = success

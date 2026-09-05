@@ -273,9 +273,8 @@
   <ForwardSearchResult
     slot="result"
     report={runtimeView.searchReport}
-    diagnostics={runtimeView.diagnostics}
+    publicFailures={runtimeView.publicFailures}
     status={runtimeView.status}
-    error={runtimeView.error ?? ''}
     {elapsedMs}
     progressLabel={runtimeView.progressLabel}
     progressDone={runtimeView.progressDone}

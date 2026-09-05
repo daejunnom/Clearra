@@ -52,6 +52,23 @@ fast feedback but do not satisfy this release gate; see `docs/test-policy.md`
 for the focused path map. Cross-boundary changes combine focused scopes, while
 the full matrix remains reserved for canonical predeployment acceptance.
 
+`Fast Fix Qualification` is a separate qualification-only boundary. Its
+successful ledger has `status=qualified-not-deployed` and
+`production_mutation=false`; it is not canonical acceptance or deployment
+authority. It fails unless every selected component job passed, every
+unselected component job was skipped, and every unchanged component carries an
+ancestor accepted digest and deployment receipt hash. A changed component has
+only a qualification receipt; its accepted and deployment fields remain null.
+The latest accepted ledger is verified before impact classification, and its
+source/workflow/run/attempt/report hash is sealed into the impact plan; the diff
+starts at that ledger source rather than the last tag. Without a ledger, only a
+tag-relative `full` result may request the canonical workflow. In v0.8, every
+Desktop, CLI, Discord, PC4, shared, performance, unknown, and
+release-infrastructure change is automatically promoted, leaving only
+Pages-only and no-product qualification eligible. Production workflows must not consume fast-fix evidence
+until a later adapter verifies the component-specific artifact and deployment
+receipt schemas.
+
 ## Blocking Conditions
 
 The following conditions block release:

@@ -116,6 +116,32 @@ impl ScenarioAppRenderContract {
     }
 }
 
+impl ScenarioAppRenderContract {
+    fn verify_search_expected(
+        &self,
+        result: &CoreExecutionResult,
+    ) -> Result<Vec<(String, String)>, String> {
+        if !self.verify_expected {
+            return Ok(vec![("expected_checked".to_owned(), "false".to_owned())]);
+        }
+        let Some(expected) = self.expected.as_ref() else {
+            return Ok(vec![
+                ("expected_checked".to_owned(), "false".to_owned()),
+                (
+                    "expected_skip_reason".to_owned(),
+                    "inline_scenario_has_no_expected_contract".to_owned(),
+                ),
+            ]);
+        };
+        expected.verify_search(result).map_err(|error| {
+            format!(
+                "scenario fixture '{}' expected result mismatch: {error}",
+                self.fixture_path.as_deref().unwrap_or("<inline>")
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clearra_core_executor::CoreExecutionResult;
@@ -174,30 +200,5 @@ mod tests {
             Some(AppErrorCode::ExecutionFailed)
         );
         assert!(response.render_model().is_none());
-    }
-}
-impl ScenarioAppRenderContract {
-    fn verify_search_expected(
-        &self,
-        result: &CoreExecutionResult,
-    ) -> Result<Vec<(String, String)>, String> {
-        if !self.verify_expected {
-            return Ok(vec![("expected_checked".to_owned(), "false".to_owned())]);
-        }
-        let Some(expected) = self.expected.as_ref() else {
-            return Ok(vec![
-                ("expected_checked".to_owned(), "false".to_owned()),
-                (
-                    "expected_skip_reason".to_owned(),
-                    "inline_scenario_has_no_expected_contract".to_owned(),
-                ),
-            ]);
-        };
-        expected.verify_search(result).map_err(|error| {
-            format!(
-                "scenario fixture '{}' expected result mismatch: {error}",
-                self.fixture_path.as_deref().unwrap_or("<inline>")
-            )
-        })
     }
 }

@@ -40,7 +40,7 @@ pub(super) fn execute_finesse_score(
     ensure_not_cancelled(control)?;
     memory_bound
         .ensure(0, finesse_score_requested_bytes(problem, score)?)
-        .map_err(WasmExactSearchError::ResourceAdmission)?;
+        .map_err(WasmExactSearchError::resource_admission)?;
     let (language, path, initial_board_words) =
         fixed_operation_language(problem, field, score, control)?;
 
@@ -60,7 +60,7 @@ pub(super) fn execute_finesse_score(
         ))?;
     memory_bound
         .ensure(observed_bytes, 0)
-        .map_err(WasmExactSearchError::ResourceAdmission)?;
+        .map_err(WasmExactSearchError::resource_admission)?;
     grouping_span.finish(classes.classes().len() as u64);
 
     ensure_not_cancelled(control)?;
@@ -91,7 +91,7 @@ pub(super) fn execute_finesse_score(
         ))?;
     memory_bound
         .ensure(observed_bytes, 0)
-        .map_err(WasmExactSearchError::ResourceAdmission)?;
+        .map_err(WasmExactSearchError::resource_admission)?;
     ensure_not_cancelled(control)?;
     let visible = if matches!(
         knowledge,
@@ -117,7 +117,7 @@ pub(super) fn execute_finesse_score(
             ))?;
         memory_bound
             .ensure(observed_bytes, 0)
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
     }
     ensure_not_cancelled(control)?;
     product_span.finish(classes.classes().len() as u64);
@@ -274,7 +274,7 @@ pub(super) fn execute_finesse_score(
         )?;
     memory_bound
         .ensure(observed_bytes, authority_future_bytes)
-        .map_err(WasmExactSearchError::ResourceAdmission)?;
+        .map_err(WasmExactSearchError::resource_admission)?;
     let report =
         report.with_score_request_authority(field, score, classes.metadata().pattern_count, &path);
     observed_bytes = observed_bytes
@@ -290,7 +290,7 @@ pub(super) fn execute_finesse_score(
         ))?;
     memory_bound
         .ensure(observed_bytes, 0)
-        .map_err(WasmExactSearchError::ResourceAdmission)?;
+        .map_err(WasmExactSearchError::resource_admission)?;
     aggregation_span.finish(classes.classes().len() as u64);
 
     let result = CoreExecutionResult::new(
@@ -326,7 +326,7 @@ pub(super) fn execute_finesse_score(
     .with_finesse_report(report);
     memory_bound
         .ensure(observed_bytes, 0)
-        .map_err(WasmExactSearchError::ResourceAdmission)?;
+        .map_err(WasmExactSearchError::resource_admission)?;
     Ok(result)
 }
 

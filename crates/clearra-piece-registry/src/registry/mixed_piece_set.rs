@@ -117,6 +117,8 @@ impl MixedPieceSet {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Preserve the public unboxed variant constructor used by piece-set authoring APIs.
+#[allow(clippy::large_enum_variant)]
 pub enum MixedPieceSetEntry {
     Standard(PieceKind),
     Custom(CustomPieceDefinition),

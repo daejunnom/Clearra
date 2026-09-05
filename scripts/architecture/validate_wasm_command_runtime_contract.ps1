@@ -23,9 +23,12 @@ foreach ($requiredFile in @(
             "packages/clearra-ui/src/lib/wasm/index.ts",
             "packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts",
             "packages/clearra-ui/src/lib/wasm/wasmWorkerStore.ts",
+            "packages/clearra-ui/src/lib/wasm/wasmArtifactGeneration.ts",
             "packages/clearra-ui/src/lib/wasm/WasmTerminalWorkerController.ts",
             "packages/clearra-ui/src/lib/wasm/WasmTerminalShell.svelte",
             "apps/clearra-web/package.json",
+            "apps/clearra-web/wasmArtifactGuard.ts",
+            "apps/clearra-web/src/lib/wasmArtifactHotUpdate.ts",
             "apps/clearra-web/src/routes/+page.svelte",
             "apps/clearra-web/src/workers/clearraWorker.ts",
             "apps/clearra-web/src/workers/WasmJobRunner.ts",
@@ -50,6 +53,10 @@ $rustSurface = @(
         Read-PhysicalText "crates/clearra-wasm/tests/wasm_host_contract.rs"
         Read-PhysicalText "scripts/wasm-command-runtime-check.ps1"
     ) -join "`n"
+$wasmCommandRuntime = Read-PhysicalText "crates/clearra-wasm/src/wasm_command_runtime.rs"
+if ($wasmCommandRuntime -like "*to_host_response_with_solution_set_artifact*") {
+    Add-ArchitectureError "U7 WASM GUI completion must defer CTK3/Fumen documents to explicit page or export requests"
+}
 foreach ($requiredMarker in @(
             "CliCommandParser",
             "CliCommandRequest",
@@ -80,9 +87,12 @@ $webSurface = @(
         Read-PhysicalText "packages/clearra-ui/src/lib/wasm/index.ts"
         Read-PhysicalText "packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts"
         Read-PhysicalText "packages/clearra-ui/src/lib/wasm/wasmWorkerStore.ts"
+        Read-PhysicalText "packages/clearra-ui/src/lib/wasm/wasmArtifactGeneration.ts"
         Read-PhysicalText "packages/clearra-ui/src/lib/wasm/WasmTerminalWorkerController.ts"
         Read-PhysicalText "packages/clearra-ui/src/lib/wasm/WasmTerminalShell.svelte"
         Read-PhysicalText "apps/clearra-web/package.json"
+        Read-PhysicalText "apps/clearra-web/wasmArtifactGuard.ts"
+        Read-PhysicalText "apps/clearra-web/src/lib/wasmArtifactHotUpdate.ts"
         Read-PhysicalText "apps/clearra-web/src/routes/+page.svelte"
         Read-PhysicalText "apps/clearra-web/src/workers/clearraWorker.ts"
         Read-PhysicalText "apps/clearra-web/src/workers/WasmJobRunner.ts"
@@ -101,6 +111,10 @@ foreach ($requiredMarker in @(
             "event.diagnostics",
             "scope_released",
             "wasm:build",
+            "clearra:wasm-artifact-updated",
+            "currentWasmArtifactGeneration",
+            "installWasmArtifactHotUpdate",
+            "the next GUI search will use the new worker generation",
             "browser-file-input",
             "ClearraHostAppResponse"
         )) {

@@ -579,7 +579,7 @@ impl PcChanceCompiledAuthority {
             result.coverage_pattern_words(),
         )
         .map_err(|_| rejected("public coverage aggregate is not a strict universe bitset"))?;
-        if &aggregate != &union {
+        if aggregate != union {
             return Err(rejected(
                 "public coverage aggregate is not the coverage-row union",
             ));

@@ -1,8 +1,9 @@
 use crate::{event::score_event::ScoreEvent, state::score_state::ScoreState};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ScoreEvaluationBasis {
     AllTraces,
+    #[default]
     RetainedTraces,
     Sample,
 }
@@ -23,12 +24,6 @@ impl ScoreEvaluationBasis {
             (Self::RetainedTraces, _) | (_, Self::RetainedTraces) => Self::RetainedTraces,
             (Self::AllTraces, Self::AllTraces) => Self::AllTraces,
         }
-    }
-}
-
-impl Default for ScoreEvaluationBasis {
-    fn default() -> Self {
-        Self::RetainedTraces
     }
 }
 

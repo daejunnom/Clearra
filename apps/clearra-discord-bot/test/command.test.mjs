@@ -878,6 +878,30 @@ test("Discord owns an adaptive worker ceiling instead of accepting a user overri
   );
 });
 
+test("Discord applies its Cloud worker authority to every typed PC score product", () => {
+  for (const product of ["score", "score-minimals", "score-finder"]) {
+    const prepared = prepareClearraArguments(
+      ["pc", product, "--lines", "4"],
+      {
+        workers: 4,
+        useAllLogicalProcessors: true,
+        logicalProcessors: 4,
+      },
+    );
+    assert.deepEqual(prepared, [
+      "pc",
+      product,
+      "--lines",
+      "4",
+      "--auto-workers",
+      "4",
+      "--use-all-cpu-threads",
+      "--format",
+      "text",
+    ]);
+  }
+});
+
 test("Discord exposes curated sfinder commands through native worker policy", () => {
   const prepared = prepareClearraArguments(
     [

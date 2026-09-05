@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn setup_path_detail_round_trips_exact_partial_state_identity() {
         let detail = SetupPathDetail::new(
-            0x0008_0719_e6,
+            0x0000_0807_19e6,
             0x0012,
             0x0000_0000_0000_0042_1003_2007,
             "hold-empty",

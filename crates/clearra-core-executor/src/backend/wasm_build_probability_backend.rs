@@ -13,6 +13,8 @@ use super::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// The completed result stays inline so the public advance API preserves zero-copy ownership.
+#[allow(clippy::large_enum_variant)]
 pub enum WasmBuildProbabilityAdvance {
     Pending,
     Completed(CoreExecutionResult),
@@ -329,7 +331,7 @@ fn map_error(error: super::wasm_cpu::WasmExactSearchError) -> WasmCpuSearchError
             WasmCpuSearchError::InvalidProblem { reason }
         }
         super::wasm_cpu::WasmExactSearchError::ResourceAdmission(resource_report) => {
-            WasmCpuSearchError::ResourceAdmission { resource_report }
+            WasmCpuSearchError::resource_admission(*resource_report)
         }
         super::wasm_cpu::WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
     }

@@ -17,7 +17,7 @@ use clearra_core_domain::{
 };
 use clearra_core_executor::{solution_probability_pattern_weights, CoreExecutionResult};
 use clearra_coverage::{
-    cover::{exact_minimum_cover, ExactMinimumCoverError},
+    cover::ExactMinimumCoverError,
     pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId},
     probability::union_probability::union_probability,
 };
@@ -201,11 +201,23 @@ impl BuildSuppliedSolutionSetV1 {
 /// but both must pass the same producer allow-list and replay gate before any
 /// coverage, probability, score, or portfolio authority can be minted.
 pub(crate) trait BuildColoredReplaySource {
+    // Retained for target/supplied source parity at the replay adapter seam.
+    #[allow(dead_code)]
     fn initial_board_mask(&self) -> u64;
+    // Retained for target/supplied source parity at the replay adapter seam.
+    #[allow(dead_code)]
     fn target_cells_mask(&self) -> u64;
+    // Retained for target/supplied source parity at the replay adapter seam.
+    #[allow(dead_code)]
     fn visible_height(&self) -> u8;
+    // Retained for target/supplied source parity at the replay adapter seam.
+    #[allow(dead_code)]
     fn page_count(&self) -> usize;
+    // Retained for target/supplied source parity at the replay adapter seam.
+    #[allow(dead_code)]
     fn input_identity_sha256(&self) -> &str;
+    // Retained for target/supplied source parity at the replay adapter seam.
+    #[allow(dead_code)]
     fn candidate_keys(&self) -> &[String];
     fn identities(&self) -> &[StandardBoard64ColoredTilingIdentity];
     fn matches_query(&self, query: &BuildProbabilityQuery) -> bool;
@@ -359,6 +371,8 @@ impl BuildSuppliedCoverPercentV1Result {
         self.completeness
     }
 
+    // Retained for product adapters that audit the validator-minted authority.
+    #[allow(dead_code)]
     pub(crate) const fn authority(
         &self,
     ) -> &ValidatedBuildSuppliedSolutionEvaluationResultAuthority {
@@ -609,6 +623,8 @@ impl BuildSuppliedMinimumCoverV1Result {
         self.completeness
     }
 
+    // Retained for product adapters that audit the validator-minted authority.
+    #[allow(dead_code)]
     pub(crate) const fn authority(
         &self,
     ) -> &ValidatedBuildSuppliedSolutionEvaluationResultAuthority {
@@ -629,6 +645,8 @@ pub(crate) enum BuildSuppliedEvaluationResultError {
     EmptyReachableCoverage,
     QueryCompileFailed,
     ProbabilityUnionInvalid,
+    // Preserves the exact-cover failure category at this product boundary.
+    #[allow(dead_code)]
     MinimumCover(ExactMinimumCoverError),
     Portfolio(PortfolioAlternativeError),
 }
@@ -661,16 +679,6 @@ pub(crate) fn validate_build_supplied_minimum_cover_v1_result(
         supplied,
         result,
     )?;
-    let selection = exact_minimum_cover(&replay.required, &replay.rows)
-        .map_err(BuildSuppliedEvaluationResultError::MinimumCover)?;
-    if !selection.complete() || selection.covered_patterns() != &replay.required {
-        return Err(BuildSuppliedEvaluationResultError::IncompleteEvidence);
-    }
-    let canonical_candidate_keys = selection
-        .row_indices()
-        .iter()
-        .map(|index| supplied.candidate_keys()[*index].clone())
-        .collect::<Vec<_>>();
     let identity = PortfolioAlternativeSetIdentity::new(
         format!(
             "build.evaluate.minimals:{}:{}:{}:{:?}:{:?}",
@@ -697,15 +705,17 @@ pub(crate) fn validate_build_supplied_minimum_cover_v1_result(
     )
     .map_err(BuildSuppliedEvaluationResultError::Portfolio)?;
     let alternatives = Arc::new(
-        CoveragePortfolioAlternativeSet::new(
+        CoveragePortfolioAlternativeSet::new_canonical(
             identity,
             supplied.candidate_keys().to_vec(),
             replay.required.clone(),
             replay.rows.clone(),
-            &canonical_candidate_keys,
         )
         .map_err(BuildSuppliedEvaluationResultError::Portfolio)?,
     );
+    let canonical_candidate_keys = alternatives
+        .canonical_candidate_keys_owned()
+        .map_err(BuildSuppliedEvaluationResultError::Portfolio)?;
 
     Ok(BuildSuppliedMinimumCoverV1Result {
         authority,
@@ -963,16 +973,6 @@ pub(crate) fn validate_build_supplied_score_v1_result(
             "winner_union_does_not_cover_replay",
         ));
     }
-    let selection = exact_minimum_cover(&score_required, &score_rows)
-        .map_err(BuildSuppliedEvaluationResultError::MinimumCover)?;
-    if !selection.complete() || selection.covered_patterns() != &score_required {
-        return Err(BuildSuppliedEvaluationResultError::IncompleteEvidence);
-    }
-    let canonical_candidate_keys = selection
-        .row_indices()
-        .iter()
-        .map(|index| supplied.candidate_keys()[*index].clone())
-        .collect::<Vec<_>>();
     let identity = PortfolioAlternativeSetIdentity::new(
         format!(
             "build.evaluate.score:{}:{}:{}:{}:{}",
@@ -998,15 +998,17 @@ pub(crate) fn validate_build_supplied_score_v1_result(
     )
     .map_err(BuildSuppliedEvaluationResultError::Portfolio)?;
     let alternatives = Arc::new(
-        CoveragePortfolioAlternativeSet::new(
+        CoveragePortfolioAlternativeSet::new_canonical(
             identity,
             supplied.candidate_keys().to_vec(),
             score_required,
             score_rows,
-            &canonical_candidate_keys,
         )
         .map_err(BuildSuppliedEvaluationResultError::Portfolio)?,
     );
+    let canonical_candidate_keys = alternatives
+        .canonical_candidate_keys_owned()
+        .map_err(BuildSuppliedEvaluationResultError::Portfolio)?;
 
     Ok(BuildSuppliedScoreV1Result {
         authority,

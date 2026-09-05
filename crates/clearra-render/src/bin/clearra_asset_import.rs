@@ -235,7 +235,7 @@ fn import_skin(
 }
 
 fn parse_options(arguments: Vec<String>) -> Result<BTreeMap<String, String>, String> {
-    if arguments.len() % 2 != 0 {
+    if !arguments.len().is_multiple_of(2) {
         return Err("options must be --name value pairs".to_owned());
     }
     let mut options = BTreeMap::new();

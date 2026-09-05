@@ -712,6 +712,7 @@ test('implemented Discord runtime capabilities are a complete fieldwise product-
     'build.evaluate.minimals',
     'build.evaluate.score',
     'build.finesse-score',
+    'build.probability',
     'build.setup',
     'build.setup-cover',
     'build.setup-cover-percent',

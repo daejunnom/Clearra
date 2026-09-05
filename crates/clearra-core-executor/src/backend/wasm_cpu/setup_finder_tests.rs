@@ -18,12 +18,129 @@ use clearra_supply::{
 use super::super::setup_representative::verify_compact_paths_against_singletons;
 
 use super::{
-    compare_setup_candidates, compile_setup_pattern_index, include_setup_depth_range,
+    compare_setup_candidates, compile_setup_admissible_prefixes_with_word_counts_legacy,
+    compile_setup_pattern_index, compile_setup_pattern_index_legacy, include_setup_depth_range,
     merge_exact_state_coverage, piece_index, prefers_setup_representative_depth,
     retain_best_setup_state_per_board, setup_build_progress_phase, setup_supply_transitions,
-    terminal_supply_target_word, SetupShape, SetupSupplyStateLayout, WasmSetupSearchAdvance,
+    terminal_supply_target_word, SetupAdmissiblePrefixCompileAdvance,
+    SetupAdmissiblePrefixCompileSession, SetupPatternIndexCompileAdvance,
+    SetupPatternIndexCompileSession, SetupShape, SetupSupplyStateLayout, WasmSetupSearchAdvance,
     WasmSetupSearchSession,
 };
+
+#[test]
+fn resumable_setup_preparation_matches_the_legacy_meaning_and_yields() {
+    let query = SetupSearchQuery::default().with_remaining_pieces(vec![
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::T,
+    ]);
+    let conditions = compile_setup_search_conditions(&query).expect("setup conditions");
+    let expected_index =
+        compile_setup_pattern_index_legacy(&conditions[0]).expect("legacy setup pattern index");
+    let mut index_session =
+        SetupPatternIndexCompileSession::new(&conditions[0]).expect("resumable index session");
+    let mut index_pending = 0;
+    let actual_index = loop {
+        match index_session
+            .advance(1, &ExecutionControl::default())
+            .expect("resumable index advance")
+        {
+            SetupPatternIndexCompileAdvance::Pending => index_pending += 1,
+            SetupPatternIndexCompileAdvance::Complete(index) => break index,
+            SetupPatternIndexCompileAdvance::Cancelled => {
+                panic!("resumable index was not cancelled")
+            }
+        }
+    };
+    assert!(index_pending > 1, "one-item budget must yield repeatedly");
+    assert_eq!(actual_index, expected_index);
+
+    let expected = compile_setup_admissible_prefixes_with_word_counts_legacy(&conditions)
+        .expect("legacy setup prefixes");
+    let mut session =
+        SetupAdmissiblePrefixCompileSession::new(&conditions).expect("resumable prefix session");
+    let mut pending = 0;
+    let actual = loop {
+        match session
+            .advance(1, &ExecutionControl::default())
+            .expect("resumable prefix advance")
+        {
+            SetupAdmissiblePrefixCompileAdvance::Pending => pending += 1,
+            SetupAdmissiblePrefixCompileAdvance::Complete {
+                prefixes,
+                word_counts,
+                pattern_indices,
+            } => break (prefixes, word_counts, pattern_indices),
+            SetupAdmissiblePrefixCompileAdvance::Cancelled => {
+                panic!("resumable prefix session was not cancelled")
+            }
+        }
+    };
+    assert!(pending > 1, "one-state budget must expose pending work");
+    assert_eq!((&actual.0, &actual.1), (&expected.0, &expected.1));
+    assert_eq!(actual.2.len(), conditions.len());
+    assert_eq!(actual.2[0].as_ref(), &expected_index);
+}
+
+#[test]
+fn resumable_setup_preparation_observes_cancellation_between_batches() {
+    let query = SetupSearchQuery::default().with_remaining_pieces(vec![
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::T,
+    ]);
+    let conditions = compile_setup_search_conditions(&query).expect("setup conditions");
+    let token = ExecutionCancellationToken::new();
+    let handle = token.handle();
+    let control = ExecutionControl::new(token);
+    let mut session =
+        SetupAdmissiblePrefixCompileSession::new(&conditions).expect("prefix session");
+
+    assert!(matches!(
+        session.advance(1, &control).expect("first batch"),
+        SetupAdmissiblePrefixCompileAdvance::Pending
+    ));
+    handle.cancel();
+    assert!(matches!(
+        session.advance(1, &control).expect("cancelled batch"),
+        SetupAdmissiblePrefixCompileAdvance::Cancelled
+    ));
+}
+
+#[test]
+fn resumable_terminal_filtered_pattern_index_matches_the_legacy_index() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S])
+        .with_next_cycle_remaining_pieces(vec![
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::I,
+            PieceKind::T,
+            PieceKind::Z,
+        ]);
+    let conditions = compile_setup_search_conditions(&query).expect("terminal setup condition");
+    let expected =
+        compile_setup_pattern_index_legacy(&conditions[0]).expect("legacy terminal index");
+    let mut session =
+        SetupPatternIndexCompileSession::new(&conditions[0]).expect("resumable terminal index");
+    let actual = loop {
+        match session
+            .advance(7, &ExecutionControl::default())
+            .expect("terminal index advance")
+        {
+            SetupPatternIndexCompileAdvance::Pending => {}
+            SetupPatternIndexCompileAdvance::Complete(index) => break index,
+            SetupPatternIndexCompileAdvance::Cancelled => {
+                panic!("terminal index was not cancelled")
+            }
+        }
+    };
+
+    assert_eq!(actual, expected);
+}
 
 #[test]
 fn serial_setup_progress_maps_graph_passes_to_stable_ui_phases() {
@@ -576,7 +693,7 @@ fn setup_finder_returns_exact_joint_witness_paths() {
 #[test]
 #[ignore = "full IOTS empty-4L exact acceptance; run in the release acceptance suite"]
 fn iots_three_lock_setup_matches_fresh_pc_continuation_coverage() {
-    const TARGET_SETUP_BOARD: u64 = 0x0040_11c4_f9;
+    const TARGET_SETUP_BOARD: u64 = 0x0000_4011_c4f9;
 
     let query = SetupSearchQuery::default().with_remaining_pieces(vec![
         PieceKind::I,

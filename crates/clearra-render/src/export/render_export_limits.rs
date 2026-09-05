@@ -79,11 +79,7 @@ impl RenderExportLimits {
 impl RenderExportLimits {
     pub fn validate_frame(self, width: u32, height: u32) -> Result<(), RenderError> {
         let pixels = self.validate_frame_shape(u128::from(width), u128::from(height))?;
-        self.validate_materialization_bytes(
-            pixels
-                .checked_mul(RGBA_BYTES_PER_PIXEL)
-                .unwrap_or(u128::MAX),
-        )
+        self.validate_materialization_bytes(pixels.saturating_mul(RGBA_BYTES_PER_PIXEL))
     }
 
     pub(crate) fn validated_scaled_frame(
@@ -100,22 +96,12 @@ impl RenderExportLimits {
             });
         }
 
-        let width = (cell_width as u128)
-            .checked_mul(u128::from(cell_size))
-            .unwrap_or(u128::MAX);
-        let height = (cell_height as u128)
-            .checked_mul(u128::from(cell_size))
-            .unwrap_or(u128::MAX);
+        let width = (cell_width as u128).saturating_mul(u128::from(cell_size));
+        let height = (cell_height as u128).saturating_mul(u128::from(cell_size));
         let pixels = self.validate_frame_shape(width, height)?;
-        self.validate_materialization_bytes(
-            pixels
-                .checked_mul(RGBA_BYTES_PER_PIXEL)
-                .unwrap_or(u128::MAX),
-        )?;
+        self.validate_materialization_bytes(pixels.saturating_mul(RGBA_BYTES_PER_PIXEL))?;
 
-        let rgba_bytes = pixels
-            .checked_mul(RGBA_BYTES_PER_PIXEL)
-            .unwrap_or(u128::MAX);
+        let rgba_bytes = pixels.saturating_mul(RGBA_BYTES_PER_PIXEL);
         Ok((
             u32::try_from(width).map_err(|_| self.width_limit_error(width))?,
             u32::try_from(height).map_err(|_| self.height_limit_error(height))?,
@@ -130,9 +116,7 @@ impl RenderExportLimits {
         height: usize,
     ) -> Result<usize, RenderError> {
         let pixels = self.validate_frame_shape(width as u128, height as u128)?;
-        let bytes = pixels
-            .checked_mul(size_of::<T>() as u128)
-            .unwrap_or(u128::MAX);
+        let bytes = pixels.saturating_mul(size_of::<T>() as u128);
         self.validate_materialization_bytes(bytes)?;
         usize::try_from(pixels).map_err(|_| self.materialization_limit_error(bytes))
     }
@@ -164,9 +148,7 @@ impl RenderExportLimits {
         }
 
         let frame_pixels = self.validate_frame_shape(u128::from(width), u128::from(height))?;
-        let timeline_pixels = frame_pixels
-            .checked_mul(frame_count as u128)
-            .unwrap_or(u128::MAX);
+        let timeline_pixels = frame_pixels.saturating_mul(frame_count as u128);
         if timeline_pixels > u128::from(self.max_timeline_pixels) {
             return Err(RenderError::ExportLimitExceeded {
                 limit: "max_timeline_pixels",
@@ -175,17 +157,10 @@ impl RenderExportLimits {
             });
         }
 
-        let rgba_bytes = timeline_pixels
-            .checked_mul(RGBA_BYTES_PER_PIXEL)
-            .unwrap_or(u128::MAX);
-        let frame_carrier_bytes = (frame_count as u128)
-            .checked_mul(size_of::<Vec<u8>>() as u128)
-            .unwrap_or(u128::MAX);
-        self.validate_materialization_bytes(
-            rgba_bytes
-                .checked_add(frame_carrier_bytes)
-                .unwrap_or(u128::MAX),
-        )
+        let rgba_bytes = timeline_pixels.saturating_mul(RGBA_BYTES_PER_PIXEL);
+        let frame_carrier_bytes =
+            (frame_count as u128).saturating_mul(size_of::<Vec<u8>>() as u128);
+        self.validate_materialization_bytes(rgba_bytes.saturating_add(frame_carrier_bytes))
     }
 
     fn validate_frame_shape(self, width: u128, height: u128) -> Result<u128, RenderError> {
@@ -196,7 +171,7 @@ impl RenderExportLimits {
             return Err(self.height_limit_error(height));
         }
 
-        let pixels = width.checked_mul(height).unwrap_or(u128::MAX);
+        let pixels = width.saturating_mul(height);
         if pixels > u128::from(self.max_frame_pixels) {
             return Err(RenderError::ExportLimitExceeded {
                 limit: "max_frame_pixels",

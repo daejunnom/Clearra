@@ -365,6 +365,7 @@ pub(crate) fn export_v2_with_workspace(
     language_v2_from_native(report, nodes, edges)
 }
 
+#[cfg(feature = "native-c-core")]
 fn native_language_is_valid(
     report: CNativeBuildUpGeometryLanguageReport,
     nodes: &[CNativeBuildUpGeometryLanguageNode],
@@ -391,6 +392,7 @@ fn native_language_is_valid(
         })
 }
 
+#[cfg(feature = "native-c-core")]
 fn language_from_native(
     report: CNativeBuildUpGeometryLanguageReport,
     nodes: Vec<CNativeBuildUpGeometryLanguageNode>,

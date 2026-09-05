@@ -267,7 +267,7 @@ foreach ($requiredMarker in @(
 }
 foreach ($requiredMarker in @(
     "self.app_context.run(request)",
-    "response.to_host_response_with_solution_set_artifact",
+    "response.to_host_response()",
     "serde_json::to_string",
     "CliCommandParser::parse_tokens",
     '"clearra-cli/CommandRequest"'

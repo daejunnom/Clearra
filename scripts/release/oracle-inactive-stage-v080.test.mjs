@@ -16,6 +16,9 @@ import {
 const generator = fileURLToPath(
   new URL("./oracle/create-inactive-stage-v080.mjs", import.meta.url),
 );
+const wrapperTest = fileURLToPath(
+  new URL("./oracle/invoke-inactive-stage-v080.test.ps1", import.meta.url),
+);
 
 function digest(character) {
   return character.repeat(64);
@@ -102,6 +105,32 @@ test("v0.8 Oracle inactive-stage generator binds every frozen authority", () => 
   assert.match(
     text,
     /upload_self=\$upload_root\/clearra-oracle-inactive-stage-v080/u,
+  );
+  assert.match(text, /validate_digester=\$2/u);
+  assert.match(
+    text,
+    /require_exact_hash "\$validate_digester" "\$expected_digester_sha256"/u,
+  );
+  assert.match(
+    text,
+    /validate_digest=\$\(\/usr\/bin\/python3 "\$validate_digester" "\$validate_root"\)/u,
+  );
+  const cleanupStart = text.indexOf('if [ "$cleanup_only" -eq 1 ]; then');
+  const cleanupEnd = text.indexOf("\nfi\n\ncapture_baseline", cleanupStart);
+  assert.notEqual(cleanupStart, -1, "CleanupOnly branch is missing");
+  assert.notEqual(cleanupEnd, -1, "CleanupOnly branch has no closed boundary");
+  const cleanupBranch = text.slice(cleanupStart, cleanupEnd);
+  assert.match(
+    cleanupBranch,
+    /cleanup_digester=\$upload_root\/clearra-release-tree-digest\.py[\s\S]*validate_candidate "\$candidate_path" "\$cleanup_digester"/u,
+  );
+  assert.doesNotMatch(
+    cleanupBranch,
+    /\$input_root\/clearra-release-tree-digest\.py/u,
+  );
+  assert.match(
+    text,
+    /validate_candidate "\$candidate_path" "\$input_root\/clearra-release-tree-digest\.py"/u,
   );
   assert.match(text, /oracle_source_commit=\$source_commit/u);
   assert.match(
@@ -219,4 +248,21 @@ test("v0.8 Oracle generator CLI audits, creates once, and checks exact bytes", (
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("v0.8 Oracle inactive-stage wrapper passes its cross-host audit", () => {
+  const wrapperAudit = spawnSync(
+    "pwsh",
+    ["-NoProfile", "-File", wrapperTest],
+    { encoding: "utf8", windowsHide: true },
+  );
+  assert.equal(
+    wrapperAudit.status,
+    0,
+    wrapperAudit.error?.message ?? wrapperAudit.stderr ?? wrapperAudit.stdout,
+  );
+  assert.match(
+    wrapperAudit.stdout,
+    /^oracle_inactive_stage_wrapper_test=pass$/mu,
+  );
 });

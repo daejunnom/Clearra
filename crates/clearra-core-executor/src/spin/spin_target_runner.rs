@@ -65,6 +65,8 @@ impl SpinTargetRunResult {
 pub struct SpinTargetRunner;
 
 impl SpinTargetRunner {
+    // Inputs mirror independent scoring, universe, and replay authority dimensions.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         spin_target: &SpinTarget,
         build_variants: &[BuildVariantReplayEvidence],

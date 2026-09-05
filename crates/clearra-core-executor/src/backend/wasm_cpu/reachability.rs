@@ -1217,12 +1217,10 @@ fn first_successful_kick(
     let transition = source * 3 + transition_slot;
     let start = template.rotation_target_offsets[transition] as usize;
     let end = template.rotation_target_offsets[transition + 1] as usize;
-    for &target in &template.rotation_targets[start..end] {
-        if board & template.state_masks[usize::from(target)] == 0 {
-            return Some(target);
-        }
-    }
-    None
+    template.rotation_targets[start..end]
+        .iter()
+        .find(|&&target| board & template.state_masks[usize::from(target)] == 0)
+        .copied()
 }
 
 fn compile_translation_targets_and_seeds(
@@ -1461,11 +1459,79 @@ fn normalized_rotation_center(piece: PieceKind, rotation: RotationState) -> (i8,
 #[cfg(test)]
 mod tests {
     use super::{
-        best_scoring_lock_evidence, reverse_lock_reachable, ReachabilityScratch,
-        ReachabilityTemplate,
+        best_scoring_lock_evidence, builtin_kick_profile, normalized_kick_delta,
+        reverse_lock_reachable, state_from_index, state_index, ReachabilityScratch,
+        ReachabilityTemplate, State,
     };
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
-    use clearra_rules::kicks::KickTableProfileId;
+    use clearra_rules::kicks::{KickTableProfileId, KickTransition};
+
+    #[test]
+    fn srs_x_reachability_compiles_every_canonical_kick_in_order() {
+        const WIDTH: u8 = 10;
+        const HEIGHT: u8 = 6;
+        const SOURCE_X: i8 = 4;
+        const SOURCE_Y: i8 = 4;
+
+        let profile = builtin_kick_profile(KickTableProfileId::SrsX).expect("SRS-X profile");
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            let template =
+                ReachabilityTemplate::compile(WIDTH, HEIGHT, piece, KickTableProfileId::SrsX);
+            for from in RotationState::ALL {
+                let source = State {
+                    rotation: from,
+                    x: SOURCE_X,
+                    y: SOURCE_Y,
+                };
+                let source_index = state_index(WIDTH, template.ceiling, source)
+                    .expect("interior source state is compiled");
+                for (slot, to) in [
+                    from.clockwise(),
+                    from.counter_clockwise(),
+                    from.rotated_180(),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let sequence = profile
+                        .sequence_for(KickTransition::new(piece, from, to))
+                        .expect("all standard SRS-X transitions are connected");
+                    let transition_index = source_index * 3 + slot;
+                    let start = template.rotation_target_offsets[transition_index] as usize;
+                    let end = template.rotation_target_offsets[transition_index + 1] as usize;
+                    let compiled_targets = template.rotation_targets[start..end]
+                        .iter()
+                        .map(|&index| state_from_index(WIDTH, template.ceiling, usize::from(index)))
+                        .collect::<Vec<_>>();
+                    let expected_targets = sequence
+                        .offsets()
+                        .iter()
+                        .map(|offset| {
+                            let (dx, dy) =
+                                normalized_kick_delta(piece, from, to, offset.dx(), offset.dy());
+                            State {
+                                rotation: to,
+                                x: SOURCE_X + dx,
+                                y: SOURCE_Y + dy,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    assert_eq!(
+                        compiled_targets, expected_targets,
+                        "{piece:?} {from:?}->{to:?}"
+                    );
+                    assert_eq!(
+                        template.rotation_kick_indices[start..end],
+                        (0..sequence.offsets().len())
+                            .map(|index| index as u8)
+                            .collect::<Vec<_>>(),
+                        "{piece:?} {from:?}->{to:?} kick order"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn srs_plus_triple_kick_dependency_changes_t_lock_reachability() {

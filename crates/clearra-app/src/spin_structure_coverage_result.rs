@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use clearra_coverage::{cover::exact_minimum_cover, pattern::pattern_bitset::PatternBitSet};
+use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_host_contract::{
     CoveragePortfolioPagePayload, ProductCandidateMemberPayload, ProductResultPayload,
     ProductResultPayloadContent,
@@ -61,16 +61,6 @@ pub(crate) fn project_spin_structure_coverage(
         .iter()
         .map(|(_, row)| row.clone())
         .collect::<Vec<_>>();
-    let selection = exact_minimum_cover(&required, &rows)
-        .map_err(|_| "spin-structure exact minimum-cover failed")?;
-    if !selection.complete() || selection.covered_patterns() != &required {
-        return Err("spin-structure exact minimum-cover is incomplete");
-    }
-    let canonical_keys = selection
-        .row_indices()
-        .iter()
-        .map(|index| candidates[*index].0.clone())
-        .collect::<Vec<_>>();
     let identities = result.identities();
     let identity = PortfolioAlternativeSetIdentity::new(
         format!(
@@ -100,14 +90,8 @@ pub(crate) fn project_spin_structure_coverage(
         .map(|(candidate, _)| candidate)
         .collect::<Vec<_>>();
     let owner = Arc::new(
-        CoveragePortfolioAlternativeSet::new(
-            identity,
-            candidate_keys,
-            required,
-            rows,
-            &canonical_keys,
-        )
-        .map_err(|_| "spin-structure portfolio alternative set is invalid")?,
+        CoveragePortfolioAlternativeSet::new_canonical(identity, candidate_keys, required, rows)
+            .map_err(|_| "spin-structure portfolio alternative set is invalid")?,
     );
     let page = owner.canonical_page();
     let member_count = page.portfolio().candidate_ids().len();

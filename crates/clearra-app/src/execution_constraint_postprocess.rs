@@ -13,8 +13,11 @@ use clearra_core_executor::{
     CoreExecutionError, CoreExecutionResult, NormalizedSolutionCoverage, SolutionAuditCheckpoint,
     SolutionCoverage, SolutionProbabilityReport,
 };
-use clearra_coverage::cover::exact_minimum_cover::{
-    exact_minimum_cover_with_memory_guard, ExactMinimumCoverError,
+use clearra_coverage::cover::{
+    exact_minimum_cover::ExactMinimumCoverError,
+    exact_minimum_cover_portfolios::{
+        ExactMinimumCoverPortfolioEnumerator, ExactMinimumCoverPortfolioError,
+    },
 };
 use clearra_coverage::pattern::{
     pattern_bitset::PatternBitSet, pattern_id::PatternId, weighted_pattern_set::WeightedPatternSet,
@@ -178,6 +181,10 @@ fn apply_execution_constraints_inner(
     };
     let (minimum_cover_requested, minimum_cover_blocking_reason) =
         minimum_cover_input_status(&result);
+    let minimum_cover_deferred_to_named_product = minimum_cover_requested
+        && minimum_cover_blocking_reason == Some("deferred-to-coordinator")
+        && result.bool_field("minimum_cover_complete") == Some(false)
+        && result.bool_field("minimum_cover_proven_minimum") == Some(false);
     // Distributed finalizers initialize this marker from the requested constraint and AND it
     // with every absorbed worker result. Once true, every partition is already materialized;
     // a coordinator-generated empty evidence wrapper must not trigger a second filtering pass.
@@ -668,6 +675,7 @@ fn apply_execution_constraints_inner(
             component: "b2b_preservation_memory_projection_overflow",
         })?;
     if minimum_cover_requested
+        && !minimum_cover_deferred_to_named_product
         && minimum_cover_blocking_reason.is_none()
         && count_complete
         && probability_complete
@@ -737,8 +745,10 @@ fn apply_execution_constraints_inner(
             })?;
         memory_guard(&result, minimum_solver_external)?;
         let mut guard_error = None;
-        let selection =
-            exact_minimum_cover_with_memory_guard(&required, &rows, &mut |solver_owned_bytes| {
+        let enumerator = ExactMinimumCoverPortfolioEnumerator::new_with_memory_guard(
+            &required,
+            &rows,
+            &mut |solver_owned_bytes| {
                 let future_bytes = minimum_solver_external
                     .checked_add(solver_owned_bytes)
                     .ok_or(ExactMinimumCoverError::ProjectionOverflow)?;
@@ -749,22 +759,23 @@ fn apply_execution_constraints_inner(
                         Err(ExactMinimumCoverError::MemoryGuardRejected)
                     }
                 }
-            });
+            },
+        );
         if let Some(error) = guard_error {
             return Err(error);
         }
-        let selection = selection.map_err(core_error_from_exact_minimum_cover)?;
-        if !selection.complete() {
-            return Err(CoreExecutionError::RuntimeUnavailable {
+        let canonical = enumerator
+            .map_err(core_error_from_exact_minimum_cover_portfolio)?
+            .into_canonical_portfolio()
+            .map_err(core_error_from_exact_minimum_cover_portfolio)?
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
                 component: "b2b_preservation_minimum_cover_incomplete",
-            });
-        }
-        let selection_bytes =
-            selection
-                .checked_retained_bytes()
-                .ok_or(CoreExecutionError::RuntimeUnavailable {
-                    component: "b2b_preservation_memory_projection_overflow",
-                })?;
+            })?;
+        let canonical_bytes = canonical.checked_retained_capacity_bytes().ok_or(
+            CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_memory_projection_overflow",
+            },
+        )?;
         let selected_projection = (accepted.len() as u128)
             .checked_mul(core::mem::size_of::<bool>() as u128)
             .ok_or(CoreExecutionError::RuntimeUnavailable {
@@ -773,7 +784,7 @@ fn apply_execution_constraints_inner(
         memory_guard(
             &result,
             minimum_solver_external
-                .checked_add(selection_bytes)
+                .checked_add(canonical_bytes)
                 .and_then(|bytes| bytes.checked_add(selected_projection))
                 .ok_or(CoreExecutionError::RuntimeUnavailable {
                     component: "b2b_preservation_memory_projection_overflow",
@@ -786,7 +797,7 @@ fn apply_execution_constraints_inner(
             }
         })?;
         selected.resize(accepted.len(), false);
-        for row_index in selection.row_indices() {
+        for row_index in canonical.row_indices() {
             selected[*row_index] = true;
         }
         let selected_bytes = (selected.capacity() as u128)
@@ -797,7 +808,7 @@ fn apply_execution_constraints_inner(
         memory_guard(
             &result,
             minimum_solver_external
-                .checked_add(selection_bytes)
+                .checked_add(canonical_bytes)
                 .and_then(|bytes| bytes.checked_add(selected_bytes))
                 .ok_or(CoreExecutionError::RuntimeUnavailable {
                     component: "b2b_preservation_memory_projection_overflow",
@@ -810,7 +821,7 @@ fn apply_execution_constraints_inner(
             keep
         });
         drop(selected);
-        drop(selection);
+        drop(canonical);
         drop(rows);
         drop(required);
         minimum_cover_complete = true;
@@ -1674,6 +1685,33 @@ fn core_error_from_exact_minimum_cover(error: ExactMinimumCoverError) -> CoreExe
         }
     };
     CoreExecutionError::RuntimeUnavailable { component }
+}
+
+fn core_error_from_exact_minimum_cover_portfolio(
+    error: ExactMinimumCoverPortfolioError,
+) -> CoreExecutionError {
+    match error {
+        ExactMinimumCoverPortfolioError::MinimumCover(error) => {
+            core_error_from_exact_minimum_cover(error)
+        }
+        ExactMinimumCoverPortfolioError::RequiredPatternsNotCoverable { .. } => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_minimum_cover_incomplete",
+            }
+        }
+        ExactMinimumCoverPortfolioError::AllocationFailed { .. } => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_minimum_cover_allocation_failed",
+            }
+        }
+        ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof
+        | ExactMinimumCoverPortfolioError::PageSizeMustBePositive
+        | ExactMinimumCoverPortfolioError::InvalidRestart => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_minimum_cover_proof_invalid",
+            }
+        }
+    }
 }
 
 fn core_error_from_field_replacement(
@@ -3330,6 +3368,185 @@ mod tests {
     }
 
     #[test]
+    fn b2b_minimum_cover_keeps_original_candidate_lex_first_identity() {
+        let coverage_a = PatternBitSet::from_words(4, vec![0b1110]).expect("candidate a coverage");
+        let coverage_b = PatternBitSet::from_words(4, vec![0b0001])
+            .expect("properly dominated candidate b coverage");
+        let coverage_c = PatternBitSet::from_words(4, vec![0b0011]).expect("candidate c coverage");
+        let input = CoreExecutionResult::new(
+            vec![
+                ("search_output_policy".to_owned(), "summary".to_owned()),
+                (
+                    "execution_constraint_preserve_b2b".to_owned(),
+                    "true".to_owned(),
+                ),
+                (
+                    "execution_constraint_spin_profile".to_owned(),
+                    "t-spins".to_owned(),
+                ),
+                (
+                    "execution_constraint_materialized".to_owned(),
+                    "false".to_owned(),
+                ),
+                ("target_piece_count".to_owned(), "1".to_owned()),
+                ("coverage_pattern_count".to_owned(), "4".to_owned()),
+                ("covered_pattern_count".to_owned(), "4".to_owned()),
+                ("solution_found".to_owned(), "true".to_owned()),
+                ("unique_solution_count".to_owned(), "3".to_owned()),
+                (
+                    "normalized_unique_solution_count".to_owned(),
+                    "3".to_owned(),
+                ),
+                (
+                    "actual_normalized_unique_solution_count".to_owned(),
+                    "3".to_owned(),
+                ),
+                ("solution_count_calculated".to_owned(), "true".to_owned()),
+                ("solution_set_materialized".to_owned(), "true".to_owned()),
+                (
+                    "solution_keys_materialized_count".to_owned(),
+                    "3".to_owned(),
+                ),
+                ("solution_keys_complete".to_owned(), "true".to_owned()),
+                ("solution_page_available".to_owned(), "true".to_owned()),
+                ("objective".to_owned(), "minimum-cover".to_owned()),
+                ("objective_search_complete".to_owned(), "true".to_owned()),
+                ("count_complete".to_owned(), "true".to_owned()),
+                ("probability_complete".to_owned(), "true".to_owned()),
+                ("minimum_cover_complete".to_owned(), "true".to_owned()),
+                ("minimum_cover_proven_minimum".to_owned(), "true".to_owned()),
+                (
+                    "minimum_cover_incomplete_reason".to_owned(),
+                    "none".to_owned(),
+                ),
+                (
+                    "postprocess_scoring_requested".to_owned(),
+                    "false".to_owned(),
+                ),
+                (
+                    "solution_probabilities_requested".to_owned(),
+                    "false".to_owned(),
+                ),
+            ],
+            Vec::new(),
+        )
+        .with_normalized_solution_keys(vec![
+            "solution-a".to_owned(),
+            "solution-b".to_owned(),
+            "solution-c".to_owned(),
+        ])
+        .with_normalized_solution_coverages(vec![
+            NormalizedSolutionCoverage::new("solution-a", coverage_a),
+            NormalizedSolutionCoverage::new("solution-b", coverage_b),
+            NormalizedSolutionCoverage::new("solution-c", coverage_c),
+        ])
+        .with_coverage_pattern_words(vec![0b1111])
+        .with_spin_coverage_execution_batch(Some(SpinCoverageExecutionBatch::new(
+            vec![
+                vec![PieceKind::I],
+                vec![PieceKind::O],
+                vec![PieceKind::T],
+                vec![PieceKind::S],
+            ],
+            0,
+            None,
+            false,
+            false,
+            false,
+            1,
+            1,
+            vec![
+                b2b_piece_subset_graph(
+                    1,
+                    "solution-a",
+                    &[PieceKind::O, PieceKind::T, PieceKind::S],
+                ),
+                b2b_piece_subset_graph(2, "solution-b", &[PieceKind::I]),
+                b2b_piece_subset_graph(3, "solution-c", &[PieceKind::I, PieceKind::O]),
+            ],
+            true,
+        )))
+        .with_postprocess_execution_batch(Vec::new(), true, vec!["0.25".to_owned(); 4]);
+
+        let result = apply_execution_constraints(input.clone(), &ExecutionControl::default())
+            .expect("B2B minimum cover with a properly dominated original candidate");
+
+        // Both [a,b] and [a,c] are minimum covers. The proof may discard b as
+        // dominated by c, but the public result must retain the original-row
+        // lex-first candidate identity [a,b].
+        assert_eq!(
+            result.normalized_solution_keys(),
+            ["solution-a", "solution-b"]
+        );
+        assert_eq!(
+            result.usize_field("minimum_cover_selected_solution_count"),
+            Some(2)
+        );
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(true));
+        assert_eq!(
+            result.bool_field("minimum_cover_proven_minimum"),
+            Some(true)
+        );
+
+        let mut peak = 0_u128;
+        let guarded = apply_execution_constraints_with_memory_guard(
+            input.clone(),
+            &ExecutionControl::default(),
+            &mut |live, future| {
+                let required = live
+                    .checked_resource_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(future))
+                    .expect("checked canonical minimum-cover guard input");
+                peak = peak.max(required);
+                Ok(())
+            },
+        )
+        .expect("guarded B2B canonical minimum cover");
+        assert_eq!(guarded, result);
+        assert!(peak > 0);
+
+        apply_execution_constraints_with_memory_guard(
+            input.clone(),
+            &ExecutionControl::default(),
+            &mut |live, future| {
+                let required = live
+                    .checked_resource_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(future))
+                    .expect("checked exact canonical minimum-cover guard input");
+                (required <= peak)
+                    .then_some(())
+                    .ok_or(CoreExecutionError::RuntimeUnavailable {
+                        component: "test_memory_cap",
+                    })
+            },
+        )
+        .expect("exact observed canonical minimum-cover peak");
+
+        let error = apply_execution_constraints_with_memory_guard(
+            input,
+            &ExecutionControl::default(),
+            &mut |live, future| {
+                let required = live
+                    .checked_resource_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(future))
+                    .expect("checked rejected canonical minimum-cover guard input");
+                (required < peak)
+                    .then_some(())
+                    .ok_or(CoreExecutionError::RuntimeUnavailable {
+                        component: "test_memory_cap",
+                    })
+            },
+        )
+        .expect_err("canonical minimum-cover peak minus one");
+        assert_eq!(
+            error,
+            CoreExecutionError::RuntimeUnavailable {
+                component: "test_memory_cap"
+            }
+        );
+    }
+
+    #[test]
     fn extended_b2b_filter_rebuilds_requested_probabilities_without_board64_identities() {
         let key = "ctk2|height=7|extended-candidate";
         let covered = PatternBitSet::from_words(1, vec![1]).expect("coverage bitset");
@@ -3736,6 +3953,38 @@ mod tests {
     }
 
     #[test]
+    fn named_product_deferred_minimum_cover_is_not_reproved_by_b2b_filtering() {
+        let reason = "deferred-to-coordinator";
+        let input = empty_partition_result(1, 0, Vec::new()).with_replaced_fields(vec![
+            ("objective".to_owned(), "minimum-cover".to_owned()),
+            ("minimum_cover_complete".to_owned(), "false".to_owned()),
+            (
+                "minimum_cover_proven_minimum".to_owned(),
+                "false".to_owned(),
+            ),
+            (
+                "minimum_cover_incomplete_reason".to_owned(),
+                reason.to_owned(),
+            ),
+        ]);
+
+        let result = apply_execution_constraints(input, &ExecutionControl::default())
+            .expect("named-product minimum cover remains deferred after B2B validation");
+
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
+        assert_eq!(
+            result.bool_field("minimum_cover_proven_minimum"),
+            Some(false)
+        );
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some(reason)
+        );
+        assert_eq!(result.bool_field("objective_complete"), Some(false));
+        assert_eq!(result.field("objective_incomplete_reason"), Some(reason));
+    }
+
+    #[test]
     fn missing_minimum_cover_status_remains_fail_closed_after_b2b_filtering() {
         let input = empty_partition_result(1, 0, Vec::new())
             .with_replaced_fields(vec![("objective".to_owned(), "minimum-cover".to_owned())]);
@@ -3772,6 +4021,41 @@ mod tests {
                 0,
                 ScoringLockEvidence::no_rotation(RotationState::Zero),
             )],
+        )
+    }
+
+    fn b2b_piece_subset_graph(
+        candidate_id: u64,
+        candidate_key: &str,
+        pieces: &[PieceKind],
+    ) -> SpinCoverageExecutionGraph {
+        SpinCoverageExecutionGraph::new(
+            candidate_id,
+            candidate_key,
+            0,
+            vec![
+                ScoringExecutionNode::new(0, pieces.len() as u32, false),
+                ScoringExecutionNode::new(pieces.len() as u32, 0, true),
+            ],
+            pieces
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(operation_index, piece)| {
+                    ScoringExecutionEdge::new(
+                        1,
+                        operation_index as u8,
+                        piece,
+                        RotationState::Zero,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        ScoringLockEvidence::no_rotation(RotationState::Zero),
+                    )
+                })
+                .collect(),
         )
     }
 

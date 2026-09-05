@@ -9,7 +9,8 @@ pub mod webgpu;
 
 pub use clearra_app::{
     CoveragePortfolioPageStore, PortfolioAlternativeAdvance, PortfolioAlternativeError,
-    PortfolioAlternativePage, PortfolioMemberPage, ProductPageSourceOwner, ProductPageStore,
+    PortfolioAlternativePage, PortfolioMemberPage, PortfolioPageLoadAdvance,
+    PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore,
     PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT,
 };
 #[cfg(feature = "stage-profiling")]
@@ -35,10 +36,11 @@ pub use distributed_wire::{
 };
 pub use host_contract_bridge::wasm_worker_event_to_host_contract;
 pub use json_event_envelope::{
-    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_page,
-    serialize_coverage_portfolio_page_exact, serialize_coverage_portfolio_retained_page,
-    serialize_governed_worker_events, serialize_parity_report_exhausted,
-    serialize_parity_report_page, serialize_search_report_from_app_response, GovernedWasmJson,
+    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
+    serialize_coverage_portfolio_page, serialize_coverage_portfolio_page_exact,
+    serialize_coverage_portfolio_retained_page, serialize_governed_worker_events,
+    serialize_parity_report_exhausted, serialize_parity_report_page,
+    serialize_search_report_from_app_response, GovernedWasmJson,
 };
 pub use wasm_command_runtime::{
     GovernedWasmExecutionResult, WasmCommandRuntime, WasmCommandRuntimeError,

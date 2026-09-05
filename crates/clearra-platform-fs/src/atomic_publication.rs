@@ -65,6 +65,7 @@ pub struct NativeFileCommit {
 }
 
 impl NativeFileCommit {
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) const fn new(identity: FileIdentity, byte_count: u64) -> Self {
         Self {
             identity,
@@ -226,10 +227,12 @@ impl Drop for AtomicFileStage {
     }
 }
 
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) fn committed(identity: FileIdentity, byte_count: u64) -> NativePublicationOutcome {
     NativePublicationOutcome::Committed(NativeFileCommit::new(identity, byte_count))
 }
 
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) fn durability_uncertain(
     identity: FileIdentity,
     byte_count: u64,

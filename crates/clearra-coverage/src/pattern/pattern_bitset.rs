@@ -455,8 +455,7 @@ impl PatternBitSet {
 }
 
 fn checked_dense_word_count(pattern_count: usize) -> Option<usize> {
-    let whole_words = pattern_count / u64::BITS as usize;
-    whole_words.checked_add(usize::from(pattern_count % u64::BITS as usize != 0))
+    Some(pattern_count.div_ceil(u64::BITS as usize))
 }
 
 fn ensure_projection_fits(
@@ -788,16 +787,36 @@ impl PatternBitSet {
     }
 
     pub fn covered_patterns_before(&self, end_exclusive: usize) -> CoveredPatternIter<'_> {
+        self.covered_patterns_in_range(0, end_exclusive)
+    }
+
+    /// Iterates covered ids in one half-open range without rescanning earlier
+    /// dense words or sparse ids. Cooperative consumers use this to resume a
+    /// large universe scan with work proportional to the current slice.
+    pub fn covered_patterns_in_range(
+        &self,
+        start_inclusive: usize,
+        end_exclusive: usize,
+    ) -> CoveredPatternIter<'_> {
         let end_exclusive = end_exclusive.min(self.pattern_count);
+        let start_inclusive = start_inclusive.min(end_exclusive);
         let storage = match &self.storage {
-            PatternBitStorage::Dense(words) => CoveredPatternIterStorage::Dense {
-                words,
-                word_index: 0,
-                remaining_word: words.first().copied().unwrap_or(0),
-            },
+            PatternBitStorage::Dense(words) => {
+                let word_index = start_inclusive / u64::BITS as usize;
+                let bit_offset = start_inclusive % u64::BITS as usize;
+                let remaining_word =
+                    words.get(word_index).copied().unwrap_or(0) & (u64::MAX << bit_offset);
+                CoveredPatternIterStorage::Dense {
+                    words,
+                    word_index,
+                    remaining_word,
+                }
+            }
             PatternBitStorage::Sparse(storage) => CoveredPatternIterStorage::Sparse {
                 pattern_ids: &storage.pattern_ids,
-                index: 0,
+                index: storage
+                    .pattern_ids
+                    .partition_point(|pattern_id| (*pattern_id as usize) < start_inclusive),
             },
         };
         CoveredPatternIter {
@@ -1034,6 +1053,30 @@ mod allocation_projection_tests {
             sparse.checked_storage_retained_bytes(),
             Some(sparse_retained_bytes)
         );
+    }
+
+    #[test]
+    fn covered_pattern_range_starts_at_the_requested_dense_word_and_sparse_id() {
+        let dense = PatternBitSet::from_pattern_indices(130, vec![1, 2, 3, 4, 63, 64, 127])
+            .expect("dense range fixture");
+        let sparse = PatternBitSet::from_pattern_indices(130, vec![1, 64, 127])
+            .expect("sparse range fixture");
+
+        assert_eq!(
+            dense
+                .covered_patterns_in_range(63, 127)
+                .map(PatternId::index)
+                .collect::<Vec<_>>(),
+            vec![63, 64]
+        );
+        assert_eq!(
+            sparse
+                .covered_patterns_in_range(2, 128)
+                .map(PatternId::index)
+                .collect::<Vec<_>>(),
+            vec![64, 127]
+        );
+        assert!(dense.covered_patterns_in_range(129, 12).next().is_none());
     }
 
     #[test]

@@ -29,10 +29,11 @@ use super::{
     setup_all_paths::{enumerate_setup_completion_paths, SetupSolutionPath},
     setup_coverage_graph::SetupCoverageGraph,
     setup_finder::{
-        compare_setup_candidates, compile_setup_pattern_index, covered_word_weight,
+        compare_setup_candidates, covered_word_weight, finish_cached_setup_path_detail,
         finish_setup_result, include_setup_depth_range, probability_string,
         retain_best_setup_state_per_board, terminal_supply_target_word, CompletedSetupCoverage,
-        SetupSupplyStateLayout, SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES,
+        SetupPatternIndexCompileAdvance, SetupPatternIndexCompileSession, SetupSupplyStateLayout,
+        SetupSupplyTransitionCatalog, COVERAGE_WORD_LANES,
     },
     setup_graph_builder::{SetupGraphBuildAdvance, SetupGraphBuildSession, SetupSharedGraph},
     setup_parallel_segmented::{SegmentedArray, SegmentedGenerationArray},
@@ -45,6 +46,9 @@ use super::{
     WasmExactSearchError,
 };
 
+#[cfg(not(target_family = "wasm"))]
+use super::setup_finder::compile_setup_pattern_index;
+
 const EMPTY_WORDS: [u64; COVERAGE_WORD_LANES] = [0; COVERAGE_WORD_LANES];
 const NO_WITNESS: u32 = u32::MAX;
 
@@ -53,6 +57,15 @@ pub(crate) enum WasmSetupParallelProduce {
     Initialization(Vec<u8>),
     Batch(Vec<u8>),
     Completed,
+    Cancelled,
+}
+
+pub(crate) enum WasmSetupParallelWorkerAdvance {
+    Pending,
+    Complete {
+        candidate_count: usize,
+        partial: Vec<u8>,
+    },
     Cancelled,
 }
 
@@ -66,8 +79,10 @@ pub(crate) struct WasmSetupParallelCoordinator {
     received_tasks: usize,
     next_merge_task: usize,
     condition_merges: Option<Vec<SetupConditionMerge>>,
+    ready_result: Option<CoreExecutionResult>,
     solution_paths: Vec<SetupSolutionPath>,
     worker_count: usize,
+    task_count_hint: usize,
 }
 
 impl WasmSetupParallelCoordinator {
@@ -76,33 +91,50 @@ impl WasmSetupParallelCoordinator {
         worker_count: usize,
     ) -> Result<Self, WasmExactSearchError> {
         let builder = SetupGraphBuildSession::new_parallel(query)?;
-        let condition_word_counts = builder.condition_pattern_word_counts()?;
-        let tasks = plan_parallel_tasks(&condition_word_counts, worker_count)?;
-        let task_count = tasks.len();
+        let task_count_hint = if builder.parallel_task_count_hint() < 2 {
+            1
+        } else {
+            worker_count.saturating_sub(1).max(2)
+        };
         Ok(Self {
             builder: Some(builder),
             shared: None,
-            tasks,
+            tasks: Vec::new(),
             next_task: 0,
-            pending_results: (0..task_count).map(|_| None).collect(),
-            received_task_flags: vec![false; task_count],
+            pending_results: Vec::new(),
+            received_task_flags: Vec::new(),
             received_tasks: 0,
             next_merge_task: 0,
             condition_merges: None,
+            ready_result: None,
             solution_paths: Vec::new(),
             worker_count: worker_count.max(1),
+            task_count_hint,
         })
     }
 
     pub(crate) fn condition_count(&self) -> usize {
         self.builder.as_ref().map_or_else(
-            || self.condition_merges.as_ref().map_or(0, Vec::len),
+            || {
+                self.condition_merges.as_ref().map_or_else(
+                    || {
+                        self.shared
+                            .as_ref()
+                            .map_or(0, |shared| shared.conditions.len())
+                    },
+                    Vec::len,
+                )
+            },
             SetupGraphBuildSession::condition_count,
         )
     }
 
     pub(crate) fn task_count(&self) -> usize {
-        self.tasks.len()
+        if self.builder.is_some() && self.tasks.is_empty() {
+            self.task_count_hint
+        } else {
+            self.tasks.len()
+        }
     }
 
     pub fn geometry_nodes(&self) -> usize {
@@ -155,6 +187,7 @@ impl WasmSetupParallelCoordinator {
                 SetupGraphBuildAdvance::Pending => Ok(WasmSetupParallelProduce::Pending),
                 SetupGraphBuildAdvance::Cancelled => Ok(WasmSetupParallelProduce::Cancelled),
                 SetupGraphBuildAdvance::Complete(shared) => {
+                    self.install_task_plan(&shared.condition_pattern_word_counts)?;
                     let initialization = encode_initialization(
                         &shared.query,
                         &shared.coverage_graph,
@@ -184,6 +217,20 @@ impl WasmSetupParallelCoordinator {
         shared: SetupSharedGraph,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
+        if let Some(result) = finish_cached_setup_path_detail(&shared, control)? {
+            if !self.tasks.is_empty()
+                || !self.pending_results.is_empty()
+                || !self.received_task_flags.is_empty()
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_cached_result_task_plan_not_empty",
+                ));
+            }
+            self.ready_result = Some(result);
+            self.shared = Some(shared);
+            self.builder = None;
+            return Ok(());
+        }
         self.solution_paths = shared
             .query
             .path_detail()
@@ -202,11 +249,49 @@ impl WasmSetupParallelCoordinator {
         let shape_count = shared.graph.shapes.len();
         let condition_merges = condition_task_counts
             .into_iter()
-            .map(|task_count| SetupConditionMerge::new(shape_count, task_count))
+            .zip(&shared.conditions)
+            .map(|(task_count, condition)| {
+                let global_pattern_count = condition
+                    .problem()
+                    .piece_source()
+                    .materialized_universe()
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_pattern_universe_not_materialized",
+                    ))?
+                    .pattern_count();
+                SetupConditionMerge::new(
+                    shape_count,
+                    task_count,
+                    u32::try_from(global_pattern_count).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "setup_parallel_pattern_count_overflow",
+                        )
+                    })?,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         self.shared = Some(shared);
         self.condition_merges = Some(condition_merges);
         self.builder = None;
+        Ok(())
+    }
+
+    fn install_task_plan(
+        &mut self,
+        condition_pattern_word_counts: &[usize],
+    ) -> Result<(), WasmExactSearchError> {
+        if !self.tasks.is_empty()
+            || !self.pending_results.is_empty()
+            || !self.received_task_flags.is_empty()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_task_plan_already_installed",
+            ));
+        }
+        self.tasks = plan_parallel_tasks(condition_pattern_word_counts, self.worker_count)?;
+        self.task_count_hint = self.tasks.len();
+        self.pending_results = (0..self.tasks.len()).map(|_| None).collect();
+        self.received_task_flags = vec![false; self.tasks.len()];
         Ok(())
     }
 
@@ -287,6 +372,23 @@ impl WasmSetupParallelCoordinator {
     ) -> Result<CoreExecutionResult, WasmExactSearchError> {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
+        }
+        if let Some(result) = self.ready_result.take() {
+            if self.builder.is_some()
+                || self.shared.is_none()
+                || !self.tasks.is_empty()
+                || self.next_task != 0
+                || !self.pending_results.is_empty()
+                || !self.received_task_flags.is_empty()
+                || self.received_tasks != 0
+                || self.next_merge_task != 0
+                || self.condition_merges.is_some()
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_cached_result_state_invalid",
+                ));
+            }
+            return Ok(result);
         }
         let mut cancellation_work = 0_usize;
         let shared = self
@@ -405,7 +507,7 @@ impl WasmSetupParallelCoordinator {
                     condition.initial_hold(),
                     condition.pattern_expression().to_owned(),
                     result.global_pattern_count as usize,
-                    result.candidate_count as usize,
+                    result.candidate_count,
                     false,
                     true,
                     candidates,
@@ -417,6 +519,7 @@ impl WasmSetupParallelCoordinator {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
         }
+        let parallel = !self.tasks.is_empty();
         let result = finish_setup_result(
             &shared.query,
             &shared.graph,
@@ -425,9 +528,17 @@ impl WasmSetupParallelCoordinator {
             shared.geometry_expanded_nodes,
             shared.tablebase_status,
             shared.tablebase_pruned_states,
-            workers_used.min(self.worker_count).max(1),
-            true,
-            "setup-family-quotient-segmented-task-multiworker",
+            if parallel {
+                workers_used.min(self.worker_count).max(1)
+            } else {
+                1
+            },
+            parallel,
+            if parallel {
+                "setup-family-quotient-segmented-task-multiworker"
+            } else {
+                "setup-empty-pattern-task-plan"
+            },
             control,
         )?;
         Ok(result.with_additional_fields(vec![
@@ -546,6 +657,11 @@ pub(crate) fn execute_setup_parallel_native(
     control: &ExecutionControl,
 ) -> Result<CoreExecutionResult, WasmExactSearchError> {
     let mut coordinator = WasmSetupParallelCoordinator::new(query, worker_count)?;
+    prepare_native_setup_graph(&mut coordinator, control)?;
+    if coordinator.tasks.is_empty() {
+        control.report_progress("setup-finalize", 4, Some(4));
+        return coordinator.finish_with_control(1, control);
+    }
     let tasks: Arc<[SetupParallelTask]> = Arc::from(coordinator.tasks.clone());
     let workers_used = worker_count.max(1).min(tasks.len().max(1));
     let task_queue = Arc::new(Mutex::new(
@@ -579,7 +695,7 @@ pub(crate) fn execute_setup_parallel_native(
                         &worker_sender,
                     )
                 }))
-                .unwrap_or_else(|_| {
+                .unwrap_or({
                     Err(WasmExactSearchError::InvalidProblem(
                         "setup_parallel_worker_panicked",
                     ))
@@ -592,7 +708,6 @@ pub(crate) fn execute_setup_parallel_native(
         let mut completed_background_workers = 0;
         let main_outcome =
             catch_unwind(AssertUnwindSafe(|| -> Result<(), WasmExactSearchError> {
-                prepare_native_setup_graph(&mut coordinator, control)?;
                 let initialization = native_setup_worker_initialization(&coordinator)?;
                 worker_gate.publish(Arc::new(NativeSetupWorkerStart {
                     initialization: initialization.clone(),
@@ -624,7 +739,7 @@ pub(crate) fn execute_setup_parallel_native(
                 }
                 Ok(())
             }))
-            .unwrap_or_else(|_| {
+            .unwrap_or({
                 Err(WasmExactSearchError::InvalidProblem(
                     "setup_parallel_main_worker_panicked",
                 ))
@@ -691,6 +806,7 @@ fn prepare_native_setup_graph(
             SetupGraphBuildAdvance::Pending => {}
             SetupGraphBuildAdvance::Cancelled => return Err(WasmExactSearchError::Cancelled),
             SetupGraphBuildAdvance::Complete(shared) => {
+                coordinator.install_task_plan(&shared.condition_pattern_word_counts)?;
                 coordinator.install_shared(shared, control)?;
             }
         }
@@ -718,15 +834,22 @@ fn native_setup_worker_initialization(
         .ok_or(WasmExactSearchError::InvalidProblem(
             "setup_parallel_graph_not_ready",
         ))?;
+    if shared.condition_pattern_indices.len() != shared.conditions.len() {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_parallel_shared_pattern_index_count_mismatch",
+        ));
+    }
     let runtimes = shared
         .conditions
         .iter()
+        .zip(&shared.condition_pattern_indices)
         .enumerate()
-        .map(|(condition_index, condition)| {
-            SetupParallelConditionRuntime::compile(
+        .map(|(condition_index, (condition, pattern_index))| {
+            SetupParallelConditionRuntime::from_pattern_index(
                 condition_index,
                 condition,
                 shared.query.max_setup_pieces(),
+                Arc::clone(pattern_index),
             )
         })
         .collect::<Result<Vec<_>, _>>()?
@@ -893,18 +1016,22 @@ fn absorb_native_setup_result(
 struct SetupConditionMerge {
     expected_tasks: usize,
     received_tasks: usize,
-    global_pattern_count: Option<u32>,
+    global_pattern_count: u32,
     accumulators: SegmentedArray<ShapeAccumulator>,
     covered_shapes: Vec<usize>,
     peak_segment_pages: u32,
 }
 
 impl SetupConditionMerge {
-    fn new(shape_count: usize, expected_tasks: usize) -> Result<Self, WasmExactSearchError> {
+    fn new(
+        shape_count: usize,
+        expected_tasks: usize,
+        global_pattern_count: u32,
+    ) -> Result<Self, WasmExactSearchError> {
         Ok(Self {
             expected_tasks,
             received_tasks: 0,
-            global_pattern_count: None,
+            global_pattern_count,
             accumulators: SegmentedArray::new(shape_count)?,
             covered_shapes: Vec::new(),
             peak_segment_pages: 0,
@@ -916,14 +1043,10 @@ impl SetupConditionMerge {
         result: SetupParallelTaskResult,
         shape_count: usize,
     ) -> Result<(), WasmExactSearchError> {
-        match self.global_pattern_count {
-            Some(count) if count != result.global_pattern_count => {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "setup_parallel_global_pattern_count_mismatch",
-                ));
-            }
-            None => self.global_pattern_count = Some(result.global_pattern_count),
-            _ => {}
+        if self.global_pattern_count != result.global_pattern_count {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_global_pattern_count_mismatch",
+            ));
         }
         for shape in result.covered_shapes {
             let shape_index = shape.shape_index as usize;
@@ -1007,11 +1130,7 @@ impl SetupConditionMerge {
                 "setup_parallel_condition_tasks_incomplete",
             ));
         }
-        let global_pattern_count =
-            self.global_pattern_count
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "setup_parallel_condition_pattern_count_missing",
-                ))?;
+        let global_pattern_count = self.global_pattern_count;
         self.covered_shapes.retain(|shape_index| {
             self.accumulators
                 .get(*shape_index)
@@ -1168,9 +1287,13 @@ fn plan_parallel_tasks(
 pub(crate) struct WasmSetupParallelWorker {
     query: SetupSearchQuery,
     runtimes: Vec<Option<SetupParallelConditionRuntime>>,
+    runtime_compilers: Vec<Option<SetupParallelConditionCompileSession>>,
     #[cfg(not(target_family = "wasm"))]
     shared_runtimes: Option<Arc<[SetupParallelConditionRuntime]>>,
     workspace: SegmentedCoverageWorkspace,
+    pending_tasks: Vec<SetupParallelTask>,
+    pending_task_cursor: usize,
+    pending_results: Vec<SetupParallelTaskResult>,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1205,14 +1328,19 @@ impl WasmSetupParallelWorker {
             WasmExactSearchError::InvalidProblem("setup_parallel_worker_condition_count_failed")
         })?;
         let runtimes = (0..condition_count).map(|_| None).collect();
+        let runtime_compilers = (0..condition_count).map(|_| None).collect();
         let workspace =
             SegmentedCoverageWorkspace::new(graph, shape_count, SetupSupplyStateLayout::new())?;
         Ok(Self {
             query,
             runtimes,
+            runtime_compilers,
             #[cfg(not(target_family = "wasm"))]
             shared_runtimes: None,
             workspace,
+            pending_tasks: Vec::new(),
+            pending_task_cursor: 0,
+            pending_results: Vec::new(),
         })
     }
 
@@ -1238,18 +1366,137 @@ impl WasmSetupParallelWorker {
         input: &[u8],
         control: &ExecutionControl,
     ) -> Result<(usize, Vec<u8>), WasmExactSearchError> {
-        let tasks = decode_tasks(input)?;
-        let task_count = tasks.len();
-        let mut results = Vec::new();
-        results.try_reserve_exact(task_count).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_parallel_worker_result_storage_unavailable")
-        })?;
-        for task in tasks {
-            results.push(self.consume_task(task, control)?);
+        self.enqueue(input)?;
+        loop {
+            match self.advance_pending(8_192, control)? {
+                WasmSetupParallelWorkerAdvance::Pending => {}
+                WasmSetupParallelWorkerAdvance::Complete {
+                    candidate_count,
+                    partial,
+                } => return Ok((candidate_count, partial)),
+                WasmSetupParallelWorkerAdvance::Cancelled => {
+                    return Err(WasmExactSearchError::Cancelled)
+                }
+            }
         }
-        Ok((task_count, encode_results(&results)?))
     }
 
+    pub(crate) fn enqueue(&mut self, input: &[u8]) -> Result<(), WasmExactSearchError> {
+        if self.has_pending_work() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_worker_batch_still_pending",
+            ));
+        }
+        let tasks = decode_tasks(input)?;
+        self.pending_results.clear();
+        self.pending_results
+            .try_reserve_exact(tasks.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_worker_result_storage_unavailable",
+                )
+            })?;
+        self.pending_tasks = tasks;
+        self.pending_task_cursor = 0;
+        Ok(())
+    }
+
+    pub(crate) fn has_pending_work(&self) -> bool {
+        self.pending_task_cursor < self.pending_tasks.len()
+    }
+
+    pub(crate) fn advance_pending(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<WasmSetupParallelWorkerAdvance, WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Ok(WasmSetupParallelWorkerAdvance::Cancelled);
+        }
+        let Some(task) = self.pending_tasks.get(self.pending_task_cursor).copied() else {
+            let candidate_count = self.pending_tasks.len();
+            let partial = encode_results(&std::mem::take(&mut self.pending_results))?;
+            self.pending_tasks.clear();
+            self.pending_task_cursor = 0;
+            return Ok(WasmSetupParallelWorkerAdvance::Complete {
+                candidate_count,
+                partial,
+            });
+        };
+        let condition_index = task.condition_index as usize;
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(runtimes) = self.shared_runtimes.as_ref() {
+            let runtime =
+                runtimes
+                    .get(condition_index)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_parallel_worker_condition_out_of_range",
+                    ))?;
+            self.pending_results
+                .push(self.workspace.run_task(task, runtime, control)?);
+            self.pending_task_cursor += 1;
+            return if self.has_pending_work() {
+                Ok(WasmSetupParallelWorkerAdvance::Pending)
+            } else {
+                self.advance_pending(work_budget, control)
+            };
+        }
+
+        let runtime_slot =
+            self.runtimes
+                .get_mut(condition_index)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_worker_condition_out_of_range",
+                ))?;
+        if runtime_slot.is_none() {
+            let compiler_slot = self.runtime_compilers.get_mut(condition_index).ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_worker_condition_out_of_range",
+                ),
+            )?;
+            if compiler_slot.is_none() {
+                *compiler_slot = Some(SetupParallelConditionCompileSession::new(
+                    &self.query,
+                    condition_index,
+                )?);
+            }
+            let compiler = compiler_slot
+                .as_mut()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_worker_compiler_missing",
+                ))?;
+            match compiler.advance(work_budget, control)? {
+                SetupParallelConditionCompileAdvance::Pending => {
+                    return Ok(WasmSetupParallelWorkerAdvance::Pending)
+                }
+                SetupParallelConditionCompileAdvance::Cancelled => {
+                    return Ok(WasmSetupParallelWorkerAdvance::Cancelled)
+                }
+                SetupParallelConditionCompileAdvance::Complete(runtime) => {
+                    *runtime_slot = Some(runtime);
+                    *compiler_slot = None;
+                    return Ok(WasmSetupParallelWorkerAdvance::Pending);
+                }
+            }
+        }
+        let runtime = runtime_slot
+            .as_ref()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_worker_runtime_missing",
+            ))?;
+        self.pending_results
+            .push(self.workspace.run_task(task, runtime, control)?);
+        self.pending_task_cursor += 1;
+        if self.has_pending_work() {
+            Ok(WasmSetupParallelWorkerAdvance::Pending)
+        } else {
+            self.advance_pending(work_budget, control)
+        }
+    }
+
+    // Native workers consume a complete task synchronously; browser workers
+    // advance the incremental compiler through `advance_pending` instead.
+    #[cfg(not(target_family = "wasm"))]
     fn consume_task(
         &mut self,
         task: SetupParallelTask,
@@ -1300,10 +1547,69 @@ impl WasmSetupParallelWorker {
     }
 }
 
+enum SetupParallelConditionCompileAdvance {
+    Pending,
+    Complete(SetupParallelConditionRuntime),
+    Cancelled,
+}
+
+struct SetupParallelConditionCompileSession {
+    condition_index: usize,
+    condition: SetupSearchCondition,
+    max_setup_pieces: u8,
+    pattern_index: SetupPatternIndexCompileSession,
+}
+
+impl SetupParallelConditionCompileSession {
+    fn new(query: &SetupSearchQuery, condition_index: usize) -> Result<Self, WasmExactSearchError> {
+        let condition = compile_setup_search_condition(query, condition_index)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_worker_condition_compile_failed",
+                )
+            })?
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_worker_condition_out_of_range",
+            ))?;
+        let pattern_index = SetupPatternIndexCompileSession::new(&condition)?;
+        Ok(Self {
+            condition_index,
+            condition,
+            max_setup_pieces: query.max_setup_pieces(),
+            pattern_index,
+        })
+    }
+
+    fn advance(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<SetupParallelConditionCompileAdvance, WasmExactSearchError> {
+        match self.pattern_index.advance(work_budget, control)? {
+            SetupPatternIndexCompileAdvance::Pending => {
+                Ok(SetupParallelConditionCompileAdvance::Pending)
+            }
+            SetupPatternIndexCompileAdvance::Cancelled => {
+                Ok(SetupParallelConditionCompileAdvance::Cancelled)
+            }
+            SetupPatternIndexCompileAdvance::Complete(pattern_index) => {
+                Ok(SetupParallelConditionCompileAdvance::Complete(
+                    SetupParallelConditionRuntime::from_pattern_index(
+                        self.condition_index,
+                        &self.condition,
+                        self.max_setup_pieces,
+                        Arc::new(pattern_index),
+                    )?,
+                ))
+            }
+        }
+    }
+}
+
 struct SetupParallelConditionRuntime {
     condition_index: u32,
     initial_hold_code: u8,
-    pattern_index: PatternPiecePositionIndex,
+    pattern_index: Arc<PatternPiecePositionIndex>,
     weights: WeightedPatternSet,
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
@@ -1315,10 +1621,23 @@ struct SetupParallelConditionRuntime {
 }
 
 impl SetupParallelConditionRuntime {
+    // This eager compiler backs the native synchronous worker path. Browser
+    // workers use `SetupParallelConditionCompileSession` cooperatively.
+    #[cfg(not(target_family = "wasm"))]
     fn compile(
         condition_index: usize,
         condition: &SetupSearchCondition,
         max_setup_pieces: u8,
+    ) -> Result<Self, WasmExactSearchError> {
+        let pattern_index = Arc::new(compile_setup_pattern_index(condition)?);
+        Self::from_pattern_index(condition_index, condition, max_setup_pieces, pattern_index)
+    }
+
+    fn from_pattern_index(
+        condition_index: usize,
+        condition: &SetupSearchCondition,
+        max_setup_pieces: u8,
+        pattern_index: Arc<PatternPiecePositionIndex>,
     ) -> Result<Self, WasmExactSearchError> {
         let problem = condition.problem();
         let universe = problem.piece_source().materialized_universe().ok_or(
@@ -1331,7 +1650,7 @@ impl SetupParallelConditionRuntime {
             initial_hold_code: condition
                 .initial_hold()
                 .map_or(0, |piece| piece_index(piece) as u8 + 1),
-            pattern_index: compile_setup_pattern_index(condition)?,
+            pattern_index,
             weights: universe.weights().clone(),
             hold_enabled: problem.supply().hold_enabled(),
             projects_unplaced_lookahead: problem.supply().projects_unplaced_lookahead(),
@@ -1518,7 +1837,7 @@ impl SegmentedCoverageWorkspace {
                     let edge = self.graph.edges[edge_index];
                     let target_node = edge.child() as usize;
                     let terminal = self.graph.nodes[target_node].accepting();
-                    for lane in 0..lane_count {
+                    for (lane, active_word) in active[..lane_count].iter().copied().enumerate() {
                         for transition in transition_catalog
                             .get(
                                 node.depth,
@@ -1537,7 +1856,7 @@ impl SegmentedCoverageWorkspace {
                                     transition.hold_code,
                                 ),
                                 lane,
-                                active[lane] & transition.mask,
+                                active_word & transition.mask,
                             )?;
                         }
                     }
@@ -1714,8 +2033,8 @@ impl SegmentedCoverageWorkspace {
         }
         let (state, first) = self.state_values.get_mut_or_default(state_index)?;
         let was_empty = first || state.words == EMPTY_WORDS;
-        for lane in 0..COVERAGE_WORD_LANES {
-            state.words[lane] |= mask[lane];
+        for (state_word, mask_word) in state.words.iter_mut().zip(mask) {
+            *state_word |= mask_word;
         }
         if was_empty {
             let (node, _, _) = self.state_layout.decode(state_index);

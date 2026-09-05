@@ -575,7 +575,7 @@ fn builtin_srs_x_uses_the_canonical_verified_table_during_native_packing() {
     assert_eq!(rule.kick_profile_id, C_KICK_SRS_X);
     assert_eq!(rule.has_verified_kick_profile, 1);
     assert_eq!(rule.verified_supports_180, 1);
-    assert_eq!(rule.verified_transition_count, 80);
+    assert_eq!(rule.verified_transition_count, 84);
     assert!(result.candidate_count() > 0);
 }
 
@@ -684,8 +684,10 @@ impl SearchBackendExecutor for SuccessfulPackingExecutor {
         _cancellation: &clearra_core_domain::execution_cancellation::ExecutionCancellationToken,
     ) -> Result<PackingBackendOutcome, PackingRunnerError> {
         self.calls.set(self.calls.get() + 1);
-        let mut candidate = clearra_core_ffi::CPackingCandidate::default();
-        candidate.candidate_id = self.candidate_id;
+        let mut candidate = clearra_core_ffi::CPackingCandidate {
+            candidate_id: self.candidate_id,
+            ..clearra_core_ffi::CPackingCandidate::default()
+        };
         let multiset = if problem.piece_multiset_family.count > 0 {
             problem.piece_multiset_family.members[0]
         } else {

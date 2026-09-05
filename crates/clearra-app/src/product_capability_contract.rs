@@ -369,6 +369,9 @@ pub(crate) struct ValidatedProductCapabilityContract {
 /// Closed typed payload carried by the common proof. Each product family adds
 /// its own validator-owned variant instead of borrowing PC proof fields or
 /// falling back to string metadata.
+// The `Pc` prefix mirrors the published product-capability identifiers and
+// keeps each closed proof variant searchable at this cross-product boundary.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ValidatedProductCapabilityPayload {
     PcTilingOpening {

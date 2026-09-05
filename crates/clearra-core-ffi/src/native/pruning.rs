@@ -25,7 +25,7 @@ pub struct CNativePruningProofLedgerEntry {
 }
 
 impl CNativePruningProofLedgerEntry {
-    fn to_owned_evidence(&self) -> Result<NativePruningEvidence, NativePruningLedgerError> {
+    fn decode_evidence(&self) -> Result<NativePruningEvidence, NativePruningLedgerError> {
         if self.batch_id == 0 {
             return Err(NativePruningLedgerError::MissingBatchId);
         }
@@ -73,7 +73,7 @@ pub struct CNativePruningMinimalRecord {
 }
 
 impl CNativePruningMinimalRecord {
-    fn to_owned_record(&self) -> Result<NativePruningMinimalRecord, NativePruningLedgerError> {
+    fn decode_record(&self) -> Result<NativePruningMinimalRecord, NativePruningLedgerError> {
         if self.batch_id == 0 {
             return Err(NativePruningLedgerError::MissingBatchId);
         }
@@ -194,11 +194,11 @@ impl CNativePruningProofLedger {
         }
         let entries = self.entries[..usize::from(self.count)]
             .iter()
-            .map(CNativePruningProofLedgerEntry::to_owned_evidence)
+            .map(CNativePruningProofLedgerEntry::decode_evidence)
             .collect::<Result<Vec<_>, _>>()?;
         let minimal_records = self.minimal_records[..usize::from(self.minimal_record_count)]
             .iter()
-            .map(CNativePruningMinimalRecord::to_owned_record)
+            .map(CNativePruningMinimalRecord::decode_record)
             .collect::<Result<Vec<_>, _>>()?;
         for entry in &entries {
             if !minimal_records.iter().any(|record| {

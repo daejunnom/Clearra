@@ -68,11 +68,7 @@ fn expected_build_coverage_probability() -> &'static str {
 }
 
 fn expected_c_buildup_coverage_row_generated() -> &'static str {
-    if cfg!(feature = "native-c-core") {
-        "false"
-    } else {
-        "false"
-    }
+    "false"
 }
 
 #[test]

@@ -72,9 +72,13 @@ read_cmake_set() {
 }
 
 mapfile -t CORE_SOURCES < <(grep -oE 'src/[^[:space:])]+\.c' "$SOURCE_MANIFEST")
+mapfile -t TEST_ORACLE_SOURCES < <(
+    read_cmake_set CLEARRA_CORE_TEST_ORACLE_SOURCES "$SOURCE_MANIFEST"
+)
 mapfile -t TEST_NAMES < <(read_cmake_set CLEARRA_CORE_TEST_NAMES "$TEST_MANIFEST")
 mapfile -t TEST_SOURCES < <(read_cmake_set CLEARRA_CORE_TEST_SOURCES "$TEST_MANIFEST")
-if [[ "${#CORE_SOURCES[@]}" -eq 0 || "${#TEST_NAMES[@]}" -eq 0 ||
+if [[ "${#CORE_SOURCES[@]}" -eq 0 || "${#TEST_ORACLE_SOURCES[@]}" -eq 0 ||
+      "${#TEST_NAMES[@]}" -eq 0 ||
       "${#TEST_NAMES[@]}" -ne "${#TEST_SOURCES[@]}" ]]; then
     printf 'Clearra C source/test manifests could not be resolved exactly\n' >&2
     exit 2
@@ -101,11 +105,12 @@ esac
 CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build"
 VARIANT="aggregate-$SANITIZER-profile$PROFILE"
 BUILD_ROOT="$CACHE_ROOT/core-c-tests/$VARIANT"
-mkdir -p "$BUILD_ROOT/core" "$BUILD_ROOT/tests"
+mkdir -p "$BUILD_ROOT/core" "$BUILD_ROOT/oracle" "$BUILD_ROOT/tests"
 
 INPUT_DIGEST="$({
     printf '%s\0' "$(gcc --version | head -n 1)" "${CFLAGS[@]}" "${LDFLAGS[@]}"
     find "$CORE_ROOT/include" "$CORE_ROOT/src" "$CORE_ROOT/tests" \
+        "$CORE_ROOT/tools" \
         -type f \( -name '*.c' -o -name '*.h' \) -print0 \
         | sort -z | xargs -0 sha256sum
     sha256sum "$SOURCE_MANIFEST" "$TEST_MANIFEST" "$ROOT/scripts/tools/wsl-core-c-tests.sh"
@@ -121,7 +126,8 @@ compile_core_source() {
 }
 
 if [[ ! -x "$EXECUTABLE" || ! -f "$STAMP" || "$(<"$STAMP")" != "$INPUT_DIGEST" ]]; then
-    rm -f -- "$BUILD_ROOT/core/"*.o "$BUILD_ROOT/tests/"*.o "$EXECUTABLE"
+    rm -f -- "$BUILD_ROOT/core/"*.o "$BUILD_ROOT/oracle/"*.o \
+        "$BUILD_ROOT/tests/"*.o "$EXECUTABLE"
     declare -a compile_pids=()
     declare -a core_objects=()
     wait_for_compile_slot() {
@@ -135,6 +141,16 @@ if [[ ! -x "$EXECUTABLE" || ! -f "$STAMP" || "$(<"$STAMP")" != "$INPUT_DIGEST" ]
         core_objects+=("$object")
         wait_for_compile_slot
         compile_core_source "$source" "$object" "${CFLAGS[@]}" &
+        compile_pids+=("$!")
+    done
+
+    declare -a oracle_objects=()
+    for source in "${TEST_ORACLE_SOURCES[@]}"; do
+        object="$BUILD_ROOT/oracle/${source//\//_}.o"
+        oracle_objects+=("$object")
+        wait_for_compile_slot
+        gcc "${CFLAGS[@]}" -DCLEARRA_CORE_TEST=1 \
+            -c "$CORE_ROOT/$source" -o "$object" &
         compile_pids+=("$!")
     done
 
@@ -160,7 +176,9 @@ if [[ ! -x "$EXECUTABLE" || ! -f "$STAMP" || "$(<"$STAMP")" != "$INPUT_DIGEST" ]
     for pid in "${compile_pids[@]}"; do wait "$pid"; done
 
     gcc "${CFLAGS[@]}" "$CORE_ROOT/tests/all_tests.c" \
-        "${core_objects[@]}" "${test_objects[@]}" "${LDFLAGS[@]}" \
+        "$CORE_ROOT/tools/geometry_benchmark.c" \
+        "${core_objects[@]}" "${oracle_objects[@]}" "${test_objects[@]}" \
+        "${LDFLAGS[@]}" \
         -o "$EXECUTABLE"
     printf '%s\n' "$INPUT_DIGEST" > "$STAMP"
 fi
@@ -170,5 +188,5 @@ if [[ -n "$TEST_NAME" ]]; then
 else
     "$EXECUTABLE"
 fi
-printf 'clearra-wsl-core-c-tests: aggregate=passed internal=%d workers=%d cache=%s\n' \
-    "${#TEST_NAMES[@]}" "$WORKERS" "$BUILD_ROOT"
+printf 'clearra-wsl-core-c-tests: aggregate=passed internal=%d oracle_sources=%d workers=%d cache=%s\n' \
+    "${#TEST_NAMES[@]}" "${#TEST_ORACLE_SOURCES[@]}" "$WORKERS" "$BUILD_ROOT"

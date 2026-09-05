@@ -138,9 +138,9 @@ run_json_smoke() {
                         halfTurns.has(`${entry?.from}:${entry?.to}`)).length
                     : 0;
                 if (embedded?.id !== "srs-x" || embedded?.source_rule !== "srs-x" ||
-                    embedded?.entries?.length !== 80 || halfTurnCount !== 24) {
+                    embedded?.entries?.length !== 84 || halfTurnCount !== 28) {
                     throw new Error(
-                        "Clearra CLI SRS-X export did not preserve its canonical 80-transition profile"
+                        "Clearra CLI SRS-X export did not preserve its canonical 84-transition profile"
                     );
                 }
             }

@@ -230,6 +230,86 @@ fn proven_empty_evidence_is_complete_only_when_every_source_identity_is_known() 
 }
 
 #[test]
+fn product_deferred_exact_audit_never_claims_portfolio_completion_or_runs_the_solver() {
+    let candidates = four_class_candidates();
+    let keys = candidates
+        .iter()
+        .map(|candidate| candidate.canonical_key().to_owned())
+        .collect::<Vec<_>>();
+    let mut guard_calls = Vec::new();
+    let (report, _) = SolutionSetAuditReport::analyze_with_memory_guard(
+        complete_input(
+            keys,
+            candidates,
+            SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover,
+        ),
+        &mut |owned_bytes| {
+            guard_calls.push(owned_bytes);
+            Ok::<_, ()>(())
+        },
+    )
+    .expect("deferred source audit");
+
+    // One call reserves the generic audit projection and one validates the
+    // retained report. An exact solver would make additional guarded calls.
+    assert_eq!(guard_calls.len(), 2);
+    assert!(!report.complete());
+    assert!(!report.exact_minimum_proven());
+    assert!(!report.portfolio_snapshot().complete());
+    assert_eq!(report.coverage_classes().len(), 4);
+    assert_eq!(report.portfolio_snapshot().len(), 4);
+    assert!(report
+        .stage(SolutionSetAuditStageKind::PortfolioSelected)
+        .rejection_reasons()
+        .iter()
+        .any(|reason| {
+            reason == "exact-minimum-cover-selection-deferred-to-product-coordinator"
+        }));
+}
+
+#[test]
+fn product_deferred_exact_audit_is_fail_closed_for_empty_or_uncovered_sources() {
+    let empty = SolutionSetAuditReport::analyze(
+        SolutionSetAuditInput::new(
+            SolutionProductFamily::Pc,
+            PatternBitSet::new(0),
+            SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover,
+        )
+        .with_source_checkpoints(
+            SolutionAuditCheckpoint::known(0, "produced-empty"),
+            SolutionAuditCheckpoint::known(0, "execution-empty"),
+            SolutionAuditCheckpoint::known(0, "filtered-empty"),
+        )
+        .with_normalized_keys(Vec::new(), true, Vec::<String>::new()),
+    )
+    .expect("deferred empty source audit");
+    assert!(!empty.complete());
+    assert!(!empty.portfolio_snapshot().complete());
+    assert!(empty
+        .stage(SolutionSetAuditStageKind::PortfolioSelected)
+        .rejection_reasons()
+        .iter()
+        .any(|reason| {
+            reason == "exact-minimum-cover-selection-deferred-to-product-coordinator"
+        }));
+
+    let uncovered = SolutionSetAuditReport::analyze(complete_input(
+        vec!["solution-a".to_owned()],
+        vec![candidate("solution-a", &[0], dimensions("minimum-cover"))],
+        SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover,
+    ))
+    .expect("deferred uncovered source audit");
+    assert!(!uncovered.complete());
+    let reasons = uncovered.portfolio_families()[0].incomplete_reasons();
+    assert!(reasons
+        .iter()
+        .any(|reason| reason == "required-pattern-cover-incomplete"));
+    assert!(reasons.iter().any(|reason| {
+        reason == "exact-minimum-cover-selection-deferred-to-product-coordinator"
+    }));
+}
+
+#[test]
 fn lazy_cursor_is_stable_for_equal_snapshots_and_fails_on_snapshot_drift() {
     let candidates = four_class_candidates();
     let keys = candidates
@@ -324,6 +404,65 @@ fn two_pass_exact_selection_matches_exact_cardinality_and_retains_required_patte
         .expect("matching pattern universe"));
     assert!(family.complete());
     assert!(family.exact_minimum_proven());
+}
+
+#[test]
+fn two_pass_exact_selection_exposes_original_row_lex_first_identity() {
+    let candidates = vec![
+        candidate("solution-a", &[1, 2, 3], dimensions("minimum-cover")),
+        candidate("solution-b", &[0], dimensions("minimum-cover")),
+        candidate("solution-c", &[0, 1], dimensions("minimum-cover")),
+    ];
+    let keys = candidates
+        .iter()
+        .map(|candidate| candidate.canonical_key().to_owned())
+        .collect::<Vec<_>>();
+
+    let report = SolutionSetAuditReport::analyze(complete_input(
+        keys,
+        candidates,
+        SolutionPortfolioSelectionPolicy::ExactMinimumCover,
+    ))
+    .expect("two-pass report with a properly dominated original row");
+    let family = &report.portfolio_families()[0];
+
+    // Coverage classes are ordered by their bit words before the exact
+    // portfolio is selected: b={0}, c={0,1}, a={1,2,3}. Both [b,a] and [c,a]
+    // are minimum covers. The exact proof may discard b as dominated, but the
+    // public representative identity must be the original-row lex-first
+    // portfolio [b,a].
+    assert_eq!(family.representative_keys(), ["solution-b", "solution-a"]);
+    assert!(family.complete());
+    assert!(family.exact_minimum_proven());
+}
+
+#[test]
+fn canonical_exact_selection_preserves_incomplete_partial_coverage_evidence() {
+    let candidates = vec![
+        candidate("solution-a", &[0], dimensions("minimum-cover")),
+        candidate("solution-b", &[1], dimensions("minimum-cover")),
+    ];
+    let keys = candidates
+        .iter()
+        .map(|candidate| candidate.canonical_key().to_owned())
+        .collect::<Vec<_>>();
+
+    let report = SolutionSetAuditReport::analyze(complete_input(
+        keys,
+        candidates,
+        SolutionPortfolioSelectionPolicy::ExactMinimumCover,
+    ))
+    .expect("an incomplete family remains a typed partial audit result");
+    let family = &report.portfolio_families()[0];
+
+    assert_eq!(family.representative_keys(), ["solution-a", "solution-b"]);
+    assert_eq!(family.covered_patterns(), &bits(4, &[0, 1]));
+    assert!(!family.complete());
+    assert!(!family.exact_minimum_proven());
+    assert_eq!(
+        family.incomplete_reasons(),
+        ["required-pattern-cover-incomplete"]
+    );
 }
 
 #[test]

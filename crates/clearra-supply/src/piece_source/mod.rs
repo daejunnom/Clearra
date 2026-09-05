@@ -1,5 +1,7 @@
 mod finite_piece_source;
 mod piece_set_id;
+// Preserve the public `piece_source::piece_source` domain path.
+#[allow(clippy::module_inception)]
 pub mod piece_source;
 mod piece_source_descriptors;
 mod piece_source_id;

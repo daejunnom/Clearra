@@ -1,12 +1,17 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createClearraWasmBuildContract,
   serializeClearraWasmManifest,
 } from './clearra-wasm-build-contract.mjs';
+import {
+  CLEARRA_WASM_GENERATION_HISTORY_FILE,
+  captureClearraWasmGenerationRetention,
+  retainPublishedClearraWasmGenerations,
+} from './clearra-wasm-generation-retention.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
@@ -84,6 +89,7 @@ try {
     writeFile(resolve(stagingDir, artifactManifest.wasm.path), wasmBytes)
   ]);
   await writeFile(manifest, serializeClearraWasmManifest(artifactManifest), 'utf8');
+  const retentionSnapshot = await captureClearraWasmGenerationRetention(destinationDir);
   for (const name of [
     artifactManifest.bindings.path,
     artifactManifest.wasm.path,
@@ -96,7 +102,26 @@ try {
     manifest,
     resolve(destinationDir, 'clearra_wasm.manifest.json')
   );
-  await removeStaleVersionedArtifacts(artifactManifest);
+  const retention = await retainPublishedClearraWasmGenerations({
+    destinationDir,
+    currentManifest: artifactManifest,
+    snapshot: retentionSnapshot,
+    publishHistory: async (serializedHistory) => {
+      const stagedHistory = resolve(stagingDir, CLEARRA_WASM_GENERATION_HISTORY_FILE);
+      await writeFile(stagedHistory, serializedHistory, 'utf8');
+      await replaceFileAtomically(
+        stagedHistory,
+        resolve(destinationDir, CLEARRA_WASM_GENERATION_HISTORY_FILE)
+      );
+    },
+  });
+  if (retention.status === 'skipped') {
+    console.warn(`wasm_generation_cleanup=skipped reason=${retention.reason}`);
+  } else {
+    console.log(
+      `wasm_generation_cleanup=retained generations=${retention.retainedGenerationCount} deleted_files=${retention.deleted.length}`
+    );
+  }
   console.log(
     `staged_wasm=${resolve(destinationDir, artifactManifest.wasm.path)} bytes=${destinationStat.size} wasm_sha256=${artifactManifest.wasm.sha256} bindings=${resolve(destinationDir, artifactManifest.bindings.path)} bindings_bytes=${bindingsStat.size} manifest=${resolve(destinationDir, 'clearra_wasm.manifest.json')}`
   );
@@ -106,24 +131,6 @@ try {
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
-}
-
-async function removeStaleVersionedArtifacts(artifactManifest) {
-  const retained = new Set([
-    artifactManifest.bindings.path,
-    artifactManifest.wasm.path
-  ]);
-  for (const name of await readdir(destinationDir)) {
-    if (retained.has(name) || !isVersionedArtifactName(name)) continue;
-    await rm(resolve(destinationDir, name), { force: true });
-  }
-}
-
-function isVersionedArtifactName(name) {
-  return (
-    /^clearra_wasm\.[0-9a-f]{20,64}\.js$/.test(name) ||
-    /^clearra_wasm_bg\.[0-9a-f]{20,64}\.wasm$/.test(name)
-  );
 }
 
 async function replaceFileAtomically(sourcePath, destinationPath) {

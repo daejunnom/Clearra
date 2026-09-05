@@ -25,8 +25,9 @@ use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
 #[cfg(not(target_family = "wasm"))]
 use clearra_pc_graph::request::WorkerPolicy;
 use clearra_postprocess::{
-    ExactScoringExecutionMaterializer, SpinCoverageTarget, TSpinCoverageMaterializationError,
-    TSpinCoverageOnlyMaterializer,
+    ExactReplayMaterializationError, ExactReplayMaterializationLimits,
+    ExactScoringExecutionMaterialization, ExactScoringExecutionMaterializer, SpinCoverageTarget,
+    TSpinCoverageMaterializationError, TSpinCoverageOnlyMaterializer,
 };
 use clearra_problem::{
     BuildProbabilityFinesseRequest, BuildSolutionProbabilityPolicy, SearchProblem, SetupSearchQuery,
@@ -70,7 +71,7 @@ pub use crate::native_build_probability_execution::host_runtime::{
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum AppPcFailedQueueExecutionError {
     Core(CoreExecutionError),
-    EvidenceMemoryAdmission(CoreResourceReport),
+    EvidenceMemoryAdmission(Box<CoreResourceReport>),
     Evidence(PcFailedQueueEvidenceError),
 }
 
@@ -97,7 +98,7 @@ impl AppPcFailedQueueExecutionError {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AppServices {
     core_executor: AppCoreExecutorService,
     file_resolver: AppFileResolver,
@@ -172,18 +173,6 @@ impl AppServices {
     }
 }
 
-impl Default for AppServices {
-    fn default() -> Self {
-        Self {
-            core_executor: AppCoreExecutorService::default(),
-            file_resolver: AppFileResolver::default(),
-            language_resolver: AppLanguageResolverService::default(),
-            clock: AppClock::default(),
-            diagnostic_sink: AppDiagnosticSink::default(),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppCoreExecutorBackend {
     NativeCore,
@@ -199,6 +188,268 @@ impl AppCoreExecutorService {
     pub const fn wasm_cpu() -> Self {
         Self {
             backend: AppCoreExecutorBackend::WasmCpu,
+        }
+    }
+}
+
+fn append_materialized_replays(
+    target: &mut Vec<CorePostProcessExecution>,
+    materialized: ExactScoringExecutionMaterialization,
+) -> Result<(), CoreExecutionError> {
+    let additional = materialized
+        .aggregates()
+        .iter()
+        .try_fold(0_usize, |count, aggregate| {
+            count.checked_add(aggregate.executions().len())
+        })
+        .ok_or(CoreExecutionError::RuntimeUnavailable {
+            component: "complete_replay_execution_count_overflow",
+        })?;
+    target
+        .try_reserve_exact(additional)
+        .map_err(|_| CoreExecutionError::RuntimeUnavailable {
+            component: "complete_replay_output_allocation_failed",
+        })?;
+    for aggregate in materialized.into_aggregates() {
+        let (candidate_id, executions) = aggregate.into_parts();
+        target.extend(executions.into_iter().map(|execution| {
+            let (pattern_id, trace_identity, replay_trace) = execution.into_parts();
+            CorePostProcessExecution::new(candidate_id, pattern_id, trace_identity, replay_trace)
+        }));
+    }
+    Ok(())
+}
+
+fn try_clone_replay_pattern_weights(source: &[String]) -> Result<Vec<String>, CoreExecutionError> {
+    let allocation_error = || CoreExecutionError::RuntimeUnavailable {
+        component: "complete_replay_output_allocation_failed",
+    };
+    let mut cloned = Vec::new();
+    cloned
+        .try_reserve_exact(source.len())
+        .map_err(|_| allocation_error())?;
+    for value in source {
+        let mut copy = String::new();
+        copy.try_reserve_exact(value.len())
+            .map_err(|_| allocation_error())?;
+        copy.push_str(value);
+        cloned.push(copy);
+    }
+    Ok(cloned)
+}
+
+fn checked_materialized_replay_bytes(
+    executions: &[CorePostProcessExecution],
+    capacity: usize,
+) -> Option<u128> {
+    let inline_bytes =
+        (capacity as u128).checked_mul(core::mem::size_of::<CorePostProcessExecution>() as u128)?;
+    executions
+        .iter()
+        .try_fold(inline_bytes, |bytes, execution| {
+            bytes.checked_add(execution.checked_nested_retained_bytes()?)
+        })
+}
+
+// The browser host's authoritative transfer policy never grants less than
+// 16 MiB. Rust does not currently receive the per-session transfer cap through
+// `clearra_wasm_configure_host`, so complete-replay products use that minimum
+// as their portable whole-live ceiling instead of assuming a larger device.
+const COMPLETE_REPLAY_PORTABLE_WHOLE_LIVE_BYTES: u128 = 16_u128 * 1024_u128 * 1024_u128;
+// Path depth is an independent traversal safety cap. It must not be derived
+// from the terminal board area: Build paths may clear rows and consume more
+// pieces than remain in the final target. The command compiler governs the
+// requested source window; this guard only prevents an unbounded/malformed DAG
+// from growing traversal scratch without limit.
+const COMPLETE_REPLAY_MAX_PATH_STEPS: usize = 256;
+// This is the same explicit exhaustive-family ceiling used by the separator
+// joiner. Memory admission normally becomes authoritative first.
+const COMPLETE_REPLAY_MAX_EXECUTIONS: usize = 1_000_000;
+// A retained Core replay is expanded into a typed App witness, a string-heavy
+// Host DTO, an optional canonical witness, and the JSON transfer buffer while
+// earlier owners are still live. Reserving sixteen retained-output bytes for
+// every byte admitted by the materializer covers those simultaneous owners,
+// their vector slots, and traversal scratch rather than treating only the
+// final Core Vec as the memory cost.
+const COMPLETE_REPLAY_TRANSIENT_EXPANSION: u128 = 16;
+// The source graph/result remains live during traversal. A second source-sized
+// reserve covers cloned pattern weights and response-envelope metadata until
+// the typed product has consumed and stripped the private replay evidence.
+const COMPLETE_REPLAY_SOURCE_TRANSIENT_COPIES: u128 = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompleteReplayWholeLiveBudget {
+    maximum_bytes: u128,
+    source_retained_bytes: u128,
+}
+
+impl CompleteReplayWholeLiveBudget {
+    fn from_result(result: &CoreExecutionResult) -> Result<Self, CoreExecutionError> {
+        let memory_authority_occurrences =
+            result.field_occurrence_count("execution_max_memory_mib");
+        if memory_authority_occurrences > 1 {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_authority_invalid",
+            });
+        }
+        let runtime_limit = match (
+            memory_authority_occurrences,
+            result.unique_field("execution_max_memory_mib"),
+        ) {
+            (0, None) | (1, Some("none")) => COMPLETE_REPLAY_PORTABLE_WHOLE_LIVE_BYTES,
+            (1, Some(value)) => value
+                .parse::<u128>()
+                .ok()
+                .and_then(|mib| mib.checked_mul(1024_u128 * 1024_u128))
+                .ok_or(CoreExecutionError::RuntimeUnavailable {
+                    component: "complete_replay_memory_authority_invalid",
+                })?,
+            _ => {
+                return Err(CoreExecutionError::RuntimeUnavailable {
+                    component: "complete_replay_memory_authority_invalid",
+                });
+            }
+        };
+        let maximum_bytes = runtime_limit.min(COMPLETE_REPLAY_PORTABLE_WHOLE_LIVE_BYTES);
+        let source_retained_bytes = result.checked_resource_retained_bytes().ok_or(
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_projection_overflow",
+            },
+        )?;
+        let source_peak = source_retained_bytes
+            .checked_mul(COMPLETE_REPLAY_SOURCE_TRANSIENT_COPIES)
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_projection_overflow",
+            })?;
+        if source_peak > maximum_bytes {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_whole_live_limit_exceeded",
+            });
+        }
+        Ok(Self {
+            maximum_bytes,
+            source_retained_bytes,
+        })
+    }
+
+    fn checked_output_allowance(self) -> Result<u128, CoreExecutionError> {
+        let source_peak = self
+            .source_retained_bytes
+            .checked_mul(COMPLETE_REPLAY_SOURCE_TRANSIENT_COPIES)
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_projection_overflow",
+            })?;
+        self.maximum_bytes
+            .checked_sub(source_peak)
+            .map(|remaining| remaining / COMPLETE_REPLAY_TRANSIENT_EXPANSION)
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_whole_live_limit_exceeded",
+            })
+    }
+
+    fn enforce_output(
+        self,
+        executions: &[CorePostProcessExecution],
+        capacity: usize,
+    ) -> Result<(), CoreExecutionError> {
+        let retained_bytes = checked_materialized_replay_bytes(executions, capacity).ok_or(
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_projection_overflow",
+            },
+        )?;
+        if retained_bytes > self.checked_output_allowance()? {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_whole_live_limit_exceeded",
+            });
+        }
+        Ok(())
+    }
+}
+
+fn remaining_complete_replay_limits(
+    budget: CompleteReplayWholeLiveBudget,
+    executions: &[CorePostProcessExecution],
+    capacity: usize,
+) -> Result<ExactReplayMaterializationLimits, CoreExecutionError> {
+    let retained_bytes = checked_materialized_replay_bytes(executions, capacity).ok_or(
+        CoreExecutionError::RuntimeUnavailable {
+            component: "complete_replay_memory_projection_overflow",
+        },
+    )?;
+    let remaining_bytes = budget
+        .checked_output_allowance()?
+        .checked_sub(retained_bytes)
+        .ok_or(CoreExecutionError::RuntimeUnavailable {
+            component: "complete_replay_whole_live_limit_exceeded",
+        })?;
+    let remaining_executions = COMPLETE_REPLAY_MAX_EXECUTIONS
+        .checked_sub(executions.len())
+        .ok_or(CoreExecutionError::RuntimeUnavailable {
+            component: "complete_replay_execution_limit_exceeded",
+        })?;
+    Ok(ExactReplayMaterializationLimits::new(
+        remaining_executions,
+        COMPLETE_REPLAY_MAX_PATH_STEPS,
+        remaining_bytes,
+    ))
+}
+
+fn enforce_complete_replay_output_limits(
+    budget: CompleteReplayWholeLiveBudget,
+    executions: &[CorePostProcessExecution],
+    capacity: usize,
+) -> Result<(), CoreExecutionError> {
+    if executions.len() > COMPLETE_REPLAY_MAX_EXECUTIONS {
+        return Err(CoreExecutionError::RuntimeUnavailable {
+            component: "complete_replay_execution_limit_exceeded",
+        });
+    }
+    budget.enforce_output(executions, capacity)
+}
+
+fn sort_materialized_replays(executions: &mut [CorePostProcessExecution]) {
+    executions.sort_unstable_by(|left, right| {
+        left.candidate_id()
+            .cmp(&right.candidate_id())
+            .then_with(|| left.pattern_id().cmp(&right.pattern_id()))
+            .then_with(|| left.trace_identity().cmp(right.trace_identity()))
+    });
+}
+
+fn core_error_from_complete_replay_materialization(
+    error: ExactReplayMaterializationError,
+) -> CoreExecutionError {
+    match error {
+        ExactReplayMaterializationError::Cancelled => CoreExecutionError::Cancelled,
+        ExactReplayMaterializationError::InvalidEvidence => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_evidence_invalid",
+            }
+        }
+        ExactReplayMaterializationError::ProjectionOverflow => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_projection_overflow",
+            }
+        }
+        ExactReplayMaterializationError::ExecutionLimitExceeded { .. } => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_execution_limit_exceeded",
+            }
+        }
+        ExactReplayMaterializationError::PathStepLimitExceeded { .. } => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_path_step_limit_exceeded",
+            }
+        }
+        ExactReplayMaterializationError::MemoryLimitExceeded { .. } => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_limit_exceeded",
+            }
+        }
+        ExactReplayMaterializationError::AllocationFailed => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_allocation_failed",
+            }
         }
     }
 }
@@ -256,35 +507,103 @@ impl AppCoreExecutorService {
         result: CoreExecutionResult,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
-        if result.bool_field("postprocess_pc_save_requested") != Some(true)
-            && result.bool_field("postprocess_pc_path_requested") != Some(true)
-        {
+        let save_requested = result.bool_field("postprocess_pc_save_requested") == Some(true);
+        let complete_path_requested =
+            result.bool_field("postprocess_pc_path_requested") == Some(true);
+        if !save_requested && !complete_path_requested {
             return Ok(result);
         }
-        let pattern_weights = result.postprocess_pattern_weights().to_vec();
+        let complete_replay_budget = complete_path_requested
+            .then(|| CompleteReplayWholeLiveBudget::from_result(&result))
+            .transpose()?;
+        let pattern_weights =
+            try_clone_replay_pattern_weights(result.postprocess_pattern_weights())?;
         let mut executions = Vec::new();
         let mut complete = !result.exact_scoring_execution_batches().is_empty();
         for batch in result.exact_scoring_execution_batches() {
-            let materialized =
+            let materialized = if complete_path_requested {
+                ExactScoringExecutionMaterializer::materialize_complete_replays_with_limits(
+                    batch,
+                    control,
+                    remaining_complete_replay_limits(
+                        complete_replay_budget.expect("complete path owns a replay budget"),
+                        &executions,
+                        executions.capacity(),
+                    )?,
+                )
+                .map(|(materialized, _)| materialized)
+                .map_err(core_error_from_complete_replay_materialization)?
+            } else {
                 ExactScoringExecutionMaterializer::materialize_terminal_replays(batch, control)
-                    .map_err(|_| CoreExecutionError::Cancelled)?;
+                    .map_err(|_| CoreExecutionError::Cancelled)?
+            };
             complete &= materialized.complete();
-            for aggregate in materialized.aggregates() {
-                executions.extend(aggregate.executions().iter().map(|execution| {
-                    CorePostProcessExecution::new(
-                        aggregate.candidate_id(),
-                        execution.pattern_id(),
-                        execution.trace_identity(),
-                        execution.replay_trace().clone(),
-                    )
-                }));
+            append_materialized_replays(&mut executions, materialized)?;
+            if complete_path_requested {
+                enforce_complete_replay_output_limits(
+                    complete_replay_budget.expect("complete path owns a replay budget"),
+                    &executions,
+                    executions.capacity(),
+                )?;
             }
         }
-        executions.sort_unstable_by(|left, right| {
-            left.candidate_id()
-                .cmp(&right.candidate_id())
-                .then_with(|| left.pattern_id().cmp(&right.pattern_id()))
-                .then_with(|| left.trace_identity().cmp(right.trace_identity()))
+        sort_materialized_replays(&mut executions);
+        if complete_path_requested {
+            executions.dedup_by(|left, right| {
+                left.candidate_id() == right.candidate_id()
+                    && left.pattern_id() == right.pattern_id()
+                    && left.trace_identity() == right.trace_identity()
+            });
+        }
+        Ok(result.with_postprocess_execution_batch(executions, complete, pattern_weights))
+    }
+
+    /// Materializes the exact Build replay family requested by the
+    /// `build-probability --paths` product adapter.
+    ///
+    /// Unlike the PC save/path seam above, this entry point is selected by a
+    /// nominal Build command mode and therefore does not inspect PC-only
+    /// result markers.  The exact scoring graph remains the sole source of
+    /// operations, locks, and line clears; callers cannot manufacture path
+    /// rows from normalized field keys.
+    pub(crate) fn materialize_build_terminal_replay_partition(
+        &self,
+        result: CoreExecutionResult,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        if control.is_cancelled() {
+            return Err(CoreExecutionError::Cancelled);
+        }
+        let complete_replay_budget = CompleteReplayWholeLiveBudget::from_result(&result)?;
+        let pattern_weights =
+            try_clone_replay_pattern_weights(result.postprocess_pattern_weights())?;
+        let mut executions = Vec::new();
+        let mut complete = !result.exact_scoring_execution_batches().is_empty();
+        for batch in result.exact_scoring_execution_batches() {
+            let (materialized, _) =
+                ExactScoringExecutionMaterializer::materialize_complete_replays_with_limits(
+                    batch,
+                    control,
+                    remaining_complete_replay_limits(
+                        complete_replay_budget,
+                        &executions,
+                        executions.capacity(),
+                    )?,
+                )
+                .map_err(core_error_from_complete_replay_materialization)?;
+            complete &= materialized.complete();
+            append_materialized_replays(&mut executions, materialized)?;
+            enforce_complete_replay_output_limits(
+                complete_replay_budget,
+                &executions,
+                executions.capacity(),
+            )?;
+        }
+        sort_materialized_replays(&mut executions);
+        executions.dedup_by(|left, right| {
+            left.candidate_id() == right.candidate_id()
+                && left.pattern_id() == right.pattern_id()
+                && left.trace_identity() == right.trace_identity()
         });
         Ok(result.with_postprocess_execution_batch(executions, complete, pattern_weights))
     }
@@ -626,6 +945,10 @@ impl AppCoreExecutorService {
         workers: usize,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        // Browser WASM executes this synchronous fallback on its current worker;
+        // the stable service seam still carries the host-selected worker budget.
+        #[cfg(target_family = "wasm")]
+        let _ = workers;
         #[cfg(not(target_family = "wasm"))]
         {
             let workers = workers.max(1).min(WorkerPolicy::hardware_worker_limit());
@@ -1131,11 +1454,7 @@ fn app_error_from_pc_failed_queue_execution(
         PcFailedQueueExecutionError::Percent(error) => {
             if let Some((stage, status, resource_report)) = error.resource_incomplete() {
                 return AppPcFailedQueueExecutionError::Core(
-                    CoreExecutionError::ResourceIncomplete {
-                        stage,
-                        status,
-                        resource_report,
-                    },
+                    CoreExecutionError::resource_incomplete(stage, status, resource_report),
                 );
             }
             if let Some(component) = error.unsupported_reason() {
@@ -1314,6 +1633,44 @@ impl AppCoreExecutorService {
         Ok((result, derivation))
     }
 
+    pub(crate) fn materialize_build_probability_public_result_with_score_derivation(
+        &self,
+        result: CoreExecutionResult,
+        solution_probability_policy: BuildSolutionProbabilityPolicy,
+        control: &ExecutionControl,
+    ) -> Result<(CoreExecutionResult, PcScoreDerivation), CoreExecutionError> {
+        self.materialize_build_probability_public_result_with_score_derivation_and_memory_guard(
+            result,
+            solution_probability_policy,
+            control,
+            |_, _| Ok(()),
+        )
+    }
+
+    pub(crate) fn materialize_build_probability_public_result_with_score_derivation_and_memory_guard(
+        &self,
+        result: CoreExecutionResult,
+        solution_probability_policy: BuildSolutionProbabilityPolicy,
+        control: &ExecutionControl,
+        mut memory_guard: impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
+    ) -> Result<(CoreExecutionResult, PcScoreDerivation), CoreExecutionError> {
+        let (result, derivation) = self
+            .materialize_build_probability_public_result_with_derivation_and_memory_guard(
+                result,
+                solution_probability_policy,
+                control,
+                true,
+                &mut memory_guard,
+            )?;
+        let derivation = derivation.ok_or(CoreExecutionError::RuntimeUnavailable {
+            component: "build_score_derivation_evidence_missing",
+        })?;
+        Ok((result, derivation))
+    }
+
+    // The private switch extends the typed Build execution boundary without
+    // duplicating its six public request/control inputs across two pipelines.
+    #[allow(clippy::too_many_arguments)]
     fn execute_build_probability_with_optional_score_derivation_with_control(
         &self,
         problem: &SearchProblem,
@@ -1335,11 +1692,6 @@ impl AppCoreExecutorService {
                     component: "native_build_probability_host_provider_not_registered",
                 });
             }
-            if retain_private_score_authority {
-                return Err(CoreExecutionError::RuntimeUnavailable {
-                    component: "native_build_probability_score_derivation_not_supported",
-                });
-            }
             return crate::native_build_probability_execution::host_runtime::run_registered_native_build_probability(
                 *self,
                 problem,
@@ -1347,9 +1699,10 @@ impl AppCoreExecutorService {
                 aggregation,
                 &finesse,
                 solution_probability_policy,
+                retain_private_score_authority,
                 control,
             )
-            .map(|result| (result, None));
+            .map(crate::native_build_probability_execution::NativeBuildProbabilityExecutionOutput::into_parts);
         }
         // A native thread pool is product-reachable only through the registered
         // durable host boundary above. A one-worker WasmCpu request retains its
@@ -2033,8 +2386,65 @@ mod execution_constraint_backend_tests {
 
     use super::{
         apply_build_spin_postprocess_with_memory_guard, validate_wasm_build_probability_terminal,
-        AppCoreExecutorService,
+        AppCoreExecutorService, CompleteReplayWholeLiveBudget,
+        COMPLETE_REPLAY_PORTABLE_WHOLE_LIVE_BYTES,
     };
+
+    #[test]
+    fn complete_replay_budget_uses_portable_cap_and_tighter_execution_authority() {
+        let portable = CoreExecutionResult::new(
+            vec![("execution_max_memory_mib".to_owned(), "none".to_owned())],
+            Vec::new(),
+        );
+        let budget = CompleteReplayWholeLiveBudget::from_result(&portable)
+            .expect("small portable replay source");
+        assert_eq!(
+            budget.maximum_bytes,
+            COMPLETE_REPLAY_PORTABLE_WHOLE_LIVE_BYTES
+        );
+
+        let finite = CoreExecutionResult::new(
+            vec![("execution_max_memory_mib".to_owned(), "1".to_owned())],
+            Vec::new(),
+        );
+        let budget = CompleteReplayWholeLiveBudget::from_result(&finite)
+            .expect("one-MiB execution authority");
+        assert_eq!(budget.maximum_bytes, 1024_u128 * 1024_u128);
+
+        let duplicate = CoreExecutionResult::new(
+            vec![
+                ("execution_max_memory_mib".to_owned(), "1".to_owned()),
+                ("execution_max_memory_mib".to_owned(), "2".to_owned()),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            CompleteReplayWholeLiveBudget::from_result(&duplicate),
+            Err(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_authority_invalid",
+            }),
+            "duplicate memory authorities must not fall back to the portable cap"
+        );
+    }
+
+    #[test]
+    fn complete_replay_budget_charges_the_live_core_source_before_materialization() {
+        let source = CoreExecutionResult::new(
+            vec![
+                ("execution_max_memory_mib".to_owned(), "1".to_owned()),
+                ("retained-source".to_owned(), "x".repeat(600 * 1024)),
+            ],
+            Vec::new(),
+        );
+        let error = CompleteReplayWholeLiveBudget::from_result(&source)
+            .expect_err("two live source-sized owners exceed one MiB");
+        assert_eq!(
+            error,
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_whole_live_limit_exceeded",
+            }
+        );
+    }
 
     #[test]
     fn build_probability_terminal_validation_preserves_backend_error_before_missing_authority() {

@@ -121,6 +121,8 @@ impl ExtendedTilingKey {
     }
 }
 
+// Successful build-order state is transferred without an additional allocation.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum ExtendedBuildOrderResult {
     Incomplete {
         searched_nodes: usize,
@@ -302,6 +304,8 @@ pub(super) fn build_extended_order_graph(
     )
 }
 
+// The builder borrows distinct admission and finesse workspaces on its hot path.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_extended_order_graph_with_finesse(
     problem: &SearchProblem,
     catalog: &ExtendedInverseCatalog,
@@ -434,7 +438,7 @@ fn build_extended_order_graph_mode(
         let (board, deleted_rows) = projection.state_for_subset(subset);
         workspace.edge_scratch.clear();
         let mut lock_sets: [Option<ExtendedReachableLocks>; 7] = std::array::from_fn(|_| None);
-        for operation in 0..rows.len() {
+        for (operation, &row_id) in rows.iter().enumerate() {
             let operation_bit = 1_u64 << operation;
             if subset & operation_bit != 0 {
                 continue;
@@ -451,7 +455,6 @@ fn build_extended_order_graph_mode(
             let locks = lock_sets[piece_slot].as_ref();
             let child_subset = subset | operation_bit;
             let (expected_board, expected_deleted) = projection.state_for_subset(child_subset);
-            let row_id = rows[operation];
             let mut build_edge_added = false;
             for realization in catalog.instantiations(row_id, deleted_rows) {
                 let lock_reachable = locks.is_some_and(|locks| {
@@ -676,6 +679,8 @@ fn build_extended_order_graph_mode(
     })
 }
 
+// Pruning operates on independent caller-owned graph and policy surfaces.
+#[allow(clippy::too_many_arguments)]
 fn annotate_and_prune_extended_finesse_graph(
     problem: &SearchProblem,
     projection: &CandidateProjection,

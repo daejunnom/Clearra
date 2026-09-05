@@ -3,6 +3,9 @@ use clearra_app::ProductPageSourceOwner;
 use clearra_host_contract::AppResponse;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// The GUI queue transfers each event once and Completed owns the canonical App
+// response; boxing it would add allocation at every terminal job boundary.
+#[allow(clippy::large_enum_variant)]
 pub enum GuiJobEvent {
     Started {
         job_id: GuiJobId,

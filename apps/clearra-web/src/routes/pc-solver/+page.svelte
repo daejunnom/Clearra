@@ -5,7 +5,8 @@
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     sharedBrowserHostCapabilitySnapshot
   } from '@clearra/ui/wasm';
-  import { setContext } from 'svelte';
+  import { onMount, setContext } from 'svelte';
+  import { installWasmArtifactHotUpdate } from '../../lib/wasmArtifactHotUpdate';
 
   setContext(
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
@@ -17,6 +18,8 @@
       type: 'module'
     });
   }
+
+  onMount(() => installWasmArtifactHotUpdate(import.meta.hot));
 </script>
 
 <PcSolverStandalone

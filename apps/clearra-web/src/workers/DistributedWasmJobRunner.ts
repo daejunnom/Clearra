@@ -23,10 +23,10 @@ import {
   type SharedExecutionResourceLease
 } from './SharedExecutionResourceAuthority';
 
-// Canonical empty-board 4L minimals profiling put 32,768 producer steps at
-// roughly the entire 8 ms host-yield budget on native debug builds. A 2,048
-// step slice stayed below 1 ms there, leaving headroom for slower WASM/browser
-// execution while preserving the exact same resumable producer state.
+// The core applies its own latency bound to PC geometry transactions. Keep a
+// large logical budget here so cheap resumable states can be drained inside a
+// single host quantum; the loop below still yields after this wall-time budget
+// for cancellation, timers, and verifier messages.
 const PRODUCER_WORK_BUDGET = 2_048;
 const CANDIDATE_BATCH_SIZE = 256;
 const HOST_YIELD_BUDGET_MS = 8;
@@ -144,6 +144,48 @@ export class DistributedWasmJobRunner {
     // ownership first because the shared lease has already been acquired.
     this.coordinatorOwned = true;
     return this.wasm.distributed_prepare(commandText);
+  }
+
+  finishPreparedResult(
+    onEvent: (event: ClearraWasmWorkerEvent) => void
+  ): ClearraWasmWorkerEvent {
+    if (!this.resourceLease || this.resourceLease.isReleased() || !this.coordinatorOwned) {
+      throw new Error('prepared terminal result requires an owned execution lease');
+    }
+    try {
+      this.requireActive();
+      onEvent({
+        schema_version: 1,
+        runtime: 'clearra-wasm',
+        event: 'started',
+        job_id: this.jobId
+      });
+      this.requireActive();
+      const decoded = JSON.parse(this.wasm.distributed_finish(this.jobId, 0)) as unknown;
+      if (!Array.isArray(decoded)) {
+        throw new Error('prepared terminal result returned a non-array event payload');
+      }
+      let terminal: ClearraWasmWorkerEvent | null = null;
+      for (const event of decoded as ClearraWasmWorkerEvent[]) {
+        onEvent(event);
+        if (
+          event.event === 'final_response' ||
+          event.event === 'failed' ||
+          event.event === 'cancelled' ||
+          event.event === 'terminated'
+        ) {
+          terminal = event;
+        }
+      }
+      if (!terminal) {
+        throw new Error('prepared App response completed without a terminal event');
+      }
+      this.releaseCompletedRun();
+      return terminal;
+    } catch (error) {
+      this.releaseFailedRun();
+      throw error;
+    }
   }
 
   /**
@@ -313,8 +355,9 @@ export class DistributedWasmJobRunner {
           if (!verifierInitialization) {
             throw new Error('distributed task arrived before worker initialization');
           }
-          await verifierInitialization;
-          this.requireActive();
+          // enqueue() waits for any ready verifier. Do not join the complete
+          // initialization set here: a fast worker must start consuming while
+          // slower workers are still loading the same immutable executable.
           await this.pool.enqueue(produced.batch, (partial) =>
             this.wasm.distributed_merge_partial(partial)
           );
@@ -327,6 +370,7 @@ export class DistributedWasmJobRunner {
         }
         if (produced.status === 'completed') break;
         if (produced.status === 'cancelled') throw new Error('distributed search cancelled');
+        if (performance.now() - lastHostYield < HOST_YIELD_BUDGET_MS) continue;
         await yieldToWorkerHost();
         lastHostYield = performance.now();
         this.requireActive();
@@ -337,8 +381,6 @@ export class DistributedWasmJobRunner {
         if (!verifierInitialization) {
           throw new Error('distributed producer completed without worker initialization');
         }
-        await verifierInitialization;
-        this.requireActive();
         progressPhase = 'draining';
         emitProgress();
         await this.pool.waitForIdle();
@@ -347,8 +389,9 @@ export class DistributedWasmJobRunner {
       if (plan.verificationRequired) {
         progressPhase = 'postprocessing';
         emitProgress();
-        finishedVerifierCount = await this.pool.finish((partial) =>
-          this.wasm.distributed_merge_partial(partial)
+        finishedVerifierCount = await this.pool.finish(
+          (partial) => this.wasm.distributed_merge_partial(partial),
+          { readySubset: true }
         );
         lastVerifierProgress = {
           ...lastVerifierProgress,

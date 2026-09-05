@@ -61,12 +61,13 @@ impl SharedCoverage {
             return true;
         }
         self.words.iter().enumerate().all(|(index, word)| {
-            let expected =
-                if index + 1 == self.words.len() && self.pattern_count % u64::BITS as usize != 0 {
-                    (1_u64 << (self.pattern_count % u64::BITS as usize)) - 1
-                } else {
-                    u64::MAX
-                };
+            let expected = if index + 1 == self.words.len()
+                && !self.pattern_count.is_multiple_of(u64::BITS as usize)
+            {
+                (1_u64 << (self.pattern_count % u64::BITS as usize)) - 1
+            } else {
+                u64::MAX
+            };
             word.load(Ordering::Acquire) == expected
         })
     }

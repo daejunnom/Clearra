@@ -6,7 +6,8 @@
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     sharedBrowserHostCapabilitySnapshot
   } from '@clearra/ui/wasm';
-  import { setContext } from 'svelte';
+  import { onMount, setContext } from 'svelte';
+  import { installWasmArtifactHotUpdate } from '../../../lib/wasmArtifactHotUpdate';
 
   setContext(
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
@@ -20,6 +21,8 @@
   }
 
   $: initialPathState = $page.params.state ?? '';
+
+  onMount(() => installWasmArtifactHotUpdate(import.meta.hot));
 </script>
 
 <PcSolverStandalone

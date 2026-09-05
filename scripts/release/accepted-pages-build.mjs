@@ -8,6 +8,8 @@ import {
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { verifyAcceptedWasmBuild } from "./accepted-wasm-build.mjs";
+
 export const PAGES_IDENTITY_FILE = "clearra-build-identity.json";
 export const PAGES_IDENTITY_SCHEMA = "clearra.pages.identity.v2";
 
@@ -165,6 +167,13 @@ async function validateDeployableSurfaces(root, authority) {
       `accepted Pages HTML does not prove base path ${authority.basePath}`,
     );
   }
+
+  await verifyAcceptedWasmBuild(
+    resolve(root, "wasm"),
+    authority.sourceCommit,
+    authority.acceptedRunId,
+    authority.acceptedRunAttempt,
+  );
 
   const manifestPath = resolve(root, "wasm", "clearra_wasm.manifest.json");
   let manifest;

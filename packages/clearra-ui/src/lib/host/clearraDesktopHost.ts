@@ -141,7 +141,8 @@ export async function loadNextProductPage(
 export async function loadProductMemberPage(
   alternativeIndex: string,
   memberPageNumber: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  maximumWorkSteps = 10_000
 ): Promise<ClearraProductPageWorkerPayload> {
   if (signal?.aborted) throw abortError(signal);
   requireCanonicalProductPageCoordinate(alternativeIndex, 'alternative index');
@@ -157,7 +158,8 @@ export async function loadProductMemberPage(
     }
     const response = await invoke<string>('product_page_get', {
       alternativeIndex,
-      memberPageNumber
+      memberPageNumber,
+      maximumWorkSteps
     });
     if (signal?.aborted) throw abortError(signal);
     return JSON.parse(response) as ClearraProductPageWorkerPayload;

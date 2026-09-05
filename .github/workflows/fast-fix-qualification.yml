@@ -1,0 +1,643 @@
+name: Fast Fix Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact current main commit to classify and qualify
+        required: true
+        type: string
+      baseline_ledger_run_id:
+        description: Optional exact pin for the automatically resolved latest accepted component ledger run
+        required: false
+        type: string
+      baseline_ledger_artifact_name:
+        description: Optional exact artifact pin paired with baseline_ledger_run_id
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: fast-fix-qualification-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+jobs:
+  authority:
+    name: Classify exact-main qualification scope
+    runs-on: ubuntu-latest
+    outputs:
+      source_commit: ${{ steps.impact.outputs.source_commit }}
+      gate_mode: ${{ steps.impact.outputs.gate_mode }}
+      requires_full_gate: ${{ steps.impact.outputs.requires_full_gate }}
+      deploy_pages: ${{ steps.impact.outputs.deploy_pages }}
+      deploy_gui: ${{ steps.impact.outputs.deploy_gui }}
+      deploy_cli: ${{ steps.impact.outputs.deploy_cli }}
+      deploy_discord: ${{ steps.impact.outputs.deploy_discord }}
+      deploy_desktop_gui: ${{ steps.impact.outputs.deploy_desktop_gui }}
+      deploy_discord_gateway: ${{ steps.impact.outputs.deploy_discord_gateway }}
+      deploy_heavy_cloud_runtime: ${{ steps.impact.outputs.deploy_heavy_cloud_runtime }}
+      deploy_pc4_lookup_service: ${{ steps.impact.outputs.deploy_pc4_lookup_service }}
+      deploy_pc4_activation_manifest: ${{ steps.impact.outputs.deploy_pc4_activation_manifest }}
+      release_infrastructure_changed: ${{ steps.impact.outputs.release_infrastructure_changed }}
+      performance_sensitive_changed: ${{ steps.impact.outputs.performance_sensitive_changed }}
+      component_scope: ${{ steps.impact.outputs.component_scope }}
+      changed_components_json: ${{ steps.impact.outputs.changed_components_json }}
+      carry_forward_components_json: ${{ steps.impact.outputs.carry_forward_components_json }}
+      impact_plan_sha256: ${{ steps.impact.outputs.impact_plan_sha256 }}
+      baseline_kind: ${{ steps.impact.outputs.baseline_kind }}
+      baseline_source_commit: ${{ steps.impact.outputs.baseline_source_commit }}
+      baseline_workflow_path: ${{ steps.impact.outputs.baseline_workflow_path }}
+      baseline_run_id: ${{ steps.impact.outputs.baseline_run_id }}
+      baseline_run_attempt: ${{ steps.impact.outputs.baseline_run_attempt }}
+      baseline_ledger_report_sha256: ${{ steps.impact.outputs.baseline_ledger_report_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Require attempt 1, exact current main, and no earlier exact-source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == '1' ]] || {
+            echo 'fast-fix qualification forbids workflow reruns; use a new source commit after failure' >&2
+            exit 2
+          }
+          [[ "$GITHUB_REF" == 'refs/heads/main' && "$GITHUB_REF_TYPE" == 'branch' ]] || {
+            echo 'fast-fix qualification must be dispatched from main' >&2
+            exit 2
+          }
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$SOURCE_COMMIT" == "$GITHUB_SHA" ]] || {
+            echo 'source_commit must equal the dispatch exact main SHA' >&2
+            exit 2
+          }
+          git fetch --force --tags origin main
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" && "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || {
+            echo 'qualification source is not exact current main' >&2
+            exit 2
+          }
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/fast-fix-qualification.yml/runs?event=workflow_dispatch&branch=main&per_page=100" \
+            > "$RUNNER_TEMP/fast-fix-runs.json"
+          prior_attempts="$(jq --arg sha "$SOURCE_COMMIT" --argjson current "$GITHUB_RUN_ID" \
+            '[.[] | .workflow_runs[] | select(.head_sha == $sha and .id != $current)] | length' \
+            "$RUNNER_TEMP/fast-fix-runs.json")"
+          [[ "$prior_attempts" == '0' ]] || {
+            echo 'exact source already has a fast-fix qualification run; use a new source commit after failure' >&2
+            exit 2
+          }
+      - name: Resolve the latest accepted component ledger before classification
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          REQUESTED_BASELINE_RUN_ID: ${{ inputs.baseline_ledger_run_id }}
+          REQUESTED_BASELINE_ARTIFACT_NAME: ${{ inputs.baseline_ledger_artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_BASELINE_RUN_ID" || -n "$REQUESTED_BASELINE_ARTIFACT_NAME" ]]; then
+            [[ "$REQUESTED_BASELINE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+              echo 'baseline ledger run ID and artifact name must be supplied together' >&2
+              exit 2
+            }
+            [[ "$REQUESTED_BASELINE_ARTIFACT_NAME" =~ ^accepted-component-ledger-[0-9a-f]{40}-run-[1-9][0-9]*-attempt-1$ ]] || {
+              echo 'baseline ledger artifact name is invalid' >&2
+              exit 2
+            }
+          fi
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs?event=workflow_dispatch&branch=main&per_page=100" \
+            > "$RUNNER_TEMP/all-main-dispatch-runs.json"
+          latest_accepted_run="$(jq -r \
+            '[.[] | .workflow_runs[] |
+              select((.path == ".github/workflows/component-ledger-bootstrap.yml" or
+                      .path == ".github/workflows/fast-fix-production-finalizer.yml") and
+                     .run_attempt == 1 and .conclusion == "success")] |
+             if length == 0 then "" else (max_by(.id).id | tostring) end' \
+            "$RUNNER_TEMP/all-main-dispatch-runs.json")"
+          if [[ -z "$latest_accepted_run" ]]; then
+            [[ -z "$REQUESTED_BASELINE_RUN_ID" && -z "$REQUESTED_BASELINE_ARTIFACT_NAME" ]] || {
+              echo 'requested baseline exists only by assertion; no accepted ledger run exists' >&2
+              exit 2
+            }
+            echo 'has_baseline=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ -z "$REQUESTED_BASELINE_RUN_ID" || "$REQUESTED_BASELINE_RUN_ID" == "$latest_accepted_run" ]] || {
+            echo 'baseline is not the last successful accepted component ledger run' >&2
+            exit 2
+          }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$latest_accepted_run/attempts/1" \
+            > "$RUNNER_TEMP/baseline-run.json"
+          baseline_sha="$(jq -r '.head_sha // empty' "$RUNNER_TEMP/baseline-run.json")"
+          baseline_path="$(jq -r '.path // empty' "$RUNNER_TEMP/baseline-run.json")"
+          jq -e --argjson id "$latest_accepted_run" \
+            '.id == $id and .run_attempt == 1 and .event == "workflow_dispatch" and
+             .head_branch == "main" and .head_repository.full_name == env.GITHUB_REPOSITORY and
+             .status == "completed" and .conclusion == "success"' \
+            "$RUNNER_TEMP/baseline-run.json" >/dev/null
+          [[ "$baseline_path" == '.github/workflows/component-ledger-bootstrap.yml' ||
+             "$baseline_path" == '.github/workflows/fast-fix-production-finalizer.yml' ]] || {
+            echo 'baseline ledger workflow is not an accepted authority' >&2
+            exit 2
+          }
+          [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ && "$baseline_sha" != "$SOURCE_COMMIT" ]] || {
+            echo 'baseline source must be a distinct full commit' >&2
+            exit 2
+          }
+          git cat-file -e "$baseline_sha^{commit}" || {
+            echo 'baseline source is absent from fetched main history' >&2
+            exit 2
+          }
+          git merge-base --is-ancestor "$baseline_sha" "$SOURCE_COMMIT" || {
+            echo 'baseline source is not an ancestor of the qualification source' >&2
+            exit 2
+          }
+          expected_name="accepted-component-ledger-${baseline_sha}-run-${latest_accepted_run}-attempt-1"
+          [[ -z "$REQUESTED_BASELINE_ARTIFACT_NAME" || "$REQUESTED_BASELINE_ARTIFACT_NAME" == "$expected_name" ]] || {
+            echo 'baseline ledger artifact name differs from its exact source/run authority' >&2
+            exit 2
+          }
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$latest_accepted_run/artifacts?per_page=100" \
+            > "$RUNNER_TEMP/baseline-artifacts.json"
+          expected_total="$(jq -r '.[0].total_count // -1' "$RUNNER_TEMP/baseline-artifacts.json")"
+          actual_total="$(jq '[.[] | .artifacts[]] | length' "$RUNNER_TEMP/baseline-artifacts.json")"
+          consistent_totals="$(jq '[.[].total_count] | unique | length' "$RUNNER_TEMP/baseline-artifacts.json")"
+          [[ "$expected_total" == "$actual_total" && "$consistent_totals" == '1' ]] || {
+            echo 'baseline artifact pagination is incomplete or unstable' >&2
+            exit 2
+          }
+          matches="$(jq --arg name "$expected_name" \
+            '[.[] | .artifacts[] | select(.name == $name and .expired == false)] | length' \
+            "$RUNNER_TEMP/baseline-artifacts.json")"
+          [[ "$matches" == '1' ]] || {
+            echo 'latest baseline ledger artifact is missing, expired, or ambiguous' >&2
+            exit 2
+          }
+          jq -e --arg name "$expected_name" --argjson run "$latest_accepted_run" \
+            '[.[] | .artifacts[] | select(.name == $name)][0] |
+             (.workflow_run.id == $run) and (.digest | test("^sha256:[0-9a-f]{64}$"))' \
+            "$RUNNER_TEMP/baseline-artifacts.json" >/dev/null
+          echo 'has_baseline=true' >> "$GITHUB_OUTPUT"
+          echo "baseline_source_commit=$baseline_sha" >> "$GITHUB_OUTPUT"
+          echo "baseline_workflow_path=$baseline_path" >> "$GITHUB_OUTPUT"
+          echo "baseline_run_id=$latest_accepted_run" >> "$GITHUB_OUTPUT"
+          echo 'baseline_run_attempt=1' >> "$GITHUB_OUTPUT"
+          echo "baseline_artifact_name=$expected_name" >> "$GITHUB_OUTPUT"
+      - name: Download the latest accepted component ledger
+        if: steps.baseline.outputs.has_baseline == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.baseline.outputs.baseline_artifact_name }}
+          path: baseline-ledger
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.baseline.outputs.baseline_run_id }}
+      - name: Verify the latest accepted component ledger before classification
+        if: steps.baseline.outputs.has_baseline == 'true'
+        id: baseline-report
+        env:
+          BASELINE_RUN_ID: ${{ steps.baseline.outputs.baseline_run_id }}
+          BASELINE_WORKFLOW_PATH: ${{ steps.baseline.outputs.baseline_workflow_path }}
+          BASELINE_SOURCE_COMMIT: ${{ steps.baseline.outputs.baseline_source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(find baseline-ledger -mindepth 1 -maxdepth 1 -type f -printf '%f\n')" == 'clearra-accepted-component-ledger.v1.json' ]]
+          [[ "$(find baseline-ledger -mindepth 1 -maxdepth 1 | wc -l)" == '1' ]]
+          node scripts/release/fast-fix-qualification-evidence.mjs verify-baseline \
+            --baseline baseline-ledger/clearra-accepted-component-ledger.v1.json \
+            --expected-repository "$GITHUB_REPOSITORY" \
+            --expected-source-commit "$BASELINE_SOURCE_COMMIT" \
+            --expected-run-id "$BASELINE_RUN_ID" --expected-run-attempt 1 \
+            --expected-workflow-path "$BASELINE_WORKFLOW_PATH"
+          report_sha256="$(jq -r '.report_sha256 // empty' baseline-ledger/clearra-accepted-component-ledger.v1.json)"
+          [[ "$report_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "baseline_ledger_report_sha256=$report_sha256" >> "$GITHUB_OUTPUT"
+      - name: Calculate closed deployment-impact qualification plan
+        id: impact
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          HAS_BASELINE: ${{ steps.baseline.outputs.has_baseline }}
+          BASELINE_SOURCE_COMMIT: ${{ steps.baseline.outputs.baseline_source_commit }}
+          BASELINE_WORKFLOW_PATH: ${{ steps.baseline.outputs.baseline_workflow_path }}
+          BASELINE_RUN_ID: ${{ steps.baseline.outputs.baseline_run_id }}
+          BASELINE_RUN_ATTEMPT: ${{ steps.baseline.outputs.baseline_run_attempt }}
+          BASELINE_LEDGER_REPORT_SHA256: ${{ steps.baseline-report.outputs.baseline_ledger_report_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--source-commit "$SOURCE_COMMIT")
+          if [[ "$HAS_BASELINE" == 'true' ]]; then
+            args+=(
+              --baseline-kind accepted-component-ledger
+              --baseline-source-commit "$BASELINE_SOURCE_COMMIT"
+              --baseline-workflow-path "$BASELINE_WORKFLOW_PATH"
+              --baseline-run-id "$BASELINE_RUN_ID"
+              --baseline-run-attempt "$BASELINE_RUN_ATTEMPT"
+              --baseline-ledger-report-sha256 "$BASELINE_LEDGER_REPORT_SHA256"
+            )
+          fi
+          node scripts/release/deployment-impact.mjs "${args[@]}" --format json \
+            > "$RUNNER_TEMP/fast-fix-impact.json"
+          gate_mode="$(jq -r '.gate_mode' "$RUNNER_TEMP/fast-fix-impact.json")"
+          baseline_kind="$(jq -r '.baseline_kind' "$RUNNER_TEMP/fast-fix-impact.json")"
+          if [[ "$HAS_BASELINE" == 'true' ]]; then
+            [[ "$baseline_kind" == 'accepted-component-ledger' ]] || exit 2
+          elif [[ "$baseline_kind" != 'production-tag' || "$gate_mode" != 'full' ]]; then
+            echo 'fast-fix focused/no-product qualification requires a bootstrapped accepted component ledger' >&2
+            exit 2
+          fi
+          node scripts/release/deployment-impact.mjs "${args[@]}" --format github-output \
+            >> "$GITHUB_OUTPUT"
+      - name: Upload immutable qualification plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-fix-impact-${{ inputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fast-fix-impact.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Re-upload verified baseline for qualification fan-in
+        if: steps.baseline.outputs.has_baseline == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-fix-verified-baseline-${{ inputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: baseline-ledger/clearra-accepted-component-ledger.v1.json
+          if-no-files-found: error
+          retention-days: 1
+
+  canonical-promotion:
+    name: Request canonical full gate for promoted impact
+    if: needs.authority.outputs.requires_full_gate == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download exact impact plan
+        uses: actions/download-artifact@v4
+        with:
+          name: fast-fix-impact-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: impact
+      - name: Revalidate exact main and request one fresh canonical dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ needs.authority.outputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == '1' ]] || exit 2
+          git fetch --no-tags --depth=1 origin main
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
+            echo 'main moved after qualification classification' >&2
+            exit 2
+          }
+          node scripts/release/canonical-acceptance-run.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$SOURCE_COMMIT" --require zero
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/release-cli.yml/runs?event=workflow_dispatch&branch=main&per_page=100" \
+            > "$RUNNER_TEMP/canonical-runs.json"
+          prior_canonical_runs="$(jq --arg sha "$SOURCE_COMMIT" \
+            '[.[] | .workflow_runs[] | select(.head_sha == $sha)] | length' \
+            "$RUNNER_TEMP/canonical-runs.json")"
+          [[ "$prior_canonical_runs" == '0' ]] || {
+            echo 'the exact source already has a canonical run; use a new source commit after failure' >&2
+            exit 2
+          }
+          node scripts/release/fast-fix-qualification-evidence.mjs promotion \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --impact impact/fast-fix-impact.json \
+            --output "$RUNNER_TEMP/clearra-fast-fix-canonical-promotion.v1.json"
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/release-cli.yml/dispatches" \
+            -f ref=main
+      - name: Upload closed canonical-promotion request evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-fix-canonical-promotion-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clearra-fast-fix-canonical-promotion.v1.json
+          if-no-files-found: error
+          retention-days: 90
+
+  carry-forward:
+    name: Carry the pre-classification accepted component ledger
+    if: needs.authority.outputs.requires_full_gate != 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download pre-classification verified baseline
+        uses: actions/download-artifact@v4
+        with:
+          name: fast-fix-verified-baseline-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: baseline-ledger
+      - name: Revalidate exact baseline identity at the fan-in boundary
+        env:
+          BASELINE_RUN_ID: ${{ needs.authority.outputs.baseline_run_id }}
+          BASELINE_WORKFLOW_PATH: ${{ needs.authority.outputs.baseline_workflow_path }}
+          BASELINE_SOURCE_COMMIT: ${{ needs.authority.outputs.baseline_source_commit }}
+          BASELINE_LEDGER_REPORT_SHA256: ${{ needs.authority.outputs.baseline_ledger_report_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(find baseline-ledger -mindepth 1 -maxdepth 1 -type f -printf '%f\n')" == 'clearra-accepted-component-ledger.v1.json' ]]
+          [[ "$(find baseline-ledger -mindepth 1 -maxdepth 1 | wc -l)" == '1' ]]
+          node scripts/release/fast-fix-qualification-evidence.mjs verify-baseline \
+            --baseline baseline-ledger/clearra-accepted-component-ledger.v1.json \
+            --expected-repository "$GITHUB_REPOSITORY" \
+            --expected-source-commit "$BASELINE_SOURCE_COMMIT" \
+            --expected-run-id "$BASELINE_RUN_ID" --expected-run-attempt 1 \
+            --expected-workflow-path "$BASELINE_WORKFLOW_PATH"
+          [[ "$(jq -r '.report_sha256' baseline-ledger/clearra-accepted-component-ledger.v1.json)" == "$BASELINE_LEDGER_REPORT_SHA256" ]]
+
+  qualify-pages:
+    name: Qualify changed Pages component
+    if: needs.authority.outputs.gate_mode == 'focused' && needs.authority.outputs.deploy_pages == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Run closed Pages component tests
+        run: node scripts/tools/run-focused-js-tests.mjs apps/clearra-web/test/ClearraWasmRuntime.contract.ts packages/clearra-ui/test/pagesEssentialSurface.test.mjs
+      - name: Seal Pages qualification evidence
+        run: >-
+          node scripts/release/fast-fix-qualification-evidence.mjs component
+          --repository "$GITHUB_REPOSITORY" --source-commit "${{ needs.authority.outputs.source_commit }}"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --component pages
+          --command "node scripts/tools/run-focused-js-tests.mjs apps/clearra-web/test/ClearraWasmRuntime.contract.ts packages/clearra-ui/test/pagesEssentialSurface.test.mjs"
+          --output "$RUNNER_TEMP/pages.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fast-fix-component-pages-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pages.json
+          if-no-files-found: error
+
+  qualify-desktop-gui:
+    name: Qualify changed Desktop GUI component
+    if: needs.authority.outputs.gate_mode == 'focused' && needs.authority.outputs.deploy_gui == 'true' && needs.authority.outputs.deploy_desktop_gui == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Run closed Desktop GUI component tests
+        run: node scripts/tools/run-focused-js-tests.mjs packages/clearra-ui/test/desktopProductPageCancellation.test.mjs packages/clearra-ui/test/uiRuntimeContracts.test.mjs
+      - name: Seal Desktop GUI qualification evidence
+        run: >-
+          node scripts/release/fast-fix-qualification-evidence.mjs component
+          --repository "$GITHUB_REPOSITORY" --source-commit "${{ needs.authority.outputs.source_commit }}"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --component desktop_gui
+          --command "node scripts/tools/run-focused-js-tests.mjs packages/clearra-ui/test/desktopProductPageCancellation.test.mjs packages/clearra-ui/test/uiRuntimeContracts.test.mjs"
+          --output "$RUNNER_TEMP/desktop_gui.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fast-fix-component-desktop-gui-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/desktop_gui.json
+          if-no-files-found: error
+
+  qualify-cli:
+    name: Qualify changed CLI component
+    if: needs.authority.outputs.gate_mode == 'focused' && needs.authority.outputs.deploy_cli == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run closed CLI component test
+        run: cargo test -p clearra-cli --test product_cli_surface_contract -- --test-threads=1
+      - name: Seal CLI qualification evidence
+        run: >-
+          node scripts/release/fast-fix-qualification-evidence.mjs component
+          --repository "$GITHUB_REPOSITORY" --source-commit "${{ needs.authority.outputs.source_commit }}"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --component cli
+          --command "cargo test -p clearra-cli --test product_cli_surface_contract -- --test-threads=1"
+          --output "$RUNNER_TEMP/cli.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fast-fix-component-cli-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cli.json
+          if-no-files-found: error
+
+  qualify-discord-gateway:
+    name: Qualify changed Discord gateway component
+    if: needs.authority.outputs.gate_mode == 'focused' && needs.authority.outputs.deploy_discord == 'true' && needs.authority.outputs.deploy_discord_gateway == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Run closed Discord gateway component tests
+        run: node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/capability-registry.test.mjs apps/clearra-discord-bot/test/cli-authority-result-paths.test.mjs
+      - name: Seal Discord gateway qualification evidence
+        run: >-
+          node scripts/release/fast-fix-qualification-evidence.mjs component
+          --repository "$GITHUB_REPOSITORY" --source-commit "${{ needs.authority.outputs.source_commit }}"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --component discord_gateway
+          --command "node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/capability-registry.test.mjs apps/clearra-discord-bot/test/cli-authority-result-paths.test.mjs"
+          --output "$RUNNER_TEMP/discord_gateway.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fast-fix-component-discord-gateway-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/discord_gateway.json
+          if-no-files-found: error
+
+  qualify-heavy-cloud-runtime:
+    name: Qualify changed heavy Cloud runtime component
+    if: needs.authority.outputs.gate_mode == 'focused' && needs.authority.outputs.deploy_discord == 'true' && needs.authority.outputs.deploy_heavy_cloud_runtime == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Run closed heavy Cloud runtime component tests
+        run: node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/cloud-candidate-smoke-job.test.mjs apps/clearra-discord-bot/test/current-job-container-closure.test.mjs
+      - name: Seal heavy Cloud runtime qualification evidence
+        run: >-
+          node scripts/release/fast-fix-qualification-evidence.mjs component
+          --repository "$GITHUB_REPOSITORY" --source-commit "${{ needs.authority.outputs.source_commit }}"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --component heavy_cloud_runtime
+          --command "node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/cloud-candidate-smoke-job.test.mjs apps/clearra-discord-bot/test/current-job-container-closure.test.mjs"
+          --output "$RUNNER_TEMP/heavy_cloud_runtime.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fast-fix-component-heavy-cloud-runtime-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/heavy_cloud_runtime.json
+          if-no-files-found: error
+
+  qualify-pc4-lookup-service:
+    name: Reject unsupported pre-v0.9 PC4 lookup fast qualification
+    if: needs.authority.outputs.gate_mode == 'focused' && needs.authority.outputs.deploy_pc4_lookup_service == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo 'PC4 lookup fast qualification is unavailable before v0.9; promote this change to canonical scope' >&2
+          exit 2
+
+  qualify-pc4-activation-manifest:
+    name: Reject unsupported pre-v0.9 PC4 activation fast qualification
+    if: needs.authority.outputs.gate_mode == 'focused' && needs.authority.outputs.deploy_pc4_activation_manifest == 'true'
+    needs: authority
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo 'PC4 activation fast qualification is unavailable before v0.9; promote this change to canonical scope' >&2
+          exit 2
+
+  qualification-evidence:
+    name: Seal qualification-only component ledger
+    if: always() && needs.authority.result == 'success' && needs.authority.outputs.requires_full_gate != 'true'
+    needs:
+      - authority
+      - carry-forward
+      - qualify-pages
+      - qualify-desktop-gui
+      - qualify-cli
+      - qualify-discord-gateway
+      - qualify-heavy-cloud-runtime
+      - qualify-pc4-lookup-service
+      - qualify-pc4-activation-manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.source_commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Require exact conditional job topology
+        env:
+          GATE_MODE: ${{ needs.authority.outputs.gate_mode }}
+          CARRY_RESULT: ${{ needs['carry-forward'].result }}
+          PAGES_SELECTED: ${{ needs.authority.outputs.deploy_pages }}
+          PAGES_RESULT: ${{ needs['qualify-pages'].result }}
+          GUI_SELECTED: ${{ needs.authority.outputs.deploy_desktop_gui }}
+          GUI_RESULT: ${{ needs['qualify-desktop-gui'].result }}
+          CLI_SELECTED: ${{ needs.authority.outputs.deploy_cli }}
+          CLI_RESULT: ${{ needs['qualify-cli'].result }}
+          DISCORD_SELECTED: ${{ needs.authority.outputs.deploy_discord_gateway }}
+          DISCORD_RESULT: ${{ needs['qualify-discord-gateway'].result }}
+          CLOUD_SELECTED: ${{ needs.authority.outputs.deploy_heavy_cloud_runtime }}
+          CLOUD_RESULT: ${{ needs['qualify-heavy-cloud-runtime'].result }}
+          PC4_LOOKUP_SELECTED: ${{ needs.authority.outputs.deploy_pc4_lookup_service }}
+          PC4_LOOKUP_RESULT: ${{ needs['qualify-pc4-lookup-service'].result }}
+          PC4_MANIFEST_SELECTED: ${{ needs.authority.outputs.deploy_pc4_activation_manifest }}
+          PC4_MANIFEST_RESULT: ${{ needs['qualify-pc4-activation-manifest'].result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GATE_MODE" == 'none' || "$GATE_MODE" == 'focused' ]]
+          [[ "$CARRY_RESULT" == 'success' ]]
+          check_result() {
+            local selected="$1" result="$2" label="$3"
+            if [[ "$selected" == 'true' ]]; then
+              [[ "$result" == 'success' ]] || { echo "$label qualification did not pass" >&2; exit 2; }
+            else
+              [[ "$result" == 'skipped' ]] || { echo "$label unselected job was not skipped" >&2; exit 2; }
+            fi
+          }
+          check_result "$PAGES_SELECTED" "$PAGES_RESULT" pages
+          check_result "$GUI_SELECTED" "$GUI_RESULT" desktop_gui
+          check_result "$CLI_SELECTED" "$CLI_RESULT" cli
+          check_result "$DISCORD_SELECTED" "$DISCORD_RESULT" discord_gateway
+          check_result "$CLOUD_SELECTED" "$CLOUD_RESULT" heavy_cloud_runtime
+          check_result "$PC4_LOOKUP_SELECTED" "$PC4_LOOKUP_RESULT" pc4_lookup_service
+          check_result "$PC4_MANIFEST_SELECTED" "$PC4_MANIFEST_RESULT" pc4_activation_manifest
+      - name: Download exact impact and verified baseline evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fast-fix-*-baseline-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fan-in
+          merge-multiple: true
+      - name: Download exact impact plan separately
+        uses: actions/download-artifact@v4
+        with:
+          name: fast-fix-impact-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: impact
+      - name: Download selected component evidence
+        if: needs.authority.outputs.gate_mode == 'focused'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fast-fix-component-*-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: component-evidence
+          merge-multiple: true
+      - name: Seal closed qualification-only evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          [[ "$(git rev-parse origin/main)" == '${{ needs.authority.outputs.source_commit }}' ]] || {
+            echo 'main moved before qualification fan-in' >&2
+            exit 2
+          }
+          mkdir -p component-evidence
+          node scripts/release/fast-fix-qualification-evidence.mjs ledger \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "${{ needs.authority.outputs.source_commit }}" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --baseline fan-in/clearra-accepted-component-ledger.v1.json \
+            --impact impact/fast-fix-impact.json \
+            --component-directory component-evidence \
+            --output "$RUNNER_TEMP/clearra-fast-fix-qualification-ledger.v1.json"
+      - name: Upload qualification-only ledger
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-fix-qualification-ledger-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clearra-fast-fix-qualification-ledger.v1.json
+          if-no-files-found: error
+          retention-days: 90

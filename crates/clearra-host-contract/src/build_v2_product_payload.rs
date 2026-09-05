@@ -557,6 +557,10 @@ impl BuildV2ProductPayload {
                 (self.capability_id.as_str(), self.result_contract.as_str()),
                 ("build.setup-cover-score", "build-setup-cover-score.v1")
                     | ("build.evaluate.score", "build-supplied-score.v1")
+                    | (
+                        "build.highest-score-minimum-set",
+                        "build-probability-score-minimum.v1"
+                    )
             ),
         };
         if !contract_pair_valid {

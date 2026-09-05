@@ -20,6 +20,10 @@ impl FixedPieceSequence {
         self.pieces.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
     /// Returns only the heap payload retained by the piece buffer, measured by
     /// allocation capacity. The inline descriptor is excluded.
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {

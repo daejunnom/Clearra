@@ -962,18 +962,14 @@ impl WebCommandRequest {
             }
             PcResultProjection::ScoreSummaryV2(_) | PcResultProjection::ScorePortfolioV2(_) => {
                 if self.backend != RequestedSearchBackend::Cpu
-                    || self.workers != Some(1)
-                    || self.automatic_worker_limit.is_some()
-                    || self.use_all_logical_processors
                     || self.allow_backend_fallback
                     || self.gpu_device != GpuDeviceSelection::Auto
-                    || self.cpu_warmup
                     || self.gpu_warmup
                     || self.tablebase_requested
                     || self.precompute_build_dependencies
                 {
                     return Err(invalid(
-                        "pc score requires the fixed Wasm CPU single-session execution policy",
+                        "pc score requires its product-owned CPU execution policy",
                     ));
                 }
                 if self.max_memory_mib.is_some() {
@@ -1702,7 +1698,9 @@ impl WebCommandRequest {
                 ));
             }
             let request = AppRequest::new(AppCommand::BuildProbability(
-                BuildProbabilityAppCommand::new(query),
+                BuildProbabilityAppCommand::new(query)
+                    .with_result_mode(input.result_mode())
+                    .with_failed_pattern_limit(input.failed_pattern_limit()),
             ))
             .with_resource_budget(resource_budget);
             return self.attach_product_capability_contract(request);
@@ -1755,6 +1753,7 @@ impl WebCommandRequest {
             .with_queue(queue)
             .with_rule(self.rule)
             .with_objective(self.objective)
+            .with_count_policy(self.count_policy)
             .with_queue_observation_policy(self.queue_observation_policy)
             .with_hold_policy(if self.hold_enabled {
                 PcHoldPolicy::default()

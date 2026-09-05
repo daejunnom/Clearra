@@ -51,6 +51,9 @@ impl PcScoreQuerySnapshot {
         }
     }
 
+    // The included production module requires this query seam, while these
+    // contract fixtures never exercise resource-accounting admission directly.
+    #[allow(dead_code)]
     pub(crate) fn checked_pointee_retained_bytes(&self) -> Option<u128> {
         Some(self.marker.len() as u128)
     }
@@ -208,6 +211,9 @@ pub struct PcScoreSummaryV2Result {
     completeness: PcScoreCompletenessEvidence,
 }
 
+// Compatibility facade required by the included production module; this test
+// validates portfolio semantics rather than minting summary evidence itself.
+#[allow(dead_code)]
 pub mod pc_score_summary_result {
     use clearra_core_executor::CoreExecutionResult;
 
@@ -356,6 +362,9 @@ pub mod pc_score_postprocess {
 }
 
 #[path = "../src/pc_score_minimum_cover_result.rs"]
+// This integration crate includes the production reducer in isolation, so its
+// full public-in-crate inspection surface is intentionally not consumed here.
+#[allow(dead_code)]
 mod pc_score_minimum_cover_result;
 
 use clearra_app::PortfolioEnumerationStop;
@@ -471,6 +480,62 @@ fn b_option_keeps_every_score_tie_and_enumerates_every_minimum_cover() {
         }
     }
     assert_eq!(portfolios, [vec![1, 3], vec![1, 4], vec![2, 3], vec![2, 4]]);
+}
+
+#[test]
+fn score_portfolio_canonical_identity_keeps_lex_first_properly_dominated_row() {
+    // Candidate 2 covers a proper subset of candidate 3. It is therefore
+    // disposable for proving k*=2, but it still belongs to the first optimum
+    // in the canonical original-row order: [1, 2], before [1, 3]. A solver
+    // proof row must never replace that presentation identity.
+    let winners = vec![
+        PcScorePatternWinnerV1::fixture(0, 2, 100, u32::MAX),
+        PcScorePatternWinnerV1::fixture(0, 3, 100, 0),
+        PcScorePatternWinnerV1::fixture(1, 1, 200, 7),
+        PcScorePatternWinnerV1::fixture(1, 3, 200, 9),
+        PcScorePatternWinnerV1::fixture(2, 1, 300, 11),
+    ];
+    let mut derivation_winners = winners.clone();
+    derivation_winners.reverse();
+    let (summary, derivation) = authority_fixture(winners, derivation_winners, 3);
+
+    let result = validate_pc_score_portfolio_v2_result(&summary, &derivation)
+        .expect("proper-dominance score portfolio");
+
+    assert_eq!(result.portfolio_alternatives().optimal_cardinality(), 2);
+    assert_eq!(result.selected_score_candidate_ids(), &[1, 2]);
+    assert_eq!(result.canonical_score_candidate_id(), 1);
+    assert_eq!(
+        result
+            .portfolio_alternatives()
+            .canonical_page()
+            .portfolio()
+            .candidate_ids(),
+        &[1, 2]
+    );
+    assert_eq!(
+        result.selected_solution_keys(),
+        &[
+            NormalizedTilingSolutionKey::from_standard_board64_identity(identity(1)).to_string(),
+            NormalizedTilingSolutionKey::from_standard_board64_identity(identity(2)).to_string(),
+        ]
+    );
+
+    let mut store = result
+        .portfolio_alternatives()
+        .open_store()
+        .expect("proper-dominance lazy exact store");
+    let second = store
+        .next_page(u64::MAX, &mut || false)
+        .expect("second proper-dominance optimum");
+    assert_eq!(
+        second
+            .page()
+            .expect("second optimum page")
+            .portfolio()
+            .candidate_ids(),
+        &[1, 3]
+    );
 }
 
 #[test]

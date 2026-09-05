@@ -137,7 +137,7 @@ mod case_replay_trace_contract_preserves_marker_line_clear_and_colored_ownership
                     if member_value(members, "type") == &JsonValue::string("lock")
                         && matches!(
                             member_value(members, "cleared_cell_owners"),
-                            JsonValue::Array(owners) if owners.len() == 0
+                                    JsonValue::Array(owners) if owners.is_empty()
                         )
             )
         }));

@@ -288,10 +288,11 @@ impl ExecutionAvailabilityReport {
             &self.dense_pattern_count,
             &self.required_dense_bytes,
             &self.required_memory_bytes,
-        ] {
-            if let Some(value) = value {
-                bytes = bytes.checked_add(value.capacity() as u128)?;
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes = bytes.checked_add(value.capacity() as u128)?;
         }
         Some(bytes)
     }

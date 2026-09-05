@@ -9,13 +9,15 @@
 
 use std::{
     collections::BTreeMap,
-    env,
     error::Error,
     fmt,
     fs::{self, File, OpenOptions, TryLockError},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+
+#[cfg(any(test, windows, unix))]
+use std::env;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -428,6 +430,17 @@ pub struct NativeJsonlDelegationJournal {
     header_len: u64,
 }
 
+// Native hosts must release the writer lock before moving a corrupt journal.
+// On wasm32 `std::fs::File` is an unsupported-platform facade without a Drop
+// implementation, but consuming it here keeps the same ownership boundary.
+#[cfg(not(target_arch = "wasm32"))]
+fn release_native_file(file: File) {
+    drop(file);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn release_native_file(_file: File) {}
+
 impl NativeJsonlDelegationJournal {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DelegationJournalError> {
         Self::open_bound(path.as_ref().to_path_buf(), None)
@@ -457,6 +470,7 @@ impl NativeJsonlDelegationJournal {
         }
         let mut file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)?;
@@ -481,7 +495,7 @@ impl NativeJsonlDelegationJournal {
                 match parse_native_header(&bytes, job_id) {
                     Ok(value) => value,
                     Err(DelegationJournalError::Corrupt { line, reason }) => {
-                        drop(file);
+                        release_native_file(file);
                         let combined = format!("line {line}: {reason}");
                         let quarantine = quarantine_native_path(&path, &bytes, &combined)?;
                         return Err(DelegationJournalError::Quarantined {
@@ -499,7 +513,7 @@ impl NativeJsonlDelegationJournal {
         let (records, valid_event_len) = match recover_jsonl(event_bytes) {
             Ok(recovered) => recovered,
             Err(DelegationJournalError::Corrupt { line, reason }) => {
-                drop(file);
+                release_native_file(file);
                 let combined = format!("line {line}: {reason}");
                 let quarantine = quarantine_native_path(&path, &bytes, &combined)?;
                 return Err(DelegationJournalError::Quarantined {
@@ -511,7 +525,7 @@ impl NativeJsonlDelegationJournal {
         };
         if let Some(job_id) = expected_job_id {
             if records.iter().any(|event| event.identity.job_id != job_id) {
-                drop(file);
+                release_native_file(file);
                 let combined = "journal event job_id does not match its durable header".to_owned();
                 let quarantine = quarantine_native_path(&path, &bytes, &combined)?;
                 return Err(DelegationJournalError::Quarantined {
@@ -621,7 +635,7 @@ impl DelegationJournal for NativeJsonlDelegationJournal {
         }
         if let Some(file) = self.file.take() {
             file.sync_all()?;
-            drop(file);
+            release_native_file(file);
         }
         let bytes = fs::read(&self.path)?;
         let quarantine = quarantine_native_path(&self.path, &bytes, reason)?;
@@ -1442,6 +1456,8 @@ impl<J: DelegationJournal> DurableDelegationAuthority<J> {
         Ok(state)
     }
 
+    // Test fixture transition mirrors every durable record field explicitly.
+    #[allow(clippy::too_many_arguments)]
     fn transition(
         &mut self,
         token: &DelegationToken,

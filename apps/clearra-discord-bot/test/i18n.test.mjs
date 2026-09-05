@@ -101,6 +101,23 @@ test("public validation and operation errors hide deployment details", () => {
     validationErrorText(new Error("private oracle mode failed"), "en"),
     /oracle/i,
   );
+
+  const publicValidationFallback =
+    "Clearra could not complete the request: Check the command input and try again.";
+  for (const internalIdentity of [
+    "candidate_id=81 does not match the canonical candidate ID",
+    "problem_id=private trace_identity=private-trace",
+    "pattern IDs are inconsistent with operation_id=lock-4",
+    "expected a canonical ctk1 solution key",
+  ]) {
+    const projected = validationErrorText(new Error(internalIdentity), "en");
+    assert.equal(projected, publicValidationFallback, internalIdentity);
+    assert.doesNotMatch(
+      projected,
+      /ctk1|field[_ -]?id|candidate[_ -]?id|problem[_ -]?id|pattern[_ -]?id|trace|operation[_ -]?id|group[_ -]?id|schema[_ -]?id/i,
+      internalIdentity,
+    );
+  }
 });
 
 test("Korean public validation errors preserve actionable input details", () => {

@@ -156,10 +156,22 @@ fn selection_policy(result: &CoreExecutionResult) -> SolutionPortfolioSelectionP
     if result.bool_field("minimum_cover_requested") == Some(true)
         || result.field("objective") == Some("minimum-cover")
     {
-        SolutionPortfolioSelectionPolicy::ExactMinimumCover
+        if result.field("minimum_cover_incomplete_reason") == Some("deferred-to-coordinator") {
+            SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover
+        } else {
+            SolutionPortfolioSelectionPolicy::ExactMinimumCover
+        }
     } else {
         SolutionPortfolioSelectionPolicy::EquivalentCoverageRepresentatives
     }
+}
+
+fn uses_minimum_cover_source_dictionary(policy: SolutionPortfolioSelectionPolicy) -> bool {
+    matches!(
+        policy,
+        SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover
+            | SolutionPortfolioSelectionPolicy::ExactMinimumCover
+    )
 }
 
 fn redacted_required_pattern_count(
@@ -319,7 +331,7 @@ fn checked_audit_input_construction_projection(result: &CoreExecutionResult) -> 
     let candidate_dimensions =
         dimension_payload.checked_mul((candidate_count as u128).checked_add(1)?)?;
     let (normalized_key_count, normalized_payload) =
-        if selection_policy(result) == SolutionPortfolioSelectionPolicy::ExactMinimumCover {
+        if uses_minimum_cover_source_dictionary(selection_policy(result)) {
             (
                 result.normalized_solution_coverages().len(),
                 result
@@ -366,6 +378,7 @@ fn checked_audit_input_construction_projection(result: &CoreExecutionResult) -> 
         "solution-key-materialization-incomplete",
         "solution-key-count-mismatch",
         "minimum-cover-source-solution-count-mismatch",
+        "minimum-cover-deferred-source-key-dictionary-mismatch",
         "b2b-filter-not-materialized",
         "b2b-filter-count-incomplete",
         "build-spin-evidence-incomplete",
@@ -412,17 +425,17 @@ fn audit_input(
     let selection_policy = selection_policy(result);
     let candidates = audit_candidates(result, pattern_count, &dimensions)?;
     let required_patterns = required_patterns(result, pattern_count, &candidates)?;
-    // Exact minimum-cover results expose only the canonical selected cover in
-    // `normalized_solution_keys`, while retaining the complete pass-1 source
-    // matrix in `normalized_solution_coverages`. The generic audit owns the
-    // pass-2 selection, so its normalized universe must be reconstructed from
-    // those source rows rather than from the already-selected public keys.
-    let mut normalized_keys =
-        if selection_policy == SolutionPortfolioSelectionPolicy::ExactMinimumCover {
-            try_clone_coverage_keys(result.normalized_solution_coverages())?
-        } else {
-            try_clone_strings(result.normalized_solution_keys())?
-        };
+    // Finalized exact minimum-cover results expose only the canonical selected
+    // cover in `normalized_solution_keys`; deferred typed results still expose
+    // the full source dictionary there. In both states the retained pass-1
+    // matrix in `normalized_solution_coverages` is the source-audit authority,
+    // so the generic audit reconstructs its universe from those rows. Exact
+    // selection for deferred typed results remains product-owned.
+    let mut normalized_keys = if uses_minimum_cover_source_dictionary(selection_policy) {
+        try_clone_coverage_keys(result.normalized_solution_coverages())?
+    } else {
+        try_clone_strings(result.normalized_solution_keys())?
+    };
     normalized_keys.sort_unstable();
     let normalized_identity_hash = normalized_key_hash(&normalized_keys);
     let count_complete = result.bool_field("count_complete").unwrap_or(false);
@@ -432,9 +445,11 @@ fn audit_input(
         && availability.solution_set_materialized()
         && availability.solution_keys_complete()
         && availability.materialized_key_count_matches(result.normalized_solution_keys().len());
-    let minimum_cover_source_complete = selection_policy
-        != SolutionPortfolioSelectionPolicy::ExactMinimumCover
+    let minimum_cover_source_complete = !uses_minimum_cover_source_dictionary(selection_policy)
         || result.usize_field("minimum_cover_source_solution_count") == Some(normalized_keys.len());
+    let deferred_source_dictionary_matches = selection_policy
+        != SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover
+        || result.normalized_solution_keys() == normalized_keys.as_slice();
 
     let mut normalized_reasons = Vec::new();
     if !count_complete {
@@ -458,13 +473,19 @@ fn audit_input(
     if !minimum_cover_source_complete {
         normalized_reasons.push("minimum-cover-source-solution-count-mismatch".to_owned());
     }
+    if !deferred_source_dictionary_matches {
+        normalized_reasons.push("minimum-cover-deferred-source-key-dictionary-mismatch".to_owned());
+    }
 
     let preserve_b2b = result.bool_field("execution_constraint_preserve_b2b") == Some(true);
     let build_spin_requested = product_family == SolutionProductFamily::BuildProbability
         && result.bool_field("postprocess_build_spin_requested") == Some(true);
     let materialized_solution_checkpoint = SolutionAuditCheckpoint::new(
         Some(normalized_keys.len()),
-        count_complete && availability_complete && minimum_cover_source_complete,
+        count_complete
+            && availability_complete
+            && minimum_cover_source_complete
+            && deferred_source_dictionary_matches,
         Some(normalized_identity_hash.clone()),
         normalized_reasons.clone(),
     );
@@ -490,8 +511,10 @@ fn audit_input(
     };
 
     let mut filter_reasons = normalized_reasons.clone();
-    let mut filter_complete =
-        count_complete && availability_complete && minimum_cover_source_complete;
+    let mut filter_complete = count_complete
+        && availability_complete
+        && minimum_cover_source_complete
+        && deferred_source_dictionary_matches;
     if preserve_b2b {
         if result.bool_field("execution_constraint_materialized") != Some(true) {
             filter_complete = false;
@@ -701,8 +724,9 @@ mod tests {
     };
     use clearra_core_executor::{
         CoreExecutionResult, NormalizedSolutionCoverage, ScoringExecutionEdge,
-        ScoringExecutionNode, ScoringLockEvidence, SolutionProductFamily,
-        SolutionSetAuditStageKind, SpinCoverageExecutionBatch, SpinCoverageExecutionGraph,
+        ScoringExecutionNode, ScoringLockEvidence, SolutionPortfolioSelectionPolicy,
+        SolutionProductFamily, SolutionSetAuditStageKind, SpinCoverageExecutionBatch,
+        SpinCoverageExecutionGraph,
     };
     use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 
@@ -883,6 +907,101 @@ mod tests {
             report.portfolio_families()[0].representative_keys(),
             &["solution-a".to_owned()]
         );
+    }
+
+    #[test]
+    fn deferred_product_minimum_cover_audits_source_without_duplicating_exact_selection() {
+        let input = materialized_result(SolutionProductFamily::Pc).with_replaced_fields(vec![
+            ("objective".to_owned(), "minimum-cover".to_owned()),
+            ("minimum_cover_requested".to_owned(), "true".to_owned()),
+            ("minimum_cover_complete".to_owned(), "false".to_owned()),
+            (
+                "minimum_cover_proven_minimum".to_owned(),
+                "false".to_owned(),
+            ),
+            (
+                "minimum_cover_incomplete_reason".to_owned(),
+                "deferred-to-coordinator".to_owned(),
+            ),
+            (
+                "minimum_cover_source_solution_count".to_owned(),
+                "2".to_owned(),
+            ),
+            (
+                "minimum_cover_selected_solution_count".to_owned(),
+                "2".to_owned(),
+            ),
+        ]);
+
+        let result = attach_solution_set_audit(input);
+        let report = result
+            .solution_set_audit_report()
+            .expect("typed source audit");
+
+        assert_eq!(
+            report.selection_policy(),
+            SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover
+        );
+        assert!(!report.complete());
+        assert!(!report.exact_minimum_proven());
+        assert_eq!(
+            report
+                .stage(SolutionSetAuditStageKind::Normalized)
+                .output_count(),
+            Some(2)
+        );
+        assert_eq!(
+            report
+                .stage(SolutionSetAuditStageKind::PortfolioSelected)
+                .output_count(),
+            Some(2)
+        );
+        assert!(report
+            .stage(SolutionSetAuditStageKind::PortfolioSelected)
+            .rejection_reasons()
+            .iter()
+            .any(|reason| {
+                reason == "exact-minimum-cover-selection-deferred-to-product-coordinator"
+            }));
+        assert!(report.incomplete_reasons().iter().any(|reason| {
+            reason
+                == "portfolio-selected:exact-minimum-cover-selection-deferred-to-product-coordinator"
+        }));
+    }
+
+    #[test]
+    fn deferred_product_minimum_cover_source_dictionary_mismatch_fails_closed() {
+        let input = materialized_result(SolutionProductFamily::Pc)
+            .with_replaced_fields(vec![
+                ("objective".to_owned(), "minimum-cover".to_owned()),
+                ("minimum_cover_requested".to_owned(), "true".to_owned()),
+                ("minimum_cover_complete".to_owned(), "false".to_owned()),
+                (
+                    "minimum_cover_proven_minimum".to_owned(),
+                    "false".to_owned(),
+                ),
+                (
+                    "minimum_cover_incomplete_reason".to_owned(),
+                    "deferred-to-coordinator".to_owned(),
+                ),
+                (
+                    "minimum_cover_source_solution_count".to_owned(),
+                    "2".to_owned(),
+                ),
+            ])
+            .with_normalized_solution_keys(vec!["solution-a".to_owned(), "solution-z".to_owned()]);
+
+        let result = attach_solution_set_audit(input);
+        let report = result
+            .solution_set_audit_report()
+            .expect("typed source audit");
+
+        assert!(!report.complete());
+        assert!(report
+            .stage(SolutionSetAuditStageKind::Normalized)
+            .rejection_reasons()
+            .iter()
+            .any(|reason| { reason == "minimum-cover-deferred-source-key-dictionary-mismatch" }));
     }
 
     #[test]

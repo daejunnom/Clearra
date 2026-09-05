@@ -6,11 +6,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 export const ACTIONS_TEST_WORKER_CAP = 4;
 
 export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
+  "scripts/release/accepted-wasm-build.test.mjs",
   "scripts/release/accepted-pages-build.test.mjs",
   "scripts/release/canonical-acceptance-evidence.test.mjs",
   "scripts/release/canonical-acceptance-run.test.mjs",
   "scripts/release/create-exact-source-archive.test.mjs",
   "scripts/release/deployment-impact.test.mjs",
+  "scripts/release/fast-fix-qualification-evidence.test.mjs",
+  "scripts/release/fast-fix-qualification-workflow.test.mjs",
   "scripts/release/discord-catalog-recovery-authority.test.mjs",
   "scripts/release/discord-deploy-workflow.test.mjs",
   "scripts/release/discord-deployment-recovery.test.mjs",
@@ -22,6 +25,7 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/release/final-source-stage-evidence.test.mjs",
   "scripts/release/finalize-discord-production-checkpoint.test.mjs",
   "scripts/release/observe-production-surfaces.test.mjs",
+  "scripts/release/oracle-inactive-stage-v080.test.mjs",
   "scripts/release/oracle/create-prestage-helper-bundle.test.mjs",
   "scripts/release/oracle/invoke-release-deploy-v080.test.mjs",
   "scripts/release/pages-deployment-authority.test.mjs",

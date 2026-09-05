@@ -54,6 +54,9 @@ pub fn coverage_row_from_raw_words_with_identity(
     )
 }
 
+// This raw bridge deliberately keeps the ABI-shaped scalar fields explicit so
+// callers cannot accidentally reuse a partially populated identity bundle.
+#[allow(clippy::too_many_arguments)]
 pub fn coverage_row_from_raw_words_with_identity_and_piece_source(
     candidate_id: u64,
     row_kind: CoverageRowKind,

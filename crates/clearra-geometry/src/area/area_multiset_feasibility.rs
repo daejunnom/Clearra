@@ -60,7 +60,7 @@ impl AreaMultisetFeasibility {
                     piece_id: entry.piece_id().clone(),
                 }
             })?;
-            areas.extend(std::iter::repeat(area).take(entry.multiplicity()));
+            areas.extend(std::iter::repeat_n(area, entry.multiplicity()));
         }
         Self::new(areas)
     }

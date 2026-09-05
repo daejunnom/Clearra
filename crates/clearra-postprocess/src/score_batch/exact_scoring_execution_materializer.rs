@@ -228,7 +228,7 @@ impl MaterializationProfiler {
                 ProfiledExecutionStage::BestSelection => &mut self.profile.best_selection_sample_ns,
             };
             *total = total.saturating_add(elapsed);
-            return output;
+            output
         }
         #[cfg(not(feature = "stage-profiling"))]
         {
@@ -276,6 +276,10 @@ impl ExactScoringExecutionMaterialization {
         &self.scored_executions
     }
 
+    pub fn into_aggregates(self) -> Vec<CandidateExecutionAggregate> {
+        self.aggregates
+    }
+
     pub const fn complete(&self) -> bool {
         self.complete
     }
@@ -290,6 +294,16 @@ impl ExactScoringExecutionMaterialization {
 
     pub const fn t_spin_single_execution_count(&self) -> u128 {
         self.t_spin_single_execution_count
+    }
+
+    pub fn checked_replay_retained_bytes(&self) -> Option<u128> {
+        let inline_bytes = (self.aggregates.capacity() as u128)
+            .checked_mul(core::mem::size_of::<CandidateExecutionAggregate>() as u128)?;
+        self.aggregates
+            .iter()
+            .try_fold(inline_bytes, |bytes, aggregate| {
+                bytes.checked_add(aggregate.checked_nested_retained_bytes()?)
+            })
     }
 
     #[cfg(feature = "stage-profiling")]
@@ -373,6 +387,78 @@ impl ExactScoreCellMaterialization {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExactScoringExecutionCancelled;
+
+/// Product-only limits for exhaustive replay materialization.
+///
+/// Complete-replay products intentionally have a separate policy from score
+/// and save products: exceeding one of these limits is an execution error,
+/// never a partial family reported as complete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExactReplayMaterializationLimits {
+    max_executions: usize,
+    max_path_steps: usize,
+    max_retained_bytes: u128,
+}
+
+impl ExactReplayMaterializationLimits {
+    pub const fn new(
+        max_executions: usize,
+        max_path_steps: usize,
+        max_retained_bytes: u128,
+    ) -> Self {
+        Self {
+            max_executions,
+            max_path_steps,
+            max_retained_bytes,
+        }
+    }
+
+    pub const fn max_executions(self) -> usize {
+        self.max_executions
+    }
+
+    pub const fn max_path_steps(self) -> usize {
+        self.max_path_steps
+    }
+
+    pub const fn max_retained_bytes(self) -> u128 {
+        self.max_retained_bytes
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExactReplayMaterializationReport {
+    execution_count: usize,
+    retained_bytes: u128,
+}
+
+impl ExactReplayMaterializationReport {
+    pub const fn execution_count(self) -> usize {
+        self.execution_count
+    }
+
+    pub const fn retained_bytes(self) -> u128 {
+        self.retained_bytes
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactReplayMaterializationError {
+    Cancelled,
+    InvalidEvidence,
+    ProjectionOverflow,
+    ExecutionLimitExceeded {
+        max_executions: usize,
+    },
+    PathStepLimitExceeded {
+        max_path_steps: usize,
+    },
+    MemoryLimitExceeded {
+        required_memory_bytes: u128,
+        max_memory_bytes: u128,
+    },
+    AllocationFailed,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExactScoredExecution {
@@ -499,6 +585,146 @@ impl ExactScoringExecutionMaterializer {
             #[cfg(feature = "stage-profiling")]
             profile: None,
         })
+    }
+
+    /// Materializes every distinct valid replay witness retained by the exact
+    /// execution DAG. This path is intentionally separate from
+    /// [`Self::materialize_terminal_replays`], whose one-terminal-state
+    /// representative semantics remain the authority for ordinary save
+    /// products.
+    ///
+    /// Any resource-limit or allocation failure aborts the materialization;
+    /// callers must not publish the partial prefix as a complete family.
+    pub fn materialize_complete_replays_with_limits(
+        batch: &ExactScoringExecutionBatch,
+        control: &ExecutionControl,
+        limits: ExactReplayMaterializationLimits,
+    ) -> Result<
+        (
+            ExactScoringExecutionMaterialization,
+            ExactReplayMaterializationReport,
+        ),
+        ExactReplayMaterializationError,
+    > {
+        if control.is_cancelled() {
+            return Err(ExactReplayMaterializationError::Cancelled);
+        }
+        let mut budget = CompleteReplayBudget::new(limits);
+        let mut aggregates = Vec::new();
+        aggregates
+            .try_reserve_exact(batch.graphs().len())
+            .map_err(|_| ExactReplayMaterializationError::AllocationFailed)?;
+        budget.charge_retained(
+            (aggregates.capacity() as u128)
+                .checked_mul(core::mem::size_of::<CandidateExecutionAggregate>() as u128)
+                .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?,
+            0,
+        )?;
+        let mut complete = batch.complete();
+
+        for (graph_index, graph) in batch.graphs().iter().enumerate() {
+            if control.is_cancelled() {
+                return Err(ExactReplayMaterializationError::Cancelled);
+            }
+            control.report_progress(
+                "complete-replay-execution",
+                graph_index as u64,
+                Some(batch.graphs().len() as u64),
+            );
+            let scratch_capacity = graph.node_count().min(limits.max_path_steps());
+            let mut path = Vec::new();
+            path.try_reserve_exact(scratch_capacity)
+                .map_err(|_| ExactReplayMaterializationError::AllocationFailed)?;
+            let mut holds = Vec::new();
+            holds
+                .try_reserve_exact(scratch_capacity)
+                .map_err(|_| ExactReplayMaterializationError::AllocationFailed)?;
+            let scratch_bytes = (path.capacity() as u128)
+                .checked_mul(core::mem::size_of::<ScoringExecutionEdge>() as u128)
+                .and_then(|bytes| {
+                    (holds.capacity() as u128)
+                        .checked_mul(core::mem::size_of::<HoldDecision>() as u128)
+                        .and_then(|hold_bytes| bytes.checked_add(hold_bytes))
+                })
+                .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
+            budget.ensure_peak(0, scratch_bytes)?;
+
+            let mut executions = Vec::new();
+            for (pattern_id, sequence) in batch.patterns().iter().enumerate() {
+                path.clear();
+                holds.clear();
+                let cell_complete = visit_complete_replay_paths(
+                    batch,
+                    graph,
+                    sequence,
+                    pattern_id,
+                    SupplyState {
+                        node: graph.root(),
+                        cursor: batch.initial_cursor(),
+                        hold: batch.initial_hold(),
+                    },
+                    &mut path,
+                    &mut holds,
+                    scratch_bytes,
+                    &mut executions,
+                    &mut budget,
+                    control,
+                )?;
+                complete &= cell_complete;
+            }
+            executions.sort_unstable_by(|left, right| {
+                left.pattern_id()
+                    .cmp(&right.pattern_id())
+                    .then_with(|| left.trace_identity().cmp(right.trace_identity()))
+            });
+            executions.dedup_by(|left, right| {
+                left.pattern_id() == right.pattern_id()
+                    && left.trace_identity() == right.trace_identity()
+            });
+            aggregates.push(CandidateExecutionAggregate::new(
+                graph.candidate_id(),
+                executions,
+            ));
+        }
+        control.report_progress(
+            "complete-replay-execution",
+            batch.graphs().len() as u64,
+            Some(batch.graphs().len() as u64),
+        );
+
+        let materialized = ExactScoringExecutionMaterialization {
+            aggregates,
+            scored_executions: Vec::new(),
+            t_spin_single_pattern_ids: BTreeSet::new(),
+            t_spin_single_candidate_ids: BTreeSet::new(),
+            t_spin_single_execution_count: 0,
+            complete,
+            #[cfg(feature = "stage-profiling")]
+            profile: None,
+        };
+        let retained_bytes = materialized
+            .checked_replay_retained_bytes()
+            .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
+        if retained_bytes > limits.max_retained_bytes() {
+            return Err(ExactReplayMaterializationError::MemoryLimitExceeded {
+                required_memory_bytes: retained_bytes,
+                max_memory_bytes: limits.max_retained_bytes(),
+            });
+        }
+        let execution_count = materialized
+            .aggregates()
+            .iter()
+            .try_fold(0_usize, |count, aggregate| {
+                count.checked_add(aggregate.executions().len())
+            })
+            .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
+        Ok((
+            materialized,
+            ExactReplayMaterializationReport {
+                execution_count,
+                retained_bytes,
+            },
+        ))
     }
 
     pub fn checked_score_cell_memory_projection(
@@ -684,7 +910,6 @@ impl ExactScoringExecutionMaterializer {
                     &mut holds,
                     projection.max_path_len,
                     profile,
-                    evaluation_policy,
                     ScoreModelEvaluator::initial_state(evaluation_policy),
                     &mut best,
                     control,
@@ -797,7 +1022,6 @@ impl ExactScoringExecutionMaterializer {
                     &mut path,
                     &mut holds,
                     &profile,
-                    evaluation_policy,
                     ScoreModelEvaluator::initial_state(evaluation_policy),
                     false,
                     retain_replays,
@@ -1034,6 +1258,280 @@ fn retain_terminal_successor(
     });
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CompleteReplayBudget {
+    limits: ExactReplayMaterializationLimits,
+    execution_count: usize,
+    retained_bytes: u128,
+    visited_nodes: u64,
+}
+
+const COMPLETE_REPLAY_PROGRESS_CADENCE: u64 = 4_096;
+
+impl CompleteReplayBudget {
+    const fn new(limits: ExactReplayMaterializationLimits) -> Self {
+        Self {
+            limits,
+            execution_count: 0,
+            retained_bytes: 0,
+            visited_nodes: 0,
+        }
+    }
+
+    fn note_visit(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), ExactReplayMaterializationError> {
+        self.visited_nodes = self
+            .visited_nodes
+            .checked_add(1)
+            .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
+        if self.visited_nodes == 1 || self.visited_nodes % COMPLETE_REPLAY_PROGRESS_CADENCE == 0 {
+            control.report_progress("complete-replay-traversal", self.visited_nodes, None);
+        }
+        Ok(())
+    }
+
+    fn ensure_peak(
+        &self,
+        additional_retained_bytes: u128,
+        scratch_bytes: u128,
+    ) -> Result<(), ExactReplayMaterializationError> {
+        let required_memory_bytes = self
+            .retained_bytes
+            .checked_add(additional_retained_bytes)
+            .and_then(|bytes| bytes.checked_add(scratch_bytes))
+            .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
+        if required_memory_bytes > self.limits.max_retained_bytes() {
+            return Err(ExactReplayMaterializationError::MemoryLimitExceeded {
+                required_memory_bytes,
+                max_memory_bytes: self.limits.max_retained_bytes(),
+            });
+        }
+        Ok(())
+    }
+
+    fn charge_retained(
+        &mut self,
+        additional_retained_bytes: u128,
+        scratch_bytes: u128,
+    ) -> Result<(), ExactReplayMaterializationError> {
+        self.ensure_peak(additional_retained_bytes, scratch_bytes)?;
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_add(additional_retained_bytes)
+            .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
+        Ok(())
+    }
+
+    fn retain_execution(
+        &mut self,
+        executions: &mut Vec<CandidateExecution>,
+        pattern_id: usize,
+        trace_identity: String,
+        trace: ReplayTrace,
+        scratch_bytes: u128,
+    ) -> Result<(), ExactReplayMaterializationError> {
+        if self.execution_count >= self.limits.max_executions() {
+            return Err(ExactReplayMaterializationError::ExecutionLimitExceeded {
+                max_executions: self.limits.max_executions(),
+            });
+        }
+        let nested_bytes = (trace_identity.capacity() as u128)
+            .checked_add(
+                trace
+                    .checked_nested_retained_bytes()
+                    .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?,
+            )
+            .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
+        let before_capacity = executions.capacity();
+        let minimum_inline_bytes = (usize::from(executions.len() == before_capacity) as u128)
+            .checked_mul(core::mem::size_of::<CandidateExecution>() as u128)
+            .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
+        self.ensure_peak(
+            nested_bytes
+                .checked_add(minimum_inline_bytes)
+                .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?,
+            scratch_bytes,
+        )?;
+        executions
+            .try_reserve_exact(1)
+            .map_err(|_| ExactReplayMaterializationError::AllocationFailed)?;
+        let additional_inline_bytes = (executions.capacity() - before_capacity) as u128
+            * core::mem::size_of::<CandidateExecution>() as u128;
+        self.charge_retained(
+            nested_bytes
+                .checked_add(additional_inline_bytes)
+                .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?,
+            scratch_bytes,
+        )?;
+        executions.push(CandidateExecution::new(pattern_id, trace_identity, trace));
+        self.execution_count += 1;
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_complete_replay_paths(
+    batch: &ExactScoringExecutionBatch,
+    graph: &ExactScoringExecutionGraph,
+    sequence: &[PieceKind],
+    pattern_id: usize,
+    state: SupplyState,
+    path: &mut Vec<ScoringExecutionEdge>,
+    holds: &mut Vec<HoldDecision>,
+    scratch_bytes: u128,
+    executions: &mut Vec<CandidateExecution>,
+    budget: &mut CompleteReplayBudget,
+    control: &ExecutionControl,
+) -> Result<bool, ExactReplayMaterializationError> {
+    if control.is_cancelled() {
+        return Err(ExactReplayMaterializationError::Cancelled);
+    }
+    budget.note_visit(control)?;
+    let Some(node) = graph.node(state.node) else {
+        return Ok(false);
+    };
+    if node.accepting() {
+        if !terminal_supply_state_is_accepted(batch, sequence, state) {
+            return Ok(true);
+        }
+        if path.is_empty() {
+            return Ok(false);
+        }
+        let Some(trace) = replay_path(batch, graph, pattern_id, path, holds) else {
+            return Ok(false);
+        };
+        let trace_identity = trace.canonical_key();
+        budget.retain_execution(executions, pattern_id, trace_identity, trace, scratch_bytes)?;
+        return Ok(true);
+    }
+
+    let Some(edges) = graph.checked_edges(node) else {
+        return Ok(false);
+    };
+    let mut complete = true;
+    for &edge in edges {
+        let child_index = edge.to() as usize;
+        let Some(child) = graph.node(edge.to()) else {
+            complete = false;
+            continue;
+        };
+        if child_index <= state.node as usize {
+            complete = false;
+            continue;
+        }
+        if batch.projects_unplaced_lookahead()
+            && batch.hold_enabled()
+            && state.cursor as usize == sequence.len()
+            && state.hold == Some(edge.piece())
+            && child.accepting()
+            && (!batch.projects_standard_bag_lookahead()
+                || first_standard_bag_lookahead(sequence).is_none())
+        {
+            push_complete_replay_scratch(
+                path,
+                holds,
+                edge,
+                HoldDecision::ReleaseHeldAtTerminal {
+                    held_piece: edge.piece(),
+                },
+                budget.limits.max_path_steps(),
+            )?;
+            let branch = visit_complete_replay_paths(
+                batch,
+                graph,
+                sequence,
+                pattern_id,
+                SupplyState {
+                    node: edge.to(),
+                    cursor: state.cursor.saturating_add(1),
+                    hold: state.hold,
+                },
+                path,
+                holds,
+                scratch_bytes,
+                executions,
+                budget,
+                control,
+            );
+            holds.pop();
+            path.pop();
+            complete &= branch?;
+        }
+
+        let mut branch_error = None;
+        let supply_result =
+            for_each_supply_successor(batch, sequence, state, edge.piece(), |decision, next| {
+                if let Err(error) = push_complete_replay_scratch(
+                    path,
+                    holds,
+                    edge,
+                    decision,
+                    budget.limits.max_path_steps(),
+                ) {
+                    branch_error = Some(error);
+                    return Err(ExactScoringExecutionCancelled);
+                }
+                let branch = visit_complete_replay_paths(
+                    batch,
+                    graph,
+                    sequence,
+                    pattern_id,
+                    SupplyState {
+                        node: edge.to(),
+                        ..next
+                    },
+                    path,
+                    holds,
+                    scratch_bytes,
+                    executions,
+                    budget,
+                    control,
+                );
+                holds.pop();
+                path.pop();
+                match branch {
+                    Ok(branch_complete) => complete &= branch_complete,
+                    Err(error) => {
+                        branch_error = Some(error);
+                        return Err(ExactScoringExecutionCancelled);
+                    }
+                }
+                Ok(())
+            });
+        if let Some(error) = branch_error {
+            return Err(error);
+        }
+        if supply_result.is_err() {
+            return Err(if control.is_cancelled() {
+                ExactReplayMaterializationError::Cancelled
+            } else {
+                ExactReplayMaterializationError::InvalidEvidence
+            });
+        }
+    }
+    Ok(complete)
+}
+
+fn push_complete_replay_scratch(
+    path: &mut Vec<ScoringExecutionEdge>,
+    holds: &mut Vec<HoldDecision>,
+    edge: ScoringExecutionEdge,
+    hold: HoldDecision,
+    max_path_steps: usize,
+) -> Result<(), ExactReplayMaterializationError> {
+    if path.len() >= max_path_steps || holds.len() >= max_path_steps {
+        return Err(ExactReplayMaterializationError::PathStepLimitExceeded { max_path_steps });
+    }
+    if path.len() == path.capacity() || holds.len() == holds.capacity() {
+        return Err(ExactReplayMaterializationError::ProjectionOverflow);
+    }
+    path.push(edge);
+    holds.push(hold);
+    Ok(())
+}
+
 fn checked_score_cell_memory_projection_for_shape(
     graph_count: usize,
     pattern_count: usize,
@@ -1096,7 +1594,6 @@ fn visit_score_cell_paths(
     holds: &mut Vec<HoldDecision>,
     max_path_len: usize,
     profile: &ScoreProfile,
-    evaluation_policy: ScoreEvaluationPolicy,
     score_state: ScoreState,
     best: &mut Option<ScoreCellBestExecution>,
     control: &ExecutionControl,
@@ -1166,7 +1663,6 @@ fn visit_score_cell_paths(
                 holds,
                 max_path_len,
                 profile,
-                evaluation_policy,
                 next_score_state,
                 best,
                 control,
@@ -1197,7 +1693,6 @@ fn visit_score_cell_paths(
                     holds,
                     max_path_len,
                     profile,
-                    evaluation_policy,
                     next_score_state,
                     best,
                     control,
@@ -1252,7 +1747,6 @@ fn visit_execution_paths(
     path: &mut Vec<ScoringExecutionEdge>,
     holds: &mut Vec<HoldDecision>,
     profile: &ScoreProfile,
-    evaluation_policy: ScoreEvaluationPolicy,
     score_state: ScoreState,
     has_t_spin_single: bool,
     retain_replay: bool,
@@ -1351,7 +1845,6 @@ fn visit_execution_paths(
                 path,
                 holds,
                 profile,
-                evaluation_policy,
                 next_score_state,
                 has_t_spin_single || edge_has_t_spin_single,
                 retain_replay,
@@ -1379,7 +1872,6 @@ fn visit_execution_paths(
                 path,
                 holds,
                 profile,
-                evaluation_policy,
                 next_score_state,
                 has_t_spin_single || edge_has_t_spin_single,
                 retain_replay,
@@ -1795,5 +2287,148 @@ mod score_cell_memory_tests {
         assert_eq!(pattern_component.len(), 32);
         assert!(pattern_component.ends_with(&format!("{:x}", usize::MAX)));
         assert_eq!(components.next(), None);
+    }
+}
+
+#[cfg(test)]
+mod complete_replay_materialization_tests {
+    use clearra_core_domain::{
+        execution_cancellation::ExecutionControl,
+        piece::{piece_kind::PieceKind, rotation::RotationState},
+        solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
+    };
+    use clearra_geometry::layout::board64_layout::Board64Layout;
+    use clearra_replay::{
+        ExactScoringExecutionBatch, ExactScoringExecutionGraph, ScoringExecutionEdge,
+        ScoringExecutionNode, ScoringLockEvidence,
+    };
+
+    use super::*;
+
+    fn replay_collision_batch() -> ExactScoringExecutionBatch {
+        let identity = StandardBoard64TilingIdentity::from_placements(0, [])
+            .expect("empty candidate identity");
+        let edges = vec![
+            o_edge(1, 0, 0, 0, false),
+            o_edge(2, 1, 2, 0, false),
+            o_edge(3, 1, 2, 0, false),
+            o_edge(3, 0, 0, 0, false),
+            o_edge(4, 2, 4, 0, false),
+            o_edge(5, 3, 6, 0, false),
+            o_edge(6, 4, 8, 2, true),
+        ];
+        ExactScoringExecutionBatch::new(
+            Board64Layout::standard_10_by_lines(2).expect("layout"),
+            0,
+            vec![vec![PieceKind::O; 5]],
+            0,
+            None,
+            false,
+            false,
+            false,
+            1,
+            1,
+            vec![ExactScoringExecutionGraph::new(
+                9,
+                identity,
+                0,
+                vec![
+                    ScoringExecutionNode::new(0, 2, false),
+                    ScoringExecutionNode::new(2, 1, false),
+                    ScoringExecutionNode::new(3, 1, false),
+                    ScoringExecutionNode::new(4, 1, false),
+                    ScoringExecutionNode::new(5, 1, false),
+                    ScoringExecutionNode::new(6, 1, false),
+                    ScoringExecutionNode::new(7, 0, true),
+                ],
+                edges,
+            )],
+            true,
+        )
+    }
+
+    fn o_edge(
+        to: u32,
+        operation_index: u8,
+        x: i8,
+        cleared_lines: u8,
+        perfect_clear: bool,
+    ) -> ScoringExecutionEdge {
+        ScoringExecutionEdge::new(
+            to,
+            operation_index,
+            PieceKind::O,
+            RotationState::Zero,
+            x,
+            0,
+            cleared_lines,
+            0,
+            0,
+            ScoringLockEvidence::no_rotation(RotationState::Zero),
+        )
+        .with_perfect_clear(perfect_clear)
+    }
+
+    #[test]
+    fn complete_replay_keeps_both_paths_that_merge_at_one_terminal_supply_state() {
+        let batch = replay_collision_batch();
+        let control = ExecutionControl::default();
+        let representative =
+            ExactScoringExecutionMaterializer::materialize_terminal_replays(&batch, &control)
+                .expect("ordinary save representative");
+        assert_eq!(representative.aggregates()[0].executions().len(), 1);
+
+        let (complete, report) =
+            ExactScoringExecutionMaterializer::materialize_complete_replays_with_limits(
+                &batch,
+                &control,
+                ExactReplayMaterializationLimits::new(8, 8, 1024 * 1024),
+            )
+            .expect("complete replay family");
+        let executions = complete.aggregates()[0].executions();
+        assert!(complete.complete());
+        assert_eq!(report.execution_count(), 2);
+        assert_eq!(executions.len(), 2);
+        assert_ne!(
+            executions[0].trace_identity(),
+            executions[1].trace_identity()
+        );
+        assert!(executions
+            .windows(2)
+            .all(|pair| { pair[0].trace_identity() < pair[1].trace_identity() }));
+        for execution in executions {
+            let steps = execution.replay_trace().solution_trace().steps();
+            assert_eq!(steps.len(), 5);
+            let terminal = steps.last().expect("terminal lock");
+            assert_eq!(terminal.piece_decision().output_cursor(), 5);
+            assert_eq!(terminal.piece_decision().output_hold_piece(), None);
+            assert_eq!(terminal.line_clear().cleared_lines(), 2);
+            assert_eq!(terminal.board_after().after_line_clear().occupied(), 0);
+        }
+    }
+
+    #[test]
+    fn exhaustive_limits_abort_instead_of_returning_a_truncated_complete_family() {
+        let error = ExactScoringExecutionMaterializer::materialize_complete_replays_with_limits(
+            &replay_collision_batch(),
+            &ExecutionControl::default(),
+            ExactReplayMaterializationLimits::new(1, 8, 1024 * 1024),
+        )
+        .expect_err("second witness exceeds the explicit family limit");
+        assert_eq!(
+            error,
+            ExactReplayMaterializationError::ExecutionLimitExceeded { max_executions: 1 }
+        );
+
+        let error = ExactScoringExecutionMaterializer::materialize_complete_replays_with_limits(
+            &replay_collision_batch(),
+            &ExecutionControl::default(),
+            ExactReplayMaterializationLimits::new(8, 8, 1),
+        )
+        .expect_err("one byte cannot retain a replay family");
+        assert!(matches!(
+            error,
+            ExactReplayMaterializationError::MemoryLimitExceeded { .. }
+        ));
     }
 }

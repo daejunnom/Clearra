@@ -1,5 +1,6 @@
 use clearra_core_domain::{
     board::board_size::BoardSize,
+    objective::objective_kind::ObjectiveKind,
     pc::pc_target::PcTarget,
     piece::piece_kind::PieceKind,
     solution::{
@@ -9,8 +10,8 @@ use clearra_core_domain::{
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCompletionGoal, PcContinuationToken, PcContinuationTokenCodec,
-    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PcSearchContractError, PieceWindow,
-    SupplyWindowSize,
+    PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PcSearchContractError,
+    PieceWindow, SupplyWindowSize,
 };
 use clearra_supply::{
     piece_source::PieceSourceKind,
@@ -55,6 +56,34 @@ mod case_opening_2l_compiles_to_search_problem {
             }
         );
         assert!(!problem.exact_target_policy().is_core_success_condition());
+    }
+}
+
+mod case_opening_count_policy_is_independent_of_objective {
+    use super::*;
+
+    #[test]
+    fn minimum_cover_over_unique_geometry_survives_problem_compilation() {
+        let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
+            .with_objective(ObjectivePolicy::minimum_cover())
+            .with_count_policy(PcCountPolicy::CountUnique);
+
+        let problem = ProblemCompiler::compile_opening_pc(&query).expect("4L problem");
+
+        assert_eq!(problem.objective().kind(), ObjectiveKind::MinimumCover);
+        assert_eq!(problem.count_policy(), PcCountPolicy::CountUnique);
+    }
+
+    #[test]
+    fn count_policy_survives_pc_query_opening_round_trip() {
+        let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
+            .with_objective(ObjectivePolicy::minimum_cover())
+            .with_count_policy(PcCountPolicy::CountUnique);
+
+        let round_trip = crate::query::PcQuery::from_opening_query(&query).to_opening_query();
+
+        assert_eq!(round_trip.objective(), query.objective());
+        assert_eq!(round_trip.count_policy(), PcCountPolicy::CountUnique);
     }
 }
 

@@ -159,7 +159,7 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
     )?;
     reduction_span.finish(reduction.generated_count as u64);
 
-    let mut resource_report = catalog.compile_resource_report().clone();
+    let mut resource_report = *catalog.compile_resource_report();
     merge_sequential_stage_metrics(&mut resource_report, &geometry_search.resource_report);
     resource_report.observe_cpu_bytes(
         usize::try_from(task_split_peak_bytes)
@@ -196,8 +196,8 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
     match reduction.truncation {
         1 => resource_report.mark_truncated(ResourceTruncationReason::CandidateBudgetExceeded),
         2 => {
-            let required_memory_bytes = observed_peak_bytes
-                .max(memory_bound.cap_bytes().checked_add(1).unwrap_or(u128::MAX));
+            let required_memory_bytes =
+                observed_peak_bytes.max(memory_bound.cap_bytes().saturating_add(1));
             return Err(packing_memory_exhausted(
                 search_problem,
                 required_memory_bytes,
@@ -218,6 +218,9 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
     .with_pruning_ledger(pruning_ledger))
 }
 
+// `ResourceReport` is the typed authority contract; callers immediately map it into
+// the boxed public runner error, so this local composition keeps the domain type intact.
+#[allow(clippy::result_large_err)]
 fn engine_memory_bound(
     search_problem: &SearchProblem,
     problem: &CPackingProblem,
@@ -233,10 +236,7 @@ fn engine_memory_bound(
 }
 
 fn packing_resource_error(resource_report: ResourceReport) -> PackingRunnerError {
-    PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
-        status: 6,
-        resource_report,
-    })
+    PackingRunnerError::Native(NativeCoreError::packing_incomplete(6, resource_report))
 }
 
 fn packing_resource_report(
@@ -303,14 +303,14 @@ fn enrich_native_memory_error(
         if availability.reason() == Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
             && availability.descriptor_pattern_count().is_none()
         {
-            return PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+            return PackingRunnerError::Native(NativeCoreError::packing_incomplete(
                 status,
-                resource_report: packing_resource_report(
+                packing_resource_report(
                     search_problem,
                     ExecutionAvailabilityReason::MemoryBudgetExceeded,
                     availability.required_memory_bytes().unwrap_or(u128::MAX),
                 ),
-            });
+            ));
         }
         return PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
             status,

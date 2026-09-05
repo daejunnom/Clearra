@@ -358,7 +358,7 @@ fn run_parallel(
                 metrics.absorb += absorb;
                 metrics.wait += wait;
                 metrics.work_items = metrics.work_items.saturating_add(items as u64);
-                debug_assert_eq!(metrics.input_bytes >= input_bytes as u64, true);
+                debug_assert!(metrics.input_bytes >= input_bytes as u64);
                 metrics.output_bytes = metrics.output_bytes.saturating_add(output.len() as u64);
                 metrics.visited_states = progress.visited_states;
                 metrics.generated_locks = progress.generated_locks;

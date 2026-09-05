@@ -6,7 +6,9 @@ use clearra_core_domain::solution::normalized_tiling_solution::{
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_supply::pattern_universe::{
-    MaterializedPatternUniverse, PackingMultisetFamily, PatternPiecePositionIndex, PieceMultisetKey,
+    MaterializedPatternUniverse, MaterializedPatternUniverseStructure, PackingMultisetFamily,
+    PatternPiecePositionIndex, PatternPiecePositionIndexCompileAdvance,
+    PatternPiecePositionIndexCompileSession, PieceMultisetKey,
 };
 
 use super::{
@@ -25,6 +27,7 @@ const NO_ROW: u32 = u32::MAX;
 const RESIDUAL_ENTRY_CHUNK_CAPACITY: usize = 4096;
 const UNION_LEVEL_COUNT: usize = 32;
 const AVAILABLE_ROW_CACHE_MAX_ROWS: usize = 8 * 1024 * 1024;
+const TARGET_PATTERN_SCAN_WORK_BUDGET: usize = 8_192;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GeometryCandidate {
@@ -1391,6 +1394,8 @@ impl FamilyCompiler {
     }
 }
 
+// The compiler transfers its completed family without an intermediate allocation.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum GeometryFamilyCompileAdvance {
     Pending,
     Complete(CompiledGeometryFamily),
@@ -1646,6 +1651,8 @@ impl FamilyEnumerator {
     }
 
     #[cfg(feature = "parallel")]
+    // Failure returns ownership of the enumerator so the caller can continue serially.
+    #[allow(clippy::result_large_err)]
     fn into_parallel_enumerators(
         self,
         desired_partition_count: usize,
@@ -1987,6 +1994,8 @@ fn remove_signature(counts: &mut [u8; 7], signature: u32) {
     }
 }
 
+// Geometry completion owns the result and moves it directly to the next stage.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum GeometryAdvance {
     Pending,
     Candidate(GeometryCandidate),
@@ -1997,6 +2006,8 @@ pub(super) enum GeometryAdvance {
 pub(super) struct GeometrySearch {
     group_pattern_index_bytes: usize,
     shared_family_bytes: usize,
+    target_preparation: Option<TargetGroupCompileSession>,
+    target_preparation_mode: Option<TargetGroupPreparationMode>,
     compiler: Option<FamilyCompiler>,
     enumerator: Option<FamilyEnumerator>,
     expanded_nodes: usize,
@@ -2015,6 +2026,204 @@ pub(super) struct GeometrySearch {
 pub(super) struct SharedTargetGroups {
     targets: Arc<[TargetGroup]>,
     group_pattern_index_bytes: usize,
+}
+
+enum TargetGroupPreparationMode {
+    Internal {
+        required_cells: u64,
+        tablebase: Option<Arc<Pc4CompactTablebase>>,
+    },
+    External,
+}
+
+// This internal advance enum transfers prepared target storage exactly once.
+#[allow(clippy::large_enum_variant)]
+enum TargetGroupCompileAdvance {
+    Pending,
+    Complete(SharedTargetGroups),
+}
+
+// Index preparation retains one active stage in place to avoid per-transition allocation.
+#[allow(clippy::large_enum_variant)]
+enum TargetGroupIndexStage {
+    SelectPatternIds {
+        target_index: usize,
+        next_pattern_id: usize,
+        pattern_ids: Vec<u32>,
+    },
+    Compile {
+        target_index: usize,
+        session: PatternPiecePositionIndexCompileSession,
+    },
+    Finished,
+}
+
+/// Cooperative compiler for the queue-language indexes attached to exact-PC
+/// target groups. Target identity and ordering are established up front, while
+/// the potentially multi-million-pattern scan and bit-slice population remain
+/// behind an explicit cursor. This keeps browser cancellation/event delivery
+/// responsive without changing ILC geometry, target IDs, or coverage meaning.
+struct TargetGroupCompileSession {
+    universe: MaterializedPatternUniverse,
+    targets: Vec<TargetGroup>,
+    next_target: usize,
+    stage: TargetGroupIndexStage,
+    retained_upper_bound_bytes: usize,
+}
+
+impl TargetGroupCompileSession {
+    fn new(
+        universe: &MaterializedPatternUniverse,
+        family: &PackingMultisetFamily,
+        retained_upper_bound_bytes: usize,
+    ) -> Result<Self, WasmExactSearchError> {
+        let mut targets = target_groups_without_pattern_indexes(family)?;
+        targets.sort_unstable_by_key(|target| target.key);
+        for (target_index, target) in targets.iter_mut().enumerate() {
+            target.pattern_index_id = u32::try_from(target_index).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_pattern_index_identity_overflow")
+            })?;
+        }
+        Ok(Self {
+            universe: universe.clone(),
+            targets,
+            next_target: 0,
+            stage: TargetGroupIndexStage::Finished,
+            retained_upper_bound_bytes,
+        })
+    }
+
+    fn advance(&mut self) -> Result<TargetGroupCompileAdvance, WasmExactSearchError> {
+        loop {
+            let stage = core::mem::replace(&mut self.stage, TargetGroupIndexStage::Finished);
+            match stage {
+                TargetGroupIndexStage::Finished => {
+                    if self.next_target == self.targets.len() {
+                        let targets = core::mem::take(&mut self.targets);
+                        let target_nested_bytes = checked_target_nested_retained_bytes(&targets)
+                            .and_then(|bytes| usize::try_from(bytes).ok())
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "wasm_pattern_index_retained_projection_overflow",
+                            ))?;
+                        return Ok(TargetGroupCompileAdvance::Complete(SharedTargetGroups {
+                            targets: targets.into(),
+                            group_pattern_index_bytes: target_nested_bytes,
+                        }));
+                    }
+                    if let Some(index) = self.targets[..self.next_target].iter().find_map(|prior| {
+                        Arc::ptr_eq(
+                            &prior.possible_patterns,
+                            &self.targets[self.next_target].possible_patterns,
+                        )
+                        .then(|| prior.pattern_index.as_ref().map(Arc::clone))
+                        .flatten()
+                    }) {
+                        self.targets[self.next_target].pattern_index = Some(index);
+                        self.next_target += 1;
+                        return Ok(TargetGroupCompileAdvance::Pending);
+                    }
+                    let member_count = self.targets[self.next_target]
+                        .possible_patterns
+                        .count_ones() as usize;
+                    let mut pattern_ids = Vec::new();
+                    pattern_ids.try_reserve_exact(member_count).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_pattern_index_storage_unavailable",
+                        )
+                    })?;
+                    self.stage = TargetGroupIndexStage::SelectPatternIds {
+                        target_index: self.next_target,
+                        next_pattern_id: 0,
+                        pattern_ids,
+                    };
+                }
+                TargetGroupIndexStage::SelectPatternIds {
+                    target_index,
+                    mut next_pattern_id,
+                    mut pattern_ids,
+                } => {
+                    let pattern_count = self.universe.pattern_count();
+                    let end = next_pattern_id
+                        .saturating_add(TARGET_PATTERN_SCAN_WORK_BUDGET)
+                        .min(pattern_count);
+                    for pattern in self.targets[target_index]
+                        .possible_patterns
+                        .covered_patterns_in_range(next_pattern_id, end)
+                    {
+                        pattern_ids.push(u32::try_from(pattern.index()).map_err(|_| {
+                            WasmExactSearchError::InvalidProblem(
+                                "wasm_pattern_index_identity_overflow",
+                            )
+                        })?);
+                    }
+                    next_pattern_id = end;
+                    if next_pattern_id != pattern_count {
+                        self.stage = TargetGroupIndexStage::SelectPatternIds {
+                            target_index,
+                            next_pattern_id,
+                            pattern_ids,
+                        };
+                        return Ok(TargetGroupCompileAdvance::Pending);
+                    }
+                    let session = PatternPiecePositionIndexCompileSession::new_for_pattern_ids(
+                        self.universe.clone(),
+                        pattern_ids,
+                    )
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem("wasm_pattern_index_compile_failed")
+                    })?;
+                    self.stage = TargetGroupIndexStage::Compile {
+                        target_index,
+                        session,
+                    };
+                }
+                TargetGroupIndexStage::Compile {
+                    target_index,
+                    mut session,
+                } => match session
+                    .advance(TARGET_PATTERN_SCAN_WORK_BUDGET)
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem("wasm_pattern_index_compile_failed")
+                    })? {
+                    PatternPiecePositionIndexCompileAdvance::Pending => {
+                        self.stage = TargetGroupIndexStage::Compile {
+                            target_index,
+                            session,
+                        };
+                        return Ok(TargetGroupCompileAdvance::Pending);
+                    }
+                    PatternPiecePositionIndexCompileAdvance::Complete(index) => {
+                        self.targets[target_index].pattern_index = Some(Arc::new(index));
+                        self.next_target = target_index + 1;
+                        self.stage = TargetGroupIndexStage::Finished;
+                        return Ok(TargetGroupCompileAdvance::Pending);
+                    }
+                },
+            }
+        }
+    }
+
+    const fn retained_upper_bound_bytes(&self) -> usize {
+        self.retained_upper_bound_bytes
+    }
+}
+
+fn target_groups_without_pattern_indexes(
+    family: &PackingMultisetFamily,
+) -> Result<Vec<TargetGroup>, WasmExactSearchError> {
+    let mut targets = Vec::<TargetGroup>::new();
+    targets.try_reserve_exact(family.len()).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_pattern_index_storage_unavailable")
+    })?;
+    for group in family.groups() {
+        targets.push(TargetGroup {
+            key: group.key(),
+            pattern_index_id: 0,
+            possible_patterns: group.shared_pattern_bits(),
+            pattern_index: None,
+        });
+    }
+    Ok(targets)
 }
 
 impl SharedTargetGroups {
@@ -2104,6 +2313,8 @@ pub(super) fn compile_target_groups(
 /// membership bitsets are already included in `already_retained_bytes`; this
 /// projection therefore counts target slots, new position indexes, conversion
 /// scratch, and the Vec-to-Arc target copy without double-counting membership.
+// Retained as the bounded constructor for embedders that do not own a full session.
+#[allow(dead_code)]
 pub(super) fn compile_target_groups_with_memory_limit(
     universe: &MaterializedPatternUniverse,
     family: &PackingMultisetFamily,
@@ -2194,11 +2405,21 @@ fn max_covered_sequence_len(
     universe: &MaterializedPatternUniverse,
     membership: &PatternBitSet,
 ) -> usize {
-    membership
-        .covered_patterns_before(universe.pattern_count())
-        .map(|pattern| universe.sequence_len_at(pattern.index()))
-        .max()
-        .unwrap_or(0)
+    match universe.structure() {
+        MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len }
+        | MaterializedPatternUniverseStructure::ObservedStandard7BagLexicographic {
+            sequence_len,
+            ..
+        }
+        | MaterializedPatternUniverseStructure::FactorizedQueueExpression { sequence_len } => {
+            usize::from(sequence_len) * usize::from(!membership.is_empty())
+        }
+        MaterializedPatternUniverseStructure::Explicit => membership
+            .covered_patterns_before(universe.pattern_count())
+            .map(|pattern| universe.sequence_len_at(pattern.index()))
+            .max()
+            .unwrap_or(0),
+    }
 }
 
 #[cfg(test)]
@@ -2221,8 +2442,9 @@ mod target_group_memory_admission_tests {
     };
 
     use super::{
-        checked_target_group_build_peak_additional_bytes, compile_target_groups_with_memory_limit,
-        max_covered_sequence_len, WasmExactSearchError,
+        checked_target_group_build_peak_additional_bytes, compile_target_groups,
+        compile_target_groups_with_memory_limit, max_covered_sequence_len,
+        TargetGroupCompileAdvance, TargetGroupCompileSession, WasmExactSearchError,
     };
 
     #[test]
@@ -2303,6 +2525,56 @@ mod target_group_memory_admission_tests {
         assert_eq!(targets.len(), family.len());
         assert!(retained_bytes > 0);
     }
+
+    #[test]
+    fn target_group_pattern_indexes_compile_in_bounded_steps_with_eager_parity() {
+        let universe = PatternUniverseMaterializer::standard_7_bag(14, 16_385, 93)
+            .expect("bounded target-index universe");
+        assert_eq!(universe.pattern_count(), 16_385);
+        let initial_hold = HoldAutomatonState::new(
+            PieceSourceId::new(93),
+            0,
+            None,
+            0,
+            0,
+            SupplyProvenanceId(93),
+        );
+        let family = universe.packing_multiset_family_for_execution(
+            2,
+            initial_hold,
+            false,
+            PackingHoldProjection::PreserveFinalHoldLanguage,
+        );
+        let eager = compile_target_groups(&universe, &family, true)
+            .expect("eager target groups remain the parity oracle");
+        let peak = checked_target_group_build_peak_additional_bytes(&universe, &family, true)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .expect("bounded target-index projection");
+        let mut session = TargetGroupCompileSession::new(&universe, &family, peak)
+            .expect("deferred target groups");
+        assert!(matches!(
+            session.advance().expect("first bounded step"),
+            TargetGroupCompileAdvance::Pending
+        ));
+
+        let mut calls = 1usize;
+        let deferred = loop {
+            calls += 1;
+            match session.advance().expect("deferred target-index step") {
+                TargetGroupCompileAdvance::Pending => {}
+                TargetGroupCompileAdvance::Complete(shared) => break shared,
+            }
+        };
+        assert!(calls > 4, "large index must not complete in one host call");
+        assert_eq!(deferred.group_pattern_index_bytes, eager.1);
+        assert_eq!(deferred.targets.len(), eager.0.len());
+        for (deferred, eager) in deferred.targets.iter().zip(&eager.0) {
+            assert_eq!(deferred.key, eager.key);
+            assert_eq!(deferred.pattern_index_id, eager.pattern_index_id);
+            assert_eq!(deferred.possible_patterns, eager.possible_patterns);
+            assert_eq!(deferred.pattern_index, eager.pattern_index);
+        }
+    }
 }
 
 // Mirrors the initial intern table in geometry_family without exposing its
@@ -2357,6 +2629,8 @@ impl GeometrySearch {
         Self {
             group_pattern_index_bytes: 0,
             shared_family_bytes: 0,
+            target_preparation: None,
+            target_preparation_mode: None,
             compiler: None,
             enumerator: None,
             expanded_nodes: 0,
@@ -2378,8 +2652,14 @@ impl GeometrySearch {
         required_cells: u64,
         compile_pattern_indexes: bool,
     ) -> Result<Self, WasmExactSearchError> {
-        let shared = SharedTargetGroups::compile(universe, family, compile_pattern_indexes)?;
-        Ok(Self::new_shared(required_cells, &shared))
+        Self::new_deferred(
+            universe,
+            family,
+            required_cells,
+            compile_pattern_indexes,
+            None,
+            None,
+        )
     }
 
     pub fn new_with_memory_limit(
@@ -2390,18 +2670,14 @@ impl GeometrySearch {
         already_retained_bytes: u128,
         max_memory_bytes: u128,
     ) -> Result<Self, WasmExactSearchError> {
-        let (targets, group_pattern_index_bytes) = compile_target_groups_with_memory_limit(
+        Self::new_deferred(
             universe,
             family,
+            required_cells,
             compile_pattern_indexes,
-            already_retained_bytes,
-            max_memory_bytes,
-        )?;
-        let shared = SharedTargetGroups {
-            targets: targets.into(),
-            group_pattern_index_bytes,
-        };
-        Self::try_new_shared_with_tablebase(required_cells, &shared, None)
+            None,
+            Some((already_retained_bytes, max_memory_bytes)),
+        )
     }
 
     pub fn new_with_tablebase(
@@ -2411,12 +2687,14 @@ impl GeometrySearch {
         compile_pattern_indexes: bool,
         tablebase: Arc<Pc4CompactTablebase>,
     ) -> Result<Self, WasmExactSearchError> {
-        let shared = SharedTargetGroups::compile(universe, family, compile_pattern_indexes)?;
-        Ok(Self::new_shared_with_tablebase(
+        Self::new_deferred(
+            universe,
+            family,
             required_cells,
-            &shared,
+            compile_pattern_indexes,
             Some(tablebase),
-        ))
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2429,18 +2707,108 @@ impl GeometrySearch {
         already_retained_bytes: u128,
         max_memory_bytes: u128,
     ) -> Result<Self, WasmExactSearchError> {
-        let (targets, group_pattern_index_bytes) = compile_target_groups_with_memory_limit(
+        Self::new_deferred(
+            universe,
+            family,
+            required_cells,
+            compile_pattern_indexes,
+            Some(tablebase),
+            Some((already_retained_bytes, max_memory_bytes)),
+        )
+    }
+
+    fn new_deferred(
+        universe: &MaterializedPatternUniverse,
+        family: &PackingMultisetFamily,
+        required_cells: u64,
+        compile_pattern_indexes: bool,
+        tablebase: Option<Arc<Pc4CompactTablebase>>,
+        memory_limit: Option<(u128, u128)>,
+    ) -> Result<Self, WasmExactSearchError> {
+        let mut preparation_peak = checked_target_group_build_peak_additional_bytes(
             universe,
             family,
             compile_pattern_indexes,
-            already_retained_bytes,
-            max_memory_bytes,
-        )?;
-        let shared = SharedTargetGroups {
-            targets: targets.into(),
-            group_pattern_index_bytes,
-        };
-        Self::try_new_shared_with_tablebase(required_cells, &shared, Some(tablebase))
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_pattern_index_projection_overflow",
+        ))?;
+        if compile_pattern_indexes {
+            let universe_clone_peak = universe
+                .checked_retained_capacity_bytes()
+                .and_then(|bytes| bytes.checked_mul(2))
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_pattern_index_projection_overflow",
+                ))?;
+            preparation_peak = preparation_peak.checked_add(universe_clone_peak).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_pattern_index_projection_overflow"),
+            )?;
+        }
+        if let Some((already_retained_bytes, max_memory_bytes)) = memory_limit {
+            let required = already_retained_bytes.checked_add(preparation_peak).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_pattern_index_projection_overflow"),
+            )?;
+            if required > max_memory_bytes {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_pattern_index_memory_capacity_exceeded",
+                ));
+            }
+        }
+        if !compile_pattern_indexes {
+            let mut targets = target_groups_without_pattern_indexes(family)?;
+            targets.sort_unstable_by_key(|target| target.key);
+            for (target_index, target) in targets.iter_mut().enumerate() {
+                target.pattern_index_id = u32::try_from(target_index).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_pattern_index_identity_overflow")
+                })?;
+            }
+            let target_nested_bytes = checked_target_nested_retained_bytes(&targets)
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_pattern_index_retained_projection_overflow",
+                ))?;
+            let shared = SharedTargetGroups {
+                targets: targets.into(),
+                group_pattern_index_bytes: target_nested_bytes,
+            };
+            return if memory_limit.is_some() {
+                Self::try_new_shared_with_tablebase(required_cells, &shared, tablebase)
+            } else {
+                Ok(Self::new_shared_with_tablebase(
+                    required_cells,
+                    &shared,
+                    tablebase,
+                ))
+            };
+        }
+        let retained_upper_bound_bytes = usize::try_from(preparation_peak).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_pattern_index_projection_overflow")
+        })?;
+        Ok(Self {
+            group_pattern_index_bytes: 0,
+            shared_family_bytes: 0,
+            target_preparation: Some(TargetGroupCompileSession::new(
+                universe,
+                family,
+                retained_upper_bound_bytes,
+            )?),
+            target_preparation_mode: Some(TargetGroupPreparationMode::Internal {
+                required_cells,
+                tablebase,
+            }),
+            compiler: None,
+            enumerator: None,
+            expanded_nodes: 0,
+            peak_frontier: 0,
+            candidate_family_count: None,
+            domain_pruned_states: 0,
+            hall_pruned_states: 0,
+            column_pruned_states: 0,
+            component_compositions: 0,
+            tablebase_pruned_states: 0,
+            external_targets: None,
+            resource_authoritative: memory_limit.is_some(),
+        })
     }
 
     pub fn new_shared(required_cells: u64, shared: &SharedTargetGroups) -> Self {
@@ -2455,6 +2823,8 @@ impl GeometrySearch {
         Self {
             group_pattern_index_bytes: shared.group_pattern_index_bytes,
             shared_family_bytes: 0,
+            target_preparation: None,
+            target_preparation_mode: None,
             compiler: Some(FamilyCompiler::new(
                 required_cells,
                 Arc::clone(&shared.targets),
@@ -2482,6 +2852,8 @@ impl GeometrySearch {
         Ok(Self {
             group_pattern_index_bytes: shared.group_pattern_index_bytes,
             shared_family_bytes: 0,
+            target_preparation: None,
+            target_preparation_mode: None,
             compiler: Some(FamilyCompiler::try_new(
                 required_cells,
                 Arc::clone(&shared.targets),
@@ -2509,10 +2881,87 @@ impl GeometrySearch {
         Self::external_shared(&shared)
     }
 
+    pub fn external_deferred(
+        universe: &MaterializedPatternUniverse,
+        family: &PackingMultisetFamily,
+        compile_pattern_indexes: bool,
+        memory_limit: Option<(u128, u128)>,
+    ) -> Result<Self, WasmExactSearchError> {
+        if !compile_pattern_indexes {
+            let mut targets = target_groups_without_pattern_indexes(family)?;
+            targets.sort_unstable_by_key(|target| target.key);
+            for (target_index, target) in targets.iter_mut().enumerate() {
+                target.pattern_index_id = u32::try_from(target_index).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_pattern_index_identity_overflow")
+                })?;
+            }
+            let target_nested_bytes = checked_target_nested_retained_bytes(&targets)
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_pattern_index_retained_projection_overflow",
+                ))?;
+            return Ok(Self::external(targets, target_nested_bytes));
+        }
+        let mut preparation_peak = checked_target_group_build_peak_additional_bytes(
+            universe,
+            family,
+            compile_pattern_indexes,
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_pattern_index_projection_overflow",
+        ))?;
+        let universe_clone_peak = universe
+            .checked_retained_capacity_bytes()
+            .and_then(|bytes| bytes.checked_mul(2))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_pattern_index_projection_overflow",
+            ))?;
+        preparation_peak = preparation_peak.checked_add(universe_clone_peak).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_pattern_index_projection_overflow"),
+        )?;
+        if let Some((already_retained_bytes, max_memory_bytes)) = memory_limit {
+            let required = already_retained_bytes.checked_add(preparation_peak).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_pattern_index_projection_overflow"),
+            )?;
+            if required > max_memory_bytes {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_pattern_index_memory_capacity_exceeded",
+                ));
+            }
+        }
+        let retained_upper_bound_bytes = usize::try_from(preparation_peak).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_pattern_index_projection_overflow")
+        })?;
+        Ok(Self {
+            group_pattern_index_bytes: 0,
+            shared_family_bytes: 0,
+            target_preparation: Some(TargetGroupCompileSession::new(
+                universe,
+                family,
+                retained_upper_bound_bytes,
+            )?),
+            target_preparation_mode: Some(TargetGroupPreparationMode::External),
+            compiler: None,
+            enumerator: None,
+            expanded_nodes: 0,
+            peak_frontier: 0,
+            candidate_family_count: None,
+            domain_pruned_states: 0,
+            hall_pruned_states: 0,
+            column_pruned_states: 0,
+            component_compositions: 0,
+            tablebase_pruned_states: 0,
+            external_targets: None,
+            resource_authoritative: memory_limit.is_some(),
+        })
+    }
+
     pub fn external_shared(shared: &SharedTargetGroups) -> Self {
         Self {
             group_pattern_index_bytes: shared.group_pattern_index_bytes,
             shared_family_bytes: 0,
+            target_preparation: None,
+            target_preparation_mode: None,
             compiler: None,
             enumerator: None,
             expanded_nodes: 0,
@@ -2548,6 +2997,64 @@ impl GeometrySearch {
         catalog: &GeometryCatalog,
         retained_limit_bytes: Option<u128>,
     ) -> GeometryAdvance {
+        if let Some(mut preparation) = self.target_preparation.take() {
+            if retained_limit_bytes
+                .is_some_and(|limit| preparation.retained_upper_bound_bytes() as u128 > limit)
+            {
+                self.target_preparation = Some(preparation);
+                return GeometryAdvance::ResourceIncomplete(
+                    "wasm_pattern_index_memory_capacity_exceeded",
+                );
+            }
+            match preparation.advance() {
+                Ok(TargetGroupCompileAdvance::Pending) => {
+                    self.target_preparation = Some(preparation);
+                    return GeometryAdvance::Pending;
+                }
+                Err(error) => {
+                    return GeometryAdvance::ResourceIncomplete(error.reason());
+                }
+                Ok(TargetGroupCompileAdvance::Complete(shared)) => {
+                    self.group_pattern_index_bytes = shared.group_pattern_index_bytes;
+                    let Some(mode) = self.target_preparation_mode.take() else {
+                        return GeometryAdvance::ResourceIncomplete(
+                            "geometry_target_preparation_mode_missing",
+                        );
+                    };
+                    match mode {
+                        TargetGroupPreparationMode::Internal {
+                            required_cells,
+                            tablebase,
+                        } => {
+                            self.compiler = if self.resource_authoritative {
+                                match FamilyCompiler::try_new(
+                                    required_cells,
+                                    Arc::clone(&shared.targets),
+                                    tablebase,
+                                ) {
+                                    Ok(compiler) => Some(compiler),
+                                    Err(error) => {
+                                        return GeometryAdvance::ResourceIncomplete(error.reason());
+                                    }
+                                }
+                            } else {
+                                Some(FamilyCompiler::new(
+                                    required_cells,
+                                    Arc::clone(&shared.targets),
+                                    tablebase,
+                                ))
+                            };
+                        }
+                        TargetGroupPreparationMode::External => {
+                            self.external_targets = Some(Arc::clone(&shared.targets));
+                        }
+                    }
+                    // Do not enter the recursive family compiler in the same
+                    // host call that commits a potentially large index.
+                    return GeometryAdvance::Pending;
+                }
+            }
+        }
         let internal_limit = match retained_limit_bytes {
             Some(total_limit) => {
                 let live_targets = self
@@ -2559,7 +3066,7 @@ impl GeometrySearch {
                             .as_ref()
                             .map(|enumerator| enumerator.targets.as_ref())
                     })
-                    .or_else(|| self.external_targets.as_deref());
+                    .or(self.external_targets.as_deref());
                 let fixed = live_targets
                     .map_or(Some(0_u128), checked_target_nested_retained_bytes)
                     .and_then(|bytes| bytes.checked_add(self.shared_family_bytes as u128))
@@ -2663,7 +3170,7 @@ impl GeometrySearch {
         catalog: &GeometryCatalog,
         control: &clearra_core_domain::execution_cancellation::ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
-        while self.compiler.is_some() {
+        while self.target_preparation.is_some() || self.compiler.is_some() {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
@@ -2683,11 +3190,13 @@ impl GeometrySearch {
     }
 
     #[cfg(feature = "parallel")]
+    // Failure returns ownership of the prepared search so serial fallback loses no state.
+    #[allow(clippy::result_large_err)]
     pub fn into_parallel_plan(
         mut self,
         requested_workers: usize,
     ) -> Result<ParallelGeometryPlan, Self> {
-        if self.compiler.is_some() {
+        if self.target_preparation.is_some() || self.compiler.is_some() {
             return Err(self);
         }
         let desired_partition_count = requested_workers.saturating_mul(8).max(2);
@@ -2715,6 +3224,8 @@ impl GeometrySearch {
             searches.push(Self {
                 group_pattern_index_bytes: 0,
                 shared_family_bytes: 0,
+                target_preparation: None,
+                target_preparation_mode: None,
                 compiler: None,
                 candidate_family_count: enumerator.candidate_count,
                 enumerator: Some(enumerator),
@@ -2739,6 +3250,9 @@ impl GeometrySearch {
 
     #[cfg(feature = "parallel")]
     pub fn parallel_target_count(&self) -> usize {
+        if let Some(preparation) = self.target_preparation.as_ref() {
+            return preparation.targets.len();
+        }
         self.compiler.as_ref().map_or(0, |compiler| {
             usize::from(compiler.is_unstarted()) * compiler.targets.len()
         })
@@ -2812,6 +3326,10 @@ impl GeometrySearch {
         self.candidate_family_count
     }
 
+    pub const fn target_preparation_pending(&self) -> bool {
+        self.target_preparation.is_some()
+    }
+
     pub const fn domain_pruned_states(&self) -> usize {
         self.domain_pruned_states
     }
@@ -2836,7 +3354,7 @@ impl GeometrySearch {
         self.enumerator
             .as_ref()
             .map(|enumerator| enumerator.targets.as_ref())
-            .or_else(|| self.external_targets.as_deref())?
+            .or(self.external_targets.as_deref())?
             .get(target_index as usize)
     }
 
@@ -2844,7 +3362,7 @@ impl GeometrySearch {
         self.enumerator
             .as_ref()
             .map(|enumerator| enumerator.targets.as_ref())
-            .or_else(|| self.external_targets.as_deref())
+            .or(self.external_targets.as_deref())
     }
 
     pub fn finish_external(
@@ -2853,6 +3371,11 @@ impl GeometrySearch {
         expanded_nodes: usize,
         peak_frontier: usize,
     ) {
+        // A zero-candidate distributed worker does not need to materialize its
+        // queue-language index. Finishing discards that unused preparation
+        // cursor while preserving the same empty worker result.
+        self.target_preparation = None;
+        self.target_preparation_mode = None;
         self.candidate_family_count = Some(candidate_count as u128);
         self.expanded_nodes = expanded_nodes;
         self.peak_frontier = peak_frontier;
@@ -2872,6 +3395,11 @@ impl GeometrySearch {
     }
 
     pub fn retained_bytes(&self) -> usize {
+        if let Some(preparation) = self.target_preparation.as_ref() {
+            return preparation
+                .retained_upper_bound_bytes()
+                .saturating_add(self.shared_family_bytes);
+        }
         let current_target_nested_bytes = self
             .compiler
             .as_ref()
@@ -2881,7 +3409,7 @@ impl GeometrySearch {
                     .as_ref()
                     .map(|enumerator| enumerator.targets.as_ref())
             })
-            .or_else(|| self.external_targets.as_deref())
+            .or(self.external_targets.as_deref())
             .and_then(checked_target_nested_retained_bytes)
             .and_then(|bytes| usize::try_from(bytes).ok())
             .unwrap_or_else(|| {

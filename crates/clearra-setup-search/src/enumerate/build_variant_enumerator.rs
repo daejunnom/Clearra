@@ -38,6 +38,7 @@ pub struct BuildUpVariantProof {
 }
 
 impl BuildUpVariantProof {
+    #[cfg(test)]
     pub(crate) fn new(successful_build_variant_count: usize, coverage_row_count: usize) -> Self {
         Self {
             successful_build_variant_count,
@@ -49,6 +50,7 @@ impl BuildUpVariantProof {
     }
 }
 impl BuildUpVariantProof {
+    #[cfg(test)]
     pub(crate) fn with_build_input(
         mut self,
         occupied_shape: u64,

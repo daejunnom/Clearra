@@ -9,7 +9,7 @@ use crate::backend::{
     SelectedSearchBackend,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackingRunnerError {
     Ffi(FfiProblemError),
     Native(NativeCoreError),

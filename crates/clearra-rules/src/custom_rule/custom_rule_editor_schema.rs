@@ -248,8 +248,7 @@ impl CustomRuleEditorSchema {
 impl CustomRuleEditorSchema {
     pub fn can_compile_to_c_descriptor(&self) -> bool {
         self.board_backends
-            .iter()
-            .any(|backend| *backend == CustomRuleBoardBackend::Board64)
+            .contains(&CustomRuleBoardBackend::Board64)
             && self
                 .runtime_features
                 .contains(&CustomRuleRuntimeFeature::CompactCDescriptor)

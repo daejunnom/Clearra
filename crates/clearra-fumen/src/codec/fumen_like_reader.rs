@@ -203,7 +203,7 @@ fn decode_action(value: usize) -> DecodedAction {
     value /= 2;
     value /= 2;
     value /= 2;
-    let comment = value % 2 != 0;
+    let comment = !value.is_multiple_of(2);
     DecodedAction { comment }
 }
 

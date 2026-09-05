@@ -1,0 +1,54 @@
+name: Candidate Preflight
+
+on:
+  push:
+    branches: ["codex/v0.8.0-preflight"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+# Development artifacts only. This workflow produces no canonical acceptance
+# evidence and cannot publish a release or change Pages/Discord/Cloud traffic.
+jobs:
+  candidate-cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check release metadata and smoke wiring
+        run: |
+          node scripts/release/validate-release-metadata.mjs --tag v0.8.0
+          node scripts/tools/validate-release-cli-smokes.mjs
+      - name: Compile candidate CLI
+        run: cargo build --locked --package clearra-cli --features wasm-cpu-runtime,webgpu-search
+      - name: Check candidate startup
+        run: target/debug/clearra --version
+      - name: Publish unqualified development binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-candidate-cli-${{ github.sha }}
+          path: target/debug/clearra
+          if-no-files-found: error
+          retention-days: 3
+  candidate-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - name: Compile GUI components without running the test matrix
+        run: node scripts/desktop-ui-compile-check.mjs

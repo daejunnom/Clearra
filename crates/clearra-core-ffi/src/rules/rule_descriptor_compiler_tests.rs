@@ -13,10 +13,27 @@ use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 use crate::problem::{
     C_KICK_IMPORTED, C_KICK_JSTRIS_180, C_KICK_NO_KICK, C_KICK_SRS_90, C_KICK_SRS_PLUS_180,
-    C_KICK_SRS_X, C_RULE_JSTRIS_180, C_RULE_NO_KICK, C_RULE_SRS, C_RULE_SRS_PLUS, C_RULE_SRS_X,
+    C_KICK_SRS_X, C_PIECE_O, C_PIECE_T, C_RULE_JSTRIS_180, C_RULE_NO_KICK, C_RULE_SRS,
+    C_RULE_SRS_PLUS, C_RULE_SRS_X,
 };
 
 use super::*;
+
+#[test]
+fn public_rule_descriptor_layout_matches_core_c_abi_23() {
+    use core::mem::{align_of, size_of};
+
+    assert_eq!(crate::problem::C_RULE_MAX_KICK_OFFSETS, 12);
+    assert_eq!(crate::problem::C_RULE_MAX_KICK_TRANSITIONS, 84);
+    assert_eq!(size_of::<crate::problem::CKickOffsetDescriptor>(), 2);
+    assert_eq!(size_of::<crate::problem::CKickSequenceDescriptor>(), 28);
+    assert_eq!(align_of::<crate::problem::CKickSequenceDescriptor>(), 1);
+    assert_eq!(size_of::<crate::problem::CKickTransitionDescriptor>(), 32);
+    assert_eq!(align_of::<crate::problem::CKickTransitionDescriptor>(), 1);
+    assert_eq!(size_of::<crate::problem::CRuleProfileDescriptor>(), 2712);
+    assert_eq!(align_of::<crate::problem::CRuleProfileDescriptor>(), 4);
+    assert_eq!(crate::CLEARRA_CORE_ABI_VERSION, 23);
+}
 
 #[test]
 fn srs_profile_compiles_to_c_descriptor() {
@@ -105,7 +122,31 @@ fn builtin_srs_x_projects_the_canonical_verified_table_to_c() {
     assert_eq!(descriptor.kick_profile_id, C_KICK_SRS_X);
     assert_eq!(descriptor.has_verified_kick_profile, 1);
     assert_eq!(descriptor.verified_supports_180, 1);
-    assert_eq!(descriptor.verified_transition_count, 80);
+    assert_eq!(descriptor.verified_transition_count, 84);
+
+    let transitions =
+        &descriptor.verified_transitions[..usize::from(descriptor.verified_transition_count)];
+    let t_half = transitions
+        .iter()
+        .find(|entry| {
+            entry.piece == C_PIECE_T && entry.from_rotation == 0 && entry.to_rotation == 2
+        })
+        .expect("T 0->2 compact transition");
+    assert_eq!(t_half.sequence.count, 12);
+    assert_eq!(t_half.sequence.offsets[0].dx, 0);
+    assert_eq!(t_half.sequence.offsets[0].dy, 0);
+    assert_eq!(t_half.sequence.offsets[11].dx, -3);
+    assert_eq!(t_half.sequence.offsets[11].dy, 0);
+
+    let o_half = transitions
+        .iter()
+        .find(|entry| {
+            entry.piece == C_PIECE_O && entry.from_rotation == 0 && entry.to_rotation == 2
+        })
+        .expect("O 0->2 compact transition");
+    assert_eq!(o_half.sequence.count, 1);
+    assert_eq!(o_half.sequence.offsets[0].dx, 0);
+    assert_eq!(o_half.sequence.offsets[0].dy, 0);
 }
 
 #[test]

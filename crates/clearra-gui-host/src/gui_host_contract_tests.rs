@@ -307,7 +307,27 @@ mod case_gui_pc_portfolio_authority_boundary {
     }
 
     #[test]
-    fn canonical_gui_pc_score_owns_the_fixed_cpu_single_session_policy() {
+    fn canonical_opening_pc_minimals_keeps_unique_count_through_the_legacy_host() {
+        let form = GuiOpeningPcForm::new(4, "srs-plus").with_score_input("minimum-cover", 0);
+        let command = PcRequestBuilder::build_command(&form, &GuiBackendForm::default())
+            .expect("canonical opening pc minimals request");
+        let AppCommand::Pc(command) = command else {
+            panic!("expected opening PC command");
+        };
+
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::MinimumCoverV2(PcMinimalsIngressOrigin::CanonicalPcMinimals)
+        );
+        assert_eq!(command.query().count_policy(), PcCountPolicy::CountUnique);
+        assert_eq!(
+            command.query().objective().kind(),
+            ObjectiveKind::MinimumCover
+        );
+    }
+
+    #[test]
+    fn canonical_gui_pc_score_owns_the_cpu_auto_worker_policy() {
         let state = GuiAppState::default()
             .with_problem_form(GuiProblemForm::ScenarioPc(scenario_form("summary")));
         let request = GuiToAppRequest::build(&state)
@@ -327,10 +347,55 @@ mod case_gui_pc_portfolio_authority_boundary {
         );
         let policy = command.query().execution_policy();
         assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
-        assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
-        assert_eq!(policy.workers(), 1);
+        assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
         assert!(!policy.allow_backend_fallback());
         assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+    }
+
+    #[test]
+    fn canonical_gui_pc_score_owns_all_solution_semantics_for_opening_and_scenario_forms() {
+        let opening = GuiOpeningPcForm::new(2, "srs-plus")
+            .with_score_input("summary", 0)
+            .with_score_profiles("tetrio", "t-spins");
+        let opening = GuiToAppRequest::build(
+            &GuiAppState::default().with_problem_form(GuiProblemForm::OpeningPc(opening)),
+        )
+        .expect("canonical opening pc score request")
+        .into_app_request();
+        assert_eq!(
+            opening.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScore)
+        );
+        let AppCommand::Pc(opening) = opening.command() else {
+            panic!("expected opening PC command");
+        };
+        assert_eq!(opening.query().objective().kind(), ObjectiveKind::All);
+        assert_eq!(opening.query().count_policy(), PcCountPolicy::CountAll);
+        opening
+            .validate_result_projection()
+            .expect("opening pc score projection must match the canonical CLI contract");
+
+        // Count is an inactive legacy DTO value for the named score product.
+        // It must not turn the product objective back into Unique while the
+        // score query independently normalizes counting to CountAll.
+        let scenario = scenario_form("summary").with_execution_input(1, None, true, "unique");
+        let scenario = GuiToAppRequest::build(
+            &GuiAppState::default().with_problem_form(GuiProblemForm::ScenarioPc(scenario)),
+        )
+        .expect("canonical scenario pc score request")
+        .into_app_request();
+        assert_eq!(
+            scenario.product_capability_contract(),
+            Some(ProductCapabilityContract::PcScore)
+        );
+        let AppCommand::Scenario(scenario) = scenario.command() else {
+            panic!("expected scenario PC command");
+        };
+        assert_eq!(scenario.query().objective().kind(), ObjectiveKind::All);
+        assert_eq!(scenario.query().count_policy(), PcCountPolicy::CountAll);
+        scenario
+            .validate_result_projection()
+            .expect("scenario pc score projection must match the canonical CLI contract");
     }
 
     #[test]
@@ -365,7 +430,7 @@ mod case_gui_pc_portfolio_authority_boundary {
         );
         let policy = command.query().execution_policy();
         assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
-        assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+        assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
         assert!(!policy.allow_backend_fallback());
         assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
     }
@@ -398,7 +463,6 @@ mod case_gui_pc_portfolio_authority_boundary {
 
         for backend in [
             GuiBackendForm::new(GuiBackendChoice::Gpu),
-            GuiBackendForm::default().with_workers(2),
             GuiBackendForm::default().with_tablebase_requested(true),
         ] {
             let error = ScenarioRequestBuilder::build_command(&score_finder_form(), &backend)
@@ -408,7 +472,7 @@ mod case_gui_pc_portfolio_authority_boundary {
     }
 
     #[test]
-    fn canonical_gui_pc_score_minimals_binds_score_only_minimum_cover_and_fixed_execution() {
+    fn canonical_gui_pc_score_minimals_binds_score_only_minimum_cover_and_cpu_execution() {
         let state = GuiAppState::default()
             .with_problem_form(GuiProblemForm::ScenarioPc(scenario_form("score-minimals")));
         let request = GuiToAppRequest::build(&state)
@@ -437,7 +501,7 @@ mod case_gui_pc_portfolio_authority_boundary {
         assert_eq!(command.query().retained_trace_limit(), 1);
         let policy = command.query().execution_policy();
         assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
-        assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+        assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
         assert!(!policy.allow_backend_fallback());
         assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
     }
@@ -470,11 +534,7 @@ mod case_gui_pc_portfolio_authority_boundary {
             assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
         }
 
-        for backend in [
-            GuiBackendForm::new(GuiBackendChoice::Gpu),
-            GuiBackendForm::default().with_workers(2),
-            GuiBackendForm::default().with_use_all_logical_processors(true),
-        ] {
+        for backend in [GuiBackendForm::new(GuiBackendChoice::Gpu)] {
             let error = ScenarioRequestBuilder::build_command(&scenario_form("summary"), &backend)
                 .expect_err("pc score execution override must fail closed");
             assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
@@ -483,6 +543,28 @@ mod case_gui_pc_portfolio_authority_boundary {
                 ScenarioRequestBuilder::build_command(&scenario_form("score-minimals"), &backend)
                     .expect_err("pc score-minimals execution override must fail closed");
             assert_eq!(error.code(), crate::RequestBuildErrorCode::ValidationFailed);
+        }
+
+        for form in [
+            scenario_form("summary"),
+            scenario_form("score-minimals"),
+            score_finder_form(),
+        ] {
+            let command = ScenarioRequestBuilder::build_command(
+                &form,
+                &GuiBackendForm::default()
+                    .with_workers(2)
+                    .with_use_all_logical_processors(true),
+            )
+            .expect("pc score worker policy");
+            let AppCommand::Scenario(command) = command else {
+                panic!("expected scenario PC score command");
+            };
+            let policy = command.query().execution_policy();
+            assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+            assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(2));
+            assert!(policy.use_all_logical_processors());
+            assert!(!policy.allow_backend_fallback());
         }
 
         for form in [
@@ -858,7 +940,7 @@ mod case_tauri_command_calls_clearra_gui_host_only {
 
     #[test]
     pub(crate) fn tauri_command_calls_clearra_gui_host_only() {
-        let bridge = DesktopTauriCommandBridge::default();
+        let mut bridge = DesktopTauriCommandBridge::default();
         let response = bridge
             .run_request(
                 r#"{
@@ -1121,7 +1203,7 @@ mod case_desktop_does_not_own_core_c_or_render_atlas {
 
     #[test]
     fn desktop_does_not_own_core_c_or_render_atlas() {
-        let bridge = DesktopTauriCommandBridge::default();
+        let mut bridge = DesktopTauriCommandBridge::default();
         let response = bridge
             .run_request(
                 r#"{

@@ -4,6 +4,8 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+// Keep the stable, unboxed event API while serde and every host share this contract.
+#[allow(clippy::large_enum_variant)]
 pub enum JobEvent {
     Started(JobStarted),
     Progress(JobProgress),

@@ -112,6 +112,7 @@ const NODE_CHUNK_SHIFT: usize = 15;
 const NODE_CHUNK_LEN: usize = 1 << NODE_CHUNK_SHIFT;
 const NODE_CHUNK_MASK: usize = NODE_CHUNK_LEN - 1;
 
+#[derive(Default)]
 pub(crate) struct SearchNodeArena {
     chunks: Vec<Vec<SearchNode>>,
     len: usize,
@@ -150,15 +151,6 @@ impl SearchNodeArena {
 
     fn iter(&self) -> impl Iterator<Item = &SearchNode> {
         self.chunks.iter().flat_map(|chunk| chunk.iter())
-    }
-}
-
-impl Default for SearchNodeArena {
-    fn default() -> Self {
-        Self {
-            chunks: Vec::new(),
-            len: 0,
-        }
     }
 }
 
@@ -519,19 +511,21 @@ impl ExactPathCount {
     }
 }
 
+type DamagePathStepKey = (
+    PieceKind,
+    RotationState,
+    i8,
+    i8,
+    &'static str,
+    u8,
+    Option<(char, bool)>,
+    u32,
+);
+
 #[derive(Eq, Hash, PartialEq)]
 struct DamagePathKey {
     board: ForwardBoard,
-    steps: Vec<(
-        PieceKind,
-        RotationState,
-        i8,
-        i8,
-        &'static str,
-        u8,
-        Option<(char, bool)>,
-        u32,
-    )>,
+    steps: Vec<DamagePathStepKey>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1174,6 +1168,9 @@ impl ForwardQueueSession {
             .push(trace);
     }
 
+    // This hot-path boundary mirrors the decomposed `ExpandedAction::Spin`
+    // payload and avoids allocating a second transient carrier per outcome.
+    #[allow(clippy::too_many_arguments)]
     fn record_spin_outcome(
         &mut self,
         board: ForwardBoard,
@@ -1610,7 +1607,7 @@ pub(crate) fn expand_search_node(
                 ForwardLineClearPolicy::PreserveBackToBack
             )
                 && BackToBackPreservationPolicy::requires_recognized_spin(edge);
-            let needs_exact_spin_confirmation = t_spin_acceleration.map_or(true, |acceleration| {
+            let needs_exact_spin_confirmation = t_spin_acceleration.is_none_or(|acceleration| {
                 acceleration.needs_exact_confirmation(
                     source.piece,
                     lock.evidence,
@@ -1952,7 +1949,7 @@ fn t_corner_counts(
 }
 
 fn corner_blocked(board: ForwardBoard, height: u8, x: i16, y: i16) -> bool {
-    if x < 0 || x >= 10 || y < 0 {
+    if !(0..10).contains(&x) || y < 0 {
         return true;
     }
     if y >= i16::from(height) {

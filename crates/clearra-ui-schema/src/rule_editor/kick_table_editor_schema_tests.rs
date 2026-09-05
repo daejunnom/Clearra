@@ -58,7 +58,7 @@ fn exact_and_unsupported_kick_profiles_expose_current_backend_capabilities() {
 
     assert!(srs_x.search_backend_supported());
     assert!(srs_x.c_compact_descriptor_ready());
-    assert_eq!(srs_x.transition_count(), 80);
+    assert_eq!(srs_x.transition_count(), 84);
     assert!(srs_x.first_success_order_preserved());
     assert!(srs_x.supports_exact_180());
     assert_eq!(srs_x.unsupported_backend_reason(), "none");

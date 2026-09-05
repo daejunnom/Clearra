@@ -94,39 +94,40 @@ pub fn encode_candidate_batch_with_memory_guard<E>(
     })?;
     memory_guard(output.capacity() as u128).map_err(GuardedDistributedWireError::MemoryGuard)?;
 
-    let mut sink = CheckedWireOutput::new(&mut output);
-    checked_put_u32(&mut sink, CANDIDATE_MAGIC).map_err(GuardedDistributedWireError::Wire)?;
-    checked_put_u32(&mut sink, WIRE_VERSION).map_err(GuardedDistributedWireError::Wire)?;
-    checked_put_u32(
-        &mut sink,
-        u32::try_from(candidates.len()).map_err(|_| {
-            GuardedDistributedWireError::Wire(DistributedWireError(
-                "candidate_batch_count_overflow",
-            ))
-        })?,
-    )
-    .map_err(GuardedDistributedWireError::Wire)?;
-    for candidate in candidates {
-        checked_put_u64(&mut sink, candidate.ordinal())
-            .map_err(GuardedDistributedWireError::Wire)?;
-        checked_put_u32(&mut sink, u32::from(candidate.pass_index()))
-            .map_err(GuardedDistributedWireError::Wire)?;
-        checked_put_u32(&mut sink, candidate.target_index())
-            .map_err(GuardedDistributedWireError::Wire)?;
+    {
+        let mut sink = CheckedWireOutput::new(&mut output);
+        checked_put_u32(&mut sink, CANDIDATE_MAGIC).map_err(GuardedDistributedWireError::Wire)?;
+        checked_put_u32(&mut sink, WIRE_VERSION).map_err(GuardedDistributedWireError::Wire)?;
         checked_put_u32(
             &mut sink,
-            u32::try_from(candidate.row_ids().len()).map_err(|_| {
+            u32::try_from(candidates.len()).map_err(|_| {
                 GuardedDistributedWireError::Wire(DistributedWireError(
-                    "candidate_row_count_overflow",
+                    "candidate_batch_count_overflow",
                 ))
             })?,
         )
         .map_err(GuardedDistributedWireError::Wire)?;
-        for row_id in candidate.row_ids() {
-            checked_put_u32(&mut sink, *row_id).map_err(GuardedDistributedWireError::Wire)?;
+        for candidate in candidates {
+            checked_put_u64(&mut sink, candidate.ordinal())
+                .map_err(GuardedDistributedWireError::Wire)?;
+            checked_put_u32(&mut sink, u32::from(candidate.pass_index()))
+                .map_err(GuardedDistributedWireError::Wire)?;
+            checked_put_u32(&mut sink, candidate.target_index())
+                .map_err(GuardedDistributedWireError::Wire)?;
+            checked_put_u32(
+                &mut sink,
+                u32::try_from(candidate.row_ids().len()).map_err(|_| {
+                    GuardedDistributedWireError::Wire(DistributedWireError(
+                        "candidate_row_count_overflow",
+                    ))
+                })?,
+            )
+            .map_err(GuardedDistributedWireError::Wire)?;
+            for row_id in candidate.row_ids() {
+                checked_put_u32(&mut sink, *row_id).map_err(GuardedDistributedWireError::Wire)?;
+            }
         }
     }
-    drop(sink);
     if output.len() != required_len {
         return Err(GuardedDistributedWireError::Wire(DistributedWireError(
             "candidate_batch_length_mismatch",
@@ -908,21 +909,23 @@ pub fn encode_partial_results_with_memory_guard<E>(
     })?;
     memory_guard(output.capacity() as u128).map_err(GuardedDistributedWireError::MemoryGuard)?;
 
-    let mut sink = CheckedWireOutput::new(&mut output);
-    checked_put_u32(&mut sink, PARTIAL_BATCH_MAGIC).map_err(GuardedDistributedWireError::Wire)?;
-    checked_put_u32(&mut sink, WIRE_VERSION).map_err(GuardedDistributedWireError::Wire)?;
-    checked_put_u32(&mut sink, result_count).map_err(GuardedDistributedWireError::Wire)?;
-    for result in results {
-        let encoded_len =
-            checked_partial_result_len(result).map_err(GuardedDistributedWireError::Wire)?;
-        checked_put_u32(
-            &mut sink,
-            u32::try_from(encoded_len).expect("encoded length was checked above"),
-        )
-        .map_err(GuardedDistributedWireError::Wire)?;
-        emit_partial_result(&mut sink, result).map_err(GuardedDistributedWireError::Wire)?;
+    {
+        let mut sink = CheckedWireOutput::new(&mut output);
+        checked_put_u32(&mut sink, PARTIAL_BATCH_MAGIC)
+            .map_err(GuardedDistributedWireError::Wire)?;
+        checked_put_u32(&mut sink, WIRE_VERSION).map_err(GuardedDistributedWireError::Wire)?;
+        checked_put_u32(&mut sink, result_count).map_err(GuardedDistributedWireError::Wire)?;
+        for result in results {
+            let encoded_len =
+                checked_partial_result_len(result).map_err(GuardedDistributedWireError::Wire)?;
+            checked_put_u32(
+                &mut sink,
+                u32::try_from(encoded_len).expect("encoded length was checked above"),
+            )
+            .map_err(GuardedDistributedWireError::Wire)?;
+            emit_partial_result(&mut sink, result).map_err(GuardedDistributedWireError::Wire)?;
+        }
     }
-    drop(sink);
     if output.len() != required_len {
         return Err(GuardedDistributedWireError::Wire(DistributedWireError(
             "partial_batch_length_mismatch",
@@ -931,6 +934,7 @@ pub fn encode_partial_results_with_memory_guard<E>(
     Ok(output)
 }
 
+#[cfg(test)]
 fn checked_partial_batch_decode_projection(
     input: &[u8],
 ) -> Result<PartialBatchDecodeProjection, DistributedWireError> {
@@ -969,6 +973,7 @@ fn checked_partial_batch_decode_projection_for_contract(
     })
 }
 
+#[cfg(test)]
 fn checked_partial_result_decode_projection(
     input: &[u8],
 ) -> Result<PartialResultDecodeProjection, DistributedWireError> {
@@ -1468,6 +1473,9 @@ fn guarded_decode_string<E>(
     Ok(owned)
 }
 
+// Each parameter represents a separately validated or charged part of the
+// two-pass wire-memory admission contract at this construction seam.
+#[allow(clippy::too_many_arguments)]
 fn guarded_decode_pattern_bitset<E>(
     reader: &mut Reader<'_>,
     pattern_count: usize,
@@ -2459,6 +2467,7 @@ pub fn decode_partial_result(input: &[u8]) -> Result<CoreExecutionResult, Distri
     })
 }
 
+#[cfg(test)]
 pub fn decode_partial_results(
     input: &[u8],
 ) -> Result<Vec<CoreExecutionResult>, DistributedWireError> {
@@ -2644,15 +2653,6 @@ fn checked_decoded_result_vec_retained_bytes(results: &Vec<CoreExecutionResult>)
     Some(retained)
 }
 
-fn encode_identity(output: &mut Vec<u8>, identity: StandardBoard64TilingIdentity) {
-    put_u64(output, identity.initial_board_mask());
-    put_u64(output, identity.packed_piece_codes());
-    output.push(identity.placement_count() as u8);
-    for mask in identity.placement_masks() {
-        put_u64(output, *mask);
-    }
-}
-
 fn decode_identity(
     reader: &mut Reader<'_>,
 ) -> Result<StandardBoard64TilingIdentity, DistributedWireError> {
@@ -2734,21 +2734,12 @@ fn put_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
-fn put_i32(output: &mut Vec<u8>, value: i32) {
-    output.extend_from_slice(&value.to_le_bytes());
-}
-
 fn put_u64(output: &mut Vec<u8>, value: u64) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
 fn put_u128(output: &mut Vec<u8>, value: u128) {
     output.extend_from_slice(&value.to_le_bytes());
-}
-
-fn put_bytes(output: &mut Vec<u8>, value: &[u8]) {
-    put_u32(output, value.len() as u32);
-    output.extend_from_slice(value);
 }
 
 struct Reader<'a> {
@@ -3577,19 +3568,31 @@ mod tests {
         // requested/actual String reserves, every incremental Core report
         // String callback, Vec capacities, and the dense Vec-to-Arc stages.
         // Construction and post-result checkpoints bound each open range.
-        for target_call in (first_segment_start + 1)..(first_segment_end - 1) {
+        for (target_call, observed_bytes) in observations
+            .iter()
+            .copied()
+            .enumerate()
+            .take(first_segment_end - 1)
+            .skip(first_segment_start + 1)
+        {
             assert_decode_checkpoint_exact_and_peak_minus_one(
                 &encoded,
                 target_call,
-                observations[target_call],
+                observed_bytes,
                 &format!("first sibling nested checkpoint {target_call}"),
             );
         }
-        for target_call in (second_segment_start + 1)..(second_segment_end - 1) {
+        for (target_call, observed_bytes) in observations
+            .iter()
+            .copied()
+            .enumerate()
+            .take(second_segment_end - 1)
+            .skip(second_segment_start + 1)
+        {
             assert_decode_checkpoint_exact_and_peak_minus_one(
                 &encoded,
                 target_call,
-                observations[target_call],
+                observed_bytes,
                 &format!("second sibling nested checkpoint {target_call}"),
             );
         }

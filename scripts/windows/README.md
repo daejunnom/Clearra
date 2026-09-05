@@ -20,7 +20,10 @@ and destination without committing either value:
   -SshDestination '<user>@<host>'
 ```
 
-Installation is idempotent. It stages the runtime files under Local AppData,
-removes the two known legacy task registrations, registers one `IgnoreNew`
-task, and starts it. Existing Vite and tunnel listener processes are not
-terminated; the replacement watchdog observes and keeps their sessions.
+Installation is idempotent. It atomically stages the runtime files under Local
+AppData and registers one `IgnoreNew` task. If the same task is already
+running, its definition is updated for the next safe start without stopping
+that instance or its Vite/SSH children. A differently named idle legacy task is
+removed; a running legacy task is only disabled for future triggers. Listener
+PIDs already bound to ports `4194` and `8790` are checked before and after the
+migration and must remain unchanged.

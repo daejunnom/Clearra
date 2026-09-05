@@ -215,7 +215,7 @@ impl SupplyExecutionState {
             self.piece_source_id.get(),
             self.source_kind.as_u32(),
             self.cursor,
-            self.hold_piece.map_or(0, |piece| piece_tag(piece)),
+            self.hold_piece.map_or(0, piece_tag),
             self.hold_empty as u8,
             hold_policy_tag(self.hold_policy),
             self.bag_epoch,
@@ -393,9 +393,8 @@ impl SupplyExecutionAutomaton {
             .checked_add(maximum_draw_count_u16)
             .ok_or(SupplyExecutionError::CursorExhausted)?;
 
-        let refill_draw_count = maximum_draw_count
-            .checked_sub(usize::from(remainder.total_count()))
-            .unwrap_or(0);
+        let refill_draw_count =
+            maximum_draw_count.saturating_sub(usize::from(remainder.total_count()));
         let full_bag_size = usize::from(full_bag.total_count());
         let maximum_refills = if refill_draw_count == 0 {
             0

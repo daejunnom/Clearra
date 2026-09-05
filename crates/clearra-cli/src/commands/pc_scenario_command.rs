@@ -28,7 +28,7 @@ impl PcScenarioCommand {
         )));
         if response.status() == clearra_app::AppStatus::ValidationFailed {
             let report = response.diagnostics().validation();
-            if let Some(output) = expected_unsupported_output(args, &assembly, &report, format) {
+            if let Some(output) = expected_unsupported_output(args, &assembly, report, format) {
                 return output;
             }
             return CliOutput::validation_failed_with_format(report, format);

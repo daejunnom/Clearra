@@ -4,10 +4,11 @@
   import { writeClipboardText } from './clipboardText';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
   import ProductResultPager from './ProductResultPager.svelte';
-  import type {
-    ProductMemberPageLoader,
-    ProductNextPageLoader,
-    ProductPageRelease
+  import {
+    productResultOwnsSolutionPage,
+    type ProductMemberPageLoader,
+    type ProductNextPageLoader,
+    type ProductPageRelease
   } from './productResultPager';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
@@ -53,6 +54,7 @@
 
   $: report = view.searchReport;
   $: productResultPayload = view.response?.product_result_payload ?? null;
+  $: productSolutionPageActive = productResultOwnsSolutionPage(productResultPayload);
   $: pcScoreFieldSummary = productResultPayload?.content.payload_kind === 'pc-score-field-summary'
     ? productResultPayload.content.payload
     : null;
@@ -307,8 +309,7 @@
   progressDone={view.progressDone}
   progressTotal={view.progressTotal}
   progressTelemetry={view.progressTelemetry}
-  failureDiagnostics={view.diagnostics}
-  failureMessage={view.error ?? ''}
+  publicFailures={view.publicFailures}
 >
   {#if !hasResult && view.status === 'idle'}
     <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noResult')}</p></div>
@@ -374,39 +375,41 @@
         releasePages={releaseProductPages}
       />
 
-      <section class="solutions-section" aria-label={label('solutions')}>
-        <div class="solutions-heading">
-          <h2>{label('solutions')}</h2>
-          {#if solutionCount !== null}
-            <SolutionCopyFormatControl
-              bind:value={copyFormat}
+      {#if !productSolutionPageActive}
+        <section class="solutions-section" aria-label={label('solutions')}>
+          <div class="solutions-heading">
+            <h2>{label('solutions')}</h2>
+            {#if solutionCount !== null}
+              <SolutionCopyFormatControl
+                bind:value={copyFormat}
+                {language}
+                solutionKeys={exportableSolutionKeys}
+                keySource={solutionExportKeySource}
+              />
+            {/if}
+          </div>
+          {#if solutionCount === null}
+            <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('solutionSetNotCalculated')}</p></div>
+          {:else if solutionCount > 0 && (solutionKeys.length || boundSolutionPageLoader)}
+            <SolutionGallery
+              {solutionKeys}
+              {solutionCount}
+              loadSolutionPage={boundSolutionPageLoader}
+              solutionProbabilities={solutionProbabilityByKey}
+              solutionAverageScores={solutionAverageScoreByKey}
+              solutionComments={solutionCommentByKey}
+              solutionSetHash={report?.normalized_solution_set_hash ?? ''}
+              {targetLines}
               {language}
-              solutionKeys={exportableSolutionKeys}
-              keySource={solutionExportKeySource}
+              {copyFormat}
             />
+          {:else if solutionCount > 0}
+            <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('solutionPageLoadFailed')}</p></div>
+          {:else}
+            <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
           {/if}
-        </div>
-        {#if solutionCount === null}
-          <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('solutionSetNotCalculated')}</p></div>
-        {:else if solutionCount > 0 && (solutionKeys.length || boundSolutionPageLoader)}
-          <SolutionGallery
-            {solutionKeys}
-            {solutionCount}
-            loadSolutionPage={boundSolutionPageLoader}
-            solutionProbabilities={solutionProbabilityByKey}
-            solutionAverageScores={solutionAverageScoreByKey}
-            solutionComments={solutionCommentByKey}
-            solutionSetHash={report?.normalized_solution_set_hash ?? ''}
-            {targetLines}
-            {language}
-            {copyFormat}
-          />
-        {:else if solutionCount > 0}
-          <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('solutionPageLoadFailed')}</p></div>
-        {:else}
-          <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
-        {/if}
-      </section>
+        </section>
+      {/if}
     {/if}
   {/if}
 </ResultWorkspaceFrame>

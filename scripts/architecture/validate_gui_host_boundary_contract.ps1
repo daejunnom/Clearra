@@ -3,6 +3,7 @@
 
 function Invoke-GuiHostBoundaryContractValidation() {
     $desktopBridge = Read-Text "crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs"
+    $guiJobRunner = Read-Text "crates/clearra-gui-host/src/job/gui_job_runner.rs"
     $productionBoundaryTest = Read-Text "crates/clearra-gui-host/tests/desktop_cli_boundary.rs"
     $guiHostLibrary = Read-Text "crates/clearra-gui-host/src/lib.rs"
     $requestModule = Read-Text "crates/clearra-gui-host/src/request/mod.rs"
@@ -31,11 +32,15 @@ function Invoke-GuiHostBoundaryContractValidation() {
         "mod active_request_parser",
         "self.app_context.validate_request",
         "self.app_context.run(request)",
-        "response.to_host_response_with_solution_set_artifact"
+        "response.to_host_response()"
     )) {
         if ($desktopBridge -notlike "*$requiredMarker*") {
             Add-ArchitectureError "U3 desktop bridge is missing executable boundary marker '$requiredMarker'"
         }
+    }
+    if ($desktopBridge -like "*to_host_response_with_solution_set_artifact*" -or
+        $guiJobRunner -like "*to_host_response_with_solution_set_artifact*") {
+        Add-ArchitectureError "U3 GUI completion must defer CTK3/Fumen documents to explicit page or export requests"
     }
     if ($tauriCommands -notlike "*DesktopTauriCommandBridge*") {
         Add-ArchitectureError "U3 Tauri commands must call clearra-gui-host"

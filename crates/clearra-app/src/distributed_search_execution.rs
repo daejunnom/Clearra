@@ -29,15 +29,20 @@ use crate::{
     build_solution_probability_result::build_probability_response_is_authorized,
     commands::core_execution_error_response,
     cooperative_execution::{
-        compile_search_command, response_from_search, CooperativePcScoreProduct,
-        CooperativeSearchResponseKind,
+        compile_search_command, response_from_search_with_build_score_derivation,
+        CooperativePcScoreProduct, CooperativeSearchResponseKind,
     },
     pc_score_minimum_cover_result::ValidatedPcScorePortfolioExecutionEvidence,
+    pc_score_postprocess::PcScoreDerivation,
     pc_score_summary_result::ValidatedPcScoreExecutionEvidence,
     product_capability_contract::ValidatedProductCapabilityContract,
     render::AppRenderModel,
+    BuildProbabilityAppCommand,
 };
 
+// Preparation is a one-shot ownership transfer and its public variants are part
+// of the distributed host contract, so retain their established inline shape.
+#[allow(clippy::large_enum_variant)]
 pub enum DistributedSearchPreparation {
     Ready(AppResponse),
     Search(PreparedDistributedSearch),
@@ -68,6 +73,7 @@ pub struct PreparedDistributedSearchCompletion {
     validation_report: DiagnosticReport,
     product_capability_contract: Option<ValidatedProductCapabilityContract>,
     result: Result<CoreExecutionResult, CoreExecutionError>,
+    build_score_derivation: Option<PcScoreDerivation>,
 }
 
 /// Retains the typed score request authority until the Core merger has been
@@ -348,12 +354,32 @@ impl PreparedDistributedSearch {
         let result =
             decorate_distributed_build_probability_tiling_result(&self.response_kind, result);
         let core_executor = self.context.services().core_executor();
+        let mut build_score_derivation = None;
         let result = match &self.response_kind {
             CooperativeSearchResponseKind::PcTiling { .. }
             | CooperativeSearchResponseKind::ScenarioTiling { .. } => Ok(result),
             CooperativeSearchResponseKind::PcChance { .. }
             | CooperativeSearchResponseKind::ScenarioChance { .. } => {
                 core_executor.postprocess_pc_chance_result_before_public_surface(result, control)
+            }
+            CooperativeSearchResponseKind::BuildProbability {
+                solution_probability_policy,
+                result_command,
+                ..
+            } if result_command
+                .as_deref()
+                .is_some_and(BuildProbabilityAppCommand::requires_score_derivation) =>
+            {
+                core_executor
+                    .materialize_build_probability_public_result_with_score_derivation(
+                        result,
+                        *solution_probability_policy,
+                        control,
+                    )
+                    .map(|(result, derivation)| {
+                        build_score_derivation = Some(derivation);
+                        result
+                    })
             }
             CooperativeSearchResponseKind::BuildProbability {
                 solution_probability_policy,
@@ -365,8 +391,16 @@ impl PreparedDistributedSearch {
             ),
             _ => core_executor.postprocess_search_result(result, control),
         };
+        let result = result.and_then(|result| {
+            self.response_kind
+                .materialize_build_probability_result_mode_evidence(core_executor, control, result)
+        });
         let response = match result {
-            Ok(result) => response_from_search(self.response_kind, result),
+            Ok(result) => response_from_search_with_build_score_derivation(
+                self.response_kind,
+                result,
+                build_score_derivation,
+            ),
             Err(error) => core_execution_error_response(error),
         };
         let response = if self.validation_report.is_empty() {
@@ -641,7 +675,28 @@ impl PreparedDistributedSearch {
 
         let result = decorate_distributed_build_probability_tiling_result(&response_kind, result);
         let core_executor = context.services().core_executor();
+        let mut build_score_derivation = None;
         let result = match &response_kind {
+            CooperativeSearchResponseKind::BuildProbability {
+                solution_probability_policy,
+                result_command,
+                ..
+            } if result_command
+                .as_deref()
+                .is_some_and(BuildProbabilityAppCommand::requires_score_derivation) =>
+            {
+                core_executor
+                    .materialize_build_probability_public_result_with_score_derivation_and_memory_guard(
+                        result,
+                        *solution_probability_policy,
+                        control,
+                        &mut terminal_guard,
+                    )
+                    .map(|(result, derivation)| {
+                        build_score_derivation = Some(derivation);
+                        result
+                    })
+            }
             CooperativeSearchResponseKind::BuildProbability {
                 solution_probability_policy,
                 ..
@@ -654,10 +709,25 @@ impl PreparedDistributedSearch {
             _ => unreachable!("response kind was checked above"),
         };
         let result = result.and_then(|result| {
-            terminal_guard(&result, 0)?;
+            response_kind.materialize_build_probability_result_mode_evidence(
+                core_executor,
+                control,
+                result,
+            )
+        });
+        let result = result.and_then(|result| {
+            let derivation_bytes = match build_score_derivation.as_ref() {
+                Some(derivation) => derivation.checked_retained_capacity_bytes().ok_or(
+                    CoreExecutionError::RuntimeUnavailable {
+                        component: "distributed_build_score_derivation_memory_projection_overflow",
+                    },
+                )?,
+                None => 0,
+            };
+            terminal_guard(&result, derivation_bytes)?;
             Ok(result)
         });
-        prepared_distributed_completion(
+        prepared_distributed_completion_with_build_score_derivation(
             context,
             response_kind,
             command_kind,
@@ -666,6 +736,7 @@ impl PreparedDistributedSearch {
             validation_report,
             product_capability_contract,
             result,
+            build_score_derivation,
         )
     }
 
@@ -726,6 +797,9 @@ impl PreparedDistributedPcScoreCompletion {
     }
 }
 
+// This constructor transfers each independently owned completion field into
+// its matching slot; an options bag would obscure those ownership boundaries.
+#[allow(clippy::too_many_arguments)]
 fn prepared_distributed_completion(
     context: AppContext,
     response_kind: CooperativeSearchResponseKind,
@@ -745,6 +819,32 @@ fn prepared_distributed_completion(
         validation_report,
         product_capability_contract,
         result,
+        build_score_derivation: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepared_distributed_completion_with_build_score_derivation(
+    context: AppContext,
+    response_kind: CooperativeSearchResponseKind,
+    command_kind: AppCommandKind,
+    output_policy: AppOutputPolicy,
+    resource_budget: ResourceBudget,
+    validation_report: DiagnosticReport,
+    product_capability_contract: Option<ValidatedProductCapabilityContract>,
+    result: Result<CoreExecutionResult, CoreExecutionError>,
+    build_score_derivation: Option<PcScoreDerivation>,
+) -> PreparedDistributedSearchCompletion {
+    PreparedDistributedSearchCompletion {
+        context,
+        response_kind,
+        command_kind,
+        output_policy,
+        resource_budget,
+        validation_report,
+        product_capability_contract,
+        result,
+        build_score_derivation,
     }
 }
 
@@ -802,6 +902,7 @@ impl PreparedDistributedSearchCompletion {
             validation_report,
             product_capability_contract,
             result,
+            build_score_derivation,
         } = self;
 
         if product_capability_contract.is_some() {
@@ -829,7 +930,11 @@ impl PreparedDistributedSearchCompletion {
         let request_memory_limit_bytes = checked_request_memory_limit_bytes(resource_budget)?;
         let Some(request_memory_limit_bytes) = request_memory_limit_bytes else {
             let response = match result {
-                Ok(result) => response_from_search(response_kind, result),
+                Ok(result) => response_from_search_with_build_score_derivation(
+                    response_kind,
+                    result,
+                    build_score_derivation,
+                ),
                 Err(error) => core_execution_error_response(error),
             };
             let response = if validation_report.is_empty() {
@@ -846,12 +951,18 @@ impl PreparedDistributedSearchCompletion {
         // path. Preserve the static Core error instead of formatting or
         // allocating an App error shape outside the admitted authority.
         let result = result.map_err(finite_distributed_completion_error)?;
+        if build_score_derivation.is_some() {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_finite_build_score_product_authority_unavailable",
+            });
+        }
         let response_authorized = match &response_kind {
             CooperativeSearchResponseKind::BuildProbability {
                 field,
                 aggregation,
                 finesse,
                 solution_probability_policy,
+                result_command: None,
             } => build_probability_response_is_authorized(
                 finesse,
                 *field,
@@ -958,14 +1069,27 @@ fn checked_distributed_terminal_external_retained_bytes(
     output_policy: &AppOutputPolicy,
     validation_report: &DiagnosticReport,
 ) -> Option<u128> {
-    if matches!(
-        response_kind,
-        CooperativeSearchResponseKind::BuildProbability { finesse, .. }
-            if finesse.score().is_some()
-    ) {
-        return None;
-    }
+    let response_kind_heap_bytes = match response_kind {
+        CooperativeSearchResponseKind::BuildProbability {
+            finesse,
+            result_command,
+            ..
+        } => {
+            if finesse.score().is_some() {
+                return None;
+            }
+            let mut bytes = finesse.checked_retained_capacity_bytes()?;
+            if let Some(command) = result_command {
+                bytes = bytes
+                    .checked_add(core::mem::size_of::<BuildProbabilityAppCommand>() as u128)?
+                    .checked_add(command.query().checked_retained_capacity_bytes()?)?;
+            }
+            bytes
+        }
+        _ => 0,
+    };
     (core::mem::size_of::<PreparedDistributedSearch>() as u128)
+        .checked_add(response_kind_heap_bytes)?
         .checked_add(output_policy.checked_retained_capacity_bytes()?)?
         .checked_add(validation_report.checked_retained_capacity_bytes()?)
 }

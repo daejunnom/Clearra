@@ -242,7 +242,7 @@ fn packing_problem_builder_projects_builtin_srs_x_as_verified_kick_profile() {
     assert_eq!(compact.rule.kick_profile_id, C_KICK_SRS_X);
     assert_eq!(compact.rule.has_verified_kick_profile, 1);
     assert_eq!(compact.rule.verified_supports_180, 1);
-    assert_eq!(compact.rule.verified_transition_count, 80);
+    assert_eq!(compact.rule.verified_transition_count, 84);
 }
 
 #[test]

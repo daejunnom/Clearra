@@ -210,7 +210,7 @@ fn pc_command_routes_builtin_srs_x_through_verified_native_descriptor() {
         .contains("compact_has_verified_kick_profile: 1"));
     assert!(output
         .stdout()
-        .contains("compact_verified_kick_transition_count: 80"));
+        .contains("compact_verified_kick_transition_count: 84"));
 }
 
 #[test]

@@ -29,7 +29,7 @@
 #define CLR_SPAWN_ARIKA 2u
 #define CLR_SPAWN_CUSTOM 255u
 
-#define CLR_RULE_MAX_KICK_OFFSETS 6u
+#define CLR_RULE_MAX_KICK_OFFSETS 12u
 #define CLR_RULE_MAX_KICK_TRANSITIONS 84u
 typedef struct clr_kick_offset_descriptor {
     int8_t dx;

@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn ffi_kick_evidence_view_respects_scope_lifetime() {
-    let mut source = vec![CKickEvidenceView::first_success(0, 1, 1, 2, 1, -1)];
+    let mut source = [CKickEvidenceView::first_success(0, 1, 1, 2, 1, -1)];
     let native = CNativeBuildVariantView {
         candidate_id: 0x99,
         build_variant_id: 1,
@@ -18,6 +18,7 @@ fn ffi_kick_evidence_view_respects_scope_lifetime() {
     let owned = CBuildVariantView::from_native(&native).expect("owned view");
     source[0].kick_index = 9;
 
+    assert_eq!(source[0].kick_index, 9);
     assert_eq!(owned.operation_set_hash(), 0x99);
     assert_eq!(owned.kick_evidence().len(), 1);
     assert_eq!(owned.kick_evidence()[0].kick_index, 2);
@@ -50,7 +51,7 @@ fn kick_evidence_buffer_respects_scope_lifetime() {
 
 #[test]
 fn ffi_build_variant_view_copies_kick_evidence_to_block_pointer_escape() {
-    let mut source = vec![CKickEvidenceView::first_success(0, 1, 1, 2, 1, -1)];
+    let mut source = [CKickEvidenceView::first_success(0, 1, 1, 2, 1, -1)];
     let native = CNativeBuildVariantView {
         candidate_id: 0x55,
         build_variant_id: 1,
@@ -65,6 +66,7 @@ fn ffi_build_variant_view_copies_kick_evidence_to_block_pointer_escape() {
     assert_ne!(owned.kick_evidence().as_ptr(), source.as_ptr());
 
     source[0].kick_index = 9;
+    assert_eq!(source[0].kick_index, 9);
     assert_eq!(owned.kick_evidence()[0].kick_index, 2);
 }
 

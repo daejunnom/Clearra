@@ -41,6 +41,9 @@ export class ClearraProductJobRunner {
       onEvent(preparationProgressEvent(this.jobId));
       await distributed.acquire();
       const plan = distributed.prepare(commandText);
+      if (plan.mode === 'ready') {
+        return distributed.finishPreparedResult(onEvent);
+      }
       if (plan.mode !== 'serial') {
         return await distributed.run(commandText, plan, onEvent);
       }

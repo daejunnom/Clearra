@@ -6,13 +6,11 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use crate::{GuiJob, GuiJobCancelHandle, GuiJobEvent, GuiJobProgress, GuiJobResult};
 use clearra_app::{AppContext, AppResponse, AppStatus};
 use clearra_core_domain::execution_cancellation::{
     ExecutionControl, ExecutionProgress, ProgressSink,
 };
-use clearra_host_contract::HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES;
-
-use crate::{GuiJob, GuiJobCancelHandle, GuiJobEvent, GuiJobProgress, GuiJobResult};
 
 const GUI_JOB_STACK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -69,9 +67,9 @@ impl GuiJobRunner {
                 let product_page_source_owner = response.public_page_source_owner();
                 let _ = sender.send(GuiJobEvent::Completed {
                     job_id,
-                    response: response.to_host_response_with_solution_set_artifact(Some(
-                        HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
-                    )),
+                    // Keep completion independent of CTK3/Fumen encoding. The GUI obtains
+                    // normalized members from its bounded page source only when requested.
+                    response: response.to_host_response(),
                     search_report_json,
                     product_page_source_owner,
                 });

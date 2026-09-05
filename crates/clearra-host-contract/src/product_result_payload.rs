@@ -73,6 +73,7 @@ pub enum ProductResultPayloadContent {
     PcScoreFieldSummary(PcScoreFieldSummaryPayload),
     ScorePatternWinnerFamily(ScorePatternWinnerFamilyPayload),
     PcPathFamily(PcPathFamilyPayload),
+    BuildPathFamily(BuildPathFamilyPayload),
     PcSaveGroups(PcSaveGroupsPayload),
     PcBestSave(PcBestSavePayload),
     ParityReportPage(crate::ParityReportPagePayload),
@@ -94,6 +95,7 @@ impl ProductResultPayloadContent {
             Self::PcScoreFieldSummary(payload) => payload.checked_retained_capacity_bytes(),
             Self::ScorePatternWinnerFamily(payload) => payload.checked_retained_capacity_bytes(),
             Self::PcPathFamily(payload) => payload.checked_retained_capacity_bytes(),
+            Self::BuildPathFamily(payload) => payload.checked_retained_capacity_bytes(),
             Self::PcSaveGroups(payload) => payload.checked_retained_capacity_bytes(),
             Self::PcBestSave(payload) => payload.checked_retained_capacity_bytes(),
             Self::ParityReportPage(payload) => payload.checked_retained_capacity_bytes(),
@@ -367,6 +369,8 @@ pub struct PcPathFamilyPayload {
 }
 
 impl PcPathFamilyPayload {
+    // The constructor mirrors the versioned wire contract's independent fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         witness_contract: impl Into<String>,
         ordering: impl Into<String>,
@@ -424,6 +428,114 @@ impl PcPathFamilyPayload {
             self.witness_contract.capacity(),
             self.ordering.capacity(),
             self.problem_id.capacity(),
+            self.materialized_pattern_count.capacity(),
+            self.witness_count.capacity(),
+            self.canonical_selection.capacity(),
+        ]
+        .into_iter()
+        .try_fold(0_u128, |total, capacity| {
+            total.checked_add(capacity as u128)
+        })?;
+        if let Some(witness) = &self.canonical_witness {
+            bytes = bytes.checked_add(witness.checked_retained_capacity_bytes()?)?;
+        }
+        bytes = bytes.checked_add(
+            (self.witnesses.capacity() as u128)
+                .checked_mul(core::mem::size_of::<PcPathWitnessPayload>() as u128)?,
+        )?;
+        for witness in &self.witnesses {
+            bytes = bytes.checked_add(witness.checked_retained_capacity_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
+/// Complete Build-probability replay family.
+///
+/// Unlike `PcPathFamilyPayload`, a Build replay is allowed to terminate on a
+/// non-empty board.  The requested terminal is therefore carried as an
+/// authoritative mask instead of letting a presenter infer PC semantics from
+/// the shared witness shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BuildPathFamilyPayload {
+    witness_contract: String,
+    ordering: String,
+    problem_id: String,
+    target_terminal_board_mask: String,
+    materialized_pattern_count: String,
+    witness_count: String,
+    complete: bool,
+    canonical_selection: String,
+    canonical_witness: Option<PcPathWitnessPayload>,
+    witnesses: Vec<PcPathWitnessPayload>,
+}
+
+impl BuildPathFamilyPayload {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        witness_contract: impl Into<String>,
+        ordering: impl Into<String>,
+        problem_id: impl Into<String>,
+        target_terminal_board_mask: impl Into<String>,
+        materialized_pattern_count: impl Into<String>,
+        witness_count: impl Into<String>,
+        complete: bool,
+        canonical_selection: impl Into<String>,
+        canonical_witness: Option<PcPathWitnessPayload>,
+        witnesses: Vec<PcPathWitnessPayload>,
+    ) -> Self {
+        Self {
+            witness_contract: witness_contract.into(),
+            ordering: ordering.into(),
+            problem_id: problem_id.into(),
+            target_terminal_board_mask: target_terminal_board_mask.into(),
+            materialized_pattern_count: materialized_pattern_count.into(),
+            witness_count: witness_count.into(),
+            complete,
+            canonical_selection: canonical_selection.into(),
+            canonical_witness,
+            witnesses,
+        }
+    }
+
+    pub fn witness_contract(&self) -> &str {
+        &self.witness_contract
+    }
+    pub fn ordering(&self) -> &str {
+        &self.ordering
+    }
+    pub fn problem_id(&self) -> &str {
+        &self.problem_id
+    }
+    pub fn target_terminal_board_mask(&self) -> &str {
+        &self.target_terminal_board_mask
+    }
+    pub fn materialized_pattern_count(&self) -> &str {
+        &self.materialized_pattern_count
+    }
+    pub fn witness_count(&self) -> &str {
+        &self.witness_count
+    }
+    pub const fn complete(&self) -> bool {
+        self.complete
+    }
+    pub fn canonical_selection(&self) -> &str {
+        &self.canonical_selection
+    }
+    pub const fn canonical_witness(&self) -> Option<&PcPathWitnessPayload> {
+        self.canonical_witness.as_ref()
+    }
+    pub fn witnesses(&self) -> &[PcPathWitnessPayload] {
+        &self.witnesses
+    }
+
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = [
+            self.witness_contract.capacity(),
+            self.ordering.capacity(),
+            self.problem_id.capacity(),
+            self.target_terminal_board_mask.capacity(),
             self.materialized_pattern_count.capacity(),
             self.witness_count.capacity(),
             self.canonical_selection.capacity(),
@@ -2968,6 +3080,8 @@ pub struct ScorePatternWinnerFamilyPayload {
 }
 
 impl ScorePatternWinnerFamilyPayload {
+    // The constructor mirrors the versioned wire contract's independent fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         winner_contract: impl Into<String>,
         ordering: impl Into<String>,

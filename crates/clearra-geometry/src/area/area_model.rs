@@ -22,7 +22,7 @@ impl AreaModel {
 }
 impl AreaModel {
     pub fn is_tetromino_tileable(self) -> bool {
-        self.occupied_cells % 4 == 0
+        self.occupied_cells.is_multiple_of(4)
     }
 }
 impl AreaModel {

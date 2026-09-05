@@ -373,6 +373,8 @@ mod linked {
             unsafe { clearra_geometry_catalog_borrow_view(catalog, out_view) }
         }
 
+        // The argument list is fixed by the C ABI and cannot be grouped safely.
+        #[allow(clippy::too_many_arguments)]
         pub fn search_partition_to_sink(
             catalog: *const c_void,
             problem: &CPackingProblem,

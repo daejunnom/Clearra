@@ -34,11 +34,15 @@ use super::{
     WasmExactSearchError,
 };
 
+// Worker sessions are retained in place for the full distributed run.
+#[allow(clippy::large_enum_variant)]
 enum DistributedBuildProbabilitySession {
     Compact(CompactBuildProbabilitySession),
     Extended(ExtendedBuildProbabilitySession),
 }
 
+// These entrypoints are exercised by the browser coordinator rather than a native host.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 impl DistributedBuildProbabilitySession {
     fn new(
         problem: &SearchProblem,
@@ -95,6 +99,9 @@ impl DistributedBuildProbabilitySession {
         }
     }
 
+    // Browser coordinators use the coexisting-retained-bytes constructor so
+    // worker payload ownership participates in finite-memory admission.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     fn new_external_geometry(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -191,6 +198,8 @@ impl DistributedBuildProbabilitySession {
         }
     }
 
+    // The product coordinator calls the external-memory-guard variant.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     fn advance_distributed_geometry(
         &mut self,
         pass_index: u8,
@@ -265,6 +274,8 @@ impl DistributedBuildProbabilitySession {
         }
     }
 
+    // The product coordinator calls the external-memory-guard variant.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     fn absorb_distributed_result(
         &mut self,
         result: &CoreExecutionResult,
@@ -458,7 +469,7 @@ impl WasmBuildProbabilityCandidateProducer {
             finesse_metric,
             finesse_pattern_knowledge,
         )
-        .map_err(WasmCpuSearchError::reason)
+        .map_err(|error| error.reason())
     }
 
     pub fn new_with_finesse_typed(
@@ -493,45 +504,49 @@ impl WasmBuildProbabilityCandidateProducer {
         let mirrored = mirror_included.then(|| original.mirrored_horizontally());
         let mirror_distinct = mirrored.is_some_and(|candidate| candidate != original);
         let replica_count = verifier_count.checked_add(1).ok_or_else(|| {
-            WasmCpuSearchError::ResourceAdmission {
-                resource_report: clearra_core_domain::resource::ResourceReport::admission_failure(
+            WasmCpuSearchError::resource_admission(
+                clearra_core_domain::resource::ResourceReport::admission_failure(
                     clearra_core_domain::resource::ExecutionAvailability::unavailable(
                         clearra_core_domain::resource::ExecutionAvailabilityReason::PatternCountAddressSpaceExceeded,
                     ),
                 ),
-            }
+            )
         })?;
         let execution_admission = admit_budget_bound_search_execution(problem, replica_count)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
         let pass_count = usize::from(mirror_distinct) + 1;
         let aggregate_plan = ExecutionAdmissionPlan::build_probability_with_verifiers(
             problem,
             pass_count,
             verifier_count,
         )
-        .ok_or_else(|| WasmCpuSearchError::ResourceAdmission {
-            resource_report: execution_admission
-                .ensure_memory_bound(u128::MAX, 1)
-                .expect_err("checked aggregate plan overflow is unavailable"),
+        .ok_or_else(|| {
+            WasmCpuSearchError::resource_admission(
+                execution_admission
+                    .ensure_memory_bound(u128::MAX, 1)
+                    .expect_err("checked aggregate plan overflow is unavailable"),
+            )
         })?;
         execution_admission
             .ensure_plan(aggregate_plan, coordinator_reserved_bytes)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
         let aggregate_budget = BuildProbabilityAggregateBudget::new(
             execution_admission.memory_cap_bytes(),
             coordinator_reserved_bytes,
             verifier_count,
         )
-        .ok_or_else(|| WasmCpuSearchError::ResourceAdmission {
-            resource_report: execution_admission
-                .memory_bound()
-                .ensure(coordinator_reserved_bytes, 0)
-                .expect_err("coordinator reservation exceeds the execution cap"),
+        .ok_or_else(|| {
+            WasmCpuSearchError::resource_admission(
+                execution_admission
+                    .memory_bound()
+                    .ensure(coordinator_reserved_bytes, 0)
+                    .expect_err("coordinator reservation exceeds the execution cap"),
+            )
         })?;
         let producer_memory_bound = execution_admission
             .memory_bound()
             .with_cap(aggregate_budget.replica_cap_bytes)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
         let active_session = DistributedBuildProbabilitySession::new_with_finesse(
             problem,
             original,
@@ -571,7 +586,7 @@ impl WasmBuildProbabilityCandidateProducer {
         };
         producer
             .ensure_memory_bound()
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
         Ok(producer)
     }
 
@@ -580,7 +595,7 @@ impl WasmBuildProbabilityCandidateProducer {
     ) -> Result<ExecutionAdmission, WasmCpuSearchError> {
         self.execution_admission
             .try_delegate_compute_only_with_memory_cap(self.aggregate_budget.replica_cap_bytes)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })
+            .map_err(WasmCpuSearchError::resource_admission)
     }
 
     pub fn new_delegated_verifier(
@@ -601,7 +616,7 @@ impl WasmBuildProbabilityCandidateProducer {
         control: &ExecutionControl,
     ) -> Result<WasmCandidateProducerAdvance, &'static str> {
         self.advance_with_external_retained(control, 0)
-            .map_err(WasmCpuSearchError::reason)
+            .map_err(|error| error.reason())
     }
 
     pub fn advance_with_external_retained(
@@ -616,7 +631,7 @@ impl WasmBuildProbabilityCandidateProducer {
         }
         self.validate_external_result_memory(external_retained_bytes)?;
         self.ensure_memory_bound()
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
         loop {
             if self.active.is_none() {
                 let Some(spec) = self.pending.pop_front() else {
@@ -669,7 +684,7 @@ impl WasmBuildProbabilityCandidateProducer {
                         let future = candidate_coexisting_retained_bytes
                             .checked_add(checked_future_bytes)
                             .ok_or_else(|| {
-                                WasmExactSearchError::ResourceAdmission(
+                                WasmExactSearchError::resource_admission(
                                     candidate_memory_bound.ensure(u128::MAX, 1).expect_err(
                                         "checked candidate packet future overflow is unavailable",
                                     ),
@@ -677,7 +692,7 @@ impl WasmBuildProbabilityCandidateProducer {
                             })?;
                         candidate_memory_bound
                             .ensure(active_observed_bytes, future)
-                            .map_err(WasmExactSearchError::ResourceAdmission)
+                            .map_err(WasmExactSearchError::resource_admission)
                     },
                 )
                 .map_err(map_typed_error)?
@@ -696,9 +711,8 @@ impl WasmBuildProbabilityCandidateProducer {
                     pass.session.prepare_distributed_finalizer();
                     self.finalizers.push(pass.session);
                     self.summaries.push(summary);
-                    self.ensure_memory_bound().map_err(|resource_report| {
-                        WasmCpuSearchError::ResourceAdmission { resource_report }
-                    })?;
+                    self.ensure_memory_bound()
+                        .map_err(WasmCpuSearchError::resource_admission)?;
                     self.validate_external_result_memory(external_retained_bytes)?;
                 }
             }
@@ -713,17 +727,16 @@ impl WasmBuildProbabilityCandidateProducer {
         self.execution_admission
             .memory_bound()
             .with_cap(aggregate_cap)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })
+            .map_err(WasmCpuSearchError::resource_admission)
     }
 
     fn producer_memory_projection_error(&self) -> WasmCpuSearchError {
-        WasmCpuSearchError::ResourceAdmission {
-            resource_report: self
-                .execution_admission
+        WasmCpuSearchError::resource_admission(
+            self.execution_admission
                 .memory_bound()
                 .ensure(u128::MAX, 1)
                 .expect_err("checked producer memory projection overflow is unavailable"),
-        }
+        )
     }
 
     pub fn into_merger(self) -> Result<WasmBuildProbabilityDistributedResultMerger, &'static str> {
@@ -809,6 +822,8 @@ impl WasmBuildProbabilityCandidateProducer {
         progress
     }
 
+    // Domain admission APIs intentionally return the typed report before the public boxed error.
+    #[allow(clippy::result_large_err)]
     fn ensure_memory_bound(&self) -> Result<(), clearra_core_domain::resource::ResourceReport> {
         let observed = self.checked_retained_bytes().ok_or_else(|| {
             self.producer_memory_bound
@@ -858,29 +873,28 @@ impl WasmBuildProbabilityCandidateProducer {
         external_result_bytes: u128,
     ) -> Result<(), WasmCpuSearchError> {
         let aggregate_cap = self.aggregate_budget.merger_cap_bytes().ok_or_else(|| {
-            WasmCpuSearchError::ResourceAdmission {
-                resource_report: self
-                    .execution_admission
+            WasmCpuSearchError::resource_admission(
+                self.execution_admission
                     .memory_bound()
                     .ensure(u128::MAX, 1)
                     .expect_err("checked aggregate cap overflow is unavailable"),
-            }
+            )
         })?;
         let aggregate_bound = self
             .execution_admission
             .memory_bound()
             .with_cap(aggregate_cap)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
-        let observed =
-            self.checked_retained_bytes()
-                .ok_or_else(|| WasmCpuSearchError::ResourceAdmission {
-                    resource_report: aggregate_bound
-                        .ensure(u128::MAX, 1)
-                        .expect_err("checked producer storage overflow is unavailable"),
-                })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
+        let observed = self.checked_retained_bytes().ok_or_else(|| {
+            WasmCpuSearchError::resource_admission(
+                aggregate_bound
+                    .ensure(u128::MAX, 1)
+                    .expect_err("checked producer storage overflow is unavailable"),
+            )
+        })?;
         aggregate_bound
             .ensure(observed, external_result_bytes)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })
+            .map_err(WasmCpuSearchError::resource_admission)
     }
 }
 
@@ -903,7 +917,7 @@ impl WasmBuildProbabilityDistributedVerifier {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, &'static str> {
-        Self::new_typed(problem, field, aggregation).map_err(WasmCpuSearchError::reason)
+        Self::new_typed(problem, field, aggregation).map_err(|error| error.reason())
     }
 
     pub fn new_typed(
@@ -912,7 +926,7 @@ impl WasmBuildProbabilityDistributedVerifier {
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmCpuSearchError> {
         let execution_admission = admit_budget_bound_search_execution(problem, 1)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
         Self::new_with_delegated_admission(problem, field, aggregation, execution_admission)
     }
 
@@ -934,7 +948,7 @@ impl WasmBuildProbabilityDistributedVerifier {
                 ExecutionAdmissionPlan::build_probability(problem, pass_count),
                 0,
             )
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
         let mut pass_fields = Vec::with_capacity(usize::from(mirrored.is_some()) + 1);
         pass_fields.push(original);
         if let Some(mirrored) = mirrored {
@@ -983,18 +997,19 @@ impl WasmBuildProbabilityDistributedVerifier {
             });
         }
         self.ensure_memory_bound_with_future(external_retained_bytes)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
         self.activate_pass(candidate.pass_index(), external_retained_bytes)?;
         self.ensure_memory_bound_with_future(external_retained_bytes)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
         let coexisting = self
             .checked_active_coexisting_retained_bytes()
             .and_then(|bytes| bytes.checked_add(external_retained_bytes))
-            .ok_or_else(|| WasmCpuSearchError::ResourceAdmission {
-                resource_report: self
-                    .memory_bound
-                    .ensure(u128::MAX, 1)
-                    .expect_err("checked verifier coexisting-byte overflow is unavailable"),
+            .ok_or_else(|| {
+                WasmCpuSearchError::resource_admission(
+                    self.memory_bound
+                        .ensure(u128::MAX, 1)
+                        .expect_err("checked verifier coexisting-byte overflow is unavailable"),
+                )
             })?;
         let active = &mut self
             .active_pass
@@ -1006,15 +1021,14 @@ impl WasmBuildProbabilityDistributedVerifier {
             .process_external_candidate(candidate, control)
             .map_err(map_typed_error)?;
         self.ensure_memory_bound_with_future(external_retained_bytes)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })
+            .map_err(WasmCpuSearchError::resource_admission)
     }
 
     pub fn finish(&mut self) -> Result<Vec<CoreExecutionResult>, &'static str> {
         if self.finished {
             return Err("wasm_build_probability_distributed_verifier_already_finished");
         }
-        self.finish_active_pass(0)
-            .map_err(WasmCpuSearchError::reason)?;
+        self.finish_active_pass(0).map_err(|error| error.reason())?;
         self.ensure_memory_bound()
             .map_err(|_| "wasm_build_probability_aggregate_memory_budget_exceeded")?;
         self.finished = true;
@@ -1026,7 +1040,7 @@ impl WasmBuildProbabilityDistributedVerifier {
         external_result_bytes: u128,
     ) -> Result<(), WasmCpuSearchError> {
         self.ensure_memory_bound_with_future(external_result_bytes)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })
+            .map_err(WasmCpuSearchError::resource_admission)
     }
 
     pub fn progress(&self) -> WasmDistributedProgress {
@@ -1135,7 +1149,7 @@ impl WasmBuildProbabilityDistributedVerifier {
             .and_then(|bytes| bytes.checked_add(external_retained_bytes))
             .ok_or_else(|| self.verifier_memory_projection_error())?;
         self.ensure_memory_bound_with_future(checked_future)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })?;
+            .map_err(WasmCpuSearchError::resource_admission)?;
 
         let fields = self.try_build_pass_index_replacement_fields(
             &result,
@@ -1151,9 +1165,7 @@ impl WasmBuildProbabilityDistributedVerifier {
                         reason: "wasm_build_probability_aggregate_memory_projection_overflow",
                     })?;
                 self.ensure_memory_bound_with_future(checked_future)
-                    .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission {
-                        resource_report,
-                    })
+                    .map_err(WasmCpuSearchError::resource_admission)
             })
             .map_err(|error| {
                 match error {
@@ -1170,7 +1182,7 @@ impl WasmBuildProbabilityDistributedVerifier {
             })?;
         self.completed_results.push(result);
         self.ensure_memory_bound_with_future(external_retained_bytes)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })
+            .map_err(WasmCpuSearchError::resource_admission)
     }
 
     fn try_build_pass_index_replacement_fields(
@@ -1195,9 +1207,7 @@ impl WasmBuildProbabilityDistributedVerifier {
                 .and_then(|bytes| bytes.checked_add(checked_future_bytes))
                 .ok_or_else(|| self.verifier_memory_projection_error())?;
             self.ensure_memory_bound_with_future(checked_future)
-                .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission {
-                    resource_report,
-                })
+                .map_err(WasmCpuSearchError::resource_admission)
         };
 
         let requested_total_bytes = requested_field_backing_bytes
@@ -1252,18 +1262,20 @@ impl WasmBuildProbabilityDistributedVerifier {
     }
 
     fn verifier_memory_projection_error(&self) -> WasmCpuSearchError {
-        WasmCpuSearchError::ResourceAdmission {
-            resource_report: self
-                .memory_bound
+        WasmCpuSearchError::resource_admission(
+            self.memory_bound
                 .ensure(u128::MAX, 1)
                 .expect_err("checked verifier memory projection overflow is unavailable"),
-        }
+        )
     }
 
+    // Domain admission APIs intentionally return the typed report before the public boxed error.
+    #[allow(clippy::result_large_err)]
     fn ensure_memory_bound(&self) -> Result<(), clearra_core_domain::resource::ResourceReport> {
         self.ensure_memory_bound_with_future(0)
     }
 
+    #[allow(clippy::result_large_err)]
     fn ensure_memory_bound_with_future(
         &self,
         checked_future_bytes: u128,
@@ -1336,7 +1348,7 @@ impl WasmBuildProbabilityDistributedResultMerger {
         let external_result_bytes = Self::public_result_retained_bytes(result)
             .ok_or("wasm_build_probability_aggregate_memory_projection_overflow")?;
         self.absorb_with_external_retained(result, external_result_bytes)
-            .map_err(WasmCpuSearchError::reason)
+            .map_err(|error| error.reason())
     }
 
     /// Absorbs one borrowed worker result while `external_result_bytes`
@@ -1362,11 +1374,12 @@ impl WasmBuildProbabilityDistributedResultMerger {
             .ok_or_else(|| self.spin_clone_projection_overflow())?;
         let validation_and_absorb_future =
             checked_worker_validation_and_absorb_future_bytes(result, clone_future).ok_or_else(
-                || WasmCpuSearchError::ResourceAdmission {
-                    resource_report: self
-                        .memory_bound
-                        .ensure(u128::MAX, 1)
-                        .expect_err("checked worker validation projection overflow is unavailable"),
+                || {
+                    WasmCpuSearchError::resource_admission(
+                        self.memory_bound.ensure(u128::MAX, 1).expect_err(
+                            "checked worker validation projection overflow is unavailable",
+                        ),
+                    )
                 },
             )?;
         self.validate_external_result_memory(external_result_bytes, validation_and_absorb_future)?;
@@ -1386,20 +1399,22 @@ impl WasmBuildProbabilityDistributedResultMerger {
             .spin_coverages
             .len()
             .checked_add(incoming.len())
-            .ok_or_else(|| WasmCpuSearchError::ResourceAdmission {
-                resource_report: self
-                    .memory_bound
-                    .ensure(u128::MAX, 1)
-                    .expect_err("checked spin clone count overflow is unavailable"),
+            .ok_or_else(|| {
+                WasmCpuSearchError::resource_admission(
+                    self.memory_bound
+                        .ensure(u128::MAX, 1)
+                        .expect_err("checked spin clone count overflow is unavailable"),
+                )
             })?;
         if self.spin_coverages.capacity() < target_len {
             self.spin_coverages
                 .try_reserve_exact(target_len.saturating_sub(self.spin_coverages.len()))
-                .map_err(|_| WasmCpuSearchError::ResourceAdmission {
-                    resource_report: self
-                        .memory_bound
-                        .ensure(self.memory_bound.cap_bytes(), 1)
-                        .expect_err("spin clone allocation failure is unavailable"),
+                .map_err(|_| {
+                    WasmCpuSearchError::resource_admission(
+                        self.memory_bound
+                            .ensure(self.memory_bound.cap_bytes(), 1)
+                            .expect_err("spin clone allocation failure is unavailable"),
+                    )
                 })?;
         }
         let post_reserve_future =
@@ -1424,7 +1439,7 @@ impl WasmBuildProbabilityDistributedResultMerger {
                 let future = absorb_coexisting_retained_bytes
                     .checked_add(checked_future_bytes)
                     .ok_or_else(|| {
-                        WasmExactSearchError::ResourceAdmission(
+                        WasmExactSearchError::resource_admission(
                             memory_bound.ensure(u128::MAX, 1).expect_err(
                                 "checked distributed absorb future overflow is unavailable",
                             ),
@@ -1432,7 +1447,7 @@ impl WasmBuildProbabilityDistributedResultMerger {
                     })?;
                 memory_bound
                     .ensure(active_observed_bytes, future)
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             },
         );
         // The raw/decoded source owner belongs to this call. Restore the
@@ -1466,12 +1481,11 @@ impl WasmBuildProbabilityDistributedResultMerger {
     }
 
     fn absorb_projection_overflow(&self) -> WasmCpuSearchError {
-        WasmCpuSearchError::ResourceAdmission {
-            resource_report: self
-                .memory_bound
+        WasmCpuSearchError::resource_admission(
+            self.memory_bound
                 .ensure(u128::MAX, 1)
                 .expect_err("checked distributed absorb projection overflow is unavailable"),
-        }
+        )
     }
 
     fn checked_spin_clone_nested_future_bytes(result: &CoreExecutionResult) -> Option<u128> {
@@ -1583,21 +1597,19 @@ impl WasmBuildProbabilityDistributedResultMerger {
     }
 
     fn spin_clone_projection_overflow(&self) -> WasmCpuSearchError {
-        WasmCpuSearchError::ResourceAdmission {
-            resource_report: self
-                .memory_bound
+        WasmCpuSearchError::resource_admission(
+            self.memory_bound
                 .ensure(u128::MAX, 1)
                 .expect_err("checked spin clone projection overflow is unavailable"),
-        }
+        )
     }
 
     fn spin_clone_allocation_failure(&self) -> WasmCpuSearchError {
-        WasmCpuSearchError::ResourceAdmission {
-            resource_report: self
-                .memory_bound
+        WasmCpuSearchError::resource_admission(
+            self.memory_bound
                 .ensure(self.memory_bound.cap_bytes(), 1)
                 .expect_err("spin clone allocation failure is unavailable"),
-        }
+        )
     }
 
     pub fn public_result_retained_bytes(result: &CoreExecutionResult) -> Option<u128> {
@@ -1611,14 +1623,15 @@ impl WasmBuildProbabilityDistributedResultMerger {
     ) -> Result<(), WasmCpuSearchError> {
         let future = external_result_bytes
             .checked_add(checked_future_bytes)
-            .ok_or_else(|| WasmCpuSearchError::ResourceAdmission {
-                resource_report: self
-                    .memory_bound
-                    .ensure(u128::MAX, 1)
-                    .expect_err("checked external result storage overflow is unavailable"),
+            .ok_or_else(|| {
+                WasmCpuSearchError::resource_admission(
+                    self.memory_bound
+                        .ensure(u128::MAX, 1)
+                        .expect_err("checked external result storage overflow is unavailable"),
+                )
             })?;
         self.ensure_memory_bound(future)
-            .map_err(|resource_report| WasmCpuSearchError::ResourceAdmission { resource_report })
+            .map_err(WasmCpuSearchError::resource_admission)
     }
 
     pub fn finish(
@@ -1801,7 +1814,7 @@ impl WasmBuildProbabilityDistributedResultMerger {
                         "wasm_build_probability_symmetry_memory_projection_overflow",
                     ))?;
                 self.ensure_memory_bound(checked_future)
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             },
         )
         .map_err(map_error)?;
@@ -1823,7 +1836,7 @@ impl WasmBuildProbabilityDistributedResultMerger {
                         ),
                     )?;
                     self.ensure_memory_bound(checked_future)
-                        .map_err(WasmExactSearchError::ResourceAdmission)
+                        .map_err(WasmExactSearchError::resource_admission)
                 },
             )
             .map_err(map_error)?;
@@ -1840,12 +1853,14 @@ impl WasmBuildProbabilityDistributedResultMerger {
                         "wasm_build_probability_backend_memory_projection_overflow",
                     ))?;
                 self.ensure_memory_bound(checked_future)
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             },
         )
         .map_err(map_error)
     }
 
+    // Domain admission APIs intentionally return the typed report before the public boxed error.
+    #[allow(clippy::result_large_err)]
     fn ensure_memory_bound(
         &self,
         checked_future_bytes: u128,
@@ -1946,7 +1961,7 @@ fn checked_worker_validation_and_absorb_future_bytes(
     spin_clone_future_bytes.checked_add(coverage_scratch)
 }
 
-fn decimal_u8<'a>(value: u8, storage: &'a mut [u8; 3]) -> &'a str {
+fn decimal_u8(value: u8, storage: &mut [u8; 3]) -> &str {
     let len = if value >= 100 {
         storage[0] = b'0' + value / 100;
         storage[1] = b'0' + (value / 10) % 10;
@@ -2193,7 +2208,7 @@ fn map_typed_error(error: WasmExactSearchError) -> WasmCpuSearchError {
             WasmCpuSearchError::InvalidProblem { reason }
         }
         WasmExactSearchError::ResourceAdmission(resource_report) => {
-            WasmCpuSearchError::ResourceAdmission { resource_report }
+            WasmCpuSearchError::resource_admission(*resource_report)
         }
         WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
     }
@@ -2928,7 +2943,7 @@ mod tests {
                     )?,
                     future,
                 )
-                .map_err(WasmExactSearchError::ResourceAdmission)
+                .map_err(WasmExactSearchError::resource_admission)
         })
         .expect("the recorded exact pre-allocation peak is sufficient");
 
@@ -2946,7 +2961,7 @@ mod tests {
                         )?,
                         future,
                     )
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             })
             .expect_err("one byte below the guarded backend-field peak must fail closed");
         assert!(matches!(error, WasmExactSearchError::ResourceAdmission(_)));

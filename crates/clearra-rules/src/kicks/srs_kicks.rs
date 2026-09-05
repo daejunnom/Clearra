@@ -8,10 +8,12 @@ use super::kick_table::{
 };
 use super::srs_offsets::{
     jlstz_offsets, jstris_180_offsets, srs_i_offsets, srs_plus_i_180_offsets, srs_plus_i_offsets,
-    srs_plus_jlstz_180_offsets, srs_x_i_180_offsets,
+    srs_plus_jlstz_180_offsets, srs_x_i_offsets, srs_x_jlstz_offsets, srs_x_o_offsets,
 };
 
-pub use super::srs_offsets::{eight_direction_transitions, one_eighty_transitions};
+pub use super::srs_offsets::{
+    eight_direction_transitions, one_eighty_transitions, twelve_direction_transitions,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SrsKicks;
@@ -135,25 +137,28 @@ fn srs_plus_profile_entries() -> Vec<KickTableEntry> {
 }
 
 fn srs_x_profile_entries() -> Vec<KickTableEntry> {
-    let mut entries = srs_profile_entries(RuleProfileId::SrsX);
-    entries.extend(
-        PieceKind::STANDARD_TETROMINOES
-            .into_iter()
-            .filter(|piece| *piece != PieceKind::O)
-            .flat_map(|piece| {
-                one_eighty_transitions().into_iter().map(move |(from, to)| {
+    PieceKind::STANDARD_TETROMINOES
+        .into_iter()
+        .flat_map(|piece| {
+            twelve_direction_transitions()
+                .into_iter()
+                .map(move |(from, to)| {
+                    let offsets = match piece {
+                        PieceKind::I => srs_x_i_offsets(from, to),
+                        PieceKind::O => srs_x_o_offsets(from, to),
+                        PieceKind::T
+                        | PieceKind::S
+                        | PieceKind::Z
+                        | PieceKind::J
+                        | PieceKind::L => srs_x_jlstz_offsets(from, to),
+                    };
                     KickTableEntry::new(
                         KickTransition::new(piece, from, to),
-                        if piece == PieceKind::I {
-                            KickOffsetSequence::new(srs_x_i_180_offsets(from, to))
-                        } else {
-                            KickOffsetSequence::new(srs_plus_jlstz_180_offsets(from, to))
-                        },
+                        KickOffsetSequence::new(offsets),
                     )
                 })
-            }),
-    );
-    entries
+        })
+        .collect()
 }
 
 fn jstris_180_profile_entries() -> Vec<KickTableEntry> {

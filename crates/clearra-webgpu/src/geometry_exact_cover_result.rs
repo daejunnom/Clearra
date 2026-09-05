@@ -239,6 +239,8 @@ pub enum WebGpuGeometryPathStreamError<E> {
     Consumer(E),
 }
 
+// Traversal state is passed separately so recursion reuses the caller-owned buffers.
+#[allow(clippy::too_many_arguments)]
 fn stream_candidate_paths<E>(
     batches: &[WebGpuGeometryExactCoverBatch],
     layers: &[TraceLayer],

@@ -433,6 +433,8 @@ impl RealizationFeasibilityWorkspace {
         });
     }
 
+    // Recursive feasibility search passes compact scalar state and shared scratch explicitly.
+    #[allow(clippy::too_many_arguments)]
     fn search(
         &mut self,
         catalog: &GeometryCatalog,

@@ -65,16 +65,26 @@ impl RenderMessage {
 }
 impl RenderMessage {
     pub fn text_lines_with_profile(&self, profile: TextOutputProfile) -> Vec<String> {
-        std::iter::once(TextWriter::line("kind", &self.kind))
-            .chain(backend_summary_lines(&self.fields, profile))
-            .chain(
-                self.fields
-                    .iter()
-                    .filter(|field| include_in_text_profile(&self.kind, field.key(), profile))
-                    .map(|field| TextWriter::line(field.key(), text_field_value(field))),
-            )
-            .collect()
+        std::iter::once(TextWriter::line(
+            "kind",
+            human_facing_kind(&self.kind, profile),
+        ))
+        .chain(backend_summary_lines(&self.fields, profile))
+        .chain(
+            self.fields
+                .iter()
+                .filter(|field| include_in_text_profile(&self.kind, field.key(), profile))
+                .map(|field| TextWriter::line(field.key(), text_field_value(field))),
+        )
+        .collect()
     }
+}
+
+fn human_facing_kind(kind: &str, profile: TextOutputProfile) -> &str {
+    if profile != TextOutputProfile::HumanSummary {
+        return kind;
+    }
+    HumanSummaryFieldPolicy::human_facing_kind(kind)
 }
 
 fn text_field_value(field: &RenderField) -> String {

@@ -107,6 +107,12 @@ test('stable Fumen ingress failures retain user-facing EN and KO messages', () =
   );
   assert.match(production.workspaceMessage('en', 'fumenInputTooLarge'), /too large/i);
   assert.match(production.workspaceMessage('ko', 'fumenPageLimit'), /4,096/u);
+  for (const locale of ['en', 'ko']) {
+    const publicImportFailure = production.workspaceMessage(locale, 'fieldImportInvalid');
+    assert.doesNotMatch(publicImportFailure, /\bctk[12]\b/iu);
+    assert.match(publicImportFailure, /Fumen/u);
+    assert.match(publicImportFailure, /CTK3/u);
+  }
   for (const file of [
     'WorkspaceBoardEditor.svelte',
     'CtkDrawerWorkspace.svelte',

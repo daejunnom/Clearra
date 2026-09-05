@@ -32,7 +32,15 @@ test("local-services watcher is one hidden 60-second owner for ports 4194 and 87
 
   assert.match(launcher, /exitCode = shell\.Run\(command, 0, True\)/u);
   assert.match(launcher, /WScript\.Quit exitCode/u);
-  assert.match(installer, /"Clearra Local Runtime", "Clearra Local Services Watchdog"/u);
+  assert.match(installer, /\$legacyTaskNames = @\("Clearra Local Runtime"\)/u);
+  assert.match(installer, /\$existingTaskWasRunning/u);
+  assert.match(installer, /Register-ScheduledTask[\s\S]*-Force/u);
+  assert.match(installer, /if \(\$existingTaskWasRunning\)[\s\S]*preserved the running instance/u);
+  assert.match(installer, /Get-ListenerOwner -Port 4194/u);
+  assert.match(installer, /Get-ListenerOwner -Port 8790/u);
+  assert.match(installer, /listener changed during the non-disruptive task migration/u);
+  assert.match(installer, /Disable-ScheduledTask -TaskName \$legacyTaskName/u);
+  assert.doesNotMatch(installer, /Stop-ScheduledTask/u);
   assert.match(installer, /-MultipleInstances IgnoreNew/u);
   assert.match(installer, /-Hidden/u);
   assert.match(installer, /-RestartCount 3/u);

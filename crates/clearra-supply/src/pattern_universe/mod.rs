@@ -17,7 +17,10 @@ pub use materialized_pattern_universe::{
     MaterializedPatternUniverse, MaterializedPatternUniverseError,
     MaterializedPatternUniverseStructure,
 };
-pub use pattern_piece_position_index::{PatternPiecePositionIndex, PatternPiecePositionIndexError};
+pub use pattern_piece_position_index::{
+    PatternPiecePositionIndex, PatternPiecePositionIndexCompileAdvance,
+    PatternPiecePositionIndexCompileSession, PatternPiecePositionIndexError,
+};
 pub use pattern_sequence_reader::{PatternSequenceReader, ProbabilityWeight};
 pub use pattern_universe_materializer::{
     PatternUniverseMaterializationError, PatternUniverseMaterializer,

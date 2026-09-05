@@ -312,6 +312,130 @@ test("Build v2 cover exposes only its closed mask-source option set", () => {
   );
 });
 
+test("Build probability exposes and lowers all seven CLI-owned result aggregations", () => {
+  const command = findSlashCommand("build").subcommands.probability;
+  assert.equal(command.capabilityId, "build.probability");
+  assert.deepEqual(command.argvPrefix, ["build-probability"]);
+  assert.deepEqual(
+    command.registration.options.map(({ name }) => name),
+    [
+      "next",
+      "base",
+      "target",
+      "kicktable",
+      "height",
+      "hold",
+      "source-pieces",
+      "aggregation",
+      "result-mode",
+      "spin-profile",
+      "preserve-b2b",
+      "solution-probabilities",
+      "finesse",
+      "finesse-knowledge",
+      "mirror",
+      "score-profile",
+      "initial-b2b",
+      "failed-count",
+    ],
+  );
+  const common = [
+    { name: "next", value: "I" },
+    { name: "base", value: "__________" },
+    { name: "target", value: "####______" },
+  ];
+  const modes = [
+    "all-solutions",
+    "complete-replay-paths",
+    "minimum-solutions",
+    "field-average-score",
+    "fixed-queue-maximum-score",
+    "highest-score-minimum-set",
+    "failed-queues",
+  ];
+  for (const mode of modes) {
+    const arguments_ = buildSlashCommandArguments(command, [
+      ...common,
+      { name: "result-mode", value: mode },
+    ]);
+    if (mode === "minimum-solutions") {
+      assert.deepEqual(arguments_.slice(0, 2), ["build", "cover"]);
+      assert.equal(arguments_.includes("--result-mode"), false);
+      assert.deepEqual(
+        arguments_.slice(arguments_.indexOf("--objective"), arguments_.indexOf("--objective") + 2),
+        ["--objective", "min-cover"],
+      );
+      assert.deepEqual(
+        arguments_.slice(arguments_.indexOf("--backend"), arguments_.indexOf("--backend") + 2),
+        ["--backend", "cpu"],
+      );
+      assert.equal(arguments_.includes("--no-backend-fallback"), true);
+    } else {
+      assert.equal(arguments_[0], "build-probability");
+      assert.equal(
+        arguments_.includes("--result-mode"),
+        mode !== "all-solutions",
+      );
+    }
+    const scoreMode = [
+      "field-average-score",
+      "fixed-queue-maximum-score",
+      "highest-score-minimum-set",
+    ].includes(mode);
+    assert.equal(arguments_.includes("--score-profile"), scoreMode);
+    assert.equal(arguments_.includes("--initial-b2b"), scoreMode);
+    assert.equal(arguments_.includes("--failed-count"), mode === "failed-queues");
+  }
+});
+
+test("Build probability result-mode compatibility and mode-only inputs fail closed", () => {
+  const command = findSlashCommand("build").subcommands.probability;
+  const common = [
+    { name: "next", value: "[I]!" },
+    { name: "base", value: "__________" },
+    { name: "target", value: "####______" },
+  ];
+  assert.throws(
+    () => buildSlashCommandArguments(command, [
+      ...common,
+      { name: "result-mode", value: "fixed-queue-maximum-score" },
+    ]),
+    /exact queue/i,
+  );
+  assert.throws(
+    () => buildSlashCommandArguments(command, [
+      ...common,
+      { name: "result-mode", value: "field-average-score" },
+      { name: "aggregation", value: "spin" },
+    ]),
+    /Non-all Build result modes require aggregation=buildability/u,
+  );
+  assert.throws(
+    () => buildSlashCommandArguments(command, [
+      ...common,
+      { name: "result-mode", value: "all-solutions" },
+      { name: "score-profile", value: "tetrio" },
+    ]),
+    /require a score result-mode/u,
+  );
+  assert.throws(
+    () => buildSlashCommandArguments(command, [
+      ...common,
+      { name: "result-mode", value: "all-solutions" },
+      { name: "failed-count", value: 3 },
+    ]),
+    /requires result-mode=failed-queues/u,
+  );
+  assert.throws(
+    () => buildSlashCommandArguments(command, [
+      ...common,
+      { name: "result-mode", value: "complete-replay-paths" },
+      { name: "height", value: 7 },
+    ]),
+    /height from 1 through 6/u,
+  );
+});
+
 test("finesse search forwards canonical masks, height, queue class, and policies", () => {
   const command = findSlashCommand("finesse");
   const direct = buildSlashCommandArguments(command, [{

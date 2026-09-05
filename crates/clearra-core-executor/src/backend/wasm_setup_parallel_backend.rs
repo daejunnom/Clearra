@@ -7,6 +7,7 @@ use super::{
     wasm_cpu::{
         WasmSetupParallelCoordinator as InnerCoordinator, WasmSetupParallelProduce as InnerProduce,
         WasmSetupParallelWorker as InnerWorker,
+        WasmSetupParallelWorkerAdvance as InnerWorkerAdvance,
     },
     WasmCpuSearchError,
 };
@@ -119,6 +120,12 @@ pub struct WasmSetupParallelWorker {
     inner: InnerWorker,
 }
 
+pub struct WasmSetupParallelWorkerStep {
+    pub candidate_count: usize,
+    pub partial: Option<Vec<u8>>,
+    pub has_pending_work: bool,
+}
+
 impl WasmSetupParallelWorker {
     pub fn accepts_initialization(input: &[u8]) -> bool {
         InnerWorker::accepts_initialization(input)
@@ -137,6 +144,45 @@ impl WasmSetupParallelWorker {
     ) -> Result<(usize, Vec<u8>), WasmCpuSearchError> {
         self.inner.consume(input, control).map_err(map_error)
     }
+
+    pub fn enqueue(&mut self, input: &[u8]) -> Result<(), WasmCpuSearchError> {
+        self.inner.enqueue(input).map_err(map_error)
+    }
+
+    pub fn continue_work(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<WasmSetupParallelWorkerStep, WasmCpuSearchError> {
+        Ok(
+            match self
+                .inner
+                .advance_pending(work_budget, control)
+                .map_err(map_error)?
+            {
+                InnerWorkerAdvance::Pending => WasmSetupParallelWorkerStep {
+                    candidate_count: 0,
+                    partial: None,
+                    has_pending_work: true,
+                },
+                InnerWorkerAdvance::Complete {
+                    candidate_count,
+                    partial,
+                } => WasmSetupParallelWorkerStep {
+                    candidate_count,
+                    partial: Some(partial),
+                    has_pending_work: false,
+                },
+                InnerWorkerAdvance::Cancelled => {
+                    return Err(map_error(super::wasm_cpu::WasmExactSearchError::Cancelled))
+                }
+            },
+        )
+    }
+
+    pub fn has_pending_work(&self) -> bool {
+        self.inner.has_pending_work()
+    }
 }
 
 fn map_error(error: super::wasm_cpu::WasmExactSearchError) -> WasmCpuSearchError {
@@ -145,7 +191,7 @@ fn map_error(error: super::wasm_cpu::WasmExactSearchError) -> WasmCpuSearchError
             WasmCpuSearchError::InvalidProblem { reason }
         }
         super::wasm_cpu::WasmExactSearchError::ResourceAdmission(resource_report) => {
-            WasmCpuSearchError::ResourceAdmission { resource_report }
+            WasmCpuSearchError::resource_admission(*resource_report)
         }
         super::wasm_cpu::WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
     }

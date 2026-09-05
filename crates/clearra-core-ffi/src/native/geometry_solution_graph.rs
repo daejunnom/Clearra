@@ -17,6 +17,7 @@ use super::{NativeCoreError, NativeGeometryCatalog, NativePruningLedger};
 
 pub const C_NATIVE_GEOMETRY_TASK_MAX_OPERATIONS: usize = 15;
 pub const C_NATIVE_GEOMETRY_PATH_MAX_OPERATIONS: usize = C_NATIVE_GEOMETRY_TASK_MAX_OPERATIONS;
+#[cfg(feature = "native-c-core")]
 const NATIVE_MEMORY_BUDGET_QUANTUM_BYTES: u128 = 1024 * 1024;
 
 #[repr(C)]
@@ -136,13 +137,13 @@ mod linked {
     }
 
     fn memory_budget_error(required_memory_bytes: u128) -> NativeCoreError {
-        NativeCoreError::PackingIncomplete {
-            status: PACKING_CAPACITY_EXCEEDED,
-            resource_report: ResourceReport::admission_failure(
+        NativeCoreError::packing_incomplete(
+            PACKING_CAPACITY_EXCEEDED,
+            ResourceReport::admission_failure(
                 ExecutionAvailability::exhausted(ExecutionAvailabilityReason::MemoryBudgetExceeded)
                     .with_required_memory_bytes(required_memory_bytes),
             ),
-        }
+        )
     }
 
     fn ensure_memory_budget(
@@ -223,7 +224,7 @@ mod linked {
                 inner: Arc::new(NativeGeometrySolutionGraphInner {
                     pointer,
                     catalog,
-                    resource_report: resource_report.clone(),
+                    resource_report,
                 }),
             };
             let retained_bytes = (graph.catalog().resident_bytes() as u128)
@@ -335,6 +336,8 @@ mod linked {
             Ok(emitted_count)
         }
 
+        // Arguments mirror the native buildability task ABI without hidden ambient state.
+        #[allow(clippy::too_many_arguments)]
         pub fn stream_buildable_task(
             &self,
             task: &NativeGeometrySolutionTask,
@@ -454,6 +457,8 @@ impl NativeGeometrySolutionGraph {
         Err(NativeCoreError::Unavailable)
     }
 
+    // The unavailable stub preserves the native buildability-task API exactly.
+    #[allow(clippy::too_many_arguments)]
     pub fn stream_buildable_task(
         &self,
         _task: &NativeGeometrySolutionTask,

@@ -75,3 +75,25 @@ test('CTK owns the Pages render entry and executes it through the local browser 
   );
   assert.match(tablebaseAssets, /credentials: 'same-origin'/u);
 });
+
+test('Setup path detail preserves results while rotating stale WASM only at its next run', () => {
+  const setup = source('../src/lib/workspace/SetupFinderWorkspace.svelte');
+
+  assert.match(setup, /let detailWorkerArtifactGeneration: string \| null = null;/u);
+  assert.match(
+    setup,
+    /if \(detailWorkerBusy\)[\s\S]*?rotateStaleDetailWorkerForNewRun\(\);[\s\S]*?const worker = detailWorker \?\?/u
+  );
+  assert.match(
+    setup,
+    /detailWorkerArtifactGeneration = currentWasmArtifactGeneration\(\);/u
+  );
+  assert.match(
+    setup,
+    /function rotateStaleDetailWorkerForNewRun\(\)[\s\S]*?isCurrentWasmArtifactGeneration\(detailWorkerArtifactGeneration\)[\s\S]*?disposeDetailWorker\(\);/u
+  );
+  assert.match(
+    setup,
+    /function finishDetailWorkerRequest\(worker: Worker\)[\s\S]*?detailWorkerBusy = false;[\s\S]*?activeDetailKey = null;[\s\S]*?\}/u
+  );
+});

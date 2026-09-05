@@ -18,10 +18,11 @@ impl ScoreObjectiveMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ScoreProfileSelection {
     Guideline,
     JstrisUltra,
+    #[default]
     Tetrio,
 }
 
@@ -77,12 +78,6 @@ impl ScoreProfileSelection {
             Self::JstrisUltra => "jstris-ultra",
             Self::Tetrio => "tetrio",
         }
-    }
-}
-
-impl Default for ScoreProfileSelection {
-    fn default() -> Self {
-        Self::Tetrio
     }
 }
 

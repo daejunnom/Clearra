@@ -184,8 +184,10 @@ impl ActualFumenDocumentTransform {
             .try_reserve(comments.len())
             .map_err(|_| ActualFumenTransformError::CapacityExceeded)?;
         for comment in comments {
-            let mut page = Page::default();
-            page.comment = Some(comment.clone());
+            let page = Page {
+                comment: Some(comment.clone()),
+                ..Page::default()
+            };
             document.pages.push(page);
         }
         encode_checked(document)
@@ -484,13 +486,15 @@ mod tests {
                 RotationState::North,
                 RotationState::West,
             ] {
-                let mut page = Page::default();
-                page.piece = Some(Piece {
-                    kind,
-                    rotation,
-                    x: 4,
-                    y: 4,
-                });
+                let page = Page {
+                    piece: Some(Piece {
+                        kind,
+                        rotation,
+                        x: 4,
+                        y: 4,
+                    }),
+                    ..Page::default()
+                };
                 pages.push(page);
             }
         }

@@ -38,18 +38,13 @@ pub struct CBuildUpState {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CBuildUpEventKind {
+    #[default]
     Placement = 1,
     HoldSwap = 2,
     HoldStore = 3,
     LineClear = 4,
-}
-
-impl Default for CBuildUpEventKind {
-    fn default() -> Self {
-        Self::Placement
-    }
 }
 
 #[repr(C)]

@@ -137,7 +137,7 @@ foreach ($requiredMarker in @(
 $desktopBridge = Read-PhysicalText "crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs"
 $desktopClient = Read-PhysicalText "packages/clearra-ui/src/lib/host/clearraDesktopHost.ts"
 $desktopJobStore = Read-PhysicalText "packages/clearra-ui/src/lib/stores/desktopJobStore.ts"
-foreach ($requiredMarker in @("CliCommandParser::parse_tokens", "response.to_host_response_with_solution_set_artifact", "serde_json::to_string")) {
+foreach ($requiredMarker in @("CliCommandParser::parse_tokens", "response.to_host_response()", "serde_json::to_string")) {
     if ($desktopBridge.IndexOf($requiredMarker, [System.StringComparison]::Ordinal) -lt 0) {
         Add-ArchitectureError "Desktop CLI production bridge must keep typed request/response marker '$requiredMarker'"
     }

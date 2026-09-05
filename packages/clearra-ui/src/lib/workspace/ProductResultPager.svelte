@@ -6,11 +6,16 @@
     ClearraCoveragePortfolioRuntimePage,
     ClearraProductResultPayload
   } from '../wasm/wasmCommandClient';
-  import SolutionBoardPreview from './SolutionBoardPreview.svelte';
+  import PcPathReplayGif from './PcPathReplayGif.svelte';
+  import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
+  import SolutionSubsetPage from './SolutionSubsetPage.svelte';
+  import type { SolutionCopyFormat } from './solutionExport';
+  import type { SolutionExportKeySource } from './solutionExportAsync';
+  import { tryCreateCoveragePortfolioExportKeySource } from './coveragePortfolioExportSource';
   import {
-    solutionBoardPreviewFromKey,
-    solutionBoardPreviewFromReplay
-  } from './solutionBoardPreview';
+    groupPcPathWitnesses,
+    pcPathCandidateGroupExportPages
+  } from './pcPathReplayPresentation';
   import {
     CoveragePortfolioPagerController,
     PRODUCT_MEMBER_PAGE_SIZE,
@@ -18,8 +23,8 @@
     coveragePortfolioPageReference,
     decrementCanonicalDecimal,
     incrementCanonicalDecimal,
+    loadCoveragePortfolioExactPage,
     productResultIdentity,
-    requireCoveragePortfolioPageResponse,
     validateProductResultPayload,
     type CoveragePortfolioPagerSnapshot,
     type ProductMemberPageLoader,
@@ -27,6 +32,8 @@
     type ProductPageRelease
   } from './productResultPager';
   import type { WorkspaceLanguage } from './workspaceI18n';
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
+  import { projectWorkspacePublicFailure } from './workspacePublicFailure';
 
   const MAX_RETAINED_MEMBER_PAGES = 3;
 
@@ -58,13 +65,28 @@
   let setupRankedPageIndex = 0;
   let setupScorePageIndex = 0;
   let spinStructurePageIndex = 0;
+  let solutionCopyFormat: SolutionCopyFormat = 'ctk';
+  let coverageExportKeySource: SolutionExportKeySource | null = null;
+  let coverageExportIdentity = '';
   let outerPager: CoveragePortfolioPagerController | null = null;
   const memberCache = new Map<string, ClearraCoveragePortfolioRuntimePage['members']>();
 
+  $: pagerFailure = error
+    ? projectWorkspacePublicFailure({
+        status: 'failed',
+        error,
+        fallbackCode: 'result-invalid'
+      })
+    : null;
   $: nextIdentity = productResultIdentity(payload);
   $: if (nextIdentity !== activeIdentity) resetForPayload(payload ?? null, nextIdentity);
   $: coveragePage = coveragePages[outerPageIndex] ?? null;
   $: currentAlternativeIndex = coveragePage?.alternative_index ?? null;
+  $: coverageSolutionKeys = currentMembers.map((member) => member.normalized_solution_key);
+  $: coverageSolutionPageIdentity = coveragePage
+    ? `${coveragePage.set_identity_sha256}:${coveragePage.candidate_map_sha256}:${coveragePage.alternative_index}:${memberPageNumber}`
+    : '';
+  $: coverageSolutionOrdinalBase = memberOrdinalBase(memberPageNumber);
   $: nextAlternativeIndex = currentAlternativeIndex === null
     ? null
     : incrementCanonicalDecimal(currentAlternativeIndex);
@@ -85,18 +107,16 @@
     (nextAlternativeIndex !== null &&
       prefetchedPage?.alternative_index === nextAlternativeIndex) ||
     (!enumerationSealed && Boolean(loadNextPage));
-  $: pathFamily = payload?.content.payload_kind === 'pc-path-family'
+  $: pathFamily = payload?.content.payload_kind === 'pc-path-family' ||
+    payload?.content.payload_kind === 'build-path-family'
     ? payload.content.payload
     : null;
-  $: pathPageCount = pathFamily
-    ? Math.max(1, Math.ceil(pathFamily.witnesses.length / PRODUCT_MEMBER_PAGE_SIZE))
-    : 0;
-  $: pathWitnesses = pathFamily
-    ? pathFamily.witnesses.slice(
-        pathPageIndex * PRODUCT_MEMBER_PAGE_SIZE,
-        (pathPageIndex + 1) * PRODUCT_MEMBER_PAGE_SIZE
-      )
-    : [];
+  $: buildPathFamily = payload?.content.payload_kind === 'build-path-family'
+    ? payload.content.payload
+    : null;
+  $: pathCandidateGroups = groupPcPathWitnesses(pathFamily?.witnesses ?? []);
+  $: pathPageCount = pathCandidateGroups.length;
+  $: pathCandidateGroup = pathCandidateGroups[pathPageIndex] ?? null;
   $: scoreFamily = payload?.content.payload_kind === 'score-pattern-winner-family'
     ? payload.content.payload
     : null;
@@ -109,6 +129,15 @@
         (scorePageIndex + 1) * PRODUCT_MEMBER_PAGE_SIZE
       )
     : [];
+  $: scoreWinnerSolutionKeys = scoreWinners.map((winner) => winner.normalized_solution_key);
+  $: allScoreWinnerSolutionKeys = scoreFamily?.winners.map(
+    (winner) => winner.normalized_solution_key
+  ) ?? [];
+  $: scoreWinnerCaptions = scoreWinners.map((winner, index) =>
+    korean
+      ? `결과 ${scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1} · 점수 ${winner.score} · 참고 공격력 ${winner.informational_attack}`
+      : `Result ${scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1} · Score ${winner.score} · Informational attack ${winner.informational_attack}`
+  );
   $: buildV2 = payload?.content.payload_kind === 'build-v2'
     ? payload.content.payload
     : null;
@@ -129,6 +158,17 @@
     buildCandidatePageIndex * PRODUCT_MEMBER_PAGE_SIZE,
     (buildCandidatePageIndex + 1) * PRODUCT_MEMBER_PAGE_SIZE
   );
+  $: buildCandidateSolutionKeys = buildCandidatePage.map(
+    (candidate) => candidate.candidate_key
+  );
+  $: allBuildCandidateSolutionKeys = buildCandidateRows.map(
+    (candidate) => candidate.candidate_key
+  );
+  $: buildCandidateCaptions = buildCandidatePage.map((candidate) =>
+    korean
+      ? `커버 패턴 ${candidate.covered_pattern_count}`
+      : `Covered patterns ${candidate.covered_pattern_count}`
+  );
   $: buildScorePageCount = buildV2?.kind === 'score-portfolio'
     ? Math.max(1, Math.ceil(buildV2.winners.length / PRODUCT_MEMBER_PAGE_SIZE))
     : 0;
@@ -138,6 +178,15 @@
         (buildScorePageIndex + 1) * PRODUCT_MEMBER_PAGE_SIZE
       )
     : [];
+  $: buildScoreSolutionKeys = buildScoreWinners.map((winner) => winner.candidate_key);
+  $: allBuildScoreSolutionKeys = buildV2?.kind === 'score-portfolio'
+    ? buildV2.winners.map((winner) => winner.candidate_key)
+    : [];
+  $: buildScoreCaptions = buildScoreWinners.map((winner, index) =>
+    korean
+      ? `결과 ${buildScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1} · 점수 ${winner.score} · 참고 공격력 ${winner.informational_attack}`
+      : `Result ${buildScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1} · Score ${winner.score} · Informational attack ${winner.informational_attack}`
+  );
   $: setupRankedFamily = payload?.content.payload_kind === 'setup-ranked-family'
     ? payload.content.payload
     : null;
@@ -179,25 +228,22 @@
     buildV2?.kind === 'portfolio' ||
     buildV2?.kind === 'score-portfolio';
   $: korean = language === 'ko';
-  $: previewLabels = korean
-    ? {
-        invalid: '보드 미리보기를 생성할 수 없습니다.',
-        rawDetails: '내부 해법 키 보기',
-        copyRaw: '키 복사',
-        copiedRaw: '복사됨',
-        copyFailed: '복사 실패'
-      }
-    : {
-        invalid: 'Board preview is unavailable.',
-        rawDetails: 'Show internal solution key',
-        copyRaw: 'Copy key',
-        copiedRaw: 'Copied',
-        copyFailed: 'Copy failed'
-      };
+  $: invalidPreviewLabel = korean
+    ? '보드 미리보기를 생성할 수 없습니다.'
+    : 'Board preview is unavailable.';
   $: scoreMinimalCoverage = payload?.contract === 'pc.score-minimals';
   $: scoreOnlyPortfolio = scoreMinimalCoverage || buildV2?.kind === 'score-portfolio';
 
   onDestroy(() => releaseHandle());
+
+  function loadVisiblePathPages() {
+    if (!pathCandidateGroup) return [];
+    return pcPathCandidateGroupExportPages(
+      pathCandidateGroup,
+      targetLines,
+      buildPathFamily?.target_terminal_board_mask ?? null
+    );
+  }
 
   function resetForPayload(
     nextPayload: ClearraProductResultPayload | null,
@@ -223,6 +269,8 @@
     setupRankedPageIndex = 0;
     setupScorePageIndex = 0;
     spinStructurePageIndex = 0;
+    coverageExportKeySource = null;
+    coverageExportIdentity = '';
     memberCache.clear();
     if (!nextPayload || validateProductResultPayload(nextPayload)) {
       if (nextPayload) error = validateProductResultPayload(nextPayload) ?? '';
@@ -236,7 +284,13 @@
       currentMembers = canonical.members;
       memberCache.set(`${canonical.alternative_index}:1`, canonical.members);
       handleOwned = page_handle_available && Boolean(releasePages);
-      initializeOuterPager(identity, canonical, page_handle_available && Boolean(loadNextPage));
+      if (!activateCoverageExportSource(canonical, identity)) {
+        releaseHandle();
+        return;
+      }
+      // The GUI materializes only the page the user is viewing. Do not advance the
+      // exact portfolio enumerator in the background merely to fill a prefetch slot.
+      initializeOuterPager(identity, canonical, false);
       return;
     }
     const pageSourceIdentity = buildPageSourceIdentity(nextPayload);
@@ -292,8 +346,24 @@
     snapshot: CoveragePortfolioPagerSnapshot
   ) {
     if (outerPager !== pager || activeIdentity !== identity) return;
+    const previousAlternativeIndex =
+      coveragePages[outerPageIndex]?.alternative_index ?? null;
     coveragePages = [...snapshot.pages];
     outerPageIndex = snapshot.outerPageIndex;
+    const selectedPage = coveragePages[outerPageIndex] ?? null;
+    if (
+      selectedPage &&
+      selectedPage.alternative_index !== previousAlternativeIndex
+    ) {
+      memberPageNumber = '1';
+      currentMembers = selectedPage.members;
+      memberCache.set(`${selectedPage.alternative_index}:1`, selectedPage.members);
+      pruneMemberCache(selectedPage.alternative_index, '1');
+      if (!activateCoverageExportSource(selectedPage, identity)) {
+        releaseHandle();
+        return;
+      }
+    }
     prefetchedPage = snapshot.prefetchedPage;
     prefetchInFlight = snapshot.prefetchInFlight;
     enumerationSealed = snapshot.enumerationSealed;
@@ -308,19 +378,29 @@
     signal: AbortSignal
   ) {
     try {
-      const response = await loadMemberPage?.('1', '1', signal);
-      if (!response) {
-        throw new Error('Build portfolio page does not match the active result');
+      if (!loadMemberPage) {
+        throw new Error('the active Build portfolio has no product-page loader');
       }
-      const initialPage = requireCoveragePortfolioPageResponse(response, {
-        setIdentitySha256: pageSourceIdentity,
+      const initialPage = await loadCoveragePortfolioExactPage({
+        loadMemberPage,
         alternativeIndex: '1',
-        memberPageNumber: '1'
+        memberPageNumber: '1',
+        signal,
+        isCurrent: () => activeIdentity === payloadIdentity,
+        expectation: {
+          setIdentitySha256: pageSourceIdentity,
+          alternativeIndex: '1',
+          memberPageNumber: '1'
+        }
       });
-      if (signal.aborted || activeIdentity !== payloadIdentity) return;
+      if (!initialPage || signal.aborted || activeIdentity !== payloadIdentity) return;
       currentMembers = initialPage.members;
       memberCache.set(`${initialPage.alternative_index}:1`, initialPage.members);
-      initializeOuterPager(payloadIdentity, initialPage, !initialPage.enumeration_complete);
+      if (!activateCoverageExportSource(initialPage, payloadIdentity)) {
+        releaseHandle();
+        return;
+      }
+      initializeOuterPager(payloadIdentity, initialPage, false);
     } catch (reason) {
       if (!signal.aborted && activeIdentity === payloadIdentity) error = errorMessage(reason);
     } finally {
@@ -339,6 +419,36 @@
       } catch {}
     }
     handleOwned = false;
+    coverageExportKeySource = null;
+    coverageExportIdentity = '';
+  }
+
+  function activateCoverageExportSource(
+    page: ClearraCoveragePortfolioRuntimePage,
+    payloadIdentity: string
+  ): boolean {
+    const exportIdentity = [
+      payloadIdentity,
+      page.set_identity_sha256,
+      page.candidate_map_sha256,
+      page.alternative_index
+    ].join(':');
+    const activation = tryCreateCoveragePortfolioExportKeySource({
+      initialPage: page,
+      loadMemberPage,
+      isCurrent: () =>
+        activeIdentity === payloadIdentity &&
+        coverageExportIdentity === exportIdentity
+    });
+    if (activation.error !== null) {
+      coverageExportKeySource = null;
+      coverageExportIdentity = '';
+      error = activation.error;
+      return false;
+    }
+    coverageExportIdentity = exportIdentity;
+    coverageExportKeySource = activation.keySource;
+    return true;
   }
 
   async function nextOuterPage() {
@@ -390,20 +500,24 @@
     loadingMember = true;
     error = '';
     try {
-      const response = await loadMemberPage(
-        alternativeIndex,
-        nextMemberPage,
-        requestSignal
-      );
-      if (requestSignal?.aborted || activeIdentity !== payloadIdentity) return;
-      const loadedPage = requireCoveragePortfolioPageResponse(response, {
-        setIdentitySha256: referencePage.set_identity_sha256,
-        candidateMapSha256: referencePage.candidate_map_sha256,
+      const loadedPage = await loadCoveragePortfolioExactPage({
+        loadMemberPage,
         alternativeIndex,
         memberPageNumber: nextMemberPage,
-        referencePage,
-        requireSameAlternativeMetadata: true
+        signal: requestSignal,
+        isCurrent: () =>
+          activeIdentity === payloadIdentity &&
+          coveragePages[outerPageIndex]?.alternative_index === alternativeIndex,
+        expectation: {
+          setIdentitySha256: referencePage.set_identity_sha256,
+          candidateMapSha256: referencePage.candidate_map_sha256,
+          alternativeIndex,
+          memberPageNumber: nextMemberPage,
+          referencePage,
+          requireSameAlternativeMetadata: true
+        }
       });
+      if (!loadedPage || requestSignal?.aborted || activeIdentity !== payloadIdentity) return;
       memberCache.set(cacheKey, loadedPage.members);
       memberPageNumber = nextMemberPage;
       currentMembers = loadedPage.members;
@@ -439,12 +553,54 @@
     return value instanceof Error ? value.message : String(value);
   }
 
-  function memberOrdinal(pageNumber: string, memberIndex: number): string {
+  function objectiveLabel(value: string): string {
+    const labels: Record<string, readonly [string, string]> = {
+      all: ['All solutions', '전체 해법'],
+      unique: ['Unique solutions', '중복 없는 해법'],
+      'min-cover': ['Minimum solutions', '최소 해법'],
+      'max-probability-minimum': ['Most probable minimum solutions', '확률이 가장 높은 최소 해법'],
+      'max-score-cover': ['Highest-score minimum set', '최고 점수 최소 해법 집합']
+    };
+    const label = labels[value];
+    return label ? label[korean ? 1 : 0] : (korean ? '선택한 목표' : 'Selected objective');
+  }
+
+  function lengthPreferenceLabel(value: 'longer' | 'shorter'): string {
+    if (value === 'longer') return korean ? '긴 Setup 우선' : 'Longer setups first';
+    return korean ? '짧은 Setup 우선' : 'Shorter setups first';
+  }
+
+  function spinPartitionLabel(value: 'regular' | 'mini'): string {
+    if (value === 'regular') return korean ? 'Regular spin' : 'Regular spin';
+    return korean ? 'Mini spin' : 'Mini spin';
+  }
+
+  function rotationLabel(value: string): string {
+    const labels: Record<string, readonly [string, string]> = {
+      '0': ['Spawn rotation', '기본 회전'],
+      '1': ['Right rotation', '오른쪽 회전'],
+      '2': ['Reverse rotation', '반대 회전'],
+      '3': ['Left rotation', '왼쪽 회전']
+    };
+    const label = labels[value];
+    return label ? label[korean ? 1 : 0] : (korean ? '회전' : 'Rotation');
+  }
+
+  function holdDecisionLabel(value: string): string {
+    const labels: Record<string, readonly [string, string]> = {
+      none: ['No hold', '홀드 없음'],
+      store: ['Stored in hold', '홀드에 저장'],
+      swap: ['Swapped hold', '홀드 교체']
+    };
+    const label = labels[value];
+    return label ? label[korean ? 1 : 0] : (korean ? '홀드 사용' : 'Hold used');
+  }
+
+  function memberOrdinalBase(pageNumber: string): string {
     try {
-      return ((BigInt(pageNumber) - 1n) * BigInt(PRODUCT_MEMBER_PAGE_SIZE) +
-        BigInt(memberIndex + 1)).toString();
+      return ((BigInt(pageNumber) - 1n) * BigInt(PRODUCT_MEMBER_PAGE_SIZE)).toString();
     } catch {
-      return String(memberIndex + 1);
+      return '0';
     }
   }
 </script>
@@ -480,23 +636,16 @@
             : 'No solution is required for this pattern set. The search completed successfully.'}
         </p>
       {:else}
-        <ol class="solution-preview-list solution-gallery-list">
-          {#each currentMembers as member, memberIndex (member.candidate_id)}
-            {@const preview = solutionBoardPreviewFromKey(member.normalized_solution_key, targetLines)}
-            <li class="solution-preview-row">
-              <strong class="solution-number">{korean ? '해법' : 'Solution'} {memberOrdinal(memberPageNumber, memberIndex)}</strong>
-              <div class="solution-preview-card">
-                <SolutionBoardPreview
-                  board={preview.board}
-                  ariaLabel={korean
-                    ? `해법 ${memberOrdinal(memberPageNumber, memberIndex)} 보드`
-                    : `Solution ${memberOrdinal(memberPageNumber, memberIndex)} board`}
-                  invalidLabel={previewLabels.invalid}
-                />
-              </div>
-            </li>
-          {/each}
-        </ol>
+        <SolutionSubsetPage
+          solutionKeys={coverageSolutionKeys}
+          solutionSetIdentity={coverageSolutionPageIdentity}
+          solutionOrdinalBase={coverageSolutionOrdinalBase}
+          exportKeySource={coverageExportKeySource}
+          exportSetIdentity={coverageExportIdentity}
+          bind:copyFormat={solutionCopyFormat}
+          {targetLines}
+          {language}
+        />
       {/if}
       <footer>
         <button type="button" disabled={loadingMember || navigatingOuter || memberPageNumber === '1'} on:click={() => showMemberPage(decrementCanonicalDecimal(memberPageNumber))}><ChevronLeft size={15} />{korean ? '이전 100개' : 'Previous 100'}</button>
@@ -509,26 +658,17 @@
             <span>{korean ? '초기 B2B' : 'Initial B2B'}: {buildV2.initial_b2b}</span>
             <span>{korean ? '점수 증거 페이지' : 'Score evidence page'}: {buildScorePageIndex + 1} / {buildScorePageCount}</span>
           </div>
-          <ol class="solution-preview-list" start={buildScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
-            {#each buildScoreWinners as winner (winner.pattern_id)}
-              {@const preview = solutionBoardPreviewFromKey(winner.candidate_key, targetLines)}
-              <li class="score-row solution-preview-row">
-                <div class="solution-preview-card">
-                  <SolutionBoardPreview
-                    board={preview.board}
-                    ariaLabel={korean ? `패턴 ${winner.pattern_id} 최고 점수 보드` : `Pattern ${winner.pattern_id} maximum-score board`}
-                    invalidLabel={previewLabels.invalid}
-                    rawKey={winner.candidate_key}
-                    rawKeyDetailsLabel={previewLabels.rawDetails}
-                    copyRawKeyLabel={previewLabels.copyRaw}
-                    copiedRawKeyLabel={previewLabels.copiedRaw}
-                    copyRawKeyFailedLabel={previewLabels.copyFailed}
-                  />
-                </div>
-                <span>{korean ? '패턴' : 'Pattern'} {winner.pattern_id} · {korean ? '점수' : 'Score'} {winner.score} · {korean ? '참고 공격력' : 'Informational attack'} {winner.informational_attack}</span>
-              </li>
-            {/each}
-          </ol>
+          <SolutionSubsetPage
+            solutionKeys={buildScoreSolutionKeys}
+            exportSolutionKeys={allBuildScoreSolutionKeys}
+            solutionCaptions={buildScoreCaptions}
+            solutionSetIdentity={`${activeIdentity}:build-score-evidence:${buildScorePageIndex}`}
+            exportSetIdentity={`${activeIdentity}:build-score-evidence`}
+            solutionOrdinalBase={(buildScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE).toString()}
+            bind:copyFormat={solutionCopyFormat}
+            {targetLines}
+            {language}
+          />
           <footer>
             <button type="button" disabled={buildScorePageIndex === 0} on:click={() => (buildScorePageIndex -= 1)}><ChevronLeft size={15} />{korean ? '이전 점수 증거' : 'Previous score evidence'}</button>
             <button type="button" disabled={buildScorePageIndex + 1 >= buildScorePageCount} on:click={() => (buildScorePageIndex += 1)}>{korean ? '다음 점수 증거' : 'Next score evidence'}<ChevronRight size={15} /></button>
@@ -542,7 +682,9 @@
     <section class="product-pager build-family" aria-label={korean ? 'Build 결과' : 'Build result'}>
       <header>
         <div>
-          <strong>{buildV2.capability_id}</strong>
+          <strong>{buildV2.kind === 'probability'
+            ? (korean ? 'Build 구축 확률' : 'Build probability')
+            : (korean ? 'Build 해법' : 'Build solutions')}</strong>
           <span>{korean ? '일반 결과 family이며 포트폴리오 동점이 아닙니다.' : 'This is an ordinary result family, not a portfolio tie.'}</span>
         </div>
         {#if buildV2.kind === 'candidate-family' && buildCandidatePageCount > 1}
@@ -554,32 +696,23 @@
         {/if}
       </header>
       <div class="member-meta">
-        <span>{korean ? '목표' : 'Objective'}: {buildV2.objective}</span>
+        <span>{korean ? '목표' : 'Objective'}: {objectiveLabel(buildV2.objective)}</span>
         <span>{korean ? '도달 후보' : 'Reachable candidates'}: {buildV2.reachable_candidate_count} / {buildV2.source_candidate_count}</span>
         <span>{korean ? '커버 패턴' : 'Covered patterns'}: {buildV2.covered_pattern_count} / {buildV2.pattern_count}</span>
         <span>{korean ? '합집합 확률' : 'Union probability'}: {buildV2.union_probability}</span>
       </div>
       {#if buildV2.kind === 'candidate-family'}
-        <ol class="solution-preview-list" start={buildCandidatePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
-          {#each buildCandidatePage as candidate (candidate.candidate_key)}
-            {@const preview = solutionBoardPreviewFromKey(candidate.candidate_key, targetLines)}
-            <li class="solution-preview-row">
-              <div class="solution-preview-card">
-                <SolutionBoardPreview
-                  board={preview.board}
-                  ariaLabel={korean ? 'Build 후보 보드' : 'Build candidate board'}
-                  invalidLabel={previewLabels.invalid}
-                  rawKey={candidate.candidate_key}
-                  rawKeyDetailsLabel={previewLabels.rawDetails}
-                  copyRawKeyLabel={previewLabels.copyRaw}
-                  copiedRawKeyLabel={previewLabels.copiedRaw}
-                  copyRawKeyFailedLabel={previewLabels.copyFailed}
-                />
-              </div>
-              <span>{korean ? '커버 패턴' : 'Covered patterns'} {candidate.covered_pattern_count}</span>
-            </li>
-          {/each}
-        </ol>
+        <SolutionSubsetPage
+          solutionKeys={buildCandidateSolutionKeys}
+          exportSolutionKeys={allBuildCandidateSolutionKeys}
+          solutionCaptions={buildCandidateCaptions}
+          solutionSetIdentity={`${activeIdentity}:build-candidate-family:${buildCandidatePageIndex}`}
+          exportSetIdentity={`${activeIdentity}:build-candidate-family`}
+          solutionOrdinalBase={(buildCandidatePageIndex * PRODUCT_MEMBER_PAGE_SIZE).toString()}
+          bind:copyFormat={solutionCopyFormat}
+          {targetLines}
+          {language}
+        />
       {/if}
     </section>
   {:else if buildSetupFamily}
@@ -598,36 +731,27 @@
         {/if}
       </header>
       <div class="member-meta">
-        <span>{korean ? '목표' : 'Objective'}: {buildSetupFamily.objective}</span>
+        <span>{korean ? '목표' : 'Objective'}: {objectiveLabel(buildSetupFamily.objective)}</span>
         <span>{korean ? '도달 후보' : 'Reachable candidates'}: {buildSetupFamily.reachable_candidate_count} / {buildSetupFamily.source_candidate_count}</span>
         <span>{korean ? '합집합 확률' : 'Union probability'}: {buildSetupFamily.union_probability}</span>
       </div>
-      <ol class="solution-preview-list" start={buildCandidatePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
-        {#each buildCandidatePage as candidate (candidate.candidate_key)}
-          {@const preview = solutionBoardPreviewFromKey(candidate.candidate_key, targetLines)}
-          <li class="solution-preview-row">
-            <div class="solution-preview-card">
-              <SolutionBoardPreview
-                board={preview.board}
-                ariaLabel={korean ? 'Build setup 후보 보드' : 'Build setup candidate board'}
-                invalidLabel={previewLabels.invalid}
-                rawKey={candidate.candidate_key}
-                rawKeyDetailsLabel={previewLabels.rawDetails}
-                copyRawKeyLabel={previewLabels.copyRaw}
-                copiedRawKeyLabel={previewLabels.copiedRaw}
-                copyRawKeyFailedLabel={previewLabels.copyFailed}
-              />
-            </div>
-            <span>{korean ? '커버 패턴' : 'Covered patterns'} {candidate.covered_pattern_count}</span>
-          </li>
-        {/each}
-      </ol>
+      <SolutionSubsetPage
+        solutionKeys={buildCandidateSolutionKeys}
+        exportSolutionKeys={allBuildCandidateSolutionKeys}
+        solutionCaptions={buildCandidateCaptions}
+        solutionSetIdentity={`${activeIdentity}:build-setup-family:${buildCandidatePageIndex}`}
+        exportSetIdentity={`${activeIdentity}:build-setup-family`}
+        solutionOrdinalBase={(buildCandidatePageIndex * PRODUCT_MEMBER_PAGE_SIZE).toString()}
+        bind:copyFormat={solutionCopyFormat}
+        {targetLines}
+        {language}
+      />
     </section>
   {:else if setupRankedFamily}
     <section class="product-pager ordinary-family" aria-label={korean ? 'Setup 순위 결과' : 'Setup ranking result'}>
       <header>
         <div>
-          <strong>{payload.contract} · {setupRankedFamily.ordering}</strong>
+          <strong>{korean ? 'Setup 순위' : 'Setup ranking'}</strong>
           <span>{korean ? '일반 순위 family이며 동점 포트폴리오로 재분류하지 않습니다.' : 'This is an ordinary ranked family and is not reclassified as a tie portfolio.'}</span>
         </div>
         {#if setupRankedPageCount > 1}
@@ -640,12 +764,12 @@
       </header>
       <div class="member-meta">
         <span>{korean ? '후보' : 'Candidates'}: {setupRankedFamily.candidate_count}</span>
-        <span>{korean ? '길이 선호' : 'Length preference'}: {setupRankedFamily.resolved_length_preference}</span>
+        <span>{korean ? '길이 선호' : 'Length preference'}: {lengthPreferenceLabel(setupRankedFamily.resolved_length_preference)}</span>
         <span>{korean ? '규칙' : 'Rule'}: {setupRankedFamily.rule_profile}</span>
       </div>
       <ol start={setupRankedPageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
-        {#each setupRankedCandidates as candidate (candidate.candidate_id)}
-          <li><code>{candidate.setup_id}</code><span>{candidate.condition_id} · ID {candidate.candidate_id}</span></li>
+        {#each setupRankedCandidates as candidate, index (candidate.candidate_id)}
+          <li><strong>{korean ? '셋업' : 'Setup'} {setupRankedPageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1}</strong></li>
         {/each}
       </ol>
     </section>
@@ -673,7 +797,7 @@
       <ol start={setupScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
         {#each setupScoreCandidates as candidate (candidate.candidate_id)}
           <li class="score-row">
-            <code>{candidate.candidate_id}</code>
+            <strong>{korean ? '셋업' : 'Setup'} {candidate.rank}</strong>
             <span>{korean ? '순위' : 'Rank'} {candidate.rank} · {korean ? '기대 점수' : 'Expected score'} {candidate.unconditional_expected_score} · {korean ? 'Setup 확률' : 'Setup probability'} {candidate.setup_covered_probability} · {korean ? '연속 성공 확률' : 'Continuation probability'} {candidate.continuation_probability}</span>
           </li>
         {/each}
@@ -683,7 +807,7 @@
     <section class="product-pager ordinary-family" aria-label={korean ? 'Spin 구조 family' : 'Spin structure family'}>
       <header>
         <div>
-          <strong>{spinStructureFamily.schema_id}</strong>
+          <strong>{korean ? 'Spin 구조 결과' : 'Spin structure results'}</strong>
           <span>{korean ? 'Search와 guaranteed는 일반 완전 family이며 cover 동점 포트폴리오가 아닙니다.' : 'Search and guaranteed are ordinary complete families, not cover tie portfolios.'}</span>
         </div>
         {#if spinStructurePageCount > 1}
@@ -707,57 +831,68 @@
         {/if}
       </div>
       <ol start={spinStructurePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
-        {#each spinStructureCandidates as candidate (candidate.candidate_id)}
-          <li><code>{candidate.candidate_id}</code><span>{candidate.partition} · {candidate.placement_count} {korean ? '배치' : 'placements'}</span></li>
-        {/each}
-      </ol>
-    </section>
-  {:else if payload.content.payload_kind === 'pc-path-family' && pathFamily}
-    <section class="product-pager path-family" aria-label={korean ? '전체 PC 리플레이 경로' : 'Complete PC replay paths'}>
-      <header>
-        <div>
-          <strong>{korean ? '전체 PC 리플레이 경로' : 'Complete PC replay family'}</strong>
-          <span>{korean ? '포트폴리오 동점이 아닌 완전한 일반 해법 family입니다.' : 'This is a complete ordinary solution family, not a portfolio tie.'}</span>
-        </div>
-        <nav aria-label={korean ? '리플레이 경로 페이지 이동' : 'Replay path page navigation'}>
-          <button type="button" disabled={pathPageIndex === 0} on:click={() => (pathPageIndex -= 1)} aria-label={korean ? '이전 경로 100개' : 'Previous 100 paths'}><ChevronLeft size={16} /></button>
-          <span>{pathPageIndex + 1} / {pathPageCount}</span>
-          <button type="button" disabled={pathPageIndex + 1 >= pathPageCount} on:click={() => (pathPageIndex += 1)} aria-label={korean ? '다음 경로 100개' : 'Next 100 paths'}><ChevronRight size={16} /></button>
-        </nav>
-      </header>
-      <div class="member-meta">
-        <span>{korean ? '경로' : 'Paths'}: {pathFamily.witness_count}</span>
-        <span>{korean ? '구체화 패턴' : 'Materialized patterns'}: {pathFamily.materialized_pattern_count}</span>
-        <span>{korean ? '문제' : 'Problem'}: {pathFamily.problem_id}</span>
-      </div>
-      <ol class="solution-preview-list" start={pathPageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
-        {#each pathWitnesses as witness (witness.candidate_id + ':' + witness.pattern_id + ':' + witness.normalized_trace_key)}
-          {@const preview = solutionBoardPreviewFromReplay(witness.steps, targetLines)}
-          <li class="path-row solution-preview-row">
-            <div class="solution-preview-card">
-              <SolutionBoardPreview
-                board={preview.board}
-                ariaLabel={korean ? `리플레이 ID ${witness.candidate_id} 보드` : `Replay ID ${witness.candidate_id} board`}
-                invalidLabel={previewLabels.invalid}
-                rawKey={witness.normalized_trace_key}
-                rawKeyDetailsLabel={previewLabels.rawDetails}
-                copyRawKeyLabel={previewLabels.copyRaw}
-                copiedRawKeyLabel={previewLabels.copiedRaw}
-                copyRawKeyFailedLabel={previewLabels.copyFailed}
-              />
-            </div>
-            <span>ID {witness.candidate_id} · {korean ? '패턴' : 'Pattern'} {witness.pattern_id} · {korean ? '소비 조각' : 'Consumed pieces'} {witness.consumed_piece_count} · {korean ? '최종 홀드' : 'Terminal hold'} {witness.terminal_hold_piece ?? 'empty'}</span>
-            <details>
-              <summary>{korean ? '전체 리플레이 단계 확인' : 'Inspect every replay step'} ({witness.steps.length})</summary>
-              <ul>
-                {#each witness.steps as step (step.step_index)}
-                  <li><span>#{step.step_index} · {step.active_piece} {step.rotation} ({step.x}, {step.y}) · {step.hold_decision} · {korean ? '클리어' : 'Cleared'} {step.cleared_lines} · {step.line_clear_identity}</span></li>
-                {/each}
-              </ul>
-            </details>
+        {#each spinStructureCandidates as candidate, index (candidate.candidate_id)}
+          <li>
+            <strong>{korean ? '구조' : 'Structure'} {spinStructurePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1}</strong>
+            <span>{spinPartitionLabel(candidate.partition)} · {candidate.placement_count} {korean ? '배치' : 'placements'}</span>
           </li>
         {/each}
       </ol>
+    </section>
+  {:else if (payload.content.payload_kind === 'pc-path-family' || payload.content.payload_kind === 'build-path-family') && pathFamily}
+    <section class="product-pager path-family" aria-label={korean ? '전체 리플레이 경로' : 'Complete replay paths'}>
+      <header>
+        <div>
+          <strong>{buildPathFamily ? (korean ? '구축 리플레이 경로' : 'Build replay paths') : (korean ? 'PC 리플레이 경로' : 'PC replay paths')}</strong>
+          <span>{korean ? '전체 경로는 복사할 수 있으며, 같은 해법의 대표 리플레이 하나씩 표시합니다.' : 'Every path can be copied; one representative replay is shown for each solution.'}</span>
+        </div>
+        <nav aria-label={korean ? '해법별 리플레이 이동' : 'Solution replay navigation'}>
+          <button type="button" disabled={pathPageIndex === 0} on:click={() => (pathPageIndex -= 1)} aria-label={korean ? '이전 해법' : 'Previous solution'}><ChevronLeft size={16} /></button>
+          <span>{pathPageCount === 0 ? 0 : pathPageIndex + 1} / {pathPageCount}</span>
+          <button type="button" disabled={pathPageIndex + 1 >= pathPageCount} on:click={() => (pathPageIndex += 1)} aria-label={korean ? '다음 해법' : 'Next solution'}><ChevronRight size={16} /></button>
+        </nav>
+      </header>
+      <div class="member-meta">
+        <span>{korean ? '해법' : 'Solutions'}: {pathCandidateGroups.length}</span>
+        <span>{korean ? '전체 경로' : 'All paths'}: {pathFamily.witness_count}</span>
+        <span>{korean ? '구체화 패턴' : 'Materialized patterns'}: {pathFamily.materialized_pattern_count}</span>
+      </div>
+      {#if pathCandidateGroup}
+        {@const witness = pathCandidateGroup.representative}
+        <article class="path-representative">
+          {#key witness.candidate_id + ':' + witness.normalized_trace_key}
+            <PcPathReplayGif
+              {witness}
+              {targetLines}
+              expectedTerminalBoardMask={buildPathFamily?.target_terminal_board_mask ?? null}
+              ariaLabel={buildPathFamily
+                ? (korean ? `구축 리플레이 ${pathPageIndex + 1}` : `Build replay ${pathPageIndex + 1}`)
+                : (korean ? `PC 리플레이 ${pathPageIndex + 1}` : `PC replay ${pathPageIndex + 1}`)}
+              invalidLabel={invalidPreviewLabel}
+            />
+          {/key}
+          <div class="path-evidence">
+            <strong>{korean ? '해법' : 'Solution'} {pathPageIndex + 1}</strong>
+            <span>{korean ? '서로 다른 패턴' : 'Distinct patterns'}: {pathCandidateGroup.distinctPatternCount} / {pathFamily.materialized_pattern_count}</span>
+            <span>{korean ? '보존된 경로' : 'Retained paths'}: {pathCandidateGroup.witnessCount}</span>
+            <span>{korean ? '소비 조각' : 'Consumed pieces'}: {witness.consumed_piece_count} · {korean ? '최종 홀드' : 'Terminal hold'}: {witness.terminal_hold_piece ?? (korean ? '없음' : 'None')}</span>
+            <SolutionCopyFormatControl
+              bind:value={solutionCopyFormat}
+              {language}
+              compact
+              loadPages={pathCandidateGroup ? loadVisiblePathPages : null}
+            />
+            <details>
+              <summary>{korean ? '대표 경로 단계 확인' : 'Inspect representative replay steps'} ({witness.steps.length})</summary>
+              <ul>
+                {#each witness.steps as step, index (step.step_index)}
+                  <li><span>#{index + 1} · {step.active_piece} {rotationLabel(step.rotation)} ({step.x}, {step.y}) · {holdDecisionLabel(step.hold_decision)} · {korean ? '클리어' : 'Cleared'} {step.cleared_lines}</span></li>
+                {/each}
+              </ul>
+            </details>
+          </div>
+        </article>
+      {/if}
     </section>
   {:else if payload.content.payload_kind === 'score-pattern-winner-family' && scoreFamily}
     <section class="product-pager score-family" aria-label={korean ? '패턴별 최고 점수 해법' : 'Per-pattern score winners'}>
@@ -772,25 +907,21 @@
           <button type="button" disabled={scorePageIndex + 1 >= scorePageCount} on:click={() => (scorePageIndex += 1)}><ChevronRight size={16} /></button>
         </nav>
       </header>
-      <ol class="solution-preview-list" start={scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
-        {#each scoreWinners as winner (winner.pattern_id + ':' + winner.candidate_id)}
-          {@const preview = solutionBoardPreviewFromKey(winner.normalized_solution_key, targetLines)}
-          <li class="score-row solution-preview-row">
-            <div class="solution-preview-card">
-              <SolutionBoardPreview
-                board={preview.board}
-                ariaLabel={korean ? `패턴 ${winner.pattern_id} 최고 점수 보드` : `Pattern ${winner.pattern_id} maximum-score board`}
-                invalidLabel={previewLabels.invalid}
-              />
-            </div>
-            <span>{korean ? '패턴' : 'Pattern'} {winner.pattern_id} · {korean ? '점수' : 'Score'} {winner.score} · {korean ? '참고 공격력' : 'Informational attack'} {winner.informational_attack}</span>
-          </li>
-        {/each}
-      </ol>
+      <SolutionSubsetPage
+        solutionKeys={scoreWinnerSolutionKeys}
+        exportSolutionKeys={allScoreWinnerSolutionKeys}
+        solutionCaptions={scoreWinnerCaptions}
+        solutionSetIdentity={`${activeIdentity}:score-winner-family:${scorePageIndex}`}
+        exportSetIdentity={`${activeIdentity}:score-winner-family`}
+        solutionOrdinalBase={(scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE).toString()}
+        bind:copyFormat={solutionCopyFormat}
+        {targetLines}
+        {language}
+      />
     </section>
   {/if}
 {:else if error}
-  <p class="pager-error" role="alert">{error}</p>
+  <WorkspaceFailureNotice failures={pagerFailure?.publicFailures ?? []} {language} compact />
 {/if}
 
 <style>
@@ -807,23 +938,19 @@
   ol { list-style-position: inside; margin: 0; max-height: 420px; overflow: auto; padding: 4px 15px; }
   li { border-bottom: 1px solid #edf0ee; gap: 12px; justify-content: space-between; min-height: 36px; padding: 5px 0; }
   li:last-child { border-bottom: 0; }
-  code { color: #23322d; font-size: 11px; overflow-wrap: anywhere; }
   footer { border-top: 1px solid #e3e8e5; justify-content: space-between; padding: 9px 15px; }
-  .solution-preview-row { align-items: stretch; flex-direction: column; gap: 7px; }
-  .solution-preview-card { max-width: 220px; width: 100%; }
-  .solution-number { color: #4d5955; font-size: 11px; }
-  .solution-gallery-list { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(154px, 1fr)); list-style: none; padding: 12px 15px; }
-  .solution-gallery-list > li { background: #f3f5f4; border: 1px solid #d7ded9; border-radius: 6px; padding: 10px; }
-  .solution-gallery-list .solution-preview-card { max-width: none; }
   .score-row { align-items: flex-start; flex-direction: column; gap: 3px; }
   .build-score-evidence { border-top: 1px solid #dce3df; }
-  .path-row { align-items: stretch; flex-direction: column; gap: 4px; }
+  .path-representative { align-items: flex-start; display: flex; gap: 18px; padding: 15px; }
+  .path-evidence { display: grid; flex: 1; gap: 6px; min-width: 0; }
+  .path-evidence > strong { color: #23322d; font-size: 13px; }
+  .path-evidence > span { color: #68736f; font-size: 11px; }
   details { color: #52615c; font-size: 11px; width: 100%; }
   summary { cursor: pointer; font-weight: 700; }
   details ul { list-style: none; margin-top: 5px; max-height: 180px; padding: 0 0 0 12px; }
   details li { justify-content: flex-start; min-height: 26px; }
   .pager-loading { align-items: center; background: #f5f8f6; border: 1px solid #dce3df; border-radius: 6px; color: #52615c; display: flex; font-size: 12px; gap: 8px; margin: 16px 0; padding: 12px; }
-  .pager-error { background: #fff1f0; border: 1px solid #efc3be; border-radius: 6px; color: #8b2820; font-size: 12px; margin: 16px 0; padding: 10px 12px; }
   :global(.spin) { animation: spin 800ms linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  @media (max-width: 620px) { .path-representative { flex-direction: column; } }
 </style>

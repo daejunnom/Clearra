@@ -9,7 +9,7 @@ fn clearra_spin_does_not_depend_on_clearra_scoring() {
 
 #[test]
 fn unknown_spin_not_false_for_pc_pruning() {
-    assert_eq!(PredicateResult::Unknown.is_false_for_pc_pruning(), false);
+    assert!(!PredicateResult::Unknown.is_false_for_pc_pruning());
     assert_eq!(
         UnknownSpinPolicy::PreserveUnknown.as_predicate(),
         PredicateResult::Unknown

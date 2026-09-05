@@ -82,23 +82,23 @@ export function loadClearraJobServiceConfig(
     ),
     searchTimeoutMs: positiveInteger(
       environment.CLEARRA_SEARCH_TIMEOUT_MS,
-      3 * 60_000,
+      14 * 60_000,
     ),
     diagnosticTimeoutMs: positiveInteger(
       environment.CLEARRA_DIAGNOSTIC_TIMEOUT_MS,
-      positiveInteger(environment.CLEARRA_SEARCH_TIMEOUT_MS, 3 * 60_000),
+      positiveInteger(environment.CLEARRA_SEARCH_TIMEOUT_MS, 14 * 60_000),
     ),
     pcSearchTimeoutMs: positiveInteger(
       environment.CLEARRA_PC_SEARCH_TIMEOUT_MS ??
         environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
-      5 * 60_000,
+      14 * 60_000,
     ),
     // Kept for one compatibility window; runtime selection uses
     // pcSearchTimeoutMs and the pc_reverse class.
     reverseSearchTimeoutMs: positiveInteger(
       environment.CLEARRA_PC_SEARCH_TIMEOUT_MS ??
         environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
-      5 * 60_000,
+      14 * 60_000,
     ),
     buildSearchTimeoutMs: positiveInteger(
       environment.CLEARRA_BUILD_SEARCH_TIMEOUT_MS ??

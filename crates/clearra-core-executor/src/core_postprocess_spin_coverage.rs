@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn retained_projection_counts_outer_slots_capacities_and_utf8_payloads_once() {
         let mut target = String::with_capacity(23);
-        target.push_str("곳");
+        target.push('곳');
         let mut words = Vec::with_capacity(9);
         words.extend([1_u64, 2]);
         let mut candidate = String::with_capacity(31);

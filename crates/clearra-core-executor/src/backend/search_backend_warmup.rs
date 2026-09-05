@@ -75,7 +75,7 @@ impl GpuSearchWarmupReport {
 pub fn prewarm_gpu_search(device: GpuDeviceSelection) -> GpuSearchWarmupReport {
     #[cfg(feature = "webgpu-search")]
     {
-        return pollster::block_on(prewarm_gpu_search_async(device));
+        pollster::block_on(prewarm_gpu_search_async(device))
     }
 
     #[cfg(not(feature = "webgpu-search"))]
@@ -90,9 +90,9 @@ pub async fn prewarm_gpu_search_async(device: GpuDeviceSelection) -> GpuSearchWa
     let started_at = host_now();
     #[cfg(feature = "webgpu-search")]
     {
-        return match clearra_webgpu::WebGpuGeometryExactCoverBackend::connect_selected(
-            webgpu_selection(device),
-        )
+        match clearra_webgpu::WebGpuGeometryExactCoverBackend::connect_selected(webgpu_selection(
+            device,
+        ))
         .await
         {
             clearra_webgpu::WebGpuGeometryExactCoverSessionOutcome::Connected(session) => {
@@ -107,7 +107,7 @@ pub async fn prewarm_gpu_search_async(device: GpuDeviceSelection) -> GpuSearchWa
             clearra_webgpu::WebGpuGeometryExactCoverSessionOutcome::Unavailable(unavailable) => {
                 GpuSearchWarmupReport::unavailable(unavailable.reason()).with_elapsed(started_at)
             }
-        };
+        }
     }
 
     #[cfg(not(feature = "webgpu-search"))]
@@ -117,14 +117,16 @@ pub async fn prewarm_gpu_search_async(device: GpuDeviceSelection) -> GpuSearchWa
     }
 }
 
-#[cfg(feature = "webgpu-search")]
+// Synchronous WebGPU sessions feed the native packing executor; WASM uses the
+// asynchronous warm-up path above instead.
+#[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
 pub(crate) fn connect_webgpu_session_for_device(
     device: GpuDeviceSelection,
 ) -> clearra_webgpu::WebGpuGeometryExactCoverSessionOutcome {
     connect_webgpu_session(webgpu_selection(device))
 }
 
-#[cfg(feature = "webgpu-search")]
+#[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
 pub(crate) fn connect_webgpu_session(
     selection: clearra_webgpu::WebGpuAdapterSelection,
 ) -> clearra_webgpu::WebGpuGeometryExactCoverSessionOutcome {
@@ -138,7 +140,7 @@ pub(crate) fn connect_webgpu_session(
     pollster::block_on(clearra_webgpu::WebGpuGeometryExactCoverBackend::connect_selected(selection))
 }
 
-#[cfg(feature = "webgpu-search")]
+#[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
 pub(crate) fn take_prepared_webgpu_session_for_device(
     device: GpuDeviceSelection,
 ) -> Option<clearra_webgpu::WebGpuGeometryExactCoverSession> {

@@ -29,8 +29,10 @@ pub struct CliOutput {
     stderr: String,
     warning_before: String,
     warning_after: String,
-    pending_solution_artifact: Option<PendingSolutionArtifact>,
-    pending_document_utility_artifact: Option<PendingDocumentUtilityArtifact>,
+    // Pending artifacts can carry a large in-memory model. Keep that payload
+    // off the ordinary success/error return path until the dispatcher commits it.
+    pending_solution_artifact: Option<Box<PendingSolutionArtifact>>,
+    pending_document_utility_artifact: Option<Box<PendingDocumentUtilityArtifact>>,
 }
 
 impl CliOutput {
@@ -96,7 +98,7 @@ impl CliOutput {
         pending: PendingSolutionArtifact,
     ) -> Self {
         debug_assert!(self.pending_document_utility_artifact.is_none());
-        self.pending_solution_artifact = Some(pending);
+        self.pending_solution_artifact = Some(Box::new(pending));
         self
     }
 
@@ -105,7 +107,7 @@ impl CliOutput {
         pending: PendingDocumentUtilityArtifact,
     ) -> Self {
         debug_assert!(self.pending_solution_artifact.is_none());
-        self.pending_document_utility_artifact = Some(pending);
+        self.pending_document_utility_artifact = Some(Box::new(pending));
         self
     }
 }
@@ -133,11 +135,11 @@ impl CliOutput {
     }
 
     fn pending_solution_artifact(&self) -> Option<&PendingSolutionArtifact> {
-        self.pending_solution_artifact.as_ref()
+        self.pending_solution_artifact.as_deref()
     }
 
     fn pending_document_utility_artifact(&self) -> Option<&PendingDocumentUtilityArtifact> {
-        self.pending_document_utility_artifact.as_ref()
+        self.pending_document_utility_artifact.as_deref()
     }
 }
 
@@ -153,7 +155,7 @@ impl CliOutputDispatcher {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            return Self::dispatch_with_publishers(
+            Self::dispatch_with_publishers(
                 output,
                 &mut stdout,
                 &mut stderr,
@@ -192,7 +194,7 @@ impl CliOutputDispatcher {
                     sink.publish(file.bytes(), file.maximum_bytes(), &NeverCancelled)
                         .map_err(artifact_sink_error_detail)
                 },
-            );
+            )
         }
 
         #[cfg(target_arch = "wasm32")]

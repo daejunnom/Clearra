@@ -113,12 +113,12 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
   );
   const searchTimeoutMs = positiveInteger(
     environment.CLEARRA_SEARCH_TIMEOUT_MS,
-    3 * 60_000,
+    14 * 60_000,
   );
   const pcSearchTimeoutMs = positiveInteger(
     environment.CLEARRA_PC_SEARCH_TIMEOUT_MS ??
       environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
-    5 * 60_000,
+    14 * 60_000,
   );
   const legacyLongSearchTimeout = environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS;
   const buildSearchTimeoutMs = positiveInteger(

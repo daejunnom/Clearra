@@ -102,7 +102,7 @@ impl WebGpuStageTimer {
     pub(crate) fn finish_ns(self) -> u64 {
         #[cfg(feature = "stage-profiling")]
         {
-            return webgpu_elapsed_ns(self.started);
+            webgpu_elapsed_ns(self.started)
         }
         #[cfg(not(feature = "stage-profiling"))]
         {

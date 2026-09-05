@@ -171,6 +171,11 @@ const releaseAcceptanceSanitizerJob = section(
 const releaseAcceptanceRustJob = section(
   workflow,
   "\n  release-acceptance-rust:",
+  "\n  release-acceptance-wasm-build:",
+);
+const releaseAcceptanceWasmBuildJob = section(
+  workflow,
+  "\n  release-acceptance-wasm-build:",
   "\n  release-acceptance-pages:",
 );
 const releaseAcceptancePagesJob = section(
@@ -290,6 +295,24 @@ const releaseAcceptancePagesRunStep = section(
   releaseAcceptancePagesJob,
   "\n      - name: Run canonical release acceptance Pages shard",
   "\n      - name: Stamp and verify the accepted Pages build",
+);
+const acceptedWasmBuildRunStep = section(
+  releaseAcceptanceWasmBuildJob,
+  "\n      - name: Run verified WASM build producer",
+  "\n      - name: Upload accepted WASM build",
+);
+const acceptedWasmBuildUploadStep = releaseAcceptanceWasmBuildJob.slice(
+  releaseAcceptanceWasmBuildJob.indexOf("\n      - name: Upload accepted WASM build"),
+);
+const acceptedWasmBuildDownloadStep = section(
+  releaseAcceptancePagesJob,
+  "\n      - name: Download accepted WASM build",
+  "\n      - name: Install JavaScript workspace",
+);
+const releaseAcceptancePagesSealStep = section(
+  releaseAcceptancePagesJob,
+  "\n      - name: Seal canonical release acceptance Pages shard",
+  "\n      - name: Upload accepted Pages build",
 );
 const acceptedPagesStampStep = section(
   releaseAcceptancePagesJob,
@@ -556,8 +579,8 @@ for (const semanticMarker of [
 for (const marker of [
   'embedded?.id !== "srs-x"',
   'embedded?.source_rule !== "srs-x"',
-  "embedded?.entries?.length !== 80",
-  "halfTurnCount !== 24",
+  "embedded?.entries?.length !== 84",
+  "halfTurnCount !== 28",
   '{"action":"export","profile":"srs-x"}',
 ]) {
   requireText(packageScript, marker, `Linux SRS-X export assertion ${marker}`);
@@ -693,8 +716,8 @@ for (const smoke of [
 for (const marker of [
   "$embedded.id -ne 'srs-x'",
   "$embedded.source_rule -ne 'srs-x'",
-  "$embedded.entries.Count -ne 80",
-  "$halfTurnCount -ne 24",
+  "$embedded.entries.Count -ne 84",
+  "$halfTurnCount -ne 28",
   "action = 'export'; profile = 'srs-x'",
 ]) {
   requireText(windowsCliJob, marker, `Windows SRS-X export assertion ${marker}`);
@@ -1224,6 +1247,31 @@ requireExactYamlScalar(
   "canonical Pages release acceptance base path",
   10,
 );
+for (const [key, value, description] of [
+  [
+    "CLEARRA_ACCEPTED_WASM_DIR",
+    "${{ runner.temp }}\\clearra-accepted-wasm",
+    "accepted WASM consumer path",
+  ],
+  [
+    "CLEARRA_ACCEPTED_RUN_ID",
+    "${{ github.run_id }}",
+    "accepted WASM consumer run ID",
+  ],
+  [
+    "CLEARRA_ACCEPTED_RUN_ATTEMPT",
+    "${{ github.run_attempt }}",
+    "accepted WASM consumer run attempt",
+  ],
+]) {
+  requireExactYamlScalar(
+    releaseAcceptancePagesRunStep,
+    key,
+    value,
+    `canonical Pages release acceptance ${description}`,
+    10,
+  );
+}
 requireExactYamlScalar(
   releaseAcceptanceRunStep,
   "run",
@@ -1240,7 +1288,12 @@ requireExactYamlKeySet(
 requireExactYamlKeySet(
   releaseAcceptancePagesRunStep,
   10,
-  ["CLEARRA_WEB_BASE_PATH"],
+  [
+    "CLEARRA_WEB_BASE_PATH",
+    "CLEARRA_ACCEPTED_WASM_DIR",
+    "CLEARRA_ACCEPTED_RUN_ID",
+    "CLEARRA_ACCEPTED_RUN_ATTEMPT",
+  ],
   "canonical Pages release acceptance shard environment",
 );
 requireExactYamlScalar(
@@ -1248,6 +1301,42 @@ requireExactYamlScalar(
   "run",
   "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Pages -ExecutionSurface Trusted",
   "canonical Pages release acceptance shard command",
+  8,
+);
+requireExactYamlKeySet(
+  acceptedWasmBuildRunStep,
+  8,
+  ["env", "run"],
+  "accepted WASM build producer step",
+);
+requireExactYamlKeySet(
+  acceptedWasmBuildRunStep,
+  10,
+  [
+    "CLEARRA_ACCEPTED_WASM_OUTPUT_DIR",
+    "CLEARRA_ACCEPTED_RUN_ID",
+    "CLEARRA_ACCEPTED_RUN_ATTEMPT",
+  ],
+  "accepted WASM build producer environment",
+);
+for (const [key, value] of [
+  ["CLEARRA_ACCEPTED_WASM_OUTPUT_DIR", "${{ runner.temp }}\\clearra-accepted-wasm"],
+  ["CLEARRA_ACCEPTED_RUN_ID", "${{ github.run_id }}"],
+  ["CLEARRA_ACCEPTED_RUN_ATTEMPT", "${{ github.run_attempt }}"],
+]) {
+  requireExactYamlScalar(
+    acceptedWasmBuildRunStep,
+    key,
+    value,
+    `accepted WASM build producer ${key}`,
+    10,
+  );
+}
+requireExactYamlScalar(
+  acceptedWasmBuildRunStep,
+  "run",
+  "powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildProducer -ExecutionSurface Trusted",
+  "accepted WASM build producer command",
   8,
 );
 for (const [name, job, skeleton] of [
@@ -1297,11 +1386,18 @@ for (const [name, job, skeleton] of [
     "- name: Seal canonical release acceptance rust shard",
     "- name: Upload canonical release acceptance rust shard",
   ]],
-  ["pages", releaseAcceptancePagesJob, [
+  ["WASM build producer", releaseAcceptanceWasmBuildJob, [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
     "- id: release_toolchain_cache",
     "- name: Prepare acceptance toolchains",
+    "- name: Run verified WASM build producer",
+    "- name: Upload accepted WASM build",
+  ]],
+  ["pages", releaseAcceptancePagesJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- name: Download accepted WASM build",
     "- name: Install JavaScript workspace",
     "- name: Run canonical release acceptance Pages shard",
     "- name: Stamp and verify the accepted Pages build",
@@ -1328,20 +1424,19 @@ requireText(
   "run: pwsh -NoProfile -File scripts/test_release_acceptance_shards.ps1",
   "canonical ReleaseAcceptance shard mapping regression",
 );
-const releaseShardJobs = [
+const releaseToolchainCacheReaderJobs = [
   releaseAcceptanceFoundationNoProductDebtJob,
   releaseAcceptanceFoundationAdversarialCorrectnessJob,
   releaseAcceptanceFoundationDesktopHostJob,
-  releaseAcceptanceSanitizerJob,
   releaseAcceptanceRustJob,
-  releaseAcceptancePagesJob,
+  releaseAcceptanceWasmBuildJob,
 ];
-for (const [index, job] of releaseShardJobs.entries()) {
+for (const [index, job] of releaseToolchainCacheReaderJobs.entries()) {
   if ((job.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1) {
-    throw new Error(`release shard ${index} must have exactly one restore-only cache reader`);
+    throw new Error(`release build job ${index} must have exactly one restore-only cache reader`);
   }
   if (job.includes("actions/cache@v4") || job.includes("actions/cache/save@v4")) {
-    throw new Error(`release shard ${index} must not own an automatic or explicit cache writer`);
+    throw new Error(`release build job ${index} must not own an automatic or explicit cache writer`);
   }
   for (const marker of [
     "~/.cargo/bin/wasm-bindgen.exe",
@@ -1351,8 +1446,41 @@ for (const [index, job] of releaseShardJobs.entries()) {
     "release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}",
     "release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-",
   ]) {
-    requireText(job, marker, `release shard ${index} cache ${marker}`);
+    requireText(job, marker, `release build job ${index} cache ${marker}`);
   }
+}
+if ((releaseAcceptanceSanitizerJob.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1) {
+  throw new Error("sanitizer acceptance must have exactly one restore-only C build cache reader");
+}
+if (
+  releaseAcceptanceSanitizerJob.includes("actions/cache@v4") ||
+  releaseAcceptanceSanitizerJob.includes("actions/cache/save@v4")
+) {
+  throw new Error("sanitizer acceptance must not write its C build cache");
+}
+for (const forbidden of [
+  "~/.cargo/",
+  "wasm-bindgen",
+  "hashFiles('Cargo.lock'",
+]) {
+  if (releaseAcceptanceSanitizerJob.includes(forbidden)) {
+    throw new Error(`sanitizer acceptance must not restore unrelated toolchain payload: ${forbidden}`);
+  }
+}
+for (const marker of [
+  "name: Restore sanitizer C build cache",
+  "path: ~/AppData/Local/Clearra/build",
+  "key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}",
+  "release-acceptance-sanitizer-${{ runner.os }}-",
+]) {
+  requireText(releaseAcceptanceSanitizerJob, marker, `sanitizer C build cache ${marker}`);
+}
+if (
+  releaseAcceptancePagesJob.includes("actions/cache/restore@v4") ||
+  releaseAcceptancePagesJob.includes("actions/cache@v4") ||
+  releaseAcceptancePagesJob.includes("actions/cache/save@v4")
+) {
+  throw new Error("Pages acceptance must consume the accepted WASM build without a build cache");
 }
 if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 0) {
   throw new Error("canonical acceptance must remain restore-only with no explicit cache writer");
@@ -1363,6 +1491,7 @@ if (
   releaseAcceptanceFoundationDesktopHostJob.includes("actions/cache/save@v4") ||
   releaseAcceptanceSanitizerJob.includes("actions/cache/save@v4") ||
   releaseAcceptanceRustJob.includes("actions/cache/save@v4") ||
+  releaseAcceptanceWasmBuildJob.includes("actions/cache/save@v4") ||
   releaseAcceptancePagesJob.includes("actions/cache/save@v4")
 ) {
   throw new Error("no canonical acceptance shard may write a cache");
@@ -1383,6 +1512,68 @@ for (const [shard, job, caseName] of [
     `release-acceptance-${shard}-shard-\${{ github.sha }}-run-\${{ needs.metadata.outputs.accepted_run_id }}-attempt-\${{ needs.metadata.outputs.accepted_run_attempt }}`,
   ]) {
     requireText(job, marker, `canonical ${shard} shard evidence ${marker}`);
+  }
+}
+for (const [name, step, action, artifactPath] of [
+  [
+    "producer upload",
+    acceptedWasmBuildUploadStep,
+    "actions/upload-artifact@v4",
+    "${{ runner.temp }}/clearra-accepted-wasm",
+  ],
+  [
+    "Pages download",
+    acceptedWasmBuildDownloadStep,
+    "actions/download-artifact@v4",
+    "${{ runner.temp }}/clearra-accepted-wasm",
+  ],
+]) {
+  requireExactYamlKeySet(step, 8, ["uses", "with"], `accepted WASM ${name} step`);
+  requireExactYamlScalar(step, "uses", action, `accepted WASM ${name} action`, 8);
+  requireExactYamlScalar(
+    step,
+    "name",
+    "accepted-wasm-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}",
+    `accepted WASM ${name} artifact name`,
+    10,
+  );
+  requireExactYamlScalar(step, "path", artifactPath, `accepted WASM ${name} path`, 10);
+}
+requireExactYamlKeySet(
+  acceptedWasmBuildUploadStep,
+  10,
+  ["name", "path", "if-no-files-found"],
+  "accepted WASM producer upload inputs",
+);
+requireExactYamlScalar(
+  acceptedWasmBuildUploadStep,
+  "if-no-files-found",
+  "error",
+  "accepted WASM producer missing artifact policy",
+  10,
+);
+requireExactYamlKeySet(
+  acceptedWasmBuildDownloadStep,
+  10,
+  ["name", "path"],
+  "accepted WASM Pages download inputs",
+);
+requireText(
+  releaseAcceptancePagesSealStep,
+  '--accepted-wasm "$env:RUNNER_TEMP\\clearra-accepted-wasm" `',
+  "Pages shard evidence accepted WASM receipt binding",
+);
+if ((workflow.match(/-Task WasmBuildProducer -ExecutionSurface Trusted/gu) ?? []).length !== 1) {
+  throw new Error("accepted WASM build must have exactly one workflow producer");
+}
+for (const forbidden of [
+  "actions/cache/restore@v4",
+  "Prepare acceptance toolchains",
+  "build-clearra-wasm.mjs",
+  "cargo test",
+]) {
+  if (releaseAcceptancePagesJob.includes(forbidden)) {
+    throw new Error(`Pages acceptance must not rebuild the accepted WASM payload: ${forbidden}`);
   }
 }
 requireExactYamlKeySet(
@@ -2173,6 +2364,7 @@ for (const [name, job] of [
   ["Windows foundation DesktopHost acceptance", releaseAcceptanceFoundationDesktopHostJob],
   ["Windows sanitizer acceptance", releaseAcceptanceSanitizerJob],
   ["Windows Rust acceptance", releaseAcceptanceRustJob],
+  ["Windows WASM build producer", releaseAcceptanceWasmBuildJob],
   ["Windows Pages acceptance", releaseAcceptancePagesJob],
   ["Linux acceptance fan-in", releaseAcceptanceJob],
 ]) {
@@ -2202,6 +2394,7 @@ for (const [name, job] of [
   ["foundation DesktopHost", releaseAcceptanceFoundationDesktopHostJob],
   ["sanitizer", releaseAcceptanceSanitizerJob],
   ["rust", releaseAcceptanceRustJob],
+  ["WASM build producer", releaseAcceptanceWasmBuildJob],
   ["Pages", releaseAcceptancePagesJob],
   ["fan-in", releaseAcceptanceJob],
 ]) {
@@ -2248,11 +2441,17 @@ requireExactYamlFlowSequence(
   "Rust acceptance dependency on metadata and accepted CTK3",
 );
 requireExactYamlScalar(
-  releaseAcceptancePagesJob,
+  releaseAcceptanceWasmBuildJob,
   "needs",
   "metadata",
-  "Pages acceptance metadata dependency",
+  "accepted WASM build producer metadata dependency",
   4,
+);
+requireExactYamlFlowSequence(
+  releaseAcceptancePagesJob,
+  "needs",
+  ["metadata", "release-acceptance-wasm-build"],
+  "Pages acceptance dependency on metadata and accepted WASM build",
 );
 requireExactYamlFlowSequence(
   releaseAcceptanceJob,

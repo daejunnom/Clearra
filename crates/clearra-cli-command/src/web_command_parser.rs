@@ -1,11 +1,11 @@
 use clearra_app::{
-    BuildObjective, BuildQueueKnowledge, BuildScoreProfile, FieldDocumentFormat,
-    FieldDocumentTransformAppCommand, FieldDocumentTransformKind, FumenAppCommand,
-    FumenTransformKind, ParityAppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin,
-    PcMinimalsIngressOrigin, PcPathIngressOrigin, PcSaveIngressOrigin, PcScoreIngressOrigin,
-    PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, RenderAppCommand, RenderArtifactFormat,
-    RequestStructuralProfiles, SpinStructureProductMode, PC_SCORE_MAX_PATTERNS,
-    PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_SOURCE_PIECES,
+    BuildObjective, BuildProbabilityResultMode, BuildQueueKnowledge, BuildScoreProfile,
+    FieldDocumentFormat, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
+    FumenAppCommand, FumenTransformKind, ParityAppCommand, PcChanceIngressOrigin,
+    PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin, PcPathIngressOrigin, PcSaveIngressOrigin,
+    PcScoreIngressOrigin, PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, RenderAppCommand,
+    RenderArtifactFormat, RequestStructuralProfiles, SpinStructureProductMode,
+    PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_SOURCE_PIECES,
 };
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
@@ -645,7 +645,7 @@ fn parse_pc_score_command(
     if origin.is_score_finder() {
         validate_pc_score_finder_options(tokens)?;
     }
-    let mut forwarded = Vec::with_capacity(tokens.len() + 12);
+    let mut forwarded = Vec::with_capacity(tokens.len() + 10);
     forwarded.extend_from_slice(tokens);
     forwarded.extend([
         "--objective".to_owned(),
@@ -653,8 +653,6 @@ fn parse_pc_score_command(
         "--score".to_owned(),
         "--backend".to_owned(),
         "cpu".to_owned(),
-        "--workers".to_owned(),
-        "1".to_owned(),
         "--no-backend-fallback".to_owned(),
         "--max-patterns".to_owned(),
         PC_SCORE_MAX_PATTERNS.to_string(),
@@ -717,7 +715,7 @@ fn parse_pc_score_minimals_command(
 ) -> Result<WebCommandRequest, WebCommandError> {
     validate_pc_score_arguments(tokens)?;
     validate_pc_score_options(tokens)?;
-    let mut forwarded = Vec::with_capacity(tokens.len() + 12);
+    let mut forwarded = Vec::with_capacity(tokens.len() + 10);
     forwarded.extend_from_slice(tokens);
     forwarded.extend([
         "--objective".to_owned(),
@@ -725,8 +723,6 @@ fn parse_pc_score_minimals_command(
         "--score".to_owned(),
         "--backend".to_owned(),
         "cpu".to_owned(),
-        "--workers".to_owned(),
-        "1".to_owned(),
         "--no-backend-fallback".to_owned(),
         "--max-patterns".to_owned(),
         PC_SCORE_MAX_PATTERNS.to_string(),
@@ -760,11 +756,7 @@ fn validate_pc_score_options(tokens: &[String]) -> Result<(), WebCommandError> {
                 ));
             }
             "--backend"
-            | "--workers"
-            | "--auto-workers"
             | "--gpu-device"
-            | "--use-all-cpu-threads"
-            | "--cpu-warmup"
             | "--gpu-warmup"
             | "--allow-backend-fallback"
             | "--no-backend-fallback"
@@ -785,6 +777,10 @@ fn validate_pc_score_options(tokens: &[String]) -> Result<(), WebCommandError> {
                     format!("pc score does not accept an explicit {option} execution override"),
                 ));
             }
+            "--workers" | "--auto-workers" => {
+                let _ = next_value(tokens, &mut cursor, option)?;
+            }
+            "--use-all-cpu-threads" | "--cpu-warmup" => cursor += 1,
             "--score-profile" | "--spin-profile" | "--initial-b2b" => {
                 let seen = match option {
                     "--score-profile" => &mut score_profile,
@@ -942,18 +938,15 @@ fn validate_pc_score_arguments(arguments: &[String]) -> Result<(), WebCommandErr
                     ));
                 }
             }
-            "--source-pieces" => {
+            "--source-pieces"
                 if value
                     .parse::<usize>()
-                    .is_ok_and(|pieces| pieces > PC_SCORE_MAX_SOURCE_PIECES)
-                {
-                    return Err(WebCommandError::new(
-                        WebCommandErrorCode::InvalidValue,
-                        format!(
-                            "pc score accepts at most {PC_SCORE_MAX_SOURCE_PIECES} source pieces"
-                        ),
-                    ));
-                }
+                    .is_ok_and(|pieces| pieces > PC_SCORE_MAX_SOURCE_PIECES) =>
+            {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("pc score accepts at most {PC_SCORE_MAX_SOURCE_PIECES} source pieces"),
+                ));
             }
             _ => {}
         }
@@ -3088,6 +3081,13 @@ fn parse_build_probability_command(
     let mut backend_fallback = BackendFallbackOverride::default();
     let mut include_horizontal_mirror = true;
     let mut aggregation = BuildAggregationOverride::default();
+    let mut result_mode: Option<BuildProbabilityResultMode> = None;
+    let mut score_profile = ScoreProfileSelection::Tetrio;
+    let mut score_profile_requested = false;
+    let mut initial_b2b = 0_u16;
+    let mut initial_b2b_requested = false;
+    let mut failed_pattern_limit = 100_usize;
+    let mut failed_pattern_limit_requested = false;
     let mut spin_profile = None;
     let mut preserve_back_to_back = false;
     let mut precompute_build_dependencies = false;
@@ -3224,6 +3224,110 @@ fn parse_build_probability_command(
                 aggregation.record(BuildAggregationKind::Tiling)?;
                 cursor += 1;
             }
+            "--result-mode" => {
+                let value = next_value(tokens, &mut cursor, "--result-mode")?;
+                let parsed = match value {
+                    "all" | "all-solutions" => BuildProbabilityResultMode::AllSolutions,
+                    "paths" | "complete-replay-paths" => {
+                        BuildProbabilityResultMode::CompleteReplayPaths
+                    }
+                    "score" | "field-average-score" => {
+                        BuildProbabilityResultMode::FieldAverageScore
+                    }
+                    "fixed-score" | "fixed-queue-maximum-score" => {
+                        BuildProbabilityResultMode::FixedQueueMaximumScore
+                    }
+                    "score-minimals" | "highest-score-minimum-set" => {
+                        BuildProbabilityResultMode::HighestScoreMinimumSet
+                    }
+                    "failed" | "failed-queue" | "failed-queues" => {
+                        BuildProbabilityResultMode::FailedQueues
+                    }
+                    _ => {
+                        return Err(WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            format!(
+                                "unsupported build result mode '{value}'; expected all-solutions, complete-replay-paths, minimum score products, field-average-score, or failed-queues"
+                            ),
+                        ));
+                    }
+                };
+                if result_mode.replace(parsed).is_some() {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "build result mode may be specified only once",
+                    ));
+                }
+            }
+            "--paths" => {
+                if result_mode
+                    .replace(BuildProbabilityResultMode::CompleteReplayPaths)
+                    .is_some()
+                {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "build result mode may be specified only once",
+                    ));
+                }
+                cursor += 1;
+            }
+            "--score" => {
+                if result_mode
+                    .replace(BuildProbabilityResultMode::FieldAverageScore)
+                    .is_some()
+                {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "build result mode may be specified only once",
+                    ));
+                }
+                cursor += 1;
+            }
+            "--score-profile" => {
+                let value = next_value(tokens, &mut cursor, "--score-profile")?;
+                if score_profile_requested {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "--score-profile may be specified only once",
+                    ));
+                }
+                score_profile = ScoreProfileSelection::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid --score-profile value '{value}'"),
+                    )
+                })?;
+                score_profile_requested = true;
+            }
+            "--initial-b2b" => {
+                let value = next_value(tokens, &mut cursor, "--initial-b2b")?;
+                if initial_b2b_requested {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "--initial-b2b may be specified only once",
+                    ));
+                }
+                initial_b2b = value.parse::<u16>().map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid --initial-b2b value '{value}'"),
+                    )
+                })?;
+                initial_b2b_requested = true;
+            }
+            "--failed-count" | "--failed-pattern-limit" => {
+                if failed_pattern_limit_requested {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "--failed-count may be specified only once",
+                    ));
+                }
+                failed_pattern_limit = parse_positive(
+                    next_value(tokens, &mut cursor, "--failed-count")?,
+                    "--failed-count",
+                )?;
+                failed_pattern_limit_requested = true;
+            }
             "--spin-profile" => {
                 let value = next_value(tokens, &mut cursor, "--spin-profile")?;
                 spin_profile = Some(SpinProfileSelection::parse(value).ok_or_else(|| {
@@ -3328,6 +3432,7 @@ fn parse_build_probability_command(
     }
     let aggregation_kind = aggregation.resolve();
     let tiling_only = aggregation_kind == BuildAggregationKind::Tiling;
+    let result_mode = result_mode.unwrap_or_default();
     let queue_knowledge = queue_knowledge.unwrap_or_default();
     if tiling_only && queue_knowledge == QueueObservationPolicy::VisibleSeven {
         return Err(WebCommandError::new(
@@ -3347,6 +3452,43 @@ fn parse_build_probability_command(
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
             "tiling aggregation cannot be combined with rule, spin, B2B-preservation, BuildUp dependency, per-solution probability, or finesse options",
+        ));
+    }
+    if result_mode != BuildProbabilityResultMode::AllSolutions
+        && (aggregation_kind != BuildAggregationKind::Buildability
+            || finesse_metric.requested()
+            || preserve_back_to_back)
+    {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "The selected Build result mode is incompatible with this engine aggregation: non-all result modes require buildability without finesse or B2B-preservation",
+        ));
+    }
+    if (score_profile_requested || initial_b2b_requested)
+        && !matches!(
+            result_mode,
+            BuildProbabilityResultMode::FieldAverageScore
+                | BuildProbabilityResultMode::FixedQueueMaximumScore
+                | BuildProbabilityResultMode::HighestScoreMinimumSet
+        )
+    {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--score-profile and --initial-b2b require a Build score result mode",
+        ));
+    }
+    if failed_pattern_limit_requested && result_mode != BuildProbabilityResultMode::FailedQueues {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--failed-count requires --result-mode failed-queues",
+        ));
+    }
+    if result_mode == BuildProbabilityResultMode::CompleteReplayPaths
+        && height.is_some_and(|height| height > 6)
+    {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "complete Build replay paths currently require --height 1..6",
         ));
     }
     if spin_profile.is_some()
@@ -3395,6 +3537,8 @@ fn parse_build_probability_command(
     .with_allow_hold(hold_enabled)
     .with_horizontal_mirror_included(include_horizontal_mirror)
     .with_aggregation(aggregation)
+    .with_result_mode(result_mode)
+    .with_failed_pattern_limit(failed_pattern_limit)
     .with_finesse(finesse_metric, finesse_pattern_knowledge);
     if let Some(source_piece_count) = source_piece_count {
         input = input.with_source_piece_count(source_piece_count);
@@ -3410,7 +3554,22 @@ fn parse_build_probability_command(
         .with_precompute_build_dependencies(precompute_build_dependencies)
         .with_solution_probabilities(solution_probabilities)
         .with_queue_observation_policy(queue_knowledge);
-    if tiling_only {
+    if matches!(
+        result_mode,
+        BuildProbabilityResultMode::CompleteReplayPaths
+            | BuildProbabilityResultMode::FieldAverageScore
+            | BuildProbabilityResultMode::FixedQueueMaximumScore
+            | BuildProbabilityResultMode::HighestScoreMinimumSet
+    ) {
+        request = request.with_objective(
+            ObjectivePolicy::unique()
+                .with_score_summary()
+                .with_score_profile(score_profile)
+                .with_initial_b2b(u32::from(initial_b2b)),
+        );
+    } else if result_mode == BuildProbabilityResultMode::FailedQueues {
+        request = request.with_objective(ObjectivePolicy::unique());
+    } else if tiling_only {
         request = request.with_objective(ObjectivePolicy::tiling());
     } else if preserve_back_to_back {
         request = request.with_objective(

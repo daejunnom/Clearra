@@ -91,6 +91,10 @@ import {
   buildClearraRendererUrl,
   buildClearraViewerUrl,
 } from "./viewer/link.mjs";
+import {
+  PC_PATH_REPLAY_FRAME_DELAY_MS,
+  buildCanonicalPathReplayDocument,
+} from "./viewer/pc-path-replay.mjs";
 import { buildSearchPreviewDocument } from "./viewer/search-preview.mjs";
 
 // SRP rationale: this module has one behavior-level change reason: coordinating
@@ -769,7 +773,7 @@ export class Clearrabot {
             ...interactionJobOptions(interaction, index),
           });
           const message = labelResultMessage(
-            resultMessage(result, tilingOnlyRequested(arguments_), {
+            await this.buildResultMessage(result, tilingOnlyRequested(arguments_), {
               maxCtk3FileBytes: this.config.maxCtk3FileBytes,
               maxArtifactBytes: this.config.maxGifBytes,
               locale,
@@ -829,7 +833,7 @@ export class Clearrabot {
         }),
         { deadlineUnixMs, signal: controller.signal },
       ).then(
-        (value) => resultMessage(value, tilingOnly, {
+        (value) => this.buildResultMessage(value, tilingOnly, {
           maxCtk3FileBytes: this.config.maxCtk3FileBytes,
           maxArtifactBytes: this.config.maxGifBytes,
           locale,
@@ -1425,6 +1429,57 @@ export class Clearrabot {
     };
   }
 
+  async buildResultMessage(result, tilingOnly = false, options = {}) {
+    const message = resultMessage(result, tilingOnly, options);
+    if (result?.exitCode !== 0 || typeof result?.stdout !== "string") return message;
+    const structured = parseStructuredResult(result.stdout);
+    if (![
+      "pc-path-family.v2",
+      "build-path-family.v1",
+    ].includes(structured?.kind)) return message;
+    let replay;
+    try {
+      // The executor boundary has already reduced the exhaustive family to a
+      // validated canonical-only envelope. Re-projecting here would reject
+      // that intentionally smaller contract and lose the replay entirely.
+      replay = buildCanonicalPathReplayDocument(structured);
+    } catch (error) {
+      this.logRenderFailure(error);
+      return textMessage(t(options.locale ?? "en", "error.result_consistency"));
+    }
+    if (!replay) return message;
+
+    try {
+      const bytes = assertGifBytes(await this.gifRenderer.render(replay.document, {
+        delayMs: PC_PATH_REPLAY_FRAME_DELAY_MS,
+        maxBytes: options.maxArtifactBytes ?? this.config.maxGifBytes ?? 8 * 1024 * 1024,
+        maxFrames: this.config.oracleMaxPages ?? 128,
+      }));
+      const locale = options.locale ?? "en";
+      const replayLine = t(locale, `result.${replay.kind}_path_replay_frames`, {
+        count: replay.frameCount,
+        delay: PC_PATH_REPLAY_FRAME_DELAY_MS,
+      });
+      const content = `${message.payload.content ?? ""}\n${replayLine}`
+        .slice(0, DISCORD_CONTENT_LIMIT);
+      return attachmentMessage(content, [
+        ...message.files,
+        {
+          name: `${replay.kind}-path-1.gif`,
+          description: t(locale, `result.${replay.kind}_path_gif_description`),
+          contentType: "image/gif",
+          bytes,
+        },
+      ]);
+    } catch (error) {
+      this.logRenderFailure(error);
+      const locale = options.locale ?? "en";
+      const content = `${message.payload.content ?? ""}\n${t(locale, "preview.image_failed")}`
+        .slice(0, DISCORD_CONTENT_LIMIT);
+      return { ...message, payload: { ...message.payload, content } };
+    }
+  }
+
   async runOracleMessageCommand(
     message,
     arguments_,
@@ -1447,8 +1502,8 @@ export class Clearrabot {
         }),
         { deadlineUnixMs, signal: controller.signal },
       ).then(
-        (value) => ({
-          outgoing: resultMessage(value, tilingOnly, {
+        async (value) => ({
+          outgoing: await this.buildResultMessage(value, tilingOnly, {
             maxCtk3FileBytes: this.config.maxCtk3FileBytes,
             maxArtifactBytes: this.config.maxGifBytes,
             locale,
@@ -1530,7 +1585,7 @@ export class Clearrabot {
             timeoutClass,
           });
           const outgoing = labelResultMessage(
-            resultMessage(result, tilingOnlyRequested(arguments_), {
+            await this.buildResultMessage(result, tilingOnlyRequested(arguments_), {
               maxCtk3FileBytes: this.config.maxCtk3FileBytes,
               maxArtifactBytes: this.config.maxGifBytes,
               locale,
@@ -2358,12 +2413,6 @@ function structuredResultSummary(
           lines.push(`${t(locale, `summary.${key}`)}: ${summaryValue(key, value, locale)}`);
         }
       }
-      if (typeof summary.normalized_trace === "string") {
-        const trace = summary.normalized_trace;
-        const preview = trace.slice(0, OPERATION_SEQUENCE_TRACE_PREVIEW_LIMIT);
-        const suffix = trace.length > OPERATION_SEQUENCE_TRACE_PREVIEW_LIMIT ? "…" : "";
-        lines.push(`${t(locale, "summary.normalized_trace_preview")}: ${preview}${suffix}`);
-      }
     }
     const solutionCountCalculated =
       coverageSummaryDisposition(summary) === "non-coverage" &&
@@ -2397,12 +2446,10 @@ function structuredResultSummary(
       const winner = selectDiscordBestSaveWinner(summary);
       if (winner) {
         lines.push(
-          `${t(locale, "summary.best_save_schema")}: ${summary.best_save_schema}`,
+          `${t(locale, "summary.selected_result")}: 1`,
           `${t(locale, "summary.best_save_weighted_total")}: ${winner.weighted_total}`,
           `${t(locale, "summary.best_save_balanced_jl_count")}: ${winner.balanced_jl_count}`,
           `${t(locale, "summary.best_save_exact_group_probability")}: ${summaryValue("best_save_exact_group_probability", winner.exact_group_probability, locale)}`,
-          `${t(locale, "summary.best_save_group")}: ${winner.group.identity}`,
-          `${t(locale, "summary.best_save_canonical_candidate_id")}: ${winner.group.canonical_candidate_id}`,
         );
       }
     }
@@ -2595,6 +2642,12 @@ function formatInputCount(value, locale) {
 
 const RESULT_SUMMARY_FIELDS = Object.freeze([
   "coverage_probability",
+  "failed_coverage_probability",
+  "covered_pattern_count",
+  "failed_pattern_count",
+  "materialized_pattern_count",
+  "materialized_probability_mass",
+  "probability_complete",
   "probability",
   "weighted_probability",
   "total_solution_count",
@@ -2624,23 +2677,19 @@ const RESULT_SUMMARY_FIELDS = Object.freeze([
 ]);
 
 const SEQUENCE_DEPENDENCY_SUMMARY_FIELDS = Object.freeze([
-  "candidate_id",
   "operation_count",
   "exact_order_count",
   "universal_dependency_count",
   "transitive_reduction_count",
   "independent_pair_count",
-  "representative_order",
 ]);
 
 const OPERATION_SEQUENCE_SUMMARY_FIELDS = Object.freeze([
   "operation_count",
   "cleared_line_count",
-  "trace_key",
   "rule_profile",
   "kick_profile",
 ]);
-const OPERATION_SEQUENCE_TRACE_PREVIEW_LIMIT = 240;
 
 const PUBLIC_RESULT_KIND_CONTRACT = new Map([
   ["search", new Set([
@@ -2730,6 +2779,8 @@ const ALLSPIN_WITNESS_SUMMARY_KEYS = new Set([
 
 const PROBABILITY_SUMMARY_FIELDS = new Set([
   "coverage_probability",
+  "failed_coverage_probability",
+  "materialized_probability_mass",
   "probability",
   "weighted_probability",
   "score_covered_probability",

@@ -578,6 +578,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $pagesRollback = Read-Text '.github/workflows/pages-rollback.yml'
     $discordDeployWorkflow = Read-Text '.github/workflows/discord-deploy.yml'
     $discordRecoveryWorkflow = Read-Text '.github/workflows/discord-deploy-recovery.yml'
+    $fastFixQualificationWorkflow = Read-Text '.github/workflows/fast-fix-qualification.yml'
+    $fastFixQualificationEvidence = Read-Text 'scripts/release/fast-fix-qualification-evidence.mjs'
     $discordRecoveryCatalogCollector = Read-Text 'scripts/release/collect-discord-primary-attempt-catalog.sh'
     $discordRecoveryAuthority = Read-Text 'scripts/release/discord-deployment-recovery.mjs'
     $discordRuntimeRecovery = Read-Text 'scripts/release/invoke-discord-runtime-recovery-v080.ps1'
@@ -623,6 +625,60 @@ function Invoke-ReleaseIdentityGateValidation {
     $oracleAcceptedLayerBuilder = Read-Text 'scripts/release/oracle/create-local-layers-v080.sh'
     $oracleActionsLayerBuilder = Read-Text 'scripts/release/oracle/create-actions-layers-v080.sh'
     $oracleActionsLayerBuilderTest = Read-Text 'scripts/release/oracle/create-actions-layers-v080.test.mjs'
+
+    foreach ($required in @(
+        'name: Fast Fix Qualification',
+        'group: fast-fix-qualification-${{ inputs.source_commit }}',
+        'cancel-in-progress: false',
+        'fast-fix qualification forbids workflow reruns',
+        'qualification source is not exact current main',
+        'exact source already has a fast-fix qualification run',
+        'main moved before qualification fan-in',
+        'outputs.requires_full_gate == ''true''',
+        'outputs.deploy_pages == ''true''',
+        'outputs.deploy_gui == ''true''',
+        'outputs.deploy_cli == ''true''',
+        'outputs.deploy_discord == ''true''',
+        'outputs.deploy_pc4_lookup_service == ''true''',
+        'outputs.deploy_pc4_activation_manifest == ''true''',
+        'git merge-base --is-ancestor',
+        'baseline is not the last successful accepted component ledger run',
+        'latest_accepted_run="$(jq -r',
+        'baseline ledger artifact name differs from its exact source/run authority',
+        'baseline artifact pagination is incomplete or unstable',
+        'Seal closed qualification-only evidence'
+    )) {
+        if ($fastFixQualificationWorkflow.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Fast Fix Qualification workflow is missing '$required'"
+        }
+    }
+    foreach ($forbidden in @(
+        'actions/deploy-pages',
+        'gcloud run services update-traffic',
+        'gh release create',
+        'gh release upload',
+        'discord.com/api'
+    )) {
+        if ($fastFixQualificationWorkflow.IndexOf($forbidden, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            Add-ArchitectureError "Fast Fix Qualification workflow contains production mutation '$forbidden'"
+        }
+    }
+    if ($fastFixQualificationWorkflow -match '(?m)^\s+(push|workflow_run):\s*$') {
+        Add-ArchitectureError 'Fast Fix Qualification must remain explicit workflow_dispatch only'
+    }
+    foreach ($required in @(
+        'clearra.fast-fix-component-qualification.v1',
+        'clearra.fast-fix-qualification-ledger.v1',
+        'clearra.accepted-component-ledger.v1',
+        'status: "qualified-not-deployed"',
+        'production_mutation: false',
+        'changed component must not claim accepted or deployed state',
+        'unchanged component must preserve its accepted and deployed receipts'
+    )) {
+        if ($fastFixQualificationEvidence.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Fast Fix Qualification evidence is missing '$required'"
+        }
+    }
 
     foreach ($required in @(
         'const GITHUB_IMMUTABLE_REPOSITORY =',
@@ -848,6 +904,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $releasePackage = Read-Text 'scripts/tools/package-release-cli.sh'
     $acceptedCtk3Dist = Read-Text 'scripts/tools/accepted-ctk3-dist.mjs'
     $acceptedCtk3DistTest = Read-Text 'scripts/tools/accepted-ctk3-dist.test.mjs'
+    $acceptedWasmBuild = Read-Text 'scripts/release/accepted-wasm-build.mjs'
+    $acceptedWasmBuildTest = Read-Text 'scripts/release/accepted-wasm-build.test.mjs'
     $acceptedPagesBuild = Read-Text 'scripts/release/accepted-pages-build.mjs'
     $acceptedPagesBuildTest = Read-Text 'scripts/release/accepted-pages-build.test.mjs'
     $discordPackage = Read-Text 'apps/clearra-discord-bot/package.json'
@@ -1279,6 +1337,7 @@ function Invoke-ReleaseIdentityGateValidation {
     foreach ($requiredEvidenceMarker in @(
         'clearra.canonical-acceptance-evidence.v1',
         'verifyAcceptedCtk3Dist',
+        'verifyAcceptedWasmBuild',
         'verifyAcceptedPagesBuild',
         'verifyCanonicalAcceptanceEvidence',
         'validateReleaseJobs',
@@ -1288,6 +1347,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'isolated-six-shard',
         'release_version',
         'pages_base_path',
+        'wasm_build_receipt_sha256',
         'downloaded release products differ from canonical acceptance evidence',
         'release-acceptance',
         'surface_reports',
@@ -1307,6 +1367,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'deterministically bind toolchains and four surfaces',
         'six isolated shard reports preserve unique stage ownership and delegated evidence',
         'shard toolchain collection invokes only the closed shard tool set',
+        'Pages shard toolchains are inherited from the producer and checked at the consumer',
         'rejects duplicate jobs and any failed required step',
         'hashes three real products',
         'downloaded release products differ'
@@ -1512,6 +1573,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $releaseFoundationDesktopHostJobStart = $release.IndexOf("`n  release-acceptance-foundation-desktop-host:", [System.StringComparison]::Ordinal)
     $releaseSanitizerJobStart = $release.IndexOf("`n  release-acceptance-sanitizer:", [System.StringComparison]::Ordinal)
     $releaseRustJobStart = $release.IndexOf("`n  release-acceptance-rust:", [System.StringComparison]::Ordinal)
+    $releaseWasmBuildJobStart = $release.IndexOf("`n  release-acceptance-wasm-build:", [System.StringComparison]::Ordinal)
     $releasePagesJobStart = $release.IndexOf("`n  release-acceptance-pages:", [System.StringComparison]::Ordinal)
     $releaseAcceptanceJobStart = $release.IndexOf("`n  release-acceptance:", [System.StringComparison]::Ordinal)
     $windowsCliJobStart = $release.IndexOf("`n  windows-cli:", [System.StringComparison]::Ordinal)
@@ -1527,7 +1589,8 @@ function Invoke-ReleaseIdentityGateValidation {
         $releaseFoundationDesktopHostJobStart -le $releaseFoundationAdversarialCorrectnessJobStart -or
         $releaseSanitizerJobStart -le $releaseFoundationDesktopHostJobStart -or
         $releaseRustJobStart -le $releaseSanitizerJobStart -or
-        $releasePagesJobStart -le $releaseRustJobStart -or
+        $releaseWasmBuildJobStart -le $releaseRustJobStart -or
+        $releasePagesJobStart -le $releaseWasmBuildJobStart -or
         $releaseAcceptanceJobStart -le $releasePagesJobStart -or
         $windowsCliJobStart -le $releaseAcceptanceJobStart -or
         $windowsGuiJobStart -le $windowsCliJobStart -or
@@ -1559,7 +1622,11 @@ function Invoke-ReleaseIdentityGateValidation {
         )
         $releaseRustJob = $release.Substring(
             $releaseRustJobStart,
-            $releasePagesJobStart - $releaseRustJobStart
+            $releaseWasmBuildJobStart - $releaseRustJobStart
+        )
+        $releaseWasmBuildJob = $release.Substring(
+            $releaseWasmBuildJobStart,
+            $releasePagesJobStart - $releaseWasmBuildJobStart
         )
         $releasePagesJob = $release.Substring(
             $releasePagesJobStart,
@@ -1628,7 +1695,8 @@ function Invoke-ReleaseIdentityGateValidation {
             @{ Name = 'Foundation DesktopHost'; Text = $releaseFoundationDesktopHostJob; Needs = @('metadata') },
             @{ Name = 'Sanitizer'; Text = $releaseSanitizerJob; Needs = @('metadata') },
             @{ Name = 'Rust'; Text = $releaseRustJob; Needs = @('metadata', 'ctk3') },
-            @{ Name = 'Pages'; Text = $releasePagesJob; Needs = @('metadata') }
+            @{ Name = 'WASM producer'; Text = $releaseWasmBuildJob; Needs = @('metadata') },
+            @{ Name = 'Pages'; Text = $releasePagesJob; Needs = @('metadata', 'release-acceptance-wasm-build') }
         )) {
             Assert-ReleaseYamlExactKeySet `
                 -Text $shardJob.Text `
@@ -1864,20 +1932,19 @@ function Invoke-ReleaseIdentityGateValidation {
             $releaseFoundationDesktopHostJob,
             $releaseSanitizerJob,
             $releaseRustJob,
-            $releasePagesJob
+            $releaseWasmBuildJob
         ) -join "`n"
         if ([regex]::Matches($releaseAcceptanceCacheText, 'actions/cache/restore@v4').Count -ne 6 -or
             [regex]::Matches($release, 'actions/cache/save@v4').Count -ne 0 -or
             [regex]::Matches($release, '(?m)^      - uses: actions/cache@v4\s*$').Count -ne 2) {
-            Add-ArchitectureError 'Canonical ReleaseAcceptance must use six restore-only cache readers without automatic or explicit cache writers'
+            Add-ArchitectureError 'Canonical ReleaseAcceptance build jobs must use six restore-only cache readers without automatic or explicit cache writers'
         }
         foreach ($shardCacheJob in @(
             $releaseFoundationNoProductDebtJob,
             $releaseFoundationAdversarialCorrectnessJob,
             $releaseFoundationDesktopHostJob,
-            $releaseSanitizerJob,
             $releaseRustJob,
-            $releasePagesJob
+            $releaseWasmBuildJob
         )) {
             foreach ($requiredRestoreMarker in @(
                 'actions/cache/restore@v4',
@@ -1888,6 +1955,52 @@ function Invoke-ReleaseIdentityGateValidation {
                 if ($shardCacheJob.IndexOf($requiredRestoreMarker, [System.StringComparison]::Ordinal) -lt 0) {
                     Add-ArchitectureError "Canonical ReleaseAcceptance isolated restore is missing '$requiredRestoreMarker'"
                 }
+            }
+        }
+        foreach ($forbiddenSanitizerCacheMarker in @(
+            '~/.cargo/',
+            'wasm-bindgen',
+            "hashFiles('Cargo.lock'"
+        )) {
+            if ($releaseSanitizerJob.IndexOf($forbiddenSanitizerCacheMarker, [System.StringComparison]::Ordinal) -ge 0) {
+                Add-ArchitectureError "Canonical sanitizer cache must not restore unrelated toolchain payload '$forbiddenSanitizerCacheMarker'"
+            }
+        }
+        foreach ($requiredSanitizerCacheMarker in @(
+            'name: Restore sanitizer C build cache',
+            'actions/cache/restore@v4',
+            'path: ~/AppData/Local/Clearra/build',
+            'key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}',
+            'release-acceptance-sanitizer-${{ runner.os }}-'
+        )) {
+            if ($releaseSanitizerJob.IndexOf($requiredSanitizerCacheMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Canonical sanitizer isolated C build restore is missing '$requiredSanitizerCacheMarker'"
+            }
+        }
+        if ($releasePagesJob.IndexOf('actions/cache/restore@v4', [System.StringComparison]::Ordinal) -ge 0 -or
+            $releasePagesJob.IndexOf('actions/cache@v4', [System.StringComparison]::Ordinal) -ge 0 -or
+            $releasePagesJob.IndexOf('actions/cache/save@v4', [System.StringComparison]::Ordinal) -ge 0) {
+            Add-ArchitectureError 'Canonical Pages acceptance must consume accepted WASM bytes without a build cache'
+        }
+        foreach ($requiredAcceptedWasmMarker in @(
+            'Run verified WASM build producer',
+            '-Task WasmBuildProducer -ExecutionSurface Trusted',
+            'Upload accepted WASM build',
+            'Download accepted WASM build',
+            'accepted-wasm-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}',
+            'CLEARRA_ACCEPTED_WASM_DIR: ${{ runner.temp }}\clearra-accepted-wasm',
+            '--accepted-wasm "$env:RUNNER_TEMP\clearra-accepted-wasm" `'
+        )) {
+            if ($release.IndexOf($requiredAcceptedWasmMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Canonical accepted WASM producer/consumer contract is missing '$requiredAcceptedWasmMarker'"
+            }
+        }
+        foreach ($forbiddenPagesBuildMarker in @(
+            'Prepare acceptance toolchains',
+            'build-clearra-wasm.mjs'
+        )) {
+            if ($releasePagesJob.IndexOf($forbiddenPagesBuildMarker, [System.StringComparison]::Ordinal) -ge 0) {
+                Add-ArchitectureError "Canonical Pages consumer must not rebuild accepted WASM bytes: '$forbiddenPagesBuildMarker'"
             }
         }
         if ($release -match 'npm test --workspace @clearra/discord-bot') {
@@ -2047,11 +2160,14 @@ function Invoke-ReleaseIdentityGateValidation {
                 Add-ArchitectureError 'Independent release regressions must have one bounded dispatch-only Linux metadata owner'
             }
             foreach ($requiredRegression in @(
+                'scripts/release/accepted-wasm-build.test.mjs',
                 'scripts/release/accepted-pages-build.test.mjs',
                 'scripts/release/canonical-acceptance-evidence.test.mjs',
                 'scripts/release/canonical-acceptance-run.test.mjs',
                 'scripts/release/create-exact-source-archive.test.mjs',
                 'scripts/release/deployment-impact.test.mjs',
+                'scripts/release/fast-fix-qualification-evidence.test.mjs',
+                'scripts/release/fast-fix-qualification-workflow.test.mjs',
                 'scripts/release/discord-catalog-recovery-authority.test.mjs',
                 'scripts/release/discord-deploy-workflow.test.mjs',
                 'scripts/release/discord-deployment-recovery.test.mjs',
@@ -2063,6 +2179,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 'scripts/release/final-source-stage-evidence.test.mjs',
                 'scripts/release/finalize-discord-production-checkpoint.test.mjs',
                 'scripts/release/observe-production-surfaces.test.mjs',
+                'scripts/release/oracle-inactive-stage-v080.test.mjs',
                 'scripts/release/oracle/create-prestage-helper-bundle.test.mjs',
                 'scripts/release/oracle/invoke-release-deploy-v080.test.mjs',
                 'scripts/release/pages-deployment-authority.test.mjs',
@@ -3326,6 +3443,34 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
+        'clearra-accepted-wasm-build.v1.json',
+        'clearra.accepted-wasm-build.v1',
+        'manifest_sha256',
+        'payload_sha256',
+        'collectPayloadFiles',
+        'validateWasmPayload',
+        'accepted WASM build does not match its closed regular-file set and hashes',
+        'flag: "wx"',
+        '--expected-source-commit',
+        '--expected-run-id',
+        '--expected-run-attempt'
+    )) {
+        if ($acceptedWasmBuild.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Accepted WASM build verifier is missing fail-closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'binds the closed payload, source, run, and producer toolchains',
+        'rejects tampering and unsealed extra files',
+        'rejects cross-source and cross-attempt reuse',
+        'fails closed for a partial or mismatched product payload',
+        'uses the closed seven-command set'
+    )) {
+        if ($acceptedWasmBuildTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Accepted WASM build regression coverage is missing '$required'"
+        }
+    }
+    foreach ($required in @(
         'clearra.pages.identity.v2',
         'acceptedRunId',
         'acceptedRunAttempt',
@@ -3335,6 +3480,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'symlink or reparse point',
         '404 fallback must exactly match index.html',
         'accepted Pages WASM manifest has a mismatched product identity',
+        'verifyAcceptedWasmBuild',
         'flag: "wx"'
     )) {
         if ($acceptedPagesBuild.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
@@ -3356,6 +3502,13 @@ function Invoke-ReleaseIdentityGateValidation {
         Add-ArchitectureError 'WASM release build must finish the accepted Pages artifact with the exact 404 fallback'
     }
     foreach ($required in @(
+        'Invoke-WasmBuildProducerGate',
+        'Invoke-WasmProductArtifactBuild',
+        'Import-AcceptedWasmBuild',
+        'CLEARRA_ACCEPTED_WASM_DIR',
+        'clearra-wasm accepted producer input',
+        'clearra-wasm accepted staged input',
+        'build_source=$buildSource',
         "'test', '--workspace', '@clearra/ui'",
         "'test', '--workspace', '@clearra/web'",
         "'--test', 'terminal_supply_public_contract'",

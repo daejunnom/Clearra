@@ -77,7 +77,7 @@ impl CheckpointDag {
     }
 }
 impl CheckpointDag {
-    pub fn node(self: &Self, id: CheckpointId) -> Option<CheckpointNode> {
+    pub fn node(&self, id: CheckpointId) -> Option<CheckpointNode> {
         self.nodes.iter().copied().find(|node| node.id() == id)
     }
 }

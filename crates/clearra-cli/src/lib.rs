@@ -24,5 +24,8 @@ mod product_cli_surface_contract;
 #[path = "../tests/product_contract_e2e.rs"]
 mod product_contract_e2e;
 #[cfg(all(test, feature = "native-c-core"))]
+#[path = "../tests/product_contract_json_assert.rs"]
+mod product_contract_json_assert;
+#[cfg(all(test, feature = "native-c-core"))]
 #[path = "../tests/product_golden_t4_contract.rs"]
 mod product_golden_t4_contract;

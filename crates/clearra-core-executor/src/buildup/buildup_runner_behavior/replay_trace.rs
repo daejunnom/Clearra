@@ -42,7 +42,6 @@ mod case_buildup_runner_exports_sample_replay_trace_for_scoring_post_processing 
 }
 
 #[cfg(feature = "native-c-core")]
-
 mod case_native_buildup_result_uses_canonical_trace_key {
     use super::*;
 

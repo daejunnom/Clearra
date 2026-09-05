@@ -8,9 +8,10 @@ use clearra_supply::{queue::fixed_sequence::FixedSequence, QueueObservationPolic
 use super::{
     continuation_token_error::PcContinuationTokenError,
     continuation_token_segments::{
-        format_hold_piece, format_piece_sequence, objective_name, opening_hold_policy,
-        parse_bool_digit_prefixed, parse_hold_piece, parse_objective, parse_queue,
-        parse_rule_profile, parse_target, prefixed_value, require_value,
+        count_policy_name, format_hold_piece, format_piece_sequence, objective_name,
+        opening_hold_policy, parse_bool_digit_prefixed, parse_count_policy, parse_hold_piece,
+        parse_objective, parse_queue, parse_rule_profile, parse_target, prefixed_value,
+        require_value,
     },
     opening_pc_search_query::OpeningPcSearchQuery,
     pc_queue_input::PcQueueInput,
@@ -22,7 +23,7 @@ pub(crate) fn encode_opening_continuation(
     pieces: &[PieceKind],
 ) -> String {
     format!(
-        "pc2:l{}:bd{}:ps{}:bg{}:r{}:o{}:e{}:h{}:q{}:qk{}",
+        "pc2:l{}:bd{}:ps{}:bg{}:r{}:o{}:e{}:h{}:q{}:qk{}:c{}",
         query.target().lines(),
         query.board().id().as_str(),
         query.piece_set().id().as_str(),
@@ -37,6 +38,7 @@ pub(crate) fn encode_opening_continuation(
         format_hold_piece(hold_piece),
         format_piece_sequence(pieces),
         query.queue_observation_policy().keyword(),
+        count_policy_name(query.count_policy()),
     )
 }
 
@@ -44,9 +46,9 @@ pub(crate) fn parse_opening_v2(
     token: &str,
 ) -> Result<OpeningPcSearchQuery, PcContinuationTokenError> {
     let parts = token.split(':').collect::<Vec<_>>();
-    if !(parts.len() == 10 || parts.len() == 11) || parts[0] != "pc2" {
+    if !(10..=12).contains(&parts.len()) || parts[0] != "pc2" {
         return Err(PcContinuationTokenError::new(
-            "continuation token must use pc2:lN:bdPROFILE:psPROFILE:bgPROFILE:rRULE:oOBJECTIVE:e0|1:hX:qPIECES:qkoracle|visible-7 format",
+            "continuation token must use pc2:lN:bdPROFILE:psPROFILE:bgPROFILE:rRULE:oOBJECTIVE:e0|1:hX:qPIECES[:qkoracle|visible-7][:cfirst-solution|count-all|count-unique] format",
         ));
     }
     require_value(
@@ -76,17 +78,44 @@ pub(crate) fn parse_opening_v2(
         ));
     }
     let queue = parse_queue(parts[9])?;
-    let queue_observation_policy = if parts.len() == 11 {
-        QueueObservationPolicy::from_keyword(prefixed_value(parts[10], "qk")?).ok_or_else(|| {
-            PcContinuationTokenError::new("unsupported opening queue observation policy")
-        })?
-    } else {
-        QueueObservationPolicy::default()
-    };
-    Ok(OpeningPcSearchQuery::new(target)
+    let mut queue_observation_policy = QueueObservationPolicy::default();
+    let mut has_queue_observation_policy = false;
+    let mut count_policy = None;
+    for part in &parts[10..] {
+        if part.starts_with("qk") {
+            if has_queue_observation_policy {
+                return Err(PcContinuationTokenError::new(
+                    "opening continuation token repeats queue observation policy",
+                ));
+            }
+            has_queue_observation_policy = true;
+            queue_observation_policy = QueueObservationPolicy::from_keyword(prefixed_value(
+                part, "qk",
+            )?)
+            .ok_or_else(|| {
+                PcContinuationTokenError::new("unsupported opening queue observation policy")
+            })?;
+        } else if part.starts_with('c') {
+            if count_policy.is_some() {
+                return Err(PcContinuationTokenError::new(
+                    "opening continuation token repeats count policy",
+                ));
+            }
+            count_policy = Some(parse_count_policy(prefixed_value(part, "c")?)?);
+        } else {
+            return Err(PcContinuationTokenError::new(format!(
+                "unsupported opening continuation field '{part}'"
+            )));
+        }
+    }
+    let mut query = OpeningPcSearchQuery::new(target)
         .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(queue)))
         .with_hold_policy(opening_hold_policy(hold_enabled, hold_piece))
         .with_rule(rule)
         .with_objective(objective)
-        .with_queue_observation_policy(queue_observation_policy))
+        .with_queue_observation_policy(queue_observation_policy);
+    if let Some(count_policy) = count_policy {
+        query = query.with_count_policy(count_policy);
+    }
+    Ok(query)
 }

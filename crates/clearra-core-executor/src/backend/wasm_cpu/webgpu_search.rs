@@ -1,8 +1,8 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, OnceLock},
-    task::{Context, Poll, Wake, Waker},
+    sync::Arc,
+    task::{Context, Poll, Waker},
 };
 
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
@@ -36,7 +36,13 @@ pub(crate) struct WasmWebGpuSearchSession {
     fallback_allowed: bool,
 }
 
+// The active GPU search phase is retained in place for the session lifetime.
+#[allow(clippy::large_enum_variant)]
 enum WebGpuSearchPhase {
+    Preparing {
+        selection: WebGpuAdapterSelection,
+        warmup_requested: bool,
+    },
     Prepared {
         batches: Vec<WebGpuGeometryExactCoverBatch>,
         selection: WebGpuAdapterSelection,
@@ -119,14 +125,10 @@ impl WebGpuExactCoverCatalog for WasmGpuCatalog {
 impl WasmWebGpuSearchSession {
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
         let exact = WasmExactSearchSession::new_external_geometry(problem)?;
-        let batch_plan_span = SearchStageSpan::begin(ExecutorSearchStage::PackingGpuBatchPlan);
-        let batches = compile_batches(&exact, problem.backend_policy())?;
-        batch_plan_span.finish(batches.len() as u64);
         Ok(Self {
             problem: Arc::new(problem.clone()),
             exact: Some(exact),
-            phase: WebGpuSearchPhase::Prepared {
-                batches,
+            phase: WebGpuSearchPhase::Preparing {
                 selection: adapter_selection(problem.backend_policy().gpu_device()),
                 warmup_requested: problem.backend_policy().gpu_warmup(),
             },
@@ -145,6 +147,34 @@ impl WasmWebGpuSearchSession {
         loop {
             let phase = std::mem::replace(&mut self.phase, WebGpuSearchPhase::Finished);
             match phase {
+                WebGpuSearchPhase::Preparing {
+                    selection,
+                    warmup_requested,
+                } => {
+                    let exact = self
+                        .exact
+                        .as_mut()
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "webgpu_exact_session_missing",
+                        ))?;
+                    if !exact.advance_external_geometry_preparation(control)? {
+                        self.phase = WebGpuSearchPhase::Preparing {
+                            selection,
+                            warmup_requested,
+                        };
+                        return Ok(ExactSearchAdvance::Pending);
+                    }
+                    let batch_plan_span =
+                        SearchStageSpan::begin(ExecutorSearchStage::PackingGpuBatchPlan);
+                    let batches = compile_batches(exact, self.problem.backend_policy())?;
+                    batch_plan_span.finish(batches.len() as u64);
+                    self.phase = WebGpuSearchPhase::Prepared {
+                        batches,
+                        selection,
+                        warmup_requested,
+                    };
+                    return Ok(ExactSearchAdvance::Pending);
+                }
                 WebGpuSearchPhase::Prepared {
                     batches,
                     selection,
@@ -647,13 +677,7 @@ fn unavailable_reason(reason: &str) -> SearchBackendFallbackReason {
 }
 
 pub(super) fn poll_once(future: &mut GpuRunFuture) -> Poll<Result<GpuRunResult, GpuRunFailure>> {
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-    static WAKER: OnceLock<Waker> = OnceLock::new();
-    let waker = WAKER.get_or_init(|| Waker::from(Arc::new(NoopWake)));
-    let mut context = Context::from_waker(waker);
+    let mut context = Context::from_waker(Waker::noop());
     future.as_mut().poll(&mut context)
 }
 

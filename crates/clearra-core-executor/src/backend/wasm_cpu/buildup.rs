@@ -816,6 +816,8 @@ pub(super) fn checked_candidate_verification_peak_upper_bound(
         catalog.height(),
         problem.kick_profile().profile_id(),
     )?;
+    let standard_bag_cursor_bytes =
+        StandardBagCoverage::checked_cursor_transition_retained_bytes(universe)?;
 
     subset_count
         .checked_mul(projection_and_feasibility_per_subset)?
@@ -826,6 +828,7 @@ pub(super) fn checked_candidate_verification_peak_upper_bound(
         .checked_add(language_cache_bytes)?
         .checked_add(trace_bytes)?
         .checked_add(reachability_bytes)?
+        .checked_add(standard_bag_cursor_bytes)?
         .checked_add(core::mem::size_of::<CandidateBuildResult>() as u128)?
         .checked_mul(2)
 }
@@ -858,10 +861,14 @@ impl CandidateProjection {
                 row_contributors[row] |= 1_u16 << operation_index;
             }
         }
-        for row in 0..catalog.height() as usize {
+        for (row, &contributors) in row_contributors
+            .iter()
+            .enumerate()
+            .take(catalog.height() as usize)
+        {
             let initial_row =
                 (catalog.initial_board() >> (row * catalog.width() as usize)) & row_bits;
-            if initial_row == row_bits && row_contributors[row] == 0 {
+            if initial_row == row_bits && contributors == 0 {
                 return Err(WasmExactSearchError::InvalidProblem(
                     "wasm_initial_full_row_requires_preclear_normalization",
                 ));
@@ -1092,6 +1099,8 @@ struct CandidateWitness {
     retained_bytes: usize,
 }
 
+// The verifier keeps independent reusable workspaces explicit on its hot path.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn verify_candidate(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
@@ -1635,6 +1644,8 @@ fn infeasible_candidate_result(feasibility_states: usize) -> CandidateBuildResul
     }
 }
 
+// Witness verification reuses caller-owned scratch and policy inputs without allocation.
+#[allow(clippy::too_many_arguments)]
 fn verify_first_pattern_witness(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
@@ -1734,6 +1745,8 @@ fn verify_first_pattern_witness(
     })
 }
 
+// Witness search reuses caller-owned scratch and policy inputs without allocation.
+#[allow(clippy::too_many_arguments)]
 fn find_first_pattern_witness(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
@@ -2698,6 +2711,8 @@ impl BuildOrderGraph {
         self.nodes[self.root as usize].live
     }
 
+    // Graph construction keeps admission, projection, and reachability policy explicit.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         _problem: &SearchProblem,
         catalog: &GeometryCatalog,
@@ -3057,6 +3072,9 @@ fn annotate_and_prune_finesse_graph_with_query_count(
     let target_grouping_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseTargetGrouping);
     let mut subsets = vec![usize::MAX; graph.nodes.len()];
     subsets[graph.root as usize] = 0;
+    // Child entries are populated while earlier indices are traversed, so an iterator
+    // borrow would incorrectly cover the same mutable work array for the whole loop.
+    #[allow(clippy::needless_range_loop)]
     for node_index in 0..graph.nodes.len() {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
@@ -3093,11 +3111,10 @@ fn annotate_and_prune_finesse_graph_with_query_count(
     let b2b_policy = finesse_b2b_policy(problem);
     let grouped_target_count = graph.edges.len();
     let mut groups = FrozenFinesseTargetGroups::new();
-    for node_index in 0..graph.nodes.len() {
+    for (node_index, &subset) in subsets.iter().enumerate().take(graph.nodes.len()) {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
         }
-        let subset = subsets[node_index];
         if subset == usize::MAX {
             continue;
         }
@@ -3709,6 +3726,8 @@ fn geometric_build_edge(
     })
 }
 
+// Path reconstruction consumes the same explicit supply-policy dimensions as search.
+#[allow(clippy::too_many_arguments)]
 fn first_pattern_path(
     graph: &BuildOrderGraph,
     sequence: &[PieceKind],
@@ -3719,6 +3738,7 @@ fn first_pattern_path(
     initial: CoverageState,
     finesse_guard: Option<FinessePathGuard<'_>>,
 ) -> Vec<CorePathStep> {
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         graph: &BuildOrderGraph,
         sequence: &[PieceKind],
@@ -3848,6 +3868,8 @@ pub(super) fn representative_pattern_path(
     )
 }
 
+// Supply-state transition inputs remain scalar on this allocation-sensitive path.
+#[allow(clippy::too_many_arguments)]
 fn hold_successors(
     sequence: &[PieceKind],
     hold_enabled: bool,

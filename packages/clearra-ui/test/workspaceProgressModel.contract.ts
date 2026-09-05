@@ -81,18 +81,75 @@ assert.equal(producing.stages.find((stage) => stage.id === 'verify')?.status, 'p
 const verifying = buildWorkspaceProgressModel(
   input('pc', telemetry({ candidates_verified: 1, build_nodes: 12 }))
 );
-assert.equal(verifying.stages.find((stage) => stage.id === 'geometry')?.status, 'complete');
+assert.equal(verifying.stages.find((stage) => stage.id === 'geometry')?.status, 'running');
 assert.equal(verifying.stages.find((stage) => stage.id === 'verify')?.status, 'running');
 assert.equal(
   verifying.stages.filter((stage) => stage.status === 'running').length,
-  1
+  2
 );
+assert.equal(verifying.completedStages, 1);
+
+const producerComplete = buildWorkspaceProgressModel(
+  input(
+    'pc',
+    telemetry({
+      producer_complete: true,
+      candidates_emitted: 80,
+      geometry_family_count: '80',
+      candidates_verified: 1,
+      build_nodes: 12
+    })
+  )
+);
+assert.equal(producerComplete.stages.find((stage) => stage.id === 'geometry')?.status, 'complete');
+assert.equal(producerComplete.stages.find((stage) => stage.id === 'verify')?.status, 'running');
+
+const producerDraining = buildWorkspaceProgressModel(
+  input(
+    'pc',
+    telemetry({
+      phase: 'draining',
+      producer_complete: false,
+      candidates_emitted: 80,
+      candidates_verified: 1
+    })
+  )
+);
+assert.equal(producerDraining.stages.find((stage) => stage.id === 'geometry')?.status, 'complete');
+assert.equal(producerDraining.stages.find((stage) => stage.id === 'verify')?.status, 'running');
 
 const tiling = buildWorkspaceProgressModel(
   input('tiling', telemetry({ candidates_emitted: 20 }))
 );
 assert.equal(tiling.stages.some((stage) => stage.id === 'verify'), false);
 assert.equal(tiling.stages.find((stage) => stage.id === 'geometry')?.status, 'running');
+
+const tilingComplete = buildWorkspaceProgressModel(
+  input(
+    'tiling',
+    telemetry({
+      producer_complete: true,
+      candidates_emitted: 20,
+      geometry_family_count: '20'
+    })
+  )
+);
+assert.equal(tilingComplete.stages.find((stage) => stage.id === 'geometry')?.status, 'complete');
+assert.equal(tilingComplete.stages.find((stage) => stage.id === 'finalize')?.status, 'pending');
+
+const tilingFinalizing = buildWorkspaceProgressModel(
+  input(
+    'tiling',
+    telemetry({
+      phase: 'postprocessing',
+      producer_complete: false,
+      candidates_emitted: 20,
+      geometry_family_count: '20'
+    })
+  )
+);
+assert.equal(tilingFinalizing.stages.find((stage) => stage.id === 'geometry')?.status, 'complete');
+assert.equal(tilingFinalizing.stages.find((stage) => stage.id === 'finalize')?.status, 'running');
 
 const setupGeometry = buildWorkspaceProgressModel(
   input(
@@ -144,6 +201,22 @@ const setupDispatch = buildWorkspaceProgressModel(
 );
 assert.equal(setupDispatch.stages.find((stage) => stage.id === 'graph')?.status, 'complete');
 assert.equal(setupDispatch.stages.find((stage) => stage.id === 'tasks')?.status, 'running');
+
+const setupFinalizing = buildWorkspaceProgressModel(
+  input(
+    'setup',
+    telemetry({
+      phase: 'merging',
+      producer_complete: false,
+      pass_index: 3,
+      pass_count: 4
+    })
+  )
+);
+assert.equal(setupFinalizing.stages.find((stage) => stage.id === 'geometry')?.status, 'complete');
+assert.equal(setupFinalizing.stages.find((stage) => stage.id === 'graph')?.status, 'complete');
+assert.equal(setupFinalizing.stages.find((stage) => stage.id === 'tasks')?.status, 'complete');
+assert.equal(setupFinalizing.stages.find((stage) => stage.id === 'finalize')?.status, 'running');
 
 const minimumCoverPostprocess = buildWorkspaceProgressModel(
   input(
@@ -228,3 +301,29 @@ const serialScorePostprocess = buildWorkspaceProgressModel({
 });
 assert.equal(serialScorePostprocess.stages.find((stage) => stage.id === 'verify')?.status, 'complete');
 assert.equal(serialScorePostprocess.stages.find((stage) => stage.id === 'finalize')?.status, 'running');
+
+const serialMinimumCoverFinalize = buildWorkspaceProgressModel({
+  profile: 'pc',
+  mode: 'pc-minimum-cover',
+  status: 'running',
+  progressLabel: 'pc-minimals-finalize',
+  progressDone: 0,
+  progressTotal: 1,
+  telemetry: null
+});
+assert.equal(
+  serialMinimumCoverFinalize.stages.find((stage) => stage.id === 'geometry')?.status,
+  'complete'
+);
+assert.equal(
+  serialMinimumCoverFinalize.stages.find((stage) => stage.id === 'verify')?.status,
+  'complete'
+);
+assert.equal(
+  serialMinimumCoverFinalize.stages.find((stage) => stage.id === 'finalize')?.status,
+  'running'
+);
+assert.equal(
+  serialMinimumCoverFinalize.stages.find((stage) => stage.id === 'finalize')?.labelKey,
+  'progressStageMinimumCover'
+);

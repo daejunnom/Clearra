@@ -12,7 +12,7 @@ use crate::{
     pc_score_summary_result::ValidatedPcScoreExecutionEvidence,
     pc_tiling_family_result::ValidatedPcTilingExecutionEvidence,
     portfolio_alternative_store::ProductPageSourceOwner,
-    product_capability_contract::ProductCapabilityContractError,
+    product_capability_contract::{ProductCapabilityContract, ProductCapabilityContractError},
     product_capability_result::ProductCapabilityResult,
     render::AppRenderModel,
     resource_contract::{
@@ -24,8 +24,8 @@ use clearra_core_executor::CoreExecutionResult;
 use clearra_host_contract::{
     AppCommandKind, AppResponse as HostAppResponse, AppResult, AppStatus as HostAppStatus,
     BackendReport, CapabilityReport, ContinuationReport, Diagnostic, ProductResultPayload,
-    RenderCapabilityReport as HostRenderCapabilityReport, ResourceReport,
-    SolutionSetArtifactPayload, HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
+    ProductResultPayloadContent, RenderCapabilityReport as HostRenderCapabilityReport,
+    ResourceReport, SolutionSetArtifactPayload, HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
 };
 #[cfg(feature = "bitmap-render")]
 use clearra_output::render::RenderExactOutputGate;
@@ -422,7 +422,18 @@ impl AppResponse {
     pub(crate) fn without_product_capability_transients(mut self) -> Self {
         let strip_replay_transients = self.pc_score_execution_evidence.is_some()
             || self.pc_score_portfolio_execution_evidence.is_some()
-            || self.pc_save_execution_evidence.is_some();
+            || self.pc_save_execution_evidence.is_some()
+            || self
+                .product_capability_result
+                .as_ref()
+                .is_some_and(|result| result.contract() == ProductCapabilityContract::PcPath)
+            || self.public_result_payload.as_ref().is_some_and(|payload| {
+                matches!(
+                    payload.content(),
+                    ProductResultPayloadContent::PcPathFamily(_)
+                        | ProductResultPayloadContent::BuildPathFamily(_)
+                )
+            });
         self.pc_chance_execution_evidence = None;
         self.pc_failed_queue_execution_evidence = None;
         self.pc_save_execution_evidence = None;

@@ -340,9 +340,11 @@ fn configure_candidate_geometry(
 
     let candidate_piece_count = u8::try_from(operation_count)
         .map_err(|_| FfiProblemError::CandidateOperationCountTooLarge { operation_count })?;
-    let mut candidate_multiset = CPieceMultisetWindow::default();
-    candidate_multiset.total_count = candidate_piece_count;
-    candidate_multiset.exact_count = candidate_piece_count;
+    let mut candidate_multiset = CPieceMultisetWindow {
+        total_count: candidate_piece_count,
+        exact_count: candidate_piece_count,
+        ..CPieceMultisetWindow::default()
+    };
     for (index, operation) in operations.take(operation_count).enumerate() {
         if !(C_PIECE_I..=C_PIECE_L).contains(&operation.piece) {
             return Err(FfiProblemError::InvalidCandidatePiece {

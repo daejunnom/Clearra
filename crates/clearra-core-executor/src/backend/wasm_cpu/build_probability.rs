@@ -71,6 +71,8 @@ use super::{
     WasmExactSearchError, MAX_BOARD64_PIECES,
 };
 
+// Completed results move directly out of the session without a second heap allocation.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BuildProbabilityAdvance {
     Pending,
     Completed(CoreExecutionResult),
@@ -174,6 +176,9 @@ pub(super) fn checked_build_probability_problem_nested_retained_bytes(
         .checked_sub(core::mem::size_of::<SearchProblem>() as u128)
 }
 
+// Sessions are long-lived state machines; keeping either representation inline avoids
+// an allocation at every compact/extended dispatch boundary.
+#[allow(clippy::large_enum_variant)]
 enum BuildProbabilitySessionKind {
     Compact(CompactBuildProbabilitySession),
     Extended(super::extended_build_probability::ExtendedBuildProbabilitySession),
@@ -271,7 +276,7 @@ impl WasmBuildProbabilitySession {
         let mirrored = mirror_included.then(|| original.mirrored_horizontally());
         let mirror_distinct = mirrored.is_some_and(|candidate| candidate != original);
         let execution_admission = admit_budget_bound_search_execution(problem, 1)
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
         let pass_count = usize::from(mirror_distinct) + 1;
         let allocation_plan = if score_requested {
             ExecutionAdmissionPlan::finesse_score(problem)
@@ -283,7 +288,7 @@ impl WasmBuildProbabilitySession {
                 allocation_plan,
                 caller_memory.external_retained_owner_bytes(),
             )
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
         let memory_bound = execution_admission.memory_bound();
         let mut pending = VecDeque::with_capacity(usize::from(mirror_distinct) + 1);
         if !score_requested {
@@ -608,7 +613,7 @@ impl WasmBuildProbabilitySession {
             ))?;
         self._execution_admission
             .ensure_memory_bound(retained, future)
-            .map_err(WasmExactSearchError::ResourceAdmission)
+            .map_err(WasmExactSearchError::resource_admission)
     }
 
     fn ensure_completion_memory_bound(
@@ -684,7 +689,7 @@ impl WasmBuildProbabilitySession {
             ))?;
         self._execution_admission
             .ensure_memory_bound(retained, checked_future_bytes)
-            .map_err(WasmExactSearchError::ResourceAdmission)
+            .map_err(WasmExactSearchError::resource_admission)
     }
 
     fn checked_retained_bytes(&self) -> Option<u128> {
@@ -2086,14 +2091,21 @@ pub(super) struct CompactBuildProbabilitySharedCatalog {
     supply_projection_complete: bool,
 }
 
+// Browser workers call the distributed entrypoints; native builds retain the same
+// session surface so both targets share one implementation.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 impl CompactBuildProbabilitySession {
+    // Browser product execution always supplies an explicit finite-memory
+    // boundary through the constructors below; keep this unbounded adapter for
+    // native embeddings and parity tests only.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn new(
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
         let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
         Self::new_with_external_geometry(
             problem,
             field,
@@ -2124,6 +2136,7 @@ impl CompactBuildProbabilitySession {
         )
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn new_with_finesse(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -2131,7 +2144,7 @@ impl CompactBuildProbabilitySession {
         finesse_requested: bool,
     ) -> Result<Self, WasmExactSearchError> {
         let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
         Self::new_with_finesse_and_memory_bound(
             problem,
             field,
@@ -2160,16 +2173,18 @@ impl CompactBuildProbabilitySession {
         )
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn new_external_geometry(
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
         let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
         Self::new_external_geometry_with_memory_bound(problem, field, aggregation, memory_bound)
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn new_external_geometry_with_memory_bound(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -2204,6 +2219,7 @@ impl CompactBuildProbabilitySession {
         )
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn new_with_shared_supply_catalog(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -2212,7 +2228,7 @@ impl CompactBuildProbabilitySession {
         shared_supply_catalog: &CompactBuildProbabilitySharedCatalog,
     ) -> Result<Self, WasmExactSearchError> {
         let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
         Self::new_with_shared_supply_catalog_and_memory_bound(
             problem,
             field,
@@ -2223,6 +2239,7 @@ impl CompactBuildProbabilitySession {
         )
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn new_with_shared_supply_catalog_and_memory_bound(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -2279,6 +2296,8 @@ impl CompactBuildProbabilitySession {
         }
     }
 
+    // Constructor parameters make ownership and memory-accounting inputs explicit.
+    #[allow(clippy::too_many_arguments)]
     fn new_with_external_geometry(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -2686,6 +2705,9 @@ impl CompactBuildProbabilitySession {
             })
     }
 
+    // The browser coordinator calls the explicit external-memory-guard form so
+    // retained worker payloads are included in every admission decision.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn advance_distributed_geometry(
         &mut self,
         pass_index: u8,
@@ -2710,7 +2732,7 @@ impl CompactBuildProbabilitySession {
                     ))?;
                 memory_bound
                     .ensure(observed, future)
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             },
         )
     }
@@ -2771,6 +2793,7 @@ impl CompactBuildProbabilitySession {
         }
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     fn try_copy_distributed_candidate_row_ids(
         &self,
         source: &[u32],
@@ -2793,7 +2816,7 @@ impl CompactBuildProbabilitySession {
                     ))?;
                 memory_bound
                     .ensure(observed, future)
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             },
         )
     }
@@ -2911,6 +2934,9 @@ impl CompactBuildProbabilitySession {
         Ok(result)
     }
 
+    // Browser result absorption likewise uses the coordinator-owned memory
+    // guard; this convenience adapter remains for native/parity callers.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn absorb_distributed_result(
         &mut self,
         result: &CoreExecutionResult,
@@ -2924,7 +2950,7 @@ impl CompactBuildProbabilitySession {
                     .checked_retained_bytes()
                     .and_then(|bytes| bytes.checked_add(local_retained_bytes))
                     .ok_or_else(|| {
-                        WasmExactSearchError::ResourceAdmission(
+                        WasmExactSearchError::resource_admission(
                             memory_bound.ensure(u128::MAX, 1).expect_err(
                                 "checked compact absorb storage overflow is unavailable",
                             ),
@@ -2933,7 +2959,7 @@ impl CompactBuildProbabilitySession {
                 let future = coexisting_retained_bytes
                     .checked_add(checked_future_bytes)
                     .ok_or_else(|| {
-                        WasmExactSearchError::ResourceAdmission(
+                        WasmExactSearchError::resource_admission(
                             memory_bound.ensure(u128::MAX, 1).expect_err(
                                 "checked compact absorb future overflow is unavailable",
                             ),
@@ -2941,7 +2967,7 @@ impl CompactBuildProbabilitySession {
                     })?;
                 memory_bound
                     .ensure(observed, future)
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             },
         )
     }
@@ -3396,7 +3422,11 @@ impl CompactBuildProbabilitySession {
 
         let mut row_ids = [0_u32; MAX_BOARD64_PIECES];
         let mut covered = 0_u64;
-        for index in 0..identity.placement_count() {
+        for (index, row_slot) in row_ids
+            .iter_mut()
+            .enumerate()
+            .take(identity.placement_count())
+        {
             let placement =
                 identity
                     .placement(index)
@@ -3410,7 +3440,7 @@ impl CompactBuildProbabilitySession {
                     "wasm_build_probability_distributed_identity_not_in_catalog",
                 ))?;
             covered |= placement.cells_mask();
-            row_ids[index] = row_id;
+            *row_slot = row_id;
         }
         if covered != self.target_cells {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -4433,7 +4463,7 @@ impl CompactBuildProbabilitySession {
 
     fn ensure_memory_bound(&self, checked_future_bytes: u128) -> Result<(), WasmExactSearchError> {
         let observed = self.checked_retained_bytes().ok_or_else(|| {
-            WasmExactSearchError::ResourceAdmission(
+            WasmExactSearchError::resource_admission(
                 self.memory_bound
                     .ensure(u128::MAX, 1)
                     .expect_err("checked retained-byte overflow is unavailable"),
@@ -4443,7 +4473,7 @@ impl CompactBuildProbabilitySession {
             .coexisting_retained_bytes
             .checked_add(checked_future_bytes)
             .ok_or_else(|| {
-                WasmExactSearchError::ResourceAdmission(
+                WasmExactSearchError::resource_admission(
                     self.memory_bound
                         .ensure(u128::MAX, 1)
                         .expect_err("checked coexisting retained-byte overflow is unavailable"),
@@ -4451,7 +4481,7 @@ impl CompactBuildProbabilitySession {
             })?;
         self.memory_bound
             .ensure(observed, future)
-            .map_err(WasmExactSearchError::ResourceAdmission)
+            .map_err(WasmExactSearchError::resource_admission)
     }
 }
 
@@ -5528,6 +5558,8 @@ pub(super) fn costed_finesse_language(
         .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_costed_language_invalid"))
 }
 
+// This hot path receives precomputed policy surfaces separately to avoid cloning an aggregate.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_finesse_policy(
     policy: &'static str,
     languages: &[(String, CostedGeometryLanguage)],
@@ -7258,7 +7290,7 @@ mod finesse_integration_tests {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "test_finesse_projection_overflow",
                     ))?;
-                if peak <= required - 1 {
+                if peak < required {
                     Ok(())
                 } else {
                     Err(WasmExactSearchError::InvalidProblem(

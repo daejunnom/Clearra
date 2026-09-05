@@ -515,6 +515,9 @@ impl GuiProblemForm {
         ))
     }
 
+    // Each argument is a distinct user-visible scenario input retained by the
+    // stable desktop form constructor and validated independently downstream.
+    #[allow(clippy::too_many_arguments)]
     pub fn scenario_pc_with_execution_input(
         visible_height: u8,
         initial_board_mask: u64,

@@ -153,12 +153,14 @@ fn piece_multiset_window(
     problem: &SearchProblem,
     piece_multiset: PieceMultisetKey,
 ) -> CPieceMultisetWindow {
-    let mut window = CPieceMultisetWindow::default();
-    window.total_count = piece_multiset.total_count();
-    window.exact_count = problem
-        .exact_pieces()
-        .and_then(|count| u8::try_from(count).ok())
-        .unwrap_or(0);
+    let mut window = CPieceMultisetWindow {
+        total_count: piece_multiset.total_count(),
+        exact_count: problem
+            .exact_pieces()
+            .and_then(|count| u8::try_from(count).ok())
+            .unwrap_or(0),
+        ..CPieceMultisetWindow::default()
+    };
     for piece in clearra_core_domain::piece::piece_kind::PieceKind::STANDARD_TETROMINOES {
         window.counts[usize::from(piece_code(piece))] = piece_multiset.count(piece);
     }

@@ -176,6 +176,7 @@ board/Fumen/solution identity를 저장한다.
 
 - Jstris product: <https://jstris.jezevec10.com/?mode=1&play=1>
 - TETR.IO official patch notes: <https://tetr.io/about/patchnotes/>
+- TETR.IO current client rule source: <https://tetr.io/js/tetrio.js>
 - TETR.IO rules summary: <https://tetris.wiki/Tetr.io>
 - TETR.IO mechanics: <https://tetrio.wiki.gg/wiki/Mechanics>
 - Tetra League: <https://tetrio.wiki.gg/wiki/TETRA_LEAGUE>
@@ -186,6 +187,13 @@ board/Fumen/solution identity를 저장한다.
 calculator는 fixture와 해석 보조 자료로 사용한다. kick table,
 spin-recognition profile, score table, attack table은 서로 다른 객체다.
 특정 게임의 score/attack 규칙을 PC geometry prune으로 사용하지 않는다.
+
+SRS-X의 표준 tetromino 숫자 표는 현재 응답하는 공식 `tetrio.js`를 권위로
+삼고, [`tetrio_srs_x_standard_tetromino_kicks.json`](../tests/fixtures/rules/tetrio_srs_x_standard_tetromino_kicks.json)에
+공개 데이터 사실과 좌표 변환 계약을 기록한다. 사용자 제공
+`srs_plus_srs_x_kick_tables.json`은 이 전사를 대조하는 참고 자료일 뿐 제품
+권위나 런타임 입력이 아니다. 소스의 `oo_kicks`는 표준 O가 아니라 별도
+`oo` piece용이며, 표준 `o`의 `disallow_kick` 경계를 보존한다.
 
 ## Fumen과 CTK3 상호운용성
 

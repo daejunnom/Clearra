@@ -1,3 +1,5 @@
+// Preserve the published `diagnostic::diagnostic::Diagnostic` path used by CLI and GUI hosts.
+#[allow(clippy::module_inception)]
 pub mod diagnostic;
 pub mod diagnostic_code;
 mod diagnostic_code_string;

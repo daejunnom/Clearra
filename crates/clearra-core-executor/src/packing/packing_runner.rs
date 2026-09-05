@@ -92,6 +92,8 @@ impl PartialEq for PackingExecutionAdmission {
 impl Eq for PackingExecutionAdmission {}
 
 impl PackingRunResult {
+    // This aggregate constructor makes every retained execution artifact explicit.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         plan: PackingExecutionPlan,
         backend_report: SearchBackendReport,
@@ -620,6 +622,8 @@ impl PackingRunner {
         ))
     }
 
+    // Packing execution borrows independent catalogs, sinks, and controls without cloning.
+    #[allow(clippy::too_many_arguments)]
     fn run_multiset_groups(
         problem: &SearchProblem,
         groups: &[clearra_supply::PackingMultisetGroup],
@@ -720,6 +724,8 @@ impl PackingRunner {
         merged.ok_or(PackingRunnerError::NoReachablePieceMultiset)
     }
 
+    // Per-group execution keeps shared catalogs and reporting sinks caller-owned.
+    #[allow(clippy::too_many_arguments)]
     fn run_multiset_group(
         problem: &SearchProblem,
         piece_multiset: PieceMultisetKey,
@@ -968,10 +974,7 @@ fn packing_family_resource_error(
 }
 
 fn packing_admission_error(resource_report: ResourceReport) -> PackingRunnerError {
-    PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
-        status: 0,
-        resource_report,
-    })
+    PackingRunnerError::Native(NativeCoreError::packing_incomplete(0, resource_report))
 }
 
 fn execute_packing_for_problem(

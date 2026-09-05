@@ -25,6 +25,18 @@ const MAX_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 const HMAC_BLOCK_BYTES: usize = 64;
 
+type SnapshotPageSemanticFields<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a [String],
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    bool,
+);
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExplicitPortfolioMember {
     candidate_id_decimal: String,
@@ -110,6 +122,9 @@ impl ExplicitPortfolioOutput {
     }
 
     #[cfg(test)]
+    // The test fixture mirrors every serialized output field so contract tests
+    // can construct invalid combinations deliberately.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn for_test(
         set_identity_sha256: &str,
         candidate_map_sha256: &str,
@@ -633,19 +648,7 @@ impl SnapshotPage {
         }
     }
 
-    fn semantic_fields(
-        &self,
-    ) -> (
-        &str,
-        &str,
-        &str,
-        &str,
-        &[String],
-        &str,
-        &str,
-        Option<&str>,
-        bool,
-    ) {
+    fn semantic_fields(&self) -> SnapshotPageSemanticFields<'_> {
         (
             &self.page_contract,
             &self.set_identity_sha256,
@@ -1071,7 +1074,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return None;
     }
     value

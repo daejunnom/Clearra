@@ -1,9 +1,11 @@
 // SRP rationale: this test module has one behavior-level change reason: verifying product capability validation and query-bound authority invariants.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clearra_core_domain::{
-    pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
+    execution_cancellation::{ExecutionProgress, ProgressSink},
+    pc::pc_target::PcTarget,
+    piece::piece_kind::PieceKind,
     resource::ResourceReport as CoreResourceReport,
 };
 use clearra_core_executor::PercentService;
@@ -18,9 +20,10 @@ use clearra_objectives::policy::{
 };
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
-    PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
+    PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy, PieceWindow,
+    RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
 };
-use clearra_problem::{PcChanceEvidencePolicy, SearchProblem};
+use clearra_problem::{PcChanceEvidencePolicy, ProblemCompiler, SearchProblem};
 use clearra_replay::ExactScoringExecutionBatch;
 use clearra_rules::profile::{
     builtin_rules::{srs, srs_plus},
@@ -327,6 +330,31 @@ fn multi_candidate_minimals_request() -> AppRequest {
         .expect("valid multi-candidate pc minimals product capability")
 }
 
+fn multi_candidate_minimals_probability_request() -> AppRequest {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(2, 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::O,
+        ])),
+        PieceWindow::new(5),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(5))
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+    .with_objective(ObjectivePolicy::minimum_cover());
+    let command = ScenarioAppCommand::new(query).with_result_projection(
+        PcResultProjection::MinimumCoverV2(PcMinimalsIngressOrigin::CanonicalPcMinimals),
+    );
+    AppRequest::new(AppCommand::Scenario(command))
+        .with_product_capability_contract(ProductCapabilityContract::PcMinimals)
+        .expect("valid probability-bearing pc minimals product capability")
+}
+
 fn path_request() -> AppRequest {
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(1, 0x3f0),
@@ -342,6 +370,24 @@ fn path_request() -> AppRequest {
     AppRequest::new(AppCommand::Scenario(command))
         .with_product_capability_contract(ProductCapabilityContract::PcPath)
         .expect("valid pc path product capability")
+}
+
+fn replay_collision_path_request() -> AppRequest {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(2, 0xfc3f0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; 2])),
+        PieceWindow::new(2),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(2))
+    .with_count_policy(PcCountPolicy::CountAll)
+    .with_objective(ObjectivePolicy::all());
+    let command = ScenarioAppCommand::new(query).with_result_projection(
+        PcResultProjection::PathFamilyV2(PcPathIngressOrigin::CanonicalPcPath),
+    );
+    AppRequest::new(AppCommand::Scenario(command))
+        .with_product_capability_contract(ProductCapabilityContract::PcPath)
+        .expect("valid replay-collision pc path product capability")
 }
 
 #[test]
@@ -416,6 +462,46 @@ fn direct_wasm_pc_path_returns_every_query_bound_replay_with_supply_and_line_cle
 }
 
 #[test]
+fn pc_path_keeps_distinct_operation_orders_after_their_dag_states_merge() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let response = context.run(replay_collision_path_request());
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    let public_core = response
+        .render_model()
+        .and_then(|model| model.core_result())
+        .expect("pc path render model");
+    assert!(public_core.postprocess_executions().is_empty());
+    assert!(public_core.exact_scoring_execution_batches().is_empty());
+    let report = response
+        .product_capability_result()
+        .and_then(|wrapper| wrapper.pc_path_family_v2())
+        .expect("complete replay-collision path family");
+    assert!(report.completeness().complete());
+
+    let repeated_candidate = report.witnesses().iter().find_map(|left| {
+        report.witnesses().iter().find(|right| {
+            left.producer_candidate_id() == right.producer_candidate_id()
+                && left.trace_identity() != right.trace_identity()
+        })
+    });
+    assert!(
+        repeated_candidate.is_some(),
+        "two operation orders that merge at one terminal state must both survive"
+    );
+    assert!(report.witnesses().iter().all(|witness| {
+        witness.consumed_piece_count() == 2
+            && witness.terminal_hold_piece().is_none()
+            && witness
+                .steps()
+                .last()
+                .is_some_and(|step| step.board_after_line_clear_mask() == 0)
+    }));
+}
+
+#[test]
 fn direct_wasm_pc_minimals_returns_one_query_bound_exact_minimum_cover_wrapper() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let expected_query =
@@ -475,7 +561,7 @@ fn direct_wasm_pc_minimals_returns_one_query_bound_exact_minimum_cover_wrapper()
 
     let (canonical_candidate_id, canonical_solution_key) = report
         .canonical_candidate()
-        .expect("pc.minimals core-owned canonical witness");
+        .expect("pc.minimals App-owned canonical witness");
     let payload = wrapper
         .public_result_payload()
         .expect("public pc.minimals payload");
@@ -504,6 +590,12 @@ fn direct_wasm_pc_minimals_returns_one_query_bound_exact_minimum_cover_wrapper()
         .and_then(crate::AppRenderModel::core_result)
         .expect("public pc minimals Core result");
     assert!(core.pc_chance_coverage_evidence().is_none());
+    assert_eq!(core.bool_field("minimum_cover_complete"), Some(false));
+    assert_eq!(core.bool_field("minimum_cover_proven_minimum"), Some(false));
+    assert_eq!(
+        core.field("minimum_cover_incomplete_reason"),
+        Some("deferred-to-coordinator")
+    );
     assert_eq!(
         core.normalized_solution_keys(),
         report.selected_solution_keys()
@@ -533,7 +625,29 @@ fn direct_wasm_pc_minimals_enumerates_every_iiooo_single_member_tie() {
     assert_eq!(report.selected_solution_count(), 1);
     assert_eq!(report.source_solution_count(), 4);
     assert_eq!(report.portfolio_alternatives().candidates().len(), 4);
+    assert!(report.selected_solution_probabilities().is_empty());
     assert!(result.public_page_source_owner().is_some());
+
+    let core = response
+        .render_model()
+        .and_then(crate::AppRenderModel::core_result)
+        .expect("deferred four-row pc.minimals Core result");
+    assert_eq!(core.bool_field("minimum_cover_complete"), Some(false));
+    assert_eq!(
+        core.field("minimum_cover_incomplete_reason"),
+        Some("deferred-to-coordinator")
+    );
+    assert_eq!(core.normalized_solution_keys().len(), 4);
+    assert_eq!(core.normalized_solution_coverages().len(), 4);
+    assert_eq!(
+        core.usize_field("minimum_cover_selected_solution_count"),
+        Some(4)
+    );
+    assert_ne!(
+        core.field("normalized_solution_set_hash"),
+        Some(report.normalized_solution_set_hash()),
+        "the deferred Core hash describes all four rows, while the typed report describes the canonical singleton"
+    );
 
     let mut store = report
         .portfolio_alternatives()
@@ -557,6 +671,92 @@ fn direct_wasm_pc_minimals_enumerates_every_iiooo_single_member_tie() {
         }
     }
     assert_eq!(portfolios, [vec![1], vec![2], vec![3], vec![4]]);
+}
+
+#[test]
+fn pc_minimals_derives_selected_metadata_and_probabilities_from_the_app_canonical_page() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let response = context.run(multi_candidate_minimals_probability_request());
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+
+    let report = response
+        .product_capability_result()
+        .and_then(|result| result.pc_minimum_cover_v2())
+        .expect("probability-bearing App-owned minimum-cover report");
+    let core = response
+        .render_model()
+        .and_then(crate::AppRenderModel::core_result)
+        .expect("deferred probability-bearing Core result");
+    assert_eq!(report.source_solution_count(), 4);
+    assert_eq!(report.selected_solution_count(), 1);
+    assert_eq!(core.normalized_solution_keys().len(), 4);
+    assert_eq!(core.solution_probabilities().len(), 4);
+    assert_eq!(report.selected_solution_probabilities().len(), 1);
+    assert_eq!(
+        report.selected_solution_probabilities()[0].solution_key(),
+        report.selected_solution_keys()[0]
+    );
+    let source_probability = core
+        .solution_probabilities()
+        .iter()
+        .find(|probability| {
+            probability.solution_key() == report.selected_solution_keys()[0].as_str()
+        })
+        .expect("canonical selection is projected from the complete source probabilities");
+    assert_eq!(
+        &report.selected_solution_probabilities()[0],
+        source_probability
+    );
+    assert_eq!(
+        report
+            .portfolio_alternatives()
+            .canonical_page()
+            .portfolio()
+            .candidate_ids(),
+        &[1]
+    );
+}
+
+#[test]
+fn pc_minimals_deferred_boundary_rejects_status_and_full_source_tampering() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let query = Arc::new(
+        match multi_candidate_minimals_probability_request().command() {
+            AppCommand::Scenario(command) => command.query().clone(),
+            _ => panic!("fixture is a scenario command"),
+        },
+    );
+    let problem = ProblemCompiler::compile_scenario_pc(query.as_ref())
+        .expect("deferred minimum-cover problem")
+        .with_pc_minimum_cover_v2_evidence();
+    let result = WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+        .expect("deferred minimum-cover producer");
+    let validate = |candidate: &CoreExecutionResult| {
+        crate::pc_minimum_cover_result::validate_pc_minimum_cover_v2_result(
+            crate::pc_minimum_cover_result::PcMinimumCoverQueryBinding::Scenario(&query),
+            PcMinimalsIngressOrigin::CanonicalPcMinimals,
+            candidate,
+        )
+    };
+    validate(&result).expect("complete deferred source validates once in App");
+
+    let wrong_status = result
+        .clone()
+        .with_replaced_fields(vec![field("minimum_cover_incomplete_reason", "none")]);
+    assert!(validate(&wrong_status).is_err());
+
+    let mut missing_keys = result.normalized_solution_keys().to_vec();
+    missing_keys.pop();
+    let incomplete_source = result.clone().with_normalized_solution_keys(missing_keys);
+    assert!(validate(&incomplete_source).is_err());
+
+    let mut wrong_probabilities = result.solution_probabilities().to_vec();
+    wrong_probabilities.pop();
+    let incomplete_probabilities = result.with_solution_probabilities(wrong_probabilities);
+    assert!(validate(&incomplete_probabilities).is_err());
 }
 
 #[test]
@@ -667,7 +867,7 @@ fn pc_minimals_rejects_unaccounted_caps_and_binds_both_distributed_and_cooperati
         panic!("typed pc minimals must bind its distributed product identity");
     };
     assert!(!distributed.is_pc_score());
-    assert_eq!(distributed.problem().exact_pieces(), Some(5));
+    assert_eq!(distributed.problem().exact_pieces(), base.exact_pieces());
     drop(distributed);
 
     let context = AppContext::new(
@@ -712,6 +912,78 @@ fn pc_minimals_rejects_unaccounted_caps_and_binds_both_distributed_and_cooperati
             .len(),
         report.selected_solution_count()
     );
+
+    let direct = context.run(minimals_request());
+    assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
+    let direct_report = direct
+        .product_capability_result()
+        .and_then(|result| result.pc_minimum_cover_v2())
+        .expect("blocking pc.minimals report");
+    assert_eq!(
+        report, direct_report,
+        "blocking and cooperative product coordinators must drive the same preparation authority"
+    );
+}
+
+#[derive(Default)]
+struct PcMinimalsProgressRecorder {
+    events: Mutex<Vec<ExecutionProgress>>,
+}
+
+impl ProgressSink for PcMinimalsProgressRecorder {
+    fn report(&self, progress: ExecutionProgress) {
+        self.events.lock().expect("progress lock").push(progress);
+    }
+}
+
+#[test]
+fn cooperative_pc_minimals_finalizer_preserves_zero_budget_and_honors_cancellation() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let mut cooperative = context.start_cooperative_execution(minimals_request());
+    let recorder = Arc::new(PcMinimalsProgressRecorder::default());
+    let cancellation = ExecutionCancellationToken::new();
+    let control = ExecutionControl::new(cancellation.clone()).with_progress_sink(recorder.clone());
+
+    let entered_finalizer = (0..10_000).any(|_| {
+        match cooperative.advance(100_000, &control) {
+            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+            advance => panic!("pc.minimals must reach its finalizer before terminal: {advance:?}"),
+        }
+        recorder
+            .events
+            .lock()
+            .expect("progress lock")
+            .last()
+            .is_some_and(|event| event.stage == "pc-minimals-finalize")
+    });
+    assert!(entered_finalizer, "pc.minimals finalizer was not entered");
+    let before_zero = *recorder
+        .events
+        .lock()
+        .expect("progress lock")
+        .last()
+        .expect("finalizer progress");
+    assert!(matches!(
+        cooperative.advance(0, &control),
+        CooperativeAppAdvance::Progress
+    ));
+    let after_zero = *recorder
+        .events
+        .lock()
+        .expect("progress lock")
+        .last()
+        .expect("zero-budget progress");
+    assert_eq!(after_zero.stage, "pc-minimals-finalize");
+    assert_eq!(after_zero.completed, before_zero.completed);
+
+    cancellation.handle().cancel();
+    assert!(matches!(
+        cooperative.advance(1, &control),
+        CooperativeAppAdvance::Cancelled
+    ));
 }
 
 fn tiling_command(origin: PcTilingIngressOrigin) -> PcAppCommand {
@@ -814,6 +1086,33 @@ fn multi_candidate_score_minimals_request() -> AppRequest {
     ))
     .with_product_capability_contract(ProductCapabilityContract::PcScoreMinimals)
     .expect("valid pc score-minimals product capability")
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn parallel_score_minimals_request(execution_policy: PcExecutionPolicy) -> AppRequest {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0xf03c_0f03_c0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::J,
+            PieceKind::L,
+            PieceKind::Z,
+        ])),
+        PieceWindow::new(6),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(6))
+    .with_count_policy(PcCountPolicy::CountAll)
+    .with_retained_trace_limit(1)
+    .with_execution_policy(execution_policy)
+    .with_objective(ObjectivePolicy::minimum_cover().with_score_summary());
+    AppRequest::new(AppCommand::Scenario(
+        ScenarioAppCommand::new(query).with_score_minimals_result(),
+    ))
+    .with_product_capability_contract(ProductCapabilityContract::PcScoreMinimals)
+    .expect("valid parallel pc score-minimals product capability")
 }
 
 fn opening_score_request(origin: PcScoreIngressOrigin) -> AppRequest {
@@ -2436,6 +2735,126 @@ fn direct_wasm_pc_score_minimals_finalizes_distinct_original_id_portfolio() {
         .any(|candidate| candidate.score_candidate_id() == member.candidate_id())));
 }
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[test]
+fn native_score_minimals_workers_preserve_the_typed_portfolio_and_report_tail_scope() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let base = pc_score_execution_policy().with_worker_hardware_limit(2);
+    let serial = context.run(parallel_score_minimals_request(
+        base.clone().with_workers(1),
+    ));
+    let fixed = context.run(parallel_score_minimals_request(
+        base.clone()
+            .with_workers(2)
+            .with_use_all_logical_processors(true),
+    ));
+    let auto = context.run(parallel_score_minimals_request(
+        base.with_worker_policy(WorkerPolicy::Auto)
+            .with_automatic_worker_limit(2)
+            .with_use_all_logical_processors(true),
+    ));
+    for response in [&serial, &fixed, &auto] {
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    }
+
+    fn portfolio(response: &AppResponse) -> &crate::PcScorePortfolioV2Result {
+        response
+            .product_capability_result()
+            .and_then(|result| result.pc_score_portfolio_v2())
+            .expect("typed score-minimals portfolio")
+    }
+    fn assert_same_semantic_portfolio(
+        left: &crate::PcScorePortfolioV2Result,
+        right: &crate::PcScorePortfolioV2Result,
+    ) {
+        assert_eq!(left.contract_id(), right.contract_id());
+        assert_eq!(left.origin(), right.origin());
+        assert_eq!(left.problem_preset(), right.problem_preset());
+        assert_eq!(left.problem_id(), right.problem_id());
+        assert_eq!(left.score_profile_id(), right.score_profile_id());
+        assert_eq!(
+            left.materialized_pattern_count(),
+            right.materialized_pattern_count()
+        );
+        assert_eq!(left.pattern_best_scores(), right.pattern_best_scores());
+        assert_eq!(left.pattern_winners(), right.pattern_winners());
+        assert_eq!(left.eligible_candidates(), right.eligible_candidates());
+        assert_eq!(
+            left.eligible_candidate_map_sha256(),
+            right.eligible_candidate_map_sha256()
+        );
+        assert_eq!(
+            left.score_eligibility_sha256(),
+            right.score_eligibility_sha256()
+        );
+        assert_eq!(
+            left.selected_score_candidate_ids(),
+            right.selected_score_candidate_ids()
+        );
+        assert_eq!(
+            left.selected_solution_keys(),
+            right.selected_solution_keys()
+        );
+        assert_eq!(
+            left.canonical_score_candidate_id(),
+            right.canonical_score_candidate_id()
+        );
+        assert_eq!(
+            left.canonical_solution_key(),
+            right.canonical_solution_key()
+        );
+        assert_eq!(
+            left.portfolio_alternatives(),
+            right.portfolio_alternatives()
+        );
+        assert_eq!(left.completeness(), right.completeness());
+    }
+    assert_same_semantic_portfolio(portfolio(&fixed), portfolio(&serial));
+    assert_same_semantic_portfolio(portfolio(&auto), portfolio(&serial));
+    assert_eq!(
+        fixed
+            .product_capability_result()
+            .and_then(|result| result.public_result_payload()),
+        serial
+            .product_capability_result()
+            .and_then(|result| result.public_result_payload())
+    );
+    assert_eq!(
+        auto.product_capability_result()
+            .and_then(|result| result.public_result_payload()),
+        serial
+            .product_capability_result()
+            .and_then(|result| result.public_result_payload())
+    );
+
+    for response in [&fixed, &auto] {
+        let core = response
+            .render_model()
+            .and_then(crate::AppRenderModel::core_result)
+            .expect("score-minimals Core telemetry");
+        if core
+            .usize_field("workers_used")
+            .is_some_and(|workers| workers > 1)
+        {
+            assert_eq!(core.bool_field("cpu_parallel_execution"), Some(true));
+            assert_eq!(
+                core.field("cpu_parallel_decision_reason"),
+                Some("parallel-immutable-family-queue")
+            );
+        }
+        // The exact-family/BuildUp source is parallel. Candidate x pattern
+        // scoring and the exact optimal-portfolio finalizer are intentionally
+        // still one coordinator-owned deterministic tail.
+        assert_eq!(
+            core.field("score_execution_distribution"),
+            Some("coordinator")
+        );
+    }
+}
+
 #[test]
 fn opening_wasm_pc_score_validates_the_two_line_target_frame() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
@@ -2673,11 +3092,69 @@ fn pc_score_contract_rejects_stale_queries_profiles_and_memory_without_generic_i
     assert!(matches!(
         rejection,
         ProductCapabilityContractError::RequestContractRejected(reason)
-            if reason.contains("fixed Wasm CPU single-session execution policy")
+            if reason.contains("fixed-cap CPU execution policy")
     ));
 
     let generic = AppRequest::new(AppCommand::Scenario(ScenarioAppCommand::new(capped)));
     assert_eq!(generic.product_capability_contract(), None);
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn pc_score_native_worker_policies_reserve_their_effective_compute_width() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let base = pc_score_execution_policy();
+    let policies = [
+        base.clone()
+            .with_workers(2)
+            .with_worker_hardware_limit(2)
+            .with_use_all_logical_processors(true)
+            .with_cpu_warmup(true),
+        base.with_worker_policy(WorkerPolicy::Auto)
+            .with_automatic_worker_limit(2)
+            .with_worker_hardware_limit(2)
+            .with_use_all_logical_processors(true),
+    ];
+
+    for policy in policies {
+        let expected_workers = policy.workers();
+        let query = score_command(PcScoreIngressOrigin::CanonicalPcScore, PieceKind::I)
+            .query()
+            .clone()
+            .with_execution_policy(policy);
+        let command = ScenarioAppCommand::new(query.clone()).with_result_projection(
+            PcResultProjection::ScoreSummaryV2(PcScoreIngressOrigin::CanonicalPcScore),
+        );
+        command
+            .validate_result_projection()
+            .expect("native score accepts bounded CPU worker policy controls");
+        let authority = PcScoreCompiledAuthority::compile_scenario(
+            query,
+            PcScoreIngressOrigin::CanonicalPcScore,
+        )
+        .expect("native score reserves its effective compute width before compilation");
+        assert_eq!(
+            authority
+                .terminal_resource_authority()
+                .compute_capacity_units(),
+            u32::try_from(expected_workers).expect("effective host workers fit the authority")
+        );
+        drop(authority);
+    }
+
+    let invalid = score_command(PcScoreIngressOrigin::CanonicalPcScore, PieceKind::I)
+        .query()
+        .clone()
+        .with_execution_policy(pc_score_execution_policy().with_workers(0));
+    assert_eq!(
+        ScenarioAppCommand::new(invalid)
+            .with_result_projection(PcResultProjection::ScoreSummaryV2(
+                PcScoreIngressOrigin::CanonicalPcScore,
+            ))
+            .validate_result_projection()
+            .expect_err("a zero-width fixed policy remains invalid"),
+        "pc score requires its fixed-cap CPU execution policy"
+    );
 }
 
 #[test]
@@ -3277,7 +3754,8 @@ fn pc_failed_queue_memory_admission_mapping_preserves_the_core_resource_report()
     let mut report = CoreResourceReport::complete();
     report.observe_cpu_bytes(4096);
     report.observe_candidate_rows(7);
-    let response = AppPcFailedQueueExecutionError::EvidenceMemoryAdmission(report).into_response();
+    let response =
+        AppPcFailedQueueExecutionError::EvidenceMemoryAdmission(Box::new(report)).into_response();
 
     assert_eq!(response.status(), AppStatus::ExecutionFailed);
     assert_eq!(response.resource_report().peak_cpu_bytes, 4096);

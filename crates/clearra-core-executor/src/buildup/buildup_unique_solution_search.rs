@@ -275,6 +275,8 @@ fn execute_candidates(
     })
 }
 
+// Unique-solution verification keeps reusable workspace and output sinks caller-owned.
+#[allow(clippy::too_many_arguments)]
 fn execute_candidate(
     problem: &SearchProblem,
     packing: &PackingRunResult,
@@ -364,6 +366,8 @@ enum CandidateVerification {
     Incomplete(&'static str),
 }
 
+// Verification passes compiled candidate and pattern surfaces separately on the hot path.
+#[allow(clippy::too_many_arguments)]
 fn verify_candidate_patterns(
     packing: &PackingRunResult,
     candidate_index: usize,

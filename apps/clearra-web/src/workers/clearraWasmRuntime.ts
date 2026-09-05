@@ -33,7 +33,8 @@ export type ClearraWasmModule = {
   product_page_next: (maximumWorkSteps: number) => ClearraProductPageWorkerPayload;
   product_page_get: (
     alternativeIndex: string,
-    memberPageNumber: string
+    memberPageNumber: string,
+    maximumWorkSteps: number
   ) => ClearraProductPageWorkerPayload;
   product_page_release: () => void;
   distributed_cancel: () => void;
@@ -65,7 +66,7 @@ export type ClearraWasmFailureDiagnostics = {
 };
 
 export type ClearraDistributedPlan = {
-  mode: 'serial' | 'cpu-multi' | 'gpu-multi';
+  mode: 'serial' | 'cpu-multi' | 'gpu-multi' | 'ready';
   workerCount: number;
   requestedBackend: 'auto' | 'cpu' | 'gpu' | 'hybrid';
   selectedBackend: 'wasm-cpu' | 'webgpu';
@@ -922,8 +923,12 @@ function wrapRawModule(
     const ptr = raw.clearra_wasm_transfer_ptr() >>> 0;
     new Uint8Array(raw.memory.buffer, ptr, input.byteLength).set(new Uint8Array(input));
   };
-  const setProductPageRequest = (alternativeIndex: string, memberPageNumber: string) => {
-    const request = `portfolio-page-request.v1\n${alternativeIndex}\n${memberPageNumber}`;
+  const setProductPageRequest = (
+    alternativeIndex: string,
+    memberPageNumber: string,
+    maximumWorkSteps: number
+  ) => {
+    const request = `portfolio-page-request.v2\n${alternativeIndex}\n${memberPageNumber}\n${Math.max(1, maximumWorkSteps) >>> 0}`;
     const bytes = encoder.encode(request);
     requireOk(raw.clearra_wasm_product_page_request_resize(bytes.byteLength));
     const ptr = raw.clearra_wasm_input_ptr() >>> 0;
@@ -1010,21 +1015,26 @@ function wrapRawModule(
       setCommand(commandText);
       const mode = raw.clearra_wasm_distributed_prepare();
       requireOk(mode);
-      const labels = ['serial', 'cpu-multi', 'gpu-multi'] as const;
+      const labels = ['serial', 'cpu-multi', 'gpu-multi', 'ready'] as const;
       const requestedLabels = ['auto', 'cpu', 'gpu', 'hybrid'] as const;
       const fallbackReasonCode = raw.clearra_wasm_distributed_preparation_fallback_reason();
       const fallbackReasonLabels = {
         1: 'gpu_kernel_unavailable',
         2: 'gpu_device_not_found'
       } as const;
-      const selectedMode = labels[mode] ?? 'serial';
+      const selectedMode = labels[mode];
+      if (!selectedMode) throw new Error(`invalid Clearra WASM distributed mode: ${mode}`);
       requireExactCount(
         raw.clearra_wasm_distributed_worker_count_available(),
         raw.clearra_wasm_distributed_worker_count_exact(),
         'distributed worker count'
       );
-      requireOk(raw.clearra_wasm_distributed_worker_initialization());
-      const initialization = outputBytes();
+      let initialization: ArrayBuffer | null = null;
+      if (selectedMode !== 'ready') {
+        requireOk(raw.clearra_wasm_distributed_worker_initialization());
+        const output = outputBytes();
+        initialization = output.byteLength === 0 ? null : output;
+      }
       return {
         mode: selectedMode,
         workerCount: Math.max(1, raw.clearra_wasm_distributed_worker_count()),
@@ -1034,10 +1044,12 @@ function wrapRawModule(
         fallbackUsed: fallbackReasonCode !== 0,
         fallbackReason:
           fallbackReasonLabels[fallbackReasonCode as keyof typeof fallbackReasonLabels] ?? null,
-        workerInitialization: initialization.byteLength === 0 ? null : initialization,
+        workerInitialization: initialization,
         deferredInitialization:
+          selectedMode !== 'ready' &&
           raw.clearra_wasm_distributed_worker_initialization_deferred() !== 0,
         verificationRequired:
+          selectedMode !== 'ready' &&
           raw.clearra_wasm_distributed_verification_required() !== 0,
         tilingGeometryParallel:
           raw.clearra_wasm_distributed_tiling_geometry_parallel() !== 0
@@ -1168,10 +1180,11 @@ function wrapRawModule(
       requireOk(raw.clearra_wasm_product_page_next(Math.max(1, maximumWorkSteps) >>> 0));
       return JSON.parse(outputText()) as ClearraProductPageWorkerPayload;
     },
-    product_page_get(alternativeIndex, memberPageNumber) {
+    product_page_get(alternativeIndex, memberPageNumber, maximumWorkSteps) {
       setProductPageRequest(
         requireProductPageDecimal(alternativeIndex, 'alternative index'),
-        requireProductPageDecimal(memberPageNumber, 'member page number')
+        requireProductPageDecimal(memberPageNumber, 'member page number'),
+        maximumWorkSteps
       );
       requireOk(raw.clearra_wasm_product_page_get_exact());
       return JSON.parse(outputText()) as ClearraProductPageWorkerPayload;

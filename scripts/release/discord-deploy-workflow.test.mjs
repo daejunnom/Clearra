@@ -70,6 +70,21 @@ test("primary has exact automatic/manual authority and explicit impact no-op", (
   assert.doesNotMatch(primary, /Discord deployment rerun attempts are forbidden/u);
 });
 
+test("Pages-only release infrastructure cannot start a Discord candidate", () => {
+  const candidateHeader = primary.slice(
+    primary.indexOf("  candidate:"),
+    primary.indexOf("    needs: authority", primary.indexOf("  candidate:")),
+  );
+  assert.match(
+    candidateHeader,
+    /needs\.authority\.outputs\.deploy_discord == 'true'\s*&&/u,
+  );
+  assert.match(
+    candidateHeader,
+    /\(needs\.authority\.outputs\.deploy_discord_gateway == 'true'[\s\S]*needs\.authority\.outputs\.release_infrastructure_changed == 'true'\)/u,
+  );
+});
+
 test("primary and recovery share one non-cancelling production serialization group", () => {
   for (const workflow of [primary, recovery]) {
     assert.match(workflow, /group: discord-production/u);

@@ -327,10 +327,7 @@ fn movement_evidence_for_step(
     })
 }
 
-fn kick_evidence_for_step<'a>(
-    trace: &'a ReplayTrace,
-    step_index: usize,
-) -> Option<&'a KickEvidenceEvent> {
+fn kick_evidence_for_step(trace: &ReplayTrace, step_index: usize) -> Option<&KickEvidenceEvent> {
     trace.events().iter().find_map(|event| match event {
         ReplayEvent::KickEvidence(evidence) if evidence.step_index() == step_index => {
             Some(evidence)

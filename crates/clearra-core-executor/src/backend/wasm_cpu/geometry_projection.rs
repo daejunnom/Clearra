@@ -22,6 +22,8 @@ pub(super) struct ProjectionCatalog {
     piece_minimum: [Vec<u8>; 7],
     piece_maximum: [Vec<u8>; 7],
     piece_checker_options: [u8; 7],
+    // Serialized into the GPU constraint catalog only when that backend is built.
+    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
     standard_checker_rule_certified: bool,
     identity_digest: u64,
 }
@@ -139,10 +141,10 @@ impl ProjectionCatalog {
             options.sort_unstable();
             options.dedup();
         }
-        for piece in 0..7 {
-            for x in 0..width as usize {
-                if piece_minimum[piece][x] == u8::MAX {
-                    piece_minimum[piece][x] = 0;
+        for minimums in &mut piece_minimum {
+            for minimum in minimums {
+                if *minimum == u8::MAX {
+                    *minimum = 0;
                 }
             }
         }
@@ -222,6 +224,8 @@ impl ProjectionCatalog {
         self.identity_digest
     }
 
+    // The GPU catalog owns the packed per-piece column bounds consumer.
+    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
     pub fn piece_column_bounds(&self, piece: usize, column: usize) -> (u8, u8) {
         (
             self.piece_minimum[piece][column],
@@ -229,6 +233,8 @@ impl ProjectionCatalog {
         )
     }
 
+    // The GPU catalog owns the checker-rule certification consumer.
+    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
     pub const fn standard_checker_rule_certified(&self) -> bool {
         self.standard_checker_rule_certified
     }
@@ -268,9 +274,9 @@ impl ProjectionCatalog {
                 ((demand >> (x * self.bits_per_column as usize)) & self.column_value_mask) as u16;
             let mut minimum = 0_u16;
             let mut maximum = 0_u16;
-            for piece in 0..7 {
-                minimum += u16::from(counts[piece]) * u16::from(self.piece_minimum[piece][x]);
-                maximum += u16::from(counts[piece]) * u16::from(self.piece_maximum[piece][x]);
+            for (piece, count) in counts.iter().copied().enumerate() {
+                minimum += u16::from(count) * u16::from(self.piece_minimum[piece][x]);
+                maximum += u16::from(count) * u16::from(self.piece_maximum[piece][x]);
             }
             if requested < minimum || requested > maximum {
                 return false;
@@ -295,8 +301,8 @@ impl ProjectionCatalog {
 
     fn checker_domain(&self, counts: [u8; 7]) -> u128 {
         let mut domain = 1_u128 << CHECKER_OFFSET;
-        for piece in 0..7 {
-            for _ in 0..counts[piece] {
+        for (piece, count) in counts.into_iter().enumerate() {
+            for _ in 0..count {
                 let mut next = 0_u128;
                 let options = self.piece_checker_options[piece];
                 for option_index in 0..5_i8 {
@@ -480,14 +486,14 @@ fn compile_reachable_projections(
         return ProjectionCacheEntry::Unavailable;
     }
     current.insert(0_u64);
-    for piece in 0..7 {
-        if counts[piece] != 0 && catalog.piece_options[piece].is_empty() {
+    for (piece, count) in counts.into_iter().enumerate() {
+        if count != 0 && catalog.piece_options[piece].is_empty() {
             return ProjectionCacheEntry::Complete {
                 signatures: Box::new([]),
                 checker_domain: 0,
             };
         }
-        for _ in 0..counts[piece] {
+        for _ in 0..count {
             let mut next = HashSet::new();
             let reserve = current
                 .len()

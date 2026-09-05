@@ -7,7 +7,8 @@ MVP2 kick semantics are still intentionally explicit:
 - `srs` uses Clearra's built-in numeric 90-degree SRS kick tables.
 - `no-kick` uses only `(0, 0)` rotation offsets and harddrop/no-kick candidates.
 - `srs-plus` uses Clearra's built-in exact SRS+ table: regular SRS JLSTZ 90-degree kicks, y-axis-symmetric I-piece 90-degree kicks, and transition-specific 180-degree kicks. `rules list` and `rules inspect` disclose `source_kind=built-in-exact` and `supports_exact_180=true`.
-- `srs-x` uses SRS 90-degree kicks with the built-in Nullpomino/Heboris-style 180 table. The WASM product backend consumes this table directly and exactly. The C compact lowering remains a separate compatibility boundary and accepts SRS-X only through a verified imported profile; it must never fall back to SRS+, SRS, or NoKick.
+- `srs-x` uses the exact ordered standard-tetromino transitions published in the current TETR.IO client source at [`tetrio.js`](https://tetr.io/js/tetrio.js). TETR.IO tests the unshifted rotation before consulting `kicks` or `i_kicks`; Clearra therefore prefixes an explicit `(0, 0)` to every sequence. TETR.IO coordinates point down on positive y, while Clearra board coordinates point up, so imported table y values are sign-inverted before Clearra's compact-anchor rotation-center adjustment. The resulting built-in profile has 84 transitions (12 directed transitions for each of I/O/J/L/S/T/Z) and a maximum ordered sequence length of 12. The WASM, native Rust, C compact, CLI, and GUI Player paths consume the same profile contract.
+- TETR.IO's standard `o` definition has `disallow_kick=true`. It can still pass the implicit origin rotation check, so Clearra represents each O transition as `(0, 0)` only. The source field `oo_kicks` belongs to the separate non-standard `oo` piece (`kickset_special="oo"`) and must not be applied to the standard O tetromino.
 - `jstris-180` uses standard SRS 90-degree kicks and the Jstris two-offset 180 table for I/J/L/S/T/Z. Its ordered half-turn offsets are `0->2: (0,0),(0,1)`, `R->L: (0,0),(1,0)`, `2->0: (0,0),(0,-1)`, and `L->R: (0,0),(-1,0)`. O has no rotation transitions. The product and C compact backends consume the same 72-transition table.
 - `asc` and `ars` remain selectable registry descriptors whose spawn-aware reachability is unsupported. CLI inspection must report `search_backend_supported=false`, `c_compact_descriptor_ready=false`, and an `unsupported_backend_reason`, and validation must reject them before search.
 
@@ -48,10 +49,13 @@ preserved. Future property import/export should produce and consume verified
 text directly.
 
 X1 Rule / Kick Expansion keeps `SRS-X`, `ASC`, and `ARS` visible as named
-profiles while preventing silent runtime fallback. WASM uses the built-in
-verified SRS-X table; SRS-X can reach the C compact descriptor only through an
-imported verified exact 180 profile. `ASC` and `ARS` remain guarded until
-spawn-aware reachability is connected.
+profiles while preventing silent runtime fallback. WASM and C compact execution
+use the same built-in verified 84-transition SRS-X table; the compact ABI allows
+up to 12 ordered offsets so the longest TETR.IO half-turn sequence is not
+truncated. Because that fixed descriptor array changes its C layout, the paired
+C/Rust core ABI version is 23. Imported SRS-X overrides still require independent
+verification.
+`ASC` and `ARS` remain guarded until spawn-aware reachability is connected.
 Unsupported profiles must not fall back to NoKick. 180 candidates must not be
 generated unless the compact profile has `supports_180=true`.
 

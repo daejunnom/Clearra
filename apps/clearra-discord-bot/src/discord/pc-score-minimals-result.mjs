@@ -93,20 +93,17 @@ export function discordPcScoreMinimalsSummaryLines(structured, locale = "en") {
   if (projection === null) return null;
   const labels = String(locale).toLowerCase().startsWith("ko")
     ? {
-        candidate: "정규 후보 ID",
-        solution: "정규 해법 키",
+        selected: "선택된 결과",
         equality: "점수 동등성",
         attack: "공격력 역할",
       }
     : {
-        candidate: "Canonical candidate ID",
-        solution: "Canonical solution key",
+        selected: "Selected result",
         equality: "Score equality",
         attack: "Attack role",
       };
   return Object.freeze([
-    `${labels.candidate}: ${projection.canonicalCandidateId}`,
-    `${labels.solution}: ${projection.canonicalSolutionKey}`,
+    `${labels.selected}: 1`,
     `${labels.equality}: ${projection.scoreEquality}`,
     `${labels.attack}: ${projection.attackRole}`,
   ]);

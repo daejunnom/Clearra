@@ -244,14 +244,25 @@ pub(super) struct QueueObservationMetrics {
     pub action_checks: usize,
     pub observation_nodes: usize,
     pub retained_bytes: usize,
+    // Detailed memo diagnostics are consumed only by the native opt-in
+    // `CLEARRA_SETUP_POLICY_DIAGNOSTICS` reporter.
+    #[cfg(not(target_arch = "wasm32"))]
     pub local_values: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     pub local_zero_scores: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     pub shared_values: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     pub shared_zero_scores: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     pub local_value_capacity: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     pub local_zero_score_capacity: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     pub shared_value_capacity: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     pub shared_zero_score_capacity: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     pub shared_hits: usize,
 }
 
@@ -1041,14 +1052,23 @@ impl QueueObservationPolicyEvaluator {
                 action_checks: self.action_checks,
                 observation_nodes: self.trie.nodes.len(),
                 retained_bytes: self.retained_bytes(),
+                #[cfg(not(target_arch = "wasm32"))]
                 local_values: self.memo.len(),
+                #[cfg(not(target_arch = "wasm32"))]
                 local_zero_scores: self.zero_scores.len(),
+                #[cfg(not(target_arch = "wasm32"))]
                 shared_values: self.shared_memo.len(),
+                #[cfg(not(target_arch = "wasm32"))]
                 shared_zero_scores: self.shared_zero_scores.len(),
+                #[cfg(not(target_arch = "wasm32"))]
                 local_value_capacity: self.memo.capacity(),
+                #[cfg(not(target_arch = "wasm32"))]
                 local_zero_score_capacity: self.zero_scores.capacity(),
+                #[cfg(not(target_arch = "wasm32"))]
                 shared_value_capacity: self.shared_memo.capacity(),
+                #[cfg(not(target_arch = "wasm32"))]
                 shared_zero_score_capacity: self.shared_zero_scores.capacity(),
+                #[cfg(not(target_arch = "wasm32"))]
                 shared_hits: self.shared_hits,
             },
         })
@@ -1064,6 +1084,8 @@ impl QueueObservationPolicyEvaluator {
         self.terminal_supply_target = target;
     }
 
+    // Only native setup workers fork the evaluator for parallel target scans.
+    #[cfg(not(target_family = "wasm"))]
     pub fn fork_empty(&self) -> Result<Self, WasmExactSearchError> {
         if self.trie.future_classes.len() != self.trie.nodes.len() {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -1119,6 +1141,9 @@ impl QueueObservationPolicyEvaluator {
         domain
     }
 
+    // Browser workers are isolated and coordinate cancellation outside this
+    // evaluator; the shared abort flag belongs to native worker threads.
+    #[cfg(not(target_family = "wasm"))]
     pub fn set_peer_abort(&mut self, abort: Arc<AtomicBool>) {
         self.peer_abort = Some(abort);
     }

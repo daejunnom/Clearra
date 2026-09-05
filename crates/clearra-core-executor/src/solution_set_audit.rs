@@ -10,7 +10,9 @@ use std::fmt::Write;
 use clearra_core_domain::solution::normalized_tiling_solution::normalized_tiling_solution_key_set_hash_from_sorted_strings;
 use clearra_coverage::{
     cover::{
-        exact_minimum_cover::ExactMinimumCoverError, minimum_cover_solver::MinimumCoverSolver,
+        exact_minimum_cover::ExactMinimumCoverError,
+        exact_minimum_cover_portfolios::ExactMinimumCoverPortfolioError,
+        minimum_cover_solver::MinimumCoverSolver,
     },
     matrix::{coverage_matrix::CoverageMatrix, coverage_row::CoverageRow as MatrixCoverageRow},
     pattern::pattern_bitset::PatternBitSet,
@@ -60,6 +62,10 @@ impl SolutionProductFamily {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SolutionPortfolioSelectionPolicy {
     EquivalentCoverageRepresentatives,
+    /// Audits the source dictionary while exact portfolio selection remains
+    /// owned by the typed product coordinator. The report stays incomplete
+    /// until that product authority performs and validates the exact proof.
+    ProductDeferredExactMinimumCover,
     ExactMinimumCover,
 }
 
@@ -67,6 +73,9 @@ impl SolutionPortfolioSelectionPolicy {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::EquivalentCoverageRepresentatives => "equivalent-coverage-representatives",
+            Self::ProductDeferredExactMinimumCover => {
+                "product-deferred-two-pass-exact-minimum-cover"
+            }
             Self::ExactMinimumCover => "two-pass-exact-minimum-cover",
         }
     }
@@ -942,22 +951,23 @@ impl SolutionSetAuditReport {
             .map_err(SolutionSetAuditGuardedError::MemoryGuard)?;
 
         let mut caller_guard_error = None;
-        let mut exact_solver_guard = |solver_owned_bytes: u128| {
-            let owned_bytes = projection
-                .required_peak_bytes
-                .checked_add(solver_owned_bytes)
-                .ok_or(ExactMinimumCoverError::ProjectionOverflow)?;
-            match memory_guard(owned_bytes) {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    caller_guard_error = Some(error);
-                    Err(ExactMinimumCoverError::MemoryGuardRejected)
-                }
-            }
-        };
         let mut exact_solver_error = None;
-        let report = Self::analyze_inner(input, &mut exact_solver_guard, &mut exact_solver_error);
-        drop(exact_solver_guard);
+        let report = {
+            let mut exact_solver_guard = |solver_owned_bytes: u128| {
+                let owned_bytes = projection
+                    .required_peak_bytes
+                    .checked_add(solver_owned_bytes)
+                    .ok_or(ExactMinimumCoverError::ProjectionOverflow)?;
+                match memory_guard(owned_bytes) {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        caller_guard_error = Some(error);
+                        Err(ExactMinimumCoverError::MemoryGuardRejected)
+                    }
+                }
+            };
+            Self::analyze_inner(input, &mut exact_solver_guard, &mut exact_solver_error)
+        };
         if let Some(error) = caller_guard_error {
             return Err(SolutionSetAuditGuardedError::MemoryGuard(error));
         }
@@ -1298,7 +1308,10 @@ impl SolutionSetAuditReport {
             exact_solver_memory_guard,
             exact_solver_error,
         )?;
+        let selection_deferred = input.selection_policy
+            == SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover;
         let portfolio_complete = classed_checkpoint.complete()
+            && !selection_deferred
             && if portfolio_families.is_empty() {
                 input.required_patterns.is_empty()
             } else {
@@ -1306,9 +1319,19 @@ impl SolutionSetAuditReport {
                     .iter()
                     .all(SolutionPortfolioFamily::complete)
             };
+        if selection_deferred
+            && !portfolio_reasons.iter().any(|reason| {
+                reason == "exact-minimum-cover-selection-deferred-to-product-coordinator"
+            })
+        {
+            portfolio_reasons
+                .push("exact-minimum-cover-selection-deferred-to-product-coordinator".to_owned());
+        }
         if portfolio_families.is_empty() && !input.required_patterns.is_empty() {
             portfolio_reasons.push("required-patterns-have-no-coverage-family".to_owned());
         }
+        portfolio_reasons.sort_unstable();
+        portfolio_reasons.dedup();
         let mut page_entries = Vec::new();
         for family in &portfolio_families {
             for (class_id, representative_key) in family
@@ -2474,57 +2497,78 @@ fn build_portfolio_families(
                 .then_with(|| left.representative_key().cmp(right.representative_key()))
         });
         let family_id = hash_semantic_dimensions("spf1", &dimensions);
-        let (selected_indices, covered_patterns, solver_complete, exact_minimum_proven) =
-            match selection_policy {
-                SolutionPortfolioSelectionPolicy::EquivalentCoverageRepresentatives => {
-                    let matrix =
-                        coverage_matrix_for_classes(required_patterns.pattern_count(), &classes)?;
-                    let indices = (0..classes.len()).collect::<Vec<_>>();
-                    let covered = matrix
-                        .union_rows(&indices)
-                        .map_err(|_| SolutionSetAuditError::CoverageMatrixInvalid)?;
-                    let covers_required = covered
-                        .is_superset(required_patterns)
-                        .map_err(|_| SolutionSetAuditError::RequiredCoverageLost)?;
-                    (indices, covered, covers_required, false)
-                }
-                SolutionPortfolioSelectionPolicy::ExactMinimumCover => {
-                    let matrix =
-                        coverage_matrix_for_classes(required_patterns.pattern_count(), &classes)?;
-                    let selection = MinimumCoverSolver::solve_exact_with_memory_guard(
-                        &matrix,
-                        required_patterns,
-                        exact_solver_memory_guard,
-                    );
-                    let selection = match selection {
-                        Ok(selection) => selection,
-                        Err(error) => {
+        let (
+            selected_indices,
+            covered_patterns,
+            required_coverage_complete,
+            selection_complete,
+            exact_minimum_proven,
+        ) = match selection_policy {
+            SolutionPortfolioSelectionPolicy::EquivalentCoverageRepresentatives
+            | SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover => {
+                let matrix =
+                    coverage_matrix_for_classes(required_patterns.pattern_count(), &classes)?;
+                let indices = (0..classes.len()).collect::<Vec<_>>();
+                let covered = matrix
+                    .union_rows(&indices)
+                    .map_err(|_| SolutionSetAuditError::CoverageMatrixInvalid)?;
+                let covers_required = covered
+                    .is_superset(required_patterns)
+                    .map_err(|_| SolutionSetAuditError::RequiredCoverageLost)?;
+                let selection_deferred = selection_policy
+                    == SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover;
+                (
+                    indices,
+                    covered,
+                    covers_required,
+                    covers_required && !selection_deferred,
+                    false,
+                )
+            }
+            SolutionPortfolioSelectionPolicy::ExactMinimumCover => {
+                let matrix =
+                    coverage_matrix_for_classes(required_patterns.pattern_count(), &classes)?;
+                let selection = MinimumCoverSolver::solve_exact_canonical_with_memory_guard(
+                    &matrix,
+                    required_patterns,
+                    exact_solver_memory_guard,
+                );
+                let selection = match selection {
+                    Ok(selection) => selection,
+                    Err(error) => {
+                        if let ExactMinimumCoverPortfolioError::MinimumCover(error) = error {
                             *exact_solver_error = Some(error);
-                            return Err(SolutionSetAuditError::ExactMinimumCoverInvalid);
                         }
-                    };
-                    let covers_required = selection
-                        .covered_patterns()
-                        .is_superset(required_patterns)
-                        .map_err(|_| SolutionSetAuditError::RequiredCoverageLost)?;
-                    if selection.is_complete() && !covers_required {
-                        return Err(SolutionSetAuditError::RequiredCoverageLost);
+                        return Err(SolutionSetAuditError::ExactMinimumCoverInvalid);
                     }
-                    (
-                        selection.row_indices().to_vec(),
-                        selection.covered_patterns().clone(),
-                        selection.is_complete() && covers_required,
-                        selection.is_proven_minimum(),
-                    )
+                };
+                let covers_required = selection
+                    .covered_patterns()
+                    .is_superset(required_patterns)
+                    .map_err(|_| SolutionSetAuditError::RequiredCoverageLost)?;
+                if selection.is_complete() && !covers_required {
+                    return Err(SolutionSetAuditError::RequiredCoverageLost);
                 }
-            };
-        let complete = classed_complete && solver_complete;
+                (
+                    selection.row_indices().to_vec(),
+                    selection.covered_patterns().clone(),
+                    covers_required,
+                    selection.is_complete() && covers_required,
+                    selection.is_proven_minimum(),
+                )
+            }
+        };
+        let complete = classed_complete && selection_complete;
         let mut incomplete_reasons = Vec::new();
         if !classed_complete {
             incomplete_reasons.push("coverage-class-input-incomplete".to_owned());
         }
-        if !solver_complete {
+        if !required_coverage_complete {
             incomplete_reasons.push("required-pattern-cover-incomplete".to_owned());
+        }
+        if selection_policy == SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover {
+            incomplete_reasons
+                .push("exact-minimum-cover-selection-deferred-to-product-coordinator".to_owned());
         }
         let selected_classes = selected_indices
             .iter()
@@ -2665,22 +2709,6 @@ fn lower_hex(bytes: &[u8]) -> String {
         output.push(HEX[usize::from(byte & 0xf)] as char);
     }
     output
-}
-
-fn joined_reasons(reasons: &[String]) -> String {
-    if reasons.is_empty() {
-        "none".to_owned()
-    } else {
-        reasons.join("|")
-    }
-}
-
-fn optional_count(value: Option<usize>) -> String {
-    value.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
-}
-
-fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
-    (key.into(), value.to_string())
 }
 
 #[cfg(test)]

@@ -27,6 +27,8 @@ pub(crate) struct LayerScratch {
 }
 
 impl LayerScratch {
+    // Buffer roles and sizes are independent inputs to this private GPU allocation boundary.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         device: &wgpu::Device,
         pipeline: &wgpu::ComputePipeline,

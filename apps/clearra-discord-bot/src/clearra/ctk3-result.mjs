@@ -204,6 +204,7 @@ export function buildCtk3Result(jsonOrObject) {
           initialMask,
           plan.forward.outcomes[index],
           `artifacts.forward.outcomes[${index}]`,
+          index + 1,
         ),
       );
     }
@@ -1412,7 +1413,7 @@ function setupCandidatePage(candidate, path) {
   return coloredPage(0n, placements, path);
 }
 
-function forwardOutcomePage(initialMask, outcome, path) {
+function forwardOutcomePage(initialMask, outcome, path, displayIndex) {
   const value = requireRecord(outcome, path);
   const finalMask = parseBoardWordsMask(
     requiredString(value, "final_board", `${path}.final_board`),
@@ -1510,14 +1511,17 @@ function forwardOutcomePage(initialMask, outcome, path) {
       "replayed path does not match final_board",
     );
   }
-  return coloredPage(initialMask, placements, path, forwardOutcomeComment(value, path));
+  return coloredPage(
+    initialMask,
+    placements,
+    path,
+    forwardOutcomeComment(value, path, displayIndex),
+  );
 }
 
-function forwardOutcomeComment(outcome, path) {
-  const parts = [];
-  if (hasOwn(outcome, "id")) {
-    parts.push(`#${canonicalForwardOutcomeIdValue(outcome.id, `${path}.id`)}`);
-  }
+function forwardOutcomeComment(outcome, path, displayIndex) {
+  const parts = [`#${displayIndex}`];
+  if (hasOwn(outcome, "id")) canonicalForwardOutcomeIdValue(outcome.id, `${path}.id`);
   if (hasOwn(outcome, "source_queue")) {
     const queue = requiredString(outcome, "source_queue", `${path}.source_queue`);
     if (!/^[IOTSZJL]*$/.test(queue)) {

@@ -221,14 +221,20 @@ impl BuildV2OptionRequest {
         self.queue_knowledge
     }
 
+    // Retained for product adapters that need to distinguish defaults from explicit input.
+    #[allow(dead_code)]
     pub const fn explicit_objective(self) -> Option<BuildObjective> {
         self.explicit_objective
     }
 
+    // Retained for product adapters that need to distinguish defaults from explicit input.
+    #[allow(dead_code)]
     pub const fn explicit_score_profile(self) -> Option<BuildScoreProfile> {
         self.explicit_score_profile
     }
 
+    // Retained for product adapters that need to distinguish defaults from explicit input.
+    #[allow(dead_code)]
     pub const fn explicit_initial_b2b(self) -> Option<u16> {
         self.explicit_initial_b2b
     }
@@ -317,6 +323,8 @@ impl ValidatedBuildV2Options {
         self.initial_b2b
     }
 
+    // Retained for product projections that expose the validated execution policy.
+    #[allow(dead_code)]
     pub const fn execution_semantics(self) -> BuildExecutionSemantics {
         self.execution_semantics
     }

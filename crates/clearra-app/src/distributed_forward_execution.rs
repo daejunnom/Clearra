@@ -12,6 +12,9 @@ use crate::{
     AppCommand,
 };
 
+// Preparation is a one-shot ownership transfer and its public variants are part
+// of the distributed host contract, so retain their established inline shape.
+#[allow(clippy::large_enum_variant)]
 pub enum DistributedForwardPreparation {
     Ready(AppResponse),
     Search(PreparedDistributedForwardSearch),

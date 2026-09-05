@@ -90,6 +90,41 @@ foreach ($sealedCopyMarker in @(
         throw "Inactive-stage sealed-overlay fail-closed contract drifted: $sealedCopyMarker"
     }
 }
+$cleanupStart = $stageTemplateSource.IndexOf(
+    'if [ "$cleanup_only" -eq 1 ]; then',
+    [StringComparison]::Ordinal
+)
+$cleanupEnd = $stageTemplateSource.IndexOf(
+    "`nfi`n`ncapture_baseline",
+    $cleanupStart,
+    [StringComparison]::Ordinal
+)
+if ($cleanupStart -lt 0 -or $cleanupEnd -lt 0) {
+    throw 'Inactive-stage CleanupOnly branch boundary is unavailable.'
+}
+$cleanupBranch = $stageTemplateSource.Substring($cleanupStart, $cleanupEnd - $cleanupStart)
+foreach ($cleanupDigesterMarker in @(
+    'validate_digester=$2',
+    'require_exact_hash "$validate_digester" "$expected_digester_sha256"',
+    'cleanup_digester=$upload_root/clearra-release-tree-digest.py',
+    'validate_candidate "$candidate_path" "$cleanup_digester"'
+)) {
+    if ($stageTemplateSource.IndexOf($cleanupDigesterMarker, [StringComparison]::Ordinal) -lt 0) {
+        throw "Inactive-stage explicit digester contract drifted: $cleanupDigesterMarker"
+    }
+}
+if ($cleanupBranch.IndexOf(
+    '$input_root/clearra-release-tree-digest.py',
+    [StringComparison]::Ordinal
+) -ge 0) {
+    throw 'Candidate-present CleanupOnly depends on the unmaterialized input-root digester.'
+}
+if ($stageTemplateSource.IndexOf(
+    'validate_candidate "$candidate_path" "$input_root/clearra-release-tree-digest.py"',
+    [StringComparison]::Ordinal
+) -lt 0) {
+    throw 'Normal inactive staging lost the root-owned input digester contract.'
+}
 
 function Get-Sha256([string] $Path) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
@@ -163,12 +198,27 @@ try {
         }
     }
     $manifestPath = Join-Path $temporaryRoot 'manifest.json'
-    $manifestJson = $manifest | ConvertTo-Json -Depth 10
+    # Windows PowerShell 5.1 and PowerShell 7 indent ConvertTo-Json output
+    # differently. The production parser deliberately accepts only Node's
+    # two-space canonical JSON, so make the cross-host test fixture canonical
+    # with the same required Node runtime before invoking the wrapper.
+    $manifestJson = $manifest | ConvertTo-Json -Depth 10 -Compress
     [IO.File]::WriteAllText(
         $manifestPath,
-        $manifestJson.Replace("`r`n", "`n") + "`n",
+        $manifestJson,
         [Text.UTF8Encoding]::new($false)
     )
+    $canonicalizerPath = Join-Path $temporaryRoot 'canonicalize-json.cjs'
+    $canonicalizeManifest = 'const fs=require("node:fs");const path=process.argv[2];const value=JSON.parse(fs.readFileSync(path,"utf8"));fs.writeFileSync(path,JSON.stringify(value,null,2)+"\n");'
+    [IO.File]::WriteAllText(
+        $canonicalizerPath,
+        $canonicalizeManifest,
+        [Text.UTF8Encoding]::new($false)
+    )
+    & node $canonicalizerPath $manifestPath
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Oracle stage manifest fixture canonicalization failed.'
+    }
 
     $audit = @(& $wrapper `
         -ManifestPath $manifestPath `

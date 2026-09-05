@@ -290,6 +290,16 @@ impl ExactScoringExecutionGraph {
         &self.edges[start..start + node.edge_count as usize]
     }
 
+    /// Returns the node's edge slice without trusting serialized graph
+    /// offsets. Product materializers use this checked seam so malformed or
+    /// stale graph evidence fails closed instead of panicking while claiming
+    /// a complete replay family.
+    pub fn checked_edges(&self, node: ScoringExecutionNode) -> Option<&[ScoringExecutionEdge]> {
+        let start = node.edge_start as usize;
+        let end = start.checked_add(node.edge_count as usize)?;
+        self.edges.get(start..end)
+    }
+
     /// Heap storage retained by this graph, excluding the inline graph value.
     pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
         (self.nodes.capacity() as u128)

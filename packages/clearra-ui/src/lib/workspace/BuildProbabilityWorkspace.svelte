@@ -3,6 +3,12 @@
   import { getContext, onDestroy, onMount, tick } from 'svelte';
 
   import {
+    loadNextProductPage as loadNextDesktopProductPage,
+    loadProductMemberPage as loadDesktopProductMemberPage,
+    releaseProductPages as releaseDesktopProductPages
+  } from '../host';
+
+  import {
     cancelDesktopJob,
     clearDesktopTerminalResult,
     desktopJobState,
@@ -59,6 +65,7 @@
   let resultExistingMask = request.existingMask;
   let resultTargetMask = request.targetMask;
   let resultAggregation = request.aggregation;
+  let resultMode = request.resultMode;
   let continuationApplied = false;
   let workspaceShell: { scrollWorkspaceIntoView: () => void } | null = null;
 
@@ -156,6 +163,7 @@
     resultExistingMask = executionRequest.existingMask;
     resultTargetMask = executionRequest.targetMask;
     resultAggregation = executionRequest.aggregation;
+    resultMode = executionRequest.resultMode;
     if (runtime === 'web') {
       updateWasmCommandText(buildProbabilityCommand(executionRequest));
       if (workerController.run()) startElapsedTimer();
@@ -278,9 +286,21 @@
     existingMask={resultExistingMask}
     targetMask={resultTargetMask}
     aggregation={resultAggregation}
+    {resultMode}
     loadSolutionPage={runtime === 'web'
       ? (offset, limit, signal) => workerController.loadSolutionPage(offset, limit, signal)
       : null}
+    loadNextProductPage={runtime === 'web'
+      ? (signal) => workerController.loadNextProductPage(signal)
+      : (signal) => loadNextDesktopProductPage(10_000, signal)}
+    loadProductMemberPage={runtime === 'web'
+      ? (outerPageNumber, memberPageNumber, signal) =>
+          workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal)
+      : (outerPageNumber, memberPageNumber, signal) =>
+          loadDesktopProductMemberPage(outerPageNumber, memberPageNumber, signal)}
+    releaseProductPages={runtime === 'web'
+      ? () => workerController.releaseProductPages()
+      : () => releaseDesktopProductPages()}
     on:continue={(event) => continueFromCompletedBuild(event.detail.existingMask, event.detail.height)}
   />
 </WorkspaceShell>

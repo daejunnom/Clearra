@@ -3,6 +3,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+_Static_assert(CLR_RULE_MAX_KICK_OFFSETS == 12u,
+               "public kick-sequence capacity must preserve SRS-X");
+_Static_assert(CLEARRA_RULE_MAX_KICK_OFFSETS == CLR_RULE_MAX_KICK_OFFSETS,
+               "public and compact kick-sequence capacities must agree");
+_Static_assert(sizeof(clr_kick_offset_descriptor) == 2u,
+               "public kick-offset ABI layout changed");
+_Static_assert(sizeof(clr_kick_sequence_descriptor) == 28u,
+               "public kick-sequence ABI layout changed");
+_Static_assert(sizeof(clr_kick_transition_descriptor) == 32u,
+               "public kick-transition ABI layout changed");
+_Static_assert(sizeof(clr_rule_profile_descriptor) == 2712u,
+               "public rule-profile ABI layout changed");
+
 #define EXPECT_STATUS(EXPR, EXPECTED)                                                   \
     do {                                                                                \
         ClearraRuleStatus actual_status = (EXPR);                                       \
@@ -166,7 +179,48 @@ static clr_rule_profile_descriptor descriptor(uint32_t rule, uint32_t kick) {
         CLEARRA_RULE_OK);
     EXPECT_U16(sequence->count, 2);
     EXPECT_I8(sequence->offsets[1].dx, -1);
-}static void srs_plus_capability_reported_fixture(void) {
+}
+
+static void verified_srs_x_max_sequence_round_trips_fixture(void) {
+    ClearraCompactRuleProfile profile;
+    const ClearraCompactKickSequence *sequence = 0;
+    clr_rule_profile_descriptor srs_x =
+        descriptor(CLR_RULE_SRS_X, CLR_KICK_SRS_X);
+    srs_x.has_verified_kick_profile = 1;
+    srs_x.verified_supports_180 = 1;
+    srs_x.verified_transition_count = 1;
+    srs_x.verified_transitions[0].piece = CLR_PIECE_T;
+    srs_x.verified_transitions[0].from_rotation =
+        CLEARRA_RULE_ROTATION_SPAWN;
+    srs_x.verified_transitions[0].to_rotation =
+        CLEARRA_RULE_ROTATION_REVERSE;
+    srs_x.verified_transitions[0].sequence.count =
+        CLR_RULE_MAX_KICK_OFFSETS;
+    for (uint8_t index = 0; index < CLR_RULE_MAX_KICK_OFFSETS; ++index) {
+        srs_x.verified_transitions[0].sequence.offsets[index].dx =
+            (int8_t)index;
+        srs_x.verified_transitions[0].sequence.offsets[index].dy =
+            (int8_t)(-((int8_t)index));
+    }
+
+    EXPECT_STATUS(clearra_rule_profile_from_descriptor(&srs_x, &profile),
+                  CLEARRA_RULE_OK);
+    EXPECT_STATUS(
+        clearra_kick_table_sequence_for(
+            &profile.kick_table,
+            CLR_PIECE_T,
+            CLEARRA_RULE_ROTATION_SPAWN,
+            CLEARRA_RULE_ROTATION_REVERSE,
+            &sequence),
+        CLEARRA_RULE_OK);
+    EXPECT_U16(sequence->count, 12);
+    for (uint8_t index = 0; index < CLR_RULE_MAX_KICK_OFFSETS; ++index) {
+        EXPECT_I8(sequence->offsets[index].dx, (int8_t)index);
+        EXPECT_I8(sequence->offsets[index].dy, (int8_t)(-((int8_t)index)));
+    }
+}
+
+static void srs_plus_capability_reported_fixture(void) {
     ClearraCompactRuleProfile profile;
     const ClearraCompactKickSequence *sequence = 0;
     const ClearraCompactKickSequence *mirrored_sequence = 0;
@@ -325,6 +379,7 @@ int main(void) {
     no_kick_has_zero_offset_only_fixture();
     unsupported_rule_returns_status_fixture();
     imported_verified_kick_profile_compiles_to_compact_descriptor_fixture();
+    verified_srs_x_max_sequence_round_trips_fixture();
     srs_plus_capability_reported_fixture();
     jstris_180_profile_matches_two_kick_reference_fixture();
     return 0;

@@ -283,13 +283,15 @@ fn install_requested_tablebase(
 fn product_app_context() -> AppContext {
     #[cfg(feature = "wasm-cpu-runtime")]
     {
-        return AppContext::new(
+        AppContext::new(
             AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
-        );
+        )
     }
 
     #[cfg(not(feature = "wasm-cpu-runtime"))]
-    AppContext::default()
+    {
+        AppContext::default()
+    }
 }
 
 #[cfg(all(test, feature = "wasm-cpu-runtime"))]
@@ -399,6 +401,7 @@ mod tests {
                     .as_str()
                     .and_then(|value| value.parse::<usize>().ok())
                     .expect("normalized solution field count");
+                let materialized_count_decimal = materialized_count.to_string();
                 let rows = value["summary"]["score_solution_fields"]
                     .as_array()
                     .expect("ordinary pc.score field rows");
@@ -407,7 +410,8 @@ mod tests {
                     row["normalized_field_key"].is_string()
                         && row["average_score"].is_string()
                         && row["covered_pattern_count"].is_string()
-                        && row["pattern_count"] == materialized_count.to_string()
+                        && row["pattern_count"].as_str()
+                            == Some(materialized_count_decimal.as_str())
                         && row["score_complete"] == true
                         && row.get("input_pattern").is_none()
                         && row.get("candidate_id").is_none()

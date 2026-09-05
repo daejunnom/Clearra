@@ -181,7 +181,8 @@ function loadProductPage(
         ? loadedWasm.product_page_next(request.maximumWorkSteps ?? 10_000)
         : loadedWasm.product_page_get(
             request.alternativeIndex ?? '',
-            request.memberPageNumber ?? ''
+            request.memberPageNumber ?? '',
+            request.maximumWorkSteps ?? 10_000
           );
     self.postMessage({
       type: 'product_page',
@@ -404,7 +405,9 @@ function interruptIncompleteRuntimePrewarm() {
   runtimePrewarmGeneration += 1;
   runtimePrewarm = null;
   completedPrewarmWorkerCount = 0;
-  disposeDistributedWorkers();
+  // Keep already-ready clients and their in-flight prewarm promises. The
+  // foreground pool initialization can reuse each client independently and
+  // schedule its first batch without joining the slowest speculative worker.
 }
 
 function setTablebaseRequested(requested: boolean) {
