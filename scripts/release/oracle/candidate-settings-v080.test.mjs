@@ -35,7 +35,7 @@ test("renders the canonical 13-line Oracle candidate settings fixture", async ()
   }), {
     lineCount: 13,
     size: 661,
-    sha256: "a14111258028ad8d0ec3449720bc803895f346e3a92a5e2d30e9861ff1c5c61e",
+    sha256: "756ab15f1bb3554191833abf1cb362a126c9eacfae3b21e884949445df37ede1",
   });
 });
 

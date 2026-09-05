@@ -175,6 +175,23 @@ export function buildWorkspaceProgressModel(
   return summarize(stages);
 }
 
+export function workspaceActiveWorkerCount(
+  telemetry: ClearraSearchProgressTelemetry | null,
+  status: WorkspaceRuntimeStatus
+): number | null {
+  if (
+    !telemetry ||
+    !telemetry.availability.active_workers ||
+    !telemetry.exactness.active_workers
+  ) {
+    return null;
+  }
+  if (status !== 'running' && status !== 'cancelling') return 0;
+  return Number.isSafeInteger(telemetry.active_workers) && telemetry.active_workers >= 0
+    ? telemetry.active_workers
+    : null;
+}
+
 function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspaceProgressInput) {
   const telemetry = input.telemetry;
   if (!telemetry) {
@@ -287,11 +304,12 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
       'progressMetricChecks',
       telemetryCount(telemetry, 'coverage_checks', telemetry.coverage_checks)
     );
-    if (telemetry.worker_count > 0) {
+    const activeWorkers = workspaceActiveWorkerCount(telemetry, input.status);
+    if (activeWorkers !== null && telemetry.worker_count > 0) {
       addMetric(
         verify,
         'progressMetricWorkers',
-        telemetry.active_workers,
+        activeWorkers,
         telemetry.worker_count
       );
     }
@@ -461,11 +479,12 @@ function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
         telemetry.geometry_family_count
       )
     );
-    if (telemetry.worker_count > 0) {
+    const activeWorkers = workspaceActiveWorkerCount(telemetry, input.status);
+    if (activeWorkers !== null && telemetry.worker_count > 0) {
       addMetric(
         tasks,
         'progressMetricWorkers',
-        telemetry.active_workers,
+        activeWorkers,
         telemetry.worker_count
       );
     }
@@ -595,11 +614,12 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
         'progressMetricStates',
         telemetryCount(telemetry, 'geometry_nodes', telemetry.geometry_nodes)
       );
-      if (telemetry.worker_count > 0) {
+      const activeWorkers = workspaceActiveWorkerCount(telemetry, input.status);
+      if (activeWorkers !== null && telemetry.worker_count > 0) {
         addMetric(
           forward,
           'progressMetricWorkers',
-          telemetry.active_workers,
+          activeWorkers,
           telemetry.worker_count
         );
       }

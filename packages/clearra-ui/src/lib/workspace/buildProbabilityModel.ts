@@ -219,6 +219,7 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
   const existing = trimBuildProbabilityMask(request.existingMask, request.height);
   const target = trimBuildProbabilityMask(request.targetMask, request.height);
   const parsedQueue = parseBrowserQueueInput(request.queue);
+  const targetPieceCount = buildTargetPieceCount(request);
   const tokens = request.resultMode === 'minimum-solutions'
     ? [
         'clearra',
@@ -246,10 +247,25 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
   if (request.sourcePieces != null) {
     tokens.push('--source-pieces', String(request.sourcePieces));
   }
-  if (request.queue) {
+  if (parsedQueue) {
     tokens.push(
-      parsedQueue?.kind === 'pattern' ? '--patterns' : '--queue',
-      parsedQueue?.source ?? request.queue
+      parsedQueue.kind === 'pattern' ? '--patterns' : '--queue',
+      parsedQueue.source
+    );
+  } else if (request.resultMode === 'minimum-solutions') {
+    // Build probability deliberately treats an empty source as the standard
+    // 7-bag. `build cover` keeps its stricter explicit-source CLI contract, so
+    // the GUI adapter must spell out the finite draw window needed by this
+    // target instead of silently emitting an unparseable command.
+    const automaticSourcePieces = Math.max(
+      1,
+      (targetPieceCount ?? 1) + Number(request.holdEnabled)
+    );
+    tokens.push(
+      '--patterns',
+      finiteStandardBagPattern(
+        Math.min(request.sourcePieces ?? automaticSourcePieces, automaticSourcePieces)
+      )
     );
   }
   if (request.resultMode === 'minimum-solutions') {
@@ -270,12 +286,13 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
         : '--no-build-dependency-dag'
     );
   }
-  if (request.resultMode === 'complete-replay-paths') {
-    tokens.push('--result-mode', 'complete-replay-paths');
-  } else if (request.resultMode === 'field-average-score') {
+  if (request.resultMode !== 'minimum-solutions') {
+    // Transmit the selected product explicitly, including All Solutions. This
+    // keeps the GUI -> CLI boundary independent from the parser's default.
+    tokens.push('--result-mode', request.resultMode);
+  }
+  if (request.resultMode === 'field-average-score') {
     tokens.push(
-      '--result-mode',
-      'field-average-score',
       '--score-profile',
       request.scoreProfile,
       '--initial-b2b',
@@ -283,8 +300,6 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
     );
   } else if (request.resultMode === 'fixed-queue-maximum-score') {
     tokens.push(
-      '--result-mode',
-      'fixed-queue-maximum-score',
       '--score-profile',
       request.scoreProfile,
       '--initial-b2b',
@@ -292,8 +307,6 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
     );
   } else if (request.resultMode === 'highest-score-minimum-set') {
     tokens.push(
-      '--result-mode',
-      'highest-score-minimum-set',
       '--score-profile',
       request.scoreProfile,
       '--initial-b2b',
@@ -301,8 +314,6 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
     );
   } else if (request.resultMode === 'failed-queues') {
     tokens.push(
-      '--result-mode',
-      'failed-queues',
       '--failed-count',
       String(request.failedPatternLimit)
     );
@@ -315,6 +326,13 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
   tokens.push(...searchExecutionCommandArguments(buildProbabilitySearchExecution(request)));
   tokens.push(...buildProbabilityFinesseCommandArguments(request.finesse, request.patternKnowledge));
   return tokens;
+}
+
+function finiteStandardBagPattern(drawCount: number): string {
+  const bounded = Number.isFinite(drawCount) ? Math.max(1, Math.trunc(drawCount)) : 1;
+  const completeBags = Math.floor(bounded / 7);
+  const remainder = bounded % 7;
+  return `${'P7'.repeat(completeBags)}${remainder > 0 ? `P${remainder}` : ''}`;
 }
 
 export function buildProbabilityCommand(request: BuildProbabilityRequest): string {

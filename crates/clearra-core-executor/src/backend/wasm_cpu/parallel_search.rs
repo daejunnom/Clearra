@@ -37,9 +37,6 @@ pub(super) enum ParallelSearchDecision {
     Completed(ParallelSearchOutcome),
 }
 
-const MIN_ESTIMATED_PARALLEL_STATES: usize = 4_096;
-const MIN_CANDIDATE_FAMILIES_PER_WORKER: usize = 8;
-
 pub(super) struct ParallelSearchOutcome {
     pub geometry: GeometrySearch,
     pub covered_patterns: PatternBitSet,
@@ -84,19 +81,8 @@ pub(super) fn execute_if_worthwhile(
     requested_workers: usize,
     cpu_warmup_requested: bool,
 ) -> Result<ParallelSearchDecision, WasmExactSearchError> {
-    let target_piece_count = catalog.required_cells().count_ones() as usize / 4;
-    let supply_target_count = geometry.parallel_target_count();
-    let estimated_states = supply_target_count.saturating_mul(
-        catalog.skeleton_count().saturating_mul(
-            1usize
-                .checked_shl(target_piece_count.min(usize::BITS as usize - 1) as u32)
-                .unwrap_or(usize::MAX),
-        ),
-    );
     let serial_reason = if requested_workers <= 1 {
         Some("single-worker-request")
-    } else if estimated_states < MIN_ESTIMATED_PARALLEL_STATES {
-        Some("small-estimated-state-space")
     } else if has_explicit_resource_cap(&problem) {
         Some("explicit-resource-cap-requires-serial-accounting")
     } else {
@@ -111,7 +97,7 @@ pub(super) fn execute_if_worthwhile(
     let balanced_workers = geometry
         .candidate_family_count()
         .map_or(requested_workers, |count| {
-            balanced_parallel_worker_count(count, requested_workers)
+            parallel_worker_count_for_candidates(count, requested_workers)
         });
     if balanced_workers < 2 {
         return Ok(ParallelSearchDecision::Serial {
@@ -139,21 +125,22 @@ pub(super) fn execute_if_worthwhile(
     .map(ParallelSearchDecision::Completed)
 }
 
-fn balanced_parallel_worker_count(candidate_count: u128, requested_workers: usize) -> usize {
+fn parallel_worker_count_for_candidates(candidate_count: u128, requested_workers: usize) -> usize {
     let candidate_count = candidate_count.min(usize::MAX as u128) as usize;
-    requested_workers.min(candidate_count / MIN_CANDIDATE_FAMILIES_PER_WORKER)
+    requested_workers.min(candidate_count)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::balanced_parallel_worker_count;
+    use super::parallel_worker_count_for_candidates;
 
     #[test]
-    fn candidate_balance_clamps_worker_width_instead_of_serializing_partial_capacity() {
-        assert_eq!(balanced_parallel_worker_count(40, 7), 5);
-        assert_eq!(balanced_parallel_worker_count(16, 7), 2);
-        assert_eq!(balanced_parallel_worker_count(15, 7), 1);
-        assert_eq!(balanced_parallel_worker_count(u128::MAX, 7), 7);
+    fn actual_candidate_work_clamps_only_workers_that_cannot_receive_a_branch() {
+        assert_eq!(parallel_worker_count_for_candidates(40, 7), 7);
+        assert_eq!(parallel_worker_count_for_candidates(16, 7), 7);
+        assert_eq!(parallel_worker_count_for_candidates(2, 7), 2);
+        assert_eq!(parallel_worker_count_for_candidates(1, 7), 1);
+        assert_eq!(parallel_worker_count_for_candidates(u128::MAX, 7), 7);
     }
 }
 

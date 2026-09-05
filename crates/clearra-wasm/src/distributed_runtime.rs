@@ -1592,6 +1592,14 @@ impl DistributedCandidateProducer {
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.progress().candidate_family_count,
         }?;
+        // Before the streaming Geometry producer has completed compilation,
+        // zero is a progress value rather than proof that the exact family is
+        // empty. Do not collapse a requested pool to serial on that provisional
+        // value; the producer will expose real batches (or a completed empty
+        // result) under the same coordinator.
+        if candidate_family_count == 0 {
+            return None;
+        }
         let verifier_capacity = usize::try_from(candidate_family_count).unwrap_or(usize::MAX);
         Some(verifier_capacity.saturating_add(1))
     }

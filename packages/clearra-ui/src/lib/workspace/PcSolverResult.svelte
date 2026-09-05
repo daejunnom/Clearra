@@ -29,6 +29,7 @@
     workspaceProbability,
     type WorkspaceLanguage
   } from './workspaceI18n';
+  import { workspaceActiveWorkerCount } from './workspaceProgressModel';
 
   export let view: WorkspaceRuntimeView;
   export let language: WorkspaceLanguage;
@@ -106,6 +107,7 @@
   $: progressPercent = view.progressTotal > 0
     ? Math.max(0, Math.min(100, (view.progressDone / view.progressTotal) * 100))
     : 0;
+  $: activeWorkerCount = workspaceActiveWorkerCount(view.progressTelemetry, view.status);
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
@@ -132,7 +134,12 @@
         {/if}
         <strong>{label(view.status)}</strong>
       </div>
-      <span>{(elapsedMs / 1000).toFixed(1)}s</span>
+      <div class="runtime-metrics">
+        <span>{(elapsedMs / 1000).toFixed(1)}s</span>
+        {#if activeWorkerCount !== null}
+          <span>{label('activeWorkers')} <strong>{number(activeWorkerCount)}</strong></span>
+        {/if}
+      </div>
     </header>
 
     {#if view.status === 'running' || view.status === 'validating' || view.status === 'cancelling'}
@@ -203,10 +210,12 @@
 
 <style>
   .solver-result { border-top: 1px solid #d9dfdb; margin: 0 auto; max-width: 1180px; padding: 22px 0 40px; }
-  header, .status, .result-summary, .result-summary > div { align-items: center; display: flex; }
+  header, .status, .runtime-metrics, .result-summary, .result-summary > div { align-items: center; display: flex; }
   header { color: #68736f; font-size: 12px; justify-content: space-between; }
   .status { color: #08766d; gap: 8px; }
   .status strong { color: #17211e; font-size: 16px; }
+  .runtime-metrics { gap: 20px; }
+  .runtime-metrics strong { color: #26322e; margin-left: 5px; }
   .spinner { animation: spin 900ms linear infinite; display: inline-flex; }
   .progress { background: #e5ebe7; height: 3px; margin-top: 14px; overflow: hidden; position: relative; }
   .progress i { background: #16877d; display: block; height: 100%; transition: width 120ms linear; }

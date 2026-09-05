@@ -334,8 +334,11 @@ impl WasmCpuSearchBackend {
             return false;
         }
         let required_piece_count = required_piece_count(problem);
-        estimated_pre_geometry_parallel_work(problem, required_piece_count)
-            >= MIN_PRE_GEOMETRY_PARALLEL_STATES
+        // Preparation is intentionally permissive. The compiled Geometry
+        // family and `into_parallel_plan` are the authorities for whether two
+        // distinct branches really exist; this pre-gate only rejects a request
+        // that cannot describe more than one unit of potential work.
+        estimated_pre_geometry_parallel_work(problem, required_piece_count) > 1
     }
 
     pub fn execute_with_control(
@@ -554,13 +557,6 @@ fn required_piece_count(problem: &SearchProblem) -> usize {
         board_cells.saturating_sub(problem.initial_board().occupied_mask().count_ones() as usize);
     required_cells / 4
 }
-
-/// This deliberately permissive pre-Geometry threshold lets fixed four-piece
-/// and larger searches reach the catalog-aware gate without making a tiny
-/// one-piece standard-bag search (7 × 2) pay worker startup. The prepared
-/// native search applies a stricter catalog estimate, actual candidate-family
-/// balance, and splittability checks before spawning.
-const MIN_PRE_GEOMETRY_PARALLEL_STATES: usize = 16;
 
 fn estimated_pre_geometry_parallel_work(
     problem: &SearchProblem,

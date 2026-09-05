@@ -1339,14 +1339,6 @@ impl FamilyCompiler {
             .map(|index| &self.targets[index])
     }
 
-    #[cfg(feature = "parallel")]
-    fn is_unstarted(&self) -> bool {
-        self.expanded_nodes == 0
-            && self.stack.len() == 1
-            && !self.stack[0].entered
-            && self.root_family == FAMILY_INVALID
-    }
-
     fn retained_bytes(&self) -> usize {
         target_bytes(&self.targets)
             + self.admissible_prefixes.capacity() * core::mem::size_of::<u32>()
@@ -3245,16 +3237,6 @@ impl GeometrySearch {
             searches,
             group_pattern_index_bytes: self.group_pattern_index_bytes,
             shared_family_bytes,
-        })
-    }
-
-    #[cfg(feature = "parallel")]
-    pub fn parallel_target_count(&self) -> usize {
-        if let Some(preparation) = self.target_preparation.as_ref() {
-            return preparation.targets.len();
-        }
-        self.compiler.as_ref().map_or(0, |compiler| {
-            usize::from(compiler.is_unstarted()) * compiler.targets.len()
         })
     }
 

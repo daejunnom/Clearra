@@ -28,7 +28,8 @@ import {
 // single host quantum; the loop below still yields after this wall-time budget
 // for cancellation, timers, and verifier messages.
 const PRODUCER_WORK_BUDGET = 2_048;
-const CANDIDATE_BATCH_SIZE = 256;
+const MAX_CANDIDATE_BATCH_SIZE = 256;
+const TARGET_BATCHES_PER_VERIFIER = 4;
 const HOST_YIELD_BUDGET_MS = 8;
 const PROGRESS_REFRESH_MS = 50;
 const SHARED_RESOURCE_WAIT_TIMEOUT_MS = 5_000;
@@ -236,7 +237,7 @@ export class DistributedWasmJobRunner {
       exactness: emptyVerifierProgressFlags(),
       readyWorkers: 0,
       activeWorkers: 0,
-      workerCount: verifierCount,
+      workerCount: 0,
       oldestBatchMs: 0
     };
     const emitProgress = () => {
@@ -248,6 +249,10 @@ export class DistributedWasmJobRunner {
         if (snapshot.workerCount > 0) lastVerifierProgress = snapshot;
         verifier = snapshot.workerCount > 0 ? snapshot : lastVerifierProgress;
       }
+      const coordinatorActive = distributedCoordinatorIsActive(
+        progressPhase,
+        producerComplete
+      );
       onEvent(
         progressEvent(
           this.jobId,
@@ -271,9 +276,9 @@ export class DistributedWasmJobRunner {
             producer_coverage_checks: producer.coverageChecks,
             build_nodes: verifier.buildNodes,
             coverage_checks: verifier.coverageChecks,
-            ready_workers: verifier.readyWorkers,
-            active_workers: verifier.activeWorkers,
-            worker_count: verifier.workerCount,
+            ready_workers: verifier.readyWorkers + 1,
+            active_workers: verifier.activeWorkers + coordinatorActive,
+            worker_count: verifier.workerCount + 1,
             oldest_batch_ms: Math.floor(verifier.oldestBatchMs),
             pass_index: producer.passIndex,
             pass_count: producer.passCount,
@@ -316,9 +321,13 @@ export class DistributedWasmJobRunner {
       emitProgress();
 
       while (!this.cancelled) {
+        const candidateBatchSize = distributedCandidateBatchSize(
+          this.wasm.distributed_progress().candidateFamilyCount,
+          effectiveVerifierCount
+        );
         const produced = this.wasm.distributed_produce(
           PRODUCER_WORK_BUDGET,
-          CANDIDATE_BATCH_SIZE
+          candidateBatchSize
         );
         if (produced.status === 'initialization') {
           if (!plan.verificationRequired) {
@@ -534,6 +543,37 @@ function telemetryFlags(
     layer_done: producerFlags.layerDone,
     layer_total: producerFlags.layerTotal
   };
+}
+
+function distributedCoordinatorIsActive(
+  phase: ClearraSearchProgressTelemetry['phase'],
+  producerComplete: boolean
+): number {
+  if (phase === 'initializing') return 1;
+  if (phase === 'searching' && !producerComplete) return 1;
+  if (phase === 'merging') return 1;
+  return 0;
+}
+
+function distributedCandidateBatchSize(
+  candidateFamilyCount: string | null,
+  verifierCount: number
+): number {
+  if (verifierCount <= 1) return MAX_CANDIDATE_BATCH_SIZE;
+  if (candidateFamilyCount === null) return 1;
+  try {
+    const candidates = BigInt(candidateFamilyCount);
+    if (candidates <= 0n) return 1;
+    const targetBatches = BigInt(verifierCount * TARGET_BATCHES_PER_VERIFIER);
+    const balanced = (candidates + targetBatches - 1n) / targetBatches;
+    return Number(
+      balanced > BigInt(MAX_CANDIDATE_BATCH_SIZE)
+        ? BigInt(MAX_CANDIDATE_BATCH_SIZE)
+        : balanced
+    );
+  } catch {
+    return 1;
+  }
 }
 
 function withSearchProfile(

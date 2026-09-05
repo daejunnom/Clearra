@@ -93,7 +93,7 @@ fn execute_five_piece_unique(
 }
 
 #[test]
-fn one_piece_low_work_remains_serial_after_piece_count_gate_removal() {
+fn one_piece_request_reaches_actual_family_gate_and_remains_serial_when_unsplittable() {
     let _resource_guard = parallel_exact_test_guard();
     use clearra_core_domain::piece::piece_kind::PieceKind;
     use clearra_supply::queue::fixed_sequence::FixedSequence;
@@ -114,7 +114,7 @@ fn one_piece_low_work_remains_serial_after_piece_count_gate_removal() {
     .with_count_policy(PcCountPolicy::CountAll)
     .with_execution_policy(policy);
     let problem = ProblemCompiler::compile_scenario_pc(&query).expect("one-piece exact problem");
-    assert!(!WasmCpuSearchBackend::distributed_execution_is_worthwhile(
+    assert!(WasmCpuSearchBackend::distributed_execution_is_worthwhile(
         &problem
     ));
     let result = WasmCpuSearchBackend::execute_with_control(
@@ -125,7 +125,7 @@ fn one_piece_low_work_remains_serial_after_piece_count_gate_removal() {
     assert_eq!(result.usize_field("workers_used"), Some(1));
     assert_eq!(
         result.field("cpu_parallel_decision_reason"),
-        Some("small-estimated-state-space")
+        Some("small-compiled-candidate-family")
     );
 }
 

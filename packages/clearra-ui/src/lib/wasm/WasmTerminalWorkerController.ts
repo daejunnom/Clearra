@@ -394,23 +394,23 @@ export class WasmTerminalWorkerController {
       signal?.addEventListener('abort', onAbort, { once: true });
       if (this.productPageStallTimeoutMs > 0) {
         stallTimer = setTimeout(() => {
-        const pending = this.productPageRequests.get(requestId);
-        if (
-          !pending ||
-          pending.generation !== generation ||
-          this.productPageGeneration !== generation ||
-          this.worker !== worker
-        ) {
-          return;
-        }
-        this.productPageRequests.delete(requestId);
-        pending.reject(
-          new Error(
-            `Product page work did not return within ${this.productPageStallTimeoutMs} ms.`
-          )
-        );
-        this.releaseWorker(worker, 'worker-failure');
-      }, this.productPageStallTimeoutMs);
+          const pending = this.productPageRequests.get(requestId);
+          if (
+            !pending ||
+            pending.generation !== generation ||
+            this.productPageGeneration !== generation ||
+            this.worker !== worker
+          ) {
+            return;
+          }
+          this.productPageRequests.delete(requestId);
+          pending.reject(
+            new Error(
+              `Product page work did not return within ${this.productPageStallTimeoutMs} ms.`
+            )
+          );
+          this.releaseWorker(worker, 'worker-failure');
+        }, this.productPageStallTimeoutMs);
         const nodeTimer = stallTimer as unknown as { unref?: () => void };
         nodeTimer.unref?.();
       }

@@ -4,10 +4,11 @@
   import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
   import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import WorkspaceProgressStatus from './WorkspaceProgressStatus.svelte';
-  import type { WorkspaceLanguage } from './workspaceI18n';
-  import type {
-    WorkspaceProgressMode,
-    WorkspaceProgressProfile
+  import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
+  import {
+    workspaceActiveWorkerCount,
+    type WorkspaceProgressMode,
+    type WorkspaceProgressProfile
   } from './workspaceProgressModel';
   import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
   import type { WorkspacePublicFailure } from './workspacePublicFailure';
@@ -44,6 +45,7 @@
   ) {
     displayedTelemetry = progressTelemetry;
   }
+  $: activeWorkerCount = workspaceActiveWorkerCount(displayedTelemetry, status);
 </script>
 
 <section class="result-workspace" aria-label={ariaLabel}>
@@ -64,6 +66,9 @@
       </div>
       <div class="heading-metrics">
         <span>{elapsedLabel} <strong>{elapsedText}</strong></span>
+        {#if activeWorkerCount !== null}
+          <span>{workspaceMessage(language, 'activeWorkers')} <strong>{activeWorkerCount}</strong></span>
+        {/if}
       </div>
     </div>
 

@@ -41,7 +41,6 @@ fn assert_serial_and_partitioned_geometry_match(problem: SearchProblem, workers:
     serial
         .compile_for_parallel(&catalog, &control)
         .expect("serial family compile");
-    assert_eq!(serial.parallel_target_count(), 0);
     let serial_count = serial
         .candidate_family_count()
         .expect("P7P3 family path count");

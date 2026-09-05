@@ -20,6 +20,7 @@ const bundle = await build({
         from './src/lib/workspace/buildProbabilityAggregation.ts';
       export {
         buildProbabilityCommandArguments,
+        buildProbabilityRequestForDesktop,
         buildProbabilityValidationCodes,
         createDefaultBuildProbabilityRequest
       }
@@ -159,6 +160,12 @@ test('Build result modes lower to CLI-owned products without changing engine agg
     preserveB2B: true,
     finesse: 'inputs'
   };
+  const all = production.buildProbabilityCommandArguments({
+    ...base,
+    resultMode: 'all-solutions'
+  });
+  assert.equal(all[all.indexOf('--result-mode') + 1], 'all-solutions');
+
   const path = production.buildProbabilityCommandArguments({
     ...base,
     resultMode: 'complete-replay-paths'
@@ -187,6 +194,36 @@ test('Build result modes lower to CLI-owned products without changing engine agg
   assert.equal(minimum.includes('--aggregate'), false);
   assert.equal(minimum.includes('--result-mode'), false);
 
+  const minimumWithImplicitStandardBag = production.buildProbabilityCommandArguments({
+    ...base,
+    queue: '   ',
+    resultMode: 'minimum-solutions'
+  });
+  assert.equal(
+    minimumWithImplicitStandardBag[minimumWithImplicitStandardBag.indexOf('--patterns') + 1],
+    'P2'
+  );
+  assert.equal(minimumWithImplicitStandardBag.includes('--queue'), false);
+
+  const minimumWithExplicitSourceWindow = production.buildProbabilityCommandArguments({
+    ...base,
+    queue: '',
+    sourcePieces: 0xffff_ffff,
+    resultMode: 'minimum-solutions'
+  });
+  assert.equal(
+    minimumWithExplicitSourceWindow[minimumWithExplicitSourceWindow.indexOf('--patterns') + 1],
+    'P2'
+  );
+
+  const tenPieceMinimum = production.buildProbabilityCommandArguments({
+    ...base,
+    targetMask: (1n << 40n) - 1n,
+    queue: '',
+    resultMode: 'minimum-solutions'
+  });
+  assert.equal(tenPieceMinimum[tenPieceMinimum.indexOf('--patterns') + 1], 'P7P4');
+
   const fixed = production.buildProbabilityCommandArguments({
     ...base,
     queue: 'IOT',
@@ -214,9 +251,23 @@ test('Build result modes lower to CLI-owned products without changing engine agg
   assert.equal(failed[failed.indexOf('--result-mode') + 1], 'failed-queues');
   assert.equal(failed[failed.indexOf('--failed-count') + 1], '37');
 
-  for (const arguments_ of [path, score, minimum, fixed, scoreMinimum, failed]) {
+  for (const arguments_ of [all, path, score, minimum, fixed, scoreMinimum, failed]) {
     assert.equal(arguments_.includes('--cpu-warmup'), false);
   }
+  assert.deepEqual(
+    production.buildProbabilityRequestForDesktop(
+      { ...base, resultMode: 'all-solutions' },
+      'en'
+    ).arguments,
+    all
+  );
+  assert.deepEqual(
+    production.buildProbabilityRequestForDesktop(
+      { ...base, resultMode: 'minimum-solutions' },
+      'ko'
+    ).arguments,
+    minimum
+  );
 });
 
 test('Build compatibility matrix validates only active result inputs', () => {

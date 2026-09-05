@@ -287,73 +287,79 @@ class VerifierClient {
     hostCapabilities?: ClearraWasmHostCapabilities
   ): Promise<void> {
     this.initialized = false;
-    await this.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities);
-    this.worker ??= this.createWorker();
-    const worker = this.worker;
-    this.candidatesVerified = 0;
-    this.candidatesVerifiedAvailable = true;
-    this.candidatesVerifiedExact = true;
-    this.progress = emptyVerifierProgress();
-    this.batchStartedAt = null;
-    const workerInitialization =
-      typeof initialization === 'string' ? initialization : initialization.slice(0);
-    const delegation = await this.publishExecutableDelegation(
-      'initialize',
-      workerInitialization,
-      byteLength(workerInitialization)
-    );
-    this.rootRequestSha256 = delegation.permit.payloadSha256;
-    this.initializationDelegation = delegation;
-    this.ready = new Promise<void>((resolve, reject) => {
-      const rejectAndCleanup = (error: Error) => {
-        cleanup();
-        void this.failDelegation(delegation, error.message);
-        reject(error);
-      };
-      const cleanup = () => {
-        worker.removeEventListener('message', onMessage);
-        worker.removeEventListener('error', onError);
-        if (this.readyReject === rejectAndCleanup) this.readyReject = null;
-      };
-      const onMessage = (event: MessageEvent<VerifierResponse>) => {
-        if (event.data.type === 'ready') {
-          void this.completeDelegation(delegation)
-            .then(() => {
-              if (this.initializationDelegation === delegation) {
-                this.initializationDelegation = null;
-              }
-              cleanup();
-              resolve();
-            })
-            .catch((error) => rejectAndCleanup(asError(error)));
-        } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
-          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+    this.busy = true;
+    this.batchStartedAt = performance.now();
+    try {
+      await this.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities);
+      this.worker ??= this.createWorker();
+      const worker = this.worker;
+      this.candidatesVerified = 0;
+      this.candidatesVerifiedAvailable = true;
+      this.candidatesVerifiedExact = true;
+      this.progress = emptyVerifierProgress();
+      const workerInitialization =
+        typeof initialization === 'string' ? initialization : initialization.slice(0);
+      const delegation = await this.publishExecutableDelegation(
+        'initialize',
+        workerInitialization,
+        byteLength(workerInitialization)
+      );
+      this.rootRequestSha256 = delegation.permit.payloadSha256;
+      this.initializationDelegation = delegation;
+      this.ready = new Promise<void>((resolve, reject) => {
+        const rejectAndCleanup = (error: Error) => {
+          cleanup();
+          void this.failDelegation(delegation, error.message);
+          reject(error);
+        };
+        const cleanup = () => {
+          worker.removeEventListener('message', onMessage);
+          worker.removeEventListener('error', onError);
+          if (this.readyReject === rejectAndCleanup) this.readyReject = null;
+        };
+        const onMessage = (event: MessageEvent<VerifierResponse>) => {
+          if (event.data.type === 'ready') {
+            void this.completeDelegation(delegation)
+              .then(() => {
+                if (this.initializationDelegation === delegation) {
+                  this.initializationDelegation = null;
+                }
+                cleanup();
+                resolve();
+              })
+              .catch((error) => rejectAndCleanup(asError(error)));
+          } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
+            rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+          }
+        };
+        const onError = (event: ErrorEvent) => {
+          rejectAndCleanup(new Error(event.message || 'distributed verifier initialization failed'));
+        };
+        this.readyReject = rejectAndCleanup;
+        worker.addEventListener('message', onMessage);
+        worker.addEventListener('error', onError);
+        try {
+          this.pendingStarts.set(delegation.token.taskId, { delegation });
+          worker.postMessage(
+            {
+              type: 'initialize',
+              initialization: workerInitialization,
+              lifecycleOwnerId: this.lifecycleOwnerId,
+              hostCapabilities,
+              delegation: delegation.permit
+            },
+            workerInitialization instanceof ArrayBuffer ? [workerInitialization] : []
+          );
+        } catch (error) {
+          this.pendingStarts.delete(delegation.token.taskId);
+          rejectAndCleanup(asError(error));
         }
-      };
-      const onError = (event: ErrorEvent) => {
-        rejectAndCleanup(new Error(event.message || 'distributed verifier initialization failed'));
-      };
-      this.readyReject = rejectAndCleanup;
-      worker.addEventListener('message', onMessage);
-      worker.addEventListener('error', onError);
-      try {
-        this.pendingStarts.set(delegation.token.taskId, { delegation });
-        worker.postMessage(
-          {
-            type: 'initialize',
-            initialization: workerInitialization,
-            lifecycleOwnerId: this.lifecycleOwnerId,
-            hostCapabilities,
-            delegation: delegation.permit
-          },
-          workerInitialization instanceof ArrayBuffer ? [workerInitialization] : []
-        );
-      } catch (error) {
-        this.pendingStarts.delete(delegation.token.taskId);
-        rejectAndCleanup(asError(error));
-      }
-    });
-    return this.ready;
+      });
+      await this.ready;
+    } finally {
+      this.busy = false;
+      this.batchStartedAt = null;
+    }
   }
 
   async consume(
@@ -1061,7 +1067,10 @@ export class ClearraVerifierPool {
         coverageChecks: coverageChecks.exact
       },
       readyWorkers: readySnapshots.length,
-      activeWorkers: readySnapshots.filter((snapshot) => snapshot.active).length,
+      // Initialization and finalization are real worker activity too. A worker
+      // does not have to be ready for candidate consumption before it counts as
+      // active CPU work.
+      activeWorkers: snapshots.filter((snapshot) => snapshot.active).length,
       workerCount: this.targetWorkerCount,
       oldestBatchMs: snapshots.reduce(
         (oldest, snapshot) => Math.max(oldest, snapshot.batchAgeMs),

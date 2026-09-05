@@ -1155,12 +1155,13 @@ impl ExactMinimumCoverPortfolioEnumerator {
         if page_size == 0 {
             return Err(ExactMinimumCoverPortfolioError::PageSizeMustBePositive);
         }
-        let enumerator_live = self.checked_retained_capacity_bytes().ok_or(
+        let enumerator_live_before_transaction = self.checked_retained_capacity_bytes().ok_or(
             ExactMinimumCoverPortfolioError::MinimumCover(
                 ExactMinimumCoverError::ProjectionOverflow,
             ),
         )?;
-        memory_guard(enumerator_live).map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
+        memory_guard(enumerator_live_before_transaction)
+            .map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
 
         if cancelled() {
             return self.unchanged_page_with_memory_guard(
@@ -1181,10 +1182,23 @@ impl ExactMinimumCoverPortfolioEnumerator {
             );
         }
 
-        let mut working = if transactional {
-            PendingEnumerationState::try_clone_from_enumerator(self, enumerator_live, memory_guard)?
+        let (mut working, enumerator_live) = if transactional {
+            (
+                PendingEnumerationState::try_clone_from_enumerator(
+                    self,
+                    enumerator_live_before_transaction,
+                    memory_guard,
+                )?,
+                enumerator_live_before_transaction,
+            )
         } else {
-            PendingEnumerationState::take_from_enumerator(self)
+            let working = PendingEnumerationState::take_from_enumerator(self);
+            let enumerator_live_after_take = self.checked_retained_capacity_bytes().ok_or(
+                ExactMinimumCoverPortfolioError::MinimumCover(
+                    ExactMinimumCoverError::ProjectionOverflow,
+                ),
+            )?;
+            (working, enumerator_live_after_take)
         };
         let mut portfolios = try_vec_with_memory_guard(
             page_size,

@@ -3011,7 +3011,7 @@ fn typed_pc_score_products_preserve_parent_workers_and_match_serial_payload_byte
 }
 
 #[test]
-fn three_piece_fixed_score_minimals_keeps_the_low_work_serial_path() {
+fn three_piece_fixed_score_minimals_reaches_the_shared_distributed_coordinator() {
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
     let preparation = WasmDistributedCoordinator::prepare(
@@ -3022,7 +3022,17 @@ fn three_piece_fixed_score_minimals_keeps_the_low_work_serial_path() {
     )
     .expect("three-piece fixed score-minimals preparation");
 
-    assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+    let coordinator = match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+        WasmDistributedPreparation::Serial => {
+            panic!("actual Geometry work, not a fixed piece threshold, must select the path")
+        }
+        WasmDistributedPreparation::Ready(result) => panic!(
+            "score-minimals unexpectedly completed during preparation: {:?}",
+            result.app_response()
+        ),
+    };
+    assert_eq!(coordinator.worker_count(), 2);
 }
 
 #[test]
@@ -3229,7 +3239,7 @@ fn typed_pc_tiling_one_root_finishes_a_valid_empty_solution_family() {
 }
 
 #[test]
-fn three_piece_fixed_count_all_keeps_the_low_work_serial_policy() {
+fn three_piece_fixed_count_all_reaches_the_shared_distributed_coordinator() {
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(12, false, false));
     let preparation = WasmDistributedCoordinator::prepare(
@@ -3239,7 +3249,17 @@ fn three_piece_fixed_count_all_keeps_the_low_work_serial_policy() {
     )
     .expect("three-piece fixed CountAll preparation");
 
-    assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+    let coordinator = match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+        WasmDistributedPreparation::Serial => {
+            panic!("CountAll must not have a product- or piece-count serial exclusion")
+        }
+        WasmDistributedPreparation::Ready(result) => panic!(
+            "CountAll unexpectedly completed during preparation: {:?}",
+            result.app_response()
+        ),
+    };
+    assert_eq!(coordinator.worker_count(), 11);
 }
 
 #[test]

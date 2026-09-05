@@ -21,18 +21,19 @@ and Discord contract evidence. A tag push is not a second acceptance run: all
 full-test and product-build jobs are dispatch-only.
 
 The workflow does not implement this speedup with background processes inside
-one Windows workspace. Four isolated jobs own Foundation
-(`NoProductDebt -> AdversarialCorrectness -> DesktopHost`), Sanitizer, Rust
+one Windows workspace. Six isolated shards own Foundation NoProductDebt,
+Foundation AdversarialCorrectness, Foundation DesktopHost, Sanitizer, Rust
 (`RustExactTests -> ProductE2E -> RenderGolden`), and Pages (`WasmBuildTest`).
 Each job seals its exact source/run/attempt, command, ordered stages, and
 toolchains. A separate Linux fan-in accepts exactly one canonical report from
-each job, rejects toolchain disagreement, and reconstructs the unchanged full
+each shard, rejects toolchain disagreement, and reconstructs the unchanged full
 eight-stage gate. It also binds the deferred evidence ownership from
 `NoProductDebt` and `AdversarialCorrectness` to the actual Rust, render, and
 desktop owners before canonical acceptance evidence can be created.
 
-The four jobs may restore the same prior canonical cache archive, but GitHub
-extracts it into four physically independent runner filesystems. No shard owns
+The toolchain-owning shards restore caches into physically independent runner
+filesystems. The Pages shard consumes the single WASM producer's accepted
+artifact without restoring a Cargo cache or rebuilding WASM. No shard owns
 an `actions/cache` or `actions/cache/save` writer, so none can publish its
 mutated Cargo, C, Pages, or desktop output back into another shard or append a
 cache post-step to the acceptance tail. A miss runs cold and remains correct;

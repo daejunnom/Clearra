@@ -31,7 +31,7 @@ jobs:
       - name: Compile candidate CLI
         run: cargo build --locked --package clearra-cli --features wasm-cpu-runtime,webgpu-search
       - name: Check candidate startup
-        run: target/debug/clearra --version
+        run: target/debug/clearra --help
       - name: Publish unqualified development binary
         uses: actions/upload-artifact@v4
         with:
