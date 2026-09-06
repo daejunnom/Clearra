@@ -417,20 +417,14 @@ function validateRecoveryJobAuthority(pages, recovery, candidate, repository) {
       step.name === "Upload durable verified recovery result");
     const terminalFail = byName.get("recover").steps.find((step) =>
       step.name === "Fail closed unless the canonical recovery result was verified and uploaded");
-    const catalogDirectSuccess = catalogRestore?.conclusion === "success" &&
-      catalogRetry?.conclusion === "skipped";
-    const catalogRetrySuccess = ["failure", "cancelled", "timed_out"].includes(
-      catalogRestore?.conclusion,
-    ) && catalogRetry?.conclusion === "success";
-    const directSuccess = restore?.conclusion === "success" && retry?.conclusion === "skipped";
-    const retrySuccess = ["failure", "cancelled", "timed_out"].includes(restore?.conclusion) &&
-      retry?.conclusion === "success";
+    const catalogMetadataPath = hasCompletedRestoreMetadataPath(catalogRestore, catalogRetry);
+    const runtimeMetadataPath = hasCompletedRestoreMetadataPath(restore, retry);
     if (
       !["success", "failure", "cancelled", "timed_out"].includes(
         runtimeRestore?.conclusion,
-      ) || (!catalogDirectSuccess && !catalogRetrySuccess) ||
+      ) || !catalogMetadataPath ||
       rollbackReauth?.conclusion !== "success" ||
-      (!directSuccess && !retrySuccess) || verify?.conclusion !== "success" ||
+      !runtimeMetadataPath || verify?.conclusion !== "success" ||
       upload?.conclusion !== "success" || terminalFail?.conclusion !== "skipped" ||
       catalogRestore.number <= runtimeRestore.number ||
       catalogRetry.number <= catalogRestore.number ||
@@ -470,6 +464,20 @@ function sealJobStepProof(step) {
   });
 }
 
+function hasCompletedRestoreMetadataPath(restore, retry) {
+  // REST exposes conclusion, not the step outcome used by workflow conditions.
+  // continue-on-error can therefore produce success/success for a retried
+  // restore, including when that retry also failed. This is ONLY a compatible
+  // execution topology, never proof that anything was recovered. Runtime debt
+  // still requires verify/upload/final-step authority AND audit's independent
+  // verification of the exact terminal artifact and all bound recovery inputs.
+  const direct = restore?.conclusion === "success" && retry?.conclusion === "skipped";
+  const retried = ["success", "failure", "cancelled", "timed_out"].includes(
+    restore?.conclusion,
+  ) && retry?.conclusion === "success";
+  return direct || retried;
+}
+
 function validateCatalogRecoveryJobProof(proof, required) {
   requirePlainObject(proof, "Discord recovery job-step proof");
   if (!Array.isArray(proof.recover_job_steps)) {
@@ -491,11 +499,8 @@ function validateCatalogRecoveryJobProof(proof, required) {
     "Restore the exact prior Discord catalog and seal its disposition",
   );
   const retry = byName.get("Retry catalog recovery after an ordinary failure or cancellation");
-  const direct = restore?.conclusion === "success" && retry?.conclusion === "skipped";
-  const retried = ["failure", "cancelled", "timed_out"].includes(restore?.conclusion) &&
-    retry?.conclusion === "success";
-  if (!direct && !retried) {
-    throw new Error("Discord catalog recovery did not produce one exact terminal success path");
+  if (!hasCompletedRestoreMetadataPath(restore, retry)) {
+    throw new Error("Discord catalog recovery lacks a compatible completed restore metadata path");
   }
 }
 

@@ -33,6 +33,22 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
   ...['build_cover_', 'build_score_minimum_', 'build_minimum_source_preparation_'].map((filter) => ({
     package: 'clearra-wasm', filter, exact: false, parallel: false,
   })),
+  ...[
+    'pc_replay_source_digest::tests::', 'pc_replay_page_source::tests::',
+    'pc_replay_page_error::tests::', 'cooperative_pc_replay_pages_',
+    'pc_replay_v2_page_pending_', 'cooperative_pc_replay_manifest_cancellation_',
+    'cooperative_pc_replay_p7_ctk3_',
+  ].map((filter) => ({ package: 'clearra-app', filter, exact: false, parallel: true })),
+  { package: 'clearra-postprocess', filter: 'exact_replay_language::tests::', exact: false, parallel: false },
+  ...['softmax_positive_zero_skip_', 'zero_row_scatter_'].map((filter) => ({
+    package: 'clearra-coverage', filter, exact: false, parallel: false,
+  })),
+  { package: 'clearra-wasm', filter: 'pc_replay_', exact: false, parallel: false },
+  ...['pc_replay_page_abi_', 'warm_minimum_to_geometry_', 'geometry_replacement_rejects_'].map((filter) => ({
+    package: 'clearra-wasm-abi', filter, exact: false, parallel: false,
+  })),
+  { package: 'clearra-gui-host', filter: 'desktop_exact_page_replay_', exact: false,
+    parallel: false, features: 'wasm-cpu-runtime' },
 ].map(Object.freeze));
 
 export function assertCandidateHost(environment, platform) {
@@ -51,7 +67,7 @@ export function assertCandidateHost(environment, platform) {
 export function candidateRegressionArguments(spec) {
   if (!CANDIDATE_RUST_REGRESSIONS.includes(spec)) throw new Error('Unknown candidate regression');
   return ['test', '--locked', '--package', spec.package, '--lib',
-    ...(spec.parallel ? ['--features', 'parallel'] : []), spec.filter,
+    ...(spec.parallel ? ['--features', 'parallel'] : spec.features ? ['--features', spec.features] : []), spec.filter,
     '--', '--test-threads=1', ...(spec.exact ? ['--exact'] : [])];
 }
 
@@ -68,7 +84,15 @@ export function runCandidateRegressions({ environment = process.env, platform = 
   repositoryRoot = ROOT, spawnImplementation = spawnSync, write = (text) => process.stdout.write(text) } = {}) {
   assertCandidateHost(environment, platform);
   const failures = [];
+  const blockedCompilations = new Set();
+  const blocked = [];
   for (const spec of CANDIDATE_RUST_REGRESSIONS) {
+    const compilation = `${spec.package}:${spec.parallel ? 'parallel' : spec.features ?? 'default'}`;
+    if (blockedCompilations.has(compilation)) {
+      blocked.push(`${spec.package}:${spec.filter}`);
+      write(`candidate_regression=blocked package=${spec.package} filter=${spec.filter} reason=prior-same-target-compile-failure\n`);
+      continue;
+    }
     write(`candidate_regression=start package=${spec.package} filter=${spec.filter}\n`);
     const result = spawnImplementation('cargo', candidateRegressionArguments(spec), {
       cwd: repositoryRoot, env: environment, shell: false, windowsHide: true,
@@ -77,9 +101,16 @@ export function runCandidateRegressions({ environment = process.env, platform = 
     if (result?.stdout) write(result.stdout);
     if (result?.stderr) write(result.stderr);
     try { assertNonemptyRustSuccess(result); }
-    catch { failures.push(`${spec.package}:${spec.filter}`); }
+    catch {
+      failures.push(`${spec.package}:${spec.filter}`);
+      // Re-running another filter cannot repair the same lib-test compilation.
+      // Keep runtime failures independent; blocked selections are NOT passes.
+      const output = `${result?.stdout ?? ''}\n${result?.stderr ?? ''}`;
+      if (result?.status !== 0 && /error: could not compile `/u.test(output) &&
+          !/^test result:/mu.test(output)) blockedCompilations.add(compilation);
+    }
   }
-  if (failures.length) throw new Error(`Focused candidate regressions failed (${failures.length}): ${failures.join(', ')}`);
+  if (failures.length) throw new Error(`Focused candidate regressions failed (${failures.length}): ${failures.join(', ')}; blocked (${blocked.length}): ${blocked.join(', ')}`);
   write(`candidate_regressions=passed selections=${CANDIDATE_RUST_REGRESSIONS.length} release_authority=false\n`);
 }
 

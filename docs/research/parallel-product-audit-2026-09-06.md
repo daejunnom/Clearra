@@ -13,6 +13,51 @@ boundary; do not mislabel that difference as measured gallery rendering time.
 
 ## Frozen user criteria
 
+### Latest exact-source GUI checkpoint (candidate8b8, not release acceptance)
+
+- User explicitly chose to fix **pattern complete replay before deployment**.
+  Disabling P7 replay or offering only fixed queues is not authorized.
+- Candidate34035858892 finished failure. Source/GUI/CLI and the independent
+  WASM build passed. Sixteen App selections never ran because of one shared
+  test-only `ExecutionCancellationToken.cancel()` compilation error. Four
+  WASM tests failed across three selections: invalid BuildV2 test options,
+  a native hardware-cap expectation, and an obsolete synchronous test driver.
+  Do not count these as nineteen independent runtime regressions or a gate pass.
+- Verified unqualified artifact9990587460 was imported after matching all five
+  files, current raw source bytes and the paired8b8 commit identity. Current4194
+  WASM is `bee0e666c3d36c3fecc8a223e69d62dc633fbd6cfd288c78885c634845eed356`,
+  source `dc2de65a70d849588bf5738bc6a7c9eaf0e56e97294d3c20f56676e30eed4edb`.
+  Two manifest renames were denied while Vite11592 was running. Stopping only
+  that server allowed the unchanged import to succeed; hidden Vite5952 serves
+  the new generation. No production surface or release tag changed.
+- Actual GUI minimum: auto11 cold40.5s, clean-pool repeat43.0s, separate-tab
+  full12 cold41.7s. All returned246 source solutions,100%coverage and exact25
+  first canonical members. Auto first three waves took11.901/10.692/5.279s;
+  source452.1ms,drain67.2ms,verification146.9ms,finalization39,717.2ms.
+  Coordinator computation was0 in this auto run, with observed11 compute slots.
+  Native16.771s is NOT a GUI20s pass. The20s release condition remains unmet.
+- The samebee0 GUI Build all-solutions fixture completed338.1ms (GUI0.3s):
+  all246 fields and5,040/5,040 success, first100 rendered, whole-copy control
+  present. Source236.0ms included production87.7/enqueue125.8/merge4.5;
+  drain37.3ms,verification51.4ms,App finalize9.5ms,parse0.1ms. Eight remote
+  instances were reused and two created. This supports the accepted~0.4s
+  ordinary stopping point without reverting to probability-only output.
+- A fresh minimum success followed by another search in the same tab failed
+  at Geometry64/2260 in0.1s, for BOTH11-to12 and11-to11 transitions. After the
+  failing pool was discarded, auto11 succeeded again; a fresh tab's12 also
+  succeeded. ABI source inspection found that exact-to-Geometry initialization
+  does not release the previous drained minimum worker/query memory lease,
+  unlike the reverse transition. A guarded reset fix is staged, not inbee0.
+- Exact-count/rank-select P7 replay, pending page continuations, whole-selected
+  geometry export, exact-positive-zero arithmetic skips and warm-reuse fixes
+  are being completed in the isolated pc-replay-dp worktree. They have not yet
+  been compiled or measured. Local native execution remains prohibited by UMCI;
+  mocked Node checks and source formatting are not product acceptance.
+- Focused CI now records a same-target compilation failure once and marks later
+  filters blocked, not passed; unrelated packages still run. Its source-bound
+  WASM remains unqualified even if artifact construction succeeds. Production
+  acceptance remains the unchanged final canonical gate, not this feedback job.
+
 ### Latest implementation / nonpublishing gate checkpoint
 
 - Cross-width RNG selection was fixed at all eight blocking/cooperative sites.
@@ -102,6 +147,15 @@ existing canonical main workflow can trigger actual Discord candidate deployment
   Windows checkout and local formatting; artifact import must still validate
   the actual source hash and exact commit. No hash restamping or freshness
   exemption is introduced. Published4194 is still512 until verified import.
+- Follow-up candidate25a6b75 passed all eight local static groups (95 advisory
+  cohesion notices) and30 Node workflow/artifact/runner contracts. Its isolated
+  CLI compile caught an `Option<ProductPageSourceOwner>` mismatch in Build score
+  completion. Commit8b8d578 fixes the owner attachment explicitly; the obsolete
+  run34035693707 was cancelled by branch concurrency. The replacement
+  [run34035858892](https://github.com/daejunnom/Clearra/actions/runs/34035858892)
+  has passed source binding, GUI compilation and CLI compile/startup. Windows
+  focused Rust regression execution and WASM creation remain separate pending
+  evidence at this checkpoint; this is not a release Go.
 
 - Current P0: pattern-based complete replay fails during finalization; unexpected
   local4194 refresh can destroy a running search. Retain all prior correctness

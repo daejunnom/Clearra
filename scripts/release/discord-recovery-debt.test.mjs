@@ -762,15 +762,7 @@ test("missing, expired, ambiguous, or parent-mismatched recovery evidence remain
   }
 });
 
-test("runtime debt requires the exact durable recovery result", async () => {
-  const input = catalogs([resolutionArtifact(), resultArtifact()]);
-  const plan = planDiscordRecoveryDebt(
-    input.runList,
-    input.primaryAttempts,
-    input.recoveryAttempts,
-    input.artifactPages,
-    { ...identity, recoveryJobCatalog: recoveryJobCatalog(true) },
-  );
+function runtimeRecoveryReports() {
   const resolution = noOpResolution({
     recovery_required: true,
     recovery_stage: "live",
@@ -806,30 +798,149 @@ test("runtime debt requires the exact durable recovery result", async () => {
     catalog_recovery: catalogDisposition,
     bindings,
   });
+  return { resolution, result, catalogDisposition };
+}
+
+function retriedRecoveryJobCatalog({ runtime = false, catalog = false, restore = "success" } = {}) {
+  const jobCatalog = recoveryJobCatalog(true);
+  const steps = jobCatalog.runs[0].pages[0].jobs.find((job) => job.name === "recover").steps;
+  for (const [enabled, restoreName, retryName] of [
+    [runtime, "Restore exact prior live authorities and seal the canonical result",
+      "Retry exact recovery after an ordinary step failure or cancellation"],
+    [catalog, "Restore the exact prior Discord catalog and seal its disposition",
+      "Retry catalog recovery after an ordinary failure or cancellation"],
+  ]) {
+    if (!enabled) continue;
+    steps.find((step) => step.name === restoreName).conclusion = restore;
+    steps.find((step) => step.name === retryName).conclusion = "success";
+  }
+  return jobCatalog;
+}
+
+async function writeRuntimeRecoveryReports(root, reports) {
+  await writeReportArtifact(root, "401", "recovery-result.json", reports.result);
+  await writeReportArtifact(root, "401", "protected-recovery-authority.json", reports.resolution);
+  await writeReportArtifact(
+    root, "401", "discord-catalog-recovery-disposition.json", reports.catalogDisposition,
+  );
+}
+
+for (const [name, retryOptions] of [
+  ["direct restore", {}],
+  ["masked runtime retry", { runtime: true }],
+  ["masked catalog retry", { catalog: true }],
+  ["both masked retries", { runtime: true, catalog: true }],
+  ["explicit failed-step retries", { runtime: true, catalog: true, restore: "failure" }],
+]) {
+test(`runtime debt requires independently verified exact terminal evidence: ${name}`, async () => {
+  const input = catalogs([resolutionArtifact(), resultArtifact()]);
+  const plan = planDiscordRecoveryDebt(
+    input.runList,
+    input.primaryAttempts,
+    input.recoveryAttempts,
+    input.artifactPages,
+    { ...identity, recoveryJobCatalog: retriedRecoveryJobCatalog(retryOptions) },
+  );
+  const reports = runtimeRecoveryReports();
   const root = await mkdtemp(join(tmpdir(), "clearra-debt-runtime-"));
   try {
     const planPath = join(root, "plan.json");
     await writeFile(planPath, `${JSON.stringify(plan)}\n`);
-    await writeReportArtifact(root, "400", "recovery-authority.json", resolution);
+    await writeReportArtifact(root, "400", "recovery-authority.json", reports.resolution);
     await assert.rejects(
       auditDiscordRecoveryDebt(planPath, root, identity),
       /ENOENT|regular file/u,
     );
-    await writeReportArtifact(root, "401", "recovery-result.json", result);
-    await writeReportArtifact(
-      root,
-      "401",
-      "protected-recovery-authority.json",
-      resolution,
-    );
-    await writeReportArtifact(
-      root,
-      "401",
-      "discord-catalog-recovery-disposition.json",
-      catalogDisposition,
-    );
+    await writeRuntimeRecoveryReports(root, reports);
     const clearance = await auditDiscordRecoveryDebt(planPath, root, identity);
     assert.equal(clearance.cleared_debts[0].clearance_kind, "completed-live-recovery");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+}
+
+test("masked success conclusions without a terminal artifact cannot clear recovery debt", async () => {
+  // Matches the observed failed recovery shape: continue-on-error reports
+  // success for restore/retry/verify, but no terminal upload was produced.
+  const input = catalogs();
+  input.recoveryAttempts.attempts[0].conclusion = "failure";
+  const jobCatalog = retriedRecoveryJobCatalog({ runtime: true, catalog: true });
+  const recover = jobCatalog.runs[0].pages[0].jobs.find((job) => job.name === "recover");
+  recover.conclusion = "failure";
+  recover.steps.find((step) => step.name === "Upload durable verified recovery result")
+    .conclusion = "skipped";
+  recover.steps.find((step) =>
+    step.name === "Fail closed unless the canonical recovery result was verified and uploaded")
+    .conclusion = "failure";
+  const plan = planDiscordRecoveryDebt(
+    input.runList, input.primaryAttempts, input.recoveryAttempts, input.artifactPages,
+    { ...identity, recoveryJobCatalog: jobCatalog },
+  );
+  const root = await mkdtemp(join(tmpdir(), "clearra-debt-masked-failure-"));
+  try {
+    const planPath = join(root, "plan.json");
+    await writeFile(planPath, `${JSON.stringify(plan)}\n`);
+    await writeReportArtifact(root, "400", "recovery-authority.json", runtimeRecoveryReports().resolution);
+    await assert.rejects(auditDiscordRecoveryDebt(planPath, root, identity), /has no exact clearance/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("masked retries cannot replace mandatory terminal metadata or a performed restore", () => {
+  const input = catalogs([resolutionArtifact(), resultArtifact()]);
+  for (const [name, conclusion] of [
+    ["Preserve and verify the exact terminal recovery evidence as the sole success authority", "skipped"],
+    ["Upload durable verified recovery result", "skipped"],
+    ["Fail closed unless the canonical recovery result was verified and uploaded", "failure"],
+    ["Restore exact prior live authorities and seal the canonical result", "skipped"],
+    ["Restore the exact prior Discord catalog and seal its disposition", "skipped"],
+  ]) {
+    const jobCatalog = retriedRecoveryJobCatalog({ runtime: true, catalog: true });
+    jobCatalog.runs[0].pages[0].jobs.find((job) => job.name === "recover").steps
+      .find((step) => step.name === name).conclusion = conclusion;
+    assert.throws(() => planDiscordRecoveryDebt(
+      input.runList, input.primaryAttempts, input.recoveryAttempts, input.artifactPages,
+      { ...identity, recoveryJobCatalog: jobCatalog },
+    ), /lacks terminal verify-and-upload authority/u, name);
+  }
+});
+
+test("masked retries retain exact terminal run, source, artifact, and protected-byte bindings", async () => {
+  const input = catalogs([resolutionArtifact(), resultArtifact()]);
+  const plan = planDiscordRecoveryDebt(
+    input.runList, input.primaryAttempts, input.recoveryAttempts, input.artifactPages,
+    { ...identity, recoveryJobCatalog: retriedRecoveryJobCatalog({ runtime: true, catalog: true }) },
+  );
+  const root = await mkdtemp(join(tmpdir(), "clearra-debt-masked-binding-"));
+  try {
+    const planPath = join(root, "plan.json");
+    await writeFile(planPath, `${JSON.stringify(plan)}\n`);
+    const reports = runtimeRecoveryReports();
+    const { report_sha256: _sealedDigest, ...resultFields } = reports.result;
+    await writeReportArtifact(root, "400", "recovery-authority.json", reports.resolution);
+    await writeRuntimeRecoveryReports(root, reports);
+    for (const [field, value] of [
+      ["original_workflow_run_id", "101"], ["original_workflow_run_attempt", "2"],
+      ["recovery_workflow_run_id", "301"], ["recovery_workflow_run_attempt", "2"],
+      ["source_commit", "f".repeat(40)], ["artifact_id", "501"],
+      ["artifact_digest", `sha256:${"a".repeat(64)}`],
+    ]) {
+      await writeReportArtifact(root, "401", "recovery-result.json",
+        sealCanonicalReport({ ...resultFields, [field]: value }));
+      await assert.rejects(auditDiscordRecoveryDebt(planPath, root, identity),
+        new RegExp(`recovery result ${field} differs`, "u"));
+    }
+    const alteredBindings = reports.result.bindings.map((binding) => binding.name === "recovery_authority"
+      ? { ...binding, file_sha256: "a".repeat(64) } : binding);
+    await writeReportArtifact(root, "401", "recovery-result.json",
+      sealCanonicalReport({ ...resultFields, bindings: alteredBindings }));
+    await assert.rejects(auditDiscordRecoveryDebt(planPath, root, identity), /does not bind the protected authority bytes/u);
+    await writeReportArtifact(root, "401", "recovery-result.json", reports.result);
+    await writeReportArtifact(root, "401", "discord-catalog-recovery-disposition.json",
+      notRequiredCatalogDisposition({ recoveryAttempt: "2" }));
+    await assert.rejects(auditDiscordRecoveryDebt(planPath, root, identity), /differs/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

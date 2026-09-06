@@ -4386,7 +4386,7 @@ mod pc_allspin_projection_tests {
                     .expect("score-only matrix bounds");
                 assert!(rows > 0 && patterns > 0);
                 execution.enable_minimum_parallel(4).unwrap();
-                control.cancellation.cancel();
+                control.cancellation.handle().cancel();
                 assert_eq!(
                     execution.advance(1, &control),
                     CooperativeAppAdvance::Cancelled

@@ -73,3 +73,35 @@ test('all fixed selections execute once without a shell and failures remain non-
   }), /failed \(1\)/u);
   assert.equal(attempted, CANDIDATE_RUST_REGRESSIONS.length);
 });
+
+test('one compilation failure blocks only the same package and features, never marks skipped tests passed', () => {
+  const calls = [];
+  const messages = [];
+  const expectedBlocked = CANDIDATE_RUST_REGRESSIONS.filter((entry) => entry.package === 'clearra-app' && entry.parallel).length - 1;
+  assert.throws(() => runCandidateRegressions({ environment: ENV, platform: 'win32',
+    write(message) { messages.push(message); },
+    spawnImplementation(command, args) {
+      calls.push(args);
+      return calls.length === 1
+        ? { status: 101, stdout: '', stderr: 'error: could not compile `clearra-app` (lib test) due to 1 previous error\n' }
+        : PASSED;
+    },
+  }), new RegExp(`failed \\(1\\).*blocked \\(${expectedBlocked}\\)`));
+  assert.equal(calls.filter((args) => args.includes('clearra-app')).length, 1);
+  assert.equal(calls.length, CANDIDATE_RUST_REGRESSIONS.length - expectedBlocked);
+  assert.equal(messages.filter((message) => message.startsWith('candidate_regression=blocked')).length, expectedBlocked);
+  assert.ok(!messages.some((message) => message.includes('candidate_regressions=passed')));
+});
+
+test('replay DP, exact-zero equivalence, warm reuse and Desktop feature seams are included', () => {
+  for (const [packageName, filter] of [
+    ['clearra-postprocess', 'exact_replay_language::tests::'],
+    ['clearra-app', 'cooperative_pc_replay_p7_ctk3_'],
+    ['clearra-coverage', 'softmax_positive_zero_skip_'],
+    ['clearra-coverage', 'zero_row_scatter_'],
+    ['clearra-wasm-abi', 'warm_minimum_to_geometry_'],
+    ['clearra-wasm-abi', 'geometry_replacement_rejects_'],
+  ]) assert.ok(CANDIDATE_RUST_REGRESSIONS.some((entry) => entry.package === packageName && entry.filter === filter));
+  const desktop = CANDIDATE_RUST_REGRESSIONS.find((entry) => entry.package === 'clearra-gui-host');
+  assert.ok(candidateRegressionArguments(desktop).includes('wasm-cpu-runtime'));
+});
