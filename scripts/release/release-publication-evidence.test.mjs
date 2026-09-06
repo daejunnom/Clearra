@@ -569,6 +569,7 @@ function acceptanceEvidence() {
     accepted_inputs: {
       ctk3_manifest_sha256: "6".repeat(64),
       pages_identity_sha256: "7".repeat(64),
+      wasm_build_receipt_sha256: "9".repeat(64),
       gate_index_sha256: "8".repeat(64),
     },
     final_source_fragments: {

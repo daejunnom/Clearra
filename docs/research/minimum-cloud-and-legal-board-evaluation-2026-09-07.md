@@ -17,6 +17,115 @@ servers are fixed to 4195; existing listeners remain a separate manual cleanup.
 
 ## Latest completed CI and actual GUI evaluation
 
+### September 7 follow-up: deploy preparation and live Cloud recovery
+
+[Candidate 34057674746](https://github.com/daejunnom/Clearra/actions/runs/34057674746)
+at `09572e6a2eec6150c2cf11cbcd1438e16176022b` passed all six focused leaves,
+including the previously failing real native CLI/Discord comparison. The unlimited
+Build admission correction below is therefore confirmed by a trusted executable.
+No repeat investigation of that resolved early unsupported failure is required.
+
+[Canonical 34057759636](https://github.com/daejunnom/Clearra/actions/runs/34057759636)
+at `40315a3bef7a02e0d20b579b731f1837a11aa330` failed before product acceptance:
+two release evidence test fixtures omitted the now-required WASM receipt digest,
+causing nine assertions to fail. The fixtures now include the digest; validators
+are not weakened. All 459 independent Node release regressions passed locally.
+Those two test files are also selected before native compilation in candidate CLI
+feedback, so this inexpensive fixture regression is caught earlier.
+
+[Capture 34057705261](https://github.com/daejunnom/Clearra/actions/runs/34057705261)
+was submitted prematurely and correctly refused missing canonical authority.
+The required order is **successful exact-new-main canonical acceptance, then
+capture of the active 9177273 site under that main, then Pages publication**.
+Capture must not race acceptance. No new Pages publication is claimed by these
+failed preparation runs, and no rollback/canonical guard is relaxed.
+
+[Cloud 34057649033](https://github.com/daejunnom/Clearra/actions/runs/34057649033)
+passed identity exchange and the immutable image build, then failed before the
+Job API: gcloud ArgList rejects the repeated standalone `8` in `--cpus,8,--workers,8`.
+Joined `--cpus=8,--workers=8` arguments fix the parser, without IAM or quota changes.
+Independent diagnostics now offer closed 4/8-worker profiles (default 4); both
+routes bind the same CPU/worker resources. The production-candidate mode keeps its
+8-worker configuration check and cannot claim production parity using four.
+
+A locally initiated recovery reused that exact 40315a3 immutable image, rather
+than building it again: image digest
+`abf3feddd846f26d423a9ecdfa7d0eaaebf4849a8aa78d0f4d61ea83cb6b209f`,
+4 vCPU / 8 GiB / four workers. Execution
+`clearra-parity-40315a3-34057649033-8q9b8` completed successfully; its owned parent
+Job was deleted after UID/count/parent checks. Structured evidence was recovered
+after discovering that `gcloud run jobs logs read --format=json` prints blank
+human-readable payload lines instead of JSON envelopes. The wrapper now uses
+bounded `gcloud logging read` with one closed project/region/Job selector; exact
+execution/schema validation remains mandatory. All 32 Cloud lifecycle/command
+tests passed after this correction. No raw logs or credentials are archived.
+
+Live Cloud medians, one warm pair excluded and three measured pairs, startup and
+capability discovery excluded (process timing still includes spawn/serialization):
+
+| Fixture | Direct CLI ms | Discord service CLI ms | Service job ms | Loopback HTTP ms |
+| --- | ---: | ---: | ---: | ---: |
+| PC all, 246 fields / 5,040 queues | 34.649 | 34.357 | 35 | 41.357 |
+| First canonical minimum, 25 members | 96,162.461 | 96,252.389 | 96,253 | 96,256.212 |
+| Build all, 246 fields / 5,040 queues | 134.126 | 140.227 | 141 | 145.333 |
+
+Result identities and all first-set members matched. Process deltas are -0.292ms,
++89.928ms (+0.094%) and +6.102ms (+4.55%); the actual service scheduling wrapper
+adds below 1ms at the median for each fixture. This bounded same-image sample
+supports small route overhead under the user's relaxed worker-count criterion.
+It is not a production service/traffic configuration audit, a formal statistical
+equivalence proof, or a successful rerun of the failed GitHub workflow. Absolute
+Cloud minimum time remains a P2 algorithm/input-policy issue. Original failed
+lifecycle evidence is preserved; the separate local recovery receipt is
+`_local/reports/cloud-log-recovery-40315a3.json` and does not relabel that failure.
+
+Latest same-binary ABBA medians from candidate 34057674746:
+
+| Experiment | Workers | Baseline proof / canonical / total ms | Candidate proof / canonical / total ms |
+| --- | ---: | ---: | ---: |
+| Residual warm seed | 4 | 10,695 / 14,103 / 24,798 | 9,129 / 12,903 / 22,033 |
+| Cached pivot exhaustion | 4 | 10,606 / 14,142 / 24,749 | 10,166 / 13,285 / 23,452 |
+| Residual warm seed | 2 | 10,962 / 13,351 / 24,314 | 8,922 / 11,594 / 20,517 |
+| Combined | 4 | 10,598 / 14,118 / 24,717 | 9,148 / 12,864 / 22,013 |
+
+Every arm proved K=25 and the identical first canonical set. Repeated warm-start
+benefit is approximately 11.2% at four workers and 15.6% at two in this run, not a
+general speed guarantee. Warm seed is now promoted to the shared product default
+for CLI/GUI/Discord, subject to the next exact-source canonical run. Only the dual
+proposal is reused; all eligible capacities and checked-u128 prune certificates
+are recomputed for the current residual problem. Root exports remain unchanged;
+bad seed state falls back to uniform initialization without rejecting a solution.
+Diagnostic builds retain explicit on/off A/B. Cached pivot exhaustion remains
+isolated/default-off: the combined measurements do not show additive benefit.
+First canonical ordering and explicit lazy subsequent ties are not weakened.
+
+The new local-only Qnia comparison uses unchanged upstream 03b6377, the same
+Jstris matrix, fresh workers, and two samples per backend/input. Module load is
+excluded. HiGHS API time includes LP construction; CP-SAT API time includes model
+encoding, while its reported solver wall time excludes that work. HiGHS uses its
+WASM default and CP-SAT two workers, so these are not equal-CPU speed ratios.
+
+| Input / exact K | HiGHS API ms | HiGHS rounded-cuts API ms | CP-SAT API ms | CP-SAT solver ms |
+| --- | --- | --- | --- | --- |
+| Full left P7 / 25 | 16,359 / 16,376 | 14,916 / 15,011 | 4,374 / 4,351 | 4,233 / 4,212 |
+| First I / 11 | 600 / 593 | 460 / 455 | 284 / 306 | 157 / 176 |
+
+Continuous root LP bounds were 20.932385 for full P7 and 9.5 for first I, weaker
+than the integer optima; a fast LP bound alone does not prove K. CP-SAT's full-P7
+pure calculation now reproduces roughly 4.2s and confirms that Clearra's primary
+proof, not only canonical refinement, needs further work. Rounded cuts helped
+this fixture, but are not imported or treated as an exact integer certificate.
+HiGHS reports Optimal with zero relative MIP gap; its floating objective is checked
+against the validated integer cardinality with 1e-8 tolerance, not silently
+rounded into a Clearra proof. All chosen rows cover the original matrix.
+Initial local harness failures (missing Node JSPI flag and an over-strict raw
+floating equality check) were corrected and only failed samples were retried;
+the report does not claim uninterrupted ABBA. No expected answer was a solver hint.
+No Qnia/HiGHS/OR-Tools code or asset enters tracked product/CI/deployment source.
+Report: `_local/reports/qnia-highs-cpsat-20260907-complete.json`.
+
+### Earlier completed evidence (retained, not a new verification)
+
 [Candidate 34055343299](https://github.com/daejunnom/Clearra/actions/runs/34055343299)
 at `4f6715b0fe5523ea2518e7b2fcde62e4a4876772` completed: source, native Rust,
 WASM, UI compilation and minimum diagnostics passed; CLI parity failed on the
@@ -112,7 +221,8 @@ identical first canonical members in every arm):
 | Residual warm seed | 2 | 11,050 / 13,430 / 24,480 | 8,955 / 11,631 / 20,587 |
 | Combined ideas | 4 | 10,628 / 14,091 / 24,719 | 9,146 / 12,881 / 22,028 |
 
-Both techniques stay diagnostic/default-off. The combined arm is approximately
+At that checkpoint both techniques were diagnostic/default-off (warm seed is
+promoted in the follow-up above). The combined arm is approximately
 10.9% faster in this bounded run and essentially matches warm seed alone within
 the observed variation. This does not establish an additive gain, a general speed
 ratio or the 3-second target. Exact K and first-canonical identity remain unchanged.
@@ -269,13 +379,14 @@ and equal/dominated alternatives remain available for canonical and lazy ties.
 
 `Warm Cloud CLI Diagnostic` is a new manual-only workflow on an exact current-main
 SHA, using the existing protected Cloud environment. It builds one source-bound
-immutable image and creates one fresh, UID-checked Cloud Run Job: 8 vCPU, 16 GiB,
+immutable image and creates one fresh, UID-checked Cloud Run Job: default 4 vCPU,
+8 GiB, or explicit 8 vCPU / 16 GiB,
 one task, no retries, no injected managed secrets. It never changes a service or
 traffic and never stages Oracle. It cleans up only the Job and execution it owns;
 uncertain ownership is reported instead of adopting/deleting another resource.
 
 Inside that image, direct CLI and the actual Job Service/Runner/Executor use the
-same executable hash, argv, source identity and 8-worker policy. One warm pair is
+same executable hash, argv, source identity and selected 4/8-worker policy. One warm pair is
 excluded and three measured pairs alternate execution order. Report four separate
 times: direct CLI process, service CLI process, service job, and loopback HTTP wall
 time. Cloud startup/capability probes are outside these measurements. CLI process
@@ -384,6 +495,8 @@ requested CP-SAT/minimum work or presented as a 3-second fix.
 - [Qnia OR-Tools integration and limits](https://github.com/Qnia28/sfinder_wasm/blob/03b637730c5b541f4f2934be613498fbe65327fd/ORTOOLS_INTEGRATION_AND_LICENSE.md)
 - [Qnia CP-SAT public adapter](https://github.com/Qnia28/sfinder_wasm/blob/03b637730c5b541f4f2934be613498fbe65327fd/src/ortools-min-cover.mjs)
 - [Google CP-SAT architecture](https://github.com/google/or-tools/blob/stable/ortools/sat/README.md)
+- [HiGHS primary repository](https://github.com/ERGO-Code/HiGHS)
+- [Google Cloud structured log read](https://docs.cloud.google.com/sdk/gcloud/reference/logging/read)
 - [wirelyre license](https://github.com/wirelyre/tetra-tools/blob/2342953cb424cfd5ca94fa8eefdbe5434bd5ff1c/LICENSE)
 - [wirelyre graph reference, not imported](https://github.com/wirelyre/tetra-tools/blob/2342953cb424cfd5ca94fa8eefdbe5434bd5ff1c/legal-boards/src/boardgraph.rs)
 - [Google Cloud Job deletion and execution termination](https://cloud.google.com/run/docs/managing/jobs#deleting)

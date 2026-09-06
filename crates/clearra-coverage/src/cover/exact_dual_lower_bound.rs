@@ -9,6 +9,11 @@
 
 use super::exact_minimum_cover::ExactMinimumCoverError;
 
+// Reuse a previous dual only as a proposal. Repeated same-binary A/B showed a
+// benefit; exact checked-integer certification below remains the sole prune
+// authority. Diagnostic builds can still select the uniform baseline explicitly.
+const RESIDUAL_WARM_SEED_DEFAULT_ENABLED: bool = true;
+
 #[cfg(any(test, feature = "diagnostic-probes"))]
 use super::exact_minimum_cover::{
     ExactMinimumCoverPivotExhaustionDiagnostics, ExactMinimumCoverWarmSeedDiagnostics,
@@ -16,7 +21,7 @@ use super::exact_minimum_cover::{
 
 #[cfg(feature = "diagnostic-probes")]
 static DIAGNOSTIC_RESIDUAL_WARM_SEED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+    std::sync::atomic::AtomicBool::new(RESIDUAL_WARM_SEED_DEFAULT_ENABLED);
 
 #[cfg(feature = "diagnostic-probes")]
 pub(super) fn set_diagnostic_residual_warm_seed(enabled: bool) {
@@ -397,8 +402,7 @@ pub(super) struct DualProposalWorkspace {
     // Every reuse replays all currently eligible row capacities from scratch.
     cached_patterns: Vec<usize>,
     cached_weights: Vec<u128>,
-    // Experimental proposal-only A/B. Ordinary builds remain unchanged until
-    // the same-matrix benchmark decides whether to enable this candidate.
+    // Diagnostic override of the shared product default, not proof authority.
     #[cfg(any(test, feature = "diagnostic-probes"))]
     diagnostic_warm_seed_enabled: bool,
     #[cfg(any(test, feature = "diagnostic-probes"))]
@@ -628,7 +632,7 @@ impl DualProposalWorkspace {
             diagnostic_warm_seed_enabled: DIAGNOSTIC_RESIDUAL_WARM_SEED
                 .load(std::sync::atomic::Ordering::Relaxed),
             #[cfg(all(test, not(feature = "diagnostic-probes")))]
-            diagnostic_warm_seed_enabled: false,
+            diagnostic_warm_seed_enabled: RESIDUAL_WARM_SEED_DEFAULT_ENABLED,
             #[cfg(any(test, feature = "diagnostic-probes"))]
             diagnostic_warm_seed: ExactMinimumCoverWarmSeedDiagnostics::default(),
             #[cfg(feature = "diagnostic-probes")]
@@ -974,7 +978,6 @@ impl DualProposalWorkspace {
             return None;
         }
         self.reset_proposal_state();
-        #[cfg(any(test, feature = "diagnostic-probes"))]
         self.maybe_seed_residual_proposal(row_limit, support_by_pattern.len(), target_words.len());
         let mut accumulated_samples = 0_usize;
 
@@ -1372,27 +1375,38 @@ impl DualProposalWorkspace {
     /// alive. Only log_p changes; q, averages and exact certificate state are
     /// still fresh, and every later prune rechecks all currently eligible rows.
     /// The two sorted merge scans allocate nothing and never carry an old D.
-    #[cfg(any(test, feature = "diagnostic-probes"))]
     fn maybe_seed_residual_proposal(
         &mut self,
         row_limit: usize,
         source_pattern_count: usize,
         target_word_count: usize,
     ) {
-        if !self.diagnostic_warm_seed_enabled || row_limit == usize::MAX {
+        #[cfg(any(test, feature = "diagnostic-probes"))]
+        let enabled = self.diagnostic_warm_seed_enabled;
+        #[cfg(not(any(test, feature = "diagnostic-probes")))]
+        let enabled = RESIDUAL_WARM_SEED_DEFAULT_ENABLED;
+        if !enabled || row_limit == usize::MAX {
             return;
         }
-        self.diagnostic_warm_seed.attempts = self.diagnostic_warm_seed.attempts.saturating_add(1);
-        if let Some(matched) = self.seed_residual_log_p(source_pattern_count, target_word_count) {
-            self.diagnostic_warm_seed.applied = self.diagnostic_warm_seed.applied.saturating_add(1);
-            self.diagnostic_warm_seed.matched_patterns = self
-                .diagnostic_warm_seed
-                .matched_patterns
-                .saturating_add(matched as u64);
-            self.diagnostic_warm_seed.seeded_constraints = self
-                .diagnostic_warm_seed
-                .seeded_constraints
-                .saturating_add(self.patterns.len() as u64);
+        #[cfg(any(test, feature = "diagnostic-probes"))]
+        {
+            self.diagnostic_warm_seed.attempts =
+                self.diagnostic_warm_seed.attempts.saturating_add(1);
+        }
+        if let Some(_matched) = self.seed_residual_log_p(source_pattern_count, target_word_count) {
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            {
+                self.diagnostic_warm_seed.applied =
+                    self.diagnostic_warm_seed.applied.saturating_add(1);
+                self.diagnostic_warm_seed.matched_patterns = self
+                    .diagnostic_warm_seed
+                    .matched_patterns
+                    .saturating_add(_matched as u64);
+                self.diagnostic_warm_seed.seeded_constraints = self
+                    .diagnostic_warm_seed
+                    .seeded_constraints
+                    .saturating_add(self.patterns.len() as u64);
+            }
         } else {
             // Undo any partial floating writes. A seed miss resumes the
             // original uniform proposal, never an infeasibility claim.
@@ -1400,7 +1414,6 @@ impl DualProposalWorkspace {
         }
     }
 
-    #[cfg(any(test, feature = "diagnostic-probes"))]
     fn seed_residual_log_p(
         &mut self,
         source_pattern_count: usize,
@@ -2491,11 +2504,11 @@ mod tests {
     }
 
     #[test]
-    fn residual_warm_seed_is_disabled_by_default_and_root_export_is_bitwise_unchanged() {
+    fn residual_warm_seed_product_default_keeps_root_export_bitwise_unchanged() {
         let supports = vec![vec![0, 1], vec![1, 2], vec![0, 2]];
         let mut baseline = workspace(3, 3, 6);
         #[cfg(not(feature = "diagnostic-probes"))]
-        assert!(!baseline.diagnostic_warm_seed_enabled);
+        assert!(baseline.diagnostic_warm_seed_enabled);
         // Do not mutate the diagnostic global in parallel tests. These local
         // snapshots independently reproduce the two same-binary conditions.
         baseline.diagnostic_warm_seed_enabled = false;
@@ -3123,19 +3136,17 @@ mod tests {
     fn residual_cache_checkpoint_and_failed_prepare_do_not_relabel_weights() {
         let supports = vec![vec![0], vec![1], vec![0, 1]];
         let mut workspace = workspace(2, 3, 4);
-        assert!(
-            workspace
-                .certified_residual_lower_bound_inner(
-                    &supports,
-                    &[7],
-                    &[0],
-                    &[false; 2],
-                    &[0],
-                    usize::MAX,
-                    false,
-                )
-                .is_some()
-        );
+        assert!(workspace
+            .certified_residual_lower_bound_inner(
+                &supports,
+                &[7],
+                &[0],
+                &[false; 2],
+                &[0],
+                usize::MAX,
+                false,
+            )
+            .is_some());
         assert!(!workspace.cached_patterns.is_empty());
         assert_eq!(
             workspace.cached_patterns.len(),
@@ -3624,20 +3635,18 @@ mod tests {
 
         let mut full_call = workspace(2, 3, 4);
         full_call.set_remaining_iterations_for_test(1_000);
-        assert!(
-            full_call
-                .certified_residual_lower_bound_inner_with_iteration_limit(
-                    &supports,
-                    &target,
-                    &covered,
-                    &selected,
-                    &excluded,
-                    usize::MAX,
-                    false,
-                    MIRROR_PROX_ITERATIONS,
-                )
-                .is_some()
-        );
+        assert!(full_call
+            .certified_residual_lower_bound_inner_with_iteration_limit(
+                &supports,
+                &target,
+                &covered,
+                &selected,
+                &excluded,
+                usize::MAX,
+                false,
+                MIRROR_PROX_ITERATIONS,
+            )
+            .is_some());
         assert_eq!(full_call.remaining_proposal_iterations(), 800);
     }
 }

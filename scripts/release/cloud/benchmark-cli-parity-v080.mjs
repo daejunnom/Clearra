@@ -4,8 +4,8 @@
  * Existing services are read-only; only a successfully created, UID-fenced Job
  * and its one owned execution may be removed. Raw logs/errors are never emitted.
  * CLI references: https://docs.cloud.google.com/sdk/gcloud/reference/run/jobs/create
- * https://docs.cloud.google.com/sdk/gcloud/reference/run/jobs/logs/read
- * https://docs.cloud.google.com/sdk/gcloud/reference/run/jobs/executions/delete
+ * https://docs.cloud.google.com/sdk/gcloud/reference/logging/read
+ * https://docs.cloud.google.com/sdk/gcloud/reference/run/jobs/delete
  */
 import { createHash } from "node:crypto";
 import { lstat, open } from "node:fs/promises";
@@ -58,7 +58,12 @@ export function parityJobAuthority(options) {
   requireThat(typeof options.runId === "string" && /^[1-9][0-9]{0,19}$/u.test(options.runId), "invalid_run_id");
   const jobName = `clearra-parity-${authority.sourceCommit.slice(0, 7)}-${options.runId}`;
   requireThat(RESOURCE.test(jobName), "invalid_job_name");
-  return Object.freeze({ ...authority, mode, runId: options.runId, jobName });
+  const selectedWorkers = options.workers ?? (mode === "isolated-image" ? 4 : 8);
+  requireThat([4, 8, "4", "8"].includes(selectedWorkers), "invalid_diagnostic_worker_profile");
+  const workers = Number(selectedWorkers);
+  requireThat(mode === "isolated-image" || workers === 8, "candidate_worker_profile_mismatch");
+  return Object.freeze({ ...authority, mode, runId: options.runId, jobName,
+    workers, cpus: workers, memory: workers === 4 ? "8Gi" : "16Gi" });
 }
 
 // Explicit diagnostics-only scope; never invent a candidate/prior revision or
@@ -79,18 +84,30 @@ function isolatedImageAuthority(options) {
 }
 
 export function parityJobArguments(a) {
-  return ["./scripts/benchmark-cloud-cli-parity.mjs", "--executable", "/usr/local/bin/clearra",
-    "--source-commit", a.sourceCommit, "--cpus", "8", "--workers", "8"];
+  // gcloud's ArgList rejects duplicate list items before making an API call.
+  // Bind each value to its option; standalone repeated "8" values are invalid.
+  return ["./scripts/benchmark-cloud-cli-parity.mjs", "--executable=/usr/local/bin/clearra",
+    `--source-commit=${a.sourceCommit}`, `--cpus=${a.cpus}`, `--workers=${a.workers}`];
 }
 
 export function buildParityJobCreateArguments(a) {
   return ["run", "jobs", "create", a.jobName, ...flags(a), `--image=${a.imageDigest}`,
     `--service-account=${a.runtimeServiceAccount}`, "--tasks=1", "--parallelism=1", "--max-retries=0",
-    "--task-timeout=900s", "--cpu=8", "--memory=16Gi", "--command=node",
+    "--task-timeout=900s", `--cpu=${a.cpus}`, `--memory=${a.memory}`, "--command=node",
     `--args=${parityJobArguments(a).join(",")}`,
     `--set-env-vars=${jobEnvironment(a).map(({ name, value }) => `${name}=${value}`).join(",")}`,
     `--labels=${Object.entries(jobLabels(a)).map(([key, value]) => `${key}=${value}`).join(",")}`,
     "--quiet", "--format=json"];
+}
+
+export function buildParityLogReadArguments(a) {
+  // `run jobs logs read` prints human-formatted payloads even with --format=json;
+  // structured jsonPayload entries become blank lines, losing their evidence.
+  // Logging read preserves the envelope. Exact execution/schema checks still
+  // occur in extractParityLogReport; an unrelated entry never becomes authority.
+  return ["logging", "read", `resource.type=cloud_run_job AND resource.labels.project_id=${a.projectId}` +
+    ` AND resource.labels.location=${REGION} AND resource.labels.job_name=${a.jobName}`,
+    `--project=${a.projectId}`, "--freshness=1d", "--limit=100", "--format=json"];
 }
 
 // Validate the documented v1 gcloud readback shape, not a deep search that can
@@ -105,7 +122,7 @@ function validateExecutionSpec(spec, a) {
     (!task.volumes || task.volumes.length === 0), "job_container_mismatch");
   const c = task.containers[0];
   requireThat(c.image === a.imageDigest && equal(c.command, ["node"]) && equal(c.args, parityJobArguments(a)) &&
-    String(c.resources?.limits?.cpu) === "8" && c.resources?.limits?.memory === "16Gi" &&
+    String(c.resources?.limits?.cpu) === String(a.cpus) && c.resources?.limits?.memory === a.memory &&
     (!c.volumeMounts || c.volumeMounts.length === 0), "job_image_or_command_mismatch");
   const env = Array.isArray(c.env) ? c.env : [];
   requireThat(env.length === 2 && env.every((entry) => Object.keys(entry).length === 2 &&
@@ -156,8 +173,8 @@ function checkedTimings(raw) {
 export function validateParityReport(raw, a) {
   const runtime = currentRuntimeIdentityForCommit(a.sourceCommit);
   requireThat(raw?.schema_id === INNER_SCHEMA && raw.status === "passed" && raw.release_authority === false &&
-    raw.cpus === 8 && raw.workers === 8 && Number.isSafeInteger(raw.process_visible_cpus) &&
-    raw.process_visible_cpus >= 8 && raw.process_visible_cpus <= 4096 &&
+    raw.cpus === a.cpus && raw.workers === a.workers && Number.isSafeInteger(raw.process_visible_cpus) &&
+    raw.process_visible_cpus >= a.cpus && raw.process_visible_cpus <= 4096 &&
     raw.fixture_timeout_ms === 120_000 && raw.total_timeout_ms === 900_000 &&
     raw.timing_scope === TIMING_SCOPE && raw.cold_start_and_capability_excluded === true &&
     raw.pure_solver_timing === false && raw.performance_threshold_applied === false &&
@@ -203,7 +220,7 @@ export function validateParityReport(raw, a) {
     sum + sample.direct_process_ms + sample.service_http_wall_ms, 0) <= 900_000, "diagnostic_deadline_exceeded");
   // Return a whitelist, never the arbitrary incoming JSON/log object.
   return { schema_id: INNER_SCHEMA, status: "passed", release_authority: false, runtime_identity: runtime,
-    cli_binary_sha256: raw.cli_binary_sha256, cpus: 8, workers: 8, process_visible_cpus: raw.process_visible_cpus,
+    cli_binary_sha256: raw.cli_binary_sha256, cpus: a.cpus, workers: a.workers, process_visible_cpus: raw.process_visible_cpus,
     fixture_timeout_ms: 120_000, total_timeout_ms: 900_000, timing_scope: TIMING_SCOPE,
     cold_start_and_capability_excluded: true, pure_solver_timing: false, performance_threshold_applied: false,
     fixtures, warnings };
@@ -259,6 +276,7 @@ export async function benchmarkCliParity(options, dependencies = {}) {
   const report = { schema_id: PARITY_JOB_SCHEMA, release_authority: false, status: "failed",
     measurement_binding: a.mode, production_service_verified: false,
     source_commit: a.sourceCommit, run_id: a.runId, project_id: a.projectId, region: REGION,
+    compute_profile: { cpus: a.cpus, workers: a.workers, memory: a.memory },
     candidate_revision: a.candidateRevision, prior_revision: a.priorRevision,
     image_digest: a.imageDigest, job_name: a.jobName, started_at: new Date().toISOString(),
     cleanup: { job: "not_created", execution: "not_created" } };
@@ -303,7 +321,7 @@ export async function benchmarkCliParity(options, dependencies = {}) {
     report.execution_readback_sha256 = hash(execution);
     stage = "log_attestation";
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const logs = await runJson(["run", "jobs", "logs", "read", a.jobName, ...flags(a), "--limit=100", "--format=json"]);
+      const logs = await runJson(buildParityLogReadArguments(a));
       try { diagnostic = extractParityLogReport(logs, a, executionIdentity.name); break; }
       catch (error) {
         if (!(error instanceof ParityFailure) || error.code !== "missing_parity_report" || attempt === 2) throw error;
@@ -371,9 +389,9 @@ async function main() {
       project: { type: "string" }, "source-commit": { type: "string" }, "prior-revision": { type: "string" },
       "image-digest": { type: "string" }, "candidate-url": { type: "string" },
       "job-bearer-secret-version": { type: "string" }, "run-id": { type: "string" }, output: { type: "string" },
-      mode: { type: "string" },
+      mode: { type: "string" }, workers: { type: "string" },
     } });
-    const result = await benchmarkCliParity({ mode: values.mode, projectId: values.project, sourceCommit: values["source-commit"],
+    const result = await benchmarkCliParity({ mode: values.mode, workers: values.workers, projectId: values.project, sourceCommit: values["source-commit"],
       priorRevision: values["prior-revision"], imageDigest: values["image-digest"], candidateUrl: values["candidate-url"],
       jobBearerSecretVersion: values["job-bearer-secret-version"], runId: values["run-id"], output: values.output });
     process.stdout.write(`${PARITY_JOB_SCHEMA} ${result.status} ${result.report_sha256}\n`);
