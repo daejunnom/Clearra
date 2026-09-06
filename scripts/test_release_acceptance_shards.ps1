@@ -130,3 +130,14 @@ foreach ($contract in @(
     }
 }
 Write-Output 'release_acceptance_shard_test=delegated-evidence-owners status=passed'
+
+$continueIndex = $rustExact.IndexOf('$arguments.Add(''--no-fail-fast'')', [System.StringComparison]::Ordinal)
+$harnessIndex = $rustExact.IndexOf('$arguments.Add(''--'')', [System.StringComparison]::Ordinal)
+if ($continueIndex -lt 0 -or $harnessIndex -le $continueIndex) {
+    throw 'RustExactTests must collect all package failures using the Cargo-level no-fail-fast option.'
+}
+if ($rustExact.IndexOf('if ($result.ExitCode -ne 0)', [System.StringComparison]::Ordinal) -lt 0 -or
+    $rustExact.IndexOf('throw "Rust exact tests failed with exit code $($result.ExitCode)"', [System.StringComparison]::Ordinal) -lt 0) {
+    throw 'RustExactTests must still fail the release gate on a nonzero Cargo exit.'
+}
+Write-Output 'release_acceptance_shard_test=rust-collects-package-failures-without-authority status=passed'

@@ -4,6 +4,8 @@
 
 ## 0.8.0 - 2026-09-05
 
+- Retained complete, identity-checked source coverage for native parallel score
+  portfolios instead of incorrectly marking their producer evidence incomplete.
 - Fixed valid all-failure pattern aggregates being rejected by floating-point
   summation at the unit-probability boundary, including two-piece standard-bag
   tiling-only Build results; malformed weights still fail closed.

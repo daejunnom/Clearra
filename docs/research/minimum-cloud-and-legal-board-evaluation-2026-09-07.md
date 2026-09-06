@@ -507,6 +507,36 @@ status and the failure reason. Genuine missing runtimes remain unsupported;
 no guard is skipped and no partial minimum result is published. Both the shared
 error projection and the full cooperative test assert this distinction.
 
+### Final known-failure repair and asynchronous handoff
+
+Canonical run34062725587 at f176647 passed the Pages acceptance leaf, native
+CLI packages, Windows GUI, DesktopHost, Discord, CTK3, WASM producer, sanitizer,
+adversarial and static-debt leaves. App passed422/422. Core exposed two remaining
+failures, so this run is not canonical publication authority:
+
+- The SRS-X result fixture still expected80 transitions despite the corrected
+  rule registry and all-transition TETR.IO fixture already establishing84.
+  Only the stale result assertion changes; no kick tables change in this repair.
+- Native parallel score portfolios were explicitly excluded from the complete
+  source-row validator even though their coverage/scoring producer dictionaries
+  were retained. Both minimum products now use the same exact identity, row-count,
+  pattern-universe and union checks before reconstruction. Missing rows, false
+  unions, incomplete counts and truncation remain rejected. Two-worker positive
+  and negative tests now exercise both policies, including complete scoring rows.
+
+The Rust gate now uses Cargo-level `--no-fail-fast` to collect all package
+failures in one attempt while still failing on any nonzero Cargo exit. The local
+shard/ownership regression and its fail-closed argument check pass; rustfmt and
+diff whitespace checks pass. The new native regression execution remains for
+trusted CI, not the local host.
+
+The user requested stopping after retry submission without waiting for deployment.
+Dispatch a fresh exact-main canonical run after this repair; do not rerun the failed
+attempt or submit a premature Pages capture/publication. Actual Pages publication
+still requires the new successful canonical run, a successful rollback capture,
+and the existing Pages workflow. No newly dispatched run is claimed successful
+at this handoff, and the currently deployed Pages source remains9177273.
+
 ## Finite experiment server lifecycle
 
 `scripts/tools/run-gui-experiment.mjs` is the only new one-off GUI launcher.

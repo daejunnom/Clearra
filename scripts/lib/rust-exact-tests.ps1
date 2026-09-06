@@ -19,6 +19,8 @@ function Invoke-RustExactTestsGate {
     )
     $arguments = New-Object System.Collections.Generic.List[string]
     $arguments.Add('test')
+    # Collect every package failure in one run; the nonzero exit still fails the gate.
+    $arguments.Add('--no-fail-fast')
     foreach ($package in $packages) {
         $arguments.Add('--package')
         $arguments.Add($package)
