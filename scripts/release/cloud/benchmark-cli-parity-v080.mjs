@@ -51,11 +51,31 @@ function jobEnvironment(a) { return [
 ]; }
 
 export function parityJobAuthority(options) {
-  const authority = candidateAuthority(options, { requireImage: true, requireCandidateUrl: true });
+  const mode = options.mode ?? "zero-traffic-candidate";
+  requireThat(["zero-traffic-candidate", "isolated-image"].includes(mode), "invalid_parity_mode");
+  const authority = mode === "isolated-image" ? isolatedImageAuthority(options)
+    : candidateAuthority(options, { requireImage: true, requireCandidateUrl: true });
   requireThat(typeof options.runId === "string" && /^[1-9][0-9]{0,19}$/u.test(options.runId), "invalid_run_id");
   const jobName = `clearra-parity-${authority.sourceCommit.slice(0, 7)}-${options.runId}`;
   requireThat(RESOURCE.test(jobName), "invalid_job_name");
-  return Object.freeze({ ...authority, runId: options.runId, jobName });
+  return Object.freeze({ ...authority, mode, runId: options.runId, jobName });
+}
+
+// Explicit diagnostics-only scope; never invent a candidate/prior revision or
+// a secret version to pass production readback validation. The report from this
+// mode cannot attest that any production service configuration is correct.
+function isolatedImageAuthority(options) {
+  const { projectId, sourceCommit, imageDigest } = options;
+  requireThat(typeof projectId === "string" && /^[a-z][a-z0-9-]{4,61}[a-z0-9]$/u.test(projectId), "invalid_project");
+  requireThat(typeof sourceCommit === "string" && /^[0-9a-f]{40}$/u.test(sourceCommit), "invalid_source_commit");
+  const imageBase = `${REGION}-docker.pkg.dev/${projectId}/clearra/${SERVICE}`;
+  requireThat(typeof imageDigest === "string" && imageDigest.startsWith(`${imageBase}@sha256:`) &&
+    SHA256.test(imageDigest.slice(`${imageBase}@sha256:`.length)), "invalid_immutable_image");
+  requireThat(["candidateUrl", "priorRevision", "jobBearerSecretVersion"].every((key) => options[key] === undefined),
+    "isolated_image_cannot_claim_candidate_binding");
+  return { projectId, sourceCommit, imageDigest,
+    runtimeServiceAccount: `${SERVICE}@${projectId}.iam.gserviceaccount.com`,
+    candidateRevision: null, priorRevision: null };
 }
 
 export function parityJobArguments(a) {
@@ -237,6 +257,7 @@ export async function benchmarkCliParity(options, dependencies = {}) {
   let diagnostic = null;
   let failure = null;
   const report = { schema_id: PARITY_JOB_SCHEMA, release_authority: false, status: "failed",
+    measurement_binding: a.mode, production_service_verified: false,
     source_commit: a.sourceCommit, run_id: a.runId, project_id: a.projectId, region: REGION,
     candidate_revision: a.candidateRevision, prior_revision: a.priorRevision,
     image_digest: a.imageDigest, job_name: a.jobName, started_at: new Date().toISOString(),
@@ -250,7 +271,7 @@ export async function benchmarkCliParity(options, dependencies = {}) {
     return { service_sha256: hash(service), revision_sha256: hash(revision) };
   }
   try {
-    report.candidate_before = await candidateReadback();
+    if (a.mode === "zero-traffic-candidate") report.candidate_before = await candidateReadback();
     stage = "job_create";
     createAttempted = true;
     const created = await runJson(buildParityJobCreateArguments(a));
@@ -289,9 +310,12 @@ export async function benchmarkCliParity(options, dependencies = {}) {
         await sleep(5_000);
       }
     }
-    stage = "candidate_post_readback";
-    report.candidate_after = await candidateReadback();
-    report.zero_traffic_verified = true;
+    if (a.mode === "zero-traffic-candidate") {
+      stage = "candidate_post_readback";
+      report.candidate_after = await candidateReadback();
+      report.zero_traffic_verified = true;
+      report.production_service_verified = true;
+    }
   } catch (error) {
     failure = error instanceof ParityFailure ? error.code : `${stage}_failed`;
   } finally {
@@ -346,8 +370,9 @@ async function main() {
       project: { type: "string" }, "source-commit": { type: "string" }, "prior-revision": { type: "string" },
       "image-digest": { type: "string" }, "candidate-url": { type: "string" },
       "job-bearer-secret-version": { type: "string" }, "run-id": { type: "string" }, output: { type: "string" },
+      mode: { type: "string" },
     } });
-    const result = await benchmarkCliParity({ projectId: values.project, sourceCommit: values["source-commit"],
+    const result = await benchmarkCliParity({ mode: values.mode, projectId: values.project, sourceCommit: values["source-commit"],
       priorRevision: values["prior-revision"], imageDigest: values["image-digest"], candidateUrl: values["candidate-url"],
       jobBearerSecretVersion: values["job-bearer-secret-version"], runId: values["run-id"], output: values.output });
     process.stdout.write(`${PARITY_JOB_SCHEMA} ${result.status} ${result.report_sha256}\n`);

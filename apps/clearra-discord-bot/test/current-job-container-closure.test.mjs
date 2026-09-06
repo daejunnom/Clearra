@@ -76,6 +76,21 @@ async function relativeEsmClosure(entries) {
   return closure;
 }
 
+test("job service and CLI parity import only Node builtins and source, without document codecs", async () => {
+  const closure = await relativeEsmClosure([
+    "scripts/benchmark-cloud-cli-parity.mjs", "src/job-service/server.mjs",
+  ]);
+  assert.ok(!closure.has("src/discord/slash-command-input.mjs"));
+  assert.ok(closure.has("src/discord/field-limits.mjs"));
+  for (const modulePath of closure) {
+    const source = await readFile(new URL(modulePath, sourceRootUrl), "utf8");
+    for (const specifier of moduleSpecifiers(source)) {
+      assert.ok(specifier.startsWith(".") || specifier.startsWith("node:"),
+        `${modulePath} pulls a package into the dependency-free job runtime: ${specifier}`);
+    }
+  }
+});
+
 function moduleSpecifiers(source) {
   return [
     ...source.matchAll(staticModuleSpecifier),

@@ -8,6 +8,8 @@ import { decoder as fumenDecoder } from "tetris-fumen";
 
 import { decodeViewerDocument } from "../viewer/document.mjs";
 import { DiscordInputError } from "./i18n.mjs";
+import { DISCORD_PC_FIELD_MAX_ROWS, DISCORD_WIDE_FIELD_MAX_ROWS } from "./field-limits.mjs";
+export { DISCORD_PC_FIELD_MAX_ROWS, DISCORD_WIDE_FIELD_MAX_ROWS } from "./field-limits.mjs";
 import {
   booleanSetting,
   damagePackedArguments,
@@ -94,8 +96,6 @@ const FUMEN_COLORS = new Set(["X", "GRAY", "I", "O", "T", "S", "Z", "J", "L"]);
 const GRID_OCCUPIED_PATTERN = /^[+■#1XGIOTSZJL]$/i;
 const GRID_EMPTY_PATTERN = /^[C~□._0]$/i;
 
-export const DISCORD_PC_FIELD_MAX_ROWS = 6;
-export const DISCORD_WIDE_FIELD_MAX_ROWS = 24;
 
 const COMPATIBILITY_PRESET_OPTIONS = Object.freeze({
   finesse: "finesse",

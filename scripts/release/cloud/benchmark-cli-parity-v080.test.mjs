@@ -177,6 +177,45 @@ test("success validates fresh parent/execution binding and deletes only the exac
   });
 });
 
+test("isolated image diagnostic never reads or mutates a production service and cannot claim candidate authority", async () => {
+  const isolated = { mode: "isolated-image", projectId: options.projectId, sourceCommit: options.sourceCommit,
+    imageDigest: options.imageDigest, runId: options.runId };
+  const ia = parityJobAuthority(isolated);
+  assert.equal(ia.candidateRevision, null);
+  assert.equal(ia.priorRevision, null);
+  for (const key of ["candidateUrl", "priorRevision", "jobBearerSecretVersion"])
+    assert.throws(() => parityJobAuthority({ ...isolated, [key]: options[key] }), /cannot_claim_candidate_binding/);
+  for (const patch of [{ mode: "automatic" }, { projectId: "p;whoami" }, { sourceCommit: "main" },
+    { imageDigest: options.imageDigest.replace("clearra-cloud/", "another-project/") }, { imageDigest: "image:latest" }])
+    assert.throws(() => parityJobAuthority({ ...isolated, ...patch }));
+  await withOutput(async (output) => {
+    const cloud = mockCloud();
+    const result = await benchmarkCliParity({ ...isolated, output }, cloud.dependencies);
+    assert.equal(result.status, "passed");
+    assert.equal(result.measurement_binding, "isolated-image");
+    assert.equal(result.production_service_verified, false);
+    assert.equal(result.release_authority, false);
+    assert.equal(result.zero_traffic_verified, undefined);
+    assert.equal(result.candidate_before, undefined);
+    assert.deepEqual(result.cleanup, { job: "deleted", execution: "deleted" });
+    assert.ok(cloud.calls.every((args) => args[0] === "run" && args[1] === "jobs"));
+  });
+});
+
+test("standalone Cloud workflow is manual, protected, exact-source bound and has no publication step", async () => {
+  const source = await readFile(new URL("../../../.github/workflows/cloud-cli-diagnostic.yml", import.meta.url), "utf8");
+  assert.match(source, /workflow_dispatch:/u);
+  assert.match(source, /environment: discord-path-confirmation/u);
+  assert.match(source, /contents: read/u);
+  assert.match(source, /persist-credentials: false/u);
+  assert.match(source, /cancel-in-progress: false/u);
+  assert.match(source, /git ls-remote origin refs\/heads\/main/u);
+  assert.match(source, /--mode isolated-image/u);
+  assert.equal((source.match(/gcloud builds submit/gu) ?? []).length, 1);
+  assert.equal((source.match(/node scripts\/release\/cloud\/benchmark-cli-parity-v080.mjs/gu) ?? []).length, 1);
+  assert.doesNotMatch(source, /workflow_run:|\n  push:|secrets\.|contents: write|gcloud run|restore|invoke-.*\.ps1|uses:.*deploy-pages/u);
+});
+
 test("output create_new refuses existing content before any Cloud access", async () => {
   await withOutput(async (output) => {
     await writeFile(output, "sentinel");

@@ -2,7 +2,7 @@ import { normalizeDiscordLocale } from "./i18n.mjs";
 import {
   DISCORD_PC_FIELD_MAX_ROWS,
   DISCORD_WIDE_FIELD_MAX_ROWS,
-} from "./slash-command-input.mjs";
+} from "./field-limits.mjs";
 import {
   activeDiscordGenericCompatibilityRoutes,
   activeDiscordSearchCapabilities,

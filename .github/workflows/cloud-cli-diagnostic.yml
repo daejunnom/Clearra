@@ -1,0 +1,92 @@
+name: Warm Cloud CLI Diagnostic
+
+# Explicit evaluation only. No service, traffic, Oracle, Discord, tag, Pages,
+# release or canonical acceptance mutation. Never chained from temporary CI.
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact current main SHA to build and measure, without publishing
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-cli-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    environment: discord-path-confirmation
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bind exact trusted source before Cloud access
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GCP_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,61}[a-z0-9]$ ]]
+          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" && "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          [[ "$(git ls-remote origin refs/heads/main | cut -f1)" == "$SOURCE_COMMIT" ]]
+          node --input-type=module -e "await import('./apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs')"
+          mkdir -p "$RUNNER_TEMP/clearra-cloud-diagnostic"
+          node scripts/release/create-exact-source-archive.mjs \
+            --source-commit "$SOURCE_COMMIT" \
+            --output "$RUNNER_TEMP/clearra-cloud-diagnostic/exact-source.tar.gz"
+      - name: Authenticate the protected diagnostic identity
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Build exactly one immutable diagnostic image
+        timeout-minutes: 62
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/clearra-cloud-diagnostic"
+          gcloud builds submit "$evidence/exact-source.tar.gz" \
+            --project="$GCP_PROJECT_ID" \
+            --config=apps/clearra-discord-bot/cloudbuild-current-job-service.yaml \
+            --substitutions="_SOURCE_COMMIT=$SOURCE_COMMIT,_TAG=source-$SOURCE_COMMIT" \
+            --format=json > "$evidence/build-readback.json"
+          node scripts/release/cloud/cloud-build-image-authority-v080.mjs \
+            --source-commit "$SOURCE_COMMIT" --project "$GCP_PROJECT_ID" \
+            --exact-source-archive "$evidence/exact-source.tar.gz" \
+            --build-readback "$evidence/build-readback.json" --output "$evidence/image-binding.json"
+      - name: Compare warm CLI and Discord compute in an isolated Cloud Run Job
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/clearra-cloud-diagnostic"
+          image="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).image_digest)' "$evidence/image-binding.json")"
+          node scripts/release/cloud/benchmark-cli-parity-v080.mjs \
+            --mode isolated-image --project "$GCP_PROJECT_ID" --source-commit "$SOURCE_COMMIT" \
+            --image-digest "$image" --run-id "$GITHUB_RUN_ID" --output "$evidence/parity.json"
+      - name: Preserve diagnostics only, including failure or cleanup status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-cloud-cli-${{ inputs.source_commit }}-run-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/clearra-cloud-diagnostic/image-binding.json
+            ${{ runner.temp }}/clearra-cloud-diagnostic/parity.json
+          if-no-files-found: warn
+          retention-days: 14
