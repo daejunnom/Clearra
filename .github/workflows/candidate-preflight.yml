@@ -15,7 +15,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: candidate-preflight-${{ github.ref }}
+  # Preserve feedback and source-bound artifacts for an older SHA while the
+  # next correctness fix is checked. Repeated requests for one SHA still merge.
+  group: candidate-preflight-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 # Development artifacts only. This workflow produces no canonical acceptance
@@ -176,7 +178,11 @@ jobs:
     if: needs.candidate-source.outputs.full_gate == 'false'
     needs: candidate-source
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      RUST_MIN_STACK: "16777216"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -189,14 +195,34 @@ jobs:
           node scripts/release/validate-release-metadata.mjs --tag v0.8.0
           node scripts/tools/validate-release-cli-smokes.mjs
       - name: Compile candidate CLI
-        run: cargo build --locked --package clearra-cli --features wasm-cpu-runtime,webgpu-search
+        run: cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search
       - name: Check candidate startup
-        run: target/debug/clearra --help
+        run: target/release/clearra --help
+      - name: Verify the current typed score renderer boundary
+        run: cargo test --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search --lib score_finder_renderer_ -- --nocapture
+      - name: Compare direct CLI and Discord execution without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          cpus="$(node -p 'Math.min(4, require("node:os").availableParallelism())')"
+          node apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs \
+            --executable "$GITHUB_WORKSPACE/target/release/clearra" \
+            --source-commit "$GITHUB_SHA" --cpus "$cpus" --workers "$cpus" \
+            > "$RUNNER_TEMP/unqualified-cli-parity.json"
+      - name: Preserve unqualified same-host CLI parity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-cli-parity-${{ github.sha }}-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/unqualified-cli-parity.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Publish unqualified development binary
         uses: actions/upload-artifact@v4
         with:
           name: unqualified-candidate-cli-${{ github.sha }}
-          path: target/debug/clearra
+          path: target/release/clearra
           if-no-files-found: error
           retention-days: 3
   candidate-minimum-diagnostic:

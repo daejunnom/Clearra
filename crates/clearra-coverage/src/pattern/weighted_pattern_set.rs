@@ -223,6 +223,36 @@ impl WeightedPatternSet {
     }
 }
 
+/// Evaluates serialized per-solution probability evidence in ascending pattern
+/// order, independently of whether the producer stores weights compactly or
+/// explicitly. Repeated addition and uniform multiplication need not have the
+/// same IEEE-754 bits. A wire consumer must be able to reconstruct the former
+/// from the exact weight sequence without guessing its storage provenance.
+///
+/// The caller must validate the whole weight source and its denominator. Only
+/// covered entries are read here, with no allocation or count-sized scratch.
+/// The ordinary compact `WeightedPatternSet::covered_weight` remains available
+/// for internal computations which do not cross this serialized boundary.
+pub fn covered_weight_in_pattern_order(
+    pattern_count: usize,
+    coverage: &PatternBitSet,
+    mut weight_at: impl FnMut(PatternId) -> Option<ProbabilityValue>,
+) -> Option<ProbabilityValue> {
+    if coverage.pattern_count() != pattern_count {
+        return None;
+    }
+    let mut total = 0.0_f64;
+    for pattern in coverage.covered_patterns_before(pattern_count) {
+        total += weight_at(pattern)?.get();
+    }
+    let total = if coverage.count_ones() as usize == pattern_count {
+        normalize_total(total, pattern_count)
+    } else {
+        total.min(1.0)
+    };
+    ProbabilityValue::new(total).ok()
+}
+
 fn canonical_terminal_remainder(
     weight: ProbabilityValue,
     count: usize,

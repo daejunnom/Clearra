@@ -7,6 +7,7 @@ const dockerfileUrl = new URL("../Dockerfile.current-job-service", import.meta.u
 const sourceRootUrl = new URL("../", import.meta.url);
 const runtimeEntries = Object.freeze([
   "scripts/run-cloud-candidate-smoke-job.mjs",
+  "scripts/benchmark-cloud-cli-parity.mjs",
   "src/clearra/command.mjs",
   "src/job-service/main.mjs",
   "src/job-service/server.mjs",
@@ -31,6 +32,10 @@ test("current job image closes and imports its runtime module graph during build
     dockerfile,
     /^COPY --from=node-build \/workspace\/apps\/clearra-discord-bot\/scripts\/run-cloud-candidate-smoke-job\.mjs \.\/scripts\/run-cloud-candidate-smoke-job\.mjs$/m,
   );
+  assert.match(
+    dockerfile,
+    /^COPY --from=node-build \/workspace\/apps\/clearra-discord-bot\/scripts\/benchmark-cloud-cli-parity\.mjs \.\/scripts\/benchmark-cloud-cli-parity\.mjs$/m,
+  );
 
   for (const modulePath of closure) {
     assert.ok(
@@ -41,7 +46,7 @@ test("current job image closes and imports its runtime module graph during build
 
   assert.match(
     dockerfile,
-    /^RUN node --input-type=module -e "await import\('\.\/src\/clearra\/command\.mjs'\); await import\('\.\/src\/job-service\/server\.mjs'\); await import\('\.\/scripts\/run-cloud-candidate-smoke-job\.mjs'\)"$/m,
+    /^RUN node --input-type=module -e "await import\('\.\/src\/clearra\/command\.mjs'\); await import\('\.\/src\/job-service\/server\.mjs'\); await import\('\.\/scripts\/run-cloud-candidate-smoke-job\.mjs'\); await import\('\.\/scripts\/benchmark-cloud-cli-parity\.mjs'\)"$/m,
   );
 });
 

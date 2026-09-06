@@ -60,6 +60,12 @@ test('zero tests, only ignored, malformed results and nonzero process outcomes f
   ]) assert.throws(() => assertNonemptyRustSuccess(invalid));
 });
 
+test('ordered probability evidence runs through coverage, producer and strict App reducer', () => {
+  const selected = CANDIDATE_RUST_REGRESSIONS.filter((entry) => entry.filter === 'ordered_solution_probability_');
+  assert.deepEqual(selected.map((entry) => entry.package).sort(), ['clearra-app', 'clearra-core-executor', 'clearra-coverage']);
+  assert.ok(selected.every((entry) => entry.exact === false));
+});
+
 test('focused feedback includes first-canonical lazy ties and warm-seed authority regressions', () => {
   for (const [packageName, filter] of [
     ['clearra-app', 'canonical_ready_reads_do_not_enumerate_hidden_ties_and_explicit_pages_preserve_all_ties'],

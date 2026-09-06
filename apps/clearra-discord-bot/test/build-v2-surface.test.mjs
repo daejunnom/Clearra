@@ -546,6 +546,40 @@ function buildResult(capabilityId, resultContract, payloadKind) {
   };
 }
 
+test("Build score minimum canonical output survives every runner/client hop and rejects mixed or forged payloads", () => {
+  const raw = buildScoreMinimumResult();
+  const once = assertDiscordCanonicalOnlyResult({ exitCode: 0, signal: null, stdout: JSON.stringify(raw), stderr: "" });
+  const twice = assertDiscordCanonicalOnlyResult(once);
+  assert.equal(twice.stdout, once.stdout);
+  assert.equal(assertDiscordCanonicalOnlyResult(twice).stdout, once.stdout);
+  const canonical = JSON.parse(twice.stdout);
+  assert.equal(validDiscordBuildV2Result(canonical), true);
+  assert.equal(canonical.summary.complete, true);
+  assert.equal(canonical.summary.selected_candidate_count, "2");
+  assert.equal(canonical.summary.canonical_candidate_key, raw.summary.canonical_candidate_keys[0]);
+  for (const mutate of [
+    (value) => { value.summary.complete = false; },
+    (value) => { value.summary.winners = raw.summary.winners; },
+    (value) => { value.summary.canonical_candidate_keys = raw.summary.canonical_candidate_keys; },
+    (value) => { value.summary.completeness = raw.summary.completeness; },
+    (value) => { value.summary.score_equality_basis = "score-and-attack"; },
+    (value) => { value.summary.canonical_winner.candidate_key = raw.summary.canonical_candidate_keys[1]; },
+    (value) => { value.summary.canonical_winner.score = "NaN"; },
+    (value) => { value.summary.canonical_winner.pattern_id = "01"; },
+    (value) => { value.summary.canonical_winner.attack = "999"; },
+    (value) => { value.summary.selected_candidate_count = "0"; },
+    (value) => { value.summary.required_pattern_count = "0"; },
+    (value) => { value.summary.page_source_available = true; },
+    (value) => { value.members = []; },
+    (value) => { value.runtime_identity = { source_commit: "forged" }; },
+  ]) {
+    const forged = structuredClone(canonical);
+    mutate(forged);
+    assert.equal(validDiscordBuildV2Result(forged), false);
+    assert.throws(() => assertDiscordCanonicalOnlyResult({ stdout: JSON.stringify(forged) }));
+  }
+});
+
 function buildScoreMinimumResult() {
   const first = "ctk1|initial=0000000000000000|placements=I:000000000000000f";
   const second = "ctk1|initial=0000000000000000|placements=O:0000000000000033";

@@ -1128,7 +1128,7 @@ function Invoke-ReleaseIdentityGateValidation {
         '--max-retries=0',
         '--set-secrets=CLEARRA_CANDIDATE_JOB_TOKEN=',
         '--candidate-url',
-        'labels.execution_name',
+        'run.googleapis.com/execution_name',
         'execution_readback_sha256',
         'validateCloudCandidateSmokeReport',
         'writeCanonicalReportNew',

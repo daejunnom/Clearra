@@ -42,6 +42,10 @@ export function projectDiscordBuildV2Result(structured) {
   if (!authority) return null;
 
   const [resultContract, payloadKind] = authority;
+  if (capabilityId === "build.highest-score-minimum-set" &&
+    structured.summary.payload_kind === "canonical-build-score-minimum-candidate") {
+    return preserveBuildScoreMinimum(structured);
+  }
   if (
     structured.kind !== resultContract ||
     structured.contract?.command?.kind !== resultContract ||
@@ -91,6 +95,36 @@ export function projectDiscordBuildV2Result(structured) {
   const projected = stripAttackFields(clonePlain(structured));
   projected.summary = summary;
   return deepFreeze(projected);
+}
+
+function preserveBuildScoreMinimum(structured) {
+  const summary = structured.summary;
+  const rootKeys = ["kind", "contract", "summary"];
+  if (Object.hasOwn(structured, "schema_version")) rootKeys.push("schema_version");
+  if (Object.hasOwn(structured, "runtime_identity")) rootKeys.push("runtime_identity");
+  const winner = summary.canonical_winner;
+  if (!exactKeys(structured, rootKeys) ||
+    (Object.hasOwn(structured, "schema_version") && structured.schema_version !== 2) ||
+    (Object.hasOwn(structured, "runtime_identity") && !validRuntimeIdentity(structured.runtime_identity)) ||
+    structured.kind !== "build-probability-score-minimum.v1" ||
+    !plainObject(structured.contract) || !exactKeys(structured.contract, ["command"]) ||
+    !plainObject(structured.contract.command) || !exactKeys(structured.contract.command, ["kind"]) ||
+    structured.contract.command.kind !== structured.kind || !exactKeys(summary, [
+      "capability_id", "result_contract", "payload_kind", "canonical_selection", "score_equality_basis",
+      "canonical_candidate_key", "canonical_winner", "selected_candidate_count", "required_pattern_count", "complete",
+    ]) || summary.result_contract !== structured.kind ||
+    summary.canonical_selection !== "smallest-canonical-candidate-id" ||
+    summary.score_equality_basis !== SCORE_ONLY_EQUALITY || summary.complete !== true ||
+    !canonicalBuildCandidateKey(summary.canonical_candidate_key) ||
+    !canonicalDecimal(summary.selected_candidate_count) || summary.selected_candidate_count === "0" ||
+    !canonicalDecimal(summary.required_pattern_count) || summary.required_pattern_count === "0" ||
+    BigInt(summary.selected_candidate_count) > BigInt(summary.required_pattern_count) ||
+    !plainObject(winner) || !exactKeys(winner, ["pattern_id", "candidate_key", "score"]) ||
+    !canonicalDecimal(winner.pattern_id) || !canonicalDecimal(winner.score) ||
+    winner.candidate_key !== summary.canonical_candidate_key || containsForbiddenAlternativeMetadata(structured)) {
+    throw new Error("build.highest-score-minimum-set has an invalid canonical-only envelope.");
+  }
+  return deepFreeze(clonePlain(structured));
 }
 
 function projectBuildScoreMinimum(structured) {
@@ -216,6 +250,20 @@ function containsForbiddenAlternativeMetadata(value, path = []) {
 
 function canonicalDecimal(value) {
   return typeof value === "string" && /^(?:0|[1-9][0-9]*)$/u.test(value);
+}
+
+function exactKeys(value, keys) {
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function validRuntimeIdentity(identity) {
+  return plainObject(identity) && exactKeys(identity, ["source_commit", "engine_build_id", "contract_schema_version",
+    "supply_semantics_id", "artifact_schema_version"]) &&
+    typeof identity.source_commit === "string" && identity.source_commit.length > 0 &&
+    identity.engine_build_id === identity.source_commit &&
+    identity.contract_schema_version === "clearra.search.contract.v2" &&
+    identity.supply_semantics_id === "clearra.supply.projected-terminal-lookahead.v1" &&
+    identity.artifact_schema_version === "clearra.solution-data.v1";
 }
 
 function canonicalBuildCandidateKey(value) {

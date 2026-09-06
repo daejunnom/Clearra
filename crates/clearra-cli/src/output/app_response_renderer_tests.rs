@@ -739,6 +739,89 @@ fn pc_fixed_score_witness_v2_json_kind_requires_the_closed_product_pair() {
 }
 
 #[test]
+fn score_finder_renderer_accepts_current_typed_family_without_legacy_root_metadata() {
+    use clearra_host_contract::ScorePatternWinnerPayload;
+
+    let winner = ScorePatternWinnerPayload::new("0", "1", "solution-1", "1200", "7");
+    let family = ScorePatternWinnerFamilyPayload::new(
+        PC_SCORE_PATTERN_WINNER_CONTRACT,
+        "pattern-id-ascending-then-candidate-id-ascending",
+        "score-only-attack-informational",
+        "canonical-equal-score-trace",
+        "100",
+        "1",
+        PC_SCORE_CANONICAL_SELECTION,
+        winner.clone(),
+        vec![winner],
+    );
+    let payload = |contract, kind, family| {
+        ProductResultPayload::new(
+            contract,
+            kind,
+            ProductResultPayloadContent::ScorePatternWinnerFamily(family),
+        )
+    };
+    let current = payload(
+        ProductCapabilityContract::PcScoreFinder.as_str(),
+        ProductCapabilityResultKind::PcFixedScoreWitnessV2.as_str(),
+        family.clone(),
+    );
+    let render = |payload: &ProductResultPayload| {
+        render_public_build_result(
+            payload,
+            RenderFormat::Json,
+            None,
+            None,
+            false,
+            CliErrorCode::ProductRuntimeUnsupported,
+        )
+    };
+    let output =
+        render(&current).expect("current typed winner family must not use legacy fallback");
+    assert!(output.stderr().is_empty());
+    let value: serde_json::Value =
+        serde_json::from_str(output.stdout()).expect("typed winner JSON");
+    assert_eq!(value["kind"], "pc-fixed-score-witness.v2");
+    assert_eq!(
+        value["summary"]["payload_kind"],
+        "score-pattern-winner-family"
+    );
+    assert_eq!(value["summary"]["score_pattern_winner_complete"], true);
+    assert_eq!(value["summary"]["score_pattern_winner_count"], "1");
+    assert_eq!(
+        value["summary"]["score_pattern_winners"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        value["summary"]["score_pattern_canonical_winner"]["informational_attack"],
+        "7"
+    );
+    assert_eq!(
+        value["contract"],
+        serde_json::json!({"command": {"kind": "pc-fixed-score-witness.v2"}})
+    );
+    assert!(value.get("resource_report").is_none());
+    assert_eq!(
+        value.as_object().unwrap().len(),
+        5,
+        "only the typed root and runtime identity are emitted"
+    );
+
+    // Unsupported legacy/mixed pairs stay unsupported; never relabel a legacy
+    // response as the new closed product contract to satisfy a transport.
+    for (contract, kind) in [
+        ("pc.score-finder", "pc-score-finder.v1"),
+        ("pc.score", "pc-fixed-score-witness.v2"),
+        ("pc.score-finder", "pc-score-summary.v2"),
+    ] {
+        assert!(render(&payload(contract, kind, family.clone())).is_none());
+    }
+}
+
+#[test]
 fn score_finder_renderer_rejects_a_noncanonical_supplied_witness() {
     use clearra_host_contract::{ScorePatternWinnerFamilyPayload, ScorePatternWinnerPayload};
 

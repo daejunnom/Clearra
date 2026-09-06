@@ -31,7 +31,11 @@ const SECRET_VERSION = /^[1-9][0-9]{0,18}$/u;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const EXECUTION_NAME = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/u;
 const CLOSED_GCLOUD_ATOM = /^[A-Za-z0-9_./:=,@+\-]+$/u;
-const CLOSED_GCLOUD_LOG_FILTER = /^--log-filter=labels\.execution_name="[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?" AND textPayload:"candidate_smoke_job=passed"$/u;
+// Cloud Run system labels use the full namespaced key. Logging requires a
+// quoted field component when it contains '/', not labels.execution_name.
+// https://docs.cloud.google.com/logging/docs/api/platform-logs
+// https://docs.cloud.google.com/logging/docs/view/logging-query-language
+const CLOSED_GCLOUD_LOG_FILTER = /^--log-filter=labels\."run\.googleapis\.com\/execution_name"="[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?" AND textPayload:"candidate_smoke_job=passed"$/u;
 const DEFAULT_LOG_ATTEMPTS = 30;
 const DEFAULT_LOG_RETRY_DELAY_MS = 2_000;
 
@@ -337,6 +341,16 @@ function validateCandidateResources(service, revision) {
   ) {
     throw new Error("Cloud candidate startup CPU boost readback drifted");
   }
+  // The service returns 202 while the CLI continues in the background. Only
+  // explicit instance-based CPU allocation preserves that execution contract.
+  // Omission means request-based billing, not a default false value:
+  // https://docs.cloud.google.com/run/docs/configuring/billing-settings
+  if (
+    serviceTemplate?.metadata?.annotations?.["run.googleapis.com/cpu-throttling"] !== "false" ||
+    revision?.metadata?.annotations?.["run.googleapis.com/cpu-throttling"] !== "false"
+  ) {
+    throw new Error("Cloud candidate always-allocated CPU readback drifted");
+  }
   const ready = Array.isArray(revision?.status?.conditions)
     ? revision.status.conditions
     : [];
@@ -431,7 +445,7 @@ export function validateSmokeLogAttestation(logs, authority, executionName) {
   }
   const marker = /^candidate_smoke_job=passed source_commit=([0-9a-f]{40}) job_id=(candidate-smoke-[0-9a-f]{12}-[0-9a-z]+) solution_set_hash=(cts1:[0-9a-f]{16})$/u;
   const matching = logs.flatMap((entry) => {
-    if (entry?.labels?.execution_name !== executionName) return [];
+    if (entry?.labels?.["run.googleapis.com/execution_name"] !== executionName) return [];
     const match = typeof entry?.textPayload === "string"
       ? entry.textPayload.trim().match(marker)
       : null;
@@ -583,7 +597,7 @@ function smokeJobLogsArguments(authority, executionName) {
     "run", "jobs", "logs", "read", authority.smokeJob,
     `--project=${authority.projectId}`,
     `--region=${REGION}`,
-    `--log-filter=labels.execution_name=\"${executionName}\" AND textPayload:\"candidate_smoke_job=passed\"`,
+    `--log-filter=labels."run.googleapis.com/execution_name"="${executionName}" AND textPayload:"candidate_smoke_job=passed"`,
     "--freshness=1h",
     "--order=desc",
     "--limit=10",

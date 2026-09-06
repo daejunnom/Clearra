@@ -5,6 +5,13 @@ Discord does not call it. The Oracle Gateway owns slash ACKs, Modals, interactio
 tokens, message edits, `$`/`>` ingress, and bounded GIF rendering; Oracle calls
 this service only through the authenticated `clearra.job.v1` seam.
 
+For cold-start-excluded computation parity, the current v0.8.0 pipeline also
+runs the same immutable CLI binary directly and through the real Job Service
+in an isolated 8-vCPU diagnostic Job before traffic promotion. See
+[the measurement scope and evidence status](../../docs/research/cloud-cli-parity-and-minimum-follow-up-2026-09-07.md).
+Process time, service overhead and HTTP polling time are separate measurements;
+mock/source checks are not evidence of live Cloud performance.
+
 ```text
 Discord -> Oracle Gateway -> POST clearra-current-job /jobs -> Clearra CLI
                     ^                                      |

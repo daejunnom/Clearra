@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { assertDiscordCanonicalOnlyResult } from "../src/clearra/command.mjs";
 
 import {
   discordPcScoreMinimalsResultProjection,
@@ -131,6 +132,39 @@ test("score-minimals accepts an open canonical enumeration only with an unknown 
     scoreEquality: "score-only",
     attackRole: "informational-only",
   });
+});
+
+test("legacy score-minimals stays exact and idempotent through runner and executor canonical-only boundaries", () => {
+  const raw = validResult();
+  raw.summary.optimal_cardinality = "2";
+  raw.summary.members.push({ candidate_id: "10", normalized_solution_key: "pc:solution:10" });
+  raw.summary.enumeration_complete = false;
+  raw.summary.total_alternative_count = null;
+  raw.contract.artifacts = {
+    schema_version: "clearra.solution-data.v1", solution_keys: ["pc:solution:10", "pc:solution:02"],
+    solution_classes: ["other", "canonical"],
+  };
+  const once = assertDiscordCanonicalOnlyResult({ exitCode: 0, signal: null, stdout: JSON.stringify(raw), stderr: "" });
+  const twice = assertDiscordCanonicalOnlyResult(once);
+  assert.equal(twice.stdout, once.stdout);
+  assert.equal(assertDiscordCanonicalOnlyResult(twice).stdout, once.stdout);
+  const projected = JSON.parse(twice.stdout);
+  assert.deepEqual(projected.contract.artifacts.solution_keys, ["pc:solution:02"]);
+  assert.equal(projected.summary.members.length, 2, "exact canonical membership evidence is retained");
+  assert.equal(projected.summary.total_alternative_count, null);
+  for (const mutate of [
+    (value) => { value.resource_report.count_complete = false; },
+    (value) => { value.summary.score_minimals_score_equality = "score-and-attack"; },
+    (value) => { value.summary.score_minimals_canonical_candidate_id = "10"; },
+    (value) => { value.summary.candidate_ids = ["2", "10"]; },
+    (value) => { value.summary.tie_cursor = "forged"; },
+    (value) => { value.summary.members.pop(); },
+  ]) {
+    const forged = structuredClone(projected);
+    mutate(forged);
+    assert.equal(validDiscordPcScoreMinimalsResult(forged), false);
+    assert.throws(() => assertDiscordCanonicalOnlyResult({ stdout: JSON.stringify(forged) }));
+  }
 });
 
 test("score-minimals rejects every Discord tie, page, cursor, or second-candidate projection", () => {

@@ -136,6 +136,21 @@ test("prestage and live recovery artifacts bracket every protected runtime trans
   assert.match(primary, /discord-live-recovery-authority-\$\{\{ needs\.authority\.outputs\.source_commit \}\}-run-/u);
 });
 
+test("warm Cloud CLI parity is bounded and precedes activation without replacing acceptance or recovery evidence", () => {
+  const uploaded = primary.indexOf("Upload live-transition authority before Oracle activation or Cloud traffic");
+  const diagnostic = primary.indexOf("Compare warm CLI and Discord execution on the exact zero-traffic Cloud image");
+  const preserved = primary.indexOf("Preserve warm Cloud CLI parity diagnostics separately from release authority");
+  const activation = primary.indexOf("Activate Oracle, verify the real path, then cut Cloud to 100 percent");
+  assert.ok(uploaded >= 0 && diagnostic > uploaded && preserved > diagnostic && activation > preserved);
+  const step = primary.slice(diagnostic, preserved);
+  assert.match(step, /timeout-minutes: 20/u);
+  assert.match(step, /benchmark-cli-parity-v080\.mjs/u);
+  assert.match(step, /--source-commit \$env:SOURCE_COMMIT/u);
+  assert.match(step, /--run-id \$env:GITHUB_RUN_ID --output diagnostics\/cloud-cli-parity\.json/u);
+  assert.doesNotMatch(step, /continue-on-error|update-traffic|invoke-release-deploy|seal\s/u);
+  assert.match(primary.slice(preserved, activation), /if: always\(\) && steps\.cloud_cli_parity\.outcome != 'skipped'/u);
+});
+
 test("prestage capture executes an accepted-source helper bundle outside current", () => {
   assert.match(
     primary,

@@ -31,6 +31,11 @@ function assertIsolated(source) {
 
 test('candidate workflow has only isolated read-only preflight authority', () => assertIsolated(workflow));
 
+test('new source feedback preserves an in-flight older source-bound build', () => {
+  assert.match(workflow, /group: candidate-preflight-\$\{\{ github\.ref \}\}-\$\{\{ github\.sha \}\}/u);
+  assert.match(workflow, /cancel-in-progress: true/u);
+});
+
 for (const [name, mutate] of [
   ['main branch', (source) => source.replace('branches: ["codex/v0.8.0-preflight-20260906-rng"]', 'branches: ["main"]')],
   ['canonical name', (source) => source.replace('name: Candidate Preflight', 'name: Publish Product Release')],
@@ -92,6 +97,20 @@ test('Jstris diagnostic is bounded, same-binary and separate from release or GUI
   assert.equal((job.match(/--release --package clearra-wasm --test pc_minimals_ctk3_stage_probe/gu) ?? []).length, 3);
   assert.doesNotMatch(job, /continue-on-error:|--workspace|--all-targets|--no-default-features|--features|-Task ReleaseAcceptance/u);
   assert.match(job, /name: unqualified-jstris-matrix-/u);
+});
+
+test('candidate CLI compares actual direct and Discord paths with one release binary and no Cloud mutation', () => {
+  const job = workflow.split('  candidate-cli:')[1].split('  candidate-minimum-diagnostic:')[0];
+  assert.equal((job.match(/cargo build /gu) ?? []).length, 1);
+  assert.match(job, /cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search/u);
+  assert.match(job, /cargo test --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search --lib score_finder_renderer_ -- --nocapture/u);
+  assert.match(job, /CLEARRA_SOURCE_COMMIT: \$\{\{ github\.sha \}\}/u);
+  assert.match(job, /CLEARRA_ENGINE_BUILD_ID: \$\{\{ github\.sha \}\}/u);
+  assert.match(job, /Math\.min\(4, require\("node:os"\)\.availableParallelism\(\)\)/u);
+  assert.match(job, /--executable "\$GITHUB_WORKSPACE\/target\/release\/clearra"/u);
+  assert.match(job, /--source-commit "\$GITHUB_SHA" --cpus "\$cpus" --workers "\$cpus"/u);
+  assert.match(job, /if: always\(\)[\s\S]*name: unqualified-cli-parity-/u);
+  assert.doesNotMatch(job, /target\/debug|continue-on-error:|\bgcloud\b|--workspace|ReleaseAcceptance/u);
 });
 
 test('existing production triggers cannot consume Candidate Preflight by name or branch', () => {

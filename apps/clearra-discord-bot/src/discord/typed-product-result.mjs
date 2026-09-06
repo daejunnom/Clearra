@@ -1,3 +1,6 @@
+// SRP rationale: the single change reason is the closed Discord projection of
+// App-owned typed results, including repeat validation at runner/client hops.
+// Keeping raw and narrowed forms together prevents divergent privacy contracts.
 const DISPLAY_FAMILY_LIMIT = 24;
 const SCORE_ONLY_EQUALITY = "score-only-attack-informational";
 const SCORE_ONLY_SUMMARY_EQUALITY = "score-only";
@@ -27,21 +30,23 @@ export function projectDiscordTypedProductResult(structured) {
     return preserveCanonicalPath(structured, "build") ?? projectPcPath(structured, "build");
   }
   if (structured.kind === "pc-fixed-score-witness.v2") {
-    return projectPcScoreFinder(structured);
+    return preserveCanonicalScoreWinner(structured) ?? projectPcScoreFinder(structured);
   }
   if (structured.kind === "build-fixed-score-witness.v1") {
-    return projectPcScoreFinder(structured, "build");
+    return preserveCanonicalScoreWinner(structured, "build") ?? projectPcScoreFinder(structured, "build");
   }
   if (structured.kind === "pc-score-summary.v2") return projectPcScore(structured);
   if (structured.kind === "build-field-average-score.v1") {
     return projectPcScore(structured, "build");
   }
-  if (structured.kind === "pc-minimum-cover.v2") return projectPcMinimals(structured);
+  if (structured.kind === "pc-minimum-cover.v2") {
+    return preserveCanonicalMinimum(structured) ?? projectPcMinimals(structured);
+  }
   if (structured.kind === "setup-score-ranking.v1") return projectSetupScore(structured);
   if (SETUP_FAMILIES.has(structured.kind)) return projectSetupFamily(structured);
   if (SPIN_FAMILIES.has(structured.kind)) return projectSpinFamily(structured);
   if (structured.kind === "spin-structure-coverage.v1") {
-    return projectSpinCoverage(structured);
+    return preserveCanonicalSpinCoverage(structured) ?? projectSpinCoverage(structured);
   }
   return null;
 }
@@ -213,6 +218,32 @@ function validatePcPathStep(step, capabilityId) {
     !canonicalDecimal(step.cleared_lines) ||
     !safeText(step.line_clear_identity)
   ) throw invalid(capabilityId, "path step evidence");
+}
+
+function preserveCanonicalScoreWinner(structured, semantics = "pc") {
+  if (structured.summary.payload_kind !== "canonical-score-winner") return null;
+  const build = semantics === "build";
+  const capability = build ? "build.fixed-queue-maximum-score" : "pc.score-finder";
+  const contract = build ? "build-fixed-score-witness.v1" : "pc-fixed-score-witness.v2";
+  const witnessContract = build ? "build-score-pattern-winner.v1" : "pc-score-pattern-winner.v1";
+  const summary = assertEnvelope(structured, contract, capability);
+  const winner = summary.canonical_winner;
+  if (
+    !closedCanonicalRoot(structured) ||
+    !exactKeys(summary, ["capability_id", "result_contract", "payload_kind", "winner_contract",
+      "ordering", "score_equality", "canonical_selection", "complete", "canonical_winner"]) ||
+    summary.result_contract !== contract || summary.winner_contract !== witnessContract ||
+    summary.ordering !== "candidate-id-ascending" || summary.score_equality !== SCORE_ONLY_SUMMARY_EQUALITY ||
+    summary.canonical_selection !== CANONICAL_SELECTION || summary.complete !== true ||
+    !plainObject(winner) ||
+    !exactKeys(winner, ["contract", "pattern_id", "candidate_id", "normalized_solution_key", "score"]) ||
+    winner.contract !== witnessContract || !canonicalDecimal(winner.pattern_id) ||
+    !canonicalPositiveDecimalU64(winner.candidate_id) || !safeText(winner.normalized_solution_key) ||
+    !canonicalInteger(winner.score)
+  ) throw invalid(capability, "canonical score envelope");
+  rejectAlternativeMetadata(structured);
+  rejectLegacyPrivateMetadata(structured);
+  return deepFreeze(clonePlain(structured));
 }
 
 function projectPcScoreFinder(structured, semantics = "pc") {
@@ -414,6 +445,30 @@ function projectPcScore(structured, semantics = "pc") {
   return deepFreeze(stripAttackFields(clonePlain(structured)));
 }
 
+/** Accept only the closed output of projectPcMinimals on subsequent hops. */
+function preserveCanonicalMinimum(structured) {
+  if (structured.summary.payload_kind !== "canonical-minimum-cover-candidate") return null;
+  const summary = assertEnvelope(structured, "pc-minimum-cover.v2", "pc.minimals");
+  const candidate = summary.canonical_candidate;
+  if (
+    !closedCanonicalRoot(structured) ||
+    !exactKeys(summary, [
+      "capability_id", "result_contract", "payload_kind", "canonical_selection", "canonical_candidate",
+    ]) ||
+    summary.result_contract !== "pc-minimum-cover.v2" ||
+    summary.canonical_selection !== CANONICAL_SELECTION ||
+    !plainObject(candidate) ||
+    !exactKeys(candidate, ["candidate_id", "normalized_solution_key"]) ||
+    !canonicalPositiveDecimalU64(candidate.candidate_id) ||
+    !safeText(candidate.normalized_solution_key)
+  ) throw invalid("pc.minimals", "canonical minimum envelope");
+  // This preserves the existing core-selected candidate, not proof or paging
+  // authority. Mixed full-family/private fields may not bypass normal checks.
+  rejectAlternativeMetadata(structured);
+  rejectLegacyPrivateMetadata(structured);
+  return deepFreeze(clonePlain(structured));
+}
+
 function projectPcMinimals(structured) {
   const summary = assertEnvelope(structured, "pc-minimum-cover.v2", "pc.minimals");
   const members = canonicalPortfolioMembers(summary, "pc.minimals");
@@ -446,7 +501,7 @@ function projectSetupFamily(structured) {
     summary.payload_kind !== "setup-ranked-family" ||
     !canonicalDecimal(summary.candidate_count) ||
     !Array.isArray(summary.candidates) ||
-    BigInt(summary.candidate_count) !== BigInt(summary.candidates.length) ||
+    !validFamilyDisplayCount(structured, "setup") ||
     !safeText(summary.ordering)
   ) throw invalid(capabilityId, "ranked family evidence");
   for (const candidate of summary.candidates) {
@@ -469,7 +524,7 @@ function projectSetupScore(structured) {
     summary.complete !== true ||
     !canonicalDecimal(summary.candidate_count) ||
     !Array.isArray(summary.candidates) ||
-    BigInt(summary.candidate_count) !== BigInt(summary.candidates.length) ||
+    !validFamilyDisplayCount(structured, "setup-score") ||
     !safeText(summary.ordering)
   ) throw invalid("setup.score", "ranked family evidence");
   for (const candidate of summary.candidates) {
@@ -479,7 +534,8 @@ function projectSetupScore(structured) {
       !safeText(candidate.candidate_id)
     ) throw invalid("setup.score", "ranked candidate");
   }
-  rejectAlternativeMetadata(structured);
+  // Source document page count is not alternative-result paging authority.
+  rejectAlternativeMetadata(structured, new Set(["summary.source_page_count"]));
   return boundedFamily(structured, "candidates");
 }
 
@@ -494,7 +550,7 @@ function projectSpinFamily(structured) {
     !canonicalDecimal(summary.regular_count) ||
     !canonicalDecimal(summary.mini_count) ||
     !Array.isArray(summary.candidates) ||
-    BigInt(summary.candidate_count) !== BigInt(summary.candidates.length) ||
+    !validFamilyDisplayCount(structured, "spin") ||
     !safeText(summary.ordering)
   ) throw invalid(capabilityId, "structure family evidence");
   for (const candidate of summary.candidates) {
@@ -507,6 +563,45 @@ function projectSpinFamily(structured) {
   }
   rejectAlternativeMetadata(structured);
   return boundedFamily(structured, "candidates");
+}
+
+function preserveCanonicalSpinCoverage(structured) {
+  const summary = structured.summary;
+  if (summary.payload_kind !== "canonical-coverage-portfolio") return null;
+  assertEnvelope(structured, "spin-structure-coverage.v1", "spin-structure.cover");
+  const hasTruncation = hasOwn(summary, "discord_family_display_truncated");
+  const members = summary.displayed_members;
+  if (!closedCanonicalRoot(structured) || !exactKeys(summary, [
+    "capability_id", "result_contract", "payload_kind", "set_contract", "set_identity_sha256",
+    "candidate_map_sha256", "optimal_cardinality", "canonical_selection", "displayed_members",
+    ...(hasTruncation ? ["discord_family_display_truncated"] : []),
+  ]) || summary.result_contract !== "spin-structure-coverage.v1" ||
+    summary.set_contract !== "portfolio-alternative-set.v1" ||
+    !sha256(summary.set_identity_sha256) || !sha256(summary.candidate_map_sha256) ||
+    !canonicalDecimal(summary.optimal_cardinality) ||
+    summary.canonical_selection !== "first-canonical-portfolio" || !Array.isArray(members)) {
+    throw invalid("spin-structure.cover", "canonical portfolio envelope");
+  }
+  const cardinality = BigInt(summary.optimal_cardinality);
+  const expectedMembers = cardinality < BigInt(DISPLAY_FAMILY_LIMIT) ? Number(cardinality) : DISPLAY_FAMILY_LIMIT;
+  if (members.length !== expectedMembers ||
+    (hasTruncation ? summary.discord_family_display_truncated !== true || cardinality <= BigInt(members.length)
+      : cardinality !== BigInt(members.length))) throw invalid("spin-structure.cover", "canonical display count");
+  const ids = new Set();
+  let previous = null;
+  for (const member of members) {
+    if (!plainObject(member) || !exactKeys(member, ["candidate_id", "normalized_solution_key"]) ||
+      !canonicalPositiveDecimalU64(member.candidate_id) || !safeText(member.normalized_solution_key) ||
+      ids.has(member.candidate_id) ||
+      (previous !== null && previous.localeCompare(member.normalized_solution_key) >= 0)) {
+      throw invalid("spin-structure.cover", "canonical displayed member");
+    }
+    ids.add(member.candidate_id);
+    previous = member.normalized_solution_key;
+  }
+  rejectAlternativeMetadata(structured);
+  rejectLegacyPrivateMetadata(structured);
+  return deepFreeze(clonePlain(structured));
 }
 
 function projectSpinCoverage(structured) {
@@ -571,6 +666,51 @@ function canonicalPortfolioMembers(summary, capabilityId) {
   return summary.members;
 }
 
+function closedCanonicalRoot(structured) {
+  const keys = ["kind", "contract", "summary"];
+  if (hasOwn(structured, "schema_version")) keys.push("schema_version");
+  if (hasOwn(structured, "runtime_identity")) keys.push("runtime_identity");
+  return exactKeys(structured, keys) &&
+    (!hasOwn(structured, "schema_version") || structured.schema_version === 2) &&
+    (!hasOwn(structured, "runtime_identity") || validTerminalRuntimeIdentity(structured.runtime_identity)) &&
+    plainObject(structured.contract) && exactKeys(structured.contract, ["command"]) &&
+    plainObject(structured.contract.command) && exactKeys(structured.contract.command, ["kind"]);
+}
+
+/** The unchanged full count and explicit 24-member display marker are paired. */
+function validFamilyDisplayCount(structured, family) {
+  const summary = structured.summary;
+  if (!hasOwn(summary, "discord_family_display_truncated")) {
+    return BigInt(summary.candidate_count) === BigInt(summary.candidates.length);
+  }
+  if (summary.discord_family_display_truncated !== true || !closedCanonicalRoot(structured) ||
+    summary.candidates.length !== DISPLAY_FAMILY_LIMIT ||
+    BigInt(summary.candidate_count) <= BigInt(DISPLAY_FAMILY_LIMIT) ||
+    summary.result_count !== summary.candidate_count) return false;
+  const metadata = family === "setup-score" ? [
+    "input_identity_sha256", "evaluation_identity_sha256", "document_format", "rule_profile", "score_profile",
+    "initial_b2b", "source_page_count", "setup_pattern_count", "average_priority_score", "complete",
+  ] : [
+    "query_identity_sha256", "rule_profile", "supply_identity_sha256", "universe_identity_sha256", "product_build",
+    ...(family === "setup" ? ["resolved_length_preference"] : [
+      "spin_profile", "minimum_placements", "guaranteed_final_piece", "guarantee_basis", "dependency_report_included",
+      "dependency_relation", "dependency_edge_count", "regular_count", "mini_count", "complete",
+    ]),
+  ];
+  const keys = ["capability_id", "result_contract", "payload_kind", "ordering", "candidate_count", "candidates",
+    "result_count", "discord_family_display_truncated", ...metadata.filter((key) => hasOwn(summary, key))];
+  if (!exactKeys(summary, keys)) return false;
+  const candidateKeys = family === "setup" ? ["candidate_id", "condition_id", "setup_id"]
+    : family === "spin" ? ["candidate_id", "partition", "placement_count"]
+    : ["rank", "candidate_id", "completed_board_mask", "setup_covered_pattern_count", "setup_covered_probability",
+      "continuation_probability", "unconditional_expected_score"];
+  if (summary.candidates.some((candidate) => !plainObject(candidate) ||
+    Object.keys(candidate).some((key) => !candidateKeys.includes(key)))) return false;
+  if (family === "spin" && BigInt(summary.regular_count) + BigInt(summary.mini_count) !== BigInt(summary.candidate_count)) return false;
+  rejectLegacyPrivateMetadata(structured);
+  return true;
+}
+
 function boundedFamily(structured, field) {
   const projected = stripAttackFields(clonePlain(structured));
   const members = projected.summary[field];
@@ -608,7 +748,7 @@ function rejectAlternativeMetadata(value, allowed = new Set()) {
       const normalized = key.toLowerCase().replaceAll("-", "_");
       const pathText = [...path, key].join(".");
       const traceCursor = /(?:^|\.)(?:input_cursor|output_cursor)$/u.test(pathText);
-      const forbidden = !allowed.has(normalized) && (
+      const forbidden = !allowed.has(normalized) && !allowed.has(pathText) && (
         /(?:^|_)(?:ties?|alternatives?|tie_metadata)(?:_|$)/u.test(normalized) ||
         normalized === "cursor" ||
         (/(?:^|_)page(?:_|$)/u.test(normalized) && !traceCursor) ||

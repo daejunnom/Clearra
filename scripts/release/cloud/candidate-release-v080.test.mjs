@@ -74,7 +74,8 @@ function serviceFixture(overrides = {}) {
     spec: {
       template: {
         metadata: {
-          annotations: { "run.googleapis.com/startup-cpu-boost": "true" },
+          annotations: { "run.googleapis.com/startup-cpu-boost": "true",
+            "run.googleapis.com/cpu-throttling": "false" },
         },
         spec: {
           serviceAccountName: expected.runtimeServiceAccount,
@@ -99,6 +100,7 @@ function revisionFixture(overrides = {}) {
       annotations: {
         "autoscaling.knative.dev/maxScale": "4",
         "run.googleapis.com/startup-cpu-boost": "true",
+        "run.googleapis.com/cpu-throttling": "false",
       },
     },
     status: {
@@ -216,7 +218,7 @@ test("gcloud runner uses a closed Windows command shim and native non-Windows ar
     "logs",
     "read",
     "clearra-candidate-smoke-111111111111",
-    '--log-filter=labels.execution_name="execution-1" AND textPayload:"candidate_smoke_job=passed"',
+    '--log-filter=labels."run.googleapis.com/execution_name"="execution-1" AND textPayload:"candidate_smoke_job=passed"',
     "--format=json",
   ];
   const comspec = "C:\\Windows\\System32\\cmd.exe";
@@ -235,7 +237,11 @@ test("gcloud runner uses a closed Windows command shim and native non-Windows ar
     () => gcloudProcessInvocation(["version", "safe&whoami"], "win32", {}),
     /not a closed command surface/u,
   );
-  for (const argument of ["%COMSPEC%", " --verbosity=debug ", "safe --format=json"]) {
+  for (const argument of ["%COMSPEC%", " --verbosity=debug ", "safe --format=json",
+    '--log-filter=labels.execution_name="execution-1" AND textPayload:"candidate_smoke_job=passed"',
+    '--log-filter=labels."run.googleapis.com/execution_name"="execution-1" OR severity=ERROR',
+    '--log-filter=labels."run.googleapis.com/execution_name"="execution-1&whoami" AND textPayload:"candidate_smoke_job=passed"',
+  ]) {
     assert.throws(
       () => gcloudProcessInvocation(["version", argument], "win32", {}),
       /not a closed command surface/u,
@@ -295,7 +301,7 @@ test(
       "logs",
       "read",
       "clearra-candidate-smoke-111111111111",
-      '--log-filter=labels.execution_name="execution-1" AND textPayload:"candidate_smoke_job=passed"',
+      '--log-filter=labels."run.googleapis.com/execution_name"="execution-1" AND textPayload:"candidate_smoke_job=passed"',
       "--format=json",
     ];
     assert.deepEqual(
@@ -445,6 +451,24 @@ test("scale readback accepts Cloud Run's omitted default zero and rejects explic
   );
 });
 
+test("candidate requires explicit always-allocated CPU in both service and revision readback", () => {
+  assert.ok(buildServiceDeployArguments(authority()).includes("--no-cpu-throttling"));
+  assert.equal(validateZeroTrafficReadback({ service: serviceFixture(), revision: revisionFixture() }, authority()), candidateUrl);
+  for (const side of ["service", "revision"]) {
+    for (const value of [undefined, "true", "", false, true, 0, "0", null]) {
+      const actual = { service: serviceFixture(), revision: revisionFixture() };
+      const annotations = side === "service" ? actual.service.spec.template.metadata.annotations : actual.revision.metadata.annotations;
+      if (value === undefined) delete annotations["run.googleapis.com/cpu-throttling"];
+      else annotations["run.googleapis.com/cpu-throttling"] = value;
+      // A matching value at the wrong metadata level cannot hide a missing or
+      // contradictory value on the immutable candidate revision/template.
+      actual.service.metadata.annotations["run.googleapis.com/cpu-throttling"] = "false";
+      assert.throws(() => validateZeroTrafficReadback(actual, authority()), /always-allocated CPU readback drifted/u,
+        `${side}: ${String(value)}`);
+    }
+  }
+});
+
 test("smoke deploys one digest-bound managed-secret Job against the zero-traffic URL", async () => {
   const calls = [];
   let logReadCount = 0;
@@ -468,7 +492,7 @@ test("smoke deploys one digest-bound managed-secret Job against the zero-traffic
       logReadCount += 1;
       if (logReadCount === 1) return [];
       return [{
-        labels: { execution_name: "smoke-execution-1" },
+        labels: { "run.googleapis.com/execution_name": "smoke-execution-1" },
         textPayload: `candidate_smoke_job=passed source_commit=${sourceCommit} job_id=candidate-smoke-${sourceCommit.slice(0, 12)}-rs solution_set_hash=cts1:0000000000000000`,
       }];
     }
@@ -519,7 +543,7 @@ test("smoke deploys one digest-bound managed-secret Job against the zero-traffic
 test("managed smoke log readback retries boundedly and rejects ambiguous attestations", async () => {
   const expected = authority();
   const exact = {
-    labels: { execution_name: "execution-1" },
+    labels: { "run.googleapis.com/execution_name": "execution-1" },
     textPayload: `candidate_smoke_job=passed source_commit=${sourceCommit} job_id=candidate-smoke-${sourceCommit.slice(0, 12)}-rs solution_set_hash=cts1:0000000000000000`,
   };
   let attempts = 0;
@@ -551,7 +575,7 @@ test("managed smoke log readback retries boundedly and rejects ambiguous attesta
     readSmokeLogAttestation(
       async () => [{
         ...exact,
-        labels: { "run.googleapis.com/execution_name": "execution-1" },
+        labels: { execution_name: "execution-1" },
       }],
       expected,
       "execution-1",

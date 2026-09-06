@@ -69,10 +69,11 @@ COPY --from=clearra-build /workspace/target/release/clearra /usr/local/bin/clear
 COPY --from=node-build /workspace/node_modules ./node_modules
 COPY --from=node-build /workspace/apps/clearra-discord-bot/src ./src
 COPY --from=node-build /workspace/apps/clearra-discord-bot/scripts/run-cloud-candidate-smoke-job.mjs ./scripts/run-cloud-candidate-smoke-job.mjs
+COPY --from=node-build /workspace/apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs ./scripts/benchmark-cloud-cli-parity.mjs
 COPY --from=node-build /workspace/packages/ctk3/package.json ./packages/ctk3/package.json
 COPY --from=node-build /workspace/packages/ctk3/dist ./packages/ctk3/dist
 
-RUN node --input-type=module -e "await import('./src/clearra/command.mjs'); await import('./src/job-service/server.mjs'); await import('./scripts/run-cloud-candidate-smoke-job.mjs')"
+RUN node --input-type=module -e "await import('./src/clearra/command.mjs'); await import('./src/job-service/server.mjs'); await import('./scripts/run-cloud-candidate-smoke-job.mjs'); await import('./scripts/benchmark-cloud-cli-parity.mjs')"
 
 USER node
 EXPOSE 8080

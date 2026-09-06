@@ -14,6 +14,7 @@ use core::fmt::{self, Write as _};
 
 use clearra_core_domain::probability::probability_value::ProbabilityValue;
 use clearra_core_executor::CoreExecutionResult;
+use clearra_coverage::pattern::weighted_pattern_set::covered_weight_in_pattern_order;
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFinesseRequest,
     BuildSolutionProbabilityPolicy, FinessePatternKnowledge, FinesseScoreRequest,
@@ -1320,28 +1321,20 @@ fn validate_streaming_solution_probability_reports(
     reports: &[clearra_core_executor::SolutionProbabilityReport],
     complete: bool,
 ) -> Result<(), BuildSolutionProbabilityResultError> {
-    let total_weight = validate_streaming_pattern_weight_authority(result, pattern_count)?;
+    validate_streaming_pattern_weight_authority(result, pattern_count)?;
     let serialized_weights = result.postprocess_pattern_weights();
 
     for (row, report) in coverage.iter().zip(reports) {
         let covered_count = row.covered_patterns().count_ones() as usize;
-        let expected_probability = if covered_count == pattern_count {
-            normalize_probability_total(total_weight, pattern_count)
-        } else {
-            let mut covered_weight = 0.0_f64;
-            for (index, serialized_weight) in serialized_weights.iter().enumerate() {
-                if row.covered_patterns().word_at(index / u64::BITS as usize)
-                    & (1_u64 << (index % u64::BITS as usize))
-                    != 0
-                {
-                    covered_weight += parse_canonical_probability(serialized_weight)
-                        .map_err(canonical_weight_error)?;
-                }
-            }
-            covered_weight.min(1.0)
-        };
-        let expected_probability = ProbabilityValue::new(expected_probability)
-            .map_err(|_| BuildSolutionProbabilityResultError::ReportProbabilityInvalid)?
+        let expected_probability =
+            covered_weight_in_pattern_order(pattern_count, row.covered_patterns(), |pattern| {
+                // The whole source was checked above, including uncovered
+                // weights. This callback only streams canonical covered values.
+                let value =
+                    parse_canonical_probability(serialized_weights.get(pattern.index())?).ok()?;
+                ProbabilityValue::new(value).ok()
+            })
+            .ok_or(BuildSolutionProbabilityResultError::ReportProbabilityInvalid)?
             .get();
         let reported_probability = parse_canonical_probability(report.probability())
             .map_err(|_| BuildSolutionProbabilityResultError::ReportProbabilityInvalid)?;
@@ -1411,15 +1404,6 @@ fn canonical_weight_error(
             "solution_probability_pattern_weight_not_canonical"
         }
     })
-}
-
-fn normalize_probability_total(total: f64, count: usize) -> f64 {
-    let summation_tolerance = f64::EPSILON * count.max(1) as f64 * 2.0;
-    if (total - 1.0).abs() <= summation_tolerance {
-        1.0
-    } else {
-        total.min(1.0)
-    }
 }
 
 fn canonical_probability_text_matches(value: f64, expected: &str) -> bool {
@@ -2191,6 +2175,57 @@ mod tests {
             validate_build_solution_probability_result(
                 BuildSolutionProbabilityPolicy::Include,
                 &wrong_weight_authority,
+            ),
+            Err(BuildSolutionProbabilityResultError::ReportVectorMismatch)
+        );
+    }
+
+    #[test]
+    fn ordered_solution_probability_p7_compact_reports_pass_exact_app_validation() {
+        let count = 5040_usize;
+        let serialized = (1.0 / count as f64).to_string();
+        let serialized_weights = vec![serialized.as_str(); count];
+        let mut words = vec![0; count.div_ceil(64)];
+        words[0] = 0b11_1111;
+        let canonical = weighted_included_result(&serialized_weights, words);
+        let compact = WeightedPatternSet::uniform(count).unwrap();
+        let reports = normalized_solution_probability_reports(
+            canonical.normalized_solution_keys(),
+            canonical.normalized_solution_coverages(),
+            &compact,
+            true,
+        )
+        .unwrap();
+        assert_eq!(reports[0].probability(), "0.0011904761904761904");
+        let canonical = canonical.with_solution_probabilities(reports);
+        assert_eq!(
+            validate_build_solution_probability_result(
+                BuildSolutionProbabilityPolicy::Include,
+                &canonical,
+            ),
+            Ok(())
+        );
+
+        // Keep the original exact weights and coverage, but substitute reports
+        // from a different (still individually valid) compact distribution.
+        // Representation independence must not become tolerance-based trust.
+        let wrong_weights = WeightedPatternSet::uniform_with_weight(
+            count,
+            ProbabilityValue::new(0.5 / count as f64).unwrap(),
+        )
+        .unwrap();
+        let wrong_reports = normalized_solution_probability_reports(
+            canonical.normalized_solution_keys(),
+            canonical.normalized_solution_coverages(),
+            &wrong_weights,
+            true,
+        )
+        .unwrap();
+        let tampered = canonical.with_solution_probabilities(wrong_reports);
+        assert_eq!(
+            validate_build_solution_probability_result(
+                BuildSolutionProbabilityPolicy::Include,
+                &tampered,
             ),
             Err(BuildSolutionProbabilityResultError::ReportVectorMismatch)
         );

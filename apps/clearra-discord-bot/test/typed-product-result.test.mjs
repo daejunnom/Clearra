@@ -252,6 +252,182 @@ test("pc.minimals exposes only its supplied numeric-smallest canonical member", 
   assert.equal(JSON.stringify(projected).toLowerCase().includes("page_"), false);
 });
 
+test("pc.minimals canonical projection survives runner, HTTP client and bot validation without widening", () => {
+  const raw = coverage("pc-minimum-cover.v2", "pc.minimals");
+  const once = assertDiscordCanonicalOnlyResult({ exitCode: 0, signal: null, stdout: JSON.stringify(raw), stderr: "" });
+  const twice = assertDiscordCanonicalOnlyResult(once);
+  const third = projectDiscordTypedProductResult(JSON.parse(twice.stdout));
+  assert.equal(twice.stdout, once.stdout);
+  assert.deepEqual(third, JSON.parse(once.stdout));
+  assert.equal(validDiscordTypedProductResult(third), true);
+  assert.deepEqual(third.summary.canonical_candidate, raw.summary.members[0]);
+  assert.deepEqual(Object.keys(third.summary).sort(), [
+    "capability_id", "canonical_candidate", "canonical_selection", "payload_kind", "result_contract",
+  ].sort());
+});
+
+test("already-canonical pc.minimals rejects mixed families, forged fields and invalid identities", () => {
+  const canonical = projectDiscordTypedProductResult(coverage("pc-minimum-cover.v2", "pc.minimals"));
+  for (const mutate of [
+    (value) => { value.summary.members = []; },
+    (value) => { value.summary.alternative_index = "2"; },
+    (value) => { value.summary.page_handle_available = true; },
+    (value) => { value.summary.complete = false; },
+    (value) => { value.summary.result_contract = "spin-structure-coverage.v1"; },
+    (value) => { value.contract.command.kind = "pc"; },
+    (value) => { value.contract.artifacts = { solution_keys: ["forged"] }; },
+    (value) => { value.members = []; },
+    (value) => { value.summary.canonical_selection = "first-canonical-portfolio"; },
+    (value) => { value.summary.canonical_candidate.candidate_id = "0"; },
+    (value) => { value.summary.canonical_candidate.candidate_id = "02"; },
+    (value) => { value.summary.canonical_candidate.candidate_id = "18446744073709551616"; },
+    (value) => { value.summary.canonical_candidate.normalized_solution_key = ""; },
+    (value) => { value.summary.canonical_candidate.attack = "100"; },
+    (value) => { value.schema_version = 1; },
+    (value) => { value.runtime_identity = { source_commit: "forged" }; },
+  ]) {
+    const forged = structuredClone(canonical);
+    mutate(forged);
+    assert.equal(validDiscordTypedProductResult(forged), false);
+    assert.throws(() => assertDiscordCanonicalOnlyResult({ stdout: JSON.stringify(forged) }));
+  }
+});
+
+test("PC and Build fixed-score winner projection is strict and idempotent across all three hops", () => {
+  for (const build of [false, true]) {
+    const raw = scoreFinder();
+    if (build) {
+      raw.kind = "build-fixed-score-witness.v1";
+      raw.contract.command.kind = raw.kind;
+      raw.summary.capability_id = "build.fixed-queue-maximum-score";
+      raw.summary.result_contract = raw.kind;
+      raw.summary.score_pattern_winner_contract = "build-score-pattern-winner.v1";
+      for (const winner of [...raw.summary.score_pattern_winners, raw.summary.score_pattern_canonical_winner]) {
+        winner.contract = "build-score-pattern-winner.v1";
+      }
+    }
+    const projected = roundTrip(raw);
+    assert.equal(projected.summary.complete, true);
+    assert.equal(projected.summary.canonical_winner.candidate_id, "2");
+    for (const mutate of [
+      (value) => { value.summary.score_pattern_winners = []; },
+      (value) => { value.summary.complete = false; },
+      (value) => { value.summary.score_equality = "score-and-attack"; },
+      (value) => { value.summary.winner_contract = "wrong"; },
+      (value) => { value.summary.canonical_winner.informational_attack = "99"; },
+      (value) => { value.summary.canonical_winner.candidate_id = "0"; },
+      (value) => { value.summary.canonical_winner.pattern_id = "01"; },
+      (value) => { value.summary.canonical_winner.score = "NaN"; },
+      (value) => { value.summary.canonical_winner.extra_winner = {}; },
+      (value) => { value.contract.alternatives = []; },
+    ]) {
+      const forged = structuredClone(projected);
+      mutate(forged);
+      assert.equal(validDiscordTypedProductResult(forged), false);
+      assert.throws(() => roundTrip(forged));
+    }
+  }
+});
+
+test("spin canonical portfolio preserves full cardinality with exactly its bounded display on repeat hops", () => {
+  for (const count of [0, 2, 24, 25, 30]) {
+    const raw = coverage("spin-structure-coverage.v1", "spin-structure.cover");
+    raw.summary.optimal_cardinality = String(count);
+    raw.summary.members = Array.from({ length: count }, (_, i) => ({
+      candidate_id: String(i + 1), normalized_solution_key: `spin-${String(i).padStart(3, "0")}`,
+    }));
+    const projected = roundTrip(raw);
+    assert.equal(projected.summary.optimal_cardinality, String(count));
+    assert.equal(projected.summary.displayed_members.length, Math.min(count, 24));
+    if (count > 24) assert.equal(projected.summary.discord_family_display_truncated, true);
+    for (const mutate of [
+      (value) => { value.summary.members = []; },
+      (value) => { value.summary.member_page_number = "1"; },
+      (value) => { value.summary.set_identity_sha256 = "bad"; },
+      (value) => { value.summary.optimal_cardinality = "999"; },
+      (value) => { value.summary.canonical_selection = "attack-descending"; },
+      (value) => { value.summary.discord_family_display_truncated = false; },
+    ]) {
+      const forged = structuredClone(projected);
+      mutate(forged);
+      // Counts above the displayed prefix are opaque; a changed larger count
+      // cannot be re-proven by a display adapter. Other shape mutations fail.
+      if (count >= 25 && forged.summary.optimal_cardinality === "999") continue;
+      assert.equal(validDiscordTypedProductResult(forged), false);
+    }
+    if (count > 0) {
+      const forged = structuredClone(projected);
+      forged.summary.displayed_members[0].candidate_id = "0";
+      assert.equal(validDiscordTypedProductResult(forged), false);
+    }
+  }
+});
+
+test("all setup/spin families remain idempotent at 0/24/25/30 members without changing original counts", () => {
+  const families = [
+    ["setup-joint-ranking.v2", "setup.joint", "setup-ranked-family"],
+    ["setup-build-ranking.v2", "setup.build", "setup-ranked-family"],
+    ["setup-pc-ranking.v2", "setup.pc", "setup-ranked-family"],
+    ["setup-score-ranking.v1", "setup.score", "ranked-family"],
+    ["spin-structure-family.v2", "spin-structure.search", "spin-structure-family"],
+    ["spin-structure-guaranteed.v1", "spin-structure.guaranteed", "spin-structure-family"],
+  ];
+  for (const [kind, capability, payloadKind] of families) {
+    for (const count of [0, 24, 25, 30]) {
+      const spin = capability.startsWith("spin-");
+      const score = capability === "setup.score";
+      const raw = envelope(kind, {
+        capability_id: capability, result_contract: kind, payload_kind: payloadKind,
+        ordering: "rank-ascending", candidate_count: String(count),
+        ...(spin ? { regular_count: String(count), mini_count: "0", complete: true } : {}),
+        ...(score ? { complete: true, source_page_count: "1" } : {}),
+        candidates: Array.from({ length: count }, (_, i) => ({
+          candidate_id: String(i + 1),
+          ...(spin ? { partition: "regular", placement_count: "1" }
+            : score ? { rank: String(i + 1) } : { condition_id: `condition-${i}`, setup_id: `setup-${i}` }),
+        })),
+      });
+      const projected = roundTrip(raw);
+      assert.equal(projected.summary.candidate_count, String(count));
+      assert.equal(projected.summary.result_count, String(count));
+      assert.equal(projected.summary.candidates.length, Math.min(count, 24));
+      if (count <= 24) continue;
+      for (const mutate of [
+        (value) => { value.summary.candidates.pop(); },
+        (value) => { value.summary.candidates.push(value.summary.candidates[0]); },
+        (value) => { value.summary.candidate_count = "24"; },
+        (value) => { value.summary.result_count = "123"; },
+        (value) => { value.summary.discord_family_display_truncated = false; },
+        (value) => { delete value.summary.discord_family_display_truncated; },
+        (value) => { value.summary.members = []; },
+        (value) => { value.summary.score_pattern_winners = []; },
+        (value) => { value.summary.candidates[0].informational_attack = "999"; },
+        (value) => { value.summary.candidates[0].source_page_count = "1"; },
+      ]) {
+        const forged = structuredClone(projected);
+        mutate(forged);
+        assert.equal(validDiscordTypedProductResult(forged), false, `${capability}: strict display prefix`);
+      }
+      if (spin || score) {
+        const incomplete = structuredClone(projected);
+        incomplete.summary.complete = false;
+        assert.equal(validDiscordTypedProductResult(incomplete), false);
+      }
+    }
+  }
+});
+
+function roundTrip(raw) {
+  const once = assertDiscordCanonicalOnlyResult({ exitCode: 0, signal: null, stdout: JSON.stringify(raw), stderr: "" });
+  const twice = assertDiscordCanonicalOnlyResult(once);
+  const thrice = assertDiscordCanonicalOnlyResult(twice);
+  assert.equal(twice.stdout, once.stdout);
+  assert.equal(thrice.stdout, once.stdout);
+  const parsed = JSON.parse(thrice.stdout);
+  assert.deepEqual(projectDiscordTypedProductResult(parsed), parsed);
+  return parsed;
+}
+
 test("pc.score preserves score-only evidence and strips informational attack", () => {
   const result = scoreSummary();
   const projected = projectDiscordTypedProductResult(result);

@@ -3,7 +3,8 @@ use clearra_core_domain::solution::normalized_tiling_solution::{
     NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
 };
 use clearra_coverage::pattern::{
-    pattern_bitset::PatternBitSet, weighted_pattern_set::WeightedPatternSet,
+    pattern_bitset::PatternBitSet,
+    weighted_pattern_set::{covered_weight_in_pattern_order, WeightedPatternSet},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -352,8 +353,14 @@ pub fn normalized_solution_probability_reports(
         if covered_patterns.pattern_count() != weights.len() {
             return Err(NormalizedSolutionProbabilityError::PatternCountMismatch);
         }
-        let probability = weights
-            .covered_weight(covered_patterns)
+        // Serialized reports carry individual canonical weights, not their
+        // compact storage representation. Use the same ordered evaluation as
+        // the App validator; do not leak uniform-multiply rounding into this
+        // otherwise representation-independent evidence.
+        let probability =
+            covered_weight_in_pattern_order(weights.len(), covered_patterns, |pattern| {
+                weights.weight(pattern)
+            })
             .ok_or(NormalizedSolutionProbabilityError::PatternWeightMismatch)?;
         reports.push(SolutionProbabilityReport {
             solution_key: solution_key.clone(),
@@ -519,6 +526,36 @@ mod normalized_probability_tests {
         assert_eq!(reports[1].solution_key(), keys[1]);
         assert_eq!(reports[1].probability(), "0.25");
         assert_eq!(reports[1].covered_pattern_count(), 1);
+    }
+
+    #[test]
+    fn ordered_solution_probability_reports_match_explicit_p7_reconstruction() {
+        let count = 5040;
+        let keys = vec![canonical_key(PieceKind::I, 0xf)];
+        let coverage = vec![NormalizedSolutionCoverage::new(
+            keys[0].clone(),
+            PatternBitSet::from_pattern_indices(count, (0..6).collect()).unwrap(),
+        )];
+        let compact = WeightedPatternSet::uniform(count).unwrap();
+        let explicit = WeightedPatternSet::new(
+            (0..count)
+                .map(|index| {
+                    compact
+                        .weight(clearra_coverage::pattern::pattern_id::PatternId::new(index))
+                        .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        let compact_reports =
+            normalized_solution_probability_reports(&keys, &coverage, &compact, true).unwrap();
+        let explicit_reports =
+            normalized_solution_probability_reports(&keys, &coverage, &explicit, true).unwrap();
+        assert_eq!(compact_reports, explicit_reports);
+        assert_eq!(compact_reports[0].probability(), "0.0011904761904761904");
+        assert_eq!(compact_reports[0].covered_pattern_count(), 6);
+        assert_eq!(compact_reports[0].pattern_count(), count);
+        assert!(compact_reports[0].probability_complete());
     }
 
     #[test]

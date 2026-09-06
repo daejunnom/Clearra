@@ -1401,7 +1401,7 @@ fn is_supported_score_winner_family(
         ),
         (
             "pc.score-finder",
-            "pc-score-finder.v1",
+            "pc-fixed-score-witness.v2",
             PC_SCORE_PATTERN_WINNER_CONTRACT
         ) | (
             BUILD_FIXED_SCORE_CAPABILITY,

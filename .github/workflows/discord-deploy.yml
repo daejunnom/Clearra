@@ -706,6 +706,31 @@ jobs:
             candidate
           if-no-files-found: error
           retention-days: 90
+      - name: Compare warm CLI and Discord execution on the exact zero-traffic Cloud image
+        id: cloud_cli_parity
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path diagnostics -ErrorAction Stop | Out-Null
+          $candidate = Get-Content candidate/cloud-candidate-authority.json -Raw | ConvertFrom-Json
+          $prior = Get-Content prestage/cloud-prior-authority.json -Raw | ConvertFrom-Json
+          node scripts/release/cloud/benchmark-cli-parity-v080.mjs `
+            --project $env:GCP_PROJECT_ID --source-commit $env:SOURCE_COMMIT `
+            --prior-revision ([string]$prior.prior_revision) `
+            --image-digest ([string]$candidate.imageDigest) `
+            --candidate-url ([string]$candidate.candidateUrl) `
+            --job-bearer-secret-version ([string]$prior.job_bearer_secret_version) `
+            --run-id $env:GITHUB_RUN_ID --output diagnostics/cloud-cli-parity.json
+          if ($LASTEXITCODE -ne 0) { throw 'Cloud CLI result parity or isolated diagnostic lifecycle failed' }
+      - name: Preserve warm Cloud CLI parity diagnostics separately from release authority
+        if: always() && steps.cloud_cli_parity.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-cli-parity-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: diagnostics/cloud-cli-parity.json
+          if-no-files-found: warn
+          retention-days: 30
       - name: Activate Oracle, verify the real path, then cut Cloud to 100 percent
         shell: pwsh
         run: |
