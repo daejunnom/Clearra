@@ -23,7 +23,7 @@ use clearra_problem::{
 };
 use clearra_problem::{BuildProbabilityField, BuildSolutionProbabilityPolicy};
 
-use crate::app_services::AppCoreExecutorService;
+use crate::{app_services::AppCoreExecutorService, pc_score_postprocess::PcScoreDerivation};
 
 #[path = "native_durable_build_probability_execution.rs"]
 mod durable;
@@ -38,16 +38,22 @@ const NATIVE_BUILD_WORKER_THREAD_NAME_PREFIX: &str = "clearra-finesse-build-";
 const NATIVE_BUILD_REQUEST_CHANNEL_CAPACITY: usize = 1;
 const NATIVE_BUILD_COMPLETION_CHANNEL_CAPACITY: usize = 0;
 
+// The direct native coordinator remains compiled in non-test builds as the
+// reference implementation for admission parity, while production delegates
+// through the registered durable host.
+#[cfg_attr(not(test), allow(dead_code))]
 enum WorkerRequest {
     Consume(Vec<WasmCandidatePacket>),
     Finish,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 enum WorkerResult {
     Consumed(usize),
     Finished(Vec<CoreExecutionResult>),
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 struct WorkerCompletion {
     worker_index: usize,
     result: Result<WorkerResult, &'static str>,
@@ -56,6 +62,40 @@ struct WorkerCompletion {
 struct NativeBuildProbabilityWorkerOutput {
     summary: WasmDistributedGeometrySummary,
     worker_results: Vec<(usize, Vec<CoreExecutionResult>)>,
+}
+
+#[derive(Debug)]
+pub(crate) struct NativeBuildProbabilityExecutionOutput {
+    result: CoreExecutionResult,
+    score_derivation: Option<PcScoreDerivation>,
+}
+
+impl NativeBuildProbabilityExecutionOutput {
+    fn without_score_derivation(result: CoreExecutionResult) -> Self {
+        Self {
+            result,
+            score_derivation: None,
+        }
+    }
+
+    fn with_score_derivation(
+        result: CoreExecutionResult,
+        score_derivation: PcScoreDerivation,
+    ) -> Self {
+        Self {
+            result,
+            score_derivation: Some(score_derivation),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (CoreExecutionResult, Option<PcScoreDerivation>) {
+        (self.result, self.score_derivation)
+    }
+
+    #[cfg(test)]
+    fn into_result(self) -> CoreExecutionResult {
+        self.result
+    }
 }
 
 /// Allocation-free upper bound for memory owned by the native coordinator.
@@ -227,6 +267,9 @@ fn native_coordinator_allocation_unavailable() -> CoreExecutionError {
 }
 
 #[cfg(test)]
+// This test seam mirrors every independent production policy input so parity
+// tests can vary them without constructing an application command.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_native_build_probability_with_workers(
     service: AppCoreExecutorService,
     problem: &SearchProblem,
@@ -238,6 +281,67 @@ pub(crate) fn run_native_build_probability_with_workers(
     requested_workers: usize,
     control: &ExecutionControl,
 ) -> Result<CoreExecutionResult, CoreExecutionError> {
+    run_native_build_probability_with_workers_inner(
+        service,
+        problem,
+        field,
+        aggregation,
+        finesse_metric,
+        finesse_pattern_knowledge,
+        solution_probability_policy,
+        requested_workers,
+        control,
+        false,
+    )
+    .map(NativeBuildProbabilityExecutionOutput::into_result)
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn run_native_build_probability_with_score_derivation_and_workers(
+    service: AppCoreExecutorService,
+    problem: &SearchProblem,
+    field: BuildProbabilityField,
+    aggregation: BuildProbabilityAggregation,
+    finesse_metric: FinesseMetric,
+    finesse_pattern_knowledge: FinessePatternKnowledge,
+    solution_probability_policy: BuildSolutionProbabilityPolicy,
+    requested_workers: usize,
+    control: &ExecutionControl,
+) -> Result<(CoreExecutionResult, PcScoreDerivation), CoreExecutionError> {
+    let output = run_native_build_probability_with_workers_inner(
+        service,
+        problem,
+        field,
+        aggregation,
+        finesse_metric,
+        finesse_pattern_knowledge,
+        solution_probability_policy,
+        requested_workers,
+        control,
+        true,
+    )?;
+    let (result, derivation) = output.into_parts();
+    let derivation = derivation.ok_or(CoreExecutionError::RuntimeUnavailable {
+        component: "native_build_probability_score_derivation_evidence_missing",
+    })?;
+    Ok((result, derivation))
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn run_native_build_probability_with_workers_inner(
+    service: AppCoreExecutorService,
+    problem: &SearchProblem,
+    field: BuildProbabilityField,
+    aggregation: BuildProbabilityAggregation,
+    finesse_metric: FinesseMetric,
+    finesse_pattern_knowledge: FinessePatternKnowledge,
+    solution_probability_policy: BuildSolutionProbabilityPolicy,
+    requested_workers: usize,
+    control: &ExecutionControl,
+    retain_private_score_authority: bool,
+) -> Result<NativeBuildProbabilityExecutionOutput, CoreExecutionError> {
     let total_workers = requested_workers.max(2);
     // One unit remains with the producer/merger while every verifier receives
     // an explicit child of the aggregate parent admission.
@@ -339,12 +443,14 @@ pub(crate) fn run_native_build_probability_with_workers(
             solution_probability_policy,
             total_workers,
             control,
+            retain_private_score_authority,
         ),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn native_coordinator_reserved_bytes(
     field: BuildProbabilityField,
     worker_threads: usize,
@@ -352,6 +458,7 @@ fn native_coordinator_reserved_bytes(
     native_coordinator_reserved_bytes_with_cap(field, worker_threads, u128::MAX)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn native_coordinator_reserved_bytes_with_cap(
     field: BuildProbabilityField,
     worker_threads: usize,
@@ -362,6 +469,7 @@ fn native_coordinator_reserved_bytes_with_cap(
     (required <= memory_cap_bytes).then_some(required)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn drive_native_build_probability(
     producer: &mut WasmBuildProbabilityCandidateProducer,
     request_senders: &[SyncSender<WorkerRequest>],
@@ -511,7 +619,8 @@ fn finish_native_build_probability(
     solution_probability_policy: BuildSolutionProbabilityPolicy,
     total_workers: usize,
     control: &ExecutionControl,
-) -> Result<CoreExecutionResult, CoreExecutionError> {
+    retain_private_score_authority: bool,
+) -> Result<NativeBuildProbabilityExecutionOutput, CoreExecutionError> {
     let (external_container_bytes, mut external_payload_bytes) =
         checked_worker_output_memory(&output).ok_or_else(|| {
             producer
@@ -614,19 +723,44 @@ fn finish_native_build_probability(
                         .map_err(core_error)
                 },
             )?;
-            service.materialize_build_probability_public_result_with_memory_guard(
-                result,
-                solution_probability_policy,
-                control,
-                |stage_result, checked_future_bytes| {
-                    authority
-                        .validate_public_result_memory_with_future(
-                            stage_result,
-                            checked_future_bytes,
+            if retain_private_score_authority {
+                service
+                    .materialize_build_probability_public_result_with_score_derivation_and_memory_guard(
+                        result,
+                        solution_probability_policy,
+                        control,
+                        |stage_result, checked_future_bytes| {
+                            authority
+                                .validate_public_result_memory_with_future(
+                                    stage_result,
+                                    checked_future_bytes,
+                                )
+                                .map_err(core_error)
+                        },
+                    )
+                    .map(|(result, derivation)| {
+                        NativeBuildProbabilityExecutionOutput::with_score_derivation(
+                            result,
+                            derivation,
                         )
-                        .map_err(core_error)
-                },
-            )
+                    })
+            } else {
+                service
+                    .materialize_build_probability_public_result_with_memory_guard(
+                        result,
+                        solution_probability_policy,
+                        control,
+                        |stage_result, checked_future_bytes| {
+                            authority
+                                .validate_public_result_memory_with_future(
+                                    stage_result,
+                                    checked_future_bytes,
+                                )
+                                .map_err(core_error)
+                        },
+                    )
+                    .map(NativeBuildProbabilityExecutionOutput::without_score_derivation)
+            }
         },
     )
 }
@@ -725,6 +859,7 @@ fn checked_worker_results_memory(
     Some((container_bytes, payload_bytes))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_probability_worker_main(
     worker_index: usize,
     mut verifier: WasmBuildProbabilityDistributedVerifier,
@@ -775,16 +910,23 @@ fn core_error(reason: &'static str) -> CoreExecutionError {
 mod tests {
     use clearra_core_domain::piece::piece_kind::PieceKind;
     use clearra_objectives::policy::{
-        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+        objective_policy::ObjectivePolicy,
+        score_objective_policy::{ScoreProfileSelection, SpinProfileSelection},
     };
     use clearra_pc_graph::request::{
         PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
-        PcSolutionProbabilityPolicy, PieceWindow,
+        PcSolutionProbabilityPolicy, PieceWindow, WorkerPolicy,
     };
-    use clearra_problem::{BuildProbabilityFinesseRequest, ProblemCompiler};
+    use clearra_problem::{BuildProbabilityFinesseRequest, BuildProbabilityQuery, ProblemCompiler};
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     use super::*;
+    use crate::{AppStatus, BuildProbabilityAppCommand, BuildProbabilityResultMode};
+
+    fn one_piece_field() -> BuildProbabilityField {
+        BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("one-row target")
+    }
 
     fn one_piece_problem(workers: usize) -> SearchProblem {
         let query = PcScenarioQuery::new(
@@ -822,6 +964,26 @@ mod tests {
                 .with_worker_hardware_limit(workers),
         );
         ProblemCompiler::compile_scenario_pc(&query).expect("one-piece probability problem")
+    }
+
+    fn one_piece_score_query(workers: usize) -> BuildProbabilityQuery {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_allow_hold(false)
+        .with_objective(ObjectivePolicy::unique().with_score_summary())
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_workers(workers)
+                .with_worker_hardware_limit(workers)
+                .with_use_all_logical_processors(true)
+                .with_max_candidates(1_024),
+        );
+        BuildProbabilityQuery::new(query, one_piece_field())
+            .with_score_summary(ScoreProfileSelection::Guideline, 0)
     }
 
     fn native_decision_test_result() -> CoreExecutionResult {
@@ -1043,6 +1205,138 @@ mod tests {
             Some(true)
         );
         assert_eq!(parallel.solution_probabilities().len(), 1);
+    }
+
+    #[test]
+    fn native_score_products_match_one_worker_for_explicit_and_auto_reserved_workers() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let service = AppCoreExecutorService::wasm_cpu();
+        let control = ExecutionControl::default();
+        let serial_query = one_piece_score_query(1);
+        let serial_problem = ProblemCompiler::compile_scenario_pc(serial_query.core_query())
+            .expect("one-worker score problem");
+        let (serial_result, serial_derivation) = service
+            .execute_build_probability_with_score_derivation_with_control(
+                &serial_problem,
+                serial_query.field(),
+                serial_query.aggregation(),
+                serial_query.finesse_request().clone(),
+                serial_query.solution_probability_policy(),
+                &control,
+            )
+            .expect("one-worker typed score product evidence");
+
+        let auto_reserved_workers = WorkerPolicy::Auto.effective_for_hardware_limit(false, 8);
+        assert_eq!(auto_reserved_workers, 7);
+        for workers in [2, auto_reserved_workers] {
+            let parallel_query = one_piece_score_query(workers);
+            let parallel_problem =
+                ProblemCompiler::compile_scenario_pc(parallel_query.core_query())
+                    .expect("parallel score problem");
+            let (parallel_result, parallel_derivation) =
+                run_native_build_probability_with_score_derivation_and_workers(
+                    service,
+                    &parallel_problem,
+                    parallel_query.field(),
+                    parallel_query.aggregation(),
+                    parallel_query.finesse_metric(),
+                    parallel_query.finesse_pattern_knowledge(),
+                    parallel_query.solution_probability_policy(),
+                    workers,
+                    &control,
+                )
+                .expect("parallel typed score product evidence");
+
+            assert_eq!(
+                parallel_derivation, serial_derivation,
+                "global typed score evidence differs for {workers} workers"
+            );
+            assert_eq!(parallel_result.usize_field("workers_used"), Some(workers));
+            assert_eq!(
+                parallel_result.field("cpu_parallel_decision_reason"),
+                Some("native-ready-worker-build-probability-pipeline")
+            );
+            for mode in [
+                BuildProbabilityResultMode::FieldAverageScore,
+                BuildProbabilityResultMode::FixedQueueMaximumScore,
+                BuildProbabilityResultMode::HighestScoreMinimumSet,
+            ] {
+                let serial = BuildProbabilityAppCommand::new(serial_query.clone())
+                    .with_result_mode(mode)
+                    .response_from_materialized_result(
+                        serial_result.clone(),
+                        Some(serial_derivation.clone()),
+                    );
+                let parallel = BuildProbabilityAppCommand::new(parallel_query.clone())
+                    .with_result_mode(mode)
+                    .response_from_materialized_result(
+                        parallel_result.clone(),
+                        Some(parallel_derivation.clone()),
+                    );
+                assert_eq!(serial.status(), AppStatus::Success, "{mode:?}: {serial:#?}");
+                assert_eq!(
+                    parallel.status(),
+                    AppStatus::Success,
+                    "{workers} workers, {mode:?}: {parallel:#?}"
+                );
+                assert_eq!(
+                    parallel.public_result_payload(),
+                    serial.public_result_payload(),
+                    "{workers} workers changed {mode:?} payload semantics"
+                );
+                assert_eq!(
+                    parallel.public_page_source_owner(),
+                    serial.public_page_source_owner(),
+                    "{workers} workers changed {mode:?} page-owner semantics"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_typed_score_terminal_rejects_missing_evidence_and_cancellation_without_output() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let service = AppCoreExecutorService::wasm_cpu();
+        let error = run_native_build_probability_with_score_derivation_and_workers(
+            service,
+            &one_piece_problem(2),
+            one_piece_field(),
+            BuildProbabilityAggregation::Buildability,
+            FinesseMetric::Off,
+            FinessePatternKnowledge::Both,
+            BuildSolutionProbabilityPolicy::Omit,
+            2,
+            &ExecutionControl::default(),
+        )
+        .expect_err("a non-scoring worker family cannot publish typed score evidence");
+        assert!(matches!(
+            error,
+            CoreExecutionError::RuntimeUnavailable {
+                component: "build_score_derivation_evidence_missing"
+            }
+        ));
+
+        let score_query = one_piece_score_query(2);
+        let score_problem = ProblemCompiler::compile_scenario_pc(score_query.core_query())
+            .expect("parallel score cancellation problem");
+        let cancellation =
+            clearra_core_domain::execution_cancellation::ExecutionCancellationToken::new();
+        cancellation.handle().cancel();
+        let error = run_native_build_probability_with_score_derivation_and_workers(
+            service,
+            &score_problem,
+            score_query.field(),
+            score_query.aggregation(),
+            score_query.finesse_metric(),
+            score_query.finesse_pattern_knowledge(),
+            score_query.solution_probability_policy(),
+            2,
+            &ExecutionControl::new(cancellation),
+        )
+        .expect_err("cancelled native score work cannot publish a terminal derivation");
+        assert_eq!(error, CoreExecutionError::Cancelled);
     }
 
     #[test]

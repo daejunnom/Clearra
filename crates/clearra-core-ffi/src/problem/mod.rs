@@ -297,7 +297,7 @@ mod rule_constants {
     pub const C_SPAWN_STANDARD_10: u32 = 1;
     pub const C_SPAWN_ARIKA: u32 = 2;
     pub const C_SPAWN_CUSTOM: u32 = 255;
-    pub const C_RULE_MAX_KICK_OFFSETS: usize = 6;
+    pub const C_RULE_MAX_KICK_OFFSETS: usize = 12;
     pub const C_RULE_MAX_KICK_TRANSITIONS: usize = 84;
 }
 mod rule_profile_descriptor {

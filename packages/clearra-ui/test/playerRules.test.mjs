@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -16,6 +17,11 @@ import {
   playerPieceOffsets,
   playerPlacementFits,
 } from '../src/lib/workspace/player/playerRules.ts';
+
+const tetrioSrsXFixture = JSON.parse(readFileSync(
+  new URL('../../../tests/fixtures/rules/tetrio_srs_x_standard_tetromino_kicks.json', import.meta.url),
+  'utf8',
+));
 
 test('player board and CTK palette contracts are fixed and reversible', () => {
   assert.equal(PLAYER_BOARD_WIDTH, 10);
@@ -91,10 +97,59 @@ test('PC solver kick registry is reproduced with profile-exact quarter and half 
   assert.deepEqual(jstrisIHalf, plusIHalf);
 
   assert.equal(playerKickCandidates('T', 'spawn', 'reverse', 'srs-plus').length, 6);
-  assert.equal(playerKickCandidates('T', 'spawn', 'reverse', 'srs-x').length, 6);
+  assert.equal(playerKickCandidates('T', 'spawn', 'reverse', 'srs-x').length, 12);
   assert.equal(playerKickCandidates('T', 'spawn', 'reverse', 'jstris-180').length, 2);
   assert.equal(playerKickCandidates('O', 'spawn', 'right', 'srs-x').length, 1);
+  assert.equal(playerKickCandidates('O', 'spawn', 'reverse', 'srs-x').length, 1);
   assert.equal(playerKickCandidates('O', 'spawn', 'right', 'jstris-180').length, 0);
+});
+
+test('Player SRS-X matches tetrio.js for every standard tetromino transition', () => {
+  assert.equal(tetrioSrsXFixture.authority, 'https://tetr.io/js/tetrio.js');
+  assert.equal(tetrioSrsXFixture.implicit_origin_attempt, true);
+  assert.equal(tetrioSrsXFixture.standard_o.disallow_kick, true);
+  assert.equal(tetrioSrsXFixture.standard_o.uses_oo_kicks, false);
+  assert.equal(tetrioSrsXFixture.oo_kicks_scope.standard_tetromino, false);
+
+  const transitions = [
+    '01', '12', '23', '30', '03', '32', '21', '10', '02', '13', '20', '31',
+  ];
+  const rotations = ['spawn', 'right', 'reverse', 'left'];
+  const jlstzCenters = [[1, 0], [0, 1], [1, 1], [1, 1]];
+  const iCenters = [[0, 0], [-2, 2], [0, 1], [-1, 2]];
+  let transitionCount = 0;
+  let maximumSequenceLength = 0;
+
+  for (const piece of ['I', 'O', 'T', 'S', 'Z', 'J', 'L']) {
+    for (const transition of transitions) {
+      const fromIndex = Number(transition[0]);
+      const toIndex = Number(transition[1]);
+      const actual = playerKickCandidates(
+        piece,
+        rotations[fromIndex],
+        rotations[toIndex],
+        'srs-x',
+      );
+      const expected = piece === 'O'
+        ? [{ dx: 0, dy: 0 }]
+        : normalizedTetrioFixtureOffsets(
+          tetrioSrsXFixture.families[piece === 'I' ? 'i' : 'jlstz'][transition],
+          piece === 'I' ? iCenters : jlstzCenters,
+          fromIndex,
+          toIndex,
+        );
+
+      assert.deepEqual(actual, expected, `TETR.IO SRS-X ${piece} ${transition}`);
+      transitionCount += 1;
+      maximumSequenceLength = Math.max(maximumSequenceLength, actual.length);
+    }
+  }
+
+  assert.equal(transitionCount, tetrioSrsXFixture.expected_standard_transition_count);
+  assert.equal(
+    maximumSequenceLength,
+    tetrioSrsXFixture.expected_max_sequence_length_with_origin,
+  );
 });
 
 test('placement collision depends on row occupancy rather than stored colors', () => {
@@ -104,3 +159,12 @@ test('placement collision depends on row occupancy rather than stored colors', (
   assert.equal(playerPlacementFits(empty, 'O', 'spawn', 4, 0), false);
   assert.equal(playerPlacementFits(empty, 'I', 'spawn', -1, 2), false);
 });
+
+function normalizedTetrioFixtureOffsets(sourceOffsets, centers, fromIndex, toIndex) {
+  const [fromX, fromY] = centers[fromIndex];
+  const [toX, toY] = centers[toIndex];
+  return [[0, 0], ...sourceOffsets].map(([dx, sourceDy]) => ({
+    dx: dx + fromX - toX,
+    dy: -sourceDy + fromY - toY,
+  }));
+}

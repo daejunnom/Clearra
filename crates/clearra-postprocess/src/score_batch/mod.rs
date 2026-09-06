@@ -13,9 +13,10 @@ pub use candidate_execution_aggregate::{CandidateExecution, CandidateExecutionAg
 #[cfg(feature = "stage-profiling")]
 pub use exact_scoring_execution_materializer::ExactScoringExecutionProfile;
 pub use exact_scoring_execution_materializer::{
-    ExactScoreCellMaterialization, ExactScoreCellMaterializationError,
-    ExactScoreCellMemoryProjection, ExactScoreCellMemoryReport, ExactScoredExecution,
-    ExactScoringExecutionCancelled, ExactScoringExecutionMaterialization,
+    ExactReplayMaterializationError, ExactReplayMaterializationLimits,
+    ExactReplayMaterializationReport, ExactScoreCellMaterialization,
+    ExactScoreCellMaterializationError, ExactScoreCellMemoryProjection, ExactScoreCellMemoryReport,
+    ExactScoredExecution, ExactScoringExecutionCancelled, ExactScoringExecutionMaterialization,
     ExactScoringExecutionMaterializer,
 };
 pub use score_matrix::{

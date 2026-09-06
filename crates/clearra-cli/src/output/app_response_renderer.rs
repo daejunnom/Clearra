@@ -5,17 +5,20 @@ use clearra_app::{
     AppResponse, AppResultKind, AppStatus, ForwardSearchOutcome, PcBestSaveWinnerV2,
     PcSaveCompletenessEvidence, PcSaveGroupV2, PcSavePieceMultiset, PcSaveWitness,
     ProductCapabilityContract, ProductCapabilityResult, ProductCapabilityResultKind,
-    PC_BEST_SAVE_CANONICAL_SELECTION, PC_MINIMUM_COVER_CANONICAL_SELECTION,
-    PC_PATH_CANONICAL_SELECTION, PC_SCORE_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+    BUILD_FIELD_AVERAGE_CAPABILITY, BUILD_FIELD_AVERAGE_RESULT_CONTRACT,
+    BUILD_FIXED_SCORE_CAPABILITY, BUILD_FIXED_SCORE_RESULT_CONTRACT,
+    BUILD_FIXED_SCORE_WINNER_CONTRACT, PC_BEST_SAVE_CANONICAL_SELECTION,
+    PC_MINIMUM_COVER_CANONICAL_SELECTION, PC_PATH_CANONICAL_SELECTION,
+    PC_SCORE_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
     PC_SCORE_PATTERN_WINNER_CONTRACT,
 };
 use clearra_host_contract::{
-    BuildCoveragePortfolioV2Payload, BuildSetupFamilyV1Payload, BuildV2PayloadKind,
-    BuildV2ProductPayload, CoveragePortfolioPagePayload, ExecutionAvailabilityState,
-    ExecutionCompletenessState, PcPathFamilyPayload, PcPathWitnessPayload,
-    PcScoreFieldSummaryPayload, ProductResultPayload, ProductResultPayloadContent,
-    ScorePatternWinnerFamilyPayload, SetupRankedFamilyPayload, SetupScoreRankingPayload,
-    SpinStructureFamilyPayload,
+    BuildCoveragePortfolioV2Payload, BuildPathFamilyPayload, BuildSetupFamilyV1Payload,
+    BuildV2PayloadKind, BuildV2ProductPayload, CoveragePortfolioPagePayload,
+    ExecutionAvailabilityState, ExecutionCompletenessState, PcPathFamilyPayload,
+    PcPathWitnessPayload, PcScoreFieldSummaryPayload, ProductResultPayload,
+    ProductResultPayloadContent, ScorePatternWinnerFamilyPayload, SetupRankedFamilyPayload,
+    SetupScoreRankingPayload, SpinStructureFamilyPayload,
 };
 use clearra_spin_structure_search::{SpinStructureOutcome, SpinStructureQuery, StructureOperation};
 
@@ -120,15 +123,7 @@ impl AppResponseRenderer {
                 response.diagnostics().validation(),
                 format,
             ),
-            AppStatus::Unsupported => {
-                let Some(error) = response.error() else {
-                    return CliOutput::error(default_error, "app execution failed");
-                };
-                CliOutput::error(
-                    cli_error_for_app_error(error.code(), default_error),
-                    error.message(),
-                )
-            }
+            AppStatus::Unsupported => render_unsupported_failure(&response, format, default_error),
             AppStatus::ExecutionFailed => {
                 render_execution_failure(&response, format, default_error)
             }
@@ -147,18 +142,41 @@ impl AppResponseRenderer {
     }
 }
 
+const PUBLIC_UNSUPPORTED_MESSAGE: &str = "the requested operation is not supported";
+const PUBLIC_EXECUTION_FAILURE_MESSAGE: &str = "the operation could not be completed";
+
+fn render_unsupported_failure(
+    response: &AppResponse,
+    format: RenderFormat,
+    default_error: CliErrorCode,
+) -> CliOutput {
+    let Some(error) = response.error() else {
+        return CliOutput::error(default_error, PUBLIC_UNSUPPORTED_MESSAGE);
+    };
+    let cli_error = cli_error_for_app_error(error.code(), default_error);
+    let message = if exposes_developer_failure_evidence(format) {
+        error.message()
+    } else {
+        PUBLIC_UNSUPPORTED_MESSAGE
+    };
+    CliOutput::error(cli_error, message)
+}
+
 fn render_execution_failure(
     response: &AppResponse,
     format: RenderFormat,
     default_error: CliErrorCode,
 ) -> CliOutput {
     let Some(error) = response.error() else {
-        return CliOutput::error(default_error, "app execution failed");
+        return CliOutput::error(default_error, PUBLIC_EXECUTION_FAILURE_MESSAGE);
     };
     let cli_error = cli_error_for_app_error(error.code(), default_error);
+    if matches!(format, RenderFormat::Text | RenderFormat::FumenLike) {
+        return CliOutput::error(cli_error, PUBLIC_EXECUTION_FAILURE_MESSAGE);
+    }
     if matches!(
         format,
-        RenderFormat::Text | RenderFormat::TextVerbose | RenderFormat::TextDiagnostics
+        RenderFormat::TextVerbose | RenderFormat::TextDiagnostics
     ) {
         let report = response.resource_report();
         if !has_authoritative_resource_report(report) {
@@ -171,7 +189,7 @@ fn render_execution_failure(
         );
     }
     if format != RenderFormat::Json {
-        return CliOutput::error(cli_error, error.message());
+        return CliOutput::error(cli_error, PUBLIC_EXECUTION_FAILURE_MESSAGE);
     }
     let fields = [
         RenderField::new(
@@ -193,6 +211,13 @@ fn render_execution_failure(
             render_error.to_string(),
         ),
     }
+}
+
+const fn exposes_developer_failure_evidence(format: RenderFormat) -> bool {
+    matches!(
+        format,
+        RenderFormat::TextVerbose | RenderFormat::TextDiagnostics | RenderFormat::Json
+    )
 }
 
 fn has_authoritative_resource_report(report: &clearra_host_contract::ResourceReport) -> bool {
@@ -1308,12 +1333,12 @@ fn render_public_build_result(
             spin_structure_family_fields(payload.contract(), family)
         }
         ProductResultPayloadContent::PcScoreFieldSummary(summary)
-            if payload.contract() == ProductCapabilityContract::PcScore.as_str() =>
+            if is_supported_score_field_summary(payload) =>
         {
             pc_score_field_summary_fields(payload, summary)
         }
         ProductResultPayloadContent::ScorePatternWinnerFamily(family)
-            if payload.contract() == ProductCapabilityContract::PcScoreFinder.as_str() =>
+            if is_supported_score_winner_family(payload, family) =>
         {
             match score_pattern_winner_family_fields(payload, family) {
                 Ok(fields) => fields,
@@ -1321,6 +1346,10 @@ fn render_public_build_result(
             }
         }
         ProductResultPayloadContent::PcPathFamily(family) => match pc_path_fields(family) {
+            Ok(fields) => fields,
+            Err(reason) => return Some(CliOutput::error(default_error, reason)),
+        },
+        ProductResultPayloadContent::BuildPathFamily(family) => match build_path_fields(family) {
             Ok(fields) => fields,
             Err(reason) => return Some(CliOutput::error(default_error, reason)),
         },
@@ -1347,6 +1376,39 @@ fn render_public_build_result(
         fields,
         format,
     ))
+}
+
+fn is_supported_score_field_summary(payload: &ProductResultPayload) -> bool {
+    matches!(
+        (payload.contract(), payload.result_kind()),
+        ("pc.score", "pc-score-summary.v2")
+            | (
+                BUILD_FIELD_AVERAGE_CAPABILITY,
+                BUILD_FIELD_AVERAGE_RESULT_CONTRACT
+            )
+    )
+}
+
+fn is_supported_score_winner_family(
+    payload: &ProductResultPayload,
+    family: &ScorePatternWinnerFamilyPayload,
+) -> bool {
+    matches!(
+        (
+            payload.contract(),
+            payload.result_kind(),
+            family.winner_contract()
+        ),
+        (
+            "pc.score-finder",
+            "pc-score-finder.v1",
+            PC_SCORE_PATTERN_WINNER_CONTRACT
+        ) | (
+            BUILD_FIXED_SCORE_CAPABILITY,
+            BUILD_FIXED_SCORE_RESULT_CONTRACT,
+            BUILD_FIXED_SCORE_WINNER_CONTRACT
+        )
+    )
 }
 
 fn append_pc_score_minimals_resource_report(
@@ -1465,7 +1527,7 @@ fn score_pattern_winner_family_fields(
     family: &ScorePatternWinnerFamilyPayload,
 ) -> Result<Vec<RenderField>, &'static str> {
     if !valid_score_pattern_canonical_witness(family) {
-        return Err("pc score-finder canonical witness was invalid");
+        return Err("score-pattern winner canonical witness was invalid");
     }
     Ok(vec![
         RenderField::new("capability_id", payload.contract()),
@@ -1816,6 +1878,79 @@ fn valid_pc_path_canonical_witness(payload: &PcPathFamilyPayload) -> bool {
         }
         _ => false,
     }
+}
+
+fn build_path_fields(payload: &BuildPathFamilyPayload) -> Result<Vec<RenderField>, &'static str> {
+    if payload.canonical_selection() != "smallest-canonical-candidate-id"
+        || !valid_canonical_path_witness(payload.canonical_witness(), payload.witnesses())
+        || !canonical_hex_mask(payload.target_terminal_board_mask())
+        || payload
+            .mirrored_terminal_board_mask()
+            .is_some_and(|mask| !canonical_hex_mask(mask))
+    {
+        return Err("Build path canonical witness or terminal was missing or mismatched");
+    }
+    Ok(vec![
+        RenderField::new("capability_id", "build.complete-replay-paths"),
+        RenderField::new("witness_contract", payload.witness_contract()),
+        RenderField::new("ordering", payload.ordering()),
+        RenderField::new("problem_id", payload.problem_id()),
+        RenderField::new(
+            "target_terminal_board_mask",
+            payload.target_terminal_board_mask(),
+        ),
+        RenderField::new(
+            "mirrored_terminal_board_mask",
+            payload
+                .mirrored_terminal_board_mask()
+                .map_or(RenderFieldValue::Null, |mask| RenderFieldValue::from(mask)),
+        ),
+        RenderField::new(
+            "materialized_pattern_count",
+            payload.materialized_pattern_count(),
+        ),
+        RenderField::new("witness_count", payload.witness_count()),
+        RenderField::new("complete", payload.complete()),
+        RenderField::new("canonical_selection", payload.canonical_selection()),
+        RenderField::new(
+            "canonical_witness",
+            payload
+                .canonical_witness()
+                .map_or(RenderFieldValue::Null, pc_path_witness_value),
+        ),
+        RenderField::new(
+            "witnesses",
+            RenderFieldValue::array(payload.witnesses().iter().map(pc_path_witness_value)),
+        ),
+    ])
+}
+
+fn valid_canonical_path_witness(
+    canonical: Option<&PcPathWitnessPayload>,
+    witnesses: &[PcPathWitnessPayload],
+) -> bool {
+    match (canonical, witnesses.first()) {
+        (None, None) => true,
+        (Some(canonical), Some(first)) if canonical == first => {
+            let Some(canonical_id) = canonical_decimal_u64(canonical.candidate_id()) else {
+                return false;
+            };
+            canonical_id > 0
+                && witnesses.iter().all(|witness| {
+                    canonical_decimal_u64(witness.candidate_id())
+                        .is_some_and(|candidate_id| candidate_id >= canonical_id)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn canonical_hex_mask(value: &str) -> bool {
+    value.len() == 18
+        && value.starts_with("0x")
+        && value[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn pc_path_witness_value(witness: &PcPathWitnessPayload) -> RenderFieldValue {

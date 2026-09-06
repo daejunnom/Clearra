@@ -25,7 +25,7 @@ pub enum CoreExecutionError {
     ResourceIncomplete {
         stage: &'static str,
         status: i32,
-        resource_report: ResourceReport,
+        resource_report: Box<ResourceReport>,
     },
     Pc(String),
     Cover(String),
@@ -118,7 +118,7 @@ impl CoreExecutionError {
 }
 
 impl CoreExecutionError {
-    pub const fn resource_incomplete(
+    pub fn resource_incomplete(
         stage: &'static str,
         status: i32,
         resource_report: ResourceReport,
@@ -126,7 +126,7 @@ impl CoreExecutionError {
         Self::ResourceIncomplete {
             stage,
             status,
-            resource_report,
+            resource_report: Box::new(resource_report),
         }
     }
 }
@@ -155,7 +155,7 @@ fn core_error_from_pc(error: PcServiceError) -> CoreExecutionError {
                 status,
                 resource_report,
             },
-        )) => CoreExecutionError::resource_incomplete("packing", status, resource_report),
+        )) => CoreExecutionError::resource_incomplete("packing", status, *resource_report),
         PcServiceError::Packing(PackingRunnerError::Backend(error)) => {
             CoreExecutionError::RuntimeUnavailable {
                 component: error.reason(),
@@ -182,7 +182,7 @@ fn core_error_from_pc(error: PcServiceError) -> CoreExecutionError {
         ),
         PcServiceError::TilingMaterialization(
             PcTilingMaterializationError::ResourceIncomplete(resource_report),
-        ) => CoreExecutionError::resource_incomplete("tiling-materialization", 0, resource_report),
+        ) => CoreExecutionError::resource_incomplete("tiling-materialization", 0, *resource_report),
         PcServiceError::TilingMaterialization(PcTilingMaterializationError::PageStore(reason)) => {
             CoreExecutionError::Pc(reason.to_owned())
         }
@@ -219,7 +219,7 @@ fn core_error_from_percent(error: PercentServiceError) -> CoreExecutionError {
                 status,
                 resource_report,
             },
-        )) => CoreExecutionError::resource_incomplete("packing", status, resource_report),
+        )) => CoreExecutionError::resource_incomplete("packing", status, *resource_report),
         PercentServiceError::Packing(PackingRunnerError::Backend(error)) => {
             CoreExecutionError::RuntimeUnavailable {
                 component: error.reason(),
@@ -262,7 +262,7 @@ fn core_error_from_cover(error: CoverServiceError) -> CoreExecutionError {
                 status,
                 resource_report,
             },
-        )) => CoreExecutionError::resource_incomplete("packing", status, resource_report),
+        )) => CoreExecutionError::resource_incomplete("packing", status, *resource_report),
         CoverServiceError::Packing(PackingRunnerError::Backend(error)) => {
             CoreExecutionError::RuntimeUnavailable {
                 component: error.reason(),

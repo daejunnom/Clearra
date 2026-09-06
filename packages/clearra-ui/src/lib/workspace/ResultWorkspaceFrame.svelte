@@ -1,17 +1,18 @@
 <script lang="ts">
   import { AlertTriangle, CheckCircle2, Search } from '@lucide/svelte';
 
-  import type {
-    ClearraDiagnostic,
-    ClearraSearchProgressTelemetry
-  } from '../wasm/wasmCommandClient';
+  import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import WorkspaceProgressStatus from './WorkspaceProgressStatus.svelte';
-  import type { WorkspaceLanguage } from './workspaceI18n';
-  import type {
-    WorkspaceProgressMode,
-    WorkspaceProgressProfile
+  import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
+  import {
+    workspaceActiveWorkerCount,
+    workspaceWorkerCapacity,
+    type WorkspaceProgressMode,
+    type WorkspaceProgressProfile
   } from './workspaceProgressModel';
   import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
+  import type { WorkspacePublicFailure } from './workspacePublicFailure';
 
   export let ariaLabel: string;
   export let status: WorkspaceRuntimeStatus;
@@ -26,11 +27,9 @@
   export let progressDone = 0;
   export let progressTotal = 0;
   export let progressTelemetry: ClearraSearchProgressTelemetry | null = null;
-  export let showWorkerMetrics = true;
   export let forwardPatternDone = 0;
   export let forwardPatternTotal = 0;
-  export let failureDiagnostics: ClearraDiagnostic[] = [];
-  export let failureMessage = '';
+  export let publicFailures: WorkspacePublicFailure[] = [];
 
   let displayedTelemetry: ClearraSearchProgressTelemetry | null = null;
   let rememberedStatus = status;
@@ -46,10 +45,8 @@
   ) {
     displayedTelemetry = progressTelemetry;
   }
-  $: failureMessages = Array.from(new Set([
-    ...(failureMessage ? [failureMessage] : []),
-    ...failureDiagnostics.map((diagnostic) => diagnostic.message).filter(Boolean)
-  ]));
+  $: activeWorkerCount = workspaceActiveWorkerCount(displayedTelemetry, status);
+  $: workerCapacity = workspaceWorkerCapacity(displayedTelemetry);
 </script>
 
 <section class="result-workspace" aria-label={ariaLabel}>
@@ -69,7 +66,8 @@
         </div>
       </div>
       <div class="heading-metrics">
-        <span>{elapsedLabel} <strong>{elapsedText}</strong></span>
+        <span class="worker-metric">{workspaceMessage(language, 'activeWorkers')} <strong>{activeWorkerCount ?? '—'} / {workerCapacity ?? '—'}</strong></span>
+        <span class="elapsed-metric">{elapsedLabel} <strong>{elapsedText}</strong></span>
       </div>
     </div>
 
@@ -85,19 +83,10 @@
       {forwardPatternDone}
       {forwardPatternTotal}
       telemetry={displayedTelemetry}
-      {showWorkerMetrics}
     />
 
     {#if status === 'failed' || status === 'terminated'}
-      <div class="failure-banner" role="alert">
-        <AlertTriangle size={18} strokeWidth={2} />
-        <div>
-          <strong>{statusLabel}</strong>
-          {#each failureMessages as message}
-            <p>{message}</p>
-          {/each}
-        </div>
-      </div>
+      <WorkspaceFailureNotice failures={publicFailures} {language} heading={statusLabel} />
     {/if}
   </div>
 
@@ -151,37 +140,31 @@
 
   .heading-metrics {
     color: #68736f;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     font-size: 12px;
-    gap: 20px;
+    gap: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .worker-metric, .elapsed-metric {
+    display: inline-flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex: 0 0 auto;
+  }
+
+  .worker-metric { width: 15em; }
+  .elapsed-metric { width: 12em; }
+
+  .worker-metric strong {
+    min-width: 9ch;
+    text-align: right;
   }
 
   .heading-metrics strong {
     color: #26322e;
     margin-left: 5px;
-  }
-
-  .failure-banner {
-    align-items: start;
-    background: #fff1ed;
-    border: 1px solid #e5b2a4;
-    color: #8d3026;
-    display: grid;
-    gap: 10px;
-    grid-template-columns: auto minmax(0, 1fr);
-    margin-top: 16px;
-    padding: 12px 14px;
-  }
-
-  .failure-banner strong,
-  .failure-banner p {
-    margin: 0;
-  }
-
-  .failure-banner p {
-    font-size: 12px;
-    margin-top: 4px;
-    overflow-wrap: anywhere;
   }
 
   .result-body {
@@ -202,6 +185,9 @@
   }
 
   @media (max-width: 520px) {
+    .heading-metrics { font-size: 11px; }
+    .worker-metric { width: 14em; }
+    .elapsed-metric { width: 10em; }
     .result-workspace {
       padding-left: 16px;
       padding-right: 16px;

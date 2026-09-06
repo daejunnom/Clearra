@@ -17,15 +17,21 @@ use crate::{packing::PackingRunResult, tiling_solution_store::TilingSolutionPage
 pub(crate) const ACTUAL_TILING_SOLUTION_SET_CONTRACT: &str = "normalized-tiling-set";
 pub(crate) const PC_TILING_INITIAL_PAGE_LIMIT: usize = 100;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcTilingMaterializationError {
     ExecutionCancelled,
     CandidateUnavailable { candidate_index: usize },
     CandidateIdentity(PackingCandidateIdentityError),
     AllocationFailed,
     MemoryAccountingUnavailable,
-    ResourceIncomplete(ResourceReport),
+    ResourceIncomplete(Box<ResourceReport>),
     PageStore(&'static str),
+}
+
+impl PcTilingMaterializationError {
+    fn resource_incomplete(report: ResourceReport) -> Self {
+        Self::ResourceIncomplete(Box::new(report))
+    }
 }
 
 const TILING_MATERIALIZATION_CANCELLATION_POLL_STRIDE: usize = 4_096;
@@ -214,7 +220,7 @@ impl PcTilingMaterialization {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native-c-core"))]
     pub(crate) fn from_packing_with_poll_observer_for_test(
         problem: &SearchProblem,
         packing: &PackingRunResult,
@@ -225,7 +231,7 @@ impl PcTilingMaterialization {
         Self::from_packing_with_poll(problem, packing, control, poll_stride, observer)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native-c-core"))]
     pub(crate) fn from_packing_with_production_poll_observer_for_test(
         problem: &SearchProblem,
         packing: &PackingRunResult,
@@ -310,7 +316,7 @@ fn ensure_materialization_memory(
         .ok_or(PcTilingMaterializationError::MemoryAccountingUnavailable)?;
     bound
         .ensure(retained, future_bytes)
-        .map_err(PcTilingMaterializationError::ResourceIncomplete)?;
+        .map_err(PcTilingMaterializationError::resource_incomplete)?;
     Ok(true)
 }
 

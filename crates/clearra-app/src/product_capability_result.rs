@@ -20,7 +20,10 @@ use crate::{
     pc_allspin_result::PcAllSpinResultReport,
     pc_chance_probability_result::PcProbabilityV2Result,
     pc_failed_queue_result::PcFailedQueueV2Result,
-    pc_minimum_cover_result::{validate_pc_minimum_cover_v2_result, PcMinimumCoverV2Result},
+    pc_minimum_cover_result::{
+        validate_pc_minimum_cover_v2_source, PcMinimumCoverV2Preparation,
+        PcMinimumCoverV2PreparationAdvance, PcMinimumCoverV2Result,
+    },
     pc_path_result::{validate_pc_path_family_v2_result, PcPathFamilyV2Result},
     pc_save_result::{
         PcBestSaveV2Result, PcSaveCompletenessEvidence, PcSaveExecutionReport, PcSaveGroupV2,
@@ -131,6 +134,196 @@ pub struct ProductCapabilityResult {
     validation_count: u8,
 }
 
+#[derive(Debug)]
+pub(crate) enum PcMinimumCoverProductPreparationAdvance {
+    Pending { work_steps: u64 },
+    Completed(ProductCapabilityResult),
+    Cancelled { work_steps: u64 },
+}
+
+/// Exactly-once product wrapper continuation for `pc.minimals`.
+/// Response-envelope, resource, query and source evidence validation all run
+/// in the constructor; later advances own only exact proof/canonical work.
+pub(crate) struct PcMinimumCoverProductPreparation {
+    validated: Option<ValidatedProductCapabilityContract>,
+    report: PcMinimumCoverV2Preparation,
+}
+
+impl PcMinimumCoverProductPreparation {
+    pub(crate) fn parallel_source_dimensions(&self) -> Option<(usize, usize)> {
+        self.report.parallel_source_dimensions()
+    }
+
+    /// Heap-only upper bound; the enclosing cooperative owner charges its
+    /// inline storage separately. Shared query Arcs are conservatively counted
+    /// per proof/source owner, never replaced with an unknown zero allowance.
+    pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        self.report
+            .checked_retained_capacity_bytes()?
+            .checked_add(match &self.validated {
+                Some(validated) => validated.checked_minimum_cover_retained_capacity_bytes()?,
+                None => 0,
+            })
+    }
+
+    pub(crate) fn enable_parallel(
+        &mut self,
+        partitions: usize,
+    ) -> Result<(), ProductCapabilityContractError> {
+        self.report
+            .enable_parallel(partitions)
+            .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)
+    }
+
+    pub(crate) fn parallel_query_satisfied(&self) -> bool {
+        self.report.parallel_query_satisfied()
+    }
+
+    pub(crate) fn parallel_query(&self) -> Option<&clearra_coverage::cover::ExactAtMostQuery> {
+        self.report.parallel_query()
+    }
+
+    pub(crate) fn take_parallel_task(
+        &mut self,
+    ) -> Option<clearra_coverage::cover::ExactAtMostTask> {
+        self.report.take_parallel_task()
+    }
+
+    pub(crate) fn prepare_parallel_idle_assist(
+        &mut self,
+        maximum_children: usize,
+        guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+    ) -> Result<bool, &'static str> {
+        self.report
+            .prepare_parallel_idle_assist(maximum_children, guard)
+    }
+
+    pub(crate) fn parallel_task_is_redundant(
+        &self,
+        identity: clearra_coverage::cover::ExactAtMostQueryIdentity,
+        partition_id: u64,
+    ) -> Result<bool, &'static str> {
+        self.report
+            .parallel_task_is_redundant(identity, partition_id)
+    }
+
+    pub(crate) fn accept_parallel_receipt(
+        &mut self,
+        receipt: clearra_coverage::cover::ExactAtMostReceipt,
+    ) -> Result<(), ProductCapabilityContractError> {
+        self.report
+            .accept_parallel_receipt(receipt)
+            .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)
+    }
+
+    pub(crate) fn advance(
+        &mut self,
+        maximum_work_steps: u64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PcMinimumCoverProductPreparationAdvance, ProductCapabilityContractError> {
+        self.advance_with_memory_guard(maximum_work_steps, &mut |_| Ok(()), cancelled)
+    }
+
+    /// The host receives a whole preparation inline+heap peak. It can replace
+    /// the preparation's previous bytes inside its full App memory envelope
+    /// without recounting the retained response for every solver allocation.
+    pub(crate) fn advance_with_memory_guard(
+        &mut self,
+        maximum_work_steps: u64,
+        memory_guard: &mut impl FnMut(
+            u128,
+        )
+            -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PcMinimumCoverProductPreparationAdvance, ProductCapabilityContractError> {
+        let validated_heap = match &self.validated {
+            Some(validated) => validated.checked_minimum_cover_retained_capacity_bytes(),
+            None => Some(0),
+        };
+        let outer_live = validated_heap
+            .and_then(|bytes| bytes.checked_add(core::mem::size_of::<Self>() as u128))
+            .and_then(|bytes| {
+                bytes.checked_sub(core::mem::size_of::<PcMinimumCoverV2Preparation>() as u128)
+            })
+            .ok_or(
+                ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
+                    "pc_minimum_cover_memory_projection_overflow",
+                ),
+            )?;
+        match self
+            .report
+            .advance_with_memory_guard(
+                maximum_work_steps,
+                &mut |report_peak| {
+                    memory_guard(outer_live.checked_add(report_peak).ok_or(
+                        clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow,
+                    )?)
+                },
+                cancelled,
+            )
+            .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)?
+        {
+            PcMinimumCoverV2PreparationAdvance::Pending { work_steps } => {
+                Ok(PcMinimumCoverProductPreparationAdvance::Pending { work_steps })
+            }
+            PcMinimumCoverV2PreparationAdvance::Completed(report) => {
+                let completed_peak = self
+                    .checked_retained_capacity_bytes()
+                    .and_then(|bytes| bytes.checked_add(core::mem::size_of::<Self>() as u128))
+                    .and_then(|bytes| {
+                        bytes.checked_add(core::mem::size_of::<ProductCapabilityResult>() as u128)
+                    })
+                    .and_then(|bytes| bytes.checked_add(report.checked_retained_capacity_bytes()?))
+                    .ok_or(
+                        ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
+                            "pc_minimum_cover_memory_projection_overflow",
+                        ),
+                    )?;
+                memory_guard(completed_peak).map_err(|_| {
+                    ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
+                        "pc_minimum_cover_memory_limit_exceeded",
+                    )
+                })?;
+                let validated = self.validated.take().ok_or(
+                    ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
+                        "pc minimals product preparation completed more than once",
+                    ),
+                )?;
+                ProductCapabilityResult::from_validated_pc_minimum_cover_report(validated, report)
+                    .map(PcMinimumCoverProductPreparationAdvance::Completed)
+            }
+            PcMinimumCoverV2PreparationAdvance::Cancelled { work_steps } => {
+                self.validated = None;
+                Ok(PcMinimumCoverProductPreparationAdvance::Cancelled { work_steps })
+            }
+        }
+    }
+
+    fn complete(mut self) -> Result<ProductCapabilityResult, ProductCapabilityContractError> {
+        loop {
+            match self.advance(u64::MAX, &mut || false)? {
+                PcMinimumCoverProductPreparationAdvance::Pending { work_steps } => {
+                    if work_steps == 0 {
+                        return Err(
+                            ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
+                                "pc minimals product preparation made no progress",
+                            ),
+                        );
+                    }
+                }
+                PcMinimumCoverProductPreparationAdvance::Completed(result) => return Ok(result),
+                PcMinimumCoverProductPreparationAdvance::Cancelled { .. } => {
+                    return Err(
+                        ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
+                            "pc minimals product preparation was cancelled",
+                        ),
+                    )
+                }
+            }
+        }
+    }
+}
+
 impl Eq for ProductCapabilityResult {}
 
 impl ProductCapabilityResult {
@@ -207,7 +400,11 @@ impl ProductCapabilityResult {
     ) -> Result<Self, ProductCapabilityContractError> {
         if report.contract_id() != ProductCapabilityResultKind::BuildCoveragePortfolioV2.as_str()
             || !report.completeness().complete()
-            || report.canonical_candidate_keys().first().is_none()
+            || (report.canonical_candidate_keys().is_empty()
+                && (report.source_candidate_count() != 0
+                    || report.selected_candidate_count() != 0
+                    || report.required_pattern_count() != 0
+                    || report.union_probability() != "0"))
         {
             return Err(ProductCapabilityContractError::ResponseResultContractMismatch);
         }
@@ -315,7 +512,10 @@ impl ProductCapabilityResult {
                     report.required_pattern_count().to_string(),
                     report.union_probability(),
                     report.normalized_solution_set_hash(),
-                    report.canonical_candidate_keys().first()?.as_str(),
+                    report
+                        .canonical_candidate_keys()
+                        .first()
+                        .map_or("", String::as_str),
                     BuildCoverageCompletenessPayload::new(
                         completeness.source_universe_complete(),
                         completeness.coverage_rows_complete(),
@@ -356,38 +556,48 @@ impl ProductCapabilityResult {
                         candidate.normalized_key(),
                     ));
                 }
-                let (canonical_candidate_id, canonical_solution_key) =
-                    report.canonical_candidate()?;
-                let canonical_witness = ProductCandidateMemberPayload::new(
-                    canonical_candidate_id.to_string(),
-                    canonical_solution_key,
+                let canonical_candidate = report.canonical_candidate();
+                if canonical_candidate.is_none()
+                    && (page.optimal_cardinality() != 0
+                        || !page.portfolio().candidate_ids().is_empty())
+                {
+                    return None;
+                }
+                let page_payload = CoveragePortfolioPagePayload::new(
+                    set.contract_id(),
+                    page.contract_id(),
+                    crate::PORTFOLIO_MEMBER_PAGE_CONTRACT,
+                    set.set_identity_sha256(),
+                    set.candidate_map_sha256(),
+                    page.alternative_index_decimal(),
+                    page.optimal_cardinality().to_string(),
+                    page.known_alternative_count_decimal(),
+                    page.total_alternative_count_decimal()
+                        .map(ToOwned::to_owned),
+                    page.enumeration_complete(),
+                    "1",
+                    member_count
+                        .div_ceil(crate::PORTFOLIO_MEMBER_PAGE_SIZE)
+                        .max(1)
+                        .to_string(),
+                    members,
+                    true,
                 );
+                let page_payload = match canonical_candidate {
+                    Some((canonical_candidate_id, canonical_solution_key)) => page_payload
+                        .with_canonical_witness(
+                            report.canonical_selection(),
+                            ProductCandidateMemberPayload::new(
+                                canonical_candidate_id.to_string(),
+                                canonical_solution_key,
+                            ),
+                        ),
+                    None => page_payload,
+                };
                 Some(ProductResultPayload::new(
                     self.contract.as_str(),
                     self.result_kind.as_str(),
-                    ProductResultPayloadContent::CoveragePortfolio(
-                        CoveragePortfolioPagePayload::new(
-                            set.contract_id(),
-                            page.contract_id(),
-                            crate::PORTFOLIO_MEMBER_PAGE_CONTRACT,
-                            set.set_identity_sha256(),
-                            set.candidate_map_sha256(),
-                            page.alternative_index_decimal(),
-                            page.optimal_cardinality().to_string(),
-                            page.known_alternative_count_decimal(),
-                            page.total_alternative_count_decimal()
-                                .map(ToOwned::to_owned),
-                            page.enumeration_complete(),
-                            "1",
-                            member_count
-                                .div_ceil(crate::PORTFOLIO_MEMBER_PAGE_SIZE)
-                                .max(1)
-                                .to_string(),
-                            members,
-                            true,
-                        )
-                        .with_canonical_witness(report.canonical_selection(), canonical_witness),
-                    ),
+                    ProductResultPayloadContent::CoveragePortfolio(page_payload),
                 ))
             }
             (ProductCapabilityContract::PcPath, ProductCapabilityResultKind::PcPathFamilyV2) => {
@@ -445,17 +655,28 @@ impl ProductCapabilityResult {
                 Some(ProductResultPayload::new(
                     self.contract.as_str(),
                     self.result_kind.as_str(),
-                    ProductResultPayloadContent::PcPathFamily(PcPathFamilyPayload::new(
-                        report.witness_contract(),
-                        report.ordering(),
-                        report.problem_id(),
-                        report.materialized_pattern_count().to_string(),
-                        witnesses.len().to_string(),
-                        report.completeness().complete(),
-                        report.canonical_selection(),
-                        canonical_witness,
-                        witnesses,
-                    )),
+                    ProductResultPayloadContent::PcPathFamily(
+                        PcPathFamilyPayload::new(
+                            report.witness_contract(),
+                            report.ordering(),
+                            report.problem_id(),
+                            report.materialized_pattern_count().to_string(),
+                            report.witness_count().to_string(),
+                            report.completeness().complete(),
+                            report.canonical_selection(),
+                            canonical_witness,
+                            witnesses,
+                        )
+                        .with_optional_page_metadata(
+                            report.page_source().and_then(|source| {
+                                (source.geometry_count() != 0).then(|| {
+                                    source.page_metadata(1, 1).expect(
+                                        "validated replay source owns its canonical member page",
+                                    )
+                                })
+                            }),
+                        ),
+                    ),
                 ))
             }
             (ProductCapabilityContract::PcScore, ProductCapabilityResultKind::PcScoreSummaryV2) => {
@@ -684,6 +905,13 @@ impl ProductCapabilityResult {
     /// common lifecycle seam.
     pub fn public_page_source_owner(&self) -> Option<ProductPageSourceOwner> {
         match (self.contract, self.result_kind) {
+            (ProductCapabilityContract::PcPath, ProductCapabilityResultKind::PcPathFamilyV2) => {
+                self.pc_path_family_v2
+                    .as_ref()
+                    .and_then(|report| report.page_source())
+                    .filter(|source| source.geometry_count() != 0)
+                    .map(|source| ProductPageSourceOwner::PcReplay(Arc::clone(source)))
+            }
             (
                 ProductCapabilityContract::PcMinimals,
                 ProductCapabilityResultKind::PcMinimumCoverV2,
@@ -719,6 +947,32 @@ impl ProductCapabilityResult {
         validated: ValidatedProductCapabilityContract,
         response: &AppResponse,
     ) -> Result<Self, ProductCapabilityContractError> {
+        Self::validate_with_optional_pc_replay_source(validated, response, None)
+    }
+
+    pub(crate) fn validate_with_pc_replay_source(
+        validated: ValidatedProductCapabilityContract,
+        response: &AppResponse,
+        source: Arc<crate::PcReplayPageSource>,
+    ) -> Result<Self, ProductCapabilityContractError> {
+        if validated.contract() != ProductCapabilityContract::PcPath {
+            return Err(
+                ProductCapabilityContractError::ResponsePathEvidenceMismatch(
+                    "replay source requires pc.path authority",
+                ),
+            );
+        }
+        Self::validate_with_optional_pc_replay_source(validated, response, Some(source))
+    }
+
+    fn validate_with_optional_pc_replay_source(
+        validated: ValidatedProductCapabilityContract,
+        response: &AppResponse,
+        page_source: Option<Arc<crate::PcReplayPageSource>>,
+    ) -> Result<Self, ProductCapabilityContractError> {
+        if validated.contract() == ProductCapabilityContract::PcMinimals {
+            return Self::prepare_pc_minimum_cover(validated, response)?.complete();
+        }
         if response.status() != AppStatus::Success {
             return Err(ProductCapabilityContractError::ResponseStatusNotSuccessful);
         }
@@ -765,11 +1019,8 @@ impl ProductCapabilityResult {
         ) {
             return Self::validate_pc_save(validated, response, core_result);
         }
-        if validated.contract() == ProductCapabilityContract::PcMinimals {
-            return Self::validate_pc_minimum_cover(validated, response, core_result);
-        }
         if validated.contract() == ProductCapabilityContract::PcPath {
-            return Self::validate_pc_path(validated, response, core_result);
+            return Self::validate_pc_path(validated, response, core_result, page_source);
         }
         if validated.contract() == ProductCapabilityContract::PcChance {
             return Self::validate_pc_chance(validated, response, core_result);
@@ -1117,18 +1368,62 @@ impl ProductCapabilityResult {
         })
     }
 
-    fn validate_pc_minimum_cover(
+    pub(crate) fn prepare_pc_minimum_cover(
         validated: ValidatedProductCapabilityContract,
         response: &AppResponse,
-        core_result: &clearra_core_executor::CoreExecutionResult,
-    ) -> Result<Self, ProductCapabilityContractError> {
+    ) -> Result<PcMinimumCoverProductPreparation, ProductCapabilityContractError> {
+        if validated.contract() != ProductCapabilityContract::PcMinimals {
+            return Err(ProductCapabilityContractError::UnexpectedContract {
+                actual: validated.contract(),
+            });
+        }
+        if response.status() != AppStatus::Success {
+            return Err(ProductCapabilityContractError::ResponseStatusNotSuccessful);
+        }
+        if response.product_capability_result().is_some() {
+            return Err(ProductCapabilityContractError::ResponseAlreadyWrapped);
+        }
+        if response.command() != Some(validated.command_kind()) {
+            return Err(ProductCapabilityContractError::ResponseCommandMismatch);
+        }
+        let expected_app_result = validated.expected_result_kind();
+        let result = response
+            .result()
+            .ok_or(ProductCapabilityContractError::ResponseResultMissing)?;
+        if result.kind() != expected_app_result.as_str() {
+            return Err(ProductCapabilityContractError::ResponseResultKindMismatch);
+        }
+        let render_model = response
+            .render_model()
+            .ok_or(ProductCapabilityContractError::ResponseRenderModelMissing)?;
+        if render_model.kind() != expected_app_result {
+            return Err(ProductCapabilityContractError::ResponseRenderKindMismatch);
+        }
+        let core_result = match (validated.query(), render_model) {
+            (QueryEnvelope::PcOpening, AppRenderModel::Pc(result))
+            | (QueryEnvelope::PcScenario, AppRenderModel::Scenario(result)) => result,
+            _ => return Err(ProductCapabilityContractError::ResponseRenderFamilyMismatch),
+        };
         let (query, origin) = validated.pc_minimum_cover_binding().ok_or(
             ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
                 "validated pc.minimals query binding is missing",
             ),
         )?;
-        let report = validate_pc_minimum_cover_v2_result(query, origin, core_result)
+        let source = validate_pc_minimum_cover_v2_source(query, origin, core_result)
             .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)?;
+        Self::validate_pc_minimum_cover_resources(response)?;
+        let report = PcMinimumCoverV2Preparation::new(source)
+            .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)?;
+        Ok(PcMinimumCoverProductPreparation {
+            validated: Some(validated),
+            report,
+        })
+    }
+
+    fn from_validated_pc_minimum_cover_report(
+        validated: ValidatedProductCapabilityContract,
+        report: PcMinimumCoverV2Result,
+    ) -> Result<Self, ProductCapabilityContractError> {
         if report.contract_id() != ProductCapabilityResultKind::PcMinimumCoverV2.as_str()
             || report.problem_preset().as_str() != validated.expected_problem_preset().as_str()
             || !report.completeness().complete()
@@ -1138,29 +1433,6 @@ impl ProductCapabilityResult {
                     "pc-minimum-cover.v2 compact report contract mismatch",
                 ),
             );
-        }
-
-        let resources = response.resource_report();
-        if !resources.solver_executed() {
-            return Err(ProductCapabilityContractError::SolverNotExecuted);
-        }
-        if resources.execution_availability().state() != ExecutionAvailabilityState::Available {
-            return Err(ProductCapabilityContractError::ExecutionUnavailable);
-        }
-        if resources.execution_availability().reason().is_some() {
-            return Err(ProductCapabilityContractError::AvailabilityReasonPresent);
-        }
-        if resources.result_completeness() != ExecutionCompletenessState::Complete {
-            return Err(ProductCapabilityContractError::ResultIncomplete);
-        }
-        if resources.truncated() {
-            return Err(ProductCapabilityContractError::ResultTruncated);
-        }
-        if resources.truncation_reason().is_some() {
-            return Err(ProductCapabilityContractError::TruncationReasonPresent);
-        }
-        if !resources.probability_complete() {
-            return Err(ProductCapabilityContractError::ResourceProbabilityIncomplete);
         }
 
         Ok(Self {
@@ -1190,17 +1462,46 @@ impl ProductCapabilityResult {
         })
     }
 
+    fn validate_pc_minimum_cover_resources(
+        response: &AppResponse,
+    ) -> Result<(), ProductCapabilityContractError> {
+        let resources = response.resource_report();
+        if !resources.solver_executed() {
+            return Err(ProductCapabilityContractError::SolverNotExecuted);
+        }
+        if resources.execution_availability().state() != ExecutionAvailabilityState::Available {
+            return Err(ProductCapabilityContractError::ExecutionUnavailable);
+        }
+        if resources.execution_availability().reason().is_some() {
+            return Err(ProductCapabilityContractError::AvailabilityReasonPresent);
+        }
+        if resources.result_completeness() != ExecutionCompletenessState::Complete {
+            return Err(ProductCapabilityContractError::ResultIncomplete);
+        }
+        if resources.truncated() {
+            return Err(ProductCapabilityContractError::ResultTruncated);
+        }
+        if resources.truncation_reason().is_some() {
+            return Err(ProductCapabilityContractError::TruncationReasonPresent);
+        }
+        if !resources.probability_complete() {
+            return Err(ProductCapabilityContractError::ResourceProbabilityIncomplete);
+        }
+        Ok(())
+    }
+
     fn validate_pc_path(
         validated: ValidatedProductCapabilityContract,
         response: &AppResponse,
         core_result: &clearra_core_executor::CoreExecutionResult,
+        page_source: Option<Arc<crate::PcReplayPageSource>>,
     ) -> Result<Self, ProductCapabilityContractError> {
         let (query, origin) = validated.pc_path_binding().ok_or(
             ProductCapabilityContractError::ResponsePathEvidenceMismatch(
                 "validated pc.path query binding is missing",
             ),
         )?;
-        let report = validate_pc_path_family_v2_result(query, origin, core_result)
+        let report = validate_pc_path_family_v2_result(query, origin, core_result, page_source)
             .map_err(ProductCapabilityContractError::ResponsePathEvidenceMismatch)?;
         if report.contract_id() != ProductCapabilityResultKind::PcPathFamilyV2.as_str()
             || report.problem_preset().as_str() != validated.expected_problem_preset().as_str()

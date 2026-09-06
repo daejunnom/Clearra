@@ -35,10 +35,10 @@ use sha2::{Digest, Sha256};
 
 use super::{
     finish_native_build_probability, join_workers, native_coordinator_allocation_unavailable,
-    native_worker_thread_name, NativeBuildProbabilityWorkerOutput,
-    NativeCoordinatorMemoryProjection, NATIVE_BUILD_BATCH_CAPACITY,
-    NATIVE_BUILD_COMPLETION_CHANNEL_CAPACITY, NATIVE_BUILD_REQUEST_CHANNEL_CAPACITY,
-    NATIVE_BUILD_WORKER_STACK_BYTES,
+    native_worker_thread_name, NativeBuildProbabilityExecutionOutput,
+    NativeBuildProbabilityWorkerOutput, NativeCoordinatorMemoryProjection,
+    NATIVE_BUILD_BATCH_CAPACITY, NATIVE_BUILD_COMPLETION_CHANNEL_CAPACITY,
+    NATIVE_BUILD_REQUEST_CHANNEL_CAPACITY, NATIVE_BUILD_WORKER_STACK_BYTES,
 };
 use crate::app_services::AppCoreExecutorService;
 
@@ -319,6 +319,9 @@ struct CompactExecutablePermit {
     expires_at_unix_ms: u64,
 }
 
+// The worker consumes each executable exactly once; keeping verifier state inline
+// avoids heap indirection in the durable queue's hot hand-off path.
+#[allow(clippy::large_enum_variant)]
 enum DurableWorkerExecutable {
     Initialize(WasmBuildProbabilityDistributedVerifier),
     Consume(Vec<WasmCandidatePacket>),
@@ -335,6 +338,9 @@ impl DurableWorkerExecutable {
     }
 }
 
+// Requests are short-lived ownership messages consumed by one worker. Their
+// inline representation avoids allocating each durable queue operation.
+#[allow(clippy::large_enum_variant)]
 enum DurableWorkerRequest {
     Offer(DurableWorkerOffer),
     Publish {
@@ -973,6 +979,9 @@ fn worker_reservation_sha256(
     hex_sha256(finish_sha256(hasher))
 }
 
+// Durable identity, journal authority, executable, and budget are separate
+// proof inputs and must remain explicit at the exactly-once prepare boundary.
+#[allow(clippy::too_many_arguments)]
 fn prepare_durable_delegation<J: DelegationJournal, C: NativeDurableClock>(
     authority: &mut DurableDelegationAuthority<J>,
     durable_identity: &NativeBuildProbabilityDurableIdentity,
@@ -1544,12 +1553,13 @@ pub(crate) fn run_provider_admitted_native_build_probability<
     finesse_pattern_knowledge: FinessePatternKnowledge,
     solution_probability_policy: BuildSolutionProbabilityPolicy,
     requested_workers: usize,
+    retain_private_score_authority: bool,
     control: &ExecutionControl,
     durable_identity: &NativeBuildProbabilityDurableIdentity,
     authority: &mut DurableDelegationAuthority<J>,
     admission_provider: &P,
     clock: &C,
-) -> Result<CoreExecutionResult, CoreExecutionError> {
+) -> Result<NativeBuildProbabilityExecutionOutput, CoreExecutionError> {
     let expected_request_sha256 = canonical_native_build_probability_request_sha256(
         problem,
         field,
@@ -1705,6 +1715,7 @@ pub(crate) fn run_provider_admitted_native_build_probability<
         solution_probability_policy,
         total_workers,
         control,
+        retain_private_score_authority,
     ) {
         Ok(result) => result,
         Err(error) => {
@@ -1755,7 +1766,12 @@ pub(crate) fn run_provider_admitted_native_build_probability<
             ));
         }
     }
-    drop(provider_authority);
+    // Move the non-clone admission proof into a final scope so it remains live
+    // through every worker join and durable result acknowledgement above.
+    let result = {
+        let _provider_authority = provider_authority;
+        result
+    };
     Ok(result)
 }
 
@@ -1907,13 +1923,15 @@ mod tests {
             FinessePatternKnowledge::Both,
             BuildSolutionProbabilityPolicy::Include,
             2,
+            false,
             &control,
             &identity,
             &mut authority,
             &ExactProvider,
             &StepClock::new(),
         )
-        .expect("provider-admitted durable Build result");
+        .expect("provider-admitted durable Build result")
+        .into_result();
 
         assert_eq!(
             durable.normalized_solution_keys(),
@@ -2018,6 +2036,7 @@ mod tests {
             FinessePatternKnowledge::Both,
             BuildSolutionProbabilityPolicy::Omit,
             2,
+            false,
             &control,
             &durable_identity(&problem, 2, BuildSolutionProbabilityPolicy::Omit),
             &mut authority,
@@ -2047,6 +2066,7 @@ mod tests {
             FinessePatternKnowledge::Both,
             BuildSolutionProbabilityPolicy::Omit,
             2,
+            false,
             &control,
             &wrong,
             &mut authority,

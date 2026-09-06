@@ -64,7 +64,97 @@ Focused passes are development feedback, not release authority. They may be
 repeated while a patch is changing. The full matrix remains intact but runs at
 the frozen predeployment boundary described below.
 
+`Trusted` selects the execution surface; it does not override Windows application
+control. Before any requested full/generated-execution task starts, the entry
+point normalizes `auto` to the requested host runtime and checks its policy.
+Enforced or unknown Windows UMCI rejects that task before workspace/cache/gate
+work begins. Source-only `Validate` remains available. The mock-only
+`scripts/test_execution_surface_policy.ps1` verifies this boundary without
+building or launching a generated executable.
+
+### Non-publishing candidate full gate
+
+`Candidate Preflight` is isolated to `codex/v0.8.0-preflight-20260906-rng`. A push to that
+branch runs the existing full eight-stage `ReleaseAcceptance` command once on
+`windows-latest`, the same hosted runner family as canonical acceptance. A
+manual dispatch on that exact branch defaults to `full_gate=true`; setting it
+to `false` selects only the existing CLI build/startup and UI compile feedback. Full runs skip
+those light jobs to avoid repeating their work. No local UMCI policy is changed,
+and native execution policy errors remain fatal on the selected runner.
+
+The token is contents-read-only, checkout credentials are not persisted, and
+this workflow has no production environment, secret, accepted-run receipt,
+release tag, or deployment call. Its name and branch are not consumed by any
+production `workflow_run` trigger. Source and engine identity both use the exact
+candidate SHA; this is provenance, not canonical release authority. A successful
+candidate full gate cannot replace the required exact-main canonical acceptance.
+
+After a full run, even if a later stage failed, only an already-built generation
+whose five files, hashes, aliases, manifest and current source contract verify
+may be uploaded as `unqualified-candidate-wasm-*` for seven days. Missing WASM is
+reported as not built; malformed/stale WASM fails preservation. The preserved
+bytes are not rebuilt or restamped. A local 4194 import must independently verify
+the same source contract and paired runtime identity before using them; this
+neither grants production acceptance nor publishes Pages/Discord/Cloud/Oracle.
+
+### Fast Fix Qualification boundary
+
+`Fast Fix Qualification` is an explicit, manual qualification layer; it is not
+a production deployment workflow and it does not publish a GitHub Release,
+update Pages, change Cloud/Oracle traffic, or synchronize Discord commands. It
+requires attempt 1 on the exact current `main` SHA and rejects every second run
+for that SHA, including a fresh dispatch after failure. Before classification it
+automatically resolves and verifies the latest successful attempt-1 accepted
+component ledger, then calculates only the exact
+`ledger.source_commit..candidate` diff. The ledger kind, source, workflow,
+run/attempt and report SHA-256 are part of the sealed impact plan. This prevents
+an earlier fast fix from being counted again merely because it is newer than the
+last version tag. `deployment-impact.mjs` selects one of three closed modes:
+
+- `none` for documentation, test snapshot, or `scripts/windows/**` local
+  watchdog-only changes. No product component job runs.
+- `focused` only for a Pages-only v0.8 change. The Pages qualification job runs
+  and every unselected job must be `skipped` at fan-in.
+- `full` for Desktop, CLI, Discord, PC4, shared/common product contracts,
+  performance/core paths, unknown paths, or release infrastructure. The
+  qualification workflow requests the existing canonical `Publish Product
+  Release` dispatch and emits only a non-mutating dispatch-request receipt.
+
+Focused and no-product modes require an unexpired attempt-1
+`clearra.accepted-component-ledger.v1` artifact from an accepted ancestor. The
+ledger covers all eight component-vector entries and binds each entry's
+accepted digest, accepted receipt hash, and deployment receipt hash. Changed
+entries end as `qualified-not-deployed` with only a qualification receipt and
+null accepted/deployment fields; unchanged
+entries preserve the prior receipt byte identity. The first such ledger must be
+bootstrapped from the canonical acceptance plus actual Pages/CLI/GUI/Discord/
+Cloud deployment receipts before this path may be connected to production.
+Missing bootstrap evidence fails closed; it must not be replaced with a locally
+authored or manually asserted digest. When no accepted ledger exists, a
+production-tag diff may dispatch the canonical workflow only if it classifies
+as `full`; `focused` and `none` stop with a bootstrap-required error. The
+optional baseline inputs are exact pins for the automatically discovered latest
+ledger, not authority to select an older run.
+
 ## Single Full Gate Per Exact Commit
+
+### Nonpublishing preparation is a separate boundary
+
+Do not treat the canonical `workflow_dispatch` as a harmless dry run. Although
+that run does not execute the tag-only GitHub Release publication job, a
+successful dispatch on `main` automatically triggers `Deploy Discord
+Production`. Its candidate preparation can submit Cloud Build work, and its
+protected jobs can change Cloud/Oracle runtimes and Discord commands. Environment
+approval settings must not be assumed to make the whole chain read-only.
+
+Before a request authorizes those external effects, use explicit local source,
+metadata, workflow-mutation and artifact-receipt contracts. These checks do not
+dispatch Actions, create canonical evidence, or qualify a dirty worktree for
+publication. `Candidate Preflight` is also distinct: it builds unqualified
+development artifacts and cannot replace exact-SHA canonical acceptance. A
+zero-traffic Cloud candidate is still an external deployment, not a local
+nonpublishing check. Run the full canonical gate once only after the final source
+is frozen and its downstream effects are within the authorized release scope.
 
 The `Publish Product Release` workflow has two deliberately different modes:
 
@@ -110,6 +200,14 @@ packaged CLI smokes remain serial where their process-global state, shared build
 surface, exact output evidence, or ordered product contract requires it. Their
 Cargo/CMake compilation continues to receive the bounded runner CPU count; this
 metadata optimization does not weaken deterministic execution evidence.
+
+Canonical Actions builds the verified WASM product once in the dedicated
+`release-acceptance-wasm-build` producer. Its receipt closes the complete file
+set and binds the manifest and payload digests, source SHA, run ID/attempt, and
+producer toolchains. The Pages shard downloads and verifies those exact bytes;
+it does not restore the Cargo build cache or rebuild WASM. The six acceptance
+shards and their eight-stage semantic order remain unchanged, and final
+canonical evidence additionally requires the producer job and receipt.
 
 The successful dispatch also retains its exact Pages-ready Web/WASM build. A
 later Pages deployment verifies and reuses that accepted artifact; it does not
@@ -228,8 +326,12 @@ Gate summaries distinguish what happened:
 
 Build/cache artifacts use the platform Clearra artifact root. Reports use the
 platform report root. Repository-local `target`, `build`, and report output are
-forbidden. `_local/bundle.py` and its review bundle output are the sole narrow
-`_local` exception.
+forbidden. `_local/` is an explicitly Git-ignored, nonproduct diagnostics
+boundary, not a build/report output destination. Its contents are not inspected,
+executed, or cleaned by the release gate. Existing tracked files there are
+rejected; intentionally deleted historical tools are not restored. Product
+source and dependency manifests must not reference `_local/`, and exact release
+source archives remain Git-tree based, excluding these ignored experiments.
 
 ## Search Stage Profiling
 

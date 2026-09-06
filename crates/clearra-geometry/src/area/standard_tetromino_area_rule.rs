@@ -6,14 +6,12 @@ impl StandardTetrominoAreaRule {
 }
 impl StandardTetrominoAreaRule {
     pub fn piece_areas(piece_count: usize) -> Vec<usize> {
-        std::iter::repeat(Self::PIECE_AREA)
-            .take(piece_count)
-            .collect()
+        std::iter::repeat_n(Self::PIECE_AREA, piece_count).collect()
     }
 }
 impl StandardTetrominoAreaRule {
     pub fn can_fill_component_area(component_area: usize) -> bool {
-        component_area % Self::PIECE_AREA == 0
+        component_area.is_multiple_of(Self::PIECE_AREA)
     }
 }
 

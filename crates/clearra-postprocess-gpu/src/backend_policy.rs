@@ -23,16 +23,11 @@ pub enum BackendFallbackPolicy {
     AllowWithDiagnostic,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum GpuDeviceSelection {
+    #[default]
     Auto,
     DeviceId(String),
-}
-
-impl Default for GpuDeviceSelection {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

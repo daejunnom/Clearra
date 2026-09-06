@@ -9,11 +9,21 @@
   } from '@clearra/ui/wasm';
   import { onMount, setContext } from 'svelte';
   import { resolveCtkViewerQuery } from '../lib/ctkViewerQuery';
+  import { installWasmArtifactHotUpdate } from '../lib/wasmArtifactHotUpdate';
+  import { isLocalSearchProfileMode, localSearchProfileText } from '../lib/localSearchProfile';
+
+  const showLocalProfile = isLocalSearchProfileMode(import.meta.env.MODE);
+  let localProfile = '';
 
   function workerFactory() {
-    return new Worker(new URL('../workers/clearraWorker.ts', import.meta.url), {
+    const worker = new Worker(new URL('../workers/clearraWorker.ts', import.meta.url), {
       type: 'module'
     });
+    if (showLocalProfile) worker.addEventListener('message', ({ data }) => {
+      const profile = localSearchProfileText(data);
+      if (profile !== null) localProfile = profile;
+    });
+    return worker;
   }
 
   setContext(PC_SOLVER_HREF_CONTEXT, `${base}/pc-solver`);
@@ -28,9 +38,11 @@
     $page.url.searchParams.get('tool') ?? (ctkViewer.document ? 'ctk' : null);
 
   onMount(() => {
+    const removeWasmArtifactHotUpdate = installWasmArtifactHotUpdate(import.meta.hot, import.meta.env.MODE);
     if (!['pc', 'setup', 'setup-score', 'spin-structure', 'build', 'build-probability', 'sequence', 'sequence-dependencies', 'parity', 'fumen', 'render', 'to-gray', 'mirror', 'damage', 'spin-finder', 'ren', 'ctk', 'player'].includes(selectedTool ?? '')) {
       void goto(`${base}/?tool=pc`, { replaceState: true, noScroll: true, keepFocus: true });
     }
+    return removeWasmArtifactHotUpdate;
   });
 </script>
 
@@ -67,3 +79,16 @@
 {:else}
   <SolverWorkspace runtime="web" {workerFactory} />
 {/if}
+
+{#if showLocalProfile && localProfile}
+  <details class="local-search-profile">
+    <summary>로컬 성능 계측 · 최근 완료한 탐색</summary>
+    <p>워커별 시간 합계는 서로 겹치므로 전체 경과 시간이 아닙니다. 입력·필드·해법 ID는 포함하지 않습니다.</p>
+    <pre>{localProfile}</pre>
+  </details>
+{/if}
+
+<style>
+  .local-search-profile { margin: 1rem; padding: .75rem; border: 1px solid #8886; }
+  .local-search-profile pre { overflow: auto; max-height: 32rem; font-size: .75rem; }
+</style>

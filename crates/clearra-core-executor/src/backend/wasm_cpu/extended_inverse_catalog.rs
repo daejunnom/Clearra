@@ -154,7 +154,7 @@ impl ExtendedInverseCatalog {
                 "wasm_extended_build_target_overlaps_initial_board",
             ));
         }
-        if required_cells.count_ones() % 4 != 0 {
+        if !required_cells.count_ones().is_multiple_of(4) {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_extended_required_area_not_tetromino_aligned",
             ));

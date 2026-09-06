@@ -61,9 +61,9 @@ impl PieceMultisetKey {
     fn componentwise_max(self, other: Self) -> Self {
         let mut counts = [0; 7];
         let mut total_count = 0u8;
-        for index in 0..counts.len() {
-            counts[index] = self.counts[index].max(other.counts[index]);
-            total_count = total_count.saturating_add(counts[index]);
+        for (index, count) in counts.iter_mut().enumerate() {
+            *count = self.counts[index].max(other.counts[index]);
+            total_count = total_count.saturating_add(*count);
         }
         Self {
             counts,
@@ -382,6 +382,8 @@ impl MaterializedPatternUniverse {
         })
     }
 
+    // These independent execution limits are part of the public supply contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn packing_multiset_family_for_execution_with_workers_and_memory_limit(
         &self,
         placed_piece_count: usize,

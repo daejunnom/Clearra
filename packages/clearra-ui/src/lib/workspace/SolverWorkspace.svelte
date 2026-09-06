@@ -42,10 +42,10 @@
     type SolverWorkspaceRequest
   } from './solverWorkspaceModel';
   import {
-    preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage
   } from './workspaceI18n';
+  import { persistWorkspaceLanguage, readWorkspaceLanguage } from './workspaceLanguagePreference';
   import {
     workspaceViewFromDesktop,
     workspaceViewFromWasm,
@@ -88,9 +88,7 @@
   $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
 
   onMount(() => {
-    language = preferredWorkspaceLanguage(
-      localStorage.getItem('clearra-language') ?? navigator.language
-    );
+    language = readWorkspaceLanguage();
     const workers = automaticWorkerCount(request.useAllLogicalProcessors);
     request = {
       ...request,
@@ -129,7 +127,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    localStorage.setItem('clearra-language', next);
+    persistWorkspaceLanguage(next);
   }
 
   function updateRequest(next: SolverWorkspaceRequest) {
@@ -329,10 +327,10 @@
       ? (signal) => workerController.loadNextProductPage(signal)
       : (signal) => loadNextDesktopProductPage(10_000, signal)}
     loadProductMemberPage={runtime === 'web'
-      ? (outerPageNumber, memberPageNumber, signal) =>
-          workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal)
-      : (outerPageNumber, memberPageNumber, signal) =>
-          loadDesktopProductMemberPage(outerPageNumber, memberPageNumber, signal)}
+      ? (outerPageNumber, memberPageNumber, signal, maximumWorkSteps) =>
+          workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal, maximumWorkSteps)
+      : (outerPageNumber, memberPageNumber, signal, maximumWorkSteps) =>
+          loadDesktopProductMemberPage(outerPageNumber, memberPageNumber, signal, maximumWorkSteps)}
     releaseProductPages={runtime === 'web'
       ? () => workerController.releaseProductPages()
       : () => releaseDesktopProductPages()}

@@ -26,7 +26,6 @@
   export let forwardPatternDone = 0;
   export let forwardPatternTotal = 0;
   export let telemetry: ClearraSearchProgressTelemetry | null = null;
-  export let showWorkerMetrics = true;
 
   $: model = buildWorkspaceProgressModel({
     profile,
@@ -87,11 +86,6 @@
       : `${count(value.value)} / ${count(value.total)}`;
   }
 
-  function visibleMetrics(stage: WorkspaceProgressStage): WorkspaceProgressMetric[] {
-    return showWorkerMetrics
-      ? stage.metrics
-      : stage.metrics.filter((metric) => metric.labelKey !== 'progressMetricWorkers');
-  }
 </script>
 
 <section class="progress-status" aria-live="polite" aria-label={workspaceMessage(language, 'progress')}>
@@ -127,8 +121,8 @@
           <strong>{workspaceMessage(language, stage.labelKey)}</strong>
           <span>{metric(stage)}</span>
         </div>
-        <div class="stage-metrics" aria-hidden={visibleMetrics(stage).length === 0}>
-          {#each visibleMetrics(stage) as stageMetric}
+        <div class="stage-metrics" aria-hidden={stage.metrics.length === 0}>
+          {#each stage.metrics as stageMetric}
             <span>
               {workspaceMessage(language, stageMetric.labelKey)}
               <b>{secondaryMetric(stageMetric)}</b>

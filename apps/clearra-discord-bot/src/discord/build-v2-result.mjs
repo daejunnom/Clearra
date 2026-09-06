@@ -11,6 +11,7 @@ const BUILD_V2_RESULT_CONTRACTS = new Map([
   ["build.evaluate.cover", ["build-supplied-coverage.v1", "candidate-family"]],
   ["build.evaluate.minimals", ["build-supplied-minimum-cover.v1", "portfolio"]],
   ["build.evaluate.score", ["build-supplied-score.v1", "score-portfolio"]],
+  ["build.highest-score-minimum-set", ["build-probability-score-minimum.v1", "score-portfolio"]],
   ["build.evaluate.b2b-cover", ["build-supplied-b2b-coverage.v1", "candidate-family"]],
   ["build.evaluate.cover-percent", ["build-supplied-probability.v1", "probability"]],
 ]);
@@ -59,6 +60,10 @@ export function projectDiscordBuildV2Result(structured) {
     assertScoreOnlyResult(structured.summary, capabilityId);
   }
 
+  if (capabilityId === "build.highest-score-minimum-set") {
+    return projectBuildScoreMinimum(structured);
+  }
+
   const summary = stripAttackFields(clonePlain(structured.summary));
   delete summary.page_source_available;
   delete summary.page_source_identity_sha256;
@@ -85,6 +90,60 @@ export function projectDiscordBuildV2Result(structured) {
 
   const projected = stripAttackFields(clonePlain(structured));
   projected.summary = summary;
+  return deepFreeze(projected);
+}
+
+function projectBuildScoreMinimum(structured) {
+  const source = structured.summary;
+  const canonicalKeys = source.canonical_candidate_keys;
+  if (
+    source.objective !== "max-score-cover" ||
+    source.completeness.exact_minimum_proven !== true ||
+    source.completeness.score_evidence_complete !== true ||
+    !canonicalDecimal(source.selected_candidate_count) ||
+    !canonicalDecimal(source.required_pattern_count) ||
+    !Array.isArray(canonicalKeys) ||
+    canonicalKeys.length === 0 ||
+    BigInt(source.selected_candidate_count) !== BigInt(canonicalKeys.length) ||
+    !Array.isArray(source.winners) ||
+    BigInt(source.required_pattern_count) !== BigInt(source.winners.length) ||
+    canonicalKeys.some((key, index, keys) =>
+      !canonicalBuildCandidateKey(key) ||
+      (index > 0 && keys[index - 1].localeCompare(key, "en") >= 0)
+    ) ||
+    source.winners.some((winner, index, winners) =>
+      !plainObject(winner) ||
+      !canonicalDecimal(winner.pattern_id) ||
+      !canonicalKeys.includes(winner.candidate_key) ||
+      (index > 0 && BigInt(winners[index - 1].pattern_id) >= BigInt(winner.pattern_id))
+    )
+  ) {
+    throw new Error("build.highest-score-minimum-set lacks an exact canonical portfolio.");
+  }
+  // Build probability assigns candidate IDs in normalized ctk1 identity order;
+  // the product validator proves the same lexical order. Selecting the first
+  // key therefore selects the smallest canonical candidate ID without using
+  // attack or exposing a tie family on Discord.
+  const canonicalCandidateKey = canonicalKeys[0];
+  const canonicalWinner = source.winners.find(
+    (winner) => winner.candidate_key === canonicalCandidateKey,
+  );
+  if (!canonicalWinner) {
+    throw new Error("build.highest-score-minimum-set canonical candidate lacks score evidence.");
+  }
+  const projected = stripAttackFields(clonePlain(structured));
+  projected.summary = {
+    capability_id: "build.highest-score-minimum-set",
+    result_contract: "build-probability-score-minimum.v1",
+    payload_kind: "canonical-build-score-minimum-candidate",
+    canonical_selection: "smallest-canonical-candidate-id",
+    score_equality_basis: SCORE_ONLY_EQUALITY,
+    canonical_candidate_key: canonicalCandidateKey,
+    canonical_winner: withoutAttackFields(canonicalWinner),
+    selected_candidate_count: source.selected_candidate_count,
+    required_pattern_count: source.required_pattern_count,
+    complete: true,
+  };
   return deepFreeze(projected);
 }
 
@@ -157,6 +216,11 @@ function containsForbiddenAlternativeMetadata(value, path = []) {
 
 function canonicalDecimal(value) {
   return typeof value === "string" && /^(?:0|[1-9][0-9]*)$/u.test(value);
+}
+
+function canonicalBuildCandidateKey(value) {
+  return typeof value === "string" &&
+    /^ctk1\|initial=[0-9a-f]{16}\|placements=[A-Z][A-Za-z0-9@:_+\-]*:[0-9a-f]{16}(?:,[A-Z][A-Za-z0-9@:_+\-]*:[0-9a-f]{16})*$/u.test(value);
 }
 
 function clonePlain(value) {

@@ -1172,6 +1172,22 @@ function buildCoverArguments(command, values) {
     throw new Error("target occupied-cell count must be divisible by four.");
   }
 
+  const resultMode = normalizedChoice(
+    optionalText(values, "result-mode", 48) ?? "all-solutions",
+  );
+  const resultModes = new Set([
+    "all-solutions",
+    "complete-replay-paths",
+    "minimum-solutions",
+    "field-average-score",
+    "fixed-queue-maximum-score",
+    "highest-score-minimum-set",
+    "failed-queues",
+  ]);
+  if (!resultModes.has(resultMode)) {
+    throw new Error("result-mode is not a supported Build result aggregation.");
+  }
+
   const visibleHeight = Math.max(1, base.height, target.height);
   const requestedHeight = optionalInteger(
     values,
@@ -1179,9 +1195,16 @@ function buildCoverArguments(command, values) {
     1,
     DISCORD_WIDE_FIELD_MAX_ROWS,
   );
-  const height = requestedHeight ?? Math.max(8, visibleHeight);
+  const height = requestedHeight ?? (
+    resultMode === "complete-replay-paths"
+      ? visibleHeight
+      : Math.max(8, visibleHeight)
+  );
   if (height < visibleHeight) {
     throw new Error("height must include every occupied row in base and target.");
+  }
+  if (resultMode === "complete-replay-paths" && height > 6) {
+    throw new Error("complete-replay-paths requires a Build height from 1 through 6.");
   }
 
   const aggregationSource = optionalText(values, "aggregation", 16);
@@ -1252,6 +1275,37 @@ function buildCoverArguments(command, values) {
     1,
     4_294_967_295,
   );
+  const scoreMode = new Set([
+    "field-average-score",
+    "fixed-queue-maximum-score",
+    "highest-score-minimum-set",
+  ]).has(resultMode);
+  const scoreProfileSource = optionalText(values, "score-profile", 32);
+  const scoreProfile = normalizedChoice(scoreProfileSource ?? "tetrio");
+  if (!new Set(["tetrio", "guideline", "jstris-ultra"]).has(scoreProfile)) {
+    throw new Error("score-profile must be tetrio, guideline, or jstris-ultra.");
+  }
+  const initialB2b = optionalInteger(values, "initial-b2b", 0, 65_535);
+  const failedCount = optionalInteger(values, "failed-count", 1, 4_294_967_295);
+  if (!scoreMode && (scoreProfileSource !== null || initialB2b !== null)) {
+    throw new Error("score-profile and initial-b2b require a score result-mode.");
+  }
+  if (resultMode !== "failed-queues" && failedCount !== null) {
+    throw new Error("failed-count requires result-mode=failed-queues.");
+  }
+  if (
+    resultMode !== "all-solutions" &&
+    (aggregation !== "buildability" || preserveB2b || solutionProbabilities ||
+      spinProfileSource !== null || finesse !== "off" || knowledge != null)
+  ) {
+    throw new Error(
+      "Non-all Build result modes require aggregation=buildability without spin, B2B, solution-probability, or finesse options.",
+    );
+  }
+  const next = validatedNext(values, resultMode === "fixed-queue-maximum-score");
+  const nextArguments = /^[IOTSZJL]+$/i.test(next)
+    ? ["--queue", next.toUpperCase()]
+    : ["--patterns", next];
 
   const mirror = (optionalText(values, "mirror", 16) ?? "auto").toLowerCase();
   if (!new Set(["auto", "include", "exclude"]).has(mirror)) {
@@ -1265,6 +1319,33 @@ function buildCoverArguments(command, values) {
         ? ["--include-mirror"]
         : ["--no-mirror"];
 
+  if (resultMode === "minimum-solutions") {
+    if (values.has("mirror")) {
+      throw new Error("mirror is not available with result-mode=minimum-solutions.");
+    }
+    return [
+      "build",
+      "cover",
+      "--base-mask",
+      base.mask,
+      "--target-mask",
+      target.mask,
+      "--height",
+      String(height),
+      ...nextArguments,
+      ...holdArguments,
+      ...(sourcePieces === null ? [] : ["--source-pieces", String(sourcePieces)]),
+      "--queue-knowledge",
+      "oracle",
+      "--objective",
+      "min-cover",
+      ...kicktableArguments(values, true),
+      "--backend",
+      "cpu",
+      "--no-backend-fallback",
+    ];
+  }
+
   return [
     ...command.argvPrefix,
     "--base-mask",
@@ -1273,7 +1354,7 @@ function buildCoverArguments(command, values) {
     target.mask,
     "--height",
     String(height),
-    ...finesseNextArguments(values),
+    ...nextArguments,
     ...holdArguments,
     ...(sourcePieces === null
       ? []
@@ -1292,6 +1373,20 @@ function buildCoverArguments(command, values) {
         ]),
     ...(finesse === "inputs"
       ? ["--finesse", "inputs", "--pattern-knowledge", knowledge ?? "both"]
+      : []),
+    ...(resultMode === "all-solutions"
+      ? []
+      : ["--result-mode", resultMode]),
+    ...(scoreMode
+      ? [
+          "--score-profile",
+          scoreProfile,
+          "--initial-b2b",
+          String(initialB2b ?? 0),
+        ]
+      : []),
+    ...(resultMode === "failed-queues"
+      ? ["--failed-count", String(failedCount ?? 100)]
       : []),
     ...mirrorArguments,
     ...(aggregation === "tiling" ? [] : kicktableArguments(values, true)),
@@ -2856,12 +2951,16 @@ function allowedOptionNames(command) {
         "hold",
         "source-pieces",
         "aggregation",
+        "result-mode",
         "spin-profile",
         "preserve-b2b",
         "solution-probabilities",
         "finesse",
         "finesse-knowledge",
         "mirror",
+        "score-profile",
+        "initial-b2b",
+        "failed-count",
       ]);
     case "build-v2-cover":
       return new Set([

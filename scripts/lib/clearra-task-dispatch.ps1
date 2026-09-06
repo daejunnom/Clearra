@@ -147,6 +147,12 @@ function Invoke-ClearraTask([string]$TaskName, [string]$Root) {
                 (Get-ClearraCargoTargetDir) `
                 $Workers
         }
+        "WasmBuildProducer" {
+            Invoke-WasmBuildProducerGate `
+                $Root `
+                $CargoPath `
+                (Get-ClearraCargoTargetDir)
+        }
         "WasmBuildTest" {
             Invoke-WasmBuildTestGate `
                 $Root `

@@ -191,7 +191,7 @@ fn every_build_v2_app_response_renders_its_closed_public_cli_payload() {
 }
 
 #[test]
-fn native_build_v2_text_output_exposes_the_public_product_payload() {
+fn native_build_v2_text_output_exposes_only_the_public_product_summary() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let source = "clearra build cover --base-mask 0 --target-mask 15 --height 4 --queue I --no-hold --objective min-cover --workers 2";
     let invocation = CliParser::parse(source.split_whitespace()).expect("native Build v2 CLI");
@@ -216,13 +216,26 @@ fn native_build_v2_text_output_exposes_the_public_product_payload() {
     );
     assert!(output.stderr().is_empty(), "{}", output.stderr());
     for marker in [
-        "build-coverage-portfolio.v2",
-        "capability_id: build.cover",
-        "result_contract: build-coverage-portfolio.v2",
-        "payload_kind: portfolio",
-        "page_source_available: true",
+        "kind: minimum build solutions",
+        "objective:",
+        "source_candidate_count:",
+        "selected_candidate_count:",
     ] {
         assert!(output.stdout().contains(marker), "missing {marker}");
+    }
+    for private_marker in [
+        "build-coverage-portfolio.v2",
+        "capability_id",
+        "result_contract",
+        "payload_kind",
+        "page_source",
+        "candidate_id",
+    ] {
+        assert!(
+            !output.stdout().contains(private_marker),
+            "private marker {private_marker}: {}",
+            output.stdout()
+        );
     }
 }
 
@@ -1020,7 +1033,7 @@ fn execution_failed_json_preserves_the_typed_resource_report() {
 }
 
 #[test]
-fn execution_failed_text_profiles_preserve_typed_resource_authority() {
+fn execution_failed_default_text_is_public_while_explicit_text_profiles_keep_authority() {
     let availability = clearra_host_contract::ExecutionAvailabilityReport::exhausted(
         clearra_host_contract::ExecutionSurface::Native,
         clearra_host_contract::ExecutionAvailabilityReason::MemoryBudgetExceeded,
@@ -1045,11 +1058,29 @@ fn execution_failed_text_profiles_preserve_typed_resource_authority() {
     );
     let default_text = RenderFormatSelector::parse(None).expect("omitted format defaults to text");
     assert_eq!(default_text, RenderFormat::Text);
-    for format in [
+    let default_response = AppResponse::failed(
+        AppStatus::ExecutionFailed,
+        AppError::new(
+            AppErrorCode::ExecutionFailed,
+            "shared memory budget exhausted",
+        ),
+    )
+    .with_resource_report(report.clone());
+    let default_output = AppResponseRenderer::render(
+        default_response,
         default_text,
-        RenderFormat::TextVerbose,
-        RenderFormat::TextDiagnostics,
-    ] {
+        CliErrorCode::ProductRuntimeUnsupported,
+    );
+    assert_eq!(
+        default_output.stderr(),
+        "error E_PRODUCT_RUNTIME_UNSUPPORTED the operation could not be completed"
+    );
+    assert!(!default_output.stderr().contains("resource_report."));
+    assert!(!default_output
+        .stderr()
+        .contains("shared memory budget exhausted"));
+
+    for format in [RenderFormat::TextVerbose, RenderFormat::TextDiagnostics] {
         let response = AppResponse::failed(
             AppStatus::ExecutionFailed,
             AppError::new(
@@ -1079,9 +1110,69 @@ fn execution_failed_text_does_not_fabricate_an_absent_resource_report() {
 
     assert_eq!(
         output.stderr(),
-        "error E_PRODUCT_RUNTIME_UNSUPPORTED legacy failure"
+        "error E_PRODUCT_RUNTIME_UNSUPPORTED the operation could not be completed"
     );
     assert!(!output.stderr().contains("resource_report."));
+    assert!(!output.stderr().contains("legacy failure"));
+}
+
+#[test]
+fn app_failure_format_boundary_keeps_private_identity_out_of_default_text() {
+    const PRIVATE_SENTINEL: &str =
+        "problem_id=private candidate_id=81 trace_identity=private-trace";
+    for (status, app_error, default_error, public_message) in [
+        (
+            AppStatus::Unsupported,
+            AppErrorCode::Unsupported,
+            CliErrorCode::ProductRuntimeUnsupported,
+            "the requested operation is not supported",
+        ),
+        (
+            AppStatus::ExecutionFailed,
+            AppErrorCode::ExecutionFailed,
+            CliErrorCode::PcSearchInternal,
+            "the operation could not be completed",
+        ),
+    ] {
+        for format in [RenderFormat::Text, RenderFormat::FumenLike] {
+            let output = AppResponseRenderer::render(
+                AppResponse::failed(status, AppError::new(app_error, PRIVATE_SENTINEL)),
+                format,
+                default_error,
+            );
+            assert!(output.stdout().is_empty(), "{status:?}:{format:?}");
+            assert_eq!(
+                output.stderr(),
+                format!("error {} {public_message}", default_error.as_str()),
+                "{status:?}:{format:?}"
+            );
+            assert!(!output.stderr().contains(PRIVATE_SENTINEL));
+        }
+
+        for format in [RenderFormat::TextVerbose, RenderFormat::TextDiagnostics] {
+            let output = AppResponseRenderer::render(
+                AppResponse::failed(status, AppError::new(app_error, PRIVATE_SENTINEL)),
+                format,
+                default_error,
+            );
+            assert!(output.stdout().is_empty(), "{status:?}:{format:?}");
+            assert!(
+                output.stderr().contains(PRIVATE_SENTINEL),
+                "{status:?}:{format:?}"
+            );
+        }
+
+        let json = AppResponseRenderer::render(
+            AppResponse::failed(status, AppError::new(app_error, PRIVATE_SENTINEL)),
+            RenderFormat::Json,
+            default_error,
+        );
+        let developer_output = format!("{}\n{}", json.stdout(), json.stderr());
+        assert!(
+            developer_output.contains(PRIVATE_SENTINEL),
+            "{status:?}:json"
+        );
+    }
 }
 
 #[test]

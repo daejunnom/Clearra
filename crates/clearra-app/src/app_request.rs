@@ -204,6 +204,17 @@ impl AppRequest {
         self.resource_budget = resource_budget;
         self
     }
+
+    /// Host result-construction policy; never rewrites search memory or query semantics.
+    pub fn with_product_retention_budget(
+        mut self,
+        budget: Option<crate::ProductRetentionBudget>,
+    ) -> Self {
+        if let AppCommand::BuildProbability(command) = &mut self.command {
+            command.set_product_retention_budget(budget);
+        }
+        self
+    }
 }
 impl AppRequest {
     pub fn command(&self) -> &AppCommand {

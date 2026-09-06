@@ -1,6 +1,7 @@
 <!-- SRP rationale: the single change reason is Player session orchestration; simulation, rendering, controls, settings, and finder execution remain delegated boundaries. -->
 <!-- The Player keeps simulation buffers outside Svelte reactivity; this component only bridges input, low-rate HUD state, and the Canvas renderer. -->
 <script lang="ts">
+  import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { Pause, Play, RotateCcw } from '@lucide/svelte';
   import { onDestroy, onMount, tick } from 'svelte';
 
@@ -53,7 +54,6 @@
   } from './player/playerUiModel';
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
-    preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage,
     type WorkspaceMessageKey
@@ -150,11 +150,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    try {
-      localStorage.setItem('clearra-language', next);
-    } catch {
-      // Language selection still applies to the current session when storage is unavailable.
-    }
+    persistWorkspaceLanguage(next);
   }
 
   function togglePlaying() {
@@ -571,13 +567,7 @@
   }
 
   function loadWorkspaceLanguage(): WorkspaceLanguage {
-    try {
-      return preferredWorkspaceLanguage(
-        localStorage.getItem('clearra-language') ?? navigator.language
-      );
-    } catch {
-      return preferredWorkspaceLanguage(navigator.language);
-    }
+    return readWorkspaceLanguage();
   }
 
   function playerStartingBoardCells(page: Ctk3Page) {

@@ -35,6 +35,8 @@ pub(super) enum ComponentPlanResult {
     StorageUnavailable,
 }
 
+// Component compilation keeps each bounded scratch surface explicit.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn compile_component_plan(
     catalog: &GeometryCatalog,
     remaining: u64,
@@ -196,8 +198,8 @@ impl ComponentCompiler<'_> {
         let mut mask = 0_u8;
         for piece in 0..7 {
             let mut counts = self.base_used_counts;
-            for index in 0..7 {
-                counts[index] = counts[index].saturating_add(self.local_counts[index]);
+            for (count, local_count) in counts.iter_mut().zip(self.local_counts) {
+                *count = count.saturating_add(local_count);
             }
             counts[piece] = counts[piece].saturating_add(1);
             if self
@@ -440,16 +442,16 @@ fn combined_signature_is_target(
     right: u32,
     targets: &[TargetGroup],
 ) -> bool {
-    for piece in 0..7 {
+    for (piece, count) in counts.iter_mut().enumerate() {
         let left_count = ((left >> (piece * 4)) & 0x0f) as u8;
         let right_count = ((right >> (piece * 4)) & 0x0f) as u8;
-        let Some(count) = counts[piece]
+        let Some(combined_count) = count
             .checked_add(left_count)
             .and_then(|count| count.checked_add(right_count))
         else {
             return false;
         };
-        counts[piece] = count;
+        *count = combined_count;
     }
     targets.iter().any(|target| target.key.counts() == counts)
 }

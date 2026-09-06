@@ -1,6 +1,8 @@
 .git
 .github
 .codex
+# Nonproduct diagnostics must not enter raw local Docker contexts either.
+_local
 .env
 .env.*
 .ssh

@@ -290,10 +290,10 @@ test("job service uses every Cloud Run logical processor by default", () => {
   assert.equal(config.useAllLogicalProcessors, true);
   assert.equal(config.maxConcurrentJobs, 1);
   assert.equal(config.port, 8787);
-  assert.equal(config.searchTimeoutMs, 180_000);
-  assert.equal(config.diagnosticTimeoutMs, 180_000);
-  assert.equal(config.pcSearchTimeoutMs, 300_000);
-  assert.equal(config.reverseSearchTimeoutMs, 300_000);
+  assert.equal(config.searchTimeoutMs, 840_000);
+  assert.equal(config.diagnosticTimeoutMs, 840_000);
+  assert.equal(config.pcSearchTimeoutMs, 840_000);
+  assert.equal(config.reverseSearchTimeoutMs, 840_000);
   assert.equal(config.buildSearchTimeoutMs, 900_000);
   assert.equal(config.setupSearchTimeoutMs, 900_000);
   assert.equal(config.forwardSearchTimeoutMs, 900_000);

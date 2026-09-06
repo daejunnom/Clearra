@@ -79,6 +79,7 @@ pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
 pub(crate) use setup_parallel::execute_setup_parallel_native;
 pub(crate) use setup_parallel::{
     WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
+    WasmSetupParallelWorkerAdvance,
 };
 pub use tiling_parallel::{
     WasmPackedTilingIdentity, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
@@ -89,15 +90,21 @@ pub use webgpu_distributed::WasmWebGpuCandidateProducer;
 #[cfg(feature = "webgpu-search")]
 pub(crate) use webgpu_search::WasmWebGpuSearchSession;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum WasmExactSearchError {
     InvalidProblem(&'static str),
-    ResourceAdmission(clearra_core_domain::resource::ResourceReport),
+    ResourceAdmission(Box<clearra_core_domain::resource::ResourceReport>),
     Cancelled,
 }
 
 impl WasmExactSearchError {
-    pub(super) const fn reason(self) -> &'static str {
+    pub(super) fn resource_admission(
+        report: clearra_core_domain::resource::ResourceReport,
+    ) -> Self {
+        Self::ResourceAdmission(Box::new(report))
+    }
+
+    pub(super) fn reason(&self) -> &'static str {
         use clearra_core_domain::resource::{
             ExecutionAvailabilityReason as Reason, ExecutionAvailabilityState as State,
         };

@@ -51,14 +51,14 @@ const TEST_REMOTE_RUNTIME_ENVIRONMENT = Object.freeze({
 test("Clearrabot applies direction-specific search and interaction limits", () => {
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" });
   assert.equal(config.ingressMode, "gateway");
-  assert.equal(config.searchTimeoutMs, 180_000);
-  assert.equal(config.pcSearchTimeoutMs, 300_000);
-  assert.equal(config.reverseSearchTimeoutMs, 300_000);
+  assert.equal(config.searchTimeoutMs, 840_000);
+  assert.equal(config.pcSearchTimeoutMs, 840_000);
+  assert.equal(config.reverseSearchTimeoutMs, 840_000);
   assert.equal(config.buildSearchTimeoutMs, 900_000);
   assert.equal(config.setupSearchTimeoutMs, 900_000);
   assert.equal(config.forwardSearchTimeoutMs, 900_000);
   assert.equal(config.structureSearchTimeoutMs, 900_000);
-  assert.equal(config.diagnosticTimeoutMs, 180_000);
+  assert.equal(config.diagnosticTimeoutMs, 840_000);
   assert.equal(config.setupProgressNoticeMs, 300_000);
   assert.equal(config.interactionDeadlineMs, 840_000);
   assert.equal(config.jobEndpoint, "http://127.0.0.1:8787/jobs");
@@ -128,7 +128,7 @@ test("every represented sfinder search keeps its direction-specific deadline", (
     assert.equal(searchTimeoutClass(["sfinder", command]), "pc_reverse", command);
     assert.equal(
       searchTimeoutMsForArguments(["sfinder", command]),
-      300_000,
+      840_000,
       command,
     );
   }
@@ -159,14 +159,14 @@ test("every represented sfinder search keeps its direction-specific deadline", (
 });
 
 test("search timeout policy preserves independent canonical family defaults", () => {
-  assert.equal(searchTimeoutMsForArguments(["pc"]), 300_000);
+  assert.equal(searchTimeoutMsForArguments(["pc"]), 840_000);
   assert.equal(searchTimeoutMsForArguments(["build-probability"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["damage"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["setup-finder"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["spin-structure"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["finesse", "search"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["finesse", "score"]), 900_000);
-  assert.equal(searchTimeoutMsForArguments(["sfinder", "verify"]), 180_000);
+  assert.equal(searchTimeoutMsForArguments(["sfinder", "verify"]), 840_000);
 
   const policy = {
     searchTimeoutMs: 11,
@@ -199,12 +199,12 @@ test("the frozen public Discord contract matches every runtime timeout class", (
     assert.equal(
       searchTimeoutMsForArguments(arguments_),
       timeoutClass === "pc_reverse"
-        ? 300_000
+        ? 840_000
         : timeoutClass === "utility_bounded"
           ? 900_000
         : timeoutClass.endsWith("_long")
           ? 900_000
-          : 180_000,
+          : 840_000,
       id,
     );
   }
@@ -876,6 +876,30 @@ test("Discord owns an adaptive worker ceiling instead of accepting a user overri
       }),
     /hard limit of 8 logical processors/,
   );
+});
+
+test("Discord applies its Cloud worker authority to every typed PC score product", () => {
+  for (const product of ["score", "score-minimals", "score-finder"]) {
+    const prepared = prepareClearraArguments(
+      ["pc", product, "--lines", "4"],
+      {
+        workers: 4,
+        useAllLogicalProcessors: true,
+        logicalProcessors: 4,
+      },
+    );
+    assert.deepEqual(prepared, [
+      "pc",
+      product,
+      "--lines",
+      "4",
+      "--auto-workers",
+      "4",
+      "--use-all-cpu-threads",
+      "--format",
+      "text",
+    ]);
+  }
 });
 
 test("Discord exposes curated sfinder commands through native worker policy", () => {

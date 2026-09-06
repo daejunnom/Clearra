@@ -17,6 +17,7 @@ import {
   verifyCanonicalReportHash,
 } from "./canonical-release-evidence.mjs";
 import { verifyAcceptedPagesBuild } from "./accepted-pages-build.mjs";
+import { verifyAcceptedWasmBuild } from "./accepted-wasm-build.mjs";
 import { verifyAcceptedCtk3Dist } from "../tools/accepted-ctk3-dist.mjs";
 
 export const CANONICAL_ACCEPTANCE_EVIDENCE_SCHEMA =
@@ -196,7 +197,12 @@ const REQUIRED_JOBS = Object.freeze(new Map([
     "Seal canonical release acceptance rust shard",
     "Upload canonical release acceptance rust shard",
   ])],
+  ["release-acceptance-wasm-build", Object.freeze([
+    "Run verified WASM build producer",
+    "Upload accepted WASM build",
+  ])],
   ["release-acceptance-pages", Object.freeze([
+    "Download accepted WASM build",
     "Run canonical release acceptance Pages shard",
     "Stamp and verify the accepted Pages build",
     "Seal canonical release acceptance Pages shard",
@@ -553,6 +559,35 @@ export function collectReleaseShardToolchains(shard, dependencies = {}) {
   return collectToolchainSet(contract.toolchains, invocations, run);
 }
 
+function collectPagesConsumerToolchains(dependencies = {}) {
+  const run = dependencies.run ?? runVersionCommand;
+  const platform = dependencies.platform ?? process.platform;
+  const npmInvocation = platform === "win32"
+    ? ["cmd.exe", ["/d", "/s", "/c", "npm.cmd --version"], "npm"]
+    : ["npm", ["--version"], "npm"];
+  const invocations = new Map([
+    ["node", ["node", ["--version"], "node"]],
+    ["npm", npmInvocation],
+    ["powershell", [
+      "powershell",
+      ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+      "PowerShell",
+    ]],
+  ]);
+  return collectToolchainSet(["node", "npm", "powershell"], invocations, run);
+}
+
+export function acceptedWasmToolchainsForPages(receiptToolchains, consumerToolchains) {
+  const contract = requireReleaseShard("pages");
+  const producer = validateReleaseShardToolchains(receiptToolchains, contract);
+  for (const key of ["node", "npm", "powershell"]) {
+    if (consumerToolchains?.[key] !== producer[key]) {
+      throw new Error(`Pages consumer disagrees with the accepted WASM ${key} toolchain`);
+    }
+  }
+  return producer;
+}
+
 function collectToolchainSet(keys, invocations, run) {
   const tools = {};
   for (const key of keys) {
@@ -575,7 +610,7 @@ export async function createCanonicalAcceptanceEvidence(options) {
     options.gateEvidenceDirectory,
     authority,
   );
-  const [ctk3Manifest, pagesIdentity, artifacts] = await Promise.all([
+  const [ctk3Manifest, pagesIdentity, acceptedWasm, artifacts] = await Promise.all([
     verifyAcceptedCtk3Dist(
       options.ctk3Directory,
       authority.sourceCommit,
@@ -589,8 +624,18 @@ export async function createCanonicalAcceptanceEvidence(options) {
       basePath,
       version,
     }),
+    verifyAcceptedWasmBuild(
+      resolve(options.pagesDirectory, "wasm"),
+      authority.sourceCommit,
+      authority.runId,
+      authority.runAttempt,
+    ),
     collectReleaseArtifacts(options.productsDirectory, version, authority.sourceCommit),
   ]);
+  const pagesShard = gateReports.shardReports.find((report) => report.shard === "pages");
+  if (canonicalJson(pagesShard?.toolchains) !== canonicalJson(acceptedWasm.toolchains)) {
+    throw new Error("Pages shard toolchains differ from the accepted WASM producer receipt");
+  }
 
   const finalSourceFragments = Object.freeze({
     toolchains: {
@@ -631,6 +676,9 @@ export async function createCanonicalAcceptanceEvidence(options) {
     accepted_inputs: {
       ctk3_manifest_sha256: sha256Buffer(Buffer.from(canonicalJson(ctk3Manifest), "utf8")),
       pages_identity_sha256: sha256Buffer(Buffer.from(canonicalJson(pagesIdentity), "utf8")),
+      wasm_build_receipt_sha256: sha256Buffer(
+        Buffer.from(canonicalJson(acceptedWasm), "utf8"),
+      ),
       gate_index_sha256: gateReports.index.report_sha256,
     },
     final_source_fragments: finalSourceFragments,
@@ -688,6 +736,7 @@ export function validateCanonicalAcceptanceEvidence(report, authorityValue) {
   for (const key of [
     "ctk3_manifest_sha256",
     "pages_identity_sha256",
+    "wasm_build_receipt_sha256",
     "gate_index_sha256",
   ]) {
     if (typeof report.accepted_inputs[key] !== "string" || !/^[0-9a-f]{64}$/u.test(report.accepted_inputs[key])) {
@@ -1066,6 +1115,7 @@ async function main() {
           "run-attempt": { type: "string" },
           shard: { type: "string" },
           output: { type: "string" },
+          "accepted-wasm": { type: "string" },
         },
         strict: true,
       });
@@ -1074,11 +1124,33 @@ async function main() {
       if (process.env.GITHUB_ACTIONS !== "true" || process.env.GITHUB_JOB !== contract.job) {
         throw new Error(`${shard} shard evidence must be produced by ${contract.job}`);
       }
+      let toolchains;
+      if (shard === "pages") {
+        const acceptedWasmPath = requireNonEmptyString(
+          values["accepted-wasm"],
+          "accepted WASM build path",
+        );
+        const acceptedWasm = await verifyAcceptedWasmBuild(
+          acceptedWasmPath,
+          values["source-commit"],
+          values["run-id"],
+          values["run-attempt"],
+        );
+        toolchains = acceptedWasmToolchainsForPages(
+          acceptedWasm.toolchains,
+          collectPagesConsumerToolchains(),
+        );
+      } else {
+        if (values["accepted-wasm"] !== undefined) {
+          throw new Error("only the Pages shard may consume an accepted WASM build");
+        }
+        toolchains = collectReleaseShardToolchains(shard);
+      }
       const report = await writeReleaseAcceptanceShardEvidence(
         values.output,
         gateCliOptions(values),
         shard,
-        collectReleaseShardToolchains(shard),
+        toolchains,
       );
       console.log(`canonical_release_shard=passed shard=${shard} sha256=${report.report_sha256}`);
       return;

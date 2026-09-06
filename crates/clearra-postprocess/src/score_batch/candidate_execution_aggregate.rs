@@ -31,6 +31,15 @@ impl CandidateExecution {
     pub fn replay_trace(&self) -> &ReplayTrace {
         &self.replay_trace
     }
+
+    pub fn into_parts(self) -> (usize, String, ReplayTrace) {
+        (self.pattern_id, self.trace_identity, self.replay_trace)
+    }
+
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        (self.trace_identity.capacity() as u128)
+            .checked_add(self.replay_trace.checked_nested_retained_bytes()?)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,5 +62,19 @@ impl CandidateExecutionAggregate {
 
     pub fn executions(&self) -> &[CandidateExecution] {
         &self.executions
+    }
+
+    pub fn into_parts(self) -> (u64, Vec<CandidateExecution>) {
+        (self.candidate_id, self.executions)
+    }
+
+    pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
+        let inline_bytes = (self.executions.capacity() as u128)
+            .checked_mul(core::mem::size_of::<CandidateExecution>() as u128)?;
+        self.executions
+            .iter()
+            .try_fold(inline_bytes, |bytes, execution| {
+                bytes.checked_add(execution.checked_nested_retained_bytes()?)
+            })
     }
 }

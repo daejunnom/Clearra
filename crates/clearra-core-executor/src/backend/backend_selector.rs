@@ -134,7 +134,7 @@ mod choice_policy {
 mod context {
     use clearra_pc_graph::request::PcCountPolicy;
 
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub enum PcBackendSelectionContext {
         Opening {
             trace_enumeration_requested: bool,
@@ -146,6 +146,7 @@ mod context {
             piece_window: usize,
             multiset_group_count: usize,
         },
+        #[default]
         Unknown,
     }
 
@@ -222,11 +223,6 @@ mod context {
                         ..
                     } if multiset_group_count >= PARALLEL_MULTISET_GROUP_THRESHOLD
                 )
-        }
-    }
-    impl Default for PcBackendSelectionContext {
-        fn default() -> Self {
-            Self::Unknown
         }
     }
 }

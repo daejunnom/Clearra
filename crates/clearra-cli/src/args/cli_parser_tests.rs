@@ -20,6 +20,86 @@ fn top_level_help_lists_both_finesse_modes_and_build_probability_entry() {
 }
 
 #[test]
+fn ordinary_help_never_exposes_versioned_contracts_or_internal_identity_terms() {
+    let topics = [
+        CliHelpTopic::TopLevel,
+        CliHelpTopic::Pc,
+        CliHelpTopic::PcScenario,
+        CliHelpTopic::Path,
+        CliHelpTopic::Percent,
+        CliHelpTopic::FailedQueue,
+        CliHelpTopic::Setup,
+        CliHelpTopic::Cover,
+        CliHelpTopic::Rules,
+        CliHelpTopic::Scoring,
+        CliHelpTopic::Convert,
+        CliHelpTopic::Continue,
+        CliHelpTopic::SpinStructure,
+        CliHelpTopic::Sfinder,
+        CliHelpTopic::Product(ProductHelpTopic::PcTiling),
+        CliHelpTopic::Product(ProductHelpTopic::PcMinimals),
+        CliHelpTopic::Product(ProductHelpTopic::PcPath),
+        CliHelpTopic::Product(ProductHelpTopic::PcChance),
+        CliHelpTopic::Product(ProductHelpTopic::PcScore),
+        CliHelpTopic::Product(ProductHelpTopic::PcScoreFinder),
+        CliHelpTopic::Product(ProductHelpTopic::PcScoreMinimals),
+        CliHelpTopic::Product(ProductHelpTopic::PcSaves),
+        CliHelpTopic::Product(ProductHelpTopic::PcBestSave),
+        CliHelpTopic::Product(ProductHelpTopic::PcFailedQueue),
+        CliHelpTopic::Product(ProductHelpTopic::PcAllSpinSolution),
+        CliHelpTopic::Product(ProductHelpTopic::PcAllSpinPreservationChance),
+        CliHelpTopic::Product(ProductHelpTopic::BuildV2),
+        CliHelpTopic::Product(ProductHelpTopic::BuildProbability),
+        CliHelpTopic::Product(ProductHelpTopic::Finesse),
+        CliHelpTopic::Product(ProductHelpTopic::Damage),
+        CliHelpTopic::Product(ProductHelpTopic::SpinFinder),
+        CliHelpTopic::Product(ProductHelpTopic::Ren),
+        CliHelpTopic::Product(ProductHelpTopic::MappedCompatibility),
+    ];
+    let forbidden_identity_terms = [
+        "ctk1",
+        "field_id",
+        "field id",
+        "candidate_id",
+        "candidate id",
+        "canonical candidate",
+        "problem_id",
+        "problem id",
+        "pattern_id",
+        "pattern id",
+        "trace_identity",
+        "trace identity",
+        "trace_key",
+        "trace key",
+        "operation_id",
+        "operation id",
+        "group_key",
+        "group key",
+        "schema_id",
+        "schema id",
+    ];
+
+    for topic in topics {
+        let output = topic.into_output(LanguageId::En);
+        let text = output.stdout().to_ascii_lowercase();
+        let has_versioned_contract = text
+            .as_bytes()
+            .windows(3)
+            .any(|window| window[0] == b'.' && window[1] == b'v' && window[2].is_ascii_digit());
+        assert!(
+            !has_versioned_contract,
+            "ordinary help exposes a versioned product contract: {topic:?}\n{text}"
+        );
+        for forbidden in forbidden_identity_terms {
+            assert!(
+                !text.contains(forbidden),
+                "ordinary help exposes internal term {forbidden:?}: {topic:?}\n{text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn build_probability_help_uses_the_canonical_parser_option_names() {
     let output =
         CliHelpTopic::Product(ProductHelpTopic::BuildProbability).into_output(LanguageId::En);
@@ -207,8 +287,10 @@ fn pc_minimals_routes_only_the_grouped_canonical_spelling_to_product_help_and_to
     assert!(output
         .stdout()
         .contains("usage: clearra pc minimals --lines 2"));
-    assert!(output.stdout().contains("pc.minimals product contract"));
-    assert!(output.stdout().contains("pc-minimum-cover.v2"));
+    assert!(output
+        .stdout()
+        .contains("dedicated minimum-solution search"));
+    assert!(output.stdout().contains("exact query-bound minimum cover"));
     for hidden in ["objective", "diagnostic", "verify"] {
         assert!(
             !output.stdout().to_ascii_lowercase().contains(hidden),
@@ -270,7 +352,7 @@ fn pc_chance_routes_only_the_grouped_canonical_spelling_to_product_help_and_toke
     assert!(output
         .stdout()
         .contains("usage: clearra pc chance --lines 2"));
-    assert!(output.stdout().contains("pc.chance product contract"));
+    assert!(output.stdout().contains("dedicated PC probability search"));
     for hidden in ["objective", "diagnostic", "verify"] {
         assert!(
             !output.stdout().to_ascii_lowercase().contains(hidden),
@@ -322,10 +404,24 @@ fn pc_score_routes_only_the_grouped_canonical_spelling_to_product_help_and_token
     assert!(output
         .stdout()
         .contains("usage: clearra pc score --lines 2"));
-    assert!(output.stdout().contains("pc-score-summary.v2"));
-    assert!(output.stdout().contains("basic-approximation"));
-    assert!(output.stdout().contains("profile_specific_exact=false"));
-    assert!(output.stdout().contains("fixed Wasm CPU single-session"));
+    assert!(output.stdout().contains("PC field-average score result"));
+    assert!(output.stdout().contains("basic approximation"));
+    assert!(output
+        .stdout()
+        .contains("not profile-specific exact values"));
+    assert!(output
+        .stdout()
+        .contains("automatic execution reserves one logical processor"));
+    assert!(output
+        .stdout()
+        .contains("Browser execution keeps N on the coordinator"));
+    for worker_option in [
+        "--workers N|--auto-workers N",
+        "--use-all-cpu-threads",
+        "--cpu-warmup",
+    ] {
+        assert!(output.stdout().contains(worker_option), "{worker_option}");
+    }
     assert!(output.stdout().contains("16 source pieces"));
     assert!(output
         .stdout()
@@ -336,8 +432,6 @@ fn pc_score_routes_only_the_grouped_canonical_spelling_to_product_help_and_token
         "diagnostic",
         "verify",
         "--backend",
-        "--workers",
-        "--auto-workers",
         "--gpu-device",
         "--max-patterns",
         "--max-memory-mib",
@@ -387,10 +481,19 @@ fn pc_score_finder_help_and_explicit_family_view_are_closed() {
         ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::PcScoreFinder))
     );
     let output = CliHelpTopic::Product(ProductHelpTopic::PcScoreFinder).into_output(LanguageId::En);
-    assert!(output.stdout().contains("pc-fixed-score-witness.v2"));
+    assert!(output
+        .stdout()
+        .contains("dedicated fixed-queue maximum-score search"));
     assert!(output.stdout().contains("score only"));
     assert!(output.stdout().contains("attack is informational"));
     assert!(output.stdout().contains("no portfolio tie metadata"));
+    assert!(output
+        .stdout()
+        .contains("automatic execution reserves one logical processor"));
+    assert!(output
+        .stdout()
+        .contains("Browser execution keeps N on the coordinator"));
+    assert!(output.stdout().contains("--workers N|--auto-workers N"));
 
     let invocation = CliParser::parse([
         "clearra",
@@ -422,16 +525,20 @@ fn pc_score_finder_help_and_explicit_family_view_are_closed() {
 
 #[test]
 fn pc_save_commands_route_to_distinct_product_help_and_tokens() {
-    for (subcommand, topic, contract_marker) in [
-        ("saves", ProductHelpTopic::PcSaves, "pc-save-groups.v2"),
-        ("best-save", ProductHelpTopic::PcBestSave, "pc-best-save.v2"),
+    for (subcommand, topic, product_marker) in [
+        ("saves", ProductHelpTopic::PcSaves, "Returns save groups"),
+        (
+            "best-save",
+            ProductHelpTopic::PcBestSave,
+            "Returns the best save groups",
+        ),
     ] {
         let help = CliParser::parse(["clearra", "pc", subcommand, "--help"])
             .expect("canonical pc save help")
             .into_command();
         assert_eq!(help, ParsedCliCommand::Help(CliHelpTopic::Product(topic)));
         let output = CliHelpTopic::Product(topic).into_output(LanguageId::En);
-        assert!(output.stdout().contains(contract_marker), "{subcommand}");
+        assert!(output.stdout().contains(product_marker), "{subcommand}");
         assert!(output.stdout().contains("whole-universe"), "{subcommand}");
         assert!(
             output.stdout().contains("fixed bag-boundary"),
@@ -456,9 +563,11 @@ fn pc_save_commands_route_to_distinct_product_help_and_tokens() {
     }
 
     let saves = CliHelpTopic::Product(ProductHelpTopic::PcSaves).into_output(LanguageId::En);
-    assert!(saves.stdout().contains("conditional_probability_given_pc"));
+    assert!(saves
+        .stdout()
+        .contains("conditional probability among successful PC queues"));
     let best = CliHelpTopic::Product(ProductHelpTopic::PcBestSave).into_output(LanguageId::En);
-    assert!(best.stdout().contains("clearra-save-v1"));
+    assert!(best.stdout().contains("documented save weights"));
     assert!(best.stdout().contains("ordinary list entry"));
     assert!(best.stdout().contains("never uses portfolio tie semantics"));
 }
@@ -1944,8 +2053,15 @@ fn pc_score_minimals_help_describes_score_only_portfolio_paging() {
     );
     let output =
         CliHelpTopic::Product(ProductHelpTopic::PcScoreMinimals).into_output(LanguageId::En);
-    assert!(output.stdout().contains("pc-score-portfolio.v2"));
+    assert!(output.stdout().contains("highest-score minimum-set search"));
     assert!(output.stdout().contains("never use attack"));
+    assert!(output
+        .stdout()
+        .contains("automatic execution reserves one logical processor"));
+    assert!(output
+        .stdout()
+        .contains("Browser execution keeps N on the coordinator"));
+    assert!(output.stdout().contains("--workers N|--auto-workers N"));
     assert!(output.stdout().contains("--tie-snapshot PATH"));
 }
 

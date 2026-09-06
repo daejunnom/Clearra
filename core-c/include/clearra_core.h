@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define CLEARRA_CORE_ABI_VERSION 22
+#define CLEARRA_CORE_ABI_VERSION 23
 
 const char *clearra_core_version(void);
 int clearra_core_abi_version(void);

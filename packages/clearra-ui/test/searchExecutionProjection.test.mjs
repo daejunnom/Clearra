@@ -341,6 +341,11 @@ function assertPcTilingProjection(request, label) {
   ]) {
     assert.equal(hasOption(tokens, option), false, `${label}: leaked ${option}`);
   }
+  assert.equal(
+    hasOption(tokens, '--max-patterns'),
+    request.maxPatterns !== undefined,
+    `${label}: pattern ceiling presence`
+  );
 
   assertDesktopCliParity(request, label);
 }
@@ -645,13 +650,14 @@ test('PC minimum-cover and score GUI modes lower only to their canonical product
   assert.equal(optionValue(scoreTokens, '--score-profile'), 'guideline');
   assert.equal(optionValue(scoreTokens, '--spin-profile'), 'all-mini-plus');
   assert.equal(optionValue(scoreTokens, '--initial-b2b'), '7');
+  assert.equal(optionValue(scoreTokens, '--workers'), '8');
+  assert.equal(hasOption(scoreTokens, '--cpu-warmup'), false);
+  assert.equal(hasOption(scoreTokens, '--use-all-cpu-threads'), true);
   for (const option of [
     '--objective',
     '--count',
     '--score',
     '--backend',
-    '--workers',
-    '--use-all-cpu-threads',
     '--gpu-device',
     '--allow-backend-fallback',
     '--no-backend-fallback',
@@ -749,8 +755,8 @@ test('PC score-finder GUI mode owns one fixed queue and its fixed score policy',
   assert.equal(normalized.initialB2B, 1);
   assert.equal(normalized.backend, 'cpu');
   assert.equal(normalized.gpuDevice, 'auto');
-  assert.equal(normalized.workers, 1);
-  assert.equal(normalized.useAllLogicalProcessors, false);
+  assert.equal(normalized.workers, 8);
+  assert.equal(normalized.useAllLogicalProcessors, true);
   assert.equal(normalized.preserveB2B, false);
   assert.equal(normalized.solutionProbabilities, false);
   assert.equal(normalized.tablebaseEnabled, false);
@@ -762,6 +768,9 @@ test('PC score-finder GUI mode owns one fixed queue and its fixed score policy',
   assert.equal(optionValue(tokens, '--queue'), 'I');
   assert.equal(optionValue(tokens, '--rule'), request.rule);
   assert.equal(optionValue(tokens, '--initial-b2b'), '1');
+  assert.equal(optionValue(tokens, '--workers'), '8');
+  assert.equal(hasOption(tokens, '--cpu-warmup'), false);
+  assert.equal(hasOption(tokens, '--use-all-cpu-threads'), true);
   for (const option of [
     '--patterns',
     '--objective',
@@ -770,8 +779,6 @@ test('PC score-finder GUI mode owns one fixed queue and its fixed score policy',
     '--score-profile',
     '--spin-profile',
     '--backend',
-    '--workers',
-    '--use-all-cpu-threads',
     '--gpu-device',
     '--allow-backend-fallback',
     '--no-backend-fallback',
@@ -799,7 +806,7 @@ test('PC score-finder GUI mode owns one fixed queue and its fixed score policy',
   }
 });
 
-test('PC score-minimals GUI mode binds score-only minimum cover without runtime overrides', () => {
+test('PC score-minimals GUI mode binds score-only minimum cover with CPU worker options', () => {
   const request = {
     ...production.createDefaultWorkspaceRequest(),
     lines: 1,
@@ -831,8 +838,8 @@ test('PC score-minimals GUI mode binds score-only minimum cover without runtime 
   assert.equal(normalized.solutionProbabilities, false);
   assert.equal(normalized.backend, 'cpu');
   assert.equal(normalized.gpuDevice, 'auto');
-  assert.equal(normalized.workers, 1);
-  assert.equal(normalized.useAllLogicalProcessors, false);
+  assert.equal(normalized.workers, 8);
+  assert.equal(normalized.useAllLogicalProcessors, true);
   assert.equal(normalized.tablebaseEnabled, false);
   assert.equal(normalized.precomputeBuildDependencies, false);
   assert.equal(normalized.maxPatterns, undefined);
@@ -842,13 +849,14 @@ test('PC score-minimals GUI mode binds score-only minimum cover without runtime 
   assert.equal(optionValue(tokens, '--score-profile'), 'guideline');
   assert.equal(optionValue(tokens, '--spin-profile'), 'all-mini-plus');
   assert.equal(optionValue(tokens, '--initial-b2b'), '7');
+  assert.equal(optionValue(tokens, '--workers'), '8');
+  assert.equal(hasOption(tokens, '--cpu-warmup'), false);
+  assert.equal(hasOption(tokens, '--use-all-cpu-threads'), true);
   for (const option of [
     '--objective',
     '--count',
     '--score',
     '--backend',
-    '--workers',
-    '--use-all-cpu-threads',
     '--gpu-device',
     '--allow-backend-fallback',
     '--no-backend-fallback',
@@ -1125,4 +1133,29 @@ test('PC tiling canonicalizes fixture-derived high-risk singles and ordered opti
     }
   }
   assert.ok(cases >= 100, `expected a substantive production matrix, got ${cases}`);
+});
+
+test('PC tiling preserves the explicit pattern-universe ceiling across Web and Desktop argv', () => {
+  for (const request of [
+    {
+      ...pcTilingBase(),
+      queue: '[I]5[I]4',
+      maxPatterns: 23
+    },
+    {
+      ...pcTilingBase(),
+      boardMask: 0n,
+      queue: '[I]5[I]5',
+      maxPatterns: 23
+    }
+  ]) {
+    const web = commandTokens(production.buildWorkspaceCommand(request));
+    const desktop = production.workspaceRequestForDesktop(request, 'en');
+
+    assert.equal(optionValue(web, '--max-patterns'), '23');
+    assert.deepEqual(desktop.arguments, web);
+  }
+
+  const absent = commandTokens(production.buildWorkspaceCommand(pcTilingBase()));
+  assert.equal(hasOption(absent, '--max-patterns'), false);
 });

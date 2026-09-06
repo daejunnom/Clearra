@@ -19,6 +19,7 @@ import {
   type ExecutionCompletenessState
 } from './executionAvailability';
 import type { ClearraWasmForcedTerminationReason } from './wasmWorkerLifecycle';
+import { deferWasmTerminalResponse, type WasmTerminalLine } from './wasmTerminalTranscript';
 
 export type WasmWorkerState = {
   request: ClearraWasmCommandRequest;
@@ -38,7 +39,7 @@ export type WasmWorkerState = {
   forwardPatternDone: number;
   forwardPatternTotal: number;
   progressTelemetry: ClearraSearchProgressTelemetry | null;
-  terminalLines: string[];
+  terminalLines: WasmTerminalLine[];
   diagnostics: ClearraDiagnostic[];
   response: ClearraHostAppResponse | null;
   resourceReport: ClearraHostAppResponse['resource_report'] | null;
@@ -270,7 +271,7 @@ function reduceWasmWorkerEvent(
         progressTelemetry: null,
         diagnostics: event.response.diagnostics,
         error,
-        terminalLines: [...state.terminalLines, JSON.stringify(event.response, null, 2)]
+        terminalLines: [...state.terminalLines, deferWasmTerminalResponse(event.response)]
       };
     }
     case 'cancelled':
@@ -349,7 +350,7 @@ function reduceWasmWorkerEvent(
         diagnostics,
         terminalLines: [
           ...state.terminalLines,
-          response ? JSON.stringify(response, null, 2) : error
+          response ? deferWasmTerminalResponse(response) : error
         ]
       };
     }
@@ -448,7 +449,7 @@ function availabilityReportsEqual(
   );
 }
 
-function appendDistinctProgress(lines: string[], label: string): string[] {
+function appendDistinctProgress(lines: WasmTerminalLine[], label: string): WasmTerminalLine[] {
   if (lines.at(-1) === label) return lines;
   return [...lines, label];
 }

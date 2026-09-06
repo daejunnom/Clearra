@@ -2,12 +2,13 @@
 //! machine shared by producer, verifier, merge, cancellation, and terminal transitions.
 
 use clearra_app::{
-    AppCommand, AppCoreExecutorService, AppRequest, DistributedForwardPreparation,
-    DistributedSearchPreparation, DistributedSetupPreparation, ExecutionControl,
-    PreparedDistributedForwardSearch, PreparedDistributedPcScoreCompletion,
+    AppCommand, AppCoreExecutorService, AppRequest, CooperativeAppAdvance, CooperativeAppExecution,
+    DistributedForwardPreparation, DistributedSearchPreparation, DistributedSetupPreparation,
+    ExecutionControl, PreparedDistributedForwardSearch, PreparedDistributedPcScoreCompletion,
     PreparedDistributedSearch, PreparedDistributedSearchCompletion, PreparedDistributedSetupSearch,
     ProductCapabilityContract,
 };
+use clearra_core_executor::performance::CooperativeWorkQuantum;
 #[cfg(feature = "webgpu-search")]
 use clearra_core_executor::WasmWebGpuCandidateProducer;
 use clearra_core_executor::{
@@ -42,7 +43,24 @@ use crate::{
     WasmWorkerJobEvent, WasmWorkerJobId,
 };
 
-const MIN_DISTRIBUTED_TARGET_PIECES: usize = 7;
+const PC_GEOMETRY_STEPS_PER_PRODUCE: usize = 2_048;
+const PC_GEOMETRY_HOST_QUANTUM_MS: u32 = 8;
+const SETUP_WORKER_PREPARATION_BUDGET: usize = 8_192;
+
+fn bounded_producer_work_budget(
+    requested: usize,
+    pc_geometry: bool,
+    target_preparation_pending: bool,
+) -> usize {
+    let requested = requested.max(1);
+    if target_preparation_pending {
+        1
+    } else if pc_geometry {
+        requested.min(PC_GEOMETRY_STEPS_PER_PRODUCE)
+    } else {
+        requested
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -69,6 +87,9 @@ pub enum WasmDistributedFallbackReason {
     GpuDeviceNotFound = 2,
 }
 
+// Preparation transfers exactly one owned runtime state to the browser; keep
+// the established public variants inline without adding a per-job allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum WasmDistributedPreparation {
     Serial,
     Ready(WasmExecutionResult),
@@ -102,6 +123,1068 @@ pub struct WasmDistributedCoordinator {
     control: ExecutionControl,
 }
 
+/// The completed source matrix moves here once. Exact product construction
+/// then yields through the shared App cursor instead of blocking finish().
+pub struct WasmDistributedCompletionSession {
+    execution: CooperativeAppExecution,
+    control: ExecutionControl,
+    webgpu_requested: bool,
+    finished: bool,
+    parallel_partitions: Option<usize>,
+    published_parallel_query: Option<clearra_coverage::cover::ExactAtMostQueryIdentity>,
+    coordinator_shard: Option<clearra_coverage::cover::ExactAtMostShardSession>,
+    coordinator_task: Option<clearra_coverage::cover::ExactAtMostTask>,
+    coordinator_memory: Option<crate::minimum_parallel_runtime::MinimumCoordinatorMemory>,
+    coordinator_disabled: bool,
+    coordinator_decline_pending: bool,
+    last_parallel_task_key: Option<[u8; 56]>,
+    coordinator_app_memory: Option<(Option<u128>, u128)>,
+    maximum_compute_workers: usize,
+    parallel_tasks_issued: bool,
+    parallel_control_only: bool,
+    parallel_remote_memory_cap: Option<u128>,
+    parallel_host_grant: Option<(usize, u128)>,
+    parallel_packet_reservation: Option<(u128, u128)>,
+    coordinator_query_bytes: Option<u128>,
+}
+
+pub enum WasmDistributedCompletionAdvance {
+    Pending,
+    Completed(WasmExecutionResult),
+    Cancelled,
+}
+
+fn local_shard_admission_declined(
+    error: &clearra_coverage::cover::ExactAtMostParallelError,
+) -> bool {
+    matches!(
+        error,
+        clearra_coverage::cover::ExactAtMostParallelError::Exact(
+            clearra_coverage::cover::ExactMinimumCoverError::MemoryCapacityExceeded { .. }
+                | clearra_coverage::cover::ExactMinimumCoverError::AllocationFailed { .. }
+                | clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow
+        )
+    )
+}
+
+fn minimum_task_key(task: &clearra_coverage::cover::ExactAtMostTask) -> [u8; 56] {
+    let identity = task.identity();
+    let mut bytes = [0; 56];
+    bytes[..32].copy_from_slice(&identity.matrix_id);
+    bytes[32..40].copy_from_slice(&identity.generation.to_le_bytes());
+    bytes[40..48].copy_from_slice(&identity.query_id.to_le_bytes());
+    bytes[48..].copy_from_slice(&task.partition_id().to_le_bytes());
+    bytes
+}
+
+impl WasmDistributedCompletionSession {
+    /// The outer job lease is supplied before the first deferred AtMost
+    /// preparation. This is a declared admission grant, not measured RAM.
+    pub fn configure_parallel_control(
+        &mut self,
+        compute: usize,
+        memory: u128,
+    ) -> Result<(), WasmCommandRuntimeError> {
+        if self.finished
+            || self.parallel_host_grant.is_some()
+            || self.published_parallel_query.is_some()
+            || compute == 0
+            || memory == 0
+        {
+            return Err(distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "invalid or repeated minimum host admission",
+            ));
+        }
+        self.parallel_host_grant = Some((compute, memory));
+        Ok(())
+    }
+
+    pub fn has_minimum_control_memory(&self) -> bool {
+        self.coordinator_memory.is_some()
+    }
+
+    /// Admit old/new transfer carriers before resizing, while the real App,
+    /// retry descriptor and optional local workspace still coexist.
+    pub fn ensure_outer_capacity(
+        &mut self,
+        outer_bytes: u128,
+    ) -> Result<(), WasmCommandRuntimeError> {
+        if self.coordinator_memory.is_none() {
+            return Ok(());
+        }
+        loop {
+            let (_, app_bytes) = self.minimum_coordinator_memory_envelope().ok_or_else(|| {
+                distributed_error(
+                    "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                    "transfer App owner is unavailable",
+                )
+            })?;
+            let local = self.coordinator_shard.as_ref().map_or(Some(0), |shard| {
+                shard
+                    .checked_retained_bytes()?
+                    .checked_sub(self.coordinator_query_bytes?)
+            });
+            let extra = local.and_then(|bytes| {
+                bytes.checked_add(
+                    self.coordinator_task
+                        .as_ref()
+                        .map_or(Some(0), |task| task.checked_retained_bytes())?,
+                )
+            });
+            if extra.is_some_and(|bytes| {
+                self.coordinator_memory
+                    .as_ref()
+                    .expect("control lease retained")
+                    .ensure(app_bytes, outer_bytes, bytes)
+                    .is_ok()
+            }) {
+                return Ok(());
+            }
+            if self.coordinator_shard.is_some() {
+                self.coordinator_decline_pending = true;
+                self.decline_coordinator_shard();
+                if self.coordinator_memory.is_none() {
+                    return Ok(());
+                }
+                continue;
+            }
+            return Err(distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                "transfer staging exceeds control admission",
+            ));
+        }
+    }
+
+    pub fn parallel_query_satisfied(&self) -> bool {
+        self.execution.minimum_parallel_query_satisfied()
+    }
+
+    pub fn prepare_parallel(
+        &mut self,
+        partitions: usize,
+    ) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
+        self.prepare_parallel_guarded(partitions, 0)
+    }
+
+    pub fn prepare_parallel_guarded(
+        &mut self,
+        partitions: usize,
+        outer_bytes: u128,
+    ) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
+        if self.finished {
+            return Err(distributed_error(
+                "E_WASM_DISTRIBUTED_STATE",
+                "distributed completion already finished",
+            ));
+        }
+        if partitions < 2 {
+            return Ok(None);
+        }
+        self.parallel_partitions = Some(partitions);
+        self.coordinator_app_memory = None;
+        self.execution
+            .enable_minimum_parallel(partitions)
+            .map_err(|reason| distributed_error("E_WASM_MINIMUM_PARALLEL_STATE", reason))?;
+        let app_bytes = if self.coordinator_memory.is_some() {
+            Some(
+                self.minimum_coordinator_memory_envelope()
+                    .ok_or_else(|| {
+                        distributed_error(
+                            "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                            "query source owner unavailable",
+                        )
+                    })?
+                    .1,
+            )
+        } else {
+            None
+        };
+        let Some(query) = self.execution.minimum_parallel_query() else {
+            return Ok(None);
+        };
+        if self.published_parallel_query == Some(query.identity()) {
+            return Ok(None);
+        }
+        self.coordinator_query_bytes = query.checked_retained_bytes();
+        let bytes = crate::minimum_parallel_wire::encode_query_with_memory_guard(
+            query,
+            None,
+            &mut |peak| {
+                if let (Some(memory), Some(app_bytes)) =
+                    (self.coordinator_memory.as_ref(), app_bytes)
+                {
+                    memory.ensure(app_bytes, outer_bytes, peak).map_err(|_| {
+                        distributed_error(
+                            "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                            "query encoding exceeds control admission",
+                        )
+                    })?;
+                }
+                Ok(())
+            },
+        )?;
+        self.published_parallel_query = Some(query.identity());
+        self.parallel_tasks_issued = false;
+        Ok(Some(bytes))
+    }
+
+    /// Configure a source-bound wave before issuing any task. Decline is safe
+    /// only here: a caller may retry the smaller shared topology with no proof
+    /// frontier, worker ownership, or algorithm change.
+    pub fn admit_parallel_control(
+        &mut self,
+        remote_count: usize,
+        control_only: bool,
+        host_compute: usize,
+        host_memory_grant: u128,
+        outer_bytes: u128,
+        physical_floor: u128,
+    ) -> Result<bool, WasmCommandRuntimeError> {
+        if self.finished
+            || self.parallel_tasks_issued
+            || self.coordinator_shard.is_some()
+            || self.coordinator_task.is_some()
+            || self.parallel_remote_memory_cap.is_some()
+        {
+            return Err(distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "parallel resources must be admitted once before task issuance",
+            ));
+        }
+        if remote_count == 0
+            || remote_count
+                .checked_add(usize::from(!control_only))
+                .is_none_or(|count| count > self.maximum_compute_workers)
+            || remote_count
+                .checked_add(1)
+                .is_none_or(|count| count > host_compute)
+            || (control_only && self.maximum_compute_workers >= host_compute)
+        {
+            return Ok(false);
+        }
+        if self.parallel_host_grant != Some((host_compute, host_memory_grant)) {
+            return Ok(false);
+        }
+        let Some((request_limit, app_bytes)) = self.minimum_coordinator_memory_envelope() else {
+            return Ok(false);
+        };
+        let Some(query) = self.execution.minimum_parallel_query() else {
+            return Ok(false);
+        };
+        let (source_rows, source_patterns) = self
+            .execution
+            .minimum_parallel_source_dimensions()
+            .ok_or_else(|| {
+                distributed_error(
+                    "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                    "minimum completion source bounds unavailable",
+                )
+            })?;
+        let (query_bytes, task_receipt_bytes) =
+            crate::minimum_parallel_wire::checked_completion_query_carrier_bounds(
+                source_rows,
+                source_patterns,
+            )?;
+        let (query_bytes, task_receipt_bytes) = (query_bytes as u128, task_receipt_bytes as u128);
+        // Reserve source/offer-hash/transferred JS carriers AND raw WASM input
+        // staging. The initial packet is staged before its cap can be decoded;
+        // the independent raw carrier reservation admits that bounded phase.
+        // Reserve all three packet classes (query, task, pending receipt)
+        // simultaneously, not merely the currently executing transport phase.
+        // The coordinator additionally retains its source query and incoming
+        // receipt copy. These JS owners are outside WASM linear memory.
+        let carriers = task_receipt_bytes
+            .checked_mul(2)
+            .and_then(|bytes| query_bytes.checked_add(bytes))
+            .and_then(|bytes| bytes.checked_mul(4))
+            .and_then(|bytes| bytes.checked_mul(remote_count as u128))
+            .and_then(|bytes| bytes.checked_add(query_bytes.checked_mul(2)?))
+            .and_then(|bytes| bytes.checked_add(task_receipt_bytes));
+        let Some(carriers) = carriers else {
+            return Ok(false);
+        };
+        if self.coordinator_memory.is_none() {
+            self.coordinator_memory =
+                crate::minimum_parallel_runtime::MinimumCoordinatorMemory::try_acquire(
+                    Some(request_limit.map_or(host_memory_grant, |cap| cap.min(host_memory_grant))),
+                    app_bytes,
+                    outer_bytes,
+                    physical_floor,
+                );
+        }
+        let Some(memory) = self.coordinator_memory.as_mut() else {
+            return Ok(false);
+        };
+        // Compute a prospective split before committing: a declined dedicated
+        // topology must retain the original unpartitioned lease for fallback.
+        let Some(remote_cap) = memory.partition_preview(
+            host_memory_grant,
+            app_bytes,
+            outer_bytes,
+            physical_floor,
+            remote_count,
+            carriers,
+        ) else {
+            return Ok(false);
+        };
+        let minimum_remote = query
+            .checked_retained_bytes()
+            .and_then(|bytes| bytes.checked_add(query_bytes))
+            .and_then(|bytes| {
+                bytes.checked_add(core::mem::size_of::<
+                    crate::minimum_parallel_runtime::WasmMinimumParallelWorker,
+                >() as u128)
+            });
+        if minimum_remote.is_none_or(|bytes| bytes > remote_cap)
+            || memory.ensure(app_bytes, outer_bytes, query_bytes).is_err()
+        {
+            return Ok(false);
+        }
+        if memory.partition(
+            host_memory_grant,
+            app_bytes,
+            outer_bytes,
+            physical_floor,
+            remote_count,
+            carriers,
+        ) != Some(remote_cap)
+        {
+            return Ok(false);
+        }
+        self.parallel_remote_memory_cap = Some(remote_cap);
+        self.parallel_packet_reservation = Some((query_bytes, task_receipt_bytes));
+        self.parallel_control_only = control_only;
+        Ok(true)
+    }
+
+    pub fn guarded_parallel_query(
+        &mut self,
+        outer_bytes: u128,
+    ) -> Result<Vec<u8>, WasmCommandRuntimeError> {
+        if self.parallel_tasks_issued {
+            return Err(distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "guarded query cannot replace an issued wave",
+            ));
+        }
+        let cap = self.parallel_remote_memory_cap.ok_or_else(|| {
+            distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "parallel control resources are not admitted",
+            )
+        })?;
+        let (_, app_bytes) = self.minimum_coordinator_memory_envelope().ok_or_else(|| {
+            distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                "parallel control owner is unavailable",
+            )
+        })?;
+        let memory = self.coordinator_memory.as_ref().ok_or_else(|| {
+            distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                "parallel control lease is missing",
+            )
+        })?;
+        let query = self.execution.minimum_parallel_query().ok_or_else(|| {
+            distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "parallel query is unavailable",
+            )
+        })?;
+        let reserved = self.parallel_packet_reservation.ok_or_else(|| {
+            distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "parallel packet reservation is unavailable",
+            )
+        })?;
+        if crate::minimum_parallel_wire::checked_guarded_query_encoded_bytes(query)? as u128
+            > reserved.0
+            || crate::minimum_parallel_wire::checked_maximum_task_receipt_encoded_bytes(query)?
+                as u128
+                > reserved.1
+        {
+            return Err(distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                "new query exceeds fixed completion packet reservation",
+            ));
+        }
+        crate::minimum_parallel_wire::encode_guarded_query_with_memory_guard(
+            query,
+            cap,
+            &mut |bytes| {
+                memory.ensure(app_bytes, outer_bytes, bytes).map_err(|_| {
+                    distributed_error(
+                        "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                        "guarded query packet exceeds control admission",
+                    )
+                })
+            },
+        )
+    }
+
+    pub fn take_parallel_task(&mut self) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
+        self.take_parallel_task_guarded(0)
+    }
+
+    pub fn take_parallel_task_guarded(
+        &mut self,
+        outer_bytes: u128,
+    ) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
+        let app_bytes = self
+            .minimum_coordinator_memory_envelope()
+            .map(|envelope| envelope.1);
+        let extra_local = self
+            .coordinator_shard
+            .as_ref()
+            .map_or(Some(0), |shard| {
+                shard
+                    .checked_retained_bytes()?
+                    .checked_sub(self.coordinator_query_bytes?)
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    self.coordinator_task
+                        .as_ref()
+                        .map_or(Some(0), |task| task.checked_retained_bytes())?,
+                )
+            });
+        let descriptor = self
+            .execution
+            .minimum_parallel_query()
+            .and_then(|query| {
+                (query.rows().len() as u128).checked_mul(2 * core::mem::size_of::<usize>() as u128)
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    core::mem::size_of::<clearra_coverage::cover::ExactAtMostTask>() as u128,
+                )
+            });
+        if let Some(memory) = self.coordinator_memory.as_ref() {
+            let peak = descriptor.and_then(|bytes| bytes.checked_add(extra_local?));
+            if app_bytes.is_none()
+                || peak.is_none_or(|peak| {
+                    memory
+                        .ensure(app_bytes.unwrap_or(u128::MAX), outer_bytes, peak)
+                        .is_err()
+                })
+            {
+                return Err(distributed_error(
+                    "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                    "task issuance exceeds control admission",
+                ));
+            }
+        }
+        let task;
+        if self.coordinator_shard.is_none() {
+            task = self
+                .coordinator_task
+                .take()
+                .or_else(|| self.execution.take_minimum_parallel_task());
+        } else {
+            task = self.execution.take_minimum_parallel_task();
+        }
+        self.parallel_tasks_issued |= task.is_some();
+        self.coordinator_app_memory = None;
+        self.last_parallel_task_key = task.as_ref().map(minimum_task_key);
+        task.as_ref()
+            .map(|task| {
+                crate::minimum_parallel_wire::encode_task_with_memory_guard(task, &mut |packet| {
+                    if let Some(memory) = self.coordinator_memory.as_ref() {
+                        let peak = task
+                            .checked_retained_bytes()
+                            .and_then(|bytes| bytes.checked_add(packet))
+                            .and_then(|bytes| bytes.checked_add(extra_local?));
+                        if peak.is_none_or(|peak| {
+                            memory
+                                .ensure(app_bytes.unwrap_or(u128::MAX), outer_bytes, peak)
+                                .is_err()
+                        }) {
+                            return Err(distributed_error(
+                                "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                                "task encoding exceeds control admission",
+                            ));
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .transpose()
+    }
+
+    pub fn last_parallel_task_key(&self) -> Result<Vec<u8>, WasmCommandRuntimeError> {
+        self.last_parallel_task_key
+            .map(|key| key.to_vec())
+            .ok_or_else(|| {
+                distributed_error(
+                    "E_WASM_MINIMUM_PARALLEL_STATE",
+                    "no current issued task routing key",
+                )
+            })
+    }
+
+    pub fn parallel_task_redundant(&self, key: &[u8]) -> Result<bool, WasmCommandRuntimeError> {
+        if key.len() != 56 {
+            return Err(distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "invalid exact task routing key",
+            ));
+        }
+        let identity = clearra_coverage::cover::ExactAtMostQueryIdentity {
+            matrix_id: key[..32].try_into().expect("checked fixed identity"),
+            generation: u64::from_le_bytes(key[32..40].try_into().expect("checked generation")),
+            query_id: u64::from_le_bytes(key[40..48].try_into().expect("checked query")),
+        };
+        let partition = u64::from_le_bytes(key[48..56].try_into().expect("checked partition"));
+        self.execution
+            .minimum_parallel_task_redundant(identity, partition)
+            .map_err(|reason| distributed_error("E_WASM_MINIMUM_PARALLEL_STATE", reason))
+    }
+
+    pub fn prepare_idle_assist(
+        &mut self,
+        maximum_children: usize,
+        outer_bytes: u128,
+        physical_floor: u128,
+    ) -> Result<bool, WasmCommandRuntimeError> {
+        let Some((cap, app_bytes)) = self.minimum_coordinator_memory_envelope() else {
+            return Ok(false);
+        };
+        let extra_local = if let Some(shard) = self.coordinator_shard.as_ref() {
+            shard.checked_retained_bytes().and_then(|bytes| {
+                bytes.checked_sub(
+                    self.execution
+                        .minimum_parallel_query()?
+                        .checked_retained_bytes()?,
+                )
+            })
+        } else {
+            Some(0)
+        };
+        let retry_bytes = self
+            .coordinator_task
+            .as_ref()
+            .map_or(Some(0), |task| task.checked_retained_bytes());
+        let extra_local = extra_local.and_then(|bytes| bytes.checked_add(retry_bytes?));
+        let Some(extra_local) = extra_local else {
+            return Ok(false);
+        };
+        let temporary = if self.coordinator_memory.is_none() {
+            crate::minimum_parallel_runtime::MinimumCoordinatorMemory::try_acquire(
+                cap,
+                app_bytes,
+                outer_bytes,
+                physical_floor,
+            )
+        } else {
+            None
+        };
+        let Some(memory) = self.coordinator_memory.as_ref().or(temporary.as_ref()) else {
+            return Ok(false);
+        };
+        let assisted = self
+            .execution
+            .prepare_minimum_parallel_assist(maximum_children, &mut |extra| {
+                let peak = extra_local
+                    .checked_add(extra)
+                    .ok_or(clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow)?;
+                memory.ensure(app_bytes, outer_bytes, peak)
+            })
+            .map_err(|reason| distributed_error("E_WASM_MINIMUM_PARALLEL_STATE", reason))?;
+        if assisted {
+            self.coordinator_app_memory = None;
+            let (_, actual) = self
+                .execution
+                .minimum_parallel_memory_envelope()
+                .ok_or_else(|| {
+                    distributed_error(
+                        "E_WASM_MINIMUM_PARALLEL_STATE",
+                        "assistance owner projection unavailable",
+                    )
+                })?;
+            memory
+                .ensure(actual, outer_bytes, extra_local)
+                .map_err(|error| {
+                    distributed_error(
+                        "E_WASM_MINIMUM_PARALLEL_STATE",
+                        format!("assistance owner exceeds admission: {error:?}"),
+                    )
+                })?;
+        }
+        Ok(assisted)
+    }
+
+    pub fn merge_parallel_receipt(
+        &mut self,
+        bytes: &[u8],
+        outer_bytes: u128,
+    ) -> Result<(), WasmCommandRuntimeError> {
+        let receipt = loop {
+            let (cap, app_bytes) = self.minimum_coordinator_memory_envelope().ok_or_else(|| {
+                distributed_error(
+                    "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                    "remote receipt App owner is unavailable",
+                )
+            })?;
+            if self.coordinator_memory.is_none() {
+                self.coordinator_memory =
+                    crate::minimum_parallel_runtime::MinimumCoordinatorMemory::try_acquire(
+                        cap,
+                        app_bytes,
+                        outer_bytes,
+                        0,
+                    );
+            }
+            let memory = self.coordinator_memory.as_ref().ok_or_else(|| {
+                distributed_error(
+                    "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                    "remote receipt control admission is unavailable",
+                )
+            })?;
+            let local = self.coordinator_shard.as_ref().map_or(Some(0), |shard| {
+                shard
+                    .checked_retained_bytes()?
+                    .checked_sub(self.coordinator_query_bytes?)
+            });
+            let retry = self
+                .coordinator_task
+                .as_ref()
+                .map_or(Some(0), |task| task.checked_retained_bytes());
+            let additional = local
+                .and_then(|bytes| bytes.checked_add(retry?))
+                .and_then(|bytes| bytes.checked_add(self.minimum_decision_clone_peak()?));
+            let mut admission_failed = false;
+            let decoded = crate::minimum_parallel_wire::decode_receipt_with_memory_guard(
+                bytes,
+                &mut |receipt| {
+                    let peak = additional.and_then(|bytes| bytes.checked_add(receipt));
+                    if peak.is_none_or(|peak| memory.ensure(app_bytes, outer_bytes, peak).is_err())
+                    {
+                        admission_failed = true;
+                        return Err(distributed_error(
+                            "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                            "remote receipt overlap exceeds control admission",
+                        ));
+                    }
+                    Ok(())
+                },
+            );
+            match decoded {
+                Ok(receipt) => break receipt,
+                Err(_) if admission_failed && self.coordinator_shard.is_some() => {
+                    // Local compute is optional; the control lease and remote
+                    // reservations are not. Retry under the SAME guard after
+                    // dropping only local scratch, keeping its exact task.
+                    self.coordinator_decline_pending = true;
+                    self.decline_coordinator_shard();
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        self.coordinator_app_memory = None;
+        self.execution
+            .accept_minimum_parallel_receipt(receipt)
+            .map_err(|reason| distributed_error("E_WASM_MINIMUM_PARALLEL_STATE", reason))?;
+        let (_, app_bytes) = self.minimum_coordinator_memory_envelope().ok_or_else(|| {
+            distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                "accepted receipt App owner is unavailable",
+            )
+        })?;
+        let admitted = self
+            .coordinator_memory
+            .as_ref()
+            .expect("receipt admission retained")
+            .ensure(
+                app_bytes,
+                outer_bytes,
+                self.coordinator_task
+                    .as_ref()
+                    .map_or(Some(0), |task| task.checked_retained_bytes())
+                    .ok_or_else(|| {
+                        distributed_error("E_WASM_MINIMUM_PARALLEL_MEMORY", "retry owner overflow")
+                    })?,
+            )
+            .map_err(|_| {
+                distributed_error(
+                    "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                    "accepted receipt owner exceeds control admission",
+                )
+            });
+        // Legacy in-process consumers have no whole-job remote partition.
+        // Keep their prior per-operation lease lifetime, never the new typed
+        // completion's fixed manager/remote lease lifetime.
+        if self.parallel_host_grant.is_none() && self.coordinator_shard.is_none() {
+            self.coordinator_memory = None;
+        }
+        admitted
+    }
+
+    /// Reuse the live query's Arc-backed matrix on the already admitted
+    /// coordinator thread, without decoding another copy of immutable rows.
+    pub fn start_coordinator_shard(
+        &mut self,
+        outer_bytes: u128,
+        physical_floor: u128,
+    ) -> Result<bool, WasmCommandRuntimeError> {
+        if self.finished || self.coordinator_shard.is_some() {
+            return Err(distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "coordinator shard is already active or completion finished",
+            ));
+        }
+        if self.coordinator_disabled || self.parallel_control_only || self.control.is_cancelled() {
+            return Ok(false);
+        }
+        let Some((request_limit, app_bytes)) = self.minimum_coordinator_memory_envelope() else {
+            self.coordinator_disabled = true;
+            return Ok(false);
+        };
+        let Some(query) = self.execution.minimum_parallel_query().cloned() else {
+            return Ok(false);
+        };
+        if self.coordinator_memory.is_none() {
+            self.coordinator_memory =
+                crate::minimum_parallel_runtime::MinimumCoordinatorMemory::try_acquire(
+                    request_limit,
+                    app_bytes,
+                    outer_bytes,
+                    physical_floor,
+                );
+        }
+        let Some(memory) = self.coordinator_memory.as_ref() else {
+            self.coordinator_disabled = true;
+            return Ok(false);
+        };
+        // Forced/excluded rows are disjoint original IDs: two clones cannot
+        // exceed two complete row-index arrays. Admit before taking a task.
+        let preflight = (query.rows().len() as u128)
+            .checked_mul(core::mem::size_of::<usize>() as u128)
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(|bytes| {
+                bytes.checked_add(core::mem::size_of::<
+                    clearra_coverage::cover::ExactAtMostShardSession,
+                >() as u128)
+            });
+        if preflight.is_none_or(|bytes| memory.ensure(app_bytes, outer_bytes, bytes).is_err()) {
+            self.coordinator_disabled = true;
+            return Ok(false);
+        }
+        let Some(task) = self.execution.take_minimum_parallel_task() else {
+            return Ok(false);
+        };
+        self.parallel_tasks_issued = true;
+        self.coordinator_app_memory = None;
+        let Some((_, app_bytes)) = self.execution.minimum_parallel_memory_envelope() else {
+            self.coordinator_task = Some(task);
+            self.coordinator_disabled = true;
+            return Ok(false);
+        };
+        if preflight.is_none_or(|bytes| memory.ensure(app_bytes, outer_bytes, bytes).is_err()) {
+            self.coordinator_task = Some(task);
+            self.coordinator_disabled = true;
+            return Ok(false);
+        }
+        let (Some(shared_query_bytes), Some(retry_bytes)) = (
+            query.checked_retained_bytes(),
+            task.checked_retained_bytes(),
+        ) else {
+            self.coordinator_task = Some(task);
+            self.coordinator_disabled = true;
+            return Ok(false);
+        };
+        let shard = clearra_coverage::cover::ExactAtMostShardSession::prepare(
+            query,
+            task.clone(),
+            &mut |peak| {
+                let additional = peak
+                    .checked_sub(shared_query_bytes)
+                    .and_then(|bytes| bytes.checked_add(retry_bytes))
+                    .ok_or(clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow)?;
+                memory.ensure(app_bytes, outer_bytes, additional)
+            },
+            &mut || self.control.is_cancelled(),
+        );
+        self.coordinator_task = Some(task);
+        match shard {
+            Ok(shard) => self.coordinator_shard = Some(shard),
+            Err(error) if local_shard_admission_declined(&error) => {
+                self.coordinator_disabled = true;
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(distributed_error(
+                    "E_WASM_MINIMUM_PARALLEL_STATE",
+                    format!("coordinator shard rejected: {error:?}"),
+                ))
+            }
+        }
+        Ok(true)
+    }
+
+    /// False means pending; true means the local owner drained, either by a
+    /// validated receipt or by returning its unchanged task for remote retry.
+    pub fn advance_coordinator_shard(
+        &mut self,
+        maximum_work: usize,
+        outer_bytes: u128,
+    ) -> Result<bool, WasmCommandRuntimeError> {
+        if self.coordinator_shard.is_none() && self.coordinator_decline_pending {
+            self.coordinator_decline_pending = false;
+            return Ok(true);
+        }
+        if self.finished || self.coordinator_shard.is_none() {
+            return Err(distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "coordinator shard is not active",
+            ));
+        }
+        let redundant = self
+            .coordinator_task
+            .as_ref()
+            .map(|task| {
+                self.execution
+                    .minimum_parallel_task_redundant(task.identity(), task.partition_id())
+            })
+            .transpose()
+            .map_err(|reason| distributed_error("E_WASM_MINIMUM_PARALLEL_STATE", reason))?
+            .unwrap_or(false);
+        let cancelled = self.control.is_cancelled() || self.parallel_query_satisfied() || redundant;
+        let Some((_, app_bytes)) = self.minimum_coordinator_memory_envelope() else {
+            self.decline_coordinator_shard();
+            return Ok(true);
+        };
+        let shared_query_bytes = self.coordinator_query_bytes;
+        let retry_bytes = self
+            .coordinator_task
+            .as_ref()
+            .and_then(|task| task.checked_retained_bytes());
+        let (Some(shared_query_bytes), Some(retry_bytes), Some(memory)) = (
+            shared_query_bytes,
+            retry_bytes,
+            self.coordinator_memory.as_ref(),
+        ) else {
+            self.decline_coordinator_shard();
+            return Ok(true);
+        };
+        let shard = self.coordinator_shard.as_mut().ok_or_else(|| {
+            distributed_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "coordinator shard is not active",
+            )
+        })?;
+        let advanced = shard.advance(
+            maximum_work as u64,
+            &mut |peak| {
+                let additional = peak
+                    .checked_sub(shared_query_bytes)
+                    .and_then(|bytes| bytes.checked_add(retry_bytes))
+                    .ok_or(clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow)?;
+                memory.ensure(app_bytes, outer_bytes, additional)
+            },
+            &mut || cancelled,
+        );
+        let advanced = match advanced {
+            Ok(advanced) => advanced,
+            Err(error) if local_shard_admission_declined(&error) => {
+                self.decline_coordinator_shard();
+                return Ok(true);
+            }
+            Err(error) => {
+                return Err(distributed_error(
+                    "E_WASM_MINIMUM_PARALLEL_STATE",
+                    format!("coordinator shard failed: {error:?}"),
+                ))
+            }
+        };
+        match advanced {
+            clearra_coverage::cover::ExactAtMostShardAdvance::Pending { .. } => Ok(false),
+            clearra_coverage::cover::ExactAtMostShardAdvance::Terminal(receipt) => {
+                self.coordinator_shard = None;
+                // Accept may clone the positive decision once. Admit the
+                // receipt, that clone, and the retained retry owner together;
+                // retain the actual lease through the App mutation.
+                let found_bytes = match receipt.outcome() {
+                    clearra_coverage::cover::ExactAtMostShardOutcome::Found(rows) => {
+                        (rows.capacity() as u128).checked_mul(core::mem::size_of::<usize>() as u128)
+                    }
+                    _ => Some(0),
+                };
+                let receipt_peak = receipt
+                    .task()
+                    .checked_retained_bytes()
+                    .and_then(|bytes| bytes.checked_add(found_bytes?))
+                    .and_then(|bytes| bytes.checked_add(self.minimum_decision_clone_peak()?))
+                    .and_then(|bytes| bytes.checked_add(retry_bytes));
+                if receipt_peak
+                    .is_none_or(|bytes| memory.ensure(app_bytes, outer_bytes, bytes).is_err())
+                {
+                    self.decline_coordinator_shard();
+                    return Ok(true);
+                }
+                self.execution
+                    .accept_minimum_parallel_receipt(receipt)
+                    .map_err(|reason| distributed_error("E_WASM_MINIMUM_PARALLEL_STATE", reason))?;
+                self.coordinator_app_memory = None;
+                let (_, actual_app_bytes) = self
+                    .execution
+                    .minimum_parallel_memory_envelope()
+                    .ok_or_else(|| {
+                        distributed_error(
+                            "E_WASM_MINIMUM_PARALLEL_STATE",
+                            "accepted receipt owner projection unavailable",
+                        )
+                    })?;
+                memory
+                    .ensure(actual_app_bytes, outer_bytes, retry_bytes)
+                    .map_err(|error| {
+                        distributed_error(
+                            "E_WASM_MINIMUM_PARALLEL_STATE",
+                            format!("accepted receipt owner exceeded admission: {error:?}"),
+                        )
+                    })?;
+                self.coordinator_task = None;
+                if self.parallel_host_grant.is_none() {
+                    self.coordinator_memory = None;
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    fn decline_coordinator_shard(&mut self) {
+        self.coordinator_shard = None;
+        if self.parallel_host_grant.is_none() {
+            self.coordinator_memory = None;
+        }
+        self.coordinator_disabled = true;
+    }
+
+    fn minimum_decision_clone_peak(&self) -> Option<u128> {
+        let query = self.execution.minimum_parallel_query()?;
+        // A sibling may already have published Found, so even a cancelled or
+        // negative incoming receipt can return a clone of that valid decision.
+        (query.limit().min(query.rows().len()) as u128)
+            .checked_mul(core::mem::size_of::<usize>() as u128)
+    }
+
+    fn minimum_coordinator_memory_envelope(&mut self) -> Option<(Option<u128>, u128)> {
+        // Local shard advances mutate only their separately guarded workspace.
+        // Rewalk the immutable App source graph only after an App mutation,
+        // not once per 128-node proof slice.
+        if let Some(envelope) = self.coordinator_app_memory {
+            return Some(envelope);
+        }
+        let envelope = self.execution.minimum_parallel_memory_envelope()?;
+        self.coordinator_app_memory = Some(envelope);
+        Some(envelope)
+    }
+
+    pub fn cancel(&self) {
+        self.control.cancellation.handle().cancel();
+    }
+
+    pub fn advance(
+        &mut self,
+        work_budget: usize,
+    ) -> Result<WasmDistributedCompletionAdvance, WasmCommandRuntimeError> {
+        self.advance_guarded(work_budget, 0, 0)
+    }
+
+    pub fn advance_guarded(
+        &mut self,
+        work_budget: usize,
+        outer_bytes: u128,
+        physical_floor: u128,
+    ) -> Result<WasmDistributedCompletionAdvance, WasmCommandRuntimeError> {
+        if self.finished {
+            return Err(distributed_error(
+                "E_WASM_DISTRIBUTED_STATE",
+                "distributed completion already finished",
+            ));
+        }
+        if work_budget == 0 && !self.control.is_cancelled() {
+            return Ok(WasmDistributedCompletionAdvance::Pending);
+        }
+        // Moving queries must not discard an issued local shard.
+        if self.coordinator_shard.is_some() || self.coordinator_task.is_some() {
+            return Ok(WasmDistributedCompletionAdvance::Pending);
+        }
+        if let Some(partitions) = self.parallel_partitions {
+            self.execution
+                .enable_minimum_parallel(partitions)
+                .map_err(|reason| distributed_error("E_WASM_MINIMUM_PARALLEL_STATE", reason))?;
+        }
+        if self.coordinator_memory.is_none() {
+            if let (Some((_, host_memory)), Some((request_limit, app_bytes))) = (
+                self.parallel_host_grant,
+                self.minimum_coordinator_memory_envelope(),
+            ) {
+                self.coordinator_memory =
+                    crate::minimum_parallel_runtime::MinimumCoordinatorMemory::try_acquire(
+                        Some(request_limit.map_or(host_memory, |limit| limit.min(host_memory))),
+                        app_bytes,
+                        outer_bytes,
+                        physical_floor,
+                    );
+                if self.coordinator_memory.is_none() {
+                    return Err(distributed_error(
+                        "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                        "deferred minimum preparation admission unavailable",
+                    ));
+                }
+            }
+        }
+        self.coordinator_app_memory = None;
+        let memory = self.coordinator_memory.as_ref();
+        let configured = self.parallel_host_grant.is_some();
+        let advanced = self.execution.advance_with_minimum_memory_guard(
+            work_budget,
+            &self.control,
+            &mut |whole_app| {
+                if let Some(memory) = memory {
+                    return memory.ensure(whole_app, outer_bytes, 0);
+                }
+                if configured {
+                    return Err(
+                        clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow,
+                    );
+                }
+                Ok(())
+            },
+        );
+        match advanced {
+            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {
+                Ok(WasmDistributedCompletionAdvance::Pending)
+            }
+            CooperativeAppAdvance::Completed(response) => {
+                self.finished = true;
+                Ok(WasmDistributedCompletionAdvance::Completed(
+                    WasmExecutionResult::from_app_response(response, self.webgpu_requested),
+                ))
+            }
+            CooperativeAppAdvance::Cancelled => {
+                self.finished = true;
+                Ok(WasmDistributedCompletionAdvance::Cancelled)
+            }
+            CooperativeAppAdvance::FailedFinite(error) => {
+                self.finished = true;
+                Err(distributed_terminal_core_error(error))
+            }
+            CooperativeAppAdvance::CompletedGoverned(_) => {
+                self.finished = true;
+                Err(distributed_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "minimum completion returned an incompatible memory authority",
+                ))
+            }
+        }
+    }
+}
+
+// One producer backend is active for the lifetime of a distributed job. Its
+// state stays inline to avoid allocation and pointer chasing in each advance.
+#[allow(clippy::large_enum_variant)]
 enum DistributedCandidateProducer {
     Cpu(WasmCpuCandidateProducer),
     Tiling(WasmTilingRootProducer),
@@ -122,6 +1205,9 @@ pub struct WasmDistributedVerifierRuntime {
     control: ExecutionControl,
 }
 
+// Verifier backends are mutually exclusive worker state and are consumed in
+// the hot batch loop, where an extra allocation would provide no size benefit.
+#[allow(clippy::large_enum_variant)]
 enum DistributedVerifier {
     Pc(WasmDistributedVerifier),
     Tiling(WasmTilingRootWorker),
@@ -130,6 +1216,9 @@ enum DistributedVerifier {
     Setup(WasmSetupParallelWorker),
 }
 
+// A coordinator owns one merger for the whole job; keeping it inline avoids a
+// heap allocation at every distributed result boundary.
+#[allow(clippy::large_enum_variant)]
 enum DistributedResultMerger {
     Pc(WasmDistributedResultMerger),
     Tiling(WasmTilingRootResultMerger),
@@ -137,6 +1226,9 @@ enum DistributedResultMerger {
     Forward(ForwardParallelCoordinator),
 }
 
+// Prepared searches are one-shot ownership values whose concrete variant is
+// consumed directly when the coordinator starts.
+#[allow(clippy::large_enum_variant)]
 enum DistributedPreparedSearch {
     Core(PreparedDistributedSearch),
     Forward(PreparedDistributedForwardSearch),
@@ -217,12 +1309,13 @@ impl WasmDistributedCoordinator {
         }
         if matches!(
             request.command(),
-            AppCommand::Damage(_) | AppCommand::SpinFinder(_)
+            AppCommand::Damage(_) | AppCommand::SpinFinder(_) | AppCommand::Ren(_)
         ) {
             let workers = usize::from(request.resource_budget().workers()).max(1);
             let query = match request.command() {
                 AppCommand::Damage(command) => command.query(),
                 AppCommand::SpinFinder(command) => command.query(),
+                AppCommand::Ren(command) => command.query(),
                 _ => {
                     return Err(distributed_error(
                         "E_WASM_DISTRIBUTED_STATE",
@@ -269,6 +1362,15 @@ impl WasmDistributedCoordinator {
         if !request_needs_distributed_execution(&request) {
             return Ok(WasmDistributedPreparation::Serial);
         }
+        let score_coordinator_worker_count = score_product_worker_count(&request);
+        let request = if score_coordinator_worker_count.is_some() {
+            runtime
+                .prepare_distributed_score_child_command_text(command_text)?
+                .into_parts()
+                .0
+        } else {
+            request
+        };
         let prepared = match runtime.app_context().prepare_distributed_search(request) {
             DistributedSearchPreparation::Ready(response) => {
                 return Ok(WasmDistributedPreparation::Ready(
@@ -297,12 +1399,16 @@ impl WasmDistributedCoordinator {
             // passed the normal BuildUp verifier, so keep this combination serial.
             return Ok(WasmDistributedPreparation::Serial);
         }
-        let worker_count = problem.backend_policy().workers();
-        let distributed_worthwhile = build_probability_request.map_or_else(
-            || WasmCpuSearchBackend::distributed_execution_is_worthwhile(problem),
-            |(field, _)| build_probability_distributed_execution_is_worthwhile(field, worker_count),
-        );
-        if worker_count < 2 || !distributed_worthwhile {
+        let worker_count =
+            score_coordinator_worker_count.unwrap_or_else(|| problem.backend_policy().workers());
+        let distributed_worthwhile =
+            WasmCpuSearchBackend::distributed_execution_is_worthwhile(problem);
+        let pc_tiling_terminal_resource_authority = prepared
+            .pc_tiling_terminal_resource_authority()
+            .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
+        let typed_pc_tiling_requires_coordinator =
+            worker_count >= 2 && pc_tiling_terminal_resource_authority.is_some();
+        if worker_count < 2 || (!distributed_worthwhile && !typed_pc_tiling_requires_coordinator) {
             return Ok(WasmDistributedPreparation::Serial);
         }
         let requested_backend = problem.backend_policy().requested_backend();
@@ -380,10 +1486,7 @@ impl WasmDistributedCoordinator {
             == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
             && selected_product_backend == Some(WasmProductSearchBackend::Cpu)
         {
-            let producer = match prepared
-                .pc_tiling_terminal_resource_authority()
-                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?
-            {
+            let producer = match pc_tiling_terminal_resource_authority {
                 Some((authority, checked_external_retained_upper_bound_bytes)) => {
                     WasmTilingRootProducer::new_shared_under_authority(
                         prepared.problem_arc(),
@@ -394,10 +1497,17 @@ impl WasmDistributedCoordinator {
                 None => WasmTilingRootProducer::new(problem),
             }
             .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
-            if producer.root_count() < 2 {
-                return Ok(WasmDistributedPreparation::Serial);
+            let root_count = producer.root_count();
+            // `WasmTilingRootProducer::from_sessions` rejects every empty root
+            // order, so a constructed producer has at least one root. Preserve
+            // that invariant fail-closed if the producer contract ever changes.
+            if root_count == 0 {
+                return Err(distributed_error(
+                    "E_WASM_DISTRIBUTED_START",
+                    "wasm_tiling_root_set_empty",
+                ));
             }
-            let worker_count = worker_count.min(producer.root_count().saturating_add(1));
+            let worker_count = worker_count.min(root_count.saturating_add(1));
             (
                 DistributedCandidateProducer::Tiling(producer),
                 WasmDistributedMode::CpuMulti,
@@ -457,6 +1567,18 @@ impl WasmDistributedCoordinator {
             }
         };
         let verification_required = producer.verification_required();
+        // Geometry remains streaming, so an exact candidate-family size is not
+        // always available without blocking synchronous preparation. When a
+        // producer already owns an exact size, avoid starting verifier workers
+        // that can never receive a distinct task. Unknown sizes keep the
+        // compile-time work estimate above and are dispatched progressively by
+        // the browser pool as batches become ready.
+        let worker_count = producer
+            .known_parallel_session_capacity()
+            .map_or(worker_count, |capacity| worker_count.min(capacity));
+        if worker_count < 2 {
+            return Ok(WasmDistributedPreparation::Serial);
+        }
         Ok(WasmDistributedPreparation::Coordinator(Self {
             prepared: Some(DistributedPreparedSearch::Core(prepared)),
             producer: Some(producer),
@@ -625,7 +1747,9 @@ impl WasmDistributedCoordinator {
             .as_ref()
             .or(self.pending_build_completion_summary.as_ref())
             .map_or(self.completed_progress, |summary| WasmDistributedProgress {
-                geometry_nodes: summary.expanded_nodes,
+                geometry_nodes: summary
+                    .expanded_nodes
+                    .max(self.completed_progress.geometry_nodes),
                 candidates: summary.candidate_count,
                 candidate_family_count: summary.candidate_family_count,
                 pass_count: 1,
@@ -737,7 +1861,33 @@ impl WasmDistributedCoordinator {
             batch_capacity.max(1)
         };
         reserve_candidate_batch_storage(producer, &mut candidates, batch_capacity)?;
-        for _ in 0..work_budget.max(1) {
+        let (pc_geometry, target_preparation_pending) = match &*producer {
+            DistributedCandidateProducer::Cpu(producer) => {
+                (true, producer.target_preparation_pending())
+            }
+            #[cfg(feature = "webgpu-search")]
+            DistributedCandidateProducer::WebGpu(producer) => {
+                (true, producer.target_preparation_pending())
+            }
+            _ => (false, false),
+        };
+        let work_budget =
+            bounded_producer_work_budget(work_budget, pc_geometry, target_preparation_pending);
+        // Eight logical steps were also an accidental maximum batch size:
+        // sparse Geometry streams flushed one or a few candidates into the
+        // durable delegation protocol on every ABI call. Drain cheap steps
+        // until the requested batch fills, but yield between atomic core
+        // transactions after one host quantum. Preparation remains one step.
+        let host_quantum =
+            pc_geometry.then(|| CooperativeWorkQuantum::start(PC_GEOMETRY_HOST_QUANTUM_MS));
+        for step in 0..work_budget {
+            if step > 0
+                && host_quantum
+                    .as_ref()
+                    .is_some_and(CooperativeWorkQuantum::is_exhausted)
+            {
+                break;
+            }
             let external_candidate_bytes = if let DistributedCandidateProducer::BuildProbability(
                 build_producer,
             ) = &*producer
@@ -766,6 +1916,7 @@ impl WasmDistributedCoordinator {
                     }
                 }
                 WasmCandidateProducerAdvance::Completed(mut summary) => {
+                    self.completed_progress = producer.progress();
                     if let Some(execution) = self.backend_execution_override.clone() {
                         summary.backend_execution = execution;
                     }
@@ -998,6 +2149,76 @@ impl WasmDistributedCoordinator {
                 .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_MERGE", reason))?;
         }
         Ok(())
+    }
+
+    pub fn requires_cooperative_completion(&self) -> bool {
+        matches!(&self.prepared, Some(DistributedPreparedSearch::Core(prepared))
+            if prepared.requires_cooperative_product_completion())
+    }
+
+    pub fn into_cooperative_completion(
+        mut self,
+        workers_used: usize,
+    ) -> Result<WasmDistributedCompletionSession, WasmCommandRuntimeError> {
+        if !self.requires_cooperative_completion() {
+            return Err(distributed_error(
+                "E_WASM_DISTRIBUTED_STATE",
+                "distributed completion kind is not a cooperative product",
+            ));
+        }
+        let summary = self.summary.take().ok_or_else(|| {
+            distributed_error(
+                "E_WASM_DISTRIBUTED_STATE",
+                "geometry producer has not completed",
+            )
+        })?;
+        let prepared = match self.prepared.take() {
+            Some(DistributedPreparedSearch::Core(prepared)) => prepared,
+            _ => {
+                return Err(distributed_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "core app search is not prepared",
+                ))
+            }
+        };
+        let mut merger = self.merger.take().ok_or_else(|| {
+            distributed_error("E_WASM_DISTRIBUTED_STATE", "result merger is not ready")
+        })?;
+        let result = merger
+            .finish(
+                &summary,
+                workers_used.min(self.worker_count).max(1),
+                &self.control,
+            )
+            .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?;
+        drop(merger);
+        drop(summary);
+        drop(self.producer.take());
+        let execution = prepared
+            .into_cooperative_product_completion(result)
+            .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?;
+        Ok(WasmDistributedCompletionSession {
+            execution,
+            control: self.control,
+            webgpu_requested: self.webgpu_requested,
+            finished: false,
+            parallel_partitions: None,
+            published_parallel_query: None,
+            coordinator_shard: None,
+            coordinator_task: None,
+            coordinator_memory: None,
+            coordinator_disabled: false,
+            coordinator_decline_pending: false,
+            last_parallel_task_key: None,
+            coordinator_app_memory: None,
+            maximum_compute_workers: self.worker_count,
+            parallel_tasks_issued: false,
+            parallel_control_only: false,
+            parallel_remote_memory_cap: None,
+            parallel_host_grant: None,
+            parallel_packet_reservation: None,
+            coordinator_query_bytes: None,
+        })
     }
 
     /// Compatibility terminal for unlimited distributed searches. A finite
@@ -1325,6 +2546,7 @@ impl BuildProbabilityPartialIngressAuthority for WasmBuildProbabilityDistributed
     }
 }
 
+#[cfg(test)]
 fn absorb_build_probability_partial_batch<A>(
     input: &[u8],
     authority: &mut A,
@@ -1506,6 +2728,27 @@ impl From<RequestedSearchBackend> for WasmDistributedRequestedBackend {
 }
 
 impl DistributedCandidateProducer {
+    fn known_parallel_session_capacity(&self) -> Option<usize> {
+        let candidate_family_count = match self {
+            Self::Cpu(producer) => producer.progress().candidate_family_count,
+            Self::Tiling(producer) => Some(producer.root_count() as u128),
+            Self::BuildProbability(producer) => producer.progress().candidate_family_count,
+            Self::Forward(_) | Self::Setup(_) => None,
+            #[cfg(feature = "webgpu-search")]
+            Self::WebGpu(producer) => producer.progress().candidate_family_count,
+        }?;
+        // Before the streaming Geometry producer has completed compilation,
+        // zero is a progress value rather than proof that the exact family is
+        // empty. Do not collapse a requested pool to serial on that provisional
+        // value; the producer will expose real batches (or a completed empty
+        // result) under the same coordinator.
+        if candidate_family_count == 0 {
+            return None;
+        }
+        let verifier_capacity = usize::try_from(candidate_family_count).unwrap_or(usize::MAX);
+        Some(verifier_capacity.saturating_add(1))
+    }
+
     fn verification_required(&self) -> bool {
         match self {
             Self::Cpu(producer) => producer.verification_required(),
@@ -1514,13 +2757,6 @@ impl DistributedCandidateProducer {
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.verification_required(),
         }
-    }
-
-    fn advance(
-        &mut self,
-        control: &ExecutionControl,
-    ) -> Result<WasmCandidateProducerAdvance, WasmCpuSearchError> {
-        self.advance_with_external_retained(control, 0)
     }
 
     fn advance_with_external_retained(
@@ -1611,20 +2847,6 @@ impl DistributedCandidateProducer {
 }
 
 impl DistributedVerifier {
-    fn consume(
-        &mut self,
-        candidate: &WasmCandidatePacket,
-        control: &ExecutionControl,
-    ) -> Result<(), &'static str> {
-        match self {
-            Self::Pc(verifier) => verifier.consume(candidate, control),
-            Self::Tiling(_) => Err("tiling_verifier_requires_root_task_batch"),
-            Self::BuildProbability(verifier) => verifier.consume(candidate, control),
-            Self::Forward(_) => Err("forward_verifier_requires_forward_task_wire"),
-            Self::Setup(_) => Err("setup_verifier_requires_setup_task_wire"),
-        }
-    }
-
     fn finish(&mut self) -> Result<Vec<clearra_core_executor::CoreExecutionResult>, &'static str> {
         match self {
             Self::Pc(verifier) => verifier.finish().map(|result| vec![result]),
@@ -1768,6 +2990,14 @@ impl WasmDistributedVerifierRuntime {
     ) -> Result<Self, WasmCommandRuntimeError> {
         let prepared = runtime.prepare_command_text(command_text)?;
         let (request, _) = prepared.into_parts();
+        let request = if score_product_worker_count(&request).is_some() {
+            runtime
+                .prepare_distributed_score_child_command_text(command_text)?
+                .into_parts()
+                .0
+        } else {
+            request
+        };
         let prepared = match runtime.app_context().prepare_distributed_search(request) {
             DistributedSearchPreparation::Search(prepared) => prepared,
             DistributedSearchPreparation::Ready(_) => {
@@ -1913,15 +3143,10 @@ impl WasmDistributedVerifierRuntime {
             });
         }
         if let DistributedVerifier::Setup(verifier) = &mut self.verifier {
-            let (candidate_count, partial) =
-                verifier.consume(input, &self.control).map_err(|error| {
-                    distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFY", error.reason())
-                })?;
-            return Ok(WasmDistributedVerifierConsume {
-                candidate_count,
-                partial: Some(partial),
-                has_pending_work: false,
-            });
+            verifier.enqueue(input).map_err(|error| {
+                distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFY", error.reason())
+            })?;
+            return advance_setup_worker(verifier, &self.control);
         }
         if let DistributedVerifier::BuildProbability(verifier) = &mut self.verifier {
             if external_retained_bytes < input.len() as u128 {
@@ -2006,9 +3231,26 @@ impl WasmDistributedVerifierRuntime {
 
         let candidate = &self.pending_candidates[self.pending_candidate_cursor];
         match &mut self.verifier {
-            DistributedVerifier::Pc(verifier) => verifier
-                .consume(candidate, &self.control)
-                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY", reason))?,
+            DistributedVerifier::Pc(verifier) => {
+                if verifier.preparation_pending() {
+                    verifier
+                        .advance_preparation(&self.control)
+                        .map_err(|reason| {
+                            distributed_error("E_WASM_DISTRIBUTED_VERIFY_PREPARE", reason)
+                        })?;
+                    // Even the step that commits the final index yields before
+                    // candidate verification, keeping cancellation and worker
+                    // heartbeat delivery observable at the phase boundary.
+                    return Ok(WasmDistributedVerifierConsume {
+                        candidate_count: 0,
+                        partial: None,
+                        has_pending_work: true,
+                    });
+                }
+                verifier
+                    .consume(candidate, &self.control)
+                    .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY", reason))?;
+            }
             DistributedVerifier::BuildProbability(verifier) => verifier
                 .consume_with_external_retained(
                     candidate,
@@ -2045,18 +3287,23 @@ impl WasmDistributedVerifierRuntime {
         if self.has_pending_candidates() {
             return self.advance_pending_candidate();
         }
-        let DistributedVerifier::Tiling(verifier) = &mut self.verifier else {
-            return Err(distributed_error(
+        match &mut self.verifier {
+            DistributedVerifier::Setup(verifier) if verifier.has_pending_work() => {
+                advance_setup_worker(verifier, &self.control)
+            }
+            DistributedVerifier::Tiling(verifier) => {
+                let (partial, has_pending_work) = advance_tiling_worker(verifier, &self.control)?;
+                Ok(WasmDistributedVerifierConsume {
+                    candidate_count: 0,
+                    partial,
+                    has_pending_work,
+                })
+            }
+            _ => Err(distributed_error(
                 "E_WASM_DISTRIBUTED_STATE",
                 "distributed verifier has no resumable work",
-            ));
-        };
-        let (partial, has_pending_work) = advance_tiling_worker(verifier, &self.control)?;
-        Ok(WasmDistributedVerifierConsume {
-            candidate_count: 0,
-            partial,
-            has_pending_work,
-        })
+            )),
+        }
     }
 
     pub fn progress(&self) -> WasmDistributedProgress {
@@ -2080,6 +3327,15 @@ impl WasmDistributedVerifierRuntime {
             self.verifier,
             DistributedVerifier::Forward(_) | DistributedVerifier::Setup(_)
         ) {
+            if matches!(
+                &self.verifier,
+                DistributedVerifier::Setup(verifier) if verifier.has_pending_work()
+            ) {
+                return Err(distributed_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "distributed setup verifier cannot finish with pending work",
+                ));
+            }
             return Ok(Vec::new());
         }
         if matches!(&self.verifier, DistributedVerifier::BuildProbability(_)) {
@@ -2257,6 +3513,20 @@ fn build_worker_memory_projection_error(
         .expect_err("overflow-sized build worker terminal storage is unavailable")
 }
 
+fn advance_setup_worker(
+    verifier: &mut WasmSetupParallelWorker,
+    control: &ExecutionControl,
+) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
+    let step = verifier
+        .continue_work(SETUP_WORKER_PREPARATION_BUDGET, control)
+        .map_err(|error| distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFY", error.reason()))?;
+    Ok(WasmDistributedVerifierConsume {
+        candidate_count: step.candidate_count,
+        partial: step.partial,
+        has_pending_work: step.has_pending_work,
+    })
+}
+
 fn advance_tiling_worker(
     verifier: &mut WasmTilingRootWorker,
     control: &ExecutionControl,
@@ -2319,7 +3589,7 @@ fn distributed_search_error(
     let reason = error.reason();
     match error {
         WasmCpuSearchError::ResourceAdmission { resource_report } => {
-            WasmCommandRuntimeError::new(code, reason).with_resource_report(resource_report)
+            WasmCommandRuntimeError::new(code, reason).with_resource_report(*resource_report)
         }
         _ => WasmCommandRuntimeError::new(code, reason),
     }
@@ -2338,49 +3608,37 @@ const fn invalid_search_error(reason: &'static str) -> WasmCpuSearchError {
 }
 
 fn request_needs_distributed_execution(request: &AppRequest) -> bool {
-    if matches!(
-        request.product_capability_contract(),
-        Some(ProductCapabilityContract::PcScore | ProductCapabilityContract::PcScoreMinimals)
-    ) {
-        return false;
-    }
-    let (workers, required_piece_count) = match request.command() {
-        AppCommand::Pc(command) => (
-            command.query().execution_policy().workers(),
-            usize::from(command.query().target().lines()) * 10 / 4,
-        ),
-        AppCommand::Path(command) => (
-            command.query().execution_policy().workers(),
-            usize::from(command.query().target().lines()) * 10 / 4,
-        ),
-        AppCommand::Scenario(command) => {
-            let query = command.query();
-            let board = query.initial_board();
-            let board_cells = usize::from(board.width()) * usize::from(board.visible_height());
-            let required_cells =
-                board_cells.saturating_sub(board.occupied_mask().count_ones() as usize);
-            (
-                query.execution_policy().workers(),
-                query.exact_pieces().unwrap_or(required_cells / 4),
-            )
-        }
+    let workers = match request.command() {
+        AppCommand::Pc(command) => command.query().execution_policy().workers(),
+        AppCommand::Path(command) => command.query().execution_policy().workers(),
+        AppCommand::Scenario(command) => command.query().execution_policy().workers(),
         AppCommand::BuildProbability(command) => {
             if command.query().finesse_score().is_some() {
                 return false;
             }
-            return command.query().core_query().execution_policy().workers() >= 2
-                && command.query().target_piece_count() >= MIN_DISTRIBUTED_TARGET_PIECES;
+            command.query().core_query().execution_policy().workers()
         }
         _ => return false,
     };
-    workers >= 2 && required_piece_count >= 7
+    workers >= 2
 }
 
-fn build_probability_distributed_execution_is_worthwhile(
-    field: clearra_problem::BuildProbabilityField,
-    worker_count: usize,
-) -> bool {
-    worker_count >= 2 && field.target_piece_count() >= MIN_DISTRIBUTED_TARGET_PIECES
+fn score_product_worker_count(request: &AppRequest) -> Option<usize> {
+    if !matches!(
+        request.product_capability_contract(),
+        Some(
+            ProductCapabilityContract::PcScore
+                | ProductCapabilityContract::PcScoreFinder
+                | ProductCapabilityContract::PcScoreMinimals
+        )
+    ) {
+        return None;
+    }
+    match request.command() {
+        AppCommand::Pc(command) => Some(command.query().execution_policy().workers()),
+        AppCommand::Scenario(command) => Some(command.query().execution_policy().workers()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -2396,6 +3654,16 @@ mod build_probability_partial_ingress_tests {
     use clearra_core_executor::CoreExecutionResult;
 
     use super::*;
+
+    #[test]
+    fn pc_geometry_producer_budget_is_bounded_but_other_products_keep_their_budget() {
+        assert_eq!(bounded_producer_work_budget(0, true, false), 1);
+        assert_eq!(bounded_producer_work_budget(8, true, false), 8);
+        assert_eq!(bounded_producer_work_budget(2_048, true, false), 2_048);
+        assert_eq!(bounded_producer_work_budget(16_384, true, false), 2_048);
+        assert_eq!(bounded_producer_work_budget(2_048, false, false), 2_048);
+        assert_eq!(bounded_producer_work_budget(2_048, true, true), 1);
+    }
 
     struct RecordingIngressAuthority {
         cap_bytes: u128,
@@ -3048,6 +4316,37 @@ mod build_probability_partial_ingress_tests {
                 .map(|value| value.candidate_count),
             Some(7)
         );
+    }
+
+    #[test]
+    fn ctk3_build_all_solutions_keeps_requested_parallel_capacity() {
+        let runtime = WasmCommandRuntime::default().with_host_capabilities(
+            crate::WasmHostCapabilities::new(12, false, false).with_product_retention_budget(
+                clearra_app::ProductRetentionBudget::new(64 * 1024 * 1024),
+            ),
+        );
+        // Match the GUI's CLI lowering, including explicit CPU/no-fallback,
+        // default disabled DAG/finesse, and host product-retention authority.
+        let command = "clearra build-probability --base-mask 0x00000003c0f03c0f \
+            --target-mask 0x000000fc3f0fc3f0 --height 4 --hold empty --patterns P7 \
+            --aggregate buildability --rule srs-plus --no-build-dependency-dag \
+            --result-mode all-solutions --no-mirror --backend cpu --no-backend-fallback --workers 11";
+        let preparation = WasmDistributedCoordinator::prepare(&runtime, command).unwrap();
+        let mut coordinator = match preparation {
+            WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+            _ => panic!("CTK3/P7 Build all-solutions must not silently use one worker"),
+        };
+        assert_eq!(coordinator.worker_count, 11);
+        let mut saw_geometry = false;
+        for _ in 0..10_000 {
+            let advance = coordinator.advance_producer(64, 16).unwrap();
+            saw_geometry |= coordinator.progress().geometry_nodes > 0;
+            if matches!(advance, WasmDistributedProducerAdvance::Batch(_)) {
+                assert!(saw_geometry, "Build Geometry must expose node progress");
+                return;
+            }
+        }
+        panic!("bounded CTK3/P7 Build must emit verifier work");
     }
 
     #[test]

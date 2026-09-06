@@ -121,6 +121,7 @@ pub use wasm_cpu_search_backend::{
 };
 pub use wasm_setup_parallel_backend::{
     WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
+    WasmSetupParallelWorkerStep,
 };
 pub use wasm_setup_search_backend::{
     WasmSetupSearchAdvance, WasmSetupSearchBackend, WasmSetupSearchSession,

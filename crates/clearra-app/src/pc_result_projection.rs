@@ -794,7 +794,7 @@ pub(crate) fn validate_pc_tiling_scenario_request_contract(
     }
     let normalized_board = board.after_initial_line_clear();
     let empty_cells = visible_bits - (normalized_board.occupied_mask() & visible_mask).count_ones();
-    if empty_cells == 0 || empty_cells % 4 != 0 {
+    if empty_cells == 0 || !empty_cells.is_multiple_of(4) {
         return Err("pc tiling scenario empty-cell count must be a positive multiple of four");
     }
     let required_pieces = empty_cells as usize / 4;
@@ -967,7 +967,7 @@ fn validate_pc_score_scenario_request_contract_with_origin(
     }
     let normalized_board = board.after_initial_line_clear();
     let empty_cells = visible_bits - (normalized_board.occupied_mask() & visible_mask).count_ones();
-    if empty_cells == 0 || empty_cells % 4 != 0 {
+    if empty_cells == 0 || !empty_cells.is_multiple_of(4) {
         return Err("pc score scenario empty-cell count must be a positive multiple of four");
     }
     let required_pieces = empty_cells as usize / 4;
@@ -990,10 +990,7 @@ fn validate_pc_score_scenario_request_contract_with_origin(
 fn validate_pc_score_execution_policy(policy: &PcExecutionPolicy) -> Result<(), &'static str> {
     let baseline = PcExecutionPolicy::mvp_default();
     if policy.requested_backend() != RequestedSearchBackend::Cpu
-        || policy.worker_policy() != WorkerPolicy::Fixed(1)
-        || policy.workers() != 1
-        || policy.use_all_logical_processors()
-        || policy.cpu_warmup()
+        || matches!(policy.worker_policy(), WorkerPolicy::Fixed(0))
         || policy.gpu_warmup()
         || policy.tablebase_requested()
         || policy.precompute_build_dependencies()
@@ -1006,7 +1003,7 @@ fn validate_pc_score_execution_policy(policy: &PcExecutionPolicy) -> Result<(), 
         || policy.max_frontier_states() != baseline.max_frontier_states()
         || policy.max_candidates() != baseline.max_candidates()
     {
-        return Err("pc score requires its fixed Wasm CPU single-session execution policy");
+        return Err("pc score requires its fixed-cap CPU execution policy");
     }
     Ok(())
 }

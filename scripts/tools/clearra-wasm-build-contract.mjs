@@ -24,6 +24,8 @@ const OPTIONAL_ROOT_FILES = Object.freeze(['rust-toolchain', 'rust-toolchain.tom
 const OPTIONAL_PRODUCER_FILES = Object.freeze([
   'scripts/tools/build-clearra-wasm.mjs',
   'scripts/tools/clearra-wasm-build-contract.mjs',
+  'scripts/tools/clearra-wasm-generation-retention.mjs',
+  'scripts/tools/stage-clearra-wasm.mjs',
 ]);
 const SOURCE_ROOTS = Object.freeze(['crates', 'core-c', 'tools/vendor']);
 const SOURCE_EXTENSIONS = new Set(['.c', '.cmake', '.frag', '.h', '.rs', '.vert', '.wgsl']);

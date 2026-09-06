@@ -1,12 +1,9 @@
 #![cfg(feature = "native-c-core")]
 
+use crate::product_contract_json_assert;
 use crate::{exit::ExitCode, output::CliOutput, run_with_args};
 use serde_json::Value;
 use std::path::PathBuf;
-
-#[allow(dead_code)]
-#[path = "product_contract_json_assert.rs"]
-mod product_contract_json_assert;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

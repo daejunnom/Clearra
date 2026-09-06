@@ -14,6 +14,7 @@ import {
   PRODUCT_MEMBER_PAGE_SIZE,
   isCanonicalDecimal,
   isCanonicalProbability,
+  loadCoveragePortfolioExactPage,
   productResultIdentity,
   validateCoveragePortfolioRuntimePage,
   validateProductResultPayload,
@@ -22,8 +23,25 @@ import {
 
 const coverage = coveragePayload(PRODUCT_MEMBER_PAGE_SIZE);
 assert.equal(validateProductResultPayload(coverage), null);
+const buildScoreCoverage = coveragePayload(1);
+buildScoreCoverage.contract = 'build.highest-score-minimum-set';
+buildScoreCoverage.result_kind = 'build-probability-score-minimum.v1';
+assert.equal(validateProductResultPayload(buildScoreCoverage), null,
+  'Build score minimum uses the owner-bound runtime portfolio page after initial loading');
+const invalidBuildScorePair = structuredClone(buildScoreCoverage);
+invalidBuildScorePair.result_kind = 'pc-score-portfolio.v2';
+assert.equal(validateProductResultPayload(invalidBuildScorePair), 'invalid coverage portfolio payload');
 assert.equal(coverage.content.payload.members.length, 100);
 assert.match(productResultIdentity(coverage), /a{64}:b{64}$/u);
+const forgedPageHandle = structuredClone(coverage) as unknown as {
+  content: { payload: { page_handle_available: unknown } };
+};
+forgedPageHandle.content.payload.page_handle_available = 'true';
+assert.equal(
+  validateProductResultPayload(forgedPageHandle as unknown as ClearraProductResultPayload),
+  'invalid coverage portfolio payload',
+  'coverage portfolios reject non-boolean page handle authority'
+);
 
 const oversized = coveragePayload(PRODUCT_MEMBER_PAGE_SIZE + 1);
 assert.equal(validateProductResultPayload(oversized), 'invalid coverage portfolio payload');
@@ -50,9 +68,13 @@ assert.equal(isCanonicalProbability('0.14285714285714285'), true);
 assert.equal(isCanonicalProbability('1.2'), false);
 
 await verifyCoveragePortfolioPagerNavigation();
+await verifyCoveragePortfolioPagerDemandLoadsOnlyTheVisibleAlternative();
 await verifyCoveragePortfolioPagerPrunesAdjacentPrefetchOnBacktrack();
 await verifyCoveragePortfolioPagerResetIgnoresStaleGet();
 await verifyCoveragePortfolioPagerUsesCanonicalLargeIndices();
+await verifyCoveragePortfolioReplayRequiresBoundedProgress();
+await verifySharedExactPageLoaderPreservesCancellationAndGeneration();
+await verifyCancelledPortfolioPrefetchDoesNotForgeSealedEnumeration();
 verifyCoveragePortfolioPageValidator();
 
 const buildV2Capabilities = [
@@ -65,7 +87,8 @@ const buildV2Capabilities = [
   'build.setup-cover',
   'build.evaluate.minimals',
   'build.setup-cover-score',
-  'build.evaluate.score'
+  'build.evaluate.score',
+  'build.highest-score-minimum-set'
 ] as const;
 for (const capability of buildV2Capabilities) {
   const build = buildV2Payload(capability);
@@ -75,7 +98,21 @@ for (const capability of buildV2Capabilities) {
 
 const buildCover = buildCoveragePortfolioPayload();
 assert.equal(validateProductResultPayload(buildCover), null);
-assert.match(productResultIdentity(buildCover), /d{64}:e{64}$/u);
+const emptyBuildCover = buildCoveragePortfolioPayload();
+Object.assign(emptyBuildCover.content.payload, {
+  source_candidate_count: '0', selected_candidate_count: '0', required_pattern_count: '0',
+  union_probability: '0', canonical_first_candidate_id: ''
+});
+assert.equal(validateProductResultPayload(emptyBuildCover), null, 'exact empty Build cover remains a successful pageable product');
+const incompleteEmptyBuildCover = structuredClone(emptyBuildCover);
+incompleteEmptyBuildCover.content.payload.completeness.exact_minimum_proven = false;
+assert.equal(validateProductResultPayload(incompleteEmptyBuildCover), 'invalid Build coverage portfolio payload');
+assert.match(productResultIdentity(buildCover), /cts1:ea2c4fa12ddc1b01:e{64}$/u);
+for (const invalidHash of ['d'.repeat(64), 'cts1:abc', 'ea2c4fa12ddc1b01']) {
+  const malformed = structuredClone(buildCover);
+  malformed.content.payload.normalized_solution_set_hash = invalidHash;
+  assert.equal(validateProductResultPayload(malformed), 'invalid Build coverage portfolio payload');
+}
 
 const buildSetup = buildSetupFamilyPayload();
 assert.equal(validateProductResultPayload(buildSetup), null);
@@ -277,6 +314,37 @@ assert.equal(
   validateProductResultPayload(forgedFieldUniverse),
   'invalid PC score field summary payload'
 );
+const forgedFieldOrder = structuredClone(score);
+forgedFieldOrder.content.payload.fields.reverse();
+assert.equal(
+  validateProductResultPayload(forgedFieldOrder),
+  'invalid PC score field summary payload',
+  'PC score fields must follow the declared strict normalized-field order'
+);
+const buildFieldAverage = structuredClone(score) as unknown as {
+  contract: string;
+  result_kind: string;
+  content: {
+    payload_kind: 'pc-score-field-summary';
+    payload: typeof score.content.payload & { field_contract: string };
+  };
+};
+buildFieldAverage.contract = 'build.field-average-score';
+buildFieldAverage.result_kind = 'build-field-average-score.v1';
+buildFieldAverage.content.payload.field_contract = 'build-solution-field-average.v1';
+assert.equal(
+  validateProductResultPayload(buildFieldAverage as unknown as ClearraProductResultPayload),
+  null,
+  'Build field average reuses the score-row shape under an explicit Build contract'
+);
+const forgedBuildScoreAsPc = structuredClone(buildFieldAverage);
+forgedBuildScoreAsPc.contract = 'pc.score';
+forgedBuildScoreAsPc.result_kind = 'pc-score-summary.v2';
+assert.equal(
+  validateProductResultPayload(forgedBuildScoreAsPc as unknown as ClearraProductResultPayload),
+  'invalid PC score field summary payload',
+  'Build field-average content cannot be cross-relabeled as PC score'
+);
 
 const scoreFinder: ClearraProductResultPayload = {
   contract: 'pc.score-finder',
@@ -290,6 +358,14 @@ const scoreFinder: ClearraProductResultPayload = {
       informational_attack_basis: 'canonical-equal-score-trace',
       page_size: '100',
       winner_count: '2',
+      canonical_selection: 'smallest-canonical-candidate-id',
+      canonical_winner: {
+        pattern_id: '0',
+        candidate_id: '1',
+        normalized_solution_key: 'first',
+        score: '100',
+        informational_attack: '99'
+      },
       winners: [
         {
           pattern_id: '0',
@@ -322,6 +398,27 @@ assert.deepEqual(
   ],
   'score-finder is a normal score-only family and does not use attack to remove winners'
 );
+const buildFixedScore = structuredClone(scoreFinder) as unknown as {
+  contract: string;
+  result_kind: string;
+  content: { payload: { winner_contract: string } };
+};
+buildFixedScore.contract = 'build.fixed-queue-maximum-score';
+buildFixedScore.result_kind = 'build-fixed-score-witness.v1';
+buildFixedScore.content.payload.winner_contract = 'build-score-pattern-winner.v1';
+assert.equal(
+  validateProductResultPayload(buildFixedScore as unknown as ClearraProductResultPayload),
+  null,
+  'Build fixed-queue score uses the same score-only family under its own nominal contract'
+);
+const forgedBuildFixedAsPc = structuredClone(buildFixedScore);
+forgedBuildFixedAsPc.contract = 'pc.score-finder';
+forgedBuildFixedAsPc.result_kind = 'pc-fixed-score-witness.v2';
+assert.equal(
+  validateProductResultPayload(forgedBuildFixedAsPc as unknown as ClearraProductResultPayload),
+  'invalid score winner family payload',
+  'Build fixed-score content cannot be cross-relabeled as PC score-finder'
+);
 const forgedScoreFinderPair = structuredClone(scoreFinder) as unknown as { result_kind: string };
 forgedScoreFinderPair.result_kind = 'pc-score-summary.v2';
 assert.equal(
@@ -351,12 +448,83 @@ assert.equal(
   'invalid pc.path replay family payload'
 );
 
+const buildPathFamily = structuredClone(pathFamily) as unknown as {
+  contract: string;
+  result_kind: string;
+  content: {
+    payload_kind: string;
+    payload: typeof pathFamily.content.payload & {
+      witness_contract: string;
+      target_terminal_board_mask: string;
+      mirrored_terminal_board_mask?: string | null;
+    };
+  };
+};
+buildPathFamily.contract = 'build.complete-replay-paths';
+buildPathFamily.result_kind = 'build-path-family.v1';
+buildPathFamily.content.payload_kind = 'build-path-family';
+(buildPathFamily.content.payload as { witness_contract: string }).witness_contract =
+  'build-path-witness.v1';
+buildPathFamily.content.payload.target_terminal_board_mask = '0x0000000000000001';
+for (const witness of buildPathFamily.content.payload.witnesses) {
+  witness.steps.at(-1)!.board_after_line_clear_mask = '0x0000000000000001';
+}
+buildPathFamily.content.payload.canonical_witness = structuredClone(
+  buildPathFamily.content.payload.witnesses[0]!
+);
+assert.equal(
+  validateProductResultPayload(buildPathFamily as unknown as ClearraProductResultPayload),
+  null,
+  'Build replay explicitly accepts the requested non-empty terminal'
+);
+const forgedBuildTerminal = structuredClone(buildPathFamily);
+forgedBuildTerminal.content.payload.target_terminal_board_mask = '0x0000000000000002';
+assert.equal(
+  validateProductResultPayload(forgedBuildTerminal as unknown as ClearraProductResultPayload),
+  'invalid Build replay family payload',
+  'Build replay rejects a target relabel that does not match every terminal witness'
+);
+const mirroredBuildFamily = structuredClone(buildPathFamily);
+mirroredBuildFamily.content.payload.mirrored_terminal_board_mask = '0x0000000000000200';
+for (const witness of mirroredBuildFamily.content.payload.witnesses) {
+  witness.steps.at(-1)!.board_after_line_clear_mask = '0x0000000000000200';
+}
+mirroredBuildFamily.content.payload.canonical_witness = structuredClone(
+  mirroredBuildFamily.content.payload.witnesses[0]!
+);
+assert.equal(
+  validateProductResultPayload(mirroredBuildFamily as unknown as ClearraProductResultPayload),
+  null,
+  'Build replay preserves an explicitly authorized horizontal-mirror target'
+);
+mirroredBuildFamily.content.payload.mirrored_terminal_board_mask = '0x0000000000000100';
+assert.equal(
+  validateProductResultPayload(mirroredBuildFamily as unknown as ClearraProductResultPayload),
+  'invalid Build replay family payload',
+  'an arbitrary alternative terminal cannot claim horizontal-mirror authority'
+);
+const forgedBuildAsPc = structuredClone(buildPathFamily);
+forgedBuildAsPc.contract = 'pc.path';
+forgedBuildAsPc.result_kind = 'pc-path-family.v2';
+assert.equal(
+  validateProductResultPayload(forgedBuildAsPc as unknown as ClearraProductResultPayload),
+  'invalid Build replay family payload',
+  'Build path content cannot be cross-relabeled as a PC path result'
+);
+
 const wrongOrdering = structuredClone(scoreFinder);
 if (wrongOrdering.content.payload_kind === 'score-pattern-winner-family') {
   (wrongOrdering.content.payload as { ordering: string }).ordering =
     'score-descending-then-candidate-id-ascending';
 }
 assert.equal(validateProductResultPayload(wrongOrdering), 'invalid score winner family payload');
+const forgedScoreFinderOrder = structuredClone(scoreFinder);
+forgedScoreFinderOrder.content.payload.winners.reverse();
+assert.equal(
+  validateProductResultPayload(forgedScoreFinderOrder),
+  'invalid score winner family payload',
+  'score winners must follow the declared strict pattern/candidate order'
+);
 
 const parity: ClearraProductResultPayload = {
   contract: 'parity-report.v1',
@@ -501,11 +669,14 @@ function buildV2Payload(capability: BuildV2Capability): BuildV2ProductResult {
       break;
     case 'build.setup-cover-score':
     case 'build.evaluate.score':
+    case 'build.highest-score-minimum-set':
       payload.kind = 'score-portfolio';
       payload.result_contract =
         capability === 'build.setup-cover-score'
           ? 'build-setup-cover-score.v1'
-          : 'build-supplied-score.v1';
+          : capability === 'build.evaluate.score'
+            ? 'build-supplied-score.v1'
+            : 'build-probability-score-minimum.v1';
       payload.objective = 'max-score-cover';
       payload.evaluation_identity_sha256 = null;
       payload.reachable_candidate_count = '2';
@@ -567,7 +738,7 @@ function buildCoveragePortfolioPayload(): Extract<
         pattern_count: '2',
         required_pattern_count: '2',
         union_probability: '1',
-        normalized_solution_set_hash: 'd'.repeat(64),
+        normalized_solution_set_hash: 'cts1:ea2c4fa12ddc1b01',
         canonical_first_candidate_id: 'candidate-a',
         completeness: {
           source_universe_complete: true,
@@ -921,6 +1092,8 @@ function pcPathFamilyPayload(): Extract<
         materialized_pattern_count: '2',
         witness_count: '2',
         complete: true,
+        canonical_selection: 'smallest-canonical-candidate-id',
+        canonical_witness: witness('1', '0', 'trace-a'),
         witnesses: [witness('1', '0', 'trace-a'), witness('2', '1', 'trace-b')]
       }
     }
@@ -961,7 +1134,7 @@ async function verifyCoveragePortfolioPagerNavigation(): Promise<void> {
     onChange: (snapshot) => assertCoveragePagerWindow(snapshot)
   });
 
-  controller.reset('portfolio-old', runtimeCoveragePage(1));
+  controller.reset('portfolio-old', runtimeCoveragePage(1), { autoPrefetch: true });
   assert.equal(loadNextCallCount, 1, 'reset starts exactly one page-2 prefetch');
   nextResponses[0]!.resolve(coveragePageResponse(runtimeCoveragePage(2)));
   await settlePromises();
@@ -1061,7 +1234,7 @@ async function verifyCoveragePortfolioPagerPrunesAdjacentPrefetchOnBacktrack(): 
     onChange: (snapshot) => assertCoveragePagerWindow(snapshot)
   });
 
-  controller.reset('portfolio-prune', runtimeCoveragePage(2));
+  controller.reset('portfolio-prune', runtimeCoveragePage(2), { autoPrefetch: true });
   await settlePromises();
   assert.equal(controller.snapshot().prefetchedPage?.alternative_index, '3');
   assert.equal((await controller.previous())?.alternative_index, '1');
@@ -1074,6 +1247,41 @@ async function verifyCoveragePortfolioPagerPrunesAdjacentPrefetchOnBacktrack(): 
     ['1', '1'],
     ['3', '1']
   ]);
+  controller.dispose();
+}
+
+async function verifyCoveragePortfolioPagerDemandLoadsOnlyTheVisibleAlternative(): Promise<void> {
+  let loadNextCallCount = 0;
+  const controller = new CoveragePortfolioPagerController({
+    loadNextPage: () => {
+      loadNextCallCount += 1;
+      return Promise.resolve(
+        coveragePageResponse(
+          runtimeCoveragePage(loadNextCallCount + 1, {
+            complete: loadNextCallCount === 2
+          })
+        )
+      );
+    },
+    loadMemberPage: null
+  });
+
+  controller.reset('portfolio-demand-only', runtimeCoveragePage(1));
+  await settlePromises();
+  assert.equal(loadNextCallCount, 0, 'opening a result does not compute the hidden next page');
+  assert.equal(controller.snapshot().prefetchedPage, null);
+
+  assert.equal((await controller.next())?.alternative_index, '2');
+  await settlePromises();
+  assert.equal(
+    loadNextCallCount,
+    1,
+    'showing page 2 does not compute page 3 until the user asks for it'
+  );
+  assert.equal(controller.snapshot().prefetchedPage, null);
+
+  assert.equal((await controller.next())?.alternative_index, '3');
+  assert.equal(loadNextCallCount, 2, 'each explicit next action advances exactly one page');
   controller.dispose();
 }
 
@@ -1136,7 +1344,9 @@ async function verifyCoveragePortfolioPagerUsesCanonicalLargeIndices(): Promise<
     onChange: (snapshot) => assertCoveragePagerWindow(snapshot)
   });
 
-  controller.reset('portfolio-large', runtimeCoveragePage(largeAlternativeIndex));
+  controller.reset('portfolio-large', runtimeCoveragePage(largeAlternativeIndex), {
+    autoPrefetch: true
+  });
   await settlePromises();
   assert.equal(nextCallCount, 1);
   assert.equal(controller.snapshot().prefetchedPage?.alternative_index, nextAlternativeIndex);
@@ -1149,6 +1359,153 @@ async function verifyCoveragePortfolioPagerUsesCanonicalLargeIndices(): Promise<
     [[previousAlternativeIndex, '1']],
     'large alternative identity reaches the loader as an exact decimal string'
   );
+  controller.dispose();
+}
+
+async function verifyCoveragePortfolioReplayRequiresBoundedProgress(): Promise<void> {
+  let replayCalls = 0;
+  const resumable = new CoveragePortfolioPagerController({
+    loadNextPage: null,
+    loadMemberPage: (alternativeIndex, memberPageNumber, _signal, maximumWorkSteps) => {
+      replayCalls += 1;
+      assert.equal(alternativeIndex, '1');
+      assert.equal(memberPageNumber, '1');
+      assert.equal(maximumWorkSteps, 10_000);
+      if (replayCalls === 1) {
+        return Promise.resolve({
+          schema_version: 1,
+          runtime: 'clearra-wasm',
+          product_page_kind: 'coverage-portfolio',
+          state: 'work-budget-exhausted',
+          known_alternative_count: '2',
+          enumeration_complete: false,
+          work_steps: 1,
+          replay_cursor_alternative_index: '1'
+        });
+      }
+      return Promise.resolve(coveragePageResponse(runtimeCoveragePage(1)));
+    }
+  });
+  resumable.reset('portfolio-resumable', runtimeCoveragePage(2), { autoPrefetch: false });
+  assert.equal((await resumable.previous())?.alternative_index, '1');
+  assert.equal(replayCalls, 2, 'an incomplete slice yields before the exact retry');
+  resumable.dispose();
+
+  const stalled = new CoveragePortfolioPagerController({
+    loadNextPage: null,
+    loadMemberPage: () =>
+      Promise.resolve({
+        schema_version: 1,
+        runtime: 'clearra-wasm',
+        product_page_kind: 'coverage-portfolio',
+        state: 'work-budget-exhausted',
+        known_alternative_count: '2',
+        enumeration_complete: false,
+        work_steps: 0,
+        replay_cursor_alternative_index: '1'
+      })
+  });
+  stalled.reset('portfolio-zero-progress', runtimeCoveragePage(2), { autoPrefetch: false });
+  assert.equal(await stalled.previous(), null);
+  assert.match(stalled.snapshot().error, /no bounded progress/u);
+  assert.equal(stalled.snapshot().currentPage?.alternative_index, '2');
+  stalled.dispose();
+}
+
+async function verifySharedExactPageLoaderPreservesCancellationAndGeneration(): Promise<void> {
+  const expected = runtimeCoveragePage(1);
+  let calls = 0;
+  const loaded = await loadCoveragePortfolioExactPage({
+    alternativeIndex: '1',
+    memberPageNumber: '1',
+    expectation: {
+      setIdentitySha256: expected.set_identity_sha256,
+      candidateMapSha256: expected.candidate_map_sha256,
+      alternativeIndex: '1',
+      memberPageNumber: '1'
+    },
+    loadMemberPage: () => {
+      calls += 1;
+      return Promise.resolve(
+        calls === 1
+          ? {
+              schema_version: 1,
+              runtime: 'clearra-wasm',
+              product_page_kind: 'coverage-portfolio',
+              state: 'work-budget-exhausted',
+              known_alternative_count: '2',
+              enumeration_complete: false,
+              work_steps: 1,
+              replay_cursor_alternative_index: '1'
+            }
+          : coveragePageResponse(expected)
+      );
+    }
+  });
+  assert.equal(loaded?.alternative_index, '1');
+  assert.equal(calls, 2, 'every exact-page consumer resumes the shared bounded replay contract');
+
+  const cancelled = await loadCoveragePortfolioExactPage({
+    alternativeIndex: '1',
+    memberPageNumber: '1',
+    expectation: {
+      setIdentitySha256: expected.set_identity_sha256,
+      alternativeIndex: '1',
+      memberPageNumber: '1'
+    },
+    loadMemberPage: () => Promise.resolve({
+      schema_version: 1,
+      runtime: 'clearra-desktop',
+      product_page_kind: 'coverage-portfolio',
+      state: 'cancelled',
+      known_alternative_count: '1',
+      enumeration_complete: false,
+      work_steps: 0,
+      replay_cursor_alternative_index: null
+    })
+  });
+  assert.equal(cancelled, null, 'a cancelled replay never publishes a page');
+
+  let current = true;
+  const deferredPage = deferred<ClearraProductPageWorkerPayload>();
+  const staleLoad = loadCoveragePortfolioExactPage({
+    alternativeIndex: '1',
+    memberPageNumber: '1',
+    expectation: {
+      setIdentitySha256: expected.set_identity_sha256,
+      alternativeIndex: '1',
+      memberPageNumber: '1'
+    },
+    isCurrent: () => current,
+    loadMemberPage: () => deferredPage.promise
+  });
+  current = false;
+  deferredPage.resolve(coveragePageResponse(expected));
+  assert.equal(await staleLoad, null, 'a replaced generation never publishes its late page');
+}
+
+async function verifyCancelledPortfolioPrefetchDoesNotForgeSealedEnumeration(): Promise<void> {
+  const controller = new CoveragePortfolioPagerController({
+    loadNextPage: () =>
+      Promise.resolve({
+        schema_version: 1,
+        runtime: 'clearra-desktop',
+        product_page_kind: 'coverage-portfolio',
+        state: 'cancelled',
+        known_alternative_count: '1',
+        enumeration_complete: false,
+        work_steps: 0,
+        replay_cursor_alternative_index: null
+      }),
+    loadMemberPage: null
+  });
+  controller.reset('portfolio-cancelled-prefetch', runtimeCoveragePage(1), {
+    autoPrefetch: true
+  });
+  await settlePromises();
+  assert.equal(controller.snapshot().enumerationSealed, false);
+  assert.equal(controller.snapshot().prefetchedPage, null);
+  assert.equal(controller.snapshot().error, '');
   controller.dispose();
 }
 

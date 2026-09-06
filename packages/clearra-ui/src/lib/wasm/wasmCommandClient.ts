@@ -290,7 +290,9 @@ export type ClearraPcScoreFieldPayload = {
 };
 
 export type ClearraPcScoreFieldSummaryPayload = {
-  field_contract: 'pc-score-solution-field-average.v1';
+  field_contract:
+    | 'pc-score-solution-field-average.v1'
+    | 'build-solution-field-average.v1';
   ordering: 'normalized-solution-field-order';
   solution_field_average_basis: 'whole-materialized-pattern-universe-failed-pc-zero';
   score_evaluation_basis: 'all-traces';
@@ -349,7 +351,37 @@ export type ClearraPcPathFamilyPayload = {
   materialized_pattern_count: string;
   witness_count: string;
   complete: true;
+  canonical_selection: 'smallest-canonical-candidate-id';
+  canonical_witness: ClearraPcPathWitnessPayload | null;
   witnesses: ClearraPcPathWitnessPayload[];
+} & Partial<ClearraPcReplayPageMetadata>;
+
+export type ClearraPcReplayPageMetadata = {
+  page_contract: 'pc-replay-member-page.v1';
+  page_source_available: true;
+  page_source_identity_sha256: string;
+  geometry_count: string;
+  geometry_page_number: string;
+  candidate_id: string;
+  geometry_witness_count: string;
+  geometry_pattern_count: string;
+  member_page_number: string;
+  member_page_count: string;
+};
+
+export type ClearraPcReplayRuntimePage = ClearraPcReplayPageMetadata & {
+  witness_count: string;
+  materialized_pattern_count: string;
+  witnesses: ClearraPcPathWitnessPayload[];
+};
+
+export type ClearraBuildPathFamilyPayload = Omit<
+  ClearraPcPathFamilyPayload,
+  'witness_contract'
+> & {
+  witness_contract: 'build-path-witness.v1';
+  target_terminal_board_mask: string;
+  mirrored_terminal_board_mask?: string | null;
 };
 
 export type ClearraParityReportPagePayload = {
@@ -488,11 +520,27 @@ export type ClearraProductResultPayload =
       };
     }
   | {
+      contract: 'build.highest-score-minimum-set';
+      result_kind: 'build-probability-score-minimum.v1';
+      content: {
+        payload_kind: 'coverage-portfolio';
+        payload: ClearraCoveragePortfolioPagePayload;
+      };
+    }
+  | {
       contract: 'pc.path';
       result_kind: 'pc-path-family.v2';
       content: {
         payload_kind: 'pc-path-family';
         payload: ClearraPcPathFamilyPayload;
+      };
+    }
+  | {
+      contract: 'build.complete-replay-paths';
+      result_kind: 'build-path-family.v1';
+      content: {
+        payload_kind: 'build-path-family';
+        payload: ClearraBuildPathFamilyPayload;
       };
     }
   | {
@@ -504,8 +552,16 @@ export type ClearraProductResultPayload =
       };
     }
   | {
-      contract: 'pc.score-finder';
-      result_kind: 'pc-fixed-score-witness.v2';
+      contract: 'build.field-average-score';
+      result_kind: 'build-field-average-score.v1';
+      content: {
+        payload_kind: 'pc-score-field-summary';
+        payload: ClearraPcScoreFieldSummaryPayload;
+      };
+    }
+  | {
+      contract: 'pc.score-finder' | 'build.fixed-queue-maximum-score';
+      result_kind: 'pc-fixed-score-witness.v2' | 'build-fixed-score-witness.v1';
       content: {
         payload_kind: 'score-pattern-winner-family';
         payload: {
@@ -515,6 +571,8 @@ export type ClearraProductResultPayload =
           informational_attack_basis: string;
           page_size: string;
           winner_count: string;
+          canonical_selection: 'smallest-canonical-candidate-id';
+          canonical_winner: ClearraScorePatternWinnerPayload;
           winners: ClearraScorePatternWinnerPayload[];
         };
       };
@@ -561,6 +619,13 @@ export type ClearraProductPageWorkerPayload =
   | {
       schema_version: 1;
       runtime: 'clearra-wasm' | 'clearra-desktop';
+      product_page_kind: 'pc-replay';
+      state: 'page';
+      page: ClearraPcReplayRuntimePage;
+    }
+  | {
+      schema_version: 1;
+      runtime: 'clearra-wasm' | 'clearra-desktop';
       product_page_kind: 'coverage-portfolio';
       state: 'page';
       page: ClearraCoveragePortfolioRuntimePage;
@@ -572,6 +637,8 @@ export type ClearraProductPageWorkerPayload =
       state: 'work-budget-exhausted' | 'cancelled' | 'sealed';
       known_alternative_count: string;
       enumeration_complete: boolean;
+      work_steps: number;
+      replay_cursor_alternative_index?: string | null;
     }
   | {
       schema_version: 1;
@@ -1168,14 +1235,16 @@ export function postLoadProductMemberPage(
   worker: Worker,
   requestId: number,
   alternativeIndex: string,
-  memberPageNumber: string
+  memberPageNumber: string,
+  maximumWorkSteps = 10_000
 ) {
   worker.postMessage({
     type: 'load_product_page',
     requestId,
     action: 'get',
     alternativeIndex,
-    memberPageNumber
+    memberPageNumber,
+    maximumWorkSteps
   });
 }
 

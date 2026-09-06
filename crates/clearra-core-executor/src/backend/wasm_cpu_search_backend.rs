@@ -14,21 +14,33 @@ use crate::{resource::WasmCpuTerminalResourceAuthority, CoreExecutionError, Core
 use super::wasm_cpu::WasmWebGpuSearchSession;
 use super::wasm_cpu::{ExactSearchAdvance, WasmExactSearchError, WasmExactSearchSession};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WasmCpuSearchError {
-    Unsupported { reason: &'static str },
-    InvalidProblem { reason: &'static str },
-    ResourceAdmission { resource_report: ResourceReport },
+    Unsupported {
+        reason: &'static str,
+    },
+    InvalidProblem {
+        reason: &'static str,
+    },
+    ResourceAdmission {
+        resource_report: Box<ResourceReport>,
+    },
     WorkerPoolUnavailable,
     Cancelled,
 }
 
 impl WasmCpuSearchError {
-    pub const fn reason(self) -> &'static str {
+    pub fn resource_admission(resource_report: ResourceReport) -> Self {
+        Self::ResourceAdmission {
+            resource_report: Box::new(resource_report),
+        }
+    }
+
+    pub fn reason(&self) -> &'static str {
         match self {
             Self::Unsupported { reason } | Self::InvalidProblem { reason } => reason,
             Self::ResourceAdmission { resource_report } => {
-                resource_admission_reason(resource_report)
+                resource_admission_reason(**resource_report)
             }
             Self::WorkerPoolUnavailable => "wasm_cpu_worker_pool_unavailable",
             Self::Cancelled => "wasm_cpu_search_cancelled",
@@ -38,7 +50,7 @@ impl WasmCpuSearchError {
     pub fn into_core_execution_error(self) -> CoreExecutionError {
         match self {
             Self::ResourceAdmission { resource_report } => {
-                CoreExecutionError::resource_incomplete("execution-admission", 0, resource_report)
+                CoreExecutionError::resource_incomplete("execution-admission", 0, *resource_report)
             }
             Self::Unsupported { reason } => {
                 CoreExecutionError::RuntimeUnavailable { component: reason }
@@ -91,6 +103,8 @@ pub enum WasmProductSearchBackend {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Completed product results move directly across the public backend boundary.
+#[allow(clippy::large_enum_variant)]
 pub enum WasmCpuSearchAdvance {
     Pending,
     Completed(CoreExecutionResult),
@@ -132,6 +146,8 @@ impl WasmCpuSearchTerminalAuthority<'_> {
     }
 }
 
+// A search session owns one backend state for its full lifetime.
+#[allow(clippy::large_enum_variant)]
 enum WasmSearchSessionInner {
     Cpu(WasmExactSearchSession),
     #[cfg(feature = "webgpu-search")]
@@ -177,7 +193,7 @@ impl WasmCpuSearchSession {
     /// clone but does not establish terminal public-memory authority. Use
     /// `new_shared_under_authority` for an authoritative typed score session.
     pub fn new_shared(problem: Arc<SearchProblem>) -> Result<Self, WasmCpuSearchError> {
-        validate_shared_terminal_problem(problem.as_ref(), false)?;
+        validate_shared_terminal_problem(problem.as_ref(), false, false)?;
         Ok(Self {
             inner: WasmSearchSessionInner::Cpu(
                 WasmExactSearchSession::new_shared(problem).map_err(map_error)?,
@@ -194,7 +210,9 @@ impl WasmCpuSearchSession {
         checked_external_retained_upper_bound_bytes: u128,
         authority: &WasmCpuTerminalResourceAuthority,
     ) -> Result<Self, WasmCpuSearchError> {
-        validate_shared_terminal_problem(problem.as_ref(), true)?;
+        let allow_native_parallel =
+            cfg!(not(target_family = "wasm")) && problem.objective().score().requested();
+        validate_shared_terminal_problem(problem.as_ref(), true, allow_native_parallel)?;
         Ok(Self {
             inner: WasmSearchSessionInner::Cpu(
                 WasmExactSearchSession::new_shared_under_authority(
@@ -309,10 +327,18 @@ impl WasmCpuSearchBackend {
     }
 
     pub fn distributed_execution_is_worthwhile(problem: &SearchProblem) -> bool {
-        !problem
+        if problem
             .queue_observation_policy()
             .requires_observation_policy()
-            && required_piece_count(problem) >= 7
+        {
+            return false;
+        }
+        let required_piece_count = required_piece_count(problem);
+        // Preparation is intentionally permissive. The compiled Geometry
+        // family and `into_parallel_plan` are the authorities for whether two
+        // distinct branches really exist; this pre-gate only rejects a request
+        // that cannot describe more than one unit of potential work.
+        estimated_pre_geometry_parallel_work(problem, required_piece_count) > 1
     }
 
     pub fn execute_with_control(
@@ -415,6 +441,16 @@ impl WasmCpuSearchBackend {
             Option<WasmCpuSearchTerminalAuthority<'_>>,
         ) -> R,
     ) -> R {
+        let worker_count = runtime_worker_count(problem.backend_policy().workers());
+        let native_score_parallel_authorized =
+            cfg!(not(target_family = "wasm")) && problem.objective().score().requested();
+        #[cfg(not(feature = "parallel"))]
+        if native_score_parallel_authorized
+            && worker_count > 1
+            && Self::distributed_execution_is_worthwhile(problem.as_ref())
+        {
+            return terminal(Err(WasmCpuSearchError::WorkerPoolUnavailable), None);
+        }
         let mut session = match WasmCpuSearchSession::new_shared_under_authority(
             problem,
             checked_external_retained_upper_bound_bytes,
@@ -423,6 +459,31 @@ impl WasmCpuSearchBackend {
             Ok(session) => session,
             Err(error) => return terminal(Err(error), None),
         };
+        // For native typed score, this is the same deterministic exact-family
+        // decomposition used by ordinary native PC search. The one request-
+        // scoped child lease owns all N compute slots, so this does not create
+        // nested resource owners: parallel_search submits N-1 pool jobs, runs
+        // one branch on the caller, then restores canonical branch order before
+        // the terminal callback. Typed tiling and WASM shared sessions retain
+        // their existing one-compute-slot serial authority.
+        #[cfg(feature = "parallel")]
+        if native_score_parallel_authorized && worker_count > 1 {
+            match session.execute_parallel_if_worthwhile(worker_count, control) {
+                Ok(Some(result)) => {
+                    return terminal(
+                        Ok(result),
+                        Some(WasmCpuSearchTerminalAuthority { session: &session }),
+                    )
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return terminal(
+                        Err(error),
+                        Some(WasmCpuSearchTerminalAuthority { session: &session }),
+                    )
+                }
+            }
+        }
         let result = loop {
             match session.advance(4096, control) {
                 Err(error) => break Err(error),
@@ -441,6 +502,7 @@ impl WasmCpuSearchBackend {
 fn validate_shared_terminal_problem(
     problem: &SearchProblem,
     allow_typed_tiling: bool,
+    allow_native_parallel: bool,
 ) -> Result<(), WasmCpuSearchError> {
     use clearra_pc_graph::request::{RequestedSearchBackend, WorkerPolicy};
 
@@ -463,10 +525,12 @@ fn validate_shared_terminal_problem(
             });
         }
     }
-    if matches!(
-        problem.backend_policy().worker_policy(),
-        WorkerPolicy::Fixed(workers) if workers > 1
-    ) {
+    if !allow_native_parallel
+        && matches!(
+            problem.backend_policy().worker_policy(),
+            WorkerPolicy::Fixed(workers) if workers > 1
+        )
+    {
         return Err(WasmCpuSearchError::Unsupported {
             reason: "shared_terminal_memory_authority_requires_single_worker",
         });
@@ -483,12 +547,29 @@ fn should_use_webgpu(problem: &SearchProblem) -> bool {
 }
 
 fn required_piece_count(problem: &SearchProblem) -> usize {
+    if let Some(exact_pieces) = problem.exact_pieces() {
+        return exact_pieces;
+    }
     let width = usize::from(problem.initial_board().width());
     let height = usize::from(problem.visible_height());
     let board_cells = width.saturating_mul(height);
     let required_cells =
         board_cells.saturating_sub(problem.initial_board().occupied_mask().count_ones() as usize);
     required_cells / 4
+}
+
+fn estimated_pre_geometry_parallel_work(
+    problem: &SearchProblem,
+    required_piece_count: usize,
+) -> usize {
+    let pattern_count = problem
+        .piece_source()
+        .materialized_universe()
+        .map_or(0, |universe| universe.pattern_count());
+    let subset_states = 1usize
+        .checked_shl(required_piece_count.min(usize::BITS as usize - 1) as u32)
+        .unwrap_or(usize::MAX);
+    pattern_count.saturating_mul(subset_states)
 }
 
 fn explicit_gpu_unavailable_reason(problem: &SearchProblem) -> Option<&'static str> {
@@ -533,7 +614,7 @@ fn map_error(error: WasmExactSearchError) -> WasmCpuSearchError {
             WasmCpuSearchError::InvalidProblem { reason }
         }
         WasmExactSearchError::ResourceAdmission(resource_report) => {
-            WasmCpuSearchError::ResourceAdmission { resource_report }
+            WasmCpuSearchError::resource_admission(*resource_report)
         }
         WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
     }
@@ -666,6 +747,65 @@ mod coverage_summary_tests {
         ProblemCompiler::compile_scenario_pc(&query).expect("default Auto score problem")
     }
 
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn seven_piece_shared_score_problem(
+        execution_policy: PcExecutionPolicy,
+    ) -> clearra_problem::SearchProblem {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0x1c07_01c07),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::S,
+                PieceKind::T,
+                PieceKind::O,
+                PieceKind::I,
+                PieceKind::L,
+                PieceKind::J,
+                PieceKind::Z,
+            ])),
+            PieceWindow::new(7),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(7))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_retained_trace_limit(1)
+        .with_objective(ObjectivePolicy::all().with_score_summary())
+        .with_execution_policy(execution_policy);
+        ProblemCompiler::compile_scenario_pc(&query).expect("seven-piece shared score problem")
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn execute_parent_authorized_shared_score(
+        execution_policy: PcExecutionPolicy,
+    ) -> (usize, crate::CoreExecutionResult) {
+        let problem = seven_piece_shared_score_problem(execution_policy);
+        let worker_count = problem.backend_policy().workers();
+        let authority =
+            WasmCpuTerminalResourceAuthority::try_acquire_full_capacity_with_compute_units(
+                worker_count,
+            )
+            .expect("request-level terminal resource authority");
+        assert_eq!(
+            authority.compute_capacity_units(),
+            u32::try_from(worker_count).expect("host worker count fits resource authority")
+        );
+        let problem = Arc::new(problem);
+        let result = WasmCpuSearchBackend::execute_shared_under_authority_with_control_and_terminal(
+            Arc::clone(&problem),
+            16 * 1024 * 1024,
+            &authority,
+            &ExecutionControl::default(),
+            |result, terminal_authority| {
+                let result = result.expect("shared score search completes");
+                terminal_authority
+                    .expect("shared score terminal keeps its child lease")
+                    .validate_public_result_memory(&result)
+                    .expect("shared score result fits the parent authority");
+                result
+            },
+        );
+        (worker_count, result)
+    }
+
     #[test]
     fn score_exact_search_uses_full_configured_cap_while_generic_keeps_projection() {
         let _resource_guard = score_resource_test_guard();
@@ -713,6 +853,65 @@ mod coverage_summary_tests {
         );
 
         assert!(result.solution_found());
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    #[test]
+    fn parent_authorized_native_score_workers_preserve_the_canonical_payload() {
+        let _resource_guard = score_resource_test_guard();
+        let base = PcExecutionPolicy::mvp_default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_allow_backend_fallback(false)
+            .with_runtime_webgpu_available(false);
+        let (_, serial) = execute_parent_authorized_shared_score(base.clone().with_workers(1));
+        let (fixed_workers, fixed) = execute_parent_authorized_shared_score(
+            base.clone()
+                .with_workers(2)
+                .with_worker_hardware_limit(2)
+                .with_use_all_logical_processors(true),
+        );
+        let (auto_workers, auto) = execute_parent_authorized_shared_score(
+            base.with_automatic_worker_limit(2)
+                .with_worker_hardware_limit(2)
+                .with_use_all_logical_processors(true),
+        );
+
+        for candidate in [&fixed, &auto] {
+            assert_eq!(
+                candidate.normalized_solution_identities(),
+                serial.normalized_solution_identities()
+            );
+            assert_eq!(
+                candidate.normalized_solution_keys(),
+                serial.normalized_solution_keys()
+            );
+            assert_eq!(
+                candidate.normalized_solution_coverages(),
+                serial.normalized_solution_coverages()
+            );
+            assert_eq!(
+                candidate.exact_scoring_execution_batches(),
+                serial.exact_scoring_execution_batches()
+            );
+            assert_eq!(
+                candidate.field("normalized_solution_set_hash"),
+                serial.field("normalized_solution_set_hash")
+            );
+        }
+
+        // A single-vCPU test host legitimately clamps both policies to one.
+        // Everywhere else this proves that the parent-authorized path, rather
+        // than only the generic path, entered the canonical branch executor.
+        for (workers, result) in [(fixed_workers, &fixed), (auto_workers, &auto)] {
+            if workers > 1 {
+                assert_eq!(result.usize_field("workers_used"), Some(workers));
+                assert_eq!(result.bool_field("cpu_parallel_execution"), Some(true));
+                assert_eq!(
+                    result.field("cpu_parallel_decision_reason"),
+                    Some("parallel-immutable-family-queue")
+                );
+            }
+        }
     }
 
     #[test]
@@ -791,11 +990,19 @@ mod coverage_summary_tests {
             clearra_core_domain::resource::ExecutionAvailabilityState::Available
         );
         drop(authority);
-        let reacquired = WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
-            .expect("dropping the parent releases full capacity");
         let problem = Arc::new(one_piece_default_auto_score_problem());
+        let expected_compute = super::runtime_worker_count(problem.backend_policy().workers());
+        let reacquired =
+            WasmCpuTerminalResourceAuthority::try_acquire_full_capacity_with_compute_units(
+                expected_compute,
+            )
+            .expect("dropping the parent releases full capacity");
+        assert_eq!(
+            reacquired.compute_capacity_units(),
+            u32::try_from(expected_compute).expect("host worker count fits")
+        );
         let session = WasmCpuSearchSession::new_shared_under_authority(problem, 4_096, &reacquired)
-            .expect("default Auto score is normalized to the serial CPU child");
+            .expect("default Auto score borrows its complete admitted CPU width");
         assert_eq!(
             session.admitted_memory_cap_bytes(),
             reacquired.memory_capacity_bytes(),
@@ -803,6 +1010,17 @@ mod coverage_summary_tests {
         );
         drop(session);
         drop(reacquired);
+    }
+
+    #[test]
+    fn terminal_parent_rejects_a_child_wider_than_its_atomic_compute_reservation() {
+        let _resource_guard = score_resource_test_guard();
+        let authority = WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
+            .expect("single-compute parent authority");
+        assert!(
+            authority.try_acquire_compute_child(2).is_err(),
+            "a child cannot silently overcommit the compute width held by its parent"
+        );
     }
 
     #[test]

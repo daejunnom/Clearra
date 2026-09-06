@@ -20,6 +20,9 @@ pub(crate) use free_list_allocator::FreeListAllocator;
 pub(crate) enum AllocationType {
     Free,
     Linear,
+    // Only the optional Vulkan backend constructs non-linear image allocations.
+    // Keep the shared enum/visualizer layout intact for D3D12-only builds.
+    #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
     NonLinear,
 }
 

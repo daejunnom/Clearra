@@ -108,7 +108,7 @@ fn run_forward_search(
     {
         let report = ForwardSearchSession::new(query)
             .and_then(|session| session.run_to_completion(context.execution_control));
-        return match report {
+        match report {
             Ok(report) => forward_search_response(report, response_kind),
             Err(ForwardSearchError::Cancelled) => AppResponse::failed(
                 AppStatus::ExecutionFailed,
@@ -121,7 +121,7 @@ fn run_forward_search(
                     format!("invalid forward-search request: {error:?}"),
                 ),
             ),
-        };
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
     let report = run_native_forward_search(

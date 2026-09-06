@@ -487,6 +487,9 @@ copy_root_input() {
 
 validate_candidate() {
   validate_root=$1
+  validate_digester=$2
+  [ -f "$validate_digester" ] && [ ! -L "$validate_digester" ] || fail 77
+  require_exact_hash "$validate_digester" "$expected_digester_sha256"
   [ -d "$validate_root" ] && [ ! -L "$validate_root" ] || fail 77
   [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$validate_root")" = '0:0:755' ] || fail 77
   validate_unsafe=$(/usr/bin/find "$validate_root" -xdev \
@@ -532,7 +535,7 @@ validate_candidate() {
   [ "$(/usr/bin/stat -c '%s' -- "$validate_config")" = "$expected_config_size" ] || fail 65
   require_exact_hash "$validate_config" "$expected_config_sha256"
 
-  validate_digest=$(/usr/bin/python3 "$input_root/clearra-release-tree-digest.py" "$validate_root") || fail 65
+  validate_digest=$(/usr/bin/python3 "$validate_digester" "$validate_root") || fail 65
   [ "$validate_digest" = "$expected_tree_sha256" ] || fail 65
 }
 
@@ -565,7 +568,7 @@ assemble_candidate() {
     "$assemble_root/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
     "$assemble_root/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs" \
     "$assemble_root/apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run"
-  validate_candidate "$assemble_root"
+  validate_candidate "$assemble_root" "$input_root/clearra-release-tree-digest.py"
 }
 
 syntax_check_candidate() {
@@ -862,8 +865,9 @@ if [ "$cleanup_only" -eq 1 ]; then
     [ ! -L "$candidate_path" ] || fail 73
     [ "$(/usr/bin/readlink -f -- "$candidate_path")" = "$candidate_path" ] || fail 73
     [ "$baseline_current_resolved" != "$candidate_path" ] || fail 73
-    validate_candidate "$candidate_path"
-    [ "$(/usr/bin/python3 "$upload_root/clearra-release-tree-digest.py" "$candidate_path")" = "$expected_tree_sha256" ] || fail 65
+    cleanup_digester=$upload_root/clearra-release-tree-digest.py
+    validate_candidate "$candidate_path" "$cleanup_digester"
+    [ "$(/usr/bin/python3 "$cleanup_digester" "$candidate_path")" = "$expected_tree_sha256" ] || fail 65
     /usr/bin/rm -rf -- "$candidate_path"
     [ ! -e "$candidate_path" ] && [ ! -L "$candidate_path" ] || fail 73
   fi
@@ -902,7 +906,7 @@ require_exact_hash "$input_root/server-config.mjs" "$expected_config_sha256"
 [ "$(/usr/bin/stat -c '%d' -- "$stage_root")" = "$(/usr/bin/stat -c '%d' -- "$release_root")" ] || fail 77
 
 if [ -e "$candidate_path" ] || [ -L "$candidate_path" ]; then
-  validate_candidate "$candidate_path"
+  validate_candidate "$candidate_path" "$input_root/clearra-release-tree-digest.py"
 else
   /usr/bin/mkdir -m 0700 -- "$test_parent"
   assemble_candidate "$test_parent/$release_id"
@@ -919,7 +923,7 @@ else
   [ ! -e "$candidate_path" ] && [ ! -L "$candidate_path" ] || fail 73
   /usr/bin/mv -T -n -- "$final_parent/$release_id" "$candidate_path"
   [ ! -e "$final_parent/$release_id" ] && [ ! -L "$final_parent/$release_id" ] || fail 73
-  validate_candidate "$candidate_path"
+  validate_candidate "$candidate_path" "$input_root/clearra-release-tree-digest.py"
 fi
 
 require_baseline_unchanged
@@ -932,7 +936,7 @@ require_root_directory_0755 /usr/local/libexec
 install_canonical_tools
 [ "$("$canonical_digester" "$candidate_path")" = "$expected_tree_sha256" ] || fail 65
 
-validate_candidate "$candidate_path"
+validate_candidate "$candidate_path" "$input_root/clearra-release-tree-digest.py"
 require_baseline_unchanged
 [ "$(/usr/bin/python3 "$input_root/clearra-release-tree-digest.py" "$baseline_current_resolved")" = "$expected_active_tree_sha256" ] || fail 73
 [ "$("$canonical_digester" "$baseline_current_resolved")" = "$expected_active_tree_sha256" ] || fail 73

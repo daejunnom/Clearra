@@ -182,6 +182,7 @@ function Invoke-NoProductDebtGate {
 
     Assert-ClearraRepositoryArtifactPolicy $Root
     & (Join-Path $Root 'scripts/test_artifact_path_policy.ps1') -RepositoryRoot $Root
+    & (Join-Path $Root 'scripts/test_execution_surface_policy.ps1')
     if (-not $?) {
         throw 'NoProductDebt artifact path policy tests failed'
     }

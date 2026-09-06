@@ -4,8 +4,9 @@ use std::{fmt::Write, sync::Arc};
 
 use clearra_app::{
     CoveragePortfolioAlternativeSet, CoveragePortfolioPageStore, PortfolioAlternativeAdvance,
-    PortfolioAlternativeError, PortfolioAlternativePage, ProductPageSourceOwner,
-    PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
+    PortfolioAlternativeError, PortfolioAlternativePage, PortfolioPageLoadAdvance,
+    PortfolioPageLoadState, ProductPageSourceOwner, PORTFOLIO_MEMBER_PAGE_CONTRACT,
+    PORTFOLIO_MEMBER_PAGE_SIZE,
 };
 use clearra_host_contract::{
     AppResponse, AppStatus, BackendReport, CapabilityReport, ContinuationReport, Diagnostic,
@@ -161,6 +162,36 @@ pub fn serialize_coverage_portfolio_advance_state(
             "enumeration_complete",
             advance.checkpoint().enumeration_complete(),
         );
+        object.number("work_steps", advance.work_steps());
+        object.finish();
+    })
+}
+
+/// Serializes one incomplete/cancelled exact-identity replay slice. A page is
+/// serialized only by `serialize_coverage_portfolio_retained_page` after App
+/// has committed the exact target into the retained window.
+pub fn serialize_coverage_portfolio_load_advance_state(
+    store: &CoveragePortfolioPageStore,
+    advance: PortfolioPageLoadAdvance,
+) -> Result<String, WasmCommandRuntimeError> {
+    if advance.state() == PortfolioPageLoadState::Page || advance.retained_slot().is_some() {
+        return Err(WasmCommandRuntimeError::new(
+            "E_WASM_PRODUCT_PAGE_PROJECTION",
+            String::new(),
+        ));
+    }
+    let known_alternative_count = store.known_alternative_count_decimal();
+    let replay_cursor = store.replay_cursor_alternative_index_decimal();
+    serialize_json(|output| {
+        let mut object = JsonObject::begin(output);
+        object.number("schema_version", 1);
+        object.string("runtime", "clearra-wasm");
+        object.string("product_page_kind", "coverage-portfolio");
+        object.string("state", advance.state().as_str());
+        object.string("known_alternative_count", &known_alternative_count);
+        object.boolean("enumeration_complete", store.enumeration_complete());
+        object.number("work_steps", advance.work_steps());
+        object.optional_string("replay_cursor_alternative_index", replay_cursor.as_deref());
         object.finish();
     })
 }
@@ -191,6 +222,58 @@ pub fn serialize_parity_report_exhausted() -> Result<String, WasmCommandRuntimeE
         object.string("state", "exhausted");
         object.finish();
     })
+}
+
+pub fn serialize_pc_replay_page(
+    store: &mut clearra_app::PcReplayPageStore,
+    geometry_page_number: usize,
+    member_page_number: usize,
+) -> Result<String, WasmCommandRuntimeError> {
+    let page = store
+        .page(
+            geometry_page_number,
+            member_page_number,
+            &clearra_core_domain::execution_cancellation::ExecutionControl::default(),
+        )
+        .map_err(|reason| WasmCommandRuntimeError::new("E_WASM_PRODUCT_PAGE", reason))?;
+    serialize_json(|output| {
+        let mut object = JsonObject::begin(output);
+        object.number("schema_version", 1);
+        object.string("runtime", "clearra-wasm");
+        object.string("product_page_kind", "pc-replay");
+        object.string("state", "page");
+        object.object("page", |nested| {
+            write_pc_replay_page_metadata(nested, &page.metadata);
+            nested.string("witness_count", &page.witness_count);
+            nested.string(
+                "materialized_pattern_count",
+                &page.materialized_pattern_count,
+            );
+            nested.array("witnesses", |output| {
+                write_object_array(output, &page.witnesses, write_pc_path_witness)
+            });
+        });
+        object.finish();
+    })
+}
+
+fn write_pc_replay_page_metadata(
+    object: &mut JsonObject<'_>,
+    metadata: &clearra_host_contract::PcReplayPageMetadata,
+) {
+    object.string("page_contract", &metadata.page_contract);
+    object.boolean("page_source_available", metadata.page_source_available);
+    object.string(
+        "page_source_identity_sha256",
+        &metadata.page_source_identity_sha256,
+    );
+    object.string("geometry_count", &metadata.geometry_count);
+    object.string("geometry_page_number", &metadata.geometry_page_number);
+    object.string("candidate_id", &metadata.candidate_id);
+    object.string("geometry_witness_count", &metadata.geometry_witness_count);
+    object.string("geometry_pattern_count", &metadata.geometry_pattern_count);
+    object.string("member_page_number", &metadata.member_page_number);
+    object.string("member_page_count", &metadata.member_page_count);
 }
 
 fn product_page_error(error: PortfolioAlternativeError) -> WasmCommandRuntimeError {
@@ -425,10 +508,12 @@ fn governed_json_returned_carrier_inline_bytes_for_route(route: GovernedJsonRout
     }) as u128
 }
 
+#[cfg(test)]
 pub(crate) fn governed_json_returned_carrier_inline_bytes() -> u128 {
     governed_json_returned_carrier_inline_bytes_for_route(GovernedJsonRoute::DirectReturn)
 }
 
+#[cfg(test)]
 pub(crate) fn governed_json_abi_storage_carrier_inline_bytes() -> u128 {
     governed_json_returned_carrier_inline_bytes_for_route(GovernedJsonRoute::AbiOptionStorage)
 }
@@ -459,6 +544,9 @@ pub fn serialize_governed_worker_events(
 /// Stages every fallible JSON operation while the original governed event
 /// owner remains intact. The worker runtime uses the returned owner to restore
 /// its completed batch transactionally when admission or allocation fails.
+// The large Err intentionally returns the exact non-cloneable owner without a
+// new allocation so the caller can restore the transaction after OOM.
+#[allow(clippy::result_large_err)]
 pub(crate) fn serialize_governed_worker_events_preserving_owner(
     governed: GovernedWasmWorkerEvents,
 ) -> Result<GovernedWasmJson, (WasmCommandRuntimeError, GovernedWasmWorkerEvents)> {
@@ -468,6 +556,9 @@ pub(crate) fn serialize_governed_worker_events_preserving_owner(
     )
 }
 
+// ABI storage has the same allocation-free owner-restoration requirement as
+// the direct governed serialization path above.
+#[allow(clippy::result_large_err)]
 pub(crate) fn serialize_governed_worker_events_for_abi_preserving_owner(
     governed: GovernedWasmWorkerEvents,
 ) -> Result<GovernedWasmJson, (WasmCommandRuntimeError, GovernedWasmWorkerEvents)> {
@@ -477,6 +568,9 @@ pub(crate) fn serialize_governed_worker_events_for_abi_preserving_owner(
     )
 }
 
+// This common route must return the original governed owner verbatim on every
+// fallible stage; boxing it would itself require the allocation being guarded.
+#[allow(clippy::result_large_err)]
 fn serialize_governed_worker_events_preserving_owner_for_route(
     governed: GovernedWasmWorkerEvents,
     route: GovernedJsonRoute,
@@ -1245,9 +1339,43 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
         ProductResultPayloadContent::PcPathFamily(family) => {
             nested.string("payload_kind", "pc-path-family");
             nested.object("payload", |family_object| {
+                if let Some(metadata) = family.page_metadata() {
+                    write_pc_replay_page_metadata(family_object, metadata);
+                }
                 family_object.string("witness_contract", family.witness_contract());
                 family_object.string("ordering", family.ordering());
                 family_object.string("problem_id", family.problem_id());
+                family_object.string(
+                    "materialized_pattern_count",
+                    family.materialized_pattern_count(),
+                );
+                family_object.string("witness_count", family.witness_count());
+                family_object.boolean("complete", family.complete());
+                family_object.string("canonical_selection", family.canonical_selection());
+                family_object.optional_object(
+                    "canonical_witness",
+                    family.canonical_witness(),
+                    write_pc_path_witness,
+                );
+                family_object.array("witnesses", |output| {
+                    write_object_array(output, family.witnesses(), write_pc_path_witness)
+                });
+            });
+        }
+        ProductResultPayloadContent::BuildPathFamily(family) => {
+            nested.string("payload_kind", "build-path-family");
+            nested.object("payload", |family_object| {
+                family_object.string("witness_contract", family.witness_contract());
+                family_object.string("ordering", family.ordering());
+                family_object.string("problem_id", family.problem_id());
+                family_object.string(
+                    "target_terminal_board_mask",
+                    family.target_terminal_board_mask(),
+                );
+                family_object.optional_string(
+                    "mirrored_terminal_board_mask",
+                    family.mirrored_terminal_board_mask(),
+                );
                 family_object.string(
                     "materialized_pattern_count",
                     family.materialized_pattern_count(),

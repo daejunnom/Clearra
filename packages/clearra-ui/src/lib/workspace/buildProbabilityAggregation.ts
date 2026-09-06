@@ -1,4 +1,27 @@
-import type { ClearraWasmSearchReport } from '../wasm/wasmCommandClient';
+import type { ClearraProductResultPayload, ClearraWasmSearchReport } from '../wasm/wasmCommandClient';
+import { validateProductResultPayload } from './productResultPager';
+
+/** Build cover owns a typed product result, not a legacy SearchReport. */
+export function buildCoveragePortfolioSummary(payload: ClearraProductResultPayload | null | undefined): {
+  sourceCandidateCount: number;
+  selectedCandidateCount: number;
+  patternCount: number;
+  successfulPatternCount: number;
+  successProbability: string;
+} | null {
+  if (!payload || payload.content.payload_kind !== 'build-coverage-portfolio-v2' ||
+      validateProductResultPayload(payload) !== null) return null;
+  const portfolio = payload.content.payload;
+  const sourceCandidateCount = canonicalCount(portfolio.source_candidate_count);
+  const selectedCandidateCount = canonicalCount(portfolio.selected_candidate_count);
+  const patternCount = canonicalCount(portfolio.pattern_count);
+  const successfulPatternCount = canonicalCount(portfolio.required_pattern_count);
+  if (sourceCandidateCount === null || selectedCandidateCount === null || patternCount === null ||
+      successfulPatternCount === null || selectedCandidateCount > sourceCandidateCount ||
+      successfulPatternCount > patternCount) return null;
+  return { sourceCandidateCount, selectedCandidateCount, patternCount, successfulPatternCount,
+    successProbability: portfolio.union_probability };
+}
 
 export type BuildProbabilityAggregation = 'buildability' | 'tiling' | 'spin';
 
@@ -26,6 +49,33 @@ export type BuildProbabilityAggregationAuthority =
         | 'missing-or-duplicate-result-aggregation'
         | 'invalid-result-aggregation'
         | 'request-result-aggregation-mismatch';
+    };
+
+export type BuildProbabilityCoverageAggregation =
+  | { state: 'pending'; reason: null }
+  | {
+      state: 'not-calculated';
+      sourceRowCount: number;
+      patternCount: number;
+      reason: null;
+    }
+  | {
+      state: 'authorized';
+      sourceRowCount: number;
+      patternCount: number;
+      successfulPatternCount: number;
+      failedPatternCount: number;
+      successProbability: string;
+      failedProbability: string;
+      complete: boolean;
+      reason: null;
+    }
+  | {
+      state: 'rejected';
+      reason:
+        | 'missing-or-duplicate-coverage-field'
+        | 'invalid-coverage-contract'
+        | 'coverage-result-mismatch';
     };
 
 /**
@@ -89,6 +139,167 @@ export function buildProbabilityAggregationAuthority(
     effective: reported,
     reason: null
   };
+}
+
+/**
+ * Projects the executor-owned, product-neutral PC/Build coverage aggregation.
+ *
+ * The presenter does not reconstruct coverage from candidate variants. Every
+ * displayed count and probability must agree with the one exact terminal
+ * summary and its typed report fields; malformed or cross-generation data is
+ * rejected as a unit. The request-side aggregation is joined separately before
+ * this projection is allowed to render.
+ */
+export function buildProbabilityCoverageAggregation(
+  report: Pick<
+    ClearraWasmSearchReport,
+    | 'summary_fields'
+    | 'coverage_calculated'
+    | 'probability_calculated'
+    | 'materialized_pattern_count'
+    | 'covered_pattern_count'
+    | 'coverage_probability'
+    | 'probability_complete'
+  > | null | undefined,
+  aggregation: BuildProbabilityAggregation
+): BuildProbabilityCoverageAggregation {
+  if (!report) return { state: 'pending', reason: null };
+
+  const exact = (key: string): string | null => {
+    const values = report.summary_fields
+      .filter(([field]) => field === key)
+      .map(([, value]) => value);
+    return values.length === 1 ? values[0] : null;
+  };
+  const requiredKeys = [
+    'coverage_aggregation_contract',
+    'coverage_aggregation_availability',
+    'coverage_aggregation_complete',
+    'coverage_aggregation_source_row_count',
+    'materialized_pattern_count',
+    'covered_pattern_count',
+    'failed_pattern_count',
+    'coverage_probability',
+    'failed_coverage_probability',
+    'materialized_probability_mass',
+    'coverage_probability_denominator',
+    'probability_complete'
+  ] as const;
+  const fields = Object.fromEntries(requiredKeys.map((key) => [key, exact(key)]));
+  if (Object.values(fields).some((value) => value === null)) {
+    return { state: 'rejected', reason: 'missing-or-duplicate-coverage-field' };
+  }
+  if (
+    fields.coverage_aggregation_contract !== 'pattern-coverage-aggregation.v1' ||
+    fields.coverage_probability_denominator !== 'full-materialized-pattern-universe'
+  ) {
+    return { state: 'rejected', reason: 'invalid-coverage-contract' };
+  }
+
+  const sourceRowCount = canonicalCount(fields.coverage_aggregation_source_row_count);
+  const patternCount = canonicalCount(fields.materialized_pattern_count);
+  const successfulPatternCount = canonicalCount(fields.covered_pattern_count);
+  if (
+    sourceRowCount === null ||
+    patternCount === null ||
+    patternCount < 1 ||
+    successfulPatternCount === null ||
+    report.materialized_pattern_count !== patternCount ||
+    report.covered_pattern_count !== successfulPatternCount
+  ) {
+    return { state: 'rejected', reason: 'coverage-result-mismatch' };
+  }
+
+  if (aggregation === 'tiling') {
+    if (
+      fields.coverage_aggregation_availability !== 'not-calculated' ||
+      fields.coverage_aggregation_complete !== 'false' ||
+      fields.failed_pattern_count !== 'not-calculated' ||
+      fields.coverage_probability !== 'not-calculated' ||
+      fields.failed_coverage_probability !== 'not-calculated' ||
+      fields.probability_complete !== 'false' ||
+      report.coverage_calculated ||
+      report.probability_calculated ||
+      report.probability_complete ||
+      successfulPatternCount !== 0 ||
+      report.coverage_probability !== 'not-calculated'
+    ) {
+      return { state: 'rejected', reason: 'coverage-result-mismatch' };
+    }
+    return { state: 'not-calculated', sourceRowCount, patternCount, reason: null };
+  }
+
+  const failedPatternCount = canonicalCount(fields.failed_pattern_count);
+  const successProbability = canonicalProbability(fields.coverage_probability);
+  const failedProbability = canonicalProbability(fields.failed_coverage_probability);
+  const materializedProbabilityMass = canonicalProbability(fields.materialized_probability_mass);
+  const complete = canonicalBoolean(fields.coverage_aggregation_complete);
+  const probabilityComplete = canonicalBoolean(fields.probability_complete);
+  if (
+    failedPatternCount === null ||
+    successProbability === null ||
+    failedProbability === null ||
+    materializedProbabilityMass === null ||
+    complete === null ||
+    probabilityComplete === null ||
+    successfulPatternCount + failedPatternCount !== patternCount ||
+    complete !== probabilityComplete ||
+    report.probability_complete !== complete ||
+    report.coverage_calculated !== true ||
+    report.probability_calculated !== true ||
+    report.coverage_probability !== fields.coverage_probability ||
+    fields.coverage_aggregation_availability !== (complete ? 'available' : 'incomplete') ||
+    !probabilityPartitionMatches(
+      successProbability,
+      failedProbability,
+      materializedProbabilityMass,
+      patternCount
+    )
+  ) {
+    return { state: 'rejected', reason: 'coverage-result-mismatch' };
+  }
+  return {
+    state: 'authorized',
+    sourceRowCount,
+    patternCount,
+    successfulPatternCount,
+    failedPatternCount,
+    successProbability: fields.coverage_probability!,
+    failedProbability: fields.failed_coverage_probability!,
+    complete,
+    reason: null
+  };
+}
+
+function canonicalCount(value: string | null): number | null {
+  if (value === null || !/^(?:0|[1-9]\d*)$/u.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function canonicalBoolean(value: string | null): boolean | null {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
+}
+
+function canonicalProbability(value: string | null): number | null {
+  if (
+    value === null ||
+    !/^(?:0|[1-9]\d*)(?:\.\d+)?(?:e-?\d+)?$/u.test(value)
+  ) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : null;
+}
+
+function probabilityPartitionMatches(
+  success: number,
+  failed: number,
+  materialized: number,
+  patternCount: number
+): boolean {
+  const tolerance = Number.EPSILON * Math.max(patternCount, 1) * 4;
+  return Math.abs(success + failed - materialized) <= tolerance;
 }
 
 function parseBuildProbabilityAggregation(

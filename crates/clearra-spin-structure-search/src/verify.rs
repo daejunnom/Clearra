@@ -10,6 +10,8 @@ use crate::{
     model::{SpinStructureQuery, StructurePlacement},
 };
 
+// Classification mirrors the physical and logical lock evidence surfaces explicitly.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn classify_lock(
     query: &SpinStructureQuery,
     board_before: StructureBoard,

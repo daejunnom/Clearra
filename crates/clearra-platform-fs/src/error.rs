@@ -1,4 +1,7 @@
-use std::{fmt, io};
+use std::fmt;
+
+#[cfg(any(target_os = "linux", windows))]
+use std::io;
 
 use crate::FileIdentity;
 
@@ -72,17 +75,13 @@ impl NativePublicationError {
         }
     }
 
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn from_io(code: NativePublicationErrorCode, error: &io::Error) -> Self {
         Self {
             code,
             residue: PublicationResidue::None,
             raw_os_error: error.raw_os_error(),
         }
-    }
-
-    pub(crate) fn with_residue(mut self, residue: PublicationResidue) -> Self {
-        self.residue = residue;
-        self
     }
 
     pub const fn code(&self) -> NativePublicationErrorCode {

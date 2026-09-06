@@ -137,6 +137,17 @@ consume the same pair; preparation time is kept outside search timings. Empty
 imports and direct raw-WASM instantiation are not a product surface because
 WebGPU requires reviewed host imports.
 
+Successful development builds and explicit staging use the same generation
+retention transaction. `clearra_wasm.manifest.json` remains the sole current
+runtime authority and is published after the new binding/module pair. A
+non-runtime retention sidecar records deterministic binding/WASM pairs by path,
+byte count, and full SHA-256, and keeps the current generation plus the four
+most recent complete generations. Publishing a sixth generation removes only
+the oldest proven pair. Missing, malformed, orphaned, untracked, or hash-mismatched
+managed files make cleanup retain every file; a deletion I/O failure fails the
+publisher. This bounded history lets an already-running development worker keep
+its generation while the next search adopts the newly verified manifest.
+
 ## Reason
 
 Cargo build scripts add executable launch points to a normal workspace build.

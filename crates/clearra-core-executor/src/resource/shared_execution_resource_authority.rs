@@ -15,14 +15,16 @@ use super::dense_pattern_preflight::{
 static SHARED_EXECUTION_AUTHORITY: OnceLock<SharedResourceLeaseAuthority> = OnceLock::new();
 static NEXT_EXECUTION_OWNER: AtomicU64 = AtomicU64::new(1);
 
-/// Opaque owner of the complete shared execution-memory surface and one CPU
-/// compute slot for a typed WASM score request.
+/// Opaque owner of the complete shared execution-memory surface and the CPU
+/// compute slots reserved for one typed score request.
 ///
 /// Acquire this authority before compiling the request into a SearchProblem,
 /// then retain it through terminal post-processing. Child search admissions
 /// borrow compute from this owner without acquiring a second global memory
 /// lease, so request compilation, exact search, and public projection remain
-/// serialized under one physical-capacity authority.
+/// serialized under one physical-capacity authority. Browser WASM reserves one
+/// local compute slot; native callers may reserve their complete effective
+/// worker count before the exact-search session starts.
 #[must_use = "retain this authority through typed score terminal post-processing"]
 pub struct WasmCpuTerminalResourceAuthority {
     lease: ResourceLease,
@@ -30,9 +32,27 @@ pub struct WasmCpuTerminalResourceAuthority {
 }
 
 impl WasmCpuTerminalResourceAuthority {
+    // The resource layer returns typed admission evidence; product errors box it later.
+    #[allow(clippy::result_large_err)]
     pub fn try_acquire_full_capacity() -> Result<Self, ResourceReport> {
+        Self::try_acquire_full_capacity_with_compute_units(1)
+    }
+
+    /// Atomically reserves the complete shared memory surface and the exact
+    /// native compute width that the child search session may consume.
+    ///
+    /// Keeping compute and memory in one parent lease prevents a typed score
+    /// request from compiling successfully and then discovering that its
+    /// requested worker width cannot be admitted. The effective worker policy
+    /// is already capped to host capacity before it reaches this boundary.
+    #[allow(clippy::result_large_err)]
+    pub fn try_acquire_full_capacity_with_compute_units(
+        requested_compute_units: usize,
+    ) -> Result<Self, ResourceReport> {
         let capacity = shared_execution_resource_capacity();
-        let request = ResourceLeaseRequest::new(1, capacity.memory_bytes)
+        let requested_compute_units =
+            u32::try_from(requested_compute_units.max(1)).unwrap_or(u32::MAX);
+        let request = ResourceLeaseRequest::new(requested_compute_units, capacity.memory_bytes)
             .expect("the shared execution surface has nonzero capacity");
         let lease = acquire_shared_execution_resources(next_execution_resource_owner(), request)
             .map_err(|error| ResourceReport::admission_failure(error.availability()))?;
@@ -48,11 +68,21 @@ impl WasmCpuTerminalResourceAuthority {
         self.memory_capacity_bytes
     }
 
+    /// Compute width owned by this request-level authority. Child sessions may
+    /// borrow at most this many slots and return them before terminal projection.
+    pub fn compute_capacity_units(&self) -> u32 {
+        self.lease.token().grant().compute_units
+    }
+
+    #[allow(clippy::result_large_err)]
     pub(crate) fn try_acquire_compute_child(
         &self,
+        requested_compute_units: usize,
     ) -> Result<ResourceLease, ResourceLeaseAcquireError> {
-        let request =
-            ResourceLeaseRequest::new(1, 0).expect("one compute unit is a valid child request");
+        let requested_compute_units =
+            u32::try_from(requested_compute_units.max(1)).unwrap_or(u32::MAX);
+        let request = ResourceLeaseRequest::new(requested_compute_units, 0)
+            .expect("a nonzero compute child request is valid");
         self.lease
             .try_child(next_execution_resource_owner(), request)
     }
@@ -67,6 +97,7 @@ pub(crate) fn next_execution_resource_owner() -> ResourceLeaseOwnerId {
     ResourceLeaseOwnerId::new(value).expect("owner identity starts at one")
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn acquire_shared_execution_resources(
     owner: ResourceLeaseOwnerId,
     request: ResourceLeaseRequest,

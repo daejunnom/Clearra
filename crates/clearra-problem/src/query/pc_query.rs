@@ -1,4 +1,4 @@
-use clearra_core_domain::{objective::objective_kind::ObjectiveKind, pc::pc_target::PcTarget};
+use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
@@ -23,6 +23,7 @@ pub struct PcQuery {
     rule: RuleProfile,
     verified_kick_profile: Option<VerifiedKickTableProfile>,
     objective: ObjectivePolicy,
+    count_policy: PcCountPolicy,
     solution_probability_policy: PcSolutionProbabilityPolicy,
     queue_observation_policy: QueueObservationPolicy,
     execution_policy: PcExecutionPolicy,
@@ -41,6 +42,7 @@ impl PcQuery {
             rule: query.rule(),
             verified_kick_profile: query.verified_kick_profile().cloned(),
             objective: query.objective(),
+            count_policy: query.count_policy(),
             solution_probability_policy: query.solution_probability_policy(),
             queue_observation_policy: query.queue_observation_policy(),
             execution_policy: query.execution_policy().clone(),
@@ -136,10 +138,7 @@ impl PcQuery {
         if self.objective.score().requested() {
             return PcCountPolicy::CountAll;
         }
-        match self.objective.kind() {
-            ObjectiveKind::Unique | ObjectiveKind::Tiling => PcCountPolicy::CountUnique,
-            ObjectiveKind::All | ObjectiveKind::MinimumCover => PcCountPolicy::CountAll,
-        }
+        self.count_policy
     }
 }
 impl PcQuery {
@@ -149,6 +148,7 @@ impl PcQuery {
             .with_hold_policy(self.hold_policy)
             .with_rule(self.rule)
             .with_objective(self.objective)
+            .with_count_policy(self.count_policy)
             .with_solution_probability_policy(self.solution_probability_policy)
             .with_queue_observation_policy(self.queue_observation_policy)
             .with_execution_policy(self.execution_policy.clone());

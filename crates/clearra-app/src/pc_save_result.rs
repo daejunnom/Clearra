@@ -559,6 +559,8 @@ impl PcSaveExecutionReport {
         }
     }
 
+    // Retained as the typed accessor for product projections of this report variant.
+    #[allow(dead_code)]
     pub(crate) fn save_groups(&self) -> Option<&PcSaveGroupsV2Result> {
         match self {
             Self::SaveGroups(report) => Some(report),
@@ -566,6 +568,8 @@ impl PcSaveExecutionReport {
         }
     }
 
+    // Retained as the typed accessor for product projections of this report variant.
+    #[allow(dead_code)]
     pub(crate) fn best_save(&self) -> Option<&PcBestSaveV2Result> {
         match self {
             Self::BestSave(report) => Some(report),
@@ -617,6 +621,8 @@ impl PcSaveCompiledAuthority {
         })
     }
 
+    // Retained for borrowed execution adapters; active paths currently share the Arc.
+    #[allow(dead_code)]
     pub(crate) fn problem(&self) -> &SearchProblem {
         self.problem.as_ref()
     }
@@ -717,6 +723,8 @@ pub(crate) struct PcSaveExecutionError {
 }
 
 impl PcSaveExecutionError {
+    // Retained for typed host error projection without parsing Display output.
+    #[allow(dead_code)]
     pub(crate) const fn component(self) -> &'static str {
         self.component
     }

@@ -35,7 +35,14 @@ if ($ConfigPath) {
 if (-not $RepoRoot -or -not $NodePath -or -not $NpmCliPath) {
     throw "RepoRoot, NodePath, and NpmCliPath are required."
 }
-$mutex = [Threading.Mutex]::new($false, "Local\ClearraLocalServicesWatchdog-v2")
+# Keep the installed default owner identity stable. An isolated custom-port
+# diagnostic must not silently exit because the real 4194 watchdog is alive.
+$mutexSuffix = if ($GuiPort -eq 4194 -and $TunnelPort -eq 8790) {
+    ""
+} else {
+    "-${GuiPort}-${TunnelPort}"
+}
+$mutex = [Threading.Mutex]::new($false, "Local\ClearraLocalServicesWatchdog-v2$mutexSuffix")
 $ownsMutex = $false
 $ownedGuiProcess = $null
 $ownedTunnelProcess = $null
@@ -89,15 +96,13 @@ function Test-OwnedProcessRunning {
 function Test-ExistingGuiStartup {
     try {
         $escapedNodePath = [regex]::Escape($NodePath)
-        $escapedNpmCliPath = [regex]::Escape($NpmCliPath)
+        $escapedVitePath = [regex]::Escape((Join-Path $RepoRoot "node_modules\vite\bin\vite.js"))
         $process = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" `
             -ErrorAction SilentlyContinue |
             Where-Object {
                 $_.ExecutablePath -match "^${escapedNodePath}$" -and
-                $_.CommandLine -match $escapedNpmCliPath -and
-                $_.CommandLine -match '(?:^|\s)run(?:\s|$)' -and
-                $_.CommandLine -match '(?:^|\s)dev(?:\s|$)' -and
-                $_.CommandLine -match '@clearra/web'
+                $_.CommandLine -match $escapedVitePath -and
+                $_.CommandLine -match "(?:^|\s)--port\s+${GuiPort}(?:\s|$)"
             } |
             Select-Object -First 1
         return $null -ne $process
@@ -164,18 +169,21 @@ function Ensure-DeveloperGui {
         Write-WatchdogEvent "gui preserved: matching startup process already running"
         return
     }
-    if (-not (Test-Path -LiteralPath $RepoRoot -PathType Container) -or
+    $vitePath = Join-Path $RepoRoot "node_modules\vite\bin\vite.js"
+    $webRoot = Join-Path $RepoRoot "apps\clearra-web"
+    if (-not (Test-Path -LiteralPath $webRoot -PathType Container) -or
         -not (Test-Path -LiteralPath $NodePath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $NpmCliPath -PathType Leaf)) {
-        Write-WatchdogEvent "gui start skipped: workspace, node, or npm cli missing"
+        -not (Test-Path -LiteralPath $vitePath -PathType Leaf)) {
+        Write-WatchdogEvent "gui start skipped: workspace, node, or vite missing"
         return
     }
 
     try {
+        # Login/recovery serves the existing WASM; never invoke npm predev builds.
         $script:ownedGuiProcess = Start-HiddenProcess `
             -FilePath $NodePath `
-            -ArgumentList @($NpmCliPath, "run", "dev", "-w", "@clearra/web") `
-            -WorkingDirectory $RepoRoot
+            -ArgumentList @(('"{0}"' -f $vitePath), "--host", "127.0.0.1", "--port", [string]$GuiPort, "--strictPort", "--mode", "local-recovery") `
+            -WorkingDirectory $webRoot
         Write-WatchdogEvent "gui start requested: pid=$($script:ownedGuiProcess.Id)"
     } catch {
         Write-WatchdogEvent "gui start failed"

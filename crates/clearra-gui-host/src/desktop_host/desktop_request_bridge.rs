@@ -35,9 +35,9 @@ mod bridge {
     fn product_app_context() -> AppContext {
         #[cfg(feature = "wasm-cpu-runtime")]
         {
-            return AppContext::new(
+            AppContext::new(
                 AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
-            );
+            )
         }
 
         #[cfg(not(feature = "wasm-cpu-runtime"))]
@@ -271,11 +271,13 @@ mod cli_request_parser {
     #[cfg(test)]
     mod tests {
         use clearra_app::{
-            AppCommand, PcMinimalsIngressOrigin, PcResultProjection, ProductCapabilityContract,
+            AppCommand, PcMinimalsIngressOrigin, PcResultProjection, PcScoreIngressOrigin,
+            ProductCapabilityContract,
         };
         use clearra_cli_command::CliCommandParser;
+        use clearra_core_domain::objective::objective_kind::ObjectiveKind;
         use clearra_i18n::LanguageId;
-        use clearra_pc_graph::request::PcCountPolicy;
+        use clearra_pc_graph::request::{PcCountPolicy, RequestedSearchBackend, WorkerPolicy};
         use serde_json::json;
 
         use super::desktop_request_builds_app_request;
@@ -378,6 +380,170 @@ mod cli_request_parser {
                 "count_policy": "unique",
             });
             assert!(desktop_request_builds_app_request(&extra_dto_authority.to_string()).is_err());
+        }
+
+        #[test]
+        fn production_pc_score_opening_and_scenario_ingresses_share_all_solution_authority() {
+            let cases = [
+                vec![
+                    "clearra",
+                    "pc",
+                    "score",
+                    "--lines",
+                    "2",
+                    "--rule",
+                    "srs-plus",
+                    "--score-profile",
+                    "tetrio",
+                    "--spin-profile",
+                    "t-spins",
+                    "--initial-b2b",
+                    "0",
+                ],
+                vec![
+                    "clearra",
+                    "pc",
+                    "score",
+                    "--lines",
+                    "1",
+                    "--board-mask",
+                    "0x3f",
+                    "--height",
+                    "1",
+                    "--pieces",
+                    "1",
+                    "--queue",
+                    "I",
+                    "--hold",
+                    "empty",
+                    "--rule",
+                    "srs-plus",
+                    "--score-profile",
+                    "tetrio",
+                    "--spin-profile",
+                    "t-spins",
+                    "--initial-b2b",
+                    "0",
+                ],
+            ];
+
+            for arguments in
+                cases.map(|arguments| arguments.into_iter().map(str::to_owned).collect::<Vec<_>>())
+            {
+                let desktop = desktop_request_builds_app_request(
+                    &json!({
+                        "app_request_model": "clearra-cli/CommandRequest",
+                        "command": "cli",
+                        "language": "en",
+                        "arguments": arguments,
+                    })
+                    .to_string(),
+                )
+                .expect("canonical Desktop pc score argv");
+                let cli = CliCommandParser::parse_tokens(&arguments)
+                    .expect("canonical CLI pc score tokens")
+                    .to_app_request()
+                    .expect("typed CLI pc score request")
+                    .with_language(LanguageId::En);
+                let web = CliCommandParser::parse(&arguments.join(" "))
+                    .expect("canonical Web pc score text")
+                    .to_app_request()
+                    .expect("typed Web pc score request")
+                    .with_language(LanguageId::En);
+
+                assert_eq!(desktop, cli);
+                assert_eq!(web, cli);
+                assert_eq!(
+                    cli.product_capability_contract(),
+                    Some(ProductCapabilityContract::PcScore)
+                );
+                match cli.command() {
+                    AppCommand::Pc(command) => {
+                        assert_eq!(
+                            command.result_projection(),
+                            PcResultProjection::ScoreSummaryV2(
+                                PcScoreIngressOrigin::CanonicalPcScore
+                            )
+                        );
+                        assert_eq!(command.query().objective().kind(), ObjectiveKind::All);
+                        assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+                        command
+                            .validate_result_projection()
+                            .expect("opening pc score projection");
+                    }
+                    AppCommand::Scenario(command) => {
+                        assert_eq!(
+                            command.result_projection(),
+                            PcResultProjection::ScoreSummaryV2(
+                                PcScoreIngressOrigin::CanonicalPcScore
+                            )
+                        );
+                        assert_eq!(command.query().objective().kind(), ObjectiveKind::All);
+                        assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+                        command
+                            .validate_result_projection()
+                            .expect("scenario pc score projection");
+                    }
+                    other => panic!("unexpected pc score command: {other:?}"),
+                }
+            }
+        }
+
+        #[test]
+        fn production_desktop_pc_score_argv_preserves_cpu_worker_options() {
+            let arguments = [
+                "clearra",
+                "pc",
+                "score",
+                "--lines",
+                "2",
+                "--patterns",
+                "[TIOSZ]!",
+                "--workers",
+                "2",
+                "--use-all-cpu-threads",
+                "--cpu-warmup",
+            ]
+            .map(str::to_owned)
+            .to_vec();
+            let request = desktop_request_builds_app_request(
+                &json!({
+                    "app_request_model": "clearra-cli/CommandRequest",
+                    "command": "cli",
+                    "language": "en",
+                    "arguments": arguments,
+                })
+                .to_string(),
+            )
+            .expect("Desktop pc score worker argv");
+            let policy = match request.command() {
+                AppCommand::Pc(command) => command.query().execution_policy(),
+                AppCommand::Scenario(command) => command.query().execution_policy(),
+                command => panic!("expected PC score command, got {command:?}"),
+            };
+            assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+            assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(2));
+            assert!(policy.use_all_logical_processors());
+            assert!(policy.cpu_warmup());
+            assert!(!policy.allow_backend_fallback());
+        }
+
+        #[test]
+        fn generic_pc_score_flag_does_not_gain_the_named_all_solution_product_contract() {
+            let request = CliCommandParser::parse(
+                "clearra pc --lines 2 --score --score-profile tetrio --spin-profile t-spins",
+            )
+            .expect("generic score-aware PC command")
+            .to_app_request()
+            .expect("generic score-aware PC request");
+
+            assert_eq!(request.product_capability_contract(), None);
+            let AppCommand::Pc(command) = request.command() else {
+                panic!("expected opening PC command");
+            };
+            assert_eq!(command.result_projection(), PcResultProjection::Standard);
+            assert_eq!(command.query().objective().kind(), ObjectiveKind::Unique);
+            assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
         }
 
         #[cfg(feature = "wasm-cpu-runtime")]
@@ -1584,9 +1750,10 @@ mod legacy_form_parser {
         let finesse = text_or_default(&value, &["finesse"], "off")?;
         let pattern_knowledge = text_or_default(&value, &["pattern_knowledge"], "both")?;
         let score_active = matches!(score_mode, "summary" | "score-finder" | "score-minimals");
-        if (!score_active && initial_b2b != 0)
-            || (!score_active && score_profile != "tetrio")
-            || (!score_active && !preserve_b2b && spin_profile != "t-spins")
+        if (!score_active
+            && (initial_b2b != 0
+                || score_profile != "tetrio"
+                || (!preserve_b2b && spin_profile != "t-spins")))
             || (score_mode == "failed-queue" && solution_probabilities)
         {
             return Err(DesktopTauriCommandError::invalid_request(
@@ -3703,7 +3870,10 @@ mod job_event_json {
     }
 }
 mod product_pages {
-    use clearra_app::{CoveragePortfolioPageStore, PortfolioAlternativeAdvance, ProductPageStore};
+    use clearra_app::{
+        CoveragePortfolioPageStore, PortfolioAlternativeAdvance, PortfolioPageLoadAdvance,
+        PortfolioPageLoadState, ProductPageStore,
+    };
     use clearra_host_contract::ParityReportPagePayload;
 
     use super::{bridge::DesktopTauriCommandBridge, error::DesktopTauriCommandError};
@@ -3810,6 +3980,56 @@ mod product_pages {
             page_json(coverage_store(self)?, retained_slot, member_page_number)
         }
 
+        pub fn product_page_get_slice_with_cancel(
+            &mut self,
+            alternative_index_decimal: &str,
+            member_page_number_decimal: &str,
+            maximum_work_steps: u64,
+            cancelled: &mut impl FnMut() -> bool,
+        ) -> Result<String, DesktopTauriCommandError> {
+            let member_page_number = parse_canonical_positive_usize(
+                member_page_number_decimal,
+                "desktop member page number",
+            )?;
+            if self
+                .product_page_store
+                .as_ref()
+                .and_then(ProductPageStore::parity_report)
+                .is_some()
+            {
+                return self.product_page_get_with_cancel(
+                    alternative_index_decimal,
+                    member_page_number_decimal,
+                    cancelled,
+                );
+            }
+            let advance = coverage_store_mut(self)?
+                .load_page_by_alternative_index_slice(
+                    alternative_index_decimal,
+                    maximum_work_steps.max(1),
+                    cancelled,
+                )
+                .map_err(|error| {
+                    DesktopTauriCommandError::job(format!(
+                        "load desktop product page slice: {}",
+                        error.as_str()
+                    ))
+                })?;
+            match advance.state() {
+                PortfolioPageLoadState::Page => {
+                    let retained_slot = advance.retained_slot().ok_or_else(|| {
+                        DesktopTauriCommandError::job(
+                            "desktop product page slice omitted its retained page",
+                        )
+                    })?;
+                    page_json(coverage_store(self)?, retained_slot, member_page_number)
+                }
+                PortfolioPageLoadState::WorkBudgetExhausted | PortfolioPageLoadState::Cancelled => {
+                    replay_advance_json(coverage_store(self)?, advance)
+                }
+            }
+        }
+
         pub fn product_page_release(&mut self) {
             self.product_page_store = None;
         }
@@ -3909,10 +4129,37 @@ mod product_pages {
             "state": advance.stop().as_str(),
             "known_alternative_count": advance.checkpoint().known_alternative_count_decimal(),
             "enumeration_complete": advance.checkpoint().enumeration_complete(),
+            "work_steps": advance.work_steps(),
         }))
         .map_err(|error| {
             DesktopTauriCommandError::job(format!(
                 "serialize desktop product page advance: {error}"
+            ))
+        })
+    }
+
+    fn replay_advance_json(
+        store: &CoveragePortfolioPageStore,
+        advance: PortfolioPageLoadAdvance,
+    ) -> Result<String, DesktopTauriCommandError> {
+        if advance.state() == PortfolioPageLoadState::Page || advance.retained_slot().is_some() {
+            return Err(DesktopTauriCommandError::job(
+                "desktop incomplete replay attempted to expose a page",
+            ));
+        }
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "runtime": "clearra-desktop",
+            "product_page_kind": "coverage-portfolio",
+            "state": advance.state().as_str(),
+            "known_alternative_count": store.known_alternative_count_decimal(),
+            "enumeration_complete": store.enumeration_complete(),
+            "work_steps": advance.work_steps(),
+            "replay_cursor_alternative_index": store.replay_cursor_alternative_index_decimal(),
+        }))
+        .map_err(|error| {
+            DesktopTauriCommandError::job(format!(
+                "serialize desktop product page replay advance: {error}"
             ))
         })
     }
@@ -3948,7 +4195,7 @@ mod product_pages {
     }
 }
 mod run_request {
-    use clearra_host_contract::HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES;
+    use clearra_app::ProductPageStore;
 
     use super::{
         active_request_parser::desktop_request_builds_app_request,
@@ -3956,15 +4203,30 @@ mod run_request {
     };
 
     impl DesktopTauriCommandBridge {
-        pub fn run_request(&self, request_json: &str) -> Result<String, DesktopTauriCommandError> {
+        pub fn run_request(
+            &mut self,
+            request_json: &str,
+        ) -> Result<String, DesktopTauriCommandError> {
+            self.product_page_store = None;
             let request = desktop_request_builds_app_request(request_json)?;
             let response = self.app_context.run(request);
-            serde_json::to_string(&response.to_host_response_with_solution_set_artifact(Some(
-                HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
-            )))
-            .map_err(|error| {
-                DesktopTauriCommandError::job(format!("serialize AppResponse: {error}"))
-            })
+            let product_page_source_owner = response.public_page_source_owner();
+            // This legacy synchronous GUI boundary must not turn every solution into a
+            // CTK3/Fumen document. Explicit CLI/export routes retain that responsibility.
+            let serialized =
+                serde_json::to_string(&response.to_host_response()).map_err(|error| {
+                    DesktopTauriCommandError::job(format!("serialize AppResponse: {error}"))
+                })?;
+            self.product_page_store = product_page_source_owner
+                .map(ProductPageStore::from_source)
+                .transpose()
+                .map_err(|error| {
+                    DesktopTauriCommandError::job(format!(
+                        "open synchronous desktop product page store: {}",
+                        error.as_str()
+                    ))
+                })?;
+            Ok(serialized)
         }
     }
 }
@@ -4474,10 +4736,10 @@ mod tests {
             "queue",
         ] {
             let mut request = desktop_spin_structure_json("spin-structure.search");
-            request.as_object_mut().expect("request").insert(
-                field.to_owned(),
-                json!(if field == "hold_enabled" { true } else { false }),
-            );
+            request
+                .as_object_mut()
+                .expect("request")
+                .insert(field.to_owned(), json!(field == "hold_enabled"));
             invalid.push(request);
         }
         let mut fallback = desktop_spin_structure_json("spin-structure.search");
@@ -4507,7 +4769,7 @@ mod tests {
 
     #[cfg(feature = "wasm-cpu-runtime")]
     #[test]
-    fn desktop_actual_build_solution_results_attach_bounded_native_sidecars() {
+    fn desktop_actual_build_solution_results_defer_documents_to_page_or_export_routes() {
         use crate::GuiJobEvent;
 
         let executable_document = encode_ctk3_compact(&Ctk3Document::new(
@@ -4522,20 +4784,7 @@ mod tests {
             )],
         ))
         .expect("executable desktop Build v2 target");
-        for (capability_id, result_kind, selection_kind, key_algorithm) in [
-            (
-                "build.cover",
-                "build-coverage-portfolio.v2",
-                "portfolio-alternative",
-                "portfolio-member-normalized-tiling-key.v1",
-            ),
-            (
-                "build.setup",
-                "build-target-family.v2",
-                "solution-family",
-                "clearra-colored-field-key-v1",
-            ),
-        ] {
+        for capability_id in ["build.cover", "build.setup"] {
             let mut bridge = DesktopTauriCommandBridge::default();
             let request = desktop_build_v2_json(capability_id, &executable_document).to_string();
             let job_id = bridge
@@ -4576,14 +4825,10 @@ mod tests {
                 response.product_result_payload().is_some(),
                 "{capability_id} product payload"
             );
-            let artifact = response
-                .solution_set_artifact()
-                .expect("desktop Build v2 solution sidecar");
-            assert_eq!(artifact.source_result_kind(), result_kind);
-            assert_eq!(artifact.selection_kind(), selection_kind);
-            assert_eq!(artifact.normalized_key_algorithm(), key_algorithm);
-            assert!(artifact.solution_count() >= 1);
-            assert!(artifact.formats().iter().all(|format| format.available()));
+            assert!(
+                response.solution_set_artifact().is_none(),
+                "GUI completion must not eagerly encode a solution document"
+            );
 
             let synchronous: Value = serde_json::from_str(
                 &bridge
@@ -4591,10 +4836,28 @@ mod tests {
                     .expect("run synchronous desktop Build v2 request"),
             )
             .expect("desktop Build v2 response JSON");
-            assert_eq!(
-                synchronous["solution_set_artifact"]["source_result_kind"],
-                result_kind
+            assert!(
+                synchronous
+                    .get("solution_set_artifact")
+                    .is_none_or(serde_json::Value::is_null),
+                "synchronous GUI completion must not eagerly encode a solution document"
             );
+            if capability_id == "build.cover" {
+                assert_eq!(
+                    synchronous["product_result_payload"]["content"]["payload"]
+                        ["page_source_available"],
+                    true
+                );
+                let page: Value = serde_json::from_str(
+                    &bridge
+                        .product_page_get("1", "1")
+                        .expect("load the synchronous desktop canonical page"),
+                )
+                .expect("synchronous desktop product page JSON");
+                assert_eq!(page["state"], "page");
+                assert_eq!(page["page"]["alternative_index"], "1");
+                assert_eq!(page["page"]["member_page_number"], "1");
+            }
         }
     }
 
@@ -5744,6 +6007,86 @@ mod tests {
     }
 
     #[test]
+    fn legacy_desktop_pc_score_dto_normalizes_to_the_cli_owned_opening_and_scenario_contract() {
+        let cases = [
+            (
+                r#"{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc",
+                    "lines": 2,
+                    "count_policy": "unique",
+                    "score_mode": "summary",
+                    "score_profile": "tetrio",
+                    "spin_profile": "t-spins",
+                    "backend": "cpu",
+                    "workers": 1,
+                    "allow_backend_fallback": false
+                }"#,
+                "clearra pc score --lines 2 --rule srs-plus --score-profile tetrio --spin-profile t-spins --initial-b2b 0 --workers 1",
+            ),
+            (
+                r#"{
+                    "app_request_model": "clearra-app/AppRequest",
+                    "command": "pc-scenario",
+                    "lines": 1,
+                    "visible_height": 1,
+                    "board_mask": "0x3f",
+                    "piece_window": 1,
+                    "queue": "I",
+                    "hold_enabled": true,
+                    "hold_piece": "empty",
+                    "count_policy": "unique",
+                    "score_mode": "summary",
+                    "score_profile": "tetrio",
+                    "spin_profile": "t-spins",
+                    "backend": "cpu",
+                    "workers": 1,
+                    "allow_backend_fallback": false
+                }"#,
+                "clearra pc score --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus --score-profile tetrio --spin-profile t-spins --initial-b2b 0 --workers 1",
+            ),
+        ];
+
+        for (legacy_json, cli_text) in cases {
+            let legacy = desktop_request_builds_app_request(legacy_json)
+                .expect("legacy desktop named pc score DTO");
+            let cli = CliCommandParser::parse(cli_text)
+                .expect("canonical pc score CLI")
+                .to_app_request()
+                .expect("canonical pc score AppRequest");
+
+            assert_eq!(
+                legacy.product_capability_contract(),
+                Some(ProductCapabilityContract::PcScore)
+            );
+            assert_eq!(
+                legacy.product_capability_contract(),
+                cli.product_capability_contract()
+            );
+            match (legacy.command(), cli.command()) {
+                (AppCommand::Pc(legacy), AppCommand::Pc(cli)) => {
+                    assert_eq!(legacy.result_projection(), cli.result_projection());
+                    assert_eq!(legacy.query().objective(), cli.query().objective());
+                    assert_eq!(legacy.query().count_policy(), PcCountPolicy::CountAll);
+                    assert_eq!(legacy.query().count_policy(), cli.query().count_policy());
+                    assert_eq!(legacy.query().queue(), cli.query().queue());
+                    assert_eq!(legacy.query().hold_policy(), cli.query().hold_policy());
+                    assert_eq!(legacy.query().execution_policy(), cli.query().execution_policy());
+                }
+                (AppCommand::Scenario(legacy), AppCommand::Scenario(cli)) => {
+                    assert_eq!(legacy.result_projection(), cli.result_projection());
+                    assert_eq!(legacy.query(), cli.query());
+                    assert_eq!(legacy.query().objective().kind(), ObjectiveKind::All);
+                    assert_eq!(legacy.query().count_policy(), PcCountPolicy::CountAll);
+                }
+                (legacy, cli) => panic!(
+                    "legacy and CLI pc score requests chose different command families: {legacy:?} != {cli:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn desktop_pc_path_attaches_the_complete_ordinary_replay_family_contract() {
         let request = desktop_request_builds_app_request(
             r#"{
@@ -6281,18 +6624,22 @@ mod tests {
         assert_eq!(second_page["page"]["alternative_index"], "2");
 
         let mut cancellation_checks = 0;
-        let error = bridge
-            .product_page_get_with_cancel("2", "1", &mut || {
-                cancellation_checks += 1;
-                true
-            })
-            .expect_err("cancelled exact replay must not publish a page");
+        let cancelled: Value = serde_json::from_str(
+            &bridge
+                .product_page_get_slice_with_cancel("2", "1", 1, &mut || {
+                    cancellation_checks += 1;
+                    true
+                })
+                .expect("cancelled exact replay must remain an incomplete advance"),
+        )
+        .expect("cancelled exact replay JSON");
         assert!(cancellation_checks > 0);
-        assert!(error.message().contains("portfolio-page-replay-cancelled"));
+        assert_eq!(cancelled["state"], "cancelled");
+        assert!(cancelled.get("page").is_none());
 
         let replayed: Value = serde_json::from_str(
             &bridge
-                .product_page_get("2", "1")
+                .product_page_get_slice_with_cancel("2", "1", 1, &mut || false)
                 .expect("retry exact desktop replay"),
         )
         .expect("retried desktop replay JSON");

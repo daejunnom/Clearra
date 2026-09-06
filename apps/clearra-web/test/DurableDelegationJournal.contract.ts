@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 
+// SRP rationale: this contract's single change reason is crash-recoverable
+// delegation authority. Its bounded IDB fake injects read/write/commit failures
+// to verify the same journal's fences, recovery states and durable ACK boundary.
+
 import {
   ACTIVE_LEASE_EXPIRY_MS,
+  createBrowserDelegationAuthority,
   DurableDelegationAuthority,
   IndexedDbDelegationJournal,
   MemoryDelegationJournal,
@@ -10,7 +15,8 @@ import {
   TERMINAL_TOMBSTONE_RETENTION_MS,
   WORKER_HEARTBEAT_INTERVAL_MS,
   sha256Hex,
-  type DelegationEvent
+  type DelegationEvent,
+  type DelegationJournal
 } from '../src/workers/DurableDelegationJournal.ts';
 import { ClearraVerifierPool } from '../src/workers/ClearraVerifierPool.ts';
 
@@ -20,6 +26,30 @@ assert.equal(WORKER_HEARTBEAT_INTERVAL_MS, 5_000);
 assert.equal(PERSISTED_RENEWAL_INTERVAL_MS, 30_000);
 assert.equal(ACTIVE_LEASE_EXPIRY_MS, 120_000);
 assert.equal(TERMINAL_TOMBSTONE_RETENTION_MS, 86_400_000);
+
+let localNow = 100;
+const localAuthority = await createBrowserDelegationAuthority(() => localNow, 'local-long-task');
+const localToken = await localAuthority.prepare(identity('local-long-task'), budget());
+await localAuthority.offered(localToken);
+await localAuthority.accepted(localToken, {
+  taskId: localToken.taskId,
+  fencingTokenDecimal: localToken.fencingTokenDecimal,
+  workerId: '1',
+  reservationSha256: '33'.repeat(32)
+});
+const localPermit = await localAuthority.publish(localToken);
+await localAuthority.running(localToken);
+localNow += ACTIVE_LEASE_EXPIRY_MS * 100;
+assert.ok(Number(localPermit.expiresAtUnixMsDecimal) > localNow);
+assert.equal(await localAuthority.expireStale(), 0, 'local atomic work has no hidden runtime cap');
+await localAuthority.resultSealed(localToken, '44'.repeat(32), '55'.repeat(32));
+await localAuthority.resultAppliedAndCompleted(localToken);
+assert.equal(localAuthority.phase(localToken), 'completed');
+await assert.rejects(
+  localAuthority.running({ ...localToken, fencingTokenDecimal: '999' }),
+  /stale/
+);
+localAuthority.close();
 
 const katJournal = new MemoryDelegationJournal();
 const katAuthority = await DurableDelegationAuthority.recover(katJournal, () => 100);
@@ -272,6 +302,7 @@ const indexedJournal = await IndexedDbDelegationJournal.open(
   'clearra-runtime-v1-contract'
 );
 const indexedAuthority = await DurableDelegationAuthority.recover(indexedJournal, () => 1_000);
+const transactionsBeforeAppend = fakeFactory.database.transactionModes.length;
 fakeFactory.database.holdWriteCompletion = true;
 let durableAcked = false;
 const pendingPrepare = indexedAuthority
@@ -285,7 +316,214 @@ assert.equal(durableAcked, false, 'append must not ACK before transaction.oncomp
 fakeFactory.database.releaseHeldWrite();
 await pendingPrepare;
 assert.equal(durableAcked, true);
+assert.deepEqual(
+  fakeFactory.database.transactionModes.slice(transactionsBeforeAppend),
+  ['readwrite'],
+  'one transition must fence quarantine and head without an extra readonly storage round trip'
+);
 indexedJournal.close();
+
+async function prepareSealed(journal: DelegationJournal, task: string) {
+  const authority = await DurableDelegationAuthority.recover(journal, () => 1_000);
+  const token = await authority.prepare(identity(task), budget());
+  await authority.offered(token);
+  await authority.accepted(token, {
+    taskId: token.taskId, fencingTokenDecimal: token.fencingTokenDecimal,
+    workerId: '1', reservationSha256: '33'.repeat(32)
+  });
+  await authority.publish(token);
+  await authority.running(token);
+  await authority.resultSealed(token, '44'.repeat(32), '55'.repeat(32));
+  return { authority, token };
+}
+
+{
+  const pairFactory = new FakeIdbFactory();
+  const pairJournal = await IndexedDbDelegationJournal.open(pairFactory as unknown as IDBFactory, 'atomic-terminal-pair');
+  const { authority, token } = await prepareSealed(pairJournal, 'atomic-terminal-pair');
+  const before = await pairJournal.load();
+  const transactionStart = pairFactory.database.transactionModes.length;
+  pairFactory.database.holdWriteCompletion = true;
+  let acknowledged = false;
+  const terminal = authority.resultAppliedAndCompleted(token).then(() => { acknowledged = true; });
+  await pairFactory.database.waitForHeldWrite();
+  assert.equal(acknowledged, false);
+  assert.equal(authority.phase(token), 'result-sealed', 'the pair has no early in-memory terminal ACK');
+  assert.equal(authority.resultApplicationDecision(token, '44'.repeat(32)), 'apply-once');
+  assert.equal(pairFactory.database.stores.get('delegation-events-v1')!.size, before.length);
+  pairFactory.database.releaseHeldWrite();
+  await terminal;
+  assert.equal(acknowledged, true);
+  assert.equal(authority.phase(token), 'completed');
+  assert.equal(authority.resultApplicationDecision(token, '44'.repeat(32)), 'already-applied');
+  assert.deepEqual(pairFactory.database.transactionModes.slice(transactionStart), ['readwrite']);
+  const pairEvents = await pairJournal.load();
+  assert.deepEqual(pairEvents.slice(-2).map((event) => event.phase), ['result-applied', 'completed']);
+  assert.equal(pairEvents.at(-1)!.previousEventSha256, pairEvents.at(-2)!.eventSha256);
+  const legacyMemory = new MemoryDelegationJournal();
+  const legacy: DelegationJournal = {
+    load: () => legacyMemory.load(), append: (draft) => legacyMemory.append(draft),
+    resetIfHead: (head) => legacyMemory.resetIfHead(head),
+    quarantine: (reason) => legacyMemory.quarantine(reason), close: () => legacyMemory.close()
+  };
+  const reference = await prepareSealed(legacy, 'atomic-terminal-pair');
+  await reference.authority.resultAppliedAndCompleted(reference.token);
+  assert.deepEqual(pairEvents, await legacy.load(), 'atomic commit preserves every legacy event byte/hash/sequence');
+  const afterTerminal = pairFactory.database.transactionModes.length;
+  await Promise.all([authority.resultAppliedAndCompleted(token), authority.resultAppliedAndCompleted(token)]);
+  assert.equal(pairFactory.database.transactionModes.length, afterTerminal, 'completed receipt retry writes nothing');
+  await assert.rejects(authority.resultAppliedAndCompleted({ ...token, fencingTokenDecimal: '999' }), /stale/);
+  await assert.rejects(authority.resultSealed(token, 'aa'.repeat(32), '55'.repeat(32)), /does not match/);
+  const recovered = await DurableDelegationAuthority.recover(pairJournal, () => 1_000);
+  assert.equal(recovered.phase(token), 'completed');
+  assert.equal(recovered.resultApplicationDecision(token, '44'.repeat(32)), 'already-applied');
+  pairJournal.close();
+}
+
+for (const failureWrite of [1, 2, 3]) {
+  const failureFactory = new FakeIdbFactory();
+  const failureJournal = await IndexedDbDelegationJournal.open(failureFactory as unknown as IDBFactory, `terminal-write-${failureWrite}`);
+  const { authority, token } = await prepareSealed(failureJournal, `terminal-write-${failureWrite}`);
+  const before = await failureJournal.load();
+  const head = structuredClone(failureFactory.database.stores.get('delegation-meta-v1')!.get('head'));
+  failureFactory.database.failWriteAt = failureWrite;
+  await assert.rejects(authority.resultAppliedAndCompleted(token), (error: unknown) => {
+    assert.ok(error instanceof Error && error.cause instanceof Error);
+    assert.match(error.cause.message, /synthetic atomic write failure/);
+    return true;
+  });
+  assert.equal(authority.phase(token), 'result-sealed', 'failed pair never creates an applied/completed state');
+  assert.deepEqual(await failureJournal.load(), before, 'first/second event or head failure commits neither event');
+  assert.deepEqual(failureFactory.database.stores.get('delegation-meta-v1')!.get('head'), head);
+  await assert.rejects(DurableDelegationAuthority.recover(new MemoryDelegationJournal(before), () => 1_000),
+    /unresolved.*result-sealed/, 'restart still fails closed for an unresolved sealed result');
+  await authority.resultAppliedAndCompleted(token);
+  assert.equal((await failureJournal.load()).length, before.length + 2, 'retry adds one pair without phantom rows');
+  failureJournal.close();
+}
+
+for (const failureMode of ['quarantine', 'head', 'cancelled'] as const) {
+  const factory = new FakeIdbFactory();
+  const journal = await IndexedDbDelegationJournal.open(factory as unknown as IDBFactory, `terminal-fence-${failureMode}`);
+  const { authority, token } = await prepareSealed(journal, `terminal-fence-${failureMode}`);
+  if (failureMode === 'cancelled') await authority.cancelled(token);
+  const eventCount = factory.database.stores.get('delegation-events-v1')!.size;
+  const meta = factory.database.stores.get('delegation-meta-v1')!;
+  if (failureMode === 'quarantine') meta.set('quarantine', { key: 'quarantine', reason: 'external fence' });
+  if (failureMode === 'head') meta.set('head', { ...(meta.get('head') as object), eventSha256: 'aa'.repeat(32) });
+  await assert.rejects(authority.resultAppliedAndCompleted(token), /quarantined|head changed|cannot complete/);
+  assert.equal(factory.database.stores.get('delegation-events-v1')!.size, eventCount);
+  assert.equal(authority.phase(token), failureMode === 'cancelled' ? 'cancelled' : 'result-sealed');
+  journal.close();
+}
+
+for (const failure of ['append-head-read', 'append-quarantine-read', 'append-early-abort', 'reset-head-read', 'reset-early-abort']) {
+  const factory = new FakeIdbFactory();
+  const journal = await IndexedDbDelegationJournal.open(factory as unknown as IDBFactory, failure);
+  const { authority, token } = await prepareSealed(journal, failure);
+  const resetting = failure.startsWith('reset-');
+  if (resetting) await authority.resultAppliedAndCompleted(token);
+  const before = await journal.load();
+  const head = structuredClone(factory.database.stores.get('delegation-meta-v1')!.get('head'));
+  factory.database.failReadKey = failure.endsWith('head-read') ? 'head'
+    : failure.endsWith('quarantine-read') ? 'quarantine' : null;
+  factory.database.abortWriteBeforeReads = failure.endsWith('early-abort');
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => { unhandled.push(error); };
+  const processEvents = process as typeof process & {
+    on(event: 'unhandledRejection', listener: (error: unknown) => void): void;
+    off(event: 'unhandledRejection', listener: (error: unknown) => void): void;
+  };
+  processEvents.on('unhandledRejection', onUnhandled);
+  try {
+    await assert.rejects(resetting ? journal.resetIfHead(before.at(-1)!.eventSha256)
+      : authority.resultAppliedAndCompleted(token), /read delegation|transaction aborted/);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(unhandled, [], 'metadata request failure and early abort share one handled transaction rejection');
+  } finally { processEvents.off('unhandledRejection', onUnhandled); }
+  assert.deepEqual(await journal.load(), before, 'read/early-abort failure cannot mutate committed history or cache');
+  assert.deepEqual(factory.database.stores.get('delegation-meta-v1')!.get('head'), head);
+  assert.equal(authority.phase(token), resetting ? 'completed' : 'result-sealed');
+  journal.close();
+}
+
+for (const failure of ['quarantine-read', 'quarantine-early-abort', 'load-head-read', 'load-events-read',
+  'load-early-abort', 'header-read', 'header-early-abort', 'header-write', 'quarantine-write']) {
+  const factory = new FakeIdbFactory();
+  const journal = await IndexedDbDelegationJournal.open(factory as unknown as IDBFactory, `owner-${failure}`);
+  const before = structuredClone(factory.database.stores);
+  const header = failure.startsWith('header-');
+  const loadingEvents = failure.startsWith('load-');
+  if (failure.endsWith('-read')) {
+    factory.database.failReadMode = header ? 'readwrite' : 'readonly';
+    factory.database.failReadStore = loadingEvents ? 'delegation-events-v1' : null;
+    factory.database.failReadKey = header ? 'journal-header'
+      : failure === 'load-events-read' ? '*getAll' : loadingEvents ? 'head' : 'quarantine';
+  } else if (failure.endsWith('early-abort')) {
+    factory.database.abortWriteBeforeReads = header;
+    factory.database.abortReadBeforeReads = !header;
+    factory.database.abortReadStore = loadingEvents ? 'delegation-events-v1' : null;
+  } else factory.database.failWriteAt = 1;
+  const unhandled: unknown[] = [];
+  const listener = (error: unknown) => { unhandled.push(error); };
+  const processEvents = process as typeof process & {
+    on(event: 'unhandledRejection', listener: (error: unknown) => void): void;
+    off(event: 'unhandledRejection', listener: (error: unknown) => void): void;
+  };
+  processEvents.on('unhandledRejection', listener);
+  try {
+    const operation = header ? IndexedDbDelegationJournal.openForJob(factory as unknown as IDBFactory,
+      `owner-${failure}`, '018f0f25-6f8a-7c1d-9b20-8b85c4d9e001')
+      : failure === 'quarantine-write' ? journal.quarantine('must not become durable') : journal.load();
+    await assert.rejects(operation, /read delegation|load delegation|transaction aborted|synthetic atomic write failure/);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(unhandled, [], `${failure} must have exactly one handled failure owner`);
+  } finally { processEvents.off('unhandledRejection', listener); }
+  assert.deepEqual(factory.database.stores, before, 'failed reads/header/quarantine cannot commit partial metadata');
+  assert.equal(factory.database.closeCount, header ? 1 : 0, 'a failed header does not leak its unopened journal handle');
+  assert.deepEqual(await journal.load(), [], 'a failed read or quarantine write does not cache false authority');
+  journal.close();
+}
+
+{
+  const factory = new FakeIdbFactory();
+  const journal = await IndexedDbDelegationJournal.open(factory as unknown as IDBFactory, 'legacy-result-applied');
+  const { authority, token } = await prepareSealed(journal, 'legacy-result-applied');
+  await authority.resultApplied(token);
+  const before = await journal.load();
+  await assert.rejects(DurableDelegationAuthority.recover(new MemoryDelegationJournal(before), () => 1_000),
+    /unresolved.*result-applied/, 'legacy partial terminal history does not gain restart authority');
+  const start = factory.database.transactionModes.length;
+  await authority.resultAppliedAndCompleted(token);
+  assert.deepEqual(factory.database.transactionModes.slice(start), ['readwrite']);
+  assert.equal((await journal.load()).length, before.length + 1, 'legacy applied state appends only completed');
+  journal.close();
+}
+
+const quarantinedWriterFactory = new FakeIdbFactory();
+const quarantinedWriterJournal = await IndexedDbDelegationJournal.open(
+  quarantinedWriterFactory as unknown as IDBFactory,
+  'clearra-runtime-v1-concurrent-quarantine'
+);
+const quarantinedWriterAuthority = await DurableDelegationAuthority.recover(
+  quarantinedWriterJournal, () => 1_000
+);
+await quarantinedWriterAuthority.prepare(identity('before-quarantine'), budget());
+const eventCountBeforeQuarantine = quarantinedWriterFactory.database.stores
+  .get('delegation-events-v1')!.size;
+quarantinedWriterFactory.database.stores.get('delegation-meta-v1')!.set('quarantine', {
+  key: 'quarantine', reason: 'other owner quarantined storage', timestampUnixMsDecimal: '1000'
+});
+await assert.rejects(
+  quarantinedWriterAuthority.prepare(identity('after-quarantine'), budget()),
+  /is quarantined/
+);
+assert.equal(
+  quarantinedWriterFactory.database.stores.get('delegation-events-v1')!.size,
+  eventCountBeforeQuarantine,
+  'a cached journal head must not bypass an externally committed quarantine marker'
+);
+quarantinedWriterJournal.close();
 
 const headerFactory = new FakeIdbFactory();
 const durableJobId = '018f0f25-6f8a-7c1d-9b20-8b85c4d9e001';
@@ -546,7 +784,16 @@ class FakeIdbFactory {
 
 class FakeIdbDatabase {
   readonly stores = new Map<string, Map<string, unknown>>();
+  readonly transactionModes: IDBTransactionMode[] = [];
   holdWriteCompletion = false;
+  failWriteAt: number | null = null;
+  failReadKey: string | null = null;
+  failReadMode: IDBTransactionMode = 'readwrite';
+  failReadStore: string | null = null;
+  abortWriteBeforeReads = false;
+  abortReadBeforeReads = false;
+  abortReadStore: string | null = null;
+  closeCount = 0;
   private heldWrite: FakeIdbTransaction | null = null;
   private heldWriteReady: (() => void) | null = null;
 
@@ -560,6 +807,7 @@ class FakeIdbDatabase {
   }
 
   transaction(names: string[], mode: IDBTransactionMode): IDBTransaction {
+    this.transactionModes.push(mode);
     const transaction = new FakeIdbTransaction(this, names, mode);
     if (mode === 'readwrite' && this.holdWriteCompletion) {
       this.heldWrite = transaction;
@@ -583,7 +831,7 @@ class FakeIdbDatabase {
     transaction?.complete();
   }
 
-  close(): void {}
+  close(): void { this.closeCount += 1; }
 }
 
 class FakeIdbTransaction {
@@ -592,20 +840,57 @@ class FakeIdbTransaction {
   onerror: ((event: Event) => void) | null = null;
   error: DOMException | null = null;
   private completionScheduled = false;
+  private finished = false;
+  private writeCount = 0;
+  private readonly failWriteAt: number | null;
+  private readonly failReadKey: string | null;
+  private readonly stagedStores = new Map<string, Map<string, unknown>>();
 
   constructor(
     private readonly database: FakeIdbDatabase,
     private readonly names: string[],
     private readonly mode: IDBTransactionMode
-  ) {}
+  ) {
+    this.failWriteAt = mode === 'readwrite' ? database.failWriteAt : null;
+    const matchesReadFailure = mode === database.failReadMode &&
+      (database.failReadStore === null || names.includes(database.failReadStore));
+    this.failReadKey = matchesReadFailure ? database.failReadKey : null;
+    if (matchesReadFailure) database.failReadKey = null;
+    if (mode === 'readwrite') {
+      database.failWriteAt = null;
+      if (database.abortWriteBeforeReads) {
+        database.abortWriteBeforeReads = false;
+        queueMicrotask(() => {
+          this.error = new DOMException('synthetic abort before metadata responses', 'AbortError');
+          this.abort();
+        });
+      }
+    }
+    if (mode === 'readonly' && database.abortReadBeforeReads &&
+        (database.abortReadStore === null || names.includes(database.abortReadStore))) {
+      database.abortReadBeforeReads = false;
+      queueMicrotask(() => {
+        this.error = new DOMException('synthetic readonly abort before metadata responses', 'AbortError');
+        this.abort();
+      });
+    }
+    for (const name of names) this.stagedStores.set(name, new Map(database.stores.get(name)!));
+  }
 
   objectStore(name: string): IDBObjectStore {
     assert.equal(this.names.includes(name), true);
-    const store = this.database.stores.get(name)!;
+    const store = this.mode === 'readwrite' ? this.stagedStores.get(name)! : this.database.stores.get(name)!;
     return {
       getAll: () => {
         const request = new FakeIdbRequest<unknown[]>();
         queueMicrotask(() => {
+          if (this.finished) return;
+          if (this.failReadKey === '*getAll') {
+            this.error = request.error = new DOMException('synthetic event read failure', 'AbortError');
+            request.onerror?.({} as Event);
+            this.abort();
+            return;
+          }
           request.result = [...store.values()];
           request.onsuccess?.({} as Event);
           this.scheduleCompletion();
@@ -615,6 +900,13 @@ class FakeIdbTransaction {
       get: (key: string) => {
         const request = new FakeIdbRequest<unknown>();
         queueMicrotask(() => {
+          if (this.finished) return;
+          if (String(key) === this.failReadKey) {
+            this.error = request.error = new DOMException('synthetic metadata read failure', 'AbortError');
+            request.onerror?.({} as Event);
+            this.abort();
+            return;
+          }
           request.result = store.get(String(key));
           request.onsuccess?.({} as Event);
           this.scheduleCompletion();
@@ -622,21 +914,25 @@ class FakeIdbTransaction {
         return request;
       },
       add: (value: Record<string, unknown>) => {
+        this.beforeWrite();
         store.set(String(value.sequenceDecimal), structuredClone(value));
         this.scheduleCompletion();
         return new FakeIdbRequest();
       },
       put: (value: Record<string, unknown>) => {
+        this.beforeWrite();
         store.set(String(value.key), structuredClone(value));
         this.scheduleCompletion();
         return new FakeIdbRequest();
       },
       clear: () => {
+        this.beforeWrite();
         store.clear();
         this.scheduleCompletion();
         return new FakeIdbRequest();
       },
       delete: (key: string) => {
+        this.beforeWrite();
         store.delete(String(key));
         this.scheduleCompletion();
         return new FakeIdbRequest();
@@ -645,11 +941,31 @@ class FakeIdbTransaction {
   }
 
   complete(): void {
-    queueMicrotask(() => this.oncomplete?.({} as Event));
+    // IDB completes after request callbacks and their microtasks, never while
+    // the caller is still adding writes from a resolved head request.
+    setTimeout(() => {
+      if (this.finished) return;
+      this.finished = true;
+      if (this.mode === 'readwrite') {
+        for (const [name, staged] of this.stagedStores) this.database.stores.set(name, staged);
+      }
+      this.oncomplete?.({} as Event);
+    }, 0);
   }
 
   abort(): void {
+    if (this.finished) return;
+    this.finished = true;
     queueMicrotask(() => this.onabort?.({} as Event));
+  }
+
+  private beforeWrite(): void {
+    if (this.finished) throw new DOMException('transaction is inactive', 'TransactionInactiveError');
+    if (++this.writeCount === this.failWriteAt) {
+      this.error = new DOMException('synthetic atomic write failure', 'AbortError');
+      this.abort();
+      throw this.error;
+    }
   }
 
   private scheduleCompletion(): void {
@@ -657,7 +973,7 @@ class FakeIdbTransaction {
     this.completionScheduled = true;
     queueMicrotask(() => {
       if (this.mode === 'readwrite' && this.database.holdWriteCompletion) return;
-      this.oncomplete?.({} as Event);
+      this.complete();
     });
   }
 }

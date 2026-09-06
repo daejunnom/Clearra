@@ -24,10 +24,15 @@ test('WASM build contract follows compile inputs and ignores unrelated documents
   try {
     await mkdir(resolve(root, 'crates/example/src'), { recursive: true });
     await mkdir(resolve(root, 'node_modules/ignored'), { recursive: true });
+    await mkdir(resolve(root, 'scripts/tools'), { recursive: true });
     await writeFile(resolve(root, 'Cargo.toml'), '[workspace]\nmembers=["crates/example"]\n');
     await writeFile(resolve(root, 'Cargo.lock'), '# fixture lock\n');
     await writeFile(resolve(root, 'crates/example/Cargo.toml'), '[package]\nname="example"\n');
     await writeFile(resolve(root, 'crates/example/src/lib.rs'), 'pub const VALUE: u8 = 1;\n');
+    await writeFile(
+      resolve(root, 'scripts/tools/clearra-wasm-generation-retention.mjs'),
+      'export const RETAIN = 5;\n',
+    );
     await writeFile(resolve(root, 'private-data.json'), '{"ignored":1}\n');
     await writeFile(resolve(root, 'README.md'), 'ignored one\n');
     await writeFile(resolve(root, 'node_modules/ignored/lib.rs'), 'ignored\n');
@@ -54,6 +59,19 @@ test('WASM build contract follows compile inputs and ignores unrelated documents
     await writeFile(resolve(root, 'README.md'), 'ignored two\n');
     const afterIgnoredChanges = await createClearraWasmBuildContract(root, {});
     assert.equal(clearraWasmBuildContractsEqual(initial, afterIgnoredChanges), true);
+
+    await writeFile(
+      resolve(root, 'scripts/tools/clearra-wasm-generation-retention.mjs'),
+      'export const RETAIN = 6;\n',
+    );
+    const afterRetentionProducerChange = await createClearraWasmBuildContract(root, {});
+    assert.equal(clearraWasmBuildContractsEqual(initial, afterRetentionProducerChange), false);
+    await writeFile(
+      resolve(root, 'scripts/tools/clearra-wasm-generation-retention.mjs'),
+      'export const RETAIN = 5;\n',
+    );
+    const afterRetentionProducerRestore = await createClearraWasmBuildContract(root, {});
+    assert.equal(clearraWasmBuildContractsEqual(initial, afterRetentionProducerRestore), true);
 
     await writeFile(resolve(root, 'crates/example/src/lib.rs'), 'pub const VALUE: u8 = 2;\n');
     const afterSourceChange = await createClearraWasmBuildContract(root, {});

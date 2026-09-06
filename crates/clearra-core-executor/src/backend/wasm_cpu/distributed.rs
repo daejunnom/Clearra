@@ -194,6 +194,7 @@ pub enum WasmCandidateProducerAdvance {
 
 pub struct WasmCpuCandidateProducer {
     session: WasmExactSearchSession,
+    preparation_progress_steps: usize,
     candidate_count: usize,
     candidate_digest: u64,
     verification_required: bool,
@@ -202,7 +203,7 @@ pub struct WasmCpuCandidateProducer {
 
 impl WasmCpuCandidateProducer {
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
-        Self::new_typed(problem).map_err(WasmCpuSearchError::reason)
+        Self::new_typed(problem).map_err(|error| error.reason())
     }
 
     pub fn new_typed(problem: &SearchProblem) -> Result<Self, WasmCpuSearchError> {
@@ -210,6 +211,7 @@ impl WasmCpuCandidateProducer {
             != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling;
         Ok(Self {
             session: WasmExactSearchSession::new(problem).map_err(map_typed_error)?,
+            preparation_progress_steps: 0,
             candidate_count: 0,
             candidate_digest: 0,
             verification_required,
@@ -234,6 +236,7 @@ impl WasmCpuCandidateProducer {
                 authority,
             )
             .map_err(map_typed_error)?,
+            preparation_progress_steps: 0,
             candidate_count: 0,
             candidate_digest: 0,
             verification_required: true,
@@ -251,11 +254,15 @@ impl WasmCpuCandidateProducer {
         if control.is_cancelled() {
             return Ok(WasmCandidateProducerAdvance::Cancelled);
         }
-        match self
+        let was_preparing = self.session.geometry_target_preparation_pending();
+        let advance = self
             .session
             .advance_distributed_geometry(self.candidate_count)
-            .map_err(map_error)?
-        {
+            .map_err(map_error)?;
+        if was_preparing {
+            self.preparation_progress_steps = self.preparation_progress_steps.saturating_add(1);
+        }
+        match advance {
             DistributedGeometryAdvance::Pending => Ok(WasmCandidateProducerAdvance::Pending),
             DistributedGeometryAdvance::Candidate {
                 target_index,
@@ -326,8 +333,15 @@ impl WasmCpuCandidateProducer {
 
     pub fn progress(&self) -> WasmDistributedProgress {
         let mut progress = self.session.distributed_progress();
+        progress.geometry_nodes = progress
+            .geometry_nodes
+            .saturating_add(self.preparation_progress_steps);
         progress.candidates = self.candidate_count;
         progress
+    }
+
+    pub fn target_preparation_pending(&self) -> bool {
+        self.session.geometry_target_preparation_pending()
     }
 
     pub const fn verification_required(&self) -> bool {
@@ -372,6 +386,13 @@ impl WasmDistributedVerifier {
         if self.finished {
             return Err("wasm_distributed_verifier_already_finished");
         }
+        // Preserve the direct Rust compatibility API. Browser workers call
+        // `advance_preparation` through their resumable runtime before they
+        // enter this method, while legacy in-process callers still receive the
+        // same complete transaction they did before preparation was deferred.
+        while self.preparation_pending() {
+            self.advance_preparation(control)?;
+        }
         match self
             .session
             .process_external_candidate_with_ordinal(
@@ -408,6 +429,22 @@ impl WasmDistributedVerifier {
 
     pub fn progress(&self) -> WasmDistributedProgress {
         self.session.distributed_progress()
+    }
+
+    pub fn preparation_pending(&self) -> bool {
+        self.session.geometry_target_preparation_pending()
+    }
+
+    pub fn advance_preparation(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<bool, &'static str> {
+        if self.finished {
+            return Err("wasm_distributed_verifier_already_finished");
+        }
+        self.session
+            .advance_external_geometry_preparation(control)
+            .map_err(map_error)
     }
 }
 
@@ -597,7 +634,7 @@ fn map_typed_error(error: WasmExactSearchError) -> WasmCpuSearchError {
             WasmCpuSearchError::InvalidProblem { reason }
         }
         WasmExactSearchError::ResourceAdmission(resource_report) => {
-            WasmCpuSearchError::ResourceAdmission { resource_report }
+            WasmCpuSearchError::resource_admission(*resource_report)
         }
         WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
     }

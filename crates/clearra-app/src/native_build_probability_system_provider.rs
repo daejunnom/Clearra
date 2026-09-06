@@ -195,7 +195,11 @@ fn probe_all_worker_stacks(
 ) -> Result<u128, NativeBuildProbabilityHostProviderError> {
     let worker_count = request.worker_count();
     let worker_count_u128 = worker_count as u128;
-    if worker_count == 0 || request.worker_stack_bytes() % worker_count_u128 != 0 {
+    if worker_count == 0
+        || !request
+            .worker_stack_bytes()
+            .is_multiple_of(worker_count_u128)
+    {
         return Err(provider_error(
             "native_build_probability_system_worker_stack_request_invalid",
         ));

@@ -743,12 +743,16 @@ function registrationOptions(input, capabilityId = null) {
           4_294_967_295,
         ),
         aggregationOption(),
+        buildResultModeOption(),
         spinProfileOption(false),
         onOffOption("preserve-b2b", "Require a solution that preserves back-to-back", "off"),
         onOffOption("solution-probabilities", "Include exact per-solution probabilities", "off"),
         buildFinesseOption(),
         buildFinesseKnowledgeOption(),
         buildMirrorOption(),
+        pcScoreProfileOption(),
+        boundedIntegerOption("initial-b2b", "Initial back-to-back chain used by score result modes", 0, 65_535),
+        boundedIntegerOption("failed-count", "Maximum failed Build patterns returned", 1, 4_294_967_295),
       ]);
     case "build-v2-cover":
       return Object.freeze([
@@ -1409,6 +1413,22 @@ function aggregationOption() {
   );
 }
 
+function buildResultModeOption() {
+  return choiceOption(
+    "result-mode",
+    "Result aggregation; non-all modes use exact Buildability evidence",
+    [
+      ["All solutions (default)", "all-solutions"],
+      ["Complete replay paths", "complete-replay-paths"],
+      ["Minimum solutions", "minimum-solutions"],
+      ["Field average score", "field-average-score"],
+      ["Fixed-queue maximum score", "fixed-queue-maximum-score"],
+      ["Highest-score minimum set", "highest-score-minimum-set"],
+      ["Failed queues", "failed-queues"],
+    ],
+  );
+}
+
 function damageModeOption() {
   return choiceOption(
     "damage-mode",
@@ -1750,7 +1770,7 @@ function commandListHelp(locale) {
       "**Clearra 슬래시 명령어**",
       "렌더 파일: `/render-file` 또는 미리보기 메시지의 `앱 → 원본 GIF 받기` (명령어 필드는 해당 명령 안에서 자동 렌더링)",
       "퍼펙트 클리어: `/pc path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder`",
-      "구축: `/build cover|setup|congruent|congruent-cover|setup-cover|setup-cover-percent|setup-cover-score|evaluate-cover|evaluate-minimals|evaluate-score|evaluate-b2b-cover|evaluate-cover-percent|finesse-score`",
+      "구축: `/build cover|probability|setup|congruent|congruent-cover|setup-cover|setup-cover-percent|setup-cover-score|evaluate-cover|evaluate-minimals|evaluate-score|evaluate-b2b-cover|evaluate-cover-percent|finesse-score`",
       "셋업 순위와 점수: `/setup joint|build|pc|score`",
       "정방향 탐색: `/forward spin|damage`",
       "구조 탐색: `/spin-structure search|cover|guaranteed`",
@@ -1765,7 +1785,7 @@ function commandListHelp(locale) {
     "**Clearra slash commands**",
     "Render files: `/render-file` or `Apps → Get original GIF` on a preview message (command fields render inside their own command)",
     "Perfect clears: `/pc path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder`",
-    "Build: `/build cover|setup|congruent|congruent-cover|setup-cover|setup-cover-percent|setup-cover-score|evaluate-cover|evaluate-minimals|evaluate-score|evaluate-b2b-cover|evaluate-cover-percent|finesse-score`",
+    "Build: `/build cover|probability|setup|congruent|congruent-cover|setup-cover|setup-cover-percent|setup-cover-score|evaluate-cover|evaluate-minimals|evaluate-score|evaluate-b2b-cover|evaluate-cover-percent|finesse-score`",
     "Setup ranking and scoring: `/setup joint|build|pc|score`",
     "Forward search: `/forward spin|damage`",
     "Spin structures: `/spin-structure search|cover|guaranteed`",
@@ -1810,7 +1830,7 @@ function syntax(entry, locale = "en") {
       case "cover":
         return `/${path} next:<패턴> base:<기존 필드> target:<추가할 칸> [kicktable:<내장 프로필>] [options:hold=use]`;
       case "build-cover":
-        return `/${path} next:<패턴> base:<기존 필드> target:<추가할 칸> [kicktable:<내장 프로필>] [hold:<disabled|empty|IOTSZJL>] [source-pieces:1..4294967295] [solution-probabilities:<on|off>] [finesse:<off|inputs>] [finesse-knowledge:<both|oracle|visible-7>] [mirror:<auto|include|exclude>]`;
+        return `/${path} next:<패턴> base:<기존 필드> target:<추가할 칸> [result-mode:<7개 결과 집계>] [kicktable:<내장 프로필>] [hold:<disabled|empty|IOTSZJL>] [source-pieces:1..4294967295] [score-profile:<프로필>] [initial-b2b:0..65535] [failed-count:<개수>] [solution-probabilities:<on|off>] [finesse:<off|inputs>] [finesse-knowledge:<both|oracle|visible-7>] [mirror:<auto|include|exclude>]`;
       case "build-v2-cover":
         return `/${path} base-mask:<10진수|0x16진수> target-mask:<10진수|0x16진수> height:1..${DISCORD_PC_FIELD_MAX_ROWS} (queue:<정확한 큐>|patterns:<패턴>) [hold:<disabled|empty|IOTSZJL>] [queue-knowledge:<oracle|visible-7>] [objective:<허용 objective>] [kicktable:<내장 프로필>] [source-pieces:<개수>]`;
       case "build-v2-target":
@@ -1897,7 +1917,7 @@ function syntax(entry, locale = "en") {
     case "cover":
       return `/${path} next:<pattern> base:<field> target:<delta> [kicktable:<built-in>] [options:hold=use]`;
     case "build-cover":
-      return `/${path} next:<pattern> base:<field> target:<delta> [kicktable:<built-in>] [hold:<disabled|empty|IOTSZJL>] [source-pieces:1..4294967295] [solution-probabilities:<on|off>] [finesse:<off|inputs>] [finesse-knowledge:<both|oracle|visible-7>] [mirror:<auto|include|exclude>]`;
+      return `/${path} next:<pattern> base:<field> target:<delta> [result-mode:<7 result aggregations>] [kicktable:<built-in>] [hold:<disabled|empty|IOTSZJL>] [source-pieces:1..4294967295] [score-profile:<profile>] [initial-b2b:0..65535] [failed-count:<count>] [solution-probabilities:<on|off>] [finesse:<off|inputs>] [finesse-knowledge:<both|oracle|visible-7>] [mirror:<auto|include|exclude>]`;
     case "build-v2-cover":
       return `/${path} base-mask:<decimal|0x-hex> target-mask:<decimal|0x-hex> height:1..${DISCORD_PC_FIELD_MAX_ROWS} (queue:<exact queue>|patterns:<pattern>) [hold:<disabled|empty|IOTSZJL>] [queue-knowledge:<oracle|visible-7>] [objective:<allowed objective>] [kicktable:<built-in>] [source-pieces:<count>]`;
     case "build-v2-target":
@@ -2005,7 +2025,7 @@ function inputHelp(entry, locale = "en") {
       ] : [
         `\`field\` and \`next\` use the PC contracts, but \`next\` must compile to an unambiguous fixed bag boundary; exact fixed queues and observed-suffix sources fail closed. \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS}.`,
         "Best-save uses schema `clearra-save-v1`: maximize weighted terminal inventory (T6/I4/O3/J1/L1/S0/Z0), then minimize J+L, then maximize exact whole-universe group probability.",
-        "All exact best witnesses remain a normal tie list in the typed result. Discord displays the witness with the smallest canonical candidate ID; it does not reinterpret ties as portfolios.",
+        "All exact best witnesses remain a normal tie list in the typed result. Discord displays the first result in deterministic order; it does not reinterpret ties as portfolios.",
         nativeKickHelp,
       ];
     case "pc-allspin-exact-v1":
@@ -2035,13 +2055,13 @@ function inputHelp(entry, locale = "en") {
       return [
         `\`field\` is a 1–${DISCORD_PC_FIELD_MAX_ROWS}-row initial PC board or one static document; \`next\` must be one exact IOTSZJL queue, never a pattern.`,
         "Jstris Ultra scoring, T-spin recognition, all-witness search, and CPU execution are fixed by the capability. Score/profile, spin/profile, objective, queue-knowledge, worker, backend, fallback, and max-memory overrides are unavailable.",
-        "Score equality and ordering are score-only. Attack is informational and cannot select or order a witness; Discord returns only the smallest canonical candidate ID and exposes no tie metadata.",
+        "Score equality and ordering are score-only. Attack is informational and cannot select or order a witness; Discord returns only the first result in deterministic order and exposes no tie metadata.",
         nativeKickHelp,
       ];
       if (entry.capabilityId === "pc.score-minimals") return [
         `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS} and omission evaluates feasible targets serially.`,
         "This route fixes exact score-only minimum-cover semantics. Attack is informational only and cannot affect equality, eligibility, ordering, membership, or canonical selection.",
-        "Discord returns exactly the smallest canonical candidate ID from the canonical portfolio and exposes no tie, alternative-page, or cursor controls.",
+        "Discord returns exactly the first result in deterministic order from the canonical portfolio and exposes no tie, alternative-page, or cursor controls.",
         nativeKickHelp,
       ];
       return [
@@ -2073,8 +2093,8 @@ function inputHelp(entry, locale = "en") {
         `Both fields accept 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first grid rows or one static CTK3/v115 Fumen/URL.`,
         "`hold` is disabled, empty, or one occupied IOTSZJL piece. `source-pieces` sets the exact source window; when omitted, the engine derives it from the target piece count and initial hold.",
         "`solution-probabilities=on` includes exact per-solution probabilities. It is unavailable with geometry-only tiling.",
-        "`finesse=inputs` enables minimum-input evaluation; only then may `finesse-knowledge` be set.",
-        "`mirror=auto|include|exclude` controls reflected solutions. The `/finesse search` compatibility route is exactly `finesse=inputs finesse-knowledge=both mirror=exclude` unless its legacy knowledge/hold options override the corresponding defaults.",
+        "`finesse=inputs` enables minimum-input evaluation; only then may `finesse-knowledge` be set. `mirror` controls reflected solutions. `/finesse search` retains its fixed preset.",
+        "`result-mode` selects All solutions, Complete replay paths, Minimum solutions, Field average score, Fixed-queue maximum score, Highest-score minimum set, or Failed queues. Non-all modes use the explicit Buildability compatibility row; score ties never use attack and Discord selects the first result in deterministic order.",
         nativeKickHelp,
       ];
     case "build-v2-cover":
@@ -2132,7 +2152,7 @@ function inputHelp(entry, locale = "en") {
     case "forward-ren-v1":
       return [
         `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows or one static document; \`next\` must be one exact queue of at most 22 pieces. \`height\` defaults to at least 8 and cannot exclude supplied rows.`,
-        "Every accepted lock must clear at least one line. The first clear is REN 0; initial complete rows are normalized without counting. Discord returns the smallest canonical candidate ID when maximum-REN witnesses tie.",
+        "Every accepted lock must clear at least one line. The first clear is REN 0; initial complete rows are normalized without counting. Discord returns the first result in deterministic order when maximum-REN witnesses tie.",
         nativeKickHelp,
       ];
     case "score-fixed-next":
@@ -2307,7 +2327,7 @@ function koreanInputHelp(entry) {
       ] : [
         `\`field\`와 \`next\`는 PC 입력 계약을 사용하지만 \`next\`는 모호하지 않은 고정 가방 경계로 컴파일되어야 합니다. 정확한 고정 큐와 관측 접미 공급원은 닫힌 실패로 거부합니다. \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}입니다.`,
         "최적 세이브는 `clearra-save-v1` 스키마로 종료 인벤토리 가중치(T6/I4/O3/J1/L1/S0/Z0)를 최대화하고, J+L을 최소화한 뒤, 전체 우주 기준 그룹 정확 확률을 최대화합니다.",
-        "정확히 동률인 최적 증거는 타입 결과에서 일반 목록으로 유지합니다. Discord는 canonical candidate ID가 가장 작은 증거 하나만 표시하며 동률을 포트폴리오로 바꾸지 않습니다.",
+        "정확히 동률인 최적 증거는 타입 결과에서 일반 목록으로 유지합니다. Discord는 결정적으로 정렬된 첫 결과 하나만 표시하며 동률을 포트폴리오로 바꾸지 않습니다.",
         nativeKickHelp,
       ];
     case "pc-allspin-exact-v1":
@@ -2337,13 +2357,13 @@ function koreanInputHelp(entry) {
       return [
         `\`field\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 PC 초기 필드 또는 정적 문서이며 \`next\`에는 패턴이 아닌 정확한 IOTSZJL 큐 하나를 입력합니다.`,
         "Jstris Ultra 점수, T-spin 판정, 전체 증거 탐색, CPU 실행은 capability가 고정합니다. 점수·스핀 프로필, objective, 큐 공개 범위, worker, backend, fallback, 최대 메모리 재정의는 사용할 수 없습니다.",
-        "점수 동등성과 순서는 score-only입니다. attack은 정보일 뿐 증거 선택·정렬에 사용할 수 없고 Discord는 가장 작은 canonical candidate ID 하나만 반환하며 tie 메타데이터를 노출하지 않습니다.",
+        "점수 동등성과 순서는 score-only입니다. attack은 정보일 뿐 증거 선택·정렬에 사용할 수 없고 Discord는 결정적으로 정렬된 첫 결과 하나만 반환하며 tie 메타데이터를 노출하지 않습니다.",
         nativeKickHelp,
       ];
       if (entry.capabilityId === "pc.score-minimals") return [
         `\`field\`와 \`next\`는 PC 입력 계약을 사용하며 \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}이고 생략 시 가능한 목표를 순서대로 계산합니다.`,
         "이 경로는 정확한 score-only 최소 커버 의미를 고정합니다. 공격력은 정보일 뿐 동등성, 적격성, 순서, 해법 집합 구성, 정규 선택에 관여하지 않습니다.",
-        "Discord는 정규 포트폴리오에서 가장 작은 정규 후보 ID 하나만 반환하며 tie, 대안 페이지, 커서 제어를 노출하지 않습니다.",
+        "Discord는 정규 포트폴리오에서 결정적으로 정렬된 첫 결과 하나만 반환하며 tie, 대안 페이지, 커서 제어를 노출하지 않습니다.",
         nativeKickHelp,
       ];
       return [
@@ -2375,8 +2395,8 @@ function koreanInputHelp(entry) {
         `두 필드는 위쪽 줄부터 적은 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 받습니다.`,
         "`hold`는 비활성, 빈 홀드 또는 IOTSZJL 미노 하나가 들어 있는 홀드입니다. `source-pieces`는 정확한 소스 미노 창이며, 생략하면 엔진이 목표 미노 수와 초기 홀드에서 자동으로 계산합니다.",
         "`solution-probabilities=on`은 해법별 정확한 확률을 포함합니다. 기하학 타일링에서는 사용할 수 없습니다.",
-        "`finesse=inputs`에서만 `finesse-knowledge`를 설정할 수 있습니다.",
-        "`mirror=auto|include|exclude`로 반전 해법을 제어합니다. `/finesse search` 호환 경로는 기존 홀드·공개 범위 값을 제외하면 정확히 `finesse=inputs finesse-knowledge=both mirror=exclude` 프리셋입니다.",
+        "`finesse=inputs`에서만 `finesse-knowledge`를 설정할 수 있습니다. `mirror`는 반전 해법을 제어하며 `/finesse search`는 고정 프리셋을 유지합니다.",
+        "`result-mode`은 전체 해법, 전체 리플레이 경로, 최소 해법, 필드 평균 점수, 고정 큐 최고 점수, 최고 점수 최소 해법 집합, 실패 큐 중 하나를 선택합니다. all 이외 모드는 명시적인 구축 가능성 호환 조합으로 실행하고, 점수 동점에는 공격력을 사용하지 않으며 Discord는 결정적으로 정렬된 첫 결과 하나만 선택합니다.",
         nativeKickHelp,
       ];
     case "build-v2-cover":
@@ -2434,7 +2454,7 @@ function koreanInputHelp(entry) {
     case "forward-ren-v1":
       return [
         `\`field\`는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 또는 정적 문서를 받고 \`next\`는 최대 22개 미노의 정확한 큐 하나여야 합니다. \`height\` 기본값은 최소 8입니다.`,
-        "모든 배치는 한 줄 이상을 지워야 합니다. 첫 줄 삭제는 REN 0이며 초기 완성 줄은 세지 않고 정규화합니다. 최대 REN 경로가 여럿이면 Discord는 가장 작은 canonical candidate ID 하나만 반환합니다.",
+        "모든 배치는 한 줄 이상을 지워야 합니다. 첫 줄 삭제는 REN 0이며 초기 완성 줄은 세지 않고 정규화합니다. 최대 REN 경로가 여럿이면 Discord는 결정적으로 정렬된 첫 결과 하나만 반환합니다.",
         nativeKickHelp,
       ];
     case "score-fixed-next":
@@ -2753,6 +2773,17 @@ function koreanChoiceName(name, value, path = "") {
       tiling: "기하학 타일링",
     })[value] ?? name;
   }
+  if (path.endsWith(".result-mode")) {
+    return ({
+      "all-solutions": "전체 해법 (기본값)",
+      "complete-replay-paths": "전체 리플레이 경로",
+      "minimum-solutions": "최소 해법",
+      "field-average-score": "필드 평균 점수",
+      "fixed-queue-maximum-score": "고정 큐 최고 점수",
+      "highest-score-minimum-set": "최고 점수 최소 해법 집합",
+      "failed-queues": "실패 큐",
+    })[value] ?? name;
+  }
   if (path.endsWith(".finesse")) {
     return ({ off: "사용 안 함 (기본값)", inputs: "최소 입력 수" })[value] ?? name;
   }
@@ -2863,6 +2894,7 @@ const KOREAN_COMMAND_NAMES = Object.freeze({
   saves: "세이브",
   "best-save": "최적-세이브",
   cover: "커버",
+  probability: "확률",
   setup: "셋업",
   congruent: "합동",
   "congruent-cover": "합동-커버",
@@ -2907,6 +2939,7 @@ const KOREAN_OPTION_NAMES = Object.freeze({
   qb: "qb-미노",
   aggregation: "집계",
   "score-profile": "점수-프로필",
+  "result-mode": "결과-집계",
   "spin-profile": "스핀-프로필",
   "preserve-b2b": "b2b-보존",
   "initial-b2b": "초기-b2b",
@@ -2984,6 +3017,7 @@ const KOREAN_OPTION_NAMES = Object.freeze({
   "pc.allspin-sol": "올스핀-해법",
   "pc.allspin-pres-chance": "올스핀-보존-확률",
   "build.cover": "커버",
+  "build.probability": "확률",
   "build.setup": "셋업",
   "build.congruent": "합동",
   "build.congruent-cover": "합동-커버",
@@ -3049,6 +3083,7 @@ const KOREAN_COMMAND_DESCRIPTIONS = Object.freeze({
   saves: "종료 홀드와 활성 가방 잔여 미노별 세이브 확률을 계산합니다",
   "best-save": "clearra-save-v1 순위로 최적 세이브 증거를 선택합니다",
   cover: "기존 필드에서 목표 칸까지의 구축 확률을 계산합니다",
+  probability: "구축 확률과 정확한 결과 집계를 탐색합니다",
   setup: "명시한 관측 정책으로 셋업 후보의 순위를 계산합니다",
   congruent: "목표 모양의 구축 확률을 계산합니다",
   "congruent-cover": "목표 모양의 구축 확률을 계산합니다",
@@ -3086,6 +3121,7 @@ const KOREAN_COMMAND_NOTES = Object.freeze({
   "allspin-sol-finder": "명령 의도 호환만 제공하며 정확한 상위 도구 판정 일치를 보장하지 않습니다. 슬래시 별칭은 v0.10에 제거되고 텍스트 별칭은 장기 유지됩니다.",
   "allspin-pres-chance": "명령 의도 호환만 제공하며 정확한 상위 도구 판정 일치를 보장하지 않습니다. 슬래시 별칭은 v0.10에 제거되고 텍스트 별칭은 장기 유지됩니다.",
   "forward.spin": "기존 /spin과 /spin-cover는 Clearra 호환 별칭입니다. sfinder spin/spincover의 순서 없는 구조 탐색과는 별개입니다.",
+  "build.probability": "결과 모드 호환성 표는 CLI가 소유한 구축 확률 계약에서 강제합니다.",
   "spin-structure": "타입이 지정된 구조 탐색 형제가 실제 제공될 때까지 최상위 명령어 형태를 유지합니다. Discord에서는 최상위 옵션과 하위 명령어를 섞을 수 없습니다.",
   percent: "/chance와 같은 기능입니다.",
   chance: "/percent와 같은 기능입니다.",
@@ -3116,6 +3152,7 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   "pc.allspin-sol": "정확한 큐에서 B2B를 보존하는 퍼펙트 클리어 증거를 찾습니다",
   "pc.allspin-pres-chance": "패턴 큐 전체집합에서 B2B 보존 퍼펙트 클리어 확률을 계산합니다",
   "build.cover": "기존 필드에서 목표 칸까지의 빌드 확률을 계산합니다",
+  "build.probability": "구축 확률과 정확한 결과 집계를 탐색합니다",
   "build.setup": "색상 target의 unique 빌드 family를 찾습니다",
   "build.congruent": "색상 target의 합동 빌드 family를 찾습니다",
   "build.congruent-cover": "색상 합동 target의 정확한 커버 포트폴리오를 찾습니다",
@@ -3157,6 +3194,7 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   mode: "셋업 후보가 관측할 공급 모드입니다",
   qb: "qb 모드에서 이미 관측한 현재 가방 미노입니다",
   aggregation: "빌드 가능성, 스핀 커버리지, 기하학 타일링 중 결과 집계 방식입니다",
+  "result-mode": "구축 확률 탐색에 적용할 정확한 결과 집계 방식입니다",
   "score-profile": "퍼펙트 클리어 해법에 적용할 점수 프로필입니다",
   "spin-profile": "스핀을 판정할 프로필이며 Regular와 Mini는 분리됩니다",
   "preserve-b2b": "선택한 결과가 백투백 상태를 보존하도록 요구합니다",

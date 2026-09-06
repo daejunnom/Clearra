@@ -261,7 +261,7 @@ impl PcFailedQueueProducerAdmission {
     fn ensure(&self, producer_peak_bytes: u128) -> Result<(), PcFailedQueueEvidenceError> {
         self.memory_bound
             .ensure(self.observed_execution_bytes, producer_peak_bytes)
-            .map_err(PcFailedQueueEvidenceError::MemoryAdmission)
+            .map_err(PcFailedQueueEvidenceError::memory_admission)
     }
 }
 
@@ -968,7 +968,7 @@ pub enum PcFailedQueueProbabilityClass {
     MaterializedMass,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcFailedQueueEvidenceError {
     UnsupportedPreset,
     MissingMaterializedPatternUniverse,
@@ -1066,10 +1066,16 @@ pub enum PcFailedQueueEvidenceError {
     },
     MemoryAuthorityUnavailable,
     MemoryProjectionOverflow,
-    MemoryAdmission(ResourceReport),
+    MemoryAdmission(Box<ResourceReport>),
     AllocationUnavailable,
     InvalidCoverageBitSet(clearra_coverage::pattern::pattern_bitset::PatternBitSetError),
     SharedCoverageAggregationInvalid,
+}
+
+impl PcFailedQueueEvidenceError {
+    fn memory_admission(report: ResourceReport) -> Self {
+        Self::MemoryAdmission(Box::new(report))
+    }
 }
 
 #[cfg(test)]

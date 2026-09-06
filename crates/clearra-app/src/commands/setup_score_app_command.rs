@@ -99,6 +99,7 @@ impl SetupScoreAppCommand {
         {
             return Err(SetupScoreAppCommandError::CoverageExecutionPolicyInvalid);
         }
+        let continuation_execution_policy = score_execution_policy(&coverage_execution_policy);
 
         let document_format = document.format();
         let document_hash = document.document_hash().to_owned();
@@ -195,7 +196,7 @@ impl SetupScoreAppCommand {
                     .with_initial_b2b(initial_b2b),
             )
             .with_retained_trace_limit(1)
-            .with_execution_policy(score_execution_policy());
+            .with_execution_policy(continuation_execution_policy.clone());
             if let Some(length) = solution_standard_bag_len {
                 continuation = continuation.with_supply_window_size(SupplyWindowSize::new(
                     length.min(continuation_piece_count),
@@ -357,7 +358,7 @@ fn execute(
                     clearra_core_executor::CoreExecutionError::resource_incomplete(
                         "execution-admission",
                         0,
-                        report,
+                        *report,
                     ),
                 ));
             }
@@ -472,12 +473,39 @@ fn execute(
     ))
 }
 
-fn score_execution_policy() -> PcExecutionPolicy {
-    PcExecutionPolicy::mvp_default()
+fn score_execution_policy(coverage_policy: &PcExecutionPolicy) -> PcExecutionPolicy {
+    let policy = PcExecutionPolicy::mvp_default()
         .with_requested_backend(RequestedSearchBackend::Cpu)
-        .with_workers(1)
         .with_allow_backend_fallback(false)
-        .with_max_patterns(PC_SCORE_MAX_PATTERNS)
+        .with_max_patterns(PC_SCORE_MAX_PATTERNS);
+
+    #[cfg(target_family = "wasm")]
+    {
+        // Browser workers own separate WASM module instances. A Setup-score
+        // continuation therefore remains a one-worker child; the host-side
+        // coordinator owns any wider coverage policy.
+        let _ = coverage_policy;
+        policy.with_workers(1)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let use_all = coverage_policy.use_all_logical_processors();
+        let effective_workers = coverage_policy.workers();
+        // `with_worker_policy` deliberately clears an Auto ceiling. Rebuild a
+        // hardware ceiling which preserves the already-clamped effective
+        // width while retaining Auto versus Fixed and the n-1/use-all rule.
+        let effective_hardware_limit = if use_all {
+            effective_workers
+        } else {
+            effective_workers.saturating_add(1)
+        };
+        policy
+            .with_worker_policy(coverage_policy.worker_policy())
+            .with_worker_hardware_limit(effective_hardware_limit)
+            .with_use_all_logical_processors(use_all)
+            .with_cpu_warmup(coverage_policy.cpu_warmup())
+    }
 }
 
 fn candidate_document_hash(document_hash: &str, candidate_id: &str) -> String {
@@ -518,4 +546,116 @@ fn evaluation_identity(
 fn hash_text(hasher: &mut Sha256, value: &str) {
     hasher.update((value.len() as u128).to_be_bytes());
     hasher.update(value.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_ctk3::{encode_ctk3, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece};
+    #[cfg(target_family = "wasm")]
+    use clearra_pc_graph::request::WorkerPolicy;
+    use clearra_rules::profile::rule_profile::RuleProfileId;
+    use clearra_supply::queue::queue_parser;
+
+    use super::*;
+
+    fn setup_score_document() -> SetupScoreDocumentV1 {
+        let mut cells = vec![Ctk3Color::Empty; 20];
+        cells[0..4].fill(Ctk3Color::Piece(Ctk3Piece::I));
+        let source = encode_ctk3(&Ctk3Document::new(10, vec![Ctk3Page::new(2, cells)]))
+            .expect("Setup-score CTK3 fixture");
+        SetupScoreDocumentV1::decode(crate::FieldDocumentFormat::Ctk3, &source)
+            .expect("canonical Setup-score document")
+    }
+
+    fn setup_score_command(policy: PcExecutionPolicy) -> SetupScoreAppCommand {
+        SetupScoreAppCommand::new(
+            setup_score_document(),
+            PcQueueInput::fixed_sequence(
+                queue_parser::parse_fixed_sequence("I").expect("Setup queue"),
+            ),
+            None,
+            PcQueueInput::fixed_sequence(
+                queue_parser::parse_fixed_sequence("OTSJ").expect("continuation queue"),
+            ),
+            None,
+            2,
+            false,
+            ScoreProfileSelection::Tetrio,
+            0,
+            RuleProfile::new(RuleProfileId::SrsPlus),
+            policy,
+        )
+        .expect("valid Setup-score command")
+    }
+
+    #[test]
+    #[cfg(not(target_family = "wasm"))]
+    fn setup_score_continuation_inherits_native_cpu_parallel_controls_only() {
+        let baseline = PcExecutionPolicy::mvp_default();
+        let policies = [
+            baseline
+                .clone()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_workers(3)
+                .with_worker_hardware_limit(4)
+                .with_cpu_warmup(true)
+                .with_allow_backend_fallback(false),
+            baseline
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_automatic_worker_limit(2)
+                .with_worker_hardware_limit(8)
+                .with_use_all_logical_processors(true)
+                .with_allow_backend_fallback(false),
+        ];
+
+        for coverage_policy in policies {
+            let expected_worker_policy = coverage_policy.worker_policy();
+            let expected_workers = coverage_policy.workers();
+            let expected_use_all = coverage_policy.use_all_logical_processors();
+            let expected_cpu_warmup = coverage_policy.cpu_warmup();
+            let command = setup_score_command(coverage_policy);
+            let continuation = command
+                .candidates
+                .first()
+                .expect("Setup-score candidate")
+                .continuation
+                .execution_policy();
+
+            assert_eq!(continuation.worker_policy(), expected_worker_policy);
+            assert_eq!(continuation.workers(), expected_workers);
+            assert_eq!(continuation.use_all_logical_processors(), expected_use_all);
+            assert_eq!(continuation.cpu_warmup(), expected_cpu_warmup);
+            assert_eq!(
+                continuation.requested_backend(),
+                RequestedSearchBackend::Cpu
+            );
+            assert!(!continuation.allow_backend_fallback());
+            assert!(!continuation.gpu_warmup());
+            assert!(!continuation.tablebase_requested());
+            assert!(!continuation.precompute_build_dependencies());
+            assert_eq!(continuation.max_memory_mib(), None);
+            assert_eq!(continuation.max_patterns(), PC_SCORE_MAX_PATTERNS);
+        }
+    }
+
+    #[test]
+    #[cfg(target_family = "wasm")]
+    fn setup_score_continuation_keeps_one_worker_per_wasm_instance() {
+        let command = setup_score_command(
+            PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_workers(4)
+                .with_worker_hardware_limit(4)
+                .with_use_all_logical_processors(true)
+                .with_allow_backend_fallback(false),
+        );
+        let continuation = command
+            .candidates
+            .first()
+            .expect("Setup-score candidate")
+            .continuation
+            .execution_policy();
+        assert_eq!(continuation.worker_policy(), WorkerPolicy::Fixed(1));
+        assert_eq!(continuation.workers(), 1);
+    }
 }

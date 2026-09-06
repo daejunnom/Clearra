@@ -135,10 +135,48 @@ fn srs_plus_profile_preserves_symmetric_i_and_transition_specific_180_kicks() {
 }
 
 #[test]
-fn srs_x_retains_the_extended_i_180_sequence() {
+fn srs_x_matches_the_tetrio_standard_tetromino_fixture_for_all_84_transitions() {
     let profile = SrsKicks::srs_x_profile();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/rules/tetrio_srs_x_standard_tetromino_kicks.json"
+    ))
+    .expect("TETR.IO SRS-X fixture");
 
     assert_eq!(profile.id(), KickTableProfileId::SrsX);
+    assert_eq!(profile.source_rule(), RuleProfileId::SrsX);
+    assert_eq!(fixture["authority"], "https://tetr.io/js/tetrio.js");
+    assert_eq!(fixture["implicit_origin_attempt"], true);
+    assert_eq!(fixture["standard_o"]["disallow_kick"], true);
+    assert_eq!(fixture["standard_o"]["uses_oo_kicks"], false);
+    assert_eq!(fixture["oo_kicks_scope"]["standard_tetromino"], false);
+    assert_eq!(profile.transition_count(), 84);
+    assert_eq!(profile.duplicate_transitions(), []);
+
+    for piece in PieceKind::STANDARD_TETROMINOES {
+        for source_transition in [
+            "01", "12", "23", "30", "03", "32", "21", "10", "02", "13", "20", "31",
+        ] {
+            let bytes = source_transition.as_bytes();
+            let from = source_rotation(bytes[0]);
+            let to = source_rotation(bytes[1]);
+            let expected = if piece == PieceKind::O {
+                vec![KickOffset::new(0, 0)]
+            } else {
+                let family = if piece == PieceKind::I { "i" } else { "jlstz" };
+                tetrio_source_offsets_y_up(&fixture["families"][family][source_transition])
+            };
+
+            assert_eq!(
+                profile
+                    .sequence_for(KickTransition::new(piece, from, to))
+                    .expect("complete SRS-X transition")
+                    .offsets(),
+                expected,
+                "TETR.IO SRS-X {piece:?} {source_transition}"
+            );
+        }
+    }
+
     assert_eq!(
         profile
             .sequence_for(KickTransition::new(
@@ -148,7 +186,15 @@ fn srs_x_retains_the_extended_i_180_sequence() {
             ))
             .expect("SRS-X I 0->2")
             .offsets(),
-        offsets([(0, 0), (0, 1), (1, 1), (-1, 1), (1, 0), (-1, 0)])
+        offsets([(0, 0), (-1, 0), (-2, 0), (1, 0), (2, 0), (0, -1)])
+    );
+    assert_eq!(
+        profile
+            .entries()
+            .iter()
+            .map(|entry| entry.sequence().len())
+            .max(),
+        Some(12)
     );
 }
 
@@ -299,4 +345,31 @@ fn offsets<const N: usize>(values: [(i8, i8); N]) -> Vec<KickOffset> {
         .into_iter()
         .map(|(dx, dy)| KickOffset::new(dx, dy))
         .collect()
+}
+
+fn source_rotation(value: u8) -> RotationState {
+    match value {
+        b'0' => RotationState::Zero,
+        b'1' => RotationState::Right,
+        b'2' => RotationState::Two,
+        b'3' => RotationState::Left,
+        _ => panic!("invalid TETR.IO rotation digit"),
+    }
+}
+
+fn tetrio_source_offsets_y_up(value: &serde_json::Value) -> Vec<KickOffset> {
+    let mut expected = vec![KickOffset::new(0, 0)];
+    expected.extend(
+        value
+            .as_array()
+            .expect("TETR.IO transition array")
+            .iter()
+            .map(|offset| {
+                let offset = offset.as_array().expect("TETR.IO offset pair");
+                let dx = offset[0].as_i64().expect("TETR.IO dx") as i8;
+                let source_dy = offset[1].as_i64().expect("TETR.IO dy") as i8;
+                KickOffset::new(dx, -source_dy)
+            }),
+    );
+    expected
 }

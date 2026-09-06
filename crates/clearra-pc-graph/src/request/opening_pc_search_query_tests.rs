@@ -59,6 +59,36 @@ fn opening_query_can_carry_cli_supplied_queue_hold_and_objective() {
         query.objective().kind(),
         clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
     );
+    assert_eq!(query.count_policy(), PcCountPolicy::CountUnique);
+}
+
+#[test]
+fn opening_query_preserves_an_explicit_count_policy_independently_of_objective_order() {
+    let count_then_objective = OpeningPcSearchQuery::new(PcTarget::four_lines())
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::minimum_cover());
+    let objective_then_count = OpeningPcSearchQuery::new(PcTarget::four_lines())
+        .with_objective(ObjectivePolicy::minimum_cover())
+        .with_count_policy(PcCountPolicy::CountUnique);
+
+    for query in [count_then_objective, objective_then_count] {
+        assert_eq!(
+            query.objective().kind(),
+            clearra_core_domain::objective::objective_kind::ObjectiveKind::MinimumCover
+        );
+        assert_eq!(query.count_policy(), PcCountPolicy::CountUnique);
+    }
+}
+
+#[test]
+fn opening_query_score_contract_forces_count_all_without_erasing_the_override() {
+    let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::minimum_cover().with_score_summary());
+    assert_eq!(query.count_policy(), PcCountPolicy::CountAll);
+
+    let unscored = query.with_objective(ObjectivePolicy::minimum_cover());
+    assert_eq!(unscored.count_policy(), PcCountPolicy::CountUnique);
 }
 
 #[test]

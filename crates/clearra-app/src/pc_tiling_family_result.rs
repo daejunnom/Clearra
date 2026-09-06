@@ -333,7 +333,7 @@ impl PcTilingCompiledAuthority {
         }
         let terminal_resource_authority =
             WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
-                .map_err(PcTilingCompiledAuthorityError::ResourceAdmission)?;
+                .map_err(PcTilingCompiledAuthorityError::resource_admission)?;
         let problem = match query.as_ref() {
             PcTilingQuerySnapshot::Opening(query) => {
                 ProblemCompiler::compile_opening_pc_tiling(query.as_ref())
@@ -639,11 +639,17 @@ fn rejected(reason: &'static str) -> PcTilingExecutionError {
     PcTilingExecutionError::ContractRejected(reason)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PcTilingCompiledAuthorityError {
-    ResourceAdmission(ResourceReport),
+    ResourceAdmission(Box<ResourceReport>),
     ProblemCompile(ProblemCompileError),
     Contract(&'static str),
+}
+
+impl PcTilingCompiledAuthorityError {
+    fn resource_admission(resource_report: ResourceReport) -> Self {
+        Self::ResourceAdmission(Box::new(resource_report))
+    }
 }
 
 impl fmt::Display for PcTilingCompiledAuthorityError {

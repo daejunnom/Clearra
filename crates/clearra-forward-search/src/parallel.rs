@@ -962,16 +962,15 @@ fn encode_worker_initialization(
     output
 }
 
+type WorkerInitialization = (
+    ForwardSearchConfig,
+    Option<Vec<PieceKind>>,
+    Vec<Vec<PieceKind>>,
+);
+
 fn decode_worker_initialization(
     input: &[u8],
-) -> Result<
-    (
-        ForwardSearchConfig,
-        Option<Vec<PieceKind>>,
-        Vec<Vec<PieceKind>>,
-    ),
-    ForwardParallelError,
-> {
+) -> Result<WorkerInitialization, ForwardParallelError> {
     let mut reader = Reader::new(input);
     reader.require_header(INIT_MAGIC)?;
     let config = decode_config(&mut reader)?;

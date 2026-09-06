@@ -189,6 +189,39 @@ fn unbounded_exact_matrix_solver_is_fieldwise_equal_to_the_existing_exact_author
 }
 
 #[test]
+fn guarded_canonical_matrix_solver_uses_original_row_lex_first_identity() {
+    let required =
+        PatternBitSet::from_patterns(3, (0..3).map(PatternId::new)).expect("required patterns");
+    let rows = vec![
+        PatternBitSet::from_patterns(3, [PatternId::new(1), PatternId::new(2)]).expect("first row"),
+        PatternBitSet::from_patterns(3, [PatternId::new(0)])
+            .expect("properly dominated second row"),
+        PatternBitSet::from_patterns(3, [PatternId::new(0), PatternId::new(1)]).expect("third row"),
+    ];
+    let matrix = CoverageMatrix::from_rows(
+        3,
+        rows.into_iter()
+            .enumerate()
+            .map(|(candidate_id, patterns)| MatrixCoverageRow::new(candidate_id, patterns))
+            .collect(),
+    )
+    .expect("coverage matrix");
+
+    let selection = MinimumCoverSolver::solve_exact_canonical_with_memory_guard(
+        &matrix,
+        &required,
+        &mut |_| Ok(()),
+    )
+    .expect("canonical exact cover");
+
+    // The proof may discard row 1 as dominated by row 2, but [0, 1] is the
+    // lexicographically first minimum portfolio over the original matrix.
+    assert_eq!(selection.row_indices(), [0, 1]);
+    assert!(selection.is_complete());
+    assert!(selection.is_proven_minimum());
+}
+
+#[test]
 fn unbounded_exact_matrix_solver_preserves_partial_authority_when_no_full_cover_exists() {
     let required =
         PatternBitSet::from_patterns(2, [PatternId::new(0), PatternId::new(1)]).expect("required");

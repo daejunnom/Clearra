@@ -58,6 +58,8 @@ pub(super) struct CoverageProductEvaluator {
 }
 
 impl CoverageProductEvaluator {
+    // Evaluation borrows independent compiled surfaces rather than allocating a facade.
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         &mut self,
         graph: &BuildOrderGraph,

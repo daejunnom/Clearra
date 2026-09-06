@@ -2,7 +2,7 @@ use std::{cell::RefCell, sync::Arc};
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_problem::{compile_setup_search_conditions, SetupSearchCondition, SetupSearchQuery};
-use clearra_supply::pattern_universe::PieceMultisetKey;
+use clearra_supply::pattern_universe::{PatternPiecePositionIndex, PieceMultisetKey};
 
 use crate::performance::{ExecutorSearchStage, SearchStageSpan};
 
@@ -14,14 +14,16 @@ use super::{
     },
     setup_coverage_graph::SetupCoverageGraph,
     setup_finder::{
-        compile_setup_admissible_prefixes_with_word_counts, compile_setup_pattern_index,
-        CompletedSetupCoverage,
+        CompletedSetupCoverage, SetupAdmissiblePrefixCompileAdvance,
+        SetupAdmissiblePrefixCompileSession,
     },
     setup_partial_build::{PartialBuildAdvance, PartialBuildGraph, PartialBuildGraphBuilder},
     setup_suffix_coverage::{SetupSuffixCoverageAdvance, SetupSuffixCoverageSession},
     WasmExactSearchError,
 };
 
+// Completed graphs move directly into the consumer session.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum SetupGraphBuildAdvance {
     Pending,
     Complete(SetupSharedGraph),
@@ -77,9 +79,27 @@ pub(super) struct SetupSharedGraph {
     pub(super) tablebase_status: &'static str,
     pub(super) tablebase_pruned_states: usize,
     pub(super) cached_coverage: Option<Arc<[CompletedSetupCoverage]>>,
+    pub(super) condition_pattern_word_counts: Vec<usize>,
+    pub(super) condition_pattern_indices: Vec<Arc<PatternPiecePositionIndex>>,
 }
 
+// The graph builder owns one stage at a time; inline storage avoids transition allocation.
+#[allow(clippy::large_enum_variant)]
 enum SetupGraphBuildStage {
+    Conditions {
+        cached: Option<CachedSetupGraph>,
+    },
+    CachedPrefixes {
+        session: SetupAdmissiblePrefixCompileSession,
+        cached: Option<CachedSetupGraph>,
+    },
+    Catalog,
+    Prefixes(SetupAdmissiblePrefixCompileSession),
+    Targets {
+        admissible_prefixes: Vec<u32>,
+        target_keys: Vec<PieceMultisetKey>,
+        next_condition: usize,
+    },
     Cached(Option<CachedSetupGraph>),
     Geometry(GeometryFamilyCompileSession),
     PartialBuild(PartialBuildGraphBuilder),
@@ -96,9 +116,13 @@ pub(super) struct SetupGraphBuildSession {
     query: SetupSearchQuery,
     conditions: Vec<SetupSearchCondition>,
     condition_pattern_word_counts: Option<Vec<usize>>,
+    condition_pattern_indices: Option<Vec<Arc<PatternPiecePositionIndex>>>,
     catalog: Option<Arc<GeometryCatalog>>,
+    tablebase: Option<Arc<Pc4CompactTablebase>>,
     cached_detail_coverage: Option<Arc<[CompletedSetupCoverage]>>,
     tablebase_status: &'static str,
+    parallel_task_count_hint: usize,
+    retain_pattern_indices: bool,
     stage: SetupGraphBuildStage,
 }
 
@@ -133,144 +157,43 @@ thread_local! {
 
 impl SetupGraphBuildSession {
     pub(super) fn new(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
-        Self::new_internal(query)
+        Self::new_internal(query, false)
     }
 
     pub(super) fn new_parallel(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
-        Self::new_internal(query)
+        Self::new_internal(query, true)
     }
 
-    fn new_internal(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
-        let mut conditions = compile_setup_search_conditions(query).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_residue_condition_compile_failed")
-        })?;
-        if let Some(detail) = query.path_detail() {
-            conditions.retain(|condition| condition.condition_id() == detail.condition_id());
-            if conditions.is_empty() {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "setup_path_detail_condition_not_found",
-                ));
-            }
-        }
-        let first = conditions
-            .first()
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "setup_residue_has_no_hold_condition",
-            ))?;
-        super::ensure_connected_kick_profile(first.problem())?;
-        let cached = cached_setup_graph(query);
-        if let Some(cached) = cached {
-            if !cached.compact_continuation {
-                let graph = cached.graph.ok_or(WasmExactSearchError::InvalidProblem(
-                    "setup_cached_graph_missing",
-                ))?;
-                let coverage_graph =
-                    cached
-                        .coverage_graph
-                        .ok_or(WasmExactSearchError::InvalidProblem(
-                            "setup_cached_coverage_graph_missing",
-                        ))?;
-                let tablebase_status = cached.tablebase_status;
-                return Ok(Self {
-                    query: query.clone(),
-                    conditions,
-                    condition_pattern_word_counts: None,
-                    catalog: None,
-                    cached_detail_coverage: None,
-                    tablebase_status,
-                    stage: SetupGraphBuildStage::Cached(Some(CachedSetupGraph {
-                        graph: Some(graph),
-                        coverage_graph: Some(coverage_graph),
-                        compact_continuation: false,
-                        geometry_family_count: cached.geometry_family_count,
-                        geometry_expanded_nodes: cached.geometry_expanded_nodes,
-                        tablebase_status: cached.tablebase_status,
-                        tablebase_pruned_states: cached.tablebase_pruned_states,
-                        coverage: cached.coverage,
-                    })),
-                });
-            }
-            let cached_detail_coverage = cached.coverage;
-            return Self::new_uncached(query, conditions, cached_detail_coverage);
-        }
-        Self::new_uncached(query, conditions, None)
-    }
-
-    fn new_uncached(
+    fn new_internal(
         query: &SetupSearchQuery,
-        conditions: Vec<SetupSearchCondition>,
-        cached_detail_coverage: Option<Arc<[CompletedSetupCoverage]>>,
+        parallel: bool,
     ) -> Result<Self, WasmExactSearchError> {
-        let first = conditions
-            .first()
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "setup_residue_has_no_hold_condition",
-            ))?;
-        let catalog = Arc::new(GeometryCatalog::compile(first.problem())?);
-        if catalog.width() != 10 || catalog.height() != 4 || catalog.initial_board() != 0 {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "setup_finder_requires_empty_10x4_target",
-            ));
-        }
-        let loaded_tablebase = query
-            .tablebase_requested()
-            .then(loaded_pc4_compact_tablebase)
-            .flatten();
-        let expected_tablebase_profile =
-            pc4_tablebase_profile_identity(first.problem(), catalog.identity_digest());
-        let (tablebase, tablebase_status) = select_setup_tablebase(
-            query.tablebase_requested(),
-            loaded_tablebase,
-            catalog.identity_digest(),
-            expected_tablebase_profile,
-        );
-
-        let (mut admissible_prefixes, condition_pattern_word_counts) =
-            compile_setup_admissible_prefixes_with_word_counts(&conditions)?;
-        let mut target_keys = Vec::<PieceMultisetKey>::new();
-        for condition in &conditions {
-            let problem = condition.problem();
-            let universe = problem.piece_source().materialized_universe().ok_or(
-                WasmExactSearchError::InvalidProblem("setup_pattern_universe_not_materialized"),
-            )?;
-            let family = universe.packing_multiset_family_for_execution(
-                10,
-                problem.initial_hold(),
-                problem.supply().hold_enabled(),
-                super::packing_hold_projection(problem),
-            );
-            target_keys.extend(family.groups().iter().map(|group| group.key()));
-        }
-        if conditions
-            .iter()
-            .any(|condition| condition.terminal_supply_target().is_some())
-        {
-            target_keys.retain(|target| {
-                admissible_prefixes
-                    .binary_search(&pack_piece_counts(target.counts()))
-                    .is_ok()
-            });
-        }
-        admissible_prefixes.extend(
-            target_keys
-                .iter()
-                .map(|target| pack_piece_counts(target.counts())),
-        );
-        let geometry = GeometryFamilyCompileSession::new_with_tablebase(
-            catalog.required_cells(),
-            target_keys,
-            admissible_prefixes,
-            tablebase,
-        )?;
+        let cached = cached_setup_graph(query);
+        let parallel_task_count_hint = if cached.as_ref().is_some_and(|cached| {
+            !cached.compact_continuation
+                && cached_detail_candidate_exists(query, cached.coverage.as_deref())
+        }) {
+            1
+        } else {
+            2
+        };
         Ok(Self {
             query: query.clone(),
-            conditions,
-            condition_pattern_word_counts: Some(condition_pattern_word_counts),
-            catalog: Some(catalog),
-            cached_detail_coverage,
-            tablebase_status,
-            stage: SetupGraphBuildStage::Geometry(geometry),
+            conditions: Vec::new(),
+            condition_pattern_word_counts: None,
+            condition_pattern_indices: None,
+            catalog: None,
+            tablebase: None,
+            cached_detail_coverage: None,
+            tablebase_status: "disabled",
+            parallel_task_count_hint,
+            retain_pattern_indices: !parallel || cfg!(not(target_family = "wasm")),
+            stage: SetupGraphBuildStage::Conditions { cached },
         })
+    }
+
+    pub(super) const fn parallel_task_count_hint(&self) -> usize {
+        self.parallel_task_count_hint
     }
 
     pub(super) fn condition_count(&self) -> usize {
@@ -286,7 +209,13 @@ impl SetupGraphBuildSession {
                 ..
             } => *geometry_expanded_nodes,
             SetupGraphBuildStage::Cached(Some(cached)) => cached.geometry_expanded_nodes,
-            SetupGraphBuildStage::Cached(None) | SetupGraphBuildStage::Finished => 0,
+            SetupGraphBuildStage::Conditions { .. }
+            | SetupGraphBuildStage::CachedPrefixes { .. }
+            | SetupGraphBuildStage::Catalog
+            | SetupGraphBuildStage::Prefixes(_)
+            | SetupGraphBuildStage::Targets { .. }
+            | SetupGraphBuildStage::Cached(None)
+            | SetupGraphBuildStage::Finished => 0,
         }
     }
 
@@ -298,6 +227,11 @@ impl SetupGraphBuildSession {
                 cached.graph.as_ref().map_or(0, |graph| graph.nodes.len())
             }
             SetupGraphBuildStage::Cached(None)
+            | SetupGraphBuildStage::Conditions { .. }
+            | SetupGraphBuildStage::CachedPrefixes { .. }
+            | SetupGraphBuildStage::Catalog
+            | SetupGraphBuildStage::Prefixes(_)
+            | SetupGraphBuildStage::Targets { .. }
             | SetupGraphBuildStage::Geometry(_)
             | SetupGraphBuildStage::Finished => 0,
         }
@@ -305,6 +239,30 @@ impl SetupGraphBuildSession {
 
     pub(super) fn progress(&self) -> SetupGraphBuildProgress {
         match &self.stage {
+            SetupGraphBuildStage::Conditions { .. } => {
+                SetupGraphBuildProgress::stage(0).with_layer(0, 1, 0, 1)
+            }
+            SetupGraphBuildStage::Catalog => {
+                SetupGraphBuildProgress::stage(0).with_layer(0, 1, 1, 1)
+            }
+            SetupGraphBuildStage::Prefixes(session)
+            | SetupGraphBuildStage::CachedPrefixes { session, .. } => {
+                let (layer_index, layer_count, layer_done, layer_total) = session.progress();
+                SetupGraphBuildProgress::stage(0).with_layer(
+                    layer_index,
+                    layer_count,
+                    layer_done,
+                    layer_total,
+                )
+            }
+            SetupGraphBuildStage::Targets { next_condition, .. } => {
+                SetupGraphBuildProgress::stage(0).with_layer(
+                    *next_condition,
+                    self.conditions.len().max(1),
+                    *next_condition,
+                    self.conditions.len().max(1),
+                )
+            }
             SetupGraphBuildStage::Geometry(_) => SetupGraphBuildProgress::stage(0),
             SetupGraphBuildStage::PartialBuild(builder) => {
                 let (layer_index, layer_count, layer_done, layer_total) =
@@ -331,21 +289,6 @@ impl SetupGraphBuildSession {
         }
     }
 
-    pub(super) fn condition_pattern_word_counts(&self) -> Result<Vec<usize>, WasmExactSearchError> {
-        if let Some(word_counts) = self.condition_pattern_word_counts.as_ref() {
-            return Ok(word_counts.clone());
-        }
-        if let SetupGraphBuildStage::Cached(Some(cached)) = &self.stage {
-            if cached_detail_candidate_exists(&self.query, cached.coverage.as_deref()) {
-                return Ok(vec![0; self.conditions.len()]);
-            }
-        }
-        self.conditions
-            .iter()
-            .map(|condition| compile_setup_pattern_index(condition).map(|index| index.word_count()))
-            .collect()
-    }
-
     pub(super) fn advance(
         &mut self,
         work_budget: usize,
@@ -358,10 +301,209 @@ impl SetupGraphBuildSession {
         let budget = work_budget.max(1);
         let stage = std::mem::replace(&mut self.stage, SetupGraphBuildStage::Finished);
         match stage {
+            SetupGraphBuildStage::Conditions { cached } => {
+                let mut conditions =
+                    compile_setup_search_conditions(&self.query).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "setup_residue_condition_compile_failed",
+                        )
+                    })?;
+                if let Some(detail) = self.query.path_detail() {
+                    conditions
+                        .retain(|condition| condition.condition_id() == detail.condition_id());
+                    if conditions.is_empty() {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "setup_path_detail_condition_not_found",
+                        ));
+                    }
+                }
+                let first = conditions
+                    .first()
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_residue_has_no_hold_condition",
+                    ))?;
+                super::ensure_connected_kick_profile(first.problem())?;
+                self.conditions = conditions;
+                if let Some(cached) = cached {
+                    if !cached.compact_continuation {
+                        if cached_detail_candidate_exists(&self.query, cached.coverage.as_deref()) {
+                            self.condition_pattern_word_counts =
+                                Some(vec![0; self.conditions.len()]);
+                            self.condition_pattern_indices = Some(Vec::new());
+                            self.stage = SetupGraphBuildStage::Cached(Some(cached));
+                        } else {
+                            self.stage = SetupGraphBuildStage::CachedPrefixes {
+                                session:
+                                    SetupAdmissiblePrefixCompileSession::new_with_retained_indices(
+                                        &self.conditions,
+                                        self.retain_pattern_indices,
+                                    )?,
+                                cached: Some(cached),
+                            };
+                        }
+                        return Ok(SetupGraphBuildAdvance::Pending);
+                    }
+                    self.cached_detail_coverage = cached.coverage;
+                }
+                self.stage = SetupGraphBuildStage::Catalog;
+                Ok(SetupGraphBuildAdvance::Pending)
+            }
+            SetupGraphBuildStage::CachedPrefixes {
+                mut session,
+                mut cached,
+            } => match session.advance(budget, control)? {
+                SetupAdmissiblePrefixCompileAdvance::Pending => {
+                    self.stage = SetupGraphBuildStage::CachedPrefixes { session, cached };
+                    Ok(SetupGraphBuildAdvance::Pending)
+                }
+                SetupAdmissiblePrefixCompileAdvance::Cancelled => {
+                    Ok(SetupGraphBuildAdvance::Cancelled)
+                }
+                SetupAdmissiblePrefixCompileAdvance::Complete {
+                    word_counts,
+                    pattern_indices,
+                    ..
+                } => {
+                    self.condition_pattern_word_counts = Some(word_counts);
+                    self.condition_pattern_indices = Some(pattern_indices);
+                    self.stage = SetupGraphBuildStage::Cached(cached.take());
+                    Ok(SetupGraphBuildAdvance::Pending)
+                }
+            },
+            SetupGraphBuildStage::Catalog => {
+                let first = self
+                    .conditions
+                    .first()
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_residue_has_no_hold_condition",
+                    ))?;
+                let catalog = Arc::new(GeometryCatalog::compile(first.problem())?);
+                if catalog.width() != 10 || catalog.height() != 4 || catalog.initial_board() != 0 {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "setup_finder_requires_empty_10x4_target",
+                    ));
+                }
+                let loaded_tablebase = self
+                    .query
+                    .tablebase_requested()
+                    .then(loaded_pc4_compact_tablebase)
+                    .flatten();
+                let expected_tablebase_profile =
+                    pc4_tablebase_profile_identity(first.problem(), catalog.identity_digest());
+                let (tablebase, tablebase_status) = select_setup_tablebase(
+                    self.query.tablebase_requested(),
+                    loaded_tablebase,
+                    catalog.identity_digest(),
+                    expected_tablebase_profile,
+                );
+                self.tablebase = tablebase;
+                self.tablebase_status = tablebase_status;
+                self.catalog = Some(catalog);
+                self.stage = SetupGraphBuildStage::Prefixes(
+                    SetupAdmissiblePrefixCompileSession::new_with_retained_indices(
+                        &self.conditions,
+                        self.retain_pattern_indices,
+                    )?,
+                );
+                Ok(SetupGraphBuildAdvance::Pending)
+            }
+            SetupGraphBuildStage::Prefixes(mut session) => {
+                let span = SearchStageSpan::begin(ExecutorSearchStage::WasmSetupGeometryCompile);
+                let advance = session.advance(budget, control);
+                span.finish(budget as u64);
+                match advance? {
+                    SetupAdmissiblePrefixCompileAdvance::Pending => {
+                        self.stage = SetupGraphBuildStage::Prefixes(session);
+                        Ok(SetupGraphBuildAdvance::Pending)
+                    }
+                    SetupAdmissiblePrefixCompileAdvance::Cancelled => {
+                        Ok(SetupGraphBuildAdvance::Cancelled)
+                    }
+                    SetupAdmissiblePrefixCompileAdvance::Complete {
+                        prefixes,
+                        word_counts,
+                        pattern_indices,
+                    } => {
+                        self.condition_pattern_word_counts = Some(word_counts);
+                        self.condition_pattern_indices = Some(pattern_indices);
+                        self.stage = SetupGraphBuildStage::Targets {
+                            admissible_prefixes: prefixes,
+                            target_keys: Vec::new(),
+                            next_condition: 0,
+                        };
+                        Ok(SetupGraphBuildAdvance::Pending)
+                    }
+                }
+            }
+            SetupGraphBuildStage::Targets {
+                mut admissible_prefixes,
+                mut target_keys,
+                mut next_condition,
+            } => {
+                if let Some(condition) = self.conditions.get(next_condition) {
+                    let problem = condition.problem();
+                    let universe = problem.piece_source().materialized_universe().ok_or(
+                        WasmExactSearchError::InvalidProblem(
+                            "setup_pattern_universe_not_materialized",
+                        ),
+                    )?;
+                    let family = universe.packing_multiset_family_for_execution(
+                        10,
+                        problem.initial_hold(),
+                        problem.supply().hold_enabled(),
+                        super::packing_hold_projection(problem),
+                    );
+                    target_keys.extend(family.groups().iter().map(|group| group.key()));
+                    next_condition += 1;
+                    self.stage = SetupGraphBuildStage::Targets {
+                        admissible_prefixes,
+                        target_keys,
+                        next_condition,
+                    };
+                    return Ok(SetupGraphBuildAdvance::Pending);
+                }
+                if self
+                    .conditions
+                    .iter()
+                    .any(|condition| condition.terminal_supply_target().is_some())
+                {
+                    target_keys.retain(|target| {
+                        admissible_prefixes
+                            .binary_search(&pack_piece_counts(target.counts()))
+                            .is_ok()
+                    });
+                }
+                admissible_prefixes.extend(
+                    target_keys
+                        .iter()
+                        .map(|target| pack_piece_counts(target.counts())),
+                );
+                let catalog = self
+                    .catalog
+                    .as_ref()
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "setup_geometry_catalog_missing",
+                    ))?;
+                let geometry = GeometryFamilyCompileSession::new_with_tablebase(
+                    catalog.required_cells(),
+                    target_keys,
+                    admissible_prefixes,
+                    self.tablebase.take(),
+                )?;
+                self.stage = SetupGraphBuildStage::Geometry(geometry);
+                Ok(SetupGraphBuildAdvance::Pending)
+            }
             SetupGraphBuildStage::Cached(mut cached) => {
                 let cached = cached.take().ok_or(WasmExactSearchError::InvalidProblem(
                     "setup_cached_graph_already_consumed",
                 ))?;
+                let condition_pattern_word_counts =
+                    self.condition_pattern_word_counts.take().ok_or(
+                        WasmExactSearchError::InvalidProblem("setup_pattern_word_counts_missing"),
+                    )?;
+                let condition_pattern_indices = self.condition_pattern_indices.take().ok_or(
+                    WasmExactSearchError::InvalidProblem("setup_pattern_indices_missing"),
+                )?;
                 Ok(SetupGraphBuildAdvance::Complete(SetupSharedGraph {
                     query: self.query.clone(),
                     conditions: std::mem::take(&mut self.conditions),
@@ -376,6 +518,8 @@ impl SetupGraphBuildSession {
                     tablebase_status: cached.tablebase_status,
                     tablebase_pruned_states: cached.tablebase_pruned_states,
                     cached_coverage: cached.coverage,
+                    condition_pattern_word_counts,
+                    condition_pattern_indices,
                 }))
             }
             SetupGraphBuildStage::Geometry(mut session) => {
@@ -478,6 +622,18 @@ impl SetupGraphBuildSession {
                             tablebase_status: self.tablebase_status,
                             tablebase_pruned_states,
                             cached_coverage: self.cached_detail_coverage.take(),
+                            condition_pattern_word_counts: self
+                                .condition_pattern_word_counts
+                                .take()
+                                .ok_or(WasmExactSearchError::InvalidProblem(
+                                    "setup_pattern_word_counts_missing",
+                                ))?,
+                            condition_pattern_indices: self
+                                .condition_pattern_indices
+                                .take()
+                                .ok_or(WasmExactSearchError::InvalidProblem(
+                                    "setup_pattern_indices_missing",
+                                ))?,
                         };
                         cache_setup_graph(&shared);
                         Ok(SetupGraphBuildAdvance::Complete(shared))
@@ -522,6 +678,18 @@ impl SetupGraphBuildSession {
                             tablebase_status: self.tablebase_status,
                             tablebase_pruned_states,
                             cached_coverage: None,
+                            condition_pattern_word_counts: self
+                                .condition_pattern_word_counts
+                                .take()
+                                .ok_or(WasmExactSearchError::InvalidProblem(
+                                    "setup_pattern_word_counts_missing",
+                                ))?,
+                            condition_pattern_indices: self
+                                .condition_pattern_indices
+                                .take()
+                                .ok_or(WasmExactSearchError::InvalidProblem(
+                                    "setup_pattern_indices_missing",
+                                ))?,
                         };
                         cache_setup_graph(&shared);
                         Ok(SetupGraphBuildAdvance::Complete(shared))
@@ -563,9 +731,7 @@ fn cached_setup_graph(query: &SetupSearchQuery) -> Option<CachedSetupGraph> {
     let identity = query.clone().without_path_detail();
     SETUP_GRAPH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let Some(entry) = cache.as_ref() else {
-            return None;
-        };
+        let entry = cache.as_ref()?;
         if entry.query != identity {
             *cache = None;
             return None;
@@ -620,6 +786,35 @@ pub(super) fn cache_setup_coverage_result(
             entry.coverage = Some(Arc::from(completed.to_vec()));
         }
     });
+}
+
+#[cfg(test)]
+pub(super) fn install_setup_graph_cache_for_test(
+    query: &SetupSearchQuery,
+    graph: Arc<PartialBuildGraph>,
+    coverage_graph: Arc<SetupCoverageGraph>,
+    coverage: Vec<CompletedSetupCoverage>,
+) {
+    let shared = SetupSharedGraph {
+        query: query.clone().without_path_detail(),
+        conditions: Vec::new(),
+        graph,
+        coverage_graph,
+        geometry_family_count: "1".to_owned(),
+        geometry_expanded_nodes: 1,
+        tablebase_status: "disabled",
+        tablebase_pruned_states: 0,
+        cached_coverage: None,
+        condition_pattern_word_counts: Vec::new(),
+        condition_pattern_indices: Vec::new(),
+    };
+    cache_setup_graph(&shared);
+    cache_setup_coverage_result(&shared.query, &coverage);
+}
+
+#[cfg(test)]
+pub(super) fn clear_setup_graph_cache_for_test() {
+    SETUP_GRAPH_CACHE.with(|cache| *cache.borrow_mut() = None);
 }
 
 fn cached_detail_candidate_exists(

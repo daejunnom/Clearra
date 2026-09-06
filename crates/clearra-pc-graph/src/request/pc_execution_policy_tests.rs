@@ -42,6 +42,18 @@ fn build_dependency_precomputation_requires_explicit_opt_in() {
 
 #[test]
 fn worker_policy_reserves_one_logical_processor_unless_explicitly_requested() {
+    assert_eq!(WorkerPolicy::default_worker_limit_for_hardware(8), 7);
+    assert_eq!(WorkerPolicy::Auto.effective_for_hardware_limit(false, 8), 7);
+    assert_eq!(WorkerPolicy::Auto.effective_for_hardware_limit(true, 8), 8);
+    assert_eq!(
+        WorkerPolicy::Fixed(8).effective_for_hardware_limit(false, 8),
+        7
+    );
+    assert_eq!(
+        WorkerPolicy::Fixed(8).effective_for_hardware_limit(true, 8),
+        8
+    );
+
     let hardware = WorkerPolicy::hardware_worker_limit();
     let default_limit = hardware.saturating_sub(1).max(1);
 

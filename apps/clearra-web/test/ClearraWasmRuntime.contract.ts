@@ -13,6 +13,10 @@ import {
 } from '../src/workers/clearraWasmRuntime.ts';
 import type { ClearraProductBuildIdentity } from '@clearra/ui/wasm';
 
+// Include the worker entry point in the contract type-check without executing
+// its browser-only self.onmessage binding in Node.
+type WorkerEntryPoint = typeof import('../src/workers/clearraVerifierWorker.ts');
+
 const productIdentity: ClearraProductBuildIdentity = {
   source_commit: 'a'.repeat(40),
   engine_build_id: 'a'.repeat(40),
@@ -235,7 +239,7 @@ assert.match(
 );
 assert.doesNotMatch(
   runtimeSource.slice(
-    runtimeSource.indexOf('product_page_get(alternativeIndex, memberPageNumber) {'),
+    runtimeSource.indexOf('product_page_get(alternativeIndex, memberPageNumber, maximumWorkSteps) {'),
     runtimeSource.indexOf('product_page_release() {')
   ),
   />>>\s*0/u,
@@ -244,6 +248,25 @@ assert.doesNotMatch(
 const tilingPageAdapter = runtimeSource.slice(
   runtimeSource.indexOf('tiling_solution_page(offset, limit) {'),
   runtimeSource.indexOf('tiling_solution_release() {')
+);
+const distributedPrepareAdapter = runtimeSource.slice(
+  runtimeSource.indexOf('distributed_prepare(commandText) {'),
+  runtimeSource.indexOf('distributed_produce(workBudget, batchCapacity) {')
+);
+assert.match(
+  distributedPrepareAdapter,
+  /\['serial', 'cpu-multi', 'gpu-multi', 'ready'\]/u,
+  'the browser adapter recognizes App-terminal distributed preparation'
+);
+assert.match(
+  distributedPrepareAdapter,
+  /if \(selectedMode !== 'ready'\) \{[\s\S]*?clearra_wasm_distributed_worker_initialization\(\)/u,
+  'a prepared App response bypasses worker initialization so its terminal owner is not overwritten'
+);
+assert.match(
+  distributedPrepareAdapter,
+  /verificationRequired:\s*selectedMode !== 'ready'/u,
+  'a prepared App response never advertises verifier work'
 );
 assert.match(
   tilingPageAdapter,
@@ -257,9 +280,14 @@ assert.doesNotMatch(
 );
 assert.match(
   runtimeSource.slice(
-    runtimeSource.indexOf('product_page_get(alternativeIndex, memberPageNumber) {'),
+    runtimeSource.indexOf('product_page_get(alternativeIndex, memberPageNumber, maximumWorkSteps) {'),
     runtimeSource.indexOf('product_page_release() {')
   ),
   /clearra_wasm_product_page_get_exact\(\)/u,
   'product page requests cross the WASM boundary through exact decimal text'
+);
+assert.match(
+  runtimeSource,
+  /portfolio-page-request\.v2\\n\$\{alternativeIndex\}\\n\$\{memberPageNumber\}\\n\$\{Math\.max\(1, maximumWorkSteps\) >>> 0\}/u,
+  'exact page replay carries one explicit bounded work slice across the WASM request contract'
 );

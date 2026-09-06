@@ -161,6 +161,8 @@ impl CandidatePatternIndex {
             )
     }
 
+    // Retained for callers that account only index-owned storage rather than shared bitsets.
+    #[allow(dead_code)]
     pub(crate) fn owned_resident_bytes(&self) -> usize {
         self.pattern_groups
             .capacity()
@@ -202,33 +204,6 @@ impl CandidatePatternIndex {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn requested_index_bytes_are_checked_and_never_exceed_observed_owned_storage() {
-        let patterns = Arc::new(PatternBitSet::all(129));
-        let mut index = CandidatePatternIndex::default();
-        let group = index
-            .push_shared_pattern_group(patterns)
-            .expect("one pattern group");
-        for _ in 0..17 {
-            index.bind_candidate(group).expect("candidate binding");
-        }
-        let requested =
-            CandidatePatternIndex::checked_requested_bytes(1, 17).expect("checked request");
-        assert!(index.checked_owned_resident_bytes().unwrap() >= requested);
-        assert_eq!(
-            CandidatePatternIndex::checked_requested_bytes(usize::MAX, usize::MAX),
-            Some(
-                (usize::MAX as u128) * size_of::<CandidatePatternGroup>() as u128
-                    + (usize::MAX as u128) * size_of::<u32>() as u128
-            )
-        );
-    }
-}
-
 pub(crate) struct CandidatePatternIter<'a> {
     patterns: Option<CoveredPatternIter<'a>>,
 }
@@ -253,5 +228,32 @@ impl Iterator for CandidatePatternIter<'_> {
             .as_mut()?
             .next()
             .and_then(|pattern| u32::try_from(pattern.index()).ok())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_index_bytes_are_checked_and_never_exceed_observed_owned_storage() {
+        let patterns = Arc::new(PatternBitSet::all(129));
+        let mut index = CandidatePatternIndex::default();
+        let group = index
+            .push_shared_pattern_group(patterns)
+            .expect("one pattern group");
+        for _ in 0..17 {
+            index.bind_candidate(group).expect("candidate binding");
+        }
+        let requested =
+            CandidatePatternIndex::checked_requested_bytes(1, 17).expect("checked request");
+        assert!(index.checked_owned_resident_bytes().unwrap() >= requested);
+        assert_eq!(
+            CandidatePatternIndex::checked_requested_bytes(usize::MAX, usize::MAX),
+            Some(
+                (usize::MAX as u128) * size_of::<CandidatePatternGroup>() as u128
+                    + (usize::MAX as u128) * size_of::<u32>() as u128
+            )
+        );
     }
 }

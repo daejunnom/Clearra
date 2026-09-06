@@ -5,6 +5,7 @@ pub struct WasmHostCapabilities {
     logical_processor_count: usize,
     webgpu_available: bool,
     cross_origin_isolated: bool,
+    product_retention_budget: Option<clearra_app::ProductRetentionBudget>,
 }
 
 impl WasmHostCapabilities {
@@ -17,11 +18,24 @@ impl WasmHostCapabilities {
             logical_processor_count: logical_processor_count.max(1),
             webgpu_available,
             cross_origin_isolated,
+            product_retention_budget: None,
         }
     }
 
     pub const fn logical_processor_count(self) -> usize {
         self.logical_processor_count
+    }
+
+    pub const fn with_product_retention_budget(
+        mut self,
+        budget: Option<clearra_app::ProductRetentionBudget>,
+    ) -> Self {
+        self.product_retention_budget = budget;
+        self
+    }
+
+    pub const fn product_retention_budget(self) -> Option<clearra_app::ProductRetentionBudget> {
+        self.product_retention_budget
     }
 
     pub const fn webgpu_available(self) -> bool {

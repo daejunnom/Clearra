@@ -53,9 +53,9 @@ function Assert-ClearraRequestedTaskSurfaces(
     [string]$ExecutionSurface,
     [AllowNull()][string]$RuntimeEnvironment = $null
 ) {
-    if (Test-ClearraTrustedExecutionSurface $ExecutionSurface) {
-        return
-    }
+    # Trusted is a requested execution surface, not an application-control grant.
+    # Check every generated-execution task before any gate/cache work starts.
+    $resolvedSurface = Resolve-ClearraExecutionSurface $ExecutionSurface
 
     $trustedOnly = @(
         "Acceptance",
@@ -67,6 +67,7 @@ function Assert-ClearraRequestedTaskSurfaces(
         "AdversarialCorrectness",
         "CSanitizer",
         "RustExactTests",
+        "WasmBuildProducer",
         "WasmBuildTest",
         "RenderGolden",
         "WorkerE2E",
@@ -87,7 +88,7 @@ function Assert-ClearraRequestedTaskSurfaces(
             $taskName = $rawTaskName.Trim()
             if ($taskName -in $trustedOnly) {
                 Assert-ClearraTrustedExecutionSurface `
-                    $ExecutionSurface `
+                    $resolvedSurface `
                     $taskName `
                     $RuntimeEnvironment
             }

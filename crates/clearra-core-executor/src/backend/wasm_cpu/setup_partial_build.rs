@@ -99,11 +99,11 @@ impl PartialBuildNode {
     }
 
     fn set_live(&mut self, live: bool) {
-        self.flags = (self.flags & !NODE_LIVE) | u8::from(live) * NODE_LIVE;
+        self.flags = (self.flags & !NODE_LIVE) | (u8::from(live) * NODE_LIVE);
     }
 
     fn set_accepting(&mut self, accepting: bool) {
-        self.flags = (self.flags & !NODE_ACCEPTING) | u8::from(accepting) * NODE_ACCEPTING;
+        self.flags = (self.flags & !NODE_ACCEPTING) | (u8::from(accepting) * NODE_ACCEPTING);
     }
 }
 
@@ -208,12 +208,41 @@ impl PartialBuildGraph {
     }
 
     #[cfg(test)]
+    pub(super) fn cached_path_detail_fixture(detail: &SetupPathDetail) -> Self {
+        Self {
+            nodes: vec![PartialBuildNode {
+                board: detail.board_mask(),
+                edge_start: 0,
+                edge_count: 0,
+                placement_set_or_shape_index: 0,
+                deleted_rows: detail.deleted_rows(),
+                depth: 0,
+                flags: NODE_LIVE | NODE_ACCEPTING | NODE_HAS_SHAPE,
+            }],
+            edges: Vec::new(),
+            edge_rows: Vec::new(),
+            shapes: vec![SetupShape::new(
+                detail.board_mask(),
+                1,
+                detail.deleted_rows(),
+            )],
+            placement_sets: PlacementSetStorage::Full(vec![0, detail.placement_rows()]),
+            shape_target_nodes: vec![0],
+            compact_continuation: false,
+            root: 0,
+            resource_truncated: false,
+        }
+    }
+
+    #[cfg(test)]
     fn placement_rows_for_node(&self, node: PartialBuildNode) -> Option<u128> {
         let shape = self.shapes.get(node.shape_index()? as usize)?;
         self.placement_sets.get(shape.placement_set_id)
     }
 }
 
+// Completed partial-build data is moved directly to the setup graph builder.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum PartialBuildAdvance {
     Pending,
     Complete {
@@ -276,20 +305,21 @@ impl SetupPartialBuildPrefix {
                 "setup_partial_build_prefix_finalize_mismatch",
             ));
         }
-        for index in 0..self.nodes.len() {
-            if self.nodes[index].depth != self.candidate_depth {
-                terminal_classes[index] = u32::MAX;
+        for (index, (node, terminal_class)) in
+            self.nodes.iter_mut().zip(&mut terminal_classes).enumerate()
+        {
+            if node.depth != self.candidate_depth {
+                *terminal_class = u32::MAX;
                 continue;
             }
             if self.candidate_depth == MAX_SETUP_CANDIDATE_LOCKS {
-                let accepting =
-                    self.nodes[index].board == 0 && self.residuals[index].remaining == 0;
-                self.nodes[index].set_accepting(accepting);
+                let accepting = node.board == 0 && self.residuals[index].remaining == 0;
+                node.set_accepting(accepting);
                 if !accepting {
-                    terminal_classes[index] = u32::MAX;
+                    *terminal_class = u32::MAX;
                 }
             }
-            self.nodes[index].set_live(terminal_classes[index] != u32::MAX);
+            node.set_live(*terminal_class != u32::MAX);
         }
         for index in (0..self.nodes.len()).rev() {
             if self.nodes[index].live() || self.nodes[index].depth == self.candidate_depth {
@@ -1000,11 +1030,11 @@ impl PartialBuildGraphBuilder {
         node_remap.resize(original_node_count, u32::MAX);
 
         let mut node_write = 0_usize;
-        for node_read in 0..original_node_count {
+        for (node_read, remapped_node) in node_remap.iter_mut().enumerate() {
             if node_read != self.root_index() && !self.nodes[node_read].live() {
                 continue;
             }
-            node_remap[node_read] = u32::try_from(node_write).map_err(|_| {
+            *remapped_node = u32::try_from(node_write).map_err(|_| {
                 WasmExactSearchError::InvalidProblem("setup_partial_build_node_index_overflow")
             })?;
             if node_write != node_read {
@@ -1476,24 +1506,24 @@ mod tests {
             .iter()
             .copied()
             .enumerate()
-            .fold(Ok(0_u128), |packed, (depth, row)| {
-                insert_setup_placement_row(packed?, depth as u8, row)
+            .try_fold(0_u128, |packed, (depth, row)| {
+                insert_setup_placement_row(packed, depth as u8, row)
             })
             .expect("three-row prefix");
         let prefix_after_clear = rows[..4]
             .iter()
             .copied()
             .enumerate()
-            .fold(Ok(0_u128), |packed, (depth, row)| {
-                insert_setup_placement_row(packed?, depth as u8, row)
+            .try_fold(0_u128, |packed, (depth, row)| {
+                insert_setup_placement_row(packed, depth as u8, row)
             })
             .expect("four-row prefix");
         let complete = rows
             .iter()
             .copied()
             .enumerate()
-            .fold(Ok(0_u128), |packed, (depth, row)| {
-                insert_setup_placement_row(packed?, depth as u8, row)
+            .try_fold(0_u128, |packed, (depth, row)| {
+                insert_setup_placement_row(packed, depth as u8, row)
             })
             .expect("complete row set");
 

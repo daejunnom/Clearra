@@ -538,9 +538,7 @@ fn allocate_rgba(
 }
 
 fn cell_origin(index: usize, cell_size: u32, limit: &'static str) -> Result<u32, RenderError> {
-    let actual = (index as u128)
-        .checked_mul(u128::from(cell_size))
-        .unwrap_or(u128::MAX);
+    let actual = (index as u128).saturating_mul(u128::from(cell_size));
     u32::try_from(actual).map_err(|_| RenderError::ExportLimitExceeded {
         limit,
         actual: u64::try_from(actual).unwrap_or(u64::MAX),

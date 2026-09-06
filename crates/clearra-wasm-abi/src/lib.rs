@@ -12,28 +12,36 @@ use clearra_pc_graph::request::GpuDeviceSelection;
 use clearra_wasm::prewarm_gpu_search_async;
 #[cfg(feature = "stage-profiling")]
 use clearra_wasm::ExecutorSearchProfileSession;
-#[cfg(test)]
-use clearra_wasm::WasmWorkerJobStatus;
 use clearra_wasm::{
     install_pc4_compact_tablebase, release_pc4_compact_tablebase,
-    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_page_exact,
+    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
     serialize_coverage_portfolio_retained_page, serialize_distributed_final_events,
-    serialize_parity_report_exhausted, serialize_parity_report_page, GovernedWasmJson,
-    GpuSearchWarmupReport, ProductPageSourceOwner, ProductPageStore, TilingSolutionPageStore,
-    WasmCommandRuntimeError, WasmDistributedCoordinator, WasmDistributedFallbackReason,
-    WasmDistributedMode, WasmDistributedPreparation, WasmDistributedProducerAdvance,
-    WasmDistributedRequestedBackend, WasmDistributedVerifierRuntime, WasmHostCapabilities,
+    serialize_parity_report_exhausted, serialize_parity_report_page, serialize_pc_replay_page,
+    GovernedWasmJson, GpuSearchWarmupReport, PortfolioPageLoadState, ProductPageSourceOwner,
+    ProductPageStore, TilingSolutionPageStore, WasmCommandRuntimeError,
+    WasmDistributedCompletionAdvance, WasmDistributedCompletionSession, WasmDistributedCoordinator,
+    WasmDistributedFallbackReason, WasmDistributedMode, WasmDistributedPreparation,
+    WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
+    WasmDistributedVerifierRuntime, WasmHostCapabilities, WasmMinimumParallelWorker,
     WasmWorkerAdvanceStatus, WasmWorkerJobId, WasmWorkerJobRuntime,
-    PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT,
 };
+#[cfg(test)]
+use clearra_wasm::{WasmWorkerJobStatus, PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT};
 
 const ABI_VERSION: u32 = 1;
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const PRODUCT_PAGE_REQUEST_CONTRACT: &str = "portfolio-page-request.v1";
+const PRODUCT_PAGE_REQUEST_CONTRACT_V2: &str = "portfolio-page-request.v2";
+const DEFAULT_PRODUCT_PAGE_WORK_STEPS: u64 = 10_000;
 const MAX_TRANSFER_BYTES: usize = 512 * 1024 * 1024;
 const ABI_OK: i32 = 0;
 const ABI_ERROR: i32 = -1;
 const ABI_OUTPUT_NOT_RELEASED: i32 = -2;
+// The public distributed-mode values 0..=2 are owned by `WasmDistributedMode`.
+// Preparation can also complete at the App boundary before a coordinator exists;
+// this ABI-only mode tells hosts to consume that terminal owner via
+// `clearra_wasm_distributed_finish` instead of replaying the command serially.
+const ABI_DISTRIBUTED_READY: i32 = 3;
 const HOST_CAPABILITY_WEBGPU: u32 = 1 << 0;
 const HOST_CAPABILITY_CROSS_ORIGIN_ISOLATED: u32 = 1 << 1;
 
@@ -46,6 +54,9 @@ struct WasmAbiState {
     governed_output: Option<GovernedWasmJson>,
     output_outstanding: bool,
     distributed_coordinator: Option<WasmDistributedCoordinator>,
+    distributed_ready_result: Option<clearra_wasm::WasmExecutionResult>,
+    distributed_completion: Option<(u32, WasmDistributedCompletionSession)>,
+    minimum_parallel_worker: Option<WasmMinimumParallelWorker>,
     distributed_verifier: Option<WasmDistributedVerifierRuntime>,
     distributed_verifier_partial_available: bool,
     distributed_verifier_pending_work: bool,
@@ -201,6 +212,21 @@ impl AbiProductPageStore {
                 .and_then(|bytes| bytes.checked_add(request_capacity as u128))
                 .is_some_and(|actual| actual <= *memory_limit_bytes),
         }
+    }
+
+    /// Admits a whole-live App page-store peak under the finite worker's
+    /// original authority. The App callback already includes every persistent
+    /// and transient owner below `ProductPageStore`; this boundary adds only
+    /// the ABI carrier and request allocation that remain live above it.
+    fn governed_app_peak_fits(
+        memory_limit_bytes: u128,
+        app_whole_live_bytes: u128,
+        additional_live_capacity: usize,
+    ) -> bool {
+        app_whole_live_bytes
+            .checked_add(core::mem::size_of::<Option<AbiProductPageStore>>() as u128)
+            .and_then(|bytes| bytes.checked_add(additional_live_capacity as u128))
+            .is_some_and(|actual| actual <= memory_limit_bytes)
     }
 
     #[cfg(test)]
@@ -430,6 +456,9 @@ impl WasmAbiState {
             }
         };
         self.distributed_coordinator.is_some()
+            || self.distributed_ready_result.is_some()
+            || self.distributed_completion.is_some()
+            || self.minimum_parallel_worker.is_some()
             || self.distributed_verifier.is_some()
             || self.gpu_warmup.is_some()
             || profile_active
@@ -662,6 +691,9 @@ impl WasmAbiState {
 
     fn reset_distributed_state(&mut self) {
         self.distributed_coordinator = None;
+        self.distributed_ready_result = None;
+        self.distributed_completion = None;
+        self.minimum_parallel_worker = None;
         self.distributed_verifier = None;
         self.distributed_verifier_partial_available = false;
         self.distributed_verifier_pending_work = false;
@@ -789,12 +821,27 @@ pub extern "C" fn clearra_wasm_configure_host(
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_configure_product_retention(maximum_bytes: u32) -> i32 {
+    if let Err(status) = ABI_STATE.with(|state| state.borrow().require_mutation_admission()) {
+        return status;
+    }
+    let Some(budget) = clearra_wasm::ProductRetentionBudget::new(u64::from(maximum_bytes)) else {
+        return ABI_ERROR;
+    };
+    ABI_STATE.with(|state| {
+        state
+            .borrow_mut()
+            .runtime
+            .set_product_retention_budget(Some(budget));
+    });
+    ABI_OK
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_gpu_warmup_start(device_index: i32) -> i32 {
     let warmup = ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        if let Err(status) = state.require_mutation_admission() {
-            return Err(status);
-        }
+        state.require_mutation_admission()?;
         if state.gpu_warmup.is_some() {
             return Ok(None);
         }
@@ -968,6 +1015,42 @@ pub extern "C" fn clearra_wasm_transfer_resize(byte_len: u32) -> i32 {
             );
             return ABI_ERROR;
         }
+        let minimum_active = state.minimum_parallel_worker.is_some()
+            || state
+                .distributed_completion
+                .as_ref()
+                .is_some_and(|(_, completion)| completion.has_minimum_control_memory());
+        if minimum_active {
+            let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+            let grows = byte_len > state.transfer_input.capacity();
+            let prospective = outer
+                .checked_add(if grows { byte_len as u128 } else { 0 })
+                .unwrap_or(u128::MAX);
+            if let Err(error) = ensure_minimum_transfer_outer(&mut state, prospective) {
+                state.set_runtime_error(&error);
+                return ABI_ERROR;
+            }
+            if grows {
+                let mut input = Vec::new();
+                if input.try_reserve_exact(byte_len).is_err() {
+                    state.set_error(
+                        "E_WASM_MINIMUM_PARALLEL_MEMORY",
+                        "minimum transfer allocation failed",
+                    );
+                    return ABI_ERROR;
+                }
+                let actual = outer
+                    .checked_add(input.capacity() as u128)
+                    .unwrap_or(u128::MAX);
+                if let Err(error) = ensure_minimum_transfer_outer(&mut state, actual) {
+                    state.set_runtime_error(&error);
+                    return ABI_ERROR;
+                }
+                input.resize(byte_len, 0);
+                state.transfer_input = input;
+                return ABI_OK;
+            }
+        }
         state.transfer_input.resize(byte_len, 0);
         ABI_OK
     })
@@ -976,6 +1059,19 @@ pub extern "C" fn clearra_wasm_transfer_resize(byte_len: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_transfer_ptr() -> u32 {
     ABI_STATE.with(|state| state.borrow().transfer_input.as_ptr() as usize as u32)
+}
+
+fn ensure_minimum_transfer_outer(
+    state: &mut WasmAbiState,
+    prospective: u128,
+) -> Result<(), WasmCommandRuntimeError> {
+    if let Some(worker) = state.minimum_parallel_worker.as_ref() {
+        worker.ensure_outer_capacity(prospective)?;
+    }
+    if let Some((_, completion)) = state.distributed_completion.as_mut() {
+        completion.ensure_outer_capacity(prospective)?;
+    }
+    Ok(())
 }
 
 #[no_mangle]
@@ -1045,14 +1141,18 @@ pub extern "C" fn clearra_wasm_distributed_prepare() -> i32 {
             }
         };
         state.distributed_coordinator = None;
+        state.distributed_ready_result = None;
+        state.distributed_completion = None;
         let preparation = WasmDistributedCoordinator::prepare(
             state.runtime.command_runtime(),
             command_text.as_str(),
         );
         drop(command_text);
         match preparation {
-            Ok(WasmDistributedPreparation::Serial) | Ok(WasmDistributedPreparation::Ready(_)) => {
-                WasmDistributedMode::Serial as i32
+            Ok(WasmDistributedPreparation::Serial) => WasmDistributedMode::Serial as i32,
+            Ok(WasmDistributedPreparation::Ready(result)) => {
+                state.distributed_ready_result = Some(result);
+                ABI_DISTRIBUTED_READY
             }
             Ok(WasmDistributedPreparation::Coordinator(coordinator)) => {
                 let mode = coordinator.mode() as i32;
@@ -1396,35 +1496,626 @@ pub extern "C" fn clearra_wasm_distributed_finish(job_id: u32, workers_used: u32
         if let Err(status) = state.require_mutation_admission() {
             return status;
         }
-        let Some(coordinator) = state.distributed_coordinator.take() else {
+        let result = if state.distributed_ready_result.is_some() {
+            if workers_used != 0 {
+                state.set_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "prepared terminal result requires zero distributed workers",
+                );
+                return ABI_ERROR;
+            }
+            state
+                .distributed_ready_result
+                .take()
+                .expect("ready result presence checked above")
+        } else {
+            let Some(coordinator) = state.distributed_coordinator.take() else {
+                state.set_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "distributed coordinator is not active",
+                );
+                return ABI_ERROR;
+            };
+            match coordinator.finish(workers_used as usize) {
+                Ok(result) => result,
+                Err(error) => {
+                    state.set_runtime_error(&error);
+                    return ABI_ERROR;
+                }
+            }
+        };
+        publish_distributed_result(&mut state, job_id, result)
+    })
+}
+
+fn publish_distributed_result(
+    state: &mut WasmAbiState,
+    job_id: u32,
+    result: clearra_wasm::WasmExecutionResult,
+) -> i32 {
+    let output = match serialize_distributed_final_events(job_id.into(), &result) {
+        Ok(output) => output,
+        Err(error) => {
+            state.set_error(error.code(), error.message());
+            return ABI_ERROR;
+        }
+    };
+    state.tiling_solution_page_store = result
+        .tiling_solution_page_store()
+        .cloned()
+        .map(AbiTilingSolutionPageStore::legacy);
+    state.product_page_source_owner = result.product_page_source_owner().cloned();
+    state.product_page_store = None;
+    state.set_output(output);
+    ABI_OK
+}
+
+/// Start an owned completion without running an exact minimum proof inside
+/// the source-merge ABI call. Status 1 has no output lease; 0 has final events.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_start(job_id: u32, workers_used: u32) -> i32 {
+    let cooperative = ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .is_some_and(WasmDistributedCoordinator::requires_cooperative_completion)
+    });
+    if !cooperative {
+        return clearra_wasm_distributed_finish(job_id, workers_used);
+    }
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        if state.distributed_completion.is_some() {
             state.set_error(
                 "E_WASM_DISTRIBUTED_STATE",
-                "distributed coordinator is not active",
+                "distributed completion already active",
+            );
+            return ABI_ERROR;
+        }
+        let coordinator = state
+            .distributed_coordinator
+            .take()
+            .expect("coordinator kind checked");
+        match coordinator.into_cooperative_completion(workers_used as usize) {
+            Ok(completion) => {
+                state.distributed_completion = Some((job_id, completion));
+                1
+            }
+            Err(error) => {
+                state.set_runtime_error(&error);
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+/// Resume the same source-bound proof/selection cursor. The host must yield
+/// between pending calls so cancellation and lifecycle events can be handled.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_advance(job_id: u32, maximum_work: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        #[cfg(target_arch = "wasm32")]
+        let physical = (core::arch::wasm32::memory_size(0) as u128) * 65_536;
+        #[cfg(not(target_arch = "wasm32"))]
+        let physical = 0;
+        let Some((active_job_id, completion)) = state.distributed_completion.as_mut() else {
+            state.set_error(
+                "E_WASM_DISTRIBUTED_STATE",
+                "distributed completion is not active",
             );
             return ABI_ERROR;
         };
-        let result = match coordinator.finish(workers_used as usize) {
-            Ok(result) => result,
+        if *active_job_id != job_id {
+            state.set_error(
+                "E_WASM_DISTRIBUTED_STATE",
+                "distributed completion job identity mismatch",
+            );
+            return ABI_ERROR;
+        }
+        match completion.advance_guarded(maximum_work as usize, outer, physical) {
+            Ok(WasmDistributedCompletionAdvance::Pending) => 1,
+            Ok(WasmDistributedCompletionAdvance::Completed(result)) => {
+                state.distributed_completion = None;
+                publish_distributed_result(&mut state, job_id, result)
+            }
+            Ok(WasmDistributedCompletionAdvance::Cancelled) => {
+                state.distributed_completion = None;
+                state.set_error(
+                    "E_WASM_DISTRIBUTED_CANCELLED",
+                    "distributed completion cancelled",
+                );
+                ABI_ERROR
+            }
+            Err(error) => {
+                state.distributed_completion = None;
+                state.set_runtime_error(&error);
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+fn with_minimum_parallel_output(
+    job_id: u32,
+    action: impl FnOnce(
+        &mut WasmDistributedCompletionSession,
+        u128,
+    ) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError>,
+) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        let Some((active_job_id, completion)) = state.distributed_completion.as_mut() else {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion is not active",
+            );
+            return ABI_ERROR;
+        };
+        if *active_job_id != job_id {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion job identity mismatch",
+            );
+            return ABI_ERROR;
+        }
+        match action(completion, outer) {
+            Ok(Some(bytes)) => {
+                state.set_output_bytes(bytes);
+                1
+            }
+            Ok(None) => ABI_OK,
             Err(error) => {
                 state.set_runtime_error(&error);
-                return ABI_ERROR;
+                ABI_ERROR
             }
+        }
+    })
+}
+
+/// Read-only positive decision signal. An empty task queue is not a SAT proof.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_found(job_id: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        match state.distributed_completion.as_ref() {
+            Some((active, completion)) if *active == job_id => {
+                i32::from(completion.parallel_query_satisfied())
+            }
+            _ => {
+                state.set_error(
+                    "E_WASM_MINIMUM_PARALLEL_STATE",
+                    "minimum completion job identity mismatch",
+                );
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+/// Return this active task's core-minted Cancelled receipt, never ProvedNone.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_worker_cancel() -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        let Some(worker) = state.minimum_parallel_worker.as_mut() else {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum worker query is not initialized",
+            );
+            return ABI_ERROR;
         };
-        let output = match serialize_distributed_final_events(job_id.into(), &result) {
-            Ok(output) => output,
+        match worker.cancel_guarded(outer) {
+            Ok(bytes) => {
+                state.set_output_bytes(bytes);
+                ABI_OK
+            }
             Err(error) => {
-                state.set_error(error.code(), error.message());
-                return ABI_ERROR;
+                state.set_runtime_error(&error);
+                ABI_ERROR
             }
+        }
+    })
+}
+
+/// Enable shared-core parallel exact proof. Status 1 owns a new query packet;
+/// status 0 means no newly available query (including an already published one).
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_prepare(
+    job_id: u32,
+    target_partitions: u32,
+) -> i32 {
+    with_minimum_parallel_output(job_id, |completion, outer| {
+        completion.prepare_parallel_guarded(target_partitions as usize, outer)
+    })
+}
+
+/// Drain the core-issued frontier, never host-generated row subsets.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_task(job_id: u32) -> i32 {
+    with_minimum_parallel_output(
+        job_id,
+        WasmDistributedCompletionSession::take_parallel_task_guarded,
+    )
+}
+
+/// Validate one opaque receipt against the still-live source/query frontier.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_merge(job_id: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        if !state
+            .distributed_completion
+            .as_ref()
+            .is_some_and(|(active, _)| *active == job_id)
+        {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion job identity mismatch",
+            );
+            return ABI_ERROR;
+        }
+        let outer_bytes = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        let bytes = core::mem::take(&mut state.transfer_input);
+        let completion = &mut state
+            .distributed_completion
+            .as_mut()
+            .expect("job checked")
+            .1;
+        match completion.merge_parallel_receipt(&bytes, outer_bytes) {
+            Ok(()) => ABI_OK,
+            Err(error) => {
+                state.set_runtime_error(&error);
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+fn minimum_coordinator_outer_bytes(state: &WasmAbiState) -> Option<u128> {
+    let bytes = (core::mem::size_of::<WasmAbiState>() as u128)
+        .checked_add(state.input.capacity() as u128)?
+        .checked_add(state.transfer_input.capacity() as u128)?
+        .checked_add(state.output.capacity() as u128)?;
+    #[cfg(target_arch = "wasm32")]
+    {
+        Some(bytes)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        bytes.checked_add(state.runtime.minimum_coordinator_idle_retained_bytes()?)
+    }
+}
+
+fn with_minimum_coordinator_shard(
+    job_id: u32,
+    action: impl FnOnce(
+        &mut WasmDistributedCompletionSession,
+        u128,
+        u128,
+    ) -> Result<bool, WasmCommandRuntimeError>,
+) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        let outer_bytes = minimum_coordinator_outer_bytes(&state);
+        #[cfg(target_arch = "wasm32")]
+        let physical_floor = (core::arch::wasm32::memory_size(0) as u128).checked_mul(65_536);
+        #[cfg(not(target_arch = "wasm32"))]
+        let physical_floor = Some(0_u128);
+        let Some((active_job_id, completion)) = state.distributed_completion.as_mut() else {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion is not active",
+            );
+            return ABI_ERROR;
         };
-        state.tiling_solution_page_store = result
-            .tiling_solution_page_store()
-            .cloned()
-            .map(AbiTilingSolutionPageStore::legacy);
-        state.product_page_source_owner = result.product_page_source_owner().cloned();
-        state.product_page_store = None;
-        state.set_output(output);
-        ABI_OK
+        if *active_job_id != job_id {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion job identity mismatch",
+            );
+            return ABI_ERROR;
+        }
+        // Missing native owner projection or checked overflow declines local
+        // admission; it is never turned into zero retained bytes.
+        match action(
+            completion,
+            outer_bytes.unwrap_or(u128::MAX),
+            physical_floor.unwrap_or(u128::MAX),
+        ) {
+            Ok(value) => i32::from(value),
+            Err(error) => {
+                state.set_runtime_error(&error);
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+/// Add bounded assistance only for an idle executor; no proof is minted here.
+/// Version 1 binds both the control owner and every remote replica to the
+/// actual outer lease. Absence means legacy shared topology only.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_guard_version() -> u32 {
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_configure(
+    job_id: u32,
+    host_compute: u32,
+    memory_low: u32,
+    memory_high: u32,
+) -> i32 {
+    with_minimum_coordinator_shard(job_id, |completion, _, _| {
+        let memory = (memory_high as u128) << 32 | memory_low as u128;
+        completion
+            .configure_parallel_control(host_compute as usize, memory)
+            .map(|()| true)
+    })
+}
+
+/// Decline (0) is pre-task only and leaves the original control lease intact.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_admit(
+    job_id: u32,
+    remote_count: u32,
+    control_only: u32,
+    host_compute: u32,
+    memory_low: u32,
+    memory_high: u32,
+) -> i32 {
+    if control_only > 1 {
+        return ABI_ERROR;
+    }
+    with_minimum_coordinator_shard(job_id, |completion, outer, physical| {
+        let memory = (memory_high as u128) << 32 | memory_low as u128;
+        completion.admit_parallel_control(
+            remote_count as usize,
+            control_only != 0,
+            host_compute as usize,
+            memory,
+            outer,
+            physical,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_guarded_query(job_id: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        let Some((active, completion)) = state.distributed_completion.as_mut() else {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion is unavailable",
+            );
+            return ABI_ERROR;
+        };
+        if *active != job_id {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion job identity mismatch",
+            );
+            return ABI_ERROR;
+        }
+        match completion.guarded_parallel_query(outer) {
+            Ok(bytes) => {
+                state.set_output_bytes(bytes);
+                ABI_OK
+            }
+            Err(error) => {
+                state.set_runtime_error(&error);
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_assist(
+    job_id: u32,
+    maximum_children: u32,
+) -> i32 {
+    with_minimum_coordinator_shard(job_id, |completion, outer, physical| {
+        completion.prepare_idle_assist(maximum_children as usize, outer, physical)
+    })
+}
+
+/// Opaque routing metadata for the most recently issued original/assist task.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_last_task_key(job_id: u32) -> i32 {
+    with_minimum_parallel_output(job_id, |completion, _| {
+        completion.last_parallel_task_key().map(Some)
+    })
+}
+
+/// Read-only core decision for selectively cancelling a redundant task owner.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_redundant(job_id: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        if !state
+            .distributed_completion
+            .as_ref()
+            .is_some_and(|(active, _)| *active == job_id)
+        {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion job identity mismatch",
+            );
+            return ABI_ERROR;
+        }
+        let key = core::mem::take(&mut state.transfer_input);
+        match state
+            .distributed_completion
+            .as_ref()
+            .expect("job checked")
+            .1
+            .parallel_task_redundant(&key)
+        {
+            Ok(redundant) => i32::from(redundant),
+            Err(error) => {
+                state.set_runtime_error(&error);
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+/// Take one core-issued shard on the coordinator without an external worker.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_local_start(job_id: u32) -> i32 {
+    with_minimum_coordinator_shard(
+        job_id,
+        WasmDistributedCompletionSession::start_coordinator_shard,
+    )
+}
+
+/// 0 is pending, 1 means the local owner drained (receipt or exact remote retry).
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_local_advance(
+    job_id: u32,
+    maximum_work: u32,
+) -> i32 {
+    with_minimum_coordinator_shard(job_id, |completion, outer_bytes, _| {
+        completion.advance_coordinator_shard(maximum_work as usize, outer_bytes)
+    })
+}
+
+/// Replace a drained Geometry verifier or previous AtMost query on this
+/// durable worker. Input is read once per query, not once per partition.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_worker_init() -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        if state.distributed_coordinator.is_some()
+            || state.distributed_completion.is_some()
+            || state.distributed_ready_result.is_some()
+            || state
+                .minimum_parallel_worker
+                .as_ref()
+                .is_some_and(WasmMinimumParallelWorker::has_active_shard)
+        {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "active coordinator or shard cannot be replaced by an exact proof query",
+            );
+            return ABI_ERROR;
+        }
+        // Include the detached packet and prior output capacity in the outer
+        // owner before resetting the previous, fully drained query.
+        let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        #[cfg(target_arch = "wasm32")]
+        let physical = (core::arch::wasm32::memory_size(0) as u128) * 65_536;
+        #[cfg(not(target_arch = "wasm32"))]
+        let physical = 0;
+        let bytes = core::mem::take(&mut state.transfer_input);
+        state.reset_distributed_state();
+        match WasmMinimumParallelWorker::initialize_guarded(&bytes, outer, physical) {
+            Ok(worker) => {
+                state.minimum_parallel_worker = Some(worker);
+                ABI_OK
+            }
+            Err(error) => {
+                state.set_runtime_error(&error);
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_worker_start() -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        let bytes = core::mem::take(&mut state.transfer_input);
+        let Some(worker) = state.minimum_parallel_worker.as_mut() else {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum worker query is not initialized",
+            );
+            return ABI_ERROR;
+        };
+        match worker.start_guarded(&bytes, outer) {
+            Ok(()) => ABI_OK,
+            Err(error) => {
+                state.set_runtime_error(&error);
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+/// Status 1 is cooperative pending without an output lease; status 0 owns the
+/// exact core receipt. Cancellation/reset drops the cursor without a negative.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_worker_advance(
+    maximum_work: u32,
+) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        let Some(worker) = state.minimum_parallel_worker.as_mut() else {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum worker query is not initialized",
+            );
+            return ABI_ERROR;
+        };
+        match worker.advance_guarded(maximum_work as usize, outer) {
+            Ok(Some(bytes)) => {
+                state.set_output_bytes(bytes);
+                ABI_OK
+            }
+            Ok(None) => 1,
+            Err(error) => {
+                state.set_runtime_error(&error);
+                ABI_ERROR
+            }
+        }
     })
 }
 
@@ -1649,15 +2340,36 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
             .is_some_and(|store| store.store().parity_report().is_some());
         let output = if coverage_portfolio {
             let (advance, retained_slot) = {
-                let Some(store) = state
-                    .product_page_store
-                    .as_mut()
-                    .and_then(|store| store.store_mut().coverage_portfolio_mut())
-                else {
-                    return ABI_ERROR;
+                let advance_result = match state.product_page_store.as_mut() {
+                    Some(AbiProductPageStore::Legacy(store)) => {
+                        let Some(store) = store.coverage_portfolio_mut() else {
+                            return ABI_ERROR;
+                        };
+                        store.next_page(maximum_work_steps.max(1) as u64, &mut || false)
+                    }
+                    Some(AbiProductPageStore::Governed {
+                        store,
+                        memory_limit_bytes,
+                    }) => {
+                        let memory_limit_bytes = *memory_limit_bytes;
+                        let Some(store) = store.coverage_portfolio_mut() else {
+                            return ABI_ERROR;
+                        };
+                        store.next_page_with_memory_guard(
+                            maximum_work_steps.max(1) as u64,
+                            &mut |app_whole_live| {
+                                AbiProductPageStore::governed_app_peak_fits(
+                                    memory_limit_bytes,
+                                    app_whole_live,
+                                    0,
+                                )
+                            },
+                            &mut || false,
+                        )
+                    }
+                    None => return ABI_ERROR,
                 };
-                let advance = match store.next_page(maximum_work_steps.max(1) as u64, &mut || false)
-                {
+                let advance = match advance_result {
                     Ok(advance) => advance,
                     Err(error) => {
                         if governed {
@@ -1668,9 +2380,15 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
                         return ABI_ERROR;
                     }
                 };
-                let retained_slot = advance
-                    .page()
-                    .and_then(|page| store.retained_page_slot(page.alternative_index_decimal()));
+                let retained_slot = advance.page().and_then(|page| {
+                    state
+                        .product_page_store
+                        .as_ref()
+                        .and_then(|store| store.store().coverage_portfolio())
+                        .and_then(|store| {
+                            store.retained_page_slot(page.alternative_index_decimal())
+                        })
+                });
                 (advance, retained_slot)
             };
             if state
@@ -1754,7 +2472,9 @@ pub extern "C" fn clearra_wasm_product_page_next(maximum_work_steps: u32) -> i32
                 ABI_OK
             }
             Err(error) => {
-                if !governed {
+                if governed {
+                    state.product_page_store = None;
+                } else {
                     state.set_runtime_error(&error);
                 }
                 ABI_ERROR
@@ -1772,17 +2492,21 @@ pub extern "C" fn clearra_wasm_product_page_get(
 ) -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        let alternative_index_decimal = outer_page_number.to_string();
+        let additional_live_capacity = alternative_index_decimal.capacity();
         product_page_get_from_state(
             &mut state,
-            &outer_page_number.to_string(),
+            &alternative_index_decimal,
             member_page_number as usize,
-            0,
+            DEFAULT_PRODUCT_PAGE_WORK_STEPS,
+            additional_live_capacity,
         )
     })
 }
 
 /// Loads a product/member page from canonical positive decimal identities in
-/// the request buffer: `portfolio-page-request.v1\n<outer>\n<member>`.
+/// either the compatibility v1 request or the bounded v2 request:
+/// `portfolio-page-request.v2\n<outer>\n<member>\n<maximum-work-steps>`.
 #[no_mangle]
 pub extern "C" fn clearra_wasm_product_page_get_exact() -> i32 {
     ABI_STATE.with(|state| {
@@ -1797,7 +2521,7 @@ pub extern "C" fn clearra_wasm_product_page_get_exact() -> i32 {
             Ok(request) => request,
             Err(_) => return ABI_ERROR,
         };
-        let (alternative_index_decimal, member_page_number) =
+        let (alternative_index_decimal, member_page_number, maximum_work_steps) =
             match parse_product_page_request(&request) {
                 Ok(request) => request,
                 Err(_) => return ABI_ERROR,
@@ -1806,6 +2530,7 @@ pub extern "C" fn clearra_wasm_product_page_get_exact() -> i32 {
             &mut state,
             alternative_index_decimal,
             member_page_number,
+            maximum_work_steps,
             request.capacity(),
         )
     })
@@ -1815,6 +2540,7 @@ fn product_page_get_from_state(
     state: &mut WasmAbiState,
     alternative_index_decimal: &str,
     member_page_number: usize,
+    maximum_work_steps: u64,
     additional_live_capacity: usize,
 ) -> i32 {
     if let Err(status) = state.require_released_output() {
@@ -1831,35 +2557,126 @@ fn product_page_get_from_state(
         .product_page_store
         .as_ref()
         .is_some_and(AbiProductPageStore::is_governed);
-    let output = if let Some(store) = state
+    if state
         .product_page_store
-        .as_mut()
-        .and_then(|store| store.store_mut().coverage_portfolio_mut())
+        .as_ref()
+        .is_some_and(|store| !store.governed_request_fits(additional_live_capacity))
     {
-        serialize_coverage_portfolio_page_exact(
-            store,
-            alternative_index_decimal,
-            member_page_number,
-            &mut || false,
-        )
+        state.product_page_store = None;
+        return ABI_ERROR;
+    }
+    let coverage_portfolio = state
+        .product_page_store
+        .as_ref()
+        .is_some_and(|store| store.store().coverage_portfolio().is_some());
+    let output = if coverage_portfolio {
+        let load_advance_result = match state.product_page_store.as_mut() {
+            Some(AbiProductPageStore::Legacy(store)) => {
+                let Some(store) = store.coverage_portfolio_mut() else {
+                    return ABI_ERROR;
+                };
+                store.load_page_by_alternative_index_slice(
+                    alternative_index_decimal,
+                    maximum_work_steps,
+                    &mut || false,
+                )
+            }
+            Some(AbiProductPageStore::Governed {
+                store,
+                memory_limit_bytes,
+            }) => {
+                let memory_limit_bytes = *memory_limit_bytes;
+                let Some(store) = store.coverage_portfolio_mut() else {
+                    return ABI_ERROR;
+                };
+                store.load_page_by_alternative_index_slice_with_memory_guard(
+                    alternative_index_decimal,
+                    maximum_work_steps,
+                    &mut |app_whole_live| {
+                        AbiProductPageStore::governed_app_peak_fits(
+                            memory_limit_bytes,
+                            app_whole_live,
+                            additional_live_capacity,
+                        )
+                    },
+                    &mut || false,
+                )
+            }
+            None => return ABI_ERROR,
+        };
+        let load_advance = match load_advance_result {
+            Ok(load_advance) => load_advance,
+            Err(error) => {
+                if governed {
+                    state.product_page_store = None;
+                } else {
+                    state.set_error("E_WASM_PRODUCT_PAGE", error.as_str());
+                }
+                return ABI_ERROR;
+            }
+        };
+        if state.product_page_store.as_ref().is_some_and(|store| {
+            !store.governed_store_fits() || !store.governed_request_fits(additional_live_capacity)
+        }) {
+            state.product_page_store = None;
+            return ABI_ERROR;
+        }
+        let Some(store) = state
+            .product_page_store
+            .as_ref()
+            .and_then(|store| store.store().coverage_portfolio())
+        else {
+            return ABI_ERROR;
+        };
+        match load_advance.state() {
+            PortfolioPageLoadState::Page => {
+                let Some(retained_slot) = load_advance.retained_slot() else {
+                    return ABI_ERROR;
+                };
+                serialize_coverage_portfolio_retained_page(store, retained_slot, member_page_number)
+            }
+            PortfolioPageLoadState::WorkBudgetExhausted | PortfolioPageLoadState::Cancelled => {
+                serialize_coverage_portfolio_load_advance_state(store, load_advance)
+            }
+        }
+    } else if state
+        .product_page_store
+        .as_ref()
+        .is_some_and(|store| store.store().pc_replay().is_some())
+    {
+        let Some(geometry_page_number) = parse_canonical_positive_usize(alternative_index_decimal)
+        else {
+            state.set_error("E_WASM_PRODUCT_PAGE", "invalid-geometry-page");
+            return ABI_ERROR;
+        };
+        let Some(store) = state
+            .product_page_store
+            .as_mut()
+            .and_then(|store| store.store_mut().pc_replay_mut())
+        else {
+            return ABI_ERROR;
+        };
+        serialize_pc_replay_page(store, geometry_page_number, member_page_number)
     } else if let Some(store) = state
         .product_page_store
         .as_ref()
         .and_then(|store| store.store().parity_report())
     {
-        let outer_page_number = parse_canonical_positive_usize(alternative_index_decimal);
-        if member_page_number != 1 || outer_page_number.is_none() {
-            Err(WasmCommandRuntimeError::new(
+        match (
+            member_page_number,
+            parse_canonical_positive_usize(alternative_index_decimal),
+        ) {
+            (1, Some(outer_page_number)) => match store.page(outer_page_number) {
+                Ok(page) => serialize_parity_report_page(&page),
+                Err(error) => Err(WasmCommandRuntimeError::new(
+                    "E_WASM_PRODUCT_PAGE",
+                    error.as_str(),
+                )),
+            },
+            _ => Err(WasmCommandRuntimeError::new(
                 "E_WASM_PRODUCT_PAGE",
                 "invalid-member-page",
-            ))
-        } else {
-            store
-                .page(outer_page_number.expect("validated positive page"))
-                .map_err(|error| {
-                    WasmCommandRuntimeError::new("E_WASM_PRODUCT_PAGE", error.as_str())
-                })
-                .and_then(|page| serialize_parity_report_page(&page))
+            )),
         }
     } else {
         if !governed {
@@ -1889,7 +2706,9 @@ fn product_page_get_from_state(
             ABI_OK
         }
         Err(error) => {
-            if !governed {
+            if governed {
+                state.product_page_store = None;
+            } else {
                 state.set_runtime_error(&error);
             }
             ABI_ERROR
@@ -1897,20 +2716,41 @@ fn product_page_get_from_state(
     }
 }
 
-fn parse_product_page_request(request: &str) -> Result<(&str, usize), &'static str> {
+fn parse_product_page_request(request: &str) -> Result<(&str, usize, u64), &'static str> {
     let mut fields = request.split('\n');
     let contract = fields.next().ok_or("missing-contract")?;
     let alternative_index_decimal = fields.next().ok_or("missing-alternative-index")?;
     let member_page_decimal = fields.next().ok_or("missing-member-page")?;
-    if fields.next().is_some()
-        || contract != PRODUCT_PAGE_REQUEST_CONTRACT
-        || !is_canonical_positive_decimal(alternative_index_decimal)
-    {
+    if !is_canonical_positive_decimal(alternative_index_decimal) {
         return Err("invalid-product-page-request");
     }
     let member_page_number =
         parse_canonical_positive_usize(member_page_decimal).ok_or("invalid-member-page")?;
-    Ok((alternative_index_decimal, member_page_number))
+    let maximum_work_steps = match contract {
+        PRODUCT_PAGE_REQUEST_CONTRACT => {
+            if fields.next().is_some() {
+                return Err("invalid-product-page-request");
+            }
+            DEFAULT_PRODUCT_PAGE_WORK_STEPS
+        }
+        PRODUCT_PAGE_REQUEST_CONTRACT_V2 => {
+            let work_steps_decimal = fields.next().ok_or("missing-work-steps")?;
+            if fields.next().is_some() || !is_canonical_positive_decimal(work_steps_decimal) {
+                return Err("invalid-product-page-request");
+            }
+            work_steps_decimal
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value != 0)
+                .ok_or("invalid-work-steps")?
+        }
+        _ => return Err("invalid-product-page-request"),
+    };
+    Ok((
+        alternative_index_decimal,
+        member_page_number,
+        maximum_work_steps,
+    ))
 }
 
 fn parse_canonical_positive_usize(value: &str) -> Option<usize> {
@@ -1945,13 +2785,18 @@ pub extern "C" fn clearra_wasm_product_page_release() -> i32 {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_cancel() -> i32 {
     ABI_STATE.with(|state| {
-        let state = state.borrow();
+        let mut state = state.borrow_mut();
         if let Err(status) = state.require_mutation_admission() {
             return status;
         }
+        state.distributed_ready_result = None;
         if let Some(coordinator) = state.distributed_coordinator.as_ref() {
             coordinator.cancel();
         }
+        if let Some((_, completion)) = state.distributed_completion.take() {
+            completion.cancel();
+        }
+        state.minimum_parallel_worker = None;
         ABI_OK
     })
 }
@@ -2551,6 +3396,8 @@ mod tests {
     const TYPED_PC_MINIMALS_COMMAND: &str = "clearra pc minimals --lines 1 \
         --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus \
         --backend cpu --workers 1";
+    const MULTI_ALTERNATIVE_PC_MINIMALS_COMMAND: &str = "clearra pc minimals --lines 2 \
+        --queue IIOOO --backend cpu --workers 1";
     const TYPED_PARITY_COMMAND: &str = "clearra utility parity --format ctk3 \
         --document ctk3_w0kCERPPgGduYXRpdmWycg";
 
@@ -2588,8 +3435,567 @@ mod tests {
             .clone()
     }
 
+    fn multi_alternative_pc_minimals_product_source_fixture() -> ProductPageSourceOwner {
+        static SOURCE: OnceLock<ProductPageSourceOwner> = OnceLock::new();
+        SOURCE
+            .get_or_init(|| {
+                let execution = clearra_wasm::WasmCommandRuntime::default()
+                    .run_command_text(MULTI_ALTERNATIVE_PC_MINIMALS_COMMAND)
+                    .expect("multi-alternative typed pc minimals fixture");
+                execution
+                    .product_page_source_owner()
+                    .cloned()
+                    .expect("multi-alternative pc minimals has a public product page source")
+            })
+            .clone()
+    }
+
     fn reset_abi_state_for_test() {
         ABI_STATE.with(|state| *state.borrow_mut() = WasmAbiState::default());
+    }
+
+    #[test]
+    fn product_retention_configuration_is_bounded_and_cannot_mutate_leased_output() {
+        reset_abi_state_for_test();
+        assert_eq!(clearra_wasm_configure_product_retention(0), ABI_ERROR);
+        assert_eq!(
+            clearra_wasm_configure_product_retention(u32::MAX),
+            ABI_ERROR
+        );
+        assert_eq!(
+            clearra_wasm_configure_product_retention(64 * 1024 * 1024),
+            ABI_OK
+        );
+        ABI_STATE.with(|state| state.borrow_mut().set_output_bytes(vec![1]));
+        assert_eq!(
+            clearra_wasm_configure_product_retention(128 * 1024 * 1024),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        reset_abi_state_for_test();
+    }
+
+    #[test]
+    fn typed_pc_minimals_runtime_completes_on_two_mib_stack() {
+        std::thread::Builder::new()
+            .name("typed-pc-minimals-two-mib-stack".to_owned())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let execution = clearra_wasm::WasmCommandRuntime::default()
+                    .run_command_text(TYPED_PC_MINIMALS_COMMAND)
+                    .expect("typed pc minimals completes within the explicit stack boundary");
+                assert!(execution.product_page_source_owner().is_some());
+            })
+            .expect("two-MiB stack test thread starts")
+            .join()
+            .expect("typed pc minimals does not overflow or panic");
+    }
+
+    #[test]
+    fn distributed_ready_preparation_is_finished_once_without_serial_reexecution() {
+        const COMMAND: &str = "clearra pc --lines 4 --board-mask 0 --height 4 \
+            --pieces 10 --queue IOTSZJL --hold empty --backend cpu --workers 2";
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| {
+            state.borrow_mut().input = COMMAND.as_bytes().to_vec();
+        });
+
+        assert_eq!(
+            clearra_wasm_distributed_prepare(),
+            3,
+            "an App-terminal preparation needs a distinct ABI mode"
+        );
+        ABI_STATE.with(|state| {
+            state.borrow_mut().input = COMMAND.as_bytes().to_vec();
+        });
+        assert_eq!(
+            clearra_wasm_start_job(),
+            0,
+            "the retained App result must block a serial replay owner"
+        );
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.distributed_ready_result.is_some());
+            assert!(!state.input.is_empty(), "rejected replay input stays owned");
+        });
+        assert_eq!(clearra_wasm_distributed_finish(71, 0), ABI_OK);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            let output = std::str::from_utf8(state.output_bytes()).expect("terminal UTF-8");
+            assert!(output.contains("\"event\":\"final_response\""), "{output}");
+            assert!(output.contains("\"job_id\":71"), "{output}");
+            assert!(output.contains("piece window cannot exceed"), "{output}");
+        });
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+
+        assert_eq!(
+            clearra_wasm_distributed_finish(72, 0),
+            ABI_ERROR,
+            "the prepared App response must have one terminal owner"
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+    }
+
+    fn completed_minimum_source_for_test() -> WasmDistributedCoordinator {
+        let runtime = clearra_wasm::WasmCommandRuntime::default()
+            .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+        const COMMAND: &str = "clearra pc minimals --lines 4 --board-mask 0xfc3f --height 4 \
+            --pieces 7 --patterns IOOOOOO;OOOOOOO --no-hold --backend cpu --workers 2";
+        let mut coordinator = match WasmDistributedCoordinator::prepare(&runtime, COMMAND).unwrap()
+        {
+            WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+            _ => panic!("fixture must create a distributed coordinator"),
+        };
+        let mut verifier = coordinator
+            .prepare_in_process_verifier(&runtime, COMMAND)
+            .unwrap();
+        loop {
+            match coordinator.advance_producer(16_384, 16).unwrap() {
+                WasmDistributedProducerAdvance::Pending
+                | WasmDistributedProducerAdvance::Initialization(_) => {}
+                WasmDistributedProducerAdvance::Batch(batch) => {
+                    let mut consumed = verifier.consume(&batch).unwrap();
+                    loop {
+                        if let Some(partial) = consumed.partial.take() {
+                            coordinator.absorb_partial(&partial).unwrap();
+                        }
+                        if !consumed.has_pending_work {
+                            break;
+                        }
+                        consumed = verifier.continue_work().unwrap();
+                    }
+                }
+                WasmDistributedProducerAdvance::Completed => break,
+                WasmDistributedProducerAdvance::Cancelled => {
+                    panic!("unexpected source cancellation")
+                }
+            }
+        }
+        let partial = verifier.finish().unwrap();
+        if !partial.is_empty() {
+            coordinator.absorb_partial(&partial).unwrap();
+        }
+        drop(verifier);
+        coordinator
+    }
+
+    #[test]
+    fn staged_distributed_minimum_binds_job_and_yields_without_an_output_lease() {
+        reset_abi_state_for_test();
+        let coordinator = completed_minimum_source_for_test();
+        ABI_STATE.with(|state| state.borrow_mut().distributed_coordinator = Some(coordinator));
+        assert_eq!(clearra_wasm_distributed_finish_start(31, 2), 1);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(!state.output_outstanding);
+            assert!(state.has_worker_job_start_conflict());
+            assert!(state.product_page_source_owner.is_none());
+        });
+        assert_eq!(clearra_wasm_distributed_finish_advance(31, 0), 1);
+        assert_eq!(clearra_wasm_distributed_finish_advance(32, 1), ABI_ERROR);
+        ABI_STATE.with(|state| assert!(state.borrow().distributed_completion.is_some()));
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_finish_advance(31, 1), 1);
+        let mut completed = false;
+        for _ in 0..1_000 {
+            match clearra_wasm_distributed_finish_advance(31, 64) {
+                1 => {}
+                ABI_OK => {
+                    completed = true;
+                    break;
+                }
+                status => panic!("staged completion failed: {status}"),
+            }
+        }
+        assert!(completed);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            let output = std::str::from_utf8(state.output_bytes()).unwrap();
+            assert!(output.contains("\"event\":\"final_response\""));
+            assert!(output.contains("\"job_id\":31"));
+            assert!(state.distributed_completion.is_none());
+            assert!(state.product_page_source_owner.is_some());
+        });
+        assert_eq!(
+            clearra_wasm_distributed_finish_advance(31, 1),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_product_page_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+    }
+
+    #[test]
+    fn coordinator_minimum_shards_share_live_completion_and_keep_job_fencing() {
+        reset_abi_state_for_test();
+        let coordinator = completed_minimum_source_for_test();
+        ABI_STATE.with(|state| state.borrow_mut().distributed_coordinator = Some(coordinator));
+        assert_eq!(clearra_wasm_distributed_finish_start(31, 2), 1);
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_local_start(32),
+            ABI_ERROR
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        let mut local_tasks = 0;
+        let mut completed = false;
+        for _ in 0..1_000 {
+            match clearra_wasm_distributed_finish_parallel_prepare(31, 8) {
+                0 => {}
+                1 => {
+                    assert_eq!(clearra_wasm_output_release(), ABI_OK);
+                    while clearra_wasm_distributed_finish_parallel_local_start(31) == 1 {
+                        local_tasks += 1;
+                        assert_eq!(
+                            clearra_wasm_distributed_finish_parallel_local_advance(31, 0),
+                            0
+                        );
+                        assert_eq!(
+                            clearra_wasm_distributed_finish_advance(31, 8),
+                            1,
+                            "normal continuation cannot discard an issued coordinator shard"
+                        );
+                        ABI_STATE.with(|state| {
+                            let state = state.borrow();
+                            assert!(state.distributed_completion.is_some());
+                            assert!(
+                                state.minimum_parallel_worker.is_none(),
+                                "local work must not replace completion with a verifier owner"
+                            );
+                            assert!(!state.output_outstanding);
+                        });
+                        let mut settled = false;
+                        for _ in 0..1_000 {
+                            match clearra_wasm_distributed_finish_parallel_local_advance(31, 8) {
+                                0 => {}
+                                1 => {
+                                    settled = true;
+                                    break;
+                                }
+                                status => panic!("coordinator shard failed: {status}"),
+                            }
+                        }
+                        assert!(settled);
+                    }
+                }
+                status => panic!("parallel query failed: {status}"),
+            }
+            match clearra_wasm_distributed_finish_advance(31, 8) {
+                1 => {}
+                0 => {
+                    completed = true;
+                    break;
+                }
+                status => panic!("coordinator completion failed: {status}"),
+            }
+        }
+        assert!(completed && local_tasks > 0);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            let output = std::str::from_utf8(state.output_bytes()).unwrap();
+            assert!(output.contains("\"event\":\"final_response\""));
+            assert!(state.distributed_completion.is_none());
+        });
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_product_page_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+    }
+
+    #[test]
+    fn guarded_minimum_topology_is_source_bound_and_full_cpu_keeps_shared_shape() {
+        for (host_compute, dedicated) in [(3, true), (2, false)] {
+            reset_abi_state_for_test();
+            let coordinator = completed_minimum_source_for_test();
+            ABI_STATE.with(|state| state.borrow_mut().distributed_coordinator = Some(coordinator));
+            assert_eq!(clearra_wasm_distributed_finish_start(31, 2), 1);
+            assert_eq!(clearra_wasm_distributed_finish_parallel_guard_version(), 1);
+            assert_eq!(
+                clearra_wasm_distributed_finish_parallel_configure(32, host_compute, 1 << 30, 0),
+                ABI_ERROR
+            );
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            assert_eq!(
+                clearra_wasm_distributed_finish_parallel_configure(31, host_compute, 1 << 30, 0),
+                1
+            );
+            let mut query_ready = false;
+            for _ in 0..1_000 {
+                match clearra_wasm_distributed_finish_parallel_prepare(31, 8) {
+                    0 => assert_eq!(clearra_wasm_distributed_finish_advance(31, 8), 1),
+                    1 => {
+                        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+                        query_ready = true;
+                        break;
+                    }
+                    status => panic!("guarded query preparation failed: {status}"),
+                }
+            }
+            assert!(
+                query_ready,
+                "initial deferred frontier remains protected and reachable"
+            );
+            if !dedicated {
+                assert_eq!(
+                    clearra_wasm_distributed_finish_parallel_admit(
+                        31,
+                        2,
+                        1,
+                        host_compute,
+                        1 << 30,
+                        0
+                    ),
+                    0,
+                    "full compute cannot add a control-only instance"
+                );
+            }
+            assert_eq!(
+                clearra_wasm_distributed_finish_parallel_admit(
+                    31,
+                    if dedicated { 2 } else { 1 },
+                    u32::from(dedicated),
+                    host_compute,
+                    1 << 30,
+                    0
+                ),
+                1
+            );
+            assert_eq!(
+                clearra_wasm_distributed_finish_parallel_guarded_query(31),
+                ABI_OK
+            );
+            let guarded_query = ABI_STATE.with(|state| state.borrow().output_bytes().to_vec());
+            assert_eq!(
+                u32::from_le_bytes(guarded_query[8..12].try_into().unwrap()),
+                4,
+                "source identity and exact remote slice share a guarded packet"
+            );
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            assert!(WasmMinimumParallelWorker::initialize(&guarded_query).is_err(),
+                "native process shares a real authority: manager lease remains held without a local cursor");
+            assert_eq!(
+                clearra_wasm_distributed_finish_parallel_local_start(31),
+                i32::from(!dedicated)
+            );
+            assert_eq!(
+                clearra_wasm_distributed_finish_parallel_admit(31, 1, 0, host_compute, 1 << 30, 0),
+                ABI_ERROR,
+                "fixed slices cannot be changed after admission or task issuance"
+            );
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+        }
+        reset_abi_state_for_test();
+    }
+
+    #[test]
+    fn coordinator_admission_decline_returns_issued_task_to_exact_remote_frontier() {
+        reset_abi_state_for_test();
+        let coordinator = completed_minimum_source_for_test();
+        ABI_STATE.with(|state| state.borrow_mut().distributed_coordinator = Some(coordinator));
+        assert_eq!(clearra_wasm_distributed_finish_start(31, 2), 1);
+        let mut query = None;
+        for _ in 0..1_000 {
+            match clearra_wasm_distributed_finish_parallel_prepare(31, 8) {
+                0 => assert_eq!(clearra_wasm_distributed_finish_advance(31, 8), 1),
+                1 => {
+                    query = Some(ABI_STATE.with(|state| state.borrow().output_bytes().to_vec()));
+                    assert_eq!(clearra_wasm_output_release(), ABI_OK);
+                    break;
+                }
+                status => panic!("parallel query failed: {status}"),
+            }
+        }
+        let query = query.expect("tiny fixture reaches an exact parallel query");
+        assert_eq!(clearra_wasm_distributed_finish_parallel_local_start(31), 1);
+        // A checked, unrepresentable ABI-owner growth must drop only local
+        // scratch, retaining the exact already-issued task for remote retry.
+        ABI_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            let (_, completion) = state.distributed_completion.as_mut().unwrap();
+            assert!(completion.advance_coordinator_shard(8, u128::MAX).unwrap());
+        });
+        assert_eq!(clearra_wasm_distributed_finish_parallel_local_start(31), 0);
+        assert_eq!(clearra_wasm_distributed_finish_advance(31, 8), 1);
+        assert_eq!(clearra_wasm_distributed_finish_parallel_task(31), 1);
+        let task = ABI_STATE.with(|state| state.borrow().output_bytes().to_vec());
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        let mut remote = WasmMinimumParallelWorker::initialize(&query).unwrap();
+        remote.start(&task).unwrap();
+        let mut receipt = None;
+        for _ in 0..1_000 {
+            if let Some(completed) = remote.advance(8).unwrap() {
+                receipt = Some(completed);
+                break;
+            }
+        }
+        let receipt = receipt.expect("retried exact task terminates");
+        drop(remote); // Native instances share one real authority; transport is now detached.
+        ABI_STATE.with(|state| state.borrow_mut().transfer_input = receipt.clone());
+        assert_eq!(clearra_wasm_distributed_finish_parallel_merge(31), ABI_OK);
+        // Receipt identity and original issuance are still valid; the retry
+        // cannot be accepted a second time as another negative certificate.
+        ABI_STATE.with(|state| state.borrow_mut().transfer_input = receipt);
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_merge(31),
+            ABI_ERROR
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+    }
+
+    #[test]
+    fn parallel_minimum_abi_preserves_exact_product_and_rejects_stale_job_receipts() {
+        fn output() -> Vec<u8> {
+            let output = ABI_STATE.with(|state| state.borrow().output_bytes().to_vec());
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            output
+        }
+        reset_abi_state_for_test();
+        let coordinator = completed_minimum_source_for_test();
+        ABI_STATE.with(|state| state.borrow_mut().distributed_coordinator = Some(coordinator));
+        assert_eq!(clearra_wasm_distributed_finish_start(31, 2), 1);
+        let mut query_count = 0;
+        let mut completed = false;
+        for _ in 0..1_000 {
+            match clearra_wasm_distributed_finish_parallel_prepare(31, 4) {
+                0 => {}
+                1 => {
+                    query_count += 1;
+                    assert_eq!(
+                        clearra_wasm_distributed_finish_parallel_task(31),
+                        ABI_OUTPUT_NOT_RELEASED
+                    );
+                    let query = output();
+                    assert_eq!(
+                        clearra_wasm_distributed_finish_parallel_prepare(31, 4),
+                        0,
+                        "same query is published once"
+                    );
+                    let mut tasks = Vec::new();
+                    loop {
+                        match clearra_wasm_distributed_finish_parallel_task(31) {
+                            0 => break,
+                            1 => {
+                                tasks.push(output());
+                                assert_eq!(
+                                    clearra_wasm_distributed_finish_parallel_last_task_key(31),
+                                    1
+                                );
+                                let key = output();
+                                assert_eq!(
+                                    key.len(),
+                                    56,
+                                    "routing includes matrix, generation, query and partition"
+                                );
+                                ABI_STATE
+                                    .with(|state| state.borrow_mut().transfer_input = key.clone());
+                                assert_eq!(
+                                    clearra_wasm_distributed_finish_parallel_redundant(31),
+                                    0
+                                );
+                                let mut stale = key;
+                                stale[0] ^= 1;
+                                ABI_STATE.with(|state| state.borrow_mut().transfer_input = stale);
+                                assert_eq!(
+                                    clearra_wasm_distributed_finish_parallel_redundant(31),
+                                    ABI_ERROR
+                                );
+                                let _ = output();
+                            }
+                            status => panic!("task export failed: {status}"),
+                        }
+                    }
+                    assert!(!tasks.is_empty());
+                    // Model separate workers with separate ABI owners, not a
+                    // host-created proof or a second source-search execution.
+                    let coordinator_state =
+                        ABI_STATE.with(|state| core::mem::take(&mut *state.borrow_mut()));
+                    ABI_STATE.with(|state| state.borrow_mut().transfer_input = query);
+                    assert_eq!(
+                        clearra_wasm_distributed_finish_parallel_worker_init(),
+                        ABI_OK
+                    );
+                    ABI_STATE.with(|state| assert!(state.borrow().has_external_worker_owner()));
+                    let mut receipts = Vec::new();
+                    for task in tasks.into_iter().rev() {
+                        ABI_STATE.with(|state| state.borrow_mut().transfer_input = task.clone());
+                        assert_eq!(
+                            clearra_wasm_distributed_finish_parallel_worker_start(),
+                            ABI_OK
+                        );
+                        assert_eq!(
+                            clearra_wasm_distributed_finish_parallel_worker_init(),
+                            ABI_ERROR,
+                            "an active shard cannot silently disappear on query replacement"
+                        );
+                        let _ = output();
+                        assert_eq!(
+                            clearra_wasm_distributed_finish_parallel_worker_cancel(),
+                            ABI_OK
+                        );
+                        assert!(
+                            !output().is_empty(),
+                            "cancellation must return an identity-bound receipt"
+                        );
+                        ABI_STATE.with(|state| state.borrow_mut().transfer_input = task);
+                        assert_eq!(
+                            clearra_wasm_distributed_finish_parallel_worker_start(),
+                            ABI_OK
+                        );
+                        assert_eq!(
+                            clearra_wasm_distributed_finish_parallel_worker_advance(0),
+                            1
+                        );
+                        let mut terminal = false;
+                        for _ in 0..1_000 {
+                            match clearra_wasm_distributed_finish_parallel_worker_advance(8) {
+                                1 => {}
+                                ABI_OK => {
+                                    receipts.push(output());
+                                    terminal = true;
+                                    break;
+                                }
+                                status => panic!("worker exact shard failed: {status}"),
+                            }
+                        }
+                        assert!(terminal, "tiny worker must terminate");
+                    }
+                    assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+                    ABI_STATE.with(|state| *state.borrow_mut() = coordinator_state);
+                    for receipt in receipts {
+                        ABI_STATE.with(|state| state.borrow_mut().transfer_input = receipt.clone());
+                        assert_eq!(
+                            clearra_wasm_distributed_finish_parallel_merge(32),
+                            ABI_ERROR
+                        );
+                        let _ = output();
+                        ABI_STATE.with(|state| assert_eq!(state.borrow().transfer_input, receipt));
+                        assert_eq!(clearra_wasm_distributed_finish_parallel_merge(31), ABI_OK);
+                    }
+                }
+                status => panic!("parallel query export failed: {status}"),
+            }
+            match clearra_wasm_distributed_finish_advance(31, 8) {
+                1 => {}
+                ABI_OK => {
+                    completed = true;
+                    break;
+                }
+                status => panic!("parallel completion failed: {status}"),
+            }
+        }
+        assert!(completed);
+        assert!(query_count > 0, "test must use the parallel proof contract");
+        let final_output = String::from_utf8(output()).unwrap();
+        assert!(final_output.contains("\"event\":\"final_response\""));
+        assert!(final_output.contains("\"job_id\":31"));
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.distributed_completion.is_none());
+            assert!(state.product_page_source_owner.is_some());
+        });
+        assert_eq!(clearra_wasm_product_page_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
     }
 
     fn install_exact_product_page_request(alternative_index: &str, member_page: &str) {
@@ -2604,37 +4010,31 @@ mod tests {
         });
     }
 
-    fn complete_finite_job(command: &str) -> u32 {
+    fn reject_unaccounted_finite_worker_job(command: &str) -> String {
         reset_abi_state_for_test();
         ABI_STATE.with(|state| {
             state.borrow_mut().input = command.as_bytes().to_vec();
         });
-        let job_id = clearra_wasm_start_job();
-        assert_ne!(job_id, 0, "finite Build job must be admitted");
-        for _ in 0..10_000 {
-            match clearra_wasm_advance_job(job_id, 100_000) {
-                0 | 4 => {}
-                1 => {
-                    ABI_STATE.with(|state| {
-                        let state = state.borrow();
-                        assert!(state.runtime.has_completed_governed_events());
-                        assert!(state.tiling_solution_page_store.is_none());
-                    });
-                    return job_id;
-                }
-                status => {
-                    let output = ABI_STATE.with(|state| {
-                        String::from_utf8_lossy(state.borrow().output_bytes()).into_owned()
-                    });
-                    panic!("finite Build job failed with status {status}: {output}");
-                }
-            }
-        }
-        panic!("finite Build job did not complete within the bounded advance loop");
-    }
-
-    fn complete_finite_build_job() -> u32 {
-        complete_finite_job(FINITE_BUILD_COMMAND)
+        assert_eq!(
+            clearra_wasm_start_job(),
+            0,
+            "the raw worker must reject finite memory without a retained authority"
+        );
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(!state.runtime.has_active_finite_job());
+            assert!(!state.runtime.has_completed_governed_events());
+            assert!(state.input.is_empty());
+            assert_eq!(state.input.capacity(), 0);
+            assert!(state.transfer_input.is_empty());
+            assert_eq!(state.transfer_input.capacity(), 0);
+            assert!(state.tiling_solution_page_store.is_none());
+            assert!(state.product_page_source_owner.is_none());
+            assert!(state.product_page_store.is_none());
+            assert!(state.governed_output.is_none());
+            assert!(state.output_outstanding);
+            String::from_utf8_lossy(state.output_bytes()).into_owned()
+        })
     }
 
     fn complete_legacy_job(command: &str) -> u32 {
@@ -2663,22 +4063,6 @@ mod tests {
             }
         }
         panic!("legacy worker job did not complete within the bounded advance loop");
-    }
-
-    fn start_active_finite_job() -> u32 {
-        reset_abi_state_for_test();
-        ABI_STATE.with(|state| {
-            state.borrow_mut().input = FINITE_BUILD_COMMAND.as_bytes().to_vec();
-        });
-        let job_id = clearra_wasm_start_job();
-        assert_ne!(job_id, 0, "finite Build job must be admitted");
-        assert_eq!(clearra_wasm_advance_job(job_id, 1), 0);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_active_finite_job());
-            assert!(!state.runtime.has_completed_governed_events());
-        });
-        job_id
     }
 
     #[test]
@@ -2750,87 +4134,14 @@ mod tests {
     }
 
     #[test]
-    fn active_finite_job_rejects_preterminal_drain_and_unrelated_mutation_without_output() {
-        let job_id = start_active_finite_job();
-        let mut command = Vec::with_capacity(257);
-        command.extend_from_slice(b"preserve-command-owner");
-        let command_pointer = command.as_ptr();
-        let command_capacity = command.capacity();
-        let mut transfer = Vec::with_capacity(521);
-        transfer.extend_from_slice(b"preserve-transfer-owner");
-        let transfer_pointer = transfer.as_ptr();
-        let transfer_capacity = transfer.capacity();
-        ABI_STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            state.input = command;
-            state.transfer_input = transfer;
-            let generation = state.begin_gpu_warmup().expect("late callback fixture");
-            assert!(!state.accepts_gpu_warmup_completion(generation));
-            state.cancel_gpu_warmup();
-        });
+    fn finite_memory_worker_start_is_fail_closed_without_retained_authority() {
+        let output = reject_unaccounted_finite_worker_job(FINITE_BUILD_COMMAND);
+        assert_eq!(output, "E_WASM_FINITE_AUTHORITY_UNAVAILABLE: ");
 
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_ERROR);
-        assert_eq!(clearra_wasm_configure_host(u32::MAX, u32::MAX), ABI_ERROR);
-        assert_eq!(clearra_wasm_gpu_warmup_start(i32::MAX), ABI_ERROR);
-        assert_eq!(clearra_wasm_gpu_warmup_cancel(), ABI_ERROR);
-        assert_eq!(clearra_wasm_gpu_warmup_advance(), ABI_ERROR);
-        assert_eq!(clearra_wasm_input_resize(u32::MAX), ABI_ERROR);
-        assert_eq!(clearra_wasm_transfer_resize(u32::MAX), ABI_ERROR);
-        assert_eq!(clearra_wasm_tablebase_install(), ABI_ERROR);
-        assert_eq!(clearra_wasm_tablebase_release(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_prepare(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_worker_initialization(), ABI_ERROR);
-        assert_eq!(
-            clearra_wasm_distributed_produce(u32::MAX, u32::MAX),
-            ABI_ERROR
-        );
-        assert_eq!(clearra_wasm_distributed_merge_partial(), ABI_ERROR);
-        assert_eq!(
-            clearra_wasm_distributed_finish(u32::MAX, u32::MAX),
-            ABI_ERROR
-        );
-        assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_forward_verifier_start(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_verifier_consume(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_verifier_continue(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_verifier_finish(), ABI_ERROR);
-        assert_eq!(
-            clearra_wasm_tiling_solution_page(u32::MAX, u32::MAX),
-            ABI_ERROR
-        );
-        assert_eq!(clearra_wasm_tiling_solution_release(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_cancel(), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_reset(), ABI_ERROR);
-        assert_eq!(clearra_wasm_start_job(), 0);
-        #[cfg(feature = "stage-profiling")]
-        {
-            assert_eq!(clearra_wasm_profile_start(), ABI_ERROR);
-            assert_eq!(clearra_wasm_profile_finish(), ABI_ERROR);
-        }
-
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_active_finite_job());
-            assert!(!state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.as_ptr(), command_pointer);
-            assert_eq!(state.input.capacity(), command_capacity);
-            assert_eq!(state.transfer_input.as_ptr(), transfer_pointer);
-            assert_eq!(state.transfer_input.capacity(), transfer_capacity);
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(state.governed_output.is_none());
-            assert!(!state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_cancel_job(job_id), ABI_OK);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(!state.runtime.has_active_finite_job());
-            assert_eq!(
-                state.runtime.status(WasmWorkerJobId::new(job_id.into())),
-                Some(WasmWorkerJobStatus::Cancelled)
-            );
-        });
+        assert_eq!(clearra_wasm_input_resize(1), ABI_OUTPUT_NOT_RELEASED);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OUTPUT_NOT_RELEASED);
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
     }
 
     #[test]
@@ -2960,164 +4271,21 @@ mod tests {
     }
 
     #[test]
-    fn governed_drain_preserves_wrong_job_owner_then_leases_exact_abi_output_until_release() {
-        let job_id = complete_finite_build_job();
-        let wrong_job_id = if job_id == u32::MAX {
-            job_id - 1
-        } else {
-            job_id + 1
-        };
-
-        ABI_STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            let generation = state.begin_gpu_warmup().expect("late callback fixture");
-            assert!(!state.accepts_gpu_warmup_completion(generation));
-        });
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            assert!(state.runtime.has_completed_governed_events());
-            assert!(matches!(state.gpu_warmup, Some(GpuWarmupState::Pending)));
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(!state.output_outstanding);
-            state.cancel_gpu_warmup();
-        });
-        assert_eq!(clearra_wasm_tiling_solution_page(0, 1), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(state.governed_output.is_none());
-            assert!(!state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_drain_job_events(wrong_job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(state.governed_output.is_none());
-            assert!(!state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_input_resize(1), ABI_ERROR);
-        assert_eq!(clearra_wasm_transfer_resize(1), ABI_ERROR);
-        assert_eq!(clearra_wasm_distributed_prepare(), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.capacity(), 0);
-            assert_eq!(state.transfer_input.capacity(), 0);
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(!state.output_outstanding);
-        });
-
-        let mut next_command = Vec::with_capacity(FINITE_BUILD_COMMAND.len() + 37);
-        next_command.extend_from_slice(FINITE_BUILD_COMMAND.as_bytes());
-        let next_command_ptr = next_command.as_ptr();
-        let next_command_capacity = next_command.capacity();
-        ABI_STATE.with(|state| state.borrow_mut().input = next_command);
-        assert_eq!(clearra_wasm_start_job(), 0);
-        assert_eq!(clearra_wasm_advance_job(wrong_job_id, 1), ABI_ERROR);
-        assert_eq!(clearra_wasm_cancel_job(wrong_job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.as_ptr(), next_command_ptr);
-            assert_eq!(state.input.capacity(), next_command_capacity);
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(!state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.as_ptr(), next_command_ptr);
-            assert_eq!(state.input.capacity(), next_command_capacity);
-            assert!(state.governed_output.is_none());
-        });
-        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            assert!(state.runtime.has_completed_governed_events());
-            assert_eq!(state.input.capacity(), 0);
-            assert_eq!(state.transfer_input.capacity(), 0);
-        });
-
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_OK);
-        let (output_ptr, output_len, output_actual, output_limit) = ABI_STATE.with(|state| {
-            let state = state.borrow();
-            let output = state
-                .governed_output
-                .as_ref()
-                .expect("correct job drains the governed JSON owner into ABI state");
-            let output_actual = WasmAbiState::governed_output_storage_actual_bytes(output)
-                .expect("governed ABI storage bytes remain representable");
-            assert!(WasmAbiState::governed_output_storage_fits(
-                output,
-                output_actual
-            ));
-            assert!(output_actual > 0);
-            assert!(!WasmAbiState::governed_output_storage_fits(
-                output,
-                output_actual - 1
-            ));
-            assert!(output_actual <= output.memory_limit_bytes());
-            assert_eq!(state.output_retained_capacity_bytes(), output_actual);
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert!(state.output_outstanding);
-            (
-                output.json().as_ptr(),
-                output.json().len(),
-                output_actual,
-                output.memory_limit_bytes(),
-            )
-        });
-        assert_eq!(clearra_wasm_output_ptr(), output_ptr as usize as u32);
-        assert_eq!(clearra_wasm_output_len(), output_len as u32);
-        assert_eq!(clearra_wasm_output_len_exact(), 1);
-        assert!(output_actual <= output_limit);
-
-        assert_eq!(clearra_wasm_input_resize(1), ABI_OUTPUT_NOT_RELEASED);
-        assert_eq!(clearra_wasm_distributed_reset(), ABI_OUTPUT_NOT_RELEASED);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
-            let output = state
-                .governed_output
-                .as_ref()
-                .expect("the next operation cannot consume the output owner");
-            assert_eq!(output.json().as_ptr(), output_ptr);
-            assert_eq!(output.json().len(), output_len);
-            assert_eq!(state.output_retained_capacity_bytes(), output_actual);
-            assert!(state.output_outstanding);
-        });
-
-        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+    fn finite_memory_worker_rejection_never_creates_a_governed_event_lease() {
+        let output = reject_unaccounted_finite_worker_job(FINITE_BUILD_COMMAND);
+        assert_eq!(output, "E_WASM_FINITE_AUTHORITY_UNAVAILABLE: ");
         ABI_STATE.with(|state| {
             let state = state.borrow();
             assert!(state.governed_output.is_none());
-            assert!(state.output.is_empty());
-            assert_eq!(state.output.capacity(), 0);
-            assert_eq!(state.output_retained_capacity_bytes(), 0);
-            assert!(!state.output_outstanding);
-        });
-        assert_eq!(clearra_wasm_output_release(), ABI_OK);
-        assert_eq!(clearra_wasm_drain_job_events(wrong_job_id), ABI_ERROR);
-        ABI_STATE.with(|state| {
-            let state = state.borrow();
             assert!(!state.runtime.has_completed_governed_events());
-            assert!(!state.output.is_empty());
-            assert!(state.output_outstanding);
+            assert!(state.tiling_solution_page_store.is_none());
+            assert!(state.product_page_source_owner.is_none());
+            assert!(state.product_page_store.is_none());
         });
+        assert_eq!(clearra_wasm_drain_job_events(1), ABI_OUTPUT_NOT_RELEASED);
         assert_eq!(clearra_wasm_output_release(), ABI_OK);
-        assert_eq!(clearra_wasm_input_resize(1), ABI_OK);
+        assert_eq!(clearra_wasm_drain_job_events(1), ABI_ERROR);
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
         assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
     }
 
@@ -3367,12 +4535,142 @@ mod tests {
     }
 
     #[test]
+    fn governed_product_advance_denial_is_an_abi_error_without_a_false_page_state() {
+        let source = typed_pc_minimals_product_source_fixture();
+        let mut probe = ProductPageStore::from_source(source.clone()).expect("probe page store");
+        let mut trace = Vec::new();
+        probe
+            .coverage_portfolio_mut()
+            .expect("coverage portfolio")
+            .next_page_with_memory_guard(
+                10_000,
+                &mut |whole_live| {
+                    trace.push(whole_live);
+                    true
+                },
+                &mut || false,
+            )
+            .expect("measure one guarded advance");
+        let abi_inline = core::mem::size_of::<Option<AbiProductPageStore>>() as u128;
+        let denied_limit = trace
+            .iter()
+            .copied()
+            .max()
+            .expect("advance reports a whole-live peak")
+            .checked_add(abi_inline)
+            .and_then(|peak| peak.checked_sub(1))
+            .expect("peak-minus-one limit");
+
+        let denied_store = ProductPageStore::from_source(source).expect("denied page store");
+        let retained_before = denied_store
+            .checked_retained_capacity_bytes()
+            .expect("retained bytes");
+        assert!(retained_before + abi_inline <= denied_limit);
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| {
+            state.borrow_mut().product_page_store = Some(AbiProductPageStore::Governed {
+                store: denied_store,
+                memory_limit_bytes: denied_limit,
+            });
+        });
+
+        assert_eq!(clearra_wasm_product_page_next(10_000), ABI_ERROR);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.product_page_store.is_none());
+            assert!(state.output.is_empty());
+            assert!(!state.output_outstanding);
+        });
+    }
+
+    #[test]
+    fn governed_product_cache_replay_denial_is_fail_closed_at_the_abi_boundary() {
+        fn fully_advanced(source: ProductPageSourceOwner) -> ProductPageStore {
+            let mut store = ProductPageStore::from_source(source).expect("page store");
+            let coverage = store.coverage_portfolio_mut().expect("coverage portfolio");
+            loop {
+                let advance = coverage
+                    .next_page(u64::MAX, &mut || false)
+                    .expect("advance all alternatives");
+                if advance.checkpoint().enumeration_complete() {
+                    break;
+                }
+            }
+            assert!(coverage.retained_page_slot("1").is_none());
+            store
+        }
+
+        let source = multi_alternative_pc_minimals_product_source_fixture();
+        let mut probe = fully_advanced(source.clone());
+        let mut trace = Vec::new();
+        probe
+            .coverage_portfolio_mut()
+            .expect("coverage portfolio")
+            .load_page_by_alternative_index_slice_with_memory_guard(
+                "1",
+                DEFAULT_PRODUCT_PAGE_WORK_STEPS,
+                &mut |whole_live| {
+                    trace.push(whole_live);
+                    true
+                },
+                &mut || false,
+            )
+            .expect("measure guarded cache replay");
+        let abi_inline = core::mem::size_of::<Option<AbiProductPageStore>>() as u128;
+        let requested_alternative_index = "1".to_owned();
+        let request_capacity = requested_alternative_index.capacity();
+        let denied_limit = trace
+            .iter()
+            .copied()
+            .max()
+            .expect("replay reports a whole-live peak")
+            .checked_add(abi_inline)
+            .and_then(|peak| peak.checked_add(request_capacity as u128))
+            .and_then(|peak| peak.checked_sub(1))
+            .expect("peak-minus-one limit");
+        let denied_store = fully_advanced(source);
+        let retained_before = denied_store
+            .checked_retained_capacity_bytes()
+            .expect("retained bytes");
+        assert!(retained_before + abi_inline + request_capacity as u128 <= denied_limit);
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| {
+            state.borrow_mut().product_page_store = Some(AbiProductPageStore::Governed {
+                store: denied_store,
+                memory_limit_bytes: denied_limit,
+            });
+        });
+
+        let status = ABI_STATE.with(|state| {
+            product_page_get_from_state(
+                &mut state.borrow_mut(),
+                &requested_alternative_index,
+                1,
+                DEFAULT_PRODUCT_PAGE_WORK_STEPS,
+                request_capacity,
+            )
+        });
+        assert_eq!(status, ABI_ERROR);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.product_page_store.is_none());
+            assert!(state.output.is_empty());
+            assert!(!state.output_outstanding);
+        });
+    }
+
+    #[test]
     fn exact_product_page_request_preserves_indices_beyond_js_and_u32_ranges() {
         let request = format!("{PRODUCT_PAGE_REQUEST_CONTRACT}\n184467440737095516160\n1");
-        let (alternative_index, member_page) =
+        let (alternative_index, member_page, maximum_work_steps) =
             parse_product_page_request(&request).expect("exact decimal request");
         assert_eq!(alternative_index, "184467440737095516160");
         assert_eq!(member_page, 1);
+        assert_eq!(maximum_work_steps, DEFAULT_PRODUCT_PAGE_WORK_STEPS);
+        let bounded = format!("{PRODUCT_PAGE_REQUEST_CONTRACT_V2}\n184467440737095516160\n1\n17");
+        let (_, _, maximum_work_steps) =
+            parse_product_page_request(&bounded).expect("bounded exact decimal request");
+        assert_eq!(maximum_work_steps, 17);
         assert!(
             parse_product_page_request("portfolio-page-request.v1\n9007199254740992\n01").is_err()
         );
@@ -3483,17 +4781,15 @@ mod tests {
     }
 
     #[test]
-    fn governed_generic_tiling_does_not_forge_pc_tiling_page_authority() {
-        let job_id = complete_finite_job(FINITE_GENERIC_TILING_COMMAND);
-        assert_eq!(clearra_wasm_drain_job_events(job_id), ABI_OK);
+    fn rejected_finite_generic_tiling_does_not_forge_pc_tiling_page_authority() {
+        let output = reject_unaccounted_finite_worker_job(FINITE_GENERIC_TILING_COMMAND);
+        assert_eq!(output, "E_WASM_FINITE_AUTHORITY_UNAVAILABLE: ");
         ABI_STATE.with(|state| {
             let state = state.borrow();
-            let output = state
-                .governed_output
-                .as_ref()
-                .expect("finite Build drains through the governed JSON route");
-            assert!(output.completed_tiling_solution_page_store().is_none());
             assert!(state.tiling_solution_page_store.is_none());
+            assert!(state.product_page_source_owner.is_none());
+            assert!(state.product_page_store.is_none());
+            assert!(state.governed_output.is_none());
             assert!(state.output_outstanding);
         });
 
@@ -3769,7 +5065,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_build_verifier_admission_exports_typed_not_executed_report() {
+    fn standalone_build_verifier_rejects_unaccounted_finite_authority() {
         reset_abi_state_for_test();
         ABI_STATE.with(|state| {
             state.borrow_mut().input = b"clearra build-probability --base-mask 0x0 \
@@ -3786,15 +5082,15 @@ mod tests {
             assert_eq!(state.input.capacity(), 0);
             let output = std::str::from_utf8(&state.output).expect("typed UTF-8 error");
             assert!(output.starts_with('{'), "output={output}");
-            assert!(output.contains("\"code\":\"E_WASM_DISTRIBUTED_VERIFIER_START\""));
-            assert!(output.contains("\"solver_executed\":false"));
-            assert!(output.contains("\"state\":\"exhausted\""));
-            assert!(output.contains("\"reason\":\"memory-budget-exceeded\""));
-            assert!(output.contains("\"descriptor_pattern_count\":\"1058400\""));
-            assert!(output.contains("\"dense_pattern_count\":\"1058400\""));
-            assert!(output.contains("\"required_dense_bytes\":\"132304\""));
-            assert!(output.contains("\"required_memory_bytes\":\"17066704\""));
-            assert!(output.contains("\"result_completeness\":\"not-executed\""));
+            assert!(
+                output.contains("\"code\":\"E_WASM_FINITE_AUTHORITY_UNAVAILABLE\""),
+                "output={output}"
+            );
+            assert!(
+                output.contains("\"resource_report\":null"),
+                "output={output}"
+            );
+            assert!(state.output_outstanding);
         });
         assert_eq!(clearra_wasm_output_release(), ABI_OK);
         assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);

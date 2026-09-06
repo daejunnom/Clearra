@@ -676,8 +676,7 @@ fn trace_has_complete_spin_evidence(
                 ReplayEvent::KickEvidence(evidence)
                     if evidence.step_index() == step.step_index()
                         && evidence.first_success_confirmed()
-                        && evidence.to_rotation()
-                            == step.placement().rotation().quarter_turns() as u8
+                        && evidence.to_rotation() == step.placement().rotation().quarter_turns()
                         && evidence.result() == (result_x, result_y)
             )
         })

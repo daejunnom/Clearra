@@ -4,15 +4,17 @@ use super::{
     NativeCoreError, NativePackingOutcome, NativePackingStreamOutcome,
     C_NATIVE_PACKING_MAX_CANDIDATES, C_NATIVE_PACKING_MAX_PIECES,
 };
+#[cfg(feature = "native-c-core")]
+use crate::PackingCandidateBatch;
 use crate::{
     native::NativePackingCandidateConsumer,
     packing_problem::{CPackingCandidate, CPackingOperation, C_PACKING_MAX_OPERATIONS},
     problem::CPackingProblem,
-    PackingCandidateBatch,
 };
 use clearra_core_domain::execution_cancellation::ExecutionCancellationToken;
 use clearra_core_domain::pruning::PruningEvidencePolicy;
 
+#[cfg(feature = "native-c-core")]
 const C_PACKING_STATUS_OK: i32 = 0;
 #[cfg(feature = "native-c-core")]
 const C_PACKING_STATUS_CAPACITY_EXCEEDED: i32 = 6;

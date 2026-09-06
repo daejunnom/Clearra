@@ -4,6 +4,8 @@ import type {
 } from '@clearra/ui/wasm';
 
 import { DistributedWasmJobRunner } from './DistributedWasmJobRunner';
+import { withHostExecutionTiming } from './HostExecutionProfile';
+import { SerialSearchProgress } from './SerialSearchProgress';
 import type { SharedExecutionResourceAuthority } from './SharedExecutionResourceAuthority';
 import { WasmJobRunner } from './WasmJobRunner';
 import type {
@@ -25,8 +27,13 @@ export class ClearraProductJobRunner {
 
   async run(
     commandText: string,
-    onEvent: (event: ClearraWasmWorkerEvent) => void
+    onEvent: (event: ClearraWasmWorkerEvent) => void,
+    options: { transportProfile?: boolean } = {}
   ): Promise<ClearraWasmWorkerEvent> {
+    const preparationStarted = options.transportProfile ? performance.now() : null;
+    let preparationMs = 0;
+    const emit = (event: ClearraWasmWorkerEvent) => onEvent(withHostExecutionTiming(event,
+      preparationStarted === null ? null : { product_prepare_ms: preparationMs }));
     const distributed = new DistributedWasmJobRunner(
       this.wasm,
       this.jobId,
@@ -41,15 +48,20 @@ export class ClearraProductJobRunner {
       onEvent(preparationProgressEvent(this.jobId));
       await distributed.acquire();
       const plan = distributed.prepare(commandText);
+      if (preparationStarted !== null) preparationMs = performance.now() - preparationStarted;
+      if (plan.mode === 'ready') {
+        return distributed.finishPreparedResult(emit);
+      }
       if (plan.mode !== 'serial') {
-        return await distributed.run(commandText, plan, onEvent);
+        return await distributed.run(commandText, plan, emit, options);
       }
       distributed.resetPreparedCoordinatorForSerial();
-      onEvent(serialExecutionProgressEvent(this.jobId));
+      const serialProgress = new SerialSearchProgress(serialExecutionProgressEvent(this.jobId));
+      onEvent(serialProgress.initialEvent);
       const serial = new WasmJobRunner(this.wasm);
       this.activeRunner = serial;
       try {
-        return await serial.run(commandText, onEvent);
+        return await serial.run(commandText, (event) => emit(serialProgress.project(event)));
       } finally {
         // The preparation owner retains the shared lease across the complete
         // serial execution and releases it only after a terminal/error path.
@@ -73,7 +85,7 @@ export class ClearraProductJobRunner {
   }
 }
 
-function serialExecutionProgressEvent(jobId: number): ClearraWasmWorkerEvent {
+function serialExecutionProgressEvent(jobId: number): Extract<ClearraWasmWorkerEvent, { event: 'progress' }> {
   return {
     schema_version: 1,
     runtime: 'clearra-wasm',

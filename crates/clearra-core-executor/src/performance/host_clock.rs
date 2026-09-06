@@ -34,3 +34,36 @@ pub(crate) fn host_elapsed_ns(started_at: HostInstant) -> u64 {
 pub(crate) fn host_elapsed_ns(started_at: HostInstant) -> u64 {
     ((performance_now_ms() - started_at).max(0.0) * 1_000_000.0).min(u64::MAX as f64) as u64
 }
+
+/// A monotonic host-turn budget, not a timeout on the search itself.
+///
+/// Callers check this only between atomic search transactions and retain a
+/// finite logical work bound as well. The clock uses `performance.now` on
+/// wasm32, where `std::time::Instant::now` is not supported.
+pub struct CooperativeWorkQuantum {
+    started_at: HostInstant,
+    maximum_ns: u64,
+}
+
+impl CooperativeWorkQuantum {
+    pub fn start(maximum_millis: u32) -> Self {
+        Self {
+            started_at: host_now(),
+            maximum_ns: u64::from(maximum_millis) * 1_000_000,
+        }
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        host_elapsed_ns(self.started_at) >= self.maximum_ns
+    }
+}
+
+#[cfg(test)]
+mod cooperative_work_quantum_tests {
+    use super::CooperativeWorkQuantum;
+
+    #[test]
+    fn zero_host_turn_budget_is_immediately_exhausted() {
+        assert!(CooperativeWorkQuantum::start(0).is_exhausted());
+    }
+}

@@ -162,11 +162,18 @@ const JSTRIS_180: Readonly<Record<string, readonly PlayerKickOffset[]>> = Object
   "left>right": kicks([[0, 0], [-1, 0]]),
 });
 
+const SRS_X_JLSTZ_180: Readonly<Record<string, readonly PlayerKickOffset[]>> = Object.freeze({
+  "spawn>reverse": kicks([[0, 0], [1, 0], [2, 0], [1, -1], [2, -1], [-1, 0], [-2, 0], [-1, -1], [-2, -1], [0, 1], [3, 0], [-3, 0]]),
+  "right>left": kicks([[0, 0], [0, -1], [0, -2], [-1, -1], [-1, -2], [0, 1], [0, 2], [-1, 1], [-1, 2], [1, 0], [0, -3], [0, 3]]),
+  "reverse>spawn": kicks([[0, 0], [-1, 0], [-2, 0], [-1, 1], [-2, 1], [1, 0], [2, 0], [1, 1], [2, 1], [0, -1], [-3, 0], [3, 0]]),
+  "left>right": kicks([[0, 0], [0, -1], [0, -2], [1, -1], [1, -2], [0, 1], [0, 2], [1, 1], [1, 2], [-1, 0], [0, -3], [0, 3]]),
+});
+
 const SRS_X_I_180: Readonly<Record<string, readonly PlayerKickOffset[]>> = Object.freeze({
-  "spawn>reverse": kicks([[0, 0], [0, 1], [1, 1], [-1, 1], [1, 0], [-1, 0]]),
-  "right>left": kicks([[1, 1], [1, 0], [0, 0], [2, 0], [0, 1], [2, 1]]),
-  "reverse>spawn": kicks([[-1, -1], [0, -1], [0, 1], [0, 0], [-1, 1], [-1, 0]]),
-  "left>right": kicks([[0, 0], [-1, 0], [-1, 2], [-1, 1], [0, 2], [0, 1]]),
+  "spawn>reverse": kicks([[0, 0], [-1, 0], [-2, 0], [1, 0], [2, 0], [0, -1]]),
+  "right>left": kicks([[0, 0], [0, -1], [0, -2], [0, 1], [0, 2], [-1, 0]]),
+  "reverse>spawn": kicks([[0, 0], [1, 0], [2, 0], [-1, 0], [-2, 0], [0, 1]]),
+  "left>right": kicks([[0, 0], [0, -1], [0, -2], [0, 1], [0, 2], [1, 0]]),
 });
 
 export function isPlayerPiece(value: unknown): value is PlayerPiece {
@@ -243,7 +250,12 @@ function normalizedKickCandidates(
 ): readonly PlayerKickOffset[] {
   const transition = `${from}>${to}`;
   if (piece === "O") {
-    return profile !== "jstris-180" && isQuarterTurn(from, to)
+    // TETR.IO's standard `o` is marked `disallow_kick`; `oo_kicks` belongs
+    // to a separate non-standard `oo` piece. ComputeKick still performs its
+    // implicit origin attempt, represented explicitly here for all SRS-X
+    // rotation requests.
+    return (profile === "srs-x" && (isQuarterTurn(from, to) || isHalfTurn(from, to))) ||
+      (profile !== "jstris-180" && isQuarterTurn(from, to))
       ? ZERO_KICK
       : EMPTY_KICKS;
   }
@@ -253,7 +265,7 @@ function normalizedKickCandidates(
       profile === "srs-plus"
         ? (piece === "I" ? JSTRIS_180 : JLSTZ_180)[transition]
         : profile === "srs-x"
-          ? (piece === "I" ? SRS_X_I_180 : JLSTZ_180)[transition]
+          ? (piece === "I" ? SRS_X_I_180 : SRS_X_JLSTZ_180)[transition]
           : profile === "jstris-180"
             ? JSTRIS_180[transition]
             : undefined;

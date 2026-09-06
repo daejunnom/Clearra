@@ -1,9 +1,9 @@
 use clearra_app::{
-    AppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
-    PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin, PcScoreIngressOrigin,
-    PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, ProductCapabilityContract,
-    SpinStructureProductMode, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
-    PC_SCORE_MAX_SOURCE_PIECES,
+    AppCommand, BuildProbabilityResultMode, PcChanceIngressOrigin, PcFailedQueueIngressOrigin,
+    PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin,
+    PcScoreIngressOrigin, PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin,
+    ProductCapabilityContract, SpinStructureProductMode, PC_SCORE_MAX_PATTERNS,
+    PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_SOURCE_PIECES,
 };
 use clearra_core_domain::{
     objective::{objective_kind::ObjectiveKind, tie_policy::TiePolicy, trace_policy::TracePolicy},
@@ -20,7 +20,7 @@ use clearra_pc_graph::request::{
 };
 use clearra_problem::{
     BuildProbabilityAggregation, BuildSolutionProbabilityPolicy, FinessePlacement,
-    FinesseScoreRequest,
+    FinesseScoreRequest, PcQuery,
 };
 use clearra_scoring::profile::SpinProfileId;
 use clearra_spin_structure_search::{MinimalityPolicy, SpinLineRequirement, SpinStructureMode};
@@ -136,6 +136,58 @@ fn pc_minimals_canonical_and_internal_alias_bind_one_typed_v2_contract() {
     .to_app_request()
     .expect("generic PC AppRequest");
     assert_eq!(generic.product_capability_contract(), None);
+}
+
+#[test]
+fn pc_minimals_four_line_opening_and_scenario_share_normalized_identity_semantics() {
+    let opening = CliCommandParser::parse("clearra pc minimals --lines 4")
+        .expect("canonical four-line opening pc minimals")
+        .to_app_request()
+        .expect("typed opening pc minimals AppRequest");
+    let scenario = CliCommandParser::parse(
+        "clearra pc minimals --lines 4 --board-mask 0 --height 4 --pieces 10 --hold empty",
+    )
+    .expect("canonical four-line scenario pc minimals")
+    .to_app_request()
+    .expect("typed scenario pc minimals AppRequest");
+
+    assert_eq!(
+        opening.product_capability_contract(),
+        Some(ProductCapabilityContract::PcMinimals)
+    );
+    assert_eq!(
+        scenario.product_capability_contract(),
+        Some(ProductCapabilityContract::PcMinimals)
+    );
+
+    let AppCommand::Pc(opening) = opening.command() else {
+        panic!("expected opening-backed pc.minimals command");
+    };
+    let AppCommand::Scenario(scenario) = scenario.command() else {
+        panic!("expected scenario-backed pc.minimals command");
+    };
+    let normalized_opening = PcQuery::from_opening_query(opening.query());
+
+    assert_eq!(
+        normalized_opening.count_policy(),
+        PcCountPolicy::CountUnique,
+        "the canonical product count policy must survive opening-preset lowering"
+    );
+    assert_eq!(scenario.query().count_policy(), PcCountPolicy::CountUnique);
+    assert_eq!(
+        normalized_opening.objective().kind(),
+        ObjectiveKind::MinimumCover
+    );
+    assert_eq!(
+        scenario.query().objective().kind(),
+        ObjectiveKind::MinimumCover
+    );
+    assert_eq!(
+        normalized_opening.queue(),
+        scenario.query().remaining_queue()
+    );
+    assert_eq!(normalized_opening.exact_piece_count(), 10);
+    assert_eq!(scenario.query().exact_pieces(), Some(10));
 }
 
 #[test]
@@ -1100,7 +1152,7 @@ fn setup_command_preserves_exact_path_detail_selection() {
     };
     let detail = command.query().path_detail().expect("path detail");
 
-    assert_eq!(detail.board_mask(), 0x0008_0719_e6);
+    assert_eq!(detail.board_mask(), 0x0000_0807_19e6);
     assert_eq!(detail.deleted_rows(), 3);
     assert_eq!(detail.placement_rows(), 1);
     assert_eq!(detail.condition_id(), "hold-empty");
@@ -1353,6 +1405,85 @@ fn build_probability_back_to_back_preservation_reaches_the_core_query() {
         objective.execution_constraints().spin_profile().as_str(),
         "t-spins-plus"
     );
+}
+
+#[test]
+fn build_probability_result_aggregation_is_cli_owned_and_independent_from_engine_aggregation() {
+    let base = "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --aggregate buildability";
+    for (suffix, expected) in [
+        (
+            " --result-mode complete-replay-paths",
+            BuildProbabilityResultMode::CompleteReplayPaths,
+        ),
+        (
+            " --result-mode field-average-score --score-profile guideline --initial-b2b 7",
+            BuildProbabilityResultMode::FieldAverageScore,
+        ),
+        (
+            " --result-mode fixed-queue-maximum-score --score-profile guideline --initial-b2b 7",
+            BuildProbabilityResultMode::FixedQueueMaximumScore,
+        ),
+        (
+            " --result-mode highest-score-minimum-set --score-profile guideline --initial-b2b 7",
+            BuildProbabilityResultMode::HighestScoreMinimumSet,
+        ),
+    ] {
+        let request = CliCommandParser::parse_with_worker_limit(&format!("{base}{suffix}"), 8)
+            .expect("Build result aggregation command")
+            .to_app_request()
+            .expect("Build result aggregation AppRequest");
+        let AppCommand::BuildProbability(command) = request.command() else {
+            panic!("expected AppCommand::BuildProbability");
+        };
+        assert_eq!(command.result_mode(), expected);
+        assert_eq!(
+            command.query().aggregation(),
+            BuildProbabilityAggregation::Buildability
+        );
+        assert!(command.query().core_query().objective().score().requested());
+        assert_eq!(request.resource_budget().workers(), 7);
+        assert_eq!(command.query().core_query().execution_policy().workers(), 7);
+    }
+
+    for suffix in [
+        "--tiling-only --result-mode complete-replay-paths",
+        "--tiling-only --result-mode field-average-score",
+        "--result-mode complete-replay-paths --score-profile tetrio",
+    ] {
+        assert!(
+            CliCommandParser::parse(&format!(
+                "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror {suffix}"
+            ))
+            .is_err(),
+            "{suffix}"
+        );
+    }
+}
+
+#[test]
+fn build_replay_and_score_occupied_height_is_bounded_before_execution() {
+    for mode in [
+        "complete-replay-paths",
+        "field-average-score",
+        "fixed-queue-maximum-score",
+        "highest-score-minimum-set",
+    ] {
+        let command = format!("clearra build-probability --base-mask 0 --target-mask 0xf --height 8 --queue I --no-hold --no-mirror --result-mode {mode}");
+        let request = CliCommandParser::parse(&command)
+            .expect("empty display rows are allowed")
+            .to_app_request()
+            .expect("compact App query");
+        let AppCommand::BuildProbability(build) = request.command() else {
+            panic!("Build query");
+        };
+        assert!(build.query().field().is_compact());
+        for (base, target) in [("0", "0xf000000000000000"), ("0x1000000000000000", "0xf")] {
+            let error = CliCommandParser::parse(&format!("clearra build-probability --base-mask {base} --target-mask {target} --height 8 --queue I --no-hold --no-mirror --result-mode {mode}"))
+                .expect_err("occupied seventh row must fail before Geometry");
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
+            assert!(error.message().contains("bottom six rows"));
+        }
+    }
 }
 
 #[test]
@@ -2314,7 +2445,7 @@ fn pc_save_ingress_fails_closed_without_fixed_bag_boundary_authority() {
 #[test]
 fn canonical_pc_tiling_binds_the_closed_projection_but_generic_tiling_does_not() {
     let canonical = CliCommandParser::parse(
-        "clearra pc tiling --lines 2 --queue IIOOO --no-hold --backend cpu --workers 2 --max-memory-mib 64",
+        "clearra pc tiling --lines 2 --queue IIOOO --no-hold --backend cpu --workers 2 --max-patterns 23 --max-memory-mib 64",
     )
     .expect("canonical pc tiling")
     .to_app_request()
@@ -2335,6 +2466,7 @@ fn canonical_pc_tiling_binds_the_closed_projection_but_generic_tiling_does_not()
         command.query().execution_policy().max_memory_mib(),
         Some(64)
     );
+    assert_eq!(command.query().execution_policy().max_patterns(), 23);
 
     for source in [
         "clearra pc --lines 2 --queue IIOOO --no-hold --objective tiling",
@@ -2355,7 +2487,7 @@ fn canonical_pc_tiling_binds_the_closed_projection_but_generic_tiling_does_not()
 #[test]
 fn canonical_scenario_pc_tiling_preserves_unique_family_counting() {
     let request = CliCommandParser::parse(
-        "clearra pc tiling --board-mask 0 --height 2 --pieces 5 --lines 2 --queue IIOOO --no-hold",
+        "clearra pc tiling --board-mask 0 --height 2 --pieces 5 --lines 2 --queue IIOOO --no-hold --max-patterns 23",
     )
     .expect("canonical scenario pc tiling")
     .to_app_request()
@@ -2368,6 +2500,7 @@ fn canonical_scenario_pc_tiling_preserves_unique_family_counting() {
         panic!("expected scenario PC command");
     };
     assert_eq!(command.query().count_policy(), PcCountPolicy::CountUnique);
+    assert_eq!(command.query().execution_policy().max_patterns(), 23);
     assert_eq!(
         command.result_projection(),
         PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling)
@@ -2558,7 +2691,7 @@ fn internal_pc_score_candidates_preserve_closed_origin_profile_and_typed_contrac
                 assert_eq!(command.result_projection(), parsed.pc_result_projection());
                 let policy = command.query().execution_policy();
                 assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
-                assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+                assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
                 assert!(!policy.allow_backend_fallback());
                 assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
                 command.query().objective()
@@ -2567,7 +2700,7 @@ fn internal_pc_score_candidates_preserve_closed_origin_profile_and_typed_contrac
                 assert_eq!(command.result_projection(), parsed.pc_result_projection());
                 let policy = command.query().execution_policy();
                 assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
-                assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+                assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
                 assert!(!policy.allow_backend_fallback());
                 assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
                 command.query().objective()
@@ -2625,7 +2758,7 @@ fn canonical_pc_score_minimals_binds_the_score_only_exact_portfolio_contract() {
     );
     let policy = query.execution_policy();
     assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
-    assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+    assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
     assert!(!policy.allow_backend_fallback());
     assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
 
@@ -2635,7 +2768,6 @@ fn canonical_pc_score_minimals_binds_the_score_only_exact_portfolio_contract() {
         "--count all",
         "--solution-probabilities",
         "--backend cpu",
-        "--workers 1",
         "--max-memory-mib 64",
     ] {
         let command = format!("{source} {suffix}");
@@ -2680,12 +2812,8 @@ fn pc_score_rejects_authority_overrides_and_unaccounted_resource_limits() {
 
     for suffix in [
         "--backend cpu",
-        "--workers 1",
-        "--auto-workers 1",
-        "--use-all-cpu-threads",
         "--gpu-device auto",
         "--gpu-warmup",
-        "--cpu-warmup",
         "--allow-backend-fallback",
         "--no-backend-fallback",
         "--tablebase",
@@ -2703,6 +2831,55 @@ fn pc_score_rejects_authority_overrides_and_unaccounted_resource_limits() {
         let error = CliCommandParser::parse(&source).expect_err(&source);
         assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{source}");
         assert!(error.message().contains("execution override"), "{source}");
+    }
+}
+
+#[test]
+fn pc_score_products_preserve_bounded_cpu_worker_options() {
+    for (product, source_input) in [
+        ("score", "--patterns [TIOSZ]!"),
+        ("score-minimals", "--patterns [TIOSZ]!"),
+        (
+            "score-finder",
+            "--board-mask 0 --height 2 --pieces 5 --queue TIOSZJL --no-hold",
+        ),
+    ] {
+        let source = format!(
+            "clearra pc {product} --lines 2 {source_input} \
+             --workers 4 --use-all-cpu-threads --cpu-warmup"
+        );
+        let request = CliCommandParser::parse_with_worker_limit(&source, 4)
+            .expect(&source)
+            .to_app_request()
+            .expect("typed score AppRequest");
+        let policy = match request.command() {
+            AppCommand::Pc(command) => command.query().execution_policy(),
+            AppCommand::Scenario(command) => command.query().execution_policy(),
+            command => panic!("expected PC score command, got {command:?}"),
+        };
+        assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+        assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(4));
+        assert!(policy.use_all_logical_processors());
+        assert!(policy.cpu_warmup());
+        assert!(!policy.allow_backend_fallback());
+
+        let automatic = CliCommandParser::parse_with_worker_limit(
+            &format!(
+                "clearra pc {product} --lines 2 {source_input} \
+                 --auto-workers 3"
+            ),
+            4,
+        )
+        .expect("automatic score worker policy")
+        .to_app_request()
+        .expect("automatic typed score AppRequest");
+        let automatic_policy = match automatic.command() {
+            AppCommand::Pc(command) => command.query().execution_policy(),
+            AppCommand::Scenario(command) => command.query().execution_policy(),
+            command => panic!("expected PC score command, got {command:?}"),
+        };
+        assert_eq!(automatic_policy.worker_policy(), WorkerPolicy::Auto);
+        assert!(automatic_policy.workers() <= 3);
     }
 }
 
@@ -2842,7 +3019,7 @@ fn pc_score_bounds_pattern_and_fixed_queue_sources() {
 }
 
 #[test]
-fn pc_score_accepts_six_line_factorized_source_with_fixed_product_policy() {
+fn pc_score_accepts_six_line_factorized_source_with_product_cpu_policy() {
     let request = CliCommandParser::parse("clearra pc score --lines 6 --patterns P7P7P2")
         .expect("bounded six-line factorized score source")
         .to_app_request()
@@ -2858,7 +3035,7 @@ fn pc_score_accepts_six_line_factorized_source_with_fixed_product_policy() {
     );
     let policy = query.execution_policy();
     assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
-    assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
+    assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
     assert!(!policy.allow_backend_fallback());
     assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
 }

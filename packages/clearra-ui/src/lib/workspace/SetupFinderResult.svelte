@@ -8,6 +8,7 @@
     ClearraSetupHoldCondition
   } from '../wasm/wasmCommandClient';
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import ProductResultPager from './ProductResultPager.svelte';
   import SolutionCopyButton from './SolutionCopyButton.svelte';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
@@ -284,8 +285,7 @@
   progressDone={view.progressDone}
   progressTotal={view.progressTotal}
   progressTelemetry={view.progressTelemetry}
-  failureDiagnostics={view.diagnostics}
-  failureMessage={view.error ?? ''}
+  publicFailures={view.publicFailures}
 >
   {#if view.response?.product_result_payload}
     <ProductResultPager payload={view.response.product_result_payload} {language} />
@@ -356,7 +356,7 @@
                 <span>{number(condition.candidate_count)}</span>
               </div>
               <ol class="setup-grid">
-                {#each condition.candidates as result}
+                {#each condition.candidates as result, candidateIndex}
                   <li>
                     <div class="setup-card-actions">
                       <SolutionCopyButton
@@ -369,7 +369,9 @@
                       class="setup-board"
                       style={`--rows:${result.board.height};aspect-ratio:${10 / result.board.height}`}
                       role="img"
-                      aria-label={result.candidate.setup_id}
+                      aria-label={language === 'ko'
+                        ? `Setup 보드 ${candidateIndex + 1}`
+                        : `Setup board ${candidateIndex + 1}`}
                     >
                       {#each result.board.cells as cell}
                         <span
@@ -411,7 +413,11 @@
                         <p class="path-status">{label('loadingExactBuildSolutions')}</p>
                       {:else if pathDetails[result.pathKey]?.status === 'failed'}
                         <div class="path-error">
-                          <p>{pathDetails[result.pathKey].error ?? label('pathDetailFailed')}</p>
+                          <WorkspaceFailureNotice
+                            failures={pathDetails[result.pathKey].publicFailures}
+                            {language}
+                            compact
+                          />
                           <button
                             type="button"
                             on:click|stopPropagation={() => retryPaths(
@@ -542,7 +548,6 @@
   .setup-path summary { color: #37534d; cursor: pointer; font-size: 10px; font-weight: 750; }
   .path-status { color: #68736f; font-size: 10px; margin: 8px 0 0; }
   .path-error { align-items: start; border-left: 2px solid #b95449; display: grid; gap: 7px; margin-top: 8px; padding-left: 8px; }
-  .path-error p { color: #8b3e36; font-size: 10px; margin: 0; overflow-wrap: anywhere; }
   .path-error button { background: #fff; border: 1px solid #aebbb6; border-radius: 4px; color: #174a45; cursor: pointer; font-size: 10px; font-weight: 750; min-height: 28px; padding: 0 9px; width: fit-content; }
   .solution-paths { display: grid; gap: 8px; margin-top: 8px; }
   .solution-path { border-top: 1px solid #d8dfdb; padding-top: 6px; }

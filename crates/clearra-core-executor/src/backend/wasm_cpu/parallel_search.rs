@@ -27,9 +27,8 @@ use super::{
     WasmExactSearchError,
 };
 
-const MIN_PARALLEL_PIECES: usize = 7;
-const MIN_ESTIMATED_PARALLEL_STATES: usize = 4_096;
-
+// Worker completion is a one-shot ownership transfer and remains inline deliberately.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum ParallelSearchDecision {
     Serial {
         geometry: GeometrySearch,
@@ -82,21 +81,8 @@ pub(super) fn execute_if_worthwhile(
     requested_workers: usize,
     cpu_warmup_requested: bool,
 ) -> Result<ParallelSearchDecision, WasmExactSearchError> {
-    let target_piece_count = catalog.required_cells().count_ones() as usize / 4;
-    let supply_target_count = geometry.parallel_target_count();
-    let estimated_states = supply_target_count.saturating_mul(
-        catalog.skeleton_count().saturating_mul(
-            1usize
-                .checked_shl(target_piece_count.min(usize::BITS as usize - 1) as u32)
-                .unwrap_or(usize::MAX),
-        ),
-    );
     let serial_reason = if requested_workers <= 1 {
         Some("single-worker-request")
-    } else if target_piece_count < MIN_PARALLEL_PIECES {
-        Some("small-piece-count")
-    } else if estimated_states < MIN_ESTIMATED_PARALLEL_STATES {
-        Some("small-estimated-state-space")
     } else if has_explicit_resource_cap(&problem) {
         Some("explicit-resource-cap-requires-serial-accounting")
     } else {
@@ -106,14 +92,20 @@ pub(super) fn execute_if_worthwhile(
         return Ok(ParallelSearchDecision::Serial { geometry, reason });
     }
 
-    if !cpu_warmup_requested {
-        cpu_worker_pool::ensure_cpu_workers(requested_workers).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_cpu_worker_pool_unavailable")
-        })?;
-    }
     let mut geometry = geometry;
     geometry.compile_for_parallel(&catalog, &control)?;
-    let plan = match geometry.into_parallel_plan(requested_workers) {
+    let balanced_workers = geometry
+        .candidate_family_count()
+        .map_or(requested_workers, |count| {
+            parallel_worker_count_for_candidates(count, requested_workers)
+        });
+    if balanced_workers < 2 {
+        return Ok(ParallelSearchDecision::Serial {
+            geometry,
+            reason: "small-compiled-candidate-family",
+        });
+    }
+    let plan = match geometry.into_parallel_plan(balanced_workers) {
         Ok(plan) => plan,
         Err(geometry) => {
             return Ok(ParallelSearchDecision::Serial {
@@ -127,10 +119,29 @@ pub(super) fn execute_if_worthwhile(
         catalog,
         plan,
         control,
-        requested_workers,
+        balanced_workers,
         cpu_warmup_requested,
     )
     .map(ParallelSearchDecision::Completed)
+}
+
+fn parallel_worker_count_for_candidates(candidate_count: u128, requested_workers: usize) -> usize {
+    let candidate_count = candidate_count.min(usize::MAX as u128) as usize;
+    requested_workers.min(candidate_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parallel_worker_count_for_candidates;
+
+    #[test]
+    fn actual_candidate_work_clamps_only_workers_that_cannot_receive_a_branch() {
+        assert_eq!(parallel_worker_count_for_candidates(40, 7), 7);
+        assert_eq!(parallel_worker_count_for_candidates(16, 7), 7);
+        assert_eq!(parallel_worker_count_for_candidates(2, 7), 2);
+        assert_eq!(parallel_worker_count_for_candidates(1, 7), 1);
+        assert_eq!(parallel_worker_count_for_candidates(u128::MAX, 7), 7);
+    }
 }
 
 fn has_explicit_resource_cap(problem: &SearchProblem) -> bool {

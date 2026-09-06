@@ -536,6 +536,8 @@ impl<'a> SetupRepresentativeResolver<'a> {
         Ok(())
     }
 
+    // Representative traversal reuses caller-owned caches and scratch buffers.
+    #[allow(clippy::too_many_arguments)]
     fn prefix_paths_for_pattern(
         &self,
         word_index: usize,
@@ -730,6 +732,8 @@ impl<'a> SetupRepresentativeResolver<'a> {
         Ok(path)
     }
 
+    // Recursive coverage checks keep compact state and shared caches explicit.
+    #[allow(clippy::too_many_arguments)]
     fn coverage_can_complete(
         &self,
         node_index: usize,

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
 
@@ -22,13 +23,13 @@
     type HostCapabilitySnapshot
   } from '../wasm';
   import WorkspaceShell from './WorkspaceShell.svelte';
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import {
     buildOperationDocumentCommand,
     operationDocumentRequestForDesktop,
     type OperationDocumentCommandInput
   } from './operationDocumentCommandModel';
   import {
-    preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage
   } from './workspaceI18n';
@@ -62,12 +63,13 @@
   $: normalizedDocument = document.trim();
   $: validDocument = /^(?:ctk3(?:b_|_|@)|(?:v115|[Ddm]115)@)[^\s]+$/u.test(normalizedDocument);
   $: validTimeout = Number.isInteger(timeoutSeconds) && timeoutSeconds >= 1 && timeoutSeconds <= 900;
-  $: reportFields = runtimeView.searchReport?.summary_fields ?? [];
+  $: reportFields = publicDependencyReportFields(
+    runtimeView.searchReport?.summary_fields ?? [],
+    language
+  );
 
   onMount(() => {
-    language = preferredWorkspaceLanguage(
-      localStorage.getItem('clearra-language') ?? navigator.language
-    );
+    language = readWorkspaceLanguage();
     if (runtime === 'web') {
       clearWasmTerminalResult();
       workerController.prewarm(1, false, CPU_ONLY_RUNTIME_WARMUP_POLICY);
@@ -102,7 +104,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    localStorage.setItem('clearra-language', next);
+    persistWorkspaceLanguage(next);
   }
 
   async function run() {
@@ -127,6 +129,25 @@
     if (!active) return;
     if (runtime === 'web') workerController.cancel();
     else await cancelDesktopJob();
+  }
+
+  function publicDependencyReportFields(
+    fields: Array<[string, string]>,
+    selectedLanguage: WorkspaceLanguage
+  ): Array<[string, string]> {
+    const labels: Record<string, readonly [string, string]> = {
+      operation_count: ['Operations', '배치 수'],
+      exact_order_count: ['Valid orders', '유효한 순서 수'],
+      universal_dependency_count: ['Required precedence relations', '필수 선행 관계'],
+      transitive_reduction_count: ['Essential dependency edges', '핵심 의존 간선'],
+      independent_pair_count: ['Independent pairs', '독립 배치 쌍']
+    };
+    return fields.flatMap(([key, value]) => {
+      const publicLabel = labels[key];
+      return publicLabel
+        ? [[publicLabel[selectedLanguage === 'ko' ? 1 : 0], value] as [string, string]]
+        : [];
+    });
   }
 </script>
 
@@ -203,8 +224,8 @@
           </div>
         {/each}
       </dl>
-    {:else if runtimeView.error}
-      <p class="error">{runtimeView.error}</p>
+    {:else if runtimeView.publicFailures.length}
+      <WorkspaceFailureNotice failures={runtimeView.publicFailures} {language} compact />
     {:else}
       <p class="empty">
         {language === 'ko'
@@ -238,8 +259,7 @@
   dl div + div { border-top: 1px solid #e4e9e6; }
   dt { color: #596560; font-size: 12px; font-weight: 750; }
   dd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; margin: 0; overflow-wrap: anywhere; }
-  .empty, .error { background: #fff; border: 1px solid #d5dcd7; border-radius: 7px; margin: 0; padding: 18px; }
-  .error { color: #9b3030; }
+  .empty { background: #fff; border: 1px solid #d5dcd7; border-radius: 7px; margin: 0; padding: 18px; }
   @media (max-width: 720px) {
     .profile-grid { grid-template-columns: 1fr; }
     .result { padding-left: 16px; padding-right: 16px; }

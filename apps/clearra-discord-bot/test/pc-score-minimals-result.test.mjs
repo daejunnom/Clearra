@@ -8,7 +8,7 @@ import {
   validDiscordPcScoreMinimalsResult,
 } from "../src/discord/pc-score-minimals-result.mjs";
 
-test("score-minimals accepts only the score-only closed result and emits one canonical ID", () => {
+test("score-minimals accepts only the score-only closed result without exposing internal identity", () => {
   const result = validResult();
   assert.equal(validDiscordPcScoreMinimalsResult(result), true);
   assert.deepEqual(discordPcScoreMinimalsResultProjection(result), {
@@ -20,13 +20,12 @@ test("score-minimals accepts only the score-only closed result and emits one can
 
   const lines = discordPcScoreMinimalsSummaryLines(result, "en");
   assert.deepEqual(lines, [
-    "Canonical candidate ID: 2",
-    "Canonical solution key: pc:solution:02",
+    "Selected result: 1",
     "Score equality: score-only",
     "Attack role: informational-only",
   ]);
   const rendered = lines.join("\n");
-  assert.equal((rendered.match(/candidate ID/gu) ?? []).length, 1);
+  assert.doesNotMatch(rendered, /candidate|solution key|pc:solution/iu);
   assert.doesNotMatch(rendered, /tie|alternative|cursor|page/iu);
 });
 
@@ -73,7 +72,7 @@ test("score-minimals validates a complete canonical portfolio but publishes only
   });
   assert.doesNotMatch(
     discordPcScoreMinimalsSummaryLines(result, "en").join("\n"),
-    /pc:solution:09|\b9\b/u,
+    /pc:solution|\b(?:2|9)\b/u,
   );
 });
 

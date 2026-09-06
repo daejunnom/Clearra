@@ -3,7 +3,6 @@
   import { onDestroy } from 'svelte';
 
   import type {
-    ClearraDiagnostic,
     ClearraForwardSearchOutcome,
     ClearraSearchProgressTelemetry,
     ClearraWasmSearchReport
@@ -22,11 +21,11 @@
     type WorkspaceLanguage
   } from './workspaceI18n';
   import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
+  import type { WorkspacePublicFailure } from './workspacePublicFailure';
 
   export let report: ClearraWasmSearchReport | null;
-  export let diagnostics: ClearraDiagnostic[] = [];
+  export let publicFailures: WorkspacePublicFailure[] = [];
   export let status: WorkspaceRuntimeStatus;
-  export let error = '';
   export let elapsedMs = 0;
   export let progressLabel = '';
   export let progressDone = 0;
@@ -264,8 +263,7 @@
   {progressTelemetry}
   {forwardPatternDone}
   {forwardPatternTotal}
-  failureDiagnostics={diagnostics}
-  failureMessage={error}
+  {publicFailures}
 >
   {#if !active && status !== 'failed' && status !== 'terminated'}
     {#if !report || report.forward_search_kind !== tool}

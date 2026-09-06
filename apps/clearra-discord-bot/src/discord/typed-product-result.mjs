@@ -20,11 +20,22 @@ const SPIN_FAMILIES = new Map([
  */
 export function projectDiscordTypedProductResult(structured) {
   if (!plainObject(structured) || !plainObject(structured.summary)) return null;
-  if (structured.kind === "pc-path-family.v2") return projectPcPath(structured);
+  if (structured.kind === "pc-path-family.v2") {
+    return preserveCanonicalPath(structured) ?? projectPcPath(structured);
+  }
+  if (structured.kind === "build-path-family.v1") {
+    return preserveCanonicalPath(structured, "build") ?? projectPcPath(structured, "build");
+  }
   if (structured.kind === "pc-fixed-score-witness.v2") {
     return projectPcScoreFinder(structured);
   }
+  if (structured.kind === "build-fixed-score-witness.v1") {
+    return projectPcScoreFinder(structured, "build");
+  }
   if (structured.kind === "pc-score-summary.v2") return projectPcScore(structured);
+  if (structured.kind === "build-field-average-score.v1") {
+    return projectPcScore(structured, "build");
+  }
   if (structured.kind === "pc-minimum-cover.v2") return projectPcMinimals(structured);
   if (structured.kind === "setup-score-ranking.v1") return projectSetupScore(structured);
   if (SETUP_FAMILIES.has(structured.kind)) return projectSetupFamily(structured);
@@ -43,10 +54,14 @@ export function validDiscordTypedProductResult(structured) {
   }
 }
 
-function projectPcPath(structured) {
-  const summary = assertEnvelope(structured, "pc-path-family.v2", "pc.path");
+function projectPcPath(structured, semantics = "pc") {
+  const build = semantics === "build";
+  const capabilityId = build ? "build.complete-replay-paths" : "pc.path";
+  const resultContract = build ? "build-path-family.v1" : "pc-path-family.v2";
+  const witnessContract = build ? "build-path-witness.v1" : "pc-path-witness.v2";
+  const summary = assertEnvelope(structured, resultContract, capabilityId);
   if (
-    summary.witness_contract !== "pc-path-witness.v2" ||
+    summary.witness_contract !== witnessContract ||
     summary.ordering !==
       "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending" ||
     summary.canonical_selection !== CANONICAL_SELECTION ||
@@ -55,54 +70,49 @@ function projectPcPath(structured) {
     !canonicalDecimal(summary.materialized_pattern_count) ||
     !Array.isArray(summary.witnesses) ||
     BigInt(summary.witness_count) !== BigInt(summary.witnesses.length)
-  ) throw invalid("pc.path", "family evidence");
+  ) throw invalid(capabilityId, "family evidence");
+  const targetTerminal = build ? summary.target_terminal_board_mask : "0x0000000000000000";
+  if (
+    (build && !canonicalBoardMask(targetTerminal)) ||
+    (!build && Object.hasOwn(summary, "target_terminal_board_mask"))
+  ) throw invalid(capabilityId, "terminal contract");
 
   let previous = null;
   for (const witness of summary.witnesses) {
-    if (
-      !plainObject(witness) ||
-      !canonicalPositiveDecimalU64(witness.candidate_id) ||
-      !canonicalPositiveDecimalU64(witness.producer_candidate_id) ||
-      !canonicalDecimal(witness.pattern_id) ||
-      !safeText(witness.trace_identity) ||
-      !safeText(witness.normalized_trace_key) ||
-      !canonicalDecimal(witness.consumed_piece_count) ||
-      !optionalSafeText(witness.terminal_hold_piece) ||
-      !Array.isArray(witness.steps)
-    ) throw invalid("pc.path", "witness");
-    for (const step of witness.steps) validatePcPathStep(step);
+    validatePathWitness(witness, capabilityId, targetTerminal);
     const key = [BigInt(witness.candidate_id), BigInt(witness.pattern_id), witness.normalized_trace_key];
     if (previous !== null && comparePathKey(previous, key) > 0) {
-      throw invalid("pc.path", "ordering");
+      throw invalid(capabilityId, "ordering");
     }
     previous = key;
   }
   const suppliedCanonical = summary.canonical_witness;
   if (summary.witnesses.length === 0) {
     if (suppliedCanonical !== null) {
-      throw invalid("pc.path", "core-owned canonical witness");
+      throw invalid(capabilityId, "core-owned canonical witness");
     }
   } else {
     if (
       !plainObject(suppliedCanonical) ||
       !samePlainValue(suppliedCanonical, summary.witnesses[0])
-    ) throw invalid("pc.path", "core-owned canonical witness");
+    ) throw invalid(capabilityId, "core-owned canonical witness");
     const suppliedCandidateId = BigInt(suppliedCanonical.candidate_id);
     if (summary.witnesses.some((witness) =>
       BigInt(witness.candidate_id) < suppliedCandidateId
-    )) throw invalid("pc.path", "core-owned canonical witness");
+    )) throw invalid(capabilityId, "core-owned canonical witness");
   }
   rejectAlternativeMetadata(structured);
   const projected = clonePlain(structured);
   projected.summary = {
-    capability_id: "pc.path",
-    result_contract: "pc-path-family.v2",
-    payload_kind: "canonical-pc-path-witness",
-    witness_contract: "pc-path-witness.v2",
+    capability_id: capabilityId,
+    result_contract: resultContract,
+    payload_kind: build ? "canonical-build-path-witness" : "canonical-pc-path-witness",
+    witness_contract: witnessContract,
     ordering: summary.ordering,
     canonical_selection: summary.canonical_selection,
     problem_id: summary.problem_id,
     complete: true,
+    ...(build ? { target_terminal_board_mask: targetTerminal } : {}),
     canonical_witness: suppliedCanonical === null
       ? null
       : clonePlain(suppliedCanonical),
@@ -110,7 +120,78 @@ function projectPcPath(structured) {
   return deepFreeze(projected);
 }
 
-function validatePcPathStep(step) {
+/**
+ * The command/executor boundary owns canonical-only projection. Its result may
+ * cross the local runner and the HTTP job client before it reaches the bot, so
+ * validating an already-canonical envelope must be idempotent; it must never
+ * be mistaken for a widened exhaustive family and projected a second time.
+ */
+function preserveCanonicalPath(structured, semantics = "pc") {
+  const build = semantics === "build";
+  const capabilityId = build ? "build.complete-replay-paths" : "pc.path";
+  const resultContract = build ? "build-path-family.v1" : "pc-path-family.v2";
+  const witnessContract = build ? "build-path-witness.v1" : "pc-path-witness.v2";
+  const payloadKind = build
+    ? "canonical-build-path-witness"
+    : "canonical-pc-path-witness";
+  const summary = structured.summary;
+  if (summary.payload_kind !== payloadKind) return null;
+  assertEnvelope(structured, resultContract, capabilityId);
+  const expectedKeys = [
+    "capability_id",
+    "result_contract",
+    "payload_kind",
+    "witness_contract",
+    "ordering",
+    "canonical_selection",
+    "problem_id",
+    "complete",
+    ...(build ? ["target_terminal_board_mask"] : []),
+    "canonical_witness",
+  ];
+  if (
+    !exactKeys(summary, expectedKeys) ||
+    summary.result_contract !== resultContract ||
+    summary.witness_contract !== witnessContract ||
+    summary.ordering !==
+      "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending" ||
+    summary.canonical_selection !== CANONICAL_SELECTION ||
+    !safeText(summary.problem_id) ||
+    summary.complete !== true
+  ) throw invalid(capabilityId, "canonical path envelope");
+  const targetTerminal = build
+    ? summary.target_terminal_board_mask
+    : "0x0000000000000000";
+  if (
+    (build && !canonicalBoardMask(targetTerminal)) ||
+    (!build && Object.hasOwn(summary, "target_terminal_board_mask"))
+  ) throw invalid(capabilityId, "terminal contract");
+  if (summary.canonical_witness !== null) {
+    validatePathWitness(summary.canonical_witness, capabilityId, targetTerminal);
+  }
+  rejectAlternativeMetadata(structured);
+  return deepFreeze(clonePlain(structured));
+}
+
+function validatePathWitness(witness, capabilityId, targetTerminal) {
+  if (
+    !plainObject(witness) ||
+    !canonicalPositiveDecimalU64(witness.candidate_id) ||
+    !canonicalPositiveDecimalU64(witness.producer_candidate_id) ||
+    !canonicalDecimal(witness.pattern_id) ||
+    !safeText(witness.trace_identity) ||
+    !safeText(witness.normalized_trace_key) ||
+    !canonicalDecimal(witness.consumed_piece_count) ||
+    !optionalSafeText(witness.terminal_hold_piece) ||
+    !Array.isArray(witness.steps)
+  ) throw invalid(capabilityId, "witness");
+  for (const step of witness.steps) validatePcPathStep(step, capabilityId);
+  if (witness.steps.at(-1)?.board_after_line_clear_mask !== targetTerminal) {
+    throw invalid(capabilityId, "terminal witness");
+  }
+}
+
+function validatePcPathStep(step, capabilityId) {
   if (
     !plainObject(step) ||
     !canonicalDecimal(step.step_index) ||
@@ -131,18 +212,22 @@ function validatePcPathStep(step) {
     !safeText(step.cleared_row_mask) ||
     !canonicalDecimal(step.cleared_lines) ||
     !safeText(step.line_clear_identity)
-  ) throw invalid("pc.path", "path step evidence");
+  ) throw invalid(capabilityId, "path step evidence");
 }
 
-function projectPcScoreFinder(structured) {
+function projectPcScoreFinder(structured, semantics = "pc") {
+  const build = semantics === "build";
+  const capabilityId = build ? "build.fixed-queue-maximum-score" : "pc.score-finder";
+  const resultContract = build ? "build-fixed-score-witness.v1" : "pc-fixed-score-witness.v2";
+  const winnerContract = build ? "build-score-pattern-winner.v1" : "pc-score-pattern-winner.v1";
   const summary = assertEnvelope(
     structured,
-    "pc-fixed-score-witness.v2",
-    "pc.score-finder",
+    resultContract,
+    capabilityId,
   );
   if (
     summary.payload_kind !== "score-pattern-winner-family" ||
-    summary.score_pattern_winner_contract !== "pc-score-pattern-winner.v1" ||
+    summary.score_pattern_winner_contract !== winnerContract ||
     summary.score_pattern_winner_ordering !==
       "pattern-id-ascending-then-candidate-id-ascending" ||
     summary.score_pattern_winner_equality !== SCORE_ONLY_EQUALITY ||
@@ -153,27 +238,31 @@ function projectPcScoreFinder(structured) {
     BigInt(summary.score_pattern_winner_count) !==
       BigInt(summary.score_pattern_winners.length) ||
     summary.score_pattern_winners.length === 0
-  ) throw invalid("pc.score-finder", "winner family evidence");
+  ) throw invalid(capabilityId, "winner family evidence");
 
   const suppliedCanonical = summary.score_pattern_canonical_winner;
-  validateScorePatternWinner(suppliedCanonical);
+  validateScorePatternWinner(suppliedCanonical, winnerContract, capabilityId);
   let previous = null;
   let suppliedWitnessMatches = 0;
   const suppliedCandidateId = BigInt(suppliedCanonical.candidate_id);
   for (const winner of summary.score_pattern_winners) {
-    validateScorePatternWinner(winner);
+    validateScorePatternWinner(winner, winnerContract, capabilityId);
+    if (
+      winner.pattern_id !== suppliedCanonical.pattern_id ||
+      winner.score !== suppliedCanonical.score
+    ) throw invalid(capabilityId, "score-only winner equality");
     const identity = [BigInt(winner.pattern_id), BigInt(winner.candidate_id)];
     if (previous !== null && compareBigIntPair(previous, identity) >= 0) {
-      throw invalid("pc.score-finder", "winner ordering");
+      throw invalid(capabilityId, "winner ordering");
     }
     if (BigInt(winner.candidate_id) < suppliedCandidateId) {
-      throw invalid("pc.score-finder", "core-owned canonical winner");
+      throw invalid(capabilityId, "core-owned canonical winner");
     }
     if (sameScorePatternWinner(winner, suppliedCanonical)) suppliedWitnessMatches += 1;
     previous = identity;
   }
   if (suppliedWitnessMatches !== 1) {
-    throw invalid("pc.score-finder", "core-owned canonical winner");
+    throw invalid(capabilityId, "core-owned canonical winner");
   }
   rejectAlternativeMetadata(structured, new Set([
     "score_pattern_winner_contract",
@@ -184,10 +273,10 @@ function projectPcScoreFinder(structured) {
 
   const projected = clonePlain(structured);
   projected.summary = {
-    capability_id: "pc.score-finder",
-    result_contract: "pc-fixed-score-witness.v2",
+    capability_id: capabilityId,
+    result_contract: resultContract,
     payload_kind: "canonical-score-winner",
-    winner_contract: "pc-score-pattern-winner.v1",
+    winner_contract: winnerContract,
     ordering: "candidate-id-ascending",
     score_equality: SCORE_ONLY_SUMMARY_EQUALITY,
     canonical_selection: summary.score_pattern_canonical_selection,
@@ -197,17 +286,17 @@ function projectPcScoreFinder(structured) {
   return deepFreeze(stripAttackFields(projected));
 }
 
-function validateScorePatternWinner(winner) {
+function validateScorePatternWinner(winner, winnerContract, capabilityId) {
   if (
     !plainObject(winner) ||
-    winner.contract !== "pc-score-pattern-winner.v1" ||
+    winner.contract !== winnerContract ||
     !canonicalDecimal(winner.pattern_id) ||
     !canonicalPositiveDecimalU64(winner.candidate_id) ||
     !canonicalInteger(winner.score) ||
     !canonicalDecimal(winner.informational_attack) ||
     winner.informational_attack_basis !== "canonical-equal-score-trace" ||
     !safeText(winner.normalized_solution_key)
-  ) throw invalid("pc.score-finder", "winner");
+  ) throw invalid(capabilityId, "winner");
 }
 
 function sameScorePatternWinner(left, right) {
@@ -228,8 +317,14 @@ function compareBigIntPair(left, right) {
   return 0;
 }
 
-function projectPcScore(structured) {
-  const summary = assertEnvelope(structured, "pc-score-summary.v2", "pc.score");
+function projectPcScore(structured, semantics = "pc") {
+  const build = semantics === "build";
+  const capabilityId = build ? "build.field-average-score" : "pc.score";
+  const resultContract = build ? "build-field-average-score.v1" : "pc-score-summary.v2";
+  const fieldContract = build
+    ? "build-solution-field-average.v1"
+    : "pc-score-solution-field-average.v1";
+  const summary = assertEnvelope(structured, resultContract, capabilityId);
   if (
     !exactKeys(structured, [
       "schema_version",
@@ -264,8 +359,8 @@ function projectPcScore(structured) {
       "score_solution_fields",
     ]) ||
     summary.payload_kind !== "pc-score-field-summary" ||
-    summary.result_contract !== "pc-score-summary.v2" ||
-    summary.score_solution_field_contract !== "pc-score-solution-field-average.v1" ||
+    summary.result_contract !== resultContract ||
+    summary.score_solution_field_contract !== fieldContract ||
     summary.score_solution_field_ordering !== "normalized-solution-field-order" ||
     summary.score_solution_field_average_basis !==
       "whole-materialized-pattern-universe-failed-pc-zero" ||
@@ -291,7 +386,7 @@ function projectPcScore(structured) {
     BigInt(summary.score_success_pattern_count) +
       BigInt(summary.score_failed_pc_pattern_count) !==
       BigInt(summary.materialized_pattern_count)
-  ) throw invalid("pc.score", "all-solution field score evidence");
+  ) throw invalid(capabilityId, "all-solution field score evidence");
   let previousFieldKey = null;
   for (const field of summary.score_solution_fields) {
     if (
@@ -311,7 +406,7 @@ function projectPcScore(structured) {
       BigInt(field.covered_pattern_count) > BigInt(field.pattern_count) ||
       (previousFieldKey !== null &&
         previousFieldKey.localeCompare(field.normalized_field_key, "en") >= 0)
-    ) throw invalid("pc.score", "solution field score row");
+    ) throw invalid(capabilityId, "solution field score row");
     previousFieldKey = field.normalized_field_key;
   }
   rejectLegacyPrivateMetadata(structured);
@@ -582,6 +677,10 @@ function canonicalInteger(value) {
 function canonicalPositiveDecimalU64(value) {
   return typeof value === "string" && /^[1-9][0-9]*$/u.test(value) &&
     BigInt(value) <= 18_446_744_073_709_551_615n;
+}
+
+function canonicalBoardMask(value) {
+  return typeof value === "string" && /^0x[0-9a-f]{16}$/u.test(value);
 }
 
 function canonicalNonNegativeNumber(value) {

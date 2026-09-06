@@ -392,6 +392,6 @@ mod tests {
         let mut one_under = GeometrySolutionFamily::new();
         one_under.set_retained_limit_bytes(Some(exact_cap - 1));
         assert!(one_under.append(7, FAMILY_EMPTY).is_none());
-        assert!(one_under.retained_bytes() as u128 <= exact_cap - 1);
+        assert!((one_under.retained_bytes() as u128) < exact_cap);
     }
 }

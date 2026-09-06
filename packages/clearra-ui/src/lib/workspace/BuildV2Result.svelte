@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { Download, TriangleAlert } from '@lucide/svelte';
+  import { Download } from '@lucide/svelte';
 
   import type { ClearraSolutionSetArtifactFormatPayload } from '../wasm/wasmCommandClient';
   import ProductResultPager from './ProductResultPager.svelte';
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import {
     validateSolutionSetArtifactPayload,
     type ProductMemberPageLoader,
@@ -11,6 +12,7 @@
   } from './productResultPager';
   import type { WorkspaceLanguage } from './workspaceI18n';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
+  import { workspacePublicFailure } from './workspacePublicFailure';
 
   export let view: WorkspaceRuntimeView;
   export let language: WorkspaceLanguage = 'en';
@@ -24,6 +26,10 @@
   $: artifact = view.response?.solution_set_artifact ?? null;
   $: artifactError = artifact ? validateSolutionSetArtifactPayload(artifact) : null;
   $: elapsed = `${(elapsedMs / 1000).toFixed(1)}s`;
+  $: missingPayloadFailures = view.status === 'completed' && !productResult
+    ? [workspacePublicFailure('result-invalid')]
+    : [];
+  $: artifactFailures = artifactError ? [workspacePublicFailure('result-invalid')] : [];
 
   function downloadArtifact(format: ClearraSolutionSetArtifactFormatPayload) {
     if (
@@ -52,16 +58,7 @@
     {/if}
   </header>
 
-  {#if view.error}
-    <p class="error" role="alert"><TriangleAlert size={16} />{view.error}</p>
-  {/if}
-  {#if view.diagnostics.length}
-    <ul class="diagnostics">
-      {#each view.diagnostics as diagnostic}
-        <li><code>{diagnostic.code}</code><span>{diagnostic.message}</span></li>
-      {/each}
-    </ul>
-  {/if}
+  <WorkspaceFailureNotice failures={view.publicFailures} {language} compact />
 
   {#if productResult}
     <ProductResultPager
@@ -72,7 +69,7 @@
       releasePages={releaseProductPages}
     />
   {:else if view.status === 'completed'}
-    <p class="error" role="alert">{korean ? '완료 응답에 Build product payload가 없습니다.' : 'The completed response has no Build product payload.'}</p>
+    <WorkspaceFailureNotice failures={missingPayloadFailures} {language} compact />
   {:else if view.status === 'idle'}
     <p class="empty">{korean ? '입력을 확인한 뒤 실행하세요.' : 'Review the input and run the capability.'}</p>
   {:else if view.status === 'running' || view.status === 'validating'}
@@ -99,23 +96,18 @@
       </div>
     </section>
   {:else if artifactError}
-    <p class="error" role="alert">{artifactError}</p>
+    <WorkspaceFailureNotice failures={artifactFailures} {language} compact />
   {/if}
 </section>
 
 <style>
   .result { background: #fff; border-top: 1px solid #d5dcd7; margin-top: 2px; padding: 22px max(24px, calc((100vw - 1460px) / 2)) 36px; }
-  header, header > div, .artifact, .artifact > div, .artifact-actions, .diagnostics li, .error { align-items: center; display: flex; }
+  header, header > div, .artifact, .artifact > div, .artifact-actions { align-items: center; display: flex; }
   header { justify-content: space-between; }
   header > div, .artifact > div { align-items: flex-start; flex-direction: column; gap: 3px; }
   h2 { font-size: 15px; margin: 0; }
   header span, .artifact span, .empty { color: #68736f; font-size: 11px; }
   .backend { background: #edf5f2; border-radius: 999px; color: #17675f; font-weight: 720; padding: 5px 9px; }
-  .diagnostics { display: grid; gap: 5px; list-style: none; margin: 14px 0; padding: 0; }
-  .diagnostics li { background: #f7f8f7; border: 1px solid #e0e5e2; border-radius: 5px; gap: 10px; padding: 8px 10px; }
-  .diagnostics code { color: #6a4138; font-size: 10px; }
-  .diagnostics span { color: #596560; font-size: 11px; }
-  .error { background: #fff1f0; border: 1px solid #efc3be; border-radius: 6px; color: #8b2820; font-size: 11px; gap: 8px; margin: 14px 0; padding: 10px 12px; }
   .empty { margin: 18px 0; }
   .artifact { border: 1px solid #dce3df; border-radius: 7px; justify-content: space-between; margin-top: 16px; padding: 12px 14px; }
   .artifact strong { color: #26322e; font-size: 12px; }

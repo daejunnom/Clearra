@@ -79,7 +79,7 @@ impl BackendRequestBuilder {
 impl BackendRequestBuilder {
     /// Builds the product-owned execution policy for canonical `pc.score`
     /// requests. The GUI may reach this path from its neutral `auto` default or
-    /// from the explicit fixed CPU projection emitted by the Desktop bridge;
+    /// from the explicit CPU projection emitted by the Desktop bridge;
     /// other execution selections are active overrides and fail closed.
     pub fn build_pc_score_execution_policy(
         form: &GuiBackendForm,
@@ -88,9 +88,7 @@ impl BackendRequestBuilder {
         if !matches!(
             form.backend(),
             crate::GuiBackendChoice::Auto | crate::GuiBackendChoice::Cpu
-        ) || form.workers_requested().is_some_and(|workers| workers != 1)
-            || form.use_all_logical_processors()
-            || form.precompute_build_dependencies()
+        ) || form.precompute_build_dependencies()
             || form.tablebase_requested()
             || form.memory_budget_mb() != 0
             || form
@@ -99,15 +97,21 @@ impl BackendRequestBuilder {
         {
             return Err(RequestBuildError::new(
                 RequestBuildErrorCode::ValidationFailed,
-                "canonical GUI pc score request contains an execution override outside its fixed Wasm CPU single-session policy",
+                "canonical GUI pc score request contains an execution override outside its product-owned CPU policy",
             ));
         }
 
-        Ok(PcExecutionPolicy::mvp_default()
+        let mut policy = PcExecutionPolicy::mvp_default()
             .with_requested_backend(RequestedSearchBackend::Cpu)
-            .with_workers(1)
+            .with_worker_hardware_limit(WorkerPolicy::hardware_worker_limit())
+            .with_use_all_logical_processors(form.use_all_logical_processors())
+            .with_deterministic(form.deterministic())
             .with_allow_backend_fallback(false)
-            .with_max_patterns(PC_SCORE_MAX_PATTERNS))
+            .with_max_patterns(PC_SCORE_MAX_PATTERNS);
+        if let Some(workers) = form.workers_requested() {
+            policy = policy.with_workers(usize::from(workers));
+        }
+        Ok(policy)
     }
 }
 impl BackendRequestBuilder {

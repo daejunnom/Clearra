@@ -3,6 +3,12 @@
   import { getContext, onDestroy, onMount, tick } from 'svelte';
 
   import {
+    loadNextProductPage as loadNextDesktopProductPage,
+    loadProductMemberPage as loadDesktopProductMemberPage,
+    releaseProductPages as releaseDesktopProductPages
+  } from '../host';
+
+  import {
     cancelDesktopJob,
     clearDesktopTerminalResult,
     desktopJobState,
@@ -37,7 +43,8 @@
     trimBuildProbabilityRequest,
     type BuildProbabilityRequest
   } from './buildProbabilityModel';
-  import { preferredWorkspaceLanguage, workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
+  import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
+  import { persistWorkspaceLanguage, readWorkspaceLanguage } from './workspaceLanguagePreference';
   import { workspaceViewFromDesktop, workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
 
   export let workerFactory: (() => Worker) | null = null;
@@ -59,6 +66,7 @@
   let resultExistingMask = request.existingMask;
   let resultTargetMask = request.targetMask;
   let resultAggregation = request.aggregation;
+  let resultMode = request.resultMode;
   let continuationApplied = false;
   let workspaceShell: { scrollWorkspaceIntoView: () => void } | null = null;
 
@@ -76,7 +84,7 @@
   $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
 
   onMount(() => {
-    language = preferredWorkspaceLanguage(localStorage.getItem('clearra-language') ?? navigator.language);
+    language = readWorkspaceLanguage();
     const workers = automaticWorkerCount(request.useAllLogicalProcessors);
     request = { ...request, workers };
     if (runtime === 'web') {
@@ -111,7 +119,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    localStorage.setItem('clearra-language', next);
+    persistWorkspaceLanguage(next);
   }
 
   function setHeight(height: number) {
@@ -156,6 +164,7 @@
     resultExistingMask = executionRequest.existingMask;
     resultTargetMask = executionRequest.targetMask;
     resultAggregation = executionRequest.aggregation;
+    resultMode = executionRequest.resultMode;
     if (runtime === 'web') {
       updateWasmCommandText(buildProbabilityCommand(executionRequest));
       if (workerController.run()) startElapsedTimer();
@@ -278,9 +287,21 @@
     existingMask={resultExistingMask}
     targetMask={resultTargetMask}
     aggregation={resultAggregation}
+    {resultMode}
     loadSolutionPage={runtime === 'web'
       ? (offset, limit, signal) => workerController.loadSolutionPage(offset, limit, signal)
       : null}
+    loadNextProductPage={runtime === 'web'
+      ? (signal) => workerController.loadNextProductPage(signal)
+      : (signal) => loadNextDesktopProductPage(10_000, signal)}
+    loadProductMemberPage={runtime === 'web'
+      ? (outerPageNumber, memberPageNumber, signal, maximumWorkSteps) =>
+          workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal, maximumWorkSteps)
+      : (outerPageNumber, memberPageNumber, signal, maximumWorkSteps) =>
+          loadDesktopProductMemberPage(outerPageNumber, memberPageNumber, signal, maximumWorkSteps)}
+    releaseProductPages={runtime === 'web'
+      ? () => workerController.releaseProductPages()
+      : () => releaseDesktopProductPages()}
     on:continue={(event) => continueFromCompletedBuild(event.detail.existingMask, event.detail.height)}
   />
 </WorkspaceShell>

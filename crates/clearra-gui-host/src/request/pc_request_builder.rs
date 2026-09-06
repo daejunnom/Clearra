@@ -5,7 +5,8 @@ use clearra_app::{
 };
 use clearra_core_domain::{objective::objective_kind::ObjectiveKind, pc::pc_target::PcTarget};
 use clearra_pc_graph::request::{
-    OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput, PcSolutionProbabilityPolicy, SupplyWindowSize,
+    OpeningPcSearchQuery, PcCountPolicy, PcHoldPolicy, PcQueueInput, PcSolutionProbabilityPolicy,
+    SupplyWindowSize,
 };
 use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 
@@ -170,6 +171,14 @@ impl PcRequestBuilder {
                 PcHoldPolicy::Disabled
             })
             .with_execution_policy(policy);
+        if canonical_pc_minimals {
+            // The named product counts concrete geometry identities once and
+            // applies minimum-cover reduction as an independent objective.
+            // Keep that contract explicit on the legacy host builder too;
+            // deriving count policy from MinimumCover would silently widen it
+            // to CountAll before the shared App boundary.
+            query = query.with_count_policy(PcCountPolicy::CountUnique);
+        }
         if let Some(queue) = form.fixed_queue() {
             query = query.with_queue(PcQueueInput::fixed_sequence(parse_piece_sequence(
                 queue,

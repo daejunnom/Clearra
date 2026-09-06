@@ -20,6 +20,7 @@ for (const capability of BUILD_V2_CAPABILITIES) {
   const command = buildV2Command(request);
   assert.match(command, /^clearra build /u);
   assert.match(command, / --backend cpu --no-backend-fallback /u);
+  assert.doesNotMatch(command, /--cpu-warmup(?:\s|$)/u, capability);
   assert.doesNotMatch(command, /max-memory/u);
   assert.match(command, / --queue I /u);
   assert.match(command, new RegExp(commandPath(capability), 'u'));
@@ -31,6 +32,7 @@ for (const capability of BUILD_V2_CAPABILITIES) {
   assert.deepEqual(desktop.arguments, buildV2CommandArguments(request));
   assert.equal(optionValue(desktop.arguments, '--backend'), 'cpu');
   assert.equal(desktop.arguments.includes('--no-backend-fallback'), true);
+  assert.equal(desktop.arguments.includes('--cpu-warmup'), false, capability);
   assert.equal('memory_budget_mb' in desktop, false);
   assert.equal('max_memory_mib' in desktop, false);
 

@@ -68,6 +68,7 @@ $script:ClearraAllowedTasks = @(
     "AdversarialCorrectness",
     "CSanitizer",
     "RustExactTests",
+    "WasmBuildProducer",
     "WasmBuildTest",
     "RenderGolden",
     "GpuWorkerAcceptance",

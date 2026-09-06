@@ -33,6 +33,9 @@ pub(crate) trait RunnableAppCommand {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+// Command payloads are dispatched exactly once; keeping them inline preserves the
+// public command shape and avoids a heap allocation on every invocation.
+#[allow(clippy::large_enum_variant)]
 pub enum AppCommand {
     Pc(PcAppCommand),
     Scenario(ScenarioAppCommand),

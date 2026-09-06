@@ -25,7 +25,10 @@ use clearra_supply::{
         SupplyObservationIdentity, SupplyProvenanceId,
     },
     hold::hold_policy::HoldPolicy,
-    pattern_universe::PatternPiecePositionIndex,
+    pattern_universe::{
+        MaterializedPatternUniverse, PatternPiecePositionIndex,
+        PatternPiecePositionIndexCompileAdvance, PatternPiecePositionIndexCompileSession,
+    },
     piece_source::{PieceSourceId, PieceSourceKind},
 };
 
@@ -115,17 +118,22 @@ impl Drop for ObservationParallelTestWorkerGuard {
     }
 }
 
+// The completed product result is transferred without another heap allocation.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum WasmSetupSearchAdvance {
     Pending,
     Completed(CoreExecutionResult),
     Cancelled,
 }
 
+// A setup session retains exactly one stage for its lifetime and transitions by move.
+#[allow(clippy::large_enum_variant)]
 enum SetupSearchStage {
     Building(SetupGraphBuildSession),
     Coverage {
         query: SetupSearchQuery,
         conditions: Vec<SetupSearchCondition>,
+        pattern_indices: Vec<Arc<PatternPiecePositionIndex>>,
         graph: Arc<PartialBuildGraph>,
         coverage_graph: Arc<SetupCoverageGraph>,
         next_condition: usize,
@@ -145,6 +153,8 @@ pub(crate) struct WasmSetupSearchSession {
 }
 
 impl WasmSetupSearchSession {
+    // Kept as the single-worker embedding adapter; product execution selects an explicit count.
+    #[allow(dead_code)]
     pub fn new(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
         Self::new_with_observation_workers(query, 1)
     }
@@ -178,49 +188,40 @@ impl WasmSetupSearchSession {
                     Ok(WasmSetupSearchAdvance::Pending)
                 }
                 SetupGraphBuildAdvance::Cancelled => Ok(WasmSetupSearchAdvance::Cancelled),
-                SetupGraphBuildAdvance::Complete(SetupSharedGraph {
-                    query,
-                    conditions,
-                    graph,
-                    coverage_graph,
-                    geometry_family_count,
-                    geometry_expanded_nodes,
-                    tablebase_status,
-                    tablebase_pruned_states,
-                    cached_coverage,
-                }) => {
-                    if let Some(completed) = cached_path_detail_result(
-                        &query,
-                        &graph,
-                        cached_coverage.as_deref(),
-                        control,
-                    )? {
-                        let result = finish_setup_result(
-                            &query,
-                            &graph,
-                            completed,
-                            geometry_family_count,
-                            geometry_expanded_nodes,
-                            tablebase_status,
-                            tablebase_pruned_states,
-                            1,
-                            false,
-                            "setup-path-detail-graph-cache",
-                            control,
-                        );
-                        let result = match result {
-                            Ok(result) => result,
-                            Err(WasmExactSearchError::Cancelled) => {
-                                return Ok(WasmSetupSearchAdvance::Cancelled)
-                            }
-                            Err(error) => return Err(error),
-                        };
+                SetupGraphBuildAdvance::Complete(shared) => {
+                    let cached_result = match finish_cached_setup_path_detail(&shared, control) {
+                        Ok(result) => result,
+                        Err(WasmExactSearchError::Cancelled) => {
+                            return Ok(WasmSetupSearchAdvance::Cancelled)
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if let Some(result) = cached_result {
                         self.stage = SetupSearchStage::Finished;
                         return Ok(WasmSetupSearchAdvance::Completed(result));
+                    }
+                    let SetupSharedGraph {
+                        query,
+                        conditions,
+                        graph,
+                        coverage_graph,
+                        geometry_family_count,
+                        geometry_expanded_nodes,
+                        tablebase_status,
+                        tablebase_pruned_states,
+                        cached_coverage: _,
+                        condition_pattern_word_counts: _,
+                        condition_pattern_indices,
+                    } = shared;
+                    if condition_pattern_indices.len() != conditions.len() {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "setup_pattern_index_condition_count_mismatch",
+                        ));
                     }
                     self.stage = SetupSearchStage::Coverage {
                         query,
                         conditions,
+                        pattern_indices: condition_pattern_indices,
                         graph,
                         coverage_graph,
                         next_condition: 0,
@@ -237,6 +238,7 @@ impl WasmSetupSearchSession {
             SetupSearchStage::Coverage {
                 query,
                 conditions,
+                pattern_indices,
                 graph,
                 coverage_graph,
                 mut next_condition,
@@ -287,6 +289,11 @@ impl WasmSetupSearchSession {
                     }
                     active = Some(SetupCoverageSession::new(
                         &conditions[next_condition],
+                        Arc::clone(pattern_indices.get(next_condition).ok_or(
+                            WasmExactSearchError::InvalidProblem(
+                                "setup_pattern_index_condition_out_of_range",
+                            ),
+                        )?),
                         Arc::clone(&graph),
                         Arc::clone(&coverage_graph),
                         query.candidate_priority(),
@@ -304,6 +311,7 @@ impl WasmSetupSearchSession {
                         self.stage = SetupSearchStage::Coverage {
                             query,
                             conditions,
+                            pattern_indices,
                             graph,
                             coverage_graph,
                             next_condition,
@@ -323,6 +331,7 @@ impl WasmSetupSearchSession {
                         self.stage = SetupSearchStage::Coverage {
                             query,
                             conditions,
+                            pattern_indices,
                             graph,
                             coverage_graph,
                             next_condition,
@@ -362,6 +371,8 @@ fn setup_build_progress_phase(pass_index: usize) -> (&'static str, u64) {
     }
 }
 
+// Finalization receives independently owned graph, telemetry, and execution policy surfaces.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finish_setup_result(
     query: &SetupSearchQuery,
     graph: &PartialBuildGraph,
@@ -601,6 +612,34 @@ fn cached_path_detail_result(
     }]))
 }
 
+pub(super) fn finish_cached_setup_path_detail(
+    shared: &SetupSharedGraph,
+    control: &ExecutionControl,
+) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
+    let Some(completed) = cached_path_detail_result(
+        &shared.query,
+        &shared.graph,
+        shared.cached_coverage.as_deref(),
+        control,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(finish_setup_result(
+        &shared.query,
+        &shared.graph,
+        completed,
+        shared.geometry_family_count.clone(),
+        shared.geometry_expanded_nodes,
+        shared.tablebase_status,
+        shared.tablebase_pruned_states,
+        1,
+        false,
+        "setup-path-detail-graph-cache",
+        control,
+    )?))
+}
+
 struct ShapeCoverageAccumulator {
     build_covered_patterns: usize,
     joint_covered_patterns: usize,
@@ -779,7 +818,9 @@ impl SetupSupplyTransitionCatalog {
                 for extra_draw in 0..EXTRA_DRAW_STATE_COUNT as u8 {
                     for hold_code in 0..HOLD_STATE_COUNT as u8 {
                         for terminal in [false, true] {
-                            for lane in 0..lane_count {
+                            for (lane, root_bit) in
+                                root_bits[..lane_count].iter().copied().enumerate()
+                            {
                                 let index = Self::index(
                                     depth,
                                     desired_piece,
@@ -798,7 +839,7 @@ impl SetupSupplyTransitionCatalog {
                                     desired_piece,
                                     extra_draw,
                                     hold_code,
-                                    root_bits[lane],
+                                    root_bit,
                                     word_start + lane,
                                     terminal,
                                 );
@@ -1044,6 +1085,294 @@ fn projected_extra_draw(extra_draw: u8, queue_advances: u8) -> Option<u8> {
 pub(super) fn compile_setup_pattern_index(
     condition: &SetupSearchCondition,
 ) -> Result<PatternPiecePositionIndex, WasmExactSearchError> {
+    let mut session = SetupPatternIndexCompileSession::new(condition)?;
+    loop {
+        match session.advance(8_192, &ExecutionControl::default())? {
+            SetupPatternIndexCompileAdvance::Pending => {}
+            SetupPatternIndexCompileAdvance::Complete(index) => return Ok(index),
+            SetupPatternIndexCompileAdvance::Cancelled => {
+                return Err(WasmExactSearchError::Cancelled)
+            }
+        }
+    }
+}
+
+pub(super) enum SetupPatternIndexCompileAdvance {
+    Pending,
+    Complete(PatternPiecePositionIndex),
+    Cancelled,
+}
+
+enum SetupPatternIndexCompileStage {
+    Full(PatternPiecePositionIndexCompileSession),
+    Filter {
+        index: PatternPiecePositionIndex,
+        compatible_words: Vec<u64>,
+        next_word: usize,
+        compatible_count: usize,
+    },
+    CollectIds {
+        index: PatternPiecePositionIndex,
+        compatible_words: Vec<u64>,
+        next_word: usize,
+        compatible_pattern_ids: Vec<u32>,
+    },
+    Subset(PatternPiecePositionIndexCompileSession),
+    Finished,
+}
+
+pub(super) struct SetupPatternIndexCompileSession {
+    universe: MaterializedPatternUniverse,
+    terminal_supply_target: Option<SetupTerminalSupplyTarget>,
+    max_patterns: usize,
+    hold_enabled: bool,
+    initial_cursor: u16,
+    stage: SetupPatternIndexCompileStage,
+}
+
+impl SetupPatternIndexCompileSession {
+    pub(super) fn new(condition: &SetupSearchCondition) -> Result<Self, WasmExactSearchError> {
+        let problem = condition.problem();
+        let universe = problem
+            .piece_source()
+            .materialized_universe()
+            .cloned()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "setup_pattern_universe_not_materialized",
+            ))?;
+        let compiler =
+            PatternPiecePositionIndexCompileSession::new(universe.clone()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("setup_pattern_index_compile_failed")
+            })?;
+        Ok(Self {
+            universe,
+            terminal_supply_target: condition.terminal_supply_target(),
+            max_patterns: condition.max_patterns(),
+            hold_enabled: problem.supply().hold_enabled(),
+            initial_cursor: problem.initial_hold().cursor(),
+            stage: SetupPatternIndexCompileStage::Full(compiler),
+        })
+    }
+
+    pub(super) fn progress(&self) -> (usize, usize, usize, usize) {
+        match &self.stage {
+            SetupPatternIndexCompileStage::Full(session) => {
+                (0, 4, session.completed_patterns(), session.pattern_count())
+            }
+            SetupPatternIndexCompileStage::Filter {
+                index, next_word, ..
+            } => (1, 4, *next_word, index.word_count()),
+            SetupPatternIndexCompileStage::CollectIds {
+                index, next_word, ..
+            } => (2, 4, *next_word, index.word_count()),
+            SetupPatternIndexCompileStage::Subset(session) => {
+                (3, 4, session.completed_patterns(), session.pattern_count())
+            }
+            SetupPatternIndexCompileStage::Finished => (4, 4, 0, 0),
+        }
+    }
+
+    pub(super) fn advance(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<SetupPatternIndexCompileAdvance, WasmExactSearchError> {
+        if control.is_cancelled() {
+            self.stage = SetupPatternIndexCompileStage::Finished;
+            return Ok(SetupPatternIndexCompileAdvance::Cancelled);
+        }
+        let budget = work_budget.max(1);
+        let stage = std::mem::replace(&mut self.stage, SetupPatternIndexCompileStage::Finished);
+        match stage {
+            SetupPatternIndexCompileStage::Full(mut compiler) => {
+                match compiler.advance(budget).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("setup_pattern_index_compile_failed")
+                })? {
+                    PatternPiecePositionIndexCompileAdvance::Pending => {
+                        self.stage = SetupPatternIndexCompileStage::Full(compiler);
+                        Ok(SetupPatternIndexCompileAdvance::Pending)
+                    }
+                    PatternPiecePositionIndexCompileAdvance::Complete(index) => {
+                        if self.terminal_supply_target.is_none() {
+                            return Ok(SetupPatternIndexCompileAdvance::Complete(index));
+                        }
+                        let mut compatible_words = Vec::new();
+                        compatible_words
+                            .try_reserve_exact(index.word_count())
+                            .map_err(|_| {
+                                WasmExactSearchError::InvalidProblem(
+                                    "setup_terminal_supply_pattern_filter_storage_unavailable",
+                                )
+                            })?;
+                        compatible_words.resize(index.word_count(), 0);
+                        self.stage = SetupPatternIndexCompileStage::Filter {
+                            index,
+                            compatible_words,
+                            next_word: 0,
+                            compatible_count: 0,
+                        };
+                        Ok(SetupPatternIndexCompileAdvance::Pending)
+                    }
+                }
+            }
+            SetupPatternIndexCompileStage::Filter {
+                index,
+                mut compatible_words,
+                mut next_word,
+                mut compatible_count,
+            } => {
+                let target =
+                    self.terminal_supply_target
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "setup_terminal_supply_pattern_filter_target_missing",
+                        ))?;
+                let end = next_word.saturating_add(budget).min(index.word_count());
+                while next_word < end {
+                    let active = index.active_word(next_word);
+                    let mut compatible = 0_u64;
+                    if self.hold_enabled {
+                        for extra_draw in 0..EXTRA_DRAW_STATE_COUNT as u8 {
+                            for hold_code in 0..HOLD_STATE_COUNT as u8 {
+                                compatible |= terminal_supply_target_word(
+                                    &index,
+                                    target,
+                                    self.initial_cursor,
+                                    10,
+                                    extra_draw,
+                                    hold_code,
+                                    next_word,
+                                    active,
+                                );
+                            }
+                        }
+                    } else {
+                        compatible = terminal_supply_target_word(
+                            &index,
+                            target,
+                            self.initial_cursor,
+                            10,
+                            0,
+                            0,
+                            next_word,
+                            active,
+                        );
+                    }
+                    compatible &= active;
+                    compatible_count =
+                        compatible_count.saturating_add(compatible.count_ones() as usize);
+                    if compatible_count > self.max_patterns {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "setup_terminal_supply_compatible_pattern_limit_exceeded",
+                        ));
+                    }
+                    compatible_words[next_word] = compatible;
+                    next_word += 1;
+                }
+                if next_word != index.word_count() {
+                    self.stage = SetupPatternIndexCompileStage::Filter {
+                        index,
+                        compatible_words,
+                        next_word,
+                        compatible_count,
+                    };
+                    return Ok(SetupPatternIndexCompileAdvance::Pending);
+                }
+                if compatible_count == index.local_pattern_count() {
+                    return Ok(SetupPatternIndexCompileAdvance::Complete(index));
+                }
+                let mut compatible_pattern_ids = Vec::new();
+                compatible_pattern_ids
+                    .try_reserve_exact(compatible_count)
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "setup_terminal_supply_pattern_filter_storage_unavailable",
+                        )
+                    })?;
+                self.stage = SetupPatternIndexCompileStage::CollectIds {
+                    index,
+                    compatible_words,
+                    next_word: 0,
+                    compatible_pattern_ids,
+                };
+                Ok(SetupPatternIndexCompileAdvance::Pending)
+            }
+            SetupPatternIndexCompileStage::CollectIds {
+                index,
+                compatible_words,
+                mut next_word,
+                mut compatible_pattern_ids,
+            } => {
+                let end = next_word.saturating_add(budget).min(index.word_count());
+                while next_word < end {
+                    let mut word = compatible_words[next_word] & index.active_word(next_word);
+                    while word != 0 {
+                        let bit = word.trailing_zeros() as usize;
+                        word &= word - 1;
+                        let local_pattern_id = next_word * u64::BITS as usize + bit;
+                        let global_pattern_id = index
+                            .global_pattern_index(local_pattern_id)
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "setup_terminal_supply_pattern_filter_expand_failed",
+                            ))?;
+                        compatible_pattern_ids.push(u32::try_from(global_pattern_id).map_err(
+                            |_| {
+                                WasmExactSearchError::InvalidProblem(
+                                    "setup_terminal_supply_pattern_filter_expand_failed",
+                                )
+                            },
+                        )?);
+                    }
+                    next_word += 1;
+                }
+                if next_word != index.word_count() {
+                    self.stage = SetupPatternIndexCompileStage::CollectIds {
+                        index,
+                        compatible_words,
+                        next_word,
+                        compatible_pattern_ids,
+                    };
+                    return Ok(SetupPatternIndexCompileAdvance::Pending);
+                }
+                drop(index);
+                drop(compatible_words);
+                let compiler = PatternPiecePositionIndexCompileSession::new_for_pattern_ids(
+                    self.universe.clone(),
+                    compatible_pattern_ids,
+                )
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "setup_terminal_supply_pattern_subset_compile_failed",
+                    )
+                })?;
+                self.stage = SetupPatternIndexCompileStage::Subset(compiler);
+                Ok(SetupPatternIndexCompileAdvance::Pending)
+            }
+            SetupPatternIndexCompileStage::Subset(mut compiler) => {
+                match compiler.advance(budget).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "setup_terminal_supply_pattern_subset_compile_failed",
+                    )
+                })? {
+                    PatternPiecePositionIndexCompileAdvance::Pending => {
+                        self.stage = SetupPatternIndexCompileStage::Subset(compiler);
+                        Ok(SetupPatternIndexCompileAdvance::Pending)
+                    }
+                    PatternPiecePositionIndexCompileAdvance::Complete(index) => {
+                        Ok(SetupPatternIndexCompileAdvance::Complete(index))
+                    }
+                }
+            }
+            SetupPatternIndexCompileStage::Finished => Err(WasmExactSearchError::InvalidProblem(
+                "setup_pattern_index_compile_session_finished",
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+fn compile_setup_pattern_index_legacy(
+    condition: &SetupSearchCondition,
+) -> Result<PatternPiecePositionIndex, WasmExactSearchError> {
     let problem = condition.problem();
     let universe = problem.piece_source().materialized_universe().ok_or(
         WasmExactSearchError::InvalidProblem("setup_pattern_universe_not_materialized"),
@@ -1125,6 +1454,8 @@ pub(super) fn compile_setup_pattern_index(
     })
 }
 
+// This bitset hot path stays scalar to avoid constructing a per-word request object.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn terminal_supply_target_word(
     pattern_index: &PatternPiecePositionIndex,
     target: SetupTerminalSupplyTarget,
@@ -1186,11 +1517,11 @@ pub(super) fn terminal_supply_target_word(
     let consumed_in_bag = (queue_position - first_boundary) % 7;
     if consumed_in_bag == 0 {
         let expected = if logical_hold == 0 { 1 } else { 0 };
-        return suffix_counts
-            .iter()
-            .all(|count| *count == expected)
-            .then_some(active)
-            .unwrap_or(0);
+        return if suffix_counts.iter().all(|count| *count == expected) {
+            active
+        } else {
+            0
+        };
     }
     if suffix_counts.iter().any(|count| *count > 1)
         || suffix_counts
@@ -1247,6 +1578,387 @@ fn unordered_positions_word(
     active
 }
 
+// Compiled prefix state is a one-shot transfer into the search session.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum SetupAdmissiblePrefixCompileAdvance {
+    Pending,
+    Complete {
+        prefixes: Vec<u32>,
+        word_counts: Vec<usize>,
+        pattern_indices: Vec<Arc<PatternPiecePositionIndex>>,
+    },
+    Cancelled,
+}
+
+// Prefix compilation owns one stage in place and transitions it exactly once.
+#[allow(clippy::large_enum_variant)]
+enum SetupAdmissiblePrefixCompileStage {
+    PatternIndex(SetupPatternIndexCompileSession),
+    Prefixes(SetupConditionPrefixSession),
+    Finished,
+}
+
+pub(super) struct SetupAdmissiblePrefixCompileSession {
+    conditions: Vec<SetupSearchCondition>,
+    condition_index: usize,
+    prefixes: Vec<u32>,
+    word_counts: Vec<usize>,
+    pattern_indices: Vec<Arc<PatternPiecePositionIndex>>,
+    retain_pattern_indices: bool,
+    stage: SetupAdmissiblePrefixCompileStage,
+}
+
+impl SetupAdmissiblePrefixCompileSession {
+    #[cfg(test)]
+    pub(super) fn new(conditions: &[SetupSearchCondition]) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_retained_indices(conditions, true)
+    }
+
+    pub(super) fn new_with_retained_indices(
+        conditions: &[SetupSearchCondition],
+        retain_pattern_indices: bool,
+    ) -> Result<Self, WasmExactSearchError> {
+        let mut word_counts = Vec::new();
+        word_counts
+            .try_reserve_exact(conditions.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("setup_pattern_word_count_storage_unavailable")
+            })?;
+        let stage = match conditions.first() {
+            Some(condition) => SetupAdmissiblePrefixCompileStage::PatternIndex(
+                SetupPatternIndexCompileSession::new(condition)?,
+            ),
+            None => SetupAdmissiblePrefixCompileStage::Finished,
+        };
+        Ok(Self {
+            conditions: conditions.to_vec(),
+            condition_index: 0,
+            prefixes: vec![0],
+            word_counts,
+            pattern_indices: Vec::new(),
+            retain_pattern_indices,
+            stage,
+        })
+    }
+
+    pub(super) fn progress(&self) -> (usize, usize, usize, usize) {
+        const STAGES_PER_CONDITION: usize = 5;
+        let layer_count = self
+            .conditions
+            .len()
+            .saturating_mul(STAGES_PER_CONDITION)
+            .max(1);
+        match &self.stage {
+            SetupAdmissiblePrefixCompileStage::PatternIndex(session) => {
+                let (stage, _, done, total) = session.progress();
+                (
+                    self.condition_index
+                        .saturating_mul(STAGES_PER_CONDITION)
+                        .saturating_add(stage.min(STAGES_PER_CONDITION - 1)),
+                    layer_count,
+                    done,
+                    total,
+                )
+            }
+            SetupAdmissiblePrefixCompileStage::Prefixes(session) => {
+                let (done, total) = session.progress();
+                (
+                    self.condition_index
+                        .saturating_mul(STAGES_PER_CONDITION)
+                        .saturating_add(STAGES_PER_CONDITION - 1),
+                    layer_count,
+                    done,
+                    total,
+                )
+            }
+            SetupAdmissiblePrefixCompileStage::Finished => (layer_count, layer_count, 0, 0),
+        }
+    }
+
+    pub(super) fn advance(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<SetupAdmissiblePrefixCompileAdvance, WasmExactSearchError> {
+        if control.is_cancelled() {
+            self.stage = SetupAdmissiblePrefixCompileStage::Finished;
+            return Ok(SetupAdmissiblePrefixCompileAdvance::Cancelled);
+        }
+        if self.conditions.is_empty() {
+            self.stage = SetupAdmissiblePrefixCompileStage::Finished;
+            return Ok(SetupAdmissiblePrefixCompileAdvance::Complete {
+                prefixes: std::mem::take(&mut self.prefixes),
+                word_counts: std::mem::take(&mut self.word_counts),
+                pattern_indices: std::mem::take(&mut self.pattern_indices),
+            });
+        }
+        let stage = std::mem::replace(&mut self.stage, SetupAdmissiblePrefixCompileStage::Finished);
+        match stage {
+            SetupAdmissiblePrefixCompileStage::PatternIndex(mut session) => {
+                match session.advance(work_budget, control)? {
+                    SetupPatternIndexCompileAdvance::Pending => {
+                        self.stage = SetupAdmissiblePrefixCompileStage::PatternIndex(session);
+                        Ok(SetupAdmissiblePrefixCompileAdvance::Pending)
+                    }
+                    SetupPatternIndexCompileAdvance::Cancelled => {
+                        Ok(SetupAdmissiblePrefixCompileAdvance::Cancelled)
+                    }
+                    SetupPatternIndexCompileAdvance::Complete(pattern_index) => {
+                        let condition = self.conditions.get(self.condition_index).ok_or(
+                            WasmExactSearchError::InvalidProblem(
+                                "setup_prefix_condition_index_out_of_range",
+                            ),
+                        )?;
+                        self.stage = SetupAdmissiblePrefixCompileStage::Prefixes(
+                            SetupConditionPrefixSession::new(
+                                condition,
+                                pattern_index,
+                                std::mem::take(&mut self.prefixes),
+                            ),
+                        );
+                        Ok(SetupAdmissiblePrefixCompileAdvance::Pending)
+                    }
+                }
+            }
+            SetupAdmissiblePrefixCompileStage::Prefixes(mut session) => {
+                match session.advance(work_budget, control)? {
+                    SetupConditionPrefixAdvance::Pending => {
+                        self.stage = SetupAdmissiblePrefixCompileStage::Prefixes(session);
+                        Ok(SetupAdmissiblePrefixCompileAdvance::Pending)
+                    }
+                    SetupConditionPrefixAdvance::Cancelled => {
+                        Ok(SetupAdmissiblePrefixCompileAdvance::Cancelled)
+                    }
+                    SetupConditionPrefixAdvance::Complete {
+                        prefixes,
+                        word_count,
+                    } => {
+                        if self.retain_pattern_indices {
+                            self.pattern_indices
+                                .push(Arc::new(session.into_pattern_index()));
+                        }
+                        self.prefixes = prefixes;
+                        self.word_counts.push(word_count);
+                        self.condition_index += 1;
+                        if let Some(condition) = self.conditions.get(self.condition_index) {
+                            self.stage = SetupAdmissiblePrefixCompileStage::PatternIndex(
+                                SetupPatternIndexCompileSession::new(condition)?,
+                            );
+                            Ok(SetupAdmissiblePrefixCompileAdvance::Pending)
+                        } else {
+                            self.prefixes.sort_unstable();
+                            self.prefixes.dedup();
+                            Ok(SetupAdmissiblePrefixCompileAdvance::Complete {
+                                prefixes: std::mem::take(&mut self.prefixes),
+                                word_counts: std::mem::take(&mut self.word_counts),
+                                pattern_indices: std::mem::take(&mut self.pattern_indices),
+                            })
+                        }
+                    }
+                }
+            }
+            SetupAdmissiblePrefixCompileStage::Finished => {
+                Err(WasmExactSearchError::InvalidProblem(
+                    "setup_prefix_compile_session_already_finished",
+                ))
+            }
+        }
+    }
+}
+
+enum SetupConditionPrefixAdvance {
+    Pending,
+    Complete {
+        prefixes: Vec<u32>,
+        word_count: usize,
+    },
+    Cancelled,
+}
+
+struct SetupConditionPrefixSession {
+    pattern_index: PatternPiecePositionIndex,
+    terminal_supply_target: Option<SetupTerminalSupplyTarget>,
+    hold_enabled: bool,
+    projects_unplaced_lookahead: bool,
+    projects_standard_bag_lookahead: bool,
+    initial_cursor: u16,
+    initial_hold_code: u8,
+    prefixes: Vec<u32>,
+    word_index: usize,
+    depth: u8,
+    states: Vec<(SetupSupplyPrefixState, u64)>,
+    next: ExactHashMap<SetupSupplyPrefixState, u64>,
+    next_state: usize,
+}
+
+impl SetupConditionPrefixSession {
+    fn new(
+        condition: &SetupSearchCondition,
+        pattern_index: PatternPiecePositionIndex,
+        prefixes: Vec<u32>,
+    ) -> Self {
+        let problem = condition.problem();
+        let initial_hold_code = condition
+            .initial_hold()
+            .map_or(0, |piece| piece_index(piece) as u8 + 1);
+        let states = if pattern_index.word_count() != 0 {
+            {
+                vec![(
+                    SetupSupplyPrefixState {
+                        packed_counts: 0,
+                        hold_code: initial_hold_code,
+                        extra_draw: 0,
+                    },
+                    pattern_index.active_word(0),
+                )]
+            }
+        } else {
+            Default::default()
+        };
+        Self {
+            pattern_index,
+            terminal_supply_target: condition.terminal_supply_target(),
+            hold_enabled: problem.supply().hold_enabled(),
+            projects_unplaced_lookahead: problem.supply().projects_unplaced_lookahead(),
+            projects_standard_bag_lookahead: problem.supply().projects_standard_bag_lookahead(),
+            initial_cursor: problem.initial_hold().cursor(),
+            initial_hold_code,
+            prefixes,
+            word_index: 0,
+            depth: 0,
+            states,
+            next: ExactHashMap::default(),
+            next_state: 0,
+        }
+    }
+
+    fn progress(&self) -> (usize, usize) {
+        (
+            self.word_index
+                .saturating_mul(10)
+                .saturating_add(usize::from(self.depth)),
+            self.pattern_index.word_count().saturating_mul(10),
+        )
+    }
+
+    fn into_pattern_index(self) -> PatternPiecePositionIndex {
+        self.pattern_index
+    }
+
+    fn advance(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<SetupConditionPrefixAdvance, WasmExactSearchError> {
+        let mut remaining = work_budget.max(1);
+        while remaining != 0 {
+            if control.is_cancelled() {
+                return Ok(SetupConditionPrefixAdvance::Cancelled);
+            }
+            if self.word_index == self.pattern_index.word_count() {
+                self.prefixes.sort_unstable();
+                self.prefixes.dedup();
+                return Ok(SetupConditionPrefixAdvance::Complete {
+                    prefixes: std::mem::take(&mut self.prefixes),
+                    word_count: self.pattern_index.word_count(),
+                });
+            }
+            if self.next_state < self.states.len() {
+                let (state, active) = self.states[self.next_state];
+                for desired_piece in 1..=7_u8 {
+                    let Some(packed_counts) =
+                        add_packed_piece(state.packed_counts, usize::from(desired_piece - 1))
+                    else {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "setup_supply_prefix_piece_count_overflow",
+                        ));
+                    };
+                    let transitions = setup_supply_transitions(
+                        &self.pattern_index,
+                        self.initial_cursor,
+                        self.hold_enabled,
+                        self.projects_unplaced_lookahead,
+                        self.projects_standard_bag_lookahead,
+                        self.depth,
+                        desired_piece,
+                        state.extra_draw,
+                        state.hold_code,
+                        active,
+                        self.word_index,
+                        self.depth + 1 == 10,
+                    );
+                    self.next
+                        .try_reserve(usize::from(transitions.len))
+                        .map_err(|_| {
+                            WasmExactSearchError::InvalidProblem(
+                                "setup_supply_prefix_storage_unavailable",
+                            )
+                        })?;
+                    for transition in transitions.iter() {
+                        let target = SetupSupplyPrefixState {
+                            packed_counts,
+                            hold_code: transition.hold_code,
+                            extra_draw: transition.extra_draw,
+                        };
+                        *self.next.entry(target).or_default() |= transition.mask;
+                    }
+                }
+                self.next_state += 1;
+                remaining -= 1;
+                continue;
+            }
+
+            if self.depth + 1 == 10 {
+                if let Some(target) = self.terminal_supply_target {
+                    self.prefixes
+                        .extend(self.next.iter().filter_map(|(state, active)| {
+                            (terminal_supply_target_word(
+                                &self.pattern_index,
+                                target,
+                                self.initial_cursor,
+                                10,
+                                state.extra_draw,
+                                state.hold_code,
+                                self.word_index,
+                                *active,
+                            ) != 0)
+                                .then_some(state.packed_counts)
+                        }));
+                } else {
+                    self.prefixes
+                        .extend(self.next.keys().map(|state| state.packed_counts));
+                }
+            } else {
+                self.prefixes
+                    .extend(self.next.keys().map(|state| state.packed_counts));
+            }
+
+            if self.depth + 1 == 10 || self.next.is_empty() {
+                self.word_index += 1;
+                self.depth = 0;
+                self.next.clear();
+                self.next_state = 0;
+                self.states.clear();
+                if self.word_index < self.pattern_index.word_count() {
+                    self.states.push((
+                        SetupSupplyPrefixState {
+                            packed_counts: 0,
+                            hold_code: self.initial_hold_code,
+                            extra_draw: 0,
+                        },
+                        self.pattern_index.active_word(self.word_index),
+                    ));
+                }
+            } else {
+                self.states = self.next.drain().collect();
+                self.depth += 1;
+                self.next_state = 0;
+            }
+        }
+        Ok(SetupConditionPrefixAdvance::Pending)
+    }
+}
+
 #[cfg(test)]
 pub(super) fn compile_setup_admissible_prefixes(
     conditions: &[SetupSearchCondition],
@@ -1254,7 +1966,28 @@ pub(super) fn compile_setup_admissible_prefixes(
     compile_setup_admissible_prefixes_with_word_counts(conditions).map(|(prefixes, _)| prefixes)
 }
 
+#[cfg(test)]
 pub(super) fn compile_setup_admissible_prefixes_with_word_counts(
+    conditions: &[SetupSearchCondition],
+) -> Result<(Vec<u32>, Vec<usize>), WasmExactSearchError> {
+    let mut session = SetupAdmissiblePrefixCompileSession::new(conditions)?;
+    loop {
+        match session.advance(8_192, &ExecutionControl::default())? {
+            SetupAdmissiblePrefixCompileAdvance::Pending => {}
+            SetupAdmissiblePrefixCompileAdvance::Complete {
+                prefixes,
+                word_counts,
+                pattern_indices: _,
+            } => return Ok((prefixes, word_counts)),
+            SetupAdmissiblePrefixCompileAdvance::Cancelled => {
+                return Err(WasmExactSearchError::Cancelled)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn compile_setup_admissible_prefixes_with_word_counts_legacy(
     conditions: &[SetupSearchCondition],
 ) -> Result<(Vec<u32>, Vec<usize>), WasmExactSearchError> {
     let mut prefixes = vec![0_u32];
@@ -1368,7 +2101,7 @@ struct SetupCoverageSession {
     pattern_expression: String,
     graph: Arc<PartialBuildGraph>,
     coverage_graph: Arc<SetupCoverageGraph>,
-    pattern_index: PatternPiecePositionIndex,
+    pattern_index: Arc<PatternPiecePositionIndex>,
     weights: WeightedPatternSet,
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
@@ -1393,13 +2126,17 @@ struct SetupCoverageSession {
     path_target_shape_index: Option<usize>,
     solution_paths: Option<Vec<SetupSolutionPath>>,
     observation_evaluator: Option<QueueObservationPolicyEvaluator>,
+    #[cfg(not(target_family = "wasm"))]
     observation_worker_count: usize,
     observation_workers_used: usize,
 }
 
 impl SetupCoverageSession {
+    // Constructor inputs expose all graph ownership and observation-policy boundaries.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         condition: &SetupSearchCondition,
+        pattern_index: Arc<PatternPiecePositionIndex>,
         graph: Arc<PartialBuildGraph>,
         coverage_graph: Arc<SetupCoverageGraph>,
         candidate_priority: SetupCandidatePriority,
@@ -1407,14 +2144,13 @@ impl SetupCoverageSession {
         max_setup_pieces: u8,
         queue_observation_policy: clearra_supply::QueueObservationPolicy,
         path_detail: Option<&clearra_problem::SetupPathDetail>,
-        observation_worker_count: usize,
+        _observation_worker_count: usize,
         control: &ExecutionControl,
     ) -> Result<Self, WasmExactSearchError> {
         let problem = condition.problem();
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("setup_pattern_universe_not_materialized"),
         )?;
-        let pattern_index = compile_setup_pattern_index(condition)?;
         let state_layout = SetupSupplyStateLayout::new();
         let state_capacity = state_layout
             .state_capacity(coverage_graph.nodes.len())
@@ -1484,7 +2220,8 @@ impl SetupCoverageSession {
             path_target_shape_index,
             solution_paths,
             observation_evaluator,
-            observation_worker_count: observation_worker_count.max(1),
+            #[cfg(not(target_family = "wasm"))]
+            observation_worker_count: _observation_worker_count.max(1),
             observation_workers_used: 1,
         })
     }
@@ -1565,7 +2302,7 @@ impl SetupCoverageSession {
                     let edge = self.coverage_graph.edges[edge_index];
                     let target_node = edge.child() as usize;
                     let terminal = self.coverage_graph.nodes[target_node].accepting();
-                    for lane in 0..lane_count {
+                    for (lane, active_word) in active[..lane_count].iter().copied().enumerate() {
                         let transitions = transition_catalog.get(
                             node.depth,
                             edge.piece_code(),
@@ -1582,7 +2319,7 @@ impl SetupCoverageSession {
                                     transition.hold_code,
                                 ),
                                 lane,
-                                active[lane] & transition.mask,
+                                active_word & transition.mask,
                             );
                         }
                     }
@@ -1596,8 +2333,8 @@ impl SetupCoverageSession {
             if self.coverage_graph.nodes[node_index].accepting() {
                 let mut terminal = self.alpha[state_index];
                 if let Some(target) = self.terminal_supply_target {
-                    for lane in 0..lane_count {
-                        terminal[lane] &= terminal_supply_target_word(
+                    for (lane, terminal_word) in terminal[..lane_count].iter_mut().enumerate() {
+                        *terminal_word &= terminal_supply_target_word(
                             &self.pattern_index,
                             target,
                             self.initial_cursor,
@@ -1605,7 +2342,7 @@ impl SetupCoverageSession {
                             extra_draw,
                             hold_code,
                             word_start + lane,
-                            terminal[lane],
+                            *terminal_word,
                         );
                     }
                 }
@@ -1668,13 +2405,13 @@ impl SetupCoverageSession {
                 self.shape_touched[shape_index] = true;
                 self.touched_shapes.push(shape_index);
             }
-            for lane in 0..lane_count {
+            for (lane, root_bit) in root_bits[..lane_count].iter().copied().enumerate() {
                 let joint = merge_exact_state_coverage(
                     &mut self.shape_build_words[shape_index][lane],
                     &mut self.shape_joint_words[shape_index][lane],
                     self.alpha[state_index][lane],
                     self.beta[state_index][lane],
-                    root_bits[lane],
+                    root_bit,
                 );
                 let accumulator = &mut self.accumulators[shape_index];
                 if joint != 0 && accumulator.witness.is_none() {
@@ -1745,8 +2482,8 @@ impl SetupCoverageSession {
             self.depth_states[self.coverage_graph.nodes[node].depth as usize].push(state);
             self.touched_alpha.push(state);
         }
-        for lane in 0..COVERAGE_WORD_LANES {
-            self.alpha[state][lane] |= mask[lane];
+        for (alpha_word, mask_word) in self.alpha[state].iter_mut().zip(mask) {
+            *alpha_word |= mask_word;
         }
     }
 
@@ -1769,8 +2506,8 @@ impl SetupCoverageSession {
         if self.beta[state] == EMPTY_COVERAGE_WORDS {
             self.touched_beta.push(state);
         }
-        for lane in 0..COVERAGE_WORD_LANES {
-            self.beta[state][lane] |= mask[lane];
+        for (beta_word, mask_word) in self.beta[state].iter_mut().zip(mask) {
+            *beta_word |= mask_word;
         }
     }
 
@@ -1805,7 +2542,9 @@ impl SetupCoverageSession {
         // Build coverage is target-specific and never shares memo states. Run
         // every build first so switching to the terminal-aware joint oracle
         // cannot invalidate its shared target-independent suffix cache.
-        for (ordinal, shape_index) in shape_indexes.iter().copied().enumerate() {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut diagnostic_ordinal = 0;
+        for shape_index in shape_indexes.iter().copied() {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
@@ -1835,12 +2574,13 @@ impl SetupCoverageSession {
             if let Some(started) = started {
                 report_setup_policy_diagnostics(
                     "build",
-                    ordinal,
+                    diagnostic_ordinal,
                     shape_indexes.len(),
                     shape_index,
                     started,
                     &build,
                 );
+                diagnostic_ordinal += 1;
             }
             let accumulator = &mut self.accumulators[shape_index];
             accumulator.build_covered_patterns = build.covered_pattern_count;
@@ -1881,8 +2621,11 @@ impl SetupCoverageSession {
                 evaluator.begin_reusable_memo_domain()
             };
 
+        #[cfg(not(target_arch = "wasm32"))]
         let joint_target_count = joint_shape_indexes.len();
-        for (ordinal, shape_index) in joint_shape_indexes.into_iter().enumerate() {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut diagnostic_ordinal = 0;
+        for shape_index in joint_shape_indexes {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
@@ -1914,12 +2657,13 @@ impl SetupCoverageSession {
             if let Some(started) = started {
                 report_setup_policy_diagnostics(
                     "joint",
-                    ordinal,
+                    diagnostic_ordinal,
                     joint_target_count,
                     shape_index,
                     started,
                     &joint,
                 );
+                diagnostic_ordinal += 1;
             }
             let witness = setup_witness_for_coverage(&self.pattern_index, &joint.covered_patterns);
             let accumulator = &mut self.accumulators[shape_index];

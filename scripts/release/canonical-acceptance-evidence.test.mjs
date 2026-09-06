@@ -12,6 +12,7 @@ import test from "node:test";
 
 import {
   CANONICAL_ACCEPTANCE_EVIDENCE_FILE,
+  acceptedWasmToolchainsForPages,
   collectLocalToolchains,
   collectReleaseShardToolchains,
   createCanonicalAcceptanceEvidence,
@@ -28,7 +29,14 @@ import {
 } from "./canonical-acceptance-evidence.mjs";
 import { verifyCanonicalReportHash } from "./canonical-release-evidence.mjs";
 import { stampAcceptedPagesBuild } from "./accepted-pages-build.mjs";
+import { sealAcceptedWasmBuild } from "./accepted-wasm-build.mjs";
 import { sealAcceptedCtk3Dist } from "../tools/accepted-ctk3-dist.mjs";
+import {
+  CLEARRA_ARTIFACT_SCHEMA_VERSION,
+  CLEARRA_CONTRACT_SCHEMA_VERSION,
+  CLEARRA_SUPPLY_SEMANTICS_ID,
+  clearraWasmCapabilitiesSha256,
+} from "../tools/clearra-wasm-build-contract.mjs";
 
 const SOURCE_COMMIT = "7".repeat(40);
 const RUN_ID = "12345";
@@ -122,7 +130,12 @@ const REQUIRED_JOB_STEPS = Object.freeze(new Map([
     "Seal canonical release acceptance rust shard",
     "Upload canonical release acceptance rust shard",
   ]],
+  ["release-acceptance-wasm-build", [
+    "Run verified WASM build producer",
+    "Upload accepted WASM build",
+  ]],
   ["release-acceptance-pages", [
+    "Download accepted WASM build",
     "Run canonical release acceptance Pages shard",
     "Stamp and verify the accepted Pages build",
     "Seal canonical release acceptance Pages shard",
@@ -320,6 +333,25 @@ test("shard toolchain collection invokes only the closed shard tool set", () => 
   assert.deepEqual(calls.map(([command]) => command), ["cmake", "powershell"]);
 });
 
+test("Pages shard toolchains are inherited from the producer and checked at the consumer", () => {
+  assert.deepEqual(
+    acceptedWasmToolchainsForPages(TOOLCHAINS, {
+      node: TOOLCHAINS.node,
+      npm: TOOLCHAINS.npm,
+      powershell: TOOLCHAINS.powershell,
+    }),
+    TOOLCHAINS,
+  );
+  assert.throws(
+    () => acceptedWasmToolchainsForPages(TOOLCHAINS, {
+      node: "v99.0.0",
+      npm: TOOLCHAINS.npm,
+      powershell: TOOLCHAINS.powershell,
+    }),
+    /disagrees with the accepted WASM node toolchain/u,
+  );
+});
+
 test(
   "Windows npm version probe executes while child-process shell expansion stays disabled",
   { skip: process.platform !== "win32" },
@@ -437,33 +469,51 @@ async function createFixture() {
   const html = `<html><script src="${BASE_PATH}/_app/start.js"></script></html>`;
   const bindings = Buffer.from("export const ready = true;", "utf8");
   const wasm = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
+  const bindingsSha256 = sha256(bindings);
+  const wasmSha256 = sha256(wasm);
+  const bindingsPath = `clearra_wasm.${bindingsSha256.slice(0, 24)}.js`;
+  const wasmPath = `clearra_wasm_bg.${wasmSha256.slice(0, 24)}.wasm`;
   await Promise.all([
     writeFile(join(pages, "index.html"), html),
     writeFile(join(pages, "404.html"), html),
     writeFile(join(pages, "wasm", "clearra_wasm.js"), bindings),
+    writeFile(join(pages, "wasm", bindingsPath), bindings),
     writeFile(join(pages, "wasm", "clearra_wasm_bg.wasm"), wasm),
+    writeFile(join(pages, "wasm", wasmPath), wasm),
   ]);
   await writeFile(join(pages, "wasm", "clearra_wasm.manifest.json"), JSON.stringify({
+    schema_version: 1,
     build: {
+      contract_version: 2,
+      source_sha256: "8".repeat(64),
+      source_file_count: 1,
+      capabilities_sha256: clearraWasmCapabilitiesSha256(),
       runtime_identity: {
         source_commit: SOURCE_COMMIT,
         engine_build_id: SOURCE_COMMIT,
-        contract_schema_version: "clearra.search.contract.v2",
-        supply_semantics_id: "clearra.supply.projected-terminal-lookahead.v1",
-        artifact_schema_version: "clearra.solution-data.v1",
+        contract_schema_version: CLEARRA_CONTRACT_SCHEMA_VERSION,
+        supply_semantics_id: CLEARRA_SUPPLY_SEMANTICS_ID,
+        artifact_schema_version: CLEARRA_ARTIFACT_SCHEMA_VERSION,
       },
     },
     bindings: {
-      path: "clearra_wasm.js",
+      path: bindingsPath,
       bytes: bindings.byteLength,
-      sha256: sha256(bindings),
+      sha256: bindingsSha256,
     },
     wasm: {
-      path: "clearra_wasm_bg.wasm",
+      path: wasmPath,
       bytes: wasm.byteLength,
-      sha256: sha256(wasm),
+      sha256: wasmSha256,
     },
   }));
+  await sealAcceptedWasmBuild(
+    join(pages, "wasm"),
+    SOURCE_COMMIT,
+    RUN_ID,
+    RUN_ATTEMPT,
+    TOOLCHAINS,
+  );
   await stampAcceptedPagesBuild(pages, {
     sourceCommit: SOURCE_COMMIT,
     acceptedRunId: RUN_ID,

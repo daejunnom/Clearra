@@ -48,9 +48,10 @@ pub use backend::{
     WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
     WasmDistributedResultMerger, WasmDistributedVerifier, WasmPackedTilingIdentity,
     WasmProductSearchBackend, WasmSetupParallelCoordinator, WasmSetupParallelProduce,
-    WasmSetupParallelWorker, WasmSetupSearchAdvance, WasmSetupSearchBackend,
-    WasmSetupSearchSession, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
-    WasmTilingRootResultMerger, WasmTilingRootWorker, PC4_COMPACT_TABLEBASE_MAX_BYTES,
+    WasmSetupParallelWorker, WasmSetupParallelWorkerStep, WasmSetupSearchAdvance,
+    WasmSetupSearchBackend, WasmSetupSearchSession, WasmTilingRootAdvance, WasmTilingRootChunk,
+    WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
+    PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
 pub use buildup::{
     BuildUpEvent, BuildUpReducerReport, BuildUpRunResult, BuildUpRunner, BuildUpState,

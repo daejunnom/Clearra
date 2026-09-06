@@ -509,11 +509,16 @@ impl PatternSet {
     }
 }
 
+type TransitionCacheEntry = (TransitionCacheKey, Vec<TransitionMask>);
+type TerminalMaskEntry = ((u16, Option<PieceKind>), Arc<[u64]>);
+type SupplyBranchKey = (HoldDecision, u16, Option<PieceKind>);
+type SupplyBranch = (SupplyBranchKey, Vec<u64>);
+
 struct SupplyTransitionCache<'a> {
     batch: SpinBatchRef<'a>,
     word_count: usize,
-    transitions: Vec<(TransitionCacheKey, Vec<TransitionMask>)>,
-    terminal_masks: Vec<((u16, Option<PieceKind>), Arc<[u64]>)>,
+    transitions: Vec<TransitionCacheEntry>,
+    terminal_masks: Vec<TerminalMaskEntry>,
 }
 
 impl<'a> SupplyTransitionCache<'a> {
@@ -644,11 +649,11 @@ fn clone_transition_masks(source: &[TransitionMask]) -> Vec<TransitionMask> {
     cloned
 }
 
-fn branch_words<'a>(
-    branches: &'a mut Vec<((HoldDecision, u16, Option<PieceKind>), Vec<u64>)>,
-    key: (HoldDecision, u16, Option<PieceKind>),
+fn branch_words(
+    branches: &mut Vec<SupplyBranch>,
+    key: SupplyBranchKey,
     word_count: usize,
-) -> &'a mut Vec<u64> {
+) -> &mut Vec<u64> {
     if let Some(index) = branches.iter().position(|(branch, _)| *branch == key) {
         return &mut branches[index].1;
     }
@@ -1111,9 +1116,7 @@ fn intersect_words(left: &[u64], right: &[u64]) -> Option<Vec<u64>> {
 }
 
 fn zeroed_words(word_count: usize) -> Vec<u64> {
-    let mut words = Vec::with_capacity(word_count);
-    words.resize(word_count, 0);
-    words
+    vec![0; word_count]
 }
 
 fn clone_words(source: &[u64]) -> Vec<u64> {

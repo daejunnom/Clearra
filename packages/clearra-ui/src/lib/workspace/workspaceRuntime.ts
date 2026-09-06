@@ -1,5 +1,4 @@
 import type {
-  ClearraDiagnostic,
   ClearraHostAppResponse,
   ClearraSearchProgressTelemetry,
   ClearraWebGpuBackendReport
@@ -16,6 +15,11 @@ import {
   projectWorkspaceSearchReport,
   type WorkspaceSearchReport
 } from './workspaceSearchReport';
+import {
+  projectWorkspacePublicFailure,
+  type WorkspaceDeveloperDiagnostic,
+  type WorkspacePublicFailure
+} from './workspacePublicFailure';
 
 export type WorkspaceRuntimeKind = 'web' | 'desktop';
 export type WorkspaceRuntimeStatus =
@@ -28,11 +32,7 @@ export type WorkspaceRuntimeStatus =
   | 'terminated'
   | 'failed';
 
-export type WorkspaceRuntimeDiagnostic = {
-  code: string;
-  severity: string;
-  message: string;
-};
+export type WorkspaceRuntimeDiagnostic = WorkspaceDeveloperDiagnostic;
 
 export type WorkspaceRuntimeView = {
   kind: WorkspaceRuntimeKind;
@@ -45,17 +45,25 @@ export type WorkspaceRuntimeView = {
   forwardPatternDone: number;
   forwardPatternTotal: number;
   progressTelemetry: ClearraSearchProgressTelemetry | null;
-  diagnostics: WorkspaceRuntimeDiagnostic[];
+  publicFailures: WorkspacePublicFailure[];
+  developerDiagnostics: WorkspaceRuntimeDiagnostic[];
   response: ClearraHostAppResponse | ClearraDesktopAppResponse | null;
   searchReport: WorkspaceSearchReport | null;
   webgpuReport: ClearraWebGpuBackendReport | null;
   backendReport: ClearraHostAppResponse['backend_report'] | ClearraDesktopBackendStatus | null;
   resourceReport: ClearraHostAppResponse['resource_report'] | ClearraDesktopResourceStatus | null;
   renderCapability: RenderCapabilityReport | null;
-  error: string | null;
+  developerError: string | null;
 };
 
 export function workspaceViewFromWasm(state: WasmWorkerState): WorkspaceRuntimeView {
+  const failure = projectWorkspacePublicFailure({
+    status: state.status,
+    responseStatus: state.response?.status,
+    terminationReason: state.terminationReason,
+    error: state.error,
+    diagnostics: state.diagnostics
+  });
   return {
     kind: 'web',
     status: state.status,
@@ -67,7 +75,8 @@ export function workspaceViewFromWasm(state: WasmWorkerState): WorkspaceRuntimeV
     forwardPatternDone: state.forwardPatternDone,
     forwardPatternTotal: state.forwardPatternTotal,
     progressTelemetry: state.progressTelemetry,
-    diagnostics: state.diagnostics.map(normalizeDiagnostic),
+    publicFailures: failure.publicFailures,
+    developerDiagnostics: failure.developerEvidence.diagnostics,
     response: state.response,
     searchReport: projectWorkspaceSearchReport(
       state.searchReport,
@@ -78,12 +87,18 @@ export function workspaceViewFromWasm(state: WasmWorkerState): WorkspaceRuntimeV
     backendReport: state.response?.backend_report ?? null,
     resourceReport: state.resourceReport,
     renderCapability: state.response?.capability_report.render_capability ?? null,
-    error: state.error
+    developerError: failure.developerEvidence.error
   };
 }
 
 export function workspaceViewFromDesktop(state: DesktopJobState): WorkspaceRuntimeView {
   const resourceReport = state.resourceStatus ?? state.result?.resource_report ?? null;
+  const failure = projectWorkspacePublicFailure({
+    status: state.status,
+    responseStatus: state.result?.status,
+    error: state.error,
+    diagnostics: state.diagnostics
+  });
   return {
     kind: 'desktop',
     status: state.status,
@@ -95,10 +110,8 @@ export function workspaceViewFromDesktop(state: DesktopJobState): WorkspaceRunti
     forwardPatternDone: 0,
     forwardPatternTotal: 0,
     progressTelemetry: null,
-    diagnostics: state.diagnostics.map((diagnostic) => ({
-      ...diagnostic,
-      message: diagnostic.code
-    })),
+    publicFailures: failure.publicFailures,
+    developerDiagnostics: failure.developerEvidence.diagnostics,
     response: state.result,
     searchReport: projectWorkspaceSearchReport(
       state.searchReport,
@@ -109,14 +122,6 @@ export function workspaceViewFromDesktop(state: DesktopJobState): WorkspaceRunti
     backendReport: state.backendStatus ?? state.result?.backend_report ?? null,
     resourceReport,
     renderCapability: state.result?.capability_report.render_capability ?? null,
-    error: state.error
-  };
-}
-
-function normalizeDiagnostic(diagnostic: ClearraDiagnostic): WorkspaceRuntimeDiagnostic {
-  return {
-    code: diagnostic.code,
-    severity: diagnostic.severity,
-    message: diagnostic.message
+    developerError: failure.developerEvidence.error
   };
 }

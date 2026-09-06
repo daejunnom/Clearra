@@ -68,6 +68,8 @@ enum SuffixPhase {
     Complete,
 }
 
+// Completed suffix coverage is transferred without an extra allocation.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum SetupSuffixCoverageAdvance {
     Pending,
     Complete {

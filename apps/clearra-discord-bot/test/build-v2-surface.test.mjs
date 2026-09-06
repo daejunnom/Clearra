@@ -67,7 +67,7 @@ test("all twelve Build v2 capabilities have an active product-authorized Discord
   assert.deepEqual(
     BUILD_V2_CASES.map(([, subcommand]) => subcommand).sort(),
     Object.keys(build.subcommands)
-      .filter((subcommand) => subcommand !== "finesse-score")
+      .filter((subcommand) => !["finesse-score", "probability"].includes(subcommand))
       .sort(),
   );
   assert.equal(
@@ -111,8 +111,48 @@ test("all twelve Build v2 capabilities have an active product-authorized Discord
   }
 
   const registeredBuild = globalCommands.find(({ name }) => name === "build");
-  assert.equal(registeredBuild.options.length, 13);
+  assert.equal(registeredBuild.options.length, 14);
   assert.ok(registeredBuild.options.every(({ options }) => options.length <= 25));
+});
+
+test("Build probability is a separate seven-mode capability without changing either cover route", () => {
+  const build = findSlashCommand("build").subcommands;
+  const probability = build.probability;
+  const capability = findProductCapability("build.probability");
+  assert.equal(probability.capabilityId, "build.probability");
+  assert.equal(probability.input, "build-cover");
+  assert.deepEqual(probability.argvPrefix, ["build-probability"]);
+  assert.equal(capability.status, "active");
+  assert.deepEqual(
+    probability.registration.options
+      .find(({ name }) => name === "result-mode")
+      .choices.map(({ value }) => value),
+    [
+      "all-solutions",
+      "complete-replay-paths",
+      "minimum-solutions",
+      "field-average-score",
+      "fixed-queue-maximum-score",
+      "highest-score-minimum-set",
+      "failed-queues",
+    ],
+  );
+
+  const source = "$build probability --next I --base grid:__________ --target grid:####______ --result-mode failed-queues --failed-count 7";
+  const request = parseClearraTextRequest(source, "$", {
+    workers: 2,
+    outputFormat: "json",
+  });
+  assert.equal(classifyClearraTextCommand(source, "$"), "build.probability");
+  assert.equal(request.command.capabilityId, "build.probability");
+  assert.deepEqual(request.arguments_.slice(0, 1), ["build-probability"]);
+  assertOption(request.arguments_, "--result-mode", "failed-queues");
+  assertOption(request.arguments_, "--failed-count", "7");
+
+  assert.deepEqual(build.cover.argvPrefix, ["build", "cover"]);
+  assert.equal(build.cover.input, "build-v2-cover");
+  assert.deepEqual(findSlashCommand("cover").argvPrefix, ["build-probability"]);
+  assert.equal(findSlashCommand("cover").input, "cover");
 });
 
 test("all twelve slash forms lower to the frozen Web grammar and capability-closed defaults", () => {
@@ -309,10 +349,14 @@ test("command client accepts only registered CPU Build v2 execution paths", () =
   );
 });
 
-test("all twelve result contracts preserve ordinary families and narrow exact/score output", () => {
+test("all registered result contracts preserve ordinary families and narrow exact/score output", () => {
   assert.deepEqual(
     discordBuildV2ResultAuthority().map(({ capabilityId }) => capabilityId),
-    BUILD_V2_CASES.map(([capabilityId]) => capabilityId),
+    [
+      ...BUILD_V2_CASES.slice(0, 10).map(([capabilityId]) => capabilityId),
+      "build.highest-score-minimum-set",
+      ...BUILD_V2_CASES.slice(10).map(([capabilityId]) => capabilityId),
+    ],
   );
   for (const [capabilityId, , , , , resultContract, payloadKind] of BUILD_V2_CASES) {
     const structured = buildResult(capabilityId, resultContract, payloadKind);
@@ -366,6 +410,15 @@ test("all twelve result contracts preserve ordinary families and narrow exact/sc
     JSON.stringify(projectDiscordBuildV2Result(nestedAttack)).toLowerCase().includes("attack"),
     false,
   );
+
+  const scoreMinimum = buildScoreMinimumResult();
+  const canonicalScoreMinimum = projectDiscordBuildV2Result(scoreMinimum);
+  assert.equal(
+    canonicalScoreMinimum.summary.canonical_candidate_key,
+    scoreMinimum.summary.canonical_candidate_keys[0],
+  );
+  assert.equal(canonicalScoreMinimum.summary.canonical_winner.pattern_id, "0");
+  assert.equal(JSON.stringify(canonicalScoreMinimum).toLowerCase().includes("attack"), false);
 });
 
 test("Build v2 result projection rejects every alternative/tie page and attack-based score policy", () => {
@@ -490,5 +543,32 @@ function buildResult(capabilityId, resultContract, payloadKind) {
     kind: resultContract,
     contract: { command: { kind: resultContract } },
     summary,
+  };
+}
+
+function buildScoreMinimumResult() {
+  const first = "ctk1|initial=0000000000000000|placements=I:000000000000000f";
+  const second = "ctk1|initial=0000000000000000|placements=O:0000000000000033";
+  return {
+    kind: "build-probability-score-minimum.v1",
+    contract: { command: { kind: "build-probability-score-minimum.v1" } },
+    summary: {
+      capability_id: "build.highest-score-minimum-set",
+      result_contract: "build-probability-score-minimum.v1",
+      payload_kind: "score-portfolio",
+      objective: "max-score-cover",
+      selected_candidate_count: "2",
+      required_pattern_count: "2",
+      canonical_candidate_keys: [first, second],
+      score_equality_basis: "score-only",
+      winners: [
+        { pattern_id: "0", candidate_key: first, score: "1200", informational_attack: "4" },
+        { pattern_id: "1", candidate_key: second, score: "1200", informational_attack: "9" },
+      ],
+      completeness: {
+        exact_minimum_proven: true,
+        score_evidence_complete: true,
+      },
+    },
   };
 }

@@ -945,6 +945,8 @@ impl ReportedBuildSuppliedSolutionEvaluationResultIdentity {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// The repeated suffix is part of the published validation-error taxonomy.
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum BuildTargetSearchResultValidationError {
     CapabilityIdMismatch,
     ProblemContractIdMismatch,
@@ -953,6 +955,8 @@ pub(crate) enum BuildTargetSearchResultValidationError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// The repeated suffix is part of the published validation-error taxonomy.
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum BuildSuppliedSolutionEvaluationResultValidationError {
     CapabilityIdMismatch,
     ProblemContractIdMismatch,
@@ -996,10 +1000,14 @@ impl ValidatedBuildTargetSearchResultAuthority {
         self.query.contract()
     }
 
+    // Retained so adapters can audit the exact identity that minted this authority.
+    #[allow(dead_code)]
     pub(crate) fn identity(&self) -> &ReportedBuildTargetSearchResultIdentity {
         &self.identity
     }
 
+    // Retained for parity checks at alternate product ingress boundaries.
+    #[allow(dead_code)]
     pub(crate) fn matches_query(&self, expected: &BuildTargetSearchQuerySnapshot) -> bool {
         self.query == *expected
     }
@@ -1048,10 +1056,14 @@ impl ValidatedBuildSuppliedSolutionEvaluationResultAuthority {
         self.query.contract()
     }
 
+    // Retained so adapters can audit the exact identity that minted this authority.
+    #[allow(dead_code)]
     pub(crate) fn identity(&self) -> &ReportedBuildSuppliedSolutionEvaluationResultIdentity {
         &self.identity
     }
 
+    // Retained for parity checks at alternate product ingress boundaries.
+    #[allow(dead_code)]
     pub(crate) fn matches_query(
         &self,
         expected: &BuildSuppliedSolutionEvaluationQuerySnapshot,

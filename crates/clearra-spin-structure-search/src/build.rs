@@ -290,7 +290,7 @@ fn run_states(
                         let mut build = state.build.clone();
                         build.push(placement);
                         let mut logical_operations = state.logical_operations.clone();
-                        logical_operations.push(logical_lock.identity.clone());
+                        logical_operations.push(logical_lock.identity);
                         let outcome = SpinStructureOutcome {
                             board_before_spin: state.board,
                             final_board: board_after,
@@ -298,7 +298,7 @@ fn run_states(
                             build,
                             mini: event.is_mini(),
                             logical_operations,
-                            logical_spin: logical_lock.identity.clone(),
+                            logical_spin: logical_lock.identity,
                             logical_spin_cleared_rows: logical_lock.newly_deleted_rows,
                         };
                         if event.is_mini() {
@@ -314,7 +314,7 @@ fn run_states(
                         let mut build = state.build.clone();
                         build.push(placement);
                         let mut logical_operations = state.logical_operations.clone();
-                        logical_operations.push(logical_lock.identity.clone());
+                        logical_operations.push(logical_lock.identity);
                         next.push(BuildState {
                             board: board_after,
                             logical_board: logical_lock.board_after,
@@ -358,8 +358,8 @@ fn state_key(state: &BuildState) -> BuildStateKey {
     let mut operations = state.logical_operations.clone();
     operations.sort();
     BuildStateKey {
-        logical_board: state.logical_board.clone(),
-        deleted_rows: state.deleted_rows.clone(),
+        logical_board: state.logical_board,
+        deleted_rows: state.deleted_rows,
         remaining: state.remaining,
         operations,
     }

@@ -201,6 +201,16 @@ fn reserve_path_slot(
     Ok(())
 }
 
+#[inline]
+fn check_cancel(control: &ExecutionControl, work: &mut usize) -> Result<(), WasmExactSearchError> {
+    *work = work.wrapping_add(1);
+    if *work & 4095 == 0 && control.is_cancelled() {
+        Err(WasmExactSearchError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,15 +309,5 @@ mod tests {
             SetupCompletionIdentity::from_path(&candidate.steps, 2).expect("second identity");
 
         assert_ne!(first, second);
-    }
-}
-
-#[inline]
-fn check_cancel(control: &ExecutionControl, work: &mut usize) -> Result<(), WasmExactSearchError> {
-    *work = work.wrapping_add(1);
-    if *work & 4095 == 0 && control.is_cancelled() {
-        Err(WasmExactSearchError::Cancelled)
-    } else {
-        Ok(())
     }
 }

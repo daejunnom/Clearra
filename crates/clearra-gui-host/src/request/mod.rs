@@ -50,6 +50,14 @@ pub(crate) fn score_objective_policy(
     initial_b2b: u32,
     base: clearra_objectives::policy::objective_policy::ObjectivePolicy,
 ) -> Result<clearra_objectives::policy::objective_policy::ObjectivePolicy, RequestBuildError> {
+    // Named GUI score products own the same all-solution objective as the
+    // canonical CLI subcommands. The legacy scenario count field is inactive
+    // for these products and must not leak back into objective selection.
+    let base = if matches!(mode, "summary" | "score-finder") {
+        clearra_objectives::policy::objective_policy::ObjectivePolicy::all()
+    } else {
+        base
+    };
     let objective_kind = score_mode_objective_kind(mode, base.kind())?;
     let objective = match objective_kind {
         clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling => {

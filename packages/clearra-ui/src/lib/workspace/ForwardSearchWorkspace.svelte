@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
 
@@ -38,7 +39,7 @@
     type ForwardSearchRequest,
     type ForwardTool
   } from './forwardSearchModel';
-  import { preferredWorkspaceLanguage, workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
+  import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import { workspaceViewFromDesktop, workspaceViewFromWasm, type WorkspaceRuntimeStatus } from './workspaceRuntime';
 
   export let tool: ForwardTool;
@@ -84,7 +85,7 @@
   $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
 
   onMount(() => {
-    language = preferredWorkspaceLanguage(localStorage.getItem('clearra-language') ?? navigator.language);
+    language = readWorkspaceLanguage();
     workerCount = automaticWorkerCount(request.useAllLogicalProcessors);
     if (runtime === 'web') {
       clearWasmTerminalResult();
@@ -134,7 +135,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    localStorage.setItem('clearra-language', next);
+    persistWorkspaceLanguage(next);
   }
 
   function setHeight(value: number) {
@@ -273,9 +274,8 @@
   <ForwardSearchResult
     slot="result"
     report={runtimeView.searchReport}
-    diagnostics={runtimeView.diagnostics}
+    publicFailures={runtimeView.publicFailures}
     status={runtimeView.status}
-    error={runtimeView.error ?? ''}
     {elapsedMs}
     progressLabel={runtimeView.progressLabel}
     progressDone={runtimeView.progressDone}

@@ -7,6 +7,7 @@ pub mod app_request;
 pub mod app_response;
 pub mod app_services;
 mod build_colored_target_document;
+mod build_probability_product_result;
 mod build_setup_product_projection;
 mod build_solution_probability_result;
 mod build_v2_product_projection;
@@ -38,6 +39,7 @@ mod pc_chance_probability_result;
 mod pc_failed_queue_result;
 mod pc_minimum_cover_result;
 mod pc_path_result;
+mod pc_replay_page_source;
 mod pc_result_projection;
 mod pc_save_result;
 mod pc_score_field_result;
@@ -49,6 +51,7 @@ mod pc_tiling_family_result;
 mod portfolio_alternative_store;
 pub mod product_capability_contract;
 mod product_capability_result;
+mod product_retention_budget;
 mod ranked_family_product_projection;
 pub mod render;
 pub mod request;
@@ -98,6 +101,11 @@ pub use app_services::{
 };
 pub use build_colored_target_document::{
     BuildColoredTargetDocument, BuildColoredTargetDocumentError,
+};
+pub use build_probability_product_result::{
+    BUILD_FIELD_AVERAGE_CAPABILITY, BUILD_FIELD_AVERAGE_RESULT_CONTRACT,
+    BUILD_FIXED_SCORE_CAPABILITY, BUILD_FIXED_SCORE_RESULT_CONTRACT,
+    BUILD_FIXED_SCORE_WINNER_CONTRACT, BUILD_PATH_CANONICAL_SELECTION,
 };
 pub use build_setup_product_projection::{
     project_build_setup_v1, BuildSetupProductProjectionError,
@@ -152,15 +160,15 @@ pub use clearra_output::{
     Ctk3PageFlags, Ctk3Piece, Ctk3Rotation,
 };
 pub use commands::{
-    BuildProbabilityAppCommand, BuildV2AppCommand, BuildV2AppRequest, ContinueAppCommand,
-    ConvertAppCommand, CoverAppCommand, DamageAppCommand, FieldDocumentTransformAppCommand,
-    FieldDocumentTransformAppCommandError, FieldDocumentTransformKind, FumenAppCommand,
-    FumenAppCommandError, FumenTransformKind, InspectUnsupportedAppCommand,
-    OperationSequenceAppCommand, ParityAppCommand, PathAppCommand, PcAppCommand, PercentAppCommand,
-    RenAppCommand, RenderAppCommand, RenderAppCommandError, RenderArtifactFormat, RulesAppCommand,
-    ScenarioAppCommand, ScenarioAppExpected, ScenarioAppRenderContract, ScoringAppCommand,
-    SequenceDependenciesAppCommand, SetupAppCommand, SetupScoreAppCommand,
-    SetupScoreAppCommandError, SpinFinderAppCommand, SpinStructureAppCommand,
+    BuildProbabilityAppCommand, BuildProbabilityResultMode, BuildV2AppCommand, BuildV2AppRequest,
+    ContinueAppCommand, ConvertAppCommand, CoverAppCommand, DamageAppCommand,
+    FieldDocumentTransformAppCommand, FieldDocumentTransformAppCommandError,
+    FieldDocumentTransformKind, FumenAppCommand, FumenAppCommandError, FumenTransformKind,
+    InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand, PathAppCommand,
+    PcAppCommand, PercentAppCommand, RenAppCommand, RenderAppCommand, RenderAppCommandError,
+    RenderArtifactFormat, RulesAppCommand, ScenarioAppCommand, ScenarioAppExpected,
+    ScenarioAppRenderContract, ScoringAppCommand, SequenceDependenciesAppCommand, SetupAppCommand,
+    SetupScoreAppCommand, SetupScoreAppCommandError, SpinFinderAppCommand, SpinStructureAppCommand,
     SpinStructureProductMode, VerifyAppCommand, SETUP_SCORE_INPUT_CONTRACT,
     SETUP_SCORE_PROBLEM_CONTRACT, SETUP_SCORE_RESULT_CONTRACT,
 };
@@ -208,6 +216,10 @@ pub use pc_path_result::{
     PcPathQuerySnapshot, PcPathStepV2, PcPathWitnessV2, PC_PATH_CANONICAL_SELECTION,
     PC_PATH_FAMILY_RESULT_CONTRACT, PC_PATH_ORDERING, PC_PATH_WITNESS_CONTRACT,
 };
+pub use pc_replay_page_source::{
+    PcReplayPageSource, PcReplayPageStore, PcReplaySourceBuildSession,
+    PC_REPLAY_MEMBER_PAGE_CONTRACT, PC_REPLAY_MEMBER_PAGE_SIZE,
+};
 pub use pc_result_projection::{
     PcResultProjection, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
     PC_SCORE_MAX_SOURCE_PIECES,
@@ -247,14 +259,16 @@ pub use portfolio_alternative_store::{
     PortfolioAlternative, PortfolioAlternativeAdvance, PortfolioAlternativeCheckpoint,
     PortfolioAlternativeError, PortfolioAlternativePage, PortfolioAlternativeSetIdentity,
     PortfolioCandidate, PortfolioEnumerationStop, PortfolioMember, PortfolioMemberPage,
-    ProductPageSourceOwner, ProductPageStore, PORTFOLIO_ALTERNATIVE_PAGE_CONTRACT,
-    PORTFOLIO_ALTERNATIVE_SET_CONTRACT, PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
+    PortfolioPageLoadAdvance, PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore,
+    PORTFOLIO_ALTERNATIVE_PAGE_CONTRACT, PORTFOLIO_ALTERNATIVE_SET_CONTRACT,
+    PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
     PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT, PORTFOLIO_SNAPSHOT_CONTRACT,
 };
 pub use product_capability_contract::{ProductCapabilityContract, ProductCapabilityContractError};
 pub use product_capability_result::{
     ProductCapabilityResourceEvidence, ProductCapabilityResult, ProductCapabilityResultKind,
 };
+pub use product_retention_budget::ProductRetentionBudget;
 pub use render::{AppMessage, AppRenderModel, AppResultKind, SetupRenderModel};
 pub use request_profile_selection::{
     RequestProfileSelection, RequestProfileSelectionError, RequestStructuralProfiles,

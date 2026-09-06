@@ -165,6 +165,24 @@ impl JobProgress {
     }
 }
 
+fn job_progress_from_execution(item: ExecutionProgress) -> JobProgress {
+    let total = item.total.unwrap_or_else(|| {
+        if matches!(
+            item.stage,
+            "build-geometry" | "build-candidates" | "build-verification"
+        ) {
+            0
+        } else {
+            item.completed.max(1)
+        }
+    });
+    JobProgress::new(
+        u32::try_from(item.completed).unwrap_or(u32::MAX),
+        u32::try_from(total).unwrap_or(u32::MAX),
+        item.stage,
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobDiagnosticEvent {
     pub job_id: JobId,
@@ -187,6 +205,9 @@ pub struct CancelRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Events cross the worker boundary once and retain the established host
+// contract shape; boxing successful responses would add per-result allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum WasmWorkerJobEvent {
     Started {
         job_id: WasmWorkerJobId,
@@ -514,6 +535,9 @@ impl GovernedWasmWorkerEvents {
         )
     }
 
+    // Retained as the product-neutral prefix adapter while worker storage uses
+    // the stricter storage-specific route below.
+    #[allow(dead_code)]
     pub(crate) fn try_from_final_result_with_prefix(
         job_id: WasmWorkerJobId,
         governed: GovernedWasmExecutionResult,
@@ -861,12 +885,14 @@ impl Drop for WasmComputationScope {
 /// used until `PreparedWasmExecution` exposes the direct finite authority that
 /// can account for its own retained owner graph.
 #[derive(Debug)]
+#[cfg(test)]
 struct WasmFiniteComputationScope {
     cancellation: WasmCancellationToken,
     control: ExecutionControl,
     released: bool,
 }
 
+#[cfg(test)]
 impl WasmFiniteComputationScope {
     fn new(partition: ExecutionPartition) -> Self {
         let cancellation = WasmCancellationToken::new();
@@ -894,6 +920,7 @@ impl WasmFiniteComputationScope {
     }
 }
 
+#[cfg(test)]
 impl Drop for WasmFiniteComputationScope {
     fn drop(&mut self) {
         self.release();
@@ -905,10 +932,12 @@ impl Drop for WasmFiniteComputationScope {
 /// capacity to account for.  Public finite activation remains gated until the
 /// direct prepared-execution authority is available.
 #[derive(Debug, Default)]
+#[cfg(test)]
 struct FiniteOwnerSlot<T> {
     owner: Option<T>,
 }
 
+#[cfg(test)]
 impl<T> FiniteOwnerSlot<T> {
     fn is_occupied(&self) -> bool {
         self.owner.is_some()
@@ -924,10 +953,6 @@ impl<T> FiniteOwnerSlot<T> {
 
     fn as_ref(&self) -> Option<&T> {
         self.owner.as_ref()
-    }
-
-    fn take(&mut self) -> Option<T> {
-        self.owner.take()
     }
 }
 
@@ -978,6 +1003,13 @@ impl WasmWorkerJobRuntime {
 
     pub fn set_host_capabilities(&mut self, capabilities: crate::WasmHostCapabilities) {
         self.runtime.set_host_capabilities(capabilities);
+    }
+
+    pub fn set_product_retention_budget(
+        &mut self,
+        budget: Option<clearra_app::ProductRetentionBudget>,
+    ) {
+        self.runtime.set_product_retention_budget(budget);
     }
 
     pub fn command_runtime(&self) -> &WasmCommandRuntime {
@@ -1316,6 +1348,23 @@ impl WasmWorkerJobRuntime {
         self.finite_job.is_some() && self.completed_governed_events.is_none()
     }
 
+    /// Native ABI-local minimum admission is available only when this separate
+    /// compatibility job registry owns no retained job/page allocations. WASM
+    /// callers can instead use the actual whole-linear-memory allocation floor.
+    pub fn minimum_coordinator_idle_retained_bytes(&self) -> Option<u128> {
+        if self.statuses.capacity() != 0
+            || self.events.capacity() != 0
+            || self.active_jobs.capacity() != 0
+            || self.completed_tiling_solution_page_store.is_some()
+            || self.completed_product_page_source_owner.is_some()
+            || self.completed_governed_events.is_some()
+            || self.finite_job.is_some()
+        {
+            return None;
+        }
+        self.runtime.app_context().checked_retained_capacity_bytes()
+    }
+
     pub fn take_completed_tiling_solution_page_store(
         &mut self,
     ) -> Option<Arc<TilingSolutionPageStore>> {
@@ -1374,14 +1423,9 @@ impl WasmWorkerJobRuntime {
             .map(|progress| progress.drain())
             .unwrap_or_default();
         for item in progress {
-            let total = item.total.unwrap_or(item.completed.max(1));
             self.push_event(WasmWorkerJobEvent::Progress {
                 job_id,
-                progress: JobProgress::new(
-                    u32::try_from(item.completed).unwrap_or(u32::MAX),
-                    u32::try_from(total).unwrap_or(u32::MAX),
-                    item.stage,
-                ),
+                progress: job_progress_from_execution(item),
             });
         }
     }
@@ -1458,6 +1502,29 @@ mod ownership_tests {
         GovernedWasmWorkerEvents, WasmCommandRuntime, WasmFiniteComputationScope,
         WasmWorkerJobEvent, WasmWorkerJobId, WasmWorkerJobRuntime,
     };
+
+    #[test]
+    fn build_cooperative_progress_preserves_unknown_totals_and_counter_saturation() {
+        for stage in ["build-geometry", "build-candidates", "build-verification"] {
+            let progress =
+                super::job_progress_from_execution(super::ExecutionProgress::new(stage, 123, None));
+            assert_eq!(progress.label, stage);
+            assert_eq!(progress.done, 123);
+            assert_eq!(progress.total, 0, "a node count is not its own total");
+        }
+        let saturated = super::job_progress_from_execution(super::ExecutionProgress::new(
+            "build-geometry",
+            u64::MAX,
+            None,
+        ));
+        assert_eq!(saturated.done, u32::MAX);
+        let explicit = super::job_progress_from_execution(super::ExecutionProgress::new(
+            "postprocess",
+            0,
+            Some(1),
+        ));
+        assert_eq!(explicit.total, 1);
+    }
 
     fn governed_events_fixture(job_id: WasmWorkerJobId) -> GovernedWasmWorkerEvents {
         GovernedWasmWorkerEvents::from_events_for_test(

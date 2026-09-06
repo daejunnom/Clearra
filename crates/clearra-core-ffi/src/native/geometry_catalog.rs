@@ -38,6 +38,7 @@ pub struct NativeGeometryCatalogIdentity {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+#[cfg(feature = "native-c-core")]
 pub(crate) struct CNativeGeometryCatalogView {
     pub identity: NativeGeometryCatalogIdentity,
     pub skeleton_cell_masks: *const u64,
@@ -52,6 +53,7 @@ pub(crate) struct CNativeGeometryCatalogView {
     pub cell_count: u32,
 }
 
+#[cfg(feature = "native-c-core")]
 impl Default for CNativeGeometryCatalogView {
     fn default() -> Self {
         Self {
@@ -283,6 +285,8 @@ mod linked {
             unsafe { view_from_raw(&raw) }
         }
 
+        // Arguments mirror the native buildability stream ABI without hidden ambient state.
+        #[allow(clippy::too_many_arguments)]
         pub fn stream_buildable_rows(
             &self,
             skeleton_row_ids: &[u32],
@@ -330,6 +334,8 @@ mod linked {
         }
 
         #[cfg(any(test, feature = "test-support"))]
+        // Partition coordinates are independent parts of the native execution contract.
+        #[allow(clippy::too_many_arguments)]
         pub fn generate_partition(
             &self,
             problem: &CPackingProblem,
@@ -360,6 +366,8 @@ mod linked {
             })
         }
 
+        // Partition coordinates and the consumer are independent native stream inputs.
+        #[allow(clippy::too_many_arguments)]
         pub fn stream_partition(
             &self,
             problem: &CPackingProblem,
@@ -615,13 +623,13 @@ mod linked {
     }
 
     fn memory_budget_error(required_memory_bytes: u128) -> NativeCoreError {
-        NativeCoreError::PackingIncomplete {
-            status: C_PACKING_STATUS_CAPACITY_EXCEEDED,
-            resource_report: ResourceReport::admission_failure(
+        NativeCoreError::packing_incomplete(
+            C_PACKING_STATUS_CAPACITY_EXCEEDED,
+            ResourceReport::admission_failure(
                 ExecutionAvailability::exhausted(ExecutionAvailabilityReason::MemoryBudgetExceeded)
                     .with_required_memory_bytes(required_memory_bytes),
             ),
-        }
+        )
     }
 
     fn ensure_request_memory_budget(
@@ -832,6 +840,8 @@ impl NativeGeometryCatalog {
         Err(NativeCoreError::Unavailable)
     }
 
+    // The unavailable stub preserves the native partition-stream API exactly.
+    #[allow(clippy::too_many_arguments)]
     pub fn stream_partition(
         &self,
         _problem: &CPackingProblem,

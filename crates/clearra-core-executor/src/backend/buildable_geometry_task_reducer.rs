@@ -170,6 +170,8 @@ fn buildability_template_and_source(
 }
 
 #[allow(clippy::too_many_arguments)]
+// Local admission composition preserves the domain `ResourceReport` until the runner boundary.
+#[allow(clippy::result_large_err)]
 pub(crate) fn reduce_buildable_geometry_paths<Producer>(
     search_problem: &SearchProblem,
     source_pattern_bits: Option<&PatternBitSet>,
@@ -460,10 +462,10 @@ fn configured_memory_limit_bytes(problem: &CPackingProblem) -> u128 {
 }
 
 fn buildable_resource_error(resource_report: ResourceReport) -> PackingRunnerError {
-    PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
-        status: PACKING_CAPACITY_EXCEEDED,
+    PackingRunnerError::Native(NativeCoreError::packing_incomplete(
+        PACKING_CAPACITY_EXCEEDED,
         resource_report,
-    })
+    ))
 }
 
 fn buildable_resource_report(
@@ -513,7 +515,7 @@ fn buildable_memory_exhausted(
     buildable_resource_error(buildable_resource_report(
         search_problem,
         ExecutionAvailabilityReason::MemoryBudgetExceeded,
-        max_memory_bytes.checked_add(1).unwrap_or(u128::MAX),
+        max_memory_bytes.saturating_add(1),
     ))
 }
 
@@ -530,14 +532,14 @@ fn enrich_native_memory_error(
         if availability.reason() == Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
             && availability.descriptor_pattern_count().is_none()
         {
-            return PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
+            return PackingRunnerError::Native(NativeCoreError::packing_incomplete(
                 status,
-                resource_report: buildable_resource_report(
+                buildable_resource_report(
                     search_problem,
                     ExecutionAvailabilityReason::MemoryBudgetExceeded,
                     availability.required_memory_bytes().unwrap_or(u128::MAX),
                 ),
-            });
+            ));
         }
         return PackingRunnerError::Native(NativeCoreError::PackingIncomplete {
             status,
@@ -906,7 +908,7 @@ fn merge_worker_reducers(
         .iter()
         .map(NativeCandidateReducer::resident_bytes)
         .try_fold(0usize, usize::checked_add)
-        .ok_or_else(|| {
+        .ok_or({
             PackingRunnerError::CandidateReducer(NativePackingCandidateSinkError::MemoryExceeded)
         })?;
     memory_bound
@@ -946,7 +948,7 @@ fn merge_worker_reducers(
     // may coexist with worker-local reducer hash tables.
     let reducer_bytes = source_reducer_bytes
         .checked_add(merged.merge_index_resident_bytes())
-        .ok_or_else(|| {
+        .ok_or({
             PackingRunnerError::CandidateReducer(NativePackingCandidateSinkError::MemoryExceeded)
         })?
         .max(merged.resident_bytes());

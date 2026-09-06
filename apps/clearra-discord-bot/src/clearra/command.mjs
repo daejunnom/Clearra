@@ -118,8 +118,10 @@ const SFINDER_STRUCTURE_SEARCH_COMMANDS = new Set([
   "spin-cover",
   "spin",
 ]);
-const DEFAULT_SEARCH_TIMEOUT_MS = 3 * 60_000;
-const DEFAULT_PC_SEARCH_TIMEOUT_MS = 5 * 60_000;
+// The ingress supplies the remaining interaction deadline. Keep a minute for
+// delivery inside Discord's 15-minute token lifetime, without shorter PC caps.
+const DEFAULT_SEARCH_TIMEOUT_MS = 14 * 60_000;
+const DEFAULT_PC_SEARCH_TIMEOUT_MS = DEFAULT_SEARCH_TIMEOUT_MS;
 const DEFAULT_LONG_SEARCH_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_UTILITY_SEARCH_TIMEOUT_MS = 15 * 60_000;
 const DISCORD_UTILITY_SUBCOMMANDS = new Set([
@@ -579,9 +581,7 @@ export function prepareClearraArguments(tokens, execution = {}) {
   ) {
     output.push("--no-tablebase");
   }
-  const fixedSingleWorkerPcScore = command === "pc" &&
-    ["score", "score-minimals", "score-finder"].includes(normalizedSearchCommand(tokens[1]));
-  const parallelSearch = !fixedSingleWorkerPcScore && (
+  const parallelSearch = (
     PARALLEL_SEARCH_COMMANDS.has(command) ||
     (command === "sfinder" && SFINDER_SEARCH_COMMANDS.has(sfinderCommand))
   );

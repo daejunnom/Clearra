@@ -7,6 +7,8 @@ import {
   type ClearraWasmModule
 } from './clearraWasmRuntime';
 import { listenForWasmOwnerTermination } from '@clearra/ui/wasm-lifecycle';
+import type { ClearraWorkerExecutionKind } from './ClearraVerifierPool';
+import { createWorkerHostYield } from './workerHostYield';
 import {
   WORKER_HEARTBEAT_INTERVAL_MS,
   sha256Hex,
@@ -32,6 +34,7 @@ type VerifierRequest =
   | {
       type: 'initialize';
       initialization: string | ArrayBuffer;
+      executionKind?: ClearraWorkerExecutionKind;
       lifecycleOwnerId?: string;
       hostCapabilities?: ClearraWasmHostCapabilities;
       delegation: ExecutableDelegationPermit;
@@ -43,6 +46,7 @@ type VerifierRequest =
       delegation: ExecutableDelegationPermit;
     }
   | { type: 'finish'; requestId: number; delegation: ExecutableDelegationPermit }
+  | { type: 'cancel-exact-task'; requestId: number }
   | { type: 'dispose' };
 
 type VerifierResponse =
@@ -81,6 +85,8 @@ type VerifierResponse =
 
 let wasm: ClearraWasmModule | null = null;
 let initialized = false;
+let executionKind: ClearraWorkerExecutionKind = 'geometry-verifier';
+const cancelledExactRequests = new Set<number>();
 let lifecycleOwnerId = '';
 let closeLifecycleListener: (() => void) | null = null;
 const acceptedOffers = new Map<string, DelegationOffer>();
@@ -90,6 +96,8 @@ type ExecutableVerifierRequest = Extract<
 >;
 const stagedExecutables = new Map<string, ExecutableVerifierRequest>();
 let workerId = '';
+const VERIFIER_HOST_QUANTUM_MS = 8;
+const yieldToHost = createWorkerHostYield();
 
 self.onmessage = (event: MessageEvent<VerifierRequest>) => {
   void handleRequest(event.data);
@@ -97,6 +105,10 @@ self.onmessage = (event: MessageEvent<VerifierRequest>) => {
 
 async function handleRequest(request: VerifierRequest) {
   try {
+    if (request.type === 'cancel-exact-task') {
+      if (executionKind === 'exact-at-most') cancelledExactRequests.add(request.requestId);
+      return;
+    }
     if (request.type === 'delegation-offer') {
       await acceptDelegationOffer(request.offer);
       return;
@@ -194,14 +206,60 @@ async function stageExecutable(request: ExecutableVerifierRequest): Promise<void
 async function executeAuthorized(request: ExecutableVerifierRequest): Promise<void> {
   if (request.type === 'initialize') {
     wasm ??= await loadClearraWasmModule(undefined, request.hostCapabilities);
-    wasm.distributed_verifier_start(request.initialization);
+    executionKind = request.executionKind ?? 'geometry-verifier';
+    cancelledExactRequests.clear();
+    if (executionKind === 'exact-at-most') {
+      if (!(request.initialization instanceof ArrayBuffer) ||
+        !wasm.distributed_finish_parallel_worker_init ||
+        !wasm.distributed_finish_parallel_worker_start ||
+        !wasm.distributed_finish_parallel_worker_advance ||
+        !wasm.distributed_finish_parallel_worker_cancel) {
+        throw new Error('exact worker initialization requires the parallel proof ABI');
+      }
+      wasm.distributed_finish_parallel_worker_init(request.initialization);
+    } else {
+      wasm.distributed_verifier_start(request.initialization);
+    }
     initialized = true;
     post({ type: 'ready' });
     return;
   }
   if (!wasm || !initialized) throw new Error('distributed verifier is not initialized');
+  if (executionKind === 'exact-at-most') {
+    if (request.type !== 'consume') throw new Error('exact task receipts have no verifier finish');
+    wasm.distributed_finish_parallel_worker_start!(request.batch);
+    let lastHeartbeatAt = performance.now();
+    let lastHostYieldAt = lastHeartbeatAt;
+    let receipt: ArrayBuffer | null = null;
+    while (receipt === null) {
+      receipt = cancelledExactRequests.delete(request.requestId)
+        ? wasm.distributed_finish_parallel_worker_cancel!()
+        : wasm.distributed_finish_parallel_worker_advance!(128);
+      if (receipt !== null) break;
+      const now = performance.now();
+      if (now - lastHeartbeatAt >= WORKER_HEARTBEAT_INTERVAL_MS) {
+        post({ type: 'heartbeat', requestId: request.requestId, progress: exactTaskProgress() });
+        lastHeartbeatAt = now;
+      }
+      // A solver work slice is not a host scheduling quantum. Match the
+      // Geometry verifier's bounded host yield while keeping cancel messages
+      // observable between quanta, including during long exact proofs.
+      if (now - lastHostYieldAt >= VERIFIER_HOST_QUANTUM_MS) {
+        await yieldToHost();
+        lastHostYieldAt = performance.now();
+      }
+    }
+    post({
+      type: 'consumed', requestId: request.requestId,
+      // A proof shard is not a Geometry candidate or a coverage check.
+      candidateCount: 0, candidateCountAvailable: false, candidateCountExact: false,
+      partial: receipt, progress: exactTaskProgress()
+    }, [receipt]);
+    return;
+  }
   if (request.type === 'consume') {
       let lastHeartbeatAt = performance.now();
+      let lastHostYieldAt = lastHeartbeatAt;
       let consumed: ClearraDistributedVerifierConsume =
         wasm.distributed_verifier_consume(request.batch);
       let candidateCount = consumed.candidateCount;
@@ -219,7 +277,13 @@ async function executeAuthorized(request: ExecutableVerifierRequest): Promise<vo
         if (now - lastHeartbeatAt >= WORKER_HEARTBEAT_INTERVAL_MS) {
           lastHeartbeatAt = postHeartbeat(request.requestId, wasm, now);
         }
-        await yieldToHost();
+        // A candidate is an atomic core transaction, not a browser scheduling
+        // quantum. Yielding a nested setTimeout(0) after every tiny candidate
+        // adds timer-clamping latency and leaves CPU workers mostly asleep.
+        if (now - lastHostYieldAt >= VERIFIER_HOST_QUANTUM_MS) {
+          await yieldToHost();
+          lastHostYieldAt = performance.now();
+        }
         consumed = wasm.distributed_verifier_continue();
         const accumulated = addVerifierCounts(candidateCount, consumed.candidateCount);
         candidateCount = accumulated.value;
@@ -353,8 +417,12 @@ function postHeartbeat(
   return now;
 }
 
-function yieldToHost(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+function exactTaskProgress(): ClearraDistributedVerifierProgress {
+  return {
+    candidateCount: 0, buildNodes: 0, coverageChecks: 0,
+    availability: { candidateCount: false, buildNodes: false, coverageChecks: false },
+    exactness: { candidateCount: false, buildNodes: false, coverageChecks: false }
+  };
 }
 
 function bindLifecycleOwner(ownerId: string) {
@@ -383,7 +451,13 @@ function disposeVerifierRuntime() {
 }
 
 function verifierFailure(error: unknown, wasm: ClearraWasmModule | null) {
-  const diagnostics = wasm?.failure_diagnostics();
+  let diagnostics: ReturnType<ClearraWasmModule['failure_diagnostics']> | undefined;
+  try {
+    diagnostics = wasm?.failure_diagnostics();
+  } catch {
+    // Reading diagnostics from a trapped instance is best effort. It must not
+    // prevent the original failure from reaching the parent and ending the job.
+  }
   const baseMessage = error instanceof Error ? error.message : String(error);
   const context = diagnostics
     ? `WASM linear memory: ${formatByteCount(diagnostics.linearMemoryBytes)}` +

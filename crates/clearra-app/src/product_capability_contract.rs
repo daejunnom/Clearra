@@ -369,6 +369,9 @@ pub(crate) struct ValidatedProductCapabilityContract {
 /// Closed typed payload carried by the common proof. Each product family adds
 /// its own validator-owned variant instead of borrowing PC proof fields or
 /// falling back to string metadata.
+// The `Pc` prefix mirrors the published product-capability identifiers and
+// keeps each closed proof variant searchable at this cross-product boundary.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ValidatedProductCapabilityPayload {
     PcTilingOpening {
@@ -724,6 +727,23 @@ impl ValidatedProductCapabilityPayload {
 }
 
 impl ValidatedProductCapabilityContract {
+    /// Heap pointees retained by the closed pc.minimals proof. Other product
+    /// payloads deliberately return None instead of silently omitting owners.
+    pub(crate) fn checked_minimum_cover_retained_capacity_bytes(&self) -> Option<u128> {
+        if self.contract != ProductCapabilityContract::PcMinimals {
+            return None;
+        }
+        match &self.payload {
+            ValidatedProductCapabilityPayload::PcMinimalsOpening { query, .. } => {
+                crate::pc_minimum_cover_result::checked_minimum_opening_query_retained_bytes(query)
+            }
+            ValidatedProductCapabilityPayload::PcMinimalsScenario { query, .. } => {
+                crate::pc_minimum_cover_result::checked_minimum_scenario_query_retained_bytes(query)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) const fn contract(&self) -> ProductCapabilityContract {
         self.contract
     }

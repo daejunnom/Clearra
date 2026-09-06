@@ -17,6 +17,7 @@ const bundle = await build({
         DEFAULT_RUNTIME_WARMUP_POLICY,
         automaticWorkerAuthority,
         createHostCapabilitySnapshot,
+        wasmProductRetentionByteCap,
         isHostCapabilitySnapshot,
         normalizeRuntimeWarmupPolicy
       } from './src/lib/wasm/hostCapabilitySnapshot.ts';
@@ -37,6 +38,10 @@ const bundle = await build({
         updateBuildProbabilityDraft
       } from './src/lib/workspace/buildProbabilityModel.ts';
       export { workspaceMessage } from './src/lib/workspace/workspaceI18n.ts';
+      export {
+        projectWorkspacePublicFailure,
+        workspacePublicFailureMessage
+      } from './src/lib/workspace/workspacePublicFailure.ts';
       export {
         ClearraWasmTransferLimitError,
         assertWasmTransferWithinHostCap
@@ -106,8 +111,171 @@ test('PC path and score-finder are reachable on both Web PC entry surfaces', () 
   assert.match(standalone, /scoreMode: 'path'/u);
   assert.match(standalone, /scoreMode: 'score-finder'/u);
   assert.match(pager, /payload\.content\.payload_kind === 'pc-path-family'/u);
-  assert.match(pager, /complete ordinary solution family, not a portfolio tie/u);
-  assert.match(pager, /Inspect every replay step/u);
+  assert.match(pager, /pathPageCount = lazyReplayPage\?\.geometry_count \?\? String\(pathCandidateGroups\.length\)/u);
+  assert.match(pager, /pathCandidateGroup = pathCandidateGroups\[lazyReplayPage \? 0 : pathPageIndex\] \?\? null/u);
+  assert.match(pager, /loadPcReplayPage\(/u);
+  assert.match(pager, /collectPcReplayGeometryExportPages\(/u);
+  assert.match(pager, /Every path can be copied; one representative replay is shown for each solution/u);
+  assert.match(pager, /Inspect representative replay steps/u);
+  assert.match(pager, /<PcPathReplayGif/u);
+  assert.match(pager, /pathCandidateGroup\.distinctPatternCount/u);
+  assert.match(pager, /pathCandidateGroup\.witnessCount/u);
+  assert.match(pager, /pcPathCandidateGroupExportPages\([\s\S]*?pathCandidateGroup,[\s\S]*?targetLines,[\s\S]*?target_terminal_board_mask,[\s\S]*?mirrored_terminal_board_mask/u);
+  assert.match(pager, /expectedTerminalBoardMask=\{buildPathFamily \? witness\.steps\.at\(-1\)\?\.board_after_line_clear_mask/u);
+  assert.doesNotMatch(pager, /\{pathFamily\.problem_id\}|\{witness\.pattern_id\}|\{step\.line_clear_identity\}/u);
+});
+
+test('workspace failure projection keeps raw identifiers in developer evidence only', () => {
+  const sentinel =
+    'ctk1|initial=deadbeef candidate_id=81 pattern_id=7 problem_id=private trace_identity=raw';
+  const projection = production.projectWorkspacePublicFailure({
+    status: 'failed',
+    responseStatus: 'execution-failed',
+    error: sentinel,
+    diagnostics: [{
+      code: 'E_SCHEMA_IDENTITY_MISMATCH_candidate_id_81',
+      severity: 'error',
+      message: sentinel
+    }]
+  });
+
+  assert.equal(projection.developerEvidence.error, sentinel);
+  assert.equal(projection.developerEvidence.diagnostics[0].message, sentinel);
+  assert.ok(projection.publicFailures.length > 0);
+  const publicText = ['en', 'ko']
+    .flatMap((language) => projection.publicFailures.map((failure) =>
+      production.workspacePublicFailureMessage(language, failure)
+    ))
+    .join('\n');
+  for (const privateToken of [
+    'ctk1',
+    'candidate_id',
+    'pattern_id',
+    'problem_id',
+    'trace_identity',
+    'E_SCHEMA_IDENTITY_MISMATCH'
+  ]) {
+    assert.doesNotMatch(publicText, new RegExp(privateToken, 'iu'));
+  }
+
+  const runtime = readFileSync(
+    new URL('../src/lib/workspace/workspaceRuntime.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(runtime, /projectWorkspacePublicFailure\(\{/u);
+  assert.match(runtime, /publicFailures: failure\.publicFailures/u);
+  assert.match(runtime, /developerDiagnostics: failure\.developerEvidence\.diagnostics/u);
+  assert.match(runtime, /developerError: failure\.developerEvidence\.error/u);
+  assert.doesNotMatch(
+    runtime,
+    /(?:publicFailures|developerDiagnostics|developerError):\s*state\.(?:diagnostics|error)/u
+  );
+});
+
+test('generic runtime wrappers expose stable failure categories without private evidence', () => {
+  for (const [message, expected] of [
+    ['heartbeat lease expired candidate_id=81', 'worker-lease-expired'],
+    ['RuntimeError: unreachable ctk1|private', 'runtime-trap'],
+    ['memory access out of bounds pattern_id=7', 'runtime-trap'],
+    ['whole-live budget exceeded problem_id=private', 'resource-limit'],
+    ['Build replay does not terminate at the requested cleared field', 'result-invalid']
+  ]) {
+    const projected = production.projectWorkspacePublicFailure({
+      status: 'failed', responseStatus: 'execution-failed',
+      diagnostics: [{ code: 'generic-error', severity: 'error', message }]
+    });
+    assert.ok(projected.publicFailures.some((failure) => failure.code === expected));
+    for (const language of ['en', 'ko']) {
+      for (const failure of projected.publicFailures) {
+        assert.doesNotMatch(production.workspacePublicFailureMessage(language, failure),
+          /ctk1|candidate_id|pattern_id|problem_id/u);
+      }
+    }
+  }
+});
+
+test('workspace shows one concrete replay failure and retains every wrapping diagnostic', () => {
+  const diagnostics = [
+    { code: 'I_PC_QUERY_MVP_SUPPORTED', severity: 'info', message: 'PC query is supported' },
+    { code: 'E_APP_UNSUPPORTED', severity: 'error', message: 'requested execution runtime is unsupported' },
+    { code: 'E_APP_EXECUTION_FAILED', severity: 'error', message: 'execution did not complete' },
+    {
+      code: 'E_APP_UNSUPPORTED', severity: 'error',
+      message: 'requested execution runtime is unsupported: complete_replay_whole_live_limit_exceeded'
+    }
+  ];
+  const projected = production.projectWorkspacePublicFailure({
+    status: 'failed', responseStatus: 'unsupported', diagnostics
+  });
+  assert.deepEqual(projected.publicFailures, [{ code: 'resource-limit', severity: 'error' }]);
+  assert.deepEqual(projected.developerEvidence.diagnostics, diagnostics);
+
+  const unsupported = production.projectWorkspacePublicFailure({
+    status: 'failed', responseStatus: 'unsupported', diagnostics: diagnostics.slice(0, 2)
+  });
+  assert.deepEqual(unsupported.publicFailures, [{ code: 'unsupported', severity: 'error' }]);
+
+  const warning = production.projectWorkspacePublicFailure({
+    status: 'failed', responseStatus: 'execution-failed',
+    diagnostics: [{ code: 'W_MEMORY_BUDGET', severity: 'warning', message: 'unrelated warning' }]
+  });
+  assert.deepEqual(warning.publicFailures, [{ code: 'execution-failed', severity: 'error' }]);
+
+  const supported = production.projectWorkspacePublicFailure({
+    status: 'completed', responseStatus: 'success', diagnostics: diagnostics.slice(0, 1)
+  });
+  assert.deepEqual(supported.publicFailures, []);
+  assert.deepEqual(supported.developerEvidence.diagnostics, diagnostics.slice(0, 1));
+});
+
+test('normal workspace failure DOM surfaces use the shared public notice only', () => {
+  for (const file of [
+    'ResultWorkspaceFrame.svelte',
+    'ProductResultPager.svelte',
+    'ProductFamilyResult.svelte',
+    'BuildV2Result.svelte',
+    'PcSolverResult.svelte',
+    'SetupFinderResult.svelte',
+    'OperationSequenceWorkspace.svelte',
+    'SequenceDependenciesWorkspace.svelte',
+    'DocumentUtilityWorkspace.svelte',
+    'CtkDrawerWorkspace.svelte'
+  ]) {
+    const source = readFileSync(
+      new URL(`../src/lib/workspace/${file}`, import.meta.url),
+      'utf8'
+    );
+    assert.match(source, /WorkspaceFailureNotice/u, file);
+    assert.doesNotMatch(
+      source,
+      /\b(?:view|runtimeView|renderRuntimeView)\.(?:error|diagnostics)\b|diagnostic\.(?:code|message)/u,
+      file
+    );
+  }
+
+  const setupWorkspace = readFileSync(
+    new URL('../src/lib/workspace/SetupFinderWorkspace.svelte', import.meta.url),
+    'utf8'
+  );
+  assert.match(setupWorkspace, /developerFailure: projection\.developerEvidence/u);
+  assert.doesNotMatch(
+    setupWorkspace,
+    /diagnostics\.map\(\(diagnostic\) => diagnostic\.message\)|event\.message\s*\|\|\s*label/u
+  );
+
+  const pager = readFileSync(
+    new URL('../src/lib/workspace/ProductResultPager.svelte', import.meta.url),
+    'utf8'
+  );
+  assert.match(pager, /projectWorkspacePublicFailure\(\{/u);
+  assert.doesNotMatch(pager, />\{error\}</u);
+
+  const replay = readFileSync(
+    new URL('../src/lib/workspace/PcPathReplayGif.svelte', import.meta.url),
+    'utf8'
+  );
+  assert.match(replay, /\{:else if renderError\}[\s\S]*?\{invalidLabel\}/u);
+  assert.doesNotMatch(replay, /title=\{renderError\}|>\{renderError\}</u);
 });
 
 test('Build result UI separates ordinary families from exact portfolio paging', () => {
@@ -120,6 +288,12 @@ test('Build result UI separates ordinary families from exact portfolio paging', 
   assert.match(pager, /payload_kind === 'build-coverage-portfolio-v2'/u);
   assert.match(pager, /payload_kind === 'build-setup-family-v1'/u);
   assert.match(pager, /loadInitialBuildPortfolioPage/u);
+  const initialBuildLoaderStart = pager.indexOf('async function loadInitialBuildPortfolioPage');
+  const initialBuildLoaderEnd = pager.indexOf('\n  function releaseHandle', initialBuildLoaderStart);
+  const initialBuildLoader = pager.slice(initialBuildLoaderStart, initialBuildLoaderEnd);
+  assert.ok(initialBuildLoaderStart >= 0 && initialBuildLoaderEnd > initialBuildLoaderStart);
+  assert.match(initialBuildLoader, /await loadCoveragePortfolioExactPage\(/u);
+  assert.match(initialBuildLoader, /isCurrent: \(\) => activeIdentity === payloadIdentity/u);
   assert.match(pager, /All optimal Build portfolios/u);
   assert.match(pager, /ordinary result family, not a portfolio tie/u);
   assert.match(pager, /Attack is informational/u);
@@ -423,6 +597,16 @@ test('device-memory snapshot owns a conservative transfer cap and rejects before
   ]) {
     assert.match(runtimeSource, new RegExp(`\\b${accessor}\\b`, 'u'), accessor);
   }
+});
+
+test('product-retention budget is bounded independently of transfer and worker count', () => {
+  for (const [memoryGiB, expectedMiB] of [[undefined, 64], [0.5, 32], [1, 64], [4, 256], [8, 512], [64, 512]]) {
+    const snapshot = snapshotForMemory(memoryGiB);
+    assert.equal(production.wasmProductRetentionByteCap(snapshot), expectedMiB * MIB);
+    assert.equal(production.wasmProductRetentionByteCap({ ...snapshot, reportedLogicalProcessors: 128 }), expectedMiB * MIB);
+  }
+  assert.equal(snapshotForMemory(4).wasmTransferByteCap, 128 * MIB);
+  assert.equal(production.wasmProductRetentionByteCap(snapshotForMemory(4)), 256 * MIB);
 });
 
 test('build probability primary metric is explicitly oracle and distinct from finesse knowledge', () => {

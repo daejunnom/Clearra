@@ -57,10 +57,11 @@ pub use product_build_identity::{
 };
 pub use product_result_payload::{
     BuildCoverageCompletenessPayload, BuildCoveragePortfolioPayloadError,
-    BuildCoveragePortfolioV2Payload, BuildSetupCandidateCoverageV1Payload,
+    BuildCoveragePortfolioV2Payload, BuildPathFamilyPayload, BuildSetupCandidateCoverageV1Payload,
     BuildSetupCompletenessPayload, BuildSetupFamilyPayloadError, BuildSetupFamilyV1Payload,
     CoveragePortfolioPagePayload, PcBestSavePayload, PcBestSaveWinnerPayload, PcPathFamilyPayload,
-    PcPathStepPayload, PcPathWitnessPayload, PcSaveCompletenessPayload, PcSaveGroupPayload,
+    PcPathStepPayload, PcPathWitnessPayload, PcReplayPageMetadata, PcReplayPagePayload,
+    PcSaveCompletenessPayload, PcSaveGroupPayload,
     PcSaveGroupsPayload, PcSavePieceMultisetPayload, PcSaveRunMetadataPayload,
     PcSaveWitnessPayload, PcScoreFieldPayload, PcScoreFieldSummaryPayload,
     ProductCandidateMemberPayload, ProductResultPayload, ProductResultPayloadContent,

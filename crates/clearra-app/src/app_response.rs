@@ -12,7 +12,7 @@ use crate::{
     pc_score_summary_result::ValidatedPcScoreExecutionEvidence,
     pc_tiling_family_result::ValidatedPcTilingExecutionEvidence,
     portfolio_alternative_store::ProductPageSourceOwner,
-    product_capability_contract::ProductCapabilityContractError,
+    product_capability_contract::{ProductCapabilityContract, ProductCapabilityContractError},
     product_capability_result::ProductCapabilityResult,
     render::AppRenderModel,
     resource_contract::{
@@ -24,8 +24,8 @@ use clearra_core_executor::CoreExecutionResult;
 use clearra_host_contract::{
     AppCommandKind, AppResponse as HostAppResponse, AppResult, AppStatus as HostAppStatus,
     BackendReport, CapabilityReport, ContinuationReport, Diagnostic, ProductResultPayload,
-    RenderCapabilityReport as HostRenderCapabilityReport, ResourceReport,
-    SolutionSetArtifactPayload, HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
+    ProductResultPayloadContent, RenderCapabilityReport as HostRenderCapabilityReport,
+    ResourceReport, SolutionSetArtifactPayload, HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
 };
 #[cfg(feature = "bitmap-render")]
 use clearra_output::render::RenderExactOutputGate;
@@ -422,7 +422,18 @@ impl AppResponse {
     pub(crate) fn without_product_capability_transients(mut self) -> Self {
         let strip_replay_transients = self.pc_score_execution_evidence.is_some()
             || self.pc_score_portfolio_execution_evidence.is_some()
-            || self.pc_save_execution_evidence.is_some();
+            || self.pc_save_execution_evidence.is_some()
+            || self
+                .product_capability_result
+                .as_ref()
+                .is_some_and(|result| result.contract() == ProductCapabilityContract::PcPath)
+            || self.public_result_payload.as_ref().is_some_and(|payload| {
+                matches!(
+                    payload.content(),
+                    ProductResultPayloadContent::PcPathFamily(_)
+                        | ProductResultPayloadContent::BuildPathFamily(_)
+                )
+            });
         self.pc_chance_execution_evidence = None;
         self.pc_failed_queue_execution_evidence = None;
         self.pc_save_execution_evidence = None;
@@ -741,6 +752,58 @@ impl AppResponse {
         Some(bytes)
     }
 
+    /// Heap retained by the ordinary PC response while the minimum-cover
+    /// preparation still owns the query and product proof. This is deliberately
+    /// separate from the finite Build response authority above: a new evidence
+    /// or result owner must gain its own projection before a local proof shard
+    /// can be admitted beside it.
+    pub(crate) fn checked_pc_minimals_retained_capacity_bytes(&self) -> Option<u128> {
+        if self.status != AppStatus::Success
+            || self.command != Some(AppCommandKind::Pc)
+            || self.exit_code_hint != ExitCodeHint::Success
+            || self.error.is_some()
+            || self.continuation.is_some()
+            || self.pc_chance_execution_evidence.is_some()
+            || self.pc_failed_queue_execution_evidence.is_some()
+            || self.pc_save_execution_evidence.is_some()
+            || self.pc_score_execution_evidence.is_some()
+            || self.pc_score_portfolio_execution_evidence.is_some()
+            || self.pc_tiling_execution_evidence.is_some()
+            || self.product_capability_result.is_some()
+            || self.public_result_payload.is_some()
+            || self.public_page_source_owner.is_some()
+        {
+            return None;
+        }
+        let result = match (
+            &self.render_model,
+            self.result.as_ref().map(AppResult::kind),
+        ) {
+            (Some(AppRenderModel::Pc(result)), Some("pc"))
+            | (Some(AppRenderModel::Scenario(result)), Some("pc-scenario")) => result,
+            _ => return None,
+        };
+        let core_heap = result
+            .checked_resource_retained_bytes()?
+            .checked_sub(core::mem::size_of::<CoreExecutionResult>() as u128)?;
+        self.result
+            .as_ref()?
+            .checked_retained_capacity_bytes()?
+            .checked_add(
+                self.diagnostics
+                    .validation()
+                    .checked_retained_capacity_bytes()?,
+            )?
+            .checked_add(self.backend_report.checked_retained_capacity_bytes()?)?
+            .checked_add(self.resource_report.checked_retained_capacity_bytes()?)?
+            .checked_add(self.capability_report.checked_retained_capacity_bytes()?)?
+            .checked_add(checked_count_bytes(
+                self.effects.capacity() as u128,
+                core::mem::size_of::<AppEffect>() as u128,
+            )?)?
+            .checked_add(core_heap)
+    }
+
     #[cfg(test)]
     pub(crate) fn with_result_kind_for_test(mut self, kind: &str) -> Self {
         self.result = Some(AppResult::new(kind));
@@ -942,6 +1005,71 @@ mod tests {
         assert_eq!(
             response.to_host_response().runtime_identity(),
             &ProductBuildIdentity::current()
+        );
+    }
+
+    #[test]
+    fn pc_minimals_response_memory_counts_heap_and_rejects_other_owners() {
+        let mut response = AppResponse::success(AppRenderModel::Pc(CoreExecutionResult::new(
+            vec![(
+                allocated_text(80, "minimum-source"),
+                allocated_text(192, "retained"),
+            )],
+            Vec::new(),
+        )))
+        .with_contract_context(AppCommandKind::Pc);
+        let before = response
+            .checked_pc_minimals_retained_capacity_bytes()
+            .expect("ordinary pre-product PC response has a measured heap");
+        assert!(before >= 272);
+        let diagnostics = non_empty_validation_report();
+        let diagnostic_bytes = diagnostics.checked_retained_capacity_bytes().unwrap();
+        let prior_bytes = response
+            .diagnostics
+            .validation()
+            .checked_retained_capacity_bytes()
+            .unwrap();
+        response.diagnostics = AppDiagnosticReport::new(diagnostics);
+        assert_eq!(
+            response.checked_pc_minimals_retained_capacity_bytes(),
+            before
+                .checked_sub(prior_bytes)
+                .and_then(|n| n.checked_add(diagnostic_bytes))
+        );
+        assert_eq!(
+            response.checked_retained_capacity_bytes(),
+            None,
+            "the separate finite Build authority must stay closed for PC"
+        );
+        response.command = Some(AppCommandKind::BuildProbability);
+        assert_eq!(response.checked_pc_minimals_retained_capacity_bytes(), None);
+        response.command = Some(AppCommandKind::Pc);
+        response.render_model = None;
+        assert_eq!(
+            response.checked_pc_minimals_retained_capacity_bytes(),
+            None,
+            "a local minimum shard requires its retained Core source owner"
+        );
+        let scenario = AppResponse::success(AppRenderModel::Scenario(CoreExecutionResult::new(
+            vec![(
+                allocated_text(48, "scenario-source"),
+                allocated_text(72, "retained"),
+            )],
+            Vec::new(),
+        )))
+        .with_contract_context(AppCommandKind::Pc);
+        assert!(
+            scenario
+                .checked_pc_minimals_retained_capacity_bytes()
+                .unwrap()
+                >= 120
+        );
+        assert_eq!(
+            scenario
+                .with_result_kind_for_test("pc")
+                .checked_pc_minimals_retained_capacity_bytes(),
+            None,
+            "Scenario Core owner requires the matching pc-scenario response kind"
         );
     }
 

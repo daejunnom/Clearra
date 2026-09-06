@@ -3,10 +3,12 @@
 
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import ProductResultPager from './ProductResultPager.svelte';
-  import type {
-    ProductMemberPageLoader,
-    ProductNextPageLoader,
-    ProductPageRelease
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
+  import {
+    productResultOwnsSolutionPage,
+    type ProductMemberPageLoader,
+    type ProductNextPageLoader,
+    type ProductPageRelease
   } from './productResultPager';
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
@@ -27,6 +29,7 @@
     workspaceProbability,
     type WorkspaceLanguage
   } from './workspaceI18n';
+  import { workspaceActiveWorkerCount, workspaceWorkerCapacity } from './workspaceProgressModel';
 
   export let view: WorkspaceRuntimeView;
   export let language: WorkspaceLanguage;
@@ -41,6 +44,7 @@
 
   $: report = view.searchReport;
   $: productResultPayload = view.response?.product_result_payload ?? null;
+  $: productSolutionPageActive = productResultOwnsSolutionPage(productResultPayload);
   $: pcScoreFieldSummary = productResultPayload?.content.payload_kind === 'pc-score-field-summary'
     ? productResultPayload.content.payload
     : null;
@@ -103,10 +107,8 @@
   $: progressPercent = view.progressTotal > 0
     ? Math.max(0, Math.min(100, (view.progressDone / view.progressTotal) * 100))
     : 0;
-  $: failureMessages = Array.from(new Set([
-    ...(view.error ? [view.error] : []),
-    ...view.diagnostics.map((diagnostic) => diagnostic.message).filter(Boolean)
-  ]));
+  $: activeWorkerCount = workspaceActiveWorkerCount(view.progressTelemetry, view.status);
+  $: workerCapacity = workspaceWorkerCapacity(view.progressTelemetry);
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
@@ -133,7 +135,10 @@
         {/if}
         <strong>{label(view.status)}</strong>
       </div>
-      <span>{(elapsedMs / 1000).toFixed(1)}s</span>
+      <div class="runtime-metrics">
+        <span class="worker-metric">{label('activeWorkers')} <strong>{activeWorkerCount === null ? '—' : number(activeWorkerCount)} / {workerCapacity === null ? '—' : number(workerCapacity)}</strong></span>
+        <span class="elapsed-metric">{(elapsedMs / 1000).toFixed(1)}s</span>
+      </div>
     </header>
 
     {#if view.status === 'running' || view.status === 'validating' || view.status === 'cancelling'}
@@ -148,9 +153,7 @@
     {/if}
 
     {#if view.status === 'failed' || view.status === 'terminated'}
-      <div class="failure" role="alert">
-        {#each failureMessages as message}<p>{message}</p>{/each}
-      </div>
+      <WorkspaceFailureNotice failures={view.publicFailures} {language} compact />
     {:else if view.status === 'completed'}
       {#if resultIncomplete}
         <p class="incomplete" role="status">{label('playerFinderResultsIncomplete')}</p>
@@ -161,7 +164,7 @@
         {#if scoringRequested || pcScoreFieldSummary}
           <div><strong>{pcScoreFieldSummary?.overall_score ?? summaryFields.score_field_average_score ?? summaryFields.score_unconditional_expected_score ?? '—'}</strong><span>{pcScoreFieldSummary ? label('overallScore') : label('averageScore')}</span></div>
         {/if}
-        {#if solutionCount !== null}
+        {#if solutionCount !== null && !productSolutionPageActive}
           <SolutionCopyFormatControl
             bind:value={copyFormat}
             {language}
@@ -181,22 +184,24 @@
         releasePages={releaseProductPages}
       />
 
-      {#if solutionCount === null}
-          <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('solutionSetNotCalculated')}</span></div>
-        {:else if solutionCount > 0}
-          <SolutionGallery
-            {solutionKeys}
-            {solutionCount}
-            loadSolutionPage={boundSolutionPageLoader}
-            solutionProbabilities={solutionProbabilityByKey}
-            solutionAverageScores={solutionAverageScoreByKey}
-            solutionSetHash={report?.normalized_solution_set_hash ?? ''}
-            {targetLines}
-            {language}
-            {copyFormat}
-          />
-        {:else}
-          <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label(resultIncomplete ? 'playerFinderNoConclusion' : 'noSolutions')}</span></div>
+      {#if !productSolutionPageActive}
+        {#if solutionCount === null}
+            <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('solutionSetNotCalculated')}</span></div>
+          {:else if solutionCount > 0}
+            <SolutionGallery
+              {solutionKeys}
+              {solutionCount}
+              loadSolutionPage={boundSolutionPageLoader}
+              solutionProbabilities={solutionProbabilityByKey}
+              solutionAverageScores={solutionAverageScoreByKey}
+              solutionSetHash={report?.normalized_solution_set_hash ?? ''}
+              {targetLines}
+              {language}
+              {copyFormat}
+            />
+          {:else}
+            <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label(resultIncomplete ? 'playerFinderNoConclusion' : 'noSolutions')}</span></div>
+        {/if}
       {/if}
     {/if}
   </section>
@@ -204,17 +209,19 @@
 
 <style>
   .solver-result { border-top: 1px solid #d9dfdb; margin: 0 auto; max-width: 1180px; padding: 22px 0 40px; }
-  header, .status, .result-summary, .result-summary > div { align-items: center; display: flex; }
+  header, .status, .runtime-metrics, .result-summary, .result-summary > div { align-items: center; display: flex; }
   header { color: #68736f; font-size: 12px; justify-content: space-between; }
   .status { color: #08766d; gap: 8px; }
   .status strong { color: #17211e; font-size: 16px; }
+  .runtime-metrics { gap: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .worker-metric { display: inline-flex; justify-content: space-between; align-items: baseline; width: 15em; }
+  .worker-metric strong { min-width: 9ch; text-align: right; }
+  .elapsed-metric { width: 9ch; text-align: right; }
+  .runtime-metrics strong { color: #26322e; margin-left: 5px; }
   .spinner { animation: spin 900ms linear infinite; display: inline-flex; }
   .progress { background: #e5ebe7; height: 3px; margin-top: 14px; overflow: hidden; position: relative; }
   .progress i { background: #16877d; display: block; height: 100%; transition: width 120ms linear; }
   .progress.indeterminate i { animation: sweep 1.1s ease-in-out infinite; left: -30%; position: absolute; width: 30% !important; }
-  .failure { background: #fff1ed; border-left: 3px solid #c45635; color: #8d3026; margin-top: 16px; padding: 10px 13px; }
-  .failure p { font-size: 12px; margin: 0; overflow-wrap: anywhere; }
-  .failure p + p { margin-top: 4px; }
   .incomplete { background: #fff7df; border-left: 3px solid #c89b2f; color: #654a0e; font-size: 11px; line-height: 1.5; margin: 16px 0 0; padding: 9px 11px; }
   .result-summary { border-bottom: 1px solid #e0e5e2; gap: 28px; margin: 18px 0; padding-bottom: 16px; }
   .result-summary > div { gap: 7px; }
@@ -227,6 +234,7 @@
   @keyframes sweep { from { transform: translateX(0); } to { transform: translateX(430%); } }
   @media (max-width: 1228px) { .solver-result { margin-left: 24px; margin-right: 24px; } }
   @media (max-width: 620px) {
+    header { align-items: flex-start; flex-direction: column; gap: 12px; }
     .solver-result { margin-left: 16px; margin-right: 16px; padding-bottom: 28px; }
     .result-summary { align-items: flex-start; flex-wrap: wrap; gap: 10px 20px; }
     .result-summary > :global(:last-child) { flex: 1 1 100%; margin-left: 0; }

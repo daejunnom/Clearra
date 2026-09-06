@@ -29,6 +29,17 @@ pub struct AppContext {
 }
 
 impl AppContext {
+    /// App services, language and file policy currently own only inline values.
+    /// Fail closed if this context acquires a dropping (heap-owning) field in a
+    /// later refactor, rather than silently omitting it from local-shard guards.
+    pub const fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        if core::mem::needs_drop::<Self>() {
+            None
+        } else {
+            Some(0)
+        }
+    }
+
     pub fn new(services: AppServices) -> Self {
         Self {
             services,
@@ -179,6 +190,14 @@ impl AppContext {
     pub fn services(&self) -> &AppServices {
         &self.services
     }
+
+    pub fn set_product_retention_budget(&mut self, budget: Option<crate::ProductRetentionBudget>) {
+        let executor = self
+            .services
+            .core_executor()
+            .with_product_retention_budget(budget);
+        self.services = self.services.clone().with_core_executor(executor);
+    }
 }
 impl AppContext {
     pub fn language(&self) -> LanguageId {
@@ -223,6 +242,31 @@ impl AppContext {
             }
             _ => response,
         };
+        self.finalize_response_surface(response, output_policy)
+    }
+
+    /// Finalizes a response whose product proof was already completed by the
+    /// cooperative product coordinator. The caller must obtain `result` from
+    /// `ProductCapabilityResult`'s checked preparation API; this seam only
+    /// avoids replaying that proof through the blocking validator.
+    pub(crate) fn finalize_response_with_prevalidated_product_capability(
+        &self,
+        response: AppResponse,
+        command_kind: clearra_host_contract::AppCommandKind,
+        output_policy: &AppOutputPolicy,
+        result: ProductCapabilityResult,
+    ) -> AppResponse {
+        let response = response
+            .with_contract_context(command_kind)
+            .with_product_capability_result(result);
+        self.finalize_response_surface(response, output_policy)
+    }
+
+    fn finalize_response_surface(
+        &self,
+        response: AppResponse,
+        output_policy: &AppOutputPolicy,
+    ) -> AppResponse {
         let response = response.without_product_capability_transients();
         self.services
             .diagnostic_sink()
@@ -387,11 +431,11 @@ fn checked_direct_score_context_base_bytes(
         })
         .and_then(|bytes| {
             bytes.checked_add(
-                include_pc_tiling_authority
-                    .then_some(
-                        crate::pc_tiling_family_result::PcTilingCompiledAuthority::execution_evidence_retained_upper_bound_bytes(),
-                    )
-                    .unwrap_or_default(),
+                if include_pc_tiling_authority {
+                    crate::pc_tiling_family_result::PcTilingCompiledAuthority::execution_evidence_retained_upper_bound_bytes()
+                } else {
+                    Default::default()
+                },
             )
         })
         .and_then(|bytes| bytes.checked_add(core::mem::size_of::<DiagnosticReport>() as u128))

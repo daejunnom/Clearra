@@ -148,6 +148,8 @@ pub(crate) fn apply_pc_postprocess(
     apply_pc_postprocess_internal(result, control, false).map(PcScorePostprocessOutput::into_result)
 }
 
+// Retained for callers that need derivation output without a custom memory guard.
+#[allow(dead_code)]
 pub(crate) fn apply_pc_postprocess_with_derivation(
     result: CoreExecutionResult,
     control: &ExecutionControl,

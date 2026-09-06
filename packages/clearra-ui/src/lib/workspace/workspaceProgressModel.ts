@@ -175,6 +175,35 @@ export function buildWorkspaceProgressModel(
   return summarize(stages);
 }
 
+export function workspaceActiveWorkerCount(
+  telemetry: ClearraSearchProgressTelemetry | null,
+  status: WorkspaceRuntimeStatus
+): number | null {
+  if (
+    !telemetry ||
+    !telemetry.availability.active_workers ||
+    !telemetry.exactness.active_workers
+  ) {
+    return null;
+  }
+  if (status !== 'running' && status !== 'cancelling') return 0;
+  return Number.isSafeInteger(telemetry.active_workers) && telemetry.active_workers >= 0
+    ? telemetry.active_workers
+    : null;
+}
+
+export function workspaceWorkerCapacity(
+  telemetry: ClearraSearchProgressTelemetry | null
+): number | null {
+  if (
+    !telemetry?.availability.worker_count ||
+    !telemetry.exactness.worker_count
+  ) return null;
+  return Number.isSafeInteger(telemetry.worker_count) && telemetry.worker_count > 0
+    ? telemetry.worker_count
+    : null;
+}
+
 function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspaceProgressInput) {
   const telemetry = input.telemetry;
   if (!telemetry) {
@@ -188,6 +217,8 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   const geometry = stage(stages, 'geometry');
   const verify = stage(stages, 'verify');
   const finalize = stage(stages, 'finalize');
+  // Verification consumes streamed candidates concurrently. Its counters do not
+  // prove that the Geometry producer has finished enumerating candidates.
   const producerDone =
     telemetry.producer_complete || isFinalizingPhase(phase) || phase === 'draining';
   const predictedCandidates = predictedCandidateTotal(telemetry);
@@ -204,22 +235,10 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
     ) ||
       telemetryPositive(telemetry, 'coverage_checks', telemetry.coverage_checks) ||
       producerDone);
-  const verificationCompletionEvidence =
-    verify !== undefined &&
-    (telemetryExactPositive(
-      telemetry,
-      'candidates_verified',
-      telemetry.candidates_verified
-    ) ||
-      telemetryExactPositive(
-        telemetry,
-        'coverage_checks',
-        telemetry.coverage_checks
-      ));
 
   if (geometry) {
     geometry.status =
-      producerDone || verificationCompletionEvidence
+      producerDone
         ? 'complete'
         : phase === 'searching'
           ? 'running'
@@ -297,14 +316,6 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
       'progressMetricChecks',
       telemetryCount(telemetry, 'coverage_checks', telemetry.coverage_checks)
     );
-    if (telemetry.worker_count > 0) {
-      addMetric(
-        verify,
-        'progressMetricWorkers',
-        telemetry.active_workers,
-        telemetry.worker_count
-      );
-    }
   }
   if (finalize) finalize.status = isFinalizingPhase(phase) ? 'running' : 'pending';
 }
@@ -471,14 +482,6 @@ function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
         telemetry.geometry_family_count
       )
     );
-    if (telemetry.worker_count > 0) {
-      addMetric(
-        tasks,
-        'progressMetricWorkers',
-        telemetry.active_workers,
-        telemetry.worker_count
-      );
-    }
   }
   if (finalize) finalize.status = isFinalizingPhase(phase) ? 'running' : 'pending';
 }
@@ -605,14 +608,6 @@ function applyForwardProgress(stages: WorkspaceProgressStage[], input: Workspace
         'progressMetricStates',
         telemetryCount(telemetry, 'geometry_nodes', telemetry.geometry_nodes)
       );
-      if (telemetry.worker_count > 0) {
-        addMetric(
-          forward,
-          'progressMetricWorkers',
-          telemetry.active_workers,
-          telemetry.worker_count
-        );
-      }
     } else {
       applyMetric(
         forward,
@@ -689,7 +684,11 @@ function applyCoarseProgress(
     return;
   }
 
-  if (input.progressLabel === 'postprocess') {
+  if (
+    input.progressLabel === 'postprocess' ||
+    input.progressLabel === 'pc-minimals-finalize' ||
+    input.progressLabel?.startsWith('complete-replay-') === true
+  ) {
     const finalStageIndex = Math.max(
       0,
       stages.findIndex((candidate) =>

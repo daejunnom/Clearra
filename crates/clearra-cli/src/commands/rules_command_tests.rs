@@ -110,7 +110,7 @@ fn rules_command_exports_and_round_trips_the_canonical_srs_x_profile() {
     assert_eq!(profile.id(), KickTableProfileId::SrsX);
     assert_eq!(profile.source_rule(), RuleProfileId::SrsX);
     assert!(profile.supports_180());
-    assert_eq!(profile.transition_count(), 80);
+    assert_eq!(profile.transition_count(), 84);
     assert_eq!(profile, SrsKicks::srs_x_profile());
 }
 

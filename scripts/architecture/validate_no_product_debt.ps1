@@ -1,5 +1,6 @@
 # Release-blocking checks for product-code debt. Tests, fixture support, and
 # historical documents are excluded explicitly; product source is not.
+. (Join-Path $PSScriptRoot '../lib/clearra-local-diagnostics-policy.ps1')
 
 function Test-NoProductDebtAllowlistedPath([string]$RelativePath) {
     $path = $RelativePath.Replace('\', '/')
@@ -64,23 +65,10 @@ function Invoke-NoProductDebtStaticValidation {
             Add-ArchitectureError "NoProductDebt repository-local artifact directory exists: $forbiddenRoot"
         }
     }
-    $bundleTool = Join-Path $Root '_local/bundle.py'
-    if (-not (Test-Path -LiteralPath $bundleTool -PathType Leaf)) {
-        Add-ArchitectureError 'NoProductDebt Clearra review bundler is missing: _local/bundle.py'
-    }
-    $localRoot = Join-Path $Root '_local'
-    if (Test-Path -LiteralPath $localRoot) {
-        $allowedLocalPaths = [System.Collections.Generic.HashSet[string]]::new(
-            [System.StringComparer]::OrdinalIgnoreCase
-        )
-        [void]$allowedLocalPaths.Add('_local/bundle.py')
-        [void]$allowedLocalPaths.Add('_local/project_bundle.txt')
-        foreach ($entry in @(Get-ChildItem -LiteralPath $localRoot -Recurse -Force)) {
-            $relative = $entry.FullName.Substring($Root.Path.Length).TrimStart('\', '/').Replace('\', '/')
-            if ($entry.PSIsContainer -or -not $allowedLocalPaths.Contains($relative)) {
-                Add-ArchitectureError "NoProductDebt unexpected repository-local artifact exists: $relative"
-            }
-        }
+    try { Assert-ClearraLocalToolDirectoryPolicy $Root.Path }
+    catch { Add-ArchitectureError "NoProductDebt $($_.Exception.Message)" }
+    if ((Read-PhysicalText '.dockerignore') -notmatch '(?m)^/?_local/?\s*$') {
+        Add-ArchitectureError 'NoProductDebt raw Docker contexts must exclude local diagnostics'
     }
     $cargoRoot = Join-Path $Root '.cargo'
     if (Test-Path -LiteralPath $cargoRoot) {
@@ -139,6 +127,18 @@ function Invoke-NoProductDebtStaticValidation {
         'apps/clearra-web/src',
         'packages/clearra-ui/src'
     )
+    # Product source and tracked dependency manifests cannot import the ignored
+    # diagnostics boundary. Docs and benchmark tooling are not product owners.
+    $manifestPaths = @(& git -C $Root.Path ls-files -- 'Cargo.toml' 'package.json' ':(glob)crates/**/Cargo.toml' ':(glob)apps/**/Cargo.toml' ':(glob)apps/**/package.json' ':(glob)packages/**/package.json' ':(glob)apps/clearra-discord-bot/src/**/*.ts' ':(glob)apps/clearra-discord-bot/src/**/*.mjs')
+    if ($LASTEXITCODE -ne 0) { Add-ArchitectureError 'NoProductDebt could not resolve product manifests' }
+    $productManifests = foreach ($path in $manifestPaths) {
+        $fullPath = Join-Path $Root $path
+        if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+            [pscustomobject]@{ RelativePath = $path; Text = Get-Content -LiteralPath $fullPath -Raw }
+        }
+    }
+    try { Assert-ClearraProductExcludesLocalDiagnostics @($productFiles + $productManifests) }
+    catch { Add-ArchitectureError "NoProductDebt $($_.Exception.Message)" }
 
     Add-NoProductDebtPatternErrors $productFiles ([ordered]@{
         portable_reference_packing_fallback_allowed = 'portable_reference_packing_fallback_allowed'

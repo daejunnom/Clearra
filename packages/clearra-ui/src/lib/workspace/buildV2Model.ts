@@ -294,9 +294,10 @@ export function buildV2CommandArguments(request: BuildV2Request): string[] {
     'cpu',
     '--no-backend-fallback',
     '--workers',
-    String(request.workers),
-    '--cpu-warmup'
+    String(request.workers)
   );
+  // Background workspace prewarm is opportunistic. A hidden native warmup
+  // flag would join the entire pool before any ready worker can execute.
   if (request.useAllLogicalProcessors) tokens.push('--use-all-logical-processors');
   if (buildV2ScoreCapable(request.capability)) {
     tokens.push(

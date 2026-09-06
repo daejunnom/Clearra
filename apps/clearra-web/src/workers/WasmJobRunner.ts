@@ -7,7 +7,7 @@ import type { ClearraWasmModule } from './clearraWasmRuntime';
 // slice below 1 ms on native debug builds versus about 8 ms at 32,768 steps.
 const SEARCH_WORK_BUDGET = 2_048;
 const EVENT_DRAIN_INTERVAL = 8;
-const HOST_YIELD_INTERVAL = 1;
+const HOST_YIELD_BUDGET_MS = 8;
 const yieldToWorkerHost = createWorkerHostYield();
 
 export class WasmJobRunner {
@@ -28,7 +28,6 @@ export class WasmJobRunner {
     }
     let terminal: ClearraWasmWorkerEvent | null = null;
     let advancesSinceDrain = 0;
-    let advancesSinceYield = 0;
     let searchProfile: unknown = null;
     try {
       this.jobId = this.wasm.start_job(commandText);
@@ -37,13 +36,13 @@ export class WasmJobRunner {
       this.drain(onEvent, (event) => {
         terminal = event;
       });
+      let lastHostYield = performance.now();
       while (this.active && terminal === null) {
         if (!this.active || this.jobId === null) break;
         let status: ReturnType<ClearraWasmModule['advance_job']> = 'pending';
         if (!this.cancellationRequested) {
           status = this.wasm.advance_job(this.jobId, SEARCH_WORK_BUDGET);
           advancesSinceDrain += 1;
-          advancesSinceYield += 1;
         }
         const terminalStatus = status !== 'pending' && status !== 'progress';
         if (
@@ -61,13 +60,17 @@ export class WasmJobRunner {
           }, searchProfile);
           advancesSinceDrain = 0;
         }
+        const mustPublishProgress = status === 'progress';
+        const mustYieldForCancellation = this.cancellationRequested;
+        const hostTimeBudgetExpired =
+          performance.now() - lastHostYield >= HOST_YIELD_BUDGET_MS;
         if (
           terminal === null &&
-          (status === 'pending' || status === 'progress') &&
-          advancesSinceYield >= HOST_YIELD_INTERVAL
+          (status === 'pending' || mustPublishProgress) &&
+          (mustYieldForCancellation || mustPublishProgress || hostTimeBudgetExpired)
         ) {
           await yieldToWorkerHost();
-          advancesSinceYield = 0;
+          lastHostYield = performance.now();
         }
       }
       if (terminal === null) {

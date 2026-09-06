@@ -21,7 +21,7 @@ use clearra_core_executor::resource::{
     default_native_delegation_journal_root, DelegationJournal, DelegationJournalError,
     DurableDelegationAuthority, NativeJsonlDelegationJournal,
 };
-use clearra_core_executor::{CoreExecutionError, CoreExecutionResult};
+use clearra_core_executor::CoreExecutionError;
 use clearra_host_contract::ProductBuildIdentity;
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFinesseRequest,
@@ -40,6 +40,7 @@ pub use super::durable::{
 };
 use super::system_provider::system_boot_uuid;
 pub use super::system_provider::SystemNativeBuildProbabilityAdmissionProvider;
+use super::NativeBuildProbabilityExecutionOutput;
 use crate::app_services::AppCoreExecutorService;
 
 const BOOT_MARKER_SCHEMA: &str = "clearra.native-build-provider-boot.v1";
@@ -329,8 +330,9 @@ pub(crate) fn run_registered_native_build_probability(
     aggregation: BuildProbabilityAggregation,
     finesse: &BuildProbabilityFinesseRequest,
     solution_probability_policy: BuildSolutionProbabilityPolicy,
+    retain_private_score_authority: bool,
     control: &ExecutionControl,
-) -> Result<CoreExecutionResult, CoreExecutionError> {
+) -> Result<NativeBuildProbabilityExecutionOutput, CoreExecutionError> {
     let runtime = REGISTERED_NATIVE_BUILD_PROBABILITY_HOST.get().ok_or(
         CoreExecutionError::RuntimeUnavailable {
             component: "native_build_probability_host_provider_not_registered",
@@ -344,6 +346,7 @@ pub(crate) fn run_registered_native_build_probability(
         aggregation,
         finesse,
         solution_probability_policy,
+        retain_private_score_authority,
         control,
     )
 }
@@ -357,8 +360,9 @@ fn run_with_registered_host(
     aggregation: BuildProbabilityAggregation,
     finesse: &BuildProbabilityFinesseRequest,
     solution_probability_policy: BuildSolutionProbabilityPolicy,
+    retain_private_score_authority: bool,
     control: &ExecutionControl,
-) -> Result<CoreExecutionResult, CoreExecutionError> {
+) -> Result<NativeBuildProbabilityExecutionOutput, CoreExecutionError> {
     if finesse.score().is_some() {
         return Err(CoreExecutionError::RuntimeUnavailable {
             component: "native_build_probability_finesse_score_not_supported",
@@ -410,6 +414,7 @@ fn run_with_registered_host(
         finesse.pattern_knowledge(),
         solution_probability_policy,
         requested_workers,
+        retain_private_score_authority,
         control,
         &durable_identity,
         &mut authority,
@@ -608,6 +613,23 @@ mod tests {
         ProblemCompiler::compile_scenario_pc(&query).expect("one-piece problem")
     }
 
+    fn one_piece_auto_score_problem(hardware_limit: usize) -> SearchProblem {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_allow_hold(false)
+        .with_objective(ObjectivePolicy::unique().with_score_summary())
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_worker_hardware_limit(hardware_limit)
+                .with_max_candidates(1_024),
+        );
+        ProblemCompiler::compile_scenario_pc(&query).expect("one-piece auto score problem")
+    }
+
     fn field() -> BuildProbabilityField {
         BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
             .expect("one-row target")
@@ -648,9 +670,11 @@ mod tests {
                 pattern_knowledge: FinessePatternKnowledge::Both,
             },
             BuildSolutionProbabilityPolicy::Omit,
+            false,
             &ExecutionControl::default(),
         )
-        .expect("registered durable Build result");
+        .expect("registered durable Build result")
+        .into_result();
 
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(result.usize_field("workers_used"), Some(2));
@@ -682,6 +706,56 @@ mod tests {
     }
 
     #[test]
+    fn registered_host_retains_auto_reserved_native_score_derivation_through_ack() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let root = TestRoot::new("auto-score");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registration = NativeBuildProbabilityHostRegistration::new(
+            provider(&calls),
+            root.path().to_path_buf(),
+            BOOT_TWO,
+        )
+        .expect("registration request");
+        let runtime = prepare_registered_host(registration, &product_identity(SOURCE_COMMIT))
+            .expect("verified registered host");
+        let problem = one_piece_auto_score_problem(8);
+        assert_eq!(problem.backend_request().workers(), 7);
+
+        let output = run_with_registered_host(
+            &runtime,
+            AppCoreExecutorService::wasm_cpu(),
+            &problem,
+            field(),
+            BuildProbabilityAggregation::Buildability,
+            &BuildProbabilityFinesseRequest::Off,
+            BuildSolutionProbabilityPolicy::Omit,
+            true,
+            &ExecutionControl::default(),
+        )
+        .expect("registered durable Build score result");
+        let (result, derivation) = output.into_parts();
+        let derivation = derivation.expect("typed score derivation survives durable completion");
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(result.usize_field("workers_used"), Some(7));
+        assert_eq!(result.bool_field("score_summary_complete"), Some(true));
+        assert!(derivation.execution_source_complete());
+        assert_eq!(derivation.solution_field_average_owner().len(), 1);
+        assert!(!derivation.pattern_winners().is_empty());
+        let journals = jsonl_paths(root.path());
+        assert_eq!(journals.len(), 1);
+        let journal = NativeJsonlDelegationJournal::open_existing_job_for_recovery(&journals[0])
+            .expect("reopen typed terminal journal");
+        assert!(journal
+            .records()
+            .iter()
+            .any(|event| event.phase == DelegationPhase::Completed));
+        DurableDelegationAuthority::recover(journal)
+            .expect("typed terminal journal is recoverable after result acknowledgement");
+    }
+
+    #[test]
     fn system_provider_probes_every_requested_worker_and_runs_the_durable_pipeline() {
         let _resource_guard =
             crate::execution_resource_test_support::execution_resource_test_guard();
@@ -706,9 +780,11 @@ mod tests {
                 pattern_knowledge: FinessePatternKnowledge::Both,
             },
             BuildSolutionProbabilityPolicy::Omit,
+            false,
             &ExecutionControl::default(),
         )
-        .expect("system-provider durable Build result");
+        .expect("system-provider durable Build result")
+        .into_result();
 
         // Four total executor participants means three bounded native worker
         // threads plus the coordinator/producer, and the provider probes all

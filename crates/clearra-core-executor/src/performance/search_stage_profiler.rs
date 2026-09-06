@@ -63,15 +63,23 @@ pub(crate) enum ExecutorSearchStage {
     PackingUniverseAndFamily,
     PackingBackendAndPatternIndex,
     PackingGpuCapabilityQuery,
+    // These stages are emitted only by the optional native geometry-graph backend.
+    #[cfg_attr(not(feature = "native-c-core"), allow(dead_code))]
     PackingCpuCatalogCompile,
+    #[cfg_attr(not(feature = "native-c-core"), allow(dead_code))]
     PackingCpuGeometryGraph,
+    #[cfg_attr(not(feature = "native-c-core"), allow(dead_code))]
     PackingCpuTaskSplit,
+    #[cfg_attr(not(feature = "native-c-core"), allow(dead_code))]
     PackingCpuBuildabilityReduce,
     #[cfg(feature = "webgpu-search")]
     PackingGpuBatchPlan,
     #[cfg(feature = "webgpu-search")]
     PackingGpuConnect,
     #[cfg(feature = "webgpu-search")]
+    // The native-c-core WebGPU backend combines dispatch and readback here;
+    // WASM-CPU/WebGPU builds emit the split host/dispatch/payload stages below.
+    #[cfg_attr(not(feature = "native-c-core"), allow(dead_code))]
     PackingGpuDispatchReadback,
     #[cfg(feature = "webgpu-search")]
     PackingGpuHostPrepareSubmit,
@@ -84,6 +92,9 @@ pub(crate) enum ExecutorSearchStage {
     #[cfg(feature = "webgpu-search")]
     PackingGpuTraceEnumeration,
     #[cfg(feature = "webgpu-search")]
+    // Canonicalization is currently emitted by the native geometry backend;
+    // retain the stage identity so cross-target profiler schemas stay stable.
+    #[cfg_attr(not(feature = "native-c-core"), allow(dead_code))]
     PackingGpuCanonicalize,
     BuildUpNativeExecution,
     BuildUpGeometryLanguageExport,
@@ -116,6 +127,7 @@ pub(crate) enum ExecutorSearchStage {
     WasmWitnessSearch,
     WasmCandidateResultReduce,
     WasmFinalCoverage,
+    WasmMinimumCoverProof,
     WasmSpinExecutionGraphPrepare,
     WasmResultCanonicalize,
     FinesseGeometry,
@@ -192,6 +204,7 @@ impl ExecutorSearchStage {
         Self::WasmWitnessSearch,
         Self::WasmCandidateResultReduce,
         Self::WasmFinalCoverage,
+        Self::WasmMinimumCoverProof,
         Self::WasmSpinExecutionGraphPrepare,
         Self::WasmResultCanonicalize,
         Self::FinesseGeometry,
@@ -265,6 +278,7 @@ impl ExecutorSearchStage {
             Self::WasmWitnessSearch => "wasm.candidate.witness_search",
             Self::WasmCandidateResultReduce => "wasm.candidate.result_reduce",
             Self::WasmFinalCoverage => "wasm.finalize.coverage",
+            Self::WasmMinimumCoverProof => "wasm.finalize.minimum_cover_proof",
             Self::WasmSpinExecutionGraphPrepare => "wasm.finalize.spin_execution_graph_prepare",
             Self::WasmResultCanonicalize => "wasm.finalize.result_canonicalize",
             Self::FinesseGeometry => "finesse.geometry",
@@ -317,12 +331,12 @@ impl SearchStageSpan {
         #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
         {
             let active = scale != 0 && ACTIVE_PROFILE.with(|profile| profile.borrow().is_some());
-            return Self {
+            Self {
                 stage,
                 started: active.then(stage_now),
                 scale: if active { scale } else { 0 },
                 finished: false,
-            };
+            }
         }
         #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]
         {

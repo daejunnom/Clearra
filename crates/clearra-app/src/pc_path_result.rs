@@ -5,6 +5,7 @@ use std::{
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_executor::{CoreExecutionResult, CorePostProcessExecution};
+use clearra_host_contract::{PcPathStepPayload, PcPathWitnessPayload};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{OpeningPcSearchQuery, PcCountPolicy, PcScenarioQuery};
 use clearra_problem::{ProblemCompiler, SearchOutputPolicy, SearchProblem, SearchProblemPreset};
@@ -212,6 +213,80 @@ impl PcPathWitnessV2 {
     }
 }
 
+impl PcPathWitnessV2 {
+    pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let bytes = (self.trace_identity.capacity() as u128)
+            .checked_add(self.normalized_trace_key.capacity() as u128)?
+            .checked_add(
+                (self.steps.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<PcPathStepV2>() as u128)?,
+            )?;
+        self.steps.iter().try_fold(bytes, |bytes, step| {
+            bytes.checked_add(step.line_clear_identity.capacity() as u128)
+        })
+    }
+}
+
+pub(crate) fn pc_path_witness_payload(witness: &PcPathWitnessV2) -> PcPathWitnessPayload {
+    let steps = witness
+        .steps()
+        .iter()
+        .map(|step| {
+            PcPathStepPayload::new(
+                step.step_index().to_string(),
+                step.operation_id().to_string(),
+                step.active_piece().as_ascii().to_string(),
+                step.input_cursor().to_string(),
+                step.output_cursor().to_string(),
+                step.input_hold_piece()
+                    .map(|piece| piece.as_ascii().to_string()),
+                step.output_hold_piece()
+                    .map(|piece| piece.as_ascii().to_string()),
+                step.hold_decision(),
+                step.rotation().to_string(),
+                step.x().to_string(),
+                step.y().to_string(),
+                format!("0x{:016x}", step.placement_mask()),
+                format!("0x{:016x}", step.board_before_mask()),
+                format!("0x{:016x}", step.board_after_placement_mask()),
+                format!("0x{:016x}", step.board_after_line_clear_mask()),
+                format!("0x{:016x}", step.cleared_row_mask()),
+                step.cleared_lines().to_string(),
+                step.line_clear_identity(),
+            )
+        })
+        .collect();
+    PcPathWitnessPayload::new(
+        witness.candidate_id().to_string(),
+        witness.producer_candidate_id().to_string(),
+        witness.pattern_id().to_string(),
+        witness.trace_identity(),
+        witness.normalized_trace_key(),
+        witness.consumed_piece_count().to_string(),
+        witness
+            .terminal_hold_piece()
+            .map(|piece| piece.as_ascii().to_string()),
+        steps,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PcPathProjectionContext {
+    pub initial_board: u64,
+    pub initial_cursor: usize,
+    pub initial_hold: Option<PieceKind>,
+}
+
+impl PcPathProjectionContext {
+    pub(crate) fn from_problem(problem: &SearchProblem) -> Self {
+        Self {
+            initial_board: problem.initial_board().occupied_mask(),
+            initial_cursor: usize::from(problem.initial_hold().cursor()),
+            initial_hold: problem.initial_hold().hold_piece(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcPathFamilyV2Result {
     contract_id: &'static str,
@@ -223,6 +298,8 @@ pub struct PcPathFamilyV2Result {
     problem_id: String,
     materialized_pattern_count: usize,
     witnesses: Vec<PcPathWitnessV2>,
+    witness_count: u128,
+    page_source: Option<Arc<crate::PcReplayPageSource>>,
     completeness: PcPathCompletenessEvidence,
 }
 
@@ -263,6 +340,13 @@ impl PcPathFamilyV2Result {
         &self.witnesses
     }
 
+    pub fn witness_count(&self) -> u128 {
+        self.witness_count
+    }
+    pub fn page_source(&self) -> Option<&Arc<crate::PcReplayPageSource>> {
+        self.page_source.as_ref()
+    }
+
     /// Core-owned representative for hosts that expose only one witness.
     ///
     /// Validation materializes this family in canonical candidate-id order, so
@@ -300,7 +384,7 @@ impl PcPathQueryBinding<'_> {
         }
     }
 
-    fn compile_expected(&self) -> Result<SearchProblem, &'static str> {
+    pub(crate) fn compile_expected(&self) -> Result<SearchProblem, &'static str> {
         match self {
             Self::Opening(query) => ProblemCompiler::compile_opening_pc(query.as_ref()),
             Self::Scenario(query) => ProblemCompiler::compile_scenario_pc(query.as_ref()),
@@ -313,6 +397,7 @@ pub(crate) fn validate_pc_path_family_v2_result(
     query: PcPathQueryBinding<'_>,
     origin: PcPathIngressOrigin,
     result: &CoreExecutionResult,
+    page_source: Option<Arc<crate::PcReplayPageSource>>,
 ) -> Result<PcPathFamilyV2Result, &'static str> {
     let problem = query.compile_expected()?;
     let preset = query.preset();
@@ -342,7 +427,7 @@ pub(crate) fn validate_pc_path_family_v2_result(
     if result.bool_field("build_variant_count_exact") != Some(true) {
         return Err("pc path build-variant count is inexact");
     }
-    if !result.postprocess_execution_complete() {
+    if page_source.is_none() && !result.postprocess_execution_complete() {
         return Err("pc path replay batch is incomplete");
     }
     if result
@@ -370,6 +455,36 @@ pub(crate) fn validate_pc_path_family_v2_result(
             .is_some_and(|count| count != materialized_pattern_count)
     {
         return Err("pc path materialized pattern count mismatch");
+    }
+
+    if let Some(source) = page_source {
+        if source.problem_id() != problem.problem_id().as_str()
+            || source.materialized_pattern_count() != materialized_pattern_count
+            || !source.matches_result(result)
+        {
+            return Err("pc replay page source is not bound to the typed result");
+        }
+        return Ok(PcPathFamilyV2Result {
+            contract_id: PC_PATH_FAMILY_RESULT_CONTRACT,
+            witness_contract: PC_PATH_WITNESS_CONTRACT,
+            ordering: PC_PATH_ORDERING,
+            origin,
+            query: query.snapshot(),
+            problem_preset: preset,
+            problem_id: problem.problem_id().as_str().to_owned(),
+            materialized_pattern_count,
+            witnesses: source.first_members().to_vec(),
+            witness_count: source.witness_count(),
+            page_source: Some(source),
+            completeness: PcPathCompletenessEvidence {
+                query_bound: true,
+                search_complete: true,
+                execution_batch_complete: true,
+                count_complete: true,
+                objective_complete: true,
+                replay_chain_validated: true,
+            },
+        });
     }
 
     let producer_to_canonical = result
@@ -431,6 +546,8 @@ pub(crate) fn validate_pc_path_family_v2_result(
         problem_preset: preset,
         problem_id: problem.problem_id().as_str().to_owned(),
         materialized_pattern_count,
+        witness_count: witnesses.len() as u128,
+        page_source: None,
         witnesses,
         completeness: PcPathCompletenessEvidence {
             query_bound: true,
@@ -449,6 +566,79 @@ fn project_execution(
     pattern_count: usize,
     candidate_id: u64,
 ) -> Result<PcPathWitnessV2, &'static str> {
+    project_execution_with_context(
+        PcPathProjectionContext::from_problem(problem),
+        execution,
+        pattern_count,
+        candidate_id,
+    )
+}
+
+pub(crate) fn project_execution_with_context(
+    context: PcPathProjectionContext,
+    execution: &CorePostProcessExecution,
+    pattern_count: usize,
+    candidate_id: u64,
+) -> Result<PcPathWitnessV2, &'static str> {
+    validate_and_project_execution(context, execution, pattern_count, candidate_id, true, false)?
+        .ok_or("pc path projection is missing")
+}
+
+/// The lazy materializer owns canonical trace identities. Only that boundary
+/// may reuse the identity as the normalized key; eager inputs retain their
+/// independent, nonempty identity contract.
+pub(crate) fn project_canonical_execution_with_context(
+    context: PcPathProjectionContext,
+    execution: &CorePostProcessExecution,
+    pattern_count: usize,
+    candidate_id: u64,
+) -> Result<PcPathWitnessV2, &'static str> {
+    if !execution
+        .replay_trace()
+        .canonical_key_matches(execution.trace_identity())
+    {
+        return Err("pc path canonical trace identity is invalid");
+    }
+    validate_and_project_execution(context, execution, pattern_count, candidate_id, true, true)?
+        .ok_or("pc path projection is missing")
+}
+
+/// The exact same chain proof as public projection, without retaining or
+/// formatting a public witness that the manifest scanner would discard.
+pub(crate) fn validate_execution_with_context(
+    context: PcPathProjectionContext,
+    execution: &CorePostProcessExecution,
+    pattern_count: usize,
+) -> Result<(), &'static str> {
+    validate_and_project_execution(context, execution, pattern_count, 0, false, false).map(|_| ())
+}
+
+/// Requested allocation peak of one public witness, excluding its input Core
+/// execution. Identity equality is verified without allocation before these
+/// two exact-size clones are made. Row identities use one pre-sized buffer.
+pub(crate) fn checked_execution_projection_peak_bytes(
+    execution: &CorePostProcessExecution,
+) -> Option<u128> {
+    (core::mem::size_of::<PcPathWitnessV2>() as u128)
+        .checked_add((execution.trace_identity().len() as u128).checked_mul(2)?)?
+        .checked_add(
+            (execution.replay_trace().solution_trace().steps().len() as u128).checked_mul(
+                (core::mem::size_of::<PcPathStepV2>() + PC_PATH_ROW_IDENTITY_MAX_BYTES) as u128,
+            )?,
+        )
+}
+
+// "rows:" + 16 hexadecimal digits + ":count:" + the u8 maximum's 3 digits.
+const PC_PATH_ROW_IDENTITY_MAX_BYTES: usize = 5 + 16 + 7 + 3;
+
+fn validate_and_project_execution(
+    context: PcPathProjectionContext,
+    execution: &CorePostProcessExecution,
+    pattern_count: usize,
+    candidate_id: u64,
+    project: bool,
+    identity_is_canonical: bool,
+) -> Result<Option<PcPathWitnessV2>, &'static str> {
     if execution.pattern_id() >= pattern_count || execution.trace_identity().is_empty() {
         return Err("pc path execution identity is invalid");
     }
@@ -457,10 +647,14 @@ fn project_execution(
     if source_steps.is_empty() {
         return Err("pc path replay trace is empty");
     }
-    let mut expected_board = problem.initial_board().occupied_mask();
-    let mut expected_cursor = usize::from(problem.initial_hold().cursor());
-    let mut expected_hold = problem.initial_hold().hold_piece();
-    let mut projected = Vec::with_capacity(source_steps.len());
+    let mut expected_board = context.initial_board;
+    let mut expected_cursor = context.initial_cursor;
+    let mut expected_hold = context.initial_hold;
+    let mut projected = if project {
+        Vec::with_capacity(source_steps.len())
+    } else {
+        Vec::new()
+    };
     for (index, step) in source_steps.iter().enumerate() {
         let decision = step.piece_decision();
         let placement = step.placement();
@@ -505,27 +699,35 @@ fn project_execution(
         if cleared_row_mask.count_ones() != u32::from(cleared_lines) {
             return Err("pc path line-clear identity is invalid");
         }
-        let line_clear_identity = format!("rows:{cleared_row_mask:016x}:count:{cleared_lines}");
-        projected.push(PcPathStepV2 {
-            step_index: index,
-            operation_id: step.operation_id().0,
-            active_piece: decision.active_piece(),
-            input_cursor: decision.input_cursor(),
-            output_cursor: decision.output_cursor(),
-            input_hold_piece: decision.input_hold_piece(),
-            output_hold_piece: decision.output_hold_piece(),
-            hold_decision: decision.hold_decision().as_str(),
-            rotation: placement.rotation().quarter_turns(),
-            x: placement.x(),
-            y: placement.y(),
-            placement_mask: placement.mask(),
-            board_before_mask: before.occupied(),
-            board_after_placement_mask: after.after_placement().occupied(),
-            board_after_line_clear_mask: after.after_line_clear().occupied(),
-            cleared_row_mask,
-            cleared_lines,
-            line_clear_identity,
-        });
+        if project {
+            use core::fmt::Write;
+            let mut line_clear_identity = String::with_capacity(PC_PATH_ROW_IDENTITY_MAX_BYTES);
+            write!(
+                &mut line_clear_identity,
+                "rows:{cleared_row_mask:016x}:count:{cleared_lines}"
+            )
+            .map_err(|_| "pc path line-clear identity formatting failed")?;
+            projected.push(PcPathStepV2 {
+                step_index: index,
+                operation_id: step.operation_id().0,
+                active_piece: decision.active_piece(),
+                input_cursor: decision.input_cursor(),
+                output_cursor: decision.output_cursor(),
+                input_hold_piece: decision.input_hold_piece(),
+                output_hold_piece: decision.output_hold_piece(),
+                hold_decision: decision.hold_decision().as_str(),
+                rotation: placement.rotation().quarter_turns(),
+                x: placement.x(),
+                y: placement.y(),
+                placement_mask: placement.mask(),
+                board_before_mask: before.occupied(),
+                board_after_placement_mask: after.after_placement().occupied(),
+                board_after_line_clear_mask: after.after_line_clear().occupied(),
+                cleared_row_mask,
+                cleared_lines,
+                line_clear_identity,
+            });
+        }
         expected_board = after.after_line_clear().occupied();
         expected_cursor = decision.output_cursor();
         expected_hold = decision.output_hold_piece();
@@ -534,14 +736,21 @@ fn project_execution(
         return Err("pc path replay does not clear to empty");
     }
 
-    Ok(PcPathWitnessV2 {
+    if !project {
+        return Ok(None);
+    }
+    Ok(Some(PcPathWitnessV2 {
         candidate_id,
         producer_candidate_id: execution.candidate_id(),
         pattern_id: execution.pattern_id(),
         trace_identity: execution.trace_identity().to_owned(),
-        normalized_trace_key: trace.canonical_key(),
+        normalized_trace_key: if identity_is_canonical {
+            execution.trace_identity().to_owned()
+        } else {
+            trace.canonical_key()
+        },
         consumed_piece_count: expected_cursor,
         terminal_hold_piece: expected_hold,
         steps: projected,
-    })
+    }))
 }

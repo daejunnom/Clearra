@@ -1,6 +1,7 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum GpuBackendKind {
     NativeCompute,
+    #[default]
     Disabled,
 }
 
@@ -15,11 +16,5 @@ impl GpuBackendKind {
 impl GpuBackendKind {
     pub fn is_real_gpu_api(self) -> bool {
         self == Self::NativeCompute
-    }
-}
-
-impl Default for GpuBackendKind {
-    fn default() -> Self {
-        Self::Disabled
     }
 }

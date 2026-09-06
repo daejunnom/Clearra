@@ -543,7 +543,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn decode_base64(value: &str) -> Result<Vec<u8>, &'static str> {
     let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return Err("render-output-base64-invalid");
     }
     let padding = usize::from(bytes.ends_with(b"=")) + usize::from(bytes.ends_with(b"=="));

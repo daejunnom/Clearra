@@ -1,11 +1,11 @@
-#[cfg(target_family = "wasm")]
-use std::cell::RefCell;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 #[cfg(not(target_family = "wasm"))]
 use std::sync::{Mutex, OnceLock};
+#[cfg(target_family = "wasm")]
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     adapter_selection::{select_adapter, WebGpuAdapterSelection, WebGpuAdapterSummary},
@@ -36,7 +36,7 @@ pub struct WebGpuGeometryExactCoverBackend;
 pub struct WebGpuGeometryExactCoverSession {
     selection: WebGpuAdapterSelection,
     reused: bool,
-    context: Arc<WebGpuDeviceContext>,
+    context: SharedWebGpuDeviceContext,
     static_buffers: Option<StaticPackingBuffers>,
     layer_scratch: Option<LayerScratch>,
 }
@@ -53,6 +53,14 @@ struct WebGpuDeviceContext {
     zero_counter_buffer: wgpu::Buffer,
 }
 
+// Native sessions can cross worker threads and therefore share a Send + Sync
+// context through Arc. Browser WebGPU handles are thread-affine and live in a
+// thread-local cache, so Rc is the accurate ownership primitive on wasm.
+#[cfg(not(target_family = "wasm"))]
+type SharedWebGpuDeviceContext = Arc<WebGpuDeviceContext>;
+#[cfg(target_family = "wasm")]
+type SharedWebGpuDeviceContext = Rc<WebGpuDeviceContext>;
+
 struct StaticPackingBuffers {
     catalog: Arc<dyn WebGpuExactCoverCatalog>,
     skeleton_mask_buffer: wgpu::Buffer,
@@ -63,6 +71,8 @@ struct StaticPackingBuffers {
     resident_bytes: u64,
 }
 
+// Keep the public session outcome unboxed so existing executor ownership stays stable.
+#[allow(clippy::large_enum_variant)]
 pub enum WebGpuGeometryExactCoverSessionOutcome {
     Connected(WebGpuGeometryExactCoverSession),
     Unavailable(WebGpuUnavailableResult),
@@ -333,17 +343,18 @@ impl WebGpuGeometryExactCoverBackend {
             "exact-cover-zero-counter-template",
             &[0_u32; crate::geometry_exact_cover_model::COUNTER_WORDS],
         );
-        let (context, reused) = cache_device_context(Arc::new(WebGpuDeviceContext {
-            auto_selected: AtomicBool::new(selection == WebGpuAdapterSelection::Auto),
-            device,
-            queue,
-            pipeline,
-            limits,
-            shader_version: contract.shader_version(),
-            shader_hash: contract.shader_hash(),
-            adapter: selected.summary,
-            zero_counter_buffer,
-        }));
+        let (context, reused) =
+            cache_device_context(SharedWebGpuDeviceContext::new(WebGpuDeviceContext {
+                auto_selected: AtomicBool::new(selection == WebGpuAdapterSelection::Auto),
+                device,
+                queue,
+                pipeline,
+                limits,
+                shader_version: contract.shader_version(),
+                shader_hash: contract.shader_hash(),
+                adapter: selected.summary,
+                zero_counter_buffer,
+            }));
         Ok(session_from_context(selection, context, reused))
     }
 
@@ -373,7 +384,7 @@ impl WebGpuGeometryExactCoverBackend {
         {
             return Err(WebGpuGeometryExactCoverInputError::IncompatibleBatchFamily);
         }
-        let maximum_binding = u64::from(session.context.limits.max_storage_buffer_binding_size);
+        let maximum_binding = session.context.limits.max_storage_buffer_binding_size;
         if [
             byte_len(batch.skeleton_cell_masks())?,
             byte_len(batch.skeleton_piece_kinds())?,
@@ -388,7 +399,7 @@ impl WebGpuGeometryExactCoverBackend {
             ));
         }
         let constraint_bytes = (CERTIFIED_CONSTRAINT_WORDS * size_of_u32()) as u64;
-        if constraint_bytes > u64::from(session.context.limits.max_uniform_buffer_binding_size) {
+        if constraint_bytes > session.context.limits.max_uniform_buffer_binding_size {
             return Ok(WebGpuGeometryExactCoverOutcome::Unavailable(
                 WebGpuUnavailableResult::new("webgpu_uniform_buffer_limit_exceeded"),
             ));
@@ -699,19 +710,19 @@ fn state_segments_resident_bytes(segments: &[Vec<u32>]) -> usize {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn device_context_pool() -> &'static Mutex<Vec<Arc<WebGpuDeviceContext>>> {
-    static CONTEXTS: OnceLock<Mutex<Vec<Arc<WebGpuDeviceContext>>>> = OnceLock::new();
+fn device_context_pool() -> &'static Mutex<Vec<SharedWebGpuDeviceContext>> {
+    static CONTEXTS: OnceLock<Mutex<Vec<SharedWebGpuDeviceContext>>> = OnceLock::new();
     CONTEXTS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 #[cfg(target_family = "wasm")]
 std::thread_local! {
-    static DEVICE_CONTEXT_POOL: RefCell<Vec<Arc<WebGpuDeviceContext>>> = const { RefCell::new(Vec::new()) };
+    static DEVICE_CONTEXT_POOL: RefCell<Vec<SharedWebGpuDeviceContext>> = const { RefCell::new(Vec::new()) };
     static SESSION_POOL: RefCell<Vec<WebGpuGeometryExactCoverSession>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn cached_device_context(selection: WebGpuAdapterSelection) -> Option<Arc<WebGpuDeviceContext>> {
+fn cached_device_context(selection: WebGpuAdapterSelection) -> Option<SharedWebGpuDeviceContext> {
     device_context_pool()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -721,7 +732,7 @@ fn cached_device_context(selection: WebGpuAdapterSelection) -> Option<Arc<WebGpu
 }
 
 #[cfg(target_family = "wasm")]
-fn cached_device_context(selection: WebGpuAdapterSelection) -> Option<Arc<WebGpuDeviceContext>> {
+fn cached_device_context(selection: WebGpuAdapterSelection) -> Option<SharedWebGpuDeviceContext> {
     DEVICE_CONTEXT_POOL.with(|contexts| {
         contexts
             .borrow()
@@ -732,7 +743,7 @@ fn cached_device_context(selection: WebGpuAdapterSelection) -> Option<Arc<WebGpu
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn cache_device_context(context: Arc<WebGpuDeviceContext>) -> (Arc<WebGpuDeviceContext>, bool) {
+fn cache_device_context(context: SharedWebGpuDeviceContext) -> (SharedWebGpuDeviceContext, bool) {
     let mut contexts = device_context_pool()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -740,15 +751,15 @@ fn cache_device_context(context: Arc<WebGpuDeviceContext>) -> (Arc<WebGpuDeviceC
 }
 
 #[cfg(target_family = "wasm")]
-fn cache_device_context(context: Arc<WebGpuDeviceContext>) -> (Arc<WebGpuDeviceContext>, bool) {
+fn cache_device_context(context: SharedWebGpuDeviceContext) -> (SharedWebGpuDeviceContext, bool) {
     DEVICE_CONTEXT_POOL
         .with(|contexts| cache_device_context_in(&mut contexts.borrow_mut(), context))
 }
 
 fn cache_device_context_in(
-    contexts: &mut Vec<Arc<WebGpuDeviceContext>>,
-    context: Arc<WebGpuDeviceContext>,
-) -> (Arc<WebGpuDeviceContext>, bool) {
+    contexts: &mut Vec<SharedWebGpuDeviceContext>,
+    context: SharedWebGpuDeviceContext,
+) -> (SharedWebGpuDeviceContext, bool) {
     if let Some(existing) = contexts
         .iter()
         .find(|existing| existing.adapter.index() == context.adapter.index())
@@ -756,13 +767,13 @@ fn cache_device_context_in(
         if context.auto_selected.load(Ordering::Relaxed) {
             existing.auto_selected.store(true, Ordering::Relaxed);
         }
-        return (Arc::clone(existing), true);
+        return (SharedWebGpuDeviceContext::clone(existing), true);
     }
     const MAX_CACHED_DEVICE_CONTEXTS: usize = 4;
     if contexts.len() == MAX_CACHED_DEVICE_CONTEXTS {
         contexts.remove(0);
     }
-    contexts.push(Arc::clone(&context));
+    contexts.push(SharedWebGpuDeviceContext::clone(&context));
     (context, false)
 }
 
@@ -778,7 +789,7 @@ fn device_context_matches(
 
 fn session_from_context(
     selection: WebGpuAdapterSelection,
-    context: Arc<WebGpuDeviceContext>,
+    context: SharedWebGpuDeviceContext,
     reused: bool,
 ) -> WebGpuGeometryExactCoverSession {
     WebGpuGeometryExactCoverSession {

@@ -147,9 +147,9 @@ impl RenderScene {
             }
 
             let piece = step.piece_decision().active_piece();
-            for index in 0..cell_count {
+            for (index, tile) in owners.iter_mut().enumerate().take(cell_count) {
                 if step.placement().mask() & (1_u64 << index) != 0 {
-                    owners[index] = RenderTile::Piece(piece);
+                    *tile = RenderTile::Piece(piece);
                 }
             }
 

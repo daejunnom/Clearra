@@ -80,6 +80,14 @@ export const FALLBACK_WASM_TRANSFER_BYTE_CAP = 32 * 1024 * 1024;
 export const MIN_WASM_TRANSFER_BYTE_CAP = 16 * 1024 * 1024;
 export const MAX_WASM_TRANSFER_BYTE_CAP = 128 * 1024 * 1024;
 
+/** One coordinator's result-construction owners, not a per-worker search or wire cap. */
+export function wasmProductRetentionByteCap(snapshot: HostCapabilitySnapshot): number {
+  const mib = 1024 * 1024;
+  const memoryGiB = snapshot.reportedDeviceMemoryGiB;
+  if (memoryGiB === null) return 64 * mib;
+  return Math.max(32 * mib, Math.min(512 * mib, Math.floor(memoryGiB * 64 * mib)));
+}
+
 export function createHostCapabilitySnapshot(
   input: CapabilityInput = {}
 ): HostCapabilitySnapshot {

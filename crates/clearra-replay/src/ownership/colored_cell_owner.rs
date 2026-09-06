@@ -120,9 +120,9 @@ fn apply_placement_owners(
     if mask & !layout_mask != 0 {
         return Err(ColoredCellOwnershipError::PlacementOutsideLayout { mask, layout_mask });
     }
-    for index in 0..owners.len() {
+    for (index, slot) in owners.iter_mut().enumerate() {
         if (mask & (1_u64 << index)) != 0 {
-            owners[index] = Some(owner);
+            *slot = Some(owner);
         }
     }
     Ok(())

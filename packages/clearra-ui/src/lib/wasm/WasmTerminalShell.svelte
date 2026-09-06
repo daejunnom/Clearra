@@ -2,6 +2,7 @@
   import { onDestroy } from 'svelte';
 
   import { updateWasmCommandText, wasmWorkerState } from './wasmWorkerStore';
+  import { formatWasmTerminalTranscript } from './wasmTerminalTranscript';
   import { WasmTerminalWorkerController } from './WasmTerminalWorkerController';
   import { workspaceSolutionCount } from '../workspace/solutionSetAvailability';
 
@@ -146,7 +147,7 @@
   </section>
 
   <section class="terminal" aria-label="terminal-like output">
-    <pre>{state.terminalLines.join('\n')}</pre>
+    <pre>{formatWasmTerminalTranscript(state.terminalLines)}</pre>
   </section>
 </main>
 

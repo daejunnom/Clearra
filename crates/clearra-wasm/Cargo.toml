@@ -21,12 +21,14 @@ clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-problem = { path = "../clearra-problem" }
 clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-cli-command = { path = "../clearra-cli-command" }
+sha2 = "0.10.9"
 
 [lib]
 doctest = false
 crate-type = ["rlib"]
 
 [dev-dependencies]
+clearra-coverage = { path = "../clearra-coverage", features = ["diagnostic-probes"] }
 clearra-host-contract = { path = "../clearra-host-contract", features = ["serde"] }
 serde_json.workspace = true
 

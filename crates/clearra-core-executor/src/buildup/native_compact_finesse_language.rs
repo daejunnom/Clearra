@@ -28,7 +28,7 @@ use clearra_rules::{kicks::KickTableProfile, spawn::SpawnProfile};
 
 use crate::performance::{ExecutorSearchStage, SearchStageSpan};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeCompactFinesseError {
     Native(NativeCoreError),
     InvalidCompactLayout,
@@ -185,8 +185,7 @@ fn annotate_with_stats(
             .checked_add(node.edge_count())
             .filter(|end| *end <= edges.len())
             .ok_or(NativeCompactFinesseError::InvalidSnapshot)?;
-        for edge_index in start..end {
-            let edge = edges[edge_index];
+        for (edge_index, &edge) in edges.iter().enumerate().take(end).skip(start) {
             if edge.child_node_index() >= nodes.len()
                 || nodes[edge.child_node_index()].depth() != node.depth().saturating_add(1)
             {

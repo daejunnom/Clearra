@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { ChevronLeft, ChevronRight, Copy, Download } from '@lucide/svelte';
   import { getContext, onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
@@ -30,6 +31,7 @@
     type HostCapabilitySnapshot
   } from '../wasm';
   import WorkspaceShell from './WorkspaceShell.svelte';
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import {
     buildDocumentUtilityCommand,
     decodeValidatedRenderArtifact,
@@ -44,11 +46,11 @@
   } from './documentUtilityModel';
   import { validateProductResultPayload } from './productResultPager';
   import {
-    preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage
   } from './workspaceI18n';
   import { workspaceViewFromDesktop, workspaceViewFromWasm } from './workspaceRuntime';
+  import { workspacePublicFailure } from './workspacePublicFailure';
 
   export let tool: DocumentUtilityTool;
   export let workerFactory: (() => Worker) | null = null;
@@ -97,6 +99,9 @@
     ? workspaceViewFromWasm($wasmWorkerState)
     : workspaceViewFromDesktop($desktopJobState);
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
+  $: publicResultFailures = resultError
+    ? [workspacePublicFailure('result-invalid')]
+    : runtimeView.publicFailures;
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: productPayload = runtimeView.response?.product_result_payload ?? null;
   $: if (productPayload !== observedPayload) acceptProductPayload(productPayload);
@@ -128,9 +133,7 @@
           : 'utilityMirror';
 
   onMount(() => {
-    language = preferredWorkspaceLanguage(
-      localStorage.getItem('clearra-language') ?? navigator.language
-    );
+    language = readWorkspaceLanguage();
     if (runtime === 'web') {
       clearWasmTerminalResult();
       workerController.prewarm(1, false, CPU_ONLY_RUNTIME_WARMUP_POLICY);
@@ -153,7 +156,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    localStorage.setItem('clearra-language', next);
+    persistWorkspaceLanguage(next);
   }
 
   async function run() {
@@ -490,8 +493,8 @@
         <figcaption>{renderArtifact.filename} · {renderArtifact.byte_length} bytes · SHA-256 {renderArtifact.sha256}</figcaption>
       </figure>
       <button class="download" type="button" on:click={downloadArtifact}><Download size={16} />{language === 'ko' ? '아티팩트 다운로드' : 'Download artifact'}</button>
-    {:else if resultError || runtimeView.error}
-      <p class="error" role="alert">{resultError || runtimeView.error}</p>
+    {:else if publicResultFailures.length}
+      <WorkspaceFailureNotice failures={publicResultFailures} {language} compact />
     {:else}
       <p class="empty">{language === 'ko' ? '실행하면 typed 결과가 여기에 표시됩니다.' : 'Run the utility to display its typed result.'}</p>
     {/if}
@@ -515,7 +518,7 @@
   .result-header nav { gap: 8px; }
   button { align-items: center; background: #fff; border: 1px solid #cbd3ce; border-radius: 5px; color: #26322e; cursor: pointer; display: inline-flex; gap: 6px; min-height: 34px; padding: 6px 10px; }
   button:disabled { cursor: not-allowed; opacity: .45; }
-  dl, .documents, figure, .empty, .error { background: #fff; border: 1px solid #d5dcd7; border-radius: 7px; margin: 0; padding: 10px 18px; }
+  dl, .documents, figure, .empty { background: #fff; border: 1px solid #d5dcd7; border-radius: 7px; margin: 0; padding: 10px 18px; }
   dl div { display: grid; gap: 16px; grid-template-columns: minmax(240px, .42fr) minmax(0, 1fr); padding: 9px 0; }
   dl div + div { border-top: 1px solid #e4e9e6; }
   dt { color: #596560; font-size: 12px; font-weight: 750; }
@@ -530,7 +533,6 @@
   figure { display: grid; gap: 12px; justify-items: center; }
   figure img { image-rendering: pixelated; max-height: 620px; max-width: 100%; }
   .download { margin-top: 12px; }
-  .error { color: #9b3030; }
   .action-message { color: #075f58; font-size: 12px; }
   @media (max-width: 720px) {
     .option-grid, dl div { grid-template-columns: 1fr; }

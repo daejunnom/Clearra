@@ -259,7 +259,9 @@ impl GpuDeviceSummary {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[cfg(feature = "webgpu-search")]
+    // Native WebGPU execution is only compiled when both the WebGPU adapter and
+    // the native packing core are present.
+    #[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
     pub(crate) fn from_execution(
         selection: &GpuDeviceSelection,
         selected_index: u8,

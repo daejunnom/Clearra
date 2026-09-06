@@ -7,6 +7,17 @@ use crate::{
 };
 
 pub(crate) fn core_execution_error_response(error: CoreExecutionError) -> AppResponse {
+    // Replay materialization happens after a supported search has completed.
+    // Its resource/evidence failure must not claim the solver never executed
+    // or that the user's queue/pattern contract is unsupported.
+    if matches!(&error, CoreExecutionError::RuntimeUnavailable { component }
+        if component.starts_with("complete_replay_"))
+    {
+        return AppResponse::failed(
+            AppStatus::ExecutionFailed,
+            AppError::new(AppErrorCode::ExecutionFailed, format!("{error:?}")),
+        );
+    }
     if let CoreExecutionError::ResourceIncomplete {
         stage,
         status,
@@ -39,6 +50,38 @@ pub(crate) fn core_execution_error_response(error: CoreExecutionError) -> AppRes
             AppStatus::ExecutionFailed,
             AppError::new(AppErrorCode::ExecutionFailed, format!("{error:?}")),
         ),
+    }
+}
+
+#[cfg(test)]
+mod replay_failure_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_replay_failures_preserve_executed_incomplete_search() {
+        for component in [
+            "complete_replay_memory_limit_exceeded",
+            "complete_replay_whole_live_limit_exceeded",
+            "complete_replay_execution_limit_exceeded",
+            "complete_replay_evidence_invalid",
+        ] {
+            let response =
+                core_execution_error_response(CoreExecutionError::RuntimeUnavailable { component });
+            assert_eq!(response.status(), AppStatus::ExecutionFailed);
+            assert_eq!(
+                response.error().unwrap().code(),
+                AppErrorCode::ExecutionFailed
+            );
+            assert!(response.error().unwrap().message().contains(component));
+            assert!(response.resource_report().solver_executed());
+            assert_eq!(
+                response.resource_report().result_completeness(),
+                clearra_host_contract::ExecutionCompletenessState::Incomplete
+            );
+        }
+        let unsupported = core_execution_error_response(CoreExecutionError::UnsupportedProblem);
+        assert_eq!(unsupported.status(), AppStatus::Unsupported);
+        assert!(!unsupported.resource_report().solver_executed());
     }
 }
 

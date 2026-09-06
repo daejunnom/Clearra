@@ -63,7 +63,7 @@ impl SeparatorCatalog {
 
         let mut identity_digest = mix_digest(0, u64::from(width));
         identity_digest = mix_digest(identity_digest, u64::from(height));
-        identity_digest = mix_digest(identity_digest, u64::from(safe_column_bits));
+        identity_digest = mix_digest(identity_digest, safe_column_bits);
         for column in 0..width as usize {
             identity_digest = mix_digest(identity_digest, column_masks[column]);
             identity_digest = mix_digest(identity_digest, left_masks[column]);
@@ -145,6 +145,8 @@ impl SeparatorCatalog {
             && (right_demand - right_supply).is_multiple_of(4)
     }
 
+    // The GPU constraint catalog is the only consumer of the packed bitset.
+    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
     pub const fn safe_column_bits(&self) -> u64 {
         self.safe_column_bits
     }

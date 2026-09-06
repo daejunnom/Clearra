@@ -117,6 +117,12 @@ type DelegationEventDraft = Omit<
 export interface DelegationJournal {
   load(): Promise<readonly DelegationEvent[]>;
   append(draft: DelegationEventDraft): Promise<DelegationEvent>;
+  // Optional internal adapter capability; legacy adapters retain two durable
+  // appends. Both events remain in the chain even when they share one commit.
+  appendTerminalPair?(
+    applied: DelegationEventDraft,
+    completed: DelegationEventDraft
+  ): Promise<readonly [DelegationEvent, DelegationEvent]>;
   resetIfHead(expectedEventSha256: string): Promise<void>;
   quarantine(reason: string): Promise<void>;
   close(): void;
@@ -179,6 +185,15 @@ export class MemoryDelegationJournal implements DelegationJournal {
   }
 
   append(draft: DelegationEventDraft): Promise<DelegationEvent> {
+    return this.appendDrafts([draft]).then((events) => events[0]);
+  }
+
+  appendTerminalPair(applied: DelegationEventDraft, completed: DelegationEventDraft) {
+    assertTerminalPairDrafts(applied, completed);
+    return this.appendDrafts([applied, completed]).then((events) => [events[0], events[1]] as const);
+  }
+
+  private appendDrafts(drafts: readonly [DelegationEventDraft] | readonly [DelegationEventDraft, DelegationEventDraft]) {
     const operation = this.appendTail.then(async () => {
       if (this.quarantineReason) {
         throw new DurableDelegationError(
@@ -195,9 +210,9 @@ export class MemoryDelegationJournal implements DelegationJournal {
           { cause: failure }
         );
       }
-      const event = await buildEvent(this.events, draft);
-      this.events.push(event);
-      return event;
+      const events = await buildEvents(this.events, drafts);
+      this.events.push(...events);
+      return events;
     });
     this.appendTail = operation.then(
       () => undefined,
@@ -303,7 +318,12 @@ export class IndexedDbDelegationJournal implements DelegationJournal {
     }
     const journal = await IndexedDbDelegationJournal.open(factory, databaseName);
     journal.jobId = jobId;
-    await journal.ensureJobHeader();
+    try {
+      await journal.ensureJobHeader();
+    } catch (error) {
+      journal.close();
+      throw error;
+    }
     return journal;
   }
 
@@ -312,13 +332,21 @@ export class IndexedDbDelegationJournal implements DelegationJournal {
     if (this.events) return this.events.map((event) => Object.freeze({ ...event }));
     const transaction = this.database.transaction([EVENT_STORE, META_STORE], 'readonly');
     const completed = transactionCompletion(transaction, 'load delegation journal');
-    const eventRequest = transaction.objectStore(EVENT_STORE).getAll();
-    const headRequest = transaction.objectStore(META_STORE).get(HEAD_KEY);
-    const [raw, rawHead] = await Promise.all([
-      requestResult(eventRequest, 'load delegation journal'),
-      requestResult(headRequest, 'load delegation journal head')
-    ]);
-    await completed;
+    let raw: unknown;
+    let rawHead: unknown;
+    try {
+      const eventRequest = transaction.objectStore(EVENT_STORE).getAll();
+      const headRequest = transaction.objectStore(META_STORE).get(HEAD_KEY);
+      [raw, rawHead] = await requestsBeforeCommit(Promise.all([
+        requestResult(eventRequest, 'load delegation journal'),
+        requestResult(headRequest, 'load delegation journal head')
+      ]), completed);
+      await completed;
+    } catch (error) {
+      try { transaction.abort(); } catch { /* Already aborted/completed. */ }
+      await completed.catch(() => undefined);
+      throw error;
+    }
     if (!Array.isArray(raw)) {
       throw new DurableDelegationError('journal-corrupt', 'delegation event store is invalid');
     }
@@ -348,49 +376,91 @@ export class IndexedDbDelegationJournal implements DelegationJournal {
   }
 
   append(draft: DelegationEventDraft): Promise<DelegationEvent> {
-    let resolveResult!: (event: DelegationEvent) => void;
+    return this.appendDrafts([draft]).then((events) => events[0]);
+  }
+
+  appendTerminalPair(applied: DelegationEventDraft, completed: DelegationEventDraft) {
+    assertTerminalPairDrafts(applied, completed);
+    return this.appendDrafts([applied, completed]).then((events) => [events[0], events[1]] as const);
+  }
+
+  private appendDrafts(drafts: readonly [DelegationEventDraft] | readonly [DelegationEventDraft, DelegationEventDraft]) {
+    let resolveResult!: (events: readonly DelegationEvent[]) => void;
     let rejectResult!: (error: unknown) => void;
-    const result = new Promise<DelegationEvent>((resolve, reject) => {
+    const result = new Promise<readonly DelegationEvent[]>((resolve, reject) => {
       resolveResult = resolve;
       rejectResult = reject;
     });
     this.appendTail = this.appendTail
       .then(async () => {
-        await this.assertNotQuarantined();
-        if (this.jobId && draft.jobId !== this.jobId) {
+        if (this.quarantineReason) {
+          throw new DurableDelegationError(
+            'journal-corrupt',
+            `delegation journal is quarantined: ${this.quarantineReason}`
+          );
+        }
+        if (this.jobId && drafts.some((draft) => draft.jobId !== this.jobId)) {
           throw new DurableDelegationError(
             'journal-corrupt',
             'delegation job ID does not match the durable journal header'
           );
         }
-        const existing = await this.load();
-        const event = await buildEvent(existing, draft);
+        // The committed in-process head is already chain-validated by load().
+        // Calling the public snapshot API for every event copied the complete
+        // history and made a long search quadratic in delegation count. The
+        // readwrite transaction below still fences this head against storage.
+        const existing = this.events ?? await this.load();
+        // Hash both bounded events before opening IDB: awaiting crypto inside
+        // the transaction would let the browser close it before the writes.
+        const events = await buildEvents(existing, drafts);
+        const event = events[events.length - 1];
         const transaction = this.database.transaction([EVENT_STORE, META_STORE], 'readwrite');
         const completed = transactionCompletion(transaction, 'append delegation journal');
-        const headRequest = transaction.objectStore(META_STORE).get(HEAD_KEY);
-        const storedHead = parseStoredHead(
-          await requestResult(headRequest, 'read delegation journal head')
-        );
-        const expectedHead = existing.at(-1);
-        if (
-          storedHead?.eventSha256 !== expectedHead?.eventSha256 ||
-          storedHead?.sequenceDecimal !== expectedHead?.sequenceDecimal
-        ) {
+        try {
+          // Read quarantine and the fenced head in the committing transaction.
+          // Include reads in the same failure owner: a request error or early
+          // abort must not leave the transaction's rejection unobserved.
+          const metadata = transaction.objectStore(META_STORE);
+          const headRequest = metadata.get(HEAD_KEY);
+          const quarantineRequest = metadata.get(QUARANTINE_KEY);
+          const [rawHead, rawQuarantine] = await requestsBeforeCommit(Promise.all([
+            requestResult(headRequest, 'read delegation journal head'),
+            requestResult(quarantineRequest, 'read delegation quarantine')
+          ]), completed);
+          const quarantine = rawQuarantine as IndexedDbQuarantine | undefined;
+          if (quarantine?.key === QUARANTINE_KEY) {
+            this.quarantineReason = quarantine.reason;
+            throw new DurableDelegationError(
+              'journal-corrupt',
+              `delegation journal is quarantined: ${quarantine.reason}`
+            );
+          }
+          const storedHead = parseStoredHead(rawHead);
+          const expectedHead = existing.at(-1);
+          if (
+            storedHead?.eventSha256 !== expectedHead?.eventSha256 ||
+            storedHead?.sequenceDecimal !== expectedHead?.sequenceDecimal
+          ) {
+            throw journalHeadChanged(expectedHead?.eventSha256, storedHead?.eventSha256);
+          }
+          for (const nextEvent of events) transaction.objectStore(EVENT_STORE).add(nextEvent);
+          const head: IndexedDbHead = {
+            key: HEAD_KEY,
+            sequenceDecimal: event.sequenceDecimal,
+            eventSha256: event.eventSha256
+          };
+          transaction.objectStore(META_STORE).put(head);
+          // The pair and head commit together. Neither in-memory history nor
+          // authority state may advance until transaction.oncomplete.
           await completed;
-          throw journalHeadChanged(expectedHead?.eventSha256, storedHead?.eventSha256);
+        } catch (error) {
+          try { transaction.abort(); } catch { /* Already aborted/completed. */ }
+          await completed.catch(() => undefined);
+          throw error;
         }
-        transaction.objectStore(EVENT_STORE).add(event);
-        const head: IndexedDbHead = {
-          key: HEAD_KEY,
-          sequenceDecimal: event.sequenceDecimal,
-          eventSha256: event.eventSha256
-        };
-        transaction.objectStore(META_STORE).put(head);
-        // Resolving only from transaction.oncomplete is the durable ACK boundary.
-        await completed;
         this.events ??= [...existing];
-        this.events.push(event);
-        resolveResult(event);
+        this.events.push(...events);
+        resolveResult(events);
       })
       .catch((error) => {
         const failure = asDelegationJournalFailure(error, 'append delegation journal');
@@ -413,18 +483,23 @@ export class IndexedDbDelegationJournal implements DelegationJournal {
         assertExpectedHead(existing, expectedEventSha256);
         const transaction = this.database.transaction([EVENT_STORE, META_STORE], 'readwrite');
         const completed = transactionCompletion(transaction, 'reset delegation journal');
-        const headRequest = transaction.objectStore(META_STORE).get(HEAD_KEY);
-        const storedHead = parseStoredHead(
-          await requestResult(headRequest, 'read delegation journal head for reset')
-        );
-        if (storedHead?.eventSha256 !== expectedEventSha256) {
+        try {
+          const headRequest = transaction.objectStore(META_STORE).get(HEAD_KEY);
+          const storedHead = parseStoredHead(await requestsBeforeCommit(
+            requestResult(headRequest, 'read delegation journal head for reset'), completed
+          ));
+          if (storedHead?.eventSha256 !== expectedEventSha256) {
+            throw journalHeadChanged(expectedEventSha256, storedHead?.eventSha256);
+          }
+          transaction.objectStore(EVENT_STORE).clear();
+          transaction.objectStore(META_STORE).delete(HEAD_KEY);
+          // The tombstones become reusable only after both stores commit.
           await completed;
-          throw journalHeadChanged(expectedEventSha256, storedHead?.eventSha256);
+        } catch (error) {
+          try { transaction.abort(); } catch { /* Already aborted/completed. */ }
+          await completed.catch(() => undefined);
+          throw error;
         }
-        transaction.objectStore(EVENT_STORE).clear();
-        transaction.objectStore(META_STORE).delete(HEAD_KEY);
-        // The tombstones become reusable only after both stores commit.
-        await completed;
         this.events = [];
         resolveResult();
       })
@@ -442,8 +517,14 @@ export class IndexedDbDelegationJournal implements DelegationJournal {
       reason,
       timestampUnixMsDecimal: String(Date.now())
     };
-    transaction.objectStore(META_STORE).put(marker);
-    await completed;
+    try {
+      transaction.objectStore(META_STORE).put(marker);
+      await completed;
+    } catch (error) {
+      try { transaction.abort(); } catch { /* Already aborted/completed. */ }
+      await completed.catch(() => undefined);
+      throw error;
+    }
     this.quarantineReason = reason;
   }
 
@@ -460,11 +541,17 @@ export class IndexedDbDelegationJournal implements DelegationJournal {
     }
     const transaction = this.database.transaction([META_STORE], 'readonly');
     const completed = transactionCompletion(transaction, 'read delegation quarantine');
-    const request = transaction.objectStore(META_STORE).get(QUARANTINE_KEY);
-    const marker = (await requestResult(request, 'read delegation quarantine')) as
-      | IndexedDbQuarantine
-      | undefined;
-    await completed;
+    let marker: IndexedDbQuarantine | undefined;
+    try {
+      const request = transaction.objectStore(META_STORE).get(QUARANTINE_KEY);
+      marker = await requestsBeforeCommit(requestResult(request, 'read delegation quarantine'), completed) as
+        IndexedDbQuarantine | undefined;
+      await completed;
+    } catch (error) {
+      try { transaction.abort(); } catch { /* Already aborted/completed. */ }
+      await completed.catch(() => undefined);
+      throw error;
+    }
     if (marker?.key === QUARANTINE_KEY) {
       this.quarantineReason = marker.reason;
       throw new DurableDelegationError(
@@ -479,31 +566,35 @@ export class IndexedDbDelegationJournal implements DelegationJournal {
     if (!jobId) return;
     const transaction = this.database.transaction([META_STORE], 'readwrite');
     const completed = transactionCompletion(transaction, 'bind delegation journal header');
-    const store = transaction.objectStore(META_STORE);
-    const raw = await requestResult(store.get(HEADER_KEY), 'read delegation journal header');
-    if (raw === undefined) {
-      const header: IndexedDbJournalHeader = {
-        key: HEADER_KEY,
-        schema: DELEGATION_JOURNAL_HEADER_SCHEMA,
-        jobId
-      };
-      store.put(header);
-    } else {
-      const header = raw as Partial<IndexedDbJournalHeader>;
-      if (
-        header.key !== HEADER_KEY ||
-        header.schema !== DELEGATION_JOURNAL_HEADER_SCHEMA ||
-        header.jobId !== jobId
-      ) {
-        transaction.abort();
-        await completed.catch(() => undefined);
-        throw new DurableDelegationError(
-          'journal-corrupt',
-          'durable delegation journal header is malformed or belongs to another job'
-        );
+    try {
+      const store = transaction.objectStore(META_STORE);
+      const raw = await requestsBeforeCommit(requestResult(store.get(HEADER_KEY), 'read delegation journal header'), completed);
+      if (raw === undefined) {
+        const header: IndexedDbJournalHeader = {
+          key: HEADER_KEY,
+          schema: DELEGATION_JOURNAL_HEADER_SCHEMA,
+          jobId
+        };
+        store.put(header);
+      } else {
+        const header = raw as Partial<IndexedDbJournalHeader>;
+        if (
+          header.key !== HEADER_KEY ||
+          header.schema !== DELEGATION_JOURNAL_HEADER_SCHEMA ||
+          header.jobId !== jobId
+        ) {
+          throw new DurableDelegationError(
+            'journal-corrupt',
+            'durable delegation journal header is malformed or belongs to another job'
+          );
+        }
       }
+      await completed;
+    } catch (error) {
+      try { transaction.abort(); } catch { /* Already aborted/completed. */ }
+      await completed.catch(() => undefined);
+      throw error;
     }
-    await completed;
   }
 }
 
@@ -529,14 +620,20 @@ export class DurableDelegationAuthority {
 
   private constructor(
     private readonly journal: DelegationJournal,
-    private readonly clock: DelegationClock
+    private readonly clock: DelegationClock,
+    private readonly activeLeaseExpiryMs: number
   ) {}
 
   static async recover(
     journal: DelegationJournal,
-    clock: DelegationClock = () => Date.now()
+    clock: DelegationClock = () => Date.now(),
+    options: { activeLeaseExpiryMs?: number } = {}
   ): Promise<DurableDelegationAuthority> {
-    const authority = new DurableDelegationAuthority(journal, clock);
+    const activeLeaseExpiryMs = options.activeLeaseExpiryMs ?? ACTIVE_LEASE_EXPIRY_MS;
+    if (!Number.isSafeInteger(activeLeaseExpiryMs) || activeLeaseExpiryMs < 0) {
+      throw new RangeError('delegation active lease timeout must be nonnegative');
+    }
+    const authority = new DurableDelegationAuthority(journal, clock, activeLeaseExpiryMs);
     let events: readonly DelegationEvent[];
     try {
       events = await journal.load();
@@ -700,7 +797,11 @@ export class DurableDelegationAuthority {
       fencingTokenDecimal: state.fencingTokenDecimal,
       publicationSequenceDecimal: event.sequenceDecimal,
       publicationSha256: event.eventSha256,
-      expiresAtUnixMsDecimal: String(now + ACTIVE_LEASE_EXPIRY_MS)
+      expiresAtUnixMsDecimal: String(
+        this.activeLeaseExpiryMs === 0
+          ? Number.MAX_SAFE_INTEGER
+          : Math.min(Number.MAX_SAFE_INTEGER, now + this.activeLeaseExpiryMs)
+      )
     });
   }
 
@@ -797,9 +898,46 @@ export class DurableDelegationAuthority {
     await this.transition(token, 'completed', this.now());
   }
 
-  async resultAppliedAndCompleted(token: DelegationToken): Promise<void> {
-    await this.resultApplied(token);
-    await this.completed(token);
+  resultAppliedAndCompleted(token: DelegationToken): Promise<void> {
+    const operation = this.mutationTail.then(async () => {
+      const state = this.state(token);
+      if (state.phase === 'completed') return;
+      if (state.phase === 'result-applied') {
+        await this.transitionNow(token, 'completed', this.now());
+        return;
+      }
+      if (!validTransition(state.phase, 'result-applied')) {
+        throw new DurableDelegationError(
+          'invalid-transition', `delegation result cannot complete from ${state.phase}`
+        );
+      }
+      if (!this.journal.appendTerminalPair) {
+        // Keep recovery/custom adapters compatible without treating a first
+        // successful append followed by a failed second append as completed.
+        await this.transitionNow(token, 'result-applied', this.now());
+        await this.transitionNow(token, 'completed', this.now());
+        return;
+      }
+      const applied: DelegationEventDraft = {
+        ...eventIdentity(state.identity, state.budget, state.fencingTokenDecimal),
+        phase: 'result-applied', workerId: state.workerId,
+        reservationSha256: state.reservationSha256, resultSha256: state.resultSha256,
+        workerReplySha256: state.workerReplySha256,
+        timestampUnixMsDecimal: String(this.now()), reason: null
+      };
+      const completed: DelegationEventDraft = {
+        ...applied, phase: 'completed', timestampUnixMsDecimal: String(this.now())
+      };
+      try {
+        await this.journal.appendTerminalPair(applied, completed);
+      } catch (error) {
+        throw asDelegationJournalFailure(error, 'persist delegation terminal pair');
+      }
+      state.phase = 'completed';
+      state.terminalAtUnixMs = Number(completed.timestampUnixMsDecimal);
+    });
+    this.mutationTail = operation.then(() => undefined, () => undefined);
+    return operation;
   }
 
   async failedClosed(token: DelegationToken, reason: string): Promise<void> {
@@ -839,11 +977,12 @@ export class DurableDelegationAuthority {
   }
 
   async expireStale(): Promise<number> {
+    if (this.activeLeaseExpiryMs === 0) return 0;
     const now = this.now();
     const stale = [...this.states.values()].filter(
       (state) =>
         (state.phase === 'published' || state.phase === 'running' || state.phase === 'renewed') &&
-        now - state.lastHeartbeatUnixMs > ACTIVE_LEASE_EXPIRY_MS
+        now - state.lastHeartbeatUnixMs > this.activeLeaseExpiryMs
     );
     for (const state of stale) {
       const token: DelegationToken = {
@@ -998,7 +1137,7 @@ export class DurableDelegationAuthority {
 
   private ensureLive(token: DelegationToken, now: number): void {
     const state = this.state(token);
-    if (now - state.lastHeartbeatUnixMs > ACTIVE_LEASE_EXPIRY_MS) {
+    if (this.activeLeaseExpiryMs > 0 && now - state.lastHeartbeatUnixMs > this.activeLeaseExpiryMs) {
       throw new DurableDelegationError('lease-expired', 'delegation heartbeat lease expired');
     }
   }
@@ -1204,7 +1343,11 @@ export async function createBrowserDelegationAuthority(
           `${DATABASE_NAME}-${jobId}`,
           jobId
         );
-  return DurableDelegationAuthority.recover(journal, clock);
+  // These are locally owned Web Workers: their lifecycle/error channel and
+  // fencing tokens govern cancellation. A long atomic WASM candidate cannot
+  // emit a heartbeat mid-call, so silence must not become a hidden 120 s search
+  // cap. Explicit test/external authorities retain their expiring lease policy.
+  return DurableDelegationAuthority.recover(journal, clock, { activeLeaseExpiryMs: 0 });
 }
 
 export async function sha256Hex(value: string | ArrayBuffer): Promise<string> {
@@ -1216,28 +1359,43 @@ export async function sha256Hex(value: string | ArrayBuffer): Promise<string> {
     .join('');
 }
 
-async function buildEvent(
+function assertTerminalPairDrafts(applied: DelegationEventDraft, completed: DelegationEventDraft): void {
+  const identicalFields = [
+    'jobId', 'taskId', 'coordinatorId', 'payloadSha256', 'requestSha256',
+    'computeUnitsDecimal', 'memoryBytesDecimal', 'fencingTokenDecimal',
+    'workerId', 'reservationSha256', 'resultSha256', 'workerReplySha256', 'reason'
+  ] as const;
+  if (applied.phase !== 'result-applied' || completed.phase !== 'completed' ||
+      identicalFields.some((key) => applied[key] !== completed[key])) {
+    throw new DurableDelegationError('invalid-transition', 'atomic terminal pair has mismatched identity or phases');
+  }
+}
+
+async function buildEvents(
   records: readonly DelegationEvent[],
-  draft: DelegationEventDraft
-): Promise<DelegationEvent> {
-  const sequence = BigInt(records.length) + 1n;
-  if (sequence > MAX_U64) {
+  drafts: readonly [DelegationEventDraft] | readonly [DelegationEventDraft, DelegationEventDraft]
+): Promise<readonly DelegationEvent[]> {
+  const firstSequence = BigInt(records.length) + 1n;
+  if (firstSequence + BigInt(drafts.length) - 1n > MAX_U64) {
     throw new DurableDelegationError(
       'sequence-exhausted',
       'delegation journal sequence exceeds decimal u64'
     );
   }
-  const sequenceDecimal = sequence.toString();
-  const previousEventSha256 = records.at(-1)?.eventSha256 ?? ZERO_SHA256;
-  const material = canonicalHashMaterial(sequenceDecimal, draft, previousEventSha256);
-  const eventSha256 = await sha256Hex(material);
-  return Object.freeze({
-    schema: DELEGATION_JOURNAL_SCHEMA,
-    sequenceDecimal,
-    ...draft,
-    previousEventSha256,
-    eventSha256
-  });
+  let previousEventSha256 = records.at(-1)?.eventSha256 ?? ZERO_SHA256;
+  const events: DelegationEvent[] = [];
+  for (let index = 0; index < drafts.length; index += 1) {
+    const sequenceDecimal = (firstSequence + BigInt(index)).toString();
+    const draft = drafts[index];
+    const material = canonicalHashMaterial(sequenceDecimal, draft, previousEventSha256);
+    const eventSha256 = await sha256Hex(material);
+    events.push(Object.freeze({
+      schema: DELEGATION_JOURNAL_SCHEMA, sequenceDecimal, ...draft,
+      previousEventSha256, eventSha256
+    }));
+    previousEventSha256 = eventSha256;
+  }
+  return events;
 }
 
 async function validateEventChain(events: readonly DelegationEvent[]): Promise<void> {
@@ -1568,6 +1726,17 @@ function requestResult<T>(request: IDBRequest<T>, label: string): Promise<T> {
         })
       );
   });
+}
+
+function requestsBeforeCommit<T>(requests: Promise<T>, completed: Promise<void>): Promise<T> {
+  return Promise.race([
+    requests,
+    completed.then(() => {
+      // Completing without the required read responses cannot grant mutation
+      // authority. Normally only an early abort can win this race.
+      throw new DurableDelegationError('journal-write-failed', 'transaction completed before required metadata reads');
+    })
+  ]);
 }
 
 function transactionCompletion(transaction: IDBTransaction, label: string): Promise<void> {

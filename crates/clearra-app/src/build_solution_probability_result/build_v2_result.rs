@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use clearra_core_executor::{solution_probability_pattern_weights, CoreExecutionResult};
 use clearra_coverage::{
-    cover::{exact_minimum_cover, ExactMinimumCoverError},
+    cover::ExactMinimumCoverError,
     pattern::{pattern_bitset::PatternBitSet, weighted_pattern_set::WeightedPatternSet},
     probability::union_probability::union_probability,
 };
@@ -64,6 +64,8 @@ impl BuildCoveragePortfolioCompletenessEvidence {
         self.query_bound
     }
 
+    // Retained as the single aggregate completeness predicate for product adapters.
+    #[allow(dead_code)]
     pub(crate) const fn complete(self) -> bool {
         self.source_universe_complete
             && self.coverage_rows_complete
@@ -99,6 +101,8 @@ impl BuildCoveragePortfolioV2Result {
         self.probability_basis
     }
 
+    // Retained for product adapters that audit the validator-minted authority.
+    #[allow(dead_code)]
     pub(crate) const fn authority(&self) -> &ValidatedBuildTargetSearchResultAuthority {
         &self.authority
     }
@@ -135,10 +139,14 @@ impl BuildCoveragePortfolioV2Result {
         &self.canonical_candidate_keys
     }
 
+    // Retained as the borrowed counterpart to the shared-owner paging seam.
+    #[allow(dead_code)]
     pub(crate) fn alternatives(&self) -> &CoveragePortfolioAlternativeSet {
         self.alternatives.as_ref()
     }
 
+    // Retained for callers that need the exact shared alternative-store owner.
+    #[allow(dead_code)]
     pub(crate) fn alternative_owner(&self) -> &Arc<CoveragePortfolioAlternativeSet> {
         &self.alternatives
     }
@@ -171,10 +179,11 @@ pub(crate) enum BuildCoveragePortfolioResultError {
     QueryCompileFailed,
     Producer(BuildSolutionProbabilityResultError),
     IncompleteEvidence,
-    EmptyCoverageUniverse,
     PatternUniverseInvalid,
     NormalizedSolutionSetHashInvalid,
     ProbabilityUnionInvalid,
+    // Preserves the exact-cover failure category at this product boundary.
+    #[allow(dead_code)]
     MinimumCover(ExactMinimumCoverError),
     Portfolio(PortfolioAlternativeError),
 }
@@ -236,9 +245,8 @@ pub(crate) fn validate_build_coverage_portfolio_v2_result(
     let required =
         PatternBitSet::from_words(pattern_count, result.coverage_pattern_words().to_vec())
             .map_err(|_| BuildCoveragePortfolioResultError::PatternUniverseInvalid)?;
-    if required.is_empty() {
-        return Err(BuildCoveragePortfolioResultError::EmptyCoverageUniverse);
-    }
+    // A fully validated zero-success source has one exact empty portfolio,
+    // not an execution failure. Completeness is checked before this point.
 
     let candidate_keys = result.normalized_solution_keys().to_vec();
     let rows = result
@@ -251,17 +259,6 @@ pub(crate) fn validate_build_coverage_portfolio_v2_result(
     {
         return Err(BuildCoveragePortfolioResultError::PatternUniverseInvalid);
     }
-
-    let selection = exact_minimum_cover(&required, &rows)
-        .map_err(BuildCoveragePortfolioResultError::MinimumCover)?;
-    if !selection.complete() || selection.covered_patterns() != &required {
-        return Err(BuildCoveragePortfolioResultError::IncompleteEvidence);
-    }
-    let canonical_candidate_keys = selection
-        .row_indices()
-        .iter()
-        .map(|index| candidate_keys[*index].clone())
-        .collect::<Vec<_>>();
 
     let normalized_solution_set_hash = result
         .unique_field("normalized_solution_set_hash")
@@ -292,15 +289,17 @@ pub(crate) fn validate_build_coverage_portfolio_v2_result(
     )
     .map_err(BuildCoveragePortfolioResultError::Portfolio)?;
     let alternatives = Arc::new(
-        CoveragePortfolioAlternativeSet::new(
+        CoveragePortfolioAlternativeSet::new_canonical(
             identity,
             candidate_keys,
             required.clone(),
             rows,
-            &canonical_candidate_keys,
         )
         .map_err(BuildCoveragePortfolioResultError::Portfolio)?,
     );
+    let canonical_candidate_keys = alternatives
+        .canonical_candidate_keys_owned()
+        .map_err(BuildCoveragePortfolioResultError::Portfolio)?;
 
     Ok(BuildCoveragePortfolioV2Result {
         contract_id: BUILD_COVERAGE_PORTFOLIO_RESULT_CONTRACT,
@@ -522,6 +521,37 @@ mod tests {
             portfolio.alternative_owner().identity(),
             portfolio.alternatives().identity()
         );
+    }
+
+    #[test]
+    fn complete_unreachable_build_cover_has_one_exact_empty_portfolio() {
+        let _resource_guard = build_probability_resource_test_guard();
+        let core = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let field =
+            BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0]).unwrap();
+        let query = BuildProbabilityQuery::new(core, field)
+            .with_solution_probability_policy(BuildSolutionProbabilityPolicy::Include);
+        let result = execute(&query);
+        let portfolio = validate_build_coverage_portfolio_v2_result(authority_for(&query), &result)
+            .expect("complete unreachable source is an exact empty result");
+        assert_eq!(portfolio.source_candidate_count(), 0);
+        assert_eq!(portfolio.selected_candidate_count(), 0);
+        assert_eq!(portfolio.pattern_count(), 1);
+        assert_eq!(portfolio.required_pattern_count(), 0);
+        assert_eq!(portfolio.union_probability(), "0");
+        assert!(portfolio.completeness().complete());
+        assert!(portfolio.canonical_candidate_keys().is_empty());
+        assert!(portfolio
+            .alternatives()
+            .canonical_page()
+            .portfolio()
+            .candidate_ids()
+            .is_empty());
     }
 
     #[test]

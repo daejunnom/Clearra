@@ -1,9 +1,9 @@
-import type { SetupPathDetailState } from './setupFinderModel';
+import type { SetupPathDetailState } from './setupFinderModel.ts';
+import { workspacePublicFailure } from './workspacePublicFailure.ts';
 
 export function cancelSetupPathDetail(
   pathDetails: Record<string, SetupPathDetailState>,
-  activeKey: string | null,
-  cancelledMessage: string
+  activeKey: string | null
 ): Record<string, SetupPathDetailState> {
   if (!activeKey) return pathDetails;
   return {
@@ -12,7 +12,8 @@ export function cancelSetupPathDetail(
       status: 'failed',
       paths: [],
       complete: false,
-      error: cancelledMessage
+      publicFailures: [workspacePublicFailure('request-cancelled')],
+      developerFailure: null
     }
   };
 }

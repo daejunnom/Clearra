@@ -917,8 +917,16 @@ where
                 .map_err(|_| SolutionArtifactOutputError::ArtifactModelInvalid)?,
         );
     }
-    debug_assert!(probabilities.next().is_none());
-    debug_assert!(scores.next().is_none());
+    #[cfg(debug_assertions)]
+    {
+        // Keep the iterator mutation outside `debug_assert!`: macro arguments
+        // are not evaluated in release builds, so state transitions must never
+        // be hidden inside the assertion itself.
+        let probabilities_exhausted = probabilities.next().is_none();
+        let scores_exhausted = scores.next().is_none();
+        debug_assert!(probabilities_exhausted);
+        debug_assert!(scores_exhausted);
+    }
 
     SolutionSetArtifact::try_new(
         source.source_contract,

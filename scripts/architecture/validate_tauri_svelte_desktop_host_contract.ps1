@@ -149,7 +149,7 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         '"clearra-cli/CommandRequest"',
         "mod active_request_parser",
         "self.app_context.run(request)",
-        "response.to_host_response_with_solution_set_artifact",
+        "response.to_host_response()",
         "serde_json::to_string",
         "PcQueueInput::fixed_sequence",
         "PcHoldPolicy::Disabled"

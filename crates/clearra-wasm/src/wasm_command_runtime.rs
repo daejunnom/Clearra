@@ -9,14 +9,15 @@ use std::{
 use clearra_app::{
     app_response::GovernedAppResponse, AppCommand, AppContext, AppCoreExecutorService,
     AppErrorCode, AppRequest, AppServices, CooperativeAppAdvance, CooperativeAppExecution,
-    ExecutionControl, FiniteCooperativeCallerMemory, FiniteCooperativeCallerMemoryRejection,
-    PcBestSaveWinnerV2, PcPathFamilyV2Result, PcPathWitnessV2, PcSaveCompletenessEvidence,
-    PcSaveGroupV2, PcSavePieceMultiset, PcSaveWitness, ProductCapabilityContract,
-    ProductCapabilityResultKind, ProductPageSourceOwner, PC_BEST_SAVE_SCHEMA,
-    PC_PATH_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+    ExecutionControl, PcBestSaveWinnerV2, PcPathFamilyV2Result, PcPathWitnessV2,
+    PcSaveCompletenessEvidence, PcSaveGroupV2, PcSavePieceMultiset, PcSaveWitness,
+    ProductCapabilityContract, ProductCapabilityResultKind, ProductPageSourceOwner,
+    PC_BEST_SAVE_SCHEMA, PC_PATH_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
     PC_SCORE_PATTERN_WINNER_CONTRACT, PC_SCORE_SOLUTION_FIELD_CONTRACT,
     PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
 };
+#[cfg(test)]
+use clearra_app::{FiniteCooperativeCallerMemory, FiniteCooperativeCallerMemoryRejection};
 use clearra_cli_command::{CliCommandError, CliCommandParser, CliCommandRequest};
 use clearra_core_domain::{
     piece::piece_kind::PieceKind,
@@ -27,7 +28,7 @@ use clearra_core_executor::{
 };
 use clearra_host_contract::{
     AppResponse as HostAppResponse, AppResult as HostAppResult, AppStatus as HostAppStatus,
-    BackendReport, BuildV2CandidateCoveragePayload, BuildV2ProductPayload,
+    BackendReport, BuildPathFamilyPayload, BuildV2CandidateCoveragePayload, BuildV2ProductPayload,
     BuildV2ScoreWinnerPayload, CapabilityReport, ContinuationReport, CoveragePortfolioPagePayload,
     Diagnostic, DiagnosticReport, ExecutionAvailabilityReport, PcBestSavePayload,
     PcBestSaveWinnerPayload, PcPathFamilyPayload, PcPathStepPayload, PcPathWitnessPayload,
@@ -38,8 +39,7 @@ use clearra_host_contract::{
     ScorePatternWinnerFamilyPayload, ScorePatternWinnerPayload, SetupRankedCandidatePayload,
     SetupRankedFamilyPayload, SetupScoreCandidatePayload, SetupScoreRankingPayload,
     SpinStructureCandidatePayload, SpinStructureFamilyPayload, ARTIFACT_SCHEMA_VERSION,
-    COMPILED_ENGINE_BUILD_ID, COMPILED_SOURCE_COMMIT, CONTRACT_SCHEMA_VERSION,
-    HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES, SUPPLY_SEMANTICS_ID,
+    COMPILED_ENGINE_BUILD_ID, COMPILED_SOURCE_COMMIT, CONTRACT_SCHEMA_VERSION, SUPPLY_SEMANTICS_ID,
 };
 
 use crate::{WasmHostCapabilities, WebGpuBackendOutcomeState, WebGpuBackendReport};
@@ -103,8 +103,10 @@ impl GovernedWasmExecutionResult {
 const WASM_FINITE_MEMORY_LIMIT: &str = "E_WASM_FINITE_MEMORY_LIMIT";
 const WASM_FINITE_ALLOCATION: &str = "E_WASM_FINITE_ALLOCATION";
 const WASM_FINITE_PROJECTION: &str = "E_WASM_FINITE_PROJECTION";
+#[cfg(test)]
 const WASM_FINITE_APP_ENTRY: &str = "E_WASM_FINITE_APP_ENTRY";
 const WASM_FINITE_AUTHORITY_UNAVAILABLE: &str = "E_WASM_FINITE_AUTHORITY_UNAVAILABLE";
+#[cfg(test)]
 const WASM_MIB_BYTES: u128 = 1024 * 1024;
 
 #[derive(Clone, Copy)]
@@ -987,8 +989,10 @@ impl WasmSearchReport {
             let inventory = PieceKind::STANDARD_TETROMINOES
                 .into_iter()
                 .flat_map(|piece| {
-                    core::iter::repeat(piece.as_ascii())
-                        .take(usize::from(query.inventory.count(piece)))
+                    core::iter::repeat_n(
+                        piece.as_ascii(),
+                        usize::from(query.inventory.count(piece)),
+                    )
                 })
                 .collect();
             return Some(Self {
@@ -1895,13 +1899,12 @@ fn try_host_product_result_payload(
             let page = set.canonical_page();
             let member_count = page.portfolio().candidate_ids().len();
             let member_end = member_count.min(PORTFOLIO_MEMBER_PAGE_SIZE);
-            let (canonical_candidate_id, canonical_solution_key) = report
-                .canonical_candidate()
-                .ok_or_else(finite_projection_error)?;
-            let canonical_witness = ProductCandidateMemberPayload::new(
-                try_decimal_u128(canonical_candidate_id as u128, ledger)?,
-                try_owned_string(canonical_solution_key, ledger)?,
-            );
+            let canonical_candidate = report.canonical_candidate();
+            if canonical_candidate.is_none()
+                && (page.optimal_cardinality() != 0 || !page.portfolio().candidate_ids().is_empty())
+            {
+                return Err(finite_projection_error());
+            }
             let members = try_owned_vec(
                 &page.portfolio().candidate_ids()[..member_end],
                 ledger,
@@ -1921,34 +1924,40 @@ fn try_host_product_result_payload(
                     ))
                 },
             )?;
+            let page_payload = CoveragePortfolioPagePayload::new(
+                try_owned_string(set.contract_id(), ledger)?,
+                try_owned_string(page.contract_id(), ledger)?,
+                try_owned_string(PORTFOLIO_MEMBER_PAGE_CONTRACT, ledger)?,
+                try_owned_string(set.set_identity_sha256(), ledger)?,
+                try_owned_string(set.candidate_map_sha256(), ledger)?,
+                try_owned_string(page.alternative_index_decimal(), ledger)?,
+                try_decimal_u128(page.optimal_cardinality() as u128, ledger)?,
+                try_owned_string(page.known_alternative_count_decimal(), ledger)?,
+                try_optional_owned_string(page.total_alternative_count_decimal(), ledger)?,
+                page.enumeration_complete(),
+                try_owned_string("1", ledger)?,
+                try_decimal_u128(
+                    member_count.div_ceil(PORTFOLIO_MEMBER_PAGE_SIZE).max(1) as u128,
+                    ledger,
+                )?,
+                members,
+                true,
+            );
+            let page_payload = match canonical_candidate {
+                Some((canonical_candidate_id, canonical_solution_key)) => page_payload
+                    .with_canonical_witness(
+                        try_owned_string(report.canonical_selection(), ledger)?,
+                        ProductCandidateMemberPayload::new(
+                            try_decimal_u128(canonical_candidate_id as u128, ledger)?,
+                            try_owned_string(canonical_solution_key, ledger)?,
+                        ),
+                    ),
+                None => page_payload,
+            };
             Ok(Some(ProductResultPayload::new(
                 try_owned_string(product.contract().as_str(), ledger)?,
                 try_owned_string(product.result_kind().as_str(), ledger)?,
-                ProductResultPayloadContent::CoveragePortfolio(
-                    CoveragePortfolioPagePayload::new(
-                        try_owned_string(set.contract_id(), ledger)?,
-                        try_owned_string(page.contract_id(), ledger)?,
-                        try_owned_string(PORTFOLIO_MEMBER_PAGE_CONTRACT, ledger)?,
-                        try_owned_string(set.set_identity_sha256(), ledger)?,
-                        try_owned_string(set.candidate_map_sha256(), ledger)?,
-                        try_owned_string(page.alternative_index_decimal(), ledger)?,
-                        try_decimal_u128(page.optimal_cardinality() as u128, ledger)?,
-                        try_owned_string(page.known_alternative_count_decimal(), ledger)?,
-                        try_optional_owned_string(page.total_alternative_count_decimal(), ledger)?,
-                        page.enumeration_complete(),
-                        try_owned_string("1", ledger)?,
-                        try_decimal_u128(
-                            member_count.div_ceil(PORTFOLIO_MEMBER_PAGE_SIZE).max(1) as u128,
-                            ledger,
-                        )?,
-                        members,
-                        true,
-                    )
-                    .with_canonical_witness(
-                        try_owned_string(report.canonical_selection(), ledger)?,
-                        canonical_witness,
-                    ),
-                ),
+                ProductResultPayloadContent::CoveragePortfolio(page_payload),
             )))
         }
         (
@@ -2399,6 +2408,11 @@ fn try_clone_public_product_result_payload(
                 payload, ledger,
             )?)
         }
+        ProductResultPayloadContent::BuildPathFamily(payload) => {
+            ProductResultPayloadContent::BuildPathFamily(try_clone_build_path_family_payload(
+                payload, ledger,
+            )?)
+        }
         _ => return Err(finite_projection_error()),
     };
     Ok(ProductResultPayload::from_owned_memory_authorized_parts(
@@ -2583,6 +2597,56 @@ fn try_clone_pc_path_family_payload(
         canonical_witness,
         witnesses,
     ))
+}
+
+fn try_clone_build_path_family_payload(
+    source: &BuildPathFamilyPayload,
+    ledger: &mut WasmFiniteMemoryLedger,
+) -> Result<BuildPathFamilyPayload, WasmCommandRuntimeError> {
+    if source.canonical_selection() != "smallest-canonical-candidate-id"
+        || !is_canonical_hex_mask(source.target_terminal_board_mask())
+        || source
+            .mirrored_terminal_board_mask()
+            .is_some_and(|mask| !is_canonical_hex_mask(mask))
+    {
+        return Err(finite_projection_error());
+    }
+    let canonical_witness = match (source.canonical_witness(), source.witnesses().first()) {
+        (Some(canonical), Some(first)) if canonical == first => {
+            Some(try_clone_pc_path_witness_payload(canonical, ledger)?)
+        }
+        (None, None) => None,
+        _ => return Err(finite_projection_error()),
+    };
+    let witnesses = try_owned_vec(
+        source.witnesses(),
+        ledger,
+        try_clone_pc_path_witness_payload,
+    )?;
+    Ok(BuildPathFamilyPayload::new(
+        try_owned_string(source.witness_contract(), ledger)?,
+        try_owned_string(source.ordering(), ledger)?,
+        try_owned_string(source.problem_id(), ledger)?,
+        try_owned_string(source.target_terminal_board_mask(), ledger)?,
+        try_owned_string(source.materialized_pattern_count(), ledger)?,
+        try_owned_string(source.witness_count(), ledger)?,
+        source.complete(),
+        try_owned_string(source.canonical_selection(), ledger)?,
+        canonical_witness,
+        witnesses,
+    )
+    .with_mirrored_terminal_board_mask(try_optional_owned_string(
+        source.mirrored_terminal_board_mask(),
+        ledger,
+    )?))
+}
+
+fn is_canonical_hex_mask(value: &str) -> bool {
+    value.len() == 18
+        && value.starts_with("0x")
+        && value[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn try_clone_pc_path_witness_payload(
@@ -3012,7 +3076,7 @@ fn try_canonical_probability(
 ) -> Result<String, WasmCommandRuntimeError> {
     let value = value.unwrap_or("0");
     let canonical = match value.parse::<f64>() {
-        Ok(number) if number == 0.0 => "0",
+        Ok(0.0) => "0",
         _ => value,
     };
     try_owned_string(canonical, ledger)
@@ -3467,9 +3531,9 @@ impl WasmExecutionResult {
             .cloned();
         let product_page_source_owner = response.public_page_source_owner();
         Self {
-            app_response: response.to_host_response_with_solution_set_artifact(Some(
-                HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
-            )),
+            // GUI completion must stay document-format agnostic. CTK3/Fumen materialization
+            // belongs to the explicitly requested page/export path, not the solver hot path.
+            app_response: response.to_host_response(),
             webgpu_backend,
             search_report,
             tiling_solution_page_store,
@@ -3710,12 +3774,21 @@ impl WasmCommandRuntime {
     }
 
     pub fn with_host_capabilities(mut self, capabilities: WasmHostCapabilities) -> Self {
-        self.host_capabilities = capabilities;
+        self.set_host_capabilities(capabilities);
         self
     }
 
     pub fn set_host_capabilities(&mut self, capabilities: WasmHostCapabilities) {
         self.host_capabilities = capabilities;
+        self.app_context
+            .set_product_retention_budget(capabilities.product_retention_budget());
+    }
+
+    pub fn set_product_retention_budget(
+        &mut self,
+        budget: Option<clearra_app::ProductRetentionBudget>,
+    ) {
+        self.set_host_capabilities(self.host_capabilities.with_product_retention_budget(budget));
     }
 
     pub(crate) fn app_context(&self) -> &AppContext {
@@ -3732,7 +3805,10 @@ impl WasmCommandRuntime {
             .to_app_request()
             .map_err(WasmCommandRuntimeError::from_cli_command)?;
         validate_build_memory_authorities(&request)?;
-        Ok(request)
+        Ok(
+            request
+                .with_product_retention_budget(self.host_capabilities.product_retention_budget()),
+        )
     }
 
     pub fn run_command_text(
@@ -3760,6 +3836,7 @@ impl WasmCommandRuntime {
     /// Internal bridge for a command whose parsing and preparation ownership
     /// has already been resolved by its caller. This does not grant authority
     /// to the raw-text parser or to the worker transport.
+    #[cfg(test)]
     pub(crate) fn execute_prepared_governed(
         &self,
         prepared: PreparedWasmCommand,
@@ -3810,6 +3887,43 @@ impl WasmCommandRuntime {
             .with_runtime_webgpu_available(self.host_capabilities.webgpu_available())
             .to_app_request()
             .map_err(WasmCommandRuntimeError::from_cli_command)?;
+        validate_build_memory_authorities(&request)?;
+        Ok(PreparedWasmCommand {
+            request: request
+                .with_product_retention_budget(self.host_capabilities.product_retention_budget()),
+            webgpu_requested,
+        })
+    }
+
+    /// Rebuilds a typed score request for one browser child session. The
+    /// browser coordinator retains the user's worker policy; every producer
+    /// and verifier session is deliberately single-threaded so one logical
+    /// worker cannot recursively request another worker pool.
+    pub(crate) fn prepare_distributed_score_child_command_text(
+        &self,
+        command_text: &str,
+    ) -> Result<PreparedWasmCommand, WasmCommandRuntimeError> {
+        let parsed = self.parse_command(command_text)?;
+        let webgpu_requested = parsed.requests_webgpu();
+        let request = parsed
+            .with_runtime_webgpu_available(self.host_capabilities.webgpu_available())
+            .with_workers(1)
+            .with_use_all_logical_processors(false)
+            .to_app_request()
+            .map_err(WasmCommandRuntimeError::from_cli_command)?;
+        if !matches!(
+            request.product_capability_contract(),
+            Some(
+                ProductCapabilityContract::PcScore
+                    | ProductCapabilityContract::PcScoreFinder
+                    | ProductCapabilityContract::PcScoreMinimals
+            )
+        ) {
+            return Err(WasmCommandRuntimeError::new(
+                "E_WASM_DISTRIBUTED_SCORE_CHILD",
+                "distributed score child preparation requires a typed score product",
+            ));
+        }
         validate_build_memory_authorities(&request)?;
         Ok(PreparedWasmCommand {
             request,
@@ -3873,6 +3987,7 @@ impl WasmCommandRuntime {
     /// Direct finite entry point. The worker intentionally continues to call
     /// `start_prepared_execution`, whose compatibility App entry rejects a
     /// finite request without an explicit caller-memory owner.
+    #[cfg(test)]
     fn start_prepared_direct_execution(
         &self,
         prepared: PreparedWasmCommand,
@@ -3906,6 +4021,7 @@ impl WasmCommandRuntime {
     }
 }
 
+#[cfg(test)]
 fn checked_finite_direct_start_retained_owner_bytes(
     control_retained_owner_bytes: u128,
 ) -> Option<u128> {
@@ -3941,6 +4057,7 @@ fn finite_direct_returned_carrier_inline_bytes() -> u128 {
     WasmFiniteConversionRoute::CooperativeAdvance.returned_carrier_inline_bytes()
 }
 
+#[cfg(test)]
 fn checked_finite_direct_request_entry_bytes(
     prepared: &PreparedWasmCommand,
     caller_retained_owner_bytes: u128,
@@ -3954,6 +4071,7 @@ fn checked_finite_direct_request_entry_bytes(
         .checked_add(caller_retained_owner_bytes)
 }
 
+#[cfg(test)]
 fn authorize_finite_direct_bytes(
     required_bytes: u128,
     memory_limit_bytes: u128,
@@ -3964,6 +4082,7 @@ fn authorize_finite_direct_bytes(
     Ok(())
 }
 
+#[cfg(test)]
 fn authorize_finite_direct_request_entry(
     prepared: &PreparedWasmCommand,
     caller_retained_owner_bytes: u128,
@@ -4002,7 +4121,7 @@ fn validate_build_memory_authorities(request: &AppRequest) -> Result<(), WasmCom
 fn canonical_probability_field(value: Option<&str>) -> String {
     let value = value.unwrap_or("0");
     match value.parse::<f64>() {
-        Ok(number) if number == 0.0 => "0".to_owned(),
+        Ok(0.0) => "0".to_owned(),
         _ => value.to_owned(),
     }
 }
@@ -4096,6 +4215,7 @@ fn advance_finite_prepared_app_execution(
         .map_err(finite_core_execution_error)
 }
 
+#[cfg(test)]
 fn finite_app_entry_error(
     rejection: FiniteCooperativeCallerMemoryRejection,
 ) -> WasmCommandRuntimeError {
@@ -4129,7 +4249,7 @@ impl Default for WasmCommandRuntime {
 pub struct WasmCommandRuntimeError {
     code: &'static str,
     message: String,
-    resource_report: Option<clearra_core_domain::resource::ResourceReport>,
+    resource_report: Option<Box<clearra_core_domain::resource::ResourceReport>>,
 }
 
 impl WasmCommandRuntimeError {
@@ -4149,7 +4269,7 @@ impl WasmCommandRuntimeError {
         mut self,
         resource_report: clearra_core_domain::resource::ResourceReport,
     ) -> Self {
-        self.resource_report = Some(resource_report);
+        self.resource_report = Some(Box::new(resource_report));
         self
     }
 
@@ -4161,8 +4281,8 @@ impl WasmCommandRuntimeError {
         &self.message
     }
 
-    pub const fn resource_report(&self) -> Option<&clearra_core_domain::resource::ResourceReport> {
-        self.resource_report.as_ref()
+    pub fn resource_report(&self) -> Option<&clearra_core_domain::resource::ResourceReport> {
+        self.resource_report.as_deref()
     }
 
     pub fn diagnostic_report(&self) -> DiagnosticReport {
@@ -5394,8 +5514,10 @@ mod finite_memory_tests {
             .into_iter()
             .try_fold(0_u128, u128::checked_add)
         };
-        let mut report = WasmSearchReport::default();
-        report.setup_report = Some(setup);
+        let report = WasmSearchReport {
+            setup_report: Some(setup),
+            ..WasmSearchReport::default()
+        };
 
         assert_eq!(
             report.checked_retained_capacity_bytes(),
@@ -5433,5 +5555,17 @@ mod finite_memory_tests {
         assert_eq!(error.code(), "E_WASM_FINITE_CORE_EXECUTION");
         assert!(error.message().is_empty());
         assert!(error.resource_report().is_none());
+    }
+
+    #[test]
+    fn runtime_error_preserves_the_typed_resource_report_after_boxing() {
+        let mut report = clearra_core_domain::resource::ResourceReport::complete();
+        report.observe_cpu_bytes(4_096);
+        report.observe_candidate_rows(37);
+
+        let error = WasmCommandRuntimeError::new("E_TEST_RESOURCE", String::new())
+            .with_resource_report(report);
+
+        assert_eq!(error.resource_report(), Some(&report));
     }
 }

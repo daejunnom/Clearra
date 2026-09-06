@@ -194,6 +194,8 @@ impl SharedResourceLeaseAuthority {
         }
     }
 
+    // Keep the copyable, typed failure evidence inline at this public authority boundary.
+    #[allow(clippy::result_large_err)]
     pub fn try_acquire(
         &self,
         owner: ResourceLeaseOwnerId,
@@ -258,6 +260,8 @@ impl SharedResourceLeaseAuthority {
         })
     }
 
+    // Keep the copyable, typed failure evidence inline through the private child path.
+    #[allow(clippy::result_large_err)]
     fn try_acquire_child(
         &self,
         parent: ResourceLeaseToken,
@@ -407,6 +411,8 @@ impl ResourceLease {
         self.token
     }
 
+    // Keep the copyable, typed failure evidence inline at this public authority boundary.
+    #[allow(clippy::result_large_err)]
     pub fn try_child(
         &self,
         owner: ResourceLeaseOwnerId,
@@ -582,6 +588,8 @@ const fn zero_capacity() -> ResourceLeaseCapacity {
     }
 }
 
+// Epoch exhaustion must retain the complete copyable availability evidence.
+#[allow(clippy::result_large_err)]
 fn next_epoch(state: &mut AuthorityState) -> Result<u64, ExecutionAvailability> {
     let epoch = state.next_epoch.checked_add(1).ok_or_else(|| {
         ExecutionAvailability::unavailable(ExecutionAvailabilityReason::CapabilityUnavailable)

@@ -7,7 +7,7 @@ use clearra_coverage::{
 
 use crate::buildup::buildup_execution_mode::BuildUpExecutionMode;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BuildUpRunnerError {
     Ffi(FfiProblemError),
     Native(NativeCoreError),

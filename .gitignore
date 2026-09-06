@@ -65,7 +65,8 @@ Thumbs.db
 # Local bundle outputs
 /project_bundle.txt
 /package-bundle.txt
-/_local/project_bundle.txt
+# Local experiments are never product imports or accepted source inputs.
+/_local/
 /research-data/
 /*.local
 /*.local.*

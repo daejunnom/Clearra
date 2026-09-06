@@ -2,6 +2,8 @@ pub mod distributed_runtime;
 mod distributed_wire;
 pub mod host_contract_bridge;
 mod json_event_envelope;
+mod minimum_parallel_runtime;
+mod minimum_parallel_wire;
 pub mod wasm_command_runtime;
 pub mod wasm_host_capabilities;
 pub mod wasm_worker_job;
@@ -9,7 +11,8 @@ pub mod webgpu;
 
 pub use clearra_app::{
     CoveragePortfolioPageStore, PortfolioAlternativeAdvance, PortfolioAlternativeError,
-    PortfolioAlternativePage, PortfolioMemberPage, ProductPageSourceOwner, ProductPageStore,
+    PortfolioAlternativePage, PortfolioMemberPage, PortfolioPageLoadAdvance,
+    PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore, ProductRetentionBudget,
     PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT,
 };
 #[cfg(feature = "stage-profiling")]
@@ -25,7 +28,8 @@ pub use clearra_core_executor::{
     TilingSolutionPageStore,
 };
 pub use distributed_runtime::{
-    serialize_distributed_final_events, WasmDistributedCoordinator, WasmDistributedFallbackReason,
+    serialize_distributed_final_events, WasmDistributedCompletionAdvance,
+    WasmDistributedCompletionSession, WasmDistributedCoordinator, WasmDistributedFallbackReason,
     WasmDistributedMode, WasmDistributedPreparation, WasmDistributedProducerAdvance,
     WasmDistributedRequestedBackend, WasmDistributedVerifierRuntime,
 };
@@ -35,11 +39,14 @@ pub use distributed_wire::{
 };
 pub use host_contract_bridge::wasm_worker_event_to_host_contract;
 pub use json_event_envelope::{
-    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_page,
-    serialize_coverage_portfolio_page_exact, serialize_coverage_portfolio_retained_page,
-    serialize_governed_worker_events, serialize_parity_report_exhausted,
-    serialize_parity_report_page, serialize_search_report_from_app_response, GovernedWasmJson,
+    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
+    serialize_coverage_portfolio_page, serialize_coverage_portfolio_page_exact,
+    serialize_coverage_portfolio_retained_page, serialize_governed_worker_events,
+    serialize_parity_report_exhausted, serialize_parity_report_page,
+    serialize_pc_replay_page,
+    serialize_search_report_from_app_response, GovernedWasmJson,
 };
+pub use minimum_parallel_runtime::WasmMinimumParallelWorker;
 pub use wasm_command_runtime::{
     GovernedWasmExecutionResult, WasmCommandRuntime, WasmCommandRuntimeError,
     WasmExecutionMemoryAuthority, WasmExecutionResult, WasmFinessePlacement,

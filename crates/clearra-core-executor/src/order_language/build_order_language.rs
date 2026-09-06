@@ -934,9 +934,9 @@ fn predecessor_closure(
     }
     for intermediate in 0..operation_ids.len() {
         let inherited = required[intermediate].clone();
-        for successor in 0..operation_ids.len() {
-            if required[successor].contains(intermediate) {
-                required[successor].union_assign(&inherited)?;
+        for successor_requirements in &mut required {
+            if successor_requirements.contains(intermediate) {
+                successor_requirements.union_assign(&inherited)?;
             }
         }
     }

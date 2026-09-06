@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
 
   import {
@@ -42,7 +43,6 @@
     type BuildV2Request
   } from './buildV2Model';
   import {
-    preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage
   } from './workspaceI18n';
@@ -80,9 +80,7 @@
   $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
 
   onMount(() => {
-    language = preferredWorkspaceLanguage(
-      localStorage.getItem('clearra-language') ?? navigator.language
-    );
+    language = readWorkspaceLanguage();
     request = { ...request, workers: workerAuthority.workersEffective };
     if (runtime === 'web') {
       workerController.prewarm(
@@ -114,7 +112,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    localStorage.setItem('clearra-language', next);
+    persistWorkspaceLanguage(next);
   }
 
   function setHeight(height: number) {
@@ -241,10 +239,10 @@
       ? (signal) => workerController.loadNextProductPage(signal)
       : (signal) => loadNextDesktopProductPage(10_000, signal)}
     loadProductMemberPage={runtime === 'web'
-      ? (outerPageNumber, memberPageNumber, signal) =>
-          workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal)
-      : (outerPageNumber, memberPageNumber, signal) =>
-          loadDesktopProductMemberPage(outerPageNumber, memberPageNumber, signal)}
+      ? (outerPageNumber, memberPageNumber, signal, maximumWorkSteps) =>
+          workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal, maximumWorkSteps)
+      : (outerPageNumber, memberPageNumber, signal, maximumWorkSteps) =>
+          loadDesktopProductMemberPage(outerPageNumber, memberPageNumber, signal, maximumWorkSteps)}
     releaseProductPages={runtime === 'web'
       ? () => workerController.releaseProductPages()
       : () => releaseDesktopProductPages()}

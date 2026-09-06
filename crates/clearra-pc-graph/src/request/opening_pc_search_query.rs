@@ -1,4 +1,4 @@
-use clearra_core_domain::pc::pc_target::PcTarget;
+use clearra_core_domain::{objective::objective_kind::ObjectiveKind, pc::pc_target::PcTarget};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_profiles::{
     bag::bag_profile::BagProfile, board::board_profile::BoardProfile,
@@ -13,7 +13,7 @@ use clearra_supply::QueueObservationPolicy;
 
 use crate::request::{
     pc_execution_policy::PcExecutionPolicy, pc_hold_policy::PcHoldPolicy,
-    pc_queue_input::PcQueueInput, PcSolutionProbabilityPolicy, SupplyWindowSize,
+    pc_queue_input::PcQueueInput, PcCountPolicy, PcSolutionProbabilityPolicy, SupplyWindowSize,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +28,14 @@ pub struct OpeningPcSearchQuery {
     rule: RuleProfile,
     verified_kick_profile: Option<VerifiedKickTableProfile>,
     objective: ObjectivePolicy,
+    /// An explicit count contract supplied by a product/API boundary.
+    ///
+    /// `None` deliberately preserves the legacy opening-query behavior where
+    /// the objective implies the count policy. Keeping the override optional
+    /// lets old callers continue to use `with_objective(unique/tiling)` while
+    /// products such as `pc.minimals` can request minimum-cover reduction over
+    /// unique geometry identities.
+    count_policy: Option<PcCountPolicy>,
     solution_probability_policy: PcSolutionProbabilityPolicy,
     queue_observation_policy: QueueObservationPolicy,
     execution_policy: PcExecutionPolicy,
@@ -52,6 +60,7 @@ impl OpeningPcSearchQuery {
             rule: srs_plus(),
             verified_kick_profile: None,
             objective: ObjectivePolicy::all(),
+            count_policy: None,
             solution_probability_policy: PcSolutionProbabilityPolicy::Omit,
             queue_observation_policy: QueueObservationPolicy::default(),
             execution_policy: PcExecutionPolicy::mvp_default(),
@@ -109,6 +118,18 @@ impl OpeningPcSearchQuery {
     }
 }
 impl OpeningPcSearchQuery {
+    pub fn count_policy(&self) -> PcCountPolicy {
+        if self.objective.score().requested() {
+            return PcCountPolicy::CountAll;
+        }
+        self.count_policy
+            .unwrap_or_else(|| match self.objective.kind() {
+                ObjectiveKind::Unique | ObjectiveKind::Tiling => PcCountPolicy::CountUnique,
+                ObjectiveKind::All | ObjectiveKind::MinimumCover => PcCountPolicy::CountAll,
+            })
+    }
+}
+impl OpeningPcSearchQuery {
     pub const fn solution_probability_policy(&self) -> PcSolutionProbabilityPolicy {
         self.solution_probability_policy
     }
@@ -158,6 +179,12 @@ impl OpeningPcSearchQuery {
 impl OpeningPcSearchQuery {
     pub fn with_objective(mut self, objective: ObjectivePolicy) -> Self {
         self.objective = objective;
+        self
+    }
+}
+impl OpeningPcSearchQuery {
+    pub fn with_count_policy(mut self, count_policy: PcCountPolicy) -> Self {
+        self.count_policy = Some(count_policy);
         self
     }
 }

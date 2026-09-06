@@ -6,6 +6,7 @@ import {
   occupiedCellCount,
   parseBrowserQueueInput,
   type RuleProfile,
+  type ScoreProfile,
   type SpinProfile
 } from './solverWorkspaceModel.ts';
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
@@ -33,6 +34,17 @@ export type BuildProbabilityRequest = {
   holdEnabled: boolean;
   sourcePieces: number | null;
   aggregation: 'buildability' | 'tiling' | 'spin';
+  resultMode:
+    | 'all-solutions'
+    | 'complete-replay-paths'
+    | 'minimum-solutions'
+    | 'field-average-score'
+    | 'fixed-queue-maximum-score'
+    | 'highest-score-minimum-set'
+    | 'failed-queues';
+  failedPatternLimit: number;
+  scoreProfile: ScoreProfile;
+  initialB2B: number;
   rule: RuleProfile;
   spinProfile: SpinProfile;
   preserveB2B: boolean;
@@ -51,6 +63,11 @@ export type BuildProbabilityValidationCode =
   | 'build_target_not_tileable'
   | 'build_target_overlap'
   | 'source_pieces_invalid'
+  | 'build_paths_height_invalid'
+  | 'build_score_height_invalid'
+  | 'fixed_queue_required'
+  | 'failed_pattern_limit_invalid'
+  | 'initial_b2b_invalid'
   | 'worker_count_invalid';
 
 // The native option is a positive usize. Browser commands execute in wasm32,
@@ -74,6 +91,10 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     holdEnabled: true,
     sourcePieces: null,
     aggregation: 'buildability',
+    resultMode: 'all-solutions',
+    failedPatternLimit: 100,
+    scoreProfile: 'tetrio',
+    initialB2B: 0,
     rule: 'srs-plus',
     spinProfile: 't-spins',
     preserveB2B: false,
@@ -97,6 +118,18 @@ export function updateBuildProbabilityDraft(
 export function normalizeBuildProbabilityRequest(
   request: BuildProbabilityRequest
 ): BuildProbabilityRequest {
+  if (request.resultMode !== 'all-solutions') {
+    return {
+      ...request,
+      aggregation: 'buildability',
+      spinProfile: 't-spins',
+      preserveB2B: false,
+      solutionProbabilities: false,
+      precomputeBuildDependencies: false,
+      finesse: 'off',
+      patternKnowledge: 'both'
+    };
+  }
   if (request.aggregation === 'tiling') {
     return {
       ...request,
@@ -128,6 +161,11 @@ export function buildProbabilityValidationCodes(
   request: BuildProbabilityRequest
 ): BuildProbabilityValidationCode[] {
   const errors: BuildProbabilityValidationCode[] = [];
+  const scoreResultMode = [
+    'field-average-score',
+    'fixed-queue-maximum-score',
+    'highest-score-minimum-set'
+  ].includes(request.resultMode);
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) {
     errors.push('target_lines_invalid');
   }
@@ -148,6 +186,31 @@ export function buildProbabilityValidationCodes(
   ) {
     errors.push('source_pieces_invalid');
   }
+  const exceedsCompactField = ((existing | target) >> 60n) !== 0n;
+  if (request.resultMode === 'complete-replay-paths' && exceedsCompactField) {
+    errors.push('build_paths_height_invalid');
+  }
+  if (scoreResultMode && exceedsCompactField) errors.push('build_score_height_invalid');
+  if (
+    request.resultMode === 'fixed-queue-maximum-score' &&
+    parseBrowserQueueInput(request.queue)?.kind !== 'fixed'
+  ) {
+    errors.push('fixed_queue_required');
+  }
+  if (
+    request.resultMode === 'failed-queues' &&
+    (!Number.isInteger(request.failedPatternLimit) ||
+      request.failedPatternLimit < 1 ||
+      request.failedPatternLimit > 1000)
+  ) {
+    errors.push('failed_pattern_limit_invalid');
+  }
+  if (
+    scoreResultMode &&
+    (!Number.isInteger(request.initialB2B) || request.initialB2B < 0 || request.initialB2B > 65_535)
+  ) {
+    errors.push('initial_b2b_invalid');
+  }
   if (!Number.isInteger(request.workers) || request.workers < 1) {
     errors.push('worker_count_invalid');
   }
@@ -159,7 +222,20 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
   const existing = trimBuildProbabilityMask(request.existingMask, request.height);
   const target = trimBuildProbabilityMask(request.targetMask, request.height);
   const parsedQueue = parseBrowserQueueInput(request.queue);
-  const tokens = [
+  const targetPieceCount = buildTargetPieceCount(request);
+  const tokens = request.resultMode === 'minimum-solutions'
+    ? [
+        'clearra',
+        'build',
+        'cover',
+        '--base-mask',
+        boardMaskHex(existing),
+        '--target-mask',
+        boardMaskHex(target),
+        '--height',
+        String(request.height)
+      ]
+    : [
     'clearra',
     'build-probability',
     '--base-mask',
@@ -174,13 +250,30 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
   if (request.sourcePieces != null) {
     tokens.push('--source-pieces', String(request.sourcePieces));
   }
-  if (request.queue) {
+  if (parsedQueue) {
     tokens.push(
-      parsedQueue?.kind === 'pattern' ? '--patterns' : '--queue',
-      parsedQueue?.source ?? request.queue
+      parsedQueue.kind === 'pattern' ? '--patterns' : '--queue',
+      parsedQueue.source
+    );
+  } else if (request.resultMode === 'minimum-solutions') {
+    // Build probability deliberately treats an empty source as the standard
+    // 7-bag. `build cover` keeps its stricter explicit-source CLI contract, so
+    // the GUI adapter must spell out the finite draw window needed by this
+    // target instead of silently emitting an unparseable command.
+    const automaticSourcePieces = Math.max(
+      1,
+      (targetPieceCount ?? 1) + Number(request.holdEnabled)
+    );
+    tokens.push(
+      '--patterns',
+      finiteStandardBagPattern(
+        Math.min(request.sourcePieces ?? automaticSourcePieces, automaticSourcePieces)
+      )
     );
   }
-  if (request.aggregation === 'tiling') {
+  if (request.resultMode === 'minimum-solutions') {
+    tokens.push('--queue-knowledge', 'oracle', '--objective', 'min-cover', '--rule', request.rule);
+  } else if (request.aggregation === 'tiling') {
     tokens.push('--tiling-only');
   } else {
     tokens.push('--aggregate', request.aggregation);
@@ -196,12 +289,53 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
         : '--no-build-dependency-dag'
     );
   }
-  tokens.push(
-    mirrorBoardMask(existing, request.height) === existing ? '--include-mirror' : '--no-mirror'
-  );
+  if (request.resultMode !== 'minimum-solutions') {
+    // Transmit the selected product explicitly, including All Solutions. This
+    // keeps the GUI -> CLI boundary independent from the parser's default.
+    tokens.push('--result-mode', request.resultMode);
+  }
+  if (request.resultMode === 'field-average-score') {
+    tokens.push(
+      '--score-profile',
+      request.scoreProfile,
+      '--initial-b2b',
+      String(request.initialB2B)
+    );
+  } else if (request.resultMode === 'fixed-queue-maximum-score') {
+    tokens.push(
+      '--score-profile',
+      request.scoreProfile,
+      '--initial-b2b',
+      String(request.initialB2B)
+    );
+  } else if (request.resultMode === 'highest-score-minimum-set') {
+    tokens.push(
+      '--score-profile',
+      request.scoreProfile,
+      '--initial-b2b',
+      String(request.initialB2B)
+    );
+  } else if (request.resultMode === 'failed-queues') {
+    tokens.push(
+      '--failed-count',
+      String(request.failedPatternLimit)
+    );
+  }
+  if (request.resultMode !== 'minimum-solutions') {
+    tokens.push(
+      mirrorBoardMask(existing, request.height) === existing ? '--include-mirror' : '--no-mirror'
+    );
+  }
   tokens.push(...searchExecutionCommandArguments(buildProbabilitySearchExecution(request)));
   tokens.push(...buildProbabilityFinesseCommandArguments(request.finesse, request.patternKnowledge));
   return tokens;
+}
+
+function finiteStandardBagPattern(drawCount: number): string {
+  const bounded = Number.isFinite(drawCount) ? Math.max(1, Math.trunc(drawCount)) : 1;
+  const completeBags = Math.floor(bounded / 7);
+  const remainder = bounded % 7;
+  return `${'P7'.repeat(completeBags)}${remainder > 0 ? `P${remainder}` : ''}`;
 }
 
 export function buildProbabilityCommand(request: BuildProbabilityRequest): string {
@@ -224,7 +358,10 @@ function buildProbabilitySearchExecution(
     workers: request.workers,
     useAllLogicalProcessors: request.useAllLogicalProcessors,
     allowBackendFallback: false,
-    cpuWarmup: true,
+    // Workspace prewarm owns asynchronous worker preparation. A hidden command
+    // warmup would make the search wait for every worker instead of dispatching
+    // to the first ready worker.
+    cpuWarmup: false,
     gpuWarmup: false
   };
 }

@@ -60,7 +60,6 @@ mod case_retained_trace_limit_does_not_truncate_solution_count {
 }
 
 #[cfg(feature = "native-c-core")]
-
 mod case_execution_variant_set_preserves_successes_from_multiple_patterns {
     use super::*;
 
@@ -134,7 +133,7 @@ mod case_buildup_witness_counts_all_pattern_verified_executions {
                 vec![result],
             );
         let witness =
-            buildup_witness_from_c_results(&problem, &[candidate], &acceptance, &executions, 1, 1);
+            buildup_witness_from_c_results(&problem, [candidate], &acceptance, &executions, 1, 1);
 
         assert_eq!(witness.total_solution_count, 1);
         assert_eq!(witness.unique_solution_count, 1);

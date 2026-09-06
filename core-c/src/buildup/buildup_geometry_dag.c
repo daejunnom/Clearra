@@ -533,7 +533,7 @@ static clr_buildup_status expand_node(
             ClearraBuildUpState next_state;
             clr_buildup_trace_step trace_step;
             clr_kick_evidence_view kick_evidence;
-            ClearraBuildUpGeometryTransitionView geometry;
+            ClearraBuildUpGeometryTransitionView geometry = {0};
             status = clearra_buildup_search_try_operation_with_geometry(
                 context,
                 state,

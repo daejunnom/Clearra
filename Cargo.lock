@@ -650,6 +650,7 @@ dependencies = [
  "clearra-problem",
  "clearra-spin-structure-search",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -966,7 +966,7 @@ test("forward exact masks preserve cleared history colors and validate the final
   ]);
   assert.deepEqual(page.cells.slice(10, 12), ["O", "O"]);
   assert.deepEqual(page.cells.slice(20, 22), ["O", "O"]);
-  assert.equal(page.comment, "#7 | Q=IO | D=4 | T-spin 2L");
+  assert.equal(page.comment, "#1 | Q=IO | D=4 | T-spin 2L");
 });
 
 test("REN Discord projection keeps only the core-supplied canonical candidate", () => {
@@ -1004,7 +1004,8 @@ test("REN Discord projection keeps only the core-supplied canonical candidate", 
 
   assert.ok(result);
   assert.equal(result.pageCount, 1);
-  assert.match(decodeCtk3(result.source).pages[0].comment, /^#3\b/);
+  assert.match(decodeCtk3(result.source).pages[0].comment, /^#1\b/);
+  assert.doesNotMatch(decodeCtk3(result.source).pages[0].comment, /#(?:3|9)\b/u);
 
   const missing = structuredClone(input);
   delete missing.artifacts.forward.canonical_outcome;

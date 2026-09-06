@@ -13,9 +13,9 @@ search-stage-profiling = [
     "clearra-core-ffi/search-stage-profiling",
     "clearra-webgpu?/stage-profiling",
 ]
-wasm-stage-profiling = ["clearra-webgpu?/stage-profiling", "dep:wasm-bindgen"]
+wasm-stage-profiling = ["clearra-webgpu?/stage-profiling"]
 parallel = []
-webgpu-search = ["dep:clearra-webgpu", "dep:pollster", "dep:wasm-bindgen"]
+webgpu-search = ["dep:clearra-webgpu", "dep:pollster"]
 experimental-native-gpu = ["clearra-core-ffi/experimental-native-gpu"]
 
 [dependencies]
@@ -39,7 +39,7 @@ serde_json.workspace = true
 sha2 = "0.10.9"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = { version = "0.2.126", optional = true }
+wasm-bindgen = { version = "0.2.126" }
 
 [dev-dependencies]
 clearra-core-ffi = { path = "../clearra-core-ffi", features = ["test-support"] }

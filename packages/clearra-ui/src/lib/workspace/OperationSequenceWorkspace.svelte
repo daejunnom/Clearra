@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
 
@@ -22,13 +23,13 @@
     type HostCapabilitySnapshot
   } from '../wasm';
   import WorkspaceShell from './WorkspaceShell.svelte';
+  import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import {
     buildOperationDocumentCommand,
     operationDocumentRequestForDesktop,
     type OperationDocumentCommandInput
   } from './operationDocumentCommandModel';
   import {
-    preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage
   } from './workspaceI18n';
@@ -62,12 +63,13 @@
   $: normalizedDocument = document.trim();
   $: validDocument = /^(?:ctk3(?:b_|_|@)|(?:v115|[Ddm]115)@)[^\s]+$/u.test(normalizedDocument);
   $: validTimeout = Number.isInteger(timeoutSeconds) && timeoutSeconds >= 1 && timeoutSeconds <= 900;
-  $: reportFields = runtimeView.searchReport?.summary_fields ?? [];
+  $: reportFields = publicOperationReportFields(
+    runtimeView.searchReport?.summary_fields ?? [],
+    language
+  );
 
   onMount(() => {
-    language = preferredWorkspaceLanguage(
-      localStorage.getItem('clearra-language') ?? navigator.language
-    );
+    language = readWorkspaceLanguage();
     if (runtime === 'web') {
       clearWasmTerminalResult();
       workerController.prewarm(1, false, CPU_ONLY_RUNTIME_WARMUP_POLICY);
@@ -98,7 +100,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    localStorage.setItem('clearra-language', next);
+    persistWorkspaceLanguage(next);
   }
 
   async function run() {
@@ -123,6 +125,24 @@
     if (!active) return;
     if (runtime === 'web') workerController.cancel();
     else await cancelDesktopJob();
+  }
+
+  function publicOperationReportFields(
+    fields: Array<[string, string]>,
+    selectedLanguage: WorkspaceLanguage
+  ): Array<[string, string]> {
+    const labels: Record<string, readonly [string, string]> = {
+      operation_count: ['Operations', '배치 수'],
+      cleared_line_count: ['Cleared lines', '삭제한 줄'],
+      rule_profile: ['Rule profile', '규칙 프로필'],
+      kick_profile: ['Kick profile', '킥 프로필']
+    };
+    return fields.flatMap(([key, value]) => {
+      const publicLabel = labels[key];
+      return publicLabel
+        ? [[publicLabel[selectedLanguage === 'ko' ? 1 : 0], value] as [string, string]]
+        : [];
+    });
   }
 </script>
 
@@ -199,13 +219,13 @@
           </div>
         {/each}
       </dl>
-    {:else if runtimeView.error}
-      <p class="error">{runtimeView.error}</p>
+    {:else if runtimeView.publicFailures.length}
+      <WorkspaceFailureNotice failures={runtimeView.publicFailures} {language} compact />
     {:else}
       <p class="empty">
         {language === 'ko'
-          ? '검증을 실행하면 canonical trace, 전후 필드, 줄 삭제와 도달성·킥 증거가 여기에 표시됩니다.'
-          : 'Run validation to see the canonical trace, before/after fields, line clears, and reachability/kick evidence.'}
+          ? '검증을 실행하면 배치 수, 줄 삭제와 적용한 규칙·킥 프로필이 여기에 표시됩니다.'
+          : 'Run validation to see the placement count, line clears, and applied rule and kick profiles.'}
       </p>
     {/if}
   </section>
@@ -234,8 +254,7 @@
   dl div + div { border-top: 1px solid #e4e9e6; }
   dt { color: #596560; font-size: 12px; font-weight: 750; }
   dd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; margin: 0; overflow-wrap: anywhere; }
-  .empty, .error { background: #fff; border: 1px solid #d5dcd7; border-radius: 7px; margin: 0; padding: 18px; }
-  .error { color: #9b3030; }
+  .empty { background: #fff; border: 1px solid #d5dcd7; border-radius: 7px; margin: 0; padding: 18px; }
   @media (max-width: 720px) {
     .profile-grid { grid-template-columns: 1fr; }
     .result { padding-left: 16px; padding-right: 16px; }

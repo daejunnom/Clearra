@@ -15,6 +15,7 @@ import {
   type DelegationToken,
   type ExecutableDelegationPermit
 } from './DurableDelegationJournal';
+import { VerifierTransportProfile, type TransportOperation } from './VerifierTransportProfile';
 
 type VerifierResponse =
   | { type: 'prewarmed' }
@@ -75,6 +76,10 @@ type ActiveDelegation = {
   authority: DurableDelegationAuthority;
   token: DelegationToken;
   permit: ExecutableDelegationPermit;
+  profile: VerifierTransportProfile;
+  operation: TransportOperation;
+  posted?: (failed?: boolean) => void;
+  executing?: (failed?: boolean) => void;
 };
 
 type DelegatedVerifierResponse = {
@@ -97,6 +102,8 @@ export type ClearraVerifierRecoveryMode =
   | 'atomic-task'
   | 'streaming';
 
+export type ClearraWorkerExecutionKind = 'geometry-verifier' | 'exact-at-most';
+
 type PoolWaiter = {
   generation: number;
   resolve: () => void;
@@ -105,9 +112,11 @@ type PoolWaiter = {
 
 type VerifierWorkerFactory = () => Worker;
 
-const VERIFIER_INITIALIZATION_TIMEOUT_MS = 90_000;
-const VERIFIER_REQUEST_STALL_TIMEOUT_MS = 120_000;
-const VERIFIER_FINISH_STALL_TIMEOUT_MS = 600_000;
+// Browser computation has no platform execution deadline. Explicit fixture
+// options can still bound initialization and work without capping real searches.
+const VERIFIER_INITIALIZATION_TIMEOUT_MS = 0;
+const VERIFIER_REQUEST_STALL_TIMEOUT_MS = 0;
+const VERIFIER_FINISH_STALL_TIMEOUT_MS = 0;
 const VERIFIER_WATCHDOG_MAX_SCAN_INTERVAL_MS = 1_000;
 
 export type ClearraVerifierPoolOptions = {
@@ -115,6 +124,16 @@ export type ClearraVerifierPoolOptions = {
   requestStallTimeoutMs?: number;
   finishStallTimeoutMs?: number;
   delegationAuthority?: DurableDelegationAuthority | Promise<DurableDelegationAuthority>;
+};
+
+export type ClearraVerifierPoolFinishOptions = {
+  /**
+   * Producer-terminal boundary: finish every verifier that became usable and
+   * retire initializers that never became ready. At least one ready verifier
+   * remains mandatory, and an ordinary initializer failure still fails the
+   * pool closed.
+   */
+  readySubset?: boolean;
 };
 
 class VerifierCommitError extends Error {
@@ -128,6 +147,13 @@ class VerifierTransportError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = 'VerifierTransportError';
+  }
+}
+
+class VerifierRetiredError extends Error {
+  constructor() {
+    super('distributed verifier initializer retired after producer completion');
+    this.name = 'VerifierRetiredError';
   }
 }
 
@@ -150,6 +176,7 @@ export type ClearraVerifierPoolProgressFlags = {
 };
 
 class VerifierClient {
+  private currentExactCancellationRequested = false;
   private worker: Worker | null;
   private nextRequestId = 1;
   private pending = new Map<number, PendingRequest>();
@@ -165,6 +192,9 @@ class VerifierClient {
   private progress: ClearraDistributedVerifierProgress = emptyVerifierProgress();
   private batchStartedAt: number | null = null;
   private initialized = false;
+  // Query-scoped latch: Found may arrive while another consume is still
+  // obtaining its durable delegation and is not in `pending` yet.
+  private exactCancellationRequested = false;
   private lifecycleOwnerId = '';
   private rootRequestSha256: string | null = null;
   private initializationDelegation: ActiveDelegation | null = null;
@@ -180,7 +210,8 @@ class VerifierClient {
     private readonly delegationAuthority: Promise<DurableDelegationAuthority>,
     private readonly coordinatorId: string,
     private readonly clientId: string,
-    private readonly jobId: string
+    private readonly jobId: string,
+    private readonly transportProfile: VerifierTransportProfile
   ) {
     this.requestWatchdogScanIntervalMs = watchdogScanInterval(
       requestStallTimeoutMs,
@@ -265,88 +296,104 @@ class VerifierClient {
     initialization: string | ArrayBuffer,
     compiledModule?: WebAssembly.Module,
     lifecycleOwnerId = '',
-    hostCapabilities?: ClearraWasmHostCapabilities
+    hostCapabilities?: ClearraWasmHostCapabilities,
+    executionKind: ClearraWorkerExecutionKind = 'geometry-verifier'
   ): Promise<void> {
     this.initialized = false;
-    await this.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities);
-    this.worker ??= this.createWorker();
-    const worker = this.worker;
-    this.candidatesVerified = 0;
-    this.candidatesVerifiedAvailable = true;
-    this.candidatesVerifiedExact = true;
-    this.progress = emptyVerifierProgress();
-    this.batchStartedAt = null;
-    const workerInitialization =
-      typeof initialization === 'string' ? initialization : initialization.slice(0);
-    const delegation = await this.publishExecutableDelegation(
-      'initialize',
-      workerInitialization,
-      byteLength(workerInitialization)
-    );
-    this.rootRequestSha256 = delegation.permit.payloadSha256;
-    this.initializationDelegation = delegation;
-    this.ready = new Promise<void>((resolve, reject) => {
-      const rejectAndCleanup = (error: Error) => {
-        cleanup();
-        void this.failDelegation(delegation, error.message);
-        reject(error);
-      };
-      const cleanup = () => {
-        worker.removeEventListener('message', onMessage);
-        worker.removeEventListener('error', onError);
-        if (this.readyReject === rejectAndCleanup) this.readyReject = null;
-      };
-      const onMessage = (event: MessageEvent<VerifierResponse>) => {
-        if (event.data.type === 'ready') {
-          void this.completeDelegation(delegation)
-            .then(() => {
-              if (this.initializationDelegation === delegation) {
-                this.initializationDelegation = null;
-              }
-              cleanup();
-              resolve();
-            })
-            .catch((error) => rejectAndCleanup(asError(error)));
-        } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
-          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+    this.exactCancellationRequested = false;
+    this.currentExactCancellationRequested = false;
+    this.busy = true;
+    this.batchStartedAt = performance.now();
+    try {
+      await this.transportProfile.measure(this.prewarmed ? 'prewarm_reuse' : 'prewarm_new', 'initialize',
+        () => this.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities));
+      this.worker ??= this.createWorker();
+      const worker = this.worker;
+      this.candidatesVerified = 0;
+      this.candidatesVerifiedAvailable = true;
+      this.candidatesVerifiedExact = true;
+      this.progress = emptyVerifierProgress();
+      const workerInitialization =
+        typeof initialization === 'string' ? initialization : initialization.slice(0);
+      const delegation = await this.publishExecutableDelegation(
+        'initialize',
+        workerInitialization,
+        byteLength(workerInitialization)
+      );
+      this.rootRequestSha256 = delegation.permit.payloadSha256;
+      this.initializationDelegation = delegation;
+      this.ready = new Promise<void>((resolve, reject) => {
+        const rejectAndCleanup = (error: Error) => {
+          cleanup();
+          void this.failDelegation(delegation, error.message);
+          reject(error);
+        };
+        const cleanup = () => {
+          worker.removeEventListener('message', onMessage);
+          worker.removeEventListener('error', onError);
+          if (this.readyReject === rejectAndCleanup) this.readyReject = null;
+        };
+        const onMessage = (event: MessageEvent<VerifierResponse>) => {
+          if (event.data.type === 'ready') {
+            delegation.executing?.();
+            void this.completeDelegation(delegation)
+              .then(() => {
+                if (this.initializationDelegation === delegation) {
+                  this.initializationDelegation = null;
+                }
+                cleanup();
+                resolve();
+              })
+              .catch((error) => rejectAndCleanup(asError(error)));
+          } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
+            rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+          }
+        };
+        const onError = (event: ErrorEvent) => {
+          rejectAndCleanup(new Error(event.message || 'distributed verifier initialization failed'));
+        };
+        this.readyReject = rejectAndCleanup;
+        worker.addEventListener('message', onMessage);
+        worker.addEventListener('error', onError);
+        try {
+          delegation.posted = this.transportProfile.start('posted_to_start_notice', 'initialize');
+          this.pendingStarts.set(delegation.token.taskId, { delegation });
+          worker.postMessage(
+            {
+              type: 'initialize',
+              initialization: workerInitialization,
+              lifecycleOwnerId: this.lifecycleOwnerId,
+              hostCapabilities,
+              executionKind,
+              delegation: delegation.permit
+            },
+            workerInitialization instanceof ArrayBuffer ? [workerInitialization] : []
+          );
+        } catch (error) {
+          this.pendingStarts.delete(delegation.token.taskId);
+          rejectAndCleanup(asError(error));
         }
-      };
-      const onError = (event: ErrorEvent) => {
-        rejectAndCleanup(new Error(event.message || 'distributed verifier initialization failed'));
-      };
-      this.readyReject = rejectAndCleanup;
-      worker.addEventListener('message', onMessage);
-      worker.addEventListener('error', onError);
-      try {
-        this.pendingStarts.set(delegation.token.taskId, { delegation });
-        worker.postMessage(
-          {
-            type: 'initialize',
-            initialization: workerInitialization,
-            lifecycleOwnerId: this.lifecycleOwnerId,
-            hostCapabilities,
-            delegation: delegation.permit
-          },
-          workerInitialization instanceof ArrayBuffer ? [workerInitialization] : []
-        );
-      } catch (error) {
-        this.pendingStarts.delete(delegation.token.taskId);
-        rejectAndCleanup(asError(error));
-      }
-    });
-    return this.ready;
+      });
+      await this.ready;
+    } finally {
+      this.busy = false;
+      this.batchStartedAt = null;
+    }
   }
 
   async consume(
     batch: ArrayBuffer,
     onPartial?: (partial: ArrayBuffer) => void
   ): Promise<VerifierConsumeResult> {
+    this.currentExactCancellationRequested = false;
     this.busy = false;
     this.batchStartedAt = null;
     let activeDelegation: ActiveDelegation | null = null;
     try {
       await this.ready;
-      const workerBatch = batch.slice(0);
+      // consumeLease owns this batch and never retries executable work. Transfer
+      // that owner directly instead of retaining a second full wire allocation.
+      const workerBatch = batch;
       const delegated = await this.request(
         { type: 'consume', batch: workerBatch },
         [workerBatch],
@@ -445,8 +492,26 @@ class VerifierClient {
     return this.initialized;
   }
 
+  cancelExactTasks(): void {
+    this.exactCancellationRequested = true;
+    this.cancelCurrentExactTask();
+  }
+
+  cancelCurrentExactTask(): void {
+    this.currentExactCancellationRequested = true;
+    for (const [requestId, request] of this.pending) {
+      if (request.operation === 'consume') {
+        this.worker?.postMessage({ type: 'cancel-exact-task', requestId });
+      }
+    }
+  }
+
   terminate() {
     this.release(new Error('distributed verifier terminated'));
+  }
+
+  retireInitializer() {
+    this.release(new VerifierRetiredError());
   }
 
   dispose() {
@@ -481,10 +546,16 @@ class VerifierClient {
         delegation
       };
       this.pending.set(requestId, pending);
+      delegation.posted = this.transportProfile.start('posted_to_start_notice', message.type);
       this.pendingStarts.set(delegation.token.taskId, { delegation });
       this.ensureRequestWatchdogScan();
       try {
         worker.postMessage({ ...message, requestId, delegation: delegation.permit }, transfer);
+        if (message.type === 'consume' && (this.exactCancellationRequested || this.currentExactCancellationRequested)) {
+          // Preserve execution/delegation identity. The authorized worker must
+          // return a durable Cancelled receipt, not silently drop issued work.
+          worker.postMessage({ type: 'cancel-exact-task', requestId });
+        }
         onExecutablePosted?.();
       } catch (error) {
         this.pendingStarts.delete(delegation.token.taskId);
@@ -549,10 +620,12 @@ class VerifierClient {
         return;
       }
       if (response.type === 'failed') {
+        pending.delegation.executing?.(true);
         this.deletePendingRequest(requestId);
         void this.failDelegation(pending.delegation, response.message);
         pending.reject(new ClearraWasmRuntimeError(response.code, response.message));
       } else {
+        pending.delegation.executing?.();
         void sealVerifierResponse(pending.operation, pending.delegation, pending.partials, response)
           .then((sealed) => {
             if (this.pending.get(requestId) !== pending) {
@@ -589,10 +662,10 @@ class VerifierClient {
     memoryBytes: number
   ): Promise<ActiveDelegation> {
     const authority = await this.delegationAuthority;
-    const payloadSha256 = await sha256Hex(payload);
+    const payloadSha256 = await this.transportProfile.measure('payload_hash', operation, () => sha256Hex(payload));
     const requestSha256 = this.rootRequestSha256 ?? payloadSha256;
     const taskId = `${this.jobId}:${this.clientId}:${this.nextDelegationTask++}:${operation}`;
-    const token = await authority.prepare(
+    const token = await this.transportProfile.measure('prepare', operation, () => authority.prepare(
       {
         jobId: this.jobId,
         taskId,
@@ -604,13 +677,13 @@ class VerifierClient {
         computeUnitsDecimal: '1',
         memoryBytesDecimal: String(memoryBytes)
       }
-    );
+    ));
     try {
-      const offer = await authority.offered(token);
-      const acceptance = await this.sendDelegationOffer(authority, token, offer);
-      await authority.accepted(token, acceptance);
-      const permit = await authority.publish(token);
-      return { authority, token, permit };
+      const offer = await this.transportProfile.measure('offered', operation, () => authority.offered(token));
+      const acceptance = await this.transportProfile.measure('offer_round_trip', operation, () => this.sendDelegationOffer(authority, token, offer));
+      await this.transportProfile.measure('accepted', operation, () => authority.accepted(token, acceptance));
+      const permit = await this.transportProfile.measure('published', operation, () => authority.publish(token));
+      return { authority, token, permit, profile: this.transportProfile, operation };
     } catch (error) {
       try {
         await authority.failedClosed(token, asError(error).message);
@@ -677,17 +750,19 @@ class VerifierClient {
   private acknowledgeExecutableStart(taskId: string, fencingTokenDecimal: string): void {
     const pending = this.pendingStarts.get(taskId);
     if (!pending) return;
+    pending.delegation.posted?.();
     if (pending.delegation.token.fencingTokenDecimal !== fencingTokenDecimal) {
       this.pendingStarts.delete(taskId);
       this.release(new Error('distributed verifier returned a stale executable start fence'));
       return;
     }
-    void pending.delegation.authority
-      .running(pending.delegation.token)
+    void this.transportProfile.measure('running_commit', pending.delegation.operation,
+      () => pending.delegation.authority.running(pending.delegation.token))
       .then(() => {
         if (this.pendingStarts.get(taskId) !== pending) return;
         const worker = this.worker;
         if (!worker) throw new Error('distributed verifier disappeared before start ACK');
+        pending.delegation.executing = this.transportProfile.start('run_grant_to_reply', pending.delegation.operation);
         worker.postMessage({
           type: 'delegation-run',
           taskId,
@@ -709,11 +784,12 @@ class VerifierClient {
     );
     if (decision === 'apply-once') {
       this.initialized = true;
-      await delegation.authority.resultApplied(delegation.token);
     } else {
       this.initialized = true;
     }
-    await delegation.authority.completed(delegation.token);
+    await this.transportProfile.measure('completed', 'initialize', () =>
+      this.transportProfile.measure('result_applied', 'initialize', () =>
+        delegation.authority.resultAppliedAndCompleted(delegation.token)));
   }
 
   private async failDelegation(
@@ -728,7 +804,8 @@ class VerifierClient {
   }
 
   private requestStallDeadline(operation: PendingRequest['operation']): number {
-    return performance.now() + this.requestStallTimeout(operation);
+    const timeoutMs = this.requestStallTimeout(operation);
+    return timeoutMs > 0 ? performance.now() + timeoutMs : Number.POSITIVE_INFINITY;
   }
 
   private requestStallTimeout(operation: PendingRequest['operation']): number {
@@ -739,6 +816,7 @@ class VerifierClient {
 
   private ensureRequestWatchdogScan() {
     if (this.requestWatchdogScan !== null) return;
+    if (this.requestStallTimeoutMs === 0 && this.finishStallTimeoutMs === 0) return;
     this.requestWatchdogScan = setInterval(() => {
       if (this.pending.size === 0) return;
       const now = performance.now();
@@ -807,6 +885,7 @@ class VerifierClient {
     this.progress = emptyVerifierProgress();
     this.batchStartedAt = null;
     this.initialized = false;
+    this.exactCancellationRequested = false;
     this.lifecycleOwnerId = '';
     this.rootRequestSha256 = null;
     this.busy = false;
@@ -814,12 +893,20 @@ class VerifierClient {
 }
 
 export class ClearraVerifierPool {
+  private readonly transportProfile = new VerifierTransportProfile();
+  beginTransportProfile() { this.transportProfile.begin(); }
+  finishTransportProfile() { return this.transportProfile.finish(); }
   private clients: VerifierClient[] = [];
   private waiters: PoolWaiter[] = [];
   private inFlight = new Set<Promise<void>>();
   private leasedClients = new Set<VerifierClient>();
+  private exactTaskKeys = new Map<VerifierClient, { key: ArrayBuffer; cancelled: boolean }>();
   private targetWorkerCount = 0;
   private generation = 0;
+  private readySubsetFinalization: {
+    generation: number;
+    retiredClients: Set<VerifierClient>;
+  } | null = null;
   private active = false;
   private failure: Error | null = null;
   private readonly jobId = uniqueDelegationUuid();
@@ -865,7 +952,9 @@ export class ClearraVerifierPool {
       while (this.clients.length < size) {
         this.clients.push(this.createClient());
       }
-      while (this.clients.length > size) this.clients.pop()?.dispose();
+      // Prewarm expresses a readiness floor, not an execution lease. Preserve
+      // already-warm clients after a larger job; initialize still trims to its
+      // exact admitted size, and cancellation releases the whole cache.
       await Promise.all(
         this.clients.map((client) =>
           client.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities)
@@ -885,9 +974,11 @@ export class ClearraVerifierPool {
     compiledModule?: WebAssembly.Module,
     lifecycleOwnerId = '',
     recoveryMode: ClearraVerifierRecoveryMode = 'atomic-task',
-    hostCapabilities?: ClearraWasmHostCapabilities
+    hostCapabilities?: ClearraWasmHostCapabilities,
+    executionKind: ClearraWorkerExecutionKind = 'geometry-verifier'
   ) {
     const generation = ++this.generation;
+    this.readySubsetFinalization = null;
     this.active = true;
     this.failure = null;
     // All durable v0.8 modes seal an immutable task result before merger
@@ -896,37 +987,71 @@ export class ClearraVerifierPool {
     void recoveryMode;
     this.targetWorkerCount = size;
     this.leasedClients.clear();
+    this.exactTaskKeys.clear();
     try {
       if (size < 1) throw new Error('distributed verifier pool requires a worker');
       while (this.clients.length > size) this.clients.pop()?.dispose();
       while (this.clients.length < size) {
         this.clients.push(this.createClient());
       }
-      await Promise.all(
-        this.clients.map((client) =>
-          withTimeout(
-            client.initialize(
-              initialization,
-              compiledModule,
-              lifecycleOwnerId,
-              hostCapabilities
-            ),
-            this.initializationTimeoutMs,
-            'distributed verifier initialization'
-          )
-        )
-      );
+      const initializations = this.clients.map(async (client) => {
+        const initializationTask = withTimeout(
+          client.initialize(
+            initialization,
+            compiledModule,
+            lifecycleOwnerId,
+            hostCapabilities,
+            executionKind
+          ),
+          this.initializationTimeoutMs,
+          'distributed verifier initialization'
+        );
+        void initializationTask.then(
+          () => {
+            // Initialization is intentionally progressive. The producer may
+            // already have a batch waiting, so make this worker schedulable as
+            // soon as its own executable is ready instead of waiting for the
+            // slowest member of the requested pool.
+            if (this.active && generation === this.generation) {
+              this.wakeNextWaiter();
+            }
+          },
+          () => undefined
+        );
+        try {
+          await initializationTask;
+        } catch (error) {
+          if (this.isRetiredInitializer(generation, client, error)) return;
+          throw error;
+        }
+      });
+      await Promise.all(initializations);
+      if (this.isReadySubsetFinalization(generation)) return;
       this.assertActive(generation);
     } catch (error) {
+      // A cancelled/retired initializer may settle after the next exact query
+      // has already begun. Its stale rejection must not kill that new pool.
+      if (generation !== this.generation) return;
       this.fail(error);
       throw this.failure;
     }
   }
 
   async enqueue(batch: ArrayBuffer, consumePartial: (partial: ArrayBuffer) => void) {
+    await this.enqueueFromSource(() => batch, consumePartial);
+  }
+
+  /** Reserve a ready executor before issuing an exact task from its owner.
+   * No task is held in a host queue while every remote executor is busy. */
+  async enqueueFromSource(
+    takeTask: () => ArrayBuffer | null,
+    consumePartial: (partial: ArrayBuffer) => void,
+    taskKey?: () => ArrayBuffer
+  ): Promise<boolean> {
     const generation = this.generation;
     this.assertActive(generation);
     let client = this.findAvailableClient();
+    const readyWait = this.transportProfile.start('ready_client_wait');
     while (!client) {
       await new Promise<void>((resolve, reject) =>
         this.waiters.push({ generation, resolve, reject })
@@ -934,7 +1059,34 @@ export class ClearraVerifierPool {
       this.assertActive(generation);
       client = this.findAvailableClient();
     }
+    readyWait();
     this.leasedClients.add(client);
+    let batch: ArrayBuffer | null;
+    try {
+      // There is no await between reserving this client, issuing the task and
+      // handing it to the fenced durable operation. A reentrant cancellation
+      // or new generation cannot publish the old task in its replacement.
+      batch = takeTask();
+      this.assertActive(generation);
+      if (batch !== null && taskKey) {
+        const key = taskKey();
+        if (key.byteLength !== 56) throw new Error('exact task routing key must contain its full core identity');
+        this.assertActive(generation);
+        this.exactTaskKeys.set(client, { key, cancelled: false });
+      }
+    } catch (error) {
+      if (generation === this.generation) {
+        this.leasedClients.delete(client);
+        this.exactTaskKeys.delete(client);
+        this.wakeNextWaiter();
+      }
+      throw error;
+    }
+    if (batch === null) {
+      this.leasedClients.delete(client);
+      this.wakeNextWaiter();
+      return false;
+    }
     const operation = this.consumeLease(client, batch, consumePartial, generation);
     this.inFlight.add(operation);
     const succeeded = () => {
@@ -947,16 +1099,39 @@ export class ClearraVerifierPool {
       this.fail(error);
     };
     void operation.then(succeeded, failed);
+    return true;
   }
 
-  async finish(consumePartial: (partial: ArrayBuffer) => void): Promise<number> {
+  async finish(
+    consumePartial: (partial: ArrayBuffer) => void,
+    options: ClearraVerifierPoolFinishOptions = {}
+  ): Promise<number> {
     const generation = this.generation;
     await this.waitForIdle();
     this.assertActive(generation);
+    if (options.readySubset) await this.retainReadySubset(generation);
+    this.assertActive(generation);
+    let commitTail = Promise.resolve();
     const finished = await Promise.all(
-      this.clients.map((client) => this.finishClient(client, generation))
+      this.clients.map(async (client) => {
+        try {
+          const value = await this.finishClient(client, generation);
+          // A sealed worker result can be merged while siblings still finalize.
+          // Keep coordinator mutation and durable receipts in one ordered queue;
+          // a rejected commit poisons the queue instead of applying later results.
+          const committed = commitTail.then(async () => {
+            this.assertActive(generation);
+            await applySealedVerifierResult(value, consumePartial);
+            this.assertActive(generation);
+          });
+          commitTail = committed;
+          await committed;
+        } catch (error) {
+          if (this.active && generation === this.generation) this.fail(error);
+          throw error;
+        }
+      })
     );
-    for (const value of finished) await applySealedVerifierResult(value, consumePartial);
     this.assertActive(generation);
     this.active = false;
     return finished.length;
@@ -966,6 +1141,35 @@ export class ClearraVerifierPool {
     const generation = this.generation;
     await Promise.allSettled([...this.inFlight]);
     this.assertActive(generation);
+  }
+
+  /** Every atomic task already emitted and durably committed its own receipt.
+   * This is a transport lifetime boundary, never an exact-proof conclusion. */
+  async completeAtomicTasks(): Promise<number> {
+    const generation = this.generation;
+    await this.waitForIdle();
+    await this.retainReadySubset(generation);
+    this.assertActive(generation);
+    this.active = false;
+    return this.clients.length;
+  }
+
+  cancelExactTasks(): void {
+    // The caller must already own a validated positive witness. Cancelled
+    // siblings still return their issued task identity and are sealed/drained.
+    for (const client of this.clients) client.cancelExactTasks();
+  }
+
+  cancelRedundantExactTasks(redundant: (key: ArrayBuffer) => boolean): void {
+    const generation = this.generation;
+    this.assertActive(generation);
+    for (const [client, task] of this.exactTaskKeys) {
+      if (!task.cancelled && redundant(task.key)) {
+        this.assertActive(generation);
+        task.cancelled = true;
+        client.cancelCurrentExactTask();
+      }
+    }
   }
 
   progressSnapshot(now = performance.now()): ClearraVerifierPoolProgress {
@@ -1008,7 +1212,10 @@ export class ClearraVerifierPool {
         coverageChecks: coverageChecks.exact
       },
       readyWorkers: readySnapshots.length,
-      activeWorkers: readySnapshots.filter((snapshot) => snapshot.active).length,
+      // Initialization and finalization are real worker activity too. A worker
+      // does not have to be ready for candidate consumption before it counts as
+      // active CPU work.
+      activeWorkers: snapshots.filter((snapshot) => snapshot.active).length,
       workerCount: this.targetWorkerCount,
       oldestBatchMs: snapshots.reduce(
         (oldest, snapshot) => Math.max(oldest, snapshot.batchAgeMs),
@@ -1021,10 +1228,12 @@ export class ClearraVerifierPool {
     this.active = false;
     this.failure = null;
     this.generation++;
+    this.readySubsetFinalization = null;
     for (const client of this.clients) client.terminate();
     this.clients = [];
     this.inFlight.clear();
     this.leasedClients.clear();
+    this.exactTaskKeys.clear();
     this.targetWorkerCount = 0;
     const error = new Error('distributed verifier pool cancelled');
     for (const waiter of this.waiters.splice(0)) waiter.reject(error);
@@ -1035,6 +1244,44 @@ export class ClearraVerifierPool {
       (candidate) =>
         candidate.isReady() && !candidate.busy && !this.leasedClients.has(candidate)
     );
+  }
+
+  private async retainReadySubset(generation: number): Promise<void> {
+    while (!this.clients.some((client) => client.isReady())) {
+      await new Promise<void>((resolve, reject) =>
+        this.waiters.push({ generation, resolve, reject })
+      );
+      this.assertActive(generation);
+    }
+
+    const readyClients = this.clients.filter((client) => client.isReady());
+    if (readyClients.length === 0) {
+      throw new Error('distributed verifier pool completed without a ready worker');
+    }
+    const retiredClients = this.clients.filter((client) => !client.isReady());
+    if (retiredClients.length === 0) return;
+
+    this.readySubsetFinalization = {
+      generation,
+      retiredClients: new Set(retiredClients)
+    };
+    this.clients = readyClients;
+    this.targetWorkerCount = readyClients.length;
+    for (const client of retiredClients) client.retireInitializer();
+  }
+
+  private isReadySubsetFinalization(generation: number): boolean {
+    return this.readySubsetFinalization?.generation === generation;
+  }
+
+  private isRetiredInitializer(
+    generation: number,
+    client: VerifierClient,
+    error: unknown
+  ): boolean {
+    return this.readySubsetFinalization?.generation === generation &&
+      this.readySubsetFinalization.retiredClients.has(client) &&
+      error instanceof VerifierRetiredError;
   }
 
   private async consumeLease(
@@ -1049,7 +1296,10 @@ export class ClearraVerifierPool {
       this.assertActive(generation);
       await applySealedVerifierResult(result.sealed, consumePartial);
     } finally {
-      this.leasedClients.delete(client);
+      if (generation === this.generation) {
+        this.leasedClients.delete(client);
+        this.exactTaskKeys.delete(client);
+      }
     }
   }
 
@@ -1074,10 +1324,12 @@ export class ClearraVerifierPool {
     this.failure = error instanceof Error ? error : new Error(String(error));
     this.active = false;
     this.generation++;
+    this.readySubsetFinalization = null;
     for (const client of this.clients) client.terminate();
     this.clients = [];
     this.inFlight.clear();
     this.leasedClients.clear();
+    this.exactTaskKeys.clear();
     this.targetWorkerCount = 0;
     for (const waiter of this.waiters.splice(0)) waiter.reject(this.failure);
   }
@@ -1090,7 +1342,8 @@ export class ClearraVerifierPool {
       this.delegationAuthority,
       this.coordinatorId,
       String(this.nextClientId++),
-      this.jobId
+      this.jobId,
+      this.transportProfile
     );
   }
 
@@ -1198,15 +1451,18 @@ function uniqueDelegationUuid(): string {
 let nextFallbackDelegationId = 1;
 
 function positiveTimeout(value: number | undefined, fallback: number): number {
-  if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
-  return Math.max(1, Math.floor(value));
+  if (value === undefined || !Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
 }
 
 function watchdogScanInterval(
   requestStallTimeoutMs: number,
   finishStallTimeoutMs: number
 ): number {
-  const shortestTimeoutMs = Math.min(requestStallTimeoutMs, finishStallTimeoutMs);
+  const shortestTimeoutMs = Math.min(
+    requestStallTimeoutMs > 0 ? requestStallTimeoutMs : Number.POSITIVE_INFINITY,
+    finishStallTimeoutMs > 0 ? finishStallTimeoutMs : Number.POSITIVE_INFINITY
+  );
   return Math.min(
     VERIFIER_WATCHDOG_MAX_SCAN_INTERVAL_MS,
     Math.max(1, Math.floor(shortestTimeoutMs / 4))
@@ -1214,6 +1470,7 @@ function watchdogScanInterval(
 }
 
 function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (timeoutMs === 0) return operation;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     operation,
@@ -1246,6 +1503,7 @@ async function sealVerifierResponse(
   response: VerifierResponse
 ): Promise<DelegatedVerifierResponse> {
   const partials = [...streamedPartials];
+  const hashing = delegation.profile.start('result_hash', operation);
   if (response.type === 'consumed' && response.partial && response.partial.byteLength > 0) {
     partials.push(response.partial);
   }
@@ -1273,11 +1531,12 @@ async function sealVerifierResponse(
       partials: partialDescriptors
     })
   );
-  await delegation.authority.resultSealed(
+  hashing();
+  await delegation.profile.measure('result_sealed', operation, () => delegation.authority.resultSealed(
     delegation.token,
     resultSha256,
     workerReplySha256
-  );
+  ));
   return Object.freeze({
     response,
     delegation,
@@ -1313,9 +1572,14 @@ async function applySealedVerifierResult(
   const decision = authority.resultApplicationDecision(token, sealed.resultSha256);
   if (decision === 'already-applied') return;
   try {
+    const applying = sealed.delegation.profile.start('result_apply', sealed.delegation.operation);
     for (const partial of sealed.partials) commitPartial(consumePartial, partial);
-    await authority.resultApplied(token);
-    await authority.completed(token);
+    applying();
+    // These two profiling intervals intentionally overlap: the two durable
+    // events now share one terminal commit, never two independent ACKs.
+    await sealed.delegation.profile.measure('completed', sealed.delegation.operation, () =>
+      sealed.delegation.profile.measure('result_applied', sealed.delegation.operation, () =>
+        authority.resultAppliedAndCompleted(token)));
   } catch (error) {
     try {
       await authority.failedClosed(token, `immutable result application failed: ${asError(error).message}`);

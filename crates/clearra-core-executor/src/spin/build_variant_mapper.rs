@@ -151,7 +151,7 @@ fn step_index_for_kick_evidence(
             let operation = operations.get(operation_index)?;
             (i16::try_from(operation.x()).ok()? == evidence.result_x
                 && i16::try_from(operation.y()).ok()? == evidence.result_y
-                && operation.rotation().quarter_turns() as u8 == evidence.to_rotation)
+                && operation.rotation().quarter_turns() == evidence.to_rotation)
                 .then_some(step_index)
         })
 }

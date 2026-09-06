@@ -37,7 +37,7 @@ fn workspace_abi_mismatch_rejects_every_public_raw_c_entry_before_calling_c() {
         ));
         assert_eq!(
             workspace.buildup_exists_with_cancellation(&problem, &cancellation),
-            Err(expected_error)
+            Err(expected_error.clone())
         );
         assert!(matches!(
             workspace.verify_first_buildup_problem_with_cancellation(

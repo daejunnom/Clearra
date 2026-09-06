@@ -192,7 +192,7 @@ impl MaxScoreCover {
                 .or_insert(cell);
         }
         let mut best_value_by_pattern = BTreeMap::<usize, u64>::new();
-        for cell in best_candidate_pattern.values().copied() {
+        for cell in best_candidate_pattern.values() {
             let value = cell.score();
             best_value_by_pattern
                 .entry(cell.pattern_id().index())
@@ -204,7 +204,7 @@ impl MaxScoreCover {
                 .or_insert(value);
         }
         let mut optimal_rows = BTreeMap::<usize, PatternBitSet>::new();
-        for cell in best_candidate_pattern.values().copied() {
+        for cell in best_candidate_pattern.values() {
             let best_value = best_value_by_pattern[&cell.pattern_id().index()];
             if cell.score() == best_value {
                 optimal_rows
@@ -287,10 +287,7 @@ fn score_only_candidate_coverage_rows(
                 .insert(pattern)?;
         }
     }
-    Ok(optimal_rows
-        .into_iter()
-        .map(|(candidate_id, coverage)| (candidate_id, coverage))
-        .unzip())
+    Ok(optimal_rows.into_iter().unzip())
 }
 
 fn score_only_matrix_coverage_rows(
@@ -313,14 +310,14 @@ fn score_only_matrix_coverage_rows(
             .or_insert(cell);
     }
     let mut best_score_by_pattern = BTreeMap::<usize, u64>::new();
-    for cell in best_candidate_pattern.values().copied() {
+    for cell in best_candidate_pattern.values() {
         best_score_by_pattern
             .entry(cell.pattern_id().index())
             .and_modify(|current| *current = (*current).max(cell.score()))
             .or_insert(cell.score());
     }
     let mut optimal_rows = BTreeMap::<usize, PatternBitSet>::new();
-    for cell in best_candidate_pattern.values().copied() {
+    for cell in best_candidate_pattern.values() {
         if cell.score() == best_score_by_pattern[&cell.pattern_id().index()] {
             optimal_rows
                 .entry(cell.candidate_id())
@@ -328,10 +325,7 @@ fn score_only_matrix_coverage_rows(
                 .insert(cell.pattern_id())?;
         }
     }
-    Ok(optimal_rows
-        .into_iter()
-        .map(|(candidate_id, coverage)| (candidate_id, coverage))
-        .unzip())
+    Ok(optimal_rows.into_iter().unzip())
 }
 
 fn validate_score_matrix(

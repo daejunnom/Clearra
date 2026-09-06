@@ -13,6 +13,7 @@
     "./host": "./src/lib/host/index.ts",
     "./render": "./src/lib/render/index.ts",
     "./wasm": "./src/lib/wasm/index.ts",
+    "./wasm-artifact-generation": "./src/lib/wasm/wasmArtifactGeneration.ts",
     "./wasm-host": "./src/lib/wasm/hostCapabilitySnapshot.ts",
     "./wasm-lifecycle": "./src/lib/wasm/wasmWorkerLifecycle.ts",
     "./workspace": "./src/lib/workspace/index.ts"

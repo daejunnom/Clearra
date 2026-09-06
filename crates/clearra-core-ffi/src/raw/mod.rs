@@ -8,7 +8,7 @@ pub(crate) mod execution_control;
 #[cfg(feature = "native-c-core")]
 pub(crate) mod geometry_path_sink;
 pub(crate) mod native_slice;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, all(feature = "test-support", feature = "native-c-core")))]
 pub(crate) mod owned_packing_buffer;
 #[cfg(feature = "native-c-core")]
 pub(crate) mod packing_candidate_sink;

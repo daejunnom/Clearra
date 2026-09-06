@@ -304,11 +304,8 @@ mod tests {
     fn multiset_subset_is_strict_and_multiplicity_preserving() {
         let a = operation(PieceKind::I, 0);
         let b = operation(PieceKind::T, 1);
-        assert!(multiset_subset(
-            std::slice::from_ref(&a),
-            &[a.clone(), b.clone()]
-        ));
-        assert!(!multiset_subset(&[a.clone(), a], &[b.clone(), b]));
+        assert!(multiset_subset(std::slice::from_ref(&a), &[a, b]));
+        assert!(!multiset_subset(&[a, a], &[b, b]));
     }
 
     #[test]

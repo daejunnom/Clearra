@@ -96,7 +96,7 @@ pub(crate) fn execute_webgpu_buildable_unique(
             Ok(())
         },
     )?;
-    let mut resource_report = gpu.catalog.compile_resource_report().clone();
+    let mut resource_report = *gpu.catalog.compile_resource_report();
     resource_report.observe_candidate_rows(reduction.generated_count);
     let peak_cpu_bytes = base_resident_bytes
         .saturating_add(reduction.workspace_bytes)
@@ -114,9 +114,7 @@ pub(crate) fn execute_webgpu_buildable_unique(
         _ => {}
     }
     if problem.budget.has_max_memory_mib != 0 {
-        let max_memory_bytes = (problem.budget.max_memory_mib as usize)
-            .checked_mul(1024 * 1024)
-            .unwrap_or(usize::MAX);
+        let max_memory_bytes = (problem.budget.max_memory_mib as usize).saturating_mul(1024 * 1024);
         if peak_cpu_bytes > max_memory_bytes {
             resource_report.mark_truncated(
                 clearra_core_domain::resource::ResourceTruncationReason::MemoryExceeded,
@@ -442,7 +440,7 @@ fn stream_gpu_graphs(
                 }
             })?;
     }
-    let mut report = gpu.catalog.compile_resource_report().clone();
+    let mut report = *gpu.catalog.compile_resource_report();
     report.observe_candidate_rows(generated_count);
     report.observe_cpu_bytes(
         engine_resident_bytes

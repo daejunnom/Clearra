@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 
+// SRP rationale: this executable contract has one change reason: the browser
+// WASM worker lifecycle and its terminal-state arbitration semantics change.
+
 import { get } from 'svelte/store';
 
 import { WasmTerminalWorkerController } from '../src/lib/wasm/WasmTerminalWorkerController';
@@ -8,6 +11,11 @@ import {
   listenForWasmOwnerTermination,
   signalWasmOwnerTermination
 } from '../src/lib/wasm/wasmWorkerLifecycle';
+import {
+  announceWasmArtifactGeneration,
+  currentWasmArtifactGeneration,
+  isCurrentWasmArtifactGeneration
+} from '../src/lib/wasm/wasmArtifactGeneration';
 import {
   applyWasmWorkerEvent,
   clearWasmTerminalResult,
@@ -21,6 +29,7 @@ import type {
   ClearraWasmWorkerEvent
 } from '../src/lib/wasm/wasmCommandClient';
 import { workspaceViewFromWasm } from '../src/lib/workspace/workspaceRuntime';
+import { formatWasmTerminalLine } from '../src/lib/wasm/wasmTerminalTranscript';
 
 const originalState = get(wasmWorkerState);
 assert.doesNotMatch(originalState.request.commandText, /\bverify\b/i);
@@ -341,7 +350,7 @@ async function failedResponsePreservesTypedResourceEvidence() {
     '8846107200'
   );
   assert.equal(state.response?.resource_report.result_completeness, 'not-executed');
-  assert.match(state.terminalLines.at(-1) ?? '', /35384428800/u);
+  assert.match(formatWasmTerminalLine(state.terminalLines.at(-1) ?? ''), /35384428800/u);
 }
 
 async function responseNullFailurePreservesTopLevelResourceAxes() {
@@ -654,6 +663,11 @@ async function productPageResponsesRemainStringExact() {
   ) as { requestId: number; alternativeIndex: string; memberPageNumber: string };
   assert.equal(posted.alternativeIndex, exactAlternativeIndex);
   assert.equal(posted.memberPageNumber, '1');
+  assert.equal(
+    (posted as { maximumWorkSteps?: number }).maximumWorkSteps,
+    10_000,
+    'member-page replay is always posted as one bounded slice'
+  );
   worker.emit({
     type: 'product_page',
     request_id: posted.requestId,
@@ -684,6 +698,179 @@ async function productPageResponsesRemainStringExact() {
     assert.equal(response.page.alternative_index, exactAlternativeIndex);
     assert.equal(response.page.members[0]?.candidate_id, '18446744073709551615');
   }
+  controller.dispose();
+}
+
+async function productPageStallDeadlineTerminatesAndRejectsItsGeneration() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = new WasmTerminalWorkerController(
+    () => worker as unknown as Worker,
+    undefined,
+    { productPageStallTimeoutMs: 20 }
+  );
+  controller.prewarm(1);
+  const pending = controller.loadProductMemberPage('2', '1');
+  const outcome = pending.then(
+    () => null,
+    (error: unknown) => error as Error
+  );
+  await delay(35);
+  const error = await outcome;
+  assert.match(error?.message ?? '', /did not return within 20 ms/u);
+  assert.equal(worker.terminateCount, 1, 'a synchronous page stall releases the worker owner');
+
+  const posted = worker.messages.find(
+    (message) =>
+      (message as { type?: string; action?: string }).type === 'load_product_page' &&
+      (message as { action?: string }).action === 'get'
+  ) as { requestId: number };
+  worker.emit({
+    type: 'product_page',
+    request_id: posted.requestId,
+    payload: {
+      schema_version: 1,
+      runtime: 'clearra-wasm',
+      product_page_kind: 'coverage-portfolio',
+      state: 'work-budget-exhausted',
+      known_alternative_count: '2',
+      enumeration_complete: false,
+      work_steps: 1,
+      replay_cursor_alternative_index: '1'
+    }
+  });
+  assert.equal(worker.terminateCount, 1, 'a stale completion cannot reacquire product ownership');
+  controller.dispose();
+}
+
+async function verifiedArtifactUpdateRotatesAtTheNextRunBoundary() {
+  resetState();
+  assert.equal(
+    announceWasmArtifactGeneration({
+      sourceSha256: 'not-a-sha',
+      bindingsSha256: 'b'.repeat(64),
+      wasmSha256: 'c'.repeat(64)
+    }),
+    false,
+    'an unverified generation must not change worker authority'
+  );
+  const firstGeneration = {
+    sourceSha256: '1'.repeat(64),
+    bindingsSha256: '2'.repeat(64),
+    wasmSha256: '3'.repeat(64)
+  };
+  assert.equal(announceWasmArtifactGeneration(firstGeneration), true);
+  const firstGenerationIdentity = currentWasmArtifactGeneration();
+  assert.equal(isCurrentWasmArtifactGeneration(firstGenerationIdentity), true);
+  assert.equal(
+    isCurrentWasmArtifactGeneration(null),
+    false,
+    'a transferred worker without a generation token must not be reused'
+  );
+  const workers = [new FakeWorker(), new FakeWorker()];
+  let created = 0;
+  const controller = new WasmTerminalWorkerController(
+    () => workers[created++] as unknown as Worker
+  );
+  controller.prewarm(1);
+  workers[0].emit({
+    type: 'runtime_prewarm',
+    phase: 'finished',
+    workerCount: 1
+  } as unknown as ClearraWasmWorkerEvent);
+
+  assert.equal(
+    announceWasmArtifactGeneration({
+      sourceSha256: '4'.repeat(64),
+      bindingsSha256: '5'.repeat(64),
+      wasmSha256: '6'.repeat(64)
+    }),
+    true
+  );
+  assert.match(currentWasmArtifactGeneration(), /:[0-9a-f]{64}:/u);
+  assert.equal(isCurrentWasmArtifactGeneration(firstGenerationIdentity), false);
+
+  const retainedPage = controller.loadSolutionPage(0, 1);
+  const pageMessage = workers[0].messages.find(
+    (candidate) => (candidate as { type?: string }).type === 'load_solution_page'
+  ) as { requestId: number };
+  workers[0].emit({
+    type: 'solution_page',
+    request_id: pageMessage.requestId,
+    offset: 0,
+    total: 1,
+    keys: ['retained-old-generation-result']
+  });
+  assert.deepEqual(await retainedPage, {
+    keys: ['retained-old-generation-result'],
+    total: 1
+  });
+  for (const memberPageNumber of ['1', '2']) {
+    const retainedProductPage = controller.loadProductMemberPage(
+      '0',
+      memberPageNumber
+    );
+    const productPageMessages = workers[0].messages.filter(
+      (candidate) =>
+        (candidate as { type?: string }).type === 'load_product_page' &&
+        (candidate as { memberPageNumber?: string }).memberPageNumber ===
+          memberPageNumber
+    );
+    const productPageMessage = productPageMessages[
+      productPageMessages.length - 1
+    ] as { requestId: number };
+    workers[0].emit({
+      type: 'product_page',
+      request_id: productPageMessage.requestId,
+      payload: {
+        schema_version: 1,
+        runtime: 'clearra-wasm',
+        product_page_kind: 'coverage-portfolio',
+        state: 'page',
+        page: {
+          page_contract: 'portfolio-alternative-page.v1',
+          member_page_contract: 'portfolio-member-page.v1',
+          set_identity_sha256: 'a'.repeat(64),
+          candidate_map_sha256: 'b'.repeat(64),
+          alternative_index: '0',
+          optimal_cardinality: '2',
+          known_alternative_count: '1',
+          total_alternative_count: '1',
+          enumeration_complete: true,
+          member_page_number: memberPageNumber,
+          total_member_pages: '2',
+          members: [{
+            candidate_id: memberPageNumber,
+            normalized_solution_key: `retained-member-${memberPageNumber}`
+          }]
+        }
+      }
+    });
+    const productPage = await retainedProductPage;
+    assert.equal(productPage.state, 'page');
+    if (
+      productPage.product_page_kind === 'coverage-portfolio' &&
+      productPage.state === 'page'
+    ) {
+      assert.equal(productPage.page.member_page_number, memberPageNumber);
+    }
+  }
+  assert.equal(
+    workers[0].terminateCount,
+    0,
+    'solution and multi-page product copy must not be interrupted'
+  );
+
+  assert.equal(controller.run(), true);
+  assert.equal(workers[0].terminateCount, 1, 'the stale worker is retired at new-run');
+  assert.equal(created, 2);
+  assert.equal(
+    workers[1].messages.some(
+      (message) => (message as { type?: string }).type === 'run_command_text'
+    ),
+    true,
+    'the next command must be posted to a worker created for the new generation'
+  );
   controller.dispose();
 }
 
@@ -814,6 +1001,8 @@ try {
   await mismatchedSolutionPageResponseIsRejected();
   await productPageRequestsReleaseOnCancelAndDispose();
   await productPageResponsesRemainStringExact();
+  await productPageStallDeadlineTerminatesAndRejectsItsGeneration();
+  await verifiedArtifactUpdateRotatesAtTheNextRunBoundary();
 } finally {
   wasmWorkerState.set(originalState);
 }
@@ -840,6 +1029,9 @@ console.log(
     solution_page_worker_transfer: 'guarded',
     solution_page_response_identity: 'validated',
     product_page_release_lifecycle: 'cancelled-and-disposed',
-    product_page_decimal_identity: 'string-exact'
+    product_page_decimal_identity: 'string-exact',
+    product_page_stall: 'terminated-and-generation-fenced',
+    wasm_artifact_hot_update:
+      'retained-solution-and-product-pages-then-next-run-rotated'
   })
 );

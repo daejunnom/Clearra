@@ -1,5 +1,6 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExitCode {
+    #[default]
     Success,
     ValidationFailed,
     Unsupported,
@@ -14,12 +15,6 @@ impl ExitCode {
             Self::ValidationFailed => 2,
             Self::Unsupported => 3,
         }
-    }
-}
-
-impl Default for ExitCode {
-    fn default() -> Self {
-        Self::Success
     }
 }
 

@@ -73,6 +73,7 @@ pub enum ProductResultPayloadContent {
     PcScoreFieldSummary(PcScoreFieldSummaryPayload),
     ScorePatternWinnerFamily(ScorePatternWinnerFamilyPayload),
     PcPathFamily(PcPathFamilyPayload),
+    BuildPathFamily(BuildPathFamilyPayload),
     PcSaveGroups(PcSaveGroupsPayload),
     PcBestSave(PcBestSavePayload),
     ParityReportPage(crate::ParityReportPagePayload),
@@ -94,6 +95,7 @@ impl ProductResultPayloadContent {
             Self::PcScoreFieldSummary(payload) => payload.checked_retained_capacity_bytes(),
             Self::ScorePatternWinnerFamily(payload) => payload.checked_retained_capacity_bytes(),
             Self::PcPathFamily(payload) => payload.checked_retained_capacity_bytes(),
+            Self::BuildPathFamily(payload) => payload.checked_retained_capacity_bytes(),
             Self::PcSaveGroups(payload) => payload.checked_retained_capacity_bytes(),
             Self::PcBestSave(payload) => payload.checked_retained_capacity_bytes(),
             Self::ParityReportPage(payload) => payload.checked_retained_capacity_bytes(),
@@ -348,8 +350,71 @@ impl PcPathWitnessPayload {
     }
 }
 
-/// Complete ordinary path family. This is not an optimal-portfolio tie set and
-/// therefore deliberately carries no tie metadata or live alternative handle.
+/// Query-bound ordinary replay paging metadata; outer identities enumerate
+/// canonical geometries, never optimal-portfolio alternatives.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PcReplayPageMetadata {
+    pub page_contract: String,
+    pub page_source_available: bool,
+    pub page_source_identity_sha256: String,
+    pub geometry_count: String,
+    pub geometry_page_number: String,
+    pub candidate_id: String,
+    pub geometry_witness_count: String,
+    pub geometry_pattern_count: String,
+    pub member_page_number: String,
+    pub member_page_count: String,
+}
+
+impl PcReplayPageMetadata {
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        [
+            &self.page_contract,
+            &self.page_source_identity_sha256,
+            &self.geometry_count,
+            &self.geometry_page_number,
+            &self.candidate_id,
+            &self.geometry_witness_count,
+            &self.geometry_pattern_count,
+            &self.member_page_number,
+            &self.member_page_count,
+        ]
+        .iter()
+        .try_fold(0_u128, |bytes, value| {
+            bytes.checked_add(value.capacity() as u128)
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PcReplayPagePayload {
+    #[cfg_attr(feature = "serde", serde(flatten))]
+    pub metadata: PcReplayPageMetadata,
+    pub witness_count: String,
+    pub materialized_pattern_count: String,
+    pub witnesses: Vec<PcPathWitnessPayload>,
+}
+
+impl PcReplayPagePayload {
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let bytes = self
+            .metadata
+            .checked_retained_capacity_bytes()?
+            .checked_add(self.witness_count.capacity() as u128)?
+            .checked_add(self.materialized_pattern_count.capacity() as u128)?
+            .checked_add(
+                (self.witnesses.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<PcPathWitnessPayload>() as u128)?,
+            )?;
+        self.witnesses.iter().try_fold(bytes, |bytes, witness| {
+            bytes.checked_add(witness.checked_retained_capacity_bytes()?)
+        })
+    }
+}
+
+/// Complete ordinary path family. This is not an optimal-portfolio tie set.
 /// The canonical pair is producer-owned so bounded presenters never re-rank
 /// otherwise equivalent witnesses.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -364,9 +429,13 @@ pub struct PcPathFamilyPayload {
     canonical_selection: String,
     canonical_witness: Option<PcPathWitnessPayload>,
     witnesses: Vec<PcPathWitnessPayload>,
+    #[cfg_attr(feature = "serde", serde(flatten))]
+    page_metadata: Option<PcReplayPageMetadata>,
 }
 
 impl PcPathFamilyPayload {
+    // The constructor mirrors the versioned wire contract's independent fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         witness_contract: impl Into<String>,
         ordering: impl Into<String>,
@@ -388,6 +457,7 @@ impl PcPathFamilyPayload {
             canonical_selection: canonical_selection.into(),
             canonical_witness,
             witnesses,
+            page_metadata: None,
         }
     }
 
@@ -419,11 +489,149 @@ impl PcPathFamilyPayload {
         &self.witnesses
     }
 
+    pub fn with_page_metadata(mut self, metadata: PcReplayPageMetadata) -> Self {
+        self.page_metadata = Some(metadata);
+        self
+    }
+
+    pub fn page_metadata(&self) -> Option<&PcReplayPageMetadata> {
+        self.page_metadata.as_ref()
+    }
+
+    pub fn with_optional_page_metadata(mut self, metadata: Option<PcReplayPageMetadata>) -> Self {
+        self.page_metadata = metadata;
+        self
+    }
+
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         let mut bytes = [
             self.witness_contract.capacity(),
             self.ordering.capacity(),
             self.problem_id.capacity(),
+            self.materialized_pattern_count.capacity(),
+            self.witness_count.capacity(),
+            self.canonical_selection.capacity(),
+        ]
+        .into_iter()
+        .try_fold(0_u128, |total, capacity| {
+            total.checked_add(capacity as u128)
+        })?;
+        if let Some(witness) = &self.canonical_witness {
+            bytes = bytes.checked_add(witness.checked_retained_capacity_bytes()?)?;
+        }
+        bytes = bytes.checked_add(
+            (self.witnesses.capacity() as u128)
+                .checked_mul(core::mem::size_of::<PcPathWitnessPayload>() as u128)?,
+        )?;
+        for witness in &self.witnesses {
+            bytes = bytes.checked_add(witness.checked_retained_capacity_bytes()?)?;
+        }
+        if let Some(metadata) = &self.page_metadata {
+            bytes = bytes.checked_add(metadata.checked_retained_capacity_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
+/// Complete Build-probability replay family.
+///
+/// Unlike `PcPathFamilyPayload`, a Build replay is allowed to terminate on a
+/// non-empty board.  The requested terminal is therefore carried as an
+/// authoritative mask instead of letting a presenter infer PC semantics from
+/// the shared witness shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BuildPathFamilyPayload {
+    witness_contract: String,
+    ordering: String,
+    problem_id: String,
+    target_terminal_board_mask: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    mirrored_terminal_board_mask: Option<String>,
+    materialized_pattern_count: String,
+    witness_count: String,
+    complete: bool,
+    canonical_selection: String,
+    canonical_witness: Option<PcPathWitnessPayload>,
+    witnesses: Vec<PcPathWitnessPayload>,
+}
+
+impl BuildPathFamilyPayload {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        witness_contract: impl Into<String>,
+        ordering: impl Into<String>,
+        problem_id: impl Into<String>,
+        target_terminal_board_mask: impl Into<String>,
+        materialized_pattern_count: impl Into<String>,
+        witness_count: impl Into<String>,
+        complete: bool,
+        canonical_selection: impl Into<String>,
+        canonical_witness: Option<PcPathWitnessPayload>,
+        witnesses: Vec<PcPathWitnessPayload>,
+    ) -> Self {
+        Self {
+            witness_contract: witness_contract.into(),
+            ordering: ordering.into(),
+            problem_id: problem_id.into(),
+            target_terminal_board_mask: target_terminal_board_mask.into(),
+            mirrored_terminal_board_mask: None,
+            materialized_pattern_count: materialized_pattern_count.into(),
+            witness_count: witness_count.into(),
+            complete,
+            canonical_selection: canonical_selection.into(),
+            canonical_witness,
+            witnesses,
+        }
+    }
+
+    pub fn witness_contract(&self) -> &str {
+        &self.witness_contract
+    }
+    pub fn ordering(&self) -> &str {
+        &self.ordering
+    }
+    pub fn problem_id(&self) -> &str {
+        &self.problem_id
+    }
+    pub fn target_terminal_board_mask(&self) -> &str {
+        &self.target_terminal_board_mask
+    }
+    pub fn with_mirrored_terminal_board_mask(mut self, mask: Option<String>) -> Self {
+        self.mirrored_terminal_board_mask = mask;
+        self
+    }
+    pub fn mirrored_terminal_board_mask(&self) -> Option<&str> {
+        self.mirrored_terminal_board_mask.as_deref()
+    }
+    pub fn materialized_pattern_count(&self) -> &str {
+        &self.materialized_pattern_count
+    }
+    pub fn witness_count(&self) -> &str {
+        &self.witness_count
+    }
+    pub const fn complete(&self) -> bool {
+        self.complete
+    }
+    pub fn canonical_selection(&self) -> &str {
+        &self.canonical_selection
+    }
+    pub const fn canonical_witness(&self) -> Option<&PcPathWitnessPayload> {
+        self.canonical_witness.as_ref()
+    }
+    pub fn witnesses(&self) -> &[PcPathWitnessPayload] {
+        &self.witnesses
+    }
+
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = [
+            self.witness_contract.capacity(),
+            self.ordering.capacity(),
+            self.problem_id.capacity(),
+            self.target_terminal_board_mask.capacity(),
+            self.mirrored_terminal_board_mask
+                .as_ref()
+                .map_or(0, String::capacity),
             self.materialized_pattern_count.capacity(),
             self.witness_count.capacity(),
             self.canonical_selection.capacity(),
@@ -1533,10 +1741,15 @@ impl BuildCoveragePortfolioV2Payload {
         let selected = decimal_u128(&self.selected_candidate_count).ok_or(
             BuildCoveragePortfolioPayloadError::DecimalInvalid("selected_candidate_count"),
         )?;
-        if selected == 0 || selected > source {
+        let exact_empty = source == 0
+            && selected == 0
+            && self.required_pattern_count == "0"
+            && self.union_probability == "0"
+            && self.canonical_first_candidate_id.is_empty();
+        if (selected == 0 && !exact_empty) || selected > source {
             return Err(BuildCoveragePortfolioPayloadError::CandidateCountInvalid);
         }
-        if self.canonical_first_candidate_id.is_empty() {
+        if self.canonical_first_candidate_id.is_empty() && !exact_empty {
             return Err(BuildCoveragePortfolioPayloadError::CanonicalFirstCandidateMissing);
         }
         if self.normalized_solution_set_hash.is_empty() {
@@ -2968,6 +3181,8 @@ pub struct ScorePatternWinnerFamilyPayload {
 }
 
 impl ScorePatternWinnerFamilyPayload {
+    // The constructor mirrors the versioned wire contract's independent fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         winner_contract: impl Into<String>,
         ordering: impl Into<String>,
@@ -3199,6 +3414,39 @@ mod tests {
             build.page_source_identity_sha256(),
             Some("b".repeat(64).as_str())
         );
+    }
+
+    #[test]
+    fn build_coverage_portfolio_accepts_only_complete_exact_empty_results() {
+        let create = |source: &str, required: &str, probability: &str, first: &str, exact: bool| {
+            BuildCoveragePortfolioV2Payload::try_new(
+                "build-coverage-portfolio.v2",
+                "min-cover",
+                "exact-pattern-weight-union",
+                source,
+                "0",
+                "1",
+                required,
+                probability,
+                "cts1:0000000000000000",
+                first,
+                BuildCoverageCompletenessPayload::new(true, true, true, exact, true),
+                true,
+                Some("b".repeat(64)),
+            )
+        };
+        let empty = create("0", "0", "0", "", true).expect("complete empty portfolio");
+        assert_eq!(empty.selected_candidate_count(), "0");
+        assert_eq!(empty.canonical_first_candidate_id(), "");
+        for (source, required, probability, first, exact) in [
+            ("1", "0", "0", "", true),
+            ("0", "1", "0", "", true),
+            ("0", "0", "1", "", true),
+            ("0", "0", "0", "candidate", true),
+            ("0", "0", "0", "", false),
+        ] {
+            assert!(create(source, required, probability, first, exact).is_err());
+        }
     }
 
     #[test]

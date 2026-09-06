@@ -44,10 +44,10 @@
     type WorkspaceValidationCode
   } from './solverWorkspaceModel';
   import {
-    preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage
   } from './workspaceI18n';
+  import { persistWorkspaceLanguage, readWorkspaceLanguage } from './workspaceLanguagePreference';
   import {
     workspaceViewFromWasm,
     type WorkspaceRuntimeStatus,
@@ -109,9 +109,7 @@
 
   onMount(() => {
     mounted = true;
-    language = preferredWorkspaceLanguage(
-      localStorage.getItem('clearra-language') ?? navigator.language
-    );
+    language = readWorkspaceLanguage();
     request = withAutomaticTarget({
       ...request,
       workers: automaticWorkerAuthority(hostCapabilitySnapshot).workersEffective
@@ -161,25 +159,23 @@
 
   function updateRequest(next: SolverWorkspaceRequest) {
     invalidSharedLink = false;
-    const scorePolicyFixed =
+    const scoreCpuOnly =
       next.scoreMode === 'summary' ||
       next.scoreMode === 'score-finder' ||
       next.scoreMode === 'score-minimals';
-    const requestedUseAll = scorePolicyFixed ? false : next.useAllLogicalProcessors;
+    const requestedUseAll = next.useAllLogicalProcessors;
     const useAllChanged = requestedUseAll !== request.useAllLogicalProcessors;
     const scoreModeChanged = next.scoreMode !== request.scoreMode;
     request = withAutomaticTarget({
       ...next,
-      workers: scorePolicyFixed
-        ? 1
-        : useAllChanged
-          ? automaticWorkerAuthority(
-              hostCapabilitySnapshot,
-              requestedUseAll
-            ).workersEffective
-          : next.workers,
+      workers: useAllChanged
+        ? automaticWorkerAuthority(
+            hostCapabilitySnapshot,
+            requestedUseAll
+          ).workersEffective
+        : next.workers,
       useAllLogicalProcessors: requestedUseAll,
-      backend: scorePolicyFixed ? 'cpu' : 'auto',
+      backend: scoreCpuOnly ? 'cpu' : 'auto',
       gpuDevice: 'auto',
       tablebaseEnabled: false,
       precomputeBuildDependencies: false
@@ -237,7 +233,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    localStorage.setItem('clearra-language', next);
+    persistWorkspaceLanguage(next);
   }
 
   function run() {
@@ -338,13 +334,14 @@
       progressDone: 0,
       progressTotal: 0,
       progressTelemetry: null,
-      diagnostics: [],
+      publicFailures: [],
+      developerDiagnostics: [],
       response: null,
       searchReport: null,
       webgpuReport: null,
       backendReport: null,
       resourceReport: null,
-      error: null
+      developerError: null
     };
   }
 </script>
@@ -480,7 +477,6 @@
             role="switch"
             aria-label={label('useAllThreads')}
             aria-checked={request.useAllLogicalProcessors}
-            disabled={request.scoreMode === 'summary' || request.scoreMode === 'score-finder' || request.scoreMode === 'score-minimals'}
             on:click={() => updateRequest({
               ...request,
               useAllLogicalProcessors: !request.useAllLogicalProcessors
@@ -528,8 +524,8 @@
     loadSolutionPage={(offset, limit, signal) =>
       workerController.loadSolutionPage(offset, limit, signal)}
     loadNextProductPage={(signal) => workerController.loadNextProductPage(signal)}
-    loadProductMemberPage={(outerPageNumber, memberPageNumber, signal) =>
-      workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal)}
+    loadProductMemberPage={(outerPageNumber, memberPageNumber, signal, maximumWorkSteps) =>
+      workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal, maximumWorkSteps)}
     releaseProductPages={() => workerController.releaseProductPages()}
   />
 </main>

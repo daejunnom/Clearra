@@ -1,10 +1,16 @@
 #[path = "../src/setup_ranked_family_result.rs"]
+// The isolated contract test consumes only the promotion surface from this
+// production module, not every diagnostic accessor it exposes to the app.
+#[allow(dead_code)]
 mod setup_ranked_family_result;
 #[path = "../src/setup_ranking_contract.rs"]
 mod setup_ranking_contract;
 #[path = "../src/setup_ranking_facade.rs"]
 mod setup_ranking_facade;
 #[path = "../src/spin_structure_search_result.rs"]
+// The isolated contract test consumes the typed result surface but not the
+// host-only ownership conversion and canonical-id helper.
+#[allow(dead_code)]
 mod spin_structure_search_result;
 
 use clearra_core_domain::piece::piece_kind::PieceKind;

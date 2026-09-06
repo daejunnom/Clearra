@@ -227,13 +227,13 @@ impl SequenceDependenciesAnalyzer {
                 .map_err(|_| SequenceDependenciesError::Incomplete {
                     reason: "operation graph transition allocation failed",
                 })?;
-            for operation_index in 0..operation_count {
+            for (operation_index, target) in targets.iter().enumerate() {
                 if parent.placed.contains(operation_index) {
                     continue;
                 }
                 let Some((child_key, evidence)) = apply_target_operation(
                     problem,
-                    &targets[operation_index],
+                    target,
                     operation_index,
                     &parent,
                     &mut reachability,
@@ -316,7 +316,7 @@ impl SequenceDependenciesAnalyzer {
             })
             .collect();
         let mut live_transition_count = 0_usize;
-        for depth in 0..operation_count {
+        for nodes_at_depth in by_depth.iter().take(operation_count) {
             if live[representative_node] {
                 if let Some(edge) = nodes[representative_node]
                     .outgoing
@@ -327,7 +327,7 @@ impl SequenceDependenciesAnalyzer {
                     representative_node = edge.child;
                 }
             }
-            for node_index in by_depth[depth].iter().copied().filter(|index| live[*index]) {
+            for node_index in nodes_at_depth.iter().copied().filter(|index| live[*index]) {
                 for edge in nodes[node_index]
                     .outgoing
                     .iter()

@@ -1,9 +1,11 @@
 use std::fmt;
 
 use clearra_platform_fs::{
-    DurabilityUncertainReason, FileIdentity, NativePublicationError, NativePublicationErrorCode,
-    NeverCancelled, PublicationCheckpoint, PublicationControl, PublicationResidue,
+    DurabilityUncertainReason, FileIdentity, NeverCancelled, PublicationCheckpoint,
+    PublicationControl, PublicationResidue,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use clearra_platform_fs::{NativePublicationError, NativePublicationErrorCode};
 
 use super::{
     solution_set_artifact::SolutionSetArtifact,
@@ -290,6 +292,7 @@ impl ArtifactSinkError {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn from_native(error: NativePublicationError) -> Self {
         Self {
             code: map_native_code(error.code()),
@@ -333,6 +336,7 @@ impl ArtifactSinkError {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn map_native_code(code: NativePublicationErrorCode) -> ArtifactSinkErrorCode {
     match code {
         NativePublicationErrorCode::InvalidTarget => ArtifactSinkErrorCode::InvalidTarget,

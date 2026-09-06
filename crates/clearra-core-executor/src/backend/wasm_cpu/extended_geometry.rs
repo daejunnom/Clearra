@@ -36,6 +36,8 @@ impl ExtendedGeometryCandidate {
     }
 }
 
+// Advance payloads are single-owner state transfers, so the large variant remains inline.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum ExtendedGeometryAdvance {
     Pending,
     Candidate(ExtendedGeometryCandidate),

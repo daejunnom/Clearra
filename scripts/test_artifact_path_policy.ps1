@@ -42,6 +42,9 @@ Assert-ArtifactPathCondition `
 
 Assert-ClearraRepositoryArtifactPolicy $repository
 Assert-ArtifactPathCondition $true 'default_tasks_do_not_create_repo_local_artifacts'
+Assert-ArtifactPathCondition `
+    ((Get-Content -LiteralPath (Join-Path $repository '.dockerignore') -Raw) -match '(?m)^/?_local/?\s*$') `
+    'raw_docker_context_excludes_nonproduct_diagnostics'
 
 $transientPrefix = 'clearra-generic-policy'
 $firstTransient = New-TransientBuildDir $transientPrefix
@@ -68,18 +71,42 @@ $fakeRepository = New-TransientBuildDir 'clearra-artifact-policy-test'
 try {
     $fakeLocal = Join-Path $fakeRepository '_local'
     New-Item -ItemType Directory -Force -Path $fakeLocal | Out-Null
-    Set-Content -LiteralPath (Join-Path $fakeLocal 'bundle.py') -Value '# test bundle tool'
+    & git -C $fakeRepository init --quiet
+    if ($LASTEXITCODE -ne 0) { throw 'Could not initialize isolated artifact policy fixture' }
+    Set-Content -LiteralPath (Join-Path $fakeRepository '.gitignore') -Value '/_local/'
+    Set-Content -LiteralPath (Join-Path $fakeLocal 'measurement.json') -Value '{}'
     Assert-ClearraRepositoryArtifactPolicy $fakeRepository
-    Assert-ArtifactPathCondition $true 'repository_local_bundle_tool_is_allowed'
+    Assert-ArtifactPathCondition $true 'ignored_nonproduct_diagnostics_are_not_release_inputs'
 
-    Set-Content -LiteralPath (Join-Path $fakeLocal 'project_bundle.txt') -Value 'test bundle output'
-    Assert-ClearraRepositoryArtifactPolicy $fakeRepository
-    Assert-ArtifactPathCondition $true 'repository_local_bundle_output_is_allowed'
-
-    Set-Content -LiteralPath (Join-Path $fakeLocal 'unexpected-report.json') -Value '{}'
+    & git -C $fakeRepository add --force -- _local/measurement.json
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stage isolated negative artifact fixture' }
     Assert-ArtifactPathCondition `
         (Test-ArtifactPathThrows { Assert-ClearraRepositoryArtifactPolicy $fakeRepository }) `
-        'release_acceptance_rejects_unexpected_local_artifact'
+        'release_acceptance_rejects_tracked_diagnostics'
+    Remove-Item -LiteralPath (Join-Path $fakeLocal 'measurement.json')
+    Assert-ClearraRepositoryArtifactPolicy $fakeRepository
+    Assert-ArtifactPathCondition $true 'intentional_tracked_tool_deletion_needs_no_restoration'
+    Set-Content -LiteralPath (Join-Path $fakeRepository '.gitignore') -Value '# missing boundary'
+    Assert-ArtifactPathCondition `
+        (Test-ArtifactPathThrows { Assert-ClearraRepositoryArtifactPolicy $fakeRepository }) `
+        'diagnostics_require_explicit_ignore_boundary'
+    foreach ($reference in @('import "../../_local/probe.mjs"', 'path = "../_local/probe"')) {
+        $source = [pscustomobject]@{ RelativePath = 'product/input'; Text = $reference }
+        Assert-ArtifactPathCondition `
+            (Test-ArtifactPathThrows { Assert-ClearraProductExcludesLocalDiagnostics @($source) }) `
+            'product_import_or_manifest_cannot_include_diagnostics'
+    }
+    Assert-ClearraProductExcludesLocalDiagnostics @(
+        [pscustomobject]@{ RelativePath = 'product/input'; Text = 'use clearra_app::AppRequest;' }
+    )
+    Assert-ArtifactPathCondition $true 'ordinary_product_inputs_remain_valid'
+    foreach ($renderedName in @('_local/measurement with spaces.json', '"_local/quoted\tmeasurement.json"')) {
+        Assert-ArtifactPathCondition `
+            (Test-ArtifactPathThrows { Assert-ClearraLocalGitOwnership @($renderedName) @() }) `
+            'git_rendered_special_name_is_not_misclassified_as_deleted'
+        Assert-ClearraLocalGitOwnership @($renderedName) @($renderedName)
+        Assert-ArtifactPathCondition $true 'git_rendered_exact_deleted_name_is_preserved'
+    }
 } finally {
     Remove-TransientBuildDir $fakeRepository
 }

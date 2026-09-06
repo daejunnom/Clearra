@@ -16,8 +16,8 @@ struct ProductPageOperationSlot {
 impl ProductPageOperationSlot {
     fn begin(&self) -> Result<(u64, GuiJobCancelToken), String> {
         let mut state = self.state.lock().map_err(|error| error.to_string())?;
-        if state.active.is_some() {
-            return Err("a desktop product page operation is already active".to_owned());
+        if let Some((_, active)) = state.active.take() {
+            active.cancel();
         }
         state.next_id = state
             .next_id
@@ -62,7 +62,7 @@ pub fn run_request(
     request_json: String,
 ) -> Result<String, String> {
     state.product_page_operation.cancel()?;
-    let bridge = state.bridge.lock().map_err(|error| error.to_string())?;
+    let mut bridge = state.bridge.lock().map_err(|error| error.to_string())?;
     bridge
         .run_request(&request_json)
         .map_err(|error| error.to_string())
@@ -140,6 +140,7 @@ pub async fn product_page_get(
     state: tauri::State<'_, DesktopBridgeState>,
     alternative_index: String,
     member_page_number: String,
+    maximum_work_steps: u64,
 ) -> Result<String, String> {
     let (operation_id, cancellation) = state.product_page_operation.begin()?;
     let bridge = Arc::clone(&state.bridge);
@@ -153,9 +154,12 @@ pub async fn product_page_get(
             }
         };
         let result = bridge
-            .product_page_get_with_cancel(&alternative_index, &member_page_number, &mut || {
-                cancellation.is_cancelled()
-            })
+            .product_page_get_slice_with_cancel(
+                &alternative_index,
+                &member_page_number,
+                maximum_work_steps.max(1),
+                &mut || cancellation.is_cancelled(),
+            )
             .map_err(|error| error.to_string());
         product_page_operation.finish(operation_id)?;
         drop(bridge);
@@ -185,21 +189,28 @@ mod tests {
     use super::ProductPageOperationSlot;
 
     #[test]
-    fn product_page_release_signal_reaches_the_active_operation() {
+    fn product_page_generation_replaces_and_cancels_the_active_operation() {
         let slot = ProductPageOperationSlot::default();
         let (operation_id, cancellation) = slot.begin().expect("begin page operation");
         assert!(!cancellation.is_cancelled());
-        assert!(slot.begin().is_err());
 
-        slot.cancel().expect("cancel page operation");
-        assert!(cancellation.is_cancelled());
-        slot.finish(operation_id).expect("finish page operation");
-
-        let (replacement_id, replacement) = slot.begin().expect("begin replacement operation");
-        assert!(!replacement.is_cancelled());
+        let (replacement_id, replacement) = slot.begin().expect("replace page operation");
         assert!(replacement_id > operation_id);
+        assert!(cancellation.is_cancelled());
+        assert!(!replacement.is_cancelled());
+
+        slot.finish(operation_id)
+            .expect("stale page operation finish");
+        slot.cancel().expect("cancel replacement page operation");
+        assert!(replacement.is_cancelled());
+
         slot.finish(replacement_id)
             .expect("finish replacement operation");
+
+        let (next_id, next) = slot.begin().expect("begin post-release operation");
+        assert!(next_id > replacement_id);
+        assert!(!next.is_cancelled());
+        slot.finish(next_id).expect("finish post-release operation");
     }
 }
 

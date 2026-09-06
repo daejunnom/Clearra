@@ -53,6 +53,9 @@ enum WorkerRequest {
     },
 }
 
+// The coordinator consumes completion reports directly from the channel; boxing
+// each successful worker event would add allocation in the result hot path.
+#[allow(clippy::large_enum_variant)]
 enum WorkerEvent {
     Ready {
         worker_index: usize,

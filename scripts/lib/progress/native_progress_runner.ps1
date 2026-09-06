@@ -163,6 +163,25 @@ function ConvertTo-ClearraProcessArgument {
         }
     }
 
+    if ($cargoCommand -and $Arguments.Count -gt 0 -and
+        $Arguments[0] -in @('build', 'test', 'check', 'run', 'rustc', 'clippy') -and
+        '--release' -notin $Arguments) {
+        # Cargo and its requested test/run process have exited, both output
+        # streams are drained, and the process handle is disposed. Keep this
+        # debug-only cleanup separate from the whole-artifact size policy.
+        # The helper skips cleanup if another Cargo/compiler/linker is active.
+        try {
+            $debugRetention = & (Join-Path $PSScriptRoot '../../tools/retain-clearra-debug-builds.ps1') `
+                -CargoTargetDirectory $cargoTargetDir `
+                -Apply
+            if ($debugRetention.Status -eq 'pruned' -and $debugRetention.DeletedCount -gt 0) {
+                $text = ($text + "`n[debug-build-retention] deleted=$($debugRetention.deletedCount) freed_bytes=$($debugRetention.freedBytes)").Trim()
+            }
+        } catch {
+            Write-Warning "Clearra debug-build retention was skipped: $($_.Exception.Message)"
+        }
+    }
+
     return [pscustomobject]@{
         ExitCode = $exitCode
         Output = $text

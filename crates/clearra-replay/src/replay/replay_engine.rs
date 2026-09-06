@@ -290,7 +290,19 @@ impl ReplayTrace {
 }
 impl ReplayTrace {
     pub fn canonical_key(&self) -> String {
-        TraceCanonicalKey::from_trace(&self.solution_trace).stable_key()
+        TraceCanonicalKey::stable_key_from_trace(&self.solution_trace)
+    }
+
+    /// Compares the public canonical bytes without temporary heap allocations.
+    pub fn canonical_key_matches(&self, expected: &str) -> bool {
+        TraceCanonicalKey::matches_trace_key(&self.solution_trace, expected)
+    }
+
+    /// Requested output capacity of canonical_key: only its returned String.
+    /// Input trace storage is excluded; governed callers also check the actual
+    /// returned String capacity, as they do for other exact reservations.
+    pub fn checked_canonical_key_requested_bytes(&self) -> Option<u128> {
+        TraceCanonicalKey::checked_trace_key_bytes(&self.solution_trace)
     }
 }
 

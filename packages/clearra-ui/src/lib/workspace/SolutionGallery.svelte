@@ -44,7 +44,9 @@
   export let solutionFinesse: Record<string, BuildProbabilitySolutionFinesse[]> = {};
   export let representativeWitness: ClearraFinesseRepresentativeWitness | null = null;
   export let solutionComments: Record<string, string> = {};
+  export let solutionCaptions: string[] = [];
   export let solutionSetHash = '';
+  export let solutionOrdinalBase = '0';
   export let targetLines = 4;
   export let language: WorkspaceLanguage;
   export let copyFormat: SolutionCopyFormat = 'ctk';
@@ -79,7 +81,7 @@
     solutionSetHash,
     solutionCount,
     solutionKeys
-  )}:lines:${targetLines}`;
+  )}:ordinal-base:${solutionOrdinalBase}:lines:${targetLines}`;
   $: if (setIdentity !== lastSetIdentity) {
     abortPageLoads('Solution gallery result was replaced.');
     pageLoadController = new AbortController();
@@ -112,7 +114,8 @@
     probability: solutionProbabilities[solution.key],
     averageScore: solutionAverageScores[solution.key],
     finesse: solutionFinesse[solution.key] ?? [],
-    comment: solutionComments[solution.key]
+    comment: solutionComments[solution.key],
+    caption: solutionCaptions[solution.index]
   }));
   $: remainingCount = Math.max(0, totalSolutionCount - visibleSolutions.length);
   $: nextPageCount = Math.min(PAGE_SIZE, remainingCount);
@@ -231,6 +234,14 @@
     }).format(score);
   }
 
+  function solutionOrdinal(index: number): string {
+    try {
+      return (BigInt(solutionOrdinalBase) + BigInt(index + 1)).toString();
+    } catch {
+      return String(index + 1);
+    }
+  }
+
   function pageWithComment(
     page: SolutionExportPage | null,
     comment: string | undefined
@@ -263,7 +274,7 @@
       <li>
         <div class="solution-heading">
           <div>
-            <strong>{label('solutionNumber', { number: solution.index + 1 })}</strong>
+            <strong>{label('solutionNumber', { number: solutionOrdinal(solution.index) })}</strong>
             <div class="solution-metrics">
               {#if solution.probability}
                 <span class="solution-probability">
@@ -301,9 +312,12 @@
 
         <SolutionBoardPreview
           board={solution.board}
-          ariaLabel={label('solutionBoard', { number: solution.index + 1 })}
+          ariaLabel={label('solutionBoard', { number: solutionOrdinal(solution.index) })}
           invalidLabel={label('invalidSolutionKey')}
         />
+        {#if solution.caption}
+          <p class="solution-caption">{solution.caption}</p>
+        {/if}
       </li>
     {/each}
   </ol>
@@ -353,6 +367,14 @@
     gap: 8px;
     justify-content: space-between;
     margin-bottom: 8px;
+  }
+
+  .solution-caption {
+    color: #596560;
+    font-size: 11px;
+    line-height: 1.45;
+    margin: 8px 0 0;
+    overflow-wrap: anywhere;
   }
 
   .solution-heading > div { min-width: 0; }

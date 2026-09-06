@@ -8,6 +8,7 @@ use crate::{
         },
         exact_minimum_cover_portfolios::{
             ExactMinimumCoverPortfolioEnumerator, ExactMinimumCoverPortfolioError,
+            ExactMinimumCoverPortfolioPreparation,
         },
     },
     matrix::coverage_matrix::{CoverageMatrix, TypedCoverageMatrix},
@@ -131,6 +132,74 @@ impl MinimumCoverSolver {
         })?;
         drop(rows);
         Ok(exact_result_to_selection(result))
+    }
+
+    /// Proves the minimum cardinality once, then projects a complete result
+    /// through the original matrix-row lexicographic portfolio authority.
+    ///
+    /// The branch-and-bound proof is deliberately not a presentation
+    /// identity: its lossless dominance reduction may choose a later original
+    /// row. Incomplete proofs keep their existing partial-selection semantics,
+    /// because no complete optimum exists to enumerate.
+    pub fn solve_exact_canonical_with_memory_guard(
+        matrix: &CoverageMatrix,
+        required: &PatternBitSet,
+        memory_guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+    ) -> Result<CoverSelection, ExactMinimumCoverPortfolioError> {
+        memory_guard(0).map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
+        let row_count = matrix.rows().len();
+        let requested_row_bytes = (row_count as u128)
+            .checked_mul(core::mem::size_of::<PatternBitSet>() as u128)
+            .ok_or(ExactMinimumCoverPortfolioError::MinimumCover(
+                ExactMinimumCoverError::ProjectionOverflow,
+            ))?;
+        memory_guard(requested_row_bytes).map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(row_count).map_err(|_| {
+            ExactMinimumCoverPortfolioError::AllocationFailed {
+                component: "minimum_cover_solver_matrix_rows",
+            }
+        })?;
+        let actual_row_bytes = (rows.capacity() as u128)
+            .checked_mul(core::mem::size_of::<PatternBitSet>() as u128)
+            .ok_or(ExactMinimumCoverPortfolioError::MinimumCover(
+                ExactMinimumCoverError::ProjectionOverflow,
+            ))?;
+        memory_guard(actual_row_bytes).map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
+        rows.extend(matrix.rows().iter().map(|row| row.patterns().clone()));
+        let preparation = ExactMinimumCoverPortfolioEnumerator::prepare_with_memory_guard(
+            required,
+            &rows,
+            &mut |portfolio_owned_bytes| {
+                memory_guard(
+                    actual_row_bytes
+                        .checked_add(portfolio_owned_bytes)
+                        .ok_or(ExactMinimumCoverError::ProjectionOverflow)?,
+                )
+            },
+        )?;
+        match preparation {
+            ExactMinimumCoverPortfolioPreparation::Incomplete { proof } => {
+                drop(rows);
+                Ok(exact_result_to_selection(proof))
+            }
+            ExactMinimumCoverPortfolioPreparation::Coverable { proof, enumerator } => {
+                let canonical = enumerator
+                    .into_canonical_portfolio()?
+                    .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?;
+                let (proof_rows, covered_patterns, complete) = proof.into_parts();
+                drop(proof_rows);
+                drop(rows);
+                Ok(CoverSelection::new(
+                    canonical.into_row_indices(),
+                    covered_patterns,
+                    complete,
+                    CoverSelectionStrategy::ExactSearch,
+                    CoverSelectionOptimality::ProvenMinimum,
+                    CoverSelectionLimit::None,
+                ))
+            }
+        }
     }
 }
 

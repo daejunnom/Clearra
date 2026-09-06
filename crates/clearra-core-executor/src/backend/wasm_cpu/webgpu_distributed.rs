@@ -33,7 +33,13 @@ pub struct WasmWebGpuCandidateProducer {
     summary: Option<WasmDistributedGeometrySummary>,
 }
 
+// The active GPU producer phase is long-lived and transitions by ownership move.
+#[allow(clippy::large_enum_variant)]
 enum WebGpuProducerPhase {
+    Preparing {
+        selection: clearra_webgpu::WebGpuAdapterSelection,
+        warmup_requested: bool,
+    },
     Prepared {
         batches: Vec<clearra_webgpu::WebGpuGeometryExactCoverBatch>,
         selection: clearra_webgpu::WebGpuAdapterSelection,
@@ -50,12 +56,10 @@ impl WasmWebGpuCandidateProducer {
         let verification_required = problem.objective().kind()
             != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling;
         let exact = WasmExactSearchSession::new_external_geometry(problem).map_err(map_error)?;
-        let batches = compile_batches(&exact, problem.backend_policy()).map_err(map_error)?;
         Ok(Self {
             problem: Arc::new(problem.clone()),
             exact: Some(exact),
-            phase: WebGpuProducerPhase::Prepared {
-                batches,
+            phase: WebGpuProducerPhase::Preparing {
                 selection: adapter_selection(problem.backend_policy().gpu_device()),
                 warmup_requested: problem.backend_policy().gpu_warmup(),
             },
@@ -82,6 +86,33 @@ impl WasmWebGpuCandidateProducer {
         loop {
             let phase = std::mem::replace(&mut self.phase, WebGpuProducerPhase::Finished);
             match phase {
+                WebGpuProducerPhase::Preparing {
+                    selection,
+                    warmup_requested,
+                } => {
+                    let exact = self
+                        .exact
+                        .as_mut()
+                        .ok_or_else(|| invalid("webgpu_exact_session_missing"))?;
+                    if !exact
+                        .advance_external_geometry_preparation(control)
+                        .map_err(map_error)?
+                    {
+                        self.phase = WebGpuProducerPhase::Preparing {
+                            selection,
+                            warmup_requested,
+                        };
+                        return Ok(WasmCandidateProducerAdvance::Pending);
+                    }
+                    let batches =
+                        compile_batches(exact, self.problem.backend_policy()).map_err(map_error)?;
+                    self.phase = WebGpuProducerPhase::Prepared {
+                        batches,
+                        selection,
+                        warmup_requested,
+                    };
+                    return Ok(WasmCandidateProducerAdvance::Pending);
+                }
                 WebGpuProducerPhase::Prepared {
                     batches,
                     selection,
@@ -269,6 +300,17 @@ impl WasmWebGpuCandidateProducer {
         }
     }
 
+    pub fn target_preparation_pending(&self) -> bool {
+        match &self.phase {
+            WebGpuProducerPhase::Preparing { .. } => self
+                .exact
+                .as_ref()
+                .is_some_and(WasmExactSearchSession::geometry_target_preparation_pending),
+            WebGpuProducerPhase::CpuFallback(producer) => producer.target_preparation_pending(),
+            _ => false,
+        }
+    }
+
     pub fn verification_required(&self) -> bool {
         self.fallback_producer
             .as_ref()
@@ -358,7 +400,7 @@ fn map_error(error: WasmExactSearchError) -> WasmCpuSearchError {
     match error {
         WasmExactSearchError::InvalidProblem(reason) => invalid(reason),
         WasmExactSearchError::ResourceAdmission(resource_report) => {
-            WasmCpuSearchError::ResourceAdmission { resource_report }
+            WasmCpuSearchError::resource_admission(*resource_report)
         }
         WasmExactSearchError::Cancelled => WasmCpuSearchError::Cancelled,
     }
@@ -384,13 +426,8 @@ mod tests {
                 .with_required_memory_bytes(17_066_704),
         );
 
-        let mapped = map_error(WasmExactSearchError::ResourceAdmission(report));
-        assert_eq!(
-            mapped,
-            WasmCpuSearchError::ResourceAdmission {
-                resource_report: report
-            }
-        );
+        let mapped = map_error(WasmExactSearchError::resource_admission(report));
+        assert_eq!(mapped, WasmCpuSearchError::resource_admission(report));
         assert_eq!(mapped.reason(), "shared_execution_memory_exhausted");
         assert!(!report.execution_started());
         assert!(!report.result_complete());

@@ -661,6 +661,10 @@ impl fmt::Debug for PcScoreCompiledAuthority {
                 "terminal_memory_capacity_bytes",
                 &self.terminal_resource_authority.memory_capacity_bytes(),
             )
+            .field(
+                "terminal_compute_capacity_units",
+                &self.terminal_resource_authority.compute_capacity_units(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -745,9 +749,22 @@ impl PcScoreCompiledAuthority {
             )));
         }
 
+        let requested_compute_units = if cfg!(target_family = "wasm") {
+            // Browser workers are separate WASM module instances. The parent
+            // coordinator retains their product width, while this module owns
+            // exactly one local shared-session compute slot.
+            1
+        } else {
+            match query.as_ref() {
+                PcScoreQuerySnapshot::Opening(query) => query.execution_policy().workers(),
+                PcScoreQuerySnapshot::Scenario(query) => query.execution_policy().workers(),
+            }
+        };
         let terminal_resource_authority =
-            WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
-                .map_err(PcScoreCompiledAuthorityError::ResourceAdmission)?;
+            WasmCpuTerminalResourceAuthority::try_acquire_full_capacity_with_compute_units(
+                requested_compute_units,
+            )
+            .map_err(PcScoreCompiledAuthorityError::resource_admission)?;
         let problem = match query.as_ref() {
             PcScoreQuerySnapshot::Opening(query) => {
                 ProblemCompiler::compile_opening_pc(query.as_ref())
@@ -884,6 +901,8 @@ impl PcScoreCompiledAuthority {
         &self.terminal_resource_authority
     }
 
+    // Retained for diagnostics that expose the authority's pre-execution reservation base.
+    #[allow(dead_code)]
     pub(crate) const fn external_retained_base_bytes(&self) -> u128 {
         self.external_retained_base_bytes
     }
@@ -1290,11 +1309,17 @@ fn solution_field_average_family_is_valid(
             })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PcScoreCompiledAuthorityError {
-    ResourceAdmission(ResourceReport),
+    ResourceAdmission(Box<ResourceReport>),
     ProblemCompile(ProblemCompileError),
     Contract(PcScoreExecutionError),
+}
+
+impl PcScoreCompiledAuthorityError {
+    fn resource_admission(resource_report: ResourceReport) -> Self {
+        Self::ResourceAdmission(Box::new(resource_report))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -136,7 +136,7 @@ $desktopRustResponseSurface = @(
 ) -join "`n"
 foreach ($requiredMarker in @(
             "AppResponse",
-            "response.to_host_response_with_solution_set_artifact",
+            "response.to_host_response()",
             "serde_json::to_string"
         )) {
         if ($desktopRustResponseSurface -notlike "*$requiredMarker*") {

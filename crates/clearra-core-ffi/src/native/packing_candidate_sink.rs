@@ -6,10 +6,15 @@ use crate::{
     PackingCandidateBatch, PackingCandidateBatchError,
 };
 
+#[cfg(feature = "native-c-core")]
 const PACKING_INVALID_ARGUMENT: i32 = 1;
+#[cfg(feature = "native-c-core")]
 const PACKING_CAPACITY_EXCEEDED: i32 = 6;
+#[cfg(feature = "native-c-core")]
 const TRUNCATION_NONE: u16 = 0;
+#[cfg(feature = "native-c-core")]
 const TRUNCATION_CANDIDATE_BUDGET_EXCEEDED: u16 = 2;
+#[cfg(feature = "native-c-core")]
 const TRUNCATION_MEMORY_EXCEEDED: u16 = 10;
 const EMPTY_BUCKET: u32 = u32::MAX;
 const INITIAL_BUCKET_COUNT: usize = 256;
@@ -30,6 +35,7 @@ pub enum NativePackingCandidateSinkError {
 }
 
 impl NativePackingCandidateSinkError {
+    #[cfg(feature = "native-c-core")]
     pub(crate) const fn status(self) -> i32 {
         match self {
             Self::CandidateBudgetExceeded | Self::MemoryExceeded => PACKING_CAPACITY_EXCEEDED,
@@ -37,6 +43,7 @@ impl NativePackingCandidateSinkError {
         }
     }
 
+    #[cfg(feature = "native-c-core")]
     pub(crate) const fn truncation_reason(self) -> u16 {
         match self {
             Self::CandidateBudgetExceeded => TRUNCATION_CANDIDATE_BUDGET_EXCEEDED,

@@ -31,18 +31,25 @@ use crate::{
     },
     build_solution_probability_result::build_probability_response_is_authorized,
     commands::{
-        core_execution_error_response, path_app_command::path_response,
+        build_probability_app_command::{BuildProbabilityAppCommand, BuildProbabilityResultMode},
+        core_execution_error_response,
+        path_app_command::path_response,
         setup_app_command::setup_success_response,
     },
     pc_allspin_result::project_pc_allspin_result,
     pc_chance_probability_result::PcChanceCompiledAuthority,
     pc_result_projection::{PcResultProjection, ValidatedPcResultProjection},
     pc_save_result::{PcSaveCompiledAuthority, PcSaveCompiledAuthorityError, PcSaveResultMode},
+    pc_score_postprocess::PcScoreDerivation,
     pc_score_summary_result::{
         PcScoreCompiledAuthority, PcScoreCompiledAuthorityError, PcScoreExecutionError,
     },
     pc_tiling_family_result::{PcTilingCompiledAuthority, PcTilingCompiledAuthorityError},
     product_capability_contract::{ProductCapabilityContract, ValidatedProductCapabilityContract},
+    product_capability_result::{
+        PcMinimumCoverProductPreparation, PcMinimumCoverProductPreparationAdvance,
+        ProductCapabilityResult,
+    },
     render::AppRenderModel,
 };
 
@@ -169,13 +176,42 @@ pub struct CooperativeAppExecution {
     finite_caller_generation: Option<u64>,
 }
 
+// Only one driver is alive at a time and the session already owns this state;
+// boxing the common states would add an allocation to each cooperative command.
+#[allow(clippy::large_enum_variant)]
 enum CooperativeExecutionState {
     Immediate(Option<AppExecutionParts>),
     Ready(Option<AppResponse>),
     Search(CooperativeSearchExecution),
     Postprocess(CooperativePostprocessExecution),
+    PcMinimalsFinalize(Box<CooperativePcMinimalsFinalizeExecution>),
+    PcReplayFinalize(Box<CooperativePcReplayFinalizeExecution>),
     FiniteRequiresCallerMemory,
     Finished,
+}
+
+// Keep the mutually exclusive state drivers in distinct frames. In debug and
+// WASM builds, merging large control-flow graphs into `advance_inner` makes
+// rustc reserve their aggregate spill space for every advance.
+#[inline(never)]
+fn advance_postprocess_in_isolated_frame(
+    work: impl FnOnce() -> CooperativeAppAdvance,
+) -> CooperativeAppAdvance {
+    work()
+}
+
+#[inline(never)]
+fn advance_pc_minimals_finalize_in_isolated_frame(
+    work: impl FnOnce() -> CooperativeAppAdvance,
+) -> CooperativeAppAdvance {
+    work()
+}
+
+#[inline(never)]
+fn advance_search_in_isolated_frame(
+    work: impl FnOnce() -> CooperativeAppAdvance,
+) -> CooperativeAppAdvance {
+    work()
 }
 
 struct CooperativeSearchExecution {
@@ -200,6 +236,24 @@ struct CooperativePostprocessExecution {
     validation_report: DiagnosticReport,
     resource_budget: ResourceBudget,
     product_capability_contract: Option<ValidatedProductCapabilityContract>,
+}
+
+struct CooperativePcMinimalsFinalizeExecution {
+    response: AppResponse,
+    command_kind: AppCommandKind,
+    output_policy: AppOutputPolicy,
+    resource_budget: ResourceBudget,
+    preparation: PcMinimumCoverProductPreparation,
+    completed_work_steps: u64,
+}
+
+struct CooperativePcReplayFinalizeExecution {
+    response: AppResponse,
+    command_kind: AppCommandKind,
+    output_policy: AppOutputPolicy,
+    contract: ValidatedProductCapabilityContract,
+    preparation: crate::PcReplaySourceBuildSession,
+    manifest_work_units: u64,
 }
 
 /// Exact App-owned graph that remains live while the consumed scenario query
@@ -257,6 +311,9 @@ impl FiniteBuildCompileRemainder {
     }
 }
 
+// Search backends are mutually exclusive, long-lived session state. Keeping the
+// selected backend inline avoids another allocation in every browser session.
+#[allow(clippy::large_enum_variant)]
 enum CooperativeSearchSession {
     Pc(WasmCpuSearchSession),
     Setup(WasmSetupSearchSession),
@@ -306,11 +363,11 @@ fn checked_finite_build_response_kind_retained_bytes(
     response_kind: &CooperativeSearchResponseKind,
 ) -> Option<u128> {
     match response_kind {
-        CooperativeSearchResponseKind::BuildProbability { finesse, .. }
-            if finesse.score().is_none() =>
-        {
-            finesse.checked_retained_capacity_bytes()
-        }
+        CooperativeSearchResponseKind::BuildProbability {
+            finesse,
+            result_command: None,
+            ..
+        } if finesse.score().is_none() => finesse.checked_retained_capacity_bytes(),
         _ => None,
     }
 }
@@ -555,6 +612,12 @@ fn validate_finite_build_advance_memory(
                 )
                 .map_err(WasmCpuSearchError::into_core_execution_error)
         }
+        CooperativeExecutionState::PcMinimalsFinalize(_)
+        | CooperativeExecutionState::PcReplayFinalize(_) => {
+            Err(CoreExecutionError::RuntimeUnavailable {
+                component: "cooperative_finite_build_product_capability_authority_unavailable",
+            })
+        }
         CooperativeExecutionState::Immediate(_)
         | CooperativeExecutionState::Ready(_)
         | CooperativeExecutionState::FiniteRequiresCallerMemory
@@ -658,6 +721,9 @@ pub(crate) enum CooperativeSearchResponseKind {
         aggregation: BuildProbabilityAggregation,
         finesse: BuildProbabilityFinesseRequest,
         solution_probability_policy: BuildSolutionProbabilityPolicy,
+        /// The exact validated CLI/App product request. `None` is the
+        /// all-solutions compatibility route (and the only finite route).
+        result_command: Option<Box<BuildProbabilityAppCommand>>,
     },
     Damage,
     SpinFinder,
@@ -710,6 +776,56 @@ impl CooperativeSearchResponseKind {
             _ => None,
         }
     }
+
+    /// Applies only the command-owned evidence expansion that must run after
+    /// the ordinary Build public-surface post-process. No search is repeated.
+    pub(crate) fn materialize_build_probability_result_mode_evidence(
+        &self,
+        core_executor: &crate::AppCoreExecutorService,
+        control: &ExecutionControl,
+        result: clearra_core_executor::CoreExecutionResult,
+    ) -> Result<clearra_core_executor::CoreExecutionResult, CoreExecutionError> {
+        let Self::BuildProbability {
+            field,
+            aggregation,
+            finesse,
+            solution_probability_policy,
+            result_command,
+        } = self
+        else {
+            return Ok(result);
+        };
+        let Some(command) = result_command.as_deref() else {
+            return Ok(result);
+        };
+        if !build_probability_result_command_matches(
+            command,
+            *field,
+            *aggregation,
+            finesse,
+            *solution_probability_policy,
+        ) {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "cooperative_build_result_command_authority_mismatch",
+            });
+        }
+        command.materialize_result_mode_evidence(core_executor, control, result)
+    }
+}
+
+fn build_probability_result_command_matches(
+    command: &BuildProbabilityAppCommand,
+    field: BuildProbabilityField,
+    aggregation: BuildProbabilityAggregation,
+    finesse: &BuildProbabilityFinesseRequest,
+    solution_probability_policy: BuildSolutionProbabilityPolicy,
+) -> bool {
+    command.result_mode() != BuildProbabilityResultMode::AllSolutions
+        && command.invalid_reason().is_none()
+        && command.query().field() == field
+        && command.query().aggregation() == aggregation
+        && command.query().finesse_request() == finesse
+        && command.query().solution_probability_policy() == solution_probability_policy
 }
 
 impl AppContext {
@@ -777,6 +893,14 @@ impl AppContext {
             return Err(FiniteCooperativeCallerMemoryRejection::Invalid {
                 error: CoreExecutionError::RuntimeUnavailable {
                     component: "finite_cooperative_finesse_score_authority_unavailable",
+                },
+                caller_memory,
+            });
+        }
+        if build_command.result_mode() != BuildProbabilityResultMode::AllSolutions {
+            return Err(FiniteCooperativeCallerMemoryRejection::Invalid {
+                error: CoreExecutionError::RuntimeUnavailable {
+                    component: "finite_cooperative_build_result_product_authority_unavailable",
                 },
                 caller_memory,
             });
@@ -947,6 +1071,7 @@ impl AppContext {
             aggregation,
             finesse,
             solution_probability_policy,
+            result_command: None,
         };
         let constructor_external_retained_bytes =
             match checked_finite_build_constructor_external_retained_bytes(
@@ -1574,6 +1699,182 @@ impl CooperativePcTilingEnvelopeError {
 }
 
 impl CooperativeAppExecution {
+    /// Optional host scheduling of the same source-bound exact AtMost oracles
+    /// used by the ordinary CLI product. No minimum cardinality enters here.
+    pub fn enable_minimum_parallel(&mut self, partitions: usize) -> Result<(), &'static str> {
+        if let CooperativeExecutionState::PcMinimalsFinalize(finalize) = &mut self.state {
+            finalize
+                .preparation
+                .enable_parallel(partitions)
+                .map_err(|_| "minimum parallel preparation rejected")?;
+        }
+        Ok(())
+    }
+
+    /// Explicit request cap and every live App owner beside a local minimum
+    /// proof shard. The host must additionally retain its admitted physical
+    /// memory authority and account for transport/shard owners; this projection
+    /// is not itself an admission or permission to exceed either cap.
+    pub fn minimum_parallel_memory_envelope(&self) -> Option<(Option<u128>, u128)> {
+        let CooperativeExecutionState::PcMinimalsFinalize(finalize) = &self.state else {
+            return None;
+        };
+        #[cfg(test)]
+        if finalize.completed_work_steps == 0 {
+            eprintln!("minimum-envelope context={:?} response={:?} preparation={:?} finite={} generation={:?}",
+                self.context.as_ref().and_then(AppContext::checked_retained_capacity_bytes),
+                finalize.response.checked_pc_minimals_retained_capacity_bytes(),
+                finalize.preparation.checked_retained_capacity_bytes(),
+                self.finite_caller_memory.is_some(), self.finite_caller_generation);
+        }
+        // This non-finite PC path does not accept an unmeasured external caller
+        // owner through the finite Build protocol.
+        if self.finite_caller_memory.is_some() || self.finite_caller_generation.is_some() {
+            return None;
+        }
+        let context_heap = self.context.as_ref()?.checked_retained_capacity_bytes()?;
+        let request_mib = match (
+            finalize.resource_budget.memory_mib(),
+            finalize.resource_budget.max_memory_mib().map(u64::from),
+        ) {
+            (Some(first), Some(second)) => Some(first.min(second)),
+            (first, second) => first.or(second),
+        };
+        let memory_limit_bytes = match request_mib {
+            Some(mib) => Some(u128::from(mib).checked_mul(1024 * 1024)?),
+            None => None,
+        };
+        let retained_bytes = (core::mem::size_of::<Self>() as u128)
+            .checked_add(core::mem::size_of::<CooperativePcMinimalsFinalizeExecution>() as u128)?
+            .checked_add(context_heap)?
+            .checked_add(
+                finalize
+                    .response
+                    .checked_pc_minimals_retained_capacity_bytes()?,
+            )?
+            .checked_add(finalize.output_policy.checked_retained_capacity_bytes()?)?
+            .checked_add(finalize.preparation.checked_retained_capacity_bytes()?)?;
+        Some((memory_limit_bytes, retained_bytes))
+    }
+
+    pub fn minimum_parallel_query_satisfied(&self) -> bool {
+        match &self.state {
+            CooperativeExecutionState::PcMinimalsFinalize(finalize) => {
+                finalize.preparation.parallel_query_satisfied()
+            }
+            _ => false,
+        }
+    }
+
+    /// Optional one-level idle assistance. `memory_guard` admits extra peak
+    /// beyond the current whole App owner; no clone or child obligation is
+    /// committed when the guard declines. Host authority remains mandatory.
+    pub fn prepare_minimum_parallel_assist(
+        &mut self,
+        maximum_children: usize,
+        memory_guard: &mut impl FnMut(
+            u128,
+        )
+            -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+    ) -> Result<bool, &'static str> {
+        match &mut self.state {
+            CooperativeExecutionState::PcMinimalsFinalize(finalize) => finalize
+                .preparation
+                .prepare_parallel_idle_assist(maximum_children, memory_guard),
+            _ => Ok(false),
+        }
+    }
+
+    pub fn minimum_parallel_task_redundant(
+        &self,
+        identity: clearra_coverage::cover::ExactAtMostQueryIdentity,
+        partition_id: u64,
+    ) -> Result<bool, &'static str> {
+        match &self.state {
+            CooperativeExecutionState::PcMinimalsFinalize(finalize) => finalize
+                .preparation
+                .parallel_task_is_redundant(identity, partition_id),
+            _ => Err("minimum parallel finalizer is not active"),
+        }
+    }
+
+    pub fn minimum_parallel_query(&self) -> Option<&clearra_coverage::cover::ExactAtMostQuery> {
+        match &self.state {
+            CooperativeExecutionState::PcMinimalsFinalize(finalize) => {
+                finalize.preparation.parallel_query()
+            }
+            _ => None,
+        }
+    }
+
+    /// Original source dimensions, not a later canonical suffix. Hosts use
+    /// these bounds to reserve carriers for every query in this completion.
+    pub fn minimum_parallel_source_dimensions(&self) -> Option<(usize, usize)> {
+        match &self.state {
+            CooperativeExecutionState::PcMinimalsFinalize(finalize) => {
+                finalize.preparation.parallel_source_dimensions()
+            }
+            _ => None,
+        }
+    }
+
+    pub fn take_minimum_parallel_task(
+        &mut self,
+    ) -> Option<clearra_coverage::cover::ExactAtMostTask> {
+        match &mut self.state {
+            CooperativeExecutionState::PcMinimalsFinalize(finalize) => {
+                finalize.preparation.take_parallel_task()
+            }
+            _ => None,
+        }
+    }
+
+    pub fn accept_minimum_parallel_receipt(
+        &mut self,
+        receipt: clearra_coverage::cover::ExactAtMostReceipt,
+    ) -> Result<(), &'static str> {
+        match &mut self.state {
+            CooperativeExecutionState::PcMinimalsFinalize(finalize) => finalize
+                .preparation
+                .accept_parallel_receipt(receipt)
+                .map_err(|_| "minimum parallel receipt rejected"),
+            _ => Err("minimum parallel proof is not active"),
+        }
+    }
+
+    /// Reuses the ordinary postprocess/finalizer state machine after a
+    /// distributed producer has supplied its complete Core result. No search
+    /// is repeated. Exact minimum proof and paged replay source construction
+    /// remain owned by this cursor instead of invoking blocking finalization.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_distributed_product_result(
+        context: AppContext,
+        result: clearra_core_executor::CoreExecutionResult,
+        response_kind: CooperativeSearchResponseKind,
+        command_kind: AppCommandKind,
+        output_policy: AppOutputPolicy,
+        validation_report: DiagnosticReport,
+        resource_budget: ResourceBudget,
+        product_capability_contract: Option<ValidatedProductCapabilityContract>,
+    ) -> Self {
+        Self {
+            context: Some(context),
+            state: CooperativeExecutionState::Postprocess(CooperativePostprocessExecution {
+                result: Some(result),
+                pc_score_session: None,
+                build_probability_session: None,
+                response_kind,
+                command_kind,
+                output_policy,
+                validation_report,
+                resource_budget,
+                product_capability_contract,
+            }),
+            finite_caller_memory: None,
+            finite_caller_generation: None,
+        }
+    }
+
     fn context(&self) -> &AppContext {
         self.context
             .as_ref()
@@ -1652,11 +1953,11 @@ impl CooperativeAppExecution {
                     error: CoreExecutionError::RuntimeUnavailable {
                         component: "finite_cooperative_advance_requires_finite_session",
                     },
-                    caller_memory: incoming_caller_memory.ok_or_else(|| {
+                    caller_memory: incoming_caller_memory.ok_or(
                         FiniteCooperativeCallerMemoryRejection::Missing {
                             expected_generation: 0,
-                        }
-                    })?,
+                        },
+                    )?,
                 })
             }
         };
@@ -1880,6 +2181,7 @@ impl CooperativeAppExecution {
                     aggregation,
                     finesse,
                     solution_probability_policy,
+                    result_command: None,
                 } if finesse.score().is_none() => {
                     (*field, *aggregation, finesse, *solution_probability_policy)
                 }
@@ -2071,6 +2373,43 @@ impl CooperativeAppExecution {
         work_budget: usize,
         control: &ExecutionControl,
     ) -> CooperativeAppAdvance {
+        self.advance_inner_with_minimum_memory_guard(work_budget, control, None)
+    }
+
+    /// Admits the whole App owner while a minimum finalizer prepares or advances
+    /// its exact queries. The host adds its own ABI/transport owners and retains
+    /// the same authority across waves, even when it does not compute a shard.
+    pub fn advance_with_minimum_memory_guard(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+        memory_guard: &mut impl FnMut(
+            u128,
+        )
+            -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+    ) -> CooperativeAppAdvance {
+        if self.finite_caller_generation.is_some()
+            || self.finite_caller_memory.is_some()
+            || matches!(
+                self.state,
+                CooperativeExecutionState::FiniteRequiresCallerMemory
+            )
+        {
+            return CooperativeAppAdvance::FailedFinite(CoreExecutionError::RuntimeUnavailable {
+                component: "finite_cooperative_execution_requires_explicit_caller_memory",
+            });
+        }
+        self.advance_inner_with_minimum_memory_guard(work_budget, control, Some(memory_guard))
+    }
+
+    fn advance_inner_with_minimum_memory_guard(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+        minimum_memory_guard: Option<
+            &mut dyn FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+        >,
+    ) -> CooperativeAppAdvance {
         let finite_caller_memory = self.finite_caller_generation.map(|_| {
             self.finite_caller_memory.as_ref().map(|caller_memory| {
                 (
@@ -2098,97 +2437,173 @@ impl CooperativeAppExecution {
                 CooperativeAppAdvance::Completed(response.take().expect("ready response exists"))
             }
             CooperativeExecutionState::Search(mut search) => {
-                if matches!(finite_caller_memory, Some(None)) {
-                    self.state = CooperativeExecutionState::Search(search);
-                    return CooperativeAppAdvance::FailedFinite(
-                        CoreExecutionError::RuntimeUnavailable {
-                            component: "finite_cooperative_caller_memory_owner_missing",
-                        },
-                    );
-                }
-                if matches!(finite_caller_memory, Some(Some(_)))
-                    && !matches!(
-                        &search.session,
-                        CooperativeSearchSession::BuildProbability(_)
-                    )
-                {
-                    self.state = CooperativeExecutionState::Search(search);
-                    return CooperativeAppAdvance::FailedFinite(
-                        CoreExecutionError::RuntimeUnavailable {
-                            component: "finite_cooperative_search_session_mismatch",
-                        },
-                    );
-                }
-                let backend_advance = match finite_caller_memory {
-                    Some(Some((caller_retained_owner_bytes, caller_returned_carrier_bytes))) => {
-                        let external_retained_owner_bytes =
-                            match checked_finite_build_search_advance_external_retained_bytes(
-                                &search,
-                                caller_retained_owner_bytes,
-                            ) {
-                                Some(bytes) => bytes,
-                                None => {
-                                    self.state = CooperativeExecutionState::Search(search);
-                                    return CooperativeAppAdvance::FailedFinite(
+                advance_search_in_isolated_frame(move || {
+                    if matches!(finite_caller_memory, Some(None)) {
+                        self.state = CooperativeExecutionState::Search(search);
+                        return CooperativeAppAdvance::FailedFinite(
+                            CoreExecutionError::RuntimeUnavailable {
+                                component: "finite_cooperative_caller_memory_owner_missing",
+                            },
+                        );
+                    }
+                    if matches!(finite_caller_memory, Some(Some(_)))
+                        && !matches!(
+                            &search.session,
+                            CooperativeSearchSession::BuildProbability(_)
+                        )
+                    {
+                        self.state = CooperativeExecutionState::Search(search);
+                        return CooperativeAppAdvance::FailedFinite(
+                            CoreExecutionError::RuntimeUnavailable {
+                                component: "finite_cooperative_search_session_mismatch",
+                            },
+                        );
+                    }
+                    let backend_advance = match finite_caller_memory {
+                        Some(Some((
+                            caller_retained_owner_bytes,
+                            caller_returned_carrier_bytes,
+                        ))) => {
+                            let external_retained_owner_bytes =
+                                match checked_finite_build_search_advance_external_retained_bytes(
+                                    &search,
+                                    caller_retained_owner_bytes,
+                                ) {
+                                    Some(bytes) => bytes,
+                                    None => {
+                                        self.state = CooperativeExecutionState::Search(search);
+                                        return CooperativeAppAdvance::FailedFinite(
                                         CoreExecutionError::RuntimeUnavailable {
                                             component:
                                                 "finite_cooperative_search_memory_projection_overflow",
                                         },
                                     );
+                                    }
+                                };
+                            let returned_carrier_bytes =
+                                checked_finite_build_returned_carrier_bytes(
+                                    caller_returned_carrier_bytes,
+                                );
+                            match &mut search.session {
+                                CooperativeSearchSession::BuildProbability(session) => session
+                                    .advance_finite(
+                                        work_budget,
+                                        control,
+                                        external_retained_owner_bytes,
+                                        returned_carrier_bytes,
+                                    )
+                                    .map(|advance| match advance {
+                                        WasmBuildProbabilityAdvance::Pending => {
+                                            CooperativeBackendAdvance::Pending
+                                        }
+                                        WasmBuildProbabilityAdvance::Completed(result) => {
+                                            CooperativeBackendAdvance::CompletedCore(result)
+                                        }
+                                        WasmBuildProbabilityAdvance::Cancelled => {
+                                            CooperativeBackendAdvance::Cancelled
+                                        }
+                                    }),
+                                _ => {
+                                    unreachable!("finite search session was checked before advance")
                                 }
-                            };
-                        let returned_carrier_bytes = checked_finite_build_returned_carrier_bytes(
-                            caller_returned_carrier_bytes,
-                        );
-                        match &mut search.session {
-                            CooperativeSearchSession::BuildProbability(session) => session
-                                .advance_finite(
-                                    work_budget,
-                                    control,
-                                    external_retained_owner_bytes,
-                                    returned_carrier_bytes,
-                                )
-                                .map(|advance| match advance {
-                                    WasmBuildProbabilityAdvance::Pending => {
-                                        CooperativeBackendAdvance::Pending
-                                    }
-                                    WasmBuildProbabilityAdvance::Completed(result) => {
-                                        CooperativeBackendAdvance::CompletedCore(result)
-                                    }
-                                    WasmBuildProbabilityAdvance::Cancelled => {
-                                        CooperativeBackendAdvance::Cancelled
-                                    }
-                                }),
-                            _ => unreachable!("finite search session was checked before advance"),
+                            }
                         }
-                    }
-                    Some(None) => unreachable!("finite caller-memory owner was checked above"),
-                    None => advance_search_session(&mut search.session, work_budget, control),
-                };
-                match backend_advance {
-                    Ok(CooperativeBackendAdvance::Pending) => {
-                        self.state = CooperativeExecutionState::Search(search);
-                        CooperativeAppAdvance::Pending
-                    }
-                    Ok(CooperativeBackendAdvance::Cancelled)
-                    | Err(WasmCpuSearchError::Cancelled) => {
-                        if self.finite_caller_generation.is_some() {
+                        Some(None) => unreachable!("finite caller-memory owner was checked above"),
+                        None => advance_search_session(&mut search.session, work_budget, control),
+                    };
+                    match backend_advance {
+                        Ok(CooperativeBackendAdvance::Pending) => {
                             self.state = CooperativeExecutionState::Search(search);
+                            CooperativeAppAdvance::Pending
                         }
-                        CooperativeAppAdvance::Cancelled
-                    }
-                    Ok(CooperativeBackendAdvance::CompletedCore(result)) => {
-                        if matches!(
-                            &search.response_kind,
-                            CooperativeSearchResponseKind::Setup(_)
-                                | CooperativeSearchResponseKind::PcTiling { .. }
-                                | CooperativeSearchResponseKind::ScenarioTiling { .. }
-                        ) {
-                            let response = response_from_search(search.response_kind, result);
-                            let response = if search.validation_report.is_empty() {
-                                response
+                        Ok(CooperativeBackendAdvance::Cancelled)
+                        | Err(WasmCpuSearchError::Cancelled) => {
+                            if self.finite_caller_generation.is_some() {
+                                self.state = CooperativeExecutionState::Search(search);
+                            }
+                            CooperativeAppAdvance::Cancelled
+                        }
+                        Ok(CooperativeBackendAdvance::CompletedCore(result)) => {
+                            if matches!(
+                                &search.response_kind,
+                                CooperativeSearchResponseKind::Setup(_)
+                                    | CooperativeSearchResponseKind::PcTiling { .. }
+                                    | CooperativeSearchResponseKind::ScenarioTiling { .. }
+                            ) {
+                                let response = response_from_search(search.response_kind, result);
+                                let response = if search.validation_report.is_empty() {
+                                    response
+                                } else {
+                                    response.with_validation_diagnostics(search.validation_report)
+                                };
+                                CooperativeAppAdvance::Completed(
+                                    self.context().finalize_response_with_product_capability(
+                                        response,
+                                        search.command_kind,
+                                        &search.output_policy,
+                                        search.product_capability_contract,
+                                    ),
+                                )
                             } else {
-                                response.with_validation_diagnostics(search.validation_report)
+                                control.report_progress("postprocess", 0, Some(1));
+                                let retain_pc_score_session = matches!(
+                                    &search.response_kind,
+                                    CooperativeSearchResponseKind::PcScore { .. }
+                                        | CooperativeSearchResponseKind::ScenarioScore { .. }
+                                );
+                                let retain_build_probability_session = matches!(
+                                    &search.response_kind,
+                                    CooperativeSearchResponseKind::BuildProbability { .. }
+                                );
+                                let (pc_score_session, build_probability_session) =
+                                    match search.session {
+                                        CooperativeSearchSession::Pc(session)
+                                            if retain_pc_score_session =>
+                                        {
+                                            (Some(session), None)
+                                        }
+                                        CooperativeSearchSession::BuildProbability(session)
+                                            if retain_build_probability_session =>
+                                        {
+                                            (None, Some(session))
+                                        }
+                                        _ => (None, None),
+                                    };
+                                self.state = CooperativeExecutionState::Postprocess(
+                                    CooperativePostprocessExecution {
+                                        result: Some(result),
+                                        pc_score_session,
+                                        build_probability_session,
+                                        response_kind: search.response_kind,
+                                        command_kind: search.command_kind,
+                                        output_policy: search.output_policy,
+                                        validation_report: search.validation_report,
+                                        resource_budget: search.resource_budget,
+                                        product_capability_contract: search
+                                            .product_capability_contract,
+                                    },
+                                );
+                                CooperativeAppAdvance::Progress
+                            }
+                        }
+                        Ok(CooperativeBackendAdvance::CompletedForward(report)) => {
+                            let response = match search.response_kind {
+                                CooperativeSearchResponseKind::Damage => {
+                                    AppResponse::success(AppRenderModel::Damage(report))
+                                }
+                                CooperativeSearchResponseKind::SpinFinder => {
+                                    AppResponse::success(AppRenderModel::SpinFinder(report))
+                                }
+                                CooperativeSearchResponseKind::Ren => {
+                                    AppResponse::success(AppRenderModel::Ren(report))
+                                }
+                                _ => AppResponse::failed(
+                                    AppStatus::ExecutionFailed,
+                                    AppError::new(
+                                        AppErrorCode::ExecutionFailed,
+                                        "forward search response kind mismatch",
+                                    ),
+                                ),
                             };
                             CooperativeAppAdvance::Completed(
                                 self.context().finalize_response_with_product_capability(
@@ -2198,270 +2613,356 @@ impl CooperativeAppExecution {
                                     search.product_capability_contract,
                                 ),
                             )
-                        } else {
-                            control.report_progress("postprocess", 0, Some(1));
-                            let retain_pc_score_session = matches!(
-                                &search.response_kind,
-                                CooperativeSearchResponseKind::PcScore { .. }
-                                    | CooperativeSearchResponseKind::ScenarioScore { .. }
-                            );
-                            let retain_build_probability_session = matches!(
-                                &search.response_kind,
-                                CooperativeSearchResponseKind::BuildProbability { .. }
-                            );
-                            let (pc_score_session, build_probability_session) = match search.session
-                            {
-                                CooperativeSearchSession::Pc(session)
-                                    if retain_pc_score_session =>
-                                {
-                                    (Some(session), None)
-                                }
-                                CooperativeSearchSession::BuildProbability(session)
-                                    if retain_build_probability_session =>
-                                {
-                                    (None, Some(session))
-                                }
-                                _ => (None, None),
-                            };
-                            self.state = CooperativeExecutionState::Postprocess(
-                                CooperativePostprocessExecution {
-                                    result: Some(result),
-                                    pc_score_session,
-                                    build_probability_session,
-                                    response_kind: search.response_kind,
-                                    command_kind: search.command_kind,
-                                    output_policy: search.output_policy,
-                                    validation_report: search.validation_report,
-                                    resource_budget: search.resource_budget,
-                                    product_capability_contract: search.product_capability_contract,
-                                },
-                            );
-                            CooperativeAppAdvance::Progress
                         }
-                    }
-                    Ok(CooperativeBackendAdvance::CompletedForward(report)) => {
-                        let response = match search.response_kind {
-                            CooperativeSearchResponseKind::Damage => {
-                                AppResponse::success(AppRenderModel::Damage(report))
+                        Err(error) => {
+                            if self.finite_caller_generation.is_some() {
+                                let error = error.into_core_execution_error();
+                                self.state = CooperativeExecutionState::Search(search);
+                                return CooperativeAppAdvance::FailedFinite(error);
                             }
-                            CooperativeSearchResponseKind::SpinFinder => {
-                                AppResponse::success(AppRenderModel::SpinFinder(report))
-                            }
-                            CooperativeSearchResponseKind::Ren => {
-                                AppResponse::success(AppRenderModel::Ren(report))
-                            }
-                            _ => AppResponse::failed(
-                                AppStatus::ExecutionFailed,
-                                AppError::new(
-                                    AppErrorCode::ExecutionFailed,
-                                    "forward search response kind mismatch",
+                            let CooperativeSearchExecution {
+                                session,
+                                response_kind,
+                                command_kind,
+                                output_policy,
+                                validation_report: _,
+                                backend_requested,
+                                gpu_device_requested,
+                                resource_budget: _,
+                                product_capability_contract,
+                            } = search;
+                            drop(session);
+                            drop(response_kind);
+                            let response = wasm_search_error_response(
+                                error,
+                                &backend_requested,
+                                gpu_device_requested,
+                            );
+                            CooperativeAppAdvance::Completed(
+                                self.context().finalize_response_with_product_capability(
+                                    response,
+                                    command_kind,
+                                    &output_policy,
+                                    product_capability_contract,
                                 ),
-                            ),
-                        };
-                        CooperativeAppAdvance::Completed(
-                            self.context().finalize_response_with_product_capability(
-                                response,
-                                search.command_kind,
-                                &search.output_policy,
-                                search.product_capability_contract,
-                            ),
-                        )
-                    }
-                    Err(error) => {
-                        if self.finite_caller_generation.is_some() {
-                            let error = error.into_core_execution_error();
-                            self.state = CooperativeExecutionState::Search(search);
-                            return CooperativeAppAdvance::FailedFinite(error);
+                            )
                         }
-                        let CooperativeSearchExecution {
-                            session,
+                    }
+                })
+            }
+            CooperativeExecutionState::Postprocess(mut postprocess) => {
+                advance_postprocess_in_isolated_frame(move || {
+                    if postprocess
+                        .product_capability_contract
+                        .as_ref()
+                        .is_some_and(|contract| {
+                            contract.contract() == ProductCapabilityContract::PcPath
+                        })
+                    {
+                        if control.is_cancelled() {
+                            return CooperativeAppAdvance::Cancelled;
+                        }
+                        let contract = postprocess
+                            .product_capability_contract
+                            .take()
+                            .expect("typed pc.path contract was checked");
+                        let result = postprocess
+                            .result
+                            .take()
+                            .expect("postprocess result exists");
+                        let preparation = contract
+                            .pc_path_binding()
+                            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                                component: "complete_replay_query_binding_missing",
+                            })
+                            .and_then(|(query, _)| {
+                                query.compile_expected().map_err(|component| {
+                                    CoreExecutionError::RuntimeUnavailable { component }
+                                })
+                            })
+                            .and_then(|problem| {
+                                self.context()
+                                    .services()
+                                    .core_executor()
+                                    .prepare_pc_replay_page_source(&problem, &result)
+                            });
+                        let preparation = match preparation {
+                            Ok(preparation) => preparation,
+                            Err(error) => {
+                                return CooperativeAppAdvance::Completed(
+                                    self.context().finalize_response_with_product_capability(
+                                        core_execution_error_response(error),
+                                        postprocess.command_kind,
+                                        &postprocess.output_policy,
+                                        None,
+                                    ),
+                                )
+                            }
+                        };
+                        // The typed complete-path command has no score or
+                        // constraint reducer. Its exact graph is the replay
+                        // authority; do not run the eager family materializer.
+                        let mut response = response_from_search(postprocess.response_kind, result)
+                            .with_contract_context(postprocess.command_kind);
+                        if !postprocess.validation_report.is_empty() {
+                            response =
+                                response.with_validation_diagnostics(postprocess.validation_report);
+                        }
+                        control.report_progress("postprocess", 0, None);
+                        self.state = CooperativeExecutionState::PcReplayFinalize(Box::new(
+                            CooperativePcReplayFinalizeExecution {
+                                response,
+                                command_kind: postprocess.command_kind,
+                                output_policy: postprocess.output_policy,
+                                contract,
+                                preparation,
+                                manifest_work_units: 0,
+                            },
+                        ));
+                        return CooperativeAppAdvance::Progress;
+                    }
+                    if matches!(
+                        &postprocess.response_kind,
+                        CooperativeSearchResponseKind::BuildProbability { .. }
+                    ) {
+                        let request_memory_limit_bytes =
+                            match checked_cooperative_request_memory_limit_bytes(
+                                postprocess.resource_budget,
+                            ) {
+                                Ok(limit) => limit,
+                                Err(error) => {
+                                    self.state =
+                                        CooperativeExecutionState::Postprocess(postprocess);
+                                    return CooperativeAppAdvance::FailedFinite(error);
+                                }
+                            };
+                        if let Some(request_memory_limit_bytes) = request_memory_limit_bytes {
+                            if control.is_cancelled() {
+                                self.state = CooperativeExecutionState::Postprocess(postprocess);
+                                return CooperativeAppAdvance::Cancelled;
+                            }
+                            let result = postprocess
+                                .result
+                                .take()
+                                .expect("postprocess result exists");
+                            // Once public-result materialization starts it may
+                            // consume `result`; a failure from that producer is an
+                            // explicit terminal finite failure. All predictable
+                            // owner, shape, projection, and carrier rejection was
+                            // completed before this state was moved.
+                            return self.advance_finite_build_postprocess(
+                                postprocess,
+                                result,
+                                control,
+                                request_memory_limit_bytes,
+                            );
+                        }
+                    }
+                    let result = postprocess
+                        .result
+                        .take()
+                        .expect("postprocess result exists");
+                    if control.is_cancelled() {
+                        return CooperativeAppAdvance::Cancelled;
+                    }
+                    let core_executor = self.context().services().core_executor();
+                    let mut score_evidence = None;
+                    let mut score_portfolio_evidence = None;
+                    let mut build_score_derivation = None;
+                    let result = match &postprocess.response_kind {
+                        CooperativeSearchResponseKind::PcChance { .. }
+                        | CooperativeSearchResponseKind::ScenarioChance { .. } => core_executor
+                            .postprocess_pc_chance_result_before_public_surface(result, control),
+                        CooperativeSearchResponseKind::PcScore {
+                            authority,
+                            expected_problem,
+                            product,
+                        }
+                        | CooperativeSearchResponseKind::ScenarioScore {
+                            authority,
+                            expected_problem,
+                            product,
+                        } => match postprocess.pc_score_session.as_ref() {
+                            Some(session) => match product {
+                                CooperativePcScoreProduct::Summary
+                                | CooperativePcScoreProduct::ScoreFinder => {
+                                    core_executor
+                                        .postprocess_pc_score_wasm_result_with_memory_guard(
+                                            authority,
+                                            expected_problem,
+                                            result,
+                                            control,
+                                            |stage_result, checked_future_bytes| {
+                                                session
+                                            .validate_public_result_memory_with_future(
+                                                stage_result,
+                                                checked_future_bytes,
+                                            )
+                                            .map_err(WasmCpuSearchError::into_core_execution_error)
+                                            },
+                                        )
+                                        .map(|(result, evidence)| {
+                                            score_evidence = Some(evidence);
+                                            result
+                                        })
+                                }
+                                CooperativePcScoreProduct::Portfolio => core_executor
+                                    .postprocess_pc_score_minimals_wasm_result_with_memory_guard(
+                                        authority,
+                                        expected_problem,
+                                        result,
+                                        control,
+                                        |stage_result, checked_future_bytes| {
+                                            session
+                                                .validate_public_result_memory_with_future(
+                                                    stage_result,
+                                                    checked_future_bytes,
+                                                )
+                                                .map_err(
+                                                    WasmCpuSearchError::into_core_execution_error,
+                                                )
+                                        },
+                                    )
+                                    .map(|(result, evidence)| {
+                                        score_portfolio_evidence = Some(evidence);
+                                        result
+                                    }),
+                            },
+                            None => Err(CoreExecutionError::RuntimeUnavailable {
+                                component: "pc_score_cooperative_session_authority_missing",
+                            }),
+                        },
+                        CooperativeSearchResponseKind::BuildProbability {
+                            solution_probability_policy,
+                            result_command,
+                            ..
+                        } => match postprocess.build_probability_session.as_ref() {
+                            Some(session)
+                                if result_command
+                                    .as_deref()
+                                    .is_some_and(BuildProbabilityAppCommand::requires_score_derivation) =>
+                            {
+                                core_executor
+                                    .materialize_build_probability_public_result_with_score_derivation_and_memory_guard(
+                                        result,
+                                        *solution_probability_policy,
+                                        control,
+                                        |stage_result, checked_future_bytes| {
+                                            session
+                                                .validate_public_result_memory_with_future(
+                                                    stage_result,
+                                                    checked_future_bytes,
+                                                )
+                                                .map_err(
+                                                    WasmCpuSearchError::into_core_execution_error,
+                                                )
+                                        },
+                                    )
+                                    .map(|(result, derivation)| {
+                                        build_score_derivation = Some(derivation);
+                                        result
+                                    })
+                            }
+                            Some(session) => core_executor
+                                .materialize_build_probability_public_result_with_memory_guard(
+                                    result,
+                                    *solution_probability_policy,
+                                    control,
+                                    |stage_result, checked_future_bytes| {
+                                        session
+                                            .validate_public_result_memory_with_future(
+                                                stage_result,
+                                                checked_future_bytes,
+                                            )
+                                            .map_err(WasmCpuSearchError::into_core_execution_error)
+                                    },
+                                ),
+                            None => Err(CoreExecutionError::RuntimeUnavailable {
+                                component:
+                                    "build_probability_cooperative_session_authority_missing",
+                            }),
+                        },
+                        _ => core_executor.postprocess_search_result(result, control),
+                    };
+                    let result = result.and_then(|result| {
+                        postprocess
+                            .response_kind
+                            .materialize_build_probability_result_mode_evidence(
+                                core_executor,
+                                control,
+                                result,
+                            )
+                    });
+                    control.report_progress("postprocess", 1, Some(1));
+                    let pc_score_response_is_scenario = matches!(
+                        &postprocess.response_kind,
+                        CooperativeSearchResponseKind::ScenarioScore { .. }
+                    );
+                    let pc_score_response = matches!(
+                        &postprocess.response_kind,
+                        CooperativeSearchResponseKind::PcScore { .. }
+                            | CooperativeSearchResponseKind::ScenarioScore { .. }
+                    );
+                    if pc_score_response {
+                        let CooperativePostprocessExecution {
+                            result: _,
+                            pc_score_session,
+                            build_probability_session,
                             response_kind,
                             command_kind,
                             output_policy,
-                            validation_report: _,
-                            backend_requested,
-                            gpu_device_requested,
+                            validation_report,
                             resource_budget: _,
                             product_capability_contract,
-                        } = search;
-                        drop(session);
+                        } = postprocess;
+                        drop(pc_score_session);
+                        drop(build_probability_session);
                         drop(response_kind);
-                        let response = wasm_search_error_response(
-                            error,
-                            &backend_requested,
-                            gpu_device_requested,
-                        );
-                        CooperativeAppAdvance::Completed(
+                        let mut response = match result {
+                            Ok(result) if pc_score_response_is_scenario => {
+                                AppResponse::success(AppRenderModel::Scenario(result))
+                            }
+                            Ok(result) => AppResponse::success(AppRenderModel::Pc(result)),
+                            Err(CoreExecutionError::Cancelled) => {
+                                return CooperativeAppAdvance::Cancelled
+                            }
+                            Err(error) => core_execution_error_response(error),
+                        };
+                        if let Some(evidence) = score_evidence {
+                            response = response.with_pc_score_execution_evidence(evidence);
+                        }
+                        if let Some(evidence) = score_portfolio_evidence {
+                            response =
+                                response.with_pc_score_portfolio_execution_evidence(evidence);
+                        }
+                        let response = if validation_report.is_empty() {
+                            response
+                        } else {
+                            response.with_validation_diagnostics(validation_report)
+                        };
+                        return CooperativeAppAdvance::Completed(
                             self.context().finalize_response_with_product_capability(
                                 response,
                                 command_kind,
                                 &output_policy,
                                 product_capability_contract,
                             ),
-                        )
-                    }
-                }
-            }
-            CooperativeExecutionState::Postprocess(mut postprocess) => {
-                if matches!(
-                    &postprocess.response_kind,
-                    CooperativeSearchResponseKind::BuildProbability { .. }
-                ) {
-                    let request_memory_limit_bytes =
-                        match checked_cooperative_request_memory_limit_bytes(
-                            postprocess.resource_budget,
-                        ) {
-                            Ok(limit) => limit,
-                            Err(error) => {
-                                self.state = CooperativeExecutionState::Postprocess(postprocess);
-                                return CooperativeAppAdvance::FailedFinite(error);
-                            }
-                        };
-                    if let Some(request_memory_limit_bytes) = request_memory_limit_bytes {
-                        if control.is_cancelled() {
-                            self.state = CooperativeExecutionState::Postprocess(postprocess);
-                            return CooperativeAppAdvance::Cancelled;
-                        }
-                        let result = postprocess
-                            .result
-                            .take()
-                            .expect("postprocess result exists");
-                        // Once public-result materialization starts it may
-                        // consume `result`; a failure from that producer is an
-                        // explicit terminal finite failure. All predictable
-                        // owner, shape, projection, and carrier rejection was
-                        // completed before this state was moved.
-                        return self.advance_finite_build_postprocess(
-                            postprocess,
-                            result,
-                            control,
-                            request_memory_limit_bytes,
                         );
                     }
-                }
-                let result = postprocess
-                    .result
-                    .take()
-                    .expect("postprocess result exists");
-                if control.is_cancelled() {
-                    return CooperativeAppAdvance::Cancelled;
-                }
-                let core_executor = self.context().services().core_executor();
-                let mut score_evidence = None;
-                let mut score_portfolio_evidence = None;
-                let result = match &postprocess.response_kind {
-                    CooperativeSearchResponseKind::PcChance { .. }
-                    | CooperativeSearchResponseKind::ScenarioChance { .. } => core_executor
-                        .postprocess_pc_chance_result_before_public_surface(result, control),
-                    CooperativeSearchResponseKind::PcScore {
-                        authority,
-                        expected_problem,
-                        product,
+                    if matches!(
+                        &postprocess.response_kind,
+                        CooperativeSearchResponseKind::BuildProbability { .. }
+                    ) {
+                        // Product projection allocates only after the producer
+                        // session and its terminal lease have been released.
+                        drop(postprocess.build_probability_session.take());
                     }
-                    | CooperativeSearchResponseKind::ScenarioScore {
-                        authority,
-                        expected_problem,
-                        product,
-                    } => match postprocess.pc_score_session.as_ref() {
-                        Some(session) => match product {
-                            CooperativePcScoreProduct::Summary
-                            | CooperativePcScoreProduct::ScoreFinder => core_executor
-                                .postprocess_pc_score_wasm_result_with_memory_guard(
-                                    authority,
-                                    expected_problem,
-                                    result,
-                                    control,
-                                    |stage_result, checked_future_bytes| {
-                                        session
-                                            .validate_public_result_memory_with_future(
-                                                stage_result,
-                                                checked_future_bytes,
-                                            )
-                                            .map_err(WasmCpuSearchError::into_core_execution_error)
-                                    },
-                                )
-                                .map(|(result, evidence)| {
-                                    score_evidence = Some(evidence);
-                                    result
-                                }),
-                            CooperativePcScoreProduct::Portfolio => core_executor
-                                .postprocess_pc_score_minimals_wasm_result_with_memory_guard(
-                                    authority,
-                                    expected_problem,
-                                    result,
-                                    control,
-                                    |stage_result, checked_future_bytes| {
-                                        session
-                                            .validate_public_result_memory_with_future(
-                                                stage_result,
-                                                checked_future_bytes,
-                                            )
-                                            .map_err(WasmCpuSearchError::into_core_execution_error)
-                                    },
-                                )
-                                .map(|(result, evidence)| {
-                                    score_portfolio_evidence = Some(evidence);
-                                    result
-                                }),
-                        },
-                        None => Err(CoreExecutionError::RuntimeUnavailable {
-                            component: "pc_score_cooperative_session_authority_missing",
-                        }),
-                    },
-                    CooperativeSearchResponseKind::BuildProbability {
-                        solution_probability_policy,
-                        ..
-                    } => match postprocess.build_probability_session.as_ref() {
-                        Some(session) => core_executor
-                            .materialize_build_probability_public_result_with_memory_guard(
-                                result,
-                                *solution_probability_policy,
-                                control,
-                                |stage_result, checked_future_bytes| {
-                                    session
-                                        .validate_public_result_memory_with_future(
-                                            stage_result,
-                                            checked_future_bytes,
-                                        )
-                                        .map_err(WasmCpuSearchError::into_core_execution_error)
-                                },
-                            ),
-                        None => Err(CoreExecutionError::RuntimeUnavailable {
-                            component: "build_probability_cooperative_session_authority_missing",
-                        }),
-                    },
-                    _ => core_executor.postprocess_search_result(result, control),
-                };
-                control.report_progress("postprocess", 1, Some(1));
-                let pc_score_response_is_scenario = matches!(
-                    &postprocess.response_kind,
-                    CooperativeSearchResponseKind::ScenarioScore { .. }
-                );
-                let pc_score_response = matches!(
-                    &postprocess.response_kind,
-                    CooperativeSearchResponseKind::PcScore { .. }
-                        | CooperativeSearchResponseKind::ScenarioScore { .. }
-                );
-                if pc_score_response {
-                    let CooperativePostprocessExecution {
-                        result: _,
-                        pc_score_session,
-                        build_probability_session,
-                        response_kind,
-                        command_kind,
-                        output_policy,
-                        validation_report,
-                        resource_budget: _,
-                        product_capability_contract,
-                    } = postprocess;
-                    drop(pc_score_session);
-                    drop(build_probability_session);
-                    drop(response_kind);
                     let mut response = match result {
-                        Ok(result) if pc_score_response_is_scenario => {
-                            AppResponse::success(AppRenderModel::Scenario(result))
-                        }
-                        Ok(result) => AppResponse::success(AppRenderModel::Pc(result)),
+                        Ok(result) => response_from_search_with_build_score_derivation(
+                            postprocess.response_kind,
+                            result,
+                            build_score_derivation,
+                        ),
                         Err(CoreExecutionError::Cancelled) => {
                             return CooperativeAppAdvance::Cancelled
                         }
@@ -2473,44 +2974,258 @@ impl CooperativeAppExecution {
                     if let Some(evidence) = score_portfolio_evidence {
                         response = response.with_pc_score_portfolio_execution_evidence(evidence);
                     }
-                    let response = if validation_report.is_empty() {
+                    let response = if postprocess.validation_report.is_empty() {
                         response
                     } else {
-                        response.with_validation_diagnostics(validation_report)
+                        response.with_validation_diagnostics(postprocess.validation_report)
                     };
-                    return CooperativeAppAdvance::Completed(
+                    if response.status() == AppStatus::Success
+                        && postprocess
+                            .product_capability_contract
+                            .as_ref()
+                            .is_some_and(|contract| {
+                                contract.contract() == ProductCapabilityContract::PcMinimals
+                            })
+                    {
+                        let command_kind = postprocess.command_kind;
+                        let output_policy = postprocess.output_policy;
+                        let contract = postprocess
+                            .product_capability_contract
+                            .expect("pc.minimals capability contract was checked");
+                        let response = response.with_contract_context(command_kind);
+                        let preparation = match ProductCapabilityResult::prepare_pc_minimum_cover(
+                            contract, &response,
+                        ) {
+                            Ok(preparation) => preparation,
+                            Err(error) => {
+                                let failed = AppResponse::failed(
+                                    AppStatus::ExecutionFailed,
+                                    AppError::new(
+                                        AppErrorCode::ExecutionFailed,
+                                        format!("product capability result rejected: {error}"),
+                                    ),
+                                );
+                                return CooperativeAppAdvance::Completed(
+                                    self.context().finalize_response_with_product_capability(
+                                        failed,
+                                        command_kind,
+                                        &output_policy,
+                                        None,
+                                    ),
+                                );
+                            }
+                        };
+                        control.report_progress("pc-minimals-finalize", 0, None);
+                        self.state = CooperativeExecutionState::PcMinimalsFinalize(Box::new(
+                            CooperativePcMinimalsFinalizeExecution {
+                                response,
+                                command_kind,
+                                output_policy,
+                                resource_budget: postprocess.resource_budget,
+                                preparation,
+                                completed_work_steps: 0,
+                            },
+                        ));
+                        return CooperativeAppAdvance::Progress;
+                    }
+                    CooperativeAppAdvance::Completed(
                         self.context().finalize_response_with_product_capability(
                             response,
-                            command_kind,
-                            &output_policy,
-                            product_capability_contract,
+                            postprocess.command_kind,
+                            &postprocess.output_policy,
+                            postprocess.product_capability_contract,
                         ),
-                    );
-                }
-                let mut response = match result {
-                    Ok(result) => response_from_search(postprocess.response_kind, result),
-                    Err(CoreExecutionError::Cancelled) => return CooperativeAppAdvance::Cancelled,
-                    Err(error) => core_execution_error_response(error),
-                };
-                if let Some(evidence) = score_evidence {
-                    response = response.with_pc_score_execution_evidence(evidence);
-                }
-                if let Some(evidence) = score_portfolio_evidence {
-                    response = response.with_pc_score_portfolio_execution_evidence(evidence);
-                }
-                let response = if postprocess.validation_report.is_empty() {
-                    response
-                } else {
-                    response.with_validation_diagnostics(postprocess.validation_report)
-                };
-                CooperativeAppAdvance::Completed(
-                    self.context().finalize_response_with_product_capability(
-                        response,
-                        postprocess.command_kind,
-                        &postprocess.output_policy,
-                        postprocess.product_capability_contract,
-                    ),
-                )
+                    )
+                })
+            }
+            CooperativeExecutionState::PcReplayFinalize(finalize) => {
+                advance_postprocess_in_isolated_frame(move || {
+                    if control.is_cancelled() {
+                        return CooperativeAppAdvance::Cancelled;
+                    }
+                    let mut finalize = *finalize;
+                    // One bounded manifest work unit per host advance. The
+                    // source owns exact geometry-by-pattern progress counts.
+                    let advance = finalize.preparation.advance(1, control);
+                    if control.is_cancelled() {
+                        return CooperativeAppAdvance::Cancelled;
+                    }
+                    match advance {
+                        Ok(false) => {
+                            finalize.manifest_work_units =
+                                finalize.manifest_work_units.saturating_add(1);
+                            // Preserve the source's exact geometry-pattern
+                            // progress event; this counter only owns host work.
+                            self.state =
+                                CooperativeExecutionState::PcReplayFinalize(Box::new(finalize));
+                            CooperativeAppAdvance::Progress
+                        }
+                        Ok(true) => {
+                            let completed = finalize.manifest_work_units.saturating_add(1);
+                            control.report_progress("postprocess", completed, Some(completed));
+                            let product = finalize
+                                .preparation
+                                .complete()
+                                .map_err(str::to_owned)
+                                .and_then(|source| {
+                                    ProductCapabilityResult::validate_with_pc_replay_source(
+                                        finalize.contract,
+                                        &finalize.response,
+                                        source,
+                                    )
+                                    .map_err(|error| format!("{error}"))
+                                });
+                            match product {
+                                Ok(product) => CooperativeAppAdvance::Completed(
+                                    self.context()
+                                        .finalize_response_with_prevalidated_product_capability(
+                                            finalize.response,
+                                            finalize.command_kind,
+                                            &finalize.output_policy,
+                                            product,
+                                        ),
+                                ),
+                                Err(error) => CooperativeAppAdvance::Completed(
+                                    self.context().finalize_response_with_product_capability(
+                                        AppResponse::failed(
+                                            AppStatus::ExecutionFailed,
+                                            AppError::new(
+                                                AppErrorCode::ExecutionFailed,
+                                                format!("pc replay source rejected: {error}"),
+                                            ),
+                                        ),
+                                        finalize.command_kind,
+                                        &finalize.output_policy,
+                                        None,
+                                    ),
+                                ),
+                            }
+                        }
+                        Err(component) => CooperativeAppAdvance::Completed(
+                            self.context().finalize_response_with_product_capability(
+                                core_execution_error_response(
+                                    CoreExecutionError::RuntimeUnavailable { component },
+                                ),
+                                finalize.command_kind,
+                                &finalize.output_policy,
+                                None,
+                            ),
+                        ),
+                    }
+                })
+            }
+            CooperativeExecutionState::PcMinimalsFinalize(finalize) => {
+                advance_pc_minimals_finalize_in_isolated_frame(move || {
+                    if control.is_cancelled() {
+                        return CooperativeAppAdvance::Cancelled;
+                    }
+                    let mut finalize = *finalize;
+                    let work_budget = u64::try_from(work_budget).unwrap_or(u64::MAX);
+                    let advance = if let Some(memory_guard) = minimum_memory_guard {
+                        // Count the unchanged response/context only once per
+                        // host advance, not at every solver allocation. The
+                        // preparation callback already includes its inline
+                        // owner, which is embedded in the finalizer.
+                        let external_live = self
+                            .context()
+                            .checked_retained_capacity_bytes()
+                            .and_then(|bytes| {
+                                bytes.checked_add(core::mem::size_of::<Self>() as u128)
+                            })
+                            .and_then(|bytes| {
+                                bytes.checked_add(core::mem::size_of::<
+                                    CooperativePcMinimalsFinalizeExecution,
+                                >() as u128)
+                            })
+                            .and_then(|bytes| {
+                                bytes.checked_sub(
+                                    core::mem::size_of_val(&finalize.preparation) as u128
+                                )
+                            })
+                            .and_then(|bytes| {
+                                bytes.checked_add(
+                                    finalize
+                                        .response
+                                        .checked_pc_minimals_retained_capacity_bytes()?,
+                                )
+                            })
+                            .and_then(|bytes| {
+                                bytes.checked_add(
+                                    finalize.output_policy.checked_retained_capacity_bytes()?,
+                                )
+                            });
+                        finalize.preparation.advance_with_memory_guard(
+                            work_budget,
+                            &mut |preparation_peak| {
+                                let whole_app_peak = external_live
+                                    .and_then(|bytes| bytes.checked_add(preparation_peak))
+                                    .ok_or(clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow)?;
+                                memory_guard(whole_app_peak)
+                            },
+                            &mut || control.is_cancelled(),
+                        )
+                    } else {
+                        finalize
+                            .preparation
+                            .advance(work_budget, &mut || control.is_cancelled())
+                    };
+                    match advance {
+                        Ok(PcMinimumCoverProductPreparationAdvance::Pending { work_steps }) => {
+                            finalize.completed_work_steps =
+                                finalize.completed_work_steps.saturating_add(work_steps);
+                            control.report_progress(
+                                "pc-minimals-finalize",
+                                finalize.completed_work_steps,
+                                None,
+                            );
+                            self.state =
+                                CooperativeExecutionState::PcMinimalsFinalize(Box::new(finalize));
+                            CooperativeAppAdvance::Progress
+                        }
+                        Ok(PcMinimumCoverProductPreparationAdvance::Completed(result)) => {
+                            let completed = finalize.completed_work_steps.max(1);
+                            control.report_progress(
+                                "pc-minimals-finalize",
+                                completed,
+                                Some(completed),
+                            );
+                            CooperativeAppAdvance::Completed(
+                                self.context()
+                                    .finalize_response_with_prevalidated_product_capability(
+                                        finalize.response,
+                                        finalize.command_kind,
+                                        &finalize.output_policy,
+                                        result,
+                                    ),
+                            )
+                        }
+                        Ok(PcMinimumCoverProductPreparationAdvance::Cancelled { work_steps }) => {
+                            control.report_progress(
+                                "pc-minimals-finalize",
+                                finalize.completed_work_steps.saturating_add(work_steps),
+                                None,
+                            );
+                            CooperativeAppAdvance::Cancelled
+                        }
+                        Err(error) => {
+                            let failed = AppResponse::failed(
+                                AppStatus::ExecutionFailed,
+                                AppError::new(
+                                    AppErrorCode::ExecutionFailed,
+                                    format!("product capability result rejected: {error}"),
+                                ),
+                            );
+                            CooperativeAppAdvance::Completed(
+                                self.context().finalize_response_with_product_capability(
+                                    failed,
+                                    finalize.command_kind,
+                                    &finalize.output_policy,
+                                    None,
+                                ),
+                            )
+                        }
+                    }
+                })
             }
             CooperativeExecutionState::FiniteRequiresCallerMemory => {
                 CooperativeAppAdvance::FailedFinite(CoreExecutionError::RuntimeUnavailable {
@@ -2537,6 +3252,9 @@ impl CooperativeAppExecution {
     }
 }
 
+// This internal compiler returns the existing typed AppResponse on rejection;
+// boxing it would add indirection and churn every distributed caller contract.
+#[allow(clippy::result_large_err)]
 pub(crate) fn compile_search_command(
     command: AppCommand,
 ) -> Result<
@@ -2772,11 +3490,7 @@ pub(crate) fn compile_search_command(
             })
         }
         AppCommand::BuildProbability(command) => {
-            if let Some(reason) =
-                crate::commands::build_probability_app_command::invalid_query_reason(
-                    command.query(),
-                )
-            {
+            if let Some(reason) = command.invalid_reason() {
                 return Err(AppResponse::failed(
                     AppStatus::ValidationFailed,
                     AppError::new(AppErrorCode::InvalidInput, reason),
@@ -2786,7 +3500,11 @@ pub(crate) fn compile_search_command(
             let aggregation = command.query().aggregation();
             let finesse = command.query().finesse_request().clone();
             let solution_probability_policy = command.query().solution_probability_policy();
-            ProblemCompiler::compile_scenario_pc(command.query().core_query()).map(|problem| {
+            let compiled = ProblemCompiler::compile_scenario_pc(command.query().core_query());
+            let result_command = (command.result_mode()
+                != BuildProbabilityResultMode::AllSolutions)
+                .then(|| Box::new(command));
+            compiled.map(|problem| {
                 (
                     Arc::new(problem),
                     CooperativeSearchResponseKind::BuildProbability {
@@ -2794,6 +3512,7 @@ pub(crate) fn compile_search_command(
                         aggregation,
                         finesse,
                         solution_probability_policy,
+                        result_command,
                     },
                 )
             })
@@ -2848,7 +3567,7 @@ fn score_authority_failed_response(error: PcScoreCompiledAuthorityError) -> AppR
             core_execution_error_response(CoreExecutionError::resource_incomplete(
                 "execution-admission",
                 0,
-                resource_report,
+                *resource_report,
             ))
         }
         PcScoreCompiledAuthorityError::ProblemCompile(error) => {
@@ -2870,7 +3589,7 @@ fn tiling_authority_failed_response(error: PcTilingCompiledAuthorityError) -> Ap
             core_execution_error_response(CoreExecutionError::resource_incomplete(
                 "execution-admission",
                 0,
-                resource_report,
+                *resource_report,
             ))
         }
         PcTilingCompiledAuthorityError::ProblemCompile(error) => {
@@ -2901,6 +3620,14 @@ fn save_authority_failed_response(error: PcSaveCompiledAuthorityError) -> AppRes
 pub(crate) fn response_from_search(
     response_kind: CooperativeSearchResponseKind,
     result: clearra_core_executor::CoreExecutionResult,
+) -> AppResponse {
+    response_from_search_with_build_score_derivation(response_kind, result, None)
+}
+
+pub(crate) fn response_from_search_with_build_score_derivation(
+    response_kind: CooperativeSearchResponseKind,
+    result: clearra_core_executor::CoreExecutionResult,
+    build_score_derivation: Option<PcScoreDerivation>,
 ) -> AppResponse {
     match response_kind {
         CooperativeSearchResponseKind::Pc(result_projection) => AppResponse::success(
@@ -2953,13 +3680,34 @@ pub(crate) fn response_from_search(
             aggregation,
             finesse,
             solution_probability_policy,
-        } => crate::build_solution_probability_result::build_probability_response(
-            &finesse,
-            field,
-            aggregation,
-            solution_probability_policy,
-            result,
-        ),
+            result_command,
+        } => match result_command {
+            Some(command)
+                if build_probability_result_command_matches(
+                    &command,
+                    field,
+                    aggregation,
+                    &finesse,
+                    solution_probability_policy,
+                ) =>
+            {
+                command.response_from_materialized_result(result, build_score_derivation)
+            }
+            Some(_) => AppResponse::failed(
+                AppStatus::ExecutionFailed,
+                AppError::new(
+                    AppErrorCode::ExecutionFailed,
+                    "cooperative Build result command authority mismatch",
+                ),
+            ),
+            None => crate::build_solution_probability_result::build_probability_response(
+                &finesse,
+                field,
+                aggregation,
+                solution_probability_policy,
+                result,
+            ),
+        },
         CooperativeSearchResponseKind::Damage
         | CooperativeSearchResponseKind::SpinFinder
         | CooperativeSearchResponseKind::Ren => AppResponse::failed(
@@ -3047,6 +3795,9 @@ fn pc_save_response(
     response.with_pc_save_execution_evidence(evidence)
 }
 
+// The completed report is consumed immediately by the coordinator; boxing it
+// would only move a one-shot value through an additional allocation.
+#[allow(clippy::large_enum_variant)]
 enum CooperativeBackendAdvance {
     Pending,
     CompletedCore(clearra_core_executor::CoreExecutionResult),
@@ -3237,34 +3988,36 @@ mod pc_allspin_projection_tests {
     use clearra_core_executor::CoreExecutionResult;
     use clearra_host_contract::ResourceBudget;
     use clearra_objectives::policy::{
-        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+        objective_policy::ObjectivePolicy,
+        score_objective_policy::{ScoreProfileSelection, SpinProfileSelection},
     };
     use clearra_pc_graph::request::{
-        OpeningPcSearchQuery, PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
-        PieceWindow,
+        OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
+        PcScenarioQuery, PieceWindow,
     };
     use clearra_problem::SearchOutputPolicy;
     use clearra_problem::{
         BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityQuery,
         BuildSolutionProbabilityPolicy, FinesseMetric, FinessePatternKnowledge, FinessePlacement,
-        FinesseScoreRequest,
+        FinesseScoreRequest, ProblemCompiler,
     };
     use clearra_supply::queue::{
         fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression,
     };
 
     use super::{
-        after_dropping_producer_owners, checked_finite_build_request_entry_bytes,
-        compile_search_command, response_from_search,
+        after_dropping_producer_owners, build_probability_result_command_matches,
+        checked_finite_build_request_entry_bytes, compile_search_command, response_from_search,
+        response_from_search_with_build_score_derivation,
         validate_finite_cooperative_memory_requirement, CooperativeAppAdvance,
         CooperativeAppExecution, CooperativeExecutionState, CooperativeSearchResponseKind,
         FiniteCooperativeCallerMemory, FiniteCooperativeCallerMemoryRejection, MIB_BYTES,
     };
     use crate::{
         AppCommand, AppContext, AppCoreExecutorService, AppRenderModel, AppRequest, AppServices,
-        AppStatus, BuildProbabilityAppCommand, DistributedSearchPreparation, PcAppCommand,
-        PcResultProjection, PcTilingIngressOrigin, ScenarioAppCommand, ScenarioAppExpected,
-        ScenarioAppRenderContract,
+        AppStatus, BuildProbabilityAppCommand, BuildProbabilityResultMode,
+        DistributedSearchPreparation, PcAppCommand, PcResultProjection, PcTilingIngressOrigin,
+        ScenarioAppCommand, ScenarioAppExpected, ScenarioAppRenderContract,
     };
 
     fn fixed_queue() -> PcQueueInput {
@@ -3336,7 +4089,12 @@ mod pc_allspin_projection_tests {
             PieceWindow::new(1),
         )
         .with_exact_pieces(Some(1))
-        .with_objective(objective);
+        .with_objective(objective)
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_workers(1)
+                .with_worker_hardware_limit(1),
+        );
         let field = BuildProbabilityField::from_words_preserving_height(
             4,
             [0; 4],
@@ -3390,6 +4148,469 @@ mod pc_allspin_projection_tests {
             .render_model()
             .and_then(AppRenderModel::core_result)
             .expect("core render result")
+    }
+
+    fn complete_cooperative(
+        context: &AppContext,
+        request: AppRequest,
+        control: &ExecutionControl,
+    ) -> crate::AppResponse {
+        let mut execution = context.start_cooperative_execution(request);
+        for _ in 0..512 {
+            match execution.advance(4_096, control) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                CooperativeAppAdvance::Completed(response) => return response,
+                CooperativeAppAdvance::CompletedGoverned(_) => {
+                    panic!("unlimited Build result unexpectedly used the governed response route")
+                }
+                CooperativeAppAdvance::FailedFinite(error) => {
+                    panic!("unlimited Build result failed as finite: {error:?}")
+                }
+                CooperativeAppAdvance::Cancelled => {
+                    panic!("uncancelled Build result was cancelled")
+                }
+            }
+        }
+        panic!("tiny cooperative Build result did not complete within the work bound")
+    }
+
+    fn complete_distributed_build(
+        context: &AppContext,
+        query: BuildProbabilityQuery,
+        result_mode: BuildProbabilityResultMode,
+        failed_pattern_limit: usize,
+    ) -> crate::AppResponse {
+        let command = BuildProbabilityAppCommand::new(query.clone())
+            .with_result_mode(result_mode)
+            .with_failed_pattern_limit(failed_pattern_limit);
+        let DistributedSearchPreparation::Search(prepared) = context
+            .prepare_distributed_search(AppRequest::new(AppCommand::BuildProbability(command)))
+        else {
+            panic!("valid explicit Build product must enter distributed search")
+        };
+        let control = ExecutionControl::default();
+        let result = context
+            .services()
+            .core_executor()
+            .execute_build_probability_with_control(
+                prepared.problem(),
+                query.field(),
+                query.aggregation(),
+                query.finesse_request().clone(),
+                query.solution_probability_policy(),
+                &control,
+            )
+            .expect("tiny distributed Build producer result");
+        prepared.complete(result, &control)
+    }
+
+    #[test]
+    fn cooperative_build_result_mode_preserves_the_exact_command_snapshot() {
+        let command = BuildProbabilityAppCommand::new(one_piece_build_query())
+            .with_result_mode(BuildProbabilityResultMode::FailedQueues)
+            .with_failed_pattern_limit(7);
+        let (_, response_kind) = compile_search_command(AppCommand::BuildProbability(command))
+            .expect("compile explicit Build result command");
+        let CooperativeSearchResponseKind::BuildProbability {
+            field,
+            aggregation,
+            finesse,
+            solution_probability_policy,
+            result_command: Some(command),
+        } = response_kind
+        else {
+            panic!("explicit Build result command must remain in cooperative state")
+        };
+        assert_eq!(
+            command.result_mode(),
+            BuildProbabilityResultMode::FailedQueues
+        );
+        assert_eq!(command.failed_pattern_limit(), 7);
+        assert!(build_probability_result_command_matches(
+            &command,
+            field,
+            aggregation,
+            &finesse,
+            solution_probability_policy,
+        ));
+    }
+
+    #[test]
+    fn cooperative_build_field_average_matches_the_direct_product_payload() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let query = one_piece_build_query()
+            .with_solution_probability_policy(BuildSolutionProbabilityPolicy::Include)
+            .with_score_summary(ScoreProfileSelection::Guideline, 0);
+        let request = AppRequest::new(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(query.clone())
+                .with_result_mode(BuildProbabilityResultMode::FieldAverageScore),
+        ));
+        let direct = context.run(request.clone());
+        let cooperative = complete_cooperative(&context, request, &ExecutionControl::default());
+        assert_eq!(direct.status(), AppStatus::Success, "{direct:#?}");
+        assert_eq!(cooperative.status(), AppStatus::Success, "{cooperative:#?}");
+        assert_eq!(
+            cooperative.public_result_payload(),
+            direct.public_result_payload(),
+            "direct and cooperative Build products must share one command-owned projection"
+        );
+        assert!(matches!(
+            cooperative
+                .public_result_payload()
+                .map(clearra_host_contract::ProductResultPayload::content),
+            Some(clearra_host_contract::ProductResultPayloadContent::PcScoreFieldSummary(_))
+        ));
+
+        let distributed = complete_distributed_build(
+            &context,
+            query,
+            BuildProbabilityResultMode::FieldAverageScore,
+            100,
+        );
+        assert_eq!(distributed.status(), AppStatus::Success, "{distributed:#?}");
+        assert_eq!(
+            distributed.public_result_payload(),
+            direct.public_result_payload(),
+            "distributed completion must use the same command-owned product projection"
+        );
+    }
+
+    #[test]
+    fn cooperative_build_score_products_match_direct_and_distributed_typed_evidence() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        for mode in [
+            BuildProbabilityResultMode::FixedQueueMaximumScore,
+            BuildProbabilityResultMode::HighestScoreMinimumSet,
+        ] {
+            let query =
+                one_piece_build_query().with_score_summary(ScoreProfileSelection::Guideline, 0);
+            let request = AppRequest::new(AppCommand::BuildProbability(
+                BuildProbabilityAppCommand::new(query.clone()).with_result_mode(mode),
+            ));
+            let direct = context.run(request.clone());
+            let cooperative = complete_cooperative(&context, request, &ExecutionControl::default());
+            let distributed = complete_distributed_build(&context, query, mode, 100);
+
+            assert_eq!(direct.status(), AppStatus::Success, "{mode:?}: {direct:#?}");
+            assert_eq!(
+                cooperative.status(),
+                AppStatus::Success,
+                "{mode:?}: {cooperative:#?}"
+            );
+            assert_eq!(
+                distributed.status(),
+                AppStatus::Success,
+                "{mode:?}: {distributed:#?}"
+            );
+            assert_eq!(
+                cooperative.public_result_payload(),
+                direct.public_result_payload()
+            );
+            assert_eq!(
+                distributed.public_result_payload(),
+                direct.public_result_payload()
+            );
+            assert!(direct.public_result_payload().is_some());
+            if mode == BuildProbabilityResultMode::HighestScoreMinimumSet {
+                assert!(direct.public_page_source_owner().is_some());
+                assert!(cooperative.public_page_source_owner().is_some());
+                assert!(distributed.public_page_source_owner().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn cooperative_build_score_product_rejects_missing_typed_derivation() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let query = one_piece_build_query().with_score_summary(ScoreProfileSelection::Guideline, 0);
+        let baseline = context.run(AppRequest::new(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(query.clone()),
+        )));
+        assert_eq!(baseline.status(), AppStatus::Success, "{baseline:#?}");
+        let (_, response_kind) = compile_search_command(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(query)
+                .with_result_mode(BuildProbabilityResultMode::FieldAverageScore),
+        ))
+        .expect("compile missing typed derivation fixture");
+
+        let rejected = response_from_search(response_kind, core_result(&baseline).clone());
+        assert_eq!(rejected.status(), AppStatus::ExecutionFailed);
+        assert!(rejected.public_result_payload().is_none());
+        assert!(rejected
+            .error()
+            .is_some_and(|error| error.message().contains("typed score evidence is missing")));
+    }
+
+    #[test]
+    fn cooperative_complete_replay_preserves_an_exact_empty_terminal_family() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let core = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_objective(ObjectivePolicy::all().with_score_summary());
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("compact one-piece target");
+        let request = AppRequest::new(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(BuildProbabilityQuery::new(core.clone(), field))
+                .with_result_mode(BuildProbabilityResultMode::CompleteReplayPaths),
+        ));
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let direct = context.run(request.clone());
+        let cooperative = complete_cooperative(&context, request, &ExecutionControl::default());
+        assert_eq!(direct.status(), AppStatus::Success, "{direct:#?}");
+        assert_eq!(cooperative.status(), AppStatus::Success, "{cooperative:#?}");
+        assert_eq!(
+            cooperative.public_result_payload(),
+            direct.public_result_payload()
+        );
+        let Some(clearra_host_contract::ProductResultPayloadContent::BuildPathFamily(paths)) =
+            cooperative
+                .public_result_payload()
+                .map(clearra_host_contract::ProductResultPayload::content)
+        else {
+            panic!("empty complete Build replay still requires a typed path-family payload")
+        };
+        assert_eq!(paths.witness_count(), "0");
+        assert!(paths.complete());
+        assert!(paths.canonical_witness().is_none());
+        assert!(paths.witnesses().is_empty());
+
+        let distributed = complete_distributed_build(
+            &context,
+            BuildProbabilityQuery::new(core, field),
+            BuildProbabilityResultMode::CompleteReplayPaths,
+            100,
+        );
+        assert_eq!(distributed.status(), AppStatus::Success, "{distributed:#?}");
+        assert_eq!(
+            distributed.public_result_payload(),
+            direct.public_result_payload()
+        );
+    }
+
+    #[test]
+    fn cooperative_build_failed_queue_limit_matches_direct_and_honors_cancellation() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let request = AppRequest::new(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(one_piece_build_query())
+                .with_result_mode(BuildProbabilityResultMode::FailedQueues)
+                .with_failed_pattern_limit(1),
+        ));
+        let direct = context.run(request.clone());
+        let cooperative =
+            complete_cooperative(&context, request.clone(), &ExecutionControl::default());
+        assert_eq!(direct.status(), AppStatus::Success, "{direct:#?}");
+        assert_eq!(cooperative.status(), AppStatus::Success, "{cooperative:#?}");
+        for field in [
+            "result_mode",
+            "failed_pattern_limit",
+            "failed_pattern_count",
+            "failed_queue_probability",
+        ] {
+            assert_eq!(
+                core_result(&cooperative).field(field),
+                core_result(&direct).field(field),
+                "cooperative failed-queue field {field} diverged from direct execution"
+            );
+        }
+
+        let cancellation =
+            clearra_core_domain::execution_cancellation::ExecutionCancellationToken::new();
+        cancellation.handle().cancel();
+        let mut cancelled = context.start_cooperative_execution(request);
+        assert_eq!(
+            cancelled.advance(1, &ExecutionControl::new(cancellation)),
+            CooperativeAppAdvance::Cancelled
+        );
+    }
+
+    #[test]
+    fn cooperative_build_result_command_mismatch_fails_before_product_materialization() {
+        let command = BuildProbabilityAppCommand::new(one_piece_build_query_at(0))
+            .with_result_mode(BuildProbabilityResultMode::FailedQueues);
+        let (_, response_kind) = compile_search_command(AppCommand::BuildProbability(command))
+            .expect("compile explicit Build result command");
+        let CooperativeSearchResponseKind::BuildProbability {
+            aggregation,
+            finesse,
+            solution_probability_policy,
+            result_command,
+            ..
+        } = response_kind
+        else {
+            panic!("expected Build response kind")
+        };
+        let mismatched = CooperativeSearchResponseKind::BuildProbability {
+            field: one_piece_build_query_at(1).field(),
+            aggregation,
+            finesse,
+            solution_probability_policy,
+            result_command,
+        };
+        let rejection = mismatched
+            .materialize_build_probability_result_mode_evidence(
+                &AppCoreExecutorService::wasm_cpu(),
+                &ExecutionControl::default(),
+                CoreExecutionResult::new(Vec::new(), Vec::new()),
+            )
+            .expect_err("mismatched command authority must fail before result decoration");
+        assert!(matches!(
+            rejection,
+            CoreExecutionError::RuntimeUnavailable {
+                component: "cooperative_build_result_command_authority_mismatch"
+            }
+        ));
+    }
+
+    #[test]
+    fn cooperative_failed_queue_projection_rejects_duplicate_engine_authority() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let query = one_piece_build_query();
+        let baseline = context.run(AppRequest::new(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(query.clone()),
+        )));
+        assert_eq!(baseline.status(), AppStatus::Success, "{baseline:#?}");
+        let tampered = core_result(&baseline)
+            .clone()
+            .with_additional_fields(vec![("failed_pattern_count".to_owned(), "0".to_owned())]);
+        let (_, response_kind) = compile_search_command(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(query)
+                .with_result_mode(BuildProbabilityResultMode::FailedQueues),
+        ))
+        .expect("compile failed-queue result command");
+        let rejected = response_from_search(response_kind, tampered);
+        assert_eq!(rejected.status(), AppStatus::ExecutionFailed);
+        assert!(rejected.public_result_payload().is_none());
+        assert!(rejected.render_model().is_none());
+        assert!(rejected
+            .error()
+            .expect("duplicate authority rejection")
+            .message()
+            .contains("coverage counts do not match"));
+    }
+
+    #[test]
+    fn cooperative_build_product_memory_authority_is_bounded_and_fail_closed() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let query = one_piece_build_query().with_score_summary(ScoreProfileSelection::Guideline, 0);
+        let problem = ProblemCompiler::compile_scenario_pc(query.core_query())
+            .expect("compile memory-bounded Build product");
+        let (baseline, derivation) = context
+            .services()
+            .core_executor()
+            .execute_build_probability_with_score_derivation_with_control(
+                &problem,
+                query.field(),
+                query.aggregation(),
+                query.finesse_request().clone(),
+                query.solution_probability_policy(),
+                &ExecutionControl::default(),
+            )
+            .expect("materialize typed score authority");
+
+        let oversized = baseline
+            .clone()
+            .with_replaced_fields(vec![(
+                "execution_max_memory_mib".to_owned(),
+                "1".to_owned(),
+            )])
+            .with_additional_fields(vec![(
+                "test_retained_product_pressure".to_owned(),
+                "x".repeat(2 * 1024 * 1024),
+            )]);
+        let (_, response_kind) = compile_search_command(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(query.clone())
+                .with_result_mode(BuildProbabilityResultMode::FieldAverageScore),
+        ))
+        .expect("compile memory-bounded Build product");
+        let rejected = response_from_search_with_build_score_derivation(
+            response_kind,
+            oversized,
+            Some(derivation.clone()),
+        );
+        assert_eq!(rejected.status(), AppStatus::ExecutionFailed);
+        assert!(rejected.public_result_payload().is_none());
+        assert!(rejected
+            .error()
+            .is_some_and(|error| error.message().contains("whole-live memory limit")));
+
+        let duplicated = baseline.with_additional_fields(vec![
+            ("execution_max_memory_mib".to_owned(), "none".to_owned()),
+            ("execution_max_memory_mib".to_owned(), "1".to_owned()),
+        ]);
+        let (_, response_kind) = compile_search_command(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(query)
+                .with_result_mode(BuildProbabilityResultMode::FieldAverageScore),
+        ))
+        .expect("compile duplicate-memory-authority fixture");
+        let rejected = response_from_search_with_build_score_derivation(
+            response_kind,
+            duplicated,
+            Some(derivation),
+        );
+        assert_eq!(rejected.status(), AppStatus::ExecutionFailed);
+        assert!(rejected.public_result_payload().is_none());
+        assert!(rejected.error().is_some_and(|error| error
+            .message()
+            .contains("memory authority is missing or duplicated")));
+    }
+
+    #[test]
+    fn cooperative_failed_queue_projection_rejects_preexisting_decorator_fields() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let query = one_piece_build_query();
+        let baseline = context.run(AppRequest::new(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(query.clone()),
+        )));
+        assert_eq!(baseline.status(), AppStatus::Success, "{baseline:#?}");
+        let tampered = core_result(&baseline)
+            .clone()
+            .with_additional_fields(vec![("result_mode".to_owned(), "untrusted".to_owned())]);
+        let (_, response_kind) = compile_search_command(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(query)
+                .with_result_mode(BuildProbabilityResultMode::FailedQueues),
+        ))
+        .expect("compile failed-queue collision fixture");
+        let rejected = response_from_search(response_kind, tampered);
+        assert_eq!(rejected.status(), AppStatus::ExecutionFailed);
+        assert!(rejected.public_result_payload().is_none());
+        assert!(rejected
+            .error()
+            .is_some_and(|error| error.message().contains("product fields already exist")));
     }
 
     #[test]
@@ -3865,6 +5086,36 @@ mod pc_allspin_projection_tests {
         assert_eq!(owner.generation(), 0);
         assert_eq!(owner.retained_owner_bytes(), 43);
         assert_eq!(owner.returned_carrier_bytes(), 47);
+    }
+
+    #[test]
+    fn finite_cooperative_build_rejects_unbudgeted_result_products_before_compilation() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let request = AppRequest::new(AppCommand::BuildProbability(
+            BuildProbabilityAppCommand::new(one_piece_build_query())
+                .with_result_mode(BuildProbabilityResultMode::FailedQueues),
+        ))
+        .with_resource_budget(ResourceBudget::new(1, None, Some(64)));
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let rejection = match context.start_finite_cooperative_execution(
+            request,
+            FiniteCooperativeCallerMemory::start(0, 0).unwrap(),
+        ) {
+            Ok(_) => panic!("unbudgeted result product must not enter finite execution"),
+            Err(rejection) => rejection,
+        };
+        assert!(matches!(
+            rejection,
+            FiniteCooperativeCallerMemoryRejection::Invalid {
+                error: CoreExecutionError::RuntimeUnavailable {
+                    component: "finite_cooperative_build_result_product_authority_unavailable"
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -3,11 +3,14 @@ import {
   isHostCapabilitySnapshot,
   normalizeRuntimeWarmupPolicy,
   resolveWorkerAuthority,
+  wasmProductRetentionByteCap,
   type HostCapabilitySnapshot,
   type RuntimeWarmupPolicy,
   type WorkerAuthorityReport
 } from '@clearra/ui/wasm-host';
 import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
+import { isLocalSearchProfileMode } from '../lib/localSearchProfile';
+import { withHostExecutionTiming } from './HostExecutionProfile';
 
 import { ClearraProductJobRunner } from './ClearraProductJobRunner';
 import {
@@ -181,7 +184,8 @@ function loadProductPage(
         ? loadedWasm.product_page_next(request.maximumWorkSteps ?? 10_000)
         : loadedWasm.product_page_get(
             request.alternativeIndex ?? '',
-            request.memberPageNumber ?? ''
+            request.memberPageNumber ?? '',
+            request.maximumWorkSteps ?? 10_000
           );
     self.postMessage({
       type: 'product_page',
@@ -221,6 +225,7 @@ async function runCommandText(
   requestedTablebase: boolean,
   requestedWarmupPolicy: RuntimeWarmupPolicy
 ) {
+  const profileStarted = isLocalSearchProfileMode(import.meta.env.MODE) ? performance.now() : null;
   if (active) {
     postRuntimeFailure(active.id, 'E_WASM_JOB_ALREADY_RUNNING', 'a WASM job is already active');
     return;
@@ -264,12 +269,16 @@ async function runCommandText(
       lifecycleOwnerId,
       wasmHostCapabilities(hostCapabilitySnapshot)
     );
+    const modulePrepareMs = profileStarted === null ? 0 : performance.now() - profileStarted;
     const terminal = await job.runner.run(commandText, (event) => {
       if (event.event === 'started') return;
-      const emitted = withJobId(event, job.id);
+      const emitted = withHostExecutionTiming(withJobId(event, job.id), profileStarted === null ? null : {
+        module_prepare_ms: modulePrepareMs,
+        worker_elapsed_to_terminal_ms: performance.now() - profileStarted
+      });
       if (isTerminal(emitted)) job.terminalPosted = true;
       postWorkerEvent(emitted);
-    });
+    }, { transportProfile: isLocalSearchProfileMode(import.meta.env.MODE) });
     if (requiresFailClosedRelease(terminal)) {
       releaseJobResources(job);
       closeFailClosedWorker();
@@ -404,7 +413,9 @@ function interruptIncompleteRuntimePrewarm() {
   runtimePrewarmGeneration += 1;
   runtimePrewarm = null;
   completedPrewarmWorkerCount = 0;
-  disposeDistributedWorkers();
+  // Keep already-ready clients and their in-flight prewarm promises. The
+  // foreground pool initialization can reuse each client independently and
+  // schedule its first batch without joining the slowest speculative worker.
 }
 
 function setTablebaseRequested(requested: boolean) {
@@ -469,6 +480,7 @@ function wasmHostCapabilities(
   return {
     logicalProcessorCount: snapshot.reportedLogicalProcessors,
     transferByteCap: snapshot.wasmTransferByteCap,
+    productRetentionByteCap: wasmProductRetentionByteCap(snapshot),
     webGpuAvailable: snapshot.webGpuAvailable,
     crossOriginIsolated: snapshot.crossOriginIsolated
   };

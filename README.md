@@ -137,8 +137,9 @@ locked `build/transient/<purpose>` slot and overwrite its previous contents;
 the default runtime comparison report similarly replaces
 `reports/runtime-environments/latest`. Pass an explicit output path only when
 an additional local history is intentionally required.
-The sole `_local` exception is `_local/bundle.py`, which writes the review
-bundle under `_local` at the user's request.
+`_local/` is reserved for Git-ignored, nonproduct diagnostics. It is not a
+build/report output destination or a product dependency, and neither accepted
+Git source archives nor Docker contexts include those experiments.
 
 ## Web Runtime
 

@@ -89,6 +89,8 @@ impl ExecutionAdmissionPlan {
         )
     }
 
+    // Native packing registries consume this projection only when that backend is linked.
+    #[allow(dead_code)]
     pub(crate) fn native_packing(problem: &CPackingProblem, worker_count: usize) -> Option<Self> {
         const TASKS_PER_WORKER: u128 = 4;
         const RETAINED_CANDIDATE_CAPACITY: u128 = 8_192;
@@ -170,6 +172,8 @@ pub(crate) struct ExecutionMemoryBound {
 }
 
 impl ExecutionMemoryBound {
+    // Internal authority APIs preserve the typed report; product-facing errors box it at the seam.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn unbounded_for_problem(problem: &SearchProblem) -> Result<Self, ResourceReport> {
         let universe = problem
             .piece_source()
@@ -200,6 +204,7 @@ impl ExecutionMemoryBound {
         self.cap_bytes
     }
 
+    #[allow(clippy::result_large_err)]
     pub(crate) fn with_cap(self, cap_bytes: u128) -> Result<Self, ResourceReport> {
         if cap_bytes <= self.cap_bytes {
             return Ok(Self { cap_bytes, ..self });
@@ -213,6 +218,7 @@ impl ExecutionMemoryBound {
         ))
     }
 
+    #[allow(clippy::result_large_err)]
     pub(crate) fn ensure(
         self,
         observed_retained_bytes: u128,
@@ -262,6 +268,8 @@ impl ExecutionAdmission {
         }
     }
 
+    // Internal authority APIs preserve the typed report until the product error seam.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn ensure_memory_bound(
         &self,
         observed_retained_bytes: u128,
@@ -275,6 +283,7 @@ impl ExecutionAdmission {
     /// configured memory cap without acquiring another lease. Callers use this
     /// before constructing catalogs, bitsets, or queue-class storage; runtime
     /// retained/transient accounting continues to use the full configured cap.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn ensure_plan(
         &self,
         plan: ExecutionAdmissionPlan,
@@ -300,6 +309,7 @@ impl ExecutionAdmission {
             .ensure(projection.required_memory_bytes, additional_fixed_bytes)
     }
 
+    #[allow(clippy::result_large_err)]
     pub(crate) fn try_delegate_compute_only_with_memory_cap(
         &self,
         memory_enforcement_cap_bytes: u128,
@@ -340,6 +350,9 @@ impl ExecutionAdmission {
         })
     }
 
+    // Reserved for nested executors that transfer an existing authority lease.
+    #[allow(dead_code)]
+    #[allow(clippy::result_large_err)]
     pub(crate) fn try_delegate(
         &self,
         plan: ExecutionAdmissionPlan,
@@ -418,6 +431,7 @@ impl ExecutionAdmission {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn budget_bound_execution_preflight(
     problem: &SearchProblem,
 ) -> Result<(DensePatternPreflight, u128, u128, u128), ResourceReport> {
@@ -477,6 +491,7 @@ fn budget_bound_execution_preflight(
 /// request is unbounded. Count-proportional engines using this admission must
 /// enforce this same cap against their actual retained and transient storage;
 /// the lease alone is not allocation evidence.
+#[allow(clippy::result_large_err)]
 pub(crate) fn admit_budget_bound_search_execution(
     problem: &SearchProblem,
     requested_compute_units: usize,
@@ -536,14 +551,16 @@ pub(crate) fn admit_budget_bound_search_execution(
     })
 }
 
-/// Creates a serial exact-search admission under a request-level parent that
-/// already owns the complete physical memory surface. The child consumes only
-/// the parent's compute slot; the configured request cap and conservative
+/// Creates an exact-search admission under a request-level parent that already
+/// owns the complete physical memory surface. The child consumes only its
+/// requested compute width; the configured request cap and conservative
 /// external retained bound remain logical checks over the same parent memory.
+#[allow(clippy::result_large_err)]
 pub(crate) fn admit_budget_bound_search_execution_under_terminal_authority(
     problem: &SearchProblem,
     checked_external_retained_upper_bound_bytes: u128,
     authority: &WasmCpuTerminalResourceAuthority,
+    requested_compute_units: usize,
 ) -> Result<ExecutionAdmission, ResourceReport> {
     let (dense_preflight, descriptor_pattern_count, dense_pattern_count, configured_memory_bytes) =
         budget_bound_execution_preflight(problem)?;
@@ -563,15 +580,17 @@ pub(crate) fn admit_budget_bound_search_execution_under_terminal_authority(
         cap_bytes: configured_memory_bytes,
     }
     .ensure(checked_external_retained_upper_bound_bytes, 0)?;
-    let lease = authority.try_acquire_compute_child().map_err(|error| {
-        admission_failure(
-            error.availability(),
-            descriptor_pattern_count,
-            dense_pattern_count,
-            dense_preflight.required_dense_bytes,
-            configured_memory_bytes,
-        )
-    })?;
+    let lease = authority
+        .try_acquire_compute_child(requested_compute_units)
+        .map_err(|error| {
+            admission_failure(
+                error.availability(),
+                descriptor_pattern_count,
+                dense_pattern_count,
+                dense_preflight.required_dense_bytes,
+                configured_memory_bytes,
+            )
+        })?;
     Ok(ExecutionAdmission {
         dense_preflight,
         projection: ExecutionMemoryProjection {
@@ -586,6 +605,7 @@ pub(crate) fn admit_budget_bound_search_execution_under_terminal_authority(
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn admit_search_execution(
     problem: &SearchProblem,
     plan: ExecutionAdmissionPlan,

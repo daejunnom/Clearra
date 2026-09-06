@@ -1108,7 +1108,7 @@ fn identity_from_packed(
     let mut masks = [0_u64; STANDARD_BOARD64_TILING_MAX_PLACEMENTS];
     let mut packed_piece_codes = 0_u64;
     let mut count = 0;
-    for index in 0..STANDARD_BOARD64_TILING_MAX_PLACEMENTS {
+    for (index, mask) in masks.iter_mut().enumerate() {
         let encoded = read_packed_tiling_row(rows, index);
         if encoded == 0 {
             break;
@@ -1119,7 +1119,7 @@ fn identity_from_packed(
             .get(row_id)
             .copied()
             .ok_or("wasm_tiling_row_identity_out_of_range")?;
-        masks[index] = row.cells_mask();
+        *mask = row.cells_mask();
         packed_piece_codes |= u64::from(piece_code(row.piece())) << (index * 3);
         count += 1;
     }

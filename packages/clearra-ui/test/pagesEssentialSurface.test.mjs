@@ -48,7 +48,9 @@ test('CTK owns the Pages render entry and executes it through the local browser 
   const tablebaseAssets = source('../../../apps/clearra-web/src/workers/pc4TablebaseAssets.ts');
 
   assert.match(route, /<CtkDrawerWorkspace[\s\S]*?\{workerFactory\}[\s\S]*?\/>/u);
-  assert.match(route, /return new Worker\(new URL\('\.\.\/workers\/clearraWorker\.ts'/u);
+  assert.match(route, /const worker = new Worker\(new URL\('\.\.\/workers\/clearraWorker\.ts'[\s\S]*?return worker;/u);
+  assert.match(route, /const showLocalProfile = isLocalSearchProfileMode\(import\.meta\.env\.MODE\)/u);
+  assert.match(route, /if \(showLocalProfile\) worker\.addEventListener\('message'/u);
   assert.match(ctk, /new WasmTerminalWorkerController\([\s\S]*?workerFactory/u);
   assert.match(ctk, /const source = await encodeDocument\('ctk', controller\.signal\)/u);
   assert.match(ctk, /buildDocumentUtilityCommand\(commandInput\)/u);
@@ -74,4 +76,26 @@ test('CTK owns the Pages render entry and executes it through the local browser 
     ['artifactUrl']
   );
   assert.match(tablebaseAssets, /credentials: 'same-origin'/u);
+});
+
+test('Setup path detail preserves results while rotating stale WASM only at its next run', () => {
+  const setup = source('../src/lib/workspace/SetupFinderWorkspace.svelte');
+
+  assert.match(setup, /let detailWorkerArtifactGeneration: string \| null = null;/u);
+  assert.match(
+    setup,
+    /if \(detailWorkerBusy\)[\s\S]*?rotateStaleDetailWorkerForNewRun\(\);[\s\S]*?const worker = detailWorker \?\?/u
+  );
+  assert.match(
+    setup,
+    /detailWorkerArtifactGeneration = currentWasmArtifactGeneration\(\);/u
+  );
+  assert.match(
+    setup,
+    /function rotateStaleDetailWorkerForNewRun\(\)[\s\S]*?isCurrentWasmArtifactGeneration\(detailWorkerArtifactGeneration\)[\s\S]*?disposeDetailWorker\(\);/u
+  );
+  assert.match(
+    setup,
+    /function finishDetailWorkerRequest\(worker: Worker\)[\s\S]*?detailWorkerBusy = false;[\s\S]*?activeDetailKey = null;[\s\S]*?\}/u
+  );
 });

@@ -214,11 +214,9 @@ impl NativeBuildUpWorkspace {
         let workspace = Self::new();
         #[cfg(feature = "native-c-core")]
         {
-            workspace.abi_status?;
+            workspace.abi_status.clone()?;
             if workspace.native_workspace.is_none() {
-                return Err(workspace_memory_error(
-                    projected_minimum.checked_add(1).unwrap_or(u128::MAX),
-                ));
+                return Err(workspace_memory_error(projected_minimum.saturating_add(1)));
             }
         }
         let retained_bytes = workspace
@@ -261,7 +259,7 @@ impl NativeBuildUpWorkspace {
                 record_workspace_raw_c_entry();
                 workspace.retained_bytes()
             });
-            return buffer_bytes.saturating_add(native_bytes);
+            buffer_bytes.saturating_add(native_bytes)
         }
         #[cfg(not(feature = "native-c-core"))]
         buffer_bytes
@@ -278,7 +276,7 @@ impl NativeBuildUpWorkspace {
                 record_workspace_raw_c_entry();
                 workspace.retained_bytes()
             });
-            return buffer_bytes.checked_add(native_bytes as u128);
+            buffer_bytes.checked_add(native_bytes as u128)
         }
         #[cfg(not(feature = "native-c-core"))]
         Some(buffer_bytes)
@@ -301,7 +299,7 @@ impl NativeBuildUpWorkspace {
 
     #[cfg(feature = "native-c-core")]
     fn ensure_abi(&self) -> Result<(), NativeCoreError> {
-        self.abi_status
+        self.abi_status.clone()
     }
 
     #[cfg(feature = "native-c-core")]
@@ -474,13 +472,13 @@ impl NativeBuildUpWorkspace {
 }
 
 fn workspace_memory_error(required_memory_bytes: u128) -> NativeCoreError {
-    NativeCoreError::PackingIncomplete {
-        status: C_BUILDUP_STATUS_CAPACITY_EXCEEDED,
-        resource_report: ResourceReport::admission_failure(
+    NativeCoreError::packing_incomplete(
+        C_BUILDUP_STATUS_CAPACITY_EXCEEDED,
+        ResourceReport::admission_failure(
             ExecutionAvailability::exhausted(ExecutionAvailabilityReason::MemoryBudgetExceeded)
                 .with_required_memory_bytes(required_memory_bytes),
         ),
-    }
+    )
 }
 
 fn ensure_workspace_memory_limit(

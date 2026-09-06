@@ -206,6 +206,9 @@ where
 /// Builds the finite Build response while retaining the caller that coexists
 /// with every construction stage and authorizing the concrete inline owner
 /// that will carry the returned governed response across the caller boundary.
+// These inputs are distinct prevalidated owners and accounting values; folding
+// them into an unvalidated options bag would weaken the finite-memory boundary.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_finite_build_success_response(
     result: CoreExecutionResult,
     pending_validation: DiagnosticReport,
@@ -291,14 +294,18 @@ pub(crate) fn try_finite_build_success_response(
         // transient exists. Observe diagnostics directly and drop the render
         // model in place when requested; do not use the generic take/map
         // finalizer, whose temporary render owner has a different authority.
-        context
-            .services()
-            .diagnostic_sink()
-            .observe(response.diagnostics());
-        let response = if output_policy.include_render_model() {
-            response
-        } else {
-            response.without_render_model()
+        let response = {
+            let scoped_context = context;
+            let scoped_output_policy = output_policy;
+            scoped_context
+                .services()
+                .diagnostic_sink()
+                .observe(response.diagnostics());
+            if scoped_output_policy.include_render_model() {
+                response
+            } else {
+                response.without_render_model()
+            }
         };
         let finalized_heap = response
             .checked_retained_capacity_bytes()
@@ -308,11 +315,8 @@ pub(crate) fn try_finite_build_success_response(
             .checked_add(finalized_heap)
             .ok_or_else(projection_overflow)?;
 
-        // The sink and output-policy transition are complete. Destroy both
-        // remaining external owners before the final actual-capacity guard;
-        // the ledger then represents only the governed response wrapper.
-        drop(context);
-        drop(output_policy);
+        // The sink and output-policy owners left their scope above, so the
+        // ledger now represents only the governed response wrapper.
         ledger.transition_to_finalized_response(output_bytes)?;
         if ledger.live_heap_bytes() != finalized_heap {
             return Err(actual_authority_mismatch());

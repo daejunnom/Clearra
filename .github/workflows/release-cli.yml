@@ -375,17 +375,13 @@ jobs:
         with:
           node-version: 22
       - id: release_toolchain_cache
-        name: Restore canonical release toolchain cache
+        name: Restore sanitizer C build cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cargo/bin/wasm-bindgen.exe
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/AppData/Local/Clearra/build
-          key: release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          path: ~/AppData/Local/Clearra/build
+          key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-sanitizer-${{ runner.os }}-
       - name: Run canonical release acceptance sanitizer shard
         run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Sanitizer -ExecutionSurface Trusted
       - name: Seal canonical release acceptance sanitizer shard
@@ -457,7 +453,7 @@ jobs:
           path: release-shard-evidence/clearra-release-acceptance-rust-shard.v1.json
           if-no-files-found: error
 
-  release-acceptance-pages:
+  release-acceptance-wasm-build:
     if: github.event_name == 'workflow_dispatch'
     needs: metadata
     runs-on: windows-latest
@@ -489,11 +485,42 @@ jobs:
             cargo install wasm-bindgen-cli --version 0.2.126 --locked
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+      - name: Run verified WASM build producer
+        env:
+          CLEARRA_ACCEPTED_WASM_OUTPUT_DIR: ${{ runner.temp }}\clearra-accepted-wasm
+          CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
+          CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildProducer -ExecutionSurface Trusted
+      - name: Upload accepted WASM build
+        uses: actions/upload-artifact@v4
+        with:
+          name: accepted-wasm-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: ${{ runner.temp }}/clearra-accepted-wasm
+          if-no-files-found: error
+
+  release-acceptance-pages:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, release-acceptance-wasm-build]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download accepted WASM build
+        uses: actions/download-artifact@v4
+        with:
+          name: accepted-wasm-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: ${{ runner.temp }}/clearra-accepted-wasm
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
       - name: Run canonical release acceptance Pages shard
         env:
           CLEARRA_WEB_BASE_PATH: /${{ github.event.repository.name }}
+          CLEARRA_ACCEPTED_WASM_DIR: ${{ runner.temp }}\clearra-accepted-wasm
+          CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
+          CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Pages -ExecutionSurface Trusted
       - name: Stamp and verify the accepted Pages build
         shell: pwsh
@@ -522,6 +549,7 @@ jobs:
             --run-id $env:GITHUB_RUN_ID `
             --run-attempt $env:GITHUB_RUN_ATTEMPT `
             --shard pages `
+            --accepted-wasm "$env:RUNNER_TEMP\clearra-accepted-wasm" `
             --output release-shard-evidence/clearra-release-acceptance-pages-shard.v1.json
           if ($LASTEXITCODE -ne 0) { throw "Pages shard evidence failed" }
       - name: Upload accepted Pages build
@@ -679,9 +707,9 @@ jobs:
               ).Count
               if ($embedded.id -ne 'srs-x' -or
                   $embedded.source_rule -ne 'srs-x' -or
-                  $embedded.entries.Count -ne 80 -or
-                  $halfTurnCount -ne 24) {
-                throw 'Clearra CLI SRS-X export did not preserve its canonical 80-transition profile'
+                  $embedded.entries.Count -ne 84 -or
+                  $halfTurnCount -ne 28) {
+                throw 'Clearra CLI SRS-X export did not preserve its canonical 84-transition profile'
               }
             }
             if ($Name -eq 'terminal-supply-p0') {

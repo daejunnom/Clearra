@@ -4,7 +4,7 @@ use clearra_core_domain::solution::normalized_tiling_solution::{
     NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
 };
 use clearra_core_executor::CoreExecutionResult;
-use clearra_coverage::{cover::exact_minimum_cover, pattern::pattern_bitset::PatternBitSet};
+use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -543,38 +543,6 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
     }
 
     let required_patterns = PatternBitSet::all(pattern_count);
-    let selection = exact_minimum_cover(&required_patterns, &coverage_rows)
-        .map_err(|_| PcScorePortfolioValidationError::ExactMinimumCoverFailed)?;
-    if !selection.complete()
-        || selection.covered_patterns() != &required_patterns
-        || selection.row_indices().is_empty()
-    {
-        return Err(PcScorePortfolioValidationError::CoverageIncomplete);
-    }
-
-    let selected_solution_keys = selection
-        .row_indices()
-        .iter()
-        .map(|index| candidate_keys[*index].clone())
-        .collect::<Vec<_>>();
-    let selected_score_candidate_ids = selection
-        .row_indices()
-        .iter()
-        .map(|index| eligible_candidates[*index].score_candidate_id)
-        .collect::<Vec<_>>();
-    let canonical_candidate = selection
-        .row_indices()
-        .iter()
-        .copied()
-        .min_by_key(|index| eligible_candidates[*index].score_candidate_id)
-        .and_then(|index| eligible_candidates.get(index))
-        .ok_or(PcScorePortfolioValidationError::CoverageIncomplete)?;
-    let canonical_score_candidate_id = canonical_candidate.score_candidate_id;
-    let canonical_solution_identity = candidate_identities
-        .get(&canonical_score_candidate_id)
-        .copied()
-        .ok_or(PcScorePortfolioValidationError::CandidateIdentityMismatch)?;
-
     let eligible_candidate_map_sha256 = eligible_candidate_map_digest(&eligible_candidates);
     let score_eligibility_sha256 = score_eligibility_digest(
         &pattern_best_scores,
@@ -590,17 +558,38 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
         .iter()
         .map(PcScoreEligibleCandidateV2::score_candidate_id)
         .collect::<Vec<_>>();
-    let portfolio_alternatives = Arc::new(
-        CoveragePortfolioAlternativeSet::new(
-            portfolio_identity,
-            candidate_keys,
-            required_patterns,
-            coverage_rows,
-            &selected_solution_keys,
-        )
-        .and_then(|set| set.with_public_candidate_ids(public_candidate_ids))
-        .map_err(|_| PcScorePortfolioValidationError::PortfolioAlternativeSetInvalid)?,
-    );
+    let portfolio_alternatives = CoveragePortfolioAlternativeSet::new_canonical(
+        portfolio_identity,
+        candidate_keys,
+        required_patterns,
+        coverage_rows,
+    )
+    .and_then(|set| set.with_public_candidate_ids(public_candidate_ids))
+    .map_err(|_| PcScorePortfolioValidationError::PortfolioAlternativeSetInvalid)?;
+    let selected_solution_keys = portfolio_alternatives
+        .canonical_candidate_keys_owned()
+        .map_err(|_| PcScorePortfolioValidationError::PortfolioAlternativeSetInvalid)?;
+    let selected_score_candidate_ids = portfolio_alternatives
+        .canonical_page()
+        .portfolio()
+        .candidate_ids()
+        .iter()
+        .map(|candidate_id| {
+            portfolio_alternatives
+                .public_candidate_id(*candidate_id)
+                .ok_or(PcScorePortfolioValidationError::CandidateMapNotCanonical)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let canonical_score_candidate_id = selected_score_candidate_ids
+        .iter()
+        .copied()
+        .min()
+        .ok_or(PcScorePortfolioValidationError::CoverageIncomplete)?;
+    let canonical_solution_identity = candidate_identities
+        .get(&canonical_score_candidate_id)
+        .copied()
+        .ok_or(PcScorePortfolioValidationError::CandidateIdentityMismatch)?;
+    let portfolio_alternatives = Arc::new(portfolio_alternatives);
 
     Ok(PcScorePortfolioV2Result {
         contract_id: PC_SCORE_PORTFOLIO_RESULT_CONTRACT,

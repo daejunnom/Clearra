@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
 
   import {
@@ -24,7 +25,9 @@
     automaticWorkerAuthority,
     buildWasmCommandRequest,
     clearWasmTerminalResult,
+    currentWasmArtifactGeneration,
     ensureWasmWorkerOwnerId,
+    isCurrentWasmArtifactGeneration,
     postRunCommand,
     resolveWorkerAuthority,
     sharedBrowserHostCapabilitySnapshot,
@@ -50,9 +53,12 @@
     type SetupPathDetailState
   } from './setupFinderModel';
   import { cancelSetupPathDetail } from './setupPathDetailState';
+  import {
+    projectWorkspacePublicFailure,
+    type WorkspacePublicFailureCode
+  } from './workspacePublicFailure';
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
-    preferredWorkspaceLanguage,
     workspaceMessage,
     type WorkspaceLanguage
   } from './workspaceI18n';
@@ -72,6 +78,7 @@
   let resultRequest: SetupFinderRequest | null = null;
   let pathDetails: Record<string, SetupPathDetailState> = {};
   let detailWorker: Worker | null = null;
+  let detailWorkerArtifactGeneration: string | null = null;
   let detailWorkerBusy = false;
   let activeDetailKey: string | null = null;
   let detailGeneration = 0;
@@ -99,9 +106,7 @@
   $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
 
   onMount(() => {
-    language = preferredWorkspaceLanguage(
-      localStorage.getItem('clearra-language') ?? navigator.language
-    );
+    language = readWorkspaceLanguage();
     prewarmWorkerCount = automaticWorkerCount(request.useAllLogicalProcessors);
     if (runtime === 'web') {
       workerController.prewarm(
@@ -137,7 +142,7 @@
 
   function setLanguage(next: WorkspaceLanguage) {
     language = next;
-    localStorage.setItem('clearra-language', next);
+    persistWorkspaceLanguage(next);
   }
 
   function updateRequest(next: SetupFinderRequest) {
@@ -226,12 +231,7 @@
     const existing = pathDetails[key];
     if (existing?.status === 'loading' || existing?.status === 'complete') return;
     if (!resultRequest) {
-      updatePathDetail(key, {
-        status: 'failed',
-        paths: [],
-        complete: false,
-        error: label('pathDetailUnavailable')
-      });
+      updatePathDetail(key, failedPathDetail('unsupported'));
       return;
     }
     if (runtime === 'desktop') {
@@ -239,26 +239,17 @@
       return;
     }
     if (!workerFactory) {
-      updatePathDetail(key, {
-        status: 'failed',
-        paths: [],
-        complete: false,
-        error: label('pathDetailUnavailable')
-      });
+      updatePathDetail(key, failedPathDetail('unsupported'));
       return;
     }
 
     if (detailWorkerBusy) {
       if (activeDetailKey) {
-        updatePathDetail(activeDetailKey, {
-          status: 'failed',
-          paths: [],
-          complete: false,
-          error: label('cancelled')
-        });
+        updatePathDetail(activeDetailKey, failedPathDetail('request-cancelled'));
       }
       disposeDetailWorker();
     }
+    rotateStaleDetailWorkerForNewRun();
     const generation = ++detailGeneration;
     activeDetailKey = key;
     detailWorkerBusy = true;
@@ -266,11 +257,13 @@
       status: 'loading',
       paths: [],
       complete: false,
-      error: null
+      publicFailures: [],
+      developerFailure: null
     });
 
     const worker = detailWorker ?? workerController.takeIdleWorker() ?? workerFactory();
     detailWorker = worker;
+    detailWorkerArtifactGeneration = currentWasmArtifactGeneration();
     worker.onmessage = (message: MessageEvent<ClearraWasmWorkerEvent>) => {
       if (detailWorker !== worker || generation !== detailGeneration) return;
       const event = message.data;
@@ -290,69 +283,43 @@
             status: 'complete',
             paths: candidate.solution_paths ?? [],
             complete: true,
-            error: null
+            publicFailures: [],
+            developerFailure: null
           });
           finishDetailWorkerRequest(worker);
         } else {
-          updatePathDetail(key, {
-            status: 'failed',
-            paths: [],
-            complete: false,
-            error:
-              event.response.diagnostics.map((diagnostic) => diagnostic.message).join('\n') ||
-              label('pathDetailFailed')
-          });
+          updatePathDetail(
+            key,
+            failedPathDetail('result-invalid', null, event.response.diagnostics)
+          );
           releaseDetailWorker(worker);
         }
       } else if (event.event === 'failed') {
-        updatePathDetail(key, {
-          status: 'failed',
-          paths: [],
-          complete: false,
-          error:
-            event.diagnostics.diagnostics.map((diagnostic) => diagnostic.message).join('\n') ||
-            label('pathDetailFailed')
-        });
+        updatePathDetail(
+          key,
+          failedPathDetail('execution-failed', null, event.diagnostics.diagnostics)
+        );
         releaseDetailWorker(worker);
       } else if (event.event === 'cancelled') {
-        updatePathDetail(key, {
-          status: 'failed',
-          paths: [],
-          complete: false,
-          error: label('cancelled')
-        });
+        updatePathDetail(key, failedPathDetail('request-cancelled'));
         releaseDetailWorker(worker, 'owner-disposed');
       } else if (event.event === 'terminated') {
-        updatePathDetail(key, {
-          status: 'failed',
-          paths: [],
-          complete: false,
-          error:
-            event.diagnostics.diagnostics.map((diagnostic) => diagnostic.message).join('\n') ||
-            label('pathDetailFailed')
-        });
+        updatePathDetail(
+          key,
+          failedPathDetail('worker-terminated', null, event.diagnostics.diagnostics)
+        );
         releaseDetailWorker(worker, 'worker-failure');
       }
     };
     worker.onerror = (event) => {
       event.preventDefault();
       if (detailWorker !== worker || generation !== detailGeneration) return;
-      updatePathDetail(key, {
-        status: 'failed',
-        paths: [],
-        complete: false,
-        error: event.message || label('pathDetailFailed')
-      });
+      updatePathDetail(key, failedPathDetail('execution-failed', event.message || null));
       releaseDetailWorker(worker);
     };
     worker.onmessageerror = () => {
       if (detailWorker !== worker || generation !== detailGeneration) return;
-      updatePathDetail(key, {
-        status: 'failed',
-        paths: [],
-        complete: false,
-        error: label('pathDetailFailed')
-      });
+      updatePathDetail(key, failedPathDetail('execution-failed'));
       releaseDetailWorker(worker);
     };
     try {
@@ -371,18 +338,40 @@
         }
       );
     } catch (error) {
-      updatePathDetail(key, {
-        status: 'failed',
-        paths: [],
-        complete: false,
-        error: error instanceof Error ? error.message : label('pathDetailFailed')
-      });
+      updatePathDetail(
+        key,
+        failedPathDetail('execution-failed', error instanceof Error ? error.message : String(error))
+      );
       releaseDetailWorker(worker);
     }
   }
 
   function updatePathDetail(key: string, state: SetupPathDetailState) {
     pathDetails = { ...pathDetails, [key]: state };
+  }
+
+  function failedPathDetail(
+    fallbackCode: WorkspacePublicFailureCode,
+    developerError: string | null = null,
+    diagnostics: ReadonlyArray<{
+      code?: string | null;
+      severity?: string | null;
+      message?: string | null;
+    }> = []
+  ): SetupPathDetailState {
+    const projection = projectWorkspacePublicFailure({
+      status: 'failed',
+      error: developerError,
+      diagnostics,
+      fallbackCode
+    });
+    return {
+      status: 'failed',
+      paths: [],
+      complete: false,
+      publicFailures: projection.publicFailures,
+      developerFailure: projection.developerEvidence
+    };
   }
 
   type DesktopDetailRequest = {
@@ -398,12 +387,7 @@
     sourceRequest: SetupFinderRequest
   ) {
     if (activeDetailKey && activeDetailKey !== key) {
-      updatePathDetail(activeDetailKey, {
-        status: 'failed',
-        paths: [],
-        complete: false,
-        error: label('cancelled')
-      });
+      updatePathDetail(activeDetailKey, failedPathDetail('request-cancelled'));
     }
     const generation = ++detailGeneration;
     activeDetailKey = key;
@@ -412,7 +396,8 @@
       status: 'loading',
       paths: [],
       complete: false,
-      error: null
+      publicFailures: [],
+      developerFailure: null
     });
     desktopDetailPending = {
       key,
@@ -506,31 +491,38 @@
           status: 'complete',
           paths: candidate.solution_paths ?? [],
           complete: true,
-          error: null
+          publicFailures: [],
+          developerFailure: null
         });
         return;
       }
-      failDesktopDetail(
-        pending,
-        event.response?.diagnostics.map((diagnostic) => diagnostic.message).join('\n') ||
-          label('pathDetailFailed')
-      );
+      failDesktopDetail(pending, null, 'result-invalid', event.response?.diagnostics ?? []);
       return;
     }
-    failDesktopDetail(
-      pending,
-      event.event === 'cancelled' ? label('cancelled') : event.code ?? label('pathDetailFailed')
-    );
+    if (event.event === 'cancelled') {
+      failDesktopDetail(pending, null, 'request-cancelled');
+    } else {
+      failDesktopDetail(
+        pending,
+        null,
+        'execution-failed',
+        [{ code: event.code ?? 'desktop-detail-failed', severity: 'error', message: '' }]
+      );
+    }
   }
 
-  function failDesktopDetail(pending: DesktopDetailRequest, error: string) {
+  function failDesktopDetail(
+    pending: DesktopDetailRequest,
+    developerError: string | null,
+    fallbackCode: WorkspacePublicFailureCode = 'execution-failed',
+    diagnostics: ReadonlyArray<{
+      code?: string | null;
+      severity?: string | null;
+      message?: string | null;
+    }> = []
+  ) {
     if (pending.generation !== detailGeneration) return;
-    updatePathDetail(pending.key, {
-      status: 'failed',
-      paths: [],
-      complete: false,
-      error
-    });
+    updatePathDetail(pending.key, failedPathDetail(fallbackCode, developerError, diagnostics));
   }
 
   async function stopDesktopDetail(showCancelled: boolean) {
@@ -538,12 +530,7 @@
     detailGeneration += 1;
     desktopDetailPending = null;
     if (showCancelled && activeKey) {
-      updatePathDetail(activeKey, {
-        status: 'failed',
-        paths: [],
-        complete: false,
-        error: label('cancelled')
-      });
+      updatePathDetail(activeKey, failedPathDetail('request-cancelled'));
     }
     const jobId = desktopDetailJobId;
     if (jobId !== null) {
@@ -567,6 +554,7 @@
     activeDetailKey = null;
     const worker = detailWorker;
     detailWorker = null;
+    detailWorkerArtifactGeneration = null;
     if (!worker) return;
     worker.onmessage = null;
     worker.onerror = null;
@@ -575,7 +563,7 @@
   }
 
   function cancelWebDetail() {
-    pathDetails = cancelSetupPathDetail(pathDetails, activeDetailKey, label('cancelled'));
+    pathDetails = cancelSetupPathDetail(pathDetails, activeDetailKey);
     disposeDetailWorker();
   }
 
@@ -587,6 +575,7 @@
     detailWorkerBusy = false;
     activeDetailKey = null;
     detailWorker = null;
+    detailWorkerArtifactGeneration = null;
     worker.onmessage = null;
     worker.onerror = null;
     worker.onmessageerror = null;
@@ -600,6 +589,19 @@
     if (detailWorker !== worker) return;
     detailWorkerBusy = false;
     activeDetailKey = null;
+  }
+
+  function rotateStaleDetailWorkerForNewRun() {
+    if (
+      !detailWorker ||
+      isCurrentWasmArtifactGeneration(detailWorkerArtifactGeneration)
+    ) {
+      return;
+    }
+    // Preserve a running detail and all completed path results. Rotation is
+    // performed only at the next detail-command boundary; a worker with no
+    // recorded generation is never reused speculatively.
+    disposeDetailWorker();
   }
 </script>
 

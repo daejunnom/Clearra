@@ -220,7 +220,7 @@ impl WebGpuBackend {
         let adapter_limits = adapter.limits();
         let input_bytes = batch.byte_len()?;
         let output_bytes = u64::from(batch.word_count) * std::mem::size_of::<u32>() as u64;
-        let max_storage = u64::from(adapter_limits.max_storage_buffer_binding_size);
+        let max_storage = adapter_limits.max_storage_buffer_binding_size;
         if input_bytes > max_storage || output_bytes > max_storage {
             return Ok(WebGpuBatchOutcome::Unavailable(
                 WebGpuUnavailableResult::new("webgpu_storage_buffer_limit_exceeded"),

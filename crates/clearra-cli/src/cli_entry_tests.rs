@@ -414,7 +414,7 @@ mod case_failed_queue_json_quotes_not_calculated_solution_metadata {
         assert_eq!(value["summary"]["kick_profile"], "srs-x");
         assert_eq!(value["summary"]["effective_kick_model"], "srs-x");
         assert_eq!(value["summary"]["verified_kick_profile"], true);
-        assert_eq!(value["summary"]["kick_profile_transition_count"], 80);
+        assert_eq!(value["summary"]["kick_profile_transition_count"], 84);
     }
 
     #[cfg(not(feature = "wasm-cpu-runtime"))]
@@ -952,18 +952,17 @@ mod case_run_with_args_reports_unsupported_mvp_command {
 
     #[test]
     fn run_with_args_reports_unsupported_mvp_command() {
-        for command in ["inspect"] {
-            let output = run_with_args(["clearra", command]);
+        let command = "inspect";
+        let output = run_with_args(["clearra", command]);
 
-            assert_eq!(output.exit_code(), ExitCode::Unsupported);
-            assert!(output
-                .stderr()
-                .contains(CliErrorCode::CliCommandUnsupported.as_str()));
-            assert!(output.stderr().contains(command));
-            assert!(output
-                .stderr()
-                .contains("use rules inspect or scoring inspect for profile inspection"));
-        }
+        assert_eq!(output.exit_code(), ExitCode::Unsupported);
+        assert!(output
+            .stderr()
+            .contains(CliErrorCode::CliCommandUnsupported.as_str()));
+        assert!(output.stderr().contains(command));
+        assert!(output
+            .stderr()
+            .contains("use rules inspect or scoring inspect for profile inspection"));
     }
 }
 

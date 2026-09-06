@@ -11,23 +11,26 @@ test('cancelling an active setup detail replaces loading with a terminal failure
       status: 'loading',
       paths: [],
       complete: false,
-      error: null
+      publicFailures: [],
+      developerFailure: null
     },
     [idleKey]: {
       status: 'complete',
       paths: [],
       complete: true,
-      error: null
+      publicFailures: [],
+      developerFailure: null
     }
   };
 
-  const after = cancelSetupPathDetail(before, activeKey, 'Cancelled');
+  const after = cancelSetupPathDetail(before, activeKey);
 
   assert.deepEqual(after[activeKey], {
     status: 'failed',
     paths: [],
     complete: false,
-    error: 'Cancelled'
+    publicFailures: [{ code: 'request-cancelled', severity: 'error' }],
+    developerFailure: null
   });
   assert.equal(after[idleKey], before[idleKey]);
   assert.equal(before[activeKey].status, 'loading');
@@ -35,5 +38,5 @@ test('cancelling an active setup detail replaces loading with a terminal failure
 
 test('cancelling without an active detail preserves the state object', () => {
   const before = {};
-  assert.equal(cancelSetupPathDetail(before, null, 'Cancelled'), before);
+  assert.equal(cancelSetupPathDetail(before, null), before);
 });

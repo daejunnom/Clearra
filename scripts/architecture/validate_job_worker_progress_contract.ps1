@@ -58,7 +58,7 @@ foreach ($requiredMarker in @(
             "MemoryStatus",
             ".start_job(&request_json)",
             "GuiJobEvent::Completed",
-            "response.to_host_response_with_solution_set_artifact",
+            "response.to_host_response()",
             "WasmCancellationToken",
             "DiagnosticReport",
             "scope_released",

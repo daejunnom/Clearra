@@ -2,10 +2,7 @@
 $script:ClearraPathPolicyRepositoryRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot "../..")
 )
-$script:ClearraAllowedRepositoryLocalFiles = [string[]]@(
-    '_local/bundle.py',
-    '_local/project_bundle.txt'
-)
+. (Join-Path $PSScriptRoot 'clearra-local-diagnostics-policy.ps1')
 if ($null -eq (Get-Variable -Name ClearraTransientBuildSlotLocks -Scope Script -ErrorAction SilentlyContinue)) {
     $script:ClearraTransientBuildSlotLocks = @{}
 }
@@ -117,34 +114,6 @@ function Resolve-ClearraArtifactPath(
         Join-Path (Get-ClearraArtifactRoot) $ArtifactPath
     }
     return (Assert-ClearraPathOutsideRepository $candidate $RepositoryRoot)
-}
-function Get-ClearraAllowedRepositoryLocalFiles {
-    return [string[]]$script:ClearraAllowedRepositoryLocalFiles.Clone()
-}
-function Assert-ClearraLocalToolDirectoryPolicy(
-    [string]$RepositoryRoot = $script:ClearraPathPolicyRepositoryRoot
-) {
-    $repository = [System.IO.Path]::GetFullPath($RepositoryRoot)
-    $localRoot = Join-Path $repository '_local'
-    if (-not (Test-Path -LiteralPath $localRoot)) {
-        return
-    }
-    if (-not (Test-Path -LiteralPath $localRoot -PathType Container)) {
-        throw "Clearra local tool path must be a directory: $localRoot"
-    }
-
-    $allowed = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
-    )
-    foreach ($relativePath in Get-ClearraAllowedRepositoryLocalFiles) {
-        [void]$allowed.Add($relativePath.Replace('\', '/'))
-    }
-    foreach ($entry in @(Get-ChildItem -LiteralPath $localRoot -Recurse -Force)) {
-        $relative = $entry.FullName.Substring($repository.Length).TrimStart('\', '/').Replace('\', '/')
-        if ($entry.PSIsContainer -or -not $allowed.Contains($relative)) {
-            throw "Unexpected repository-local artifact is forbidden: $relative"
-        }
-    }
 }
 function Assert-ClearraRepositoryArtifactPolicy(
     [string]$RepositoryRoot = $script:ClearraPathPolicyRepositoryRoot

@@ -3,11 +3,175 @@ use super::*;
 use clearra_core_domain::execution_cancellation::ExecutionCancellationToken;
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_problem::{
-    SetupCandidatePriority, SetupHoldPolicy, SetupLengthPreference, SetupLimits, SetupPathDetail,
+    compile_setup_search_conditions, SetupCandidatePriority, SetupHoldPolicy,
+    SetupLengthPreference, SetupLimits, SetupPathDetail,
 };
 use clearra_rules::profile::builtin_rules::{jstris_180, srs_x};
+#[cfg(not(target_family = "wasm"))]
+use std::sync::Arc;
 
-use super::super::{setup_coverage_graph::SetupCoverageNode, setup_partial_build::SetupShape};
+use super::super::{
+    setup_coverage_graph::{SetupCoverageGraph, SetupCoverageNode},
+    setup_graph_builder::{clear_setup_graph_cache_for_test, install_setup_graph_cache_for_test},
+    setup_partial_build::{PartialBuildGraph, SetupShape},
+};
+
+#[test]
+fn parallel_setup_defers_exact_task_metadata_until_graph_preparation_advances() {
+    let query = SetupSearchQuery::default().with_remaining_pieces(vec![
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::T,
+    ]);
+    let mut coordinator =
+        WasmSetupParallelCoordinator::new(&query, 4).expect("lazy setup coordinator");
+
+    assert!(coordinator.tasks.is_empty());
+    assert!(coordinator.pending_results.is_empty());
+    assert_eq!(coordinator.task_count(), 3);
+    assert!(matches!(
+        coordinator
+            .advance(1, 1, &ExecutionControl::default())
+            .expect("first preparation batch"),
+        WasmSetupParallelProduce::Pending
+    ));
+    assert!(
+        coordinator.tasks.is_empty(),
+        "task ranges require exact word counts and must not be guessed during construction"
+    );
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn default_setup_preparation_yields_progress_before_pattern_materialization_finishes() {
+    let query = SetupSearchQuery::default().with_tablebase_requested(false);
+    let token = ExecutionCancellationToken::new();
+    let handle = token.handle();
+    let control = ExecutionControl::new(token);
+    let mut coordinator =
+        WasmSetupParallelCoordinator::new(&query, 4).expect("lazy default setup coordinator");
+
+    let initial = coordinator.build_progress();
+    let mut observed = initial;
+    for _ in 0..8 {
+        assert!(matches!(
+            coordinator
+                .advance(1_024, 1, &control)
+                .expect("bounded preparation batch"),
+            WasmSetupParallelProduce::Pending
+        ));
+        observed = coordinator.build_progress();
+        if observed.4 > 0 && observed.5 > observed.4 {
+            break;
+        }
+    }
+
+    assert_ne!(observed, initial, "preparation progress must be observable");
+    assert!(
+        observed.4 > 0 && observed.5 > observed.4,
+        "the default multi-million-pattern expansion must remain in progress"
+    );
+    assert!(coordinator.tasks.is_empty());
+
+    handle.cancel();
+    assert!(matches!(
+        coordinator
+            .advance(1_024, 1, &control)
+            .expect("cancelled preparation batch"),
+        WasmSetupParallelProduce::Cancelled
+    ));
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn scheduled_setup_worker_matches_atomic_task_result_and_yields() {
+    let graph = SetupCoverageGraph::from_wire_parts(
+        vec![SetupCoverageNode::from_wire(0, 0, 0, 10, 1).expect("coverage node")],
+        Vec::new(),
+        0,
+    )
+    .expect("coverage graph");
+    let shapes = vec![SetupShape::new(0, 0, 0)];
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T])
+        .with_tablebase_requested(false);
+    let initialization =
+        encode_initialization(&query, &graph, &shapes).expect("worker initialization");
+    let task = SetupParallelTask {
+        task_index: 0,
+        condition_index: 0,
+        word_start: 0,
+        word_end: 1,
+    };
+    let batch = encode_tasks(&[task]);
+    let control = ExecutionControl::default();
+
+    let mut atomic = WasmSetupParallelWorker::new(&initialization).expect("atomic worker");
+    let expected = encode_results(&[atomic
+        .consume_task(task, &control)
+        .expect("atomic setup task")])
+    .expect("atomic result");
+
+    let mut scheduled = WasmSetupParallelWorker::new(&initialization).expect("scheduled worker");
+    scheduled.enqueue(&batch).expect("enqueue task");
+    let mut pending = 0;
+    let (candidate_count, actual) = loop {
+        match scheduled
+            .advance_pending(1, &control)
+            .expect("scheduled worker step")
+        {
+            WasmSetupParallelWorkerAdvance::Pending => pending += 1,
+            WasmSetupParallelWorkerAdvance::Complete {
+                candidate_count,
+                partial,
+            } => break (candidate_count, partial),
+            WasmSetupParallelWorkerAdvance::Cancelled => {
+                panic!("scheduled worker was not cancelled")
+            }
+        }
+    };
+
+    assert!(pending > 1, "one-pattern budget must yield repeatedly");
+    assert_eq!(candidate_count, 1);
+    assert_eq!(actual, expected);
+    assert!(!scheduled.has_pending_work());
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn scheduled_setup_worker_cancels_during_default_pattern_compile() {
+    let graph = SetupCoverageGraph::from_wire_parts(
+        vec![SetupCoverageNode::from_wire(0, 0, 0, 10, 1).expect("coverage node")],
+        Vec::new(),
+        0,
+    )
+    .expect("coverage graph");
+    let shapes = vec![SetupShape::new(0, 0, 0)];
+    let query = SetupSearchQuery::default().with_tablebase_requested(false);
+    let initialization =
+        encode_initialization(&query, &graph, &shapes).expect("worker initialization");
+    let batch = encode_tasks(&[SetupParallelTask {
+        task_index: 0,
+        condition_index: 0,
+        word_start: 0,
+        word_end: 1,
+    }]);
+    let token = ExecutionCancellationToken::new();
+    let handle = token.handle();
+    let control = ExecutionControl::new(token);
+    let mut worker = WasmSetupParallelWorker::new(&initialization).expect("worker");
+    worker.enqueue(&batch).expect("enqueue task");
+
+    assert!(matches!(
+        worker.advance_pending(1, &control).expect("first step"),
+        WasmSetupParallelWorkerAdvance::Pending
+    ));
+    handle.cancel();
+    assert!(matches!(
+        worker.advance_pending(1, &control).expect("cancel step"),
+        WasmSetupParallelWorkerAdvance::Cancelled
+    ));
+}
 
 #[test]
 fn large_condition_mix_leaves_multiple_tasks_per_verifier() {
@@ -107,6 +271,107 @@ fn native_multiworker_matches_serial_setup_result() {
     assert!(parallel
         .usize_field("workers_used")
         .is_some_and(|workers| workers > 1));
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn native_two_worker_cached_path_detail_matches_single_worker_result() {
+    fn run_serial(
+        query: &SetupSearchQuery,
+        control: &ExecutionControl,
+    ) -> crate::CoreExecutionResult {
+        let mut session =
+            super::super::WasmSetupSearchSession::new(query).expect("single-worker setup session");
+        loop {
+            match session
+                .advance(8_192, control)
+                .expect("single-worker setup advance")
+            {
+                super::super::WasmSetupSearchAdvance::Pending => {}
+                super::super::WasmSetupSearchAdvance::Completed(result) => return result,
+                super::super::WasmSetupSearchAdvance::Cancelled => {
+                    panic!("single-worker setup was not cancelled")
+                }
+            }
+        }
+    }
+
+    clear_setup_graph_cache_for_test();
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::I, PieceKind::O, PieceKind::T])
+        .with_hold_policy(SetupHoldPolicy::Disabled)
+        .with_tablebase_requested(false);
+    let condition = compile_setup_search_conditions(&query)
+        .expect("cached setup condition")
+        .into_iter()
+        .next()
+        .expect("one cached setup condition");
+    let detail = SetupPathDetail::new(1, 0, 1, condition.condition_id())
+        .expect("synthetic cached path detail");
+    let graph = Arc::new(PartialBuildGraph::cached_path_detail_fixture(&detail));
+    let coverage_graph =
+        Arc::new(SetupCoverageGraph::compile(&graph).expect("synthetic cached coverage graph"));
+    let candidate = SetupCandidateReport::new(
+        detail.setup_id(),
+        detail.board_mask(),
+        0,
+        0,
+        1,
+        1,
+        "1.0".to_owned(),
+        "1.0".to_owned(),
+        "1.0".to_owned(),
+        Vec::new(),
+    );
+    install_setup_graph_cache_for_test(
+        &query,
+        graph,
+        coverage_graph,
+        vec![CompletedSetupCoverage {
+            report: SetupHoldConditionReport::new(
+                condition.condition_id().to_owned(),
+                condition.initial_hold(),
+                condition.pattern_expression().to_owned(),
+                1,
+                1,
+                false,
+                true,
+                vec![candidate],
+            ),
+            candidate_boards: vec![detail.board_mask()],
+            observation_workers_used: 1,
+        }],
+    );
+    let control = ExecutionControl::new(ExecutionCancellationToken::new());
+    let detail_query = query.with_path_detail(detail);
+
+    let single_worker = run_serial(&detail_query, &control);
+    let two_workers = execute_setup_parallel_native(&detail_query, 2, &control)
+        .expect("two-worker cached setup detail");
+
+    for field in [
+        "normalized_solution_set_hash",
+        "parallel",
+        "parallel_decision_reason",
+        "workers_used",
+    ] {
+        assert_eq!(
+            single_worker.field(field),
+            two_workers.field(field),
+            "{field}"
+        );
+    }
+    assert_eq!(
+        single_worker
+            .setup_finder_report()
+            .expect("single-worker detail report")
+            .hold_conditions(),
+        two_workers
+            .setup_finder_report()
+            .expect("two-worker detail report")
+            .hold_conditions()
+    );
+    clear_setup_graph_cache_for_test();
 }
 
 #[test]
@@ -231,7 +496,7 @@ fn completed_condition_keeps_more_than_the_legacy_result_page() {
             witness_pattern_id: 0,
         })
         .collect();
-    let mut merge = SetupConditionMerge::new(SHAPE_COUNT, 1).expect("condition merge");
+    let mut merge = SetupConditionMerge::new(SHAPE_COUNT, 1, 1).expect("condition merge");
     merge
         .absorb(
             SetupParallelTaskResult {
@@ -262,11 +527,30 @@ fn completed_condition_keeps_more_than_the_legacy_result_page() {
     assert_eq!(completed.candidate_boards.len(), SHAPE_COUNT);
 }
 
+#[test]
+fn zero_word_condition_finishes_as_complete_empty_result() {
+    let completed = SetupConditionMerge::new(0, 0, 37)
+        .expect("zero-task condition merge")
+        .finish(
+            &[],
+            SetupCandidatePriority::All,
+            SetupLengthPreference::Auto,
+            None,
+            &ExecutionControl::default(),
+        )
+        .expect("zero-task condition completion");
+
+    assert_eq!(completed.global_pattern_count, 37);
+    assert_eq!(completed.candidate_count, 0);
+    assert!(completed.candidate_boards.is_empty());
+    assert!(completed.selected_shapes.is_empty());
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn completed_condition_honors_cancellation_during_finalize() {
     let shapes = vec![SetupShape::new(1, 0, 0)];
-    let mut merge = SetupConditionMerge::new(1, 1).expect("condition merge");
+    let mut merge = SetupConditionMerge::new(1, 1, 1).expect("condition merge");
     merge
         .absorb(
             SetupParallelTaskResult {
@@ -318,7 +602,7 @@ fn completed_condition_uses_shape_index_to_break_equal_board_ties() {
         max_covered_locks: 1,
         witness_pattern_id: 0,
     };
-    let mut merge = SetupConditionMerge::new(2, 1).expect("condition merge");
+    let mut merge = SetupConditionMerge::new(2, 1, 1).expect("condition merge");
     merge
         .absorb(
             SetupParallelTaskResult {

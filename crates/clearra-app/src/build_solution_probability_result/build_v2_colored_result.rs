@@ -13,7 +13,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
 use clearra_core_executor::CoreExecutionResult;
 use clearra_coverage::{
-    cover::{exact_minimum_cover, ExactMinimumCoverError},
+    cover::ExactMinimumCoverError,
     pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId},
 };
 use clearra_problem::BuildProbabilityQuery;
@@ -266,6 +266,8 @@ pub(crate) struct BuildColoredTargetFamilyV1Result {
 }
 
 impl BuildColoredTargetFamilyV1Result {
+    // Retained for product adapters that audit the validator-minted authority.
+    #[allow(dead_code)]
     pub(crate) const fn authority(&self) -> &ValidatedBuildTargetSearchResultAuthority {
         &self.authority
     }
@@ -334,6 +336,8 @@ impl BuildColoredTargetProbabilityV1Result {
         "build-setup-cover-probability.v1"
     }
 
+    // Retained for product adapters that audit the validator-minted authority.
+    #[allow(dead_code)]
     pub(crate) const fn authority(&self) -> &ValidatedBuildTargetSearchResultAuthority {
         &self.authority
     }
@@ -393,6 +397,8 @@ pub(crate) struct BuildColoredTargetPortfolioV1Result {
 }
 
 impl BuildColoredTargetPortfolioV1Result {
+    // Retained for product adapters that audit the validator-minted authority.
+    #[allow(dead_code)]
     pub(crate) const fn authority(&self) -> &ValidatedBuildTargetSearchResultAuthority {
         &self.authority
     }
@@ -472,6 +478,8 @@ impl BuildColoredTargetScoreV1Result {
         "build-setup-cover-score.v1"
     }
 
+    // Retained for product adapters that audit the validator-minted authority.
+    #[allow(dead_code)]
     pub(crate) const fn authority(&self) -> &ValidatedBuildTargetSearchResultAuthority {
         &self.authority
     }
@@ -536,7 +544,11 @@ pub(crate) enum BuildColoredTargetResultError {
     Replay(BuildSuppliedEvaluationResultError),
     ScoreEvidenceInvalid(&'static str),
     PatternUniverseInvalid,
+    // Reserved to distinguish incomplete producer evidence from malformed evidence.
+    #[allow(dead_code)]
     IncompleteEvidence,
+    // Preserves the exact-cover failure category at this product boundary.
+    #[allow(dead_code)]
     MinimumCover(ExactMinimumCoverError),
     Portfolio(PortfolioAlternativeError),
 }
@@ -647,16 +659,6 @@ pub(crate) fn validate_build_colored_portfolio_v1_result(
     validate_target_binding(&authority, query, target)?;
     let replay = validate_build_colored_replay(query, target, result)
         .map_err(BuildColoredTargetResultError::Replay)?;
-    let selection = exact_minimum_cover(&replay.required, &replay.rows)
-        .map_err(BuildColoredTargetResultError::MinimumCover)?;
-    if !selection.complete() || selection.covered_patterns() != &replay.required {
-        return Err(BuildColoredTargetResultError::IncompleteEvidence);
-    }
-    let canonical_candidate_keys = selection
-        .row_indices()
-        .iter()
-        .map(|index| target.candidate_keys()[*index].clone())
-        .collect::<Vec<_>>();
     let identity = portfolio_identity(
         authority.contract(),
         objective,
@@ -666,15 +668,17 @@ pub(crate) fn validate_build_colored_portfolio_v1_result(
         "coverage-or-union",
     )?;
     let alternatives = Arc::new(
-        CoveragePortfolioAlternativeSet::new(
+        CoveragePortfolioAlternativeSet::new_canonical(
             identity,
             target.candidate_keys().to_vec(),
             replay.required.clone(),
             replay.rows.clone(),
-            &canonical_candidate_keys,
         )
         .map_err(BuildColoredTargetResultError::Portfolio)?,
     );
+    let canonical_candidate_keys = alternatives
+        .canonical_candidate_keys_owned()
+        .map_err(BuildColoredTargetResultError::Portfolio)?;
     Ok(BuildColoredTargetPortfolioV1Result {
         authority,
         contract_id,
@@ -760,16 +764,6 @@ pub(crate) fn validate_build_colored_score_v1_result(
             "winner_union_does_not_cover_replay",
         ));
     }
-    let selection = exact_minimum_cover(&score_required, &score_rows)
-        .map_err(BuildColoredTargetResultError::MinimumCover)?;
-    if !selection.complete() || selection.covered_patterns() != &score_required {
-        return Err(BuildColoredTargetResultError::IncompleteEvidence);
-    }
-    let canonical_candidate_keys = selection
-        .row_indices()
-        .iter()
-        .map(|index| target.candidate_keys()[*index].clone())
-        .collect::<Vec<_>>();
     let identity = portfolio_identity(
         authority.contract(),
         BuildObjective::MaxScoreCover,
@@ -781,15 +775,17 @@ pub(crate) fn validate_build_colored_score_v1_result(
         ),
     )?;
     let alternatives = Arc::new(
-        CoveragePortfolioAlternativeSet::new(
+        CoveragePortfolioAlternativeSet::new_canonical(
             identity,
             target.candidate_keys().to_vec(),
             score_required,
             score_rows,
-            &canonical_candidate_keys,
         )
         .map_err(BuildColoredTargetResultError::Portfolio)?,
     );
+    let canonical_candidate_keys = alternatives
+        .canonical_candidate_keys_owned()
+        .map_err(BuildColoredTargetResultError::Portfolio)?;
     Ok(BuildColoredTargetScoreV1Result {
         authority,
         input_identity_sha256: target.input_identity_sha256().to_owned(),

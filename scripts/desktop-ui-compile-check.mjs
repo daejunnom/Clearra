@@ -36,8 +36,11 @@ const svelteSources = [
   'packages/clearra-ui/src/lib/workspace/ForwardSearchWorkspace.svelte',
   'packages/clearra-ui/src/lib/workspace/ForwardSearchControls.svelte',
   'packages/clearra-ui/src/lib/workspace/ForwardSearchResult.svelte',
+  'packages/clearra-ui/src/lib/workspace/ProductResultPager.svelte',
+  'packages/clearra-ui/src/lib/workspace/PcPathReplayGif.svelte',
   'packages/clearra-ui/src/lib/workspace/ResultWorkspace.svelte',
   'packages/clearra-ui/src/lib/workspace/ResultWorkspaceFrame.svelte',
+  'packages/clearra-ui/src/lib/workspace/SolutionSubsetPage.svelte',
   'packages/clearra-ui/src/lib/workspace/WorkspaceProgressStatus.svelte'
 ];
 const typescriptSources = [
@@ -60,6 +63,8 @@ const typescriptSources = [
   'packages/clearra-ui/src/lib/workspace/documentPaste.ts',
   'packages/clearra-ui/src/lib/workspace/buildProbabilityModel.ts',
   'packages/clearra-ui/src/lib/workspace/forwardSearchModel.ts',
+  'packages/clearra-ui/src/lib/workspace/pcPathReplayGif.ts',
+  'packages/clearra-ui/src/lib/workspace/pcPathReplayPresentation.ts',
   'packages/clearra-ui/src/lib/workspace/solverWorkspaceModel.ts',
   'packages/clearra-ui/src/lib/workspace/workspaceRuntime.ts'
 ];

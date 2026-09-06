@@ -26,6 +26,24 @@ export type ClearraWasmModule = {
   distributed_progress: () => ClearraDistributedCoreProgress;
   distributed_merge_partial: (partial: ArrayBuffer) => void;
   distributed_finish: (jobId: number, workersUsed: number) => string;
+  distributed_finish_start?: (jobId: number, workersUsed: number) => string | null;
+  distributed_finish_advance?: (jobId: number, maximumWork: number) => string | null;
+  distributed_finish_parallel_prepare?: (jobId: number, targetPartitions: number) => ArrayBuffer | null;
+  distributed_finish_parallel_configure?: (jobId: number, hostCompute: number, hostMemory: bigint) => void;
+  distributed_finish_parallel_admit?: (jobId: number, remoteCount: number, controlOnly: boolean, hostCompute: number, hostMemory: bigint) => boolean;
+  distributed_finish_parallel_guarded_query?: (jobId: number) => ArrayBuffer;
+  distributed_finish_parallel_task?: (jobId: number) => ArrayBuffer | null;
+  distributed_finish_parallel_merge?: (jobId: number, receipt: ArrayBuffer) => void;
+  distributed_finish_parallel_found?: (jobId: number) => boolean;
+  distributed_finish_parallel_local_start?: (jobId: number) => boolean;
+  distributed_finish_parallel_local_advance?: (jobId: number, maximumWork: number) => boolean;
+  distributed_finish_parallel_assist?: (jobId: number, maximumChildren: number) => boolean;
+  distributed_finish_parallel_last_task_key?: (jobId: number) => ArrayBuffer;
+  distributed_finish_parallel_redundant?: (jobId: number, key: ArrayBuffer) => boolean;
+  distributed_finish_parallel_worker_init?: (query: ArrayBuffer) => void;
+  distributed_finish_parallel_worker_start?: (task: ArrayBuffer) => void;
+  distributed_finish_parallel_worker_advance?: (maximumWork: number) => ArrayBuffer | null;
+  distributed_finish_parallel_worker_cancel?: () => ArrayBuffer;
   tiling_solution_count: () => number;
   tiling_solution_page: (offset: number, limit: number) => string[];
   tiling_solution_release: () => void;
@@ -33,7 +51,8 @@ export type ClearraWasmModule = {
   product_page_next: (maximumWorkSteps: number) => ClearraProductPageWorkerPayload;
   product_page_get: (
     alternativeIndex: string,
-    memberPageNumber: string
+    memberPageNumber: string,
+    maximumWorkSteps: number
   ) => ClearraProductPageWorkerPayload;
   product_page_release: () => void;
   distributed_cancel: () => void;
@@ -65,7 +84,7 @@ export type ClearraWasmFailureDiagnostics = {
 };
 
 export type ClearraDistributedPlan = {
-  mode: 'serial' | 'cpu-multi' | 'gpu-multi';
+  mode: 'serial' | 'cpu-multi' | 'gpu-multi' | 'ready';
   workerCount: number;
   requestedBackend: 'auto' | 'cpu' | 'gpu' | 'hybrid';
   selectedBackend: 'wasm-cpu' | 'webgpu';
@@ -139,6 +158,7 @@ export type ClearraWasmHostCapabilities = {
   webGpuAvailable: boolean;
   crossOriginIsolated: boolean;
   transferByteCap: number;
+  productRetentionByteCap?: number;
 };
 
 let wasmModulePromise: Promise<ClearraWasmModule> | null = null;
@@ -146,7 +166,8 @@ const CONSERVATIVE_HOST_CAPABILITIES: ClearraWasmHostCapabilities = Object.freez
   logicalProcessorCount: 1,
   webGpuAvailable: false,
   crossOriginIsolated: false,
-  transferByteCap: 32 * 1024 * 1024
+  transferByteCap: 32 * 1024 * 1024,
+  productRetentionByteCap: 64 * 1024 * 1024
 });
 const ARTIFACT_NETWORK_TIMEOUT_MS = 30_000;
 const ARTIFACT_MODULE_TIMEOUT_MS = 60_000;
@@ -159,6 +180,7 @@ type ClearraRawWasmExports = {
     logicalProcessorCount: number,
     capabilityFlags: number
   ) => number;
+  clearra_wasm_configure_product_retention: (maximumBytes: number) => number;
   clearra_wasm_input_resize: (byteLen: number) => number;
   clearra_wasm_input_ptr: () => number;
   clearra_wasm_product_page_request_resize: (byteLen: number) => number;
@@ -206,6 +228,25 @@ type ClearraRawWasmExports = {
   clearra_wasm_distributed_progress_layer_total_exact: () => number;
   clearra_wasm_distributed_merge_partial: () => number;
   clearra_wasm_distributed_finish: (jobId: number, workersUsed: number) => number;
+  clearra_wasm_distributed_finish_start: (jobId: number, workersUsed: number) => number;
+  clearra_wasm_distributed_finish_advance: (jobId: number, maximumWork: number) => number;
+  clearra_wasm_distributed_finish_parallel_prepare?: (jobId: number, targetPartitions: number) => number;
+  clearra_wasm_distributed_finish_parallel_guard_version?: () => number;
+  clearra_wasm_distributed_finish_parallel_configure?: (jobId: number, hostCompute: number, memoryLow: number, memoryHigh: number) => number;
+  clearra_wasm_distributed_finish_parallel_admit?: (jobId: number, remoteCount: number, controlOnly: number, hostCompute: number, memoryLow: number, memoryHigh: number) => number;
+  clearra_wasm_distributed_finish_parallel_guarded_query?: (jobId: number) => number;
+  clearra_wasm_distributed_finish_parallel_task?: (jobId: number) => number;
+  clearra_wasm_distributed_finish_parallel_merge?: (jobId: number) => number;
+  clearra_wasm_distributed_finish_parallel_found?: (jobId: number) => number;
+  clearra_wasm_distributed_finish_parallel_local_start?: (jobId: number) => number;
+  clearra_wasm_distributed_finish_parallel_local_advance?: (jobId: number, maximumWork: number) => number;
+  clearra_wasm_distributed_finish_parallel_assist?: (jobId: number, maximumChildren: number) => number;
+  clearra_wasm_distributed_finish_parallel_last_task_key?: (jobId: number) => number;
+  clearra_wasm_distributed_finish_parallel_redundant?: (jobId: number) => number;
+  clearra_wasm_distributed_finish_parallel_worker_init?: () => number;
+  clearra_wasm_distributed_finish_parallel_worker_start?: () => number;
+  clearra_wasm_distributed_finish_parallel_worker_advance?: (maximumWork: number) => number;
+  clearra_wasm_distributed_finish_parallel_worker_cancel?: () => number;
   clearra_wasm_tiling_solution_count: () => number;
   clearra_wasm_tiling_solution_count_available: () => number;
   clearra_wasm_tiling_solution_count_exact: () => number;
@@ -922,8 +963,12 @@ function wrapRawModule(
     const ptr = raw.clearra_wasm_transfer_ptr() >>> 0;
     new Uint8Array(raw.memory.buffer, ptr, input.byteLength).set(new Uint8Array(input));
   };
-  const setProductPageRequest = (alternativeIndex: string, memberPageNumber: string) => {
-    const request = `portfolio-page-request.v1\n${alternativeIndex}\n${memberPageNumber}`;
+  const setProductPageRequest = (
+    alternativeIndex: string,
+    memberPageNumber: string,
+    maximumWorkSteps: number
+  ) => {
+    const request = `portfolio-page-request.v2\n${alternativeIndex}\n${memberPageNumber}\n${Math.max(1, maximumWorkSteps) >>> 0}`;
     const bytes = encoder.encode(request);
     requireOk(raw.clearra_wasm_product_page_request_resize(bytes.byteLength));
     const ptr = raw.clearra_wasm_input_ptr() >>> 0;
@@ -936,9 +981,13 @@ function wrapRawModule(
       return compiledModule;
     },
     failure_diagnostics() {
+      // Evidence extraction must not replace the original trap with a second
+      // exception when the panic buffer itself is corrupt or too large.
+      let rustPanic: string | null = null;
+      try { rustPanic = lastPanic(); } catch { /* best-effort diagnostics */ }
       return {
         linearMemoryBytes: raw.memory.buffer.byteLength,
-        rustPanic: lastPanic()
+        rustPanic
       };
     },
     configure_host(capabilities) {
@@ -951,6 +1000,12 @@ function wrapRawModule(
           flags
         )
       );
+      const productRetentionByteCap = capabilities.productRetentionByteCap ?? 64 * 1024 * 1024;
+      if (!Number.isSafeInteger(productRetentionByteCap) || productRetentionByteCap < 1 ||
+          productRetentionByteCap > 1024 * 1024 * 1024) {
+        throw new Error('invalid host product-retention budget');
+      }
+      requireOk(raw.clearra_wasm_configure_product_retention(productRetentionByteCap));
       hostTransferByteCap = capabilities.transferByteCap;
     },
     install_tablebase(artifact) {
@@ -1010,21 +1065,26 @@ function wrapRawModule(
       setCommand(commandText);
       const mode = raw.clearra_wasm_distributed_prepare();
       requireOk(mode);
-      const labels = ['serial', 'cpu-multi', 'gpu-multi'] as const;
+      const labels = ['serial', 'cpu-multi', 'gpu-multi', 'ready'] as const;
       const requestedLabels = ['auto', 'cpu', 'gpu', 'hybrid'] as const;
       const fallbackReasonCode = raw.clearra_wasm_distributed_preparation_fallback_reason();
       const fallbackReasonLabels = {
         1: 'gpu_kernel_unavailable',
         2: 'gpu_device_not_found'
       } as const;
-      const selectedMode = labels[mode] ?? 'serial';
+      const selectedMode = labels[mode];
+      if (!selectedMode) throw new Error(`invalid Clearra WASM distributed mode: ${mode}`);
       requireExactCount(
         raw.clearra_wasm_distributed_worker_count_available(),
         raw.clearra_wasm_distributed_worker_count_exact(),
         'distributed worker count'
       );
-      requireOk(raw.clearra_wasm_distributed_worker_initialization());
-      const initialization = outputBytes();
+      let initialization: ArrayBuffer | null = null;
+      if (selectedMode !== 'ready') {
+        requireOk(raw.clearra_wasm_distributed_worker_initialization());
+        const output = outputBytes();
+        initialization = output.byteLength === 0 ? null : output;
+      }
       return {
         mode: selectedMode,
         workerCount: Math.max(1, raw.clearra_wasm_distributed_worker_count()),
@@ -1034,10 +1094,12 @@ function wrapRawModule(
         fallbackUsed: fallbackReasonCode !== 0,
         fallbackReason:
           fallbackReasonLabels[fallbackReasonCode as keyof typeof fallbackReasonLabels] ?? null,
-        workerInitialization: initialization.byteLength === 0 ? null : initialization,
+        workerInitialization: initialization,
         deferredInitialization:
+          selectedMode !== 'ready' &&
           raw.clearra_wasm_distributed_worker_initialization_deferred() !== 0,
         verificationRequired:
+          selectedMode !== 'ready' &&
           raw.clearra_wasm_distributed_verification_required() !== 0,
         tilingGeometryParallel:
           raw.clearra_wasm_distributed_tiling_geometry_parallel() !== 0
@@ -1146,6 +1208,143 @@ function wrapRawModule(
         expectedRuntimeIdentity
       );
     },
+    distributed_finish_start(jobId, workersUsed) {
+      const status = raw.clearra_wasm_distributed_finish_start(jobId, workersUsed);
+      requireOk(status);
+      if (status === 1) return null;
+      if (status !== 0) throw new Error(`invalid distributed finish status: ${status}`);
+      return assertClearraWasmTerminalResponseIdentities(outputText(), expectedRuntimeIdentity);
+    },
+    distributed_finish_advance(jobId, maximumWork) {
+      const status = raw.clearra_wasm_distributed_finish_advance(jobId, maximumWork);
+      requireOk(status);
+      if (status === 1) return null;
+      if (status !== 0) throw new Error(`invalid distributed finish status: ${status}`);
+      return assertClearraWasmTerminalResponseIdentities(outputText(), expectedRuntimeIdentity);
+    },
+    ...(typeof raw.clearra_wasm_distributed_finish_parallel_prepare === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_task === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_merge === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_found === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_worker_init === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_worker_start === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_worker_advance === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_worker_cancel === 'function' ? {
+      distributed_finish_parallel_prepare(jobId: number, targetPartitions: number) {
+        const status = raw.clearra_wasm_distributed_finish_parallel_prepare!(jobId, targetPartitions);
+        requireOk(status);
+        if (status === 0) return null;
+        if (status !== 1) throw new Error('invalid exact query status');
+        return outputBytes();
+      },
+      distributed_finish_parallel_task(jobId: number) {
+        const status = raw.clearra_wasm_distributed_finish_parallel_task!(jobId);
+        requireOk(status);
+        if (status === 0) return null;
+        if (status !== 1) throw new Error('invalid exact task status');
+        return outputBytes();
+      },
+      distributed_finish_parallel_merge(jobId: number, receipt: ArrayBuffer) {
+        setTransfer(receipt);
+        requireOk(raw.clearra_wasm_distributed_finish_parallel_merge!(jobId));
+      },
+      distributed_finish_parallel_found(jobId: number) {
+        const status = raw.clearra_wasm_distributed_finish_parallel_found!(jobId);
+        requireOk(status);
+        if (status !== 0 && status !== 1) throw new Error('invalid exact witness status');
+        return status === 1;
+      },
+      distributed_finish_parallel_worker_init(query: ArrayBuffer) {
+        setTransfer(query);
+        requireOk(raw.clearra_wasm_distributed_finish_parallel_worker_init!());
+      },
+      distributed_finish_parallel_worker_start(task: ArrayBuffer) {
+        setTransfer(task);
+        requireOk(raw.clearra_wasm_distributed_finish_parallel_worker_start!());
+      },
+      distributed_finish_parallel_worker_advance(maximumWork: number) {
+        const status = raw.clearra_wasm_distributed_finish_parallel_worker_advance!(maximumWork);
+        requireOk(status);
+        if (status === 1) return null;
+        if (status !== 0) throw new Error('invalid exact worker status');
+        return outputBytes();
+      },
+      distributed_finish_parallel_worker_cancel() {
+        requireOk(raw.clearra_wasm_distributed_finish_parallel_worker_cancel!());
+        return outputBytes();
+      }
+    } : {}),
+    ...(typeof raw.clearra_wasm_distributed_finish_parallel_guard_version === 'function' &&
+      raw.clearra_wasm_distributed_finish_parallel_guard_version() === 1 &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_configure === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_admit === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_guarded_query === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_worker_init === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_worker_start === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_worker_advance === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_worker_cancel === 'function' ? {
+      distributed_finish_parallel_configure(jobId: number, hostCompute: number, hostMemory: bigint) {
+        if (!Number.isSafeInteger(hostCompute) || hostCompute < 1 || hostCompute > 0xffff_ffff ||
+          hostMemory < 1n || hostMemory > 0xffff_ffff_ffff_ffffn) throw new Error('invalid minimum host admission grant');
+        const status = raw.clearra_wasm_distributed_finish_parallel_configure!(jobId, hostCompute,
+          Number(hostMemory & 0xffff_ffffn), Number(hostMemory >> 32n));
+        requireOk(status);
+        if (status !== 1) throw new Error('minimum host admission was not configured');
+      },
+      distributed_finish_parallel_admit(jobId: number, remoteCount: number, controlOnly: boolean, hostCompute: number, hostMemory: bigint) {
+        if (!Number.isSafeInteger(remoteCount) || remoteCount < 1 || remoteCount > 0xffff_ffff ||
+          !Number.isSafeInteger(hostCompute) || hostCompute < 1 || hostCompute > 0xffff_ffff ||
+          hostMemory < 1n || hostMemory > 0xffff_ffff_ffff_ffffn) throw new Error('invalid minimum topology admission');
+        const status = raw.clearra_wasm_distributed_finish_parallel_admit!(jobId, remoteCount, Number(controlOnly), hostCompute,
+          Number(hostMemory & 0xffff_ffffn), Number(hostMemory >> 32n));
+        requireOk(status);
+        if (status !== 0 && status !== 1) throw new Error('invalid minimum topology admission status');
+        return status === 1;
+      },
+      distributed_finish_parallel_guarded_query(jobId: number) {
+        requireOk(raw.clearra_wasm_distributed_finish_parallel_guarded_query!(jobId));
+        return outputBytes();
+      }
+    } : {}),
+    ...(typeof raw.clearra_wasm_distributed_finish_parallel_local_start === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_local_advance === 'function' ? {
+      distributed_finish_parallel_local_start(jobId: number) {
+        const status = raw.clearra_wasm_distributed_finish_parallel_local_start!(jobId);
+        requireOk(status);
+        if (status !== 0 && status !== 1) throw new Error('invalid coordinator exact start status');
+        return status === 1;
+      },
+      distributed_finish_parallel_local_advance(jobId: number, maximumWork: number) {
+        const status = raw.clearra_wasm_distributed_finish_parallel_local_advance!(jobId, maximumWork);
+        requireOk(status);
+        if (status !== 0 && status !== 1) throw new Error('invalid coordinator exact advance status');
+        return status === 1;
+      }
+    } : {}),
+    ...(typeof raw.clearra_wasm_distributed_finish_parallel_assist === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_last_task_key === 'function' &&
+      typeof raw.clearra_wasm_distributed_finish_parallel_redundant === 'function' ? {
+      distributed_finish_parallel_assist(jobId: number, maximumChildren: number) {
+        const status = raw.clearra_wasm_distributed_finish_parallel_assist!(jobId, maximumChildren);
+        requireOk(status);
+        if (status !== 0 && status !== 1) throw new Error('invalid exact assistance status');
+        return status === 1;
+      },
+      distributed_finish_parallel_last_task_key(jobId: number) {
+        requireOk(raw.clearra_wasm_distributed_finish_parallel_last_task_key!(jobId));
+        const key = outputBytes();
+        if (key.byteLength !== 56) throw new Error('invalid exact task routing identity');
+        return key;
+      },
+      distributed_finish_parallel_redundant(jobId: number, key: ArrayBuffer) {
+        if (key.byteLength !== 56) throw new Error('invalid exact task routing identity');
+        setTransfer(key);
+        const status = raw.clearra_wasm_distributed_finish_parallel_redundant!(jobId);
+        requireOk(status);
+        if (status !== 0 && status !== 1) throw new Error('invalid exact redundancy status');
+        return status === 1;
+      }
+    } : {}),
     tiling_solution_count() {
       requireExactCount(
         raw.clearra_wasm_tiling_solution_count_available(),
@@ -1168,10 +1367,11 @@ function wrapRawModule(
       requireOk(raw.clearra_wasm_product_page_next(Math.max(1, maximumWorkSteps) >>> 0));
       return JSON.parse(outputText()) as ClearraProductPageWorkerPayload;
     },
-    product_page_get(alternativeIndex, memberPageNumber) {
+    product_page_get(alternativeIndex, memberPageNumber, maximumWorkSteps) {
       setProductPageRequest(
         requireProductPageDecimal(alternativeIndex, 'alternative index'),
-        requireProductPageDecimal(memberPageNumber, 'member page number')
+        requireProductPageDecimal(memberPageNumber, 'member page number'),
+        maximumWorkSteps
       );
       requireOk(raw.clearra_wasm_product_page_get_exact());
       return JSON.parse(outputText()) as ClearraProductPageWorkerPayload;

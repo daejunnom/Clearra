@@ -57,6 +57,49 @@ fn opening_v2_token_preserves_rule_objective_and_profile_contract() {
 }
 
 #[test]
+fn opening_v2_token_preserves_count_policy_independently_of_objective() {
+    let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
+        .with_objective(ObjectivePolicy::minimum_cover())
+        .with_count_policy(PcCountPolicy::CountUnique);
+
+    let token = PcContinuationTokenCodec::encode_opening_continuation(
+        &query,
+        None,
+        &[PieceKind::I, PieceKind::O],
+    );
+    let PcContinuationToken::Opening(decoded) =
+        PcContinuationTokenCodec::parse(&token).expect("pc2 token")
+    else {
+        panic!("opening token");
+    };
+
+    assert!(token.ends_with(":ccount-unique"));
+    assert_eq!(decoded.objective().kind(), ObjectiveKind::MinimumCover);
+    assert_eq!(decoded.count_policy(), PcCountPolicy::CountUnique);
+}
+
+#[test]
+fn opening_v2_tokens_without_count_policy_keep_legacy_objective_derivation() {
+    let PcContinuationToken::Opening(unique) = PcContinuationTokenCodec::parse(
+        "pc2:l2:bdstandard-10:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:ounique:e1:hnone:qI",
+    )
+    .expect("legacy unique token")
+    else {
+        panic!("opening token");
+    };
+    let PcContinuationToken::Opening(minimum_cover) = PcContinuationTokenCodec::parse(
+        "pc2:l2:bdstandard-10:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:omin-cover:e1:hnone:qI",
+    )
+    .expect("legacy minimum-cover token")
+    else {
+        panic!("opening token");
+    };
+
+    assert_eq!(unique.count_policy(), PcCountPolicy::CountUnique);
+    assert_eq!(minimum_cover.count_policy(), PcCountPolicy::CountAll);
+}
+
+#[test]
 fn scenario_v2_token_preserves_full_query_contract() {
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(2, 0x3f0),

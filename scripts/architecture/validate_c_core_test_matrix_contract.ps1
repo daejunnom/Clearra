@@ -106,6 +106,17 @@ foreach ($requiredMarker in @(
             Add-ArchitectureError "scripts/run-c-core-tests.ps1 must expose T1 runner marker '$requiredMarker'"
         }
     }
+$wslCoreTests = Read-Text "scripts/tools/wsl-core-c-tests.sh"
+foreach ($requiredMarker in @(
+            "read_cmake_set CLEARRA_CORE_TEST_ORACLE_SOURCES",
+            '"${TEST_ORACLE_SOURCES[@]}"',
+            '"${oracle_objects[@]}"',
+            '"$CORE_ROOT/tools/geometry_benchmark.c"'
+        )) {
+        if (-not $wslCoreTests.Contains($requiredMarker)) {
+            Add-ArchitectureError "WSL C aggregate runner must preserve CMake-equivalent oracle/tool source marker '$requiredMarker'"
+        }
+    }
 $clearraRunner = Read-Text "scripts/clearra.ps1"
 foreach ($requiredMarker in @(
             "COnly",

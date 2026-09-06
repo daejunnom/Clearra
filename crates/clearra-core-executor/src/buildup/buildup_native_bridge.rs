@@ -253,6 +253,8 @@ fn compile_pattern_group_indices(
     Ok(indices)
 }
 
+// Native bridge inputs mirror the FFI execution contract and caller-owned workspaces.
+#[allow(clippy::too_many_arguments)]
 fn execute_candidates(
     problem: &SearchProblem,
     packing: &PackingRunResult,
@@ -361,7 +363,9 @@ fn execute_candidates(
                     });
                     let chunk_len = chunk_end - chunk_begin;
                     let progress = completed.fetch_add(chunk_len, Ordering::Relaxed) + chunk_len;
-                    if progress % SERIAL_PROGRESS_CHUNK_SIZE == 0 || progress == candidate_count {
+                    if progress.is_multiple_of(SERIAL_PROGRESS_CHUNK_SIZE)
+                        || progress == candidate_count
+                    {
                         control.report_progress(
                             "buildup",
                             progress as u64,
@@ -459,6 +463,8 @@ fn push_candidate_execution(
     }
 }
 
+// Native bridge inputs mirror the per-candidate FFI contract.
+#[allow(clippy::too_many_arguments)]
 fn execute_candidate(
     problem: &SearchProblem,
     packing: &PackingRunResult,

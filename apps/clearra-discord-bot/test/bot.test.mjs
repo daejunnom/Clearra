@@ -1764,12 +1764,13 @@ test("Discord sequence dependencies executes the exact argv and returns only the
     "--format", "json",
   ]]);
   assert.equal(edits.length, 1);
-  for (const expected of [
-    "candidate-000000", "Exact accepted orders: 1", "Canonical representative order: 0",
-  ]) {
+  for (const expected of ["Operations: 1", "Exact accepted orders: 1"]) {
     assert.match(edits[0], new RegExp(expected));
   }
-  assert.doesNotMatch(edits[0], /must-not-enter-small-discord-report|reachability_evidence/);
+  assert.doesNotMatch(
+    edits[0],
+    /candidate-000000|Canonical representative order|must-not-enter-small-discord-report|reachability_evidence/,
+  );
   assert.doesNotMatch(edits[0], /CTK3 pages/);
 });
 
@@ -1838,16 +1839,15 @@ test("Discord sequence executes the exact trace argv and returns only the bounde
   for (const expected of [
     "Operations: 1",
     "Cleared lines: 0",
-    "Canonical trace key: 4a910fab1f82e125",
     "Rule profile: srs-x",
     "Kick profile: no-kick",
-    "Canonical trace preview:",
   ]) {
     assert.match(edits[0], new RegExp(expected));
   }
-  assert.match(edits[0], /…/u);
-  assert.doesNotMatch(edits[0], new RegExp(traceTail));
-  assert.doesNotMatch(edits[0], /must-not-enter-small-discord-report|replay_evidence/);
+  assert.doesNotMatch(
+    edits[0],
+    new RegExp(`4a910fab1f82e125|Canonical trace|${traceTail}|must-not-enter-small-discord-report|replay_evidence`),
+  );
   assert.doesNotMatch(edits[0], /CTK3 pages/);
   assert.ok(edits[0].length < 600, `bounded sequence report grew to ${edits[0].length} chars`);
 });
@@ -2325,7 +2325,15 @@ test("Korean canonical and compatibility Build routes use the proven cover resul
             stderr: "",
             stdout: JSON.stringify({
               kind: "build-probability",
-              summary: { coverage_probability: 0.5 },
+              summary: {
+                coverage_probability: 0.5,
+                failed_coverage_probability: 0.5,
+                covered_pattern_count: 3,
+                failed_pattern_count: 1,
+                materialized_pattern_count: 4,
+                materialized_probability_mass: 1,
+                probability_complete: true,
+              },
             }),
           };
         },
@@ -2353,6 +2361,12 @@ test("Korean canonical and compatibility Build routes use the proven cover resul
     assert.match(message.payload.content, /Clearra 구축 커버리지 탐색/u);
     assert.match(message.payload.content, /커버 확률: 50%/u);
   }
+  assert.match(messages[1].payload.content, /실패 확률: 50%/u);
+  assert.match(messages[1].payload.content, /성공 패턴: 3/u);
+  assert.match(messages[1].payload.content, /실패 패턴: 1/u);
+  assert.match(messages[1].payload.content, /구체화 패턴: 4/u);
+  assert.match(messages[1].payload.content, /구체화 확률 질량: 100%/u);
+  assert.match(messages[1].payload.content, /확률 완전성: 예/u);
 });
 
 test("Discord finesse summaries expose only typed user-level costs", async () => {
@@ -2702,6 +2716,7 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     tiling: ["perfect-clear tiling search", "퍼펙트 클리어 타일링 탐색"],
     failed_queue: ["failed-queue search", "실패 큐 탐색"],
     cover: ["build-coverage search", "구축 커버리지 탐색"],
+    probability: ["build-probability result aggregation", "구축 확률 결과 집계"],
     spin_cover: ["forward spin search", "정방향 스핀 탐색"],
     spin: ["forward spin search", "정방향 스핀 탐색"],
     score_finder: ["Jstris-score perfect-clear search", "Jstris 점수 퍼펙트 클리어 탐색"],
@@ -2738,7 +2753,7 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     evaluate_b2b_cover: ["supplied-solution B2B coverage family", "제공 해법 B2B 커버리지 패밀리"],
     evaluate_cover_percent: ["supplied-solution coverage probability", "제공 해법 커버리지 확률"],
   };
-  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 54);
+  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 55);
   assert.equal(Object.isFrozen(DISCORD_PUBLIC_SEARCH_CONTRACT), true);
   assert.equal(
     DISCORD_PUBLIC_SEARCH_CONTRACT.every((entry) =>
@@ -2773,6 +2788,13 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     {
       executor: {
         async execute() {
+          if (engineKind === "pc-path-family.v2") {
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify(validPcPathStructured()),
+            };
+          }
           if (engineKind === "pc-score-summary.v2") {
             return {
               exitCode: 0,
@@ -2829,6 +2851,7 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
           };
         },
       },
+      gifRenderer: resolvedGifRenderer(),
     },
   );
 
@@ -2876,12 +2899,8 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
       );
       if (publicKind === "score-minimals") {
         const rendered = messages.at(-1);
-        assert.equal(
-          rendered.split("\n").filter((line) =>
-            /(?:Canonical candidate ID|정규 후보 ID)/u.test(line)
-          ).length,
-          1,
-        );
+        assert.match(rendered, locale === "ko" ? /선택된 결과: 1/u : /Selected result: 1/u);
+        assert.doesNotMatch(rendered, /candidate|후보 ID|solution key|해법 키|pc:solution/iu);
         assert.doesNotMatch(rendered, /tie|alternative|cursor|pages?/iu);
       }
     }
@@ -3891,6 +3910,53 @@ function executableSearchArguments(route, options = {}) {
     "--spin-profile", profile,
     "--rule", "srs-plus",
   ];
+}
+
+function validPcPathStructured() {
+  const canonical = {
+    candidate_id: "1",
+    producer_candidate_id: "1",
+    pattern_id: "0",
+    trace_identity: "trace-1",
+    normalized_trace_key: "trk1:trace-1",
+    consumed_piece_count: "1",
+    terminal_hold_piece: null,
+    steps: [{
+      step_index: "0",
+      operation_id: "0",
+      active_piece: "I",
+      input_cursor: "0",
+      output_cursor: "1",
+      input_hold_piece: null,
+      output_hold_piece: null,
+      hold_decision: "none",
+      rotation: "0",
+      x: "6",
+      y: "0",
+      placement_mask: "0x00000000000003c0",
+      board_before_mask: "0x000000000000003f",
+      board_after_placement_mask: "0x00000000000003ff",
+      board_after_line_clear_mask: "0x0000000000000000",
+      cleared_row_mask: "0x0000000000000001",
+      cleared_lines: "1",
+      line_clear_identity: "rows:0000000000000001:count:1",
+    }],
+  };
+  return {
+    kind: "pc-path-family.v2",
+    contract: { command: { kind: "pc-path-family.v2" } },
+    summary: {
+      capability_id: "pc.path",
+      result_contract: "pc-path-family.v2",
+      payload_kind: "canonical-pc-path-witness",
+      witness_contract: "pc-path-witness.v2",
+      ordering: "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending",
+      problem_id: "problem",
+      complete: true,
+      canonical_selection: "smallest-canonical-candidate-id",
+      canonical_witness: structuredClone(canonical),
+    },
+  };
 }
 
 function validPcScoreStructured(overrides = {}) {

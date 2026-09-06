@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcServiceError {
     UnsupportedPreset,
     Packing(PackingRunnerError),
@@ -109,7 +109,7 @@ impl PcService {
         result
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native-c-core"))]
     pub(crate) fn finish_with_packing_for_test(
         problem: &SearchProblem,
         packing: crate::packing::PackingRunResult,
@@ -117,7 +117,7 @@ impl PcService {
         Self::finish_with_packing(problem, packing, &ExecutionControl::default())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native-c-core"))]
     pub(crate) fn finish_with_packing_and_control_for_test(
         problem: &SearchProblem,
         packing: crate::packing::PackingRunResult,

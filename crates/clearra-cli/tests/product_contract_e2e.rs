@@ -1,14 +1,12 @@
 #![cfg(feature = "native-c-core")]
 
+use crate::product_contract_json_assert;
 use crate::{exit::ExitCode, output::CliOutput, run_with_args};
 use serde_json::Value;
 use std::path::PathBuf;
 
 #[path = "product_backend_capability_assert.rs"]
 mod product_backend_capability_assert;
-#[path = "product_contract_json_assert.rs"]
-mod product_contract_json_assert;
-
 use product_backend_capability_assert::{
     assert_gpu_unavailable_reason, assert_hybrid_unavailable_reason,
     assert_u0_backend_capability_report, backend_report_bool, backend_report_optional_string,
@@ -196,10 +194,10 @@ mod case_product_gpu_allow_fallback_reports_reason {
             product_contract_json_assert::string_field(&gpu_with_fallback, "backend_selected"),
             "cpu"
         );
-        assert_eq!(
-            product_contract_json_assert::bool_field(&gpu_with_fallback, "backend_fallback_used"),
-            true
-        );
+        assert!(product_contract_json_assert::bool_field(
+            &gpu_with_fallback,
+            "backend_fallback_used"
+        ));
         assert_eq!(
             product_contract_json_assert::string_field(
                 &gpu_with_fallback,

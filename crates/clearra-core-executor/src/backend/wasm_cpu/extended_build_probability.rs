@@ -99,14 +99,20 @@ struct ExtendedDistributedPartial {
     coverage_source_row_count: usize,
 }
 
+// Browser workers call the distributed entrypoints; native builds retain the same
+// session surface so compact and extended execution stay contract-compatible.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 impl ExtendedBuildProbabilitySession {
+    // Browser product execution always supplies a finite-memory boundary; this
+    // unbounded convenience adapter remains for native embeddings and tests.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn new(
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
         let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
         Self::new_with_memory_bound(problem, field, aggregation, memory_bound)
     }
 
@@ -119,13 +125,14 @@ impl ExtendedBuildProbabilitySession {
         Self::new_mode(problem, field, aggregation, false, memory_bound, 0)
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn new_with_finesse(
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
         let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
         Self::new_with_finesse_and_memory_bound(problem, field, aggregation, memory_bound)
     }
 
@@ -273,16 +280,18 @@ impl ExtendedBuildProbabilitySession {
         Ok(session)
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn new_external_geometry(
         problem: &SearchProblem,
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<Self, WasmExactSearchError> {
         let memory_bound = ExecutionMemoryBound::unbounded_for_problem(problem)
-            .map_err(WasmExactSearchError::ResourceAdmission)?;
+            .map_err(WasmExactSearchError::resource_admission)?;
         Self::new_external_geometry_with_memory_bound(problem, field, aggregation, memory_bound)
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn new_external_geometry_with_memory_bound(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -486,7 +495,7 @@ impl ExtendedBuildProbabilitySession {
                     self.reachability_states.saturating_add(reachability_states);
                 self.peak_build_scratch_bytes = self.peak_build_scratch_bytes.max(scratch_bytes);
                 self.truncated_reason = Some("node_budget_exceeded");
-                return Ok(());
+                Ok(())
             }
             ExtendedBuildOrderResult::Complete {
                 graph,
@@ -625,7 +634,7 @@ impl ExtendedBuildProbabilitySession {
                     })?;
                     self.spin_execution_graphs.push(spin_graph);
                 }
-                return Ok(());
+                Ok(())
             }
         }
     }
@@ -674,6 +683,9 @@ impl ExtendedBuildProbabilitySession {
             })
     }
 
+    // The browser coordinator uses the external-memory-guard form so retained
+    // worker payloads participate in admission.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn advance_distributed_geometry(
         &mut self,
         pass_index: u8,
@@ -698,7 +710,7 @@ impl ExtendedBuildProbabilitySession {
                     ))?;
                 memory_bound
                     .ensure(observed, future)
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             },
         )
     }
@@ -756,6 +768,7 @@ impl ExtendedBuildProbabilitySession {
         }
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     fn try_copy_distributed_candidate_row_ids(
         &self,
         source: &[u32],
@@ -778,7 +791,7 @@ impl ExtendedBuildProbabilitySession {
                     ))?;
                 memory_bound
                     .ensure(observed, future)
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             },
         )
     }
@@ -875,6 +888,9 @@ impl ExtendedBuildProbabilitySession {
         Ok(result)
     }
 
+    // Browser merging uses the coordinator-owned memory guard; retain this
+    // convenience adapter for native/parity callers.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn absorb_distributed_result(
         &mut self,
         result: &CoreExecutionResult,
@@ -888,7 +904,7 @@ impl ExtendedBuildProbabilitySession {
                     .checked_retained_bytes()
                     .and_then(|bytes| bytes.checked_add(local_retained_bytes))
                     .ok_or_else(|| {
-                        WasmExactSearchError::ResourceAdmission(
+                        WasmExactSearchError::resource_admission(
                             memory_bound.ensure(u128::MAX, 1).expect_err(
                                 "checked extended absorb storage overflow is unavailable",
                             ),
@@ -897,7 +913,7 @@ impl ExtendedBuildProbabilitySession {
                 let future = coexisting_retained_bytes
                     .checked_add(checked_future_bytes)
                     .ok_or_else(|| {
-                        WasmExactSearchError::ResourceAdmission(
+                        WasmExactSearchError::resource_admission(
                             memory_bound.ensure(u128::MAX, 1).expect_err(
                                 "checked extended absorb future overflow is unavailable",
                             ),
@@ -905,7 +921,7 @@ impl ExtendedBuildProbabilitySession {
                     })?;
                 memory_bound
                     .ensure(observed, future)
-                    .map_err(WasmExactSearchError::ResourceAdmission)
+                    .map_err(WasmExactSearchError::resource_admission)
             },
         )
     }
@@ -2427,7 +2443,7 @@ impl ExtendedBuildProbabilitySession {
 
     fn ensure_memory_bound(&self, checked_future_bytes: u128) -> Result<(), WasmExactSearchError> {
         let observed = self.checked_retained_bytes().ok_or_else(|| {
-            WasmExactSearchError::ResourceAdmission(
+            WasmExactSearchError::resource_admission(
                 self.memory_bound
                     .ensure(u128::MAX, 1)
                     .expect_err("checked retained-byte overflow is unavailable"),
@@ -2437,7 +2453,7 @@ impl ExtendedBuildProbabilitySession {
             .coexisting_retained_bytes
             .checked_add(checked_future_bytes)
             .ok_or_else(|| {
-                WasmExactSearchError::ResourceAdmission(
+                WasmExactSearchError::resource_admission(
                     self.memory_bound
                         .ensure(u128::MAX, 1)
                         .expect_err("checked coexisting retained-byte overflow is unavailable"),
@@ -2445,7 +2461,7 @@ impl ExtendedBuildProbabilitySession {
             })?;
         self.memory_bound
             .ensure(observed, future)
-            .map_err(WasmExactSearchError::ResourceAdmission)
+            .map_err(WasmExactSearchError::resource_admission)
     }
 }
 

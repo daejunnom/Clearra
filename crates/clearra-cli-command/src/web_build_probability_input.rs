@@ -1,3 +1,4 @@
+use clearra_app::BuildProbabilityResultMode;
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
@@ -22,6 +23,8 @@ pub struct WebBuildProbabilityInput {
     preserve_visible_height: bool,
     include_horizontal_mirror: bool,
     aggregation: BuildProbabilityAggregation,
+    result_mode: BuildProbabilityResultMode,
+    failed_pattern_limit: usize,
     finesse: BuildProbabilityFinesseRequest,
 }
 
@@ -45,6 +48,8 @@ impl WebBuildProbabilityInput {
             preserve_visible_height: false,
             include_horizontal_mirror: true,
             aggregation: BuildProbabilityAggregation::Buildability,
+            result_mode: BuildProbabilityResultMode::AllSolutions,
+            failed_pattern_limit: 100,
             finesse: BuildProbabilityFinesseRequest::Off,
         }
     }
@@ -77,6 +82,24 @@ impl WebBuildProbabilityInput {
     pub fn with_aggregation(mut self, aggregation: BuildProbabilityAggregation) -> Self {
         self.aggregation = aggregation;
         self
+    }
+
+    pub fn with_result_mode(mut self, result_mode: BuildProbabilityResultMode) -> Self {
+        self.result_mode = result_mode;
+        self
+    }
+
+    pub const fn result_mode(&self) -> BuildProbabilityResultMode {
+        self.result_mode
+    }
+
+    pub const fn with_failed_pattern_limit(mut self, failed_pattern_limit: usize) -> Self {
+        self.failed_pattern_limit = failed_pattern_limit;
+        self
+    }
+
+    pub const fn failed_pattern_limit(&self) -> usize {
+        self.failed_pattern_limit
     }
 
     pub fn with_finesse(

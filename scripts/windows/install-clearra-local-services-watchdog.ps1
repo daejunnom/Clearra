@@ -22,6 +22,18 @@ $node = Get-Command node.exe -ErrorAction Stop
 $nodePath = $node.Source
 $npmCliPath = Join-Path (Split-Path -Parent $nodePath) "node_modules\npm\bin\npm-cli.js"
 
+function Get-ListenerOwner {
+    param([Parameter(Mandatory)][int]$Port)
+
+    $listener = Get-NetTCPConnection -State Listen -LocalPort $Port `
+        -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $listener) {
+        return $null
+    }
+    return [int]$listener.OwningProcess
+}
+
 foreach ($path in @($watcherSource, $launcherSource, $nodePath, $npmCliPath, $SshKeyPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required local-services file is unavailable: $path"
@@ -31,10 +43,6 @@ if (-not $SshDestination.Trim()) {
     throw "SshDestination must not be empty."
 }
 
-New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
-Copy-Item -LiteralPath $watcherSource -Destination $watcherTarget -Force
-Copy-Item -LiteralPath $launcherSource -Destination $launcherTarget -Force
-
 $configuration = [ordered]@{
     repo_root = $repoRoot
     node_path = $nodePath
@@ -43,18 +51,59 @@ $configuration = [ordered]@{
     ssh_key_path = $SshKeyPath
     ssh_destination = $SshDestination
 }
-$configuration | ConvertTo-Json | Set-Content `
-    -LiteralPath $configurationTarget `
-    -Encoding UTF8
 
-$legacyTaskNames = @("Clearra Local Runtime", "Clearra Local Services Watchdog")
+# Stage each next-start artifact under a unique sibling name before replacing
+# its destination. The currently running watchdog has already loaded its
+# script/configuration, so this does not disturb its process or its children.
+New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
+$stageId = [guid]::NewGuid().ToString("N")
+$watcherStaged = Join-Path $runtimeDirectory ".$stageId.watchdog.tmp"
+$launcherStaged = Join-Path $runtimeDirectory ".$stageId.launcher.tmp"
+$configurationStaged = Join-Path $runtimeDirectory ".$stageId.configuration.tmp"
+try {
+    Copy-Item -LiteralPath $watcherSource -Destination $watcherStaged
+    Copy-Item -LiteralPath $launcherSource -Destination $launcherStaged
+    $configuration | ConvertTo-Json | Set-Content `
+        -LiteralPath $configurationStaged `
+        -Encoding UTF8
+    Move-Item -LiteralPath $watcherStaged -Destination $watcherTarget -Force
+    Move-Item -LiteralPath $launcherStaged -Destination $launcherTarget -Force
+    Move-Item -LiteralPath $configurationStaged -Destination $configurationTarget -Force
+} finally {
+    foreach ($stagedPath in @($watcherStaged, $launcherStaged, $configurationStaged)) {
+        if (Test-Path -LiteralPath $stagedPath) {
+            Remove-Item -LiteralPath $stagedPath -Force
+        }
+    }
+}
+
+$listenerOwnersBefore = @{
+    4194 = Get-ListenerOwner -Port 4194
+    8790 = Get-ListenerOwner -Port 8790
+}
+$existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+$existingTaskWasRunning = (
+    $null -ne $existingTask -and [string]$existingTask.State -eq "Running"
+)
+
+# A differently named legacy registration may be removed while idle. If it is
+# active, disable only its future triggers: stopping/unregistering it can tear
+# down a child process that currently owns a local service.
+$legacyTaskNames = @("Clearra Local Runtime")
 foreach ($legacyTaskName in $legacyTaskNames) {
+    if ($legacyTaskName -eq $TaskName) {
+        continue
+    }
     $legacy = Get-ScheduledTask -TaskName $legacyTaskName -ErrorAction SilentlyContinue
     if ($null -eq $legacy) {
         continue
     }
-    Stop-ScheduledTask -TaskName $legacyTaskName -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:$false
+    if ([string]$legacy.State -eq "Running") {
+        Disable-ScheduledTask -TaskName $legacyTaskName | Out-Null
+        Write-Output "Disabled the running legacy task without stopping its current instance."
+    } else {
+        Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:$false
+    }
 }
 
 $action = New-ScheduledTaskAction `
@@ -81,6 +130,26 @@ Register-ScheduledTask `
     -Settings $settings `
     -Description "Single-owner hidden watchdog for Clearra ports 4194 and 8790." `
     -Force | Out-Null
-Start-ScheduledTask -TaskName $TaskName
+
+foreach ($port in @(4194, 8790)) {
+    $ownerBefore = $listenerOwnersBefore[$port]
+    if ($null -eq $ownerBefore) {
+        continue
+    }
+    $ownerAfter = Get-ListenerOwner -Port $port
+    if ($ownerAfter -ne $ownerBefore -or
+        $null -eq (Get-Process -Id $ownerBefore -ErrorAction SilentlyContinue)) {
+        throw "Port $port listener changed during the non-disruptive task migration."
+    }
+}
+
+if ($existingTaskWasRunning) {
+    # Register-ScheduledTask -Force updates the next-start definition without
+    # terminating the running instance. IgnoreNew then keeps it authoritative
+    # until a naturally safe restart (for example, the next logon).
+    Write-Output "Updated the watchdog definition for its next safe start; preserved the running instance."
+} else {
+    Start-ScheduledTask -TaskName $TaskName
+}
 
 Write-Output "Installed one hidden Clearra local-services watchdog with a 60-second poll."

@@ -1,11 +1,13 @@
 <script lang="ts">
-  import { ArrowDownToLine, Search } from '@lucide/svelte';
+  import { ArrowDownToLine, Check, Copy, Search } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
+  import ProductResultPager from './ProductResultPager.svelte';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import SolutionGallery from './SolutionGallery.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
+  import { writeClipboardText } from './clipboardText';
   import {
     workspaceSolutionCount,
     workspaceSolutionKeysComplete,
@@ -19,13 +21,22 @@
   } from './solutionPageSource';
   import { boardCellOccupied } from './solverWorkspaceModel';
   import { BUILD_PROBABILITY_PRIMARY_METRIC } from './buildProbabilityModel';
-  import { buildProbabilityAggregationAuthority } from './buildProbabilityAggregation';
+  import {
+    buildCoveragePortfolioSummary,
+    buildProbabilityAggregationAuthority,
+    buildProbabilityCoverageAggregation
+  } from './buildProbabilityAggregation';
   import {
     buildProbabilityFinesseView,
     formatFinesseInputCount
   } from './buildProbabilityFinesse';
   import type { ClearraFinessePolicyResult } from '../wasm/wasmCommandClient';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
+  import type {
+    ProductMemberPageLoader,
+    ProductNextPageLoader,
+    ProductPageRelease
+  } from './productResultPager';
   import {
     workspaceMessage,
     workspaceProbability,
@@ -41,25 +52,83 @@
   export let existingMask = 0n;
   export let targetMask = 0n;
   export let aggregation: 'buildability' | 'tiling' | 'spin' = 'buildability';
+  export let resultMode:
+    | 'all-solutions'
+    | 'complete-replay-paths'
+    | 'minimum-solutions'
+    | 'field-average-score'
+    | 'fixed-queue-maximum-score'
+    | 'highest-score-minimum-set'
+    | 'failed-queues' = 'all-solutions';
   export let loadSolutionPage: SolutionPageLoader | null = null;
+  export let loadNextProductPage: ProductNextPageLoader | null = null;
+  export let loadProductMemberPage: ProductMemberPageLoader | null = null;
+  export let releaseProductPages: ProductPageRelease | null = null;
 
   const dispatch = createEventDispatcher<{ continue: { existingMask: bigint; height: number } }>();
   const columns = Array.from({ length: 10 }, (_, index) => index);
   let copyFormat: SolutionCopyFormat = 'ctk';
+  let failedQueueCopyComplete = false;
+  let visibleFailedQueueCount = 100;
+  let failedResultIdentity = '';
 
   $: rows = Array.from({ length: height }, (_, index) => height - index - 1);
   $: report = view.searchReport;
+  $: productResultPayload = view.response?.product_result_payload ?? null;
+  $: buildCoverSummary = buildCoveragePortfolioSummary(productResultPayload);
+  $: buildScoreFieldSummary = productResultPayload?.content.payload_kind === 'pc-score-field-summary'
+    ? productResultPayload.content.payload
+    : null;
   $: aggregationAuthority = buildProbabilityAggregationAuthority(report, aggregation);
   $: effectiveAggregation = aggregationAuthority.effective ?? aggregation;
-  $: solutionCount = workspaceSolutionCount(report);
+  $: coverageAggregation = buildProbabilityCoverageAggregation(report, effectiveAggregation);
+  $: authorizedCoverage = coverageAggregation.state === 'authorized'
+    ? coverageAggregation
+    : null;
+  $: solutionCount = buildScoreFieldSummary
+    ? buildScoreFieldSummary.fields.length
+    : (buildCoverSummary?.selectedCandidateCount ?? workspaceSolutionCount(report));
   $: summary = Object.fromEntries(report?.summary_fields ?? []);
+  $: failedQueueResult = resultMode === 'failed-queues' &&
+    summary.build_failed_queue_contract === 'exact-build-coverage-complement.v1';
+  $: failedQueueEntries = failedQueueResult
+    ? Object.entries(summary)
+        .filter(([key]) => /^failed_pattern_[0-9]+$/u.test(key))
+        .sort(([left], [right]) => failedQueueIndex(left) - failedQueueIndex(right))
+        .map(([, queue]) => queue)
+    : [];
+  $: nextFailedQueueCount = Math.min(
+    100,
+    Math.max(0, failedQueueEntries.length - visibleFailedQueueCount)
+  );
+  $: nextFailedResultIdentity = failedQueueResult
+    ? `${report?.normalized_solution_set_hash ?? ''}:${summary.total_pattern_count ?? ''}:${summary.failed_pattern_count ?? ''}:${summary.failed_pattern_examples_materialized ?? ''}`
+    : '';
+  $: if (nextFailedResultIdentity !== failedResultIdentity) {
+    failedResultIdentity = nextFailedResultIdentity;
+    visibleFailedQueueCount = 100;
+    failedQueueCopyComplete = false;
+  }
   $: solutionProbabilityByKey = Object.fromEntries(
     (report?.solution_probabilities ?? []).map((entry) => [entry.solution_key, entry])
   );
   $: finesseView = buildProbabilityFinesseView(report?.finesse_report);
-  $: solutionKeys = report?.normalized_solution_keys ?? [];
-  $: solutionKeysComplete = workspaceSolutionKeysComplete(report);
-  $: solutionPageAvailable = workspaceSolutionPageAvailable(report);
+  $: solutionKeys = buildScoreFieldSummary
+    ? buildScoreFieldSummary.fields.map((field) => field.normalized_field_key)
+    : (report?.normalized_solution_keys ?? []);
+  $: solutionAverageScoreByKey = buildScoreFieldSummary
+    ? Object.fromEntries(
+        buildScoreFieldSummary.fields.map((field) => [field.normalized_field_key, field])
+      )
+    : Object.fromEntries(
+        (report?.solution_average_scores ?? []).map((field) => [field.solution_key, field])
+      );
+  $: solutionKeysComplete = buildScoreFieldSummary
+    ? true
+    : workspaceSolutionKeysComplete(report);
+  $: solutionPageAvailable = buildScoreFieldSummary
+    ? false
+    : workspaceSolutionPageAvailable(report);
   $: solutionResultIdentity = solutionPageResultIdentity(
     report?.normalized_solution_set_hash,
     solutionCount,
@@ -99,7 +168,7 @@
   );
   $: finalBoardMask = parseBoardMask(summary.build_final_board_mask);
   $: canContinue = view.status === 'completed' && report?.solution_found === true && finalBoardMask !== null;
-  $: hasOutput = Boolean(view.response || report || view.diagnostics.length || view.error);
+  $: hasOutput = Boolean(view.response || report || view.publicFailures.length);
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
@@ -164,6 +233,24 @@
     if (finalBoardMask === null) return;
     dispatch('continue', { existingMask: finalBoardMask, height });
   }
+
+  function failedQueueIndex(key: string): number {
+    const value = Number(key.slice('failed_pattern_'.length));
+    return Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
+  }
+
+  async function copyFailedQueues() {
+    if (!failedQueueEntries.length) return;
+    try {
+      await writeClipboardText(failedQueueEntries.join('\n'));
+      failedQueueCopyComplete = true;
+      setTimeout(() => {
+        failedQueueCopyComplete = false;
+      }, 1600);
+    } catch {
+      failedQueueCopyComplete = false;
+    }
+  }
 </script>
 
 <ResultWorkspaceFrame
@@ -180,15 +267,19 @@
   progressDone={view.progressDone}
   progressTotal={view.progressTotal}
   progressTelemetry={view.progressTelemetry}
-  showWorkerMetrics={false}
-  failureDiagnostics={view.diagnostics}
-  failureMessage={view.error ?? ''}
+  publicFailures={view.publicFailures}
 >
     {#if !hasOutput && view.status === 'idle'}
       <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noBuildProbabilityResult')}</p></div>
-    {:else if view.status !== 'failed' && view.status !== 'terminated' && aggregationAuthority.state === 'rejected'}
+    {:else if view.status !== 'failed' && view.status !== 'terminated' && !productResultPayload && (aggregationAuthority.state === 'rejected' || coverageAggregation.state === 'rejected')}
       <div class="aggregation-authority-error" role="alert">
-        <p>{label('buildProbabilityAggregationMismatch')}</p>
+        <p>
+          {label(
+            aggregationAuthority.state === 'rejected'
+              ? 'buildProbabilityAggregationMismatch'
+              : 'buildProbabilityCoverageAggregationInvalid'
+          )}
+        </p>
       </div>
     {:else if view.status !== 'failed' && view.status !== 'terminated'}
       <div class="result-grid">
@@ -232,7 +323,7 @@
                   data-distinct-from={BUILD_PROBABILITY_PRIMARY_METRIC.distinctFrom}
                 >
                   <span>{label('oracleBuildProbability')}</span>
-                  <strong>{workspaceProbability(language, report?.coverage_probability)}</strong>
+                  <strong>{workspaceProbability(language, buildCoverSummary?.successProbability ?? authorizedCoverage?.successProbability)}</strong>
                 </div>
                 {#if finesseView?.policyResults.length}
                   <div class="average-input-list" aria-label={label('finesseOverallAverageInputs')}>
@@ -249,7 +340,7 @@
                   </div>
                 {/if}
               </div>
-              <small class="metric-footnote">{number(report?.covered_pattern_count)} / {number(report?.materialized_pattern_count)} {label('patterns')}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
+              <small class="metric-footnote">{number(buildCoverSummary?.successfulPatternCount ?? authorizedCoverage?.successfulPatternCount)} / {number(buildCoverSummary?.patternCount ?? authorizedCoverage?.patternCount)} {label('patterns')}{summary.build_mirror_included === 'true' ? ` · ${label('originalAndMirror')}` : ''}</small>
             {/if}
           </div>
           {#if effectiveAggregation === 'spin'}
@@ -263,7 +354,7 @@
                   data-distinct-from={BUILD_PROBABILITY_PRIMARY_METRIC.distinctFrom}
                 >
                   <span>{label('oracleBuildProbability')}</span>
-                  <strong>{workspaceProbability(language, report?.coverage_probability)}</strong>
+                  <strong>{workspaceProbability(language, authorizedCoverage?.successProbability)}</strong>
                 </div>
                 {#if finesseView?.policyResults.length}
                   <div class="average-input-list" aria-label={label('finesseOverallAverageInputs')}>
@@ -280,7 +371,7 @@
                   </div>
                 {/if}
               </div>
-              <small class="metric-footnote">{number(report?.covered_pattern_count)} / {number(report?.materialized_pattern_count)} {label('patterns')}</small>
+              <small class="metric-footnote">{number(authorizedCoverage?.successfulPatternCount)} / {number(authorizedCoverage?.patternCount)} {label('patterns')}</small>
             </div>
           {/if}
           {#if finesseView && showFinesseDetails}
@@ -322,17 +413,68 @@
             </div>
           {/if}
           <dl>
+            {#if buildScoreFieldSummary}
+              <div><dt>{label('overallScore')}</dt><dd>{buildScoreFieldSummary.overall_score}</dd></div>
+            {/if}
             <div><dt>{label(effectiveAggregation === 'tiling' ? 'tilingCount' : 'buildableTilings')}</dt><dd>{solutionCount === null ? label('notCalculated') : number(solutionCount)}</dd></div>
+            {#if authorizedCoverage}
+              <div><dt>{label('successfulPatterns')}</dt><dd>{number(authorizedCoverage.successfulPatternCount)} / {number(authorizedCoverage.patternCount)}</dd></div>
+              <div><dt>{label('failedPatterns')}</dt><dd>{number(authorizedCoverage.failedPatternCount)}</dd></div>
+              <div><dt>{label('failureProbability')}</dt><dd>{workspaceProbability(language, authorizedCoverage.failedProbability)}</dd></div>
+              <div><dt>{label('probabilityComplete')}</dt><dd>{label(authorizedCoverage.complete ? 'complete' : 'incomplete')}</dd></div>
+            {/if}
             {#if effectiveAggregation !== 'tiling' && summary.build_mirror_included === 'true'}
               <div><dt>{label('originalBuildProbability')}</dt><dd>{workspaceProbability(language, summary.original_coverage_probability)}</dd></div>
               <div><dt>{label('mirrorAddedPatterns')}</dt><dd>{number(summaryNumber(summary.mirror_union_added_pattern_count))}</dd></div>
             {/if}
-            <div><dt>{label('candidateTilings')}</dt><dd>{number(report?.packing_candidate_count)}</dd></div>
+            <div><dt>{label('candidateTilings')}</dt><dd>{number(buildCoverSummary?.sourceCandidateCount ?? report?.packing_candidate_count)}</dd></div>
           </dl>
         </div>
       </div>
 
-      <section class="solutions-section" aria-label={label('solutions')}>
+      {#if failedQueueResult}
+        <section class="failed-queue-section" aria-label={label('failedQueueList')}>
+          <div class="failed-queue-metrics">
+            <article><span>{label('failedQueueCount')}</span><strong>{summary.failed_pattern_count ?? '—'}</strong></article>
+            <article><span>{label('failedQueueProbability')}</span><strong>{workspaceProbability(language, summary.failed_queue_probability)}</strong></article>
+            <article><span>{label('totalQueueCount')}</span><strong>{summary.total_pattern_count ?? '—'}</strong></article>
+          </div>
+          <div class="solutions-heading">
+            <h3>{label('failedQueueList')}</h3>
+            {#if failedQueueEntries.length}
+              <button class="queue-copy-button" type="button" on:click={copyFailedQueues}>
+                {#if failedQueueCopyComplete}<Check size={15} />{:else}<Copy size={15} />{/if}
+                <span>{label(failedQueueCopyComplete ? 'failedQueuesCopied' : 'copyFailedQueues')}</span>
+              </button>
+            {/if}
+          </div>
+          {#if failedQueueEntries.length}
+            {#if summary.failed_pattern_examples_truncated === 'true'}
+              <p class="failed-queue-note">{label('resultLimited', { count: failedQueueEntries.length, total: summary.failed_pattern_count ?? failedQueueEntries.length })}</p>
+            {/if}
+            <div class="failed-queue-grid">
+              {#each failedQueueEntries.slice(0, visibleFailedQueueCount) as queue}
+                <code>{queue}</code>
+              {/each}
+            </div>
+            {#if nextFailedQueueCount > 0}
+              <button class="show-more-failed" type="button" on:click={() => (visibleFailedQueueCount += 100)}>{label('showMoreFailedQueues')}</button>
+            {/if}
+          {:else}
+            <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noFailedQueues')}</p></div>
+          {/if}
+        </section>
+      {:else if productResultPayload && !buildScoreFieldSummary}
+        <ProductResultPager
+          payload={productResultPayload}
+          {language}
+          targetLines={height}
+          loadNextPage={loadNextProductPage}
+          loadMemberPage={loadProductMemberPage}
+          releasePages={releaseProductPages}
+        />
+      {:else}
+      <section class="solutions-section" aria-label={label('solutions')} data-result-mode={resultMode}>
         <div class="solutions-heading">
           <h3>{label('solutions')}</h3>
           {#if solutionCount !== null && solutionCount > 0}
@@ -352,6 +494,7 @@
             {solutionCount}
             loadSolutionPage={boundSolutionPageLoader}
             solutionProbabilities={solutionProbabilityByKey}
+            solutionAverageScores={solutionAverageScoreByKey}
             solutionFinesse={finesseView?.solutionByKey ?? {}}
             solutionComments={solutionCommentByKey}
             representativeWitness={finesseView?.representativeWitness ?? null}
@@ -366,6 +509,7 @@
           <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('noSolutions')}</p></div>
         {/if}
       </section>
+      {/if}
     {/if}
   </ResultWorkspaceFrame>
 
@@ -409,6 +553,15 @@
   dt { color: #68736f; font-size: 11px; }
   dd { color: #24312d; font-size: 12px; font-weight: 700; margin: 0; overflow-wrap: anywhere; text-align: right; }
   .solutions-section { border-top: 1px solid #dce2de; margin-top: 24px; padding-top: 20px; }
+  .failed-queue-section { border-top: 1px solid #dce2de; display: grid; gap: 12px; margin-top: 24px; padding-top: 20px; }
+  .failed-queue-metrics { display: grid; gap: 1px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .failed-queue-metrics article { background: #f0f3f1; display: grid; gap: 4px; padding: 12px 10px; }
+  .failed-queue-metrics span, .failed-queue-note { color: #68736f; font-size: 10px; }
+  .failed-queue-metrics strong { color: #075f58; font-size: 19px; }
+  .failed-queue-grid { display: grid; gap: 6px; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
+  .failed-queue-grid code { background: #f3f5f4; border: 1px solid #d7ded9; border-radius: 5px; color: #24312d; font-size: 11px; padding: 8px; }
+  .queue-copy-button, .show-more-failed { align-items: center; background: #fff; border: 1px solid #aebbb5; border-radius: 5px; color: #27403a; cursor: pointer; display: inline-flex; font-size: 11px; font-weight: 700; gap: 7px; min-height: 34px; padding: 7px 10px; }
+  .show-more-failed { justify-self: center; }
   .solutions-heading { align-items: center; display: flex; gap: 16px; justify-content: space-between; margin-bottom: 12px; }
   .solutions-heading h3 { margin: 0; }
   @media (max-width: 780px) { .result-grid { grid-template-columns: 1fr; } dl { grid-template-columns: 1fr; } }

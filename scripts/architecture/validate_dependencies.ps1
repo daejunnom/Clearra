@@ -222,10 +222,12 @@ $importRules = @(
             )
         },
         @{
+            # GUI adapters may use the pure clearra_cli_command compiler. The
+            # exact Cargo/import-graph rule still forbids the clearra_cli binary
+            # crate without rejecting crates that merely share its prefix.
             Dir = "crates/clearra-gui-host/src"
             ForbiddenCrates = @("clearra_cli", "clearra_core_ffi", "clearra_core_executor")
             Forbidden = @(
-                "clearra_cli",
                 "clearra_core_ffi",
                 "clearra_core_executor",
                 "CClr",
@@ -361,10 +363,11 @@ $importRules = @(
             )
         },
         @{
+            # Browser WASM links the same pure command compiler as native CLI;
+            # exact dependency/import checks below still reject clearra_cli.
             Dir = "crates/clearra-wasm/src"
             ForbiddenCrates = @("clearra_cli", "clearra_core_ffi")
             Forbidden = @(
-                "clearra_cli",
                 "clearra_core_ffi",
                 "std::process",
                 "process::Command",
