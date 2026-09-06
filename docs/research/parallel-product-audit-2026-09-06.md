@@ -46,6 +46,63 @@ No final commit, push, tag, actual deployment or new WASM publication has occurr
 at this checkpoint. A separate no-publish CI gate is being prepared because the
 existing canonical main workflow can trigger actual Discord candidate deployment.
 
+### Later isolated CI and continuation implementation checkpoint
+
+- Commit87f2b2ac1c057984455b4f4d71ec0f6c1231e060 was pushed only to
+  `codex/v0.8.0-preflight-20260906-rng`. Main and release tags were not changed.
+  [Candidate Preflight34032476231](https://github.com/daejunnom/Clearra/actions/runs/34032476231)
+  runs the full gate once without production environments, credentials, accepted
+  release evidence or downstream deployment triggers. As of12:27UTC, setup and
+  boundary tests passed and the complete gate was still running. This is not a
+  release pass. The light branch of this workflow was skipped to avoid duplicates.
+- Atomic paired terminal journal commits retain both records and the durable ACK.
+  A subsequent published512 Build warm sample returned246/5040 in475.4ms
+  (GUI0.5s); focused14-path IndexedDB failure ownership checks then passed.
+  See the elapsed-boundary report for distinct artifact/test boundaries.
+- Source after87f2b2a is changing again: PC score-minimum, Build cover and Build
+  score-minimum adapters are being connected to a shared guarded exact-cover
+  continuation. These changes are not in the running CI or published512 WASM.
+  New constructor/continuation regression sources are not yet compiled or run.
+- Existing local UMCI refusal remains respected. Do not execute generated native
+  tests through an alternate route or attribute CI acceptance to later dirty
+  source. No actual deployment or new4194 WASM publication has occurred.
+
+### Subsequent CI failure and focused-feedback correction
+
+- The above run finished **failure**, not acceptance. Full gate reached3/8
+  stages with1 failed and4 pending (1,574.43s). Rust App tests returned368
+  passed /9 failed; no WASM artifact was produced. Main, tags and production
+  were not changed.
+- Four minimum-product failures exposed a real producer boundary: relaxed
+  small-input parallel routing returned canonical solution coverage but marked
+  the source incomplete. The correction validates count/truncation, every
+  identity/row pair, the exact universe and allocation-free wordwise union
+  before restoring typed minimum evidence. It does not declare truncated or
+  mismatched evidence complete or force small inputs back to serial execution.
+- Three paging tests assumed an unlimited requested budget meant no cooperative
+  yield. Their drivers now consume the same total budget across positive-work
+  Pending states. Production paging, canonical IDs, checkpoint tamper checks
+  and backwards-page assertions are unchanged.
+- The duplicate Build memory-authority test now expects the actual shared
+  fail-closed error while retaining duplicate detection and absent payload
+  assertions. Failed-queue validation now rejects that unsupported WASM product
+  before generic compilation can misclassify it as execution failure.
+- PC score-minimum, Build cover and Build score-minimum now have source-level
+  adapters to the common guarded continuation, including source-owner lifetime,
+  cancellation and first canonical-page sealing. New query-equivalence checks
+  normalize only the initial completed rows and bind every other query field.
+  These changes have passed formatting/source review only; runtime proof is
+  pending the next exact-source CI and GUI tests.
+- The isolated branch now runs related Rust regression selections plus one
+  independently verified, unqualified WASM build. Failed regression status is
+  never converted to acceptance when retaining a diagnostic WASM artifact.
+  An explicit full dispatch still runs the original eight-stage gate once and
+  skips the lighter jobs. No production authority is present in either mode.
+- Compile-input LF checkout attributes preserve raw-byte source identity across
+  Windows checkout and local formatting; artifact import must still validate
+  the actual source hash and exact commit. No hash restamping or freshness
+  exemption is introduced. Published4194 is still512 until verified import.
+
 - Current P0: pattern-based complete replay fails during finalization; unexpected
   local4194 refresh can destroy a running search. Retain all prior correctness
   and cancellation protections while fixing both.

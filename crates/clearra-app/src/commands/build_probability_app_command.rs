@@ -87,6 +87,10 @@ impl BuildProbabilityAppCommand {
         self.product_retention_budget = budget;
     }
 
+    pub(crate) const fn product_retention_budget(&self) -> Option<crate::ProductRetentionBudget> {
+        self.product_retention_budget
+    }
+
     pub const fn with_failed_pattern_limit(mut self, failed_pattern_limit: usize) -> Self {
         self.failed_pattern_limit = failed_pattern_limit;
         self
@@ -213,19 +217,43 @@ impl BuildProbabilityAppCommand {
         } else {
             result
         };
-        let response = build_probability_response(
-            self.query.finesse_request(),
-            self.query.field(),
-            self.query.aggregation(),
-            self.query.solution_probability_policy(),
-            result,
-        );
+        let response = self.source_response(result);
         match payload {
             Some(payload) if response.status() == AppStatus::Success => {
                 response.with_public_product_result(payload, page_source_owner)
             }
             _ => response,
         }
+    }
+
+    /// Internal source carrier for the cooperative score-minimum finalizer.
+    /// The caller has already created the typed score preparation and retains
+    /// this response until that owner returns its complete payload/page source.
+    /// The ordinary Build reducer still validates query-bound completeness and
+    /// publishes all the same summary/evaluation metadata as the sync path.
+    pub(crate) fn response_from_prepared_score_minimum(
+        self,
+        result: CoreExecutionResult,
+    ) -> AppResponse {
+        if self.result_mode != BuildProbabilityResultMode::HighestScoreMinimumSet {
+            return result_projection_failed_response(
+                "Build score-minimum preparation route is unavailable",
+            );
+        }
+        if let Some(reason) = self.invalid_reason() {
+            return result_projection_failed_response(reason);
+        }
+        self.source_response(result)
+    }
+
+    fn source_response(self, result: CoreExecutionResult) -> AppResponse {
+        build_probability_response(
+            self.query.finesse_request(),
+            self.query.field(),
+            self.query.aggregation(),
+            self.query.solution_probability_policy(),
+            result,
+        )
     }
 }
 
@@ -485,6 +513,45 @@ mod tests {
         let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
             .expect("compact one-piece field");
         BuildProbabilityQuery::new(core, field)
+    }
+
+    #[test]
+    fn prepared_score_minimum_source_retains_the_ordinary_build_reducer_rejections() {
+        let query = one_piece_query().with_score_summary(
+            clearra_objectives::policy::score_objective_policy::ScoreProfileSelection::Tetrio,
+            0,
+        );
+        let missing_evidence =
+            clearra_core_executor::CoreExecutionResult::new(Vec::new(), Vec::new());
+        let expected = crate::build_solution_probability_result::build_probability_response(
+            query.finesse_request(),
+            query.field(),
+            query.aggregation(),
+            query.solution_probability_policy(),
+            missing_evidence.clone(),
+        );
+        let actual = super::BuildProbabilityAppCommand::new(query)
+            .with_result_mode(BuildProbabilityResultMode::HighestScoreMinimumSet)
+            .response_from_prepared_score_minimum(missing_evidence);
+        assert_eq!(actual, expected);
+        assert_ne!(actual.status(), crate::app_response::AppStatus::Success);
+        assert!(actual.public_result_payload().is_none());
+        assert!(actual.public_page_source_owner().is_none());
+    }
+
+    #[test]
+    fn prepared_score_minimum_source_cannot_bypass_a_different_result_mode() {
+        let response = super::BuildProbabilityAppCommand::new(one_piece_query())
+            .response_from_prepared_score_minimum(clearra_core_executor::CoreExecutionResult::new(
+                Vec::new(),
+                Vec::new(),
+            ));
+        assert_eq!(
+            response.status(),
+            crate::app_response::AppStatus::ExecutionFailed
+        );
+        assert!(response.public_result_payload().is_none());
+        assert!(response.public_page_source_owner().is_none());
     }
 
     #[test]

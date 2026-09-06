@@ -1543,8 +1543,10 @@ impl WasmExactSearchSession {
     #[cfg(feature = "parallel")]
     fn absorb_parallel_outcome(
         &mut self,
-        outcome: ParallelSearchOutcome,
+        mut outcome: ParallelSearchOutcome,
     ) -> Result<(), WasmExactSearchError> {
+        let canonical_minimum_source_complete =
+            self.validate_parallel_minimum_cover_source(&mut outcome)?;
         self.geometry = outcome.geometry;
         self.covered_patterns
             .union_with(&outcome.covered_patterns)
@@ -1552,8 +1554,12 @@ impl WasmExactSearchSession {
                 WasmExactSearchError::InvalidProblem("wasm_parallel_coverage_universe_mismatch")
             })?;
         if self.problem.objective().kind() != ObjectiveKind::Tiling {
-            self.coverage_rows_complete = false;
+            self.coverage_rows_complete &= canonical_minimum_source_complete;
         }
+        // Native family workers retain complete per-solution rows, not the
+        // serial verifier's raw candidate row log. Reuse the same validated
+        // canonical row reconstruction as the distributed minimum source.
+        self.distributed_minimum_cover_source_complete |= canonical_minimum_source_complete;
         for identity in outcome.buildable_identities {
             if self.problem.objective().kind() == ObjectiveKind::Tiling {
                 self.insert_tiling_result_identity(identity)?;
@@ -1614,6 +1620,70 @@ impl WasmExactSearchSession {
             self.mark_truncated("memory_budget_exceeded");
         }
         Ok(())
+    }
+
+    #[cfg(feature = "parallel")]
+    fn validate_parallel_minimum_cover_source(
+        &self,
+        outcome: &mut ParallelSearchOutcome,
+    ) -> Result<bool, WasmExactSearchError> {
+        if self.problem.objective().kind() != ObjectiveKind::MinimumCover
+            || !self
+                .problem
+                .pc_chance_evidence_policy()
+                .retains_pc_minimum_cover_v2_evidence()
+            || self
+                .problem
+                .pc_chance_evidence_policy()
+                .retains_pc_score_portfolio_v2_evidence()
+            || !outcome.count_complete
+            || outcome.truncated_reason.is_some()
+        {
+            return Ok(false);
+        }
+        let pattern_count = self
+            .problem
+            .piece_source()
+            .materialized_universe()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_piece_source_not_materialized",
+            ))?
+            .pattern_count();
+        outcome.buildable_identities.sort_unstable();
+        outcome.buildable_identities.dedup();
+        if outcome.solution_coverage.len() != outcome.buildable_identities.len()
+            || outcome.covered_patterns.pattern_count() != pattern_count
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_parallel_pc_minimum_source_incomplete",
+            ));
+        }
+        for (entry, identity) in outcome
+            .solution_coverage
+            .iter()
+            .zip(&outcome.buildable_identities)
+        {
+            if entry.identity() != *identity
+                || entry.covered_patterns().pattern_count() != pattern_count
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_parallel_pc_minimum_source_identity_mismatch",
+                ));
+            }
+        }
+        // Validate the union without allocating a second universe or filling
+        // sparse rows' lazy dense caches while the complete source is live.
+        for word_index in 0..outcome.covered_patterns.word_count() {
+            let source_word = outcome.solution_coverage.iter().fold(0_u64, |word, entry| {
+                word | entry.covered_patterns().word_at(word_index)
+            });
+            if source_word != outcome.covered_patterns.word_at(word_index) {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_parallel_pc_minimum_source_coverage_mismatch",
+                ));
+            }
+        }
+        Ok(true)
     }
 
     pub fn advance(
@@ -5859,6 +5929,97 @@ mod tests {
             WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
                 .expect("minimum-cover worker result");
         (problem, worker)
+    }
+
+    #[cfg(feature = "parallel")]
+    fn native_parallel_minimum_problem() -> clearra_problem::SearchProblem {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
+            ])),
+            PieceWindow::new(5),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(5))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::minimum_cover());
+        ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_pc_minimum_cover_v2_evidence()
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn native_parallel_minimum_cover_retains_complete_problem_bound_source_rows() {
+        let problem = native_parallel_minimum_problem();
+        let mut session = WasmExactSearchSession::new(&problem).expect("minimum session");
+        let result = session
+            .execute_parallel_if_worthwhile(2, &ExecutionControl::default())
+            .expect("parallel minimum source")
+            .expect("fixture takes native family workers");
+        let evidence = result
+            .pc_chance_coverage_evidence()
+            .expect("typed minimum source evidence");
+        assert!(evidence.complete());
+        assert!(evidence.problem().matches_search_problem(&problem));
+        assert_eq!(result.normalized_solution_coverages().len(), 4);
+        assert_eq!(
+            evidence.coverage_union().words(),
+            result.coverage_pattern_words()
+        );
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some("deferred-to-coordinator")
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn native_parallel_minimum_cover_rejects_missing_rows_and_false_unions() {
+        let problem = native_parallel_minimum_problem();
+        let mut session = WasmExactSearchSession::new(&problem).unwrap();
+        let geometry =
+            core::mem::replace(&mut session.geometry, super::GeometrySearch::placeholder());
+        let decision = super::parallel_search::execute_if_worthwhile(
+            std::sync::Arc::clone(&session.problem),
+            std::sync::Arc::clone(&session.catalog),
+            geometry,
+            ExecutionControl::default(),
+            2,
+            false,
+        )
+        .expect("native source");
+        let super::ParallelSearchDecision::Completed(mut outcome) = decision else {
+            panic!("fixture must exercise the native family workers");
+        };
+        assert!(session
+            .validate_parallel_minimum_cover_source(&mut outcome)
+            .unwrap());
+        let row = outcome.solution_coverage.pop().expect("four-row source");
+        assert!(session
+            .validate_parallel_minimum_cover_source(&mut outcome)
+            .is_err());
+        outcome.solution_coverage.push(row);
+        let union = outcome.covered_patterns.clone();
+        outcome.covered_patterns = PatternBitSet::new(union.pattern_count());
+        assert!(session
+            .validate_parallel_minimum_cover_source(&mut outcome)
+            .is_err());
+        outcome.covered_patterns = union;
+        outcome.count_complete = false;
+        assert!(!session
+            .validate_parallel_minimum_cover_source(&mut outcome)
+            .unwrap());
+        outcome.count_complete = true;
+        outcome.truncated_reason = Some("fixture-incomplete");
+        assert!(!session
+            .validate_parallel_minimum_cover_source(&mut outcome)
+            .unwrap());
     }
 
     fn replace_worker_field(

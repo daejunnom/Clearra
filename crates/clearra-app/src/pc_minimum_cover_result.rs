@@ -365,6 +365,13 @@ pub(crate) struct PcMinimumCoverV2Preparation {
 }
 
 impl PcMinimumCoverV2Preparation {
+    pub(crate) fn parallel_work(&self) -> &CoveragePortfolioAlternativeSetPreparation {
+        &self.portfolio
+    }
+    pub(crate) fn parallel_work_mut(&mut self) -> &mut CoveragePortfolioAlternativeSetPreparation {
+        &mut self.portfolio
+    }
+
     pub(crate) fn parallel_source_dimensions(&self) -> Option<(usize, usize)> {
         self.portfolio.parallel_source_dimensions()
     }
@@ -637,11 +644,14 @@ pub(crate) fn validate_pc_minimum_cover_v2_source(
     let producer = result
         .pc_chance_coverage_evidence()
         .ok_or("pc minimals producer coverage evidence is missing")?;
-    if !producer.complete()
-        || !producer.problem().matches_search_problem(&expected_problem)
-        || producer.pattern_count() == 0
-    {
+    if !producer.complete() {
+        return Err("pc minimals producer coverage evidence is incomplete");
+    }
+    if !producer.problem().matches_search_problem(&expected_problem) {
         return Err("pc minimals producer evidence does not match the typed query");
+    }
+    if producer.pattern_count() == 0 {
+        return Err("pc minimals producer pattern universe is empty");
     }
 
     require_optional_field(result, "problem_preset", preset.as_str())?;

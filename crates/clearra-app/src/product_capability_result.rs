@@ -150,6 +150,17 @@ pub(crate) struct PcMinimumCoverProductPreparation {
 }
 
 impl PcMinimumCoverProductPreparation {
+    pub(crate) fn parallel_work(
+        &self,
+    ) -> &crate::portfolio_alternative_store::CoveragePortfolioAlternativeSetPreparation {
+        self.report.parallel_work()
+    }
+    pub(crate) fn parallel_work_mut(
+        &mut self,
+    ) -> &mut crate::portfolio_alternative_store::CoveragePortfolioAlternativeSetPreparation {
+        self.report.parallel_work_mut()
+    }
+
     pub(crate) fn parallel_source_dimensions(&self) -> Option<(usize, usize)> {
         self.report.parallel_source_dimensions()
     }

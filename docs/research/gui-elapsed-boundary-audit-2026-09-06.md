@@ -170,3 +170,29 @@ nested enqueue287.1ms, drain43.5ms, verifier finish52.0ms, App finalization2.4ms
 parse0.1ms. The GUI displayed0.6s (cold0.9s). This confirms removal of the
 specific repeated cold-worker creation, not achievement of0.4s or elimination
 of journal/lease waits. No Cargo/agent CPU test overlapped this pair.
+
+### Atomic terminal-pair persistence
+
+The result-applied and completed journal records now commit atomically when a
+store supports the optional terminal-pair operation. Both v1 records, their
+sequence/hash links, and the terminal ACK remain present; the worker lease is
+not released before the durable commit. Custom stores retain the compatible
+two-append path. An unresolved recovered task is still rejected rather than
+being granted completion authority. This reduces the observed auto fixture's
+480 journal events from480 to420 commits without dropping events.
+
+The same512 WASM and fixture returned246 solutions and5,040/5,040 in a new
+cold/warm pair. The warm worker-start-to-terminal interval was475.4ms
+(GUI0.5s), source365.8ms, nested producer133.0ms, nested enqueue191.1ms,
+drain45.5ms, verifier finish59.5ms, App finalization2.2ms, parse0.0ms. All ten
+remote workers were reused. Cold elapsed was698.8ms (GUI0.8s). No Cargo or
+agent CPU test overlapped this pair. These individual observations improve on
+the earlier790.6ms warm sample; they do not establish a stable0.4s bound.
+
+Subsequent focused tests inject14 IndexedDB failure paths, including request
+errors, early transaction aborts, metadata/reset failures and recovery-header
+failures. The two focused contracts passed with zero unhandled rejections,
+atomic rollback and preserved prior state. The success-path pair above predates
+that final error-ownership patch; it is not a remeasurement of the exact latest
+TypeScript source. Nor do these synthetic failures prove the historical
+Geometry error had this cause.

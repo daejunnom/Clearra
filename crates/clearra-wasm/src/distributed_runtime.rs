@@ -2,9 +2,10 @@
 //! machine shared by producer, verifier, merge, cancellation, and terminal transitions.
 
 use clearra_app::{
-    AppCommand, AppCoreExecutorService, AppRequest, CooperativeAppAdvance, CooperativeAppExecution,
-    DistributedForwardPreparation, DistributedSearchPreparation, DistributedSetupPreparation,
-    ExecutionControl, PreparedDistributedForwardSearch, PreparedDistributedPcScoreCompletion,
+    AppCommand, AppCoreExecutorService, AppRequest, BuildV2AppRequest, CooperativeAppAdvance,
+    CooperativeAppExecution, DistributedForwardPreparation, DistributedSearchPreparation,
+    DistributedSetupPreparation, ExecutionControl, PreparedDistributedBuildMinimumCompletion,
+    PreparedDistributedForwardSearch, PreparedDistributedPcScoreCompletion,
     PreparedDistributedSearch, PreparedDistributedSearchCompletion, PreparedDistributedSetupSearch,
     ProductCapabilityContract,
 };
@@ -1456,6 +1457,9 @@ impl WasmDistributedCoordinator {
             let (finesse_metric, finesse_pattern_knowledge) =
                 build_probability_finesse_request.unwrap_or_default();
             let verifier_count = worker_count.saturating_sub(1);
+            let coordinator_reserved_bytes = prepared
+                .build_minimum_source_retained_bytes()
+                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
             let producer =
                 match WasmBuildProbabilityCandidateProducer::new_with_finesse_and_verifiers_typed(
                     problem,
@@ -1464,7 +1468,7 @@ impl WasmDistributedCoordinator {
                     finesse_metric,
                     finesse_pattern_knowledge,
                     verifier_count,
-                    0,
+                    coordinator_reserved_bytes,
                 ) {
                     Ok(producer) => producer,
                     Err(WasmCpuSearchError::ResourceAdmission { .. }) => {
@@ -2181,22 +2185,53 @@ impl WasmDistributedCoordinator {
                 ))
             }
         };
-        let mut merger = self.merger.take().ok_or_else(|| {
+        let merger = self.merger.take().ok_or_else(|| {
             distributed_error("E_WASM_DISTRIBUTED_STATE", "result merger is not ready")
         })?;
-        let result = merger
-            .finish(
-                &summary,
-                workers_used.min(self.worker_count).max(1),
-                &self.control,
-            )
-            .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?;
-        drop(merger);
+        let workers_used = workers_used.min(self.worker_count).max(1);
+        // Public response construction follows destruction of both merger and
+        // source summary owners, exactly as in the original raw handoff.
+        #[allow(clippy::large_enum_variant)]
+        enum PendingCompletion {
+            Core(
+                PreparedDistributedSearch,
+                clearra_core_executor::CoreExecutionResult,
+            ),
+            PcScore(PreparedDistributedPcScoreCompletion),
+            Build(PreparedDistributedBuildMinimumCompletion),
+        }
+        let pending = match merger {
+            DistributedResultMerger::BuildProbability(merger) => {
+                PendingCompletion::Build(stage_build_minimum_completion(
+                    merger,
+                    &summary,
+                    workers_used,
+                    &self.control,
+                    prepared,
+                )?)
+            }
+            merger if prepared.is_pc_score() => PendingCompletion::PcScore(
+                stage_pc_score_completion(merger, &summary, workers_used, &self.control, prepared)?,
+            ),
+            mut merger => {
+                let result = merger
+                    .finish(&summary, workers_used, &self.control)
+                    .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?;
+                drop(merger);
+                PendingCompletion::Core(prepared, result)
+            }
+        };
         drop(summary);
         drop(self.producer.take());
-        let execution = prepared
-            .into_cooperative_product_completion(result)
-            .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?;
+        let execution = match pending {
+            PendingCompletion::Core(prepared, result) => prepared
+                .into_cooperative_product_completion(result)
+                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?,
+            PendingCompletion::PcScore(stage) => stage
+                .into_cooperative_product_completion()
+                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?,
+            PendingCompletion::Build(stage) => stage.into_cooperative_product_completion(),
+        };
         Ok(WasmDistributedCompletionSession {
             execution,
             control: self.control,
@@ -2432,6 +2467,42 @@ impl WasmDistributedCoordinator {
     ) -> Result<GovernedWasmJson, WasmCommandRuntimeError> {
         serialize_governed_worker_events(self.finish_governed_events(workers_used, job_id)?)
     }
+}
+
+fn stage_build_minimum_completion(
+    mut merger: WasmBuildProbabilityDistributedResultMerger,
+    summary: &WasmDistributedGeometrySummary,
+    workers_used: usize,
+    control: &ExecutionControl,
+    prepared: PreparedDistributedSearch,
+) -> Result<PreparedDistributedBuildMinimumCompletion, WasmCommandRuntimeError> {
+    let completion = merger.finish_with_control_and_terminal(
+        summary,
+        workers_used,
+        control,
+        |result, authority| {
+            result.and_then(|result| {
+                let guard = |live: &clearra_core_executor::CoreExecutionResult, future| {
+                    authority
+                        .validate_public_result_memory_with_future(live, future)
+                        .map_err(|component| CoreExecutionError::RuntimeUnavailable { component })
+                };
+                if prepared.is_build_score_minimum() {
+                    prepared.prepare_build_score_minimum_with_memory_guard(result, control, guard)
+                } else {
+                    prepared.prepare_build_cover_with_memory_guard(result, control, guard)
+                }
+                .map_err(|error| match error {
+                    CoreExecutionError::RuntimeUnavailable { component } => component,
+                    CoreExecutionError::Cancelled => "cancelled",
+                    _ => "distributed_build_minimum_source_preparation_rejected",
+                })
+            })
+        },
+    );
+    after_authority_drop(merger, || {
+        completion.map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))
+    })
 }
 
 fn stage_build_probability_completion(
@@ -3618,6 +3689,14 @@ fn request_needs_distributed_execution(request: &AppRequest) -> bool {
             }
             command.query().core_query().execution_policy().workers()
         }
+        AppCommand::BuildV2(command) => match command.request() {
+            // A validated cover request fixes Buildability + Include and
+            // rejects finesse. Other BuildV2 families keep their own route.
+            BuildV2AppRequest::BuildCover(request) => {
+                request.query().core_query().execution_policy().workers()
+            }
+            _ => return false,
+        },
         _ => return false,
     };
     workers >= 2
@@ -4316,6 +4395,139 @@ mod build_probability_partial_ingress_tests {
                 .map(|value| value.candidate_count),
             Some(7)
         );
+    }
+
+    #[test]
+    fn build_cover_keeps_typed_build_workers_and_cooperative_minimum_completion() {
+        let runtime = WasmCommandRuntime::default()
+            .with_host_capabilities(crate::WasmHostCapabilities::new(12, false, false));
+        let command = "clearra build cover --base-mask 0x3c0f03c0f \
+            --target-mask 0xfc3f0fc3f0 --height 4 --hold empty --patterns P7 \
+            --queue-knowledge oracle --objective min-cover --rule srs-plus \
+            --no-mirror --backend cpu --no-backend-fallback --workers 11";
+        let WasmDistributedPreparation::Coordinator(coordinator) =
+            WasmDistributedCoordinator::prepare(&runtime, command).expect("typed Build cover")
+        else {
+            panic!("Build cover must not silently lose its requested workers")
+        };
+        assert_eq!(coordinator.worker_count, 11);
+        assert!(coordinator.requires_cooperative_completion());
+        assert!(matches!(
+            coordinator.producer.as_ref(),
+            Some(DistributedCandidateProducer::BuildProbability(_))
+        ));
+        let Some(DistributedPreparedSearch::Core(prepared)) = &coordinator.prepared else {
+            panic!("typed Build cover App source")
+        };
+        assert_eq!(
+            prepared.build_probability_solution_probability_policy(),
+            Some(BuildSolutionProbabilityPolicy::Include)
+        );
+        assert_eq!(
+            prepared.build_probability_request().unwrap().1,
+            clearra_problem::BuildProbabilityAggregation::Buildability
+        );
+    }
+
+    #[test]
+    fn build_score_minimum_uses_cooperative_completion_but_all_solutions_does_not() {
+        let runtime = WasmCommandRuntime::default()
+            .with_host_capabilities(crate::WasmHostCapabilities::new(12, false, false));
+        for (mode, cooperative) in [
+            ("highest-score-minimum-set", true),
+            ("all-solutions", false),
+        ] {
+            let score_options = if cooperative {
+                "--score-profile guideline --initial-b2b 0"
+            } else {
+                ""
+            };
+            let command = format!("clearra build-probability --base-mask 0x3c0f03c0f \
+                --target-mask 0xfc3f0fc3f0 --height 4 --hold empty --patterns P7 \
+                --aggregate buildability --rule srs-plus --no-build-dependency-dag \
+                --result-mode {mode} {score_options} --no-mirror --backend cpu --no-backend-fallback --workers 11");
+            let WasmDistributedPreparation::Coordinator(coordinator) =
+                WasmDistributedCoordinator::prepare(&runtime, &command)
+                    .expect("typed Build result mode")
+            else {
+                panic!("Build result mode must keep its typed distributed source")
+            };
+            assert_eq!(coordinator.worker_count, 11);
+            assert_eq!(coordinator.requires_cooperative_completion(), cooperative);
+        }
+    }
+
+    #[test]
+    fn build_cover_finite_ingress_remains_closed_before_compilation() {
+        let error = match WasmDistributedCoordinator::prepare(
+            &WasmCommandRuntime::default(),
+            "clearra build cover --workers 11 --max-memory-mib 64",
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("Build cover must not borrow the closed finite raw-text boundary"),
+        };
+        assert_eq!(error.code(), "E_WASM_FINITE_AUTHORITY_UNAVAILABLE");
+        assert!(error.message().is_empty());
+    }
+
+    #[test]
+    fn build_minimum_source_preparation_propagates_guard_decline_before_exact_work() {
+        let runtime = WasmCommandRuntime::default();
+        for command in [
+            "clearra build cover --base-mask 0x3c0f03c0f --target-mask 0xfc3f0fc3f0 \
+                --height 4 --hold empty --patterns P7 --queue-knowledge oracle \
+                --objective min-cover --no-mirror --workers 11",
+            "clearra build-probability --base-mask 0x3c0f03c0f --target-mask 0xfc3f0fc3f0 \
+                --height 4 --hold empty --patterns P7 --aggregate buildability \
+                --result-mode highest-score-minimum-set --score-profile guideline \
+                --initial-b2b 0 --no-mirror --workers 11",
+        ] {
+            let request = runtime
+                .prepare_command_text(command)
+                .unwrap()
+                .into_parts()
+                .0;
+            let DistributedSearchPreparation::Search(prepared) =
+                runtime.app_context().prepare_distributed_search(request)
+            else {
+                panic!("validated minimum source request")
+            };
+            assert!(prepared.requires_cooperative_product_completion());
+            let mut calls = 0;
+            let guard = |_: &CoreExecutionResult, _: u128| {
+                calls += 1;
+                Err(CoreExecutionError::RuntimeUnavailable {
+                    component: "test_minimum_guard_declined",
+                })
+            };
+            // Deliberately no source evidence: an admission decline must win
+            // before a portfolio is minted or exact proof can be advanced.
+            let source = CoreExecutionResult::new(Vec::new(), Vec::new());
+            let outcome = if prepared.is_build_score_minimum() {
+                prepared.prepare_build_score_minimum_with_memory_guard(
+                    source,
+                    &ExecutionControl::default(),
+                    guard,
+                )
+            } else {
+                prepared.prepare_build_cover_with_memory_guard(
+                    source,
+                    &ExecutionControl::default(),
+                    guard,
+                )
+            };
+            let error = match outcome {
+                Err(error) => error,
+                Ok(_) => panic!("unadmitted minimum preparation"),
+            };
+            assert_eq!(
+                error,
+                CoreExecutionError::RuntimeUnavailable {
+                    component: "test_minimum_guard_declined"
+                }
+            );
+            assert_eq!(calls, 1);
+        }
     }
 
     #[test]

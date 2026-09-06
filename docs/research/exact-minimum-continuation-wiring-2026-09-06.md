@@ -2,11 +2,26 @@
 
 ## 상태와 범위
 
-**이 문서는 구현 완료 보고서가 아니다.** 현재 dirty worktree의 Core/App/GUI 명령 연결을 읽기 전용으로 대조한 결과와, 아직 연결되지 않은 경로를 공통 cooperative continuation으로 연결하기 위한 최소 구현 경계를 기록한다. 아래의 기존 함수명과 관찰 위치는 현재 소스 근거이며, 제안하는 새 타입/함수명은 구현안이다. 현재 진행 중인 WASM 빌드의 소스는 이 조사로 변경하지 않았다.
+**이 문서는 검증 완료 또는 배포 Go 보고서가 아니다.** 최초 읽기 전용 감사와 그 뒤의 소스 구현을 구분한다. 아래 역사 표의 함수/줄 번호는 구현 전 동결 소스의 근거이며, 최신 연결 상황은 바로 다음 절에 별도로 기록한다.
+
+### 후속 소스 구현 — 실행 검증 전
+
+`CooperativeExecutionState::MinimumFinalize`와 `cooperative_minimum_finalize.rs`가 제품별 준비/완료 계약을 공통 exact 작업 owner에 연결한다. 새 코드의 Rust 타입 검사, 실행 및 WASM 성능 검증은 아직 완료되지 않았다. 로컬 실행 정책 문제로 소스 편집·rustfmt·diff 검사만 진행했으며, 기존 CI `87f2b2a`는 이 변경 이전 후보이다.
+
+| 경로 | 새 소스 연결 | 보존한 제품 경계 |
+| --- | --- | --- |
+| PC minimum | 기존 preparation을 공통 enum의 PC variant로 이동 | 기존 query/source/최소 집합 검증 |
+| PC score-minimals | score source preparation → 공통 exact continuation → typed evidence sealing; distributed도 producer guard 아래 준비 후 handoff | score-only eligibility, 원본 ID, attack 비혼합 |
+| Build cover | 실제 cooperative Build source 및 query-bound compiled problem → BuildCover preparation → 공통 exact continuation | Build 확률/coverage source 검증, MinCover 및 MaxProbabilityMinimum |
+| Build highest-score minimum | typed derivation → compact score preparation → 공통 exact continuation → 기존 payload/page owner | 기존 Build metadata와 score winner/public-ID 의미 |
+
+모든 variant의 query/task/receipt/assist/redundancy 메서드는 동일한 `CoveragePortfolioAlternativeSetPreparation`에 위임한다. 원래 ordinary AllSolutions finite caller-memory 프로토콜은 다른 제품을 이름만 바꾸어 허용하도록 확장하지 않는다. 제품별 constructor/terminal peak와 App 외부 owner는 별도로 집계하고, guard 거절은 미완료/오류로 닫는다.
+
+기존 score 계약 fixture는 private 공통 엔진을 실제 사용하기 위해 `tests/pc_score_minimum_cover_contracts.rs`에서 `src/pc_score_minimum_cover_contract_tests.rs`의 `cfg(test)` 모듈로 이동했다. 기존 의미 검증을 유지하고 cooperative/canonical parity, guard 거절, 취소 및 App state 진입 회귀 소스를 추가했다. 테스트 통과로 기록하는 것은 CI 실행 이후이다.
 
 이번 local coordinator + one-level idle assistance가 실제 연결되는 것은 **WASM cooperative `pc.minimals`의 최소값 증명과 첫 canonical 집합 선택**이다. 다른 제품이 같은 Exact Minimum Cover 엔진이나 같은 portfolio 결과 타입을 사용한다는 사실만으로, 그 제품에 멀티워커 scheduler가 연결되었다고 판단하면 안 된다. CLI의 native 동기 실행과 native 성능 predictor도 구별한다.
 
-## 현재 연결 행렬
+## 구현 전 동결 소스의 연결 행렬
 
 | 제품/입구 | 실제 결과 준비 경로 | 공유 exact solver 사용 | 새 local coordinator / idle assistance 도달 |
 | --- | --- | --- | --- |
@@ -107,6 +122,7 @@
 
 ## 현재 남은 일
 
-- 위 공통 continuation 및 각 제품 adapter 연결은 **미구현**이다.
-- 현재 빌드 중인 WASM의 PC minimum/Build 성능 검증과 native release predictor A/B는 별도 진행 중이며, 이 문서가 성능 조건 충족이나 배포 Go를 뜻하지 않는다.
+- 위 첫 세 신규 경로의 공통 continuation과 adapter는 소스 작성 단계이며, shared compile/CI 및 실제 WASM query-task-receipt→결과 완료 검증이 남아 있다.
+- colored/supplied/spin portfolio와 최초 결과 이후 대안 페이지의 추가 병렬 driver는 이번 세 경로 연결만으로 구현되었다고 볼 수 없다. native 동기 compatibility adapter도 WASM 멀티워커 driver와 구분한다.
+- 새 WASM의 PC minimum/Build/score 제품 성능 검증은 별도이며, 이 문서가 성능 조건 충족이나 배포 Go를 뜻하지 않는다.
 - PC minimum의 새로운 idle assist는 기존 원본 cursor를 유지한 **보조 complete-cube race**다. private DFS의 미탐색 continuation을 실제로 이전하는 work donation을 구현했다고 설명하지 않는다.

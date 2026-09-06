@@ -184,6 +184,82 @@ impl PcScenarioQuery<PcScenarioBoard> {
         Self::new_with_board(initial_board, remaining_queue, piece_window)
     }
 
+    /// Allocation-free identity comparison at a compiled-scenario boundary.
+    /// Only the standard initial line clear is normalized; every queue,
+    /// profile, hold, objective, execution and evidence-retention field must
+    /// still agree. The two small boards are inline values, not query clones.
+    /// Exhaustive destructuring intentionally makes adding any future query
+    /// field a compile-time obligation for this boundary.
+    pub fn eq_after_initial_line_clear(&self, other: &Self) -> bool {
+        let Self {
+            initial_board,
+            remaining_queue,
+            hold_state,
+            piece_set,
+            bag,
+            rule,
+            verified_kick_profile,
+            piece_window,
+            exact_pieces,
+            min_remaining_queue,
+            allow_hold,
+            supply_window_size,
+            requires_180,
+            completion_goal,
+            count_policy,
+            retained_trace_limit,
+            objective,
+            solution_probability_policy,
+            queue_observation_policy,
+            execution_policy,
+            allowed_colored_solution_identities,
+        } = self;
+        let Self {
+            initial_board: other_initial_board,
+            remaining_queue: other_remaining_queue,
+            hold_state: other_hold_state,
+            piece_set: other_piece_set,
+            bag: other_bag,
+            rule: other_rule,
+            verified_kick_profile: other_verified_kick_profile,
+            piece_window: other_piece_window,
+            exact_pieces: other_exact_pieces,
+            min_remaining_queue: other_min_remaining_queue,
+            allow_hold: other_allow_hold,
+            supply_window_size: other_supply_window_size,
+            requires_180: other_requires_180,
+            completion_goal: other_completion_goal,
+            count_policy: other_count_policy,
+            retained_trace_limit: other_retained_trace_limit,
+            objective: other_objective,
+            solution_probability_policy: other_solution_probability_policy,
+            queue_observation_policy: other_queue_observation_policy,
+            execution_policy: other_execution_policy,
+            allowed_colored_solution_identities: other_allowed_colored_solution_identities,
+        } = other;
+        initial_board.after_initial_line_clear() == other_initial_board.after_initial_line_clear()
+            && remaining_queue == other_remaining_queue
+            && hold_state == other_hold_state
+            && piece_set == other_piece_set
+            && bag == other_bag
+            && rule == other_rule
+            && verified_kick_profile == other_verified_kick_profile
+            && piece_window == other_piece_window
+            && exact_pieces == other_exact_pieces
+            && min_remaining_queue == other_min_remaining_queue
+            && allow_hold == other_allow_hold
+            && supply_window_size == other_supply_window_size
+            && requires_180 == other_requires_180
+            && completion_goal == other_completion_goal
+            && count_policy == other_count_policy
+            && retained_trace_limit == other_retained_trace_limit
+            && objective == other_objective
+            && solution_probability_policy == other_solution_probability_policy
+            && queue_observation_policy == other_queue_observation_policy
+            && execution_policy == other_execution_policy
+            && allowed_colored_solution_identities == other_allowed_colored_solution_identities
+    }
+
     /// Returns the heap graph retained by the scenario payload embedded in a
     /// typed Build-probability query. This deliberately does not authorize
     /// other PC command families to use the value as a complete request
@@ -462,3 +538,93 @@ impl<B> PcScenarioQuery<B> {
 #[cfg(test)]
 #[path = "pc_scenario_query_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod normalized_query_boundary_tests {
+    use super::*;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    fn query(mask: u64) -> PcScenarioQuery {
+        PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, mask),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O, PieceKind::I])),
+            PieceWindow::new(2),
+        )
+    }
+
+    #[test]
+    fn compiled_query_equality_normalizes_only_initial_completed_rows() {
+        let before = query(0x3ff | (0x15 << 10));
+        let normalized = query(0x15);
+        assert_ne!(before, normalized);
+        assert!(before.eq_after_initial_line_clear(&normalized));
+        assert!(normalized.eq_after_initial_line_clear(&before));
+        assert!(before.eq_after_initial_line_clear(&before));
+        assert!(!before.eq_after_initial_line_clear(&query(0x16)));
+        assert!(!normalized.eq_after_initial_line_clear(
+            &query(0x15).with_initial_board(PcScenarioBoard::standard_10(5, 0x15)),
+        ));
+        // Nonstandard/invalid boards preserve their exact existing behavior;
+        // the identity check cannot silently hide out-of-board occupancy.
+        assert!(!query(1 << 50).eq_after_initial_line_clear(&query(0)));
+        assert!(!query(0).eq_after_initial_line_clear(
+            &query(0).with_initial_board(PcScenarioBoard::new(9, 4, 0)),
+        ));
+    }
+
+    #[test]
+    fn compiled_query_equality_rejects_different_supply_rules_hold_or_objectives() {
+        let baseline = query(0x15);
+        let mut other_queue = baseline.clone();
+        other_queue.remaining_queue =
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I, PieceKind::O]));
+        let mut other_window = baseline.clone();
+        other_window.piece_window = PieceWindow::new(3);
+        let mut explicit_empty_allow_list = baseline.clone();
+        explicit_empty_allow_list.allowed_colored_solution_identities = Some(Vec::new());
+        for changed in [
+            other_queue,
+            other_window,
+            explicit_empty_allow_list,
+            baseline
+                .clone()
+                .with_rule(clearra_rules::profile::builtin_rules::srs()),
+            baseline.clone().with_hold_piece(Some(PieceKind::T)),
+            baseline.clone().with_allow_hold(false),
+            baseline.clone().with_exact_pieces(Some(2)),
+            baseline.clone().with_min_remaining_queue(1),
+            baseline
+                .clone()
+                .with_supply_window_size(SupplyWindowSize::new(3)),
+            baseline.clone().with_requires_180(true),
+            baseline
+                .clone()
+                .with_count_policy(PcCountPolicy::CountUnique),
+            baseline.clone().with_retained_trace_limit(0),
+            baseline
+                .clone()
+                .with_objective(ObjectivePolicy::minimum_cover()),
+            baseline
+                .clone()
+                .with_objective(ObjectivePolicy::all().with_initial_b2b(1)),
+            baseline
+                .clone()
+                .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include),
+            baseline.clone().with_queue_observation_policy(
+                match baseline.queue_observation_policy {
+                    QueueObservationPolicy::FullQueueOracle => QueueObservationPolicy::VisibleSeven,
+                    QueueObservationPolicy::VisibleSeven => QueueObservationPolicy::FullQueueOracle,
+                },
+            ),
+            baseline.clone().with_execution_policy(
+                baseline
+                    .execution_policy
+                    .clone()
+                    .with_deterministic(!baseline.execution_policy.deterministic()),
+            ),
+        ] {
+            assert!(!baseline.eq_after_initial_line_clear(&changed));
+            assert!(!changed.eq_after_initial_line_clear(&baseline));
+        }
+    }
+}

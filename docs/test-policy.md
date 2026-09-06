@@ -72,14 +72,18 @@ work begins. Source-only `Validate` remains available. The mock-only
 `scripts/test_execution_surface_policy.ps1` verifies this boundary without
 building or launching a generated executable.
 
-### Non-publishing candidate full gate
+### Non-publishing candidate feedback and full gate
 
 `Candidate Preflight` is isolated to `codex/v0.8.0-preflight-20260906-rng`. A push to that
-branch runs the existing full eight-stage `ReleaseAcceptance` command once on
-`windows-latest`, the same hosted runner family as canonical acceptance. A
-manual dispatch on that exact branch defaults to `full_gate=true`; setting it
-to `false` selects only the existing CLI build/startup and UI compile feedback. Full runs skip
-those light jobs to avoid repeating their work. No local UMCI policy is changed,
+branch selects focused Rust/WASM, CLI build/startup and UI compile feedback.
+The Rust selection is a closed list of the nine observed App regressions plus
+the new minimum continuations, source guards and normalized-query contracts;
+each selection must actually run at least one passing test. It is not a full
+workspace test run. A manual dispatch on that exact branch defaults to
+`full_gate=true`, running the existing full eight-stage `ReleaseAcceptance`
+command once on `windows-latest`, the hosted runner family used by canonical
+acceptance. Full runs skip all three focused jobs to avoid duplicate work.
+No local UMCI policy is changed,
 and native execution policy errors remain fatal on the selected runner.
 
 The token is contents-read-only, checkout credentials are not persisted, and
@@ -89,7 +93,14 @@ production `workflow_run` trigger. Source and engine identity both use the exact
 candidate SHA; this is provenance, not canonical release authority. A successful
 candidate full gate cannot replace the required exact-main canonical acceptance.
 
-After a full run, even if a later stage failed, only an already-built generation
+Focused feedback builds WASM once into a new runner-temporary destination with
+the native builder and without `--verify` (it does not launch the full gate).
+A failed focused Rust test may still produce this diagnostic WASM when the
+exact-source, toolchain, execution-policy and boundary checks passed, but the
+job remains failed. Cancellation or failed build prevents preservation. No
+acceptance status can be inferred from a downloadable development artifact.
+
+After either path, even if a different stage failed, only an already-built generation
 whose five files, hashes, aliases, manifest and current source contract verify
 may be uploaded as `unqualified-candidate-wasm-*` for seven days. Missing WASM is
 reported as not built; malformed/stale WASM fails preservation. The preserved

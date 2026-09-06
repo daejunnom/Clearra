@@ -727,6 +727,24 @@ impl ValidatedProductCapabilityPayload {
 }
 
 impl ValidatedProductCapabilityContract {
+    pub(crate) fn checked_score_minimum_cover_retained_capacity_bytes(&self) -> Option<u128> {
+        if self.contract != ProductCapabilityContract::PcScoreMinimals {
+            return None;
+        }
+        let query = match &self.payload {
+            ValidatedProductCapabilityPayload::PcScoreMinimalsOpening { query, .. } => {
+                PcScoreQuerySnapshot::Opening(Arc::clone(query))
+            }
+            ValidatedProductCapabilityPayload::PcScoreMinimalsScenario { query, .. } => {
+                PcScoreQuerySnapshot::Scenario(Arc::clone(query))
+            }
+            _ => return None,
+        };
+        query
+            .checked_pointee_retained_bytes()?
+            .checked_add((2 * core::mem::size_of::<usize>()) as u128)
+    }
+
     /// Heap pointees retained by the closed pc.minimals proof. Other product
     /// payloads deliberately return None instead of silently omitting owners.
     pub(crate) fn checked_minimum_cover_retained_capacity_bytes(&self) -> Option<u128> {

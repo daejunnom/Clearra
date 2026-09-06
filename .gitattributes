@@ -1,6 +1,26 @@
 *.sh text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# The WASM source contract hashes actual compile-input bytes. Keep these
+# checkout bytes identical on Windows CI and local formatter-owned sources.
+*.rs text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.cmake text eol=lf
+*.frag text eol=lf
+*.vert text eol=lf
+*.wgsl text eol=lf
+Cargo.toml text eol=lf
+Cargo.lock text eol=lf
+CMakeLists.txt text eol=lf
+/rust-toolchain text eol=lf
+/rust-toolchain.toml text eol=lf
+/.cargo/config text eol=lf
+/.cargo/config.toml text eol=lf
+/scripts/tools/build-clearra-wasm.mjs text eol=lf
+/scripts/tools/clearra-wasm-build-contract.mjs text eol=lf
+/scripts/tools/clearra-wasm-generation-retention.mjs text eol=lf
+/scripts/tools/stage-clearra-wasm.mjs text eol=lf
 apps/clearra-discord-bot/scripts/restore-oracle-release text eol=lf
 scripts/release/create-exact-source-archive.mjs text eol=lf
 scripts/release/exact-source-tar-contract.mjs text eol=lf

@@ -474,19 +474,9 @@ impl CoveragePortfolioAlternativeSetPreparation {
     }
 
     fn checked_input_retained_capacity_bytes(&self) -> Option<u128> {
-        let mut bytes = [
-            &self.identity.query_identity,
-            &self.identity.source_identity,
-            &self.identity.profile_identity,
-            &self.identity.universe_identity,
-            &self.identity.build_identity,
-            &self.set_identity_sha256,
-            &self.candidate_map_sha256,
-        ]
-        .into_iter()
-        .try_fold(0_u128, |bytes, value| {
-            bytes.checked_add(value.capacity() as u128)
-        })?;
+        let mut bytes = checked_identity_retained_capacity_bytes(&self.identity)?
+            .checked_add(self.set_identity_sha256.capacity() as u128)?
+            .checked_add(self.candidate_map_sha256.capacity() as u128)?;
         bytes = bytes.checked_add(
             (self.candidates.capacity() as u128)
                 .checked_mul(core::mem::size_of::<PortfolioCandidate>() as u128)?,
@@ -512,36 +502,119 @@ impl CoveragePortfolioAlternativeSetPreparation {
         required: PatternBitSet,
         rows: Vec<PatternBitSet>,
     ) -> Result<Self, PortfolioAlternativeError> {
-        let (candidate_keys, rows) =
-            canonicalize_candidate_keys_and_rows(candidate_keys, rows, &required)?;
-        let candidates = candidate_keys
-            .into_iter()
-            .enumerate()
-            .map(|(index, normalized_key)| {
-                let candidate_id = u64::try_from(index)
-                    .ok()
-                    .and_then(|index| index.checked_add(1))
-                    .ok_or(PortfolioAlternativeError::CandidateCountOverflow)?;
-                Ok(PortfolioCandidate {
-                    candidate_id,
-                    normalized_key,
-                })
+        Self::new_with_memory_guard(identity, candidate_keys, required, rows, &mut |_| Ok(()))
+    }
+
+    /// The callback owns this constructor's whole inline plus heap peak,
+    /// including consumed input buffers until their replacements are live.
+    /// Caller-owned query/response state must be added by the caller. Neither
+    /// a rejected allocation nor an incomplete constructor publishes proof.
+    pub(crate) fn new_with_memory_guard(
+        identity: PortfolioAlternativeSetIdentity,
+        candidate_keys: Vec<String>,
+        required: PatternBitSet,
+        rows: Vec<PatternBitSet>,
+        memory_guard: &mut impl FnMut(
+            u128,
+        )
+            -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+    ) -> Result<Self, PortfolioAlternativeError> {
+        // Self contains the final identity/required/vector headers. During
+        // canonicalization the two input buffers and zipped sort owner also
+        // retain their own headers. Sorting itself is allocation-free.
+        let constructor_inline = (core::mem::size_of::<Self>() as u128)
+            .checked_add(core::mem::size_of::<Vec<String>>() as u128)
+            .and_then(|bytes| bytes.checked_add(core::mem::size_of::<Vec<PatternBitSet>>() as u128))
+            .and_then(|bytes| {
+                bytes.checked_add(core::mem::size_of::<Vec<(String, PatternBitSet)>>() as u128)
             })
-            .collect::<Result<Vec<_>, PortfolioAlternativeError>>()?;
-        let candidate_map_sha256 = candidate_map_digest(&candidates);
-        let set_identity_sha256 = set_identity_digest(&identity, &candidate_map_sha256);
-        let proof = ExactMinimumCoverPortfolioPreparationSession::new(&required, &rows)
-            .map_err(PortfolioAlternativeError::Enumeration)?;
-        Ok(Self {
+            .ok_or_else(portfolio_projection_overflow)?;
+        let fixed_live = constructor_inline
+            .checked_add(
+                checked_identity_retained_capacity_bytes(&identity)
+                    .ok_or_else(portfolio_projection_overflow)?,
+            )
+            .and_then(|bytes| bytes.checked_add(required.checked_storage_retained_bytes()?))
+            .ok_or_else(portfolio_projection_overflow)?;
+        let (candidates, rows) = canonicalize_candidate_keys_and_rows_with_memory_guard(
+            candidate_keys,
+            rows,
+            &required,
+            fixed_live,
+            memory_guard,
+        )?;
+        let mut preparation = Self {
             identity,
-            set_identity_sha256,
-            candidate_map_sha256,
+            set_identity_sha256: String::new(),
+            candidate_map_sha256: String::new(),
             candidates,
             required,
             rows,
             parallel_partitions: None,
-            state: CoveragePortfolioAlternativeSetPreparationState::Proving(proof),
-        })
+            state: CoveragePortfolioAlternativeSetPreparationState::Finished,
+        };
+        let hash_inline = (core::mem::size_of::<Sha256>() as u128)
+            .checked_add(32)
+            .ok_or_else(portfolio_projection_overflow)?;
+        let mut hash_live = (core::mem::size_of::<Self>() as u128)
+            .checked_add(
+                preparation
+                    .checked_input_retained_capacity_bytes()
+                    .ok_or_else(portfolio_projection_overflow)?,
+            )
+            .and_then(|bytes| bytes.checked_add(hash_inline))
+            .ok_or_else(portfolio_projection_overflow)?;
+        preparation.candidate_map_sha256 =
+            candidate_map_digest(&preparation.candidates, hash_live, memory_guard)?;
+        hash_live = hash_live
+            .checked_add(preparation.candidate_map_sha256.capacity() as u128)
+            .ok_or_else(portfolio_projection_overflow)?;
+        preparation.set_identity_sha256 = set_identity_digest(
+            &preparation.identity,
+            &preparation.candidate_map_sha256,
+            hash_live,
+            memory_guard,
+        )?;
+
+        // Core may lazily populate shared sparse inputs' dense caches. Bound
+        // that source-owner growth once while its own guarded constructor
+        // accounts for the copied row headers and exact-search allocations.
+        let dense_cache_headroom = (preparation.required.word_count() as u128)
+            .checked_mul(core::mem::size_of::<u64>() as u128)
+            .and_then(|bytes| bytes.checked_add(2 * core::mem::size_of::<usize>() as u128))
+            .and_then(|bytes| bytes.checked_mul((preparation.rows.len() as u128).checked_add(1)?));
+        let static_live = (core::mem::size_of::<Self>() as u128)
+            .checked_add(
+                preparation
+                    .checked_input_retained_capacity_bytes()
+                    .ok_or_else(portfolio_projection_overflow)?,
+            )
+            .and_then(|bytes| bytes.checked_add(dense_cache_headroom?))
+            .ok_or_else(portfolio_projection_overflow)?;
+        memory_guard(static_live).map_err(portfolio_minimum_cover_error)?;
+        let proof =
+            ExactMinimumCoverPortfolioPreparationSession::new_with_memory_guard(
+                &preparation.required,
+                &preparation.rows,
+                &mut |exact_peak| {
+                    memory_guard(static_live.checked_add(exact_peak).ok_or(
+                        clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow,
+                    )?)
+                },
+            )
+            .map_err(PortfolioAlternativeError::Enumeration)?;
+        preparation.state = CoveragePortfolioAlternativeSetPreparationState::Proving(proof);
+        memory_guard(
+            (core::mem::size_of::<Self>() as u128)
+                .checked_add(
+                    preparation
+                        .checked_retained_capacity_bytes()
+                        .ok_or_else(portfolio_projection_overflow)?,
+                )
+                .ok_or_else(portfolio_projection_overflow)?,
+        )
+        .map_err(portfolio_minimum_cover_error)?;
+        Ok(preparation)
     }
 
     pub(crate) fn enable_parallel(
@@ -2876,11 +2949,82 @@ fn checked_page_nested_retained_capacity_bytes(page: &PortfolioAlternativePage) 
     )
 }
 
-fn canonicalize_candidate_keys_and_rows(
+fn checked_identity_retained_capacity_bytes(
+    identity: &PortfolioAlternativeSetIdentity,
+) -> Option<u128> {
+    [
+        &identity.query_identity,
+        &identity.source_identity,
+        &identity.profile_identity,
+        &identity.universe_identity,
+        &identity.build_identity,
+    ]
+    .into_iter()
+    .try_fold(0_u128, |bytes, value| {
+        bytes.checked_add(value.capacity() as u128)
+    })
+}
+
+fn checked_vector_capacity_bytes<T>(capacity: usize) -> Result<u128, PortfolioAlternativeError> {
+    (capacity as u128)
+        .checked_mul(core::mem::size_of::<T>() as u128)
+        .ok_or_else(portfolio_projection_overflow)
+}
+
+fn try_portfolio_vec_with_memory_guard<T>(
+    length: usize,
+    external_live: u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+) -> Result<Vec<T>, PortfolioAlternativeError> {
+    memory_guard(
+        external_live
+            .checked_add(checked_vector_capacity_bytes::<T>(length)?)
+            .ok_or_else(portfolio_projection_overflow)?,
+    )
+    .map_err(portfolio_minimum_cover_error)?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(length)
+        .map_err(|_| PortfolioAlternativeError::AllocationFailed)?;
+    memory_guard(
+        external_live
+            .checked_add(checked_vector_capacity_bytes::<T>(values.capacity())?)
+            .ok_or_else(portfolio_projection_overflow)?,
+    )
+    .map_err(portfolio_minimum_cover_error)?;
+    Ok(values)
+}
+
+fn canonicalize_candidate_keys_and_rows_with_memory_guard(
     candidate_keys: Vec<String>,
     rows: Vec<PatternBitSet>,
     required: &PatternBitSet,
-) -> Result<(Vec<String>, Vec<PatternBitSet>), PortfolioAlternativeError> {
+    fixed_live: u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+) -> Result<(Vec<PortfolioCandidate>, Vec<PatternBitSet>), PortfolioAlternativeError> {
+    let mut nested_live = fixed_live;
+    for key in &candidate_keys {
+        nested_live = nested_live
+            .checked_add(key.capacity() as u128)
+            .ok_or_else(portfolio_projection_overflow)?;
+    }
+    for row in &rows {
+        nested_live = nested_live
+            .checked_add(
+                row.checked_storage_retained_bytes()
+                    .ok_or_else(portfolio_projection_overflow)?,
+            )
+            .ok_or_else(portfolio_projection_overflow)?;
+    }
+    let input_live = nested_live
+        .checked_add(checked_vector_capacity_bytes::<String>(
+            candidate_keys.capacity(),
+        )?)
+        .and_then(|bytes| {
+            bytes.checked_add(checked_vector_capacity_bytes::<PatternBitSet>(rows.capacity()).ok()?)
+        })
+        .ok_or_else(portfolio_projection_overflow)?;
+    memory_guard(input_live).map_err(portfolio_minimum_cover_error)?;
     if candidate_keys.len() != rows.len() {
         return Err(PortfolioAlternativeError::CandidateMapLengthMismatch);
     }
@@ -2896,24 +3040,52 @@ fn canonicalize_candidate_keys_and_rows(
     {
         return Err(PortfolioAlternativeError::PatternUniverseMismatch);
     }
-    let mut keyed_rows = candidate_keys.into_iter().zip(rows).collect::<Vec<_>>();
+    let mut keyed_rows = try_portfolio_vec_with_memory_guard::<(String, PatternBitSet)>(
+        candidate_keys.len(),
+        input_live,
+        memory_guard,
+    )?;
+    // Reserve while both input buffers are live, then move (not clone) their
+    // payloads. No spare input capacity is assumed to disappear before move.
+    for pair in candidate_keys.into_iter().zip(rows) {
+        keyed_rows.push(pair);
+    }
     keyed_rows.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     if keyed_rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err(PortfolioAlternativeError::CandidateMapNotCanonical);
     }
 
-    let mut candidate_keys = Vec::new();
-    let mut rows = Vec::new();
-    candidate_keys
-        .try_reserve_exact(keyed_rows.len())
-        .map_err(|_| PortfolioAlternativeError::AllocationFailed)?;
-    rows.try_reserve_exact(keyed_rows.len())
-        .map_err(|_| PortfolioAlternativeError::AllocationFailed)?;
-    for (key, row) in keyed_rows {
-        candidate_keys.push(key);
+    let sorted_live = nested_live
+        .checked_add(checked_vector_capacity_bytes::<(String, PatternBitSet)>(
+            keyed_rows.capacity(),
+        )?)
+        .ok_or_else(portfolio_projection_overflow)?;
+    let mut candidates = try_portfolio_vec_with_memory_guard::<PortfolioCandidate>(
+        keyed_rows.len(),
+        sorted_live,
+        memory_guard,
+    )?;
+    let mut rows = try_portfolio_vec_with_memory_guard::<PatternBitSet>(
+        keyed_rows.len(),
+        sorted_live
+            .checked_add(checked_vector_capacity_bytes::<PortfolioCandidate>(
+                candidates.capacity(),
+            )?)
+            .ok_or_else(portfolio_projection_overflow)?,
+        memory_guard,
+    )?;
+    for (index, (normalized_key, row)) in keyed_rows.into_iter().enumerate() {
+        let candidate_id = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(PortfolioAlternativeError::CandidateCountOverflow)?;
+        candidates.push(PortfolioCandidate {
+            candidate_id,
+            normalized_key,
+        });
         rows.push(row);
     }
-    Ok((candidate_keys, rows))
+    Ok((candidates, rows))
 }
 
 fn portfolio_from_rows(
@@ -2991,7 +3163,11 @@ fn checkpoint_from_exact_page(
     }
 }
 
-fn candidate_map_digest(candidates: &[PortfolioCandidate]) -> String {
+fn candidate_map_digest(
+    candidates: &[PortfolioCandidate],
+    external_live: u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+) -> Result<String, PortfolioAlternativeError> {
     let mut hasher = Sha256::new();
     hasher.update(CANDIDATE_MAP_DIGEST_DOMAIN);
     hasher.update((candidates.len() as u64).to_be_bytes());
@@ -2999,13 +3175,15 @@ fn candidate_map_digest(candidates: &[PortfolioCandidate]) -> String {
         hasher.update(candidate.candidate_id.to_be_bytes());
         update_length_delimited(&mut hasher, candidate.normalized_key.as_bytes());
     }
-    hex_sha256(hasher.finalize())
+    hex_sha256_with_memory_guard(hasher.finalize(), external_live, memory_guard)
 }
 
 fn set_identity_digest(
     identity: &PortfolioAlternativeSetIdentity,
     candidate_map_sha256: &str,
-) -> String {
+    external_live: u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+) -> Result<String, PortfolioAlternativeError> {
     let mut hasher = Sha256::new();
     hasher.update(SET_IDENTITY_DIGEST_DOMAIN);
     for value in [
@@ -3018,7 +3196,7 @@ fn set_identity_digest(
     ] {
         update_length_delimited(&mut hasher, value.as_bytes());
     }
-    hex_sha256(hasher.finalize())
+    hex_sha256_with_memory_guard(hasher.finalize(), external_live, memory_guard)
 }
 
 fn update_length_delimited(hasher: &mut Sha256, bytes: &[u8]) {
@@ -3026,15 +3204,38 @@ fn update_length_delimited(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn hex_sha256(bytes: impl AsRef<[u8]>) -> String {
+fn hex_sha256_with_memory_guard(
+    bytes: impl AsRef<[u8]>,
+    external_live: u128,
+    memory_guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+) -> Result<String, PortfolioAlternativeError> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let bytes = bytes.as_ref();
-    let mut output = String::with_capacity(bytes.len() * 2);
+    let length = bytes
+        .len()
+        .checked_mul(2)
+        .ok_or_else(portfolio_projection_overflow)?;
+    memory_guard(
+        external_live
+            .checked_add(length as u128)
+            .ok_or_else(portfolio_projection_overflow)?,
+    )
+    .map_err(portfolio_minimum_cover_error)?;
+    let mut output = String::new();
+    output
+        .try_reserve_exact(length)
+        .map_err(|_| PortfolioAlternativeError::AllocationFailed)?;
+    memory_guard(
+        external_live
+            .checked_add(output.capacity() as u128)
+            .ok_or_else(portfolio_projection_overflow)?,
+    )
+    .map_err(portfolio_minimum_cover_error)?;
     for byte in bytes {
         output.push(HEX[(byte >> 4) as usize] as char);
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    output
+    Ok(output)
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -3102,6 +3303,283 @@ mod tests {
             row(3, &[2]),
         ];
         (keys, PatternBitSet::all(3), rows)
+    }
+
+    /// Drives the public cooperative page contract for these six-row
+    /// fixtures. Even an unbounded logical budget is allowed to hard-yield
+    /// inside one oracle; it is not a promise that one host call emits a page.
+    /// Keep the original total logical budget, require real forward work on
+    /// every pending slice, and never accept a sealed/empty/cancelled result
+    /// as the requested page. The finite call ceiling catches a broken cursor
+    /// instead of allowing a fixture to spin forever.
+    fn next_fixture_page(
+        mut next: impl FnMut(u64) -> Result<PortfolioAlternativeAdvance, PortfolioAlternativeError>,
+    ) -> PortfolioAlternativeAdvance {
+        let mut remaining_work = u64::MAX;
+        for _ in 0..4096 {
+            let advance = next(remaining_work).expect("bounded fixture page advance");
+            assert!(advance.work_steps() <= remaining_work);
+            remaining_work -= advance.work_steps();
+            if advance.page().is_some() {
+                return advance;
+            }
+            assert_eq!(
+                advance.stop(),
+                PortfolioEnumerationStop::WorkBudgetExhausted
+            );
+            assert!(!advance.checkpoint().enumeration_complete());
+            assert!(
+                advance.work_steps() > 0,
+                "a serial fixture cannot await an external receipt"
+            );
+            assert!(
+                remaining_work > 0,
+                "the original total logical budget is not replenished"
+            );
+        }
+        panic!("the six-row fixture did not produce its next exact page");
+    }
+
+    #[test]
+    fn minimum_preparation_constructor_guards_each_boundary_and_final_owner() {
+        let (keys, required, rows) = tied_input();
+        let mut trace = Vec::new();
+        let preparation = CoveragePortfolioAlternativeSetPreparation::new_with_memory_guard(
+            identity(),
+            keys,
+            required,
+            rows,
+            &mut |bytes| {
+                trace.push(bytes);
+                Ok(())
+            },
+        )
+        .expect("guarded preparation");
+        let final_owner = core::mem::size_of::<CoveragePortfolioAlternativeSetPreparation>()
+            as u128
+            + preparation.checked_retained_capacity_bytes().unwrap();
+        assert_eq!(
+            trace.last(),
+            Some(&final_owner),
+            "actual completed constructor owner is admitted before return"
+        );
+        assert!(
+            trace.len() > 12,
+            "input, three vector replacements, two digests and Core are all guarded"
+        );
+        for denied in 1..=trace.len() {
+            let (keys, required, rows) = tied_input();
+            let mut calls = 0;
+            let result = CoveragePortfolioAlternativeSetPreparation::new_with_memory_guard(
+                identity(),
+                keys,
+                required,
+                rows,
+                &mut |_| {
+                    calls += 1;
+                    if calls == denied {
+                        Err(clearra_coverage::cover::ExactMinimumCoverError::MemoryGuardRejected)
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(PortfolioAlternativeError::Enumeration(
+                        ExactMinimumCoverPortfolioError::MinimumCover(
+                            clearra_coverage::cover::ExactMinimumCoverError::MemoryGuardRejected
+                        )
+                    ))
+                ),
+                "constructor must stop at rejected boundary {denied}"
+            );
+            assert_eq!(
+                calls, denied,
+                "no later allocation/publication after rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_preparation_constructor_input_guard_counts_spare_payload_and_vector_capacity() {
+        let (mut keys, required, mut rows) = tied_input();
+        let mut source_identity = identity();
+        source_identity.source_identity.reserve(2_048);
+        keys[0].reserve(1_024);
+        keys.reserve(64);
+        rows.reserve(32);
+        let expected_input = core::mem::size_of::<CoveragePortfolioAlternativeSetPreparation>()
+            as u128
+            + checked_identity_retained_capacity_bytes(&source_identity).unwrap()
+            + required.checked_storage_retained_bytes().unwrap()
+            + checked_vector_capacity_bytes::<String>(keys.capacity()).unwrap()
+            + checked_vector_capacity_bytes::<PatternBitSet>(rows.capacity()).unwrap()
+            + keys.iter().map(|key| key.capacity() as u128).sum::<u128>()
+            + rows
+                .iter()
+                .map(|row| row.checked_storage_retained_bytes().unwrap())
+                .sum::<u128>();
+        let mut calls = 0;
+        let result = CoveragePortfolioAlternativeSetPreparation::new_with_memory_guard(
+            source_identity,
+            keys,
+            required,
+            rows,
+            &mut |bytes| {
+                calls += 1;
+                assert!(
+                    bytes >= expected_input,
+                    "input capacities are still live before canonicalization"
+                );
+                Err(clearra_coverage::cover::ExactMinimumCoverError::MemoryGuardRejected)
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            calls, 1,
+            "first admission precedes replacement allocation/hash/Core work"
+        );
+    }
+
+    #[test]
+    fn minimum_preparation_constructor_preserves_sorted_rows_ids_and_v1_digests() {
+        let (mut keys, required, mut rows) = tied_input();
+        let expected_rows = rows.clone();
+        keys.reverse();
+        rows.reverse();
+        let mut preparation = CoveragePortfolioAlternativeSetPreparation::new_with_memory_guard(
+            identity(),
+            keys,
+            required,
+            rows,
+            &mut |_| Ok(()),
+        )
+        .expect("guarded reversed input");
+        assert_eq!(preparation.rows, expected_rows);
+        assert_eq!(
+            preparation
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.candidate_id, candidate.normalized_key.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e"), (6, "f")]
+        );
+        let mut reference_map = Sha256::new();
+        reference_map.update(CANDIDATE_MAP_DIGEST_DOMAIN);
+        reference_map.update(6_u64.to_be_bytes());
+        for (index, key) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
+            reference_map.update(((index + 1) as u64).to_be_bytes());
+            reference_map.update((key.len() as u64).to_be_bytes());
+            reference_map.update(key.as_bytes());
+        }
+        let reference_map = reference_map
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .concat();
+        assert_eq!(preparation.candidate_map_sha256, reference_map);
+        let mut reference_set = Sha256::new();
+        reference_set.update(SET_IDENTITY_DIGEST_DOMAIN);
+        for value in [
+            "query-a",
+            "source-a",
+            "profile-a",
+            "universe-a",
+            "build-a",
+            &reference_map,
+        ] {
+            reference_set.update((value.len() as u64).to_be_bytes());
+            reference_set.update(value.as_bytes());
+        }
+        let reference_set = reference_set
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .concat();
+        assert_eq!(preparation.set_identity_sha256, reference_set);
+        let mut completed = None;
+        for _ in 0..128 {
+            match preparation
+                .advance(u64::MAX, &mut || false)
+                .expect("guarded constructor keeps exact proof")
+            {
+                CoveragePortfolioAlternativeSetPreparationAdvance::Completed(set) => {
+                    completed = Some(set);
+                    break;
+                }
+                CoveragePortfolioAlternativeSetPreparationAdvance::Pending { .. } => {}
+                CoveragePortfolioAlternativeSetPreparationAdvance::Cancelled { .. } => {
+                    panic!("uncancelled proof")
+                }
+            }
+        }
+        assert_eq!(
+            completed
+                .expect("tiny proof completes")
+                .canonical_page()
+                .portfolio()
+                .candidate_ids(),
+            &[1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn minimum_preparation_constructor_guard_preserves_input_rejections_and_overflow() {
+        for (keys, required, rows, expected) in [
+            (
+                vec!["a".to_owned()],
+                PatternBitSet::all(1),
+                Vec::new(),
+                PortfolioAlternativeError::CandidateMapLengthMismatch,
+            ),
+            (
+                vec!["".to_owned()],
+                PatternBitSet::all(1),
+                vec![row(1, &[0])],
+                PortfolioAlternativeError::CandidateMapNotCanonical,
+            ),
+            (
+                vec!["a".to_owned(), "a".to_owned()],
+                PatternBitSet::all(1),
+                vec![row(1, &[0]), row(1, &[0])],
+                PortfolioAlternativeError::CandidateMapNotCanonical,
+            ),
+            (
+                vec!["a".to_owned()],
+                PatternBitSet::all(1),
+                vec![row(2, &[0])],
+                PortfolioAlternativeError::PatternUniverseMismatch,
+            ),
+        ] {
+            let actual = CoveragePortfolioAlternativeSetPreparation::new_with_memory_guard(
+                identity(),
+                keys,
+                required,
+                rows,
+                &mut |_| Ok(()),
+            )
+            .err()
+            .expect("invalid source rejected");
+            assert_eq!(actual, expected);
+        }
+        let mut called = false;
+        let overflow = try_portfolio_vec_with_memory_guard::<u64>(1, u128::MAX, &mut |_| {
+            called = true;
+            Ok(())
+        });
+        assert!(matches!(
+            overflow,
+            Err(PortfolioAlternativeError::Enumeration(
+                ExactMinimumCoverPortfolioError::MinimumCover(
+                    clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow
+                )
+            ))
+        ));
+        assert!(!called, "overflow fails before allocator/admission call");
     }
 
     #[test]
@@ -3343,7 +3821,7 @@ mod tests {
         assert_eq!(set.canonical_page().total_alternative_count_decimal(), None);
 
         let mut store = set.open_store().expect("store");
-        let advance = store.next_page(u64::MAX, &mut || false).expect("page");
+        let advance = next_fixture_page(|work| store.next_page(work, &mut || false));
         assert_eq!(
             advance
                 .page()
@@ -3583,21 +4061,21 @@ mod tests {
     fn checkpoint_resume_is_exact_and_identity_bound() {
         let set = tied_set();
         let mut uninterrupted = set.open_store().expect("store");
-        let first_advance = uninterrupted
-            .next_page(u64::MAX, &mut || false)
-            .expect("second portfolio");
+        let first_advance = next_fixture_page(|work| uninterrupted.next_page(work, &mut || false));
         let checkpoint = first_advance.checkpoint().clone();
-        let expected = uninterrupted
-            .next_page(u64::MAX, &mut || false)
-            .expect("third portfolio")
+        assert_eq!(
+            first_advance.page().unwrap().portfolio().candidate_ids(),
+            &[1, 2, 6]
+        );
+        let expected = next_fixture_page(|work| uninterrupted.next_page(work, &mut || false))
             .page()
             .expect("third page")
             .clone();
+        assert_eq!(expected.portfolio().candidate_ids(), &[1, 3, 5]);
+        assert_eq!(expected.alternative_index_decimal(), "3");
 
         let mut resumed = set.resume_store(&checkpoint).expect("resume");
-        let actual = resumed
-            .next_page(u64::MAX, &mut || false)
-            .expect("resumed third portfolio")
+        let actual = next_fixture_page(|work| resumed.next_page(work, &mut || false))
             .page()
             .expect("resumed page")
             .clone();
@@ -3701,9 +4179,7 @@ mod tests {
             vec![1, 2, 3]
         );
 
-        let prefetched = coverage
-            .next_page(u64::MAX, &mut || false)
-            .expect("prefetched alternative");
+        let prefetched = next_fixture_page(|work| coverage.next_page(work, &mut || false));
         assert_eq!(
             prefetched
                 .page()

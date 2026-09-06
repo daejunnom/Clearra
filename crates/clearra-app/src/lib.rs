@@ -180,7 +180,8 @@ pub use distributed_forward_execution::{
     DistributedForwardPreparation, PreparedDistributedForwardSearch,
 };
 pub use distributed_search_execution::{
-    DistributedSearchPreparation, PreparedDistributedPcScoreCompletion, PreparedDistributedSearch,
+    DistributedSearchPreparation, PreparedDistributedBuildMinimumCompletion,
+    PreparedDistributedPcScoreCompletion, PreparedDistributedSearch,
     PreparedDistributedSearchCompletion,
 };
 pub use distributed_setup_execution::{
@@ -298,3 +299,7 @@ pub use typed_document_utility::{
 #[cfg(test)]
 #[path = "product_capability_contract_tests.rs"]
 mod product_capability_contract_tests;
+
+#[cfg(test)]
+#[path = "pc_score_minimum_cover_contract_tests.rs"]
+mod pc_score_minimum_cover_contract_tests;

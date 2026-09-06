@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       full_gate:
-        description: Run the complete non-publishing gate (false selects focused CLI/UI feedback)
+        description: Run the complete non-publishing gate (false selects focused Rust/WASM/CLI/UI feedback)
         required: true
         default: true
         type: boolean
@@ -40,7 +40,7 @@ jobs:
           [[ "$GITHUB_REF" == 'refs/heads/codex/v0.8.0-preflight-20260906-rng' && "$GITHUB_REF_TYPE" == 'branch' ]]
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           case "$GITHUB_EVENT_NAME" in
-            push) echo 'full_gate=true' >> "$GITHUB_OUTPUT" ;;
+            push) echo 'full_gate=false' >> "$GITHUB_OUTPUT" ;;
             workflow_dispatch)
               [[ "$REQUEST_FULL_GATE" == 'true' || "$REQUEST_FULL_GATE" == 'false' ]]
               echo "full_gate=$REQUEST_FULL_GATE" >> "$GITHUB_OUTPUT"
@@ -98,6 +98,72 @@ jobs:
           & node scripts/release/candidate-preflight-artifacts.mjs --from $candidateWasmSource --output $candidateWasmOutput --source-commit $env:GITHUB_SHA
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload verified but unqualified candidate WASM
+        if: always() && steps.candidate_wasm.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-candidate-wasm-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clearra-unqualified-candidate-wasm
+          if-no-files-found: error
+          retention-days: 7
+
+  candidate-rust-wasm:
+    if: needs.candidate-source.outputs.full_gate == 'false'
+    needs: candidate-source
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install JavaScript workspace
+        run: npm ci --ignore-scripts
+      - name: Prepare candidate toolchains
+        id: toolchains
+        shell: powershell
+        run: |
+          if ((& git rev-parse HEAD).Trim() -ne $env:GITHUB_SHA) { throw 'Candidate source mismatch' }
+          . ./scripts/lib/clearra-path-helpers.ps1
+          . ./scripts/lib/clearra-execution-surface.ps1
+          Assert-ClearraTrustedExecutionSurface -TaskName 'CandidateRustWasm' -ExecutionSurface Trusted -RuntimeEnvironment windows
+          rustup target add wasm32-unknown-unknown
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tool = Get-Command wasm-bindgen -ErrorAction SilentlyContinue
+          if ($null -eq $tool -or (& wasm-bindgen --version) -ne 'wasm-bindgen 0.2.126') {
+            cargo install wasm-bindgen-cli --version 0.2.126 --locked
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Check non-publishing focused feedback boundaries
+        id: boundaries
+        run: node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/candidate-preflight-regressions.test.mjs scripts/release/candidate-preflight-artifacts.test.mjs
+      - name: Run fixed current-regression selections without the full workspace suite
+        id: regressions
+        run: node scripts/release/candidate-preflight-regressions.mjs
+      - name: Build source-bound WASM once for independent unqualified feedback
+        id: wasm_build
+        if: ${{ !cancelled() && steps.toolchains.outcome == 'success' && steps.boundaries.outcome == 'success' }}
+        shell: powershell
+        run: |
+          $candidateWasmBuild = Join-Path $env:RUNNER_TEMP 'clearra-candidate-wasm-built'
+          & node scripts/tools/build-clearra-wasm.mjs --environment native --destination $candidateWasmBuild
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve independently verified unqualified WASM
+        id: candidate_wasm
+        if: ${{ !cancelled() && steps.wasm_build.outcome == 'success' }}
+        shell: powershell
+        run: |
+          $candidateWasmSource = Join-Path $env:RUNNER_TEMP 'clearra-candidate-wasm-built'
+          $candidateWasmOutput = Join-Path $env:RUNNER_TEMP 'clearra-unqualified-candidate-wasm'
+          & node scripts/release/candidate-preflight-artifacts.mjs --from $candidateWasmSource --output $candidateWasmOutput --source-commit $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload verified but unqualified focused WASM
         if: always() && steps.candidate_wasm.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:

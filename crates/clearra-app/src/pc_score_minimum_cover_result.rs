@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fmt::Write, sync::Arc};
+// SRP rationale: one behavior-level change reason is score-only minimum-family
+// evidence: validating the winning score matrix, binding canonical candidate
+// identities and sealing exact portfolio results under that same authority.
+// The companion preparation owns resumability; the shared portfolio engine
+// alone owns cardinality proof and canonical selection.
+use std::sync::Arc;
 
 use clearra_core_domain::solution::normalized_tiling_solution::{
     NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
@@ -7,7 +12,14 @@ use clearra_core_executor::CoreExecutionResult;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use sha2::{Digest, Sha256};
 
-use crate::{
+#[path = "pc_score_minimum_cover_preparation.rs"]
+mod preparation;
+pub(crate) use preparation::{
+    PcScorePortfolioExecutionPreparation, PcScorePortfolioPreparationAdvance,
+};
+use preparation::{PcScorePortfolioProjection, ScorePortfolioSourceMemory};
+
+use super::{
     pc_score_postprocess::PcScoreDerivation,
     pc_score_summary_result::ValidatedPcScoreExecutionEvidence, CoveragePortfolioAlternativeSet,
     PcScoreIngressOrigin, PcScorePatternWinnerV1, PcScoreProblemPreset, PcScoreQuerySnapshot,
@@ -278,12 +290,6 @@ impl PcScorePortfolioV2Result {
         Some(bytes)
     }
 
-    /// Heap payload newly retained by the score-minimals projection after the
-    /// validated score summary already owns the query and winner family.
-    pub(crate) fn checked_incremental_retained_capacity_bytes(&self) -> Option<u128> {
-        self.checked_portfolio_specific_retained_capacity_bytes()
-    }
-
     fn checked_portfolio_specific_retained_capacity_bytes(&self) -> Option<u128> {
         let mut bytes = (self.pattern_best_scores.capacity() as u128)
             .checked_mul(core::mem::size_of::<u64>() as u128)?;
@@ -328,20 +334,6 @@ pub(crate) struct ValidatedPcScorePortfolioExecutionEvidence {
 }
 
 impl ValidatedPcScorePortfolioExecutionEvidence {
-    pub(crate) fn validate(
-        score_execution: ValidatedPcScoreExecutionEvidence,
-        derivation: &PcScoreDerivation,
-    ) -> Result<Self, PcScorePortfolioValidationError> {
-        let report = Arc::new(validate_pc_score_portfolio_v2_result(
-            score_execution.report(),
-            derivation,
-        )?);
-        Ok(Self {
-            score_execution,
-            report,
-        })
-    }
-
     pub(crate) fn report(&self) -> &PcScorePortfolioV2Result {
         self.report.as_ref()
     }
@@ -352,10 +344,6 @@ impl ValidatedPcScorePortfolioExecutionEvidence {
 
     pub(crate) fn matches_core_result(&self, result: &CoreExecutionResult) -> bool {
         self.score_execution.matches_core_result(result)
-    }
-
-    pub(crate) fn checked_incremental_retained_capacity_bytes(&self) -> Option<u128> {
-        self.report.checked_incremental_retained_capacity_bytes()
     }
 }
 
@@ -376,6 +364,9 @@ pub enum PcScorePortfolioValidationError {
     ExactMinimumCoverFailed,
     PortfolioIdentityInvalid,
     PortfolioAlternativeSetInvalid,
+    MemoryProjectionOverflow,
+    MemoryLimitExceeded,
+    Cancelled,
 }
 
 impl PcScorePortfolioValidationError {
@@ -396,6 +387,9 @@ impl PcScorePortfolioValidationError {
             Self::ExactMinimumCoverFailed => "pc-score-portfolio-exact-minimum-cover-failed",
             Self::PortfolioIdentityInvalid => "pc-score-portfolio-identity-invalid",
             Self::PortfolioAlternativeSetInvalid => "pc-score-portfolio-alternative-set-invalid",
+            Self::MemoryProjectionOverflow => "pc-score-portfolio-memory-projection-overflow",
+            Self::MemoryLimitExceeded => "pc-score-portfolio-memory-limit-exceeded",
+            Self::Cancelled => "pc-score-portfolio-cancelled",
         }
     }
 }
@@ -418,25 +412,58 @@ struct CandidateAccumulator {
 /// The score summary is the query/profile/universe/weight authority; the
 /// derivation is the complete legal replay authority. The two projections are
 /// compared fieldwise without reading informational attack.
+// The isolated authority fixtures use this blocking oracle to compare the
+// resumable result. Production callers retain and drive the preparation.
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn validate_pc_score_portfolio_v2_result(
     summary: &PcScoreSummaryV2Result,
     derivation: &PcScoreDerivation,
 ) -> Result<PcScorePortfolioV2Result, PcScorePortfolioValidationError> {
+    preparation::complete_score_portfolio(summary, derivation)
+}
+
+fn prepare_pc_score_portfolio_input(
+    summary: &PcScoreSummaryV2Result,
+    derivation: &PcScoreDerivation,
+    memory: &mut ScorePortfolioSourceMemory<'_>,
+) -> Result<
+    (
+        PcScorePortfolioProjection,
+        PortfolioAlternativeSetIdentity,
+        Vec<String>,
+        PatternBitSet,
+        Vec<PatternBitSet>,
+    ),
+    PcScorePortfolioValidationError,
+> {
     validate_summary_completeness(summary, derivation)?;
 
-    let derivation_winners = canonical_winner_projection(derivation.pattern_winners())?;
-    let summary_winners = canonical_winner_projection(summary.pattern_winners())?;
+    let mut derivation_winners = canonical_winner_projection(derivation.pattern_winners(), memory)?;
+    let summary_winners = canonical_winner_projection(summary.pattern_winners(), memory)?;
     if derivation_winners != summary_winners {
         return Err(PcScorePortfolioValidationError::WinnerEvidenceMismatch);
     }
+    memory.release_vec(summary_winners)?;
 
     let pattern_count = summary.materialized_pattern_count();
-    let mut pattern_best_scores = vec![None; pattern_count];
-    let mut candidate_identities = BTreeMap::<u64, StandardBoard64TilingIdentity>::new();
-    let mut identity_owners = BTreeMap::<StandardBoard64TilingIdentity, u64>::new();
-    let mut candidates = BTreeMap::<u64, CandidateAccumulator>::new();
+    let mut pattern_best_scores = memory.vec(pattern_count)?;
+    pattern_best_scores.resize(pattern_count, None);
+    // The two canonical projections have already checked the ID/identity
+    // bijection. Group the same winners by candidate without hidden BTreeMap
+    // node allocations; within each candidate preserve ascending pattern ID.
+    derivation_winners.sort_unstable_by_key(|((pattern, candidate), _)| (*candidate, *pattern));
+    let candidate_count = derivation_winners
+        .iter()
+        .enumerate()
+        .filter(|(index, ((_, id), _))| *index == 0 || derivation_winners[*index - 1].0 .1 != *id)
+        .count();
+    let mut candidate_identities = memory.vec(candidate_count)?;
+    let mut candidates: Vec<CandidateAccumulator> = memory.vec(candidate_count)?;
 
-    for ((pattern_id, candidate_id), winner) in derivation_winners {
+    for (winner_index, ((pattern_id, candidate_id), winner)) in
+        derivation_winners.iter().copied().enumerate()
+    {
         let Some(pattern_score) = pattern_best_scores.get_mut(pattern_id) else {
             return Err(PcScorePortfolioValidationError::WinnerFamilyInvalid);
         };
@@ -448,26 +475,22 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
             _ => {}
         }
 
-        if candidate_identities
-            .insert(candidate_id, winner.solution_identity)
-            .is_some_and(|identity| identity != winner.solution_identity)
+        if candidates
+            .last()
+            .is_none_or(|candidate| candidate.score_candidate_id != candidate_id)
         {
-            return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
-        }
-        if identity_owners
-            .insert(winner.solution_identity, candidate_id)
-            .is_some_and(|owner| owner != candidate_id)
-        {
-            return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
-        }
-
-        let candidate = candidates
-            .entry(candidate_id)
-            .or_insert_with(|| CandidateAccumulator {
+            let candidate_pattern_count = derivation_winners[winner_index..]
+                .iter()
+                .take_while(|((_, id), _)| *id == candidate_id)
+                .count();
+            candidate_identities.push((candidate_id, winner.solution_identity));
+            candidates.push(CandidateAccumulator {
                 score_candidate_id: candidate_id,
                 solution_identity: winner.solution_identity,
-                eligible_patterns: Vec::new(),
+                eligible_patterns: memory.vec(candidate_pattern_count)?,
             });
+        }
+        let candidate = candidates.last_mut().expect("the candidate was inserted");
         if candidate.solution_identity != winner.solution_identity {
             return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
         }
@@ -477,15 +500,16 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
         });
     }
 
-    let pattern_best_scores = pattern_best_scores
-        .into_iter()
-        .collect::<Option<Vec<_>>>()
-        .ok_or(PcScorePortfolioValidationError::CoverageIncomplete)?;
+    let mut complete_best_scores = memory.vec(pattern_count)?;
+    for score in pattern_best_scores {
+        complete_best_scores
+            .push(score.ok_or(PcScorePortfolioValidationError::CoverageIncomplete)?);
+    }
+    let pattern_best_scores = complete_best_scores;
     if summary.best_score() != pattern_best_scores.iter().copied().max() {
         return Err(PcScorePortfolioValidationError::WinnerFamilyInvalid);
     }
 
-    let mut candidates = candidates.into_values().collect::<Vec<_>>();
     candidates.sort_unstable_by(|left, right| {
         left.solution_identity
             .cmp(&right.solution_identity)
@@ -499,9 +523,9 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
         return Err(PcScorePortfolioValidationError::CandidateMapNotCanonical);
     }
 
-    let mut eligible_candidates = Vec::with_capacity(candidates.len());
-    let mut candidate_keys = Vec::with_capacity(candidates.len());
-    let mut coverage_rows = Vec::with_capacity(candidates.len());
+    let mut eligible_candidates = memory.vec(candidates.len())?;
+    let mut candidate_keys = memory.vec(candidates.len())?;
+    let mut coverage_rows = memory.vec(candidates.len())?;
     for (index, candidate) in candidates.into_iter().enumerate() {
         if candidate
             .eligible_patterns
@@ -510,25 +534,33 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
         {
             return Err(PcScorePortfolioValidationError::WinnerFamilyInvalid);
         }
-        let pattern_ids = candidate
-            .eligible_patterns
-            .iter()
-            .map(|pattern| {
+        let mut pattern_ids = memory.vec(candidate.eligible_patterns.len())?;
+        for pattern in &candidate.eligible_patterns {
+            pattern_ids.push(
                 u32::try_from(pattern.pattern_id)
-                    .map_err(|_| PcScorePortfolioValidationError::PatternIndexOverflow)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                    .map_err(|_| PcScorePortfolioValidationError::PatternIndexOverflow)?,
+            );
+        }
+        let bitset_projection = PatternBitSet::checked_allocation_projection(
+            pattern_count,
+            pattern_ids.len(),
+            pattern_ids.capacity(),
+        )
+        .ok_or(PcScorePortfolioValidationError::MemoryProjectionOverflow)?;
+        memory.charge(bitset_projection.constructor_peak_bytes)?;
         let coverage = PatternBitSet::from_pattern_indices(pattern_count, pattern_ids)
             .map_err(|_| PcScorePortfolioValidationError::CoverageIncomplete)?;
-        let normalized_solution_key = NormalizedTilingSolutionKey::from_standard_board64_identity(
-            candidate.solution_identity,
-        )
-        .to_string();
+        memory.charge(
+            coverage
+                .checked_storage_retained_bytes()
+                .ok_or(PcScorePortfolioValidationError::MemoryProjectionOverflow)?,
+        )?;
+        let normalized_solution_key = memory.canonical_key(candidate.solution_identity)?;
         let portfolio_candidate_id = u64::try_from(index)
             .ok()
             .and_then(|value| value.checked_add(1))
             .ok_or(PcScorePortfolioValidationError::CandidateMapNotCanonical)?;
-        candidate_keys.push(normalized_solution_key.clone());
+        candidate_keys.push(memory.string(&normalized_solution_key)?);
         coverage_rows.push(coverage);
         eligible_candidates.push(PcScoreEligibleCandidateV2 {
             portfolio_candidate_id,
@@ -542,30 +574,66 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
         return Err(PcScorePortfolioValidationError::CandidateMapNotCanonical);
     }
 
+    memory.charge(
+        PatternBitSet::checked_all_projection(pattern_count)
+            .ok_or(PcScorePortfolioValidationError::MemoryProjectionOverflow)?
+            .constructor_peak_bytes,
+    )?;
     let required_patterns = PatternBitSet::all(pattern_count);
-    let eligible_candidate_map_sha256 = eligible_candidate_map_digest(&eligible_candidates);
+    // Two 64-hex digests and identity component strings are small but are
+    // still admitted before their formatting allocations.
+    let eligible_candidate_map_sha256 =
+        eligible_candidate_map_digest(&eligible_candidates, memory)?;
     let score_eligibility_sha256 = score_eligibility_digest(
         &pattern_best_scores,
         &eligible_candidates,
         &eligible_candidate_map_sha256,
-    );
+        memory,
+    )?;
     let portfolio_identity = build_portfolio_identity(
         summary,
         &eligible_candidate_map_sha256,
         &score_eligibility_sha256,
+        memory,
     )?;
-    let public_candidate_ids = eligible_candidates
-        .iter()
-        .map(PcScoreEligibleCandidateV2::score_candidate_id)
-        .collect::<Vec<_>>();
-    let portfolio_alternatives = CoveragePortfolioAlternativeSet::new_canonical(
+    Ok((
+        PcScorePortfolioProjection {
+            summary: summary.clone(),
+            pattern_best_scores,
+            pattern_winners: Arc::clone(derivation.pattern_winner_owner()),
+            eligible_candidates,
+            eligible_candidate_map_sha256,
+            score_eligibility_sha256,
+            candidate_identities,
+        },
         portfolio_identity,
         candidate_keys,
         required_patterns,
         coverage_rows,
-    )
-    .and_then(|set| set.with_public_candidate_ids(public_candidate_ids))
-    .map_err(|_| PcScorePortfolioValidationError::PortfolioAlternativeSetInvalid)?;
+    ))
+}
+
+fn finish_pc_score_portfolio_result(
+    projection: PcScorePortfolioProjection,
+    portfolio: CoveragePortfolioAlternativeSet,
+) -> Result<PcScorePortfolioV2Result, PcScorePortfolioValidationError> {
+    let PcScorePortfolioProjection {
+        summary,
+        pattern_best_scores,
+        pattern_winners,
+        eligible_candidates,
+        eligible_candidate_map_sha256,
+        score_eligibility_sha256,
+        candidate_identities,
+    } = projection;
+    let pattern_count = summary.materialized_pattern_count();
+    let public_candidate_ids = eligible_candidates
+        .iter()
+        .map(PcScoreEligibleCandidateV2::score_candidate_id)
+        .collect::<Vec<_>>();
+    let portfolio_alternatives = portfolio
+        .with_public_candidate_ids(public_candidate_ids)
+        .map_err(|_| PcScorePortfolioValidationError::PortfolioAlternativeSetInvalid)?;
     let selected_solution_keys = portfolio_alternatives
         .canonical_candidate_keys_owned()
         .map_err(|_| PcScorePortfolioValidationError::PortfolioAlternativeSetInvalid)?;
@@ -586,8 +654,9 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
         .min()
         .ok_or(PcScorePortfolioValidationError::CoverageIncomplete)?;
     let canonical_solution_identity = candidate_identities
-        .get(&canonical_score_candidate_id)
-        .copied()
+        .iter()
+        .find(|(id, _)| *id == canonical_score_candidate_id)
+        .map(|(_, identity)| *identity)
         .ok_or(PcScorePortfolioValidationError::CandidateIdentityMismatch)?;
     let portfolio_alternatives = Arc::new(portfolio_alternatives);
 
@@ -600,7 +669,7 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
         score_profile_id: Arc::from(summary.score_profile_id()),
         materialized_pattern_count: pattern_count,
         pattern_best_scores,
-        pattern_winners: Arc::clone(derivation.pattern_winner_owner()),
+        pattern_winners,
         eligible_candidates: eligible_candidates.into(),
         eligible_candidate_map_sha256,
         score_eligibility_sha256,
@@ -686,40 +755,42 @@ fn validate_summary_completeness(
 
 fn canonical_winner_projection(
     winners: &[PcScorePatternWinnerV1],
-) -> Result<BTreeMap<(usize, u64), WinnerProjection>, PcScorePortfolioValidationError> {
-    let mut projected = BTreeMap::new();
-    let mut candidate_identities = BTreeMap::new();
-    let mut identity_owners = BTreeMap::new();
+    memory: &mut ScorePortfolioSourceMemory<'_>,
+) -> Result<Vec<((usize, u64), WinnerProjection)>, PcScorePortfolioValidationError> {
+    let mut projected = memory.vec(winners.len())?;
+    let mut candidate_identities = memory.vec(winners.len())?;
     for winner in winners {
         if winner.candidate_id() == 0 {
             return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
         }
-        match candidate_identities.insert(winner.candidate_id(), winner.solution_identity()) {
-            Some(identity) if identity != winner.solution_identity() => {
-                return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
-            }
-            None => match identity_owners.insert(winner.solution_identity(), winner.candidate_id())
-            {
-                Some(owner) if owner != winner.candidate_id() => {
-                    return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
-                }
-                _ => {}
+        candidate_identities.push((winner.candidate_id(), winner.solution_identity()));
+        projected.push((
+            (winner.pattern_id(), winner.candidate_id()),
+            WinnerProjection {
+                solution_identity: winner.solution_identity(),
+                score: winner.score(),
             },
-            _ => {}
-        }
-        if projected
-            .insert(
-                (winner.pattern_id(), winner.candidate_id()),
-                WinnerProjection {
-                    solution_identity: winner.solution_identity(),
-                    score: winner.score(),
-                },
-            )
-            .is_some()
-        {
-            return Err(PcScorePortfolioValidationError::WinnerFamilyInvalid);
-        }
+        ));
     }
+    candidate_identities.sort_unstable();
+    if candidate_identities
+        .windows(2)
+        .any(|pair| pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1)
+    {
+        return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
+    }
+    candidate_identities.sort_unstable_by_key(|(id, identity)| (*identity, *id));
+    if candidate_identities
+        .windows(2)
+        .any(|pair| pair[0].1 == pair[1].1 && pair[0].0 != pair[1].0)
+    {
+        return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
+    }
+    projected.sort_unstable_by_key(|(key, _)| *key);
+    if projected.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(PcScorePortfolioValidationError::WinnerFamilyInvalid);
+    }
+    memory.release_vec(candidate_identities)?;
     Ok(projected)
 }
 
@@ -727,17 +798,23 @@ fn build_portfolio_identity(
     summary: &PcScoreSummaryV2Result,
     candidate_map_sha256: &str,
     eligibility_sha256: &str,
+    memory: &mut ScorePortfolioSourceMemory<'_>,
 ) -> Result<PortfolioAlternativeSetIdentity, PcScorePortfolioValidationError> {
     let origin = summary.origin().as_str();
     let preset = summary.problem_preset().as_str();
-    let piece_source_id = summary.piece_source_id().to_string();
+    let piece_source_id =
+        memory.format(|output| write!(output, "{}", summary.piece_source_id()))?;
     let score_profile_selection = summary.score_profile_selection().as_str();
     let spin_profile_selection = summary.spin_profile_selection().as_str();
-    let initial_b2b = summary.initial_b2b().to_string();
-    let pattern_universe_id = summary.pattern_universe_id().to_string();
-    let pattern_weight_model_id = summary.pattern_weight_model_id().to_string();
-    let materialized_pattern_count = summary.materialized_pattern_count().to_string();
-    let total_pattern_count = summary.total_pattern_count().to_string();
+    let initial_b2b = memory.format(|output| write!(output, "{}", summary.initial_b2b()))?;
+    let pattern_universe_id =
+        memory.format(|output| write!(output, "{}", summary.pattern_universe_id()))?;
+    let pattern_weight_model_id =
+        memory.format(|output| write!(output, "{}", summary.pattern_weight_model_id()))?;
+    let materialized_pattern_count =
+        memory.format(|output| write!(output, "{}", summary.materialized_pattern_count()))?;
+    let total_pattern_count =
+        memory.format(|output| write!(output, "{}", summary.total_pattern_count()))?;
     let product_build = clearra_host_contract::ProductBuildIdentity::current();
 
     PortfolioAlternativeSetIdentity::new(
@@ -749,11 +826,13 @@ fn build_portfolio_identity(
                 preset,
                 summary.problem_id(),
             ],
-        ),
+            memory,
+        )?,
         identity_component(
             "pc-score-source.v2",
             &[&piece_source_id, candidate_map_sha256],
-        ),
+            memory,
+        )?,
         identity_component(
             "pc-score-profile.v2",
             &[
@@ -762,7 +841,8 @@ fn build_portfolio_identity(
                 spin_profile_selection,
                 &initial_b2b,
             ],
-        ),
+            memory,
+        )?,
         identity_component(
             "pc-score-pattern-universe.v2",
             &[
@@ -772,7 +852,8 @@ fn build_portfolio_identity(
                 &total_pattern_count,
                 eligibility_sha256,
             ],
-        ),
+            memory,
+        )?,
         identity_component(
             "product-build.v1",
             &[
@@ -782,21 +863,30 @@ fn build_portfolio_identity(
                 product_build.supply_semantics_id(),
                 product_build.artifact_schema_version(),
             ],
-        ),
+            memory,
+        )?,
     )
     .map_err(|_| PcScorePortfolioValidationError::PortfolioIdentityInvalid)
 }
 
-fn identity_component(domain: &str, fields: &[&str]) -> String {
-    let mut identity = String::from(domain);
-    for field in fields {
-        write!(&mut identity, "|{}:", field.len()).expect("writing to String cannot fail");
-        identity.push_str(field);
-    }
-    identity
+fn identity_component(
+    domain: &str,
+    fields: &[&str],
+    memory: &mut ScorePortfolioSourceMemory<'_>,
+) -> Result<String, PcScorePortfolioValidationError> {
+    memory.format(|output| {
+        output.write_str(domain)?;
+        for field in fields {
+            write!(output, "|{}:{field}", field.len())?;
+        }
+        Ok(())
+    })
 }
 
-fn eligible_candidate_map_digest(candidates: &[PcScoreEligibleCandidateV2]) -> String {
+fn eligible_candidate_map_digest(
+    candidates: &[PcScoreEligibleCandidateV2],
+    memory: &mut ScorePortfolioSourceMemory<'_>,
+) -> Result<String, PcScorePortfolioValidationError> {
     let mut hasher = Sha256::new();
     hasher.update(ELIGIBLE_CANDIDATE_MAP_DIGEST_DOMAIN);
     hasher.update((candidates.len() as u64).to_be_bytes());
@@ -805,14 +895,15 @@ fn eligible_candidate_map_digest(candidates: &[PcScoreEligibleCandidateV2]) -> S
         hasher.update(candidate.score_candidate_id.to_be_bytes());
         update_length_delimited(&mut hasher, candidate.normalized_solution_key.as_bytes());
     }
-    hex_sha256(hasher.finalize())
+    hex_sha256(hasher.finalize(), memory)
 }
 
 fn score_eligibility_digest(
     pattern_best_scores: &[u64],
     candidates: &[PcScoreEligibleCandidateV2],
     candidate_map_sha256: &str,
-) -> String {
+    memory: &mut ScorePortfolioSourceMemory<'_>,
+) -> Result<String, PcScorePortfolioValidationError> {
     let mut hasher = Sha256::new();
     hasher.update(SCORE_ELIGIBILITY_DIGEST_DOMAIN);
     update_length_delimited(&mut hasher, candidate_map_sha256.as_bytes());
@@ -829,7 +920,7 @@ fn score_eligibility_digest(
             hasher.update(pattern.best_score.to_be_bytes());
         }
     }
-    hex_sha256(hasher.finalize())
+    hex_sha256(hasher.finalize(), memory)
 }
 
 fn update_length_delimited(hasher: &mut Sha256, bytes: &[u8]) {
@@ -837,13 +928,17 @@ fn update_length_delimited(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn hex_sha256(bytes: impl AsRef<[u8]>) -> String {
+fn hex_sha256(
+    bytes: impl AsRef<[u8]>,
+    memory: &mut ScorePortfolioSourceMemory<'_>,
+) -> Result<String, PcScorePortfolioValidationError> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let bytes = bytes.as_ref();
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
+    memory.format(|output| {
+        for byte in bytes {
+            output.write_char(HEX[(byte >> 4) as usize] as char)?;
+            output.write_char(HEX[(byte & 0x0f) as usize] as char)?;
+        }
+        Ok(())
+    })
 }

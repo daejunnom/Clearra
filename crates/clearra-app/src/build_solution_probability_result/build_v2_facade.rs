@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_coverage::{
+    cover::ExactMinimumCoverError,
     pattern::{pattern_bitset::PatternBitSet, weighted_pattern_set::WeightedPatternSet},
     probability::union_probability::union_probability,
 };
@@ -28,7 +29,9 @@ use clearra_supply::QueueObservationPolicy;
 
 use crate::{
     app_services::AppCoreExecutorService,
-    portfolio_alternative_store::CoveragePortfolioAlternativeSet,
+    portfolio_alternative_store::{
+        CoveragePortfolioAlternativeSet, CoveragePortfolioAlternativeSetPreparation,
+    },
 };
 
 pub use super::{
@@ -54,7 +57,7 @@ use super::{
         BuildColoredTargetDocumentSnapshot, BuildColoredTargetScoreQuerySnapshot,
         BuildSuppliedSolutionDocumentSnapshot, BuildSuppliedSolutionEvaluationContract,
         BuildSuppliedSolutionEvaluationQuerySnapshot, BuildSuppliedSolutionScoreQuerySnapshot,
-        BuildTargetSearchContract, BuildTargetSearchQuerySnapshot,
+        BuildTargetSearchContract, BuildTargetSearchQuerySnapshot, BuildV2QuerySnapshotError,
         ReportedBuildSuppliedSolutionEvaluationResultIdentity,
         ReportedBuildTargetSearchResultIdentity,
         ValidatedBuildSuppliedSolutionEvaluationResultAuthority,
@@ -62,7 +65,9 @@ use super::{
     },
     build_v2_options::{BuildExecutionSemantics, BuildV2OptionRequest},
     build_v2_result::{
-        validate_build_coverage_portfolio_v2_result, BuildCoveragePortfolioV2Result,
+        prepare_build_coverage_portfolio_v2_result_with_memory_guard,
+        BuildCoveragePortfolioV2Preparation, BuildCoveragePortfolioV2PreparationAdvance,
+        BuildCoveragePortfolioV2Result,
     },
     build_v2_supplied_result::{
         validate_build_colored_replay_allow_empty, validate_build_supplied_cover_percent_v1_result,
@@ -77,10 +82,23 @@ use super::{
 pub enum BuildCoverV2FacadeError {
     ObjectiveUnavailable,
     QueryNotPortfolioCapable,
-    OptionsRejected { detail: String },
-    QueryCompileFailed { detail: String },
-    ExecutionFailed { detail: String },
-    ResultRejected { detail: String },
+    OptionsRejected {
+        detail: String,
+    },
+    QueryCompileFailed {
+        detail: String,
+    },
+    ExecutionFailed {
+        detail: String,
+    },
+    ResultRejected {
+        detail: String,
+    },
+    /// Guarded continuations must not allocate diagnostics after a rejected
+    /// reservation while the source and merger owners are still retained.
+    PreparationRejected {
+        reason: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1050,7 +1068,38 @@ impl BuildCoverV2Request {
                 detail: format!("{error:?}"),
             })?;
 
-        let snapshot = validated_query_snapshot(&self.query, self.objective)?;
+        self.prepare_from_result(&result, &problem, &mut |_| Ok(()))?
+            .complete(&mut || control.is_cancelled())
+    }
+
+    /// Reuses the same query-bound reducer for native completion and the
+    /// browser's bounded, cancellable parallel exact-cover continuation.
+    pub(crate) fn prepare_from_result(
+        self,
+        result: &clearra_core_executor::CoreExecutionResult,
+        expected_problem: &clearra_problem::SearchProblem,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+    ) -> Result<BuildCoverV2Preparation, BuildCoverV2FacadeError> {
+        guard(
+            (core::mem::size_of::<Self>() as u128)
+                .checked_add(self.query.checked_retained_capacity_bytes().ok_or(
+                    BuildCoverV2FacadeError::PreparationRejected {
+                        reason: "retained-capacity-overflow",
+                    },
+                )?)
+                .ok_or(BuildCoverV2FacadeError::PreparationRejected {
+                    reason: "retained-capacity-overflow",
+                })?,
+        )
+        .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
+            reason: "memory-guard-rejected",
+        })?;
+        let snapshot =
+            validated_owned_query_snapshot(self.query, self.objective).map_err(|_| {
+                BuildCoverV2FacadeError::PreparationRejected {
+                    reason: "query-options-rejected",
+                }
+            })?;
         let contract = snapshot.contract();
         let authority = ValidatedBuildTargetSearchResultAuthority::validate(
             snapshot,
@@ -1061,16 +1110,80 @@ impl BuildCoverV2Request {
                 contract.result_contract_id(),
             ),
         )
-        .map_err(|error| BuildCoverV2FacadeError::ResultRejected {
-            detail: format!("identity:{error:?}"),
+        .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
+            reason: "result-identity-rejected",
         })?;
-        let result =
-            validate_build_coverage_portfolio_v2_result(authority, &result).map_err(|error| {
-                BuildCoverV2FacadeError::ResultRejected {
-                    detail: format!("evidence:{error:?}"),
-                }
+        let inner = prepare_build_coverage_portfolio_v2_result_with_memory_guard(
+            authority,
+            result,
+            expected_problem,
+            guard,
+        )
+        .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
+            reason: "source-evidence-rejected",
+        })?;
+        Ok(BuildCoverV2Preparation { inner })
+    }
+}
+
+pub(crate) struct BuildCoverV2Preparation {
+    inner: BuildCoveragePortfolioV2Preparation,
+}
+
+pub(crate) enum BuildCoverV2PreparationAdvance {
+    Pending { work_steps: u64 },
+    Completed(BuildCoveragePortfolioV2),
+    Cancelled { work_steps: u64 },
+}
+
+impl BuildCoverV2Preparation {
+    pub(crate) fn parallel_work(&self) -> &CoveragePortfolioAlternativeSetPreparation {
+        self.inner.parallel_work()
+    }
+
+    pub(crate) fn parallel_work_mut(&mut self) -> &mut CoveragePortfolioAlternativeSetPreparation {
+        self.inner.parallel_work_mut()
+    }
+
+    pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        self.inner.checked_retained_capacity_bytes()
+    }
+
+    pub(crate) fn advance_with_memory_guard(
+        &mut self,
+        work: u64,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<BuildCoverV2PreparationAdvance, BuildCoverV2FacadeError> {
+        let result = self
+            .inner
+            .advance_with_memory_guard(work, guard, cancelled)
+            .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
+                reason: "continuation-rejected",
             })?;
-        Ok(BuildCoveragePortfolioV2 { result })
+        Ok(match result {
+            BuildCoveragePortfolioV2PreparationAdvance::Pending { work_steps } => {
+                BuildCoverV2PreparationAdvance::Pending { work_steps }
+            }
+            BuildCoveragePortfolioV2PreparationAdvance::Cancelled { work_steps } => {
+                BuildCoverV2PreparationAdvance::Cancelled { work_steps }
+            }
+            BuildCoveragePortfolioV2PreparationAdvance::Completed(result) => {
+                BuildCoverV2PreparationAdvance::Completed(BuildCoveragePortfolioV2 { result })
+            }
+        })
+    }
+
+    fn complete(
+        self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<BuildCoveragePortfolioV2, BuildCoverV2FacadeError> {
+        self.inner
+            .complete(cancelled)
+            .map(|result| BuildCoveragePortfolioV2 { result })
+            .map_err(|error| BuildCoverV2FacadeError::ResultRejected {
+                detail: format!("evidence:{error:?}"),
+            })
     }
 }
 
@@ -1938,6 +2051,17 @@ fn validated_query_snapshot(
     query: &BuildProbabilityQuery,
     objective: BuildObjective,
 ) -> Result<BuildTargetSearchQuerySnapshot, BuildCoverV2FacadeError> {
+    validated_owned_query_snapshot(query.clone(), objective).map_err(|error| {
+        BuildCoverV2FacadeError::OptionsRejected {
+            detail: format!("{error:?}"),
+        }
+    })
+}
+
+fn validated_owned_query_snapshot(
+    query: BuildProbabilityQuery,
+    objective: BuildObjective,
+) -> Result<BuildTargetSearchQuerySnapshot, BuildV2QuerySnapshotError> {
     let queue_knowledge = match query.queue_observation_policy() {
         QueueObservationPolicy::FullQueueOracle => BuildQueueKnowledge::Oracle,
         QueueObservationPolicy::VisibleSeven => BuildQueueKnowledge::VisibleSeven,
@@ -1947,18 +2071,14 @@ fn validated_query_snapshot(
     } else {
         BuildExecutionSemantics::Reachable
     };
-    BuildTargetSearchQuerySnapshot::cover(query.clone())
-        .and_then(|snapshot| {
-            snapshot.with_options(
-                BuildV2OptionRequest::default()
-                    .with_queue_knowledge(queue_knowledge)
-                    .with_execution_semantics(execution_semantics)
-                    .with_objective(objective),
-            )
-        })
-        .map_err(|error| BuildCoverV2FacadeError::OptionsRejected {
-            detail: format!("{error:?}"),
-        })
+    BuildTargetSearchQuerySnapshot::cover(query).and_then(|snapshot| {
+        snapshot.with_options(
+            BuildV2OptionRequest::default()
+                .with_queue_knowledge(queue_knowledge)
+                .with_execution_semantics(execution_semantics)
+                .with_objective(objective),
+        )
+    })
 }
 
 fn validated_supplied_minimals_snapshot(

@@ -29,10 +29,11 @@ use crate::{
     build_solution_probability_result::build_probability_response_is_authorized,
     commands::core_execution_error_response,
     cooperative_execution::{
-        compile_search_command, response_from_search_with_build_score_derivation,
-        CooperativePcScoreProduct, CooperativeSearchResponseKind,
+        build_probability_result_command_matches, compile_search_command,
+        response_from_search_with_build_score_derivation, CooperativePcScoreProduct,
+        CooperativeSearchResponseKind,
     },
-    pc_score_minimum_cover_result::ValidatedPcScorePortfolioExecutionEvidence,
+    pc_score_minimum_cover_result::PcScorePortfolioExecutionPreparation,
     pc_score_postprocess::PcScoreDerivation,
     pc_score_summary_result::ValidatedPcScoreExecutionEvidence,
     product_capability_contract::ValidatedProductCapabilityContract,
@@ -85,6 +86,7 @@ pub struct PreparedDistributedPcScoreCompletion {
     response_kind: CooperativeSearchResponseKind,
     command_kind: AppCommandKind,
     output_policy: AppOutputPolicy,
+    resource_budget: ResourceBudget,
     validation_report: DiagnosticReport,
     product_capability_contract: Option<ValidatedProductCapabilityContract>,
     result: Result<CoreExecutionResult, CoreExecutionError>,
@@ -92,9 +94,35 @@ pub struct PreparedDistributedPcScoreCompletion {
     scenario: bool,
 }
 
+// Inline ownership avoids allocating an unadmitted Box during guarded staging.
+#[allow(clippy::large_enum_variant)]
 enum PreparedDistributedPcScoreEvidence {
     Summary(ValidatedPcScoreExecutionEvidence),
-    Portfolio(ValidatedPcScorePortfolioExecutionEvidence),
+    Portfolio(PcScorePortfolioExecutionPreparation),
+}
+
+/// Owns validated Build coverage source and a not-yet-advanced exact portfolio.
+/// Only the consuming cooperative handoff may expose this stage after the
+/// producer authority is dropped; it is not an ordinary finite Build carrier.
+pub struct PreparedDistributedBuildMinimumCompletion {
+    context: AppContext,
+    command_kind: AppCommandKind,
+    output_policy: AppOutputPolicy,
+    resource_budget: ResourceBudget,
+    validation_report: DiagnosticReport,
+    result: CoreExecutionResult,
+    preparation: PreparedDistributedBuildMinimum,
+}
+
+// The staged owner moves under an existing producer guard; boxing would add a
+// new allocation at the authority-transfer boundary.
+#[allow(clippy::large_enum_variant)]
+enum PreparedDistributedBuildMinimum {
+    Cover(crate::build_solution_probability_result::build_v2_facade::BuildCoverV2Preparation),
+    Score {
+        command: Box<BuildProbabilityAppCommand>,
+        preparation: crate::build_probability_product_result::BuildScoreMinimumPreparation,
+    },
 }
 
 enum CompletedDistributedResponse {
@@ -129,6 +157,27 @@ impl AppContext {
             );
         }
 
+        // Failed-queue uses a typed Percent authority not implemented by this
+        // distributed compiler. Reject the ingress before generic compilation
+        // can turn a missing product binding into an unrelated runtime error.
+        if product_capability_contract
+            .as_ref()
+            .is_some_and(|contract| {
+                contract.contract() == crate::ProductCapabilityContract::PcFailedQueue
+            })
+        {
+            return DistributedSearchPreparation::Ready(self.finalize_response(
+                AppResponse::failed(
+                    AppStatus::ValidationFailed,
+                    AppError::new(
+                        AppErrorCode::InvalidInput,
+                        "distributed product capability result binding is unavailable",
+                    ),
+                ),
+                command_kind,
+                &output_policy,
+            ));
+        }
         let (problem, response_kind) = match compile_search_command(command) {
             Ok(compiled) => compiled,
             Err(response) => {
@@ -182,13 +231,58 @@ fn distributed_product_capability_matches_response_kind(
 
 impl PreparedDistributedSearch {
     pub fn requires_cooperative_product_completion(&self) -> bool {
-        self.product_capability_contract
+        matches!(&self.response_kind, CooperativeSearchResponseKind::BuildCover { .. })
+            || self.is_build_score_minimum()
+            || self.product_capability_contract
             .as_ref()
             .is_some_and(|contract| {
                 matches!(contract.contract(),
                     crate::product_capability_contract::ProductCapabilityContract::PcMinimals
-                    | crate::product_capability_contract::ProductCapabilityContract::PcPath)
+                    | crate::product_capability_contract::ProductCapabilityContract::PcPath
+                    | crate::product_capability_contract::ProductCapabilityContract::PcScoreMinimals)
             })
+    }
+
+    pub fn is_build_score_minimum(&self) -> bool {
+        matches!(&self.response_kind, CooperativeSearchResponseKind::BuildProbability {
+            finesse, result_command: Some(command), ..
+        } if finesse.score().is_none()
+            && command.result_mode() == crate::BuildProbabilityResultMode::HighestScoreMinimumSet)
+    }
+
+    /// Reserve the typed request owners beside Build replicas, before the
+    /// producer allocates. Ordinary AllSolutions keeps its existing authority.
+    pub fn build_minimum_source_retained_bytes(&self) -> Result<u128, &'static str> {
+        let cover = matches!(
+            &self.response_kind,
+            CooperativeSearchResponseKind::BuildCover { .. }
+        );
+        if !cover && !self.is_build_score_minimum() {
+            return Ok(0);
+        }
+        if self.product_capability_contract.is_some() {
+            return Err("distributed_build_minimum_unexpected_product_capability");
+        }
+        checked_distributed_terminal_external_retained_bytes(
+            &self.response_kind,
+            &self.output_policy,
+            &self.validation_report,
+        )
+        .and_then(|bytes| bytes.checked_add(self.context.checked_retained_capacity_bytes()?))
+        .and_then(|bytes| {
+            if cover {
+                // The response's expected_problem is the same compiled Arc.
+                Some(bytes)
+            } else {
+                bytes
+                    .checked_add(
+                        self.problem
+                            .checked_build_probability_pointee_retained_bytes()?,
+                    )?
+                    .checked_add((2 * core::mem::size_of::<usize>()) as u128)
+            }
+        })
+        .ok_or("distributed_build_minimum_source_memory_projection_overflow")
     }
 
     /// Transfer completed source evidence to the same owned, cancellable
@@ -199,6 +293,15 @@ impl PreparedDistributedSearch {
     ) -> Result<crate::CooperativeAppExecution, &'static str> {
         if !self.requires_cooperative_product_completion() {
             return Err("distributed cooperative product completion kind mismatch");
+        }
+        if self.is_pc_score()
+            || matches!(
+                &self.response_kind,
+                CooperativeSearchResponseKind::BuildCover { .. }
+            )
+            || self.is_build_score_minimum()
+        {
+            return Err("distributed minimum requires guarded source preparation");
         }
         let Self {
             context,
@@ -310,10 +413,11 @@ impl PreparedDistributedSearch {
                     crate::pc_score_summary_result::ValidatedPcScoreExecutionEvidence,
                 >() as u128
             }
-            crate::cooperative_execution::CooperativePcScoreProduct::Portfolio => core::mem::size_of::<
-                crate::pc_score_minimum_cover_result::ValidatedPcScorePortfolioExecutionEvidence,
-            >()
-                as u128,
+            crate::cooperative_execution::CooperativePcScoreProduct::Portfolio => {
+                core::mem::size_of::<
+                    crate::pc_score_minimum_cover_result::PcScorePortfolioExecutionPreparation,
+                >() as u128
+            }
         };
         let concurrent_retained_bytes = (core::mem::size_of::<Self>() as u128)
             .checked_add(execution_evidence_inline_bytes)
@@ -359,6 +463,9 @@ impl PreparedDistributedSearch {
                 finesse,
                 ..
             } if finesse.score().is_none() => Some((*field, *aggregation)),
+            CooperativeSearchResponseKind::BuildCover { request, .. } => {
+                Some((request.query().field(), request.query().aggregation()))
+            }
             _ => None,
         }
     }
@@ -370,6 +477,10 @@ impl PreparedDistributedSearch {
             CooperativeSearchResponseKind::BuildProbability { finesse, .. }
                 if finesse.score().is_none() =>
             {
+                Some((finesse.metric(), finesse.pattern_knowledge()))
+            }
+            CooperativeSearchResponseKind::BuildCover { request, .. } => {
+                let finesse = request.query().finesse_request();
                 Some((finesse.metric(), finesse.pattern_knowledge()))
             }
             _ => None,
@@ -385,11 +496,23 @@ impl PreparedDistributedSearch {
                 solution_probability_policy,
                 ..
             } if finesse.score().is_none() => Some(*solution_probability_policy),
+            CooperativeSearchResponseKind::BuildCover { request, .. } => {
+                Some(request.query().solution_probability_policy())
+            }
             _ => None,
         }
     }
 
     pub fn complete(self, result: CoreExecutionResult, control: &ExecutionControl) -> AppResponse {
+        if matches!(
+            &self.response_kind,
+            CooperativeSearchResponseKind::BuildCover { .. }
+        ) || self.is_build_score_minimum()
+        {
+            return self.fail(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_build_cover_requires_cooperative_completion",
+            });
+        }
         if self.is_pc_score() {
             return self.fail(CoreExecutionError::RuntimeUnavailable {
                 component: "distributed_pc_score_requires_memory_guarded_completion",
@@ -476,7 +599,7 @@ impl PreparedDistributedSearch {
             response_kind,
             command_kind,
             output_policy,
-            resource_budget: _,
+            resource_budget,
             validation_report,
             product_capability_contract,
         } = self;
@@ -518,7 +641,7 @@ impl PreparedDistributedSearch {
                     }
                 }
                 CooperativePcScoreProduct::Portfolio => {
-                    match core_executor.postprocess_pc_score_minimals_wasm_result_with_memory_guard(
+                    match core_executor.prepare_pc_score_minimals_wasm_result_with_memory_guard(
                         authority,
                         expected_problem,
                         result,
@@ -546,12 +669,219 @@ impl PreparedDistributedSearch {
             response_kind,
             command_kind,
             output_policy,
+            resource_budget,
             validation_report,
             product_capability_contract,
             result,
             evidence,
             scenario,
         }
+    }
+
+    /// Builds only the validated minimum input while the Build merger still
+    /// guards its result. Exact proof/canonical enumeration is never advanced
+    /// here. This separate typed entry point does not widen finite AllSolutions.
+    pub fn prepare_build_cover_with_memory_guard(
+        self,
+        result: CoreExecutionResult,
+        control: &ExecutionControl,
+        mut memory_guard: impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
+    ) -> Result<PreparedDistributedBuildMinimumCompletion, CoreExecutionError> {
+        let Self {
+            context,
+            problem,
+            response_kind,
+            command_kind,
+            output_policy,
+            resource_budget,
+            validation_report,
+            product_capability_contract,
+        } = self;
+        drop(problem);
+        if control.is_cancelled() {
+            return Err(CoreExecutionError::Cancelled);
+        }
+        if product_capability_contract.is_some() {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_build_cover_source_authority_unavailable",
+            });
+        }
+        let external = checked_distributed_terminal_external_retained_bytes(
+            &response_kind,
+            &output_policy,
+            &validation_report,
+        )
+        .and_then(|bytes| bytes.checked_add(context.checked_retained_capacity_bytes()?))
+        .ok_or(CoreExecutionError::RuntimeUnavailable {
+            component: "distributed_build_cover_external_memory_projection_overflow",
+        })?;
+        let limit = checked_request_memory_limit_bytes(resource_budget)?;
+        let CooperativeSearchResponseKind::BuildCover {
+            request,
+            expected_problem,
+        } = response_kind
+        else {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_build_cover_completion_kind_mismatch",
+            });
+        };
+        let mut failure = None;
+        let preparation = request
+            .prepare_from_result(&result, &expected_problem, &mut |peak| {
+                let future = external
+                    .checked_add(peak)
+                    .ok_or(clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow)?;
+                memory_guard(&result, future)
+                    .and_then(|()| validate_request_terminal_memory(&result, future, limit))
+                    .map_err(|error| {
+                        failure = Some(error);
+                        clearra_coverage::cover::ExactMinimumCoverError::MemoryGuardRejected
+                    })
+            })
+            .map_err(|_| {
+                failure.unwrap_or(CoreExecutionError::RuntimeUnavailable {
+                    component: "distributed_build_cover_source_evidence_rejected",
+                })
+            })?;
+        let retained = preparation
+            .checked_retained_capacity_bytes()
+            .and_then(|bytes| bytes.checked_add(core::mem::size_of_val(&preparation) as u128))
+            .and_then(|bytes| bytes.checked_add(external))
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_build_cover_preparation_memory_projection_overflow",
+            })?;
+        memory_guard(&result, retained)?;
+        validate_request_terminal_memory(&result, retained, limit)?;
+        drop(expected_problem);
+        Ok(PreparedDistributedBuildMinimumCompletion {
+            context,
+            command_kind,
+            output_policy,
+            resource_budget,
+            validation_report,
+            result,
+            preparation: PreparedDistributedBuildMinimum::Cover(preparation),
+        })
+    }
+
+    pub fn prepare_build_score_minimum_with_memory_guard(
+        self,
+        result: CoreExecutionResult,
+        control: &ExecutionControl,
+        mut memory_guard: impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
+    ) -> Result<PreparedDistributedBuildMinimumCompletion, CoreExecutionError> {
+        if !self.is_build_score_minimum() || self.product_capability_contract.is_some() {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_build_score_minimum_authority_unavailable",
+            });
+        }
+        let source_bound = matches!(&self.response_kind,
+            CooperativeSearchResponseKind::BuildProbability {
+                field, aggregation, finesse, solution_probability_policy,
+                result_command: Some(command),
+            } if build_probability_result_command_matches(command, *field, *aggregation,
+                finesse, *solution_probability_policy));
+        if !source_bound {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "cooperative_build_result_command_authority_mismatch",
+            });
+        }
+        let Self {
+            context,
+            problem,
+            response_kind,
+            command_kind,
+            output_policy,
+            resource_budget,
+            validation_report,
+            product_capability_contract: _,
+        } = self;
+        drop(problem);
+        let external = checked_distributed_terminal_external_retained_bytes(
+            &response_kind,
+            &output_policy,
+            &validation_report,
+        )
+        .and_then(|bytes| bytes.checked_add(context.checked_retained_capacity_bytes()?))
+        .ok_or(CoreExecutionError::RuntimeUnavailable {
+            component: "distributed_build_score_external_memory_projection_overflow",
+        })?;
+        let limit = checked_request_memory_limit_bytes(resource_budget)?;
+        let CooperativeSearchResponseKind::BuildProbability {
+            solution_probability_policy,
+            result_command: Some(command),
+            ..
+        } = response_kind
+        else {
+            unreachable!("typed score-minimum request checked above")
+        };
+        let mut terminal_guard = |live: &CoreExecutionResult, peak: u128| {
+            let future =
+                external
+                    .checked_add(peak)
+                    .ok_or(CoreExecutionError::RuntimeUnavailable {
+                        component: "distributed_build_score_external_memory_projection_overflow",
+                    })?;
+            memory_guard(live, future)?;
+            validate_request_terminal_memory(live, future, limit)
+        };
+        terminal_guard(&result, 0)?;
+        let (result, derivation) = context
+            .services()
+            .core_executor()
+            .materialize_build_probability_public_result_with_score_derivation_and_memory_guard(
+                result,
+                solution_probability_policy,
+                control,
+                &mut terminal_guard,
+            )?;
+        let derivation_bytes = derivation
+            .checked_retained_capacity_bytes()
+            .and_then(|bytes| bytes.checked_add(core::mem::size_of_val(&derivation) as u128))
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_build_score_derivation_memory_projection_overflow",
+            })?;
+        let mut failure = None;
+        let preparation =
+            crate::build_probability_product_result::prepare_build_highest_score_minimum_payload(
+                command.query(),
+                &result,
+                &derivation,
+                command.product_retention_budget(),
+                &mut |peak| {
+                    let peak = peak.checked_add(derivation_bytes).ok_or(
+                        clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow,
+                    )?;
+                    terminal_guard(&result, peak).map_err(|error| {
+                        failure = Some(error);
+                        clearra_coverage::cover::ExactMinimumCoverError::MemoryGuardRejected
+                    })
+                },
+            )
+            .map_err(|component| {
+                failure.unwrap_or(CoreExecutionError::RuntimeUnavailable { component })
+            })?;
+        let retained = preparation
+            .checked_retained_capacity_bytes()
+            .and_then(|bytes| bytes.checked_add(core::mem::size_of_val(&preparation) as u128))
+            .and_then(|bytes| bytes.checked_add(derivation_bytes))
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_build_score_preparation_memory_projection_overflow",
+            })?;
+        terminal_guard(&result, retained)?;
+        drop(derivation);
+        Ok(PreparedDistributedBuildMinimumCompletion {
+            context,
+            command_kind,
+            output_policy,
+            resource_budget,
+            validation_report,
+            result,
+            preparation: PreparedDistributedBuildMinimum::Score {
+                command,
+                preparation,
+            },
+        })
     }
 
     /// Completes only the terminal Core materialization while retaining the
@@ -569,6 +899,7 @@ impl PreparedDistributedSearch {
         control: &ExecutionControl,
         mut memory_guard: impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
     ) -> PreparedDistributedSearchCompletion {
+        let requires_cooperative_minimum = self.is_build_score_minimum();
         let PreparedDistributedSearch {
             context,
             problem,
@@ -585,10 +916,12 @@ impl PreparedDistributedSearch {
         // coexist with the final Core result.
         drop(problem);
 
-        if !matches!(
-            &response_kind,
-            CooperativeSearchResponseKind::BuildProbability { .. }
-        ) {
+        if requires_cooperative_minimum
+            || !matches!(
+                &response_kind,
+                CooperativeSearchResponseKind::BuildProbability { .. }
+            )
+        {
             return prepared_distributed_completion(
                 context,
                 response_kind,
@@ -795,6 +1128,43 @@ impl PreparedDistributedSearch {
 }
 
 impl PreparedDistributedPcScoreCompletion {
+    /// The portfolio branch has only validated/prepared source under the child
+    /// lease. After that lease is dropped it joins the shared exact driver.
+    pub fn into_cooperative_product_completion(
+        self,
+    ) -> Result<crate::CooperativeAppExecution, &'static str> {
+        let Self {
+            context,
+            response_kind,
+            command_kind,
+            output_policy,
+            resource_budget,
+            validation_report,
+            product_capability_contract,
+            result,
+            evidence,
+            scenario,
+        } = self;
+        drop(response_kind);
+        let result = result.map_err(|_| "distributed_pc_score_minimum_source_rejected")?;
+        let Some(PreparedDistributedPcScoreEvidence::Portfolio(preparation)) = evidence else {
+            return Err("distributed_pc_score_minimum_preparation_missing");
+        };
+        let contract =
+            product_capability_contract.ok_or("distributed_pc_score_minimum_contract_missing")?;
+        crate::CooperativeAppExecution::from_prepared_pc_score_minimum(
+            context,
+            result,
+            scenario,
+            command_kind,
+            output_policy,
+            validation_report,
+            resource_budget,
+            contract,
+            preparation,
+        )
+    }
+
     /// Materializes the typed score response only after the distributed child
     /// lease has been dropped by the caller. Dropping `response_kind` first
     /// releases the parent authority, so no rich host allocation overlaps an
@@ -805,6 +1175,7 @@ impl PreparedDistributedPcScoreCompletion {
             response_kind,
             command_kind,
             output_policy,
+            resource_budget: _,
             validation_report,
             product_capability_contract,
             result,
@@ -822,8 +1193,11 @@ impl PreparedDistributedPcScoreCompletion {
             Some(PreparedDistributedPcScoreEvidence::Summary(evidence)) => {
                 response = response.with_pc_score_execution_evidence(evidence);
             }
-            Some(PreparedDistributedPcScoreEvidence::Portfolio(evidence)) => {
-                response = response.with_pc_score_portfolio_execution_evidence(evidence);
+            Some(PreparedDistributedPcScoreEvidence::Portfolio(preparation)) => {
+                drop(preparation);
+                response = core_execution_error_response(CoreExecutionError::RuntimeUnavailable {
+                    component: "distributed_pc_score_minimum_requires_cooperative_completion",
+                });
             }
             None => {}
         }
@@ -838,6 +1212,48 @@ impl PreparedDistributedPcScoreCompletion {
             &output_policy,
             product_capability_contract,
         )
+    }
+}
+
+impl PreparedDistributedBuildMinimumCompletion {
+    pub fn into_cooperative_product_completion(self) -> crate::CooperativeAppExecution {
+        let Self {
+            context,
+            command_kind,
+            output_policy,
+            resource_budget,
+            validation_report,
+            result,
+            preparation,
+        } = self;
+        match preparation {
+            PreparedDistributedBuildMinimum::Cover(preparation) => {
+                crate::CooperativeAppExecution::from_prepared_build_cover_minimum(
+                    context,
+                    result,
+                    command_kind,
+                    output_policy,
+                    validation_report,
+                    resource_budget,
+                    preparation,
+                )
+            }
+            PreparedDistributedBuildMinimum::Score {
+                command,
+                preparation,
+            } => {
+                let response = command.response_from_prepared_score_minimum(result);
+                crate::CooperativeAppExecution::from_prepared_build_score_minimum(
+                    context,
+                    response,
+                    command_kind,
+                    output_policy,
+                    validation_report,
+                    resource_budget,
+                    preparation,
+                )
+            }
+        }
     }
 }
 
@@ -1130,6 +1546,14 @@ fn checked_distributed_terminal_external_retained_bytes(
             }
             bytes
         }
+        CooperativeSearchResponseKind::BuildCover {
+            request,
+            expected_problem,
+        } => request
+            .query()
+            .checked_retained_capacity_bytes()?
+            .checked_add(expected_problem.checked_build_probability_pointee_retained_bytes()?)?
+            .checked_add((2 * core::mem::size_of::<usize>()) as u128)?,
         _ => 0,
     };
     (core::mem::size_of::<PreparedDistributedSearch>() as u128)

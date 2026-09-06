@@ -14,7 +14,10 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use clearra_core_domain::solution::NormalizedTilingSolutionKey;
 use clearra_core_executor::{CoreExecutionResult, CorePostProcessExecution};
-use clearra_coverage::pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId};
+use clearra_coverage::{
+    cover::ExactMinimumCoverError,
+    pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId},
+};
 use clearra_host_contract::{
     BuildPathFamilyPayload, BuildV2CompletenessPayload, BuildV2ProductPayload,
     BuildV2ScoreWinnerPayload, PcPathStepPayload, PcPathWitnessPayload, PcScoreFieldPayload,
@@ -29,7 +32,9 @@ use crate::pc_score_field_result::{
 };
 use crate::pc_score_postprocess::PcScoreDerivation;
 use crate::portfolio_alternative_store::{
-    CoveragePortfolioAlternativeSet, PortfolioAlternativeSetIdentity, ProductPageSourceOwner,
+    CoveragePortfolioAlternativeSet, CoveragePortfolioAlternativeSetPreparation,
+    CoveragePortfolioAlternativeSetPreparationAdvance, PortfolioAlternativeSetIdentity,
+    ProductPageSourceOwner,
 };
 
 pub const BUILD_FIELD_AVERAGE_CAPABILITY: &str = "build.field-average-score";
@@ -546,6 +551,22 @@ pub(crate) fn build_highest_score_minimum_payload(
     derivation: &PcScoreDerivation,
     host: Option<crate::ProductRetentionBudget>,
 ) -> Result<(ProductResultPayload, ProductPageSourceOwner), &'static str> {
+    prepare_build_highest_score_minimum_payload(query, result, derivation, host, &mut |_| Ok(()))?
+        .complete(&mut || false)
+}
+
+/// Builds only the validated score-coverage source. Exact minimum proof and
+/// canonical selection are advanced by the shared portfolio preparation;
+/// neither native nor browser callers maintain an independent solver here.
+/// The external guard receives this preparation's whole inline + heap peak.
+/// Borrowed query, Core result and score derivation remain caller-owned.
+pub(crate) fn prepare_build_highest_score_minimum_payload(
+    query: &BuildProbabilityQuery,
+    result: &CoreExecutionResult,
+    derivation: &PcScoreDerivation,
+    host: Option<crate::ProductRetentionBudget>,
+    guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+) -> Result<BuildScoreMinimumPreparation, &'static str> {
     let derivation_bytes = derivation
         .checked_retained_capacity_bytes()
         .ok_or("Build product memory projection overflow")?;
@@ -556,7 +577,7 @@ pub(crate) fn build_highest_score_minimum_payload(
         host,
     )?;
     let pattern_count = validated_score_pattern_count(result, derivation)?;
-    let budget = budget.reserve_linear_workspace(
+    let construction = budget.reserve_linear_workspace(
         result
             .normalized_solution_keys()
             .len()
@@ -566,6 +587,43 @@ pub(crate) fn build_highest_score_minimum_payload(
         checked_total_string_lengths(result.normalized_solution_keys())
             .ok_or("Build product memory projection overflow")?,
     )?;
+    // Retain the existing bounded map/string workspace admission, and also
+    // cover all dense eligible rows, their temporary storage replacements,
+    // and the query clone used only while deriving the unchanged identity.
+    // This is a conservative admission reserve, not a measured heap count.
+    let word_bytes = (pattern_count.div_ceil(64) as u128)
+        .checked_mul(core::mem::size_of::<u64>() as u128)
+        .and_then(|bytes| bytes.checked_add(4 * core::mem::size_of::<usize>() as u128))
+        .ok_or("Build score-minimum source projection overflow")?;
+    let matrix_peak = (result.normalized_solution_keys().len() as u128)
+        .checked_add(1)
+        .and_then(|rows| rows.checked_mul(word_bytes))
+        .and_then(|bytes| bytes.checked_mul(4))
+        .ok_or("Build score-minimum source projection overflow")?;
+    let metadata_bytes = [
+        "piece_source_id",
+        "actual_normalized_solution_set_hash",
+        "pattern_universe_id",
+        "pattern_weight_model_id",
+    ]
+    .into_iter()
+    .try_fold(0_u128, |bytes, field| {
+        bytes.checked_add(required_field(result, field).ok()?.len() as u128)
+    })
+    .ok_or("Build score identity metadata is missing")?;
+    let source_peak = construction
+        .source_bytes
+        .checked_sub(budget.source_bytes)
+        .and_then(|bytes| bytes.checked_add(matrix_peak))
+        .and_then(|bytes| bytes.checked_add(metadata_bytes.checked_mul(4)?))
+        .and_then(|bytes| {
+            bytes.checked_add(query.checked_retained_capacity_bytes()?.checked_mul(4)?)
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(core::mem::size_of::<BuildScoreMinimumPreparation>() as u128)
+        })
+        .ok_or("Build score-minimum source projection overflow")?;
+    authorize_build_score_peak(budget, source_peak, guard)?;
     let candidate_map = validated_score_candidate_map(result)?;
     let maxima = validated_score_winners(derivation, &candidate_map, pattern_count)?;
     let mut required_words = Vec::new();
@@ -664,84 +722,490 @@ pub(crate) fn build_highest_score_minimum_payload(
         ),
     )
     .map_err(|_| "Build score-minimum product identity is invalid")?;
-    let owner = CoveragePortfolioAlternativeSet::new_canonical(
-        identity,
-        candidate_keys,
-        required.clone(),
-        rows,
-    )
-    .and_then(|owner| owner.with_public_candidate_ids(public_candidate_ids))
-    .map(Arc::new)
-    .map_err(|_| "Build score-minimum exact portfolio failed")?;
-    let canonical_keys = owner
-        .canonical_candidate_keys_owned()
-        .map_err(|_| "Build score-minimum canonical portfolio is unavailable")?;
-    let mut selected = Vec::new();
-    selected
-        .try_reserve_exact(canonical_keys.len())
-        .map_err(|_| "Build product allocation failed")?;
-    for key in &canonical_keys {
-        selected.push(try_clone_string(key)?);
-    }
-    selected.sort_unstable();
-    let winner_count = usize::try_from(required.count_ones())
-        .map_err(|_| "Build score-minimum winner count overflow")?;
-    let mut public_winners = Vec::new();
-    public_winners
-        .try_reserve_exact(winner_count)
-        .map_err(|_| "Build product allocation failed")?;
-    for pattern_id in 0..pattern_count {
-        if !required.contains(PatternId::new(pattern_id)) {
-            continue;
-        }
-        let (candidate_id, key, winner) = maxima
-            .iter()
-            .filter(|((candidate_pattern, _), winner)| {
-                *candidate_pattern == pattern_id
-                    && best_by_pattern.get(&pattern_id) == Some(&winner.score())
-            })
-            .filter_map(|((_, candidate_id), winner)| {
-                let (_, key) = candidate_map.get(&winner.solution_identity())?;
-                selected.binary_search(key).is_ok().then_some((
-                    *candidate_id,
-                    key.as_str(),
-                    *winner,
-                ))
-            })
-            .min_by(|left, right| (left.1, left.0).cmp(&(right.1, right.0)))
-            .ok_or("Build score-minimum canonical portfolio does not cover a winner pattern")?;
-        public_winners.push(
-            BuildV2ScoreWinnerPayload::try_new(
-                pattern_id.to_string(),
-                key,
-                winner.score().to_string(),
-                winner.informational_attack().to_string(),
-            )
-            .map_err(|_| "Build score-minimum winner payload is invalid")?,
-        );
-        let _ = candidate_id;
-    }
     let input_identity = sha256_hex(&[
         problem.problem_id().as_str(),
         required_field(result, "actual_normalized_solution_set_hash")?,
         score.profile().as_str(),
         &score.initial_b2b().to_string(),
     ]);
+    let mut winners = Vec::new();
+    winners
+        .try_reserve_exact(maxima.len())
+        .map_err(|_| "Build product allocation failed")?;
+    for ((pattern_id, candidate_id), winner) in &maxima {
+        if best_by_pattern.get(pattern_id) != Some(&winner.score()) {
+            continue;
+        }
+        let (_, key) = candidate_map
+            .get(&winner.solution_identity())
+            .ok_or("Build score-minimum candidate is missing")?;
+        let candidate_index = candidate_keys
+            .binary_search(key)
+            .map_err(|_| "Build score-minimum candidate is missing")?;
+        if public_candidate_ids.get(candidate_index) != Some(candidate_id) {
+            return Err("Build score-minimum candidate identity is ambiguous");
+        }
+        winners.push(BuildScoreMinimumWinner {
+            pattern_id: *pattern_id,
+            candidate_index,
+            score: winner.score(),
+            informational_attack: winner.informational_attack(),
+        });
+    }
+    // Dense row order is key order. This is exactly the old (key, public ID)
+    // winner tie-break; neither attack nor derived display strings rank rows.
+    winners.sort_unstable_by_key(|winner| (winner.pattern_id, winner.candidate_index));
+    let projection = BuildScoreMinimumProjection {
+        input_identity,
+        score_profile: try_clone_string(score.profile().as_str())?,
+        initial_b2b: score.initial_b2b().to_string(),
+        source_candidate_count: candidate_map.len(),
+        eligible_candidate_count: candidate_keys.len(),
+        pattern_count,
+        required_pattern_count: usize::try_from(required.count_ones())
+            .map_err(|_| "Build score-minimum winner count overflow")?,
+        public_candidate_ids,
+        winners,
+    };
+    // These scratch maps and the compiled identity problem must not survive
+    // across host turns or become replicated with every exact-cover shard.
+    drop(problem);
+    drop(eligible_by_key);
+    drop(best_by_pattern);
+    drop(maxima);
+    drop(candidate_map);
+    BuildScoreMinimumPreparation::from_source(
+        budget,
+        projection,
+        identity,
+        candidate_keys,
+        required,
+        rows,
+        guard,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct BuildScoreMinimumWinner {
+    pattern_id: usize,
+    candidate_index: usize,
+    score: u64,
+    informational_attack: u32,
+}
+
+struct BuildScoreMinimumProjection {
+    input_identity: String,
+    score_profile: String,
+    initial_b2b: String,
+    source_candidate_count: usize,
+    eligible_candidate_count: usize,
+    pattern_count: usize,
+    required_pattern_count: usize,
+    public_candidate_ids: Vec<u64>,
+    winners: Vec<BuildScoreMinimumWinner>,
+}
+
+impl BuildScoreMinimumProjection {
+    fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        (self.input_identity.capacity() as u128)
+            .checked_add(self.score_profile.capacity() as u128)?
+            .checked_add(self.initial_b2b.capacity() as u128)?
+            .checked_add(
+                (self.public_candidate_ids.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<u64>() as u128)?,
+            )?
+            .checked_add(
+                (self.winners.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<BuildScoreMinimumWinner>() as u128)?,
+            )
+    }
+}
+
+pub(crate) struct BuildScoreMinimumPreparation {
+    budget: BuildProductMemoryBudget,
+    projection: Option<BuildScoreMinimumProjection>,
+    portfolio: CoveragePortfolioAlternativeSetPreparation,
+}
+
+pub(crate) enum BuildScoreMinimumPreparationAdvance {
+    Pending { work_steps: u64 },
+    Completed((ProductResultPayload, ProductPageSourceOwner)),
+    Cancelled { work_steps: u64 },
+}
+
+impl BuildScoreMinimumPreparation {
+    #[allow(clippy::too_many_arguments)]
+    fn from_source(
+        budget: BuildProductMemoryBudget,
+        projection: BuildScoreMinimumProjection,
+        identity: PortfolioAlternativeSetIdentity,
+        candidate_keys: Vec<String>,
+        required: PatternBitSet,
+        rows: Vec<PatternBitSet>,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+    ) -> Result<Self, &'static str> {
+        let outer = (core::mem::size_of::<Self>() as u128)
+            .checked_sub(core::mem::size_of::<CoveragePortfolioAlternativeSetPreparation>() as u128)
+            .and_then(|bytes| bytes.checked_add(projection.checked_retained_capacity_bytes()?))
+            .ok_or("Build score-minimum preparation projection overflow")?;
+        let portfolio = CoveragePortfolioAlternativeSetPreparation::new_with_memory_guard(
+            identity,
+            candidate_keys,
+            required,
+            rows,
+            &mut |peak| authorize_build_score_exact_peak(budget, outer, peak, guard),
+        )
+        .map_err(|_| "Build score-minimum exact portfolio preparation failed")?;
+        let preparation = Self {
+            budget,
+            projection: Some(projection),
+            portfolio,
+        };
+        authorize_build_score_peak(budget, preparation.whole_retained_bytes()?, guard)?;
+        Ok(preparation)
+    }
+
+    pub(crate) fn parallel_work(&self) -> &CoveragePortfolioAlternativeSetPreparation {
+        &self.portfolio
+    }
+
+    pub(crate) fn parallel_work_mut(&mut self) -> &mut CoveragePortfolioAlternativeSetPreparation {
+        &mut self.portfolio
+    }
+
+    /// Heap-only, excluding `Self`. The producer/derivation are not cloned
+    /// into this owner and must be accounted by their existing App owner.
+    pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        self.portfolio
+            .checked_retained_capacity_bytes()?
+            .checked_add(self.projection.as_ref().map_or(Some(0), |projection| {
+                projection.checked_retained_capacity_bytes()
+            })?)
+    }
+
+    fn whole_retained_bytes(&self) -> Result<u128, &'static str> {
+        (core::mem::size_of::<Self>() as u128)
+            .checked_add(
+                self.checked_retained_capacity_bytes()
+                    .ok_or("Build score-minimum preparation projection overflow")?,
+            )
+            .ok_or("Build score-minimum preparation projection overflow")
+    }
+
+    pub(crate) fn advance_with_memory_guard(
+        &mut self,
+        work: u64,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<BuildScoreMinimumPreparationAdvance, &'static str> {
+        let projection = self
+            .projection
+            .as_ref()
+            .ok_or("Build score-minimum preparation is already terminal")?;
+        let outer = (core::mem::size_of::<Self>() as u128)
+            .checked_sub(core::mem::size_of::<CoveragePortfolioAlternativeSetPreparation>() as u128)
+            .and_then(|bytes| bytes.checked_add(projection.checked_retained_capacity_bytes()?))
+            .ok_or("Build score-minimum preparation projection overflow")?;
+        let budget = self.budget;
+        let advanced = self
+            .portfolio
+            .advance_with_memory_guard(
+                work,
+                &mut |peak| authorize_build_score_exact_peak(budget, outer, peak, guard),
+                cancelled,
+            )
+            .map_err(|_| "Build score-minimum exact portfolio failed")?;
+        Ok(match advanced {
+            CoveragePortfolioAlternativeSetPreparationAdvance::Pending { work_steps } => {
+                BuildScoreMinimumPreparationAdvance::Pending { work_steps }
+            }
+            CoveragePortfolioAlternativeSetPreparationAdvance::Cancelled { work_steps } => {
+                self.projection = None;
+                BuildScoreMinimumPreparationAdvance::Cancelled { work_steps }
+            }
+            CoveragePortfolioAlternativeSetPreparationAdvance::Completed(portfolio) => {
+                let retained = self.whole_retained_bytes()?;
+                let projection = self
+                    .projection
+                    .take()
+                    .ok_or("Build score-minimum preparation is already terminal")?;
+                let mut cancelled_during_seal = false;
+                let sealed = seal_build_score_minimum(
+                    budget,
+                    retained,
+                    projection,
+                    portfolio,
+                    &mut |peak| {
+                        if cancelled() {
+                            cancelled_during_seal = true;
+                            Err(ExactMinimumCoverError::MemoryGuardRejected)
+                        } else {
+                            guard(peak)
+                        }
+                    },
+                );
+                match sealed {
+                    Ok(product) => BuildScoreMinimumPreparationAdvance::Completed(product),
+                    Err(_) if cancelled_during_seal => {
+                        BuildScoreMinimumPreparationAdvance::Cancelled { work_steps: 0 }
+                    }
+                    Err(reason) => return Err(reason),
+                }
+            }
+        })
+    }
+
+    fn complete(
+        mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(ProductResultPayload, ProductPageSourceOwner), &'static str> {
+        loop {
+            match self.advance_with_memory_guard(u64::MAX, &mut |_| Ok(()), cancelled)? {
+                BuildScoreMinimumPreparationAdvance::Pending { .. } => {}
+                BuildScoreMinimumPreparationAdvance::Completed(product) => return Ok(product),
+                BuildScoreMinimumPreparationAdvance::Cancelled { .. } => {
+                    return Err("Build score-minimum exact portfolio cancelled");
+                }
+            }
+        }
+    }
+}
+
+fn authorize_build_score_exact_peak(
+    budget: BuildProductMemoryBudget,
+    outer: u128,
+    peak: u128,
+    guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+) -> Result<(), ExactMinimumCoverError> {
+    let peak = outer
+        .checked_add(peak)
+        .ok_or(ExactMinimumCoverError::ProjectionOverflow)?;
+    let whole = budget
+        .source_bytes
+        .checked_add(peak)
+        .ok_or(ExactMinimumCoverError::ProjectionOverflow)?;
+    if whole > budget.maximum_bytes {
+        return Err(ExactMinimumCoverError::MemoryCapacityExceeded {
+            required_memory_bytes: whole,
+            max_memory_bytes: budget.maximum_bytes,
+        });
+    }
+    guard(peak)
+}
+
+fn authorize_build_score_peak(
+    budget: BuildProductMemoryBudget,
+    peak: u128,
+    guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+) -> Result<(), &'static str> {
+    authorize_build_score_exact_peak(budget, 0, peak, guard)
+        .map_err(|_| "Build score-minimum whole-live memory limit exceeded")
+}
+
+fn seal_build_score_minimum(
+    budget: BuildProductMemoryBudget,
+    retained_preparation: u128,
+    mut projection: BuildScoreMinimumProjection,
+    portfolio: CoveragePortfolioAlternativeSet,
+    guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+) -> Result<(ProductResultPayload, ProductPageSourceOwner), &'static str> {
+    let overflow = "Build score-minimum completed product projection overflow";
+    let owner_heap = portfolio
+        .checked_retained_capacity_bytes()
+        .ok_or(overflow)?;
+    // `with_public_candidate_ids` simultaneously retains its input vector,
+    // sorted duplicate-check clone and replacement Arc. The first vector is
+    // already in retained_preparation; reserve both new payloads and controls.
+    let replacement_peak = (projection.public_candidate_ids.len() as u128)
+        .checked_mul(2 * core::mem::size_of::<u64>() as u128)
+        .and_then(|bytes| bytes.checked_add(4 * core::mem::size_of::<usize>() as u128))
+        .ok_or(overflow)?;
+    let base = retained_preparation
+        .checked_add(owner_heap)
+        .and_then(|bytes| {
+            bytes.checked_add(3 * core::mem::size_of::<CoveragePortfolioAlternativeSet>() as u128)
+        })
+        .and_then(|bytes| bytes.checked_add(core::mem::size_of::<ProductResultPayload>() as u128))
+        .and_then(|bytes| bytes.checked_add(core::mem::size_of::<ProductPageSourceOwner>() as u128))
+        .ok_or(overflow)?;
+    authorize_build_score_peak(
+        budget,
+        base.checked_add(replacement_peak).ok_or(overflow)?,
+        guard,
+    )?;
+    let public_ids = core::mem::take(&mut projection.public_candidate_ids);
+    let portfolio = portfolio
+        .with_public_candidate_ids(public_ids)
+        .map_err(|_| "Build score-minimum public candidate map is invalid")?;
+    let updated_owner_heap = portfolio
+        .checked_retained_capacity_bytes()
+        .ok_or(overflow)?;
+    let base = base
+        .checked_add(updated_owner_heap.checked_sub(owner_heap).ok_or(overflow)?)
+        .and_then(|bytes| bytes.checked_add(2 * core::mem::size_of::<usize>() as u128))
+        .ok_or(overflow)?;
+    authorize_build_score_peak(budget, base, guard)?;
+    let owner = Arc::new(portfolio);
+    // The complete selected set is retained and copied, not just its first
+    // 100 GUI members. Each canonical key is cloned only once for the DTO.
+    let selected_ids = owner.canonical_page().portfolio().candidate_ids();
+    let mut keys_requested = (selected_ids.len() as u128)
+        .checked_mul(core::mem::size_of::<String>() as u128)
+        .ok_or(overflow)?;
+    for id in selected_ids {
+        let index = usize::try_from(id.checked_sub(1).ok_or(overflow)?).map_err(|_| overflow)?;
+        let key = owner
+            .candidates()
+            .get(index)
+            .filter(|candidate| candidate.candidate_id() == *id)
+            .ok_or("Build score-minimum canonical candidate is invalid")?
+            .normalized_key();
+        keys_requested = keys_requested
+            .checked_add(key.len() as u128)
+            .ok_or(overflow)?;
+    }
+    authorize_build_score_peak(
+        budget,
+        base.checked_add(keys_requested).ok_or(overflow)?,
+        guard,
+    )?;
+    let mut canonical_keys = Vec::new();
+    canonical_keys
+        .try_reserve_exact(selected_ids.len())
+        .map_err(|_| "Build product allocation failed")?;
+    let mut keys_actual = (canonical_keys.capacity() as u128)
+        .checked_mul(core::mem::size_of::<String>() as u128)
+        .ok_or(overflow)?;
+    authorize_build_score_peak(
+        budget,
+        base.checked_add(keys_actual).ok_or(overflow)?,
+        guard,
+    )?;
+    for id in selected_ids {
+        let index = usize::try_from(id - 1).map_err(|_| overflow)?;
+        let key = owner.candidates()[index].normalized_key();
+        authorize_build_score_peak(
+            budget,
+            base.checked_add(keys_actual)
+                .and_then(|bytes| bytes.checked_add(key.len() as u128))
+                .ok_or(overflow)?,
+            guard,
+        )?;
+        let key = try_clone_string(key)?;
+        keys_actual = keys_actual
+            .checked_add(key.capacity() as u128)
+            .ok_or(overflow)?;
+        authorize_build_score_peak(
+            budget,
+            base.checked_add(keys_actual).ok_or(overflow)?,
+            guard,
+        )?;
+        canonical_keys.push(key);
+    }
+    let mut public_winners = Vec::new();
+    let requested = (projection.required_pattern_count as u128)
+        .checked_mul(core::mem::size_of::<BuildV2ScoreWinnerPayload>() as u128)
+        .ok_or(overflow)?;
+    authorize_build_score_peak(
+        budget,
+        base.checked_add(keys_actual)
+            .and_then(|bytes| bytes.checked_add(requested))
+            .ok_or(overflow)?,
+        guard,
+    )?;
+    public_winners
+        .try_reserve_exact(projection.required_pattern_count)
+        .map_err(|_| "Build product allocation failed")?;
+    let mut winners_actual = (public_winners.capacity() as u128)
+        .checked_mul(core::mem::size_of::<BuildV2ScoreWinnerPayload>() as u128)
+        .ok_or(overflow)?;
+    authorize_build_score_peak(
+        budget,
+        base.checked_add(keys_actual)
+            .and_then(|bytes| bytes.checked_add(winners_actual))
+            .ok_or(overflow)?,
+        guard,
+    )?;
+    let mut previous_pattern = None;
+    for winner in &projection.winners {
+        if previous_pattern == Some(winner.pattern_id) {
+            continue;
+        }
+        let dense_id = u64::try_from(winner.candidate_index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(overflow)?;
+        if selected_ids.binary_search(&dense_id).is_err() {
+            continue;
+        }
+        let key = owner
+            .candidates()
+            .get(winner.candidate_index)
+            .ok_or("Build score-minimum winner candidate is invalid")?
+            .normalized_key();
+        // Three decimal fields need at most 20 bytes each (usize <= u64),
+        // plus one key. Their inline String/DTO carriers are included too.
+        let new_winner_peak = (key.len() as u128)
+            .checked_add(60)
+            .and_then(|bytes| {
+                bytes.checked_add(core::mem::size_of::<BuildV2ScoreWinnerPayload>() as u128)
+            })
+            .ok_or(overflow)?;
+        authorize_build_score_peak(
+            budget,
+            base.checked_add(keys_actual)
+                .and_then(|bytes| bytes.checked_add(winners_actual))
+                .and_then(|bytes| bytes.checked_add(new_winner_peak))
+                .ok_or(overflow)?,
+            guard,
+        )?;
+        let value = BuildV2ScoreWinnerPayload::try_new(
+            winner.pattern_id.to_string(),
+            key,
+            winner.score.to_string(),
+            winner.informational_attack.to_string(),
+        )
+        .map_err(|_| "Build score-minimum winner payload is invalid")?;
+        winners_actual = winners_actual
+            .checked_add(value.checked_retained_capacity_bytes().ok_or(overflow)?)
+            .ok_or(overflow)?;
+        authorize_build_score_peak(
+            budget,
+            base.checked_add(keys_actual)
+                .and_then(|bytes| bytes.checked_add(winners_actual))
+                .ok_or(overflow)?,
+            guard,
+        )?;
+        public_winners.push(value);
+        previous_pattern = Some(winner.pattern_id);
+    }
+    if public_winners.len() != projection.required_pattern_count {
+        return Err("Build score-minimum canonical portfolio does not cover a winner pattern");
+    }
+    // Only fixed contract names, a 64-byte digest, booleans and six decimal
+    // counters remain to allocate. Variable key/winner payload is already
+    // admitted. A conservative 4 KiB reserve includes all their inline parts.
+    let payload_peak = base
+        .checked_add(keys_actual)
+        .and_then(|bytes| bytes.checked_add(winners_actual))
+        .and_then(|bytes| bytes.checked_add(4096))
+        .ok_or(overflow)?;
+    authorize_build_score_peak(budget, payload_peak, guard)?;
     let payload = BuildV2ProductPayload::try_score_portfolio(
         BUILD_SCORE_MINIMUM_CAPABILITY,
         BUILD_SCORE_MINIMUM_RESULT_CONTRACT,
-        input_identity,
-        score.profile().as_str(),
-        score.initial_b2b().to_string(),
+        projection.input_identity,
+        projection.score_profile,
+        projection.initial_b2b,
         "basic-approximation",
         false,
         "score-only",
         SCORE_ATTACK_BASIS,
-        candidate_map.len().to_string(),
-        eligible_by_key.len().to_string(),
+        projection.source_candidate_count.to_string(),
+        projection.eligible_candidate_count.to_string(),
         canonical_keys.len().to_string(),
-        pattern_count.to_string(),
-        required.count_ones().to_string(),
+        projection.pattern_count.to_string(),
+        projection.required_pattern_count.to_string(),
         canonical_keys,
         public_winners,
         BuildV2CompletenessPayload::new(true, true, true, true, true, true, true),
@@ -753,9 +1217,20 @@ pub(crate) fn build_highest_score_minimum_payload(
         BUILD_SCORE_MINIMUM_RESULT_CONTRACT,
         ProductResultPayloadContent::BuildV2(payload),
     );
-    let owner = ProductPageSourceOwner::CoveragePortfolio(owner);
-    budget.authorize_payload(&payload, Some(&owner))?;
-    Ok((payload, owner))
+    let source = ProductPageSourceOwner::CoveragePortfolio(owner);
+    let actual_peak = retained_preparation
+        .checked_add(core::mem::size_of::<ProductResultPayload>() as u128)
+        .and_then(|bytes| bytes.checked_add(core::mem::size_of::<ProductPageSourceOwner>() as u128))
+        .and_then(|bytes| bytes.checked_add(payload.checked_retained_capacity_bytes()?))
+        .and_then(|bytes| bytes.checked_add(source.checked_retained_capacity_bytes()?))
+        .and_then(|bytes| {
+            bytes.checked_add(core::mem::size_of::<CoveragePortfolioAlternativeSet>() as u128)
+        })
+        .and_then(|bytes| bytes.checked_add(2 * core::mem::size_of::<usize>() as u128))
+        .ok_or(overflow)?;
+    authorize_build_score_peak(budget, actual_peak, guard)?;
+    budget.authorize_payload(&payload, Some(&source))?;
+    Ok((payload, source))
 }
 
 pub(crate) fn decorate_build_failed_queues(
@@ -1204,6 +1679,264 @@ fn project_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn score_minimum_source_fixture() -> (
+        BuildProductMemoryBudget,
+        BuildScoreMinimumProjection,
+        PortfolioAlternativeSetIdentity,
+        Vec<String>,
+        PatternBitSet,
+        Vec<PatternBitSet>,
+    ) {
+        let row = |patterns: &[usize]| {
+            let mut row = PatternBitSet::new(2);
+            for pattern in patterns {
+                row.insert(PatternId::new(*pattern)).unwrap();
+            }
+            row
+        };
+        (
+            BuildProductMemoryBudget {
+                maximum_bytes: 64 * 1024 * 1024,
+                source_bytes: 4096,
+            },
+            BuildScoreMinimumProjection {
+                input_identity: "a".repeat(64),
+                score_profile: "tetrio".to_owned(),
+                initial_b2b: "0".to_owned(),
+                source_candidate_count: 4,
+                eligible_candidate_count: 4,
+                pattern_count: 2,
+                required_pattern_count: 2,
+                // Public IDs deliberately differ from canonical key order.
+                public_candidate_ids: vec![4, 2, 3, 1],
+                winners: [(0, 0), (0, 1), (0, 3), (1, 1), (1, 2), (1, 3)]
+                    .into_iter()
+                    .map(|(pattern_id, candidate_index)| BuildScoreMinimumWinner {
+                        pattern_id,
+                        candidate_index,
+                        score: 1200,
+                        informational_attack: if candidate_index == 3 { 999 } else { 7 },
+                    })
+                    .collect(),
+            },
+            PortfolioAlternativeSetIdentity::new(
+                "build-score-query",
+                "build-score-source",
+                "score-only-rules",
+                "two-pattern-universe",
+                "build-score-engine",
+            )
+            .unwrap(),
+            ["candidate-a", "candidate-b", "candidate-c", "candidate-d"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            row(&[0, 1]),
+            vec![row(&[0]), row(&[0, 1]), row(&[1]), row(&[0, 1])],
+        )
+    }
+
+    fn score_minimum_preparation_fixture(
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+    ) -> Result<BuildScoreMinimumPreparation, &'static str> {
+        let (budget, projection, identity, keys, required, rows) = score_minimum_source_fixture();
+        BuildScoreMinimumPreparation::from_source(
+            budget, projection, identity, keys, required, rows, guard,
+        )
+    }
+
+    #[test]
+    fn build_score_minimum_bounded_preparation_preserves_score_only_public_identity_and_payload() {
+        // Build the previous synchronous projection explicitly as the parity
+        // oracle, not by calling the new sync delegate under test.
+        let (_, projection, identity, keys, required, rows) = score_minimum_source_fixture();
+        let expected_owner =
+            CoveragePortfolioAlternativeSet::new_canonical(identity, keys, required, rows)
+                .unwrap()
+                .with_public_candidate_ids(projection.public_candidate_ids)
+                .unwrap();
+        let expected_keys = expected_owner.canonical_candidate_keys_owned().unwrap();
+        assert_eq!(expected_keys, ["candidate-b"]);
+        let expected_payload = ProductResultPayload::new(
+            BUILD_SCORE_MINIMUM_CAPABILITY,
+            BUILD_SCORE_MINIMUM_RESULT_CONTRACT,
+            ProductResultPayloadContent::BuildV2(
+                BuildV2ProductPayload::try_score_portfolio(
+                    BUILD_SCORE_MINIMUM_CAPABILITY,
+                    BUILD_SCORE_MINIMUM_RESULT_CONTRACT,
+                    projection.input_identity,
+                    projection.score_profile,
+                    projection.initial_b2b,
+                    "basic-approximation",
+                    false,
+                    "score-only",
+                    SCORE_ATTACK_BASIS,
+                    "4",
+                    "4",
+                    "1",
+                    "2",
+                    "2",
+                    expected_keys,
+                    vec![
+                        BuildV2ScoreWinnerPayload::try_new("0", "candidate-b", "1200", "7")
+                            .unwrap(),
+                        BuildV2ScoreWinnerPayload::try_new("1", "candidate-b", "1200", "7")
+                            .unwrap(),
+                    ],
+                    BuildV2CompletenessPayload::new(true, true, true, true, true, true, true),
+                    expected_owner.set_identity_sha256(),
+                )
+                .unwrap(),
+            ),
+        );
+        let mut peak = 0;
+        let mut guard = |bytes| {
+            peak = peak.max(bytes);
+            Ok(())
+        };
+        let mut preparation = score_minimum_preparation_fixture(&mut guard).unwrap();
+        let mut completed = None;
+        for _ in 0..10_000 {
+            match preparation
+                .advance_with_memory_guard(1, &mut guard, &mut || false)
+                .unwrap()
+            {
+                BuildScoreMinimumPreparationAdvance::Pending { work_steps } => {
+                    assert!(work_steps <= 1)
+                }
+                BuildScoreMinimumPreparationAdvance::Completed(product) => {
+                    completed = Some(product);
+                    break;
+                }
+                BuildScoreMinimumPreparationAdvance::Cancelled { .. } => panic!("not cancelled"),
+            }
+        }
+        let (payload, owner) = completed.expect("bounded tiny source completes");
+        assert_eq!(payload, expected_payload);
+        let ProductPageSourceOwner::CoveragePortfolio(owner) = owner else {
+            panic!("score minimum must retain its complete portfolio source");
+        };
+        assert_eq!(owner.as_ref(), &expected_owner);
+        assert_eq!(owner.public_candidate_id(2), Some(2));
+        assert!(peak > owner.checked_retained_capacity_bytes().unwrap());
+    }
+
+    #[test]
+    fn build_score_minimum_cancelled_or_rejected_preparation_never_seals() {
+        let mut calls = 0;
+        let rejected = score_minimum_preparation_fixture(&mut |_| {
+            calls += 1;
+            Err(ExactMinimumCoverError::MemoryGuardRejected)
+        });
+        assert!(rejected.is_err());
+        assert_eq!(calls, 1, "initial owner rejected before Core allocation");
+        let mut preparation = score_minimum_preparation_fixture(&mut |_| Ok(())).unwrap();
+        assert!(matches!(
+            preparation
+                .advance_with_memory_guard(1, &mut |_| Ok(()), &mut || true)
+                .unwrap(),
+            BuildScoreMinimumPreparationAdvance::Cancelled { .. },
+        ));
+        assert!(preparation
+            .advance_with_memory_guard(1, &mut |_| Ok(()), &mut || false)
+            .is_err());
+    }
+
+    #[test]
+    fn build_score_minimum_seal_checks_each_allocation_boundary_and_actual_capacity() {
+        let fixture = || {
+            let (budget, projection, identity, keys, required, rows) =
+                score_minimum_source_fixture();
+            let portfolio =
+                CoveragePortfolioAlternativeSet::new_canonical(identity, keys, required, rows)
+                    .unwrap();
+            let retained = core::mem::size_of::<BuildScoreMinimumPreparation>() as u128
+                + projection.checked_retained_capacity_bytes().unwrap();
+            (budget, retained, projection, portfolio)
+        };
+        let (budget, retained, projection, portfolio) = fixture();
+        let mut checkpoints = Vec::new();
+        let (payload, owner) =
+            seal_build_score_minimum(budget, retained, projection, portfolio, &mut |bytes| {
+                checkpoints.push(bytes);
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            checkpoints.len() > 12,
+            "every replacement, key, winner and final carrier is guarded"
+        );
+        assert!(
+            checkpoints.last().copied().unwrap()
+                >= retained
+                    + payload.checked_retained_capacity_bytes().unwrap()
+                    + owner.checked_retained_capacity_bytes().unwrap()
+        );
+        for reject_at in 0..checkpoints.len() {
+            let (budget, retained, projection, portfolio) = fixture();
+            let mut seen = 0;
+            let result =
+                seal_build_score_minimum(budget, retained, projection, portfolio, &mut |_| {
+                    let current = seen;
+                    seen += 1;
+                    if current == reject_at {
+                        Err(ExactMinimumCoverError::MemoryGuardRejected)
+                    } else {
+                        Ok(())
+                    }
+                });
+            assert!(
+                result.is_err(),
+                "rejected checkpoint {reject_at} cannot publish exact evidence"
+            );
+            assert_eq!(
+                seen,
+                reject_at + 1,
+                "no allocation continues past a rejected guard"
+            );
+        }
+    }
+
+    #[test]
+    fn build_score_minimum_projection_counts_spare_capacity_and_never_copies_attack_into_rows() {
+        let (_, mut projection, _, _, _, _) = score_minimum_source_fixture();
+        let before = projection.checked_retained_capacity_bytes().unwrap();
+        projection.public_candidate_ids.reserve_exact(128);
+        projection.winners.reserve_exact(128);
+        projection.input_identity.reserve_exact(1024);
+        assert!(projection.checked_retained_capacity_bytes().unwrap() > before);
+        // Only numeric pattern/row identities and score are selection inputs.
+        // Attacks are retained for the selected canonical trace's DTO only.
+        for winner in &mut projection.winners {
+            winner.informational_attack = u32::MAX;
+        }
+        assert!(projection.winners.windows(2).all(|pair| (
+            pair[0].pattern_id,
+            pair[0].candidate_index
+        ) < (
+            pair[1].pattern_id,
+            pair[1].candidate_index
+        )));
+        let mut called = false;
+        assert!(authorize_build_score_exact_peak(
+            BuildProductMemoryBudget {
+                maximum_bytes: u128::MAX,
+                source_bytes: 1
+            },
+            u128::MAX,
+            1,
+            &mut |_| {
+                called = true;
+                Ok(())
+            },
+        )
+        .is_err());
+        assert!(
+            !called,
+            "overflow fails before consulting the external admission owner"
+        );
+    }
 
     #[test]
     fn build_product_budget_honors_finite_execution_authority_above_portable_fallback() {

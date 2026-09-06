@@ -4,7 +4,7 @@ use clearra_core_domain::solution::normalized_tiling_solution::{
     NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
 };
 
-pub use clearra_app::{CoveragePortfolioAlternativeSet, PortfolioAlternativeSetIdentity};
+pub use crate::{CoveragePortfolioAlternativeSet, PortfolioAlternativeSetIdentity};
 
 pub const PC_SCORE_MAX_PATTERNS: usize = 1_066_867_200;
 pub const PC_SCORE_CANONICAL_SELECTION: &str = "smallest-canonical-candidate-id";
@@ -225,6 +225,9 @@ pub mod pc_score_summary_result {
     }
 
     impl ValidatedPcScoreExecutionEvidence {
+        pub(crate) fn fixture(report: PcScoreSummaryV2Result) -> Self {
+            Self { report }
+        }
         pub(crate) fn report(&self) -> &PcScoreSummaryV2Result {
             &self.report
         }
@@ -236,6 +239,22 @@ pub mod pc_score_summary_result {
 }
 
 impl PcScoreSummaryV2Result {
+    // Synthetic authority fixture: account for every owned fixture payload;
+    // production preparation/portfolio allocation guards remain real.
+    pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        self.query
+            .checked_pointee_retained_bytes()?
+            .checked_add(self.problem_id.len() as u128)?
+            .checked_add(self.score_profile_id.len() as u128)?
+            .checked_add(
+                (self.pattern_winners.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<PcScorePatternWinnerV1>() as u128)?,
+            )?
+            .checked_add(
+                (core::mem::size_of::<Vec<PcScorePatternWinnerV1>>()
+                    + 8 * core::mem::size_of::<usize>()) as u128,
+            )
+    }
     pub const fn contract_id(&self) -> &'static str {
         self.contract_id
     }
@@ -361,13 +380,13 @@ pub mod pc_score_postprocess {
     }
 }
 
-#[path = "../src/pc_score_minimum_cover_result.rs"]
-// This integration crate includes the production reducer in isolation, so its
-// full public-in-crate inspection surface is intentionally not consumed here.
+#[path = "pc_score_minimum_cover_result.rs"]
+// Includes the production reducer with synthetic score authority, but the real
+// private portfolio continuation. No public API is exposed just for fixtures.
 #[allow(dead_code)]
 mod pc_score_minimum_cover_result;
 
-use clearra_app::PortfolioEnumerationStop;
+use crate::PortfolioEnumerationStop;
 use pc_score_minimum_cover_result::{
     validate_pc_score_portfolio_v2_result, PcScorePortfolioValidationError,
     PC_SCORE_PORTFOLIO_RESULT_CONTRACT,
@@ -748,4 +767,122 @@ fn construction_stays_within_the_default_two_mib_stack_contract() {
         })
         .expect("spawn 2 MiB thread");
     handle.join().expect("2 MiB thread did not overflow");
+}
+
+#[test]
+fn cooperative_score_minimum_keeps_exact_canonical_and_attack_independent_membership() {
+    use clearra_coverage::cover::{ExactAtMostShardAdvance, ExactAtMostShardSession};
+    use pc_score_minimum_cover_result::{
+        PcScorePortfolioExecutionPreparation, PcScorePortfolioPreparationAdvance,
+    };
+    let winners = two_by_two_winners([u32::MAX, 0, 1, u32::MAX]);
+    let (summary, derivation) = authority_fixture(winners.clone(), winners, 2);
+    let expected = validate_pc_score_portfolio_v2_result(&summary, &derivation).unwrap();
+    let mut preparation = PcScorePortfolioExecutionPreparation::new(
+        pc_score_summary_result::ValidatedPcScoreExecutionEvidence::fixture(summary),
+        &derivation,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        preparation.parallel_work().parallel_source_dimensions(),
+        Some((4, 2))
+    );
+    preparation.parallel_work_mut().enable_parallel(4).unwrap();
+    let mut peak = 0;
+    for _ in 0..1024 {
+        if let Some(query) = preparation.parallel_work().parallel_query().cloned() {
+            while let Some(task) = preparation.parallel_work_mut().take_parallel_task() {
+                let mut shard = ExactAtMostShardSession::prepare(
+                    query.clone(),
+                    task,
+                    &mut |_| Ok(()),
+                    &mut || false,
+                )
+                .unwrap();
+                let receipt = loop {
+                    match shard.advance(8, &mut |_| Ok(()), &mut || false).unwrap() {
+                        ExactAtMostShardAdvance::Pending { .. } => {}
+                        ExactAtMostShardAdvance::Terminal(receipt) => break receipt,
+                    }
+                };
+                preparation
+                    .parallel_work_mut()
+                    .accept_parallel_receipt(receipt)
+                    .unwrap();
+            }
+        }
+        match preparation
+            .advance_with_memory_guard(
+                1,
+                &mut |bytes| {
+                    peak = peak.max(bytes);
+                    Ok(())
+                },
+                &mut || false,
+            )
+            .unwrap()
+        {
+            PcScorePortfolioPreparationAdvance::Pending { .. } => {}
+            PcScorePortfolioPreparationAdvance::Completed(evidence) => {
+                assert_eq!(evidence.report(), &expected);
+                assert!(peak > 0);
+                return;
+            }
+            PcScorePortfolioPreparationAdvance::Cancelled { .. } => panic!("not cancelled"),
+        }
+    }
+    panic!("tiny score minimum continuation failed to finish");
+}
+
+#[test]
+fn cooperative_score_minimum_constructor_and_terminal_guard_fail_closed() {
+    use clearra_coverage::cover::ExactMinimumCoverError;
+    use pc_score_minimum_cover_result::PcScorePortfolioExecutionPreparation;
+    let winners = two_by_two_winners([0, 10, 100, 1]);
+    let (summary, derivation) = authority_fixture(winners.clone(), winners, 2);
+    let denied = PcScorePortfolioExecutionPreparation::new(
+        pc_score_summary_result::ValidatedPcScoreExecutionEvidence::fixture(summary.clone()),
+        &derivation,
+        &mut |_| Err(ExactMinimumCoverError::MemoryGuardRejected),
+    );
+    assert!(matches!(
+        denied,
+        Err(PcScorePortfolioValidationError::MemoryLimitExceeded)
+    ));
+    let mut preparation = PcScorePortfolioExecutionPreparation::new(
+        pc_score_summary_result::ValidatedPcScoreExecutionEvidence::fixture(summary),
+        &derivation,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert!(preparation
+        .advance_with_memory_guard(
+            u64::MAX,
+            &mut |_| Err(ExactMinimumCoverError::MemoryGuardRejected),
+            &mut || false
+        )
+        .is_err());
+}
+
+#[test]
+fn cooperative_score_minimum_cancel_does_not_seal_partial_evidence() {
+    use pc_score_minimum_cover_result::{
+        PcScorePortfolioExecutionPreparation, PcScorePortfolioPreparationAdvance,
+    };
+    let winners = two_by_two_winners([1, 2, 3, 4]);
+    let (summary, derivation) = authority_fixture(winners.clone(), winners, 2);
+    let mut preparation = PcScorePortfolioExecutionPreparation::new(
+        pc_score_summary_result::ValidatedPcScoreExecutionEvidence::fixture(summary),
+        &derivation,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert!(matches!(
+        preparation
+            .advance_with_memory_guard(1, &mut |_| Ok(()), &mut || true)
+            .unwrap(),
+        PcScorePortfolioPreparationAdvance::Cancelled { .. }
+    ));
+    assert!(preparation.parallel_work().parallel_query().is_none());
 }

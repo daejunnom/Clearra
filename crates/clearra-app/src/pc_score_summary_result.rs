@@ -336,6 +336,33 @@ pub struct PcScoreSummaryV2Result {
 }
 
 impl PcScoreSummaryV2Result {
+    /// Heap reachable from this score evidence, including Arc allocation
+    /// headers and shared pointees. The report's inline storage is excluded;
+    /// counting shared query/winner owners twice is conservative, not free
+    /// allocation credit for a concurrent exact-portfolio continuation.
+    pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        const ARC_HEADER: u128 = (2 * size_of::<usize>()) as u128;
+        self.query
+            .checked_pointee_retained_bytes()?
+            .checked_add(ARC_HEADER)?
+            .checked_add(self.problem_id.len() as u128)?
+            .checked_add(ARC_HEADER)?
+            .checked_add(self.score_profile_id.len() as u128)?
+            .checked_add(ARC_HEADER)?
+            .checked_add(size_of::<Vec<PcScorePatternWinnerV1>>() as u128)?
+            .checked_add(ARC_HEADER)?
+            .checked_add(
+                (self.pattern_winners.capacity() as u128)
+                    .checked_mul(size_of::<PcScorePatternWinnerV1>() as u128)?,
+            )?
+            .checked_add(size_of::<Vec<PcScoreSolutionFieldAverageV1>>() as u128)?
+            .checked_add(ARC_HEADER)?
+            .checked_add(
+                (self.solution_field_averages.capacity() as u128)
+                    .checked_mul(size_of::<PcScoreSolutionFieldAverageV1>() as u128)?,
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         origin: PcScoreIngressOrigin,

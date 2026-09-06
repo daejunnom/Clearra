@@ -119,6 +119,10 @@ impl BuildV2AppCommand {
         &self.request
     }
 
+    pub(crate) fn into_request(self) -> BuildV2AppRequest {
+        self.request
+    }
+
     pub(crate) fn request_profile_query(&self) -> &clearra_problem::BuildProbabilityQuery {
         match &self.request {
             BuildV2AppRequest::BuildCover(request) => request.request_profile_query(),
@@ -173,21 +177,7 @@ impl RunnableAppCommand for BuildV2AppCommand {
                 context.services().core_executor(),
                 context.execution_control(),
             ) {
-                Ok(report) => AppResponse::success(AppRenderModel::Verify(AppMessage::new(
-                    AppResultKind::Verify,
-                    Vec::new(),
-                )))
-                .with_build_coverage_portfolio_v2(report)
-                .map(with_complete_build_product_resources)
-                .unwrap_or_else(|error| {
-                    AppResponse::failed(
-                        AppStatus::ExecutionFailed,
-                        AppError::new(
-                            AppErrorCode::ExecutionFailed,
-                            format!("Build v2 result rejected: {error}"),
-                        ),
-                    )
-                }),
+                Ok(report) => build_cover_success_response(report),
                 Err(error) => AppResponse::failed(
                     AppStatus::ExecutionFailed,
                     AppError::new(
@@ -268,6 +258,28 @@ impl RunnableAppCommand for BuildV2AppCommand {
             ),
         }
     }
+}
+
+/// Both direct CLI completion and the cooperative host seal the same nominal
+/// Build portfolio through this response projection.
+pub(crate) fn build_cover_success_response(
+    report: crate::build_solution_probability_result::build_v2_facade::BuildCoveragePortfolioV2,
+) -> AppResponse {
+    AppResponse::success(AppRenderModel::Verify(AppMessage::new(
+        AppResultKind::Verify,
+        Vec::new(),
+    )))
+    .with_build_coverage_portfolio_v2(report)
+    .map(with_complete_build_product_resources)
+    .unwrap_or_else(|error| {
+        AppResponse::failed(
+            AppStatus::ExecutionFailed,
+            AppError::new(
+                AppErrorCode::ExecutionFailed,
+                format!("Build v2 result rejected: {error}"),
+            ),
+        )
+    })
 }
 
 fn projected_build_response<Report, ExecutionError>(

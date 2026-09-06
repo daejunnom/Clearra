@@ -22,7 +22,7 @@ function assertIsolated(source) {
   assert.match(source, /if: github\.ref == 'refs\/heads\/codex\/v0\.8\.0-preflight-20260906-rng' && github\.ref_type == 'branch'/u);
   assert.match(source, /\[\[ "\$GITHUB_REF" == 'refs\/heads\/codex\/v0\.8\.0-preflight-20260906-rng'/u);
   assert.match(source, /\[\[ "\$\(git rev-parse HEAD\)" == "\$GITHUB_SHA" \]\]/u);
-  for (const job of ['candidate-full-gate', 'candidate-cli', 'candidate-ui']) {
+  for (const job of ['candidate-full-gate', 'candidate-rust-wasm', 'candidate-cli', 'candidate-ui']) {
     const tail = source.slice(source.indexOf(`  ${job}:`) + `  ${job}:`.length).split(/^  [a-z][a-z-]*:/mu)[0];
     assert.match(tail, /needs: candidate-source/u, job);
     assert.match(tail, /if: needs\.candidate-source\.outputs\.full_gate == '(?:true|false)'/u, job);
@@ -46,14 +46,31 @@ for (const [name, mutate] of [
 
 test('full selection runs the unchanged eight-stage entry point once and skips light duplicates', () => {
   assert.equal((workflow.match(/-Task ReleaseAcceptance -ReleaseAcceptanceShard Full/gmu) ?? []).length, 1);
-  assert.match(workflow, /push\) echo 'full_gate=true'/u);
+  assert.match(workflow, /push\) echo 'full_gate=false'/u);
   assert.match(workflow, /full_gate:[\s\S]*default: true[\s\S]*type: boolean/u);
-  assert.equal((workflow.match(/outputs\.full_gate == 'false'/gu) ?? []).length, 2);
+  assert.equal((workflow.match(/outputs\.full_gate == 'false'/gu) ?? []).length, 3);
   assert.match(workflow, /runs-on: windows-latest/u);
   assert.match(workflow, /-ExecutionSurface Trusted -RuntimeEnvironment windows/u);
   assert.match(workflow, /RUST_MIN_STACK: "16777216"/u);
   assert.match(workflow, /wasm-bindgen-cli --version 0\.2\.126 --locked/u);
   assert.doesNotMatch(workflow, /-ExecutionPolicy|Unblock-File|Set-AuthenticodeSignature|\bwsl\b/u);
+});
+
+test('focused Rust/WASM feedback is not another full gate and builds one independent generation', () => {
+  const job = workflow.split('  candidate-rust-wasm:')[1].split('  candidate-cli:')[0];
+  assert.match(job, /if: needs\.candidate-source\.outputs\.full_gate == 'false'/u);
+  assert.match(job, /runs-on: windows-latest/u);
+  assert.match(job, /Assert-ClearraTrustedExecutionSurface -TaskName 'CandidateRustWasm' -ExecutionSurface Trusted -RuntimeEnvironment windows/u);
+  assert.match(job, /\. \.\/scripts\/lib\/clearra-path-helpers\.ps1/u);
+  assert.match(job, /git rev-parse HEAD\)\.Trim\(\) -ne \$env:GITHUB_SHA/u);
+  assert.match(job, /run: node scripts\/release\/candidate-preflight-regressions\.mjs/u);
+  assert.doesNotMatch(job, /-Task ReleaseAcceptance|--workspace|--all-targets|--verify|--benchmark/u);
+  assert.equal((job.match(/node scripts\/tools\/build-clearra-wasm\.mjs --environment native --destination \$candidateWasmBuild/gu) ?? []).length, 1);
+  assert.match(job, /Join-Path \$env:RUNNER_TEMP 'clearra-candidate-wasm-built'/u);
+  assert.match(job, /!cancelled\(\) && steps\.toolchains\.outcome == 'success' && steps\.boundaries\.outcome == 'success'/u);
+  assert.match(job, /!cancelled\(\) && steps\.wasm_build\.outcome == 'success'/u);
+  assert.match(job, /if: always\(\) && steps\.candidate_wasm\.outputs\.ready == 'true'/u);
+  assert.doesNotMatch(job, /continue-on-error:|actions\/cache|download-artifact/u);
 });
 
 test('source identity is paired and WASM is uploaded only after independent five-file verification', () => {

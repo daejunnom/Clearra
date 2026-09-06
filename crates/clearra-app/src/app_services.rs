@@ -1357,6 +1357,62 @@ impl AppCoreExecutorService {
         ),
         CoreExecutionError,
     > {
+        use crate::pc_score_minimum_cover_result::PcScorePortfolioPreparationAdvance;
+        let (result, mut preparation) = self
+            .prepare_pc_score_minimals_wasm_result_with_memory_guard(
+                authority,
+                executed_problem,
+                result,
+                control,
+                &mut memory_guard,
+            )?;
+        loop {
+            let mut memory_failure = None;
+            let advance = preparation
+                .advance_with_memory_guard(
+                    1_024,
+                    &mut |peak| {
+                        memory_guard(&result, peak).map_err(|error| {
+                            memory_failure = Some(error);
+                            clearra_coverage::cover::ExactMinimumCoverError::MemoryGuardRejected
+                        })
+                    },
+                    &mut || control.is_cancelled(),
+                )
+                .map_err(|error| {
+                    memory_failure.unwrap_or(CoreExecutionError::RuntimeUnavailable {
+                        component: error.as_str(),
+                    })
+                })?;
+            match advance {
+                PcScorePortfolioPreparationAdvance::Pending { .. } => {}
+                PcScorePortfolioPreparationAdvance::Cancelled { .. } => {
+                    return Err(CoreExecutionError::Cancelled)
+                }
+                PcScorePortfolioPreparationAdvance::Completed(evidence) => {
+                    return Ok((result, evidence))
+                }
+            }
+        }
+    }
+
+    /// Validates score-only source evidence without entering the exact minimum
+    /// proof. WASM hosts retain the returned typed continuation and drive its
+    /// guarded AtMost tasks; synchronous callers use the adapter above.
+    pub(crate) fn prepare_pc_score_minimals_wasm_result_with_memory_guard(
+        &self,
+        authority: &PcScoreCompiledAuthority,
+        executed_problem: &std::sync::Arc<SearchProblem>,
+        result: CoreExecutionResult,
+        control: &ExecutionControl,
+        mut memory_guard: impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
+    ) -> Result<
+        (
+            CoreExecutionResult,
+            crate::pc_score_minimum_cover_result::PcScorePortfolioExecutionPreparation,
+        ),
+        CoreExecutionError,
+    > {
         memory_guard(&result, 0)?;
         validate_pc_score_wasm_execution_source(authority, executed_problem, &result)?;
         let result =
@@ -1382,13 +1438,29 @@ impl AppCoreExecutorService {
             .map_err(|error| CoreExecutionError::RuntimeUnavailable {
                 component: error.component(),
             })?;
+        let mut preparation_memory_failure = None;
         let evidence =
-            ValidatedPcScorePortfolioExecutionEvidence::validate(score_execution, &derivation)
-                .map_err(|error| CoreExecutionError::RuntimeUnavailable {
+            crate::pc_score_minimum_cover_result::PcScorePortfolioExecutionPreparation::new(
+                score_execution,
+                &derivation,
+                &mut |peak| {
+                    let peak = derivation_retained_bytes.checked_add(peak).ok_or(
+                        clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow,
+                    )?;
+                    memory_guard(&result, peak).map_err(|error| {
+                        preparation_memory_failure = Some(error);
+                        clearra_coverage::cover::ExactMinimumCoverError::MemoryGuardRejected
+                    })
+                },
+            )
+            .map_err(|error| {
+                preparation_memory_failure.unwrap_or(CoreExecutionError::RuntimeUnavailable {
                     component: error.as_str(),
-                })?;
+                })
+            })?;
         let portfolio_retained_bytes = evidence
-            .checked_incremental_retained_capacity_bytes()
+            .checked_retained_capacity_bytes()
+            .and_then(|bytes| bytes.checked_add(core::mem::size_of_val(&evidence) as u128))
             .ok_or(CoreExecutionError::RuntimeUnavailable {
                 component: "pc_score_minimals_retained_memory_overflow",
             })?;

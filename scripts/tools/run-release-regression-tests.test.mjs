@@ -16,6 +16,7 @@ const EXPECTED_RELEASE_REGRESSIONS = Object.freeze([
   "scripts/release/canonical-acceptance-run.test.mjs",
   "scripts/release/candidate-preflight-workflow.test.mjs",
   "scripts/release/candidate-preflight-artifacts.test.mjs",
+  "scripts/release/candidate-preflight-regressions.test.mjs",
   "scripts/release/create-exact-source-archive.test.mjs",
   "scripts/release/deployment-impact.test.mjs",
   "scripts/release/fast-fix-qualification-evidence.test.mjs",
