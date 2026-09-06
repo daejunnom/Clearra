@@ -45,6 +45,7 @@ const EXPECTED_RELEASE_REGRESSIONS = Object.freeze([
   "scripts/release/validate-release-metadata.test.mjs",
   "scripts/release/verify-remote-annotated-tag.test.mjs",
   "scripts/tools/run-focused-js-tests.test.mjs",
+  "scripts/tools/run-gui-experiment.test.mjs",
   "scripts/tools/import-verified-clearra-wasm.test.mjs",
   "scripts/tools/retain-clearra-debug-builds.test.mjs",
   "scripts/tools/run-release-regression-tests.test.mjs",

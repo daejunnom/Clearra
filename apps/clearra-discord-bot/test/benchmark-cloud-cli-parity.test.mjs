@@ -281,6 +281,21 @@ test("unrecognized error codes and error messages are never copied into diagnost
   });
 });
 
+test("native unsupported stderr prefix retains only the fixed code, never its message", async () => {
+  const mock = mocks((output) => {
+    output.exitCode = 3;
+    output.stdout = '';
+    output.stderr = 'error E_PRODUCT_RUNTIME_UNSUPPORTED PRIVATE DETAIL';
+    return output;
+  });
+  await assert.rejects(benchmarkCloudCliParity(options, mock.dependencies), error => {
+    const report = diagnosticFailureReport(error);
+    assert.equal(report.samples[0].cli_error_code, 'E_PRODUCT_RUNTIME_UNSUPPORTED');
+    assert(!JSON.stringify(report).includes('PRIVATE DETAIL'));
+    return true;
+  });
+});
+
 test("script emits only bounded reports, rejects native Windows invocation and has no remote/deploy hook", async () => {
   const source = await readFile(new URL("../scripts/benchmark-cloud-cli-parity.mjs", import.meta.url), "utf8");
   assert.match(source, /native_windows_execution_forbidden/u);

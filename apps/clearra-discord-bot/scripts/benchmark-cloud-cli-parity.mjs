@@ -98,7 +98,9 @@ function safeSample(record, context) {
     resource = payload.resource_report;
   } catch { /* not JSON */ }
   if (!SAFE_CLI_ERRORS.has(code)) {
-    const prefix = record.result?.stderr?.match(/^(E_[A-Z_]+)(?=[:\s])/u)?.[1];
+    // CliOutput::error writes "error E_CODE message" even for unsupported JSON
+    // requests. Accept that exact prefix, not arbitrary embedded child text.
+    const prefix = record.result?.stderr?.match(/^(?:error )?(E_[A-Z_]+)(?=[:\s])/u)?.[1];
     code = SAFE_CLI_ERRORS.has(prefix) ? prefix : null;
   }
   return { ...context, process_ms: record.processMs,

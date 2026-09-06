@@ -148,6 +148,7 @@ test("plan is exact-bound, keyless, Secret-free for deployer, and emits only non
     repositoryOwnerId: "271715321",
     ref: "refs/heads/main",
     workflowRef: "daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main",
+    diagnosticWorkflowRef: "daejunnom/Clearra/.github/workflows/cloud-cli-diagnostic.yml@refs/heads/main",
     rollbackWorkflowRef:
       "daejunnom/Clearra/.github/workflows/discord-deploy-recovery.yml@refs/heads/main",
     subjects: [
@@ -353,7 +354,7 @@ test("plan is exact-bound, keyless, Secret-free for deployer, and emits only non
   }
   const provider = report.plannedMutations.find(({ id }) => id === "create-provider");
   assert.ok(provider.argv.includes(
-    "--attribute-condition=assertion.repository == 'daejunnom/Clearra' && assertion.repository_id == '1309293231' && assertion.repository_owner_id == '271715321' && assertion.ref == 'refs/heads/main' && assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main'",
+    "--attribute-condition=assertion.repository == 'daejunnom/Clearra' && assertion.repository_id == '1309293231' && assertion.repository_owner_id == '271715321' && assertion.ref == 'refs/heads/main' && (assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main' || assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/cloud-cli-diagnostic.yml@refs/heads/main')",
   ));
   const orderedIds = report.plannedMutations.map(({ id }) => id);
   const firstWifIndex = report.plannedMutations.findIndex(({ argv }) =>
@@ -1891,7 +1892,7 @@ function exactProvider() {
     description: "Exact workflow/main provider for daejunnom/Clearra",
     oidc: { issuerUri: "https://token.actions.githubusercontent.com" },
     attributeCondition:
-      "assertion.repository == 'daejunnom/Clearra' && assertion.repository_id == '1309293231' && assertion.repository_owner_id == '271715321' && assertion.ref == 'refs/heads/main' && assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main'",
+      "assertion.repository == 'daejunnom/Clearra' && assertion.repository_id == '1309293231' && assertion.repository_owner_id == '271715321' && assertion.ref == 'refs/heads/main' && (assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main' || assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/cloud-cli-diagnostic.yml@refs/heads/main')",
     attributeMapping: {
       "attribute.ref": "assertion.ref",
       "attribute.repository": "assertion.repository",

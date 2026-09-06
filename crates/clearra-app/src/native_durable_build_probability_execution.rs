@@ -916,11 +916,49 @@ fn send_durable_completion(
 fn checked_maximum_task_count(problem: &SearchProblem, worker_count: usize) -> Option<usize> {
     let maximum_candidates = problem.backend_request().max_candidates();
     if maximum_candidates == 0 {
-        return None;
+        // The common request contract uses zero for no candidate-count cap.
+        // This is not zero work or an unavailable worker admission. Receipt
+        // storage is grown for issued tasks, never reserved for this sentinel.
+        return Some(0);
     }
-    let batches = maximum_candidates.checked_add(NATIVE_BUILD_BATCH_CAPACITY.checked_sub(1)?)?
-        / NATIVE_BUILD_BATCH_CAPACITY;
+    let batches = maximum_candidates / NATIVE_BUILD_BATCH_CAPACITY
+        + usize::from(maximum_candidates % NATIVE_BUILD_BATCH_CAPACITY != 0);
     batches.checked_add(worker_count.checked_mul(2)?)
+}
+
+fn reserve_durable_task_slots<T>(
+    values: &mut Vec<T>,
+    required_count: usize,
+    maximum_task_count: usize,
+) -> Result<(), CoreExecutionError> {
+    if maximum_task_count != 0 && required_count > maximum_task_count {
+        return Err(durable_runtime_unavailable(
+            "native_build_probability_durable_task_bound_exceeded",
+        ));
+    }
+    let additional = required_count
+        .checked_sub(values.len())
+        .ok_or_else(native_coordinator_allocation_unavailable)?;
+    // Amortized growth avoids copying the whole receipt ledger for every batch
+    // of an unlimited search. The count bound above remains an authority check,
+    // independent of allocator spare capacity.
+    values
+        .try_reserve(additional)
+        .map_err(|_| native_coordinator_allocation_unavailable())
+}
+
+fn reserve_durable_wave_receipts(
+    live_tokens: &mut Vec<DelegationToken>,
+    sealed: &mut Vec<SealedDurableDelegation>,
+    additional: usize,
+    maximum_task_count: usize,
+) -> Result<(), CoreExecutionError> {
+    let required_count = live_tokens
+        .len()
+        .checked_add(additional)
+        .ok_or_else(native_coordinator_allocation_unavailable)?;
+    reserve_durable_task_slots(live_tokens, required_count, maximum_task_count)?;
+    reserve_durable_task_slots(sealed, required_count, maximum_task_count)
 }
 
 fn admission_request(
@@ -995,7 +1033,7 @@ fn prepare_durable_delegation<J: DelegationJournal, C: NativeDurableClock>(
 ) -> Result<PendingDurableDelegation, CoreExecutionError> {
     let operation = executable.kind();
     let task_ordinal = *ordinal;
-    if task_ordinal >= maximum_task_count as u64 {
+    if maximum_task_count != 0 && task_ordinal >= maximum_task_count as u64 {
         return Err(durable_runtime_unavailable(
             "native_build_probability_durable_task_bound_exceeded",
         ));
@@ -1315,19 +1353,19 @@ fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
     let budget = DelegationBudget::new(1, memory_bytes).ok_or_else(|| {
         durable_runtime_unavailable("native_build_probability_delegation_budget_invalid")
     })?;
-    live_tokens
-        .try_reserve_exact(maximum_task_count)
-        .map_err(|_| native_coordinator_allocation_unavailable())?;
     let mut sealed = Vec::new();
-    sealed
-        .try_reserve_exact(maximum_task_count)
-        .map_err(|_| native_coordinator_allocation_unavailable())?;
     let mut ordinal = 0_u64;
 
     let mut initialize = Vec::new();
     initialize
         .try_reserve_exact(request_senders.len())
         .map_err(|_| native_coordinator_allocation_unavailable())?;
+    reserve_durable_wave_receipts(
+        live_tokens,
+        &mut sealed,
+        request_senders.len(),
+        maximum_task_count,
+    )?;
     for worker_index in 0..request_senders.len() {
         let verifier = producer
             .new_delegated_verifier(field, aggregation)
@@ -1396,6 +1434,7 @@ fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
             }
             if !batch.is_empty() {
                 let count = batch.len();
+                reserve_durable_wave_receipts(live_tokens, &mut sealed, 1, maximum_task_count)?;
                 let pending = prepare_durable_delegation(
                     authority,
                     durable_identity,
@@ -1449,6 +1488,12 @@ fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
         }
     }
 
+    reserve_durable_wave_receipts(
+        live_tokens,
+        &mut sealed,
+        request_senders.len(),
+        maximum_task_count,
+    )?;
     let mut finish = Vec::new();
     finish
         .try_reserve_exact(request_senders.len())
@@ -1858,8 +1903,7 @@ mod tests {
         .with_execution_policy(
             PcExecutionPolicy::mvp_default()
                 .with_workers(workers)
-                .with_worker_hardware_limit(workers)
-                .with_max_candidates(1_024),
+                .with_worker_hardware_limit(workers),
         );
         ProblemCompiler::compile_scenario_pc(&query).expect("one-piece problem")
     }
@@ -1867,6 +1911,28 @@ mod tests {
     fn field() -> BuildProbabilityField {
         BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
             .expect("one-row target")
+    }
+
+    #[test]
+    fn native_build_default_unlimited_candidates_are_not_zero_task_authority() {
+        let problem = one_piece_problem(2);
+        assert_eq!(problem.backend_request().max_candidates(), 0);
+        assert_eq!(checked_maximum_task_count(&problem, 1), Some(0));
+        assert_eq!(
+            admission_request(&problem, field(), 1)
+                .unwrap()
+                .maximum_task_count(),
+            0
+        );
+        // A large declared bound is not a request to allocate that many tokens.
+        let mut tokens = Vec::<u8>::new();
+        reserve_durable_task_slots(&mut tokens, 2, usize::MAX).unwrap();
+        assert!(tokens.capacity() >= 2 && tokens.capacity() < 1024);
+        tokens.extend([1, 2]);
+        reserve_durable_task_slots(&mut tokens, 3, 0).unwrap();
+        assert!(tokens.capacity() >= 3);
+        assert!(reserve_durable_task_slots(&mut tokens, 4, 3).is_err());
+        assert!(reserve_durable_task_slots(&mut tokens, 1, 0).is_err());
     }
 
     fn durable_identity(

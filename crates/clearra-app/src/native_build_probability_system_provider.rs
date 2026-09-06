@@ -47,10 +47,10 @@ impl SystemAdmissionProbe {
         request: NativeBuildProbabilityAdmissionRequest,
     ) -> Result<NativeBuildProbabilityProviderMeasurement, NativeBuildProbabilityHostProviderError>
     {
-        if request.worker_count() == 0
-            || request.maximum_task_count() == 0
-            || request.candidate_batch_capacity() == 0
-        {
+        // maximum_task_count == 0 is the shared unlimited-candidates policy;
+        // admission measures the simultaneously live workers and batch owners,
+        // not an up-front allocation for every future delegation receipt.
+        if request.worker_count() == 0 || request.candidate_batch_capacity() == 0 {
             return Err(provider_error(
                 "native_build_probability_system_admission_request_invalid",
             ));
