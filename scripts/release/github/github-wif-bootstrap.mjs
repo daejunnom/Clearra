@@ -33,6 +33,8 @@ const LEGACY_GITHUB_COMMAND_SYNC_SUBJECT =
   `${LEGACY_GITHUB_SUBJECT_PREFIX}:environment:discord-global-command-sync`;
 const GITHUB_WORKFLOW_REF =
   "daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main";
+const GITHUB_DIAGNOSTIC_WORKFLOW_REF =
+  "daejunnom/Clearra/.github/workflows/cloud-cli-diagnostic.yml@refs/heads/main";
 const GITHUB_ROLLBACK_WORKFLOW_REF =
   "daejunnom/Clearra/.github/workflows/discord-deploy-recovery.yml@refs/heads/main";
 const REGION = "asia-northeast1";
@@ -182,7 +184,7 @@ const OFFICIAL_PERMISSION_REFERENCES = Object.freeze({
 });
 const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
 const ATTRIBUTE_CONDITION =
-  "assertion.repository == 'daejunnom/Clearra' && assertion.repository_id == '1309293231' && assertion.repository_owner_id == '271715321' && assertion.ref == 'refs/heads/main' && assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main'";
+  "assertion.repository == 'daejunnom/Clearra' && assertion.repository_id == '1309293231' && assertion.repository_owner_id == '271715321' && assertion.ref == 'refs/heads/main' && (assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main' || assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/cloud-cli-diagnostic.yml@refs/heads/main')";
 const ROLLBACK_ATTRIBUTE_CONDITION =
   "assertion.repository == 'daejunnom/Clearra' && assertion.repository_id == '1309293231' && assertion.repository_owner_id == '271715321' && assertion.ref == 'refs/heads/main' && assertion.workflow_ref == 'daejunnom/Clearra/.github/workflows/discord-deploy-recovery.yml@refs/heads/main'";
 const ATTRIBUTE_MAPPING = Object.freeze({
@@ -914,6 +916,7 @@ async function createGitHubWifBootstrapPlanInternal(
       repositoryOwnerId: GITHUB_REPOSITORY_OWNER_ID,
       ref: GITHUB_REF,
       workflowRef: GITHUB_WORKFLOW_REF,
+      diagnosticWorkflowRef: GITHUB_DIAGNOSTIC_WORKFLOW_REF,
       rollbackWorkflowRef: GITHUB_ROLLBACK_WORKFLOW_REF,
       subjects: [
         GITHUB_MAIN_SUBJECT,

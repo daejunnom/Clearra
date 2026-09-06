@@ -20,6 +20,8 @@ const APP_FAILURES = [
 export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
   ...APP_FAILURES.map((filter) => ({ package: 'clearra-app', filter, exact: true, parallel: true })),
   ...[
+    'native_build_probability_execution::durable::tests::',
+    'native_build_probability_execution::system_provider::tests::',
     'cooperative_score_minimum_enters_shared_guarded_driver_and_cancels',
     'cooperative_build_cover_uses_real_build_source_and_shared_minimum_state',
     'cooperative_build_score_products_match_direct_and_distributed_typed_evidence',

@@ -54,7 +54,11 @@ The primary pool/provider is
 `projects/50060711800/locations/global/workloadIdentityPools/clearra-github/providers/clearra-main`.
 It pins repository `daejunnom/Clearra`, repository ID `1309293231`, owner ID
 `271715321`, ref `refs/heads/main`, and workflow ref
-`daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main`.
+`daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main` or
+`daejunnom/Clearra/.github/workflows/cloud-cli-diagnostic.yml@refs/heads/main`.
+The additional diagnostic workflow was explicitly approved by the user. Its
+unprotected build job uses only the main-subject builder; its protected compute
+job uses the existing environment-subject deployer. No subject/IAM role is widened.
 Every exact principal uses GitHub's immutable repository subject prefix
 `repo:daejunnom@271715321/Clearra@1309293231`: the builder appends
 `:ref:refs/heads/main`, while protected Environment principals append

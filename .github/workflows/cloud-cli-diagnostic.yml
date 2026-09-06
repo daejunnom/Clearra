@@ -18,11 +18,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  evaluate:
+  build-image:
     if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 85
-    environment: discord-path-confirmation
+    timeout-minutes: 65
+    # Branch-main OIDC subject: existing Cloud-Build-only account. No protected
+    # deployer credentials, extra IAM grants, or production mutation here.
+    outputs:
+      image_digest: ${{ steps.image.outputs.image_digest }}
     permissions:
       contents: read
       id-token: write
@@ -49,13 +52,14 @@ jobs:
           node scripts/release/create-exact-source-archive.mjs \
             --source-commit "$SOURCE_COMMIT" \
             --output "$RUNNER_TEMP/clearra-cloud-diagnostic/exact-source.tar.gz"
-      - name: Authenticate the protected diagnostic identity
+      - name: Authenticate the Cloud-Build-only identity
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          service_account: ${{ vars.GCP_BUILD_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@v2
       - name: Build exactly one immutable diagnostic image
+        id: image
         timeout-minutes: 62
         shell: bash
         run: |
@@ -63,6 +67,9 @@ jobs:
           evidence="$RUNNER_TEMP/clearra-cloud-diagnostic"
           gcloud builds submit "$evidence/exact-source.tar.gz" \
             --project="$GCP_PROJECT_ID" \
+            --region=asia-northeast1 \
+            --gcs-source-staging-dir="gs://clearra-cloud_cloudbuild/source" \
+            --service-account="projects/$GCP_PROJECT_ID/serviceAccounts/clearra-build@$GCP_PROJECT_ID.iam.gserviceaccount.com" \
             --config=apps/clearra-discord-bot/cloudbuild-current-job-service.yaml \
             --substitutions="_SOURCE_COMMIT=$SOURCE_COMMIT,_TAG=source-$SOURCE_COMMIT" \
             --format=json > "$evidence/build-readback.json"
@@ -70,23 +77,58 @@ jobs:
             --source-commit "$SOURCE_COMMIT" --project "$GCP_PROJECT_ID" \
             --exact-source-archive "$evidence/exact-source.tar.gz" \
             --build-readback "$evidence/build-readback.json" --output "$evidence/image-binding.json"
+          node -e 'const b=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(`image_digest=${b.image_digest}\n`)' "$evidence/image-binding.json" >> "$GITHUB_OUTPUT"
+      - name: Preserve source-verified image binding without release authority
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-cloud-image-${{ inputs.source_commit }}-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/clearra-cloud-diagnostic/image-binding.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  evaluate:
+    needs: build-image
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 23
+    environment: discord-path-confirmation
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      DIAGNOSTIC_IMAGE: ${{ needs.build-image.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Authenticate the protected diagnostic identity
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
       - name: Compare warm CLI and Discord compute in an isolated Cloud Run Job
         timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
           evidence="$RUNNER_TEMP/clearra-cloud-diagnostic"
-          image="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).image_digest)' "$evidence/image-binding.json")"
+          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" && "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          mkdir -p "$evidence"
           node scripts/release/cloud/benchmark-cli-parity-v080.mjs \
             --mode isolated-image --project "$GCP_PROJECT_ID" --source-commit "$SOURCE_COMMIT" \
-            --image-digest "$image" --run-id "$GITHUB_RUN_ID" --output "$evidence/parity.json"
+            --image-digest "$DIAGNOSTIC_IMAGE" --run-id "$GITHUB_RUN_ID" --output "$evidence/parity.json"
       - name: Preserve diagnostics only, including failure or cleanup status
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: unqualified-cloud-cli-${{ inputs.source_commit }}-run-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/clearra-cloud-diagnostic/image-binding.json
-            ${{ runner.temp }}/clearra-cloud-diagnostic/parity.json
+          path: ${{ runner.temp }}/clearra-cloud-diagnostic/parity.json
           if-no-files-found: warn
           retention-days: 14

@@ -27,3 +27,28 @@ that instance or its Vite/SSH children. A differently named idle legacy task is
 removed; a running legacy task is only disabled for future triggers. Listener
 PIDs already bound to ports `4194` and `8790` are checked before and after the
 migration and must remain unchanged.
+
+## One-off GUI experiments: 4195 only
+
+Keep the installed watchdog and the user's long-lived GUI on 4194. Never start
+another watchdog for an experiment, and never fall back to 4196 or an ephemeral
+port. From the tooling checkout, run:
+
+```powershell
+node scripts/tools/run-gui-experiment.mjs --source-root '<absolute-experiment-worktree>' --lease-minutes 30
+```
+
+This helper refuses an occupied 4195 without adopting or terminating its owner.
+The existing experimental listeners are a separate manual cleanup task; they
+are not retroactively owned by this helper. A newly created server has a default
+30-minute lease (explicitly configurable from 1 to 120 minutes), no automatic
+restart, strict port binding, and no HMR refresh. Ctrl+C, parent exit/disconnect,
+or lease expiry closes only that invocation's server. The child has an independent
+lease to prevent an unresponsive parent from leaving it running indefinitely.
+When starting the helper in the background on Windows use `Start-Process` with
+`-WindowStyle Hidden`; its own child also uses `windowsHide` and no command shell.
+
+The lease applies only to this finite experiment server, not CLI/GUI search time.
+There is intentionally no HTTP-idle timeout: active browser-local WASM searches
+need not send requests. Choose a sufficient explicit lease before a long audit,
+and end the helper when that audit finishes. Ports 4194 and 8790 are never touched.

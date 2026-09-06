@@ -7,28 +7,58 @@ P0/P1 issues are cleared, without bypassing canonical acceptance or rollback
 capture. New diagnostic CI is submitted without waiting for completion; review
 its results on the next ordinary user turn. Minimum runtime remains a P2 hotfix.
 External source comparisons are now strictly local-only: no upstream checkout,
-comparison test, solver asset or benchmark result is included in CI/deployment.
+comparison test, solver asset or raw benchmark artifact is included in CI/deployment.
 The legal-board experiment uses a separate local branch and is not a product import.
+
+The latest steering explicitly approves adding only the diagnostic workflow to
+the existing GCP provider allow-list. Newly submitted CI/Cloud results are still
+left for the next ordinary user input, not inspected during steering. Experiment
+servers are fixed to 4195; existing listeners remain a separate manual cleanup.
 
 ## Latest completed CI and actual GUI evaluation
 
-[Candidate 34051492524](https://github.com/daejunnom/Clearra/actions/runs/34051492524)
-at `2d43a7cce2557ec376d0759746e3c3edb4de8a18` finished with Rust/WASM, UI and
-minimum diagnostics passed; CLI parity failed during computation, not import.
-The former diagnostic emitted only `cli_not_successful` and discarded prior
-fixtures and the failing route. That result cannot establish Cloud or CLI parity.
-The harness now writes a failed, non-authoritative JSON artifact with bounded,
-allow-listed fixture/route/exit/resource metadata and completed fixture evidence,
-and validates an arm before spending time running the next arm. Raw child text,
-arguments and environment are never copied. Successful compilation can preserve
-the explicitly unqualified CLI artifact even if a later diagnostic fails.
+[Candidate 34055343299](https://github.com/daejunnom/Clearra/actions/runs/34055343299)
+at `4f6715b0fe5523ea2518e7b2fcde62e4a4876772` completed: source, native Rust,
+WASM, UI compilation and minimum diagnostics passed; CLI parity failed on the
+first direct Build-all warm-up (4.743ms, exit 3 / unsupported). It did not hit a
+deadline, output limit, spawn error or process signal. The new bounded diagnostic
+artifact preserved both the failing route and the two already completed fixtures;
+its archive SHA-256 was verified before inspection. Raw child text, arguments and
+environment remain excluded. The CLI error-code parser now also recognizes the
+actual `error E_CODE message` prefix, while recording only the allow-listed code.
 
-`candidate-rust-wasm` took 44m54s: 3m22s toolchain setup, 24m16s native
+The native-only durable Build coordinator treated default `max_candidates=0`
+(unlimited) as unavailable task authority; its system admission probe also rejected
+zero. Browser WASM does not compile this native route. The correction preserves
+zero as unlimited, grows receipt storage with issued tasks using fallible amortized
+allocation, retains explicit nonzero bounds and ordinal-overflow checks, and avoids
+inventing a cap or silently reducing workers. Existing native durable tests now
+use the real unlimited default instead of masking it with 1,024 candidates; those
+tests and system-provider tests are explicitly selected in the next candidate CI.
+This source diagnosis fits the captured early unsupported exit; confirmation of
+the corrected executable still requires that new trusted native run.
+
+Completed same-host measured-pair medians (one warm pair excluded, three pairs):
+
+| Fixture | Direct CLI ms | Service CLI ms | Service job ms | Loopback HTTP ms |
+| --- | ---: | ---: | ---: | ---: |
+| PC all, 246 fields / 5,040 queues | 35.309 | 35.631 | 36 | 41.609 |
+| PC first canonical minimum, all 25 members | 46,289.657 | 46,289.661 | 46,290 | 46,293.085 |
+
+Both completed fixtures matched raw output identity. This is GitHub Linux
+same-host evidence, not Cloud Run equivalence. The product CLI minimum timing is
+also not the focused proof/canonical diagnostic timing below; that additional
+gap remains a P2 input/execution-policy comparison axis, not a solved performance
+claim. Failed Build prevents claiming overall native parity.
+
+In the previous run `candidate-rust-wasm` took 44m54s: 3m22s setup, 24m16s native
 regressions and 16m32s independent WASM compilation. Native and WASM are now
 sibling jobs after source binding. Every native selection remains; the native
 leaf no longer installs npm dependencies or wasm-bindgen. The full gate still
-runs once when explicitly selected, and skips all focused leaves. This removes
-the serial dependency, not a claim of already measured new-run speedup.
+runs once when explicitly selected, and skips all focused leaves. The latest
+independent WASM job produced its verified artifact in approximately 19m45s
+(15m13s Rust compilation), without waiting for native regression completion.
+This measures earlier WASM feedback, not a hardware-controlled compiler speedup.
 
 Downloaded artifact archive SHA-256 values were checked, then the five WASM files
 were verified against the exact 2d43a7c source worktree and original runtime IDs:
@@ -44,10 +74,25 @@ left 16-cell field / P7 / 11 compute workers:
 | Build all solutions, target complement | 246 fields, 5,040/5,040 patterns | 0.7s cold / 0.4s warm |
 
 The warm Build run also passed with Korean UI and updated Geometry nodes.
-Finished workers read 0/11. These bounded browser checks do not clear the unseen
-native CLI failure or constitute exhaustive P0/P1 coverage. No new canonical
-acceptance or current rollback capture exists for this source, so Pages is not
-published from this unqualified artifact. The 3-second minimum target is not met.
+Finished workers read 0/11. These bounded browser checks do not constitute
+exhaustive P0/P1 coverage, but the now-classified native CLI failure is not a
+Pages blocker. No outstanding observed Pages P0/P1 is established by that failure;
+minimum runtime remains the explicitly accepted P2 hotfix. Publication still needs
+one exact-main canonical acceptance and its accepted Pages artifact plus a durable
+active-site rollback capture. An unqualified candidate artifact must not be
+restamped as accepted. Start that qualification/capture path independently of
+Cloud diagnostics; do not publish an unfinished build or claim a deployment from
+successful diagnostic compilation alone. The 3-second minimum target is not met.
+Port 4196 was stopped after this completed audit, before the new 4195-only policy.
+Do not recreate 4196 or silently replace the user's 4194 WASM/session.
+
+Fresh public readback on September 7 identifies the active Pages source as
+`91772735c3f7ec7d89ecd3e82aa4af4014995bf6`, version 0.8.0, accepted run
+`33582717675` attempt 1. GitHub deployment `6214318848` is successful and points
+to Pages run `33583845820`; the public WASM manifest agrees with the source.
+Capture this active canonical site using ordinary `capture`, not the historical
+v0.7.4 bootstrap path. The rollback bracket must belong to the newly committed
+main SHA. This readback is not a new deployment.
 
 The new local-only CP-SAT adapter run (Node 24.16.0, upstream 03b6377 unchanged)
 on the same downloaded 2d43a7c Jstris matrix took 5.290, 5.539 and 7.174 seconds
@@ -62,12 +107,15 @@ identical first canonical members in every arm):
 
 | Experiment | Workers | Baseline proof / canonical / total ms | Candidate proof / canonical / total ms |
 | --- | ---: | ---: | ---: |
-| Residual warm seed | 4 | 10,768 / 14,305 / 25,075 | 9,221 / 13,044 / 22,267 |
-| Cached pivot exhaustion | 4 | 10,747 / 14,330 / 25,077 | 10,259 / 13,487 / 23,747 |
-| Residual warm seed | 2 | 11,134 / 13,463 / 24,598 | 9,057 / 11,626 / 20,684 |
+| Residual warm seed | 4 | 10,676 / 14,093 / 24,770 | 9,152 / 12,908 / 22,061 |
+| Cached pivot exhaustion | 4 | 10,622 / 14,084 / 24,706 | 10,166 / 13,297 / 23,463 |
+| Residual warm seed | 2 | 11,050 / 13,430 / 24,480 | 8,955 / 11,631 / 20,587 |
+| Combined ideas | 4 | 10,628 / 14,091 / 24,719 | 9,146 / 12,881 / 22,028 |
 
-Both techniques stay diagnostic/default-off. The next isolated candidate adds a
-combined ABBA arm to test interaction, without changing the production default.
+Both techniques stay diagnostic/default-off. The combined arm is approximately
+10.9% faster in this bounded run and essentially matches warm seed alone within
+the observed variation. This does not establish an additive gain, a general speed
+ratio or the 3-second target. Exact K and first-canonical identity remain unchanged.
 
 ## Completed input evidence
 
@@ -166,6 +214,57 @@ valid earlier IDs/ties. Qnia's default Fast secondary is a different human-quali
 objective, not this complete lexicographic proof. The historical 3.662-5.543s
 full-feature local measurements therefore do not measure the same contract.
 
+### Pure cardinality timing and input sensitivity (latest steering)
+
+The public [Qnia Minimals GUI](https://qniapc.vercel.app/sfinder/minimals) was
+actually exercised with `v115@9gD8FeD8FeD8FeD8PeAgH`, `*!`, 4L, hold enabled,
+Primary Auto and Quality Fast. Two completed runs displayed 4,265ms and 4,185ms,
+5,040 queues, 25 minima, `ortools` and `fast-2x2`. This reproduces the user's
+3–5 second range.
+That is the site's reported feature timer, not an independently observed native
+solver-only timer, and the deployed site's exact artifact revision is not bound
+to the local reference. Do not replace this GUI observation by a slower Node
+measurement or assert that loading/canonical differences fully explain the gap.
+
+The new ignored `_local/research/qnia-pure-proof.mjs` separately reads the public
+`CpSolver.wallTime` (native response `wall_time`). It excludes module/WASM load,
+worker creation, model encoding and cleanup, but includes native presolve/search.
+It uses unchanged upstream 03b6377 and its two-worker `max_lp` defaults, validates
+OPTIMAL/objective/bound and checks every selected row against the original matrix.
+Each sample uses a fresh worker. Known 25 is a postcondition, never a solver hint.
+Report: `_local/reports/qnia-pure-proof-20260907.json` (local-only, not a CI asset).
+
+| Input (all Jstris 180) | Original rows / queues | Kernel constraints / candidates / entries | Exact K | Native solver milliseconds, three samples |
+| --- | ---: | ---: | ---: | --- |
+| Left 16-cell field, full P7 | 246 / 5,040 | 1,389 / 158 / 15,128 | 25 | 6,075 / 8,017 / 9,853 |
+| Right mirror, full P7 | 246 / 5,040 | 1,385 / 158 / 15,104 | 25 | 9,399 / 8,114 / 4,916 |
+| Left, first I + remaining six permutations | 246 / 720 | 356 / 89 / 3,294 | 11 | 229 / 218 / 243 |
+| Left, first S + remaining six permutations | 246 / 720 | 241 / 80 / 2,108 | 10 | 176 / 171 / 238 |
+
+The full left input is the exact downloaded Clearra Jstris matrix. The mirror is
+independently enumerated using Qnia's public feature API; the two prefixes are
+explicit restrictions of the original queue universe, not row-order variants
+mislabelled as different physical fields. No cross-rule coverage parity is
+claimed from the mirror alone. The two P7 models already differ in constraint
+count, so physical mirroring must not be assumed to preserve the Jstris problem.
+
+Input size alone does not predict exact set-cover cost: the same 246 raw rows
+produce very different kernels and proof branches (full left 2,571–3,072;
+first-I 351; first-S 186–235). Even equal branch counts had different elapsed
+times across repeats, so Node/browser runtime, scheduling and machine load remain
+uncontrolled factors, not an established source-level cause. These observations
+do not constitute matched-browser A/B or a general speed ratio. In particular,
+Clearra's 9–11s native proof stage is itself a target, separate from its additional
+12–14s first-canonical stage; canonical semantics cannot explain the proof gap.
+
+Keep input sensitivity as an explicit hotfix acceptance axis: physical field
+shape/mirror, queue restriction, solution density, kernel size/forced rows,
+workers (2/4/all), proof branches, native proof, first-canonical and lazy-next
+time must be reported separately. Use repeated paired comparisons on identical
+raw matrices and hardware; do not pool easy prefixes with the hard P7 fixture.
+Only exact-cardinality-safe dominance belongs in the proof kernel. Original IDs
+and equal/dominated alternatives remain available for canonical and lazy ties.
+
 ## Cloud execution equivalence
 
 `Warm Cloud CLI Diagnostic` is a new manual-only workflow on an exact current-main
@@ -190,11 +289,24 @@ candidate mode retains all pre/post service readback checks for that later gate.
 Node mocks or a GitHub-hosted Linux comparison are not live Cloud evidence.
 
 [Cloud diagnostic 34051405943](https://github.com/daejunnom/Clearra/actions/runs/34051405943)
-failed at OIDC exchange before image build or Job creation. Live provider readback
-confirmed its condition permits only `discord-deploy.yml@refs/heads/main`, while
-the diagnostic uses `cloud-cli-diagnostic.yml`. A narrowly scoped allow-list
-addition preserving immutable repository/owner IDs and main was requested from
-the user; no IAM changes or production service updates were made automatically.
+failed at OIDC exchange before image build or Job creation. Its provider allowed
+only `discord-deploy.yml@refs/heads/main`. After explicit user approval, the live
+`clearra-main` provider condition was updated once to additionally allow exactly
+`cloud-cli-diagnostic.yml@refs/heads/main`. The initial asynchronous readback had
+not converged; a subsequent read confirmed the exact approved condition, ACTIVE
+state, unchanged issuer and attribute mapping. Repository ID 1309293231, owner ID
+271715321, repository name and main ref remain pinned. No IAM roles, principal
+subjects, secret access, production service or traffic were changed.
+
+Source audit found a second pre-compute failure: the old workflow tried to build
+using the protected deployer, which has no Cloud Build submit authority. The
+workflow now separates a branch-main builder job from the environment-protected
+compute job. It reuses the existing builder and deployer accounts without extra
+roles, the approved regional source bucket and build execution identity, builds
+one image and passes its verified immutable digest into the dependent compute
+job. Exact source binding still occurs before Cloud access. These source/mock
+checks are not a successful live Cloud measurement; read the newly submitted
+Cloud run only after the next ordinary user input.
 
 Live role readback also confirmed `run.jobs.delete` exists but
 `run.executions.delete` does not. The diagnostic cleanup formerly requested the
@@ -204,6 +316,20 @@ using existing authority. Google documents that Job deletion terminates its
 running executions. The receipt honestly records `owned-parent-deleted`, not a
 separately observed execution deletion. Identity drift still blocks deletion;
 cleanup failure still fails the whole diagnostic. No new Cloud timing is claimed.
+
+## Finite experiment server lifecycle
+
+`scripts/tools/run-gui-experiment.mjs` is the only new one-off GUI launcher.
+It binds 127.0.0.1:4195 with strict port handling and refuses an existing listener
+without adopting/stopping it. Its hidden, IPC-connected child uses local-audit
+mode (no HMR), a default 30-minute lease (explicit 1–120 minutes), and no restart.
+Parent exit/disconnect, explicit stop or lease expiration closes only its owned
+server; an independent child lease prevents parent failure leaving it permanent.
+No HTTP-idle timer is used because browser-local WASM can run without requests.
+This is not a product search cap, and it does not modify the 4194/8790 watchdog.
+Eight lifecycle tests cover occupied ports, strict binding/races, parent exit,
+lease/force cleanup, hidden spawning and failure reporting. A live refusal check
+preserved existing 4195 PID 25676 and 4194 PID 5952; no replacement was started.
 
 ## wirelyre legal-boards: applicability, not a product import
 

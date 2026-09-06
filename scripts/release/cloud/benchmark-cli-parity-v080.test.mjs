@@ -212,6 +212,16 @@ test("standalone Cloud workflow is manual, protected, exact-source bound and has
   assert.match(source, /git ls-remote origin refs\/heads\/main/u);
   assert.match(source, /--mode isolated-image/u);
   assert.equal((source.match(/gcloud builds submit/gu) ?? []).length, 1);
+  const buildJob = source.split('  build-image:')[1].split('  evaluate:')[0];
+  const evaluateJob = source.split('  evaluate:')[1];
+  assert.match(buildJob, /service_account: \$\{\{ vars.GCP_BUILD_SERVICE_ACCOUNT \}\}/u);
+  assert.doesNotMatch(buildJob, /environment:|GCP_DEPLOY_SERVICE_ACCOUNT/u);
+  assert.match(buildJob, /--region=asia-northeast1/u);
+  assert.match(buildJob, /--gcs-source-staging-dir="gs:\/\/clearra-cloud_cloudbuild\/source"/u);
+  assert.match(buildJob, /--service-account="projects\//u);
+  assert.match(evaluateJob, /needs: build-image/u);
+  assert.match(evaluateJob, /GCP_DEPLOY_SERVICE_ACCOUNT/u);
+  assert.doesNotMatch(evaluateJob, /gcloud builds submit|GCP_BUILD_SERVICE_ACCOUNT/u);
   assert.equal((source.match(/node scripts\/release\/cloud\/benchmark-cli-parity-v080.mjs/gu) ?? []).length, 1);
   assert.doesNotMatch(source, /workflow_run:|\n  push:|secrets\.|contents: write|gcloud run|restore|invoke-.*\.ps1|uses:.*deploy-pages/u);
 });

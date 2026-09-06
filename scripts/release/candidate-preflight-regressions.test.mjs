@@ -40,6 +40,8 @@ test('local, main, unpaired, small-stack or acceptance environments cannot launc
 
 test('focused manifest includes guarded BuildCover results and moved PC score preparation contracts', () => {
   for (const filter of [
+    'native_build_probability_execution::durable::tests::',
+    'native_build_probability_execution::system_provider::tests::',
     'build_solution_probability_result::build_v2_result::tests::',
     'pc_score_minimum_cover_contract_tests::cooperative_score_minimum_',
   ]) {
