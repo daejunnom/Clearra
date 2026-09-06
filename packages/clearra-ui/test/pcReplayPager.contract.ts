@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import type { ClearraPcPathWitnessPayload, ClearraPcReplayRuntimePage, ClearraProductResultPayload } from '../src/lib/wasm/wasmCommandClient';
-import { collectPcReplayGeometryExportPages, loadPcReplayPage, validatePcReplayPage } from '../src/lib/workspace/pcReplayPager';
+import { collectPcReplayGeometryExportPages, createReplayExportBudget, loadPcReplayPage, validatePcReplayPage } from '../src/lib/workspace/pcReplayPager';
 import { productResultIdentity, validateProductResultPayload, type ProductMemberPageLoader } from '../src/lib/workspace/productResultPager';
 
 function witness(pattern: number, candidate = '3'): ClearraPcPathWitnessPayload {
@@ -20,7 +20,7 @@ function witness(pattern: number, candidate = '3'): ClearraPcPathWitnessPayload 
 function page(member = 1): ClearraPcReplayRuntimePage {
   const start = (member - 1) * 100;
   return {
-    page_contract: 'pc-replay-member-page.v1', page_source_available: true,
+    page_contract: 'pc-replay-member-page.v2', page_source_available: true,
     page_source_identity_sha256: 'a'.repeat(64), geometry_count: '2', geometry_page_number: '1', candidate_id: '3',
     geometry_witness_count: '201', geometry_pattern_count: '201', member_page_number: String(member), member_page_count: '3',
     witness_count: '202', materialized_pattern_count: '201',
@@ -88,3 +88,33 @@ await assert.rejects(collectPcReplayGeometryExportPages({ initialPage: page(), l
 assert.equal(called, false);
 let current = true;
 await assert.rejects(loadPcReplayPage({ reference: page(), geometryPageNumber: '1', memberPageNumber: '2', loadMemberPage: async () => { current = false; return envelope(page(2)); }, isCurrent: () => current }), { name: 'AbortError' });
+
+assert.notEqual(validatePcReplayPage({ ...page(), page_contract: 'pc-replay-member-page.v1' } as unknown as ClearraPcReplayRuntimePage), null, 'v1 trace-stream source hashes must not be silently accepted as v2 immutable-source hashes');
+const pending = (member = '2') => ({ schema_version: 1 as const, runtime: 'clearra-wasm' as const,
+  product_page_kind: 'pc-replay' as const, state: 'pending' as const,
+  page_contract: 'pc-replay-member-page.v2' as const, page_source_identity_sha256: 'a'.repeat(64),
+  geometry_page_number: '1', member_page_number: member, work_steps: '64' });
+let slices = 0;
+const resumed = await loadPcReplayPage({ reference: page(), geometryPageNumber: '1', memberPageNumber: '2',
+  isCurrent: () => true, loadMemberPage: async (geometry, member, _signal, work) => {
+    assert.equal(geometry, '1'); assert.equal(member, '2'); assert.equal(work, 64);
+    return ++slices < 4 ? pending() : envelope(page(2));
+  } });
+assert.equal(slices, 4);
+assert.equal(resumed.member_page_number, '2');
+for (const invalid of [
+  { ...pending(), member_page_number: '3' }, { ...pending(), page_source_identity_sha256: 'b'.repeat(64) },
+  { ...pending(), work_steps: '0' }, { ...pending(), work_steps: '65' }
+]) await assert.rejects(loadPcReplayPage({ reference: page(), geometryPageNumber: '1', memberPageNumber: '2', isCurrent: () => true, loadMemberPage: async () => invalid }), /source|progress/);
+await assert.rejects(loadPcReplayPage({ reference: page(), geometryPageNumber: '1', memberPageNumber: '2', isCurrent: () => true,
+  loadMemberPage: async () => ({ ...pending(), state: 'cancelled' }) }), { name: 'AbortError' });
+const betweenSlices = new AbortController();
+let pendingCalls = 0;
+await assert.rejects(loadPcReplayPage({ reference: page(), geometryPageNumber: '1', memberPageNumber: '2', isCurrent: () => true, signal: betweenSlices.signal,
+  loadMemberPage: async () => { pendingCalls += 1; setTimeout(() => betweenSlices.abort(), 0); return pending(); } }), { name: 'AbortError' });
+assert.equal(pendingCalls, 1, 'pending loop yields for cancellation instead of spinning through an entire language');
+assert.throws(() => createReplayExportBudget('4294967296'), /required_memory_bytes=.*max_memory_bytes=/, 'huge exact count is rejected before clipboard accumulation');
+assert.doesNotThrow(() => createReplayExportBudget('2', 128n));
+assert.throws(() => createReplayExportBudget('2', 127n), /No partial export/);
+const bounded = createReplayExportBudget('1', 64n);
+assert.throws(() => bounded.admitConversion(witness(0)), /No partial export/, 'conversion is admitted before frames or BigInts are built');

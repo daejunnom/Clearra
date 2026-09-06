@@ -1,5 +1,6 @@
 mod b2b_execution_filter;
 pub mod candidate_execution_aggregate;
+mod exact_replay_language;
 mod exact_scoring_execution_materializer;
 mod execution_supply;
 pub mod score_matrix;
@@ -10,6 +11,7 @@ pub use b2b_execution_filter::{
     BackToBackFilterMemoryProjection, BackToBackFilterMemoryReport,
 };
 pub use candidate_execution_aggregate::{CandidateExecution, CandidateExecutionAggregate};
+pub use exact_replay_language::{ExactReplayGraphLocation, ExactReplayLanguageSession};
 #[cfg(feature = "stage-profiling")]
 pub use exact_scoring_execution_materializer::ExactScoringExecutionProfile;
 pub use exact_scoring_execution_materializer::{

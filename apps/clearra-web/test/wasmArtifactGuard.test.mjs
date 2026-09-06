@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,6 +12,7 @@ import { createClearraWasmBuildContract } from '../../../scripts/tools/clearra-w
 
 test('Vite accepts and broadcasts only one fully verified WASM artifact generation', async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'clearra-wasm-guard-'));
+  let stopServer = () => {};
   try {
     const guard = await loadProductionGuard(temporaryRoot);
     const repositoryRoot = join(temporaryRoot, 'repository');
@@ -27,7 +28,7 @@ test('Vite accepts and broadcasts only one fully verified WASM artifact generati
       writeFile(sourcePath, 'pub fn generation() -> u8 { 1 }\n')
     ]);
 
-    const initialBuild = await createClearraWasmBuildContract(repositoryRoot);
+    const initialBuild = await createClearraWasmBuildContract(repositoryRoot, {});
     const initialManifest = await publishGeneration(
       wasmRoot,
       manifestPath,
@@ -39,6 +40,7 @@ test('Vite accepts and broadcasts only one fully verified WASM artifact generati
     const watcher = new FakeWatcher();
     const webSocket = new FakeWebSocket();
     const httpServer = new FakeHttpServer();
+    stopServer = () => httpServer.emit('close');
     const infoMessages = [];
     const warningMessages = [];
     let restartCount = 0;
@@ -63,9 +65,10 @@ test('Vite accepts and broadcasts only one fully verified WASM artifact generati
       }
     };
     const plugin = guard.wasmArtifactGuard();
-    await plugin.configResolved({ root: applicationRoot });
-    plugin.configureServer(server);
-    assert.deepEqual(watcher.added, [resolve(manifestPath)]);
+    await plugin.configResolved({ root: applicationRoot, command: 'serve' });
+    await plugin.configureServer(server);
+    assert.deepEqual(watcher.added, [], 'no direct file watch may pin the atomic publication target');
+    assert.deepEqual(watcher.unwatched, [resolve(manifestPath)], 'release any Vite inherited direct manifest handle before stat polling');
 
     watcher.emit('change', join(wasmRoot, 'unrelated.json'));
     await waitForWatcher();
@@ -94,7 +97,7 @@ test('Vite accepts and broadcasts only one fully verified WASM artifact generati
     assert.equal(warningMessages.length, 3, 'each invalid manifest fails closed with one warning');
 
     await writeFile(sourcePath, 'pub fn generation() -> u8 { 2 }\n');
-    const nextBuild = await createClearraWasmBuildContract(repositoryRoot);
+    const nextBuild = await createClearraWasmBuildContract(repositoryRoot, {});
     const nextManifest = await publishGeneration(
       wasmRoot,
       manifestPath,
@@ -158,11 +161,14 @@ test('Vite accepts and broadcasts only one fully verified WASM artifact generati
     ]], 'a newly connected client receives the last verified generation');
 
     httpServer.emit('close');
+    await writeFile(sourcePath, 'pub fn generation() -> u8 { 3 }\n');
+    await publishGeneration(wasmRoot, manifestPath, await createClearraWasmBuildContract(repositoryRoot, {}), 'bindings-generation-three', 'wasm-generation-three');
     watcher.emit('change', manifestPath);
     await waitForWatcher();
     assert.equal(webSocket.broadcasts.length, 1, 'server cleanup removes manifest observers');
     assert.equal(restartCount, 0);
   } finally {
+    stopServer();
     const resolvedTemporaryRoot = resolve(temporaryRoot);
     assert.ok(
       resolvedTemporaryRoot.startsWith(resolve(tmpdir())),
@@ -196,11 +202,13 @@ class FakeEmitter {
 
 class FakeWatcher extends FakeEmitter {
   added = [];
+  unwatched = [];
 
   add(path) {
     this.added.push(path);
     return this;
   }
+  async unwatch(path) { this.unwatched.push(path); }
 }
 
 class FakeWebSocket extends FakeEmitter {
@@ -270,7 +278,11 @@ async function publishGeneration(
 }
 
 async function writeManifest(path, manifest) {
-  await writeFile(path, `${JSON.stringify(manifest)}\n`);
+  // Exercise a real atomic replacement while the production stat monitor is
+  // active, including Windows rename semantics (not a fake watcher event).
+  const staged = `${path}.next`;
+  await writeFile(staged, `${JSON.stringify(manifest)}\n`);
+  await rename(staged, path);
 }
 
 function sha256(bytes) {
@@ -278,5 +290,48 @@ function sha256(bytes) {
 }
 
 async function waitForWatcher() {
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 90));
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
 }
+
+test('local hot-update pins bind to current HEAD while production environment remains strict', async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), 'clearra-wasm-guard-pins-'));
+  const savedSource = process.env.CLEARRA_SOURCE_COMMIT;
+  const savedEngine = process.env.CLEARRA_ENGINE_BUILD_ID;
+  try {
+    const guard = await loadProductionGuard(temporaryRoot);
+    const root = join(temporaryRoot, 'repository');
+    await mkdir(root);
+    await writeFile(join(root, 'Cargo.toml'), '[workspace]\nmembers = []\n');
+    await writeFile(join(root, 'Cargo.lock'), '# synthetic fixture\n');
+    const previous = 'a'.repeat(40);
+    const current = 'b'.repeat(40);
+    process.env.CLEARRA_SOURCE_COMMIT = previous;
+    process.env.CLEARRA_ENGINE_BUILD_ID = previous;
+    const buildContract = await createClearraWasmBuildContract(root, { CLEARRA_SOURCE_COMMIT: current, CLEARRA_ENGINE_BUILD_ID: current });
+    const manifest = { build: buildContract };
+    const context = { root, repositoryRoot: root, manifestPath: join(root, 'manifest.json'), localServe: true };
+    let headReads = 0;
+    const expected = await guard.expectedBuildForManifest(context, manifest, async () => { headReads++; return current; });
+    assert.deepEqual(expected, buildContract);
+    assert.equal(headReads, 2, 'current HEAD is rechecked after reading source inputs');
+    assert.equal(process.env.CLEARRA_SOURCE_COMMIT, previous, 'the server environment is not rewritten/restamped');
+    await assert.rejects(guard.expectedBuildForManifest(context, manifest, async () => previous), /current Git HEAD/);
+    let reads = 0;
+    await assert.rejects(guard.expectedBuildForManifest(context, manifest, async () => ++reads === 1 ? current : previous), /changed during/);
+    const wrongEngine = { build: { ...buildContract, runtime_identity: { ...buildContract.runtime_identity, engine_build_id: previous } } };
+    await assert.rejects(guard.expectedBuildForManifest(context, wrongEngine, async () => current), /source\/engine pins/);
+    const production = await guard.expectedBuildForManifest({ ...context, localServe: false }, manifest, async () => { assert.fail('production must not substitute HEAD for its environment'); });
+    assert.equal(production.runtime_identity.source_commit, previous);
+    assert.notDeepEqual(production, manifest.build, 'the ordinary strict contract comparison must reject stale production pins');
+    const unverified = { build: await createClearraWasmBuildContract(root, {}) };
+    assert.deepEqual(await guard.expectedBuildForManifest(context, unverified, async () => { assert.fail('unverified local mode does not mint a commit identity'); }), unverified.build);
+    await writeFile(join(root, 'Cargo.toml'), '[workspace]\nmembers = []\n# changed source\n');
+    const changed = await guard.expectedBuildForManifest(context, manifest, async () => current);
+    assert.notEqual(changed.source_sha256, manifest.build.source_sha256, 'matching pins never bypass actual source fingerprint comparison');
+  } finally {
+    if (savedSource === undefined) delete process.env.CLEARRA_SOURCE_COMMIT; else process.env.CLEARRA_SOURCE_COMMIT = savedSource;
+    if (savedEngine === undefined) delete process.env.CLEARRA_ENGINE_BUILD_ID; else process.env.CLEARRA_ENGINE_BUILD_ID = savedEngine;
+    assert.ok(resolve(temporaryRoot).startsWith(resolve(tmpdir())));
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});

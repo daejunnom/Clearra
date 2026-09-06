@@ -15,6 +15,31 @@ pub struct TraceCanonicalKey {
 }
 
 impl TraceCanonicalKey {
+    /// Canonical visible label of one scoring edge. Counting uses this same
+    /// writer as trk1; actual supply state is deliberately not its projection.
+    pub fn write_scoring_step_key(
+        writer: &mut impl Write,
+        step_index: usize,
+        edge: ScoringExecutionEdge,
+        hold_decision: HoldDecision,
+        placement_mask: u64,
+    ) -> fmt::Result {
+        TraceStepCanonicalKey {
+            active_piece: edge.piece(),
+            input_cursor: step_index,
+            output_cursor: step_index.checked_add(1).ok_or(fmt::Error)?,
+            input_hold_piece: None,
+            output_hold_piece: None,
+            hold_decision,
+            placed_piece: edge.piece(),
+            rotation: edge.rotation(),
+            x: u16::try_from(edge.x()).map_err(|_| fmt::Error)?,
+            y: u16::try_from(edge.y()).map_err(|_| fmt::Error)?,
+            mask: placement_mask,
+        }
+        .write_key(writer)
+    }
+
     pub fn from_trace(trace: &SolutionTrace) -> Self {
         let steps = trace
             .steps()

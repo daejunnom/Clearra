@@ -16,12 +16,12 @@ use clearra_wasm::{
     install_pc4_compact_tablebase, release_pc4_compact_tablebase,
     serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
     serialize_coverage_portfolio_retained_page, serialize_distributed_final_events,
-    serialize_parity_report_exhausted, serialize_parity_report_page, serialize_pc_replay_page,
-    GovernedWasmJson, GpuSearchWarmupReport, PortfolioPageLoadState, ProductPageSourceOwner,
-    ProductPageStore, TilingSolutionPageStore, WasmCommandRuntimeError,
-    WasmDistributedCompletionAdvance, WasmDistributedCompletionSession, WasmDistributedCoordinator,
-    WasmDistributedFallbackReason, WasmDistributedMode, WasmDistributedPreparation,
-    WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
+    serialize_parity_report_exhausted, serialize_parity_report_page,
+    serialize_pc_replay_page_advance, GovernedWasmJson, GpuSearchWarmupReport,
+    PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore, TilingSolutionPageStore,
+    WasmCommandRuntimeError, WasmDistributedCompletionAdvance, WasmDistributedCompletionSession,
+    WasmDistributedCoordinator, WasmDistributedFallbackReason, WasmDistributedMode,
+    WasmDistributedPreparation, WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
     WasmDistributedVerifierRuntime, WasmHostCapabilities, WasmMinimumParallelWorker,
     WasmWorkerAdvanceStatus, WasmWorkerJobId, WasmWorkerJobRuntime,
 };
@@ -33,6 +33,10 @@ const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const PRODUCT_PAGE_REQUEST_CONTRACT: &str = "portfolio-page-request.v1";
 const PRODUCT_PAGE_REQUEST_CONTRACT_V2: &str = "portfolio-page-request.v2";
 const DEFAULT_PRODUCT_PAGE_WORK_STEPS: u64 = 10_000;
+// Small continuation/error JSON, control token and scalar serialization
+// carriers. The actual public 100-member payload keeps App's separate 16x
+// whole-live projection reserve; this is not a per-page or per-worker cap.
+const PC_REPLAY_HOST_ENVELOPE_RESERVE: usize = 4096;
 const MAX_TRANSFER_BYTES: usize = 512 * 1024 * 1024;
 const ABI_OK: i32 = 0;
 const ABI_ERROR: i32 = -1;
@@ -706,10 +710,25 @@ impl WasmAbiState {
         self.transfer_input = Vec::new();
     }
 
-    fn begin_distributed_verifier(&mut self) {
-        self.distributed_verifier_partial_available = false;
-        self.distributed_verifier_pending_work = false;
-        self.distributed_verifier_last_candidate_count = None;
+    fn require_drained_verifier_replacement(&self) -> Result<(), i32> {
+        self.require_mutation_admission()?;
+        // A Geometry verifier must publish finish before replacement, even
+        // when its current candidate cursor is idle: it may retain unapplied
+        // results. An exact worker may retain only its already-drained query.
+        if self.distributed_coordinator.is_some()
+            || self.distributed_ready_result.is_some()
+            || self.distributed_completion.is_some()
+            || self.distributed_verifier.is_some()
+            || self.distributed_verifier_pending_work
+            || self
+                .minimum_parallel_worker
+                .as_ref()
+                .is_some_and(WasmMinimumParallelWorker::has_active_shard)
+        {
+            Err(ABI_ERROR)
+        } else {
+            Ok(())
+        }
     }
 
     fn record_distributed_verifier_candidate_count(&mut self, value: usize) -> i32 {
@@ -2021,22 +2040,8 @@ pub extern "C" fn clearra_wasm_distributed_finish_parallel_local_advance(
 pub extern "C" fn clearra_wasm_distributed_finish_parallel_worker_init() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        if let Err(status) = state.require_mutation_admission() {
+        if let Err(status) = state.require_drained_verifier_replacement() {
             return status;
-        }
-        if state.distributed_coordinator.is_some()
-            || state.distributed_completion.is_some()
-            || state.distributed_ready_result.is_some()
-            || state
-                .minimum_parallel_worker
-                .as_ref()
-                .is_some_and(WasmMinimumParallelWorker::has_active_shard)
-        {
-            state.set_error(
-                "E_WASM_MINIMUM_PARALLEL_STATE",
-                "active coordinator or shard cannot be replaced by an exact proof query",
-            );
-            return ABI_ERROR;
         }
         // Include the detached packet and prior output capacity in the outer
         // owner before resetting the previous, fully drained query.
@@ -2649,14 +2654,120 @@ fn product_page_get_from_state(
             state.set_error("E_WASM_PRODUCT_PAGE", "invalid-geometry-page");
             return ABI_ERROR;
         };
-        let Some(store) = state
-            .product_page_store
-            .as_mut()
-            .and_then(|store| store.store_mut().pc_replay_mut())
+        let Some(request_and_envelope_bytes) =
+            additional_live_capacity.checked_add(PC_REPLAY_HOST_ENVELOPE_RESERVE)
         else {
             return ABI_ERROR;
         };
-        serialize_pc_replay_page(store, geometry_page_number, member_page_number)
+        let Some(page_store) = state.product_page_store.as_ref() else {
+            return ABI_ERROR;
+        };
+        let Some(replay) = page_store.store().pc_replay() else {
+            return ABI_ERROR;
+        };
+        let source_limit = replay.source().maximum_memory_bytes();
+        let memory_limit_bytes = match page_store {
+            AbiProductPageStore::Legacy(_) => source_limit,
+            AbiProductPageStore::Governed {
+                memory_limit_bytes, ..
+            } => source_limit.min(*memory_limit_bytes),
+        };
+        let entry_required = replay
+            .checked_host_entry_bytes()
+            .and_then(|n| {
+                n.checked_add(core::mem::size_of::<Option<AbiProductPageStore>>() as u128)
+            })
+            .and_then(|n| n.checked_add(request_and_envelope_bytes as u128));
+        if !entry_required.is_some_and(|required| required <= memory_limit_bytes) {
+            state.product_page_store = None;
+            return publish_pc_replay_error(
+                state,
+                "complete_replay_host_memory_limit_exceeded",
+                entry_required,
+                Some(memory_limit_bytes),
+                memory_limit_bytes,
+                additional_live_capacity,
+            );
+        }
+        let control = clearra_wasm::ExecutionControl::default();
+        // Match App's primitive ceiling; App also yields at its monotonic 8ms
+        // quantum. Do not force every cache miss into 64-step host round trips.
+        // Clamp before narrowing a caller-provided u64 on wasm32.
+        let work = maximum_work_steps.clamp(1, 8192) as usize;
+        let mut rejected_host_peak = None;
+        let advanced = match state.product_page_store.as_mut() {
+            Some(AbiProductPageStore::Legacy(store))
+            | Some(AbiProductPageStore::Governed { store, .. }) => {
+                let Some(store) = store.pc_replay_mut() else {
+                    return ABI_ERROR;
+                };
+                store.advance_page_with_memory_guard(
+                    geometry_page_number,
+                    member_page_number,
+                    work,
+                    &control,
+                    &mut |app_whole_live| {
+                        let required =
+                            app_whole_live
+                                .checked_add(
+                                    core::mem::size_of::<Option<AbiProductPageStore>>() as u128
+                                )
+                                .and_then(|n| n.checked_add(request_and_envelope_bytes as u128));
+                        let admitted =
+                            required.is_some_and(|required| required <= memory_limit_bytes);
+                        if !admitted {
+                            rejected_host_peak = required;
+                        }
+                        admitted
+                    },
+                )
+            }
+            None => return ABI_ERROR,
+        };
+        match advanced {
+            Ok(advance) => {
+                let Some(store) = state.product_page_store.as_ref() else {
+                    return ABI_ERROR;
+                };
+                if !store.governed_store_fits()
+                    || !store.governed_request_fits(additional_live_capacity)
+                {
+                    state.product_page_store = None;
+                    return ABI_ERROR;
+                }
+                let Some(replay) = store.store().pc_replay() else {
+                    return ABI_ERROR;
+                };
+                serialize_pc_replay_page_advance(
+                    &advance,
+                    replay.source().identity_sha256(),
+                    geometry_page_number,
+                    member_page_number,
+                )
+            }
+            Err(error) => {
+                // A governed page owner is released before the bounded error
+                // carrier is allocated. The 4 KiB entry reservation admitted
+                // these exact scalar diagnostics; it never admits a partial page.
+                if governed || error.required_memory_bytes().is_some() {
+                    state.product_page_store = None;
+                }
+                let required = rejected_host_peak.or(error.required_memory_bytes());
+                let maximum = if rejected_host_peak.is_some() {
+                    Some(memory_limit_bytes)
+                } else {
+                    error.max_memory_bytes()
+                };
+                return publish_pc_replay_error(
+                    state,
+                    error.code(),
+                    required,
+                    maximum,
+                    memory_limit_bytes,
+                    additional_live_capacity,
+                );
+            }
+        }
     } else if let Some(store) = state
         .product_page_store
         .as_ref()
@@ -2714,6 +2825,49 @@ fn product_page_get_from_state(
             ABI_ERROR
         }
     }
+}
+
+fn publish_pc_replay_error(
+    state: &mut WasmAbiState,
+    code: &str,
+    required: Option<u128>,
+    maximum: Option<u128>,
+    memory_limit_bytes: u128,
+    request_capacity: usize,
+) -> i32 {
+    // Static code + two 39-digit u128 fields + JSON escaping remain far below
+    // the admitted reserve. Unknown/oversized diagnostic text is not copied.
+    if code.len() > 256
+        || !code.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+        || request_capacity
+            .checked_add(PC_REPLAY_HOST_ENVELOPE_RESERVE)
+            .is_none_or(|n| n as u128 > memory_limit_bytes)
+    {
+        return ABI_ERROR;
+    }
+    use core::fmt::Write;
+    let mut message = String::with_capacity(512);
+    let _ = write!(message, "{code}");
+    if let Some(required) = required {
+        let _ = write!(message, ": required_memory_bytes={required}");
+    }
+    if let Some(maximum) = maximum {
+        let _ = write!(message, ", max_memory_bytes={maximum}");
+    }
+    let message_capacity = message.capacity();
+    let error = WasmCommandRuntimeError::new("E_WASM_PRODUCT_PAGE", message);
+    let output = error.structured_output();
+    if output
+        .capacity()
+        .checked_add(message_capacity)
+        .and_then(|n| n.checked_add(core::mem::size_of::<WasmCommandRuntimeError>()))
+        .and_then(|n| n.checked_add(core::mem::size_of::<String>()))
+        .is_none_or(|n| n > PC_REPLAY_HOST_ENVELOPE_RESERVE)
+    {
+        return ABI_ERROR;
+    }
+    state.set_output(output);
+    ABI_ERROR
 }
 
 fn parse_product_page_request(request: &str) -> Result<(&str, usize, u64), &'static str> {
@@ -2820,11 +2974,15 @@ pub extern "C" fn clearra_wasm_distributed_reset() -> i32 {
 pub extern "C" fn clearra_wasm_distributed_verifier_start() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        if let Err(status) = state.require_mutation_admission() {
+        if let Err(status) = state.require_drained_verifier_replacement() {
             return status;
         }
-        state.begin_distributed_verifier();
-        let command_text = match String::from_utf8(std::mem::take(&mut state.input)) {
+        // Preserve this request while releasing a drained exact predecessor's
+        // immutable query and real memory lease. Reusing the warm WASM module
+        // must not reuse the previous minimum wave's execution authority.
+        let input = core::mem::take(&mut state.input);
+        state.reset_distributed_state();
+        let command_text = match String::from_utf8(input) {
             Ok(command_text) => command_text,
             Err(error) => {
                 let utf8_error = error.utf8_error();
@@ -2855,11 +3013,11 @@ pub extern "C" fn clearra_wasm_distributed_verifier_start() -> i32 {
 pub extern "C" fn clearra_wasm_distributed_forward_verifier_start() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        if let Err(status) = state.require_mutation_admission() {
+        if let Err(status) = state.require_drained_verifier_replacement() {
             return status;
         }
-        state.begin_distributed_verifier();
         let input = std::mem::take(&mut state.transfer_input);
+        state.reset_distributed_state();
         let outcome = WasmDistributedVerifierRuntime::prepare_forward(
             state.runtime.command_runtime(),
             &input,
@@ -3538,17 +3696,21 @@ mod tests {
     }
 
     fn completed_minimum_source_for_test() -> WasmDistributedCoordinator {
-        let runtime = clearra_wasm::WasmCommandRuntime::default()
-            .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
         const COMMAND: &str = "clearra pc minimals --lines 4 --board-mask 0xfc3f --height 4 \
             --pieces 7 --patterns IOOOOOO;OOOOOOO --no-hold --backend cpu --workers 2";
-        let mut coordinator = match WasmDistributedCoordinator::prepare(&runtime, COMMAND).unwrap()
+        completed_source_for_test(COMMAND)
+    }
+
+    fn completed_source_for_test(command: &str) -> WasmDistributedCoordinator {
+        let runtime = clearra_wasm::WasmCommandRuntime::default()
+            .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+        let mut coordinator = match WasmDistributedCoordinator::prepare(&runtime, command).unwrap()
         {
             WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
             _ => panic!("fixture must create a distributed coordinator"),
         };
         let mut verifier = coordinator
-            .prepare_in_process_verifier(&runtime, COMMAND)
+            .prepare_in_process_verifier(&runtime, command)
             .unwrap();
         loop {
             match coordinator.advance_producer(16_384, 16).unwrap() {
@@ -3578,6 +3740,324 @@ mod tests {
         }
         drop(verifier);
         coordinator
+    }
+
+    fn completed_replay_source_for_test() -> ProductPageSourceOwner {
+        let coordinator = completed_source_for_test(
+            "clearra pc path --lines 2 --pieces 5 \
+             --queue IIOOO --no-hold --backend cpu --workers 2",
+        );
+        let mut completion = coordinator.into_cooperative_completion(2).unwrap();
+        for _ in 0..10_000 {
+            match completion.advance(64).unwrap() {
+                WasmDistributedCompletionAdvance::Pending => {}
+                WasmDistributedCompletionAdvance::Completed(result) => {
+                    return result
+                        .product_page_source_owner()
+                        .cloned()
+                        .expect("exact replay source");
+                }
+                WasmDistributedCompletionAdvance::Cancelled => panic!("uncancelled replay fixture"),
+            }
+        }
+        panic!("tiny replay source exceeded its test-only work bound");
+    }
+
+    fn minimum_query_and_task_for_replacement_test() -> (Vec<u8>, Vec<u8>) {
+        let mut completion = completed_minimum_source_for_test()
+            .into_cooperative_completion(2)
+            .unwrap();
+        for _ in 0..1_000 {
+            if let Some(query) = completion.prepare_parallel(4).unwrap() {
+                let task = completion
+                    .take_parallel_task()
+                    .unwrap()
+                    .expect("source-issued exact task");
+                // Separate WASM instances have independent authorities. Do
+                // not retain this native coordinator beside the remote lease.
+                drop(completion);
+                return (query, task);
+            }
+            assert!(matches!(
+                completion.advance(8).unwrap(),
+                WasmDistributedCompletionAdvance::Pending
+            ));
+        }
+        panic!("tiny exact source did not publish a query");
+    }
+
+    #[test]
+    fn warm_minimum_to_geometry_releases_authority_for_same_and_larger_worker_policies() {
+        reset_abi_state_for_test();
+        let (query, task) = minimum_query_and_task_for_replacement_test();
+        for (workers, all_threads) in [(11, false), (12, true)] {
+            reset_abi_state_for_test();
+            assert_eq!(clearra_wasm_configure_host(12, 0), ABI_OK);
+            let initial = "clearra pc --lines 2 --pieces 5 --queue IIOOO \
+                --no-hold --backend cpu --workers 11";
+            ABI_STATE.with(|state| state.borrow_mut().input = initial.as_bytes().to_vec());
+            assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_OK);
+            assert_eq!(clearra_wasm_distributed_verifier_finish(), ABI_OK);
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+
+            ABI_STATE.with(|state| state.borrow_mut().transfer_input = query.clone());
+            assert_eq!(
+                clearra_wasm_distributed_finish_parallel_worker_init(),
+                ABI_OK
+            );
+            ABI_STATE.with(|state| state.borrow_mut().transfer_input = task.clone());
+            assert_eq!(
+                clearra_wasm_distributed_finish_parallel_worker_start(),
+                ABI_OK
+            );
+            let mut drained = false;
+            for _ in 0..1_000 {
+                match clearra_wasm_distributed_finish_parallel_worker_advance(64) {
+                    1 => {}
+                    ABI_OK => {
+                        drained = true;
+                        break;
+                    }
+                    status => panic!("tiny exact task failed: {status}"),
+                }
+            }
+            assert!(drained);
+            let next = format!(
+                "clearra pc minimals --lines 2 --pieces 5 --queue IIOOO \
+                 --no-hold --backend cpu --workers {workers} {}",
+                if all_threads {
+                    "--use-all-cpu-threads"
+                } else {
+                    ""
+                }
+            );
+            ABI_STATE.with(|state| state.borrow_mut().input = next.as_bytes().to_vec());
+            assert_eq!(
+                clearra_wasm_distributed_verifier_start(),
+                ABI_OUTPUT_NOT_RELEASED
+            );
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_OK);
+            ABI_STATE.with(|state| {
+                let state = state.borrow();
+                assert!(state.minimum_parallel_worker.is_none());
+                assert!(state.distributed_verifier.is_some());
+                assert!(state.input.is_empty());
+            });
+            assert_eq!(clearra_wasm_distributed_verifier_finish(), ABI_OK);
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        }
+        reset_abi_state_for_test();
+    }
+
+    #[test]
+    fn geometry_replacement_rejects_unfinished_verifier_and_exact_shard_without_losing_inputs() {
+        reset_abi_state_for_test();
+        let (query, task) = minimum_query_and_task_for_replacement_test();
+        ABI_STATE.with(|state| state.borrow_mut().transfer_input = query);
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_worker_init(),
+            ABI_OK
+        );
+        ABI_STATE.with(|state| state.borrow_mut().transfer_input = task);
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_worker_start(),
+            ABI_OK
+        );
+        ABI_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.input = b"must not be parsed or discarded".to_vec();
+            state.transfer_input = vec![0xff];
+        });
+        assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_ERROR);
+        assert_eq!(clearra_wasm_distributed_forward_verifier_start(), ABI_ERROR);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.input, b"must not be parsed or discarded");
+            assert_eq!(state.transfer_input, [0xff]);
+            assert!(state
+                .minimum_parallel_worker
+                .as_ref()
+                .unwrap()
+                .has_active_shard());
+            assert!(!state.output_outstanding);
+        });
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_worker_cancel(),
+            ABI_OK
+        );
+        assert_eq!(
+            clearra_wasm_distributed_forward_verifier_start(),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        // Invalid next input still releases the authorized drained predecessor;
+        // it must not leave a hidden exact lease after decode fails.
+        assert_eq!(clearra_wasm_distributed_forward_verifier_start(), ABI_ERROR);
+        ABI_STATE.with(|state| assert!(state.borrow().minimum_parallel_worker.is_none()));
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        ABI_STATE.with(|state| {
+            state.borrow_mut().input = b"clearra pc --lines 2 --pieces 5 --queue IIOOO \
+                --no-hold --backend cpu --workers 2"
+                .to_vec();
+        });
+        assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_OK);
+        ABI_STATE.with(|state| state.borrow_mut().input = b"replacement".to_vec());
+        assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_ERROR);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.distributed_verifier.is_some());
+            assert_eq!(state.input, b"replacement");
+        });
+        assert_eq!(clearra_wasm_distributed_verifier_finish(), ABI_OK);
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+        reset_abi_state_for_test();
+    }
+
+    #[test]
+    fn exact_replacement_requires_geometry_finish_and_drained_output() {
+        reset_abi_state_for_test();
+        let (query, task) = minimum_query_and_task_for_replacement_test();
+        ABI_STATE.with(|state| {
+            state.borrow_mut().input = b"clearra pc --lines 2 --pieces 5 --queue IIOOO \
+                --no-hold --backend cpu --workers 2"
+                .to_vec();
+        });
+        assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_OK);
+        ABI_STATE.with(|state| state.borrow_mut().transfer_input = query.clone());
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_worker_init(),
+            ABI_ERROR
+        );
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.distributed_verifier.is_some());
+            assert!(state.minimum_parallel_worker.is_none());
+            assert_eq!(state.transfer_input, query);
+            assert!(!state.output_outstanding);
+        });
+        assert_eq!(clearra_wasm_distributed_verifier_finish(), ABI_OK);
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_worker_init(),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_worker_init(),
+            ABI_OK
+        );
+        ABI_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            assert!(state.distributed_verifier.is_none());
+            assert!(state.minimum_parallel_worker.is_some());
+            state.transfer_input = task;
+        });
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_worker_start(),
+            ABI_OK
+        );
+        assert_eq!(
+            clearra_wasm_distributed_finish_parallel_worker_cancel(),
+            ABI_OK
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_distributed_reset(), ABI_OK);
+        reset_abi_state_for_test();
+    }
+
+    #[test]
+    fn pc_replay_page_abi_yields_and_preserves_request_fencing_output_lease_and_release() {
+        reset_abi_state_for_test();
+        let source = completed_replay_source_for_test();
+        let ProductPageSourceOwner::PcReplay(replay) = &source else {
+            panic!("replay source");
+        };
+        assert!(
+            replay.geometry_count() >= 2,
+            "fixture exercises a non-prefetched geometry"
+        );
+        ABI_STATE.with(|state| {
+            state.borrow_mut().product_page_store = Some(AbiProductPageStore::legacy(
+                ProductPageStore::from_source(source).unwrap(),
+            ));
+        });
+        let mut pending = false;
+        let mut complete = false;
+        for _ in 0..10_000 {
+            let status = ABI_STATE
+                .with(|state| product_page_get_from_state(&mut state.borrow_mut(), "2", 1, 1, 0));
+            assert_eq!(status, ABI_OK);
+            let output = ABI_STATE
+                .with(|state| String::from_utf8(state.borrow().output_bytes().to_vec()).unwrap());
+            assert_eq!(clearra_wasm_product_page_get(2, 1), ABI_OUTPUT_NOT_RELEASED);
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            if output.contains("\"state\":\"pending\"") {
+                pending = true;
+                assert!(!output.contains("\"witnesses\""));
+                assert!(output.contains("\"page_source_identity_sha256\""));
+                assert!(output.contains("\"geometry_page_number\":\"2\""));
+                assert!(output.contains("\"member_page_number\":\"1\""));
+                assert_eq!(
+                    clearra_wasm_product_page_get(1, 1),
+                    ABI_ERROR,
+                    "a pending request cannot change its geometry"
+                );
+                assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            } else {
+                assert!(output.contains("\"state\":\"page\""), "{output}");
+                assert!(output.contains("\"witnesses\""));
+                complete = true;
+                break;
+            }
+        }
+        assert!(
+            pending && complete,
+            "cache-miss traversal yields before exact publication"
+        );
+        assert_eq!(clearra_wasm_product_page_release(), ABI_OK);
+        assert_eq!(clearra_wasm_product_page_get(1, 1), ABI_ERROR);
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        reset_abi_state_for_test();
+    }
+
+    #[test]
+    fn pc_replay_error_diagnostics_require_a_reserved_bounded_carrier_and_preserve_u128_bytes() {
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            assert_eq!(
+                publish_pc_replay_error(
+                    &mut state,
+                    "complete_replay_host_memory_limit_exceeded",
+                    Some(u128::MAX),
+                    Some(64 * 1024 * 1024),
+                    (PC_REPLAY_HOST_ENVELOPE_RESERVE - 1) as u128,
+                    0,
+                ),
+                ABI_ERROR
+            );
+            assert!(!state.output_outstanding);
+            assert!(state.output.is_empty());
+            assert_eq!(
+                publish_pc_replay_error(
+                    &mut state,
+                    "complete_replay_host_memory_limit_exceeded",
+                    Some(u128::MAX),
+                    Some(64 * 1024 * 1024),
+                    PC_REPLAY_HOST_ENVELOPE_RESERVE as u128,
+                    0,
+                ),
+                ABI_ERROR
+            );
+            let output = std::str::from_utf8(state.output_bytes()).unwrap();
+            assert!(output.contains(&format!("required_memory_bytes={}", u128::MAX)));
+            assert!(output.contains("max_memory_bytes=67108864"));
+            assert!(output.contains("E_WASM_PRODUCT_PAGE"));
+            assert!(!output.contains("\"page\""));
+        });
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        reset_abi_state_for_test();
     }
 
     #[test]

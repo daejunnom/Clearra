@@ -727,6 +727,24 @@ impl ValidatedProductCapabilityPayload {
 }
 
 impl ValidatedProductCapabilityContract {
+    /// Closed PcPath query pointee retained beside its immutable replay source.
+    /// These are the same physical Opening/Scenario query owners as minimum
+    /// cover; the shared projections do not require a minimum objective.
+    pub(crate) fn checked_pc_replay_retained_capacity_bytes(&self) -> Option<u128> {
+        if self.contract != ProductCapabilityContract::PcPath {
+            return None;
+        }
+        match &self.payload {
+            ValidatedProductCapabilityPayload::PcPathOpening { query, .. } => {
+                crate::pc_minimum_cover_result::checked_minimum_opening_query_retained_bytes(query)
+            }
+            ValidatedProductCapabilityPayload::PcPathScenario { query, .. } => {
+                crate::pc_minimum_cover_result::checked_minimum_scenario_query_retained_bytes(query)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn checked_score_minimum_cover_retained_capacity_bytes(&self) -> Option<u128> {
         if self.contract != ProductCapabilityContract::PcScoreMinimals {
             return None;

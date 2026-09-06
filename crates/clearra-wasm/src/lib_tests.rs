@@ -2779,9 +2779,37 @@ fn typed_pc_distributed_test_guard() -> MutexGuard<'static, ()> {
 }
 
 fn run_distributed_cpu(runtime: &WasmCommandRuntime, command: &str) -> WasmExecutionResult {
-    completed_distributed_cpu_source(runtime, command)
-        .finish(2)
-        .expect("distributed exact result")
+    finish_distributed_cpu_source(completed_distributed_cpu_source(runtime, command), 2)
+}
+
+fn finish_distributed_cpu_source(
+    coordinator: WasmDistributedCoordinator,
+    workers: usize,
+) -> WasmExecutionResult {
+    if !coordinator.requires_cooperative_completion() {
+        return coordinator
+            .finish(workers)
+            .expect("distributed exact result");
+    }
+    // Match the browser terminal selector: minimum/replay products must enter
+    // the shared continuation, not the compatibility terminal that deliberately
+    // rejects unprepared minimum evidence. This bound exists only in the test.
+    let mut completion = coordinator
+        .into_cooperative_completion(workers)
+        .expect("distributed cooperative handoff");
+    for _ in 0..100_000 {
+        match completion
+            .advance(64)
+            .expect("distributed cooperative slice")
+        {
+            WasmDistributedCompletionAdvance::Pending => {}
+            WasmDistributedCompletionAdvance::Completed(result) => return result,
+            WasmDistributedCompletionAdvance::Cancelled => {
+                panic!("uncancelled distributed cooperative fixture")
+            }
+        }
+    }
+    panic!("tiny distributed cooperative fixture exceeded its test-only work bound");
 }
 
 fn completed_distributed_cpu_source(
@@ -2923,9 +2951,7 @@ fn run_distributed_score_cpu(runtime: &WasmCommandRuntime, command: &str) -> Was
             .absorb_partial(&partial)
             .expect("merge score worker partial");
     }
-    coordinator
-        .finish(expected_worker_count)
-        .expect("distributed score result")
+    finish_distributed_cpu_source(coordinator, expected_worker_count)
 }
 
 #[test]
@@ -3168,6 +3194,7 @@ fn four_piece_high_work_build_score_minimum_uses_distributed_workers_with_serial
             .expect("four-piece serial Build score-minimum payload"),
     )
     .expect("serialize four-piece serial Build score-minimum payload");
+    drop(serial);
     let distributed = run_distributed_cpu(&runtime, &format!("{base} --workers 2"));
     let distributed_payload = serde_json::to_vec(
         distributed

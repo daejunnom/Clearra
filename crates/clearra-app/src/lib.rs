@@ -39,7 +39,9 @@ mod pc_chance_probability_result;
 mod pc_failed_queue_result;
 mod pc_minimum_cover_result;
 mod pc_path_result;
+mod pc_replay_page_error;
 mod pc_replay_page_source;
+mod pc_replay_source_digest;
 mod pc_result_projection;
 mod pc_save_result;
 mod pc_score_field_result;
@@ -217,8 +219,9 @@ pub use pc_path_result::{
     PcPathQuerySnapshot, PcPathStepV2, PcPathWitnessV2, PC_PATH_CANONICAL_SELECTION,
     PC_PATH_FAMILY_RESULT_CONTRACT, PC_PATH_ORDERING, PC_PATH_WITNESS_CONTRACT,
 };
+pub use pc_replay_page_error::PcReplayPageError;
 pub use pc_replay_page_source::{
-    PcReplayPageSource, PcReplayPageStore, PcReplaySourceBuildSession,
+    PcReplayPageAdvance, PcReplayPageSource, PcReplayPageStore, PcReplaySourceBuildSession,
     PC_REPLAY_MEMBER_PAGE_CONTRACT, PC_REPLAY_MEMBER_PAGE_SIZE,
 };
 pub use pc_result_projection::{

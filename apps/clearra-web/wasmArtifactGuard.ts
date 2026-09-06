@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { watchFile, unwatchFile } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 
 import type { Plugin } from 'vite';
 import {
@@ -39,12 +42,16 @@ type ArtifactContext = Readonly<{
   root: string;
   repositoryRoot: string;
   manifestPath: string;
+  localServe: boolean;
 }>;
+
+const execFileAsync = promisify(execFile);
 
 export function wasmArtifactGuard(): Plugin {
   let artifactContext: ArtifactContext | null = null;
   let acceptedGeneration = '';
   let acceptedArtifactGeneration: WasmArtifactGeneration | null = null;
+  let stopMonitoring: (() => void) | null = null;
   return {
     name: 'clearra-wasm-artifact-guard',
     async configResolved(config) {
@@ -52,7 +59,7 @@ export function wasmArtifactGuard(): Plugin {
       const root = resolve(config.root, publicDir, 'wasm');
       const repositoryRoot = resolve(config.root, '..', '..');
       const manifestPath = resolve(root, 'clearra_wasm.manifest.json');
-      artifactContext = { root, repositoryRoot, manifestPath };
+      artifactContext = { root, repositoryRoot, manifestPath, localServe: config.command === 'serve' };
       // Recovery after login must not rebuild paused work. Integrity remains
       // mandatory; production builds and live artifact updates stay strict.
       const restoreExisting = config.command === 'serve' &&
@@ -64,7 +71,8 @@ export function wasmArtifactGuard(): Plugin {
       acceptedGeneration = manifestGeneration(manifest);
       acceptedArtifactGeneration = artifactGeneration(manifest);
     },
-    configureServer(server) {
+    async configureServer(server) {
+      stopMonitoring?.();
       const context = artifactContext;
       if (!context) return;
       // Read only the generation already accepted by the integrity guard. Never
@@ -80,10 +88,17 @@ export function wasmArtifactGuard(): Plugin {
         response.end(JSON.stringify(acceptedArtifactGeneration));
       });
       let updateTimer: ReturnType<typeof setTimeout> | null = null;
+      let disposed = false;
+      let verifying = false;
+      let verifyAgain = false;
       const publishVerifiedGeneration = async () => {
         updateTimer = null;
+        if (disposed) return;
+        if (verifying) { verifyAgain = true; return; }
+        verifying = true;
         try {
           const manifest = await loadVerifiedManifest(context);
+          if (disposed) return;
           const generation = manifestGeneration(manifest);
           if (generation === acceptedGeneration) return;
           acceptedGeneration = generation;
@@ -101,13 +116,19 @@ export function wasmArtifactGuard(): Plugin {
           // A failed or in-progress build must never invalidate the running
           // worker. The atomic publisher writes the manifest last, and this
           // second verification keeps manual/partial edits fail closed too.
-          server.config.logger.warn(
+          if (!disposed) server.config.logger.warn(
             `[clearra-wasm] ignored an unverified development artifact update: ${errorMessage(error)}`
           );
+        } finally {
+          verifying = false;
+          if (verifyAgain && !disposed) {
+            verifyAgain = false;
+            observeManifest();
+          }
         }
       };
-      const observeManifest = (changedPath: string) => {
-        if (!samePath(changedPath, context.manifestPath)) return;
+      const observeManifest = () => {
+        if (disposed) return;
         if (updateTimer !== null) clearTimeout(updateTimer);
         updateTimer = setTimeout(() => void publishVerifiedGeneration(), 50);
       };
@@ -123,17 +144,26 @@ export function wasmArtifactGuard(): Plugin {
         }
       };
       const cleanup = () => {
+        if (disposed) return;
+        disposed = true;
         if (updateTimer !== null) clearTimeout(updateTimer);
         updateTimer = null;
-        server.watcher.off('add', observeManifest);
-        server.watcher.off('change', observeManifest);
+        unwatchFile(context.manifestPath, observeManifest);
         server.ws.off(CLEARRA_WASM_ARTIFACT_SYNC_EVENT, synchronizeClient);
       };
-      server.watcher.add(context.manifestPath);
-      server.watcher.on('add', observeManifest);
-      server.watcher.on('change', observeManifest);
-      server.ws.on(CLEARRA_WASM_ARTIFACT_SYNC_EVENT, synchronizeClient);
+      stopMonitoring = cleanup;
       server.httpServer?.once('close', cleanup);
+      // A direct Windows file watch can pin the destination while the atomic
+      // publisher renames its manifest-last commit. Stat polling keeps no open
+      // file handle between observations and also detects delete/recreate.
+      await server.watcher.unwatch(context.manifestPath);
+      if (disposed) return;
+      watchFile(context.manifestPath, { interval: 250, persistent: false }, observeManifest);
+      server.ws.on(CLEARRA_WASM_ARTIFACT_SYNC_EVENT, synchronizeClient);
+    },
+    closeBundle() {
+      stopMonitoring?.();
+      stopMonitoring = null;
     }
   };
 }
@@ -163,7 +193,7 @@ async function loadVerifiedManifest(
       'the manifest does not contain the current WASM build capability contract'
     );
   }
-  const expectedBuild = await createClearraWasmBuildContract(context.repositoryRoot);
+  const expectedBuild = restoreExisting ? manifest.build : await expectedBuildForManifest(context, manifest);
   if (!restoreExisting && !clearraWasmBuildContractsEqual(manifest.build, expectedBuild)) {
     throw staleArtifactError(
       context.manifestPath,
@@ -196,10 +226,34 @@ function artifactGeneration(
   };
 }
 
-function samePath(left: string, right: string): boolean {
-  const normalize = (value: string) =>
-    process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value);
-  return normalize(left) === normalize(right);
+export async function expectedBuildForManifest(context: ArtifactContext, manifest: WasmArtifactManifest, readHead: (root: string) => Promise<string> = currentGitHead): Promise<ClearraWasmBuildContract> {
+  // Production preserves strict pinned environment semantics. A long-running
+  // local server may outlive the commit whose pins were in its startup env.
+  if (!context.localServe) return createClearraWasmBuildContract(context.repositoryRoot);
+  const identity = manifest.build.runtime_identity;
+  if (identity.source_commit === 'unverified-local-build' && identity.engine_build_id === 'unverified-local-build') {
+    return createClearraWasmBuildContract(context.repositoryRoot, {});
+  }
+  const head = await readHead(context.repositoryRoot);
+  if (identity.source_commit !== head || identity.engine_build_id !== head) {
+    throw staleArtifactError(context.manifestPath, 'the artifact source/engine pins do not equal the current Git HEAD');
+  }
+  const expected = await createClearraWasmBuildContract(context.repositoryRoot, {
+    CLEARRA_SOURCE_COMMIT: head, CLEARRA_ENGINE_BUILD_ID: head
+  });
+  if (await readHead(context.repositoryRoot) !== head) {
+    throw staleArtifactError(context.manifestPath, 'Git HEAD changed during artifact verification');
+  }
+  return expected;
+}
+
+async function currentGitHead(repositoryRoot: string): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['-C', repositoryRoot, 'rev-parse', '--verify', 'HEAD^{commit}'], {
+    windowsHide: true, timeout: 5000, encoding: 'utf8', maxBuffer: 1024
+  });
+  const head = stdout.trim();
+  if (!/^[0-9a-f]{40}$/u.test(head)) throw new Error('The local repository has no exact commit identity.');
+  return head;
 }
 
 function errorMessage(error: unknown): string {

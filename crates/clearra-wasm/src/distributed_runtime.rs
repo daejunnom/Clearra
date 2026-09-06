@@ -3734,6 +3734,17 @@ mod build_probability_partial_ingress_tests {
 
     use super::*;
 
+    fn admitted_workers_for_host(requested: usize, injected_logical: usize) -> usize {
+        use clearra_pc_graph::request::WorkerPolicy;
+        #[cfg(target_family = "wasm")]
+        let hardware = injected_logical;
+        #[cfg(not(target_family = "wasm"))]
+        let hardware = injected_logical.min(WorkerPolicy::hardware_worker_limit());
+        // Native CI must not pretend that an injected browser profile grants
+        // more physical compute. WASM legitimately uses that browser profile.
+        WorkerPolicy::Fixed(requested).effective_for_hardware_limit(false, hardware)
+    }
+
     #[test]
     fn pc_geometry_producer_budget_is_bounded_but_other_products_keep_their_budget() {
         assert_eq!(bounded_producer_work_budget(0, true, false), 1);
@@ -4404,13 +4415,33 @@ mod build_probability_partial_ingress_tests {
         let command = "clearra build cover --base-mask 0x3c0f03c0f \
             --target-mask 0xfc3f0fc3f0 --height 4 --hold empty --patterns P7 \
             --queue-knowledge oracle --objective min-cover --rule srs-plus \
-            --no-mirror --backend cpu --no-backend-fallback --workers 11";
-        let WasmDistributedPreparation::Coordinator(coordinator) =
-            WasmDistributedCoordinator::prepare(&runtime, command).expect("typed Build cover")
-        else {
+            --backend cpu --no-backend-fallback --workers 11";
+        let request = runtime.compile_command_text(command).unwrap();
+        let AppCommand::BuildV2(build) = request.command() else {
+            panic!("Build cover CLI contract");
+        };
+        let BuildV2AppRequest::BuildCover(cover) = build.request() else {
+            panic!("Build cover typed request");
+        };
+        assert_eq!(
+            cover
+                .query()
+                .core_query()
+                .execution_policy()
+                .worker_policy(),
+            clearra_pc_graph::request::WorkerPolicy::Fixed(11)
+        );
+        let expected_workers = admitted_workers_for_host(11, 12);
+        let prepared =
+            WasmDistributedCoordinator::prepare(&runtime, command).expect("typed Build cover");
+        if expected_workers < 2 {
+            assert!(matches!(prepared, WasmDistributedPreparation::Serial));
+            return;
+        }
+        let WasmDistributedPreparation::Coordinator(coordinator) = prepared else {
             panic!("Build cover must not silently lose its requested workers")
         };
-        assert_eq!(coordinator.worker_count, 11);
+        assert_eq!(coordinator.worker_count, expected_workers);
         assert!(coordinator.requires_cooperative_completion());
         assert!(matches!(
             coordinator.producer.as_ref(),
@@ -4446,13 +4477,29 @@ mod build_probability_partial_ingress_tests {
                 --target-mask 0xfc3f0fc3f0 --height 4 --hold empty --patterns P7 \
                 --aggregate buildability --rule srs-plus --no-build-dependency-dag \
                 --result-mode {mode} {score_options} --no-mirror --backend cpu --no-backend-fallback --workers 11");
-            let WasmDistributedPreparation::Coordinator(coordinator) =
-                WasmDistributedCoordinator::prepare(&runtime, &command)
-                    .expect("typed Build result mode")
-            else {
+            let request = runtime.compile_command_text(&command).unwrap();
+            let AppCommand::BuildProbability(build) = request.command() else {
+                panic!("Build result mode CLI contract");
+            };
+            assert_eq!(
+                build
+                    .query()
+                    .core_query()
+                    .execution_policy()
+                    .worker_policy(),
+                clearra_pc_graph::request::WorkerPolicy::Fixed(11)
+            );
+            let expected_workers = admitted_workers_for_host(11, 12);
+            let prepared = WasmDistributedCoordinator::prepare(&runtime, &command)
+                .expect("typed Build result mode");
+            if expected_workers < 2 {
+                assert!(matches!(prepared, WasmDistributedPreparation::Serial));
+                continue;
+            }
+            let WasmDistributedPreparation::Coordinator(coordinator) = prepared else {
                 panic!("Build result mode must keep its typed distributed source")
             };
-            assert_eq!(coordinator.worker_count, 11);
+            assert_eq!(coordinator.worker_count, expected_workers);
             assert_eq!(coordinator.requires_cooperative_completion(), cooperative);
         }
     }
@@ -4472,11 +4519,12 @@ mod build_probability_partial_ingress_tests {
 
     #[test]
     fn build_minimum_source_preparation_propagates_guard_decline_before_exact_work() {
-        let runtime = WasmCommandRuntime::default();
+        let runtime = WasmCommandRuntime::default()
+            .with_host_capabilities(crate::WasmHostCapabilities::new(12, false, false));
         for command in [
             "clearra build cover --base-mask 0x3c0f03c0f --target-mask 0xfc3f0fc3f0 \
                 --height 4 --hold empty --patterns P7 --queue-knowledge oracle \
-                --objective min-cover --no-mirror --workers 11",
+                --objective min-cover --workers 11",
             "clearra build-probability --base-mask 0x3c0f03c0f --target-mask 0xfc3f0fc3f0 \
                 --height 4 --hold empty --patterns P7 --aggregate buildability \
                 --result-mode highest-score-minimum-set --score-profile guideline \
@@ -4544,11 +4592,16 @@ mod build_probability_partial_ingress_tests {
             --aggregate buildability --rule srs-plus --no-build-dependency-dag \
             --result-mode all-solutions --no-mirror --backend cpu --no-backend-fallback --workers 11";
         let preparation = WasmDistributedCoordinator::prepare(&runtime, command).unwrap();
+        let expected_workers = admitted_workers_for_host(11, 12);
+        if expected_workers < 2 {
+            assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+            return;
+        }
         let mut coordinator = match preparation {
             WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
             _ => panic!("CTK3/P7 Build all-solutions must not silently use one worker"),
         };
-        assert_eq!(coordinator.worker_count, 11);
+        assert_eq!(coordinator.worker_count, expected_workers);
         let mut saw_geometry = false;
         for _ in 0..10_000 {
             let advance = coordinator.advance_producer(64, 16).unwrap();
