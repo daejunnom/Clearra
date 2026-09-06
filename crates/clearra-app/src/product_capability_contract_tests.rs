@@ -500,8 +500,84 @@ fn cooperative_pc_replay_pages_preserve_pattern_family_and_full_copy() {
     cancelled.handle().cancel();
     assert_eq!(
         store.page(1, 1, &ExecutionControl::new(cancelled)),
-        Err("complete_replay_cancelled")
+        Err(crate::PcReplayPageError::Invalid(
+            "complete_replay_cancelled"
+        ))
     );
+}
+
+#[test]
+fn pc_replay_v2_page_pending_is_source_bound_cancellable_and_whole_live_guarded() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let response = run_paged_path(paged_path_request_at_height(2, "[OI]O", 0xfc3f0, 2, false));
+    assert_eq!(
+        response.status(),
+        AppStatus::Success,
+        "{:?}",
+        response.error()
+    );
+    let report = response
+        .product_capability_result()
+        .unwrap()
+        .pc_path_family_v2()
+        .unwrap();
+    let source = report.page_source().unwrap();
+    let mut store = crate::PcReplayPageStore::new(Arc::clone(source));
+    let control = ExecutionControl::default();
+    assert!(matches!(
+        store.advance_page(1, 1, 1, &control).unwrap(),
+        crate::PcReplayPageAdvance::Pending { work_steps: 1 }
+    ));
+    assert!(matches!(
+        store.advance_page(usize::MAX, 1, 1, &control),
+        Err(crate::PcReplayPageError::Invalid(
+            "pc replay pending request mismatch"
+        ))
+    ));
+    let mut maximum = 0u128;
+    let mut completed = None;
+    for _ in 0..100_000 {
+        match store
+            .advance_page_with_memory_guard(1, 1, 1, &control, &mut |peak| {
+                maximum = maximum.max(peak);
+                true
+            })
+            .unwrap()
+        {
+            crate::PcReplayPageAdvance::Pending { work_steps } => assert_eq!(work_steps, 1),
+            crate::PcReplayPageAdvance::Completed(page) => {
+                completed = Some(page);
+                break;
+            }
+            crate::PcReplayPageAdvance::Cancelled { .. } => {
+                panic!("uncancelled page cannot cancel")
+            }
+        }
+    }
+    let page = completed.expect("tiny lexical page completes through bounded continuations");
+    assert_eq!(page.metadata.page_contract, "pc-replay-member-page.v2");
+    assert_eq!(
+        page.metadata.page_source_identity_sha256,
+        source.identity_sha256()
+    );
+    assert_eq!(page.witnesses.len(), report.witnesses().len());
+    assert!(maximum >= store.checked_host_entry_bytes().unwrap());
+    assert!(maximum <= source.maximum_memory_bytes());
+    store.cancel_page();
+    let denied = store.advance_page_with_memory_guard(1, 1, 1, &control, &mut |_| false);
+    let Err(error) = denied else {
+        panic!("host refusal cannot return a successful/partial page")
+    };
+    assert!(error.required_memory_bytes().is_some());
+    assert!(error.to_string().contains("required_memory_bytes="));
+    let cancelled = ExecutionCancellationToken::new();
+    cancelled.handle().cancel();
+    assert!(matches!(
+        store
+            .advance_page(1, 1, 1, &ExecutionControl::new(cancelled))
+            .unwrap(),
+        crate::PcReplayPageAdvance::Cancelled { .. }
+    ));
 }
 
 #[test]

@@ -1361,7 +1361,11 @@ fn diagnostic_softmax_cutoff_density(
         return (false, density);
     }
     for value in output {
-        *value /= total;
+        // Only the exact positive zero produced by the existing cutoff is
+        // already normalized. Negative zero/nonfinite values are not skipped.
+        if value.to_bits() != 0 {
+            *value /= total;
+        }
     }
     (true, density)
 }
@@ -1393,7 +1397,9 @@ fn softmax(log_values: &[f64], output: &mut [f64]) -> bool {
         return false;
     }
     for value in output {
-        *value /= total;
+        if value.to_bits() != 0 {
+            *value /= total;
+        }
     }
     true
 }
@@ -1419,9 +1425,19 @@ fn saddle_gradients(
         let end = *row_offsets.get(row + 1)?;
         let incidence = row_constraints.get(start..end)?;
         let mut load = 0.0;
-        for constraint in incidence.iter().copied() {
-            *constraint_gradient.get_mut(constraint)? += row_distribution[row];
-            load += *constraint_distribution.get(constraint)?;
+        if row_distribution[row].to_bits() == 0 {
+            // Skip only +0 scatter. This row still needs its complete p load:
+            // omitting it would change the next Mirror-Prox q update. The
+            // equal-length check above means p.get also checks gradient bounds.
+            // Nonzero additions keep their original incidence/row order.
+            for constraint in incidence.iter().copied() {
+                load += *constraint_distribution.get(constraint)?;
+            }
+        } else {
+            for constraint in incidence.iter().copied() {
+                *constraint_gradient.get_mut(constraint)? += row_distribution[row];
+                load += *constraint_distribution.get(constraint)?;
+            }
         }
         if !load.is_finite() {
             return None;
@@ -1488,6 +1504,185 @@ fn row_is_excluded(excluded_row_words: &[u64], row: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Frozen pre-optimization proposal loops: an oracle for byte-level float
+    // equivalence, not a second product solver or a relaxed exact certificate.
+    fn reference_softmax_before_positive_zero_skip(logs: &[f64], output: &mut [f64]) -> bool {
+        if logs.is_empty() || logs.len() != output.len() {
+            return false;
+        }
+        let maximum = logs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        if !maximum.is_finite() {
+            return false;
+        }
+        let mut total = 0.0;
+        for (output, log) in output.iter_mut().zip(logs) {
+            let delta = *log - maximum;
+            let value = if delta <= PROPOSAL_LOG_CUTOFF {
+                0.0
+            } else {
+                delta.exp()
+            };
+            if !value.is_finite() || value < 0.0 {
+                return false;
+            }
+            *output = value;
+            total += value;
+        }
+        if !total.is_finite() || total <= 0.0 {
+            return false;
+        }
+        for value in output {
+            *value /= total;
+        }
+        true
+    }
+
+    fn reference_gradients_before_positive_zero_skip(
+        offsets: &[usize],
+        constraints: &[usize],
+        p: &[f64],
+        q: &[f64],
+        gp: &mut [f64],
+        gq: &mut [f64],
+    ) -> Option<()> {
+        if offsets.len() != q.len() + 1 || gp.len() != p.len() || gq.len() != q.len() {
+            return None;
+        }
+        gp.fill(0.0);
+        gq.fill(0.0);
+        for row in 0..q.len() {
+            let start = *offsets.get(row)?;
+            let end = *offsets.get(row + 1)?;
+            let incidence = constraints.get(start..end)?;
+            let mut load = 0.0;
+            for constraint in incidence.iter().copied() {
+                *gp.get_mut(constraint)? += q[row];
+                load += *p.get(constraint)?;
+            }
+            if !load.is_finite() {
+                return None;
+            }
+            gq[row] = load;
+        }
+        gp.iter().all(|value| value.is_finite()).then_some(())
+    }
+
+    #[test]
+    fn softmax_positive_zero_skip_is_bitwise_identical_to_previous_loop() {
+        let cases: &[&[f64]] = &[
+            &[],
+            &[0.0],
+            &[-0.0, 0.0],
+            &[0.0, -35.999, -36.0, -37.0, -1000.0],
+            &[f64::MIN, 0.0, f64::MAX],
+            &[0.0, f64::NEG_INFINITY],
+            &[f64::NAN],
+            &[0.0, f64::NAN],
+            &[f64::INFINITY, 0.0],
+        ];
+        for logs in cases {
+            let mut expected = vec![-0.0; logs.len()];
+            let mut actual = expected.clone();
+            assert_eq!(
+                softmax(logs, &mut actual),
+                reference_softmax_before_positive_zero_skip(logs, &mut expected)
+            );
+            assert_eq!(
+                actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+            #[cfg(feature = "diagnostic-probes")]
+            {
+                let mut diagnostic = vec![-0.0; logs.len()];
+                let (valid, _) =
+                    diagnostic_softmax_cutoff_density(logs, &mut diagnostic, None, true);
+                let mut reference = vec![-0.0; logs.len()];
+                assert_eq!(
+                    valid,
+                    reference_softmax_before_positive_zero_skip(logs, &mut reference)
+                );
+                assert_eq!(
+                    diagnostic.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_row_scatter_preserves_both_gradients_bits_and_invalid_shape_rejection() {
+        let distributions: &[&[f64]] = &[
+            &[0.0, 0.0, 0.0],
+            &[-0.0, 0.0, -0.0],
+            &[0.25, 0.0, 0.75],
+            &[f64::from_bits(1), 1.0, 0.0],
+            &[-0.5, 0.0, 0.5],
+            &[f64::NAN, 0.0, 1.0],
+            &[f64::INFINITY, 0.0, 1.0],
+        ];
+        let row_values = [
+            0.0,
+            -0.0,
+            f64::from_bits(1),
+            0.5,
+            -0.5,
+            f64::NAN,
+            f64::INFINITY,
+        ];
+        for p in distributions {
+            for a in row_values {
+                for b in row_values {
+                    for (offsets, incidence) in [
+                        (&[0, 2, 4][..], &[0, 2, 1, 2][..]),
+                        (&[0, 0, 3][..], &[0, 0, 2][..]),
+                        (&[0, 1, 2][..], &[0, 3][..]),
+                        (&[0, 2, 1][..], &[0, 1][..]),
+                        (&[0, 1][..], &[0][..]),
+                    ] {
+                        let mut expected_p = [-0.0; 3];
+                        let mut expected_q = [-0.0; 2];
+                        let mut actual_p = expected_p;
+                        let mut actual_q = expected_q;
+                        let expected = reference_gradients_before_positive_zero_skip(
+                            offsets,
+                            incidence,
+                            p,
+                            &[a, b],
+                            &mut expected_p,
+                            &mut expected_q,
+                        );
+                        let actual = saddle_gradients(
+                            offsets,
+                            incidence,
+                            p,
+                            &[a, b],
+                            &mut actual_p,
+                            &mut actual_q,
+                        );
+                        assert_eq!(actual, expected);
+                        assert_eq!(actual_p.map(f64::to_bits), expected_p.map(f64::to_bits));
+                        assert_eq!(actual_q.map(f64::to_bits), expected_q.map(f64::to_bits));
+                    }
+                }
+            }
+        }
+        let mut gp = [0.0; 3];
+        let mut gq = [0.0; 2];
+        saddle_gradients(
+            &[0, 2, 4],
+            &[0, 2, 1, 2],
+            &[0.25, 0.25, 0.5],
+            &[0.0, 1.0],
+            &mut gp,
+            &mut gq,
+        )
+        .unwrap();
+        assert_eq!(
+            gq[0], 0.75,
+            "a zero-q row still has its nonzero p load for the next update"
+        );
+    }
 
     fn workspace(rows: usize, constraints: usize, incidences: usize) -> DualProposalWorkspace {
         DualProposalWorkspace::try_new(rows, constraints, incidences, 0, &mut |_| Ok(()))

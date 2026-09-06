@@ -372,10 +372,6 @@ impl PcMinimumCoverV2Preparation {
         &mut self.portfolio
     }
 
-    pub(crate) fn parallel_source_dimensions(&self) -> Option<(usize, usize)> {
-        self.portfolio.parallel_source_dimensions()
-    }
-
     pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         self.portfolio
             .checked_retained_capacity_bytes()?
@@ -387,55 +383,6 @@ impl PcMinimumCoverV2Preparation {
             Some(0),
             PcMinimumCoverResultProjection::checked_retained_capacity_bytes,
         )
-    }
-
-    pub(crate) fn enable_parallel(&mut self, partitions: usize) -> Result<(), &'static str> {
-        self.portfolio
-            .enable_parallel(partitions)
-            .map_err(|_| "pc minimals parallel preparation failed")
-    }
-
-    pub(crate) fn parallel_query_satisfied(&self) -> bool {
-        self.portfolio.parallel_query_satisfied()
-    }
-
-    pub(crate) fn parallel_query(&self) -> Option<&clearra_coverage::cover::ExactAtMostQuery> {
-        self.portfolio.parallel_query()
-    }
-
-    pub(crate) fn take_parallel_task(
-        &mut self,
-    ) -> Option<clearra_coverage::cover::ExactAtMostTask> {
-        self.portfolio.take_parallel_task()
-    }
-
-    pub(crate) fn prepare_parallel_idle_assist(
-        &mut self,
-        maximum_children: usize,
-        guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
-    ) -> Result<bool, &'static str> {
-        self.portfolio
-            .prepare_parallel_idle_assist(maximum_children, guard)
-            .map_err(|_| "pc minimals idle assistance rejected")
-    }
-
-    pub(crate) fn parallel_task_is_redundant(
-        &self,
-        identity: clearra_coverage::cover::ExactAtMostQueryIdentity,
-        partition_id: u64,
-    ) -> Result<bool, &'static str> {
-        self.portfolio
-            .parallel_task_is_redundant(identity, partition_id)
-            .map_err(|_| "pc minimals task identity rejected")
-    }
-
-    pub(crate) fn accept_parallel_receipt(
-        &mut self,
-        receipt: clearra_coverage::cover::ExactAtMostReceipt,
-    ) -> Result<(), &'static str> {
-        self.portfolio
-            .accept_parallel_receipt(receipt)
-            .map_err(|_| "pc minimals parallel receipt validation failed")
     }
 
     pub(crate) fn new(source: ValidatedPcMinimumCoverSource) -> Result<Self, &'static str> {

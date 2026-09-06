@@ -473,13 +473,19 @@ impl AppCoreExecutorService {
         &self,
         problem: &clearra_problem::SearchProblem,
         result: &CoreExecutionResult,
+        external_reserve_bytes: u128,
     ) -> Result<crate::PcReplaySourceBuildSession, CoreExecutionError> {
         let budget = CompleteReplayWholeLiveBudget::from_result_with_host(
             result,
             self.product_retention_budget,
         )?;
-        crate::PcReplaySourceBuildSession::new(problem, result, budget.maximum_bytes)
-            .map_err(|component| CoreExecutionError::RuntimeUnavailable { component })
+        crate::PcReplaySourceBuildSession::new_with_external_reserve(
+            problem,
+            result,
+            budget.maximum_bytes,
+            external_reserve_bytes,
+        )
+        .map_err(|error| CoreExecutionError::Pc(error.to_string()))
     }
 
     pub(crate) fn postprocess_search_result(

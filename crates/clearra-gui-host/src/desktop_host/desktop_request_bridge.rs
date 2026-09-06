@@ -3871,12 +3871,18 @@ mod job_event_json {
 }
 mod product_pages {
     use clearra_app::{
-        CoveragePortfolioPageStore, PortfolioAlternativeAdvance, PortfolioPageLoadAdvance,
-        PortfolioPageLoadState, ProductPageStore,
+        CoveragePortfolioPageStore, PcReplayPageAdvance, PcReplayPageStore,
+        PortfolioAlternativeAdvance, PortfolioPageLoadAdvance, PortfolioPageLoadState,
+        ProductPageStore,
     };
     use clearra_host_contract::ParityReportPagePayload;
 
     use super::{bridge::DesktopTauriCommandBridge, error::DesktopTauriCommandError};
+
+    // Small pending/error JSON, cancellation control and scalar carriers.
+    // App independently reserves its actual public page with the existing 16x
+    // projection policy; this reserve never replaces that page admission.
+    const PC_REPLAY_HOST_ENVELOPE_RESERVE: u128 = 4096;
 
     impl DesktopTauriCommandBridge {
         pub fn product_page_next(
@@ -3943,6 +3949,21 @@ mod product_pages {
             member_page_number_decimal: &str,
             cancelled: &mut impl FnMut() -> bool,
         ) -> Result<String, DesktopTauriCommandError> {
+            if self
+                .product_page_store
+                .as_ref()
+                .and_then(ProductPageStore::pc_replay)
+                .is_some()
+            {
+                // Compatibility callers receive one bounded pending/page reply,
+                // not a synchronous loop hidden behind the legacy getter.
+                return self.product_page_get_slice_with_cancel(
+                    alternative_index_decimal,
+                    member_page_number_decimal,
+                    64,
+                    cancelled,
+                );
+            }
             let member_page_number = parse_canonical_positive_usize(
                 member_page_number_decimal,
                 "desktop member page number",
@@ -3991,6 +4012,77 @@ mod product_pages {
                 member_page_number_decimal,
                 "desktop member page number",
             )?;
+            if let Some(store) = self
+                .product_page_store
+                .as_mut()
+                .and_then(ProductPageStore::pc_replay_mut)
+            {
+                let geometry_page_number = parse_canonical_positive_usize(
+                    alternative_index_decimal,
+                    "desktop replay geometry page number",
+                )?;
+                let work = maximum_work_steps.clamp(1, 64) as usize;
+                let maximum = store.source().maximum_memory_bytes();
+                let transport_bytes = PC_REPLAY_HOST_ENVELOPE_RESERVE
+                    .checked_add(alternative_index_decimal.len() as u128)
+                    .and_then(|n| n.checked_add(member_page_number_decimal.len() as u128))
+                    .ok_or_else(|| {
+                        DesktopTauriCommandError::job("desktop replay transport size overflow")
+                    })?;
+                let entry = store
+                    .checked_host_entry_bytes()
+                    .and_then(|n| n.checked_add(transport_bytes))
+                    .ok_or_else(|| {
+                        DesktopTauriCommandError::job("desktop replay entry size overflow")
+                    })?;
+                if entry > maximum {
+                    return Err(DesktopTauriCommandError::job(format!(
+                        "complete_replay_host_memory_limit_exceeded: required_memory_bytes={entry}, max_memory_bytes={maximum}",
+                    )));
+                }
+                let control =
+                    clearra_core_domain::execution_cancellation::ExecutionControl::default();
+                if cancelled() {
+                    control.cancellation.handle().cancel();
+                }
+                let mut rejected_host_peak = None;
+                let mut advance = store
+                    .advance_page_with_memory_guard(
+                        geometry_page_number,
+                        member_page_number,
+                        work,
+                        &control,
+                        &mut |app_whole_live| {
+                            let required = app_whole_live.checked_add(transport_bytes);
+                            let admitted = required.is_some_and(|n| n <= maximum);
+                            if !admitted {
+                                rejected_host_peak = required;
+                            }
+                            admitted
+                        },
+                    )
+                    .map_err(|error| match rejected_host_peak {
+                        Some(required) => DesktopTauriCommandError::job(format!(
+                            "{}: required_memory_bytes={required}, max_memory_bytes={maximum}",
+                            error.code(),
+                        )),
+                        None => DesktopTauriCommandError::job(format!(
+                            "load desktop replay page slice: {error}"
+                        )),
+                    })?;
+                // The operation token can be cancelled from another thread
+                // while this bounded slice runs. Never publish its late page.
+                if cancelled() {
+                    store.cancel_page();
+                    advance = PcReplayPageAdvance::Cancelled { work_steps: 0 };
+                }
+                return pc_replay_advance_json(
+                    store,
+                    &advance,
+                    geometry_page_number,
+                    member_page_number,
+                );
+            }
             if self
                 .product_page_store
                 .as_ref()
@@ -4043,6 +4135,53 @@ mod product_pages {
             .as_ref()
             .and_then(ProductPageStore::coverage_portfolio)
             .ok_or_else(|| DesktopTauriCommandError::job("desktop product page store unavailable"))
+    }
+
+    fn pc_replay_advance_json(
+        store: &PcReplayPageStore,
+        advance: &PcReplayPageAdvance,
+        geometry_page_number: usize,
+        member_page_number: usize,
+    ) -> Result<String, DesktopTauriCommandError> {
+        let source_identity = store.source().identity_sha256();
+        let value = match advance {
+            PcReplayPageAdvance::Completed(page) => {
+                let metadata = &page.metadata;
+                if metadata.page_source_identity_sha256 != source_identity
+                    || metadata.page_contract != clearra_app::PC_REPLAY_MEMBER_PAGE_CONTRACT
+                    || metadata.geometry_page_number != geometry_page_number.to_string()
+                    || metadata.member_page_number != member_page_number.to_string()
+                {
+                    return Err(DesktopTauriCommandError::job(
+                        "desktop replay page differs from its pending request",
+                    ));
+                }
+                serde_json::json!({
+                    "schema_version": 1,
+                    "runtime": "clearra-desktop",
+                    "product_page_kind": "pc-replay",
+                    "state": "page",
+                    "page": page,
+                })
+            }
+            PcReplayPageAdvance::Pending { work_steps }
+            | PcReplayPageAdvance::Cancelled { work_steps } => serde_json::json!({
+                "schema_version": 1,
+                "runtime": "clearra-desktop",
+                "product_page_kind": "pc-replay",
+                "state": if matches!(advance, PcReplayPageAdvance::Pending { .. }) { "pending" } else { "cancelled" },
+                "page_contract": clearra_app::PC_REPLAY_MEMBER_PAGE_CONTRACT,
+                "page_source_identity_sha256": source_identity,
+                "geometry_page_number": geometry_page_number.to_string(),
+                "member_page_number": member_page_number.to_string(),
+                "work_steps": work_steps.to_string(),
+            }),
+        };
+        serde_json::to_string(&value).map_err(|error| {
+            DesktopTauriCommandError::job(
+                format!("serialize desktop replay page advance: {error}",),
+            )
+        })
     }
 
     fn coverage_store_mut(
@@ -4192,6 +4331,109 @@ mod product_pages {
         .map_err(|error| {
             DesktopTauriCommandError::job(format!("serialize desktop parity page advance: {error}"))
         })
+    }
+
+    #[cfg(all(test, feature = "wasm-cpu-runtime"))]
+    mod pc_replay_tests {
+        use super::*;
+        use clearra_app::{AppContext, AppCoreExecutorService, AppServices, CooperativeAppAdvance};
+        use clearra_core_domain::execution_cancellation::ExecutionControl;
+
+        fn bridge_with_replay_source() -> DesktopTauriCommandBridge {
+            let context = AppContext::new(
+                AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+            );
+            let request = clearra_cli_command::CliCommandParser::parse(
+                "clearra pc path --lines 2 --pieces 5 --queue IIOOO --no-hold --backend cpu --workers 1",
+            ).unwrap().to_app_request().unwrap();
+            let mut execution = context.start_cooperative_execution(request);
+            let control = ExecutionControl::default();
+            for _ in 0..10_000 {
+                match execution.advance(64, &control) {
+                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                    CooperativeAppAdvance::Completed(response) => {
+                        let source = response.public_page_source_owner().expect("replay source");
+                        let mut bridge = DesktopTauriCommandBridge::default();
+                        bridge.product_page_store =
+                            Some(ProductPageStore::from_source(source).unwrap());
+                        assert!(
+                            bridge
+                                .product_page_store
+                                .as_ref()
+                                .unwrap()
+                                .pc_replay()
+                                .unwrap()
+                                .source()
+                                .geometry_count()
+                                >= 2
+                        );
+                        return bridge;
+                    }
+                    other => panic!("unexpected replay source state: {other:?}"),
+                }
+            }
+            panic!("tiny Desktop replay source exceeded its test-only work bound");
+        }
+
+        #[test]
+        fn desktop_pc_replay_pending_slices_cancel_without_publishing_partial_or_late_pages() {
+            let mut bridge = bridge_with_replay_source();
+            let first: serde_json::Value = serde_json::from_str(
+                &bridge
+                    .product_page_get_slice_with_cancel("2", "1", 1, &mut || false)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(first["state"], "pending");
+            assert_eq!(first["page_contract"], "pc-replay-member-page.v2");
+            assert_eq!(first["geometry_page_number"], "2");
+            assert_eq!(first["member_page_number"], "1");
+            assert!(first.get("page").is_none());
+            assert!(first.get("witness_count").is_none());
+            let mut checks = 0;
+            let cancelled: serde_json::Value = serde_json::from_str(
+                &bridge
+                    .product_page_get_slice_with_cancel("2", "1", 1, &mut || {
+                        checks += 1;
+                        checks == 2
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(cancelled["state"], "cancelled");
+            assert_eq!(
+                cancelled["page_source_identity_sha256"],
+                first["page_source_identity_sha256"]
+            );
+            assert!(cancelled.get("page").is_none());
+            let mut completed = false;
+            for _ in 0..10_000 {
+                let next: serde_json::Value = serde_json::from_str(
+                    &bridge
+                        .product_page_get_slice_with_cancel("2", "1", 64, &mut || false)
+                        .unwrap(),
+                )
+                .unwrap();
+                if next["state"] == "page" {
+                    assert_eq!(
+                        next["page"]["page_source_identity_sha256"],
+                        first["page_source_identity_sha256"]
+                    );
+                    assert!(!next["page"]["witnesses"].as_array().unwrap().is_empty());
+                    completed = true;
+                    break;
+                }
+                assert_eq!(next["state"], "pending");
+            }
+            assert!(
+                completed,
+                "cancel drops only the pending cursor; the immutable source remains usable"
+            );
+            bridge.product_page_release();
+            assert!(bridge
+                .product_page_get_slice_with_cancel("2", "1", 64, &mut || false)
+                .is_err());
+        }
     }
 }
 mod run_request {

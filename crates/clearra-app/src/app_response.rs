@@ -804,6 +804,18 @@ impl AppResponse {
             .checked_add(core_heap)
     }
 
+    /// The replay source already reserves the original Core owner. Reuse the
+    /// exact same closed ordinary-PC response shape, subtracting only that
+    /// measured Core heap, not summary/diagnostic/report clones.
+    pub(crate) fn checked_pc_replay_external_retained_capacity_bytes(&self) -> Option<u128> {
+        let response = self.checked_pc_minimals_retained_capacity_bytes()?;
+        let core = self.render_model.as_ref()?.core_result()?;
+        let core_heap = core
+            .checked_resource_retained_bytes()?
+            .checked_sub(core::mem::size_of::<CoreExecutionResult>() as u128)?;
+        response.checked_sub(core_heap)
+    }
+
     #[cfg(test)]
     pub(crate) fn with_result_kind_for_test(mut self, kind: &str) -> Self {
         self.result = Some(AppResult::new(kind));

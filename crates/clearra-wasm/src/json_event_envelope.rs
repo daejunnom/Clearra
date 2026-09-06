@@ -235,7 +235,67 @@ pub fn serialize_pc_replay_page(
             member_page_number,
             &clearra_core_domain::execution_cancellation::ExecutionControl::default(),
         )
-        .map_err(|reason| WasmCommandRuntimeError::new("E_WASM_PRODUCT_PAGE", reason))?;
+        .map_err(|reason| {
+            WasmCommandRuntimeError::new("E_WASM_PRODUCT_PAGE", reason.to_string())
+        })?;
+    serialize_pc_replay_loaded_page(&page)
+}
+
+/// Serializes exactly one bounded App page advance. Pending work carries only
+/// its immutable source and requested coordinates, never a partial public page.
+pub fn serialize_pc_replay_page_advance(
+    advance: &clearra_app::PcReplayPageAdvance,
+    source_identity_sha256: &str,
+    geometry_page_number: usize,
+    member_page_number: usize,
+) -> Result<String, WasmCommandRuntimeError> {
+    if geometry_page_number == 0
+        || member_page_number == 0
+        || source_identity_sha256.len() != 64
+        || !source_identity_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(WasmCommandRuntimeError::new(
+            "E_WASM_PRODUCT_PAGE_PROJECTION",
+            "invalid replay page source or coordinates",
+        ));
+    }
+    let (state, work_steps) = match advance {
+        clearra_app::PcReplayPageAdvance::Completed(page) => {
+            if page.metadata.page_source_identity_sha256 != source_identity_sha256
+                || page.metadata.page_contract != clearra_app::PC_REPLAY_MEMBER_PAGE_CONTRACT
+                || page.metadata.geometry_page_number != geometry_page_number.to_string()
+                || page.metadata.member_page_number != member_page_number.to_string()
+            {
+                return Err(WasmCommandRuntimeError::new(
+                    "E_WASM_PRODUCT_PAGE_PROJECTION",
+                    "replay page differs from its pending request",
+                ));
+            }
+            return serialize_pc_replay_loaded_page(page);
+        }
+        clearra_app::PcReplayPageAdvance::Pending { work_steps } => ("pending", *work_steps),
+        clearra_app::PcReplayPageAdvance::Cancelled { work_steps } => ("cancelled", *work_steps),
+    };
+    serialize_json(|output| {
+        let mut object = JsonObject::begin(output);
+        object.number("schema_version", 1);
+        object.string("runtime", "clearra-wasm");
+        object.string("product_page_kind", "pc-replay");
+        object.string("state", state);
+        object.string("page_contract", clearra_app::PC_REPLAY_MEMBER_PAGE_CONTRACT);
+        object.string("page_source_identity_sha256", source_identity_sha256);
+        object.string("geometry_page_number", &geometry_page_number.to_string());
+        object.string("member_page_number", &member_page_number.to_string());
+        object.string("work_steps", &work_steps.to_string());
+        object.finish();
+    })
+}
+
+fn serialize_pc_replay_loaded_page(
+    page: &clearra_host_contract::PcReplayPagePayload,
+) -> Result<String, WasmCommandRuntimeError> {
     serialize_json(|output| {
         let mut object = JsonObject::begin(output);
         object.number("schema_version", 1);
@@ -2844,6 +2904,79 @@ mod exact_json_tests {
     use crate::{wasm_worker_job::GovernedWasmWorkerEvents, WasmWorkerJobId};
     use clearra_app::{CoveragePortfolioAlternativeSet, PortfolioAlternativeSetIdentity};
     use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+
+    #[test]
+    fn pc_replay_pending_and_cancelled_envelopes_are_source_bound_without_partial_pages() {
+        let source = "a".repeat(64);
+        for (advance, expected_state, expected_work) in [
+            (
+                clearra_app::PcReplayPageAdvance::Pending { work_steps: 64 },
+                "pending",
+                "64",
+            ),
+            (
+                clearra_app::PcReplayPageAdvance::Cancelled { work_steps: 0 },
+                "cancelled",
+                "0",
+            ),
+        ] {
+            let json = serialize_pc_replay_page_advance(&advance, &source, 2, 10)
+                .expect("bounded replay continuation envelope");
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["product_page_kind"], "pc-replay");
+            assert_eq!(value["state"], expected_state);
+            assert_eq!(value["page_contract"], "pc-replay-member-page.v2");
+            assert_eq!(value["page_source_identity_sha256"], source);
+            assert_eq!(value["geometry_page_number"], "2");
+            assert_eq!(value["member_page_number"], "10");
+            assert_eq!(value["work_steps"], expected_work);
+            for forbidden in ["page", "witnesses", "witness_count", "enumeration_complete"] {
+                assert!(
+                    value.get(forbidden).is_none(),
+                    "pending must not claim {forbidden}"
+                );
+            }
+            assert!(serialize_pc_replay_page_advance(&advance, &source, 0, 1).is_err());
+            assert!(serialize_pc_replay_page_advance(&advance, &source, 1, 0).is_err());
+            assert!(serialize_pc_replay_page_advance(&advance, "not-a-source", 1, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn pc_replay_completed_envelope_rejects_changed_source_version_or_requested_rank() {
+        let source = "a".repeat(64);
+        let metadata = clearra_host_contract::PcReplayPageMetadata {
+            page_contract: clearra_app::PC_REPLAY_MEMBER_PAGE_CONTRACT.to_owned(),
+            page_source_available: true,
+            page_source_identity_sha256: source.clone(),
+            geometry_count: "1".to_owned(),
+            geometry_page_number: "1".to_owned(),
+            candidate_id: "1".to_owned(),
+            geometry_witness_count: "0".to_owned(),
+            geometry_pattern_count: "0".to_owned(),
+            member_page_number: "1".to_owned(),
+            member_page_count: "1".to_owned(),
+        };
+        let page = clearra_host_contract::PcReplayPagePayload {
+            metadata,
+            witness_count: "0".to_owned(),
+            materialized_pattern_count: "1".to_owned(),
+            witnesses: Vec::new(),
+        };
+        let advance = clearra_app::PcReplayPageAdvance::Completed(page.clone());
+        assert!(serialize_pc_replay_page_advance(&advance, &"b".repeat(64), 1, 1).is_err());
+        assert!(serialize_pc_replay_page_advance(&advance, &source, 2, 1).is_err());
+        assert!(serialize_pc_replay_page_advance(&advance, &source, 1, 2).is_err());
+        let mut old_version = page;
+        old_version.metadata.page_contract = "pc-replay-member-page.v1".to_owned();
+        assert!(serialize_pc_replay_page_advance(
+            &clearra_app::PcReplayPageAdvance::Completed(old_version),
+            &source,
+            1,
+            1,
+        )
+        .is_err());
+    }
 
     #[test]
     fn build_coverage_portfolio_payload_is_lossless_json() {

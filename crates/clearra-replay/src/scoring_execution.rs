@@ -300,6 +300,12 @@ impl ExactScoringExecutionGraph {
         self.edges.get(start..end)
     }
 
+    /// Complete immutable edge storage for versioned source identity binding.
+    /// Includes unused spans; callers must still validate graph semantics.
+    pub fn all_edges(&self) -> &[ScoringExecutionEdge] {
+        &self.edges
+    }
+
     /// Heap storage retained by this graph, excluding the inline graph value.
     pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
         (self.nodes.capacity() as u128)

@@ -357,7 +357,7 @@ export type ClearraPcPathFamilyPayload = {
 } & Partial<ClearraPcReplayPageMetadata>;
 
 export type ClearraPcReplayPageMetadata = {
-  page_contract: 'pc-replay-member-page.v1';
+  page_contract: 'pc-replay-member-page.v2';
   page_source_available: true;
   page_source_identity_sha256: string;
   geometry_count: string;
@@ -616,6 +616,17 @@ export type ClearraCoveragePortfolioRuntimePage = Omit<
 >;
 
 export type ClearraProductPageWorkerPayload =
+  | {
+      schema_version: 1;
+      runtime: 'clearra-wasm' | 'clearra-desktop';
+      product_page_kind: 'pc-replay';
+      state: 'pending' | 'cancelled';
+      page_contract: 'pc-replay-member-page.v2';
+      page_source_identity_sha256: string;
+      geometry_page_number: string;
+      member_page_number: string;
+      work_steps: string;
+    }
   | {
       schema_version: 1;
       runtime: 'clearra-wasm' | 'clearra-desktop';

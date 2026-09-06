@@ -263,6 +263,29 @@ struct CooperativePcReplayFinalizeExecution {
     manifest_work_units: u64,
 }
 
+/// Heap owners outside the replay source and its original Core reservation.
+/// The original Core moves into `response`; only its heap is subtracted from
+/// that response's projection. Keep both transition/finalizer inline carriers
+/// conservatively reserved, including the compiled query used at construction
+/// and final sealing. The source retains this reservation for later pages.
+fn checked_pc_replay_external_reserve(
+    context: &AppContext,
+    response: &AppResponse,
+    output: &AppOutputPolicy,
+    contract: &ValidatedProductCapabilityContract,
+    problem: &clearra_problem::SearchProblem,
+) -> Option<u128> {
+    (core::mem::size_of::<CooperativeAppExecution>() as u128)
+        .checked_add(core::mem::size_of::<CooperativePostprocessExecution>() as u128)?
+        .checked_add(core::mem::size_of::<CooperativePcReplayFinalizeExecution>() as u128)?
+        .checked_add(core::mem::size_of::<CooperativeAppAdvance>() as u128)?
+        .checked_add(context.checked_retained_capacity_bytes()?)?
+        .checked_add(response.checked_pc_replay_external_retained_capacity_bytes()?)?
+        .checked_add(output.checked_retained_capacity_bytes()?)?
+        .checked_add(contract.checked_pc_replay_retained_capacity_bytes()?)?
+        .checked_add(problem.checked_pc_score_pointee_retained_bytes()?)
+}
+
 /// Exact App-owned graph that remains live while the consumed scenario query
 /// is handed to the finite compiler. Keeping these owners in one concrete
 /// value makes inline padding part of the measured contract and prevents the
@@ -2854,6 +2877,16 @@ impl CooperativeAppExecution {
                             .result
                             .take()
                             .expect("postprocess result exists");
+                        // Move Core into the ordinary response once. The
+                        // source reserves this same Core owner, while the
+                        // external projection below counts only response
+                        // summaries/diagnostics and the other App owners.
+                        let mut response = response_from_search(postprocess.response_kind, result)
+                            .with_contract_context(postprocess.command_kind);
+                        if !postprocess.validation_report.is_empty() {
+                            response =
+                                response.with_validation_diagnostics(postprocess.validation_report);
+                        }
                         let preparation = contract
                             .pc_path_binding()
                             .ok_or(CoreExecutionError::RuntimeUnavailable {
@@ -2865,10 +2898,39 @@ impl CooperativeAppExecution {
                                 })
                             })
                             .and_then(|problem| {
+                                if postprocess.pc_score_session.is_some()
+                                    || postprocess.build_probability_session.is_some()
+                                {
+                                    return Err(CoreExecutionError::RuntimeUnavailable {
+                                        component: "complete_replay_unexpected_live_search_owner",
+                                    });
+                                }
+                                let external_reserve = checked_pc_replay_external_reserve(
+                                    self.context(),
+                                    &response,
+                                    &postprocess.output_policy,
+                                    &contract,
+                                    &problem,
+                                )
+                                .ok_or(
+                                    CoreExecutionError::RuntimeUnavailable {
+                                        component: "complete_replay_app_owner_projection_overflow",
+                                    },
+                                )?;
+                                let result = response
+                                    .render_model()
+                                    .and_then(AppRenderModel::core_result)
+                                    .ok_or(CoreExecutionError::RuntimeUnavailable {
+                                        component: "complete_replay_response_source_missing",
+                                    })?;
                                 self.context()
                                     .services()
                                     .core_executor()
-                                    .prepare_pc_replay_page_source(&problem, &result)
+                                    .prepare_pc_replay_page_source(
+                                        &problem,
+                                        result,
+                                        external_reserve,
+                                    )
                             });
                         let preparation = match preparation {
                             Ok(preparation) => preparation,
@@ -2886,12 +2948,6 @@ impl CooperativeAppExecution {
                         // The typed complete-path command has no score or
                         // constraint reducer. Its exact graph is the replay
                         // authority; do not run the eager family materializer.
-                        let mut response = response_from_search(postprocess.response_kind, result)
-                            .with_contract_context(postprocess.command_kind);
-                        if !postprocess.validation_report.is_empty() {
-                            response =
-                                response.with_validation_diagnostics(postprocess.validation_report);
-                        }
                         control.report_progress("postprocess", 0, None);
                         self.state = CooperativeExecutionState::PcReplayFinalize(Box::new(
                             CooperativePcReplayFinalizeExecution {
@@ -3287,9 +3343,10 @@ impl CooperativeAppExecution {
                         return CooperativeAppAdvance::Cancelled;
                     }
                     let mut finalize = *finalize;
-                    // One bounded manifest work unit per host advance. The
-                    // source owns exact geometry-by-pattern progress counts.
-                    let advance = finalize.preparation.advance(1, control);
+                    // The source honors the host's primitive allowance and
+                    // independently yields at its monotonic turn quantum.
+                    // Do not collapse an 8192-work request into 64 primitives.
+                    let advance = finalize.preparation.advance(work_budget, control);
                     if control.is_cancelled() {
                         return CooperativeAppAdvance::Cancelled;
                     }
@@ -3309,7 +3366,7 @@ impl CooperativeAppExecution {
                             let product = finalize
                                 .preparation
                                 .complete()
-                                .map_err(str::to_owned)
+                                .map_err(|error| error.to_string())
                                 .and_then(|source| {
                                     ProductCapabilityResult::validate_with_pc_replay_source(
                                         finalize.contract,
@@ -3344,11 +3401,11 @@ impl CooperativeAppExecution {
                                 ),
                             }
                         }
-                        Err(component) => CooperativeAppAdvance::Completed(
+                        Err(error) => CooperativeAppAdvance::Completed(
                             self.context().finalize_response_with_product_capability(
-                                core_execution_error_response(
-                                    CoreExecutionError::RuntimeUnavailable { component },
-                                ),
+                                core_execution_error_response(CoreExecutionError::Pc(
+                                    error.to_string(),
+                                )),
                                 finalize.command_kind,
                                 &finalize.output_policy,
                                 None,

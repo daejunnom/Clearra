@@ -2016,7 +2016,7 @@ fn visit_execution_paths(
     Ok(complete)
 }
 
-fn replay_path(
+pub(super) fn replay_path(
     batch: &ExactScoringExecutionBatch,
     graph: &ExactScoringExecutionGraph,
     pattern_id: usize,

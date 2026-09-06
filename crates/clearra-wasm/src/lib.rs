@@ -19,6 +19,7 @@ pub use clearra_app::{
 pub use clearra_app::{
     ExecutorSearchProfileError, ExecutorSearchProfileSession, ExecutorSearchProfileStage,
 };
+pub use clearra_core_domain::execution_cancellation::ExecutionControl;
 #[cfg(feature = "webgpu-search")]
 pub use clearra_core_executor::backend::{
     prewarm_gpu_search, prewarm_gpu_search_async, GpuSearchWarmupReport,
@@ -42,9 +43,8 @@ pub use json_event_envelope::{
     serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
     serialize_coverage_portfolio_page, serialize_coverage_portfolio_page_exact,
     serialize_coverage_portfolio_retained_page, serialize_governed_worker_events,
-    serialize_parity_report_exhausted, serialize_parity_report_page,
-    serialize_pc_replay_page,
-    serialize_search_report_from_app_response, GovernedWasmJson,
+    serialize_parity_report_exhausted, serialize_parity_report_page, serialize_pc_replay_page,
+    serialize_pc_replay_page_advance, serialize_search_report_from_app_response, GovernedWasmJson,
 };
 pub use minimum_parallel_runtime::WasmMinimumParallelWorker;
 pub use wasm_command_runtime::{

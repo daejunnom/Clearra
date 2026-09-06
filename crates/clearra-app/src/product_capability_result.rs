@@ -161,10 +161,6 @@ impl PcMinimumCoverProductPreparation {
         self.report.parallel_work_mut()
     }
 
-    pub(crate) fn parallel_source_dimensions(&self) -> Option<(usize, usize)> {
-        self.report.parallel_source_dimensions()
-    }
-
     /// Heap-only upper bound; the enclosing cooperative owner charges its
     /// inline storage separately. Shared query Arcs are conservatively counted
     /// per proof/source owner, never replaced with an unknown zero allowance.
@@ -175,56 +171,6 @@ impl PcMinimumCoverProductPreparation {
                 Some(validated) => validated.checked_minimum_cover_retained_capacity_bytes()?,
                 None => 0,
             })
-    }
-
-    pub(crate) fn enable_parallel(
-        &mut self,
-        partitions: usize,
-    ) -> Result<(), ProductCapabilityContractError> {
-        self.report
-            .enable_parallel(partitions)
-            .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)
-    }
-
-    pub(crate) fn parallel_query_satisfied(&self) -> bool {
-        self.report.parallel_query_satisfied()
-    }
-
-    pub(crate) fn parallel_query(&self) -> Option<&clearra_coverage::cover::ExactAtMostQuery> {
-        self.report.parallel_query()
-    }
-
-    pub(crate) fn take_parallel_task(
-        &mut self,
-    ) -> Option<clearra_coverage::cover::ExactAtMostTask> {
-        self.report.take_parallel_task()
-    }
-
-    pub(crate) fn prepare_parallel_idle_assist(
-        &mut self,
-        maximum_children: usize,
-        guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
-    ) -> Result<bool, &'static str> {
-        self.report
-            .prepare_parallel_idle_assist(maximum_children, guard)
-    }
-
-    pub(crate) fn parallel_task_is_redundant(
-        &self,
-        identity: clearra_coverage::cover::ExactAtMostQueryIdentity,
-        partition_id: u64,
-    ) -> Result<bool, &'static str> {
-        self.report
-            .parallel_task_is_redundant(identity, partition_id)
-    }
-
-    pub(crate) fn accept_parallel_receipt(
-        &mut self,
-        receipt: clearra_coverage::cover::ExactAtMostReceipt,
-    ) -> Result<(), ProductCapabilityContractError> {
-        self.report
-            .accept_parallel_receipt(receipt)
-            .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)
     }
 
     pub(crate) fn advance(

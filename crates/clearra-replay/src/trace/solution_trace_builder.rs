@@ -22,6 +22,32 @@ pub struct SolutionTraceBuilder {
 }
 
 impl SolutionTraceBuilder {
+    /// Allocation-free validation of a scoring edge using the builder's exact
+    /// placement and line-compaction semantics. Every counted transition must
+    /// pass this, including transitions whose witnesses will never be displayed.
+    pub fn project_scoring_step(
+        layout: Board64Layout,
+        occupied: u64,
+        edge: crate::ScoringExecutionEdge,
+    ) -> Option<(u64, u64)> {
+        Board64State::new(layout, occupied).ok()?;
+        let registry = standard_tetromino_registry();
+        let placement = PlacementMask::new(
+            layout,
+            registry.get(edge.piece())?,
+            edge.rotation(),
+            u16::try_from(edge.x()).ok()?,
+            u16::try_from(edge.y()).ok()?,
+        )
+        .ok()?;
+        if occupied & placement.mask() != 0 {
+            return None;
+        }
+        let cleared = clear_complete_lines(layout, occupied | placement.mask());
+        (cleared.cleared_lines == edge.cleared_lines())
+            .then_some((placement.mask(), cleared.occupied))
+    }
+
     pub fn new(
         layout: Board64Layout,
         initial_occupied: u64,
