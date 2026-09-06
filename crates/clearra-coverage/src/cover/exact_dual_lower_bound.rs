@@ -83,11 +83,42 @@ pub(super) struct CertifiedResidualDual {
 }
 
 impl CertifiedResidualDual {
+    #[cfg(any(test, feature = "diagnostic-probes"))]
     pub(super) fn certified_lower_bound_for_uncovered(
         &self,
         target_words: &[u64],
         covered_words: &[u64],
     ) -> Option<usize> {
+        let numerator = self.certified_uncovered_numerator(target_words, covered_words)?;
+        usize::try_from(numerator.div_ceil(self.denominator)).ok()
+    }
+
+    /// Reuse the ordinary root-bound scan to derive a necessary weight for
+    /// every row in a residual cover of at most `row_limit` rows. A missing
+    /// threshold means no conditional filtering, not an infeasibility claim.
+    /// The threshold belongs only to this certificate and these unchanged
+    /// target/covered words; callers must not carry it across a DFS transition.
+    pub(super) fn certified_bound_and_row_requirement(
+        &self,
+        target_words: &[u64],
+        covered_words: &[u64],
+        row_limit: usize,
+    ) -> Option<(usize, Option<u128>)> {
+        let numerator = self.certified_uncovered_numerator(target_words, covered_words)?;
+        let bound = usize::try_from(numerator.div_ceil(self.denominator)).ok()?;
+        let minimum_row_weight = row_limit
+            .checked_sub(1)
+            .and_then(|remaining| self.denominator.checked_mul(remaining as u128))
+            .and_then(|remaining_capacity| numerator.checked_sub(remaining_capacity))
+            .filter(|minimum| *minimum != 0);
+        Some((bound, minimum_row_weight))
+    }
+
+    fn certified_uncovered_numerator(
+        &self,
+        target_words: &[u64],
+        covered_words: &[u64],
+    ) -> Option<u128> {
         if target_words.len() != covered_words.len()
             || self.patterns.len() != self.weights.len()
             || self.denominator == 0
@@ -95,7 +126,12 @@ impl CertifiedResidualDual {
             return None;
         }
         let mut numerator = 0_u128;
+        let mut previous = None;
         for (pattern, weight) in self.patterns.iter().copied().zip(&self.weights) {
+            if previous.is_some_and(|last| pattern <= last) {
+                return None;
+            }
+            previous = Some(pattern);
             let word_index = pattern / u64::BITS as usize;
             let bit = pattern % u64::BITS as usize;
             let target = *target_words.get(word_index)?;
@@ -104,12 +140,81 @@ impl CertifiedResidualDual {
                 numerator = numerator.checked_add(*weight)?;
             }
         }
-        usize::try_from(numerator.div_ceil(self.denominator)).ok()
+        Some(numerator)
+    }
+
+    /// With N the uncovered weight, D the certified capacity of every original
+    /// row and k the remaining row limit, selecting r is impossible if
+    /// N - load(r) > (k - 1)D. `minimum_row_weight` is N - (k - 1)D from the
+    /// immediately preceding assessment. We inspect only a pivot candidate,
+    /// never change its index/identity, and never use a floating proposal.
+    ///
+    /// No allocation occurs. Stop as soon as the necessary weight is met:
+    /// that is only a decision NOT to prune, so unseen weights cannot make it
+    /// unsound. Returning true requires the entire validated weight scan.
+    /// The second result is diagnostic work, not proof authority.
+    pub(super) fn conditional_row_prune(
+        &self,
+        target_words: &[u64],
+        covered_words: &[u64],
+        row_words: &[u64],
+        minimum_row_weight: u128,
+    ) -> Option<(bool, usize)> {
+        if target_words.len() != covered_words.len()
+            || target_words.len() != row_words.len()
+            || self.patterns.len() != self.weights.len()
+            || self.denominator == 0
+        {
+            return None;
+        }
+        if minimum_row_weight == 0 {
+            return Some((false, 0));
+        }
+        let mut load = 0_u128;
+        let mut previous = None;
+        for (index, (&pattern, &weight)) in self.patterns.iter().zip(&self.weights).enumerate() {
+            if previous.is_some_and(|last| pattern <= last) {
+                return None;
+            }
+            previous = Some(pattern);
+            let word_index = pattern / u64::BITS as usize;
+            let bit = 1_u64 << (pattern % u64::BITS as usize);
+            let uncovered = *target_words.get(word_index)? & !*covered_words.get(word_index)?;
+            if uncovered & *row_words.get(word_index)? & bit != 0 {
+                load = load.checked_add(weight)?;
+                if load >= minimum_row_weight {
+                    return Some((false, index.checked_add(1)?));
+                }
+            }
+        }
+        Some((true, self.patterns.len()))
     }
 
     pub(super) fn checked_retained_bytes(&self) -> Option<u128> {
         checked_vec_retained_bytes(&self.patterns)?
             .checked_add(checked_vec_retained_bytes(&self.weights)?)
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_checked_row_weights_for_test(
+        weights: &[u128],
+        rows: &[&[u64]],
+    ) -> Option<Self> {
+        let mut denominator = 1;
+        for row in rows {
+            let mut load = 0_u128;
+            for (pattern, &weight) in weights.iter().enumerate() {
+                if *row.get(pattern / 64)? & (1u64 << (pattern % 64)) != 0 {
+                    load = load.checked_add(weight)?;
+                }
+            }
+            denominator = denominator.max(load);
+        }
+        Some(Self {
+            patterns: (0..weights.len()).collect(),
+            weights: weights.to_vec(),
+            denominator,
+        })
     }
 }
 
@@ -1505,6 +1610,283 @@ fn row_is_excluded(excluded_row_words: &[u64], row: usize) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn root_conditional_row_pruning_is_admissible_for_all_small_cover_matrices() {
+        let mut examined = 0usize;
+        let mut pruned = 0usize;
+        // Every nonempty support on three candidate rows, all three-pattern
+        // incidence matrices, all covered subsets and every residual limit.
+        for first in 1usize..8 {
+            for second in 1usize..8 {
+                for third in 1usize..8 {
+                    let supports = [first, second, third];
+                    let rows: Vec<u64> = (0..3)
+                        .map(|row| {
+                            supports
+                                .iter()
+                                .enumerate()
+                                .fold(0, |mask, (pattern, support)| {
+                                    mask | if support & (1 << row) != 0 {
+                                        1 << pattern
+                                    } else {
+                                        0
+                                    }
+                                })
+                        })
+                        .collect();
+                    for weights in [[1u128, 2, 3], [0, 4, 1], [3, 3, 3]] {
+                        let denominator = rows
+                            .iter()
+                            .map(|row| {
+                                weights
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(pattern, _)| row & (1 << pattern) != 0)
+                                    .map(|(_, weight)| *weight)
+                                    .sum::<u128>()
+                            })
+                            .max()
+                            .unwrap()
+                            .max(1);
+                        let certificate = CertifiedResidualDual {
+                            patterns: vec![0, 1, 2],
+                            weights: weights.to_vec(),
+                            denominator,
+                        };
+                        for covered in 0u64..8 {
+                            for limit in 1usize..=3 {
+                                let (_, threshold) = certificate
+                                    .certified_bound_and_row_requirement(&[7], &[covered], limit)
+                                    .unwrap();
+                                for row in 0usize..3 {
+                                    examined += 1;
+                                    let impossible = threshold
+                                        .and_then(|threshold| {
+                                            certificate.conditional_row_prune(
+                                                &[7],
+                                                &[covered],
+                                                &[rows[row]],
+                                                threshold,
+                                            )
+                                        })
+                                        .is_some_and(|(impossible, _)| impossible);
+                                    if !impossible {
+                                        continue;
+                                    }
+                                    pruned += 1;
+                                    for chosen in 0usize..8 {
+                                        if chosen & (1 << row) == 0
+                                            || chosen.count_ones() as usize > limit
+                                        {
+                                            continue;
+                                        }
+                                        let actual = rows.iter().enumerate().fold(
+                                            covered,
+                                            |mask, (id, row)| {
+                                                mask | if chosen & (1 << id) != 0 {
+                                                    *row
+                                                } else {
+                                                    0
+                                                }
+                                            },
+                                        );
+                                        assert_ne!(
+                                            actual & 7,
+                                            7,
+                                            "removed row belongs to a feasible residual cover"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(examined, 343 * 3 * 8 * 3 * 3);
+        assert!(
+            pruned > 0,
+            "the exhaustive check must exercise positive pruning"
+        );
+    }
+
+    #[test]
+    fn root_conditional_row_pruning_keeps_equality_and_stops_at_needed_weight() {
+        let certificate = CertifiedResidualDual {
+            patterns: (0..6).collect(),
+            weights: vec![5, 5, 5, 5, 3, 3],
+            denominator: 10,
+        };
+        let (bound, threshold) = certificate
+            .certified_bound_and_row_requirement(&[63], &[0], 3)
+            .unwrap();
+        assert_eq!((bound, threshold), (3, Some(6)));
+        assert_eq!(
+            certificate.conditional_row_prune(&[63], &[0], &[1], 6),
+            Some((true, 6))
+        );
+        assert_eq!(
+            certificate.conditional_row_prune(&[63], &[0], &[48], 6),
+            Some((false, 6)),
+            "N-L == (k-1)D is not an impossibility certificate"
+        );
+        assert_eq!(
+            certificate.conditional_row_prune(&[63], &[0], &[3], 6),
+            Some((false, 2)),
+            "a viable candidate stops without scanning the other four weights"
+        );
+        assert_eq!(
+            certificate.certified_bound_and_row_requirement(&[63], &[0], 4),
+            Some((3, None))
+        );
+        // Restoring a root row cannot invalidate the original D; no smaller
+        // capacity from a previously excluded sibling is substituted.
+        let restored = CertifiedResidualDual {
+            patterns: vec![0, 1],
+            weights: vec![1, 1],
+            denominator: 2,
+        };
+        let (_, threshold) = restored
+            .certified_bound_and_row_requirement(&[3], &[0], 1)
+            .unwrap();
+        assert_eq!(
+            restored.conditional_row_prune(&[3], &[0], &[3], threshold.unwrap()),
+            Some((false, 2))
+        );
+    }
+
+    #[test]
+    fn root_conditional_row_pruning_crosses_words_and_ignores_covered_weights() {
+        let certificate = CertifiedResidualDual {
+            patterns: vec![0, 63, 64, 129],
+            weights: vec![3, 2, 5, 7],
+            denominator: 10,
+        };
+        let target = [1 | (1 << 63), 1, 2];
+        let covered = [1, 0, 0];
+        let (bound, threshold) = certificate
+            .certified_bound_and_row_requirement(&target, &covered, 2)
+            .unwrap();
+        assert_eq!((bound, threshold), (2, Some(4)));
+        assert_eq!(
+            certificate.conditional_row_prune(&target, &covered, &[1 | (1 << 63), 0, 0], 4),
+            Some((true, 4))
+        );
+        assert_eq!(
+            certificate.conditional_row_prune(&target, &covered, &[0, 1, 0], 4),
+            Some((false, 3))
+        );
+    }
+
+    #[test]
+    fn root_conditional_row_pruning_invalid_or_overflow_never_authorizes_removal() {
+        let certificate = CertifiedResidualDual {
+            patterns: vec![0, 1],
+            weights: vec![u128::MAX, 1],
+            denominator: u128::MAX,
+        };
+        assert_eq!(
+            certificate.certified_bound_and_row_requirement(&[3], &[0], 2),
+            None
+        );
+        let large_capacity = CertifiedResidualDual {
+            patterns: vec![0],
+            weights: vec![1],
+            denominator: u128::MAX,
+        };
+        assert_eq!(
+            large_capacity.certified_bound_and_row_requirement(&[1], &[0], 3),
+            Some((1, None))
+        );
+        assert_eq!(
+            large_capacity.certified_bound_and_row_requirement(&[1], &[0], 0),
+            Some((1, None))
+        );
+        assert_eq!(
+            large_capacity.conditional_row_prune(&[1], &[0], &[], 1),
+            None
+        );
+        let duplicate = CertifiedResidualDual {
+            patterns: vec![0, 0],
+            weights: vec![1, 1],
+            denominator: 1,
+        };
+        assert_eq!(
+            duplicate.certified_bound_and_row_requirement(&[1], &[0], 1),
+            None
+        );
+        assert_eq!(duplicate.conditional_row_prune(&[1], &[0], &[0], 1), None);
+        let outside = CertifiedResidualDual {
+            patterns: vec![64],
+            weights: vec![1],
+            denominator: 1,
+        };
+        assert_eq!(
+            outside.certified_bound_and_row_requirement(&[1], &[0], 1),
+            None
+        );
+        assert_eq!(outside.conditional_row_prune(&[1], &[0], &[0], 1), None);
+        let zero_capacity = CertifiedResidualDual {
+            patterns: vec![0],
+            weights: vec![1],
+            denominator: 0,
+        };
+        assert_eq!(
+            zero_capacity.certified_bound_and_row_requirement(&[1], &[0], 1),
+            None
+        );
+        assert_eq!(
+            zero_capacity.conditional_row_prune(&[1], &[0], &[0], 1),
+            None
+        );
+    }
+
+    #[test]
+    fn root_conditional_row_pruning_preserves_all_tied_canonical_sets() {
+        // The final candidate covers only the zero-weight constraint. The
+        // certificate excludes it at k=2 while retaining both canonical ties.
+        let rows = [0b0110u64, 0b1001, 0b1010, 0b0101, 0b0001];
+        let certificate = CertifiedResidualDual {
+            patterns: vec![0, 1, 2, 3],
+            weights: vec![0, 1, 1, 1],
+            denominator: 2,
+        };
+        let (_, threshold) = certificate
+            .certified_bound_and_row_requirement(&[15], &[0], 2)
+            .unwrap();
+        let removed: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                certificate
+                    .conditional_row_prune(&[15], &[0], &[*row], threshold.unwrap())
+                    .unwrap()
+                    .0
+            })
+            .collect();
+        assert_eq!(removed, vec![false, false, false, false, true]);
+        let canonical = |filtered: bool| {
+            let mut sets = Vec::new();
+            for selected in 0usize..(1 << rows.len()) {
+                if selected.count_ones() != 2 {
+                    continue;
+                }
+                let indices: Vec<_> = (0..rows.len())
+                    .filter(|id| selected & (1 << id) != 0)
+                    .collect();
+                if filtered && indices.iter().any(|id| removed[*id]) {
+                    continue;
+                }
+                if indices.iter().fold(0, |mask, id| mask | rows[*id]) == 15 {
+                    sets.push(indices);
+                }
+            }
+            sets.sort();
+            sets
+        };
+        assert_eq!(canonical(false), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(canonical(true), canonical(false));
+    }
+
     // Frozen pre-optimization proposal loops: an oracle for byte-level float
     // equivalence, not a second product solver or a relaxed exact certificate.
     fn reference_softmax_before_positive_zero_skip(logs: &[f64], output: &mut [f64]) -> bool {
@@ -1827,17 +2209,19 @@ mod tests {
     fn residual_cache_checkpoint_and_failed_prepare_do_not_relabel_weights() {
         let supports = vec![vec![0], vec![1], vec![0, 1]];
         let mut workspace = workspace(2, 3, 4);
-        assert!(workspace
-            .certified_residual_lower_bound_inner(
-                &supports,
-                &[7],
-                &[0],
-                &[false; 2],
-                &[0],
-                usize::MAX,
-                false,
-            )
-            .is_some());
+        assert!(
+            workspace
+                .certified_residual_lower_bound_inner(
+                    &supports,
+                    &[7],
+                    &[0],
+                    &[false; 2],
+                    &[0],
+                    usize::MAX,
+                    false,
+                )
+                .is_some()
+        );
         assert!(!workspace.cached_patterns.is_empty());
         assert_eq!(
             workspace.cached_patterns.len(),
@@ -2326,18 +2710,20 @@ mod tests {
 
         let mut full_call = workspace(2, 3, 4);
         full_call.set_remaining_iterations_for_test(1_000);
-        assert!(full_call
-            .certified_residual_lower_bound_inner_with_iteration_limit(
-                &supports,
-                &target,
-                &covered,
-                &selected,
-                &excluded,
-                usize::MAX,
-                false,
-                MIRROR_PROX_ITERATIONS,
-            )
-            .is_some());
+        assert!(
+            full_call
+                .certified_residual_lower_bound_inner_with_iteration_limit(
+                    &supports,
+                    &target,
+                    &covered,
+                    &selected,
+                    &excluded,
+                    usize::MAX,
+                    false,
+                    MIRROR_PROX_ITERATIONS,
+                )
+                .is_some()
+        );
         assert_eq!(full_call.remaining_proposal_iterations(), 800);
     }
 }

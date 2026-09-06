@@ -24,6 +24,19 @@ static DIAGNOSTIC_REPAIR_WORD_MASKS: std::sync::atomic::AtomicBool =
 static DIAGNOSTIC_LEGACY_WASM32_RANDOM_CHOICE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(feature = "diagnostic-probes")]
+static DIAGNOSTIC_CONDITIONAL_ROW_PRUNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Same-binary A/B only. Set before creating proof workers; each exact search
+/// snapshots the switch. It changes neither certificate construction nor
+/// the existing diagnostics/wire schema.
+#[doc(hidden)]
+#[cfg(feature = "diagnostic-probes")]
+pub fn set_diagnostic_conditional_row_pruning(enabled: bool) {
+    DIAGNOSTIC_CONDITIONAL_ROW_PRUNING.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Selects the legacy scorer only for controlled, same-binary diagnostics.
 /// Set this before starting solver threads; each repair session snapshots it.
 /// Ordinary product builds contain only the word-mask scorer.
@@ -217,6 +230,18 @@ pub struct ExactMinimumCoverResidualDiagnostics {
     pub certified_prunes_by_depth: [u64; 3],
     /// Certified prunes returned at checkpoints 25, 50, ..., 200.
     pub certified_prunes_by_checkpoint: [u64; 8],
+}
+
+/// Separate opt-in probe counters: do not extend the existing HotCost/wire
+/// schema merely to evaluate this root-certificate branch filter.
+#[doc(hidden)]
+#[cfg(any(test, feature = "diagnostic-probes"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExactMinimumCoverConditionalRowDiagnostics {
+    pub assessed_nodes: u64,
+    pub candidate_rows: u64,
+    pub examined_weights: u64,
+    pub pruned_rows: u64,
 }
 
 /// Probe-only snapshot of the cooperative AtMost cursor. It exposes no proof
@@ -2876,6 +2901,20 @@ fn prepare_lazy_search_workspace(
 }
 
 impl ExactCoverSearchSession {
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    pub(super) fn diagnostic_conditional_rows(
+        &self,
+    ) -> Option<ExactMinimumCoverConditionalRowDiagnostics> {
+        match &self.state {
+            ExactCoverSearchSessionState::PreparingRootDual { search, .. }
+            | ExactCoverSearchSessionState::ImprovingBreakout { search, .. }
+            | ExactCoverSearchSessionState::ImprovingIncumbent { search, .. }
+            | ExactCoverSearchSessionState::Searching { search, .. } => {
+                Some(search.diagnostic_conditional_rows)
+            }
+            _ => None,
+        }
+    }
     #[cfg(feature = "diagnostic-probes")]
     pub(super) fn diagnostic_hot_cost(&self) -> Option<ExactMinimumCoverHotCostDiagnostics> {
         let search = match &self.state {
@@ -3957,6 +3996,14 @@ impl ExactMinimumCoverSession {
     #[cfg(feature = "diagnostic-probes")]
     pub fn diagnostic_residual_progress(&self) -> Option<ExactMinimumCoverResidualDiagnostics> {
         self.inner.diagnostic_residual_progress()
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    pub fn diagnostic_conditional_rows(
+        &self,
+    ) -> Option<ExactMinimumCoverConditionalRowDiagnostics> {
+        self.inner.diagnostic_conditional_rows()
     }
 
     #[doc(hidden)]
@@ -5927,6 +5974,10 @@ struct MinimumCoverSearch {
     enter_child: bool,
     finished: bool,
     #[cfg(any(test, feature = "diagnostic-probes"))]
+    diagnostic_conditional_rows: ExactMinimumCoverConditionalRowDiagnostics,
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    diagnostic_conditional_rows_enabled: bool,
+    #[cfg(any(test, feature = "diagnostic-probes"))]
     diagnostic_search_nodes: u64,
     #[cfg(any(test, feature = "diagnostic-probes"))]
     diagnostic_residual_attempts: u64,
@@ -6722,6 +6773,13 @@ impl MinimumCoverSearch {
             enter_child: true,
             finished: false,
             #[cfg(any(test, feature = "diagnostic-probes"))]
+            diagnostic_conditional_rows: ExactMinimumCoverConditionalRowDiagnostics::default(),
+            #[cfg(feature = "diagnostic-probes")]
+            diagnostic_conditional_rows_enabled: DIAGNOSTIC_CONDITIONAL_ROW_PRUNING
+                .load(std::sync::atomic::Ordering::Relaxed),
+            #[cfg(all(test, not(feature = "diagnostic-probes")))]
+            diagnostic_conditional_rows_enabled: true,
+            #[cfg(any(test, feature = "diagnostic-probes"))]
             diagnostic_search_nodes: 0,
             #[cfg(any(test, feature = "diagnostic-probes"))]
             diagnostic_residual_attempts: 0,
@@ -7385,16 +7443,26 @@ impl MinimumCoverSearch {
         }
         #[cfg(feature = "diagnostic-probes")]
         self.record_top_gain_hot_cost(top_gain_started);
+        // The covered/target words and root certificate do not change during
+        // this node. Carry only the necessary row weight through the existing
+        // optional bounds; never apply it after a DFS state transition.
+        let mut minimum_root_row_weight = None;
         if let Some(row_limit) = maximum_rows_to_improve {
             #[cfg(feature = "diagnostic-probes")]
             let root_certificate_started = Instant::now();
-            let root_dual_lower_bound = self
-                .root_dual
-                .as_ref()
-                .and_then(|certificate| {
-                    certificate.certified_lower_bound_for_uncovered(&self.target_words, covered)
-                })
-                .unwrap_or(0);
+            let root_assessment = self.root_dual.as_ref().and_then(|certificate| {
+                certificate.certified_bound_and_row_requirement(
+                    &self.target_words,
+                    covered,
+                    row_limit,
+                )
+            });
+            let root_dual_lower_bound = root_assessment.map_or(0, |(bound, _)| bound);
+            minimum_root_row_weight = root_assessment.and_then(|(_, requirement)| requirement);
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            if !self.diagnostic_conditional_rows_enabled {
+                minimum_root_row_weight = None;
+            }
             #[cfg(feature = "diagnostic-probes")]
             {
                 self.diagnostic_hot_cost.root_certificate_calls = self
@@ -7556,12 +7624,50 @@ impl MinimumCoverSearch {
             memory_guard,
             "exact_minimum_cover_branches",
         )?;
-        branches.extend(
-            self.support_by_pattern[pivot]
-                .iter()
-                .copied()
-                .filter(|index| !self.selected[*index] && !self.row_is_excluded(*index)),
-        );
+        #[cfg(any(test, feature = "diagnostic-probes"))]
+        if minimum_root_row_weight.is_some() {
+            self.diagnostic_conditional_rows.assessed_nodes = self
+                .diagnostic_conditional_rows
+                .assessed_nodes
+                .saturating_add(1);
+        }
+        // Reserve the unchanged eligible-branch upper bound, then examine each
+        // pivot row once. Conditional removal is local to this branch list:
+        // do not mutate excluded_rows, whose undo trail belongs to the frame.
+        for &row_index in &self.support_by_pattern[pivot] {
+            if self.selected[row_index] || self.row_is_excluded(row_index) {
+                continue;
+            }
+            let conditional = match (self.root_dual.as_ref(), minimum_root_row_weight) {
+                (Some(certificate), Some(minimum)) => certificate.conditional_row_prune(
+                    &self.target_words,
+                    covered,
+                    &rows[row_index].words,
+                    minimum,
+                ),
+                _ => None,
+            };
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            if minimum_root_row_weight.is_some() {
+                self.diagnostic_conditional_rows.candidate_rows = self
+                    .diagnostic_conditional_rows
+                    .candidate_rows
+                    .saturating_add(1);
+                if let Some((pruned, examined)) = conditional {
+                    self.diagnostic_conditional_rows.examined_weights = self
+                        .diagnostic_conditional_rows
+                        .examined_weights
+                        .saturating_add(examined as u64);
+                    self.diagnostic_conditional_rows.pruned_rows = self
+                        .diagnostic_conditional_rows
+                        .pruned_rows
+                        .saturating_add(u64::from(pruned));
+                }
+            }
+            if !conditional.is_some_and(|(pruned, _)| pruned) {
+                branches.push(row_index);
+            }
+        }
         remove_residual_dominated_pivot_rows(&mut branches, rows, covered, &self.target_words);
         for row_index in branches.iter().copied() {
             self.packing_adjusted_degrees[row_index] = uncovered_gain(
@@ -10320,6 +10426,116 @@ mod tests {
                 .iter()
                 .sum::<u64>(),
             diagnostics.certified_prunes
+        );
+    }
+
+    #[test]
+    fn conditional_root_rows_filter_actual_pivot_without_changing_undo_or_witness() {
+        let rows: Vec<_> = [0b0001, 0b0110, 0b1001, 0b1010, 0b0101, 0b0110, 0b1010]
+            .into_iter()
+            .enumerate()
+            .map(|(source_index, word)| DenseRow {
+                source_index,
+                words: vec![word],
+            })
+            .collect();
+        let rows_live = checked_dense_rows_retained_bytes(&rows).expect("rows live");
+        let MinimumCoverSearchPreparation::Search(mut initial) = MinimumCoverSearch::try_new(
+            &rows,
+            vec![15],
+            vec![1; 4],
+            ExactCoverSearchGoal::Minimum,
+            ExactCoverIncumbentPolicy::Standard,
+            rows_live,
+            &mut |_| Ok(()),
+            &mut || false,
+            false,
+        )
+        .expect("conditional pivot search") else {
+            panic!("fixture must retain an exact search owner")
+        };
+        // Force the bounded decision through DFS instead of accepting the
+        // constructor's greedy witness. This is test setup, never a product
+        // incumbent or a claimed negative certificate.
+        initial.goal = ExactCoverSearchGoal::AtMost(2);
+        assert!(initial.best.capacity() >= 3);
+        initial.best.resize(3, usize::MAX);
+        let certificate = CertifiedResidualDual::from_checked_row_weights_for_test(
+            &[0, 1, 1, 1],
+            &rows
+                .iter()
+                .map(|row| row.words.as_slice())
+                .collect::<Vec<_>>(),
+        )
+        .expect("all original rows satisfy the same integer capacity");
+        initial.fixed_retained_bytes = initial
+            .fixed_retained_bytes
+            .checked_add(certificate.checked_retained_bytes().unwrap())
+            .unwrap();
+        assert!(initial.root_dual.is_none());
+        initial.root_dual = Some(certificate);
+        assert_eq!(initial.rarest_uncovered_pattern(&[0]), Some((0, 3)));
+
+        let mut baseline = initial.clone();
+        baseline.diagnostic_conditional_rows_enabled = false;
+        let mut filtered = initial.clone();
+        filtered.diagnostic_conditional_rows_enabled = true;
+        let mut baseline_probe = baseline.clone();
+        let mut filtered_probe = filtered.clone();
+        let baseline_branches = baseline_probe
+            .prepare_reduced_node(&rows, &[0], rows_live, 0, &mut |_| Ok(()))
+            .unwrap()
+            .expect("baseline pivot");
+        let filtered_branches = filtered_probe
+            .prepare_reduced_node(&rows, &[0], rows_live, 0, &mut |_| Ok(()))
+            .unwrap()
+            .expect("filtered pivot");
+        assert_eq!(filtered_probe.diagnostic_conditional_rows.assessed_nodes, 1);
+        assert_eq!(filtered_probe.diagnostic_conditional_rows.candidate_rows, 3);
+        assert_eq!(filtered_probe.diagnostic_conditional_rows.pruned_rows, 1);
+        assert!(!filtered_branches.contains(&0));
+        // Existing dominance can independently remove this same row. Its
+        // canonical survivor order must agree; no speedup is implied here.
+        assert_eq!(filtered_branches, baseline_branches);
+        assert_eq!(filtered_probe.excluded_rows, initial.excluded_rows);
+        assert_eq!(filtered_probe.selected, initial.selected);
+        assert_eq!(filtered_probe.current, initial.current);
+
+        for search in [&mut baseline, &mut filtered] {
+            for _ in 0..32 {
+                if matches!(
+                    search
+                        .advance(&rows, 8, rows_live, &mut |_| Ok(()), &mut || false)
+                        .unwrap(),
+                    MinimumCoverSearchAdvance::Finished { .. }
+                ) {
+                    break;
+                }
+            }
+            assert!(search.finished);
+            assert_eq!(search.best.len(), 2);
+            assert_eq!(
+                search
+                    .best
+                    .iter()
+                    .fold(0, |mask, row| mask | rows[*row].words[0]),
+                15
+            );
+        }
+        assert_eq!(filtered.best, baseline.best);
+        let mut cancelled = initial;
+        assert!(matches!(
+            cancelled
+                .advance(&rows, 8, rows_live, &mut |_| Ok(()), &mut || true)
+                .unwrap(),
+            MinimumCoverSearchAdvance::Cancelled {
+                visited_nodes: 0,
+                ..
+            }
+        ));
+        assert!(
+            !cancelled.finished,
+            "cancellation cannot prove infeasibility"
         );
     }
 
