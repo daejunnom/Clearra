@@ -336,15 +336,16 @@ export async function benchmarkCliParity(options, dependencies = {}) {
             executionIdentity?.name ?? name, executionIdentity?.uid ?? null);
           report.execution_name = owned.name;
           report.cleanup.execution = "pending";
-          // Delete is scoped to this exact immutable execution, including failed/running attempts.
-          await run(["run", "jobs", "executions", "delete", owned.name, ...flags(a), "--quiet"]);
-          report.cleanup.execution = "deleted";
+          // The deployer has run.jobs.delete, not run.executions.delete.
+          // Deleting this exclusively owned parent terminates its executions.
+          // Keep the UID/count/parent checks, but do not widen IAM for cleanup.
         }
         await run(["run", "jobs", "delete", a.jobName, ...flags(a), "--quiet"]);
         report.cleanup.job = "deleted";
+        if (report.cleanup.execution === "pending") report.cleanup.execution = "owned-parent-deleted";
       } catch {
         report.cleanup.job = "failed_or_identity_unverified";
-        if (executeAttempted && report.cleanup.execution !== "deleted") report.cleanup.execution = "failed_or_identity_unverified";
+        if (executeAttempted) report.cleanup.execution = "failed_or_identity_unverified";
         failure ??= "cleanup_failed";
       }
     } else if (createAttempted) {

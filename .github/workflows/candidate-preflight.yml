@@ -108,6 +108,37 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Native regressions and WASM compilation have no artifact dependency. Keep
+  # every regression, but let both source-bound leaves start immediately.
+  candidate-rust:
+    if: needs.candidate-source.outputs.full_gate == 'false'
+    needs: candidate-source
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bind trusted native regression source
+        shell: powershell
+        run: |
+          if ((& git rev-parse HEAD).Trim() -ne $env:GITHUB_SHA) { throw 'Candidate source mismatch' }
+          . ./scripts/lib/clearra-path-helpers.ps1
+          . ./scripts/lib/clearra-execution-surface.ps1
+          Assert-ClearraTrustedExecutionSurface -TaskName 'CandidateRustWasm' -ExecutionSurface Trusted -RuntimeEnvironment windows
+      - name: Check fixed native regression boundaries
+        run: node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/candidate-preflight-regressions.test.mjs
+      - name: Run fixed current-regression selections without the full workspace suite
+        run: node scripts/release/candidate-preflight-regressions.mjs
+
   candidate-rust-wasm:
     if: needs.candidate-source.outputs.full_gate == 'false'
     needs: candidate-source
@@ -145,9 +176,6 @@ jobs:
       - name: Check non-publishing focused feedback boundaries
         id: boundaries
         run: node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/candidate-preflight-regressions.test.mjs scripts/release/candidate-preflight-artifacts.test.mjs
-      - name: Run fixed current-regression selections without the full workspace suite
-        id: regressions
-        run: node scripts/release/candidate-preflight-regressions.mjs
       - name: Build source-bound WASM once for independent unqualified feedback
         id: wasm_build
         if: ${{ !cancelled() && steps.toolchains.outcome == 'success' && steps.boundaries.outcome == 'success' }}
@@ -195,6 +223,7 @@ jobs:
           node scripts/release/validate-release-metadata.mjs --tag v0.8.0
           node scripts/tools/validate-release-cli-smokes.mjs
       - name: Compile candidate CLI
+        id: compile
         # Fail on the real transitive import graph before spending time compiling Rust.
         # This job intentionally has no npm install or document-codec build.
         run: |
@@ -223,6 +252,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - name: Publish unqualified development binary
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: unqualified-candidate-cli-${{ github.sha }}
@@ -260,32 +290,6 @@ jobs:
         env:
           CLEARRA_CTK3_PARALLEL_WORKERS: "2"
         run: cargo test --locked --release --package clearra-wasm --test pc_minimals_ctk3_stage_probe ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe -- --exact --ignored --nocapture
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - name: Check out the pinned external reference outside product source
-        uses: actions/checkout@v4
-        with:
-          repository: Qnia28/sfinder_wasm
-          ref: 03b637730c5b541f4f2934be613498fbe65327fd
-          path: _local/qnia-cpsat-reference-03b6377
-          persist-credentials: false
-      - name: Compare Qnia CP-SAT on the same Jstris coverage matrix
-        timeout-minutes: 5
-        run: |
-          node --test scripts/tools/benchmark-qnia-cpsat.test.mjs
-          node scripts/tools/benchmark-qnia-cpsat.mjs \
-            --reference _local/qnia-cpsat-reference-03b6377 \
-            --matrix _local/exact-cover-fixtures/63de33e1d86077c179a38f6311df893ba9abcc13c9b18fa433384f5961eeee91.json \
-            --source-commit "$GITHUB_SHA" --output "$RUNNER_TEMP/qnia-jstris-cardinality.json"
-      - name: Preserve external comparison without release authority
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: unqualified-qnia-jstris-${{ github.sha }}-run-${{ github.run_id }}
-          path: ${{ runner.temp }}/qnia-jstris-cardinality.json
-          if-no-files-found: warn
-          retention-days: 7
       - name: Preserve source-only comparison matrix
         if: always()
         uses: actions/upload-artifact@v4

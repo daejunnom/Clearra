@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  benchmarkCloudCliParity, PARITY_FIXTURES, PARITY_SCHEMA, validateParityResult,
+  benchmarkCloudCliParity, diagnosticFailureReport, PARITY_FIXTURES, PARITY_SCHEMA, validateParityResult,
 } from "../scripts/benchmark-cloud-cli-parity.mjs";
 import { prepareClearraArguments } from "../src/clearra/command.mjs";
 import {
@@ -243,6 +243,42 @@ test("CPU oversubscription and post-run binary replacement are rejected, timing 
   assert.equal(report.status, "passed");
   assert.ok(report.fixtures.every((fixture) => fixture.medians_ms.direct_process_ms >= 40_000));
   assert.equal(report.performance_threshold_applied, false);
+});
+
+test("a late CLI failure retains completed evidence and only allow-listed failure metadata", async () => {
+  const mock = mocks((output, _payload, index) => {
+    if (index !== 8) return;
+    output.exitCode = 2;
+    output.stdout = JSON.stringify({ error: { code: "E_PC_SEARCH_INTERNAL", message: "PRIVATE MESSAGE" } });
+    output.stderr = "PRIVATE INPUT OR TOKEN";
+  });
+  let failure;
+  try { await benchmarkCloudCliParity(options, mock.dependencies); } catch (error) { failure = error; }
+  const report = diagnosticFailureReport(failure);
+  assert.equal(report.status, "failed");
+  assert.equal(report.code, "cli_not_successful");
+  assert.equal(report.completed_fixtures.length, 1);
+  assert.equal(report.context.fixture_id, PARITY_FIXTURES[1].id);
+  assert.equal(report.context.route, "direct");
+  assert.equal(report.samples.at(-1).cli_error_code, "E_PC_SEARCH_INTERNAL");
+  assert.equal(report.samples.at(-1).exit_code, 2);
+  assert.equal(mock.spawns.length, 9, "do not run a second arm after the first has failed");
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE|synthetic|canonical-key|--patterns/u);
+  assert.equal(diagnosticFailureReport(new Error("PRIVATE")).code, "diagnostic_failed");
+});
+
+test("unrecognized error codes and error messages are never copied into diagnostic artifacts", async () => {
+  const mock = mocks((output) => {
+    output.exitCode = 2;
+    output.stdout = JSON.stringify({ error: { code: "E_PRIVATE_DATA", message: "PRIVATE" } });
+    output.stderr = "E_PRIVATE_DATA: PRIVATE";
+  });
+  await assert.rejects(benchmarkCloudCliParity(options, mock.dependencies), (error) => {
+    const report = diagnosticFailureReport(error);
+    assert.equal(report.samples[0].cli_error_code, null);
+    assert.doesNotMatch(JSON.stringify(report), /PRIVATE/u);
+    return true;
+  });
 });
 
 test("script emits only bounded reports, rejects native Windows invocation and has no remote/deploy hook", async () => {

@@ -152,14 +152,14 @@ test("create uses same immutable image, closed nonsecret args, CPU8 and no servi
   assert.throws(() => parityJobAuthority({ ...options, imageDigest: "mutable:latest" }));
 });
 
-test("success validates fresh parent/execution binding and deletes only the exact two resources", async () => {
+test("success validates parent/execution ownership and deletes the parent without additional IAM", async () => {
   await withOutput(async (output) => {
     const { calls, dependencies } = mockCloud();
     const result = await benchmarkCliParity({ ...options, output }, dependencies);
     assert.equal(result.schema_id, PARITY_JOB_SCHEMA);
     assert.equal(result.status, "passed");
     assert.equal(result.release_authority, false);
-    assert.deepEqual(result.cleanup, { job: "deleted", execution: "deleted" });
+    assert.deepEqual(result.cleanup, { job: "deleted", execution: "owned-parent-deleted" });
     assert.equal(result.execution_elapsed_ms, 300_000);
     assert.equal(result.diagnostic.fixtures[0].service_to_direct_process_ratio, 1.1);
     assert.equal(result.diagnostic.fixtures[0].warm_job_overhead_ms, 2);
@@ -167,9 +167,9 @@ test("success validates fresh parent/execution binding and deletes only the exac
     assert.equal(result.diagnostic.warnings.length, 3);
     assert.deepEqual(JSON.parse(await readFile(output, "utf8")), result);
     const deletes = calls.filter((args) => args.includes("delete"));
-    assert.equal(deletes.length, 2);
-    assert.equal(deletes[0][4], executionName);
-    assert.equal(deletes[1][3], a.jobName);
+    assert.equal(deletes.length, 1);
+    assert.equal(deletes[0][3], a.jobName);
+    assert.ok(!deletes.some((args) => args.includes("executions")));
     assert.equal(calls.filter((args) => args[2] === "execute").length, 1);
     assert.ok(calls.filter((args) => args[1] === "services" || args[1] === "revisions").every((args) => args[2] === "describe"));
     assert.ok(calls.filter((args) => args[2] === "logs").every((args) =>
@@ -197,7 +197,7 @@ test("isolated image diagnostic never reads or mutates a production service and 
     assert.equal(result.release_authority, false);
     assert.equal(result.zero_traffic_verified, undefined);
     assert.equal(result.candidate_before, undefined);
-    assert.deepEqual(result.cleanup, { job: "deleted", execution: "deleted" });
+    assert.deepEqual(result.cleanup, { job: "deleted", execution: "owned-parent-deleted" });
     assert.ok(cloud.calls.every((args) => args[0] === "run" && args[1] === "jobs"));
   });
 });
@@ -242,8 +242,8 @@ test("create collision or ambiguous failure never adopts/deletes a preexisting J
 
 test("failed execution discovers its one exact parent-bound execution and cleans both", async () => {
   await failedRun({ executeFailure: true }, "job_execute_failed", (report, calls) => {
-    assert.deepEqual(report.cleanup, { job: "deleted", execution: "deleted" });
-    assert.equal(calls.filter((args) => args.includes("delete")).length, 2);
+    assert.deepEqual(report.cleanup, { job: "deleted", execution: "owned-parent-deleted" });
+    assert.equal(calls.filter((args) => args.includes("delete")).length, 1);
     assert.equal(report.diagnostic, undefined);
   });
 });

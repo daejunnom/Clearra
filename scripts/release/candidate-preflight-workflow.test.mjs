@@ -22,7 +22,7 @@ function assertIsolated(source) {
   assert.match(source, /if: github\.ref == 'refs\/heads\/codex\/v0\.8\.0-preflight-20260906-rng' && github\.ref_type == 'branch'/u);
   assert.match(source, /\[\[ "\$GITHUB_REF" == 'refs\/heads\/codex\/v0\.8\.0-preflight-20260906-rng'/u);
   assert.match(source, /\[\[ "\$\(git rev-parse HEAD\)" == "\$GITHUB_SHA" \]\]/u);
-  for (const job of ['candidate-full-gate', 'candidate-rust-wasm', 'candidate-cli', 'candidate-minimum-diagnostic', 'candidate-ui']) {
+  for (const job of ['candidate-full-gate', 'candidate-rust', 'candidate-rust-wasm', 'candidate-cli', 'candidate-minimum-diagnostic', 'candidate-ui']) {
     const tail = source.slice(source.indexOf(`  ${job}:`) + `  ${job}:`.length).split(/^  [a-z][a-z-]*:/mu)[0];
     assert.match(tail, /needs: candidate-source/u, job);
     assert.match(tail, /if: needs\.candidate-source\.outputs\.full_gate == '(?:true|false)'/u, job);
@@ -53,7 +53,7 @@ test('full selection runs the unchanged eight-stage entry point once and skips l
   assert.equal((workflow.match(/-Task ReleaseAcceptance -ReleaseAcceptanceShard Full/gmu) ?? []).length, 1);
   assert.match(workflow, /push\) echo 'full_gate=false'/u);
   assert.match(workflow, /full_gate:[\s\S]*default: true[\s\S]*type: boolean/u);
-  assert.equal((workflow.match(/outputs\.full_gate == 'false'/gu) ?? []).length, 4);
+  assert.equal((workflow.match(/outputs\.full_gate == 'false'/gu) ?? []).length, 5);
   assert.match(workflow, /runs-on: windows-latest/u);
   assert.match(workflow, /-ExecutionSurface Trusted -RuntimeEnvironment windows/u);
   assert.match(workflow, /RUST_MIN_STACK: "16777216"/u);
@@ -68,7 +68,7 @@ test('focused Rust/WASM feedback is not another full gate and builds one indepen
   assert.match(job, /Assert-ClearraTrustedExecutionSurface -TaskName 'CandidateRustWasm' -ExecutionSurface Trusted -RuntimeEnvironment windows/u);
   assert.match(job, /\. \.\/scripts\/lib\/clearra-path-helpers\.ps1/u);
   assert.match(job, /git rev-parse HEAD\)\.Trim\(\) -ne \$env:GITHUB_SHA/u);
-  assert.match(job, /run: node scripts\/release\/candidate-preflight-regressions\.mjs/u);
+  assert.doesNotMatch(job, /run: node scripts\/release\/candidate-preflight-regressions\.mjs/u);
   assert.doesNotMatch(job, /-Task ReleaseAcceptance|--workspace|--all-targets|--verify|--benchmark/u);
   assert.equal((job.match(/node scripts\/tools\/build-clearra-wasm\.mjs --environment native --destination \$candidateWasmBuild/gu) ?? []).length, 1);
   assert.match(job, /Join-Path \$env:RUNNER_TEMP 'clearra-candidate-wasm-built'/u);
@@ -76,6 +76,15 @@ test('focused Rust/WASM feedback is not another full gate and builds one indepen
   assert.match(job, /!cancelled\(\) && steps\.wasm_build\.outcome == 'success'/u);
   assert.match(job, /if: always\(\) && steps\.candidate_wasm\.outputs\.ready == 'true'/u);
   assert.doesNotMatch(job, /continue-on-error:|actions\/cache|download-artifact/u);
+});
+
+test('native regressions and WASM are sibling leaves, not a serial critical path', () => {
+  const job = workflow.split('  candidate-rust:')[1].split('  candidate-rust-wasm:')[0];
+  assert.match(job, /needs: candidate-source/u);
+  assert.match(job, /Assert-ClearraTrustedExecutionSurface/u);
+  assert.match(job, /run: node scripts\/release\/candidate-preflight-regressions\.mjs/u);
+  assert.doesNotMatch(job, /npm ci|wasm-bindgen|rustup target|build-clearra-wasm|candidate-rust-wasm|continue-on-error/u);
+  assert.equal((workflow.match(/run: node scripts\/release\/candidate-preflight-regressions\.mjs/gu) ?? []).length, 1);
 });
 
 test('source identity is paired and WASM is uploaded only after independent five-file verification', () => {
@@ -100,10 +109,7 @@ test('Jstris diagnostic is bounded, same-binary and separate from release or GUI
   assert.match(job, /Cross-check warm seed on two compute workers[\s\S]*CLEARRA_CTK3_PARALLEL_WORKERS: "2"/u);
   assert.doesNotMatch(job, /continue-on-error:|--workspace|--all-targets|--no-default-features|--features|-Task ReleaseAcceptance/u);
   assert.match(job, /name: unqualified-jstris-matrix-/u);
-  assert.match(job, /repository: Qnia28\/sfinder_wasm/u);
-  assert.match(job, /ref: 03b637730c5b541f4f2934be613498fbe65327fd/u);
-  assert.match(job, /node scripts\/tools\/benchmark-qnia-cpsat.mjs/u);
-  assert.match(job, /name: unqualified-qnia-jstris-/u);
+  assert.doesNotMatch(workflow, /repository: Qnia28|benchmark-qnia|unqualified-qnia|qnia-cpsat-reference/u);
 });
 
 test('candidate CLI compares actual direct and Discord paths with one release binary and no Cloud mutation', () => {
@@ -119,6 +125,7 @@ test('candidate CLI compares actual direct and Discord paths with one release bi
   assert.match(job, /--executable "\$GITHUB_WORKSPACE\/target\/release\/clearra"/u);
   assert.match(job, /--source-commit "\$GITHUB_SHA" --cpus "\$cpus" --workers "\$cpus"/u);
   assert.match(job, /if: always\(\)[\s\S]*name: unqualified-cli-parity-/u);
+  assert.match(job, /steps\.compile\.outcome == 'success'/u);
   assert.doesNotMatch(job, /target\/debug|continue-on-error:|\bgcloud\b|--workspace|ReleaseAcceptance/u);
 });
 
