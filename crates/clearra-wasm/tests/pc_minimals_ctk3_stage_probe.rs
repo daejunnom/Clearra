@@ -526,16 +526,81 @@ fn write_ctk3_diagnostic_matrix(matrix: &Ctk3DiagnosticMatrix) {
 #[test]
 #[ignore = "explicit Jstris 180 residual warm-seed first-canonical A/B probe"]
 fn ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe() {
-    use clearra_coverage::cover::exact_minimum_cover::set_diagnostic_residual_warm_seed;
+    run_jstris_first_canonical_ab(
+        JstrisMinimumExperiment::WarmSeed,
+        "ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe",
+        "CLEARRA_CTK3_JSTRIS_WARM_AB_CHILD",
+    );
+}
 
-    const TEST_NAME: &str = "ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe";
-    const CHILD_ENV: &str = "CLEARRA_CTK3_JSTRIS_WARM_AB_CHILD";
+#[test]
+#[ignore = "explicit Jstris 180 cached pivot exhaustion first-canonical A/B probe"]
+fn ctk3_jstris_180_cached_pivot_exhaustion_first_canonical_ab_probe() {
+    run_jstris_first_canonical_ab(
+        JstrisMinimumExperiment::CachedPivotExhaustion,
+        "ctk3_jstris_180_cached_pivot_exhaustion_first_canonical_ab_probe",
+        "CLEARRA_CTK3_JSTRIS_PIVOT_AB_CHILD",
+    );
+}
+
+#[derive(Clone, Copy)]
+enum JstrisMinimumExperiment {
+    WarmSeed,
+    CachedPivotExhaustion,
+}
+
+impl JstrisMinimumExperiment {
+    fn phase(self, stage: &str) -> String {
+        let name = match self {
+            Self::WarmSeed => "warm_seed",
+            Self::CachedPivotExhaustion => "cached_pivot_exhaustion",
+        };
+        format!("jstris_{name}_ab_{stage}")
+    }
+
+    fn switches(self, enabled: bool) -> (bool, bool) {
+        match self {
+            Self::WarmSeed => (enabled, false),
+            Self::CachedPivotExhaustion => (false, enabled),
+        }
+    }
+}
+
+#[test]
+fn ctk3_diagnostic_minimum_experiments_keep_warm_and_pivot_orthogonal() {
+    assert_eq!(
+        JstrisMinimumExperiment::WarmSeed.switches(false),
+        (false, false),
+    );
+    assert_eq!(
+        JstrisMinimumExperiment::WarmSeed.switches(true),
+        (true, false),
+    );
+    assert_eq!(
+        JstrisMinimumExperiment::CachedPivotExhaustion.switches(false),
+        (false, false),
+    );
+    assert_eq!(
+        JstrisMinimumExperiment::CachedPivotExhaustion.switches(true),
+        (false, true),
+    );
+}
+
+fn run_jstris_first_canonical_ab(
+    experiment: JstrisMinimumExperiment,
+    test_name: &str,
+    child_env: &str,
+) {
+    use clearra_coverage::cover::exact_minimum_cover::{
+        set_diagnostic_cached_pivot_exhaustion, set_diagnostic_residual_warm_seed,
+    };
+
     const PROCESS_DEADLINE: Duration = Duration::from_secs(240);
-    if env::var(CHILD_ENV).ok().as_deref() != Some(TEST_NAME) {
+    if env::var(child_env).ok().as_deref() != Some(test_name) {
         let mut command = Command::new(env::current_exe().expect("current Jstris A/B executable"));
         command
-            .args(["--exact", TEST_NAME, "--ignored", "--nocapture"])
-            .env(CHILD_ENV, TEST_NAME)
+            .args(["--exact", test_name, "--ignored", "--nocapture"])
+            .env(child_env, test_name)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -565,14 +630,16 @@ fn ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe() {
         }
     }
 
-    struct ResetWarmSeed;
-    impl Drop for ResetWarmSeed {
+    struct ResetExperiments;
+    impl Drop for ResetExperiments {
         fn drop(&mut self) {
             set_diagnostic_residual_warm_seed(false);
+            set_diagnostic_cached_pivot_exhaustion(false);
         }
     }
-    let _reset_warm_seed = ResetWarmSeed;
+    let _reset_experiments = ResetExperiments;
     set_diagnostic_residual_warm_seed(false);
+    set_diagnostic_cached_pivot_exhaustion(false);
     let source_command = format!("{SOURCE_COMMAND} --rule jstris-180");
     let matrix = prepare_ctk3_diagnostic_matrix(&source_command, "jstris-180", None);
     let solver_input_started = Instant::now();
@@ -593,7 +660,7 @@ fn ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe() {
     eprintln!(
         "{}",
         serde_json::json!({
-            "phase": "jstris_warm_seed_ab_source",
+            "phase": experiment.phase("source"),
             "source_command": source_command,
             "source_elapsed_ms": matrix.artifact["source_elapsed_ms"],
             "solver_input_prepare_ms": solver_input_prepare_ms,
@@ -612,8 +679,8 @@ fn ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe() {
             "native_probe_is_product_acceptance": false,
         })
     );
-    let baseline = run_jstris_warm_seed_arm(&matrix, &solver_input, workers, false);
-    let candidate = run_jstris_warm_seed_arm(&matrix, &solver_input, workers, true);
+    let baseline = run_jstris_minimum_arm(&matrix, &solver_input, workers, experiment, false);
+    let candidate = run_jstris_minimum_arm(&matrix, &solver_input, workers, experiment, true);
     assert_eq!(
         candidate.minimum, baseline.minimum,
         "exact minimum differs between arms"
@@ -625,7 +692,7 @@ fn ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe() {
     eprintln!(
         "{}",
         serde_json::json!({
-            "phase": "jstris_warm_seed_ab_comparison",
+            "phase": experiment.phase("comparison"),
             "complete": true,
             "optimal_cardinality": baseline.minimum,
             "same_first_canonical": true,
@@ -732,7 +799,7 @@ fn diagnostic_three_row_order_fixture() -> Ctk3DiagnosticMatrix {
     }
 }
 
-struct JstrisWarmSeedArm {
+struct JstrisMinimumArm {
     minimum: usize,
     canonical_rows: Vec<usize>,
     proof_ms: u128,
@@ -740,13 +807,16 @@ struct JstrisWarmSeedArm {
     total_ms: u128,
 }
 
-fn run_jstris_warm_seed_arm(
+fn run_jstris_minimum_arm(
     matrix: &Ctk3DiagnosticMatrix,
     solver_input: &Ctk3NormalizedSolverInput,
     workers: usize,
-    warm_seed: bool,
-) -> JstrisWarmSeedArm {
-    use clearra_coverage::cover::exact_minimum_cover::set_diagnostic_residual_warm_seed;
+    experiment: JstrisMinimumExperiment,
+    enabled: bool,
+) -> JstrisMinimumArm {
+    use clearra_coverage::cover::exact_minimum_cover::{
+        set_diagnostic_cached_pivot_exhaustion, set_diagnostic_residual_warm_seed,
+    };
     use clearra_coverage::cover::{
         ExactMinimumCoverPortfolioPreparationAdvance, ExactMinimumCoverPortfolioPreparationSession,
     };
@@ -754,7 +824,9 @@ fn run_jstris_warm_seed_arm(
 
     // Set before creating any workspace or child thread. The previous arm's
     // complete physical drain is guaranteed by the scoped wave scheduler.
+    let (warm_seed, pivot_exhaustion) = experiment.switches(enabled);
     set_diagnostic_residual_warm_seed(warm_seed);
+    set_diagnostic_cached_pivot_exhaustion(pivot_exhaustion);
     let started = Instant::now();
     let deadline = started + Duration::from_secs(90);
     let phase_identity = |phase: &[u8]| -> [u8; 32] {
@@ -775,7 +847,7 @@ fn run_jstris_warm_seed_arm(
     let (minimum, mut enumerator) = loop {
         assert!(
             Instant::now() < deadline,
-            "Jstris warm-seed arm incomplete at proof deadline"
+            "Jstris experiment arm incomplete at proof deadline"
         );
         if let Some(query) = proof
             .parallel_query()
@@ -796,7 +868,8 @@ fn run_jstris_warm_seed_arm(
             eprintln!(
                 "{}",
                 serde_json::json!({
-                    "phase": "jstris_warm_seed_ab_proof_wave", "warm_seed": warm_seed,
+                    "phase": experiment.phase("proof_wave"), "warm_seed": warm_seed,
+                    "cached_pivot_exhaustion": pivot_exhaustion,
                     "wave": waves, "limit": limit, "tasks": tasks,
                     "elapsed_ms": wave_started.elapsed().as_millis(),
                 })
@@ -832,7 +905,7 @@ fn run_jstris_warm_seed_arm(
     let canonical_rows = loop {
         assert!(
             Instant::now() < deadline,
-            "Jstris warm-seed arm incomplete at canonical deadline"
+            "Jstris experiment arm incomplete at canonical deadline"
         );
         if let Some(query) = enumerator
             .parallel_query()
@@ -853,7 +926,8 @@ fn run_jstris_warm_seed_arm(
             eprintln!(
                 "{}",
                 serde_json::json!({
-                    "phase": "jstris_warm_seed_ab_canonical_wave", "warm_seed": warm_seed,
+                    "phase": experiment.phase("canonical_wave"), "warm_seed": warm_seed,
+                    "cached_pivot_exhaustion": pivot_exhaustion,
                     "wave": waves, "limit": limit, "tasks": tasks,
                     "elapsed_ms": wave_started.elapsed().as_millis(),
                 })
@@ -879,7 +953,7 @@ fn run_jstris_warm_seed_arm(
         Instant::now() < deadline,
         "Jstris arm completed outside its fixture deadline"
     );
-    let result = JstrisWarmSeedArm {
+    let result = JstrisMinimumArm {
         minimum,
         canonical_rows,
         proof_ms,
@@ -889,7 +963,8 @@ fn run_jstris_warm_seed_arm(
     eprintln!(
         "{}",
         serde_json::json!({
-            "phase": "jstris_warm_seed_ab_arm", "warm_seed": warm_seed, "complete": true,
+            "phase": experiment.phase("arm"), "warm_seed": warm_seed, "complete": true,
+            "cached_pivot_exhaustion": pivot_exhaustion,
             "optimal_cardinality": result.minimum,
             "canonical_candidate_ids": result.canonical_rows.iter().map(|&row| row + 1).collect::<Vec<_>>(),
             "source_rows": result.canonical_rows.iter().map(|&row| solver_input.source_ordinals[row]).collect::<Vec<_>>(),

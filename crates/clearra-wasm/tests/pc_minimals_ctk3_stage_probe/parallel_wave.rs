@@ -11,7 +11,9 @@ use std::{
     time::Instant,
 };
 
-use clearra_coverage::cover::exact_minimum_cover::ExactMinimumCoverHotCostDiagnostics;
+use clearra_coverage::cover::exact_minimum_cover::{
+    ExactMinimumCoverHotCostDiagnostics, ExactMinimumCoverPivotExhaustionDiagnostics,
+};
 use clearra_coverage::cover::{
     ExactAtMostQuery, ExactAtMostQueryIdentity, ExactAtMostReceipt, ExactAtMostShardAdvance,
     ExactAtMostShardSession, ExactAtMostTask, ExactMinimumCoverPortfolioEnumerator,
@@ -64,6 +66,7 @@ struct Finished {
     exact_prunes: u64,
     cache_prunes: u64,
     hot_cost: Option<ExactMinimumCoverHotCostDiagnostics>,
+    pivot_exhaustion: Option<ExactMinimumCoverPivotExhaustionDiagnostics>,
 }
 
 #[derive(Default)]
@@ -146,12 +149,16 @@ pub(super) fn run_until(
                     .unwrap();
                     let mut last_residual = shard.diagnostic_residual_progress();
                     let mut last_hot_cost = shard.diagnostic_hot_cost();
+                    let mut last_pivot_exhaustion = shard.diagnostic_cached_pivot_exhaustion();
                     loop {
                         if let Some(current) = shard.diagnostic_residual_progress() {
                             last_residual = Some(current);
                         }
                         if let Some(current) = shard.diagnostic_hot_cost() {
                             last_hot_cost = Some(current);
+                        }
+                        if let Some(current) = shard.diagnostic_cached_pivot_exhaustion() {
+                            last_pivot_exhaustion = Some(current);
                         }
                         match shard
                             .advance(128, &mut |_| Ok(()), &mut || {
@@ -186,6 +193,7 @@ pub(super) fn run_until(
                                         exact_prunes,
                                         cache_prunes,
                                         hot_cost: last_hot_cost,
+                                        pivot_exhaustion: last_pivot_exhaustion,
                                     })
                                     .unwrap();
                                 break;
@@ -206,6 +214,9 @@ pub(super) fn run_until(
         let mut exact_prunes = 0;
         let mut cache_prunes = 0;
         let mut hot_cost = HotCostTotals::default();
+        let mut pivot_samples = 0_usize;
+        let mut pivot_unavailable = 0_usize;
+        let mut pivot_totals = ExactMinimumCoverPivotExhaustionDiagnostics::default();
         loop {
             // Source issuance occurs only after a worker is ready. Closed-root
             // cancellation follows accepted exact receipts, never host guesses.
@@ -250,6 +261,23 @@ pub(super) fn run_until(
             if let Some(sample) = done.hot_cost {
                 hot_cost.add(sample);
             }
+            if let Some(sample) = done.pivot_exhaustion {
+                pivot_samples += 1;
+                pivot_totals.assessments = pivot_totals
+                    .assessments
+                    .checked_add(sample.assessments)
+                    .unwrap();
+                pivot_totals.examined_rows = pivot_totals
+                    .examined_rows
+                    .checked_add(sample.examined_rows)
+                    .unwrap();
+                pivot_totals.pruned_nodes = pivot_totals
+                    .pruned_nodes
+                    .checked_add(sample.pruned_nodes)
+                    .unwrap();
+            } else {
+                pivot_unavailable += 1;
+            }
             for (_, stop, active) in &workers_state {
                 if active.is_some_and(|partition| owner.redundant(query.identity(), partition))
                     && !stop.swap(true, Ordering::Relaxed)
@@ -262,6 +290,23 @@ pub(super) fn run_until(
         // proves complete physical drain before the next query is published.
         drop(workers_state);
         assert!(tasks > 0, "pending oracle must have an exact frontier");
+        // None is explicitly unavailable, never converted into a zero sample.
+        // These totals omit terminal-advance work and cannot establish that a
+        // zero sampled prune count means no pruning occurred in the wave.
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "phase": "parallel_wave_cached_pivot_exhaustion",
+                "query": query.identity().query_id,
+                "limit": query.limit(),
+                "sampled_shards": pivot_samples,
+                "unavailable_shards": pivot_unavailable,
+                "terminal_advance_included": false,
+                "sampled_assessments": (pivot_samples != 0).then_some(pivot_totals.assessments),
+                "sampled_examined_rows": (pivot_samples != 0).then_some(pivot_totals.examined_rows),
+                "sampled_pruned_nodes": (pivot_samples != 0).then_some(pivot_totals.pruned_nodes),
+            })
+        );
         eprintln!(
             "{{\"phase\":\"parallel_wave_load\",\"tasks\":{tasks},\"workers\":{workers},\"assistance\":{assistance},\"assisted_groups\":{assisted_groups},\"selective_cancellations\":{selective_cancellations},\"elapsed_ms\":{},\"summed_task_ms\":{},\"maximum_task_ms\":{},\"sampled_proposal_iterations\":{proposal_iterations},\"sampled_exact_prunes\":{exact_prunes},\"sampled_cache_prunes\":{cache_prunes}}}",
             wave_started.elapsed().as_millis(),

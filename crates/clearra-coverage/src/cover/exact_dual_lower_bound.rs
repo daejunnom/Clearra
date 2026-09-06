@@ -10,7 +10,9 @@
 use super::exact_minimum_cover::ExactMinimumCoverError;
 
 #[cfg(any(test, feature = "diagnostic-probes"))]
-use super::exact_minimum_cover::ExactMinimumCoverWarmSeedDiagnostics;
+use super::exact_minimum_cover::{
+    ExactMinimumCoverPivotExhaustionDiagnostics, ExactMinimumCoverWarmSeedDiagnostics,
+};
 
 #[cfg(feature = "diagnostic-probes")]
 static DIAGNOSTIC_RESIDUAL_WARM_SEED: std::sync::atomic::AtomicBool =
@@ -19,6 +21,15 @@ static DIAGNOSTIC_RESIDUAL_WARM_SEED: std::sync::atomic::AtomicBool =
 #[cfg(feature = "diagnostic-probes")]
 pub(super) fn set_diagnostic_residual_warm_seed(enabled: bool) {
     DIAGNOSTIC_RESIDUAL_WARM_SEED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(feature = "diagnostic-probes")]
+static DIAGNOSTIC_CACHED_PIVOT_EXHAUSTION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "diagnostic-probes")]
+pub(super) fn set_diagnostic_cached_pivot_exhaustion(enabled: bool) {
+    DIAGNOSTIC_CACHED_PIVOT_EXHAUSTION.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(feature = "diagnostic-probes")]
@@ -91,6 +102,17 @@ pub(super) struct ResidualDualHotCostDiagnostics {
 pub(super) struct CertifiedResidualDual {
     patterns: Vec<usize>,
     weights: Vec<u128>,
+    denominator: u128,
+}
+
+/// Valid only while the just-recertified row-load scratch and residual inputs
+/// are unchanged. This value never survives a call or carries sibling authority.
+#[derive(Clone, Copy, Debug)]
+struct CachedResidualAssessment {
+    bound: usize,
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    numerator: u128,
+    #[cfg(any(test, feature = "diagnostic-probes"))]
     denominator: u128,
 }
 
@@ -381,6 +403,10 @@ pub(super) struct DualProposalWorkspace {
     diagnostic_warm_seed_enabled: bool,
     #[cfg(any(test, feature = "diagnostic-probes"))]
     diagnostic_warm_seed: ExactMinimumCoverWarmSeedDiagnostics,
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    diagnostic_pivot_exhaustion_enabled: bool,
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    diagnostic_pivot_exhaustion: ExactMinimumCoverPivotExhaustionDiagnostics,
     #[cfg(feature = "diagnostic-probes")]
     diagnostic_hot_cost: ResidualDualHotCostDiagnostics,
     #[cfg(feature = "diagnostic-probes")]
@@ -440,6 +466,10 @@ impl Clone for DualProposalWorkspace {
             diagnostic_warm_seed_enabled: self.diagnostic_warm_seed_enabled,
             #[cfg(any(test, feature = "diagnostic-probes"))]
             diagnostic_warm_seed: self.diagnostic_warm_seed,
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            diagnostic_pivot_exhaustion_enabled: self.diagnostic_pivot_exhaustion_enabled,
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            diagnostic_pivot_exhaustion: self.diagnostic_pivot_exhaustion,
             #[cfg(feature = "diagnostic-probes")]
             diagnostic_hot_cost: self.diagnostic_hot_cost,
             #[cfg(feature = "diagnostic-probes")]
@@ -602,6 +632,13 @@ impl DualProposalWorkspace {
             #[cfg(any(test, feature = "diagnostic-probes"))]
             diagnostic_warm_seed: ExactMinimumCoverWarmSeedDiagnostics::default(),
             #[cfg(feature = "diagnostic-probes")]
+            diagnostic_pivot_exhaustion_enabled: DIAGNOSTIC_CACHED_PIVOT_EXHAUSTION
+                .load(std::sync::atomic::Ordering::Relaxed),
+            #[cfg(all(test, not(feature = "diagnostic-probes")))]
+            diagnostic_pivot_exhaustion_enabled: false,
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            diagnostic_pivot_exhaustion: ExactMinimumCoverPivotExhaustionDiagnostics::default(),
+            #[cfg(feature = "diagnostic-probes")]
             diagnostic_hot_cost: ResidualDualHotCostDiagnostics::default(),
             #[cfg(feature = "diagnostic-probes")]
             diagnostic_sparse_proposal_softmax: true,
@@ -619,6 +656,19 @@ impl DualProposalWorkspace {
     #[cfg(any(test, feature = "diagnostic-probes"))]
     pub(super) const fn diagnostic_warm_seed(&self) -> ExactMinimumCoverWarmSeedDiagnostics {
         self.diagnostic_warm_seed
+    }
+
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    pub(super) const fn diagnostic_pivot_exhaustion(
+        &self,
+    ) -> ExactMinimumCoverPivotExhaustionDiagnostics {
+        self.diagnostic_pivot_exhaustion
+    }
+
+    #[cfg(test)]
+    pub(super) fn enable_pivot_exhaustion_for_test(&mut self) {
+        self.diagnostic_warm_seed_enabled = false;
+        self.diagnostic_pivot_exhaustion_enabled = true;
     }
 
     #[cfg(feature = "diagnostic-probes")]
@@ -755,8 +805,11 @@ impl DualProposalWorkspace {
         excluded_row_words: &[u64],
         row_limit: usize,
         iteration_limit: usize,
+        pivot: usize,
     ) -> Option<usize> {
-        if iteration_limit >= MIRROR_PROX_ITERATIONS {
+        if iteration_limit >= MIRROR_PROX_ITERATIONS
+            && (!self.diagnostic_pivot_exhaustion_enabled || self.diagnostic_warm_seed_enabled)
+        {
             return self.certified_residual_lower_bound(
                 support_by_pattern,
                 target_words,
@@ -766,7 +819,7 @@ impl DualProposalWorkspace {
                 row_limit,
             );
         }
-        self.certified_residual_lower_bound_inner_with_iteration_limit(
+        self.certified_residual_lower_bound_with_pivot(
             support_by_pattern,
             target_words,
             covered_words,
@@ -774,7 +827,8 @@ impl DualProposalWorkspace {
             excluded_row_words,
             row_limit,
             true,
-            iteration_limit,
+            iteration_limit.min(MIRROR_PROX_ITERATIONS),
+            Some(pivot),
         )
     }
 
@@ -813,19 +867,77 @@ impl DualProposalWorkspace {
         enforce_minimum_dimensions: bool,
         iteration_limit: usize,
     ) -> Option<usize> {
+        self.certified_residual_lower_bound_with_pivot(
+            support_by_pattern,
+            target_words,
+            covered_words,
+            selected_rows,
+            excluded_row_words,
+            row_limit,
+            enforce_minimum_dimensions,
+            iteration_limit,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn certified_residual_lower_bound_with_pivot(
+        &mut self,
+        support_by_pattern: &[Vec<usize>],
+        target_words: &[u64],
+        covered_words: &[u64],
+        selected_rows: &[bool],
+        excluded_row_words: &[u64],
+        row_limit: usize,
+        enforce_minimum_dimensions: bool,
+        iteration_limit: usize,
+        _pivot: Option<usize>,
+    ) -> Option<usize> {
         // Root export passes usize::MAX and must still execute its original
         // proposal/certificate path. A weaker cached bound must not replace
         // the existing Mirror-Prox proposal or consume any of its budget.
         if row_limit != usize::MAX {
-            if let Some(bound) = self.recertify_cached_residual_bound(
+            if let Some(assessment) = self.recertify_cached_residual_assessment(
                 support_by_pattern,
                 target_words,
                 covered_words,
                 selected_rows,
                 excluded_row_words,
             ) {
-                if bound > row_limit {
-                    return Some(bound);
+                if assessment.bound > row_limit {
+                    return Some(assessment.bound);
+                }
+                #[cfg(any(test, feature = "diagnostic-probes"))]
+                if self.diagnostic_pivot_exhaustion_enabled && !self.diagnostic_warm_seed_enabled {
+                    if let Some(pivot) = _pivot {
+                        self.diagnostic_pivot_exhaustion.assessments = self
+                            .diagnostic_pivot_exhaustion
+                            .assessments
+                            .saturating_add(1);
+                        if let Some((exhausted, examined)) = self.cached_pivot_exhausted(
+                            &assessment,
+                            support_by_pattern,
+                            target_words,
+                            covered_words,
+                            selected_rows,
+                            excluded_row_words,
+                            row_limit,
+                            pivot,
+                        ) {
+                            self.diagnostic_pivot_exhaustion.examined_rows = self
+                                .diagnostic_pivot_exhaustion
+                                .examined_rows
+                                .saturating_add(examined as u64);
+                            if exhausted {
+                                let bound = row_limit.checked_add(1)?;
+                                self.diagnostic_pivot_exhaustion.pruned_nodes = self
+                                    .diagnostic_pivot_exhaustion
+                                    .pruned_nodes
+                                    .saturating_add(1);
+                                return Some(bound);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1366,14 +1478,14 @@ impl DualProposalWorkspace {
     /// constraints absent from the cache receive zero weight. A malformed
     /// identity, missing support, or arithmetic overflow omits this optional
     /// prune and leaves the ordinary proposal path available.
-    fn recertify_cached_residual_bound(
+    fn recertify_cached_residual_assessment(
         &mut self,
         support_by_pattern: &[Vec<usize>],
         target_words: &[u64],
         covered_words: &[u64],
         selected_rows: &[bool],
         excluded_row_words: &[u64],
-    ) -> Option<usize> {
+    ) -> Option<CachedResidualAssessment> {
         if self.cached_patterns.is_empty()
             || self.cached_patterns.len() != self.cached_weights.len()
             || self.cached_patterns.len() > self.max_constraints
@@ -1447,7 +1559,95 @@ impl DualProposalWorkspace {
         // here would make a previously valid lower bound unsound.
         let denominator =
             CERTIFICATE_SCALE.max(self.exact_row_loads.iter().copied().max().unwrap_or(0));
-        usize::try_from(numerator.div_ceil(denominator)).ok()
+        Some(CachedResidualAssessment {
+            bound: usize::try_from(numerator.div_ceil(denominator)).ok()?,
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            numerator,
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            denominator,
+        })
+    }
+
+    #[cfg(test)]
+    fn recertify_cached_residual_bound(
+        &mut self,
+        support_by_pattern: &[Vec<usize>],
+        target_words: &[u64],
+        covered_words: &[u64],
+        selected_rows: &[bool],
+        excluded_row_words: &[u64],
+    ) -> Option<usize> {
+        self.recertify_cached_residual_assessment(
+            support_by_pattern,
+            target_words,
+            covered_words,
+            selected_rows,
+            excluded_row_words,
+        )
+        .map(|assessment| assessment.bound)
+    }
+
+    /// The same invocation has just certified N and D against every currently
+    /// eligible row, including rows restored after sibling exclusion. Every
+    /// completion must select a supporter of this still-uncovered pivot. Such
+    /// a row r requires N - L(r) <= (k - 1)D. If every eligible supporter fails
+    /// that necessary condition strictly, no completion of at most k exists.
+    ///
+    /// Reuse the certified row-load scratch: no weight scan, allocation, row
+    /// exclusion or branch reorder is introduced. A missing/invalid assessment
+    /// or overflow leaves the ordinary Mirror-Prox/DFS path available. This
+    /// helper is never called after proposal preparation overwrites scratch.
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    #[allow(clippy::too_many_arguments)]
+    fn cached_pivot_exhausted(
+        &self,
+        assessment: &CachedResidualAssessment,
+        support_by_pattern: &[Vec<usize>],
+        target_words: &[u64],
+        covered_words: &[u64],
+        selected_rows: &[bool],
+        excluded_row_words: &[u64],
+        row_limit: usize,
+        pivot: usize,
+    ) -> Option<(bool, usize)> {
+        if row_limit == usize::MAX
+            || assessment.denominator == 0
+            || target_words.len() != covered_words.len()
+            || self.exact_row_loads.len() != selected_rows.len()
+            || excluded_row_words.len() < selected_rows.len().div_ceil(64)
+        {
+            return None;
+        }
+        let pivot_word = pivot / 64;
+        let pivot_bit = 1_u64 << (pivot % 64);
+        if *target_words.get(pivot_word)? & !*covered_words.get(pivot_word)? & pivot_bit == 0 {
+            return None;
+        }
+        let support = support_by_pattern.get(pivot)?;
+        if support.len() > self.max_rows {
+            return None;
+        }
+        let required_load = assessment.numerator.checked_sub(
+            assessment
+                .denominator
+                .checked_mul(row_limit.checked_sub(1)? as u128)?,
+        )?;
+        if required_load == 0 {
+            return Some((false, 0));
+        }
+        let mut examined = 0_usize;
+        for &row in support {
+            if *selected_rows.get(row)? || row_is_excluded(excluded_row_words, row) {
+                continue;
+            }
+            examined = examined.checked_add(1)?;
+            if *self.exact_row_loads.get(row)? >= required_load {
+                return Some((false, examined));
+            }
+        }
+        // Empty support belongs to the existing propagation authority. Do not
+        // turn a malformed or stale pivot into a cache-derived negative proof.
+        (examined != 0).then_some((true, examined))
     }
 
     fn remember_best_certificate(&mut self) {
@@ -2426,6 +2626,380 @@ mod tests {
             evaluated >= 343 * 2,
             "both proposal policies exercise the complete root matrix family"
         );
+    }
+
+    #[test]
+    fn cached_pivot_exhaustion_is_strict_and_skips_mirror_prox_only_when_complete() {
+        // r0 covers a zero-weight mandatory pivot; r1/r2 cover both weighted
+        // constraints. ceil(N/D)=1 is weak, but no single row covers all three.
+        let supports = vec![vec![0], vec![1, 2], vec![1, 2]];
+        let mut off = workspace(3, 3, 5);
+        off.diagnostic_warm_seed_enabled = false;
+        off.diagnostic_pivot_exhaustion_enabled = false;
+        seed_cached_weights(&mut off, &[(1, CERTIFICATE_SCALE), (2, CERTIFICATE_SCALE)]);
+        let mut on = off.clone();
+        on.diagnostic_pivot_exhaustion_enabled = true;
+        let before_heap = on.actual_retained_bytes();
+        let before_iterations = on.remaining_iterations;
+        let run = |state: &mut DualProposalWorkspace| {
+            state.certified_residual_lower_bound_with_pivot(
+                &supports,
+                &[7],
+                &[0],
+                &[false; 3],
+                &[0],
+                1,
+                false,
+                0,
+                Some(0),
+            )
+        };
+        assert_eq!(run(&mut off), None);
+        assert_eq!(run(&mut on), Some(2));
+        assert_eq!(on.remaining_iterations, before_iterations);
+        assert!(
+            on.patterns.is_empty(),
+            "prune precedes proposal preparation"
+        );
+        assert_eq!(on.actual_retained_bytes(), before_heap);
+        assert_eq!(on.diagnostic_pivot_exhaustion.pruned_nodes, 1);
+        assert_eq!(on.diagnostic_pivot_exhaustion.examined_rows, 1);
+        let cloned = on.clone();
+        assert!(cloned.diagnostic_pivot_exhaustion_enabled);
+        assert_eq!(cloned.actual_retained_bytes(), before_heap);
+        assert_eq!(
+            cloned.diagnostic_pivot_exhaustion,
+            on.diagnostic_pivot_exhaustion
+        );
+
+        let mut combined = off.clone();
+        combined.diagnostic_pivot_exhaustion_enabled = true;
+        combined.diagnostic_warm_seed_enabled = true;
+        assert_eq!(
+            run(&mut combined),
+            None,
+            "do not silently combine A/B variables"
+        );
+        assert_eq!(combined.diagnostic_pivot_exhaustion.assessments, 0);
+
+        // Equality is feasible: a + bc cover the universe in two rows, and
+        // load(a)=N-(k-1)D=1. Strict < must keep this supporter.
+        seed_cached_weights(
+            &mut on,
+            &[
+                (0, CERTIFICATE_SCALE),
+                (1, CERTIFICATE_SCALE),
+                (2, CERTIFICATE_SCALE),
+            ],
+        );
+        let assessment = on
+            .recertify_cached_residual_assessment(&supports, &[7], &[0], &[false; 3], &[0])
+            .unwrap();
+        assert_eq!(
+            on.cached_pivot_exhausted(&assessment, &supports, &[7], &[0], &[false; 3], &[0], 2, 0,),
+            Some((false, 1))
+        );
+    }
+
+    #[test]
+    fn cached_pivot_exhaustion_recertifies_restored_sibling_rows() {
+        let supports = vec![vec![0, 2], vec![1, 2], vec![1, 2]];
+        let mut state = workspace(3, 3, 6);
+        seed_cached_weights(
+            &mut state,
+            &[(1, CERTIFICATE_SCALE), (2, CERTIFICATE_SCALE)],
+        );
+        let old = state
+            .recertify_cached_residual_assessment(&supports, &[7], &[0], &[false; 3], &[4])
+            .unwrap();
+        assert_eq!(
+            state.cached_pivot_exhausted(&old, &supports, &[7], &[0], &[false; 3], &[4], 1, 0,),
+            Some((true, 1))
+        );
+        let restored = state
+            .recertify_cached_residual_assessment(&supports, &[7], &[0], &[false; 3], &[0])
+            .unwrap();
+        assert_eq!(
+            state
+                .cached_pivot_exhausted(&restored, &supports, &[7], &[0], &[false; 3], &[0], 1, 0,),
+            Some((false, 2)),
+            "restored abc row is a valid one-row witness"
+        );
+    }
+
+    #[test]
+    fn cached_pivot_exhaustion_rejects_stale_pivot_shape_and_checked_overflow() {
+        let mut supports = vec![vec![0, 1]; 66];
+        supports[64] = vec![0];
+        supports[65] = vec![1];
+        let mut state = workspace(2, 66, 132);
+        seed_cached_weights(&mut state, &[(65, CERTIFICATE_SCALE)]);
+        let assessment = state
+            .recertify_cached_residual_assessment(&supports, &[0, 3], &[0, 0], &[false; 2], &[0])
+            .unwrap();
+        assert_eq!(
+            state.cached_pivot_exhausted(
+                &assessment,
+                &supports,
+                &[0, 3],
+                &[0, 0],
+                &[false; 2],
+                &[0],
+                1,
+                64,
+            ),
+            Some((true, 1))
+        );
+        assert_eq!(
+            state.cached_pivot_exhausted(
+                &assessment,
+                &supports,
+                &[0, 3],
+                &[0, 1],
+                &[false; 2],
+                &[0],
+                1,
+                64,
+            ),
+            None,
+            "covered pivot carries no exhaustion authority"
+        );
+        for (target, covered, selected, excluded, limit, pivot) in [
+            (&[0, 3][..], &[0][..], &[false, false][..], &[0][..], 1, 64),
+            (&[0, 3][..], &[0, 0][..], &[false][..], &[0][..], 1, 64),
+            (
+                &[0, 3][..],
+                &[0, 0][..],
+                &[false, false][..],
+                &[][..],
+                1,
+                64,
+            ),
+            (
+                &[0, 3][..],
+                &[0, 0][..],
+                &[false, false][..],
+                &[0][..],
+                0,
+                64,
+            ),
+            (
+                &[0, 3][..],
+                &[0, 0][..],
+                &[false, false][..],
+                &[0][..],
+                usize::MAX,
+                64,
+            ),
+            (
+                &[0, 3][..],
+                &[0, 0][..],
+                &[false, false][..],
+                &[0][..],
+                1,
+                usize::MAX,
+            ),
+        ] {
+            assert_eq!(
+                state.cached_pivot_exhausted(
+                    &assessment,
+                    &supports,
+                    target,
+                    covered,
+                    selected,
+                    excluded,
+                    limit,
+                    pivot,
+                ),
+                None
+            );
+        }
+        let overflow = CachedResidualAssessment {
+            bound: 1,
+            numerator: u128::MAX,
+            denominator: u128::MAX,
+        };
+        assert_eq!(
+            state.cached_pivot_exhausted(
+                &overflow,
+                &supports,
+                &[0, 3],
+                &[0, 0],
+                &[false; 2],
+                &[0],
+                3,
+                64,
+            ),
+            None
+        );
+        let mut invalid_supports = supports.clone();
+        invalid_supports[64] = vec![usize::MAX];
+        assert_eq!(
+            state.cached_pivot_exhausted(
+                &assessment,
+                &invalid_supports,
+                &[0, 3],
+                &[0, 0],
+                &[false; 2],
+                &[0],
+                1,
+                64,
+            ),
+            None
+        );
+        seed_cached_weights(&mut state, &[(64, u128::MAX), (65, 1)]);
+        assert!(
+            state
+                .recertify_cached_residual_assessment(
+                    &supports,
+                    &[0, 3],
+                    &[0, 0],
+                    &[false; 2],
+                    &[0],
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cached_pivot_exhaustion_preserves_tiny_exact_and_all_canonical_ties() {
+        let mut state = workspace(3, 3, 9);
+        seed_cached_weights(
+            &mut state,
+            &[(1, CERTIFICATE_SCALE), (2, CERTIFICATE_SCALE)],
+        );
+        let mut pruned = 0;
+        let mut checked = 0;
+        for a in 1_u64..8 {
+            for b in 1_u64..8 {
+                for c in 1_u64..8 {
+                    let rows = [a, b, c];
+                    let supports: Vec<Vec<usize>> = (0..3)
+                        .map(|pattern| {
+                            (0..3)
+                                .filter(|row| rows[*row] & (1 << pattern) != 0)
+                                .collect()
+                        })
+                        .collect();
+                    for selected_mask in 0_u64..8 {
+                        let selected =
+                            std::array::from_fn::<_, 3, _>(|row| selected_mask & (1 << row) != 0);
+                        let covered = rows.iter().enumerate().fold(0, |mask, (row, value)| {
+                            mask | if selected[row] { *value } else { 0 }
+                        });
+                        for excluded in 0_u64..8 {
+                            if selected_mask & excluded != 0 {
+                                continue;
+                            }
+                            let Some(assessment) = state.recertify_cached_residual_assessment(
+                                &supports,
+                                &[7],
+                                &[covered],
+                                &selected,
+                                &[excluded],
+                            ) else {
+                                continue;
+                            };
+                            for limit in 1..=3 {
+                                let mut canonical: Vec<Vec<usize>> = (0_u64..8)
+                                    .filter(|chosen| chosen & (selected_mask | excluded) == 0)
+                                    .filter(|chosen| chosen.count_ones() as usize <= limit)
+                                    .filter(|chosen| {
+                                        rows.iter().enumerate().fold(
+                                            covered,
+                                            |mask, (row, value)| {
+                                                mask | if chosen & (1 << row) != 0 {
+                                                    *value
+                                                } else {
+                                                    0
+                                                }
+                                            },
+                                        ) == 7
+                                    })
+                                    .map(|chosen| {
+                                        (0..3).filter(|row| chosen & (1 << row) != 0).collect()
+                                    })
+                                    .collect();
+                                canonical.sort();
+                                for pivot in 0..3 {
+                                    let rejected = state
+                                        .cached_pivot_exhausted(
+                                            &assessment,
+                                            &supports,
+                                            &[7],
+                                            &[covered],
+                                            &selected,
+                                            &[excluded],
+                                            limit,
+                                            pivot,
+                                        )
+                                        .is_some_and(|(exhausted, _)| exhausted);
+                                    let after = if rejected { vec![] } else { canonical.clone() };
+                                    assert_eq!(
+                                        after, canonical,
+                                        "rows={rows:?} selected={selected_mask} excluded={excluded} k={limit} pivot={pivot}"
+                                    );
+                                    pruned += usize::from(rejected);
+                                    checked += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 1_000);
+        assert!(
+            pruned > 0,
+            "the exhaustive comparison must exercise real exhaustion"
+        );
+    }
+
+    #[test]
+    fn cached_pivot_exhaustion_root_export_and_disabled_proposals_are_unchanged() {
+        let supports = vec![vec![0], vec![1, 2], vec![1, 2]];
+        let mut baseline = workspace(3, 3, 5);
+        #[cfg(not(feature = "diagnostic-probes"))]
+        assert!(!baseline.diagnostic_pivot_exhaustion_enabled);
+        baseline.diagnostic_warm_seed_enabled = false;
+        baseline.diagnostic_pivot_exhaustion_enabled = false;
+        seed_cached_weights(
+            &mut baseline,
+            &[(1, CERTIFICATE_SCALE), (2, CERTIFICATE_SCALE)],
+        );
+        let mut enabled = baseline.clone();
+        enabled.diagnostic_pivot_exhaustion_enabled = true;
+        let run = |state: &mut DualProposalWorkspace| {
+            state.certified_residual_lower_bound_with_pivot(
+                &supports,
+                &[7],
+                &[0],
+                &[false; 3],
+                &[0],
+                usize::MAX,
+                false,
+                25,
+                Some(0),
+            )
+        };
+        assert_eq!(run(&mut baseline), run(&mut enabled));
+        assert_eq!(baseline.best_weights, enabled.best_weights);
+        assert_eq!(baseline.best_numerator, enabled.best_numerator);
+        assert_eq!(baseline.best_denominator, enabled.best_denominator);
+        assert_eq!(baseline.remaining_iterations, enabled.remaining_iterations);
+        assert_eq!(
+            baseline
+                .log_p
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            enabled
+                .log_p
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(enabled.diagnostic_pivot_exhaustion.assessments, 0);
     }
 
     #[test]

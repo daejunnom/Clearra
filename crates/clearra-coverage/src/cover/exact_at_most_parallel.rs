@@ -833,6 +833,16 @@ impl ExactAtMostShardSession {
         self.search.as_ref()?.diagnostic_hot_cost()
     }
 
+    /// Live probe sample only. None means unavailable; a terminal advance may
+    /// release the owner before the caller can observe its final counters.
+    #[doc(hidden)]
+    #[cfg(feature = "diagnostic-probes")]
+    pub fn diagnostic_cached_pivot_exhaustion(
+        &self,
+    ) -> Option<super::exact_minimum_cover::ExactMinimumCoverPivotExhaustionDiagnostics> {
+        self.search.as_ref()?.diagnostic_cached_pivot_exhaustion()
+    }
+
     pub fn advance(
         &mut self,
         max_work: u64,

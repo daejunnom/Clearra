@@ -46,6 +46,15 @@ pub fn set_diagnostic_residual_warm_seed(enabled: bool) {
     super::exact_dual_lower_bound::set_diagnostic_residual_warm_seed(enabled);
 }
 
+/// Default-off, same-binary hotfix experiment. Set before worker/session
+/// construction; workspaces retain their snapshot. Warm-seed on suppresses
+/// this experiment so the two A/B variables cannot be combined accidentally.
+#[doc(hidden)]
+#[cfg(feature = "diagnostic-probes")]
+pub fn set_diagnostic_cached_pivot_exhaustion(enabled: bool) {
+    super::exact_dual_lower_bound::set_diagnostic_cached_pivot_exhaustion(enabled);
+}
+
 /// Selects the legacy scorer only for controlled, same-binary diagnostics.
 /// Set this before starting solver threads; each repair session snapshots it.
 /// Ordinary product builds contain only the word-mask scorer.
@@ -262,6 +271,18 @@ pub struct ExactMinimumCoverWarmSeedDiagnostics {
     pub applied: u64,
     pub matched_patterns: u64,
     pub seeded_constraints: u64,
+}
+
+/// Experimental node pruning, separate from stable HotCost/wire fields.
+/// `pruned_nodes` counts exits before proposal preparation/iterations; it is
+/// not a duration measurement or a claim about end-to-end GUI performance.
+#[doc(hidden)]
+#[cfg(any(test, feature = "diagnostic-probes"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExactMinimumCoverPivotExhaustionDiagnostics {
+    pub assessments: u64,
+    pub examined_rows: u64,
+    pub pruned_nodes: u64,
 }
 
 /// Probe-only snapshot of the cooperative AtMost cursor. It exposes no proof
@@ -2922,6 +2943,23 @@ fn prepare_lazy_search_workspace(
 
 impl ExactCoverSearchSession {
     #[cfg(any(test, feature = "diagnostic-probes"))]
+    pub(super) fn diagnostic_cached_pivot_exhaustion(
+        &self,
+    ) -> Option<ExactMinimumCoverPivotExhaustionDiagnostics> {
+        let search = match &self.state {
+            ExactCoverSearchSessionState::PreparingRootDual { search, .. }
+            | ExactCoverSearchSessionState::ImprovingBreakout { search, .. }
+            | ExactCoverSearchSessionState::ImprovingIncumbent { search, .. }
+            | ExactCoverSearchSessionState::Searching { search, .. } => search,
+            _ => return None,
+        };
+        search
+            .dual_workspace
+            .as_ref()
+            .map(DualProposalWorkspace::diagnostic_pivot_exhaustion)
+    }
+
+    #[cfg(any(test, feature = "diagnostic-probes"))]
     pub(super) fn diagnostic_residual_warm_seed(
         &self,
     ) -> Option<ExactMinimumCoverWarmSeedDiagnostics> {
@@ -4047,6 +4085,14 @@ impl ExactMinimumCoverSession {
     #[cfg(any(test, feature = "diagnostic-probes"))]
     pub fn diagnostic_residual_warm_seed(&self) -> Option<ExactMinimumCoverWarmSeedDiagnostics> {
         self.inner.diagnostic_residual_warm_seed()
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    pub fn diagnostic_cached_pivot_exhaustion(
+        &self,
+    ) -> Option<ExactMinimumCoverPivotExhaustionDiagnostics> {
+        self.inner.diagnostic_cached_pivot_exhaustion()
     }
 
     #[doc(hidden)]
@@ -7571,6 +7617,7 @@ impl MinimumCoverSearch {
                             row_limit,
                             self.diagnostic_residual_admission
                                 .maximum_iterations_per_attempt,
+                            pivot,
                         );
                     #[cfg(not(feature = "diagnostic-probes"))]
                     let bound = workspace.certified_residual_lower_bound(
@@ -10469,6 +10516,67 @@ mod tests {
                 .iter()
                 .sum::<u64>(),
             diagnostics.certified_prunes
+        );
+    }
+
+    #[test]
+    fn cached_pivot_exhaustion_keeps_cancellation_before_negative_authority() {
+        let rows: Vec<_> = [0b0001, 0b0110, 0b1001, 0b1010, 0b0101, 0b0110, 0b1010]
+            .into_iter()
+            .enumerate()
+            .map(|(source_index, word)| DenseRow {
+                source_index,
+                words: vec![word],
+            })
+            .collect();
+        let rows_live = checked_dense_rows_retained_bytes(&rows).unwrap();
+        let MinimumCoverSearchPreparation::Search(mut search) = MinimumCoverSearch::try_new(
+            &rows,
+            vec![15],
+            vec![1; 4],
+            ExactCoverSearchGoal::Minimum,
+            ExactCoverIncumbentPolicy::Standard,
+            rows_live,
+            &mut |_| Ok(()),
+            &mut || false,
+            false,
+        )
+        .unwrap() else {
+            panic!("fixture must retain an exact search owner")
+        };
+        // Tiny production dimensions omit MP scratch. Attach a fully admitted
+        // test workspace solely to exercise the enabled state at cancellation;
+        // no cached weights, incumbent or negative proof is injected here.
+        assert!(search.dual_workspace.is_none());
+        let mut workspace =
+            DualProposalWorkspace::try_new(7, 4, 28, rows_live, &mut |_| Ok(())).unwrap();
+        workspace.enable_pivot_exhaustion_for_test();
+        search.fixed_retained_bytes = search
+            .fixed_retained_bytes
+            .checked_add(workspace.retained_bytes())
+            .unwrap();
+        search.dual_workspace = Some(workspace);
+        let original_excluded = search.excluded_rows.clone();
+        let original_current = search.current.clone();
+        assert!(matches!(
+            search
+                .advance(&rows, 8, rows_live, &mut |_| Ok(()), &mut || true)
+                .unwrap(),
+            MinimumCoverSearchAdvance::Cancelled {
+                visited_nodes: 0,
+                ..
+            }
+        ));
+        assert!(!search.finished, "cancelled work cannot seal ProvedNone");
+        assert_eq!(search.excluded_rows, original_excluded);
+        assert_eq!(search.current, original_current);
+        assert_eq!(
+            search
+                .dual_workspace
+                .as_ref()
+                .unwrap()
+                .diagnostic_pivot_exhaustion(),
+            ExactMinimumCoverPivotExhaustionDiagnostics::default()
         );
     }
 
