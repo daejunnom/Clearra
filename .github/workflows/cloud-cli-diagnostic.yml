@@ -9,6 +9,12 @@ on:
         description: Exact current main SHA to build and measure, without publishing
         type: string
         required: true
+      workers:
+        description: Diagnostic compute profile; both routes use the same CPU and worker count
+        type: choice
+        options: ["4", "8"]
+        default: "4"
+        required: true
 
 permissions:
   contents: read
@@ -100,6 +106,7 @@ jobs:
       SOURCE_COMMIT: ${{ inputs.source_commit }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       DIAGNOSTIC_IMAGE: ${{ needs.build-image.outputs.image_digest }}
+      DIAGNOSTIC_WORKERS: ${{ inputs.workers }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -123,7 +130,8 @@ jobs:
           mkdir -p "$evidence"
           node scripts/release/cloud/benchmark-cli-parity-v080.mjs \
             --mode isolated-image --project "$GCP_PROJECT_ID" --source-commit "$SOURCE_COMMIT" \
-            --image-digest "$DIAGNOSTIC_IMAGE" --run-id "$GITHUB_RUN_ID" --output "$evidence/parity.json"
+            --image-digest "$DIAGNOSTIC_IMAGE" --workers "$DIAGNOSTIC_WORKERS" \
+            --run-id "$GITHUB_RUN_ID" --output "$evidence/parity.json"
       - name: Preserve diagnostics only, including failure or cleanup status
         if: always()
         uses: actions/upload-artifact@v4

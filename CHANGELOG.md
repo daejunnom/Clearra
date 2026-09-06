@@ -4,6 +4,11 @@
 
 ## 0.8.0 - 2026-09-05
 
+- Enabled residual dual warm-start proposals in the shared minimum-cover engine
+  after repeated same-binary comparisons, while retaining fresh checked-integer
+  pruning certificates, exact first-canonical selection, and lazy later ties.
+- Repaired canonical evidence test fixtures and Cloud diagnostic argument/log
+  collection, with exact-source binding and isolated matched 4/8-worker profiles.
 - Added actual typed product paths for all twelve Build v2 capabilities,
   including colored target and congruence generation, exact coverage
   portfolios, supplied-solution evaluation, probability, score, and B2B

@@ -8,6 +8,13 @@ const productionWorkflows = await Promise.all([
   'pages.yml', 'pages-rollback.yml', 'finalize-release-publication.yml',
 ].map((name) => readFile(new URL(`../../.github/workflows/${name}`, import.meta.url), 'utf8')));
 
+test('focused CLI feedback checks publication fixture schema before native compilation', () => {
+  const job = workflow.split('  candidate-cli:')[1].split('  candidate-minimum-diagnostic:')[0];
+  const check = 'node --test scripts/release/release-publication-evidence.test.mjs scripts/release/final-source-stage-evidence.test.mjs';
+  assert.ok(job.includes(check));
+  assert.ok(job.indexOf(check) < job.indexOf('name: Compile candidate CLI'));
+});
+
 function assertIsolated(source) {
   assert.match(source, /^name: Candidate Preflight$/mu);
   assert.match(source, /^    branches: \["codex\/v0\.8\.0-preflight-20260906-rng"\]$/mu);

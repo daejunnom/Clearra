@@ -31,6 +31,8 @@ const SECRET_VERSION = /^[1-9][0-9]{0,18}$/u;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const EXECUTION_NAME = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/u;
 const CLOSED_GCLOUD_ATOM = /^[A-Za-z0-9_./:=,@+\-]+$/u;
+// One read-only diagnostic log selector, not an arbitrary shell/filter surface.
+const CLOSED_GCLOUD_PARITY_LOG_FILTER = /^resource\.type=cloud_run_job AND resource\.labels\.project_id=[a-z][a-z0-9-]{4,61}[a-z0-9] AND resource\.labels\.location=asia-northeast1 AND resource\.labels\.job_name=clearra-parity-[0-9a-f]{7}-[1-9][0-9]{0,19}$/u;
 // Cloud Run system labels use the full namespaced key. Logging requires a
 // quoted field component when it contains '/', not labels.execution_name.
 // https://docs.cloud.google.com/logging/docs/api/platform-logs
@@ -719,7 +721,8 @@ export function gcloudProcessInvocation(
     arguments_.length === 0 ||
     arguments_.some((value) =>
       typeof value !== "string" ||
-      (!CLOSED_GCLOUD_ATOM.test(value) && !CLOSED_GCLOUD_LOG_FILTER.test(value)))
+      (!CLOSED_GCLOUD_ATOM.test(value) && !CLOSED_GCLOUD_LOG_FILTER.test(value) &&
+        !CLOSED_GCLOUD_PARITY_LOG_FILTER.test(value)))
   ) {
     throw new Error("gcloud candidate arguments are not a closed command surface");
   }

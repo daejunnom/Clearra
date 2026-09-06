@@ -336,6 +336,7 @@ function acceptanceEvidence(sourceCommit) {
     accepted_inputs: {
       ctk3_manifest_sha256: "1".repeat(64),
       pages_identity_sha256: "2".repeat(64),
+      wasm_build_receipt_sha256: "3".repeat(64),
       gate_index_sha256: reports.index.report_sha256,
     },
     final_source_fragments: {

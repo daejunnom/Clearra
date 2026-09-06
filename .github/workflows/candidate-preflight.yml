@@ -222,6 +222,7 @@ jobs:
         run: |
           node scripts/release/validate-release-metadata.mjs --tag v0.8.0
           node scripts/tools/validate-release-cli-smokes.mjs
+          node --test scripts/release/release-publication-evidence.test.mjs scripts/release/final-source-stage-evidence.test.mjs
       - name: Compile candidate CLI
         id: compile
         # Fail on the real transitive import graph before spending time compiling Rust.

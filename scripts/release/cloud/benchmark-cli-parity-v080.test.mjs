@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { currentRuntimeIdentityForCommit } from "../../../apps/clearra-discord-bot/src/job-service/runtime-identity.mjs";
 import { gcloudProcessInvocation } from "./candidate-release-v080.mjs";
-import { PARITY_JOB_SCHEMA, benchmarkCliParity, buildParityJobCreateArguments, extractParityLogReport,
+import { PARITY_JOB_SCHEMA, benchmarkCliParity, buildParityJobCreateArguments, buildParityLogReadArguments, extractParityLogReport,
   parityJobArguments, parityJobAuthority, validateParityExecutionReadback,
   validateParityJobReadback, validateParityReport } from "./benchmark-cli-parity-v080.mjs";
 
@@ -112,7 +112,7 @@ function mockCloud(changes = {}) {
         return changes.execution?.(execution()) ?? execution();
       }
       if (args[2] === "executions" && args[3] === "describe") return changes.execution?.(execution()) ?? execution();
-      if (args[2] === "logs") return changes.logs?.([logEntry()], calls) ?? [logEntry()];
+      if (args[0] === "logging" && args[1] === "read") return changes.logs?.([logEntry()], calls) ?? [logEntry()];
       assert.fail(`unexpected mock call kind ${args.slice(0, 3).join(" ")}`);
     },
   };
@@ -144,6 +144,9 @@ test("create uses same immutable image, closed nonsecret args, CPU8 and no servi
   for (const value of ["--tasks=1", "--parallelism=1", "--max-retries=0", "--task-timeout=900s", "--cpu=8", "--memory=16Gi"])
     assert.ok(args.includes(value));
   assert.ok(args.includes(`--image=${a.imageDigest}`));
+  const containerArgs = args.find((value) => value.startsWith("--args=")).slice(7).split(",");
+  assert.equal(new Set(containerArgs).size, containerArgs.length, "gcloud rejects duplicate ArgList values");
+  assert.ok(containerArgs.includes("--cpus=8") && containerArgs.includes("--workers=8"));
   assert.ok(!args.some((value) => /secret|traffic|deploy|execute-now|accepted/iu.test(value)));
   assert.equal(gcloudProcessInvocation(args, "win32", {}).arguments[4], "run");
   assert.equal(parityJobAuthority({ ...options, runId: "9".repeat(20) }).jobName.length <= 49, true);
@@ -172,14 +175,13 @@ test("success validates parent/execution ownership and deletes the parent withou
     assert.ok(!deletes.some((args) => args.includes("executions")));
     assert.equal(calls.filter((args) => args[2] === "execute").length, 1);
     assert.ok(calls.filter((args) => args[1] === "services" || args[1] === "revisions").every((args) => args[2] === "describe"));
-    assert.ok(calls.filter((args) => args[2] === "logs").every((args) =>
-      args.includes("--limit=100") && !args.some((value) => value.includes("log-filter"))));
+    assert.deepEqual(calls.filter((args) => args[0] === "logging"), [buildParityLogReadArguments(a)]);
   });
 });
 
 test("isolated image diagnostic never reads or mutates a production service and cannot claim candidate authority", async () => {
   const isolated = { mode: "isolated-image", projectId: options.projectId, sourceCommit: options.sourceCommit,
-    imageDigest: options.imageDigest, runId: options.runId };
+    imageDigest: options.imageDigest, runId: options.runId, workers: 8 };
   const ia = parityJobAuthority(isolated);
   assert.equal(ia.candidateRevision, null);
   assert.equal(ia.priorRevision, null);
@@ -198,13 +200,48 @@ test("isolated image diagnostic never reads or mutates a production service and 
     assert.equal(result.zero_traffic_verified, undefined);
     assert.equal(result.candidate_before, undefined);
     assert.deepEqual(result.cleanup, { job: "deleted", execution: "owned-parent-deleted" });
-    assert.ok(cloud.calls.every((args) => args[0] === "run" && args[1] === "jobs"));
+    assert.ok(cloud.calls.every((args) => (args[0] === "run" && args[1] === "jobs") ||
+      (args[0] === "logging" && args[1] === "read")));
+  });
+});
+
+test("isolated four-worker evidence binds both routes and cannot claim production CPU parity", async () => {
+  const isolated = { mode: "isolated-image", projectId: options.projectId, sourceCommit: options.sourceCommit,
+    imageDigest: options.imageDigest, runId: options.runId };
+  const ia = parityJobAuthority(isolated);
+  assert.deepEqual([ia.cpus, ia.workers, ia.memory], [4, 4, "8Gi"]);
+  const args = buildParityJobCreateArguments(ia);
+  assert.ok(args.includes("--cpu=4") && args.includes("--memory=8Gi"));
+  assert.ok(parityJobArguments(ia).includes("--workers=4"));
+  assert.throws(() => validateParityReport(innerReport(), ia), /invalid_parity_report/);
+  for (const workers of [0, 1, 2, 6, 16, "04", true])
+    assert.throws(() => parityJobAuthority({ ...isolated, workers }), /worker_profile/);
+  assert.throws(() => parityJobAuthority({ ...options, workers: 4 }), /candidate_worker_profile/);
+  const bindSpec = (spec) => {
+    const c = spec.template.spec.containers[0];
+    c.args = parityJobArguments(ia);
+    c.resources.limits = { cpu: "4", memory: "8Gi" };
+  };
+  const bindJob = (value) => { bindSpec(value.spec.template.spec); return value; };
+  const bindExecution = (value) => { bindSpec(value.spec); return value; };
+  await withOutput(async (output) => {
+    const cloud = mockCloud({ created: bindJob, job: bindJob, execution: bindExecution,
+      logs: (entries) => entries.map((entry) => ({ ...entry,
+        jsonPayload: { ...entry.jsonPayload, cpus: 4, workers: 4, process_visible_cpus: 4 } })) });
+    const result = await benchmarkCliParity({ ...isolated, output }, cloud.dependencies);
+    assert.equal(result.status, "passed");
+    assert.deepEqual(result.compute_profile, { cpus: 4, workers: 4, memory: "8Gi" });
+    assert.equal(result.production_service_verified, false);
+    assert.equal(result.diagnostic.workers, 4);
+    assert.deepEqual(result.cleanup, { job: "deleted", execution: "owned-parent-deleted" });
   });
 });
 
 test("standalone Cloud workflow is manual, protected, exact-source bound and has no publication step", async () => {
   const source = await readFile(new URL("../../../.github/workflows/cloud-cli-diagnostic.yml", import.meta.url), "utf8");
   assert.match(source, /workflow_dispatch:/u);
+  assert.match(source, /options: \["4", "8"\]/u);
+  assert.match(source, /--workers "\$DIAGNOSTIC_WORKERS"/u);
   assert.match(source, /environment: discord-path-confirmation/u);
   assert.match(source, /contents: read/u);
   assert.match(source, /persist-credentials: false/u);
@@ -348,6 +385,21 @@ test("logs bind exact project/region/job/execution/schema and strip arbitrary fi
   assert.throws(() => extractParityLogReport([logEntry(), logEntry()], a, executionName), /duplicate/);
 });
 
+test("structured log retrieval has one closed selector and never uses the human log printer", () => {
+  const args = buildParityLogReadArguments(a);
+  assert.deepEqual(args.slice(0, 2), ["logging", "read"]);
+  assert.ok(args[2].includes(`resource.labels.job_name=${a.jobName}`));
+  assert.ok(args[2].includes(`resource.labels.project_id=${a.projectId}`));
+  assert.ok(args.includes("--limit=100") && args.includes("--freshness=1d") && args.includes("--format=json"));
+  for (const platform of ["win32", "linux"]) {
+    assert.doesNotThrow(() => gcloudProcessInvocation(args, platform, {}));
+    for (const suffix of [" OR severity=INFO", ";whoami", " & whoami", "\nanything"]) {
+      const changed = [...args]; changed[2] += suffix;
+      assert.throws(() => gcloudProcessInvocation(changed, platform, {}), /closed command surface/);
+    }
+  }
+});
+
 test("report rejects identity drift, missing samples, bad counts, nonfinite/overdeadline samples and false medians", () => {
   for (const mutate of [
     (raw) => { raw.status = "failed"; },
@@ -374,5 +426,5 @@ test("missing log ingestion gets only three bounded reads and no arbitrary retry
     assert.equal(reads, 3);
   });
   await failedRun({ logs: () => [logEntry(), logEntry()] }, "duplicate_parity_report", (_, calls) =>
-    assert.equal(calls.filter((args) => args[2] === "logs").length, 1));
+    assert.equal(calls.filter((args) => args[0] === "logging").length, 1));
 });
