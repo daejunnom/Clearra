@@ -99,8 +99,11 @@ test('replay DP, exact-zero equivalence, warm reuse and Desktop feature seams ar
     ['clearra-app', 'cooperative_pc_replay_p7_ctk3_'],
     ['clearra-coverage', 'softmax_positive_zero_skip_'],
     ['clearra-coverage', 'zero_row_scatter_'],
+    ['clearra-coverage', 'root_conditional_row_pruning_'],
+    ['clearra-coverage', 'conditional_root_rows_filter_actual_pivot_'],
     ['clearra-wasm-abi', 'warm_minimum_to_geometry_'],
     ['clearra-wasm-abi', 'geometry_replacement_rejects_'],
+    ['clearra-wasm-abi', 'exact_replacement_requires_geometry_'],
   ]) assert.ok(CANDIDATE_RUST_REGRESSIONS.some((entry) => entry.package === packageName && entry.filter === filter));
   const desktop = CANDIDATE_RUST_REGRESSIONS.find((entry) => entry.package === 'clearra-gui-host');
   assert.ok(candidateRegressionArguments(desktop).includes('wasm-cpu-runtime'));

@@ -40,7 +40,8 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
     'cooperative_pc_replay_p7_ctk3_',
   ].map((filter) => ({ package: 'clearra-app', filter, exact: false, parallel: true })),
   { package: 'clearra-postprocess', filter: 'exact_replay_language::tests::', exact: false, parallel: false },
-  ...['softmax_positive_zero_skip_', 'zero_row_scatter_'].map((filter) => ({
+  ...['softmax_positive_zero_skip_', 'zero_row_scatter_', 'root_conditional_row_pruning_',
+    'conditional_root_rows_filter_actual_pivot_'].map((filter) => ({
     package: 'clearra-coverage', filter, exact: false, parallel: false,
   })),
   { package: 'clearra-wasm', filter: 'pc_replay_', exact: false, parallel: false },

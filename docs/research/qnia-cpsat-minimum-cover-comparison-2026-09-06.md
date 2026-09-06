@@ -21,6 +21,7 @@
 `ctk3_w0kCQBjwwAMPPAD37g` / P7 / 4L / SRS+이며 최소25는 사후 검증용이다.
 primary의 25나 이미 성공한 선택 집합을 입력으로 주입하지 않았다. 일반 PC/구축 확률
 전체 해법의 합의된 약0.4초 기준 및 패턴 전체 리플레이 해결 후 배포 조건은 유지한다.
+이5초 기준을 일반 사용자 탐색의 hard timeout으로 구현하지 않는다.
 
 ## 실제 Qnia 기본 실행: 전체 feature 구간
 
@@ -65,6 +66,26 @@ pattern=`*!`, hold=true, save filter 없음, Primary=Auto, exactHumanQuality=Fas
 이전 같은 행렬 HiGHS primary34.304초보다 짧은 관찰이지만, 서로 다른 시점의 실행을
 통계적 동일 조건 speedup으로 표시하지 않는다. 이 primary만으로도 아직5초를 넘는다.
 
+### 워커/portfolio 구성 추가 진단
+
+같은 원행렬·ordered kernel·WASM을 사용하는 독립 Node child를 순차 실행했다.
+세 조건 모두 numWorkers/subsolvers만 바꾸고 seed/cuts/inprocessing 설정은 위와
+같게 유지했다. 각 조건에 공통으로 숫자 subsolver 로그 계측을 추가했으므로, 앞의
+Qnia adapter2워커 결과와 워커 수만의 엄밀한 비교는 아니다. 각 조건1회 관찰이다.
+
+| 설정 | API/model/load/solve/검사/종료 (초) | 관측된 full subsolver |
+| --- | ---: | --- |
+| 1워커 + max_lp | 16.976 | 1개, max_lp1 |
+| 11워커 + 기본 portfolio | 9.738 | 8개, 그중 max_lp1; first-solution3 |
+| 11워커 + max_lp | 13.214 | 8개 전부 max_lp; first-solution3 |
+
+전부 OPTIMAL25 및 원본5040큐 coverage를 검증했다. 11워커 max_lp는 실제로 같은
+전략의 full subsolver8개를 구성했으므로, 워커 수만 예약하고1개만 일한 것으로
+설명할 수 없다. 이 관찰에서는 단순한 워커 확장으로5초를 만들지 못했다.
+실험의60초 parent deadline은 미증명 진단 중단용이며 제품 hard cap이 아니다.
+실행된8,038,746-byte CP-SAT WASM의 SHA256은
+`7482593df2d8fde213d17abd14a47d0def30401ab96d3afa6e0b5d14042c0030`이다.
+
 ### 행렬 차이와 kernelizer 교차 확인
 
 최신 Qnia의 각 필드와 구체 큐를 Clearra canonical 순서에 맞추어 직접 대조했다.
@@ -104,8 +125,13 @@ solution IDs까지 동일**했다. 따라서 이 실험에서 kernel 크기 차�
    소유권을 모두 다룬다. `max_memory_in_mb`는 Clearra 사전 메모리 guard의 대체가
    아니며, 외부n워커마다 내부n워커를 만드는 중첩 병렬화도 금지한다.
 
-특화 행 제거는 현재 격리된 소스 실험 단계다. 제품 컴파일·정확성 및 성능 통과를
-주장하지 않는다. 현재4194의 검증된8b8 WASM에서 최소 GUI는40.5/43.0/41.7초였고,
+특화 행 제거 구현과6개 회귀 테스트 소스를 후보 브랜치에 반영했다. 등호 유지,
+작은 행렬 완전열거, word 경계, overflow/형상 오류, 전체 canonical 동률, 실제
+pivot/undo/witness/취소 경계를 포함한다. 필터는 현재 노드의 residual MP **이후**
+위치하며 다음 child를 줄이는 실험이다. MP 이전 종료나 새 LP solver 구현을
+달성했다고 주장하지 않는다. 별도 diagnostic setter로 동일 바이너리 A/B가 가능하며
+생산 빌드에는 setter가 없다. 포맷·정적 교차 검토만 마쳤고 제품 컴파일·정확성 및
+성능 통과는 아직 미검증이다. 현재4194의 검증된8b8 WASM에서 최소 GUI는40.5/43.0/41.7초였고,
 이번 Qnia 비교가4194를 교체하거나 해당 성능을 개선한 것은 아니다.
 
 ## 재현 자료
@@ -113,9 +139,11 @@ solution IDs까지 동일**했다. 따라서 이 실험에서 kernel 크기 차�
 - `_local/qnia-cpsat-common-matrix-benchmark.mjs`
 - `_local/qnia-cpsat-stage-benchmark.mjs`
 - `_local/qnia-cpsat-kernel-comparison.mjs`
+- `_local/qnia-cpsat-parameter-probe.mjs`
 - `_local/qnia-benchmark-results/1788705095098-cpsat-common-matrix.json`
 - `_local/qnia-benchmark-results/1788705217944-cpsat-feature-clearra-field.json`
 - `_local/qnia-benchmark-results/1788705445047-cpsat-kernel-comparison.json`
+- `_local/qnia-benchmark-results/1788706119580-7b04c924-ebb8-4bde-8551-614f81d2a6fe-cpsat-parameter-probe.json`
 
 위 파일은 local diagnostic 증거이며 릴리스 acceptance authority가 아니다. 외부
 소스와 WASM은 별도 `_local/qnia-cpsat-reference-03b6377`에만 있고 제품 의존성이나
