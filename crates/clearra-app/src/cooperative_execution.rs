@@ -1684,6 +1684,49 @@ fn checked_build_minimum_source_external_bytes(
         .checked_add((2 * core::mem::size_of::<usize>()) as u128)
 }
 
+/// Build cover owns a finite source session even when its public request does
+/// not use the separate finite-AllSolutions caller protocol. Refresh the same
+/// App-side owners admitted at construction before each bounded source slice;
+/// the backend remains responsible for its own session and returned result.
+fn advance_build_minimum_source(
+    context: &AppContext,
+    search: &mut CooperativeSearchExecution,
+    work_budget: usize,
+    control: &ExecutionControl,
+) -> Result<CooperativeBackendAdvance, WasmCpuSearchError> {
+    let external = checked_build_minimum_source_external_bytes(
+        context,
+        &search.response_kind,
+        &search.output_policy,
+        &search.validation_report,
+        &search.backend_requested,
+        search.gpu_device_requested.as_ref(),
+        search.product_capability_contract.as_ref(),
+    )
+    .ok_or(WasmCpuSearchError::Unsupported {
+        reason: "build_minimum_source_owner_projection_unavailable",
+    })?;
+    let CooperativeSearchSession::BuildProbability(session) = &mut search.session else {
+        return Err(WasmCpuSearchError::Unsupported {
+            reason: "build_minimum_source_session_mismatch",
+        });
+    };
+    session
+        .advance_finite(
+            work_budget,
+            control,
+            external,
+            core::mem::size_of::<CooperativeAppAdvance>() as u128,
+        )
+        .map(|advance| match advance {
+            WasmBuildProbabilityAdvance::Pending => CooperativeBackendAdvance::Pending,
+            WasmBuildProbabilityAdvance::Completed(result) => {
+                CooperativeBackendAdvance::CompletedCore(result)
+            }
+            WasmBuildProbabilityAdvance::Cancelled => CooperativeBackendAdvance::Cancelled,
+        })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CooperativePcScoreEnvelopeError {
     ProductProofMissing,
@@ -2715,6 +2758,18 @@ impl CooperativeAppExecution {
                             }
                         }
                         Some(None) => unreachable!("finite caller-memory owner was checked above"),
+                        None if matches!(
+                            &search.response_kind,
+                            CooperativeSearchResponseKind::BuildCover { .. }
+                        ) =>
+                        {
+                            advance_build_minimum_source(
+                                self.context(),
+                                &mut search,
+                                work_budget,
+                                control,
+                            )
+                        }
                         None => advance_search_session(&mut search.session, work_budget, control),
                     };
                     match backend_advance {
@@ -4522,6 +4577,12 @@ mod pc_allspin_projection_tests {
         let control = ExecutionControl::default();
         let mut observed_minimum = false;
         for _ in 0..1024 {
+            let previous_stage = match &execution.state {
+                CooperativeExecutionState::Search(_) => "source-search",
+                CooperativeExecutionState::Postprocess(_) => "source-postprocess",
+                CooperativeExecutionState::MinimumFinalize(_) => "exact-minimum-finalize",
+                _ => "other",
+            };
             if matches!(
                 execution.state,
                 CooperativeExecutionState::MinimumFinalize(_)
@@ -4532,14 +4593,79 @@ mod pc_allspin_projection_tests {
             match execution.advance(128, &control) {
                 CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
                 CooperativeAppAdvance::Completed(response) => {
-                    assert!(observed_minimum);
-                    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+                    // An early error is also a Completed response. Preserve
+                    // its real source/guard failure instead of masking it as
+                    // a missing phase observation in the fixture assertion.
+                    assert_eq!(
+                        response.status(),
+                        AppStatus::Success,
+                        "Build failed before/at {previous_stage}: {response:?}"
+                    );
+                    assert!(
+                        observed_minimum,
+                        "successful Build must expose the shared exact continuation: {response:?}"
+                    );
                     return;
                 }
                 other => panic!("unexpected Build cover continuation: {other:?}"),
             }
         }
         panic!("tiny Build cover did not finish");
+    }
+
+    #[test]
+    fn build_cover_source_refreshes_dynamic_caller_capacity_before_cancellation() {
+        use crate::{BuildCoverV2Request, BuildObjective, BuildV2AppCommand};
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let context = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let query = one_piece_build_query()
+            .with_solution_probability_policy(BuildSolutionProbabilityPolicy::Include);
+        let request = AppRequest::new(AppCommand::BuildV2(BuildV2AppCommand::build_cover(
+            BuildCoverV2Request::new(query, BuildObjective::MinCover).unwrap(),
+        )));
+        let mut execution = context.start_cooperative_execution(request);
+        let CooperativeExecutionState::Search(search) = &mut execution.state else {
+            panic!("Build cover must retain its real source session");
+        };
+        let project = |search: &CooperativeSearchExecution| {
+            checked_build_minimum_source_external_bytes(
+                &context,
+                &search.response_kind,
+                &search.output_policy,
+                &search.validation_report,
+                &search.backend_requested,
+                search.gpu_device_requested.as_ref(),
+                search.product_capability_contract.as_ref(),
+            )
+            .expect("complete current App owner projection")
+        };
+        let before = project(search);
+        let old_capacity = search.backend_requested.capacity();
+        search.backend_requested.reserve_exact(256);
+        let actual_growth = search.backend_requested.capacity() - old_capacity;
+        assert!(actual_growth > 0);
+        assert_eq!(project(search), before + actual_growth as u128);
+
+        let control = ExecutionControl::default();
+        control.cancellation.handle().cancel();
+        assert!(matches!(
+            advance_build_minimum_source(&context, search, 1, &control),
+            Ok(CooperativeBackendAdvance::Cancelled)
+        ));
+        // Dropping the cancelled source releases its backend lease. A later
+        // source is still constructible under the same resource authority.
+        drop(execution);
+        let next_query = one_piece_build_query()
+            .with_solution_probability_policy(BuildSolutionProbabilityPolicy::Include);
+        let next = context.start_cooperative_execution(AppRequest::new(AppCommand::BuildV2(
+            BuildV2AppCommand::build_cover(
+                BuildCoverV2Request::new(next_query, BuildObjective::MinCover).unwrap(),
+            ),
+        )));
+        assert!(matches!(next.state, CooperativeExecutionState::Search(_)));
     }
 
     fn one_piece_build_query_with_objective(objective: ObjectivePolicy) -> BuildProbabilityQuery {

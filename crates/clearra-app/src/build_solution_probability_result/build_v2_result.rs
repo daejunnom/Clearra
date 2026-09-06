@@ -886,7 +886,9 @@ mod tests {
         execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind,
         probability::probability_value::ProbabilityValue,
     };
-    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_pc_graph::request::{
+        PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    };
     use clearra_problem::{
         BuildProbabilityField, BuildProbabilityQuery, BuildSolutionProbabilityPolicy,
         ProblemCompiler,
@@ -914,15 +916,27 @@ mod tests {
         pattern_bitset::PatternBitSet, weighted_pattern_set::WeightedPatternSet,
     };
 
+    fn build_cover_core_query(piece: PieceKind) -> PcScenarioQuery {
+        PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![piece])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        // These fixtures exercise result authority and exact-cover reduction,
+        // not process-owned native pool/provider registration. Keep the real
+        // one-session Build producer independent of the CI host's CPU count.
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_workers(1)
+                .with_worker_hardware_limit(1),
+        )
+    }
+
     fn build_cover_query(
         solution_probability_policy: BuildSolutionProbabilityPolicy,
     ) -> BuildProbabilityQuery {
-        let core = PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(4, 0),
-            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
-            PieceWindow::new(1),
-        )
-        .with_exact_pieces(Some(1));
+        let core = build_cover_core_query(PieceKind::I);
         let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
             .expect("canonical one-piece target");
         BuildProbabilityQuery::new(core, field)
@@ -950,6 +964,11 @@ mod tests {
     fn execute(query: &BuildProbabilityQuery) -> clearra_core_executor::CoreExecutionResult {
         let problem = ProblemCompiler::compile_scenario_pc(query.core_query())
             .expect("one-piece Build problem compiles");
+        assert_eq!(
+            problem.backend_request().workers(),
+            1,
+            "result-contract fixtures must not require a process-wide native provider"
+        );
         AppCoreExecutorService::wasm_cpu()
             .execute_build_probability_with_control(
                 &problem,
@@ -1097,12 +1116,7 @@ mod tests {
         let _resource_guard = build_probability_resource_test_guard();
         let query = build_cover_query(BuildSolutionProbabilityPolicy::Include);
         let result = execute(&query);
-        let other_query = PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(4, 0),
-            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
-            PieceWindow::new(1),
-        )
-        .with_exact_pieces(Some(1));
+        let other_query = build_cover_core_query(PieceKind::O);
         let other_problem = ProblemCompiler::compile_scenario_pc(&other_query).unwrap();
         assert!(matches!(
             prepare_build_coverage_portfolio_v2_result_with_memory_guard(
@@ -1118,12 +1132,7 @@ mod tests {
     #[test]
     fn complete_unreachable_build_cover_has_one_exact_empty_portfolio() {
         let _resource_guard = build_probability_resource_test_guard();
-        let core = PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(4, 0),
-            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
-            PieceWindow::new(1),
-        )
-        .with_exact_pieces(Some(1));
+        let core = build_cover_core_query(PieceKind::O);
         let field =
             BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0]).unwrap();
         let query = BuildProbabilityQuery::new(core, field)

@@ -1515,6 +1515,64 @@ fn browser_worker_final_event_keeps_the_fixed_score_typed_report() {
 }
 
 #[test]
+fn build_cover_worker_job_supplies_finite_source_caller_memory_and_returns_exact_minimum() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let command_runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
+    let mut runtime = WasmWorkerJobRuntime::new(command_runtime);
+    let job = runtime
+        .start_job(
+            "clearra build cover --base-mask 0 --target-mask 0xf --height 4 \
+             --queue I --no-hold --objective min-cover --workers 1",
+        )
+        .expect("canonical one-I Build cover job");
+    let mut terminal = false;
+    for _ in 0..1024 {
+        if runtime
+            .advance_job(job, 128)
+            .expect("bounded Build slice")
+            .is_terminal()
+        {
+            terminal = true;
+            break;
+        }
+    }
+    assert!(terminal, "tiny Build cover must reach a terminal response");
+    let events = runtime.drain_events(job);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, WasmWorkerJobEvent::Failed { .. })),
+        "Build source must not use the compatibility advance for a finite session: {events:?}"
+    );
+    let response = events
+        .iter()
+        .find_map(|event| match event {
+            WasmWorkerJobEvent::FinalResponse { response, .. } => Some(response),
+            _ => None,
+        })
+        .expect("exact Build final response");
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    let minimum = response
+        .product_capability_result()
+        .and_then(|result| result.build_coverage_portfolio_v2())
+        .expect("shared query-bound minimum result");
+    assert_eq!(minimum.source_candidate_count(), 1);
+    assert_eq!(minimum.selected_candidate_count(), 1);
+    assert_eq!(minimum.union_probability(), "1");
+    assert!(minimum.completeness().complete());
+    assert_eq!(
+        minimum
+            .portfolio_alternative_owner()
+            .expect("exact page source")
+            .canonical_page()
+            .portfolio()
+            .candidate_ids(),
+        &[1]
+    );
+}
+
+#[test]
 fn build_probability_tiling_only_returns_geometry_without_buildup_or_coverage() {
     let result = WasmCommandRuntime::default()
         .run_command_text(

@@ -27,6 +27,10 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
     'pc_score_minimum_cover_contract_tests::cooperative_score_minimum_',
     'minimum_preparation_constructor_',
     'build_score_minimum_',
+    'build_cover_source_refreshes_dynamic_caller_capacity_before_cancellation',
+    'compatibility_score_origin_cannot_mint_canonical_minimum_evidence',
+    'canonical_ready_reads_do_not_enumerate_hidden_ties_and_explicit_pages_preserve_all_ties',
+    'member_pages_are_fixed_at_one_hundred_without_losing_candidate_identity',
   ].map((filter) => ({ package: 'clearra-app', filter, exact: false, parallel: true })),
   { package: 'clearra-core-executor', filter: 'native_parallel_minimum_cover_', exact: false, parallel: true },
   { package: 'clearra-pc-graph', filter: 'compiled_query_equality_', exact: false, parallel: false },
@@ -41,7 +45,8 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
   ].map((filter) => ({ package: 'clearra-app', filter, exact: false, parallel: true })),
   { package: 'clearra-postprocess', filter: 'exact_replay_language::tests::', exact: false, parallel: false },
   ...['softmax_positive_zero_skip_', 'zero_row_scatter_', 'root_conditional_row_pruning_',
-    'conditional_root_rows_filter_actual_pivot_'].map((filter) => ({
+    'conditional_root_rows_filter_actual_pivot_', 'residual_warm_seed_',
+    'parallel_first_page_handoff_resumes_serial_without_losing_query_or_frontier'].map((filter) => ({
     package: 'clearra-coverage', filter, exact: false, parallel: false,
   })),
   { package: 'clearra-wasm', filter: 'pc_replay_', exact: false, parallel: false },

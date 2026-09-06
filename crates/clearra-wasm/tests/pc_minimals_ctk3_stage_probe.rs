@@ -112,24 +112,42 @@ fn ctk3_source_search_consumes_the_caller_work_budget() {
 #[test]
 #[ignore = "explicit source-only CTK3 exact-cover matrix export"]
 fn ctk3_export_exact_cover_diagnostic_matrix() {
-    use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
-    use sha2::{Digest, Sha256};
-    use std::{collections::BTreeSet, fs, io::Write, path::Path};
+    export_ctk3_exact_cover_diagnostic_matrix(
+        "ctk3_export_exact_cover_diagnostic_matrix",
+        SOURCE_COMMAND,
+        "srs-plus",
+        Some(246),
+    );
+}
 
+/// A separate rule-bound source for Jstris comparisons. Do not reuse the SRS+
+/// known witness or canonical row indices: this exporter never runs selection.
+#[test]
+#[ignore = "explicit source-only Jstris 180 CTK3 exact-cover matrix export"]
+fn ctk3_export_jstris_180_exact_cover_diagnostic_matrix() {
+    let source_command = format!("{SOURCE_COMMAND} --rule jstris-180");
+    export_ctk3_exact_cover_diagnostic_matrix(
+        "ctk3_export_jstris_180_exact_cover_diagnostic_matrix",
+        &source_command,
+        "jstris-180",
+        None,
+    );
+}
+
+fn export_ctk3_exact_cover_diagnostic_matrix(
+    test_name: &'static str,
+    source_command: &str,
+    expected_rule: &str,
+    expected_source_rows: Option<usize>,
+) {
     const EXPORT_CHILD_ENV: &str = "CLEARRA_CTK3_MATRIX_EXPORT_CHILD";
     const EXPORT_DEADLINE: Duration = Duration::from_secs(30);
-    const SOURCE_DEADLINE: Duration = Duration::from_secs(15);
-    if env::var_os(EXPORT_CHILD_ENV).is_none() {
+    if env::var(EXPORT_CHILD_ENV).ok().as_deref() != Some(test_name) {
         let executable = env::current_exe().expect("current matrix exporter executable");
         let mut command = Command::new(executable);
         command
-            .args([
-                "--exact",
-                "ctk3_export_exact_cover_diagnostic_matrix",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env(EXPORT_CHILD_ENV, "1")
+            .args(["--exact", test_name, "--ignored", "--nocapture"])
+            .env(EXPORT_CHILD_ENV, test_name)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -154,15 +172,42 @@ fn ctk3_export_exact_cover_diagnostic_matrix() {
         }
     }
 
+    let matrix =
+        prepare_ctk3_diagnostic_matrix(source_command, expected_rule, expected_source_rows);
+    write_ctk3_diagnostic_matrix(&matrix);
+}
+
+/// One source construction and identity check shared by immutable export and
+/// same-process A/B. No minimum or witness is supplied with this input.
+struct Ctk3DiagnosticMatrix {
+    required: PatternBitSet,
+    rows: Vec<PatternBitSet>,
+    candidate_keys: Vec<String>,
+    normalized_ordinals: Vec<usize>,
+    matrix_identity: [u8; 32],
+    artifact: serde_json::Value,
+}
+
+fn prepare_ctk3_diagnostic_matrix(
+    source_command: &str,
+    expected_rule: &str,
+    expected_source_rows: Option<usize>,
+) -> Ctk3DiagnosticMatrix {
+    use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
+
+    const SOURCE_DEADLINE: Duration = Duration::from_secs(15);
     let started = Instant::now();
     let request = WasmCommandRuntime::default()
-        .compile_command_text(SOURCE_COMMAND)
+        .compile_command_text(source_command)
         .expect("matrix export source request");
     let AppCommand::Scenario(pc) = request.command() else {
         panic!("matrix export source must be a PC scenario")
     };
     let problem =
         ProblemCompiler::compile_scenario_pc(pc.query()).expect("matrix export source problem");
+    assert_eq!(problem.rule_profile().rule().id().as_str(), expected_rule);
     let mut session = WasmCpuSearchSession::new(&problem).expect("matrix export source session");
     let control = ExecutionControl::default();
     let mut advances = 0_u64;
@@ -189,7 +234,13 @@ fn ctk3_export_exact_cover_diagnostic_matrix() {
     let raw_rows = source.solution_coverages();
     let normalized_rows = source.normalized_solution_coverages();
     assert_eq!(pattern_count, 5_040);
-    assert_eq!(raw_rows.len(), 246);
+    if let Some(expected_source_rows) = expected_source_rows {
+        assert_eq!(raw_rows.len(), expected_source_rows);
+    }
+    assert!(
+        !raw_rows.is_empty(),
+        "diagnostic source has no candidate rows"
+    );
     assert_eq!(normalized_rows.len(), raw_rows.len());
     let universe = problem
         .piece_source()
@@ -280,8 +331,8 @@ fn ctk3_export_exact_cover_diagnostic_matrix() {
     let mut binding_hash = Sha256::new();
     binding_hash.update(b"clearra-exact-cover-candidate-binding.v1\0");
     binding_hash.update(matrix_digest);
-    for (source_ordinal, normalized_ordinal, key) in bindings {
-        for value in [source_ordinal, normalized_ordinal, key.len()] {
+    for (source_ordinal, normalized_ordinal, key) in &bindings {
+        for value in [*source_ordinal, *normalized_ordinal, key.len()] {
             binding_hash.update(to_u64(value).to_le_bytes());
         }
         binding_hash.update(key.as_bytes());
@@ -296,10 +347,20 @@ fn ctk3_export_exact_cover_diagnostic_matrix() {
         queue_hash.update(queue.as_bytes());
     }
     let queue_binding_sha256 = format!("{:x}", queue_hash.finalize());
+    let required = PatternBitSet::from_words(pattern_count, required_words.to_vec())
+        .expect("diagnostic required coverage");
+    let rows = raw_rows
+        .iter()
+        .map(|coverage| coverage.covered_patterns().clone())
+        .collect();
+    let (normalized_ordinals, candidate_keys) = bindings
+        .into_iter()
+        .map(|(_, normalized_ordinal, key)| (normalized_ordinal, key))
+        .unzip();
     let artifact = serde_json::json!({
         "schema": "clearra-exact-cover-diagnostic-matrix.v1",
         "diagnostic_only": true,
-        "source_command": SOURCE_COMMAND,
+        "source_command": source_command,
         "package_version": env!("CARGO_PKG_VERSION"),
         "source_advances": advances,
         "source_elapsed_ms": started.elapsed().as_millis(),
@@ -318,7 +379,24 @@ fn ctk3_export_exact_cover_diagnostic_matrix() {
         "queues": queues,
         "rows": exported_rows,
     });
-    let mut encoded = serde_json::to_vec_pretty(&artifact).expect("serialize diagnostic matrix");
+    Ctk3DiagnosticMatrix {
+        required,
+        rows,
+        candidate_keys,
+        normalized_ordinals,
+        matrix_identity: matrix_digest.into(),
+        artifact,
+    }
+}
+
+fn write_ctk3_diagnostic_matrix(matrix: &Ctk3DiagnosticMatrix) {
+    use std::{fs, io::Write, path::Path};
+
+    let matrix_sha256 = matrix.artifact["matrix_sha256"]
+        .as_str()
+        .expect("diagnostic matrix hash");
+    let mut encoded =
+        serde_json::to_vec_pretty(&matrix.artifact).expect("serialize diagnostic matrix");
     encoded.push(b'\n');
 
     // No user-selected output path, overwrite, or traversal through a parent
@@ -356,13 +434,433 @@ fn ctk3_export_exact_cover_diagnostic_matrix() {
         serde_json::json!({
             "phase": "source_matrix_export",
             "path": artifact_path,
-            "rows": raw_rows.len(),
-            "patterns": pattern_count,
+            "rows": matrix.rows.len(),
+            "patterns": matrix.required.pattern_count(),
             "matrix_sha256": matrix_sha256,
-        "candidate_binding_sha256": candidate_binding_sha256,
-        "queue_binding_sha256": queue_binding_sha256,
-            "elapsed_ms": started.elapsed().as_millis(),
+            "candidate_binding_sha256": matrix.artifact["candidate_binding_sha256"],
+            "queue_binding_sha256": matrix.artifact["queue_binding_sha256"],
+            "elapsed_ms": matrix.artifact["source_elapsed_ms"],
         })
+    );
+}
+
+/// Same binary and immutable Jstris source, fresh proof/selector in each arm.
+/// Timings diagnose the algorithm only; they are not a GUI release verdict.
+#[test]
+#[ignore = "explicit Jstris 180 residual warm-seed first-canonical A/B probe"]
+fn ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe() {
+    use clearra_coverage::cover::exact_minimum_cover::set_diagnostic_residual_warm_seed;
+
+    const TEST_NAME: &str = "ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe";
+    const CHILD_ENV: &str = "CLEARRA_CTK3_JSTRIS_WARM_AB_CHILD";
+    const PROCESS_DEADLINE: Duration = Duration::from_secs(240);
+    if env::var(CHILD_ENV).ok().as_deref() != Some(TEST_NAME) {
+        let mut command = Command::new(env::current_exe().expect("current Jstris A/B executable"));
+        command
+            .args(["--exact", TEST_NAME, "--ignored", "--nocapture"])
+            .env(CHILD_ENV, TEST_NAME)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let mut child = command.spawn().expect("spawn isolated Jstris A/B child");
+        let started = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().expect("poll Jstris A/B child") {
+                assert!(
+                    status.success(),
+                    "Jstris A/B child did not complete: {status}"
+                );
+                return;
+            }
+            if started.elapsed() >= PROCESS_DEADLINE {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "Jstris A/B exceeded its 240-second fixture deadline; no completed comparison"
+                );
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    struct ResetWarmSeed;
+    impl Drop for ResetWarmSeed {
+        fn drop(&mut self) {
+            set_diagnostic_residual_warm_seed(false);
+        }
+    }
+    let _reset_warm_seed = ResetWarmSeed;
+    set_diagnostic_residual_warm_seed(false);
+    let source_command = format!("{SOURCE_COMMAND} --rule jstris-180");
+    let matrix = prepare_ctk3_diagnostic_matrix(&source_command, "jstris-180", None);
+    let solver_input_started = Instant::now();
+    let solver_input = normalized_ctk3_solver_input(&matrix);
+    let solver_input_prepare_ms = solver_input_started.elapsed().as_millis();
+    let workers = env::var("CLEARRA_CTK3_PARALLEL_WORKERS")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("numeric Jstris A/B worker count")
+        })
+        .unwrap_or(11);
+    assert!(
+        (1..=64).contains(&workers),
+        "Jstris A/B workers must be 1..64"
+    );
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "phase": "jstris_warm_seed_ab_source",
+            "source_command": source_command,
+            "source_elapsed_ms": matrix.artifact["source_elapsed_ms"],
+            "solver_input_prepare_ms": solver_input_prepare_ms,
+            "matrix_sha256": matrix.artifact["matrix_sha256"],
+            "candidate_binding_sha256": matrix.artifact["candidate_binding_sha256"],
+            "queue_binding_sha256": matrix.artifact["queue_binding_sha256"],
+            "solver_row_order": "normalized key ascending; candidate ID = solver ordinal + 1",
+            "solver_row_binding_sha256": solver_input.binding_sha256,
+            "rows": matrix.rows.len(),
+            "patterns": matrix.required.pattern_count(),
+            "workers": workers,
+            "available_parallelism": thread::available_parallelism().map(|n| n.get()).ok(),
+            "partitions_per_worker": 4,
+            "idle_assistance": true,
+            "arm_deadline_ms": 90_000,
+            "native_probe_is_product_acceptance": false,
+        })
+    );
+    let baseline = run_jstris_warm_seed_arm(&matrix, &solver_input, workers, false);
+    let candidate = run_jstris_warm_seed_arm(&matrix, &solver_input, workers, true);
+    assert_eq!(
+        candidate.minimum, baseline.minimum,
+        "exact minimum differs between arms"
+    );
+    assert_eq!(
+        candidate.canonical_rows, baseline.canonical_rows,
+        "first canonical portfolio differs between arms"
+    );
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "phase": "jstris_warm_seed_ab_comparison",
+            "complete": true,
+            "optimal_cardinality": baseline.minimum,
+            "same_first_canonical": true,
+            "baseline_total_ms": baseline.total_ms,
+            "candidate_total_ms": candidate.total_ms,
+            "baseline_proof_ms": baseline.proof_ms,
+            "candidate_proof_ms": candidate.proof_ms,
+            "baseline_canonical_ms": baseline.canonical_ms,
+            "candidate_canonical_ms": candidate.canonical_ms,
+            "native_probe_is_product_acceptance": false,
+        })
+    );
+}
+
+struct Ctk3NormalizedSolverInput {
+    rows: Vec<PatternBitSet>,
+    source_ordinals: Vec<usize>,
+    identity: [u8; 32],
+    binding_sha256: String,
+}
+
+/// The raw matrix export remains unchanged. Only this first-canonical probe
+/// follows the App's normalized-key order and its one-based candidate IDs.
+fn normalized_ctk3_solver_input(matrix: &Ctk3DiagnosticMatrix) -> Ctk3NormalizedSolverInput {
+    use sha2::{Digest, Sha256};
+
+    let mut source_ordinals = (0..matrix.rows.len()).collect::<Vec<_>>();
+    source_ordinals.sort_unstable_by_key(|&source| matrix.normalized_ordinals[source]);
+    let mut binding = Sha256::new();
+    binding.update(b"clearra-normalized-diagnostic-solver-rows.v1\0");
+    binding.update(matrix.matrix_identity);
+    for (normalized, &source) in source_ordinals.iter().enumerate() {
+        assert_eq!(
+            matrix.normalized_ordinals[source], normalized,
+            "complete normalized permutation"
+        );
+        let key = &matrix.candidate_keys[source];
+        if normalized > 0 {
+            assert!(
+                matrix.candidate_keys[source_ordinals[normalized - 1]] < *key,
+                "App candidate IDs require strictly ascending normalized keys"
+            );
+        }
+        for value in [normalized, source, key.len()] {
+            binding.update(
+                u64::try_from(value)
+                    .expect("solver dimension fits u64")
+                    .to_le_bytes(),
+            );
+        }
+        binding.update(key.as_bytes());
+    }
+    let rows = source_ordinals
+        .iter()
+        .map(|&source| matrix.rows[source].clone())
+        .collect();
+    let digest = binding.finalize();
+    Ctk3NormalizedSolverInput {
+        rows,
+        source_ordinals,
+        identity: digest.into(),
+        binding_sha256: format!("{digest:x}"),
+    }
+}
+
+#[test]
+fn ctk3_diagnostic_normalized_solver_order_preserves_raw_export_mapping() {
+    let matrix = diagnostic_three_row_order_fixture();
+    let original_artifact = matrix.artifact.clone();
+    let input = normalized_ctk3_solver_input(&matrix);
+    assert_eq!(input.source_ordinals, [1, 2, 0]);
+    assert_eq!(
+        input
+            .rows
+            .iter()
+            .map(|row| row.word_at(0))
+            .collect::<Vec<_>>(),
+        [2, 4, 1]
+    );
+    assert_eq!(matrix.candidate_keys, ["z", "a", "m"]);
+    assert_eq!(matrix.normalized_ordinals, [2, 0, 1]);
+    assert_eq!(matrix.artifact, original_artifact);
+    assert_jstris_portfolio(&matrix, &input, &[0, 1, 2]);
+}
+
+#[test]
+fn ctk3_diagnostic_normalized_solver_order_rejects_forged_key_order() {
+    let mut matrix = diagnostic_three_row_order_fixture();
+    matrix.normalized_ordinals = vec![0, 1, 2];
+    assert!(std::panic::catch_unwind(|| normalized_ctk3_solver_input(&matrix)).is_err());
+}
+
+fn diagnostic_three_row_order_fixture() -> Ctk3DiagnosticMatrix {
+    Ctk3DiagnosticMatrix {
+        required: PatternBitSet::from_words(3, vec![7]).unwrap(),
+        rows: [1, 2, 4]
+            .into_iter()
+            .map(|word| PatternBitSet::from_words(3, vec![word]).unwrap())
+            .collect(),
+        candidate_keys: ["z", "a", "m"].into_iter().map(str::to_owned).collect(),
+        normalized_ordinals: vec![2, 0, 1],
+        matrix_identity: [0; 32],
+        artifact: serde_json::json!({"row_order": "raw source fixture"}),
+    }
+}
+
+struct JstrisWarmSeedArm {
+    minimum: usize,
+    canonical_rows: Vec<usize>,
+    proof_ms: u128,
+    canonical_ms: u128,
+    total_ms: u128,
+}
+
+fn run_jstris_warm_seed_arm(
+    matrix: &Ctk3DiagnosticMatrix,
+    solver_input: &Ctk3NormalizedSolverInput,
+    workers: usize,
+    warm_seed: bool,
+) -> JstrisWarmSeedArm {
+    use clearra_coverage::cover::exact_minimum_cover::set_diagnostic_residual_warm_seed;
+    use clearra_coverage::cover::{
+        ExactMinimumCoverPortfolioPreparationAdvance, ExactMinimumCoverPortfolioPreparationSession,
+    };
+    use sha2::{Digest, Sha256};
+
+    // Set before creating any workspace or child thread. The previous arm's
+    // complete physical drain is guaranteed by the scoped wave scheduler.
+    set_diagnostic_residual_warm_seed(warm_seed);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(90);
+    let phase_identity = |phase: &[u8]| -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"clearra-jstris-warm-seed-ab.v1\0");
+        hash.update(solver_input.identity);
+        hash.update(phase);
+        hash.finalize().into()
+    };
+    let mut proof =
+        ExactMinimumCoverPortfolioPreparationSession::new(&matrix.required, &solver_input.rows)
+            .expect("fresh Jstris exact minimum preparation");
+    proof
+        .enable_parallel(workers * 4, phase_identity(b"proof"))
+        .unwrap();
+    let mut last_query = None;
+    let mut waves = 0usize;
+    let (minimum, mut enumerator) = loop {
+        assert!(
+            Instant::now() < deadline,
+            "Jstris warm-seed arm incomplete at proof deadline"
+        );
+        if let Some(query) = proof
+            .parallel_query()
+            .cloned()
+            .filter(|query| Some(query.identity()) != last_query)
+        {
+            last_query = Some(query.identity());
+            waves += 1;
+            let wave_started = Instant::now();
+            let limit = query.limit();
+            let tasks = parallel_wave::run_until(
+                query,
+                parallel_wave::Owner::Proof(&mut proof),
+                workers,
+                true,
+                deadline,
+            );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "phase": "jstris_warm_seed_ab_proof_wave", "warm_seed": warm_seed,
+                    "wave": waves, "limit": limit, "tasks": tasks,
+                    "elapsed_ms": wave_started.elapsed().as_millis(),
+                })
+            );
+        }
+        match proof
+            .advance_with_memory_guard_and_control(128, &mut |_| Ok(()), &mut || {
+                Instant::now() >= deadline
+            })
+            .expect("Jstris exact minimum advance")
+        {
+            ExactMinimumCoverPortfolioPreparationAdvance::Pending { .. } => {}
+            ExactMinimumCoverPortfolioPreparationAdvance::Coverable {
+                proof, enumerator, ..
+            } => {
+                assert!(proof.complete(), "minimum must be proved, not an incumbent");
+                assert_eq!(proof.covered_patterns(), &matrix.required);
+                assert_jstris_portfolio(matrix, solver_input, proof.row_indices());
+                break (proof.row_indices().len(), enumerator);
+            }
+            other => {
+                panic!("Jstris proof incomplete or cancelled, not a negative proof: {other:?}")
+            }
+        }
+    };
+    let proof_ms = started.elapsed().as_millis();
+    enumerator
+        .enable_parallel(workers * 4, phase_identity(b"canonical"))
+        .unwrap();
+    let canonical_started = Instant::now();
+    let mut last_query = None;
+    let mut waves = 0usize;
+    let canonical_rows = loop {
+        assert!(
+            Instant::now() < deadline,
+            "Jstris warm-seed arm incomplete at canonical deadline"
+        );
+        if let Some(query) = enumerator
+            .parallel_query()
+            .cloned()
+            .filter(|query| Some(query.identity()) != last_query)
+        {
+            last_query = Some(query.identity());
+            waves += 1;
+            let wave_started = Instant::now();
+            let limit = query.limit();
+            let tasks = parallel_wave::run_until(
+                query,
+                parallel_wave::Owner::Canonical(&mut enumerator),
+                workers,
+                true,
+                deadline,
+            );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "phase": "jstris_warm_seed_ab_canonical_wave", "warm_seed": warm_seed,
+                    "wave": waves, "limit": limit, "tasks": tasks,
+                    "elapsed_ms": wave_started.elapsed().as_millis(),
+                })
+            );
+        }
+        let page = enumerator
+            .next_page_owned_with_memory_guard_and_control(1, 128, &mut |_| Ok(()), &mut || {
+                Instant::now() >= deadline
+            })
+            .expect("Jstris exact first canonical advance");
+        if let Some(first) = page.portfolios().first() {
+            assert_eq!(first.row_indices().len(), minimum);
+            assert_jstris_portfolio(matrix, solver_input, first.row_indices());
+            break first.row_indices().to_vec();
+        }
+        assert_eq!(
+            page.stop(),
+            ExactMinimumCoverEnumerationStop::WorkBudgetExhausted,
+            "Jstris canonical result incomplete or cancelled"
+        );
+    };
+    assert!(
+        Instant::now() < deadline,
+        "Jstris arm completed outside its fixture deadline"
+    );
+    let result = JstrisWarmSeedArm {
+        minimum,
+        canonical_rows,
+        proof_ms,
+        canonical_ms: canonical_started.elapsed().as_millis(),
+        total_ms: started.elapsed().as_millis(),
+    };
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "phase": "jstris_warm_seed_ab_arm", "warm_seed": warm_seed, "complete": true,
+            "optimal_cardinality": result.minimum,
+            "canonical_candidate_ids": result.canonical_rows.iter().map(|&row| row + 1).collect::<Vec<_>>(),
+            "source_rows": result.canonical_rows.iter().map(|&row| solver_input.source_ordinals[row]).collect::<Vec<_>>(),
+            "normalized_ordinals": result.canonical_rows,
+            "candidate_keys": result.canonical_rows.iter().map(|&row| &matrix.candidate_keys[solver_input.source_ordinals[row]]).collect::<Vec<_>>(),
+            "proof_ms": result.proof_ms, "canonical_ms": result.canonical_ms, "total_ms": result.total_ms,
+            "native_probe_is_product_acceptance": false,
+        })
+    );
+    result
+}
+
+fn assert_jstris_portfolio(
+    matrix: &Ctk3DiagnosticMatrix,
+    solver_input: &Ctk3NormalizedSolverInput,
+    selected: &[usize],
+) {
+    assert!(
+        !selected.is_empty(),
+        "nonempty required matrix needs a cover"
+    );
+    assert!(
+        selected.windows(2).all(|pair| pair[0] < pair[1]),
+        "canonical row order"
+    );
+    let mut union = vec![0u64; matrix.required.word_count()];
+    for &index in selected {
+        let &source = solver_input
+            .source_ordinals
+            .get(index)
+            .expect("solver ordinal has original source");
+        let row = matrix
+            .rows
+            .get(source)
+            .expect("portfolio row belongs to original source");
+        assert_eq!(
+            row, &solver_input.rows[index],
+            "solver permutation preserves source coverage"
+        );
+        for (word, covered) in union.iter_mut().enumerate() {
+            *covered |= row.word_at(word);
+        }
+    }
+    let covered = PatternBitSet::from_words(matrix.required.pattern_count(), union)
+        .expect("selected source row union");
+    assert_eq!(
+        covered, matrix.required,
+        "selected source rows cover exactly the required universe"
     );
 }
 

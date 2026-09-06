@@ -37,6 +37,15 @@ pub fn set_diagnostic_conditional_row_pruning(enabled: bool) {
     DIAGNOSTIC_CONDITIONAL_ROW_PRUNING.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Proposal-only same-binary A/B; defaults to off. Set before starting proof
+/// workers. A workspace snapshots it once and retains it when cloned. This
+/// neither enables an ordinary product path nor changes exact proof rules.
+#[doc(hidden)]
+#[cfg(feature = "diagnostic-probes")]
+pub fn set_diagnostic_residual_warm_seed(enabled: bool) {
+    super::exact_dual_lower_bound::set_diagnostic_residual_warm_seed(enabled);
+}
+
 /// Selects the legacy scorer only for controlled, same-binary diagnostics.
 /// Set this before starting solver threads; each repair session snapshots it.
 /// Ordinary product builds contain only the word-mask scorer.
@@ -242,6 +251,17 @@ pub struct ExactMinimumCoverConditionalRowDiagnostics {
     pub candidate_rows: u64,
     pub examined_weights: u64,
     pub pruned_rows: u64,
+}
+
+/// Separate experiment counters; not part of the stable HotCost/wire schema.
+#[doc(hidden)]
+#[cfg(any(test, feature = "diagnostic-probes"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExactMinimumCoverWarmSeedDiagnostics {
+    pub attempts: u64,
+    pub applied: u64,
+    pub matched_patterns: u64,
+    pub seeded_constraints: u64,
 }
 
 /// Probe-only snapshot of the cooperative AtMost cursor. It exposes no proof
@@ -2902,6 +2922,23 @@ fn prepare_lazy_search_workspace(
 
 impl ExactCoverSearchSession {
     #[cfg(any(test, feature = "diagnostic-probes"))]
+    pub(super) fn diagnostic_residual_warm_seed(
+        &self,
+    ) -> Option<ExactMinimumCoverWarmSeedDiagnostics> {
+        let search = match &self.state {
+            ExactCoverSearchSessionState::PreparingRootDual { search, .. }
+            | ExactCoverSearchSessionState::ImprovingBreakout { search, .. }
+            | ExactCoverSearchSessionState::ImprovingIncumbent { search, .. }
+            | ExactCoverSearchSessionState::Searching { search, .. } => search,
+            _ => return None,
+        };
+        search
+            .dual_workspace
+            .as_ref()
+            .map(DualProposalWorkspace::diagnostic_warm_seed)
+    }
+
+    #[cfg(any(test, feature = "diagnostic-probes"))]
     pub(super) fn diagnostic_conditional_rows(
         &self,
     ) -> Option<ExactMinimumCoverConditionalRowDiagnostics> {
@@ -4004,6 +4041,12 @@ impl ExactMinimumCoverSession {
         &self,
     ) -> Option<ExactMinimumCoverConditionalRowDiagnostics> {
         self.inner.diagnostic_conditional_rows()
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    pub fn diagnostic_residual_warm_seed(&self) -> Option<ExactMinimumCoverWarmSeedDiagnostics> {
+        self.inner.diagnostic_residual_warm_seed()
     }
 
     #[doc(hidden)]

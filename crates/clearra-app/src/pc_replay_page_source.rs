@@ -1,10 +1,10 @@
 //! Query-bound exact replay manifests. Only one cell's language memo is live.
 use crate::pc_path_result::{
-    checked_execution_projection_peak_bytes, pc_path_witness_payload,
+    PcPathProjectionContext, PcPathWitnessV2, checked_execution_projection_peak_bytes,
+    pc_path_witness_payload,
     project_canonical_execution_with_context as project_execution_with_context,
-    PcPathProjectionContext, PcPathWitnessV2,
 };
-use crate::pc_replay_page_error::{replay_engine_error, PcReplayPageError};
+use crate::pc_replay_page_error::{PcReplayPageError, replay_engine_error};
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_executor::performance::CooperativeWorkQuantum;
 use clearra_core_executor::{CoreExecutionResult, CorePostProcessExecution};
@@ -367,6 +367,10 @@ impl PcReplaySourceBuildSession {
             return Ok(true);
         }
         self.guard_additional(0)?;
+        // Even a tiny language may finish in one caller slice. Publish its
+        // stage before doing work so a progress-triggered cancellation cannot
+        // be skipped by the fast completion path.
+        self.report_progress(control);
         let quantum = CooperativeWorkQuantum::start(ADVANCE_QUANTUM_MILLIS);
         for step in 0..work.max(1).min(MAX_ADVANCE_WORK) {
             if control.is_cancelled() {
@@ -505,6 +509,11 @@ impl PcReplaySourceBuildSession {
             }
             self.guard_additional(0)?;
         }
+        self.report_progress(control);
+        Ok(false)
+    }
+
+    fn report_progress(&self, control: &ExecutionControl) {
         control.report_progress(
             "complete-replay-pattern",
             self.next_geometry
@@ -516,7 +525,6 @@ impl PcReplaySourceBuildSession {
                     .saturating_mul(self.source.materialized_pattern_count) as u64,
             ),
         );
-        Ok(false)
     }
 
     fn finish_geometry(&mut self) -> ReplayResult<()> {

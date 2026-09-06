@@ -1,7 +1,75 @@
-# Qnia CP-SAT 전환과 최소 해법 5초 기준 재검토
+# Qnia CP-SAT 전환과 최소 해법 성능 재검토
 
-상태: **참조 실행에서 5초 수준 재현, Clearra 제품 기준은 미충족. 배포 보류.**
+상태: **과거 참조 실행에서 5초 수준 재현. 아래 SRS+ 비교는 역사적 결과이며,
+최신 Jstris 180 GUI 3초 목표는 아직 검증 전이다. 시간 문제는 P2로 배포 조건과 분리한다.**
 기존 HiGHS 비교 및 native/WASM32 RNG 비교는 별도 역사 문서로 보존한다.
+
+## 2026-09-07 최신 계약
+
+사용자 요청에 따라 Jstris 180으로 새 행렬과 단계별 A/B를 구성한다. 정확한 첫 canonical
+최소 집합만 먼저 반환하고 후속 tie는 명시 요청 시 지연 탐색한다. GUI 첫 화면 출력이
+한 번이라도 3초 이내면 이번 성능 목표를 충족하며, 어려움이 확인되면 사용자 질문 또는
+중단 후 입력 대기로 전환한다. 기존 SRS+ 정답 행 번호나 Qnia Fast 집합을 첫 canonical
+정답으로 대체하지 않는다. 3초 hard timeout은 만들지 않는다.
+
+시간 미충족 자체는 P2로서 v0.8.0 배포를 막지 않지만, 나머지 제품 회귀 및 패턴 전체
+리플레이가 통과해야 한다. 전체 gate는 최종 exact SHA에서 한 번 실행하고 배포 후 성능
+개선은 v0.8.0 hotfix로 분리할 수 있다. 아래 5초 배포 조건은 이전 요청의 역사적 기록이다.
+
+### Jstris 실제 GUI 첫 집합 A/B 및 사용자 결정
+
+2026-09-07 같은 PC에서 P7 / 4L / Jstris 180 / hold / 자동 11 compute workers로
+각각 새 탭의 최초 실행을 측정했다. 두 실행 모두 246개 source, 커버리지 100%,
+첫 최소 집합 25개를 표시했다. 후속 페이지는 요청하지 않았다.
+
+| 실제 GUI 구간(ms) | 기존 8b8d578 / 4194 | 후보 b6179fe / 별도 4195 |
+| --- | ---: | ---: |
+| source | 424.4 | 384.8 |
+| verifier finish | 122.9 | 92.4 |
+| exact minimum + 첫 canonical finalize | 28700.2 | 28467.6 |
+| worker terminal | 29389.6 | 29068.7 |
+| GUI 표시 | 29.4초 | 29.1초 |
+
+기존 WASM SHA256은 `bee0e666c3d36c3fecc8a223e69d62dc633fbd6cfd288c78885c634845eed356`,
+후보는 `adf073df3ebeebf42e0768a2dd1861ec6ec423c1404e6a6d33f11e8958d95b86`이다.
+후보는 Actions 34040571969/1의 독립 빌드 산출물이며 해당 회귀 job은 실패했으므로
+accepted release가 아니다. 소스가 일치하는 별도 worktree에서 기존 import 검증을
+통과했으며 4194의 세션이나 WASM은 바꾸지 않았다. 각 1회와 여러 누적 변경의 비교이므로
+이 약1% 차이를 특정 최적화의 인과적 speedup이나 반복 실행 보장으로 해석하지 않는다.
+
+작은 알고리즘 개선만으로 3초에 도달할 근거가 부족함을 질문했고, 사용자가
+**"성능은 P2 핫픽스로 넘기고 나머지 통과 후 v0.8.0 배포"**를 선택했다.
+따라서 residual warm-seed는 기본 off인 실험으로 A/B까지만 진행하고, 이번에 CP-SAT 전체
+제품 통합으로 범위를 확장하지 않는다. 성능 예외는 다른 회귀 실패를 면제하지 않는다.
+
+동일 후보에서 최소 탐색 직후 P7 전체 리플레이를 실행해 warm worker 재사용도 관찰했다.
+9.6초에 246개 geometry, 5040개 패턴, 총 3,993,088개 경로를 집계했고 첫 대표 리플레이와
+다음 geometry 대표 모두 10프레임·500ms로 표시됐다. 이는 Jstris 실제 GUI 완료 증거이며
+모든 경로의 독립 정답 증명이나 현재 미빌드 source의 검증을 대신하지 않는다.
+
+SRS-X는 현재 공식 `https://tetr.io/js/tetrio.js`의 JLSTZ/I ordered 24 transition과
+저장 fixture가 모두 일치했다. Rust의 O 원점 처리, verified 84-transition/최대12-offset
+FFI ABI23, C의 ordered first-success, GUI의 y축·anchor 변환도 소스로 대조했다.
+숫자 테이블 변경은 하지 않았다. Player 및 Web/Desktop command projection Node 계약
+26개가 통과했으며 Rust/C runtime 실행 증거로 확대하지 않는다.
+
+### 추가 제품 및 회귀 경계 수정(새 CI 검증 대기)
+
+- 기존 b617 WASM의 1-I `build cover --objective min-cover --workers 1`이
+  `wasm_finite_build_probability_advance_requires_caller_memory`로 실제 실패했다.
+  App이 finite source를 만들고 일반 advance를 호출한 불일치를 BuildCover 전용
+  `advance_finite` 연결로 수정했다. 생성 시와 같은 실제 외부 owner를 매 slice 다시
+  계산하며 caller memory 필수 검증을 제거하지 않는다.
+- tiny replay의 단일-slice 완료도 시작 progress를 보고하도록 하여 callback에서
+  요청한 취소가 결과 공개 전에 확인되게 했다.
+- Build V2 결과계약 fixture는 CI CPU 수에 따른 미등록 native provider 요청을
+  없애도록 명시 1worker로 구성했다. ABI fixture에는 누락된 initial-field 입력과
+  테스트 host CPU 수를 명시했다. 제품 입력/worker/provider gate는 완화하지 않았다.
+- first canonical 이후 hidden tie work 없음, explicit 페이지의 전체 tie 보존 및
+  101-member 집합의 whole-set copy 의미를 Core/App 회귀로 고정했다.
+
+이 수정들의 Rust 컴파일·회귀·새 GUI 검증은 다음 source-bound CI 산출물을 기다린다.
+원본 b617의 실제 오류 재현이나 기존 Node PASS를 수정 성공 증거로 쓰지 않는다.
 
 ## 버전과 비교 계약
 

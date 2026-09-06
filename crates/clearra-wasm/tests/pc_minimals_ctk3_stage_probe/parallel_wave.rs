@@ -4,9 +4,8 @@
 
 use std::{
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc, Arc,
     },
     thread,
     time::Instant,
@@ -107,11 +106,24 @@ impl HotCostTotals {
 
 pub(super) fn run(
     query: ExactAtMostQuery,
-    mut owner: Owner<'_>,
+    owner: Owner<'_>,
     workers: usize,
     assistance: bool,
 ) -> usize {
     let deadline = Instant::now() + super::configured_probe_timeout();
+    run_until(query, owner, workers, assistance, deadline)
+}
+
+/// A caller-owned arm deadline must not restart for every parallel query.
+/// This remains a fixture watchdog, not an executor or product timeout.
+pub(super) fn run_until(
+    query: ExactAtMostQuery,
+    mut owner: Owner<'_>,
+    workers: usize,
+    assistance: bool,
+    deadline: Instant,
+) -> usize {
+    assert!(Instant::now() < deadline, "parallel predictor arm deadline");
     let wave_started = Instant::now();
     thread::scope(|scope| {
         let (finished_sender, finished_receiver) = mpsc::channel();

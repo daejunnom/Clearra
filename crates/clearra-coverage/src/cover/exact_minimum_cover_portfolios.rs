@@ -1384,6 +1384,11 @@ mod parallel_portfolio_tests {
                 .next_page_owned_with_memory_guard_and_control(1, 8, &mut |_| Ok(()), &mut || false)
                 .unwrap();
             if let Some(portfolio) = page.portfolios().first() {
+                assert_eq!(page.portfolios().len(), 1);
+                assert_eq!(page.known_alternative_count_decimal(), "1");
+                assert_eq!(page.total_alternative_count_decimal(), None);
+                assert_eq!(page.stop(), ExactMinimumCoverEnumerationStop::PageFull);
+                assert!(!page.enumeration_complete());
                 first = Some(portfolio.row_indices().to_vec());
                 break;
             }
@@ -1408,6 +1413,17 @@ mod parallel_portfolio_tests {
         }
         assert!(rejected_active_handoff);
         assert_eq!(first, Some(vec![0, 3]));
+        assert!(
+            enumerator.pending_search.is_none(),
+            "returning the first canonical set must not start a hidden successor search"
+        );
+        assert!(
+            enumerator.parallel_query().is_none(),
+            "the initial response must not wait for a second alternative's proof"
+        );
+        assert!(enumerator.take_parallel_task().is_none());
+        assert_eq!(enumerator.known_alternative_count_decimal(), "1");
+        assert_eq!(enumerator.next_combination, Some(vec![0, 4]));
         let frontier = enumerator.next_combination.clone();
         let count = enumerator.known_alternative_count.clone();
         enumerator.disable_parallel_if_quiescent().unwrap();

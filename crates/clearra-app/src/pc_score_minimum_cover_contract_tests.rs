@@ -720,6 +720,17 @@ fn incomplete_weight_replay_and_coverage_authorities_fail_closed() {
 }
 
 #[test]
+fn compatibility_score_origin_cannot_mint_canonical_minimum_evidence() {
+    let winners = two_by_two_winners([1, 2, 3, 4]);
+    let (mut summary, derivation) = authority_fixture(winners.clone(), winners, 2);
+    summary.origin = PcScoreIngressOrigin::CompatibilityScore;
+    assert_eq!(
+        validate_pc_score_portfolio_v2_result(&summary, &derivation).unwrap_err(),
+        PcScorePortfolioValidationError::SummaryContractMismatch
+    );
+}
+
+#[test]
 fn summary_and_derivation_are_compared_without_attack_but_with_score_and_identity() {
     let summary_winners = two_by_two_winners([1, 2, 3, 4]);
     let mut score_mismatch = summary_winners.clone();

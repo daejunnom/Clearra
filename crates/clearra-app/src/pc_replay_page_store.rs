@@ -315,7 +315,7 @@ impl PcReplayPageStore {
                 PcReplayPageAdvance::Pending { .. } => (),
                 PcReplayPageAdvance::Completed(page) => return Ok(page),
                 PcReplayPageAdvance::Cancelled { .. } => {
-                    return Err("complete_replay_cancelled".into())
+                    return Err("complete_replay_cancelled".into());
                 }
             }
         }

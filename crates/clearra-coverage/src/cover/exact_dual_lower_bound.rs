@@ -9,6 +9,18 @@
 
 use super::exact_minimum_cover::ExactMinimumCoverError;
 
+#[cfg(any(test, feature = "diagnostic-probes"))]
+use super::exact_minimum_cover::ExactMinimumCoverWarmSeedDiagnostics;
+
+#[cfg(feature = "diagnostic-probes")]
+static DIAGNOSTIC_RESIDUAL_WARM_SEED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "diagnostic-probes")]
+pub(super) fn set_diagnostic_residual_warm_seed(enabled: bool) {
+    DIAGNOSTIC_RESIDUAL_WARM_SEED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[cfg(feature = "diagnostic-probes")]
 use std::time::Instant;
 
@@ -363,6 +375,12 @@ pub(super) struct DualProposalWorkspace {
     // Every reuse replays all currently eligible row capacities from scratch.
     cached_patterns: Vec<usize>,
     cached_weights: Vec<u128>,
+    // Experimental proposal-only A/B. Ordinary builds remain unchanged until
+    // the same-matrix benchmark decides whether to enable this candidate.
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    diagnostic_warm_seed_enabled: bool,
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    diagnostic_warm_seed: ExactMinimumCoverWarmSeedDiagnostics,
     #[cfg(feature = "diagnostic-probes")]
     diagnostic_hot_cost: ResidualDualHotCostDiagnostics,
     #[cfg(feature = "diagnostic-probes")]
@@ -418,6 +436,10 @@ impl Clone for DualProposalWorkspace {
             best_numerator: self.best_numerator,
             cached_patterns: with_retained_capacity(&self.cached_patterns),
             cached_weights: with_retained_capacity(&self.cached_weights),
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            diagnostic_warm_seed_enabled: self.diagnostic_warm_seed_enabled,
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            diagnostic_warm_seed: self.diagnostic_warm_seed,
             #[cfg(feature = "diagnostic-probes")]
             diagnostic_hot_cost: self.diagnostic_hot_cost,
             #[cfg(feature = "diagnostic-probes")]
@@ -573,6 +595,13 @@ impl DualProposalWorkspace {
             cached_patterns,
             cached_weights,
             #[cfg(feature = "diagnostic-probes")]
+            diagnostic_warm_seed_enabled: DIAGNOSTIC_RESIDUAL_WARM_SEED
+                .load(std::sync::atomic::Ordering::Relaxed),
+            #[cfg(all(test, not(feature = "diagnostic-probes")))]
+            diagnostic_warm_seed_enabled: false,
+            #[cfg(any(test, feature = "diagnostic-probes"))]
+            diagnostic_warm_seed: ExactMinimumCoverWarmSeedDiagnostics::default(),
+            #[cfg(feature = "diagnostic-probes")]
             diagnostic_hot_cost: ResidualDualHotCostDiagnostics::default(),
             #[cfg(feature = "diagnostic-probes")]
             diagnostic_sparse_proposal_softmax: true,
@@ -585,6 +614,11 @@ impl DualProposalWorkspace {
 
     pub(super) const fn remaining_proposal_iterations(&self) -> usize {
         self.remaining_iterations
+    }
+
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    pub(super) const fn diagnostic_warm_seed(&self) -> ExactMinimumCoverWarmSeedDiagnostics {
+        self.diagnostic_warm_seed
     }
 
     #[cfg(feature = "diagnostic-probes")]
@@ -828,6 +862,8 @@ impl DualProposalWorkspace {
             return None;
         }
         self.reset_proposal_state();
+        #[cfg(any(test, feature = "diagnostic-probes"))]
+        self.maybe_seed_residual_proposal(row_limit, support_by_pattern.len(), target_words.len());
         let mut accumulated_samples = 0_usize;
 
         for iteration in 0..iterations {
@@ -1217,6 +1253,112 @@ impl DualProposalWorkspace {
         resize_and_fill(&mut self.exact_row_loads, rows, 0);
         self.best_denominator = 0;
         self.best_numerator = 0;
+    }
+
+    /// Map advisory weights by original pattern ID, not the previous compact
+    /// residual position. Half-uniform smoothing keeps every new constraint
+    /// alive. Only log_p changes; q, averages and exact certificate state are
+    /// still fresh, and every later prune rechecks all currently eligible rows.
+    /// The two sorted merge scans allocate nothing and never carry an old D.
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    fn maybe_seed_residual_proposal(
+        &mut self,
+        row_limit: usize,
+        source_pattern_count: usize,
+        target_word_count: usize,
+    ) {
+        if !self.diagnostic_warm_seed_enabled || row_limit == usize::MAX {
+            return;
+        }
+        self.diagnostic_warm_seed.attempts = self.diagnostic_warm_seed.attempts.saturating_add(1);
+        if let Some(matched) = self.seed_residual_log_p(source_pattern_count, target_word_count) {
+            self.diagnostic_warm_seed.applied = self.diagnostic_warm_seed.applied.saturating_add(1);
+            self.diagnostic_warm_seed.matched_patterns = self
+                .diagnostic_warm_seed
+                .matched_patterns
+                .saturating_add(matched as u64);
+            self.diagnostic_warm_seed.seeded_constraints = self
+                .diagnostic_warm_seed
+                .seeded_constraints
+                .saturating_add(self.patterns.len() as u64);
+        } else {
+            // Undo any partial floating writes. A seed miss resumes the
+            // original uniform proposal, never an infeasibility claim.
+            self.log_p.fill(0.0);
+        }
+    }
+
+    #[cfg(any(test, feature = "diagnostic-probes"))]
+    fn seed_residual_log_p(
+        &mut self,
+        source_pattern_count: usize,
+        target_word_count: usize,
+    ) -> Option<usize> {
+        if self.patterns.is_empty()
+            || self.patterns.len() > self.max_constraints
+            || self.log_p.len() != self.patterns.len()
+            || self.cached_patterns.is_empty()
+            || self.cached_patterns.len() > self.max_constraints
+            || self.cached_patterns.len() != self.cached_weights.len()
+            || !self.patterns.windows(2).all(|ids| ids[0] < ids[1])
+            || !self.cached_patterns.windows(2).all(|ids| ids[0] < ids[1])
+            || self
+                .patterns
+                .iter()
+                .chain(&self.cached_patterns)
+                .any(|&id| {
+                    id >= source_pattern_count || id / u64::BITS as usize >= target_word_count
+                })
+        {
+            return None;
+        }
+        let mut cached = 0usize;
+        let mut total = 0u128;
+        let mut matched = 0usize;
+        for &pattern in &self.patterns {
+            while self
+                .cached_patterns
+                .get(cached)
+                .is_some_and(|id| *id < pattern)
+            {
+                cached += 1;
+            }
+            if self.cached_patterns.get(cached) == Some(&pattern) {
+                let weight = self.cached_weights[cached];
+                total = total.checked_add(weight)?;
+                matched += usize::from(weight != 0);
+            }
+        }
+        if total == 0 {
+            return None;
+        }
+        let total = total as f64;
+        let uniform = 0.5 / self.patterns.len() as f64;
+        if !total.is_finite() || !uniform.is_finite() || uniform <= 0.0 {
+            return None;
+        }
+        cached = 0;
+        for (index, &pattern) in self.patterns.iter().enumerate() {
+            while self
+                .cached_patterns
+                .get(cached)
+                .is_some_and(|id| *id < pattern)
+            {
+                cached += 1;
+            }
+            let weight = if self.cached_patterns.get(cached) == Some(&pattern) {
+                self.cached_weights[cached] as f64
+            } else {
+                0.0
+            };
+            let probability = uniform + 0.5 * (weight / total);
+            let log = probability.ln();
+            if !probability.is_finite() || probability <= 0.0 || !log.is_finite() {
+                return None;
+            }
+            self.log_p[index] = log;
+        }
+        Some(matched)
     }
 
     /// Reuse is a new certificate, not authority inherited from a sibling.
@@ -2086,6 +2228,204 @@ mod tests {
             workspace.cached_patterns.push(pattern);
             workspace.cached_weights.push(weight);
         }
+    }
+
+    #[test]
+    fn residual_warm_seed_remaps_original_ids_across_words_and_keeps_new_patterns() {
+        let mut state = workspace(3, 4, 12);
+        state.patterns.extend([1, 64, 129]);
+        state.eligible_rows.extend([0, 1]);
+        seed_cached_weights(&mut state, &[(0, 100), (64, 1), (129, 3)]);
+        state.reset_proposal_state();
+        state.diagnostic_warm_seed_enabled = true;
+        state.maybe_seed_residual_proposal(2, 130, 3);
+        let expected = [1.0f64 / 6.0, 1.0 / 6.0 + 0.125, 1.0 / 6.0 + 0.375];
+        for (&actual, probability) in state.log_p.iter().zip(expected) {
+            assert_eq!(actual.to_bits(), probability.ln().to_bits());
+        }
+        assert_eq!(state.diagnostic_warm_seed.applied, 1);
+        assert_eq!(state.diagnostic_warm_seed.matched_patterns, 2);
+        assert_eq!(state.diagnostic_warm_seed.seeded_constraints, 3);
+        assert!(state.log_q.iter().all(|value| value.to_bits() == 0));
+        assert!(state.average_p.iter().all(|value| value.to_bits() == 0));
+        assert!(state.candidate_weights.iter().all(|weight| *weight == 0));
+        assert!(state.best_weights.iter().all(|weight| *weight == 0));
+        assert_eq!((state.best_numerator, state.best_denominator), (0, 0));
+    }
+
+    #[test]
+    fn residual_warm_seed_missing_invalid_or_overflow_cache_restores_uniform() {
+        for entries in [
+            vec![],
+            vec![(0, 0), (1, 0)],
+            vec![(2, 1)],
+            vec![(0, 1), (0, 2)],
+            vec![(0, u128::MAX), (1, 1)],
+            vec![(usize::MAX, 1)],
+        ] {
+            let mut state = workspace(3, 3, 9);
+            state.patterns.extend([0, 1]);
+            state.eligible_rows.push(0);
+            seed_cached_weights(&mut state, &entries);
+            state.reset_proposal_state();
+            state.diagnostic_warm_seed_enabled = true;
+            state.log_p.fill(f64::NAN);
+            state.maybe_seed_residual_proposal(2, 3, 1);
+            assert!(
+                state.log_p.iter().all(|value| value.to_bits() == 0),
+                "{entries:?}"
+            );
+            assert_eq!(state.diagnostic_warm_seed.applied, 0);
+        }
+        let mut large = workspace(2, 2, 4);
+        large.patterns.extend([0, 1]);
+        seed_cached_weights(&mut large, &[(0, u128::MAX)]);
+        large.reset_proposal_state();
+        large.diagnostic_warm_seed_enabled = true;
+        large.maybe_seed_residual_proposal(1, 2, 1);
+        assert_eq!(large.log_p[0].to_bits(), 0.75f64.ln().to_bits());
+        assert_eq!(large.log_p[1].to_bits(), 0.25f64.ln().to_bits());
+        large.cached_weights.clear();
+        large.maybe_seed_residual_proposal(1, 2, 1);
+        assert!(large.log_p.iter().all(|value| value.to_bits() == 0));
+    }
+
+    #[test]
+    fn residual_warm_seed_is_disabled_by_default_and_root_export_is_bitwise_unchanged() {
+        let supports = vec![vec![0, 1], vec![1, 2], vec![0, 2]];
+        let mut baseline = workspace(3, 3, 6);
+        #[cfg(not(feature = "diagnostic-probes"))]
+        assert!(!baseline.diagnostic_warm_seed_enabled);
+        // Do not mutate the diagnostic global in parallel tests. These local
+        // snapshots independently reproduce the two same-binary conditions.
+        baseline.diagnostic_warm_seed_enabled = false;
+        seed_cached_weights(
+            &mut baseline,
+            &[(0, CERTIFICATE_SCALE), (2, 3 * CERTIFICATE_SCALE)],
+        );
+        let mut enabled = baseline.clone();
+        enabled.diagnostic_warm_seed_enabled = true;
+        let run = |state: &mut DualProposalWorkspace| {
+            state.certified_residual_lower_bound_inner_with_iteration_limit(
+                &supports,
+                &[7],
+                &[0],
+                &[false; 3],
+                &[0],
+                usize::MAX,
+                false,
+                25,
+            )
+        };
+        assert_eq!(run(&mut baseline), run(&mut enabled));
+        assert_eq!(baseline.best_weights, enabled.best_weights);
+        assert_eq!(baseline.best_numerator, enabled.best_numerator);
+        assert_eq!(baseline.best_denominator, enabled.best_denominator);
+        assert_eq!(
+            baseline
+                .log_p
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            enabled
+                .log_p
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            enabled.diagnostic_warm_seed.attempts, 0,
+            "root never warm-seeds"
+        );
+        baseline.reset_proposal_state();
+        baseline.maybe_seed_residual_proposal(2, 3, 1);
+        assert!(baseline.log_p.iter().all(|value| value.to_bits() == 0));
+        assert_eq!(
+            baseline.diagnostic_warm_seed.attempts, 0,
+            "off mode never seeds"
+        );
+    }
+
+    #[test]
+    fn residual_warm_seed_preserves_reserved_heap_and_clone_snapshot() {
+        let mut state = workspace(8, 8, 64);
+        state.patterns.extend([0, 2, 3]);
+        state.eligible_rows.extend([0, 1]);
+        seed_cached_weights(&mut state, &[(0, 7), (2, 2)]);
+        state.reset_proposal_state();
+        state.diagnostic_warm_seed_enabled = true;
+        let retained = state.actual_retained_bytes();
+        state.maybe_seed_residual_proposal(2, 8, 1);
+        assert_eq!(state.actual_retained_bytes(), retained);
+        let mut clone = state.clone();
+        assert!(clone.diagnostic_warm_seed_enabled);
+        state.diagnostic_warm_seed_enabled = false;
+        clone.reset_proposal_state();
+        clone.maybe_seed_residual_proposal(2, 8, 1);
+        assert_eq!(clone.diagnostic_warm_seed.applied, 2);
+        assert_eq!(clone.actual_retained_bytes(), retained);
+        assert_eq!(clone.log_p.capacity(), state.log_p.capacity());
+        assert_eq!(
+            clone.cached_weights.capacity(),
+            state.cached_weights.capacity()
+        );
+    }
+
+    #[test]
+    fn residual_warm_seed_certificates_remain_admissible_for_all_small_residuals() {
+        let mut evaluated = 0usize;
+        for masks in (1usize..8)
+            .flat_map(|a| (1usize..8).flat_map(move |b| (1usize..8).map(move |c| [a, b, c])))
+        {
+            let supports: Vec<Vec<usize>> = masks
+                .iter()
+                .map(|mask| (0..3).filter(|row| mask & (1 << row) != 0).collect())
+                .collect();
+            for covered in [0u64, 1] {
+                for excluded in [0u64, 1] {
+                    let optimum = (0usize..8)
+                        .filter(|chosen| {
+                            *chosen & excluded as usize == 0
+                                && masks.iter().enumerate().all(|(pattern, support)| {
+                                    covered & (1 << pattern) != 0 || *chosen & support != 0
+                                })
+                        })
+                        .map(|chosen| chosen.count_ones() as usize)
+                        .min();
+                    let Some(optimum) = optimum else {
+                        continue;
+                    };
+                    for enabled in [false, true] {
+                        let mut state = workspace(3, 3, 9);
+                        state.diagnostic_warm_seed_enabled = enabled;
+                        seed_cached_weights(
+                            &mut state,
+                            &[(0, CERTIFICATE_SCALE), (2, 3 * CERTIFICATE_SCALE)],
+                        );
+                        let bound = state
+                            .certified_residual_lower_bound_inner_with_iteration_limit(
+                                &supports,
+                                &[7],
+                                &[covered],
+                                &[false; 3],
+                                &[excluded],
+                                optimum,
+                                false,
+                                25,
+                            );
+                        assert!(
+                            bound.is_none_or(|bound| bound <= optimum),
+                            "{masks:?}, covered={covered}, excluded={excluded}, seed={enabled}, bound={bound:?}, optimum={optimum}"
+                        );
+                        evaluated += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            evaluated >= 343 * 2,
+            "both proposal policies exercise the complete root matrix family"
+        );
     }
 
     #[test]

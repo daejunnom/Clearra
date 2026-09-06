@@ -8,25 +8,25 @@ use std::{
 };
 
 use clearra_pc_graph::request::GpuDeviceSelection;
-#[cfg(target_arch = "wasm32")]
-use clearra_wasm::prewarm_gpu_search_async;
 #[cfg(feature = "stage-profiling")]
 use clearra_wasm::ExecutorSearchProfileSession;
+#[cfg(target_arch = "wasm32")]
+use clearra_wasm::prewarm_gpu_search_async;
 use clearra_wasm::{
-    install_pc4_compact_tablebase, release_pc4_compact_tablebase,
-    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
-    serialize_coverage_portfolio_retained_page, serialize_distributed_final_events,
-    serialize_parity_report_exhausted, serialize_parity_report_page,
-    serialize_pc_replay_page_advance, GovernedWasmJson, GpuSearchWarmupReport,
-    PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore, TilingSolutionPageStore,
-    WasmCommandRuntimeError, WasmDistributedCompletionAdvance, WasmDistributedCompletionSession,
-    WasmDistributedCoordinator, WasmDistributedFallbackReason, WasmDistributedMode,
-    WasmDistributedPreparation, WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
+    GovernedWasmJson, GpuSearchWarmupReport, PortfolioPageLoadState, ProductPageSourceOwner,
+    ProductPageStore, TilingSolutionPageStore, WasmCommandRuntimeError,
+    WasmDistributedCompletionAdvance, WasmDistributedCompletionSession, WasmDistributedCoordinator,
+    WasmDistributedFallbackReason, WasmDistributedMode, WasmDistributedPreparation,
+    WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
     WasmDistributedVerifierRuntime, WasmHostCapabilities, WasmMinimumParallelWorker,
-    WasmWorkerAdvanceStatus, WasmWorkerJobId, WasmWorkerJobRuntime,
+    WasmWorkerAdvanceStatus, WasmWorkerJobId, WasmWorkerJobRuntime, install_pc4_compact_tablebase,
+    release_pc4_compact_tablebase, serialize_coverage_portfolio_advance_state,
+    serialize_coverage_portfolio_load_advance_state, serialize_coverage_portfolio_retained_page,
+    serialize_distributed_final_events, serialize_parity_report_exhausted,
+    serialize_parity_report_page, serialize_pc_replay_page_advance,
 };
 #[cfg(test)]
-use clearra_wasm::{WasmWorkerJobStatus, PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT};
+use clearra_wasm::{PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT, WasmWorkerJobStatus};
 
 const ABI_VERSION: u32 = 1;
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
@@ -310,9 +310,13 @@ impl AbiTilingSolutionPageStore {
                 producer_graph_bytes,
                 ..
             } => {
-                debug_assert!(producer_graph_bytes
-                    .checked_add(core::mem::size_of::<Option<AbiTilingSolutionPageStore>>() as u128)
-                    .is_some_and(|actual| actual <= *memory_limit_bytes));
+                debug_assert!(
+                    producer_graph_bytes
+                        .checked_add(
+                            core::mem::size_of::<Option<AbiTilingSolutionPageStore>>() as u128
+                        )
+                        .is_some_and(|actual| actual <= *memory_limit_bytes)
+                );
                 true
             }
         }
@@ -3744,7 +3748,7 @@ mod tests {
 
     fn completed_replay_source_for_test() -> ProductPageSourceOwner {
         let coordinator = completed_source_for_test(
-            "clearra pc path --lines 2 --pieces 5 \
+            "clearra pc path --lines 2 --board-mask 0 --height 2 --pieces 5 \
              --queue IIOOO --no-hold --backend cpu --workers 2",
         );
         let mut completion = coordinator.into_cooperative_completion(2).unwrap();
@@ -3853,6 +3857,7 @@ mod tests {
     #[test]
     fn geometry_replacement_rejects_unfinished_verifier_and_exact_shard_without_losing_inputs() {
         reset_abi_state_for_test();
+        assert_eq!(clearra_wasm_configure_host(4, 0), ABI_OK);
         let (query, task) = minimum_query_and_task_for_replacement_test();
         ABI_STATE.with(|state| state.borrow_mut().transfer_input = query);
         assert_eq!(
@@ -3875,11 +3880,13 @@ mod tests {
             let state = state.borrow();
             assert_eq!(state.input, b"must not be parsed or discarded");
             assert_eq!(state.transfer_input, [0xff]);
-            assert!(state
-                .minimum_parallel_worker
-                .as_ref()
-                .unwrap()
-                .has_active_shard());
+            assert!(
+                state
+                    .minimum_parallel_worker
+                    .as_ref()
+                    .unwrap()
+                    .has_active_shard()
+            );
             assert!(!state.output_outstanding);
         });
         assert_eq!(
@@ -3918,6 +3925,7 @@ mod tests {
     #[test]
     fn exact_replacement_requires_geometry_finish_and_drained_output() {
         reset_abi_state_for_test();
+        assert_eq!(clearra_wasm_configure_host(4, 0), ABI_OK);
         let (query, task) = minimum_query_and_task_for_replacement_test();
         ABI_STATE.with(|state| {
             state.borrow_mut().input = b"clearra pc --lines 2 --pieces 5 --queue IIOOO \
@@ -4250,8 +4258,10 @@ mod tests {
                 "source identity and exact remote slice share a guarded packet"
             );
             assert_eq!(clearra_wasm_output_release(), ABI_OK);
-            assert!(WasmMinimumParallelWorker::initialize(&guarded_query).is_err(),
-                "native process shares a real authority: manager lease remains held without a local cursor");
+            assert!(
+                WasmMinimumParallelWorker::initialize(&guarded_query).is_err(),
+                "native process shares a real authority: manager lease remains held without a local cursor"
+            );
             assert_eq!(
                 clearra_wasm_distributed_finish_parallel_local_start(31),
                 i32::from(!dedicated)
@@ -4874,10 +4884,12 @@ mod tests {
             let state = state.borrow();
             assert!(state.output.is_empty());
             assert!(!state.output_outstanding);
-            assert!(state
-                .tiling_solution_page_store
-                .as_ref()
-                .is_some_and(AbiTilingSolutionPageStore::is_governed));
+            assert!(
+                state
+                    .tiling_solution_page_store
+                    .as_ref()
+                    .is_some_and(AbiTilingSolutionPageStore::is_governed)
+            );
         });
         assert_eq!(clearra_wasm_tiling_solution_count_available(), 1);
         assert_eq!(clearra_wasm_tiling_solution_release(), ABI_OK);
@@ -4900,10 +4912,12 @@ mod tests {
             let page = String::from_utf8(state.output_bytes().to_vec())
                 .expect("continuation page remains UTF-8");
             assert_eq!(page, expected_output);
-            assert!(state
-                .tiling_solution_page_store
-                .as_ref()
-                .is_some_and(AbiTilingSolutionPageStore::is_governed));
+            assert!(
+                state
+                    .tiling_solution_page_store
+                    .as_ref()
+                    .is_some_and(AbiTilingSolutionPageStore::is_governed)
+            );
         });
         assert_eq!(
             clearra_wasm_tiling_solution_page(200, 100),
@@ -5439,17 +5453,21 @@ mod tests {
             state.record_distributed_verifier_candidate_count(i32::MAX as usize),
             i32::MAX
         );
-        assert!(state
-            .distributed_verifier_last_candidate_count
-            .is_some_and(|count| count.exact));
+        assert!(
+            state
+                .distributed_verifier_last_candidate_count
+                .is_some_and(|count| count.exact)
+        );
 
         assert_eq!(
             state.record_distributed_verifier_candidate_count(i32::MAX as usize + 1),
             i32::MAX
         );
-        assert!(state
-            .distributed_verifier_last_candidate_count
-            .is_some_and(|count| !count.exact));
+        assert!(
+            state
+                .distributed_verifier_last_candidate_count
+                .is_some_and(|count| !count.exact)
+        );
 
         state.reset_distributed_state();
         assert!(state.distributed_verifier_last_candidate_count.is_none());

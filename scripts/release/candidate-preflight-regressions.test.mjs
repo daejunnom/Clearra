@@ -60,6 +60,15 @@ test('zero tests, only ignored, malformed results and nonzero process outcomes f
   ]) assert.throws(() => assertNonemptyRustSuccess(invalid));
 });
 
+test('focused feedback includes first-canonical lazy ties and warm-seed authority regressions', () => {
+  for (const [packageName, filter] of [
+    ['clearra-app', 'canonical_ready_reads_do_not_enumerate_hidden_ties_and_explicit_pages_preserve_all_ties'],
+    ['clearra-app', 'member_pages_are_fixed_at_one_hundred_without_losing_candidate_identity'],
+    ['clearra-coverage', 'residual_warm_seed_'],
+    ['clearra-coverage', 'parallel_first_page_handoff_resumes_serial_without_losing_query_or_frontier'],
+  ]) assert.ok(CANDIDATE_RUST_REGRESSIONS.some((entry) => entry.package === packageName && entry.filter === filter));
+});
+
 test('all fixed selections execute once without a shell and failures remain non-accepting', () => {
   const calls = [];
   runCandidateRegressions({ environment: ENV, platform: 'win32', write() {},

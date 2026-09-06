@@ -22,7 +22,7 @@ function assertIsolated(source) {
   assert.match(source, /if: github\.ref == 'refs\/heads\/codex\/v0\.8\.0-preflight-20260906-rng' && github\.ref_type == 'branch'/u);
   assert.match(source, /\[\[ "\$GITHUB_REF" == 'refs\/heads\/codex\/v0\.8\.0-preflight-20260906-rng'/u);
   assert.match(source, /\[\[ "\$\(git rev-parse HEAD\)" == "\$GITHUB_SHA" \]\]/u);
-  for (const job of ['candidate-full-gate', 'candidate-rust-wasm', 'candidate-cli', 'candidate-ui']) {
+  for (const job of ['candidate-full-gate', 'candidate-rust-wasm', 'candidate-cli', 'candidate-minimum-diagnostic', 'candidate-ui']) {
     const tail = source.slice(source.indexOf(`  ${job}:`) + `  ${job}:`.length).split(/^  [a-z][a-z-]*:/mu)[0];
     assert.match(tail, /needs: candidate-source/u, job);
     assert.match(tail, /if: needs\.candidate-source\.outputs\.full_gate == '(?:true|false)'/u, job);
@@ -48,7 +48,7 @@ test('full selection runs the unchanged eight-stage entry point once and skips l
   assert.equal((workflow.match(/-Task ReleaseAcceptance -ReleaseAcceptanceShard Full/gmu) ?? []).length, 1);
   assert.match(workflow, /push\) echo 'full_gate=false'/u);
   assert.match(workflow, /full_gate:[\s\S]*default: true[\s\S]*type: boolean/u);
-  assert.equal((workflow.match(/outputs\.full_gate == 'false'/gu) ?? []).length, 3);
+  assert.equal((workflow.match(/outputs\.full_gate == 'false'/gu) ?? []).length, 4);
   assert.match(workflow, /runs-on: windows-latest/u);
   assert.match(workflow, /-ExecutionSurface Trusted -RuntimeEnvironment windows/u);
   assert.match(workflow, /RUST_MIN_STACK: "16777216"/u);
@@ -81,6 +81,17 @@ test('source identity is paired and WASM is uploaded only after independent five
   assert.match(workflow, /name: unqualified-candidate-wasm-\$\{\{ github\.sha \}\}-run-/u);
   assert.match(workflow, /candidate-preflight-artifacts\.mjs --from \$candidateWasmSource --output \$candidateWasmOutput --source-commit \$env:GITHUB_SHA/u);
   assert.doesNotMatch(workflow, /continue-on-error: true/u);
+});
+
+test('Jstris diagnostic is bounded, same-binary and separate from release or GUI performance proof', () => {
+  const job = workflow.split('  candidate-minimum-diagnostic:')[1].split('  candidate-ui:')[0];
+  assert.match(job, /timeout-minutes: 45/u);
+  assert.match(job, /ctk3_export_jstris_180_exact_cover_diagnostic_matrix -- --exact --ignored --nocapture/u);
+  assert.match(job, /ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe -- --exact --ignored --nocapture/u);
+  assert.match(job, /ctk3_diagnostic_normalized_solver_order_ -- --nocapture/u);
+  assert.equal((job.match(/--release --package clearra-wasm --test pc_minimals_ctk3_stage_probe/gu) ?? []).length, 3);
+  assert.doesNotMatch(job, /continue-on-error:|--workspace|--all-targets|--no-default-features|--features|-Task ReleaseAcceptance/u);
+  assert.match(job, /name: unqualified-jstris-matrix-/u);
 });
 
 test('existing production triggers cannot consume Candidate Preflight by name or branch', () => {

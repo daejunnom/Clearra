@@ -3840,6 +3840,91 @@ mod tests {
     }
 
     #[test]
+    fn canonical_ready_reads_do_not_enumerate_hidden_ties_and_explicit_pages_preserve_all_ties() {
+        let (keys, required, rows) = tied_input();
+        // Use the same shared constructor as all minimum product adapters,
+        // not a supplied canonical result or a fixture-only output shortcut.
+        let source = Arc::new(
+            CoveragePortfolioAlternativeSet::new_canonical(identity(), keys, required, rows)
+                .expect("first exact canonical set"),
+        );
+        assert_eq!(source.known_alternative_count_decimal(), "1");
+        assert_eq!(source.total_alternative_count_decimal(), None);
+        assert!(!source.canonical_page().enumeration_complete());
+        let checkpoint = source
+            .open_store()
+            .expect("canonical continuation")
+            .checkpoint();
+        let mut runtime =
+            CoveragePortfolioPageStore::new(Arc::clone(&source)).expect("canonical runtime page");
+
+        for _ in 0..3 {
+            assert_eq!(runtime.loaded_page_count(), 1);
+            assert_eq!(runtime.known_alternative_count_decimal(), "1");
+            assert!(!runtime.enumeration_complete());
+            assert_eq!(
+                runtime
+                    .member_page(1, 1)
+                    .expect("visible canonical members")
+                    .members()
+                    .iter()
+                    .map(PortfolioMember::candidate_id)
+                    .collect::<Vec<_>>(),
+                [1, 2, 3]
+            );
+            assert_eq!(
+                source
+                    .canonical_candidate_keys_owned()
+                    .expect("complete selected set"),
+                ["a", "b", "c"]
+            );
+            assert_eq!(runtime.store.checkpoint(), checkpoint);
+            assert_eq!(
+                source
+                    .open_store()
+                    .expect("independent continuation")
+                    .checkpoint(),
+                checkpoint
+            );
+            assert!(runtime.pending_replay.is_none());
+        }
+
+        let expected = [
+            vec![1, 2, 3],
+            vec![1, 2, 6],
+            vec![1, 3, 5],
+            vec![1, 5, 6],
+            vec![2, 3, 4],
+            vec![2, 4, 6],
+            vec![3, 4, 5],
+            vec![4, 5, 6],
+        ];
+        let mut actual = vec![source.canonical_page().portfolio().candidate_ids().to_vec()];
+        for expected_count in 2..=expected.len() {
+            let advance = next_fixture_page(|work| runtime.next_page(work, &mut || false));
+            let page = advance.page().expect("one explicitly requested exact tie");
+            assert_eq!(
+                page.known_alternative_count_decimal(),
+                expected_count.to_string()
+            );
+            assert_eq!(page.alternative_index_decimal(), expected_count.to_string());
+            actual.push(page.portfolio().candidate_ids().to_vec());
+            if expected_count < expected.len() {
+                assert_eq!(page.total_alternative_count_decimal(), None);
+                assert!(!page.enumeration_complete());
+            } else {
+                assert_eq!(page.total_alternative_count_decimal(), Some("8"));
+                assert!(page.enumeration_complete());
+            }
+        }
+        assert_eq!(actual, expected);
+        assert!(runtime.enumeration_complete());
+        // The immutable first response remains an honest partial manifest.
+        assert_eq!(source.known_alternative_count_decimal(), "1");
+        assert_eq!(source.total_alternative_count_decimal(), None);
+    }
+
+    #[test]
     fn guarded_alternative_advance_is_transactional_through_the_final_app_allocation() {
         let set = tied_set();
         let mut baseline = set.open_store().expect("baseline store");
@@ -4153,6 +4238,12 @@ mod tests {
         assert_eq!(second.members().len(), 1);
         assert_eq!(second.members()[0].candidate_id(), 101);
         assert_eq!(second.members()[0].normalized_key(), "candidate-100");
+        assert_eq!(
+            set.canonical_candidate_keys_owned()
+                .expect("all selected members"),
+            expected,
+            "the first canonical set is complete even when its rendering needs two member pages"
+        );
     }
 
     #[test]
