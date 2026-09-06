@@ -603,8 +603,9 @@ pub(crate) fn project_canonical_execution_with_context(
         .ok_or("pc path projection is missing")
 }
 
-/// The exact same chain proof as public projection, without retaining or
-/// formatting a public witness that the manifest scanner would discard.
+/// Regression probe for the public chain proof without witness allocation.
+/// The production manifest uses the replay-language validator instead.
+#[cfg(test)]
 pub(crate) fn validate_execution_with_context(
     context: PcPathProjectionContext,
     execution: &CorePostProcessExecution,

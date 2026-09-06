@@ -221,7 +221,7 @@ jobs:
       - name: Export the actual Jstris 180 source matrix without a supplied solution
         run: cargo test --locked --release --package clearra-wasm --test pc_minimals_ctk3_stage_probe ctk3_export_jstris_180_exact_cover_diagnostic_matrix -- --exact --ignored --nocapture
       - name: Verify diagnostic source to canonical row binding
-        run: cargo test --locked --release --package clearra-wasm --test pc_minimals_ctk3_stage_probe ctk3_diagnostic_normalized_solver_order_ -- --nocapture
+        run: cargo test --locked --release --package clearra-wasm --test pc_minimals_ctk3_stage_probe ctk3_diagnostic_ -- --nocapture
       - name: Compare warm seed off and on in the same binary
         run: cargo test --locked --release --package clearra-wasm --test pc_minimals_ctk3_stage_probe ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe -- --exact --ignored --nocapture
       - name: Preserve source-only comparison matrix

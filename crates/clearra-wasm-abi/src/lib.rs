@@ -3790,6 +3790,57 @@ mod tests {
         panic!("tiny exact source did not publish a query");
     }
 
+    fn replacement_test_output() -> String {
+        ABI_STATE.with(|state| String::from_utf8_lossy(state.borrow().output_bytes()).into_owned())
+    }
+
+    #[test]
+    fn geometry_replacement_missing_initial_field_reports_command_error_and_allows_corrected_retry()
+    {
+        reset_abi_state_for_test();
+        assert_eq!(clearra_wasm_configure_host(4, 0), ABI_OK);
+        // --pieces selects the scenario grammar: the empty field and its
+        // height must still be explicit. Parsing must fail before a verifier
+        // or its execution authority is acquired.
+        const INVALID: &str = "clearra pc --lines 2 --pieces 5 --queue IIOOO \
+            --no-hold --backend cpu --workers 2";
+        ABI_STATE.with(|state| state.borrow_mut().input = INVALID.as_bytes().to_vec());
+        assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_ERROR);
+        let error_output = replacement_test_output();
+        assert!(
+            error_output.contains("E_WASM_COMMAND_MISSING_VALUE"),
+            "{error_output}"
+        );
+        assert!(
+            error_output.contains("scenario PC requires --board-mask"),
+            "{error_output}"
+        );
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.distributed_verifier.is_none());
+            assert!(state.minimum_parallel_worker.is_none());
+            assert!(state.output_outstanding);
+        });
+        const CORRECTED: &str = "clearra pc --lines 2 --board-mask 0 --height 2 \
+            --pieces 5 --queue IIOOO --no-hold --backend cpu --workers 2";
+        ABI_STATE.with(|state| state.borrow_mut().input = CORRECTED.as_bytes().to_vec());
+        assert_eq!(
+            clearra_wasm_distributed_verifier_start(),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        ABI_STATE.with(|state| assert_eq!(state.borrow().input, CORRECTED.as_bytes()));
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(
+            clearra_wasm_distributed_verifier_start(),
+            ABI_OK,
+            "{}",
+            replacement_test_output()
+        );
+        assert_eq!(clearra_wasm_distributed_verifier_finish(), ABI_OK);
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        reset_abi_state_for_test();
+    }
+
     #[test]
     fn warm_minimum_to_geometry_releases_authority_for_same_and_larger_worker_policies() {
         reset_abi_state_for_test();
@@ -3797,10 +3848,15 @@ mod tests {
         for (workers, all_threads) in [(11, false), (12, true)] {
             reset_abi_state_for_test();
             assert_eq!(clearra_wasm_configure_host(12, 0), ABI_OK);
-            let initial = "clearra pc --lines 2 --pieces 5 --queue IIOOO \
-                --no-hold --backend cpu --workers 11";
+            let initial = "clearra pc --lines 2 --board-mask 0 --height 2 \
+                --pieces 5 --queue IIOOO --no-hold --backend cpu --workers 11";
             ABI_STATE.with(|state| state.borrow_mut().input = initial.as_bytes().to_vec());
-            assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_OK);
+            assert_eq!(
+                clearra_wasm_distributed_verifier_start(),
+                ABI_OK,
+                "{}",
+                replacement_test_output()
+            );
             assert_eq!(clearra_wasm_distributed_verifier_finish(), ABI_OK);
             assert_eq!(clearra_wasm_output_release(), ABI_OK);
 
@@ -3827,8 +3883,8 @@ mod tests {
             }
             assert!(drained);
             let next = format!(
-                "clearra pc minimals --lines 2 --pieces 5 --queue IIOOO \
-                 --no-hold --backend cpu --workers {workers} {}",
+                "clearra pc minimals --lines 2 --board-mask 0 --height 2 \
+                 --pieces 5 --queue IIOOO --no-hold --backend cpu --workers {workers} {}",
                 if all_threads {
                     "--use-all-cpu-threads"
                 } else {
@@ -3841,7 +3897,12 @@ mod tests {
                 ABI_OUTPUT_NOT_RELEASED
             );
             assert_eq!(clearra_wasm_output_release(), ABI_OK);
-            assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_OK);
+            assert_eq!(
+                clearra_wasm_distributed_verifier_start(),
+                ABI_OK,
+                "{}",
+                replacement_test_output()
+            );
             ABI_STATE.with(|state| {
                 let state = state.borrow();
                 assert!(state.minimum_parallel_worker.is_none());
@@ -3904,11 +3965,16 @@ mod tests {
         ABI_STATE.with(|state| assert!(state.borrow().minimum_parallel_worker.is_none()));
         assert_eq!(clearra_wasm_output_release(), ABI_OK);
         ABI_STATE.with(|state| {
-            state.borrow_mut().input = b"clearra pc --lines 2 --pieces 5 --queue IIOOO \
-                --no-hold --backend cpu --workers 2"
+            state.borrow_mut().input = b"clearra pc --lines 2 --board-mask 0 --height 2 \
+                --pieces 5 --queue IIOOO --no-hold --backend cpu --workers 2"
                 .to_vec();
         });
-        assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_OK);
+        assert_eq!(
+            clearra_wasm_distributed_verifier_start(),
+            ABI_OK,
+            "{}",
+            replacement_test_output()
+        );
         ABI_STATE.with(|state| state.borrow_mut().input = b"replacement".to_vec());
         assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_ERROR);
         ABI_STATE.with(|state| {
@@ -3928,11 +3994,16 @@ mod tests {
         assert_eq!(clearra_wasm_configure_host(4, 0), ABI_OK);
         let (query, task) = minimum_query_and_task_for_replacement_test();
         ABI_STATE.with(|state| {
-            state.borrow_mut().input = b"clearra pc --lines 2 --pieces 5 --queue IIOOO \
-                --no-hold --backend cpu --workers 2"
+            state.borrow_mut().input = b"clearra pc --lines 2 --board-mask 0 --height 2 \
+                --pieces 5 --queue IIOOO --no-hold --backend cpu --workers 2"
                 .to_vec();
         });
-        assert_eq!(clearra_wasm_distributed_verifier_start(), ABI_OK);
+        assert_eq!(
+            clearra_wasm_distributed_verifier_start(),
+            ABI_OK,
+            "{}",
+            replacement_test_output()
+        );
         ABI_STATE.with(|state| state.borrow_mut().transfer_input = query.clone());
         assert_eq!(
             clearra_wasm_distributed_finish_parallel_worker_init(),

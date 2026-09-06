@@ -1553,23 +1553,32 @@ fn build_cover_worker_job_supplies_finite_source_caller_memory_and_returns_exact
         })
         .expect("exact Build final response");
     assert_eq!(response.status(), AppStatus::Success, "{response:?}");
-    let minimum = response
-        .product_capability_result()
-        .and_then(|result| result.build_coverage_portfolio_v2())
-        .expect("shared query-bound minimum result");
-    assert_eq!(minimum.source_candidate_count(), 1);
-    assert_eq!(minimum.selected_candidate_count(), 1);
+    // Worker events contain the public Host DTO, not the App's private
+    // capability evidence. Inspect that exact serialized product boundary.
+    let payload = response
+        .product_result_payload()
+        .expect("public query-bound minimum result");
+    let ProductResultPayloadContent::BuildCoveragePortfolioV2(minimum) = payload.content() else {
+        panic!("Build cover must publish its typed minimum payload");
+    };
+    assert_eq!(payload.contract(), "build.cover");
+    assert_eq!(payload.result_kind(), "build-coverage-portfolio.v2");
+    assert_eq!(minimum.source_candidate_count(), "1");
+    assert_eq!(minimum.selected_candidate_count(), "1");
     assert_eq!(minimum.union_probability(), "1");
     assert!(minimum.completeness().complete());
+    assert!(minimum.page_source_available());
+    let ProductPageSourceOwner::CoveragePortfolio(owner) = runtime
+        .take_completed_product_page_source_owner()
+        .expect("exact page source remains separately runtime-owned")
+    else {
+        panic!("Build cover must retain the shared exact portfolio source");
+    };
     assert_eq!(
-        minimum
-            .portfolio_alternative_owner()
-            .expect("exact page source")
-            .canonical_page()
-            .portfolio()
-            .candidate_ids(),
-        &[1]
+        minimum.page_source_identity_sha256(),
+        Some(owner.set_identity_sha256())
     );
+    assert_eq!(owner.canonical_page().portfolio().candidate_ids(), &[1]);
 }
 
 #[test]

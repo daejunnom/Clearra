@@ -4432,12 +4432,14 @@ mod pc_allspin_projection_tests {
     };
 
     use super::{
-        after_dropping_producer_owners, build_probability_result_command_matches,
+        advance_build_minimum_source, after_dropping_producer_owners,
+        build_probability_result_command_matches, checked_build_minimum_source_external_bytes,
         checked_finite_build_request_entry_bytes, compile_search_command, response_from_search,
         response_from_search_with_build_score_derivation,
         validate_finite_cooperative_memory_requirement, CooperativeAppAdvance,
-        CooperativeAppExecution, CooperativeExecutionState, CooperativeSearchResponseKind,
-        FiniteCooperativeCallerMemory, FiniteCooperativeCallerMemoryRejection, MIB_BYTES,
+        CooperativeAppExecution, CooperativeBackendAdvance, CooperativeExecutionState,
+        CooperativeSearchExecution, CooperativeSearchResponseKind, FiniteCooperativeCallerMemory,
+        FiniteCooperativeCallerMemoryRejection, MIB_BYTES,
     };
     use crate::{
         AppCommand, AppContext, AppCoreExecutorService, AppRenderModel, AppRequest, AppServices,

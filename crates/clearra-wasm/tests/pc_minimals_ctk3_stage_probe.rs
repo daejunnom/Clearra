@@ -319,7 +319,7 @@ fn prepare_ctk3_diagnostic_matrix(
             "source_ordinal": source_ordinal,
             "normalized_ordinal": normalized_ordinal,
             "candidate_key": key,
-            "masks_IOTSZJL_hex": word_hex(&coverage.identity().piece_masks()),
+            "masks_IOTSZJL_hex": word_hex(&diagnostic_colored_piece_masks(coverage.identity())),
             "coverage_words_hex": word_hex(&words),
         }));
         bindings.push((source_ordinal, normalized_ordinal, key));
@@ -387,6 +387,83 @@ fn prepare_ctk3_diagnostic_matrix(
         matrix_identity: matrix_digest.into(),
         artifact,
     }
+}
+
+/// Presentation-only color unions. The domain adapter iterates the public
+/// placement API, ORs every occurrence of each kind in IOTSZJL order, and does
+/// not include the initial board. Exact keys still retain placement boundaries.
+fn diagnostic_colored_piece_masks(
+    identity: clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
+) -> [u64; 7] {
+    use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64ColoredTilingIdentity;
+
+    StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(identity).piece_masks()
+}
+
+#[test]
+fn ctk3_diagnostic_piece_masks_union_repeated_kinds_in_iotszjl_order() {
+    use clearra_core_domain::{
+        piece::piece_kind::PieceKind,
+        solution::normalized_tiling_solution::{
+            NormalizedTilingSolutionKey, PiecePlacementMask, StandardBoard64TilingIdentity,
+        },
+    };
+
+    let identity = StandardBoard64TilingIdentity::from_placements(
+        1_u64 << 63,
+        [
+            PiecePlacementMask::new(PieceKind::L, 0x0f00_0000),
+            PiecePlacementMask::new(PieceKind::I, 0x0000_000f),
+            PiecePlacementMask::new(PieceKind::J, 0x00f0_0000),
+            PiecePlacementMask::new(PieceKind::S, 0x0000_f000),
+            PiecePlacementMask::new(PieceKind::I, 0xf000_0000),
+            PiecePlacementMask::new(PieceKind::O, 0x0000_00f0),
+            PiecePlacementMask::new(PieceKind::Z, 0x000f_0000),
+            PiecePlacementMask::new(PieceKind::T, 0x0000_0f00),
+        ],
+    )
+    .expect("nonoverlapping repeated-piece identity");
+    assert_eq!(identity.placement_count(), 8);
+    let key_before = NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
+    assert_eq!(
+        diagnostic_colored_piece_masks(identity),
+        [
+            0xf000_000f,
+            0x0000_00f0,
+            0x0000_0f00,
+            0x0000_f000,
+            0x000f_0000,
+            0x00f0_0000,
+            0x0f00_0000
+        ],
+    );
+    assert_eq!(
+        NormalizedTilingSolutionKey::from_standard_board64_identity(identity),
+        key_before,
+    );
+    assert_eq!(
+        identity.placement_count(),
+        8,
+        "color export must not merge exact placements"
+    );
+}
+
+#[test]
+fn ctk3_diagnostic_piece_masks_leave_absent_kinds_and_initial_board_empty() {
+    use clearra_core_domain::{
+        piece::piece_kind::PieceKind,
+        solution::normalized_tiling_solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
+    };
+
+    let initial = 0xf000;
+    let empty = StandardBoard64TilingIdentity::from_placements(initial, []).unwrap();
+    assert_eq!(diagnostic_colored_piece_masks(empty), [0; 7]);
+    let one = StandardBoard64TilingIdentity::from_placements(
+        initial,
+        [PiecePlacementMask::new(PieceKind::O, 0xf)],
+    )
+    .unwrap();
+    assert_eq!(diagnostic_colored_piece_masks(one), [0, 0xf, 0, 0, 0, 0, 0]);
 }
 
 fn write_ctk3_diagnostic_matrix(matrix: &Ctk3DiagnosticMatrix) {
