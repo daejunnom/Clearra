@@ -36,6 +36,7 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/release/pages-legacy-contract.test.mjs",
   "scripts/release/pages-rollback-authority.test.mjs",
   "scripts/release/pages-rollback-package.test.mjs",
+  "scripts/release/queue-pages-publication.test.mjs",
   "scripts/release/release-publication-evidence.test.mjs",
   "scripts/release/validate-final-source-revalidation.test.mjs",
   "scripts/release/validate-release-metadata.test.mjs",

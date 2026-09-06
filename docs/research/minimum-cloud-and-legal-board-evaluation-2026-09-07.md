@@ -530,12 +530,35 @@ shard/ownership regression and its fail-closed argument check pass; rustfmt and
 diff whitespace checks pass. The new native regression execution remains for
 trusted CI, not the local host.
 
-The user requested stopping after retry submission without waiting for deployment.
-Dispatch a fresh exact-main canonical run after this repair; do not rerun the failed
-attempt or submit a premature Pages capture/publication. Actual Pages publication
-still requires the new successful canonical run, a successful rollback capture,
-and the existing Pages workflow. No newly dispatched run is claimed successful
-at this handoff, and the currently deployed Pages source remains9177273.
+The user first requested stopping after retry submission, then explicitly requested
+starting Pages in parallel as well. `queue-pages-publication.yml` now accepts the
+already-started exact-main acceptance run ID and the current Pages source. It can
+start while acceptance runs, then sequences successful acceptance, rollback capture
+and Pages publication without requiring this local session to remain active.
+
+The queue is manual-only, first-attempt-only, restricted to this repository/main,
+and finite (120-minute script lease /125-minute job timeout). It has only contents
+read and Actions write permissions: actual capture and publication still belong to
+the existing workflows and their unchanged source/artifact/rollback guards. It
+reuses accepted builds and never rebuilds or publishes a release tag. Its separate
+concurrency group avoids deadlocking the child workflows' Pages lock. CLI and
+Discord deployment are not selected by queue-only changes.
+
+Every run must match the source, repository, workflow, branch, event and attempt.
+Canonical history is revalidated before capture and before publication. Main drift,
+failure, cancellation or lease expiration prevents the next dispatch. A POST with
+an uncertain receipt is not retried or resolved by guessing a recent run. Created
+child links are retained in the job summary; cancellation stops further dispatches
+but already-created child workflows have their own GitHub run lifecycle. Existing
+Pages remains unchanged until the guarded publication job actually deploys.
+
+The local queue and related impact/test-runner suite passed40 tests, including
+failed/cancelled gates, foreign receipts, failed capture, source drift, finite
+waiting and duplicate-dispatch prevention. New native and publication results are
+not claimed successful at dispatch time. This supersedes the earlier manual-only
+handoff; completion is left to GitHub and reviewed on the next ordinary user input.
+The complete closed release Node regression pool also passed476/476 in18.34s
+with four workers after adding the queue tests; no native compilation ran locally.
 
 ## Finite experiment server lifecycle
 
@@ -601,6 +624,8 @@ requested CP-SAT/minimum work or presented as a 3-second fix.
 
 ## Primary references
 
+- [GitHub workflow dispatch run-ID receipts](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+- [GitHub token workflow-dispatch trigger exception](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)
 - [Qnia OR-Tools integration and limits](https://github.com/Qnia28/sfinder_wasm/blob/03b637730c5b541f4f2934be613498fbe65327fd/ORTOOLS_INTEGRATION_AND_LICENSE.md)
 - [Qnia CP-SAT public adapter](https://github.com/Qnia28/sfinder_wasm/blob/03b637730c5b541f4f2934be613498fbe65327fd/src/ortools-min-cover.mjs)
 - [Google CP-SAT architecture](https://github.com/google/or-tools/blob/stable/ortools/sat/README.md)

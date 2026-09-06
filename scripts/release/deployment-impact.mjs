@@ -65,6 +65,8 @@ export function classifyDeploymentImpact(paths) {
     if ([
       ".github/workflows/pages.yml",
       ".github/workflows/pages-rollback.yml",
+      ".github/workflows/queue-pages-publication.yml",
+      "scripts/release/queue-pages-publication.mjs",
     ].includes(path)) {
       pages = true;
       releaseInfrastructure = true;
