@@ -543,10 +543,21 @@ fn ctk3_jstris_180_cached_pivot_exhaustion_first_canonical_ab_probe() {
     );
 }
 
+#[test]
+#[ignore = "explicit combined warm-seed and pivot first-canonical A/B probe"]
+fn ctk3_jstris_180_combined_dual_first_canonical_ab_probe() {
+    run_jstris_first_canonical_ab(
+        JstrisMinimumExperiment::Combined,
+        "ctk3_jstris_180_combined_dual_first_canonical_ab_probe",
+        "CLEARRA_CTK3_JSTRIS_COMBINED_AB_CHILD",
+    );
+}
+
 #[derive(Clone, Copy)]
 enum JstrisMinimumExperiment {
     WarmSeed,
     CachedPivotExhaustion,
+    Combined,
 }
 
 impl JstrisMinimumExperiment {
@@ -554,6 +565,7 @@ impl JstrisMinimumExperiment {
         let name = match self {
             Self::WarmSeed => "warm_seed",
             Self::CachedPivotExhaustion => "cached_pivot_exhaustion",
+            Self::Combined => "combined_dual",
         };
         format!("jstris_{name}_ab_{stage}")
     }
@@ -562,12 +574,21 @@ impl JstrisMinimumExperiment {
         match self {
             Self::WarmSeed => (enabled, false),
             Self::CachedPivotExhaustion => (false, enabled),
+            Self::Combined => (enabled, enabled),
         }
     }
 }
 
 #[test]
 fn ctk3_diagnostic_minimum_experiments_keep_warm_and_pivot_orthogonal() {
+    assert_eq!(
+        JstrisMinimumExperiment::Combined.switches(false),
+        (false, false)
+    );
+    assert_eq!(
+        JstrisMinimumExperiment::Combined.switches(true),
+        (true, true)
+    );
     assert_eq!(
         JstrisMinimumExperiment::WarmSeed.switches(false),
         (false, false),

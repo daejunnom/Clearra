@@ -290,6 +290,8 @@ jobs:
         env:
           CLEARRA_CTK3_PARALLEL_WORKERS: "2"
         run: cargo test --locked --release --package clearra-wasm --test pc_minimals_ctk3_stage_probe ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe -- --exact --ignored --nocapture
+      - name: Compare combined dual ideas with original canonical proof unchanged
+        run: cargo test --locked --release --package clearra-wasm --test pc_minimals_ctk3_stage_probe ctk3_jstris_180_combined_dual_first_canonical_ab_probe -- --exact --ignored --nocapture
       - name: Preserve source-only comparison matrix
         if: always()
         uses: actions/upload-artifact@v4
