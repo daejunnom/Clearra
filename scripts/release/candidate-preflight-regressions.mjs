@@ -44,7 +44,8 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
     package: 'clearra-coverage', filter, exact: false, parallel: false,
   })),
   { package: 'clearra-wasm', filter: 'pc_replay_', exact: false, parallel: false },
-  ...['pc_replay_page_abi_', 'warm_minimum_to_geometry_', 'geometry_replacement_rejects_'].map((filter) => ({
+  ...['pc_replay_page_abi_', 'warm_minimum_to_geometry_', 'geometry_replacement_rejects_',
+    'exact_replacement_requires_geometry_'].map((filter) => ({
     package: 'clearra-wasm-abi', filter, exact: false, parallel: false,
   })),
   { package: 'clearra-gui-host', filter: 'desktop_exact_page_replay_', exact: false,

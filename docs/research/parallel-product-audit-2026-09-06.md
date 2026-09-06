@@ -6,8 +6,12 @@ Latest user clarification: accept approximately0.4s as the ordinary Build/PC
 performance stopping point and focus improvement on minimum solutions before
 release. The earlier0.1s Build criterion below is historical, no longer a gate.
 Keep all246 solutions; a summary-only shortcut is still not authorized. The
-20s minimum target comes from the user's Qnia sfinder_wasm result (~19s).
-Qnia used HiGHS; other settings are unknown, so compare public defaults. The
+former20s minimum target came from the user's Qnia sfinder_wasm result (~19s).
+The user has now replaced it with approximately5s after Qnia's CP-SAT update.
+Earlier20s statements below are historical checkpoints, not current acceptance.
+Compare Qnia3.0's public defaults and separate primary proof from secondary
+selection; do not silently substitute its Fast secondary for exact canonical.
+The previous reference used HiGHS with otherwise unknown settings. The
 user also requested a follow-up audit of the0.129s raw-source vs0.4s GUI timing
 boundary; do not mislabel that difference as measured gallery rendering time.
 
