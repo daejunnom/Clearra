@@ -31,6 +31,19 @@ observed sum reduction is about 10.9%; it does not establish a 3-second GUI
 result. The default policy remains unchanged. Matrix export, row binding and
 this A/B job passed; this says nothing about other jobs in the same run.
 
+The same run's Windows regression step later completed with two failed
+selections and no compile-blocked selections. One was the one-I BuildCover
+fixture expecting one source despite its default horizontal-mirror policy:
+the actual 686 WASM returns two sources for edge target `0xf`, one for centered
+target `0x78`, and a selected minimum of one in both cases. The fixture now
+checks both, without adding the unsupported BuildCover `--no-mirror` option.
+The other selected the nonexistent `pc_replay_page_source::tests` module and
+correctly failed its nonempty-test guard; its real `memory_tests` module is now
+selected. Neither correction is a waiver of product correctness. The unused
+Scenario score fixture warning is addressed by a real synthetic-authority
+continuation parity case, not a broad warning suppression. Revised native
+tests still require execution.
+
 The isolated 4195 browser audit with source-bound `686067a` WASM completed Build
 all-solutions for the supplied CTK3/P7/Jstris180 fixture in 0.7 seconds fresh and
 0.4 seconds warm, with 246 solutions and 5,040/5,040 successful patterns. Build

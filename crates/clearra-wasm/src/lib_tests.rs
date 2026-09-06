@@ -1517,68 +1517,74 @@ fn browser_worker_final_event_keeps_the_fixed_score_typed_report() {
 #[test]
 fn build_cover_worker_job_supplies_finite_source_caller_memory_and_returns_exact_minimum() {
     let _resource_guard = typed_pc_distributed_test_guard();
-    let command_runtime = WasmCommandRuntime::default()
-        .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
-    let mut runtime = WasmWorkerJobRuntime::new(command_runtime);
-    let job = runtime
-        .start_job(
-            "clearra build cover --base-mask 0 --target-mask 0xf --height 4 \
-             --queue I --no-hold --objective min-cover --workers 1",
-        )
-        .expect("canonical one-I Build cover job");
-    let mut terminal = false;
-    for _ in 0..1024 {
-        if runtime
-            .advance_job(job, 128)
-            .expect("bounded Build slice")
-            .is_terminal()
-        {
-            terminal = true;
-            break;
+    // Base/target Build cover includes a horizontal mirror by default. The
+    // edge-aligned I has two source fields; the centered I is mirror-identical.
+    // Both cases still prove and retain one exact canonical minimum field.
+    for (target_mask, expected_source_count) in [("0xf", "2"), ("0x78", "1")] {
+        let command_runtime = WasmCommandRuntime::default()
+            .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
+        let mut runtime = WasmWorkerJobRuntime::new(command_runtime);
+        let job = runtime
+            .start_job(&format!(
+                "clearra build cover --base-mask 0 --target-mask {target_mask} --height 4 \
+             --queue I --no-hold --objective min-cover --workers 1"
+            ))
+            .expect("canonical one-I Build cover job");
+        let mut terminal = false;
+        for _ in 0..1024 {
+            if runtime
+                .advance_job(job, 128)
+                .expect("bounded Build slice")
+                .is_terminal()
+            {
+                terminal = true;
+                break;
+            }
         }
-    }
-    assert!(terminal, "tiny Build cover must reach a terminal response");
-    let events = runtime.drain_events(job);
-    assert!(
-        !events
+        assert!(terminal, "tiny Build cover must reach a terminal response");
+        let events = runtime.drain_events(job);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, WasmWorkerJobEvent::Failed { .. })),
+            "Build source must not use the compatibility advance for a finite session: {events:?}"
+        );
+        let response = events
             .iter()
-            .any(|event| matches!(event, WasmWorkerJobEvent::Failed { .. })),
-        "Build source must not use the compatibility advance for a finite session: {events:?}"
-    );
-    let response = events
-        .iter()
-        .find_map(|event| match event {
-            WasmWorkerJobEvent::FinalResponse { response, .. } => Some(response),
-            _ => None,
-        })
-        .expect("exact Build final response");
-    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
-    // Worker events contain the public Host DTO, not the App's private
-    // capability evidence. Inspect that exact serialized product boundary.
-    let payload = response
-        .product_result_payload()
-        .expect("public query-bound minimum result");
-    let ProductResultPayloadContent::BuildCoveragePortfolioV2(minimum) = payload.content() else {
-        panic!("Build cover must publish its typed minimum payload");
-    };
-    assert_eq!(payload.contract(), "build.cover");
-    assert_eq!(payload.result_kind(), "build-coverage-portfolio.v2");
-    assert_eq!(minimum.source_candidate_count(), "1");
-    assert_eq!(minimum.selected_candidate_count(), "1");
-    assert_eq!(minimum.union_probability(), "1");
-    assert!(minimum.completeness().complete());
-    assert!(minimum.page_source_available());
-    let ProductPageSourceOwner::CoveragePortfolio(owner) = runtime
-        .take_completed_product_page_source_owner()
-        .expect("exact page source remains separately runtime-owned")
-    else {
-        panic!("Build cover must retain the shared exact portfolio source");
-    };
-    assert_eq!(
-        minimum.page_source_identity_sha256(),
-        Some(owner.set_identity_sha256())
-    );
-    assert_eq!(owner.canonical_page().portfolio().candidate_ids(), &[1]);
+            .find_map(|event| match event {
+                WasmWorkerJobEvent::FinalResponse { response, .. } => Some(response),
+                _ => None,
+            })
+            .expect("exact Build final response");
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+        // Worker events contain the public Host DTO, not the App's private
+        // capability evidence. Inspect that exact serialized product boundary.
+        let payload = response
+            .product_result_payload()
+            .expect("public query-bound minimum result");
+        let ProductResultPayloadContent::BuildCoveragePortfolioV2(minimum) = payload.content()
+        else {
+            panic!("Build cover must publish its typed minimum payload");
+        };
+        assert_eq!(payload.contract(), "build.cover");
+        assert_eq!(payload.result_kind(), "build-coverage-portfolio.v2");
+        assert_eq!(minimum.source_candidate_count(), expected_source_count);
+        assert_eq!(minimum.selected_candidate_count(), "1");
+        assert_eq!(minimum.union_probability(), "1");
+        assert!(minimum.completeness().complete());
+        assert!(minimum.page_source_available());
+        let ProductPageSourceOwner::CoveragePortfolio(owner) = runtime
+            .take_completed_product_page_source_owner()
+            .expect("exact page source remains separately runtime-owned")
+        else {
+            panic!("Build cover must retain the shared exact portfolio source");
+        };
+        assert_eq!(
+            minimum.page_source_identity_sha256(),
+            Some(owner.set_identity_sha256())
+        );
+        assert_eq!(owner.canonical_page().portfolio().candidate_ids(), &[1]);
+    }
 }
 
 #[test]

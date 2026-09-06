@@ -66,6 +66,11 @@ test('ordered probability evidence runs through coverage, producer and strict Ap
   assert.ok(selected.every((entry) => entry.exact === false));
 });
 
+test('replay page-source selects the real memory test module, not an empty former name', () => {
+  assert.ok(CANDIDATE_RUST_REGRESSIONS.some((entry) => entry.package === 'clearra-app' && entry.filter === 'pc_replay_page_source::memory_tests::'));
+  assert.ok(!CANDIDATE_RUST_REGRESSIONS.some((entry) => entry.filter === 'pc_replay_page_source::tests::'));
+});
+
 test('focused feedback includes first-canonical lazy ties and warm-seed authority regressions', () => {
   for (const [packageName, filter] of [
     ['clearra-app', 'canonical_ready_reads_do_not_enumerate_hidden_ties_and_explicit_pages_preserve_all_ties'],

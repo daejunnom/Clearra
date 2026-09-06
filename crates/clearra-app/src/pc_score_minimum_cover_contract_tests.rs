@@ -782,16 +782,72 @@ fn construction_stays_within_the_default_two_mib_stack_contract() {
 
 #[test]
 fn cooperative_score_minimum_keeps_exact_canonical_and_attack_independent_membership() {
+    let winners = two_by_two_winners([u32::MAX, 0, 1, u32::MAX]);
+    let (summary, derivation) = authority_fixture(winners.clone(), winners, 2);
+    assert_cooperative_score_minimum_source_parity(summary, &derivation);
+}
+
+#[test]
+fn cooperative_score_minimum_scenario_preserves_source_binding_and_exact_canonical() {
+    // This is a synthetic score-authority fixture, not scenario Geometry or
+    // provider evidence. Both presets use the real guarded production reducer
+    // and the same exact parallel portfolio continuation below.
+    let winners = two_by_two_winners([u32::MAX, 0, 1, u32::MAX]);
+    let (opening_summary, derivation) = authority_fixture(winners.clone(), winners, 2);
+    let opening = validate_pc_score_portfolio_v2_result(&opening_summary, &derivation)
+        .expect("opening reference");
+    let mut scenario_summary = opening_summary.clone();
+    scenario_summary.problem_preset = PcScoreProblemPreset::ScenarioPc;
+    let scenario = validate_pc_score_portfolio_v2_result(&scenario_summary, &derivation)
+        .expect("scenario reference");
+
+    assert_eq!(scenario.problem_preset(), PcScoreProblemPreset::ScenarioPc);
+    assert_eq!(scenario.query(), scenario_summary.query());
+    assert_eq!(scenario.selected_score_candidate_ids(), &[1, 3]);
+    assert_eq!(
+        scenario.pattern_best_scores(),
+        opening.pattern_best_scores()
+    );
+    assert_eq!(
+        scenario.selected_solution_keys(),
+        opening.selected_solution_keys()
+    );
+    assert_eq!(
+        scenario
+            .portfolio_alternatives()
+            .identity()
+            .source_identity(),
+        opening
+            .portfolio_alternatives()
+            .identity()
+            .source_identity()
+    );
+    assert_ne!(
+        scenario
+            .portfolio_alternatives()
+            .identity()
+            .query_identity(),
+        opening.portfolio_alternatives().identity().query_identity()
+    );
+    assert_ne!(
+        scenario.portfolio_alternatives().set_identity_sha256(),
+        opening.portfolio_alternatives().set_identity_sha256()
+    );
+    assert_cooperative_score_minimum_source_parity(scenario_summary, &derivation);
+}
+
+fn assert_cooperative_score_minimum_source_parity(
+    summary: PcScoreSummaryV2Result,
+    derivation: &PcScoreDerivation,
+) {
     use clearra_coverage::cover::{ExactAtMostShardAdvance, ExactAtMostShardSession};
     use pc_score_minimum_cover_result::{
         PcScorePortfolioExecutionPreparation, PcScorePortfolioPreparationAdvance,
     };
-    let winners = two_by_two_winners([u32::MAX, 0, 1, u32::MAX]);
-    let (summary, derivation) = authority_fixture(winners.clone(), winners, 2);
-    let expected = validate_pc_score_portfolio_v2_result(&summary, &derivation).unwrap();
+    let expected = validate_pc_score_portfolio_v2_result(&summary, derivation).unwrap();
     let mut preparation = PcScorePortfolioExecutionPreparation::new(
         pc_score_summary_result::ValidatedPcScoreExecutionEvidence::fixture(summary),
-        &derivation,
+        derivation,
         &mut |_| Ok(()),
     )
     .unwrap();

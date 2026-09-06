@@ -40,7 +40,7 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
     package: 'clearra-wasm', filter, exact: false, parallel: false,
   })),
   ...[
-    'pc_replay_source_digest::tests::', 'pc_replay_page_source::tests::',
+    'pc_replay_source_digest::tests::', 'pc_replay_page_source::memory_tests::',
     'pc_replay_page_error::tests::', 'cooperative_pc_replay_pages_',
     'pc_replay_v2_page_pending_', 'cooperative_pc_replay_manifest_cancellation_',
     'cooperative_pc_replay_p7_ctk3_',
