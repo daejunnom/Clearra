@@ -75,6 +75,50 @@ class DiagnosticFailure extends Error {
     this.code = code;
   }
 }
+
+// Fixed vocabulary only. Never forward arbitrary child error text, argv or env.
+const SAFE_CLI_ERRORS = new Set([
+  "E_CLI_MISSING_VALUE", "E_CLI_INVALID_VALUE", "E_CLI_UNKNOWN_OPTION",
+  "E_CLI_COMMAND_UNSUPPORTED", "E_CLI_PRODUCT_THREAD_UNAVAILABLE",
+  "E_CLI_OUTPUT_LIMIT_EXCEEDED", "E_PRODUCT_RUNTIME_UNSUPPORTED",
+  "E_NATIVE_CORE_UNAVAILABLE", "E_BACKEND_GPU_UNAVAILABLE",
+  "E_PC_TARGET_INVALID", "E_PC_QUERY_INVALID", "E_PC_SEARCH_INTERNAL",
+  "E_PC_SCENARIO_SEARCH_INTERNAL", "E_PATH_SEARCH_INTERNAL",
+  "E_SETUP_QUERY_INVALID", "E_COVER_QUERY_INVALID", "E_OPERATION_SEQUENCE_INCOMPLETE",
+  "E_OPERATION_SEQUENCE_TIMED_OUT", "E_OPERATION_SEQUENCE_CANCELLED",
+  "E_TIE_SNAPSHOT_IO", "E_TIE_SNAPSHOT_PATH_UNSAFE", "E_TIE_SNAPSHOT_TARGET_EXISTS",
+]);
+
+function safeSample(record, context) {
+  let code = null;
+  let resource = null;
+  try {
+    const payload = JSON.parse(record.result?.stdout);
+    code = payload.error?.code;
+    resource = payload.resource_report;
+  } catch { /* not JSON */ }
+  if (!SAFE_CLI_ERRORS.has(code)) {
+    const prefix = record.result?.stderr?.match(/^(E_[A-Z_]+)(?=[:\s])/u)?.[1];
+    code = SAFE_CLI_ERRORS.has(prefix) ? prefix : null;
+  }
+  return { ...context, process_ms: record.processMs,
+    exit_code: Number.isSafeInteger(record.result?.exitCode) ? record.result.exitCode : null,
+    signal: ["SIGTERM", "SIGKILL", "SIGABRT", "SIGSEGV"].includes(record.result?.signal)
+      ? record.result.signal : null,
+    cli_error_code: code,
+    resource_reason: ['memory-budget-exceeded', 'worker-limit-exceeded', 'deadline-exceeded',
+      'cancelled', 'backend-unavailable', 'unsupported'].includes(resource?.execution_availability?.reason)
+      ? resource.execution_availability.reason : null,
+    output_limit_exceeded: record.overflow,
+    deadline_exceeded: record.deadlineExceeded, spawn_failed: record.spawnError === true };
+}
+
+export function diagnosticFailureReport(error) {
+  return { schema_id: PARITY_SCHEMA, status: "failed", release_authority: false,
+    performance_threshold_applied: false,
+    code: error instanceof DiagnosticFailure ? error.code : "diagnostic_failed",
+    ...(error instanceof DiagnosticFailure ? error.evidence : {}) };
+}
 function requireDiagnostic(condition, code) {
   if (!condition) throw new DiagnosticFailure(code);
 }
@@ -247,6 +291,9 @@ export async function benchmarkCloudCliParity(options, dependencies = {}) {
   let active = null;
   let expectedArguments = null;
   const operations = [];
+  const fixtures = [];
+  const samples = [];
+  let context = null;
   function captureSpawn(file, args, settings) {
     requireDiagnostic(active === null && file === executable &&
       JSON.stringify(args) === JSON.stringify(expectedArguments) && settings.shell === false &&
@@ -284,6 +331,7 @@ export async function benchmarkCloudCliParity(options, dependencies = {}) {
           stdout: Buffer.concat(out).toString("utf8").trim(),
           stderr: Buffer.concat(err).toString("utf8").trim(),
         };
+        samples.push(safeSample(record, context));
         resolveRecord(record);
       });
     });
@@ -315,7 +363,6 @@ export async function benchmarkCloudCliParity(options, dependencies = {}) {
       expectedRuntimeIdentity: runtime, timeoutMs: FIXTURE_TIMEOUT_MS,
       maxOutputBytes: OUTPUT_LIMIT, maxArtifactBytes: OUTPUT_LIMIT, now,
     });
-    const fixtures = [];
     for (const fixture of PARITY_FIXTURES) {
       expectedArguments = prepareClearraArguments([...fixture.arguments], {
         workers, useAllLogicalProcessors: true, logicalProcessors: visibleCpus,
@@ -328,6 +375,7 @@ export async function benchmarkCloudCliParity(options, dependencies = {}) {
         // Alternate AB/BA order without overlapping jobs or prefetching work.
         const order = pair % 2 === 0 ? ["direct", "service"] : ["service", "direct"];
         for (const route of order) {
+          context = { fixture_id: fixture.id, pair, warmup: pair < WARM_PAIRS, route };
           requireDiagnostic(!overall.signal.aborted, "diagnostic_deadline");
           active = null;
           if (route === "direct") {
@@ -354,6 +402,8 @@ export async function benchmarkCloudCliParity(options, dependencies = {}) {
           }
           requireDiagnostic(!active.overflow && !active.deadlineExceeded && !active.spawnError && !overall.signal.aborted,
             "failed_or_cancelled_sample");
+          // Validate at the failing route, before running another expensive arm.
+          validateParityResult(active.result, fixture, runtime);
           active = null;
         }
         const direct = validateParityResult(captures.direct.record.result, fixture, runtime);
@@ -396,6 +446,11 @@ export async function benchmarkCloudCliParity(options, dependencies = {}) {
       cold_start_and_capability_excluded: true, pure_solver_timing: false,
       performance_threshold_applied: false, fixtures,
     };
+  } catch (error) {
+    const failure = error instanceof DiagnosticFailure ? error : new DiagnosticFailure("diagnostic_failed");
+    failure.evidence = { runtime_identity: runtime, cli_binary_sha256: cliHash,
+      cpus, workers, context, completed_fixtures: fixtures, samples };
+    throw failure;
   } finally {
     overall.abort();
     clearTimeout(totalTimer);
@@ -417,8 +472,8 @@ async function main() {
     process.stdout.write(`${JSON.stringify(report)}\n`);
   } catch (error) {
     // Never print arbitrary errors (which could contain argv, output or URLs).
-    process.stderr.write(`${JSON.stringify({ schema_id: PARITY_SCHEMA, status: "failed",
-      release_authority: false, code: error instanceof DiagnosticFailure ? error.code : "diagnostic_failed" })}\n`);
+    // stdout is the diagnostic artifact even on failure; exit remains nonzero.
+    process.stdout.write(`${JSON.stringify(diagnosticFailureReport(error))}\n`);
     process.exitCode = 2;
   }
 }

@@ -2,12 +2,72 @@
 
 ## Authority and stop boundary
 
-The user requested these evaluations after the temporary CI completed, and asked
-that newly launched CI/Cloud measurements not be polled in the same turn. Results
-are to be reviewed on the next ordinary user turn, not a steering message. Public
-deployment, recovery, Pages, production traffic, Discord registration, and v0.8.0
-publication remain paused. Minimum runtime is still a P2 hotfix, not a new release
-blocker. Correctness failures are not waived.
+The latest request permits an additional Pages deployment only after all relevant
+P0/P1 issues are cleared, without bypassing canonical acceptance or rollback
+capture. New diagnostic CI is submitted without waiting for completion; review
+its results on the next ordinary user turn. Minimum runtime remains a P2 hotfix.
+External source comparisons are now strictly local-only: no upstream checkout,
+comparison test, solver asset or benchmark result is included in CI/deployment.
+The legal-board experiment uses a separate local branch and is not a product import.
+
+## Latest completed CI and actual GUI evaluation
+
+[Candidate 34051492524](https://github.com/daejunnom/Clearra/actions/runs/34051492524)
+at `2d43a7cce2557ec376d0759746e3c3edb4de8a18` finished with Rust/WASM, UI and
+minimum diagnostics passed; CLI parity failed during computation, not import.
+The former diagnostic emitted only `cli_not_successful` and discarded prior
+fixtures and the failing route. That result cannot establish Cloud or CLI parity.
+The harness now writes a failed, non-authoritative JSON artifact with bounded,
+allow-listed fixture/route/exit/resource metadata and completed fixture evidence,
+and validates an arm before spending time running the next arm. Raw child text,
+arguments and environment are never copied. Successful compilation can preserve
+the explicitly unqualified CLI artifact even if a later diagnostic fails.
+
+`candidate-rust-wasm` took 44m54s: 3m22s toolchain setup, 24m16s native
+regressions and 16m32s independent WASM compilation. Native and WASM are now
+sibling jobs after source binding. Every native selection remains; the native
+leaf no longer installs npm dependencies or wasm-bindgen. The full gate still
+runs once when explicitly selected, and skips all focused leaves. This removes
+the serial dependency, not a claim of already measured new-run speedup.
+
+Downloaded artifact archive SHA-256 values were checked, then the five WASM files
+were verified against the exact 2d43a7c source worktree and original runtime IDs:
+WASM `d7d5a71a45c7f34aab313898fb32f8f228849afc40367a5277ce9fbcbf1f39fa`.
+Browser-control checks ran on isolated port 4196 (4194 unchanged), Jstris 180,
+left 16-cell field / P7 / 11 compute workers:
+
+| Actual GUI request | Result | Displayed elapsed |
+| --- | --- | ---: |
+| PC all solutions | 246 fields, 100% coverage, 100 initially rendered | 0.7s |
+| Minimum solutions | exact first 25-member set; explicit next opens set 2 | 27.9s |
+| Pattern complete replay | 246 representatives, 3,993,088 paths; loaded replay image, 10 frames at 500ms | 9.6s |
+| Build all solutions, target complement | 246 fields, 5,040/5,040 patterns | 0.7s cold / 0.4s warm |
+
+The warm Build run also passed with Korean UI and updated Geometry nodes.
+Finished workers read 0/11. These bounded browser checks do not clear the unseen
+native CLI failure or constitute exhaustive P0/P1 coverage. No new canonical
+acceptance or current rollback capture exists for this source, so Pages is not
+published from this unqualified artifact. The 3-second minimum target is not met.
+
+The new local-only CP-SAT adapter run (Node 24.16.0, upstream 03b6377 unchanged)
+on the same downloaded 2d43a7c Jstris matrix took 5.290, 5.539 and 7.174 seconds
+for exact cardinality, including solver-worker load and cleanup. The adapter's
+`source_commit=e352492...` identifies the local invoking checkout, not a rebuild
+of that downloaded matrix. Matrix provenance is 2d43a7c / the hash below.
+All three proved K=25 and covered the original matrix, but selected-key hashes
+differed; none claimed Clearra's exact first canonical ordering.
+
+Latest native same-binary ABBA medians (two samples per arm; exact K=25 and
+identical first canonical members in every arm):
+
+| Experiment | Workers | Baseline proof / canonical / total ms | Candidate proof / canonical / total ms |
+| --- | ---: | ---: | ---: |
+| Residual warm seed | 4 | 10,768 / 14,305 / 25,075 | 9,221 / 13,044 / 22,267 |
+| Cached pivot exhaustion | 4 | 10,747 / 14,330 / 25,077 | 10,259 / 13,487 / 23,747 |
+| Residual warm seed | 2 | 11,134 / 13,463 / 24,598 | 9,057 / 11,626 / 20,684 |
+
+Both techniques stay diagnostic/default-off. The next isolated candidate adds a
+combined ABBA arm to test interaction, without changing the production default.
 
 ## Completed input evidence
 
@@ -79,16 +139,32 @@ This borrows the dual/reduced-cost pruning idea, not Google's CP-SAT implementat
 or its complete SAT/LP/cut/learning machinery. Warm-start changes proposal search,
 not the proof authority. Neither technique imports an answer or assumes 25.
 
-`scripts/tools/benchmark-qnia-cpsat.mjs` now compares Qnia's public CP-SAT API on the
+`_local/research/benchmark-qnia-cpsat.mjs` compares Qnia's public CP-SAT API on the
 same Clearra Jstris matrix and normalized candidate order. It verifies raw matrix,
 candidate and queue hashes, transposes coverage, records preparation and kernel
 times, and performs three fresh solver calls with upstream defaults. Every
 OPTIMAL/objective/bound result is checked against the original, unreduced matrix.
 It reports cardinality proof time only and explicitly sets first-canonical proof
 to false. Do not compare that time to Clearra proof-plus-canonical as though they
-were the same output contract. The upstream source/WASM is separately checked out
-in temporary CI storage, never linked or copied into the product. No product
-dependency or license list changes are made for this reference-only diagnostic.
+were the same output contract. The adapter and its tests have been moved out of
+tracked release source; execution rejects CI environments. Candidate CI no longer
+checks out Qnia or invokes/uploads external comparisons. Existing historical CI
+results below are evidence from before this policy change, not a continuing path.
+No product dependency or license list changes are made for this local diagnostic.
+
+Source comparison explains the timing gap in two separate ways. Qnia's exact
+cardinality kernel removes redundant constraints and dominated candidates; the
+current Jstris matrix becomes 1,389 constraints / 158 candidates / 15,128 entries.
+It solves Boolean coverage constraints and minimizes their sum with CP-SAT's
+`max_lp` profile. Clearra instead uses a portable exact cover branch search with
+integer-certified dual bounds, memoization and resumable partition receipts.
+After proving K, Clearra additionally uses exact AtMost self-reduction on original
+canonical candidate IDs; eliminated/dominated alternatives must remain available
+for canonical selection and lazy ties. Each negative prefix can require another
+exact proof. Copying Qnia's primary reduction into that second stage would lose
+valid earlier IDs/ties. Qnia's default Fast secondary is a different human-quality
+objective, not this complete lexicographic proof. The historical 3.662-5.543s
+full-feature local measurements therefore do not measure the same contract.
 
 ## Cloud execution equivalence
 
@@ -113,8 +189,21 @@ correct CPU throttling, concurrency or network latency. The existing zero-traffi
 candidate mode retains all pre/post service readback checks for that later gate.
 Node mocks or a GitHub-hosted Linux comparison are not live Cloud evidence.
 
-Newly dispatched diagnostics are not polled during this turn. No measured Cloud
-equivalence or new Qnia A/B result is claimed before the next requested review.
+[Cloud diagnostic 34051405943](https://github.com/daejunnom/Clearra/actions/runs/34051405943)
+failed at OIDC exchange before image build or Job creation. Live provider readback
+confirmed its condition permits only `discord-deploy.yml@refs/heads/main`, while
+the diagnostic uses `cloud-cli-diagnostic.yml`. A narrowly scoped allow-list
+addition preserving immutable repository/owner IDs and main was requested from
+the user; no IAM changes or production service updates were made automatically.
+
+Live role readback also confirmed `run.jobs.delete` exists but
+`run.executions.delete` does not. The diagnostic cleanup formerly requested the
+latter and would fail after a successful run. It now validates the exclusive
+parent UID, execution count/UID and parent pointer, then deletes the owned Job
+using existing authority. Google documents that Job deletion terminates its
+running executions. The receipt honestly records `owned-parent-deleted`, not a
+separately observed execution deletion. Identity drift still blocks deletion;
+cleanup failure still fails the whole diagnostic. No new Cloud timing is claimed.
 
 ## wirelyre legal-boards: applicability, not a product import
 
@@ -147,6 +236,18 @@ solutions/canonical IDs with index on/off on line-clear, arbitrary initial field
 mirrors, repeated pieces and each kick profile before activation. Existing
 component-area necessary checks should be reused instead of duplicated.
 
+The local `codex/legal-board-kick-index-20260907` experiment implements only the
+independent graph/index boundary under `_local/legal-board/`, not a replacement
+movement engine. Its generation key binds ordered kicks (including implicit
+origin/O policy), engine, spawn/lock/clear rules, dimensions and initial domain.
+Tests cover a kick-dependent transition change requiring regeneration, real
+SRS-X fixture key invalidation, unclosed domains, incomplete generation, memory
+budgets, cancellation and arbitrary garbage. Reverse reachability agreed with
+independent forward reachability for all 512 directed graphs on three states
+(1,536 state queries). Five tests passed in Node. This is boundary/prototype
+evidence, not generation or proof of a complete 4L Tetris index for every kick
+profile. Full generation remains deferred until its cost/domain is established.
+
 For this benchmark the source stage is tens of milliseconds, while minimum proof
 and canonical selection take seconds. Even eliminating that source stage cannot
 explain the minimum bottleneck. Therefore this idea is not substituted for the
@@ -159,3 +260,4 @@ requested CP-SAT/minimum work or presented as a 3-second fix.
 - [Google CP-SAT architecture](https://github.com/google/or-tools/blob/stable/ortools/sat/README.md)
 - [wirelyre license](https://github.com/wirelyre/tetra-tools/blob/2342953cb424cfd5ca94fa8eefdbe5434bd5ff1c/LICENSE)
 - [wirelyre graph reference, not imported](https://github.com/wirelyre/tetra-tools/blob/2342953cb424cfd5ca94fa8eefdbe5434bd5ff1c/legal-boards/src/boardgraph.rs)
+- [Google Cloud Job deletion and execution termination](https://cloud.google.com/run/docs/managing/jobs#deleting)

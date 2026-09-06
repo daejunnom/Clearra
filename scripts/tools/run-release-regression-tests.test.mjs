@@ -18,7 +18,6 @@ const EXPECTED_RELEASE_REGRESSIONS = Object.freeze([
   "scripts/release/candidate-preflight-artifacts.test.mjs",
   "scripts/release/candidate-preflight-regressions.test.mjs",
   "scripts/release/cloud/benchmark-cli-parity-v080.test.mjs",
-  "scripts/tools/benchmark-qnia-cpsat.test.mjs",
   "scripts/release/create-exact-source-archive.test.mjs",
   "scripts/release/deployment-impact.test.mjs",
   "scripts/release/fast-fix-qualification-evidence.test.mjs",
