@@ -326,6 +326,12 @@ fn uncovered_probability(
     success_coverage: &PatternBitSet,
     weights: &WeightedPatternSet,
 ) -> Result<ProbabilityValue, PatternCoverageAggregationError> {
+    // An empty success set has the exact same mass as the validated universe.
+    // In particular, 42 repeated additions of 1/42 can round above one even
+    // though the compact uniform weight authority has total mass exactly one.
+    if success_coverage.count_ones() == 0 {
+        return Ok(weights.total_weight());
+    }
     let mut failed = 0.0_f64;
     for pattern_index in 0..weights.len() {
         if success_coverage.contains(PatternId::new(pattern_index)) {
@@ -335,6 +341,11 @@ fn uncovered_probability(
             .weight(PatternId::new(pattern_index))
             .ok_or(PatternCoverageAggregationError::MissingPatternWeight { pattern_index })?
             .get();
+    }
+    // Match the constructor's bounded summation tolerance, not an arbitrary
+    // clamp. A materially invalid sum must still fail the probability guard.
+    if failed > 1.0 && failed - 1.0 <= summation_tolerance(weights.len()) {
+        failed = 1.0;
     }
     ProbabilityValue::new(failed).map_err(PatternCoverageAggregationError::FailedProbability)
 }
@@ -385,6 +396,55 @@ mod tests {
             PatternWeightModelId::new(23),
             pattern_count,
         )
+    }
+
+    #[test]
+    fn empty_and_full_success_preserve_uniform_mass_without_roundoff_rejection() {
+        for count in [7, 42, 210, 5040] {
+            let weights = WeightedPatternSet::uniform(count).unwrap();
+            for covered in [false, true] {
+                let coverage = if covered {
+                    PatternBitSet::all(count)
+                } else {
+                    PatternBitSet::new(count)
+                };
+                let summary = PatternCoverageAggregation::from_success_coverage(
+                    authority(count),
+                    usize::from(covered),
+                    &coverage,
+                    &weights,
+                    PatternCoverageCompleteness::complete(),
+                )
+                .expect("valid finite-bag probability partition");
+                assert_eq!(
+                    summary.success_probability().get(),
+                    if covered { 1.0 } else { 0.0 }
+                );
+                assert_eq!(
+                    summary.failed_probability().get(),
+                    if covered { 0.0 } else { 1.0 }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_mass_success_does_not_invalidate_rounded_failure_mass() {
+        let mut values = vec![ProbabilityValue::new(1.0 / 42.0).unwrap(); 42];
+        values.push(ProbabilityValue::ZERO);
+        let weights = WeightedPatternSet::new(values).unwrap();
+        let coverage = PatternBitSet::from_patterns(43, [PatternId::new(42)]).unwrap();
+        let summary = PatternCoverageAggregation::from_success_coverage(
+            authority(43),
+            1,
+            &coverage,
+            &weights,
+            PatternCoverageCompleteness::complete(),
+        )
+        .expect("zero-mass success and a rounded full failure mass");
+        assert_eq!(summary.success_probability(), ProbabilityValue::ZERO);
+        assert_eq!(summary.failed_probability().get(), 1.0);
+        assert!(WeightedPatternSet::new(vec![ProbabilityValue::new(0.51).unwrap(); 2]).is_err());
     }
 
     #[test]

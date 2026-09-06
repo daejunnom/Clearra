@@ -40,6 +40,16 @@ capture of the active 9177273 site under that main, then Pages publication**.
 Capture must not race acceptance. No new Pages publication is claimed by these
 failed preparation runs, and no rollback/canonical guard is relaxed.
 
+The subsequent canonical run 34060732297 at 3819bee passed those metadata checks,
+then exposed two older documentation/cohesion regressions: the replay-language
+module's source rationale did not state its single change reason in the required
+permanent format, and four generic measurement phrases matched the public
+hidden-command exclusion test. The source comment now explains the shared
+canonical-label invariant; the measurement wording is precise without describing
+any hidden product command. Focused SRP and Discord exclusion checks passed after
+correction. These edits change neither replay execution nor command exposure;
+the next source must still complete canonical acceptance before Pages publication.
+
 [Cloud 34057649033](https://github.com/daejunnom/Clearra/actions/runs/34057649033)
 passed identity exchange and the immutable image build, then failed before the
 Job API: gcloud ArgList rejects the repeated standalone `8` in `--cpus,8,--workers,8`.
@@ -427,6 +437,46 @@ using existing authority. Google documents that Job deletion terminates its
 running executions. The receipt honestly records `owned-parent-deleted`, not a
 separately observed execution deletion. Identity drift still blocks deletion;
 cleanup failure still fails the whole diagnostic. No new Cloud timing is claimed.
+
+## Canonical follow-up failures at 3819bee
+
+The corrected metadata leaf passed. Windows CLI, Windows GUI, CTK3, sanitizer
+and adversarial correctness also passed, but this source is not accepted or
+published: the remaining canonical leaves exposed additional failures.
+
+- Linux CLI successfully compiled and passed its typed PC smokes, then the real
+  Discord REN renderer could not resolve `ctk3`. The job now consumes the single
+  accepted CTK3 artifact, verifies its source/run/attempt and resolves the actual
+  renderer before compilation. The renderer assertion is retained, not replaced
+  by a synthetic substitute or a duplicate CTK build.
+- The Desktop replay cancellation fixture omitted the board required by its
+  scenario command. It now supplies the intended empty board explicitly.
+- Desktop tiling-only Build with a two-piece standard-bag source failed in the
+  common symmetry aggregate. Existing source2d43a7c WASM independently reproduced
+  `wasm_build_probability_symmetry_original_aggregation_invalid` for base0,
+  target15, height1, source2, one worker, no mirror. Buildability source1/source2
+  and tiling source1 completed. The uncovered-probability sum of42 terms of1/42
+  rounded above1 before the existing partition tolerance was checked. Empty
+  success now reuses validated universe mass; nonempty success retains explicit
+  addition with only the constructor's bounded overshoot tolerance. Shared
+  regressions cover7/42/210/5040, zero-mass success and genuinely invalid weights.
+  The existing Desktop test retains all four input/aggregation expectations and
+  now reports the actual failed response. New Rust verification belongs to CI;
+  old-WASM reproduction is not new-source verification.
+- The canonical unoptimized Rust harness overflowed its default2MiB thread in
+  the cooperative Build minimum test. Candidate CI already uses16MiB. The
+  canonical Rust test step now uses that same setting; explicit2MiB test threads
+  remain unchanged. This is test-environment parity, not a production stack fix
+  or proof about browser runtime stack consumption.
+- The exact replay module's existing SRP comment lacked the required single
+  change-reason wording, and three public research documents used generic prose
+  matching the hidden-command discovery guard. The comments/prose were corrected;
+  SRP and hidden-command checks remain enforced.
+
+A fresh exact-main canonical run is required. Failed3819bee cannot authorize
+Pages. Capture must still follow successful acceptance, and deployment must
+follow successful capture. Newly dispatched candidate/Cloud result inspection
+remains deferred to the next ordinary user input.
 
 ## Finite experiment server lifecycle
 

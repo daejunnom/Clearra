@@ -143,7 +143,7 @@ applications and OS background work remain outside the benchmark's control.
 Cold and warm GUI displays read0.8s; the source itself also varied between runs,
 so these are not a demonstrated improvement over the historical0.4s samples.
 The full-processor option was restored to auto after measurement. The native
-source-only128.9ms remains a different PC diagnostic boundary.
+source-only128.9ms remains a different PC measurement scope.
 
 Warm auto reused8 workers and initialized2 more (93.4ms maximum initialization
 prewarm). Full12 reused10 and initialized1 more. Forty auto consume batches had

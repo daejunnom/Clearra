@@ -24,6 +24,15 @@ fi
 BUILD_ROOT="${CLEARRA_RELEASE_BUILD_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/clearra-release}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$BUILD_ROOT/cargo-target}"
 
+if ! command -v node >/dev/null 2>&1; then
+    printf 'node is required to validate release CLI JSON smoke output\n' >&2
+    exit 2
+fi
+# Resolve the real REN renderer before the expensive native compilation. CI
+# supplies the already accepted CTK3 artifact; this preflight never rebuilds it.
+node --input-type=module -e 'await import(process.argv[1]);' \
+    "file://$ROOT/apps/clearra-discord-bot/src/clearra/ctk3-result.mjs"
+
 mkdir -p "$CARGO_TARGET_DIR" "$OUTPUT_DIR"
 cargo build \
     --manifest-path "$ROOT/Cargo.toml" \
@@ -39,11 +48,6 @@ if [[ ! -x "$BINARY" ]]; then
 fi
 RELEASE_BINARY="$OUTPUT_DIR/Clearra-CLI-v${VERSION}-linux-x86_64"
 install -m 0755 "$BINARY" "$RELEASE_BINARY"
-
-if ! command -v node >/dev/null 2>&1; then
-    printf 'node is required to validate release CLI JSON smoke output\n' >&2
-    exit 2
-fi
 
 run_json_smoke() {
     local name="${1:?smoke name is required}"

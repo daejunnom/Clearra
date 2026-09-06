@@ -166,13 +166,22 @@ jobs:
 
   linux-cli:
     if: github.event_name == 'workflow_dispatch'
-    needs: metadata
+    needs: [metadata, ctk3]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Download accepted CTK3 distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: packages/ctk3/dist
+      - name: Install JavaScript workspace
+        run: npm ci --ignore-scripts
+      - name: Verify accepted CTK3 distribution
+        run: node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit "$CLEARRA_SOURCE_COMMIT" --expected-run-id "$GITHUB_RUN_ID" --expected-run-attempt "$GITHUB_RUN_ATTEMPT"
       - uses: actions/cache@v4
         with:
           path: |
@@ -432,6 +441,9 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Run canonical release acceptance rust shard
         env:
+          # Match the candidate debug harness, not the release runtime stack.
+          # Explicit small-stack tests retain their own thread stack_size limits.
+          RUST_MIN_STACK: "16777216"
           CLEARRA_ACCEPTED_CTK3_DIST: ${{ github.workspace }}/packages/ctk3/dist
           CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
           CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}

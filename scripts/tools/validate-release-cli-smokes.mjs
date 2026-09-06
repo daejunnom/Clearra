@@ -296,6 +296,11 @@ const releaseAcceptancePagesRunStep = section(
   "\n      - name: Run canonical release acceptance Pages shard",
   "\n      - name: Stamp and verify the accepted Pages build",
 );
+const linuxCtk3DownloadStep = section(
+  linuxJob,
+  "\n      - name: Download accepted CTK3 distribution",
+  "\n      - name: Install JavaScript workspace",
+);
 const acceptedWasmBuildRunStep = section(
   releaseAcceptanceWasmBuildJob,
   "\n      - name: Run verified WASM build producer",
@@ -681,6 +686,17 @@ requireText(
   "Linux JSON validator Node setup",
 );
 requireText(linuxJob, "node-version: 22", "Linux JSON validator Node version");
+requireExactYamlFlowSequence(linuxJob, "needs", ["metadata", "ctk3"],
+  "Linux CLI dependency on the accepted renderer artifact");
+requireText(linuxJob,
+  'run: node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit "$CLEARRA_SOURCE_COMMIT" --expected-run-id "$GITHUB_RUN_ID" --expected-run-attempt "$GITHUB_RUN_ATTEMPT"',
+  "Linux CLI accepted CTK3 verification");
+requireText(packageScript, 'node --input-type=module -e \'await import(process.argv[1]);\'',
+  "Linux CLI actual renderer preflight");
+if (packageScript.indexOf('node --input-type=module') > packageScript.indexOf('cargo build') ||
+    linuxJob.indexOf('Verify accepted CTK3 distribution') > linuxJob.indexOf('Build standalone WASM CPU CLI')) {
+  throw new Error("Linux renderer dependency must be verified before compilation");
+}
 requireText(
   windowsCliJob,
   "--features wasm-cpu-runtime,webgpu-search",
@@ -881,7 +897,11 @@ for (const [name, job, runner] of [
     "github.event_name == 'workflow_dispatch'",
     `${name} dispatch-only condition`,
   );
-  requireExactYamlScalar(job, "needs", "metadata", `${name} dependency`);
+  if (name === "Linux CLI") {
+    requireExactYamlFlowSequence(job, "needs", ["metadata", "ctk3"], `${name} dependency`);
+  } else {
+    requireExactYamlScalar(job, "needs", "metadata", `${name} dependency`);
+  }
   requireExactYamlScalar(job, "runs-on", runner, `${name} runner`);
   if (/^    continue-on-error\s*:/mu.test(job)) {
     throw new Error(`${name} job must fail closed`);
@@ -1140,6 +1160,7 @@ for (const marker of [
   requireText(crossRunDownloadStep, marker, `cross-run artifact reuse ${marker}`);
 }
 for (const [name, step] of [
+  ["Linux CLI", linuxCtk3DownloadStep],
   ["Discord", discordDownloadStep],
   ["Windows canonical acceptance", releaseAcceptanceDownloadStep],
 ]) {
@@ -1213,12 +1234,15 @@ requireExactYamlKeySet(
   releaseAcceptanceRunStep,
   10,
   [
+    "RUST_MIN_STACK",
     "CLEARRA_ACCEPTED_CTK3_DIST",
     "CLEARRA_ACCEPTED_RUN_ID",
     "CLEARRA_ACCEPTED_RUN_ATTEMPT",
   ],
   "canonical Rust release acceptance shard environment",
 );
+requireExactYamlScalar(releaseAcceptanceRunStep, "RUST_MIN_STACK", '"16777216"',
+  "canonical Rust debug harness stack parity", 10);
 requireExactYamlScalar(
   releaseAcceptanceRunStep,
   "CLEARRA_ACCEPTED_CTK3_DIST",

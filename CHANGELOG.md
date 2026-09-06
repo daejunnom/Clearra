@@ -4,6 +4,11 @@
 
 ## 0.8.0 - 2026-09-05
 
+- Fixed valid all-failure pattern aggregates being rejected by floating-point
+  summation at the unit-probability boundary, including two-piece standard-bag
+  tiling-only Build results; malformed weights still fail closed.
+- Made the Linux CLI release smoke consume the accepted CTK3 renderer artifact
+  and resolve it before compilation instead of failing after the native build.
 - Enabled residual dual warm-start proposals in the shared minimum-cover engine
   after repeated same-binary comparisons, while retaining fresh checked-integer
   pruning certificates, exact first-canonical selection, and lazy later ties.

@@ -92,7 +92,7 @@ is no longer a release gate. The0.129s diagnostic source time must not be
 presented as the GUI's full solution-display time or subtracted directly from
 the GUI0.4s to claim a measured rendering cost.
 
-## Actual-matrix diagnostic boundary
+## Actual-matrix measurement scope
 
 The published512 query packet has been decoded with its wire SHA, target width,
 246 rows and5,040 columns checked. Qnia piece masks were converted into Clearra
@@ -121,7 +121,7 @@ The standalone diagnostic executable was compiled once in release mode, SHA256
 `29314002732dae617bca36167ce86a3e10f5e3a660b5822df186f6b74f20cbe1`.
 Both runs use the actual Clearra `ad8af932…` matrix, normalized lexical candidate
 order,11 compute workers, four partitions per worker and no idle assistance.
-The old/new repair scorer is selected only through the diagnostic feature; no
+The old/new repair scorer is selected only in the comparison build; no
 known cardinality or witness is provided. The two runs were CPU-isolated and
 sequential. One run per condition is not a statistical performance claim.
 

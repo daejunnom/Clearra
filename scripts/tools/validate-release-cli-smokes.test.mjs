@@ -160,6 +160,32 @@ test("rejects bypassing the bounded release regression owner", async () => {
   assert.notEqual(result.status, 0, diagnostic(result));
 });
 
+test("rejects Linux CLI missing the accepted CTK3 dependency", async () => {
+  const changed = normalizedWorkflow.replace(
+    /(?<=  linux-cli:\n    if: github.event_name == 'workflow_dispatch'\n)    needs: \[metadata, ctk3\]/u,
+    '    needs: metadata',
+  );
+  assert.notEqual(changed, normalizedWorkflow);
+  const result = await runValidator(changed);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects Linux CLI dropping its real renderer preflight", async () => {
+  const changed = replaceExactlyOnce(canonicalPackageScript,
+    "node --input-type=module -e 'await import(process.argv[1]);'",
+    "node --input-type=module -e 'void 0'",
+  );
+  const result = await runValidator(normalizedWorkflow, changed);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects canonical Rust silently differing from the candidate debug stack", async () => {
+  const changed = replaceExactlyOnce(normalizedWorkflow,
+    'RUST_MIN_STACK: "16777216"', 'RUST_MIN_STACK: "2097152"');
+  const result = await runValidator(changed);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
 test("rejects removal of the approved legacy annotated-tag fixture", async () => {
   const fixturelessWorkflow = replaceExactlyOnce(
     normalizedWorkflow,
@@ -341,8 +367,9 @@ for (const [name, mutate] of [
   [
     "rejects Discord consumption of a different CTK3 artifact",
     (source) =>
-      replaceExactlyOnce(
+      replaceExactlyOnceAfter(
         source,
+        "\n  discord-bot:",
         "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}\n          path: packages/ctk3/dist\n      - name: Install JavaScript workspace\n",
         "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-unbound\n          path: packages/ctk3/dist\n      - name: Install JavaScript workspace\n",
       ),
@@ -1139,6 +1166,12 @@ function replaceExactlyOnce(source, search, replacement) {
     `fixture marker is ambiguous: ${search}`,
   );
   return `${source.slice(0, first)}${replacement}${source.slice(first + search.length)}`;
+}
+
+function replaceExactlyOnceAfter(source, sectionStart, search, replacement) {
+  const start = source.indexOf(sectionStart);
+  assert.notEqual(start, -1, `fixture section is missing: ${sectionStart}`);
+  return source.slice(0, start) + replaceExactlyOnce(source.slice(start), search, replacement);
 }
 
 function diagnostic(result) {

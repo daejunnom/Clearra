@@ -475,7 +475,7 @@ push, or production deployment has been performed for this checkpoint.
   a server-restart test. Its published WASM remains0709 pending a new build.
 - The final focused Rust set passed39 tests (including the corrected external
   eager trace-identity fixture and final15 assistance tests). The full P7 debug
-  scan was stopped at the eight-minute diagnostic boundary: CPU483.88s and
+  scan was stopped at the eight-minute measurement deadline: CPU483.88s and
   working set26.1MiB. It had not completed; no full-manifest success is claimed.
 - A route observation change invalidated a source-regex test that required a
   literal `return new Worker`. Its assertion now checks creation and return of

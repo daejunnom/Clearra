@@ -1,5 +1,6 @@
-// SRP rationale: this module owns one exact visible replay language, from
-// admitted subset construction through its count and coherent rank selection.
+// SRP rationale: exact visible replay language is this module's single change reason.
+// Admitted subset construction, suffix counts and coherent rank selection share
+// the same canonical-label invariant; rendering and product paging remain outside.
 //! Exact finite visible-language counting and rank/select over replay evidence.
 //! Source DAG paths are not identities: subset construction unions equal trk1
 //! labels before adding suffix counts. No displayed-page sample grants authority.
