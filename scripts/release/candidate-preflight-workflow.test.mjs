@@ -99,11 +99,17 @@ test('Jstris diagnostic is bounded, same-binary and separate from release or GUI
   assert.equal((job.match(/--release --package clearra-wasm --test pc_minimals_ctk3_stage_probe/gu) ?? []).length, 4);
   assert.doesNotMatch(job, /continue-on-error:|--workspace|--all-targets|--no-default-features|--features|-Task ReleaseAcceptance/u);
   assert.match(job, /name: unqualified-jstris-matrix-/u);
+  assert.match(job, /repository: Qnia28\/sfinder_wasm/u);
+  assert.match(job, /ref: 03b637730c5b541f4f2934be613498fbe65327fd/u);
+  assert.match(job, /node scripts\/tools\/benchmark-qnia-cpsat.mjs/u);
+  assert.match(job, /name: unqualified-qnia-jstris-/u);
 });
 
 test('candidate CLI compares actual direct and Discord paths with one release binary and no Cloud mutation', () => {
   const job = workflow.split('  candidate-cli:')[1].split('  candidate-minimum-diagnostic:')[0];
   assert.equal((job.match(/cargo build /gu) ?? []).length, 1);
+  assert.ok(job.indexOf("await import('./apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs')") >= 0);
+  assert.ok(job.indexOf("await import('./apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs')") < job.indexOf('cargo build '));
   assert.match(job, /cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search/u);
   assert.match(job, /cargo test --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search --lib score_finder_renderer_ -- --nocapture/u);
   assert.match(job, /CLEARRA_SOURCE_COMMIT: \$\{\{ github\.sha \}\}/u);
