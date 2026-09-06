@@ -20,8 +20,8 @@ test('Setup and Spin workspaces are real Web and Desktop entry surfaces', () => 
   }
   assert.match(setupScore, /buildSetupScoreCommand\(request\)/u);
   assert.match(setupScore, /setupScoreRequestForDesktop\(request, language\)/u);
-  assert.match(setupScore, /Equal scores stay in the ordinary ranking/u);
-  assert.match(setupScore, /동일 score는 일반 순위/u);
+  assert.match(setupScore, /Equal scores use a stable display order without mixing attack/u);
+  assert.match(setupScore, /동일 score는 안정적인 순서로 표시하며 attack을 혼합하지 않습니다/u);
   assert.match(spin, /buildSpinStructureCommand\(request\)/u);
   assert.match(spin, /spinStructureRequestForDesktop\(request, language\)/u);
   assert.match(spin, /workerController\.loadNextProductPage/u);

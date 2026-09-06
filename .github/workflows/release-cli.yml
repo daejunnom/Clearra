@@ -512,7 +512,7 @@ jobs:
 
   release-acceptance-pages:
     if: github.event_name == 'workflow_dispatch'
-    needs: [metadata, release-acceptance-wasm-build]
+    needs: [metadata, ctk3, release-acceptance-wasm-build]
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -525,8 +525,18 @@ jobs:
         with:
           name: accepted-wasm-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
           path: ${{ runner.temp }}/clearra-accepted-wasm
+      - name: Download accepted CTK3 distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: packages/ctk3/dist
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
+      - name: Verify accepted CTK3 for replay parity
+        shell: pwsh
+        run: |
+          node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit $env:CLEARRA_SOURCE_COMMIT --expected-run-id $env:GITHUB_RUN_ID --expected-run-attempt $env:GITHUB_RUN_ATTEMPT
+          if ($LASTEXITCODE -ne 0) { throw "accepted CTK3 replay parity input rejected" }
       - name: Run canonical release acceptance Pages shard
         env:
           CLEARRA_WEB_BASE_PATH: /${{ github.event.repository.name }}

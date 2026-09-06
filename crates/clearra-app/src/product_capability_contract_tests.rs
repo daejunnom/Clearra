@@ -1398,6 +1398,16 @@ fn cooperative_pc_minimals_external_memory_guard_rejects_before_query_work() {
         panic!("rejected memory admission must be terminal, not a pending proof: {advance:?}")
     };
     assert_eq!(response.status(), AppStatus::ExecutionFailed);
+    assert!(response
+        .error()
+        .unwrap()
+        .message()
+        .contains("minimum_product_memory_limit_exceeded"));
+    assert!(response.resource_report().solver_executed());
+    assert_eq!(
+        response.resource_report().result_completeness(),
+        ExecutionCompletenessState::Incomplete
+    );
     assert!(response.product_capability_result().is_none());
     assert!(execution.minimum_parallel_memory_envelope().is_none());
 }

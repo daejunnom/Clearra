@@ -7,11 +7,13 @@ use crate::{
 };
 
 pub(crate) fn core_execution_error_response(error: CoreExecutionError) -> AppResponse {
-    // Replay materialization happens after a supported search has completed.
-    // Its resource/evidence failure must not claim the solver never executed
-    // or that the user's queue/pattern contract is unsupported.
+    // Replay materialization and minimum selection follow a supported search.
+    // Their resource/evidence failure must not claim the solver never executed
+    // or that the user's queue/pattern contract is unsupported. Keep the
+    // minimum marker exact: a missing runtime before search stays unsupported.
     if matches!(&error, CoreExecutionError::RuntimeUnavailable { component }
-        if component.starts_with("complete_replay_"))
+        if component.starts_with("complete_replay_")
+            || *component == "minimum_product_memory_limit_exceeded")
     {
         return AppResponse::failed(
             AppStatus::ExecutionFailed,
@@ -64,6 +66,7 @@ mod replay_failure_tests {
             "complete_replay_whole_live_limit_exceeded",
             "complete_replay_execution_limit_exceeded",
             "complete_replay_evidence_invalid",
+            "minimum_product_memory_limit_exceeded",
         ] {
             let response =
                 core_execution_error_response(CoreExecutionError::RuntimeUnavailable { component });
@@ -82,6 +85,12 @@ mod replay_failure_tests {
         let unsupported = core_execution_error_response(CoreExecutionError::UnsupportedProblem);
         assert_eq!(unsupported.status(), AppStatus::Unsupported);
         assert!(!unsupported.resource_report().solver_executed());
+        let missing_runtime =
+            core_execution_error_response(CoreExecutionError::RuntimeUnavailable {
+                component: "minimum_product_runtime_missing",
+            });
+        assert_eq!(missing_runtime.status(), AppStatus::Unsupported);
+        assert!(!missing_runtime.resource_report().solver_executed());
     }
 }
 

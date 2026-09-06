@@ -1696,7 +1696,7 @@ function Invoke-ReleaseIdentityGateValidation {
             @{ Name = 'Sanitizer'; Text = $releaseSanitizerJob; Needs = @('metadata') },
             @{ Name = 'Rust'; Text = $releaseRustJob; Needs = @('metadata', 'ctk3') },
             @{ Name = 'WASM producer'; Text = $releaseWasmBuildJob; Needs = @('metadata') },
-            @{ Name = 'Pages'; Text = $releasePagesJob; Needs = @('metadata', 'release-acceptance-wasm-build') }
+            @{ Name = 'Pages'; Text = $releasePagesJob; Needs = @('metadata', 'ctk3', 'release-acceptance-wasm-build') }
         )) {
             Assert-ReleaseYamlExactKeySet `
                 -Text $shardJob.Text `
@@ -1748,12 +1748,15 @@ function Invoke-ReleaseIdentityGateValidation {
                 -Key 'if' `
                 -ExpectedValue 'github.event_name == ''workflow_dispatch''' `
                 -Contract "$($job.Name) dispatch-only condition"
-            Assert-ReleaseYamlExactScalar `
-                -Text $job.Text `
-                -Indentation 4 `
-                -Key 'needs' `
-                -ExpectedValue 'metadata' `
-                -Contract "$($job.Name) dependency"
+            if ($job.Name -eq 'Linux CLI') {
+                Assert-ReleaseYamlExactFlowSequence `
+                    -Text $job.Text -Key 'needs' -ExpectedValues @('metadata', 'ctk3') `
+                    -Contract 'Linux CLI dependency on accepted CTK3'
+            } else {
+                Assert-ReleaseYamlExactScalar `
+                    -Text $job.Text -Indentation 4 -Key 'needs' -ExpectedValue 'metadata' `
+                    -Contract "$($job.Name) dependency"
+            }
             Assert-ReleaseYamlExactScalar `
                 -Text $job.Text `
                 -Indentation 4 `
@@ -1860,8 +1863,8 @@ function Invoke-ReleaseIdentityGateValidation {
         if ([regex]::Matches($release, '(?m)^        run: npm test --workspace ctk3\s*$').Count -ne 1) {
             Add-ArchitectureError 'CTK3 package build and test must have exactly one workflow owner'
         }
-        if ([regex]::Matches($release, 'name: ctk3-accepted-\$\{\{ github\.sha \}\}-run-\$\{\{ needs\.metadata\.outputs\.accepted_run_id \}\}-attempt-\$\{\{ needs\.metadata\.outputs\.accepted_run_attempt \}\}').Count -ne 4) {
-            Add-ArchitectureError 'Accepted CTK3 artifact must have one producer and exactly three same-attempt consumers'
+        if ([regex]::Matches($release, 'name: ctk3-accepted-\$\{\{ github\.sha \}\}-run-\$\{\{ needs\.metadata\.outputs\.accepted_run_id \}\}-attempt-\$\{\{ needs\.metadata\.outputs\.accepted_run_attempt \}\}').Count -ne 6) {
+            Add-ArchitectureError 'Accepted CTK3 artifact must have one producer and exactly five same-attempt consumers'
         }
         if ($ctk3Job -match 'name:\s*clearra-.*-v') {
             Add-ArchitectureError 'Internal accepted CTK3 artifact must not match the publication artifact pattern'

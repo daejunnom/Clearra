@@ -4344,7 +4344,7 @@ mod product_pages {
                 AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
             );
             let request = clearra_cli_command::CliCommandParser::parse(
-                "clearra pc path --board-mask 0x0 --lines 2 --pieces 5 --queue IIOOO --no-hold --backend cpu --workers 1",
+                "clearra pc path --board-mask 0x0 --height 2 --lines 2 --pieces 5 --queue IIOOO --no-hold --backend cpu --workers 1",
             ).unwrap().to_app_request().unwrap();
             let mut execution = context.start_cooperative_execution(request);
             let control = ExecutionControl::default();

@@ -50,6 +50,8 @@ test('ordinary PC full solutions use one canonical argv envelope in browser and 
   const desktopRequest = workspaceRequestForDesktop(request, 'en');
 
   assert.deepEqual(arguments_, canonicalGuiPcFullSolutionArguments);
+  assert.equal(arguments_.includes('--cpu-warmup'), false,
+    'asynchronously ready browser workers must not enter the native all-worker barrier');
   assert.deepEqual(tokenizeBrowserCommandForContract(browserCommand), arguments_);
   assert.deepEqual(desktopRequest.arguments, arguments_);
 });

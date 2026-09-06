@@ -312,7 +312,17 @@ const acceptedWasmBuildUploadStep = releaseAcceptanceWasmBuildJob.slice(
 const acceptedWasmBuildDownloadStep = section(
   releaseAcceptancePagesJob,
   "\n      - name: Download accepted WASM build",
+  "\n      - name: Download accepted CTK3 distribution",
+);
+const pagesCtk3DownloadStep = section(
+  releaseAcceptancePagesJob,
+  "\n      - name: Download accepted CTK3 distribution",
   "\n      - name: Install JavaScript workspace",
+);
+const pagesCtk3VerifyStep = section(
+  releaseAcceptancePagesJob,
+  "\n      - name: Verify accepted CTK3 for replay parity",
+  "\n      - name: Run canonical release acceptance Pages shard",
 );
 const releaseAcceptancePagesSealStep = section(
   releaseAcceptancePagesJob,
@@ -1161,6 +1171,7 @@ for (const marker of [
 }
 for (const [name, step] of [
   ["Linux CLI", linuxCtk3DownloadStep],
+  ["Pages replay parity", pagesCtk3DownloadStep],
   ["Discord", discordDownloadStep],
   ["Windows canonical acceptance", releaseAcceptanceDownloadStep],
 ]) {
@@ -1198,6 +1209,14 @@ for (const [name, step] of [
     10,
   );
 }
+requireExactYamlKeySet(pagesCtk3VerifyStep, 8, ["shell", "run"],
+  "Pages accepted CTK3 verification step");
+requireExactYamlScalar(pagesCtk3VerifyStep, "shell", "pwsh",
+  "Pages accepted CTK3 verification shell", 8);
+requireExactYamlLiteralScript(pagesCtk3VerifyStep, [
+  'node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit $env:CLEARRA_SOURCE_COMMIT --expected-run-id $env:GITHUB_RUN_ID --expected-run-attempt $env:GITHUB_RUN_ATTEMPT',
+  'if ($LASTEXITCODE -ne 0) { throw "accepted CTK3 replay parity input rejected" }',
+], "Pages same-source/run/attempt CTK3 verification");
 requireExactStepSkeleton(
   discordJob,
   [
@@ -1422,7 +1441,9 @@ for (const [name, job, skeleton] of [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
     "- name: Download accepted WASM build",
+    "- name: Download accepted CTK3 distribution",
     "- name: Install JavaScript workspace",
+    "- name: Verify accepted CTK3 for replay parity",
     "- name: Run canonical release acceptance Pages shard",
     "- name: Stamp and verify the accepted Pages build",
     "- name: Seal canonical release acceptance Pages shard",
@@ -2474,8 +2495,8 @@ requireExactYamlScalar(
 requireExactYamlFlowSequence(
   releaseAcceptancePagesJob,
   "needs",
-  ["metadata", "release-acceptance-wasm-build"],
-  "Pages acceptance dependency on metadata and accepted WASM build",
+  ["metadata", "ctk3", "release-acceptance-wasm-build"],
+  "Pages acceptance dependency on metadata, accepted CTK3 and WASM build",
 );
 requireExactYamlFlowSequence(
   releaseAcceptanceJob,

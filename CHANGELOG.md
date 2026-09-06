@@ -7,6 +7,8 @@
 - Fixed valid all-failure pattern aggregates being rejected by floating-point
   summation at the unit-probability boundary, including two-piece standard-bag
   tiling-only Build results; malformed weights still fail closed.
+- Kept minimum-selection memory denials as executed, incomplete failures instead
+  of incorrectly reporting an unsupported runtime after a completed search.
 - Made the Linux CLI release smoke consume the accepted CTK3 renderer artifact
   and resolve it before compilation instead of failing after the native build.
 - Enabled residual dual warm-start proposals in the shared minimum-cover engine

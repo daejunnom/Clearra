@@ -186,6 +186,14 @@ test("rejects canonical Rust silently differing from the candidate debug stack",
   assert.notEqual(result.status, 0, diagnostic(result));
 });
 
+test("rejects Pages accepting CTK3 without its exact source check", async () => {
+  const changed = replaceExactlyOnce(normalizedWorkflow,
+    'node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit $env:CLEARRA_SOURCE_COMMIT --expected-run-id $env:GITHUB_RUN_ID --expected-run-attempt $env:GITHUB_RUN_ATTEMPT',
+    'node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist');
+  const result = await runValidator(changed);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
 test("rejects removal of the approved legacy annotated-tag fixture", async () => {
   const fixturelessWorkflow = replaceExactlyOnce(
     normalizedWorkflow,
@@ -466,7 +474,7 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "  release-acceptance-pages:\n    if: github.event_name == 'workflow_dispatch'\n    needs: [metadata, release-acceptance-wasm-build]\n",
+        "  release-acceptance-pages:\n    if: github.event_name == 'workflow_dispatch'\n    needs: [metadata, ctk3, release-acceptance-wasm-build]\n",
         "  release-acceptance-pages:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n",
       ),
   ],
@@ -1171,7 +1179,9 @@ function replaceExactlyOnce(source, search, replacement) {
 function replaceExactlyOnceAfter(source, sectionStart, search, replacement) {
   const start = source.indexOf(sectionStart);
   assert.notEqual(start, -1, `fixture section is missing: ${sectionStart}`);
-  return source.slice(0, start) + replaceExactlyOnce(source.slice(start), search, replacement);
+  const next = source.slice(start + sectionStart.length).search(/\n  [\w-]+:\n/u);
+  const end = next < 0 ? source.length : start + sectionStart.length + next;
+  return source.slice(0, start) + replaceExactlyOnce(source.slice(start, end), search, replacement) + source.slice(end);
 }
 
 function diagnostic(result) {

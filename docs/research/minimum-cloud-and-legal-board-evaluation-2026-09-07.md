@@ -478,6 +478,35 @@ Pages. Capture must still follow successful acceptance, and deployment must
 follow successful capture. Newly dispatched candidate/Cloud result inspection
 remains deferred to the next ordinary user input.
 
+The df51395 follow-up confirmed the actual four-way Desktop Build aggregation
+regression is fixed and the Linux packaged CLI/REN smoke passes. The remaining
+Desktop replay fixture also needed explicit height2; its complete command was
+checked on the already identified2d43a7c WASM and returned four solutions. That
+is command/fixture evidence, not fresh Desktop test success.
+
+The first completed Pages leaf exposed three older test-boundary failures:
+its actual Discord GIF parity test also needs accepted CTK3, Setup score prose
+had changed while its source test retained the old wording, and the common
+GUI/CLI argv fixture still requested the removed synchronous CPU warmup barrier.
+Pages now consumes and verifies the same accepted CTK3 once, and both Node and
+PowerShell release validators explicitly include Linux/Pages consumers. UI
+wording and the argv fixture now match the intended source; ordinary-ranking
+and attack-independent semantics remain asserted. Local checks passed265 UI
+tests, all UI TypeScript contracts,103 release smoke mutations and all13 Web
+TypeScript contracts. The Web sync step reported the expected stale local WASM
+before falling back to its Svelte config; no fresh local runtime or4194 update
+is claimed. The full eight-task static architecture check passed with zero
+errors and97 advisory warnings; this is not a warning-free release claim.
+
+The df51395 Rust App suite reached421/422 passes. Its remaining memory-guard
+test exposed a real status regression: denial during minimum selection was
+classified as an unsupported runtime despite completed Geometry/coverage work.
+The existing post-search error boundary now also recognizes the exact
+`minimum_product_memory_limit_exceeded` marker and preserves executed/incomplete
+status and the failure reason. Genuine missing runtimes remain unsupported;
+no guard is skipped and no partial minimum result is published. Both the shared
+error projection and the full cooperative test assert this distinction.
+
 ## Finite experiment server lifecycle
 
 `scripts/tools/run-gui-experiment.mjs` is the only new one-off GUI launcher.
