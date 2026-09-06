@@ -49,6 +49,7 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
   ...['softmax_positive_zero_skip_', 'zero_row_scatter_', 'root_conditional_row_pruning_',
     'ordered_solution_probability_',
     'conditional_root_rows_filter_actual_pivot_', 'residual_warm_seed_',
+    'cached_pivot_exhaustion_',
     'parallel_first_page_handoff_resumes_serial_without_losing_query_or_frontier'].map((filter) => ({
     package: 'clearra-coverage', filter, exact: false, parallel: false,
   })),

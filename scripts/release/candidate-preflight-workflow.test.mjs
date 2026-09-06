@@ -93,8 +93,10 @@ test('Jstris diagnostic is bounded, same-binary and separate from release or GUI
   assert.match(job, /timeout-minutes: 45/u);
   assert.match(job, /ctk3_export_jstris_180_exact_cover_diagnostic_matrix -- --exact --ignored --nocapture/u);
   assert.match(job, /ctk3_jstris_180_residual_warm_seed_first_canonical_ab_probe -- --exact --ignored --nocapture/u);
+  assert.match(job, /ctk3_jstris_180_cached_pivot_exhaustion_first_canonical_ab_probe -- --exact --ignored --nocapture/u);
+  assert.match(job, /Compare cached pivot exhaustion off and on with warm seed fixed off/u);
   assert.match(job, /ctk3_diagnostic_ -- --nocapture/u);
-  assert.equal((job.match(/--release --package clearra-wasm --test pc_minimals_ctk3_stage_probe/gu) ?? []).length, 3);
+  assert.equal((job.match(/--release --package clearra-wasm --test pc_minimals_ctk3_stage_probe/gu) ?? []).length, 4);
   assert.doesNotMatch(job, /continue-on-error:|--workspace|--all-targets|--no-default-features|--features|-Task ReleaseAcceptance/u);
   assert.match(job, /name: unqualified-jstris-matrix-/u);
 });

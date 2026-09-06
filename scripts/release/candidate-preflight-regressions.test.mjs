@@ -80,6 +80,18 @@ test('focused feedback includes first-canonical lazy ties and warm-seed authorit
   ]) assert.ok(CANDIDATE_RUST_REGRESSIONS.some((entry) => entry.package === packageName && entry.filter === filter));
 });
 
+test('cached pivot exhaustion has one bounded lib selector with no experiment-wide feature activation', () => {
+  const selected = CANDIDATE_RUST_REGRESSIONS.filter((entry) => entry.filter === 'cached_pivot_exhaustion_');
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].package, 'clearra-coverage');
+  assert.equal(selected[0].exact, false);
+  assert.equal(selected[0].parallel, false);
+  assert.deepEqual(candidateRegressionArguments(selected[0]), [
+    'test', '--locked', '--package', 'clearra-coverage', '--lib',
+    'cached_pivot_exhaustion_', '--', '--test-threads=1',
+  ]);
+});
+
 test('all fixed selections execute once without a shell and failures remain non-accepting', () => {
   const calls = [];
   runCandidateRegressions({ environment: ENV, platform: 'win32', write() {},
