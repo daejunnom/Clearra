@@ -595,7 +595,7 @@ fn run_jstris_first_canonical_ab(
         set_diagnostic_cached_pivot_exhaustion, set_diagnostic_residual_warm_seed,
     };
 
-    const PROCESS_DEADLINE: Duration = Duration::from_secs(240);
+    const PROCESS_DEADLINE: Duration = Duration::from_secs(420);
     if env::var(child_env).ok().as_deref() != Some(test_name) {
         let mut command = Command::new(env::current_exe().expect("current Jstris A/B executable"));
         command
@@ -623,7 +623,7 @@ fn run_jstris_first_canonical_ab(
                 let _ = child.kill();
                 let _ = child.wait();
                 panic!(
-                    "Jstris A/B exceeded its 240-second fixture deadline; no completed comparison"
+                    "Jstris A/B exceeded its 420-second fixture deadline; no completed comparison"
                 );
             }
             thread::sleep(Duration::from_millis(50));
@@ -679,16 +679,35 @@ fn run_jstris_first_canonical_ab(
             "native_probe_is_product_acceptance": false,
         })
     );
-    let baseline = run_jstris_minimum_arm(&matrix, &solver_input, workers, experiment, false);
-    let candidate = run_jstris_minimum_arm(&matrix, &solver_input, workers, experiment, true);
-    assert_eq!(
-        candidate.minimum, baseline.minimum,
-        "exact minimum differs between arms"
-    );
-    assert_eq!(
-        candidate.canonical_rows, baseline.canonical_rows,
-        "first canonical portfolio differs between arms"
-    );
+    // Counterbalance startup/cache/clock order without reusing a solver state,
+    // a proved K, or a previous witness as input to any later arm.
+    let mut arms = Vec::with_capacity(4);
+    for (sample, enabled) in jstris_crossover_order().into_iter().enumerate() {
+        eprintln!(
+            "{}",
+            serde_json::json!({"phase": experiment.phase("sample_start"),
+            "sample": sample + 1, "enabled": enabled, "workers": workers})
+        );
+        arms.push(run_jstris_minimum_arm(
+            &matrix,
+            &solver_input,
+            workers,
+            experiment,
+            enabled,
+        ));
+    }
+    let baseline = &arms[0];
+    for arm in &arms[1..] {
+        assert_eq!(
+            arm.minimum, baseline.minimum,
+            "exact minimum differs between crossover arms"
+        );
+        assert_eq!(
+            arm.canonical_rows, baseline.canonical_rows,
+            "first canonical portfolio differs between crossover arms"
+        );
+    }
+    let pair_median = |a: u128, b: u128| (a + b) / 2;
     eprintln!(
         "{}",
         serde_json::json!({
@@ -696,15 +715,38 @@ fn run_jstris_first_canonical_ab(
             "complete": true,
             "optimal_cardinality": baseline.minimum,
             "same_first_canonical": true,
-            "baseline_total_ms": baseline.total_ms,
-            "candidate_total_ms": candidate.total_ms,
-            "baseline_proof_ms": baseline.proof_ms,
-            "candidate_proof_ms": candidate.proof_ms,
-            "baseline_canonical_ms": baseline.canonical_ms,
-            "candidate_canonical_ms": candidate.canonical_ms,
+            "order": ["baseline", "candidate", "candidate", "baseline"],
+            "samples_per_variant": 2, "workers": workers,
+            "summary_statistic": "median of two; fractional ms rounded down",
+            "baseline_total_ms": pair_median(arms[0].total_ms, arms[3].total_ms),
+            "candidate_total_ms": pair_median(arms[1].total_ms, arms[2].total_ms),
+            "baseline_proof_ms": pair_median(arms[0].proof_ms, arms[3].proof_ms),
+            "candidate_proof_ms": pair_median(arms[1].proof_ms, arms[2].proof_ms),
+            "baseline_canonical_ms": pair_median(arms[0].canonical_ms, arms[3].canonical_ms),
+            "candidate_canonical_ms": pair_median(arms[1].canonical_ms, arms[2].canonical_ms),
             "native_probe_is_product_acceptance": false,
         })
     );
+}
+
+fn jstris_crossover_order() -> [bool; 4] {
+    [false, true, true, false]
+}
+
+#[test]
+fn ctk3_diagnostic_crossover_balances_order_without_reusing_results() {
+    assert_eq!(jstris_crossover_order(), [false, true, true, false]);
+    for experiment in [
+        JstrisMinimumExperiment::WarmSeed,
+        JstrisMinimumExperiment::CachedPivotExhaustion,
+    ] {
+        let switches = jstris_crossover_order().map(|enabled| experiment.switches(enabled));
+        assert_eq!(switches[0], (false, false));
+        assert_eq!(switches[0], switches[3]);
+        assert_eq!(switches[1], switches[2]);
+        assert_ne!(switches[0], switches[1]);
+        assert!(switches.into_iter().all(|(warm, pivot)| !(warm && pivot)));
+    }
 }
 
 struct Ctk3NormalizedSolverInput {
@@ -1465,8 +1507,7 @@ fn drive_residual_admission_variant(
                     + hot.softmax_q_entries
                     + hot.softmax_middle_p_entries
                     + hot.softmax_middle_q_entries,
-                hot.softmax_q_cutoff_row_incidences
-                    + hot.softmax_middle_q_cutoff_row_incidences,
+                hot.softmax_q_cutoff_row_incidences + hot.softmax_middle_q_cutoff_row_incidences,
                 hot.softmax_q_row_incidences + hot.softmax_middle_q_row_incidences,
             );
             return None;
@@ -1519,8 +1560,7 @@ fn drive_residual_admission_variant(
                         + last_hot.softmax_middle_p_nanoseconds
                         + last_hot.softmax_middle_q_nanoseconds)
                         / 1_000_000,
-                    (last_hot.first_gradient_nanoseconds
-                        + last_hot.middle_gradient_nanoseconds)
+                    (last_hot.first_gradient_nanoseconds + last_hot.middle_gradient_nanoseconds)
                         / 1_000_000,
                     last_hot.softmax_p_cutoff_entries
                         + last_hot.softmax_q_cutoff_entries
@@ -1532,8 +1572,7 @@ fn drive_residual_admission_variant(
                         + last_hot.softmax_middle_q_entries,
                     last_hot.softmax_q_cutoff_row_incidences
                         + last_hot.softmax_middle_q_cutoff_row_incidences,
-                    last_hot.softmax_q_row_incidences
-                        + last_hot.softmax_middle_q_row_incidences,
+                    last_hot.softmax_q_row_incidences + last_hot.softmax_middle_q_row_incidences,
                 );
                 return Some(result.row_indices().to_vec());
             }
@@ -1651,7 +1690,10 @@ fn ctk3_parallel_minimum_cover_stage_probe() {
                 workers,
                 assistance,
             );
-            eprintln!("{{\"phase\":\"parallel_proof_query\",\"wave\":{proof_waves},\"limit\":{limit},\"tasks\":{task_count},\"elapsed_ms\":{}}}", wave_started.elapsed().as_millis());
+            eprintln!(
+                "{{\"phase\":\"parallel_proof_query\",\"wave\":{proof_waves},\"limit\":{limit},\"tasks\":{task_count},\"elapsed_ms\":{}}}",
+                wave_started.elapsed().as_millis()
+            );
         }
         match proof
             .advance_with_memory_guard_and_control(128, &mut |_| Ok(()), &mut || false)
@@ -1673,7 +1715,10 @@ fn ctk3_parallel_minimum_cover_stage_probe() {
             other => panic!("parallel proof did not establish exact minimum: {other:?}"),
         }
     };
-    eprintln!("{{\"phase\":\"parallel_minimum_proof\",\"workers\":{workers},\"waves\":{proof_waves},\"elapsed_ms\":{},\"optimal_cardinality\":25}}", proof_started.elapsed().as_millis());
+    eprintln!(
+        "{{\"phase\":\"parallel_minimum_proof\",\"workers\":{workers},\"waves\":{proof_waves},\"elapsed_ms\":{},\"optimal_cardinality\":25}}",
+        proof_started.elapsed().as_millis()
+    );
     enumerator
         .enable_parallel(workers * partitions_per_worker, [2; 32])
         .unwrap();
@@ -1700,14 +1745,21 @@ fn ctk3_parallel_minimum_cover_stage_probe() {
                 workers,
                 assistance,
             );
-            eprintln!("{{\"phase\":\"parallel_canonical_query\",\"wave\":{canonical_waves},\"limit\":{limit},\"tasks\":{task_count},\"elapsed_ms\":{}}}", wave_started.elapsed().as_millis());
+            eprintln!(
+                "{{\"phase\":\"parallel_canonical_query\",\"wave\":{canonical_waves},\"limit\":{limit},\"tasks\":{task_count},\"elapsed_ms\":{}}}",
+                wave_started.elapsed().as_millis()
+            );
         }
         let page = enumerator
             .next_page_owned_with_memory_guard_and_control(1, 128, &mut |_| Ok(()), &mut || false)
             .unwrap();
         if let Some(first) = page.portfolios().first() {
             assert_eq!(first.row_indices(), EXPECTED_FIRST_CANONICAL_SOURCE_ROWS);
-            eprintln!("{{\"phase\":\"parallel_first_canonical\",\"workers\":{workers},\"waves\":{canonical_waves},\"elapsed_ms\":{},\"rows\":{:?}}}", canonical_started.elapsed().as_millis(), first.row_indices());
+            eprintln!(
+                "{{\"phase\":\"parallel_first_canonical\",\"workers\":{workers},\"waves\":{canonical_waves},\"elapsed_ms\":{},\"rows\":{:?}}}",
+                canonical_started.elapsed().as_millis(),
+                first.row_indices()
+            );
             break;
         }
         assert_eq!(
