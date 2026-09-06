@@ -3463,7 +3463,9 @@ impl CooperativeAppExecution {
                                     ),
                                 CooperativeMinimumCompletion::BuildScore(payload, owner) => self.context()
                                     .finalize_response_with_product_capability(
-                                        finalize.response.with_public_product_result(payload, owner),
+                                        finalize
+                                            .response
+                                            .with_public_product_result(payload, Some(owner)),
                                         finalize.command_kind, &finalize.output_policy, None,
                                     ),
                             };
