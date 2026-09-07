@@ -905,7 +905,7 @@ function validateRunIdentity(run, kind, expectedRepository) {
   const runNumber = requireDecimal(run.run_number, `${kind} run number`);
   const sourceCommit = requirePattern(run.head_sha, SHA, `${kind} source commit`);
   const createdAt = requireTimestamp(run.created_at, `${kind} created-at`);
-  const startedAt = run.status === "queued" && run.run_started_at === null
+  const startedAt = ["queued", "pending", "requested", "waiting"].includes(run.status) && run.run_started_at === null
     ? null
     : requireTimestamp(run.run_started_at, `${kind} run-started-at`);
   const updatedAt = requireTimestamp(run.updated_at, `${kind} updated-at`);
@@ -922,7 +922,7 @@ function validateRunIdentity(run, kind, expectedRepository) {
     run.repository?.full_name !== repository ||
     run.head_repository?.id !== REPOSITORY_ID ||
     run.head_repository?.full_name !== repository ||
-    !["queued", "in_progress", "completed"].includes(run.status) ||
+    !["queued", "pending", "requested", "waiting", "in_progress", "completed"].includes(run.status) ||
     (run.status === "completed" ? typeof run.conclusion !== "string" : run.conclusion !== null)
   ) throw new Error(`Discord ${kind} workflow run contains foreign authority`);
   return Object.freeze({

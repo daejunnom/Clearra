@@ -580,6 +580,11 @@ function validateFreshnessProofReport(value, expected) {
       if (decision.status !== "queued" || decision.no_mutation_job_step_proof !== null) {
         throw new Error("Discord queued freshness decision is invalid");
       }
+    } else if (decision.decision === "pending-exact-no-jobs-behind-shared-group") {
+      if (decision.status !== "pending") throw new Error("Discord pending freshness decision is invalid");
+      validatePendingNoJobsProof(decision.no_mutation_job_step_proof, {
+        id, attempt, sourceCommit: decision.source_commit,
+      });
     } else if (decision.decision === "completed-exact-no-runtime-mutation") {
       if (decision.status !== "completed") {
         throw new Error("Discord completed freshness decision is invalid");
@@ -1545,6 +1550,27 @@ export function validateDiscordRecoveryFreshness(value, options) {
   const orderedAttempts = [...attempts.values()].sort(compareNormalizedAttempts);
   for (const ordering of orderedAttempts) {
     if (ordering.id === workflowRunId && ordering.attempt === workflowRunAttempt) continue;
+    if (ordering.status === "pending") {
+      // GitHub's workflow-concurrency wait is not `queued`. Do not infer
+      // no mutation from its name or run_started_at (which can already be set).
+      // The exact attempt must also have no jobs at all under the shared group.
+      const key = `${ordering.id}:${ordering.attempt}`;
+      expectedJobKeys.add(key);
+      const pages = runJobCatalog.get(key);
+      if (!pages || pages.length !== 1 || pages[0]?.total_count !== 0 ||
+          !Array.isArray(pages[0].jobs) || pages[0].jobs.length !== 0) {
+        throw new Error("Discord pending deployment lacks exact zero-job authority");
+      }
+      freshnessDecisions.push(buildFreshnessDecision(ordering,
+        "pending-exact-no-jobs-behind-shared-group", Object.freeze({
+          schema_id: "clearra.discord-pending-no-jobs-proof.v1",
+          workflow_run_id: ordering.id,
+          workflow_run_attempt: ordering.attempt,
+          source_commit: ordering.sourceCommit,
+          job_count: 0,
+        })));
+      continue;
+    }
     if (ordering.status === "queued") {
       freshnessDecisions.push(buildFreshnessDecision(
         ordering,
@@ -1658,14 +1684,14 @@ function normalizePrimaryAttempt(entry, repository, label) {
   const attempt = requireDecimalId(entry.run_attempt, `${label} run attempt`);
   const runNumber = requireDecimalId(entry.run_number, `${label} run number`);
   const createdAt = requireGitHubTimestamp(entry.created_at, `${label} created-at`);
-  if (!["queued", "in_progress", "completed"].includes(entry.status)) {
+  if (!["queued", "pending", "requested", "waiting", "in_progress", "completed"].includes(entry.status)) {
     throw new Error(`Discord recovery ${label} status is invalid`);
   }
   if (
     (entry.status === "completed" && !JOB_CONCLUSIONS.has(entry.conclusion)) ||
     (entry.status !== "completed" && entry.conclusion !== null)
   ) throw new Error(`Discord recovery ${label} status/conclusion is inconsistent`);
-  const runStartedAt = entry.status === "queued" && entry.run_started_at === null
+  const runStartedAt = ["queued", "pending", "requested", "waiting"].includes(entry.status) && entry.run_started_at === null
     ? null
     : requireGitHubTimestamp(entry.run_started_at, `${label} run-started-at`);
   const updatedAt = requireGitHubTimestamp(entry.updated_at, `${label} updated-at`);
@@ -1769,6 +1795,17 @@ function buildFreshnessDecision(ordering, decision, noMutationProof) {
     decision,
     no_mutation_job_step_proof: noMutationProof,
   });
+}
+
+function validatePendingNoJobsProof(value, expected) {
+  requirePlainObject(value, "Discord pending no-jobs proof");
+  requireExactKeys(value, ["schema_id", "workflow_run_id", "workflow_run_attempt",
+    "source_commit", "job_count"], "Discord pending no-jobs proof");
+  if (value.schema_id !== "clearra.discord-pending-no-jobs-proof.v1" ||
+      value.workflow_run_id !== expected.id || value.workflow_run_attempt !== expected.attempt ||
+      value.source_commit !== expected.sourceCommit || value.job_count !== 0) {
+    throw new Error("Discord pending no-jobs proof differs from its exact attempt");
+  }
 }
 
 function validateRunJobCatalog(value) {

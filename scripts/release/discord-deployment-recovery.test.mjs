@@ -10,6 +10,7 @@ import {
   resolveDiscordRecoveryAuthority,
   sealDiscordRecoveryResult,
   validatePrimaryRunCatalogSnapshots,
+  validateDiscordRecoveryAuthorityReport,
   verifyDiscordRecoveryResult,
 } from "./discord-deployment-recovery.mjs";
 import { sealDiscordCatalogRecoveryDisposition } from
@@ -273,6 +274,41 @@ test("recovery run catalog snapshot seal rejects added, deleted, and hidden reru
     ),
     /changed during attempt collection/u,
   );
+});
+
+test("pending concurrency waits require exact empty jobs while approval waits remain ambiguous", () => {
+  const pending = run({ id: 705, run_attempt: 1, run_number: 45, status: "pending", conclusion: null });
+  const resolve = (entry, pages) => resolveDiscordRecoveryAuthority(run(),
+    { total_count: 0, artifacts: [] }, {
+      ...options,
+      runList: { total_count: 2, workflow_runs: [run(), entry] },
+      runAttemptCatalog: runAttemptCatalog([run(), entry]),
+      runJobCatalog: runJobCatalog(pages === null ? [] : [{ workflowRunId: 705, pages }]),
+    });
+  for (const run_started_at of [null, pending.run_started_at]) {
+    const entry = { ...pending, run_started_at };
+    const snapshot = { total_count: 2, workflow_runs: [run(), entry] };
+    assert.equal(validatePrimaryRunCatalogSnapshots(snapshot, snapshot, REPOSITORY).size, 2);
+    const authority = resolve(entry, [{ total_count: 0, jobs: [] }]);
+    assert.equal(authority.freshness_proof.potential_superseders[0].decision,
+      "pending-exact-no-jobs-behind-shared-group");
+    assert.doesNotThrow(() => validateDiscordRecoveryAuthorityReport(authority, {
+      ...options, sourceCommit: SOURCE, workflowEvent: "workflow_dispatch", workflowConclusion: "cancelled",
+    }));
+  }
+  for (const pages of [null, [{ total_count: 1, jobs: [] }], [{ total_count: 0, jobs: [{}] }],
+    [{ total_count: 0, jobs: [] }, { total_count: 0, jobs: [] }]]) {
+    assert.throws(() => resolve(pending, pages), /exact zero-job authority/u);
+  }
+  for (const status of ["waiting", "requested", "in_progress"]) {
+    assert.throws(() => resolve({ ...pending, status }, [{ total_count: 0, jobs: [] }]),
+      /concurrent in-progress deployment ambiguity/u);
+  }
+  assert.throws(() => resolve({ ...pending, conclusion: "success" }, [{ total_count: 0, jobs: [] }]),
+    /status\/conclusion is inconsistent/u);
+  const before = { total_count: 1, workflow_runs: [pending] };
+  const after = { total_count: 1, workflow_runs: [{ ...pending, status: "in_progress" }] };
+  assert.throws(() => validatePrimaryRunCatalogSnapshots(before, after, REPOSITORY), /changed during/u);
 });
 
 test("recovery attempt history requires completed prior attempts and one invariant event", () => {

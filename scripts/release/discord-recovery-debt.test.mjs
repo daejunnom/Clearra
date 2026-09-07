@@ -641,6 +641,20 @@ function reseal(value) {
   return sealCanonicalReport(unsigned);
 }
 
+test("pending or approval-waiting recoveries are parsed but never clear existing debt", () => {
+  for (const status of ["pending", "waiting", "requested", "queued"]) {
+    const current = currentRun();
+    assert.throws(() => planDiscordRecoveryDebt(
+      { total_count: 2, workflow_runs: [primaryRun(), current] },
+      { schema_id: "clearra.discord-primary-attempt-catalog.v1", attempts: [primaryRun(), current] },
+      { schema_id: "clearra.discord-recovery-attempt-catalog.v1", attempts: [
+        recoveryRun({ status, conclusion: null, run_started_at: null }),
+      ] },
+      { total_count: 0, artifacts: [] }, identity,
+    ), /lacks a successful parent-bound resolution/u);
+  }
+});
+
 test("debt gate seals an empty clearance for the first exact deployment attempt", async () => {
   const current = currentRun();
   const plan = planDiscordRecoveryDebt(
