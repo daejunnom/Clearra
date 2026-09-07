@@ -1579,6 +1579,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $windowsCliJobStart = $release.IndexOf("`n  windows-cli:", [System.StringComparison]::Ordinal)
     $windowsGuiJobStart = $release.IndexOf("`n  windows-gui:", [System.StringComparison]::Ordinal)
     $canonicalEvidenceJobStart = $release.IndexOf("`n  canonical-evidence:", [System.StringComparison]::Ordinal)
+    $failureSummaryJobStart = $release.IndexOf("`n  release-failure-summary:", [System.StringComparison]::Ordinal)
     $publishBoundaryStart = $release.IndexOf("`n  publish:", [System.StringComparison]::Ordinal)
     if ($metadataJobStart -lt 0 -or
         $ctk3JobStart -le $metadataJobStart -or
@@ -1595,7 +1596,8 @@ function Invoke-ReleaseIdentityGateValidation {
         $windowsCliJobStart -le $releaseAcceptanceJobStart -or
         $windowsGuiJobStart -le $windowsCliJobStart -or
         $canonicalEvidenceJobStart -le $windowsGuiJobStart -or
-        $publishBoundaryStart -le $canonicalEvidenceJobStart) {
+        $failureSummaryJobStart -le $canonicalEvidenceJobStart -or
+        $publishBoundaryStart -le $failureSummaryJobStart) {
         Add-ArchitectureError 'Exact source archive workflow job boundaries are missing'
     }
     else {
@@ -1646,7 +1648,7 @@ function Invoke-ReleaseIdentityGateValidation {
         )
         $canonicalEvidenceJob = $release.Substring(
             $canonicalEvidenceJobStart,
-            $publishBoundaryStart - $canonicalEvidenceJobStart
+            $failureSummaryJobStart - $canonicalEvidenceJobStart
         )
         Assert-ReleaseYamlExactKeySet `
             -Text $metadataJob `
@@ -2190,6 +2192,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 'scripts/release/pages-rollback-authority.test.mjs',
                 'scripts/release/pages-rollback-package.test.mjs',
                 'scripts/release/release-publication-evidence.test.mjs',
+                'scripts/release/release-failure-summary.test.mjs',
                 'scripts/release/validate-final-source-revalidation.test.mjs',
                 'scripts/release/validate-release-metadata.test.mjs',
                 'scripts/release/verify-remote-annotated-tag.test.mjs',

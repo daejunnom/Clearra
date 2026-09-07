@@ -377,6 +377,15 @@ test("release job evidence rejects duplicate jobs and any failed required step",
   );
 });
 
+test("diagnostic summary remains outside the canonical evidence job set", () => {
+  const payload = jobsPayload();
+  const expected = validateReleaseJobs(payload, authority());
+  payload.jobs.push({ name: "release-failure-summary", status: "in_progress", conclusion: null });
+  payload.total_count += 1;
+  assert.deepEqual(validateReleaseJobs(payload, authority()), expected);
+  assert.ok(expected.every((job) => job.name !== "release-failure-summary"));
+});
+
 test("canonical acceptance evidence validates accepted inputs and hashes three real products", async () => {
   const fixture = await createFixture();
   const report = await createCanonicalAcceptanceEvidence(fixture.options);

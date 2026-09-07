@@ -201,6 +201,11 @@ const windowsGuiJob = section(
 const canonicalEvidenceJob = section(
   workflow,
   "\n  canonical-evidence:",
+  "\n  release-failure-summary:",
+);
+const failureSummaryJob = section(
+  workflow,
+  "\n  release-failure-summary:",
   "\n  publish:",
 );
 const publishJob = finalJobSection(workflow, "\n  publish:");
@@ -1737,6 +1742,40 @@ for (const [key, value] of [
     `canonical release gate evidence upload ${key}`,
     key === "uses" ? 8 : 10,
   );
+}
+
+requireExactYamlKeySet(
+  failureSummaryJob, 4, ["if", "needs", "runs-on", "permissions", "steps"],
+  "diagnostic failure summary job",
+);
+requireExactYamlScalar(
+  failureSummaryJob, "if", "always() && github.event_name == 'workflow_dispatch'",
+  "diagnostic summary dispatch-only condition", 4,
+);
+requireExactYamlScalar(failureSummaryJob, "runs-on", "ubuntu-latest", "diagnostic runner", 4);
+requireExactYamlFlowSequence(failureSummaryJob, "needs", [
+  "metadata", "ctk3", "linux-cli", "discord-bot",
+  "release-acceptance-foundation-no-product-debt",
+  "release-acceptance-foundation-adversarial-correctness",
+  "release-acceptance-foundation-desktop-host", "release-acceptance-sanitizer",
+  "release-acceptance-rust", "release-acceptance-wasm-build", "release-acceptance-pages",
+  "release-acceptance", "windows-cli", "windows-gui", "canonical-evidence",
+], "diagnostic summary complete dependency set");
+const expectedSummaryTail = [
+  "    permissions:",
+  "      contents: read",
+  "    steps:",
+  "      - uses: actions/checkout@v4",
+  "      - uses: actions/setup-node@v4",
+  "        with:",
+  "          node-version: 22",
+  "      - name: Report every failure and blocked consumer without release authority",
+  "        env:",
+  "          CLEARRA_DIAGNOSTIC_NEEDS: ${{ toJSON(needs) }}",
+  "        run: node scripts/release/release-failure-summary.mjs",
+].join("\n");
+if (failureSummaryJob.slice(failureSummaryJob.indexOf("    permissions:")).trimEnd() !== expectedSummaryTail) {
+  throw new Error("diagnostic summary must keep its closed read-only steps and permissions");
 }
 
 requireExactYamlKeySet(

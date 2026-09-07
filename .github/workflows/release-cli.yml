@@ -892,6 +892,23 @@ jobs:
           path: canonical-acceptance-evidence
           if-no-files-found: error
 
+  release-failure-summary:
+    if: always() && github.event_name == 'workflow_dispatch'
+    needs:
+      [metadata, ctk3, linux-cli, discord-bot, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-wasm-build, release-acceptance-pages, release-acceptance, windows-cli, windows-gui, canonical-evidence]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Report every failure and blocked consumer without release authority
+        env:
+          CLEARRA_DIAGNOSTIC_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/release/release-failure-summary.mjs
+
   publish:
     if: always() && github.ref_type == 'tag' && needs.metadata.result == 'success'
     needs:
