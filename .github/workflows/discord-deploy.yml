@@ -2,9 +2,12 @@ name: Deploy Discord Production
 
 # ORACLE_SSH_PRIVATE_KEY_B64 is forbidden as a repository or organization secret.
 # Configure it separately as an environment secret in discord-path-confirmation,
-# discord-global-command-sync, and the recovery workflow's reviewer-protected
+# discord-global-command-sync, and the recovery workflow's separately scoped
 # discord-runtime-rollback environment.
 # The approval-free candidate job must never resolve the key.
+# Branch preparation: retain a required reviewer on path-confirmation only.
+# Sync depends on this run's successful approved promote job; it must not ask
+# for a second approval. Environment migration is separate from this YAML.
 
 on:
   workflow_run:

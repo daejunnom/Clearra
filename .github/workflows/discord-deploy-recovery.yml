@@ -6,6 +6,9 @@ name: Recover Discord Production
 # run may leave only its inert nonce-bound prior-settings backup; it has not
 # staged Oracle, created a Cloud runtime revision, activated Oracle, changed
 # Cloud traffic, or mutated the Discord catalog.
+# One-approval policy: bounded recovery reuses the original approved transition
+# authority; it cannot authorize a fresh deployment. Historical step names with
+# "reviewer-protected" remain stable because attempt evidence binds their names.
 
 on:
   workflow_run:
@@ -163,7 +166,7 @@ jobs:
           retention-days: 90
 
   recover:
-    # The explicit status function preserves an already-approved recovery job
+    # The explicit status function preserves an already-authorized recovery job
     # long enough for its in-job ordinary-cancellation retry and key cleanup.
     if: >-
       always() &&
