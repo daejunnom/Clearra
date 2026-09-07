@@ -1,5 +1,6 @@
 // Owns candidate-tag removal sequencing, not deployment/recovery authority.
 // The caller still verifies and seals the original run/attempt/artifact evidence.
+import { recoveryTrafficExitCode } from "./recovery-traffic-error.mjs";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,6 +90,6 @@ async function main() {
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     process.stderr.write(`cloud_candidate_tag_cleanup=failed reason=${error.message}\n`);
-    process.exitCode = 2;
+    process.exitCode = recoveryTrafficExitCode(error);
   });
 }

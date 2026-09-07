@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { recoveryTrafficHttpError, recoveryTrafficExitCode } from "./recovery-traffic-error.mjs";
 import { createRecoveryTrafficClient } from "./recovery-traffic-client.mjs";
 
 const service = "projects/clearra-cloud/locations/asia-northeast1/services/clearra-current-job";
@@ -94,4 +95,62 @@ test("empty body preserves denial and success bodies retain their existing behav
   await assert.rejects(denied("GET", service), (error) => error.httpStatus === 403);
   const success = createRecoveryTrafficClient(token, { fetchImpl: async () => Response.json({ done: true }) });
   assert.deepEqual(await success("PATCH", service, body, true), { done: true });
+});
+
+for (const validateOnly of [true, false]) {
+  test(`observed actAs denial retains message evidence and exits 77 in ${validateOnly ? "validate" : "apply"}`, async () => {
+    const error = await recoveryTrafficHttpError(Response.json({ error: {
+      status: "PERMISSION_DENIED",
+      message: `Permission 'iam.serviceaccounts.actAs' denied on ${token} (or it may not exist).`,
+    } }, { status: 403 }), { method: "PATCH", validateOnly });
+    assert.match(error.message, /body_state=parsed; error_info=absent; permission_source=message/);
+    assert.match(error.message, /reason=unknown/); // Do not invent an ErrorInfo.reason.
+    assert.equal(error.diagnosis, "runtime-actas-denied");
+    assert.equal(recoveryTrafficExitCode(error), 77);
+    assert.ok(!error.message.includes(token));
+  });
+}
+
+test("structured and quoted evidence are distinguished and combined without raw content", async () => {
+  const error = await recoveryTrafficHttpError(Response.json({ error: {
+    message: `Permission 'iam.serviceAccounts.actAs' denied ${token}`,
+    details: [errorInfo("iam.serviceAccounts.actAs")],
+  } }, { status: 403 }), { method: "PATCH", validateOnly: true });
+  assert.match(error.message, /error_info=present; permission_source=error-info,message/);
+  assert.equal(recoveryTrafficExitCode(error), 77);
+});
+
+for (const [method, status, permission] of [
+  ["GET", 403, "iam.serviceAccounts.actAs"],
+  ["PATCH", 401, "iam.serviceAccounts.actAs"],
+  ["PATCH", 403, "run.services.update"],
+]) {
+  test(`${method}/${status}/${permission} does not claim the observed runtime actAs conflict`, async () => {
+    const error = await recoveryTrafficHttpError(Response.json({ error: {
+      details: [errorInfo(permission)],
+    } }, { status }), { method, validateOnly: method === "PATCH" ? true : undefined });
+    assert.equal(error.diagnosis, "unclassified-http-failure");
+    assert.equal(recoveryTrafficExitCode(error), 2);
+  });
+}
+
+for (const [payload, state] of [
+  [null, "empty"], ["", "empty"], ["{", "invalid-json"],
+  ["[]", "missing-error-object"], [JSON.stringify({ error: {} }), "parsed"],
+  ["x".repeat(16 * 1024 + 1), "oversized"],
+]) {
+  test(`unavailable diagnostic content says ${state}, not a generic unexplained unknown`, async () => {
+    const error = await recoveryTrafficHttpError(new Response(payload, { status: 403 }), { method: "PATCH", validateOnly: true });
+    assert.match(error.message, new RegExp(`body_state=${state};`));
+    assert.equal(recoveryTrafficExitCode(error), 2);
+  });
+}
+
+test("a body transport error is distinguished from a successfully parsed permission denial", async () => {
+  const response = new Response(new ReadableStream({ start(c) { c.error(new Error(token)); } }), { status: 403 });
+  const error = await recoveryTrafficHttpError(response, { method: "PATCH", validateOnly: true });
+  assert.match(error.message, /body_state=read-failed/);
+  assert.equal(recoveryTrafficExitCode(error), 2);
+  assert.ok(!error.message.includes(token));
+  assert.equal(recoveryTrafficExitCode(new Error("runtime-actas-denied")), 2);
 });
