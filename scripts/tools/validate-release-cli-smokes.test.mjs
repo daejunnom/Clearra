@@ -89,6 +89,19 @@ test("canonical release workflow passes the smoke validator", async () => {
   assert.match(result.stdout, /Release CLI smoke contract passed\./u);
 });
 
+test("rejects diagnostic continuation that promotes failure or requests mutation authority", async () => {
+  for (const replacement of [
+    "        continue-on-error: true\n        run: node scripts/release/release-failure-summary.mjs",
+    "        run: node scripts/release/release-failure-summary.mjs || true",
+    "        env:\n          GH_TOKEN: ${{ github.token }}\n        run: node scripts/release/release-failure-summary.mjs",
+  ]) {
+    const changed = replaceExactlyOnce(normalizedWorkflow,
+      "        run: node scripts/release/release-failure-summary.mjs", replacement);
+    const result = await runValidator(changed);
+    assert.notEqual(result.status, 0, diagnostic(result));
+  }
+});
+
 test("rejects the generic Linux pc objective in place of canonical pc.tiling", async () => {
   const genericPackageScript = replaceExactlyOnce(
     canonicalPackageScript,

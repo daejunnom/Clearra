@@ -31,6 +31,35 @@ eight-stage gate. It also binds the deferred evidence ownership from
 `NoProductDebt` and `AdversarialCorrectness` to the actual Rust, render, and
 desktop owners before canonical acceptance evidence can be created.
 
+### Independent failure collection (deferred branch)
+
+`codex/gate-independent-failure-collection` adds diagnostic continuation for
+`ReleaseAcceptance` only; it is deliberately not part of the current v0.8.0
+publication source. Once separately reviewed and integrated, a failing stage
+does not prevent independent later stages from running once. In the Rust shard,
+`RustExactTests`, `ProductE2E`, and `RenderGolden` each build/check their own
+prerequisites, so a test failure in one is not a prerequisite failure for the
+others. Cargo's existing `--no-fail-fast` remains responsible for collecting
+failures within the Rust exact-test package list. No automatic retry is added.
+
+This does not turn an unsuccessful build into a usable artifact. ProductE2E
+still stops its own consumers when its binary build fails. WASM/CTK3 consumer
+jobs retain their explicit successful-producer `needs` dependencies; artifact
+validation, shard sealing, canonical acceptance, and publication remain
+success-only. The sequence helper supports explicit prerequisite edges and
+records blocked descendants without invoking them. Unknown/forward edges are
+rejected before work begins, and explicit pipeline cancellation stops execution.
+
+All independent failures are printed as they occur and again in a compact final
+stage summary. Any failed or blocked stage throws after collection; no failed
+gate receives a passed marker or acceptance receipt. The diagnostic-only
+workflow summary runs after every canonical job, shows failures and blocked or
+otherwise skipped consumers together, and exits nonzero if any job did not
+succeed. It cannot supply release evidence or grant production authority. Other
+task modes keep their previous fail-fast semantics. Setup, source authorization,
+and shared artifact validation failures may still block dependent tests rather
+than attempting unsafe or misleading execution.
+
 The toolchain-owning shards restore caches into physically independent runner
 filesystems. The Pages shard consumes the single WASM producer's accepted
 artifact without restoring a Cargo cache or rebuilding WASM. No shard owns

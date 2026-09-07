@@ -501,6 +501,17 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
     1,
   );
   assert.doesNotMatch(captureJobs, /Prepare exact rollback manifest contract|Stamp exact rollback identity/u);
+  const acceptedDownload = captureJobs.slice(
+    captureJobs.indexOf("- name: Download exact accepted Pages build without rebuilding"),
+    captureJobs.indexOf("- name: Prove accepted build and current public bytes before capture"),
+  );
+  // ID-based downloads otherwise nest even one artifact under its artifact name.
+  // The verifier and rollback packager must consume the same flat accepted root.
+  assert.match(acceptedDownload, /artifact-ids: \$\{\{ needs\.capture-authority\.outputs\.accepted_artifact_id \}\}/u);
+  assert.match(acceptedDownload, /merge-multiple: true/u);
+  assert.match(acceptedDownload, /run-id: \$\{\{ needs\.capture-authority\.outputs\.accepted_run_id \}\}/u);
+  assert.match(acceptedDownload, /path: canonical-pages-build/u);
+  assert.doesNotMatch(acceptedDownload, /\n\s+pattern:|\n\s+name:/u);
   const legacyStamp = captureJobs.slice(
     captureJobs.indexOf("- name: Stamp separate reconstructed v0.7.4 identity"),
     captureJobs.indexOf("- name: Validate portable rollback tree"),

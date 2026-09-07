@@ -646,10 +646,43 @@ and canonical selection take seconds. Even eliminating that source stage cannot
 explain the minimum bottleneck. Therefore this idea is not substituted for the
 requested CP-SAT/minimum work or presented as a 3-second fix.
 
+## Successful acceptance and downstream rollout retry
+
+The exact `ba6cdfb` canonical run
+[34072662793](https://github.com/daejunnom/Clearra/actions/runs/34072662793)
+completed successfully, including the corrected score portfolio regression.
+The dispatch-only acceptance does not itself create the tagged Product Release.
+
+Two independent downstream blockers were then observed:
+
+- Pages queue `34072800121` stopped after capture run `34074201911` failed.
+  The exact accepted artifact downloaded successfully, but ID-based extraction
+  nested it under its artifact name. `verify-public` correctly rejected the
+  missing root identity. The capture download now explicitly flattens the one
+  authority-selected artifact with `merge-multiple: true`; exact artifact/run
+  binding, public byte comparison and preartifact revalidation remain unchanged.
+- Discord run `34074177636` stopped in authority before candidate or mutation:
+  the code-bound first-deployment bootstrap expired at
+  `2026-09-06T17:12:23Z`. Recovery run `34074217860` confirmed no runtime mutation;
+  it did not create a durable checkpoint or renew the bootstrap. The user then
+  explicitly approved extending only the first-deployment deadline to
+  `2026-09-14T17:12:23Z`. The bootstrap commit/epoch, full recovery-debt history,
+  durable receipt requirements and protected deployment gates are unchanged.
+  Expiry errors now include the deadline and actual attempt start, with a
+  regression proving no-op recovery cannot renew an expired deadline.
+
+The previously separate `300c468` ReleaseAcceptance failure-collection changes
+are now included in the same retry source change at the user's request. Other
+workflows' independent-check improvements remain separate next-commit work on
+`codex/ci-independent-failure-collection-next`, not authority for this rollout.
+Focused source/mock checks are not a replacement for the new exact-SHA canonical
+run. New submission is not evidence of a completed Pages or Discord deployment.
+
 ## Primary references
 
 - [GitHub workflow dispatch run-ID receipts](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
 - [GitHub token workflow-dispatch trigger exception](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)
+- [GitHub artifact ID extraction and merge-multiple behavior](https://github.com/actions/download-artifact/blob/v4/README.md#download-artifacts-by-id)
 - [Qnia OR-Tools integration and limits](https://github.com/Qnia28/sfinder_wasm/blob/03b637730c5b541f4f2934be613498fbe65327fd/ORTOOLS_INTEGRATION_AND_LICENSE.md)
 - [Qnia CP-SAT public adapter](https://github.com/Qnia28/sfinder_wasm/blob/03b637730c5b541f4f2934be613498fbe65327fd/src/ortools-min-cover.mjs)
 - [Google CP-SAT architecture](https://github.com/google/or-tools/blob/stable/ortools/sat/README.md)

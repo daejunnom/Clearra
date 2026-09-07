@@ -141,3 +141,5 @@ if ($rustExact.IndexOf('if ($result.ExitCode -ne 0)', [System.StringComparison]:
     throw 'RustExactTests must still fail the release gate on a nonzero Cargo exit.'
 }
 Write-Output 'release_acceptance_shard_test=rust-collects-package-failures-without-authority status=passed'
+
+& (Join-Path $PSScriptRoot 'test_independent_gate_sequence.ps1')

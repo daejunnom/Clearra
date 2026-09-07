@@ -97,6 +97,7 @@ $script:ClearraDeveloperEntrypoints = @(
 $ClearraScriptRoot = $PSScriptRoot
 . (Join-Path $ClearraScriptRoot "lib/clearra-start-helpers.ps1")
 . (Join-Path $ClearraScriptRoot "lib/progress.ps1")
+. (Join-Path $ClearraScriptRoot "lib/independent-gate-sequence.ps1")
 . (Join-Path $ClearraScriptRoot "lib/product-process-surface.ps1")
 . (Join-Path $ClearraScriptRoot "lib/gpu-worker-tasks.ps1")
 . (Join-Path $ClearraScriptRoot "lib/clearra-task-dispatch.ps1")
@@ -151,11 +152,13 @@ try {
     }
 
     $progressScopeName = "clearra"
+    $collectReleaseAcceptanceFailures = $false
     foreach ($taskValue in $Task) {
         foreach ($rawTaskName in ([string]$taskValue -split ",")) {
             switch ($rawTaskName.Trim().ToLowerInvariant()) {
                 "acceptance" { $progressScopeName = "acceptance" }
                 "releaseacceptance" {
+                    $collectReleaseAcceptanceFailures = $true
                     $progressScopeName = if ($ReleaseAcceptanceShard -eq "Full") {
                         "release-acceptance"
                     } else {
@@ -179,17 +182,39 @@ try {
         }
     }
 
+    # Mixed task requests retain fail-fast behavior: only the closed canonical
+    # stage set has been audited for independence from other top-level stages.
+    if ($collectReleaseAcceptanceFailures) {
+        $canonicalTasks = @(Get-ClearraReleaseAcceptanceTasks)
+        $collectReleaseAcceptanceFailures = @($tasks | Where-Object {
+            $_ -notin $canonicalTasks
+        }).Count -eq 0
+    }
     $topLevelProgressScope = New-ClearraProgressScope `
         -Name $progressScopeName `
         -Total $tasks.Count `
         -Workers 1 `
         -VerboseLog:$VerboseLog.IsPresent
-    foreach ($taskName in $tasks) {
-        Invoke-ClearraProgressCase `
-            -Scope $topLevelProgressScope `
-            -Name $taskName `
-            -PreserveOutput `
-            -Body { Invoke-ClearraTask $taskName $Root }
+    if ($collectReleaseAcceptanceFailures) {
+        # Each top-level gate builds/verifies its own prerequisites. In
+        # particular ProductE2E does not consume RustExactTests test binaries.
+        # Artifact-producing substeps retain their own fail-closed boundaries.
+        $stages = @($tasks | ForEach-Object {
+            @{
+                Name = $_
+                Requires = @()
+                Body = { param([string]$gateTaskName) Invoke-ClearraTask $gateTaskName $Root }
+            }
+        })
+        Invoke-ClearraIndependentGateSequence -Stages $stages -Scope $topLevelProgressScope
+    } else {
+        foreach ($taskName in $tasks) {
+            Invoke-ClearraProgressCase `
+                -Scope $topLevelProgressScope `
+                -Name $taskName `
+                -PreserveOutput `
+                -Body { Invoke-ClearraTask $taskName $Root }
+        }
     }
 
     Complete-ClearraProgressLine $topLevelProgressScope

@@ -93,7 +93,7 @@ const RESULT_NAME =
 const SEMVER_TAG = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/u;
 const BOOTSTRAP_COMMIT = "b1a56bc15b8d6decd1bcfc1b49163e0542e36cd6";
 const BOOTSTRAP_AT = "2026-08-30T17:12:23Z";
-const BOOTSTRAP_EXPIRES_AT = "2026-09-06T17:12:23Z";
+const BOOTSTRAP_EXPIRES_AT = "2026-09-14T17:12:23Z";
 
 export function resolveDiscordRecoveryDebtCheckpoint(
   runList,
@@ -221,7 +221,13 @@ export function resolveDiscordRecoveryDebtCheckpoint(
   }
   validateBootstrapProof(options?.bootstrapProof, sourceCommit);
   if (current.startedAt > requireTimestamp(BOOTSTRAP_EXPIRES_AT, "bootstrap expiry")) {
-    throw new Error("Discord one-time recovery checkpoint bootstrap has expired");
+    throw new Error(
+      `Discord one-time recovery checkpoint bootstrap has expired ` +
+      `(expired_at=${BOOTSTRAP_EXPIRES_AT}; attempt_started_at=${current.startedAtText}). ` +
+      "A valid durable production checkpoint or a separately reviewed and authorized " +
+      "bootstrap policy change is required; rerunning deployment or completing a " +
+      "no-runtime-mutation recovery does not renew checkpoint authority",
+    );
   }
   const bootstrapAt = requireTimestamp(BOOTSTRAP_AT, "bootstrap-at");
   for (const run of flattenRunPages(runList, "Discord primary run catalog")) {

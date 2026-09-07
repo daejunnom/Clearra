@@ -42,6 +42,7 @@ const EXPECTED_RELEASE_REGRESSIONS = Object.freeze([
   "scripts/release/pages-rollback-package.test.mjs",
   "scripts/release/queue-pages-publication.test.mjs",
   "scripts/release/release-publication-evidence.test.mjs",
+  "scripts/release/release-failure-summary.test.mjs",
   "scripts/release/validate-final-source-revalidation.test.mjs",
   "scripts/release/validate-release-metadata.test.mjs",
   "scripts/release/verify-remote-annotated-tag.test.mjs",
