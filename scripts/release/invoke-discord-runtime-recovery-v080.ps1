@@ -207,11 +207,16 @@ function Seal-ExactCandidateCloudResidue {
         -CandidateTag ([string]$Intent.cloud_candidate_tag) `
         -CandidateRevision ([string]$Intent.cloud_candidate_revision)
     if ($candidateTagEntryCount -eq 1) {
-        $candidateTag = [string]$Intent.cloud_candidate_tag
-        gcloud run services update-traffic clearra-current-job `
-            --project=$GcpProjectId --region=$GcpRegion `
-            "--remove-tags=$candidateTag" --quiet
-        if ($LASTEXITCODE -ne 0) { throw 'Cloud candidate residue tag removal failed' }
+        # A traffic-only PATCH must not resubmit the revision template. The
+        # helper validates first with the same rollback identity and fails closed
+        # on IAM denial; the original v1 readbacks still own recovery evidence.
+        Invoke-NodeExact scripts/release/cloud/remove-recovery-candidate-tag.mjs `
+            --project $GcpProjectId --region $GcpRegion `
+            --intent "$ArtifactRoot/prestage/intended-candidate-authority.json" `
+            --prior-revision $PriorRevision --source-commit $SourceCommit `
+            --workflow-run-id $OriginalWorkflowRunId `
+            --workflow-run-attempt $OriginalWorkflowRunAttempt `
+            --deployment-nonce ([string]$Intent.deployment_nonce)
     }
 
     if ((Get-ActiveCloudRevision -OutputPath $ServiceOutputPath) -cne $PriorRevision) {
