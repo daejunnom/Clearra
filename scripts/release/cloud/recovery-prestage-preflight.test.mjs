@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -43,10 +44,24 @@ $script:Service = [pscustomobject]@{ status = [pscustomobject]@{ traffic = @(
     [pscustomobject]@{ revisionName = $intent.cloud_candidate_revision; tag = $intent.cloud_candidate_tag }
 ) } }
 `;
+function executePs(body) {
+  const directory = mkdtempSync(join(tmpdir(), "clearra-preflight-behavior-"));
+  try {
+    const scriptPath = join(directory, "fixture.ps1");
+    writeFileSync(scriptPath, setup + body, { encoding: "utf8", mode: 0o600 });
+    // -Command can inherit a false $? from an intentionally caught exception.
+    // -File measures script completion instead. Do not append exit 0 or reset
+    // production error state: uncaught throws must still fail the process.
+    return spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", scriptPath], {
+      encoding: "utf8", timeout: 20_000, shell: false, maxBuffer: 256 * 1024,
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function runPs(body) {
-  const result = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", setup + body], {
-    encoding: "utf8", timeout: 20_000, shell: false, maxBuffer: 256 * 1024,
-  });
+  const result = executePs(body);
   assert.equal(result.status, 0, result.stderr || String(result.error));
   assert.doesNotMatch(result.stdout, /fixture-success-stream-must-not-escape/);
   return result;
@@ -151,4 +166,29 @@ if ($files.Count -ne 1 -or $files[0].Name -notlike 'cloud-prestage-before-*.json
 if ($script:Calls -ne 1) { throw 'permission denial was not terminal for this invocation' }
 `);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("uncaught actAs denial still fails the PowerShell fixture process", psOptions, () => {
+  const result = executePs(`
+$script:ChildExit = 77
+Assert-PrestageCloudCleanupPermission -Service $script:Service -Intent $intent -PriorRevision $prior.prior_revision
+`);
+  assert.equal(result.status, 1, result.stderr || String(result.error));
+  assert.match(result.stderr, /Cloud candidate-tag cleanup blocked/);
+  assert.doesNotMatch(result.stdout, /fixture-success-stream-must-not-escape/);
+});
+
+test("an assertion failure after an expected caught denial still fails the process", psOptions, () => {
+  const result = executePs(`
+$script:ChildExit = 77
+try {
+    Assert-PrestageCloudCleanupPermission -Service $script:Service -Intent $intent -PriorRevision $prior.prior_revision
+    throw 'unexpected success'
+} catch {
+    if ($_.Exception.Message -notmatch 'iam.serviceAccounts.actAs was denied') { throw }
+}
+throw 'fixture-assertion-failed-after-caught-denial'
+`);
+  assert.equal(result.status, 1, result.stderr || String(result.error));
+  assert.match(result.stderr, /fixture-assertion-failed-after-caught-denial/);
 });
