@@ -154,7 +154,7 @@ fn score_optimal_portfolios_preserve_all_original_candidate_identities() {
         ScoredCoverageCandidate::new(20, bitset(3, &[0]), 100, 0),
         ScoredCoverageCandidate::new(30, bitset(3, &[1, 2]), 100, 1),
     ];
-    let mut portfolios = MaxScoreCover::portfolio_enumerator(
+    let portfolios = MaxScoreCover::portfolio_enumerator(
         &candidates,
         &required,
         &weights,
@@ -162,17 +162,38 @@ fn score_optimal_portfolios_preserve_all_original_candidate_identities() {
     )
     .expect("portfolio enumerator");
 
-    let page = portfolios.next_page(10, 10).expect("all alternatives");
-    assert_eq!(page.optimal_cardinality(), 2);
-    assert_eq!(
-        page.portfolios()
-            .iter()
-            .map(|portfolio| portfolio.candidate_ids().to_vec())
-            .collect::<Vec<_>>(),
-        vec![vec![10, 30], vec![20, 30]]
-    );
-    assert_eq!(page.total_alternative_count_decimal(), Some("2"));
-    assert!(page.enumeration_complete());
+    // Score portfolios use the cooperative adapter: one budgeted call may
+    // yield before producing a field. An empty slice is not end-of-results.
+    // Preserve the full canonical identity assertion across lazy pages instead
+    // of assuming that ten work steps finish every alternative synchronously.
+    for work_budget in [1, 10, 1_024] {
+        let mut portfolios = portfolios.clone();
+        let mut selected = Vec::new();
+        let mut complete = false;
+        for _ in 0..1_024 {
+            let page = portfolios.next_page(1, work_budget).expect("lazy page");
+            assert_eq!(page.optimal_cardinality(), 2);
+            assert!(page.portfolios().len() <= 1);
+            selected.extend(
+                page.portfolios()
+                    .iter()
+                    .map(|portfolio| portfolio.candidate_ids().to_vec()),
+            );
+            if page.enumeration_complete() {
+                assert_eq!(page.total_alternative_count_decimal(), Some("2"));
+                complete = true;
+                break;
+            }
+            assert_eq!(page.total_alternative_count_decimal(), None);
+            assert!(page.restart().is_some());
+        }
+        assert!(
+            complete,
+            "tiny fixture did not finish at budget {work_budget}"
+        );
+        assert_eq!(selected, vec![vec![10, 30], vec![20, 30]]);
+        assert!(portfolios.enumeration_complete());
+    }
 }
 
 #[test]

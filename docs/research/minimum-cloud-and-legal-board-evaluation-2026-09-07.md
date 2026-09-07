@@ -562,6 +562,30 @@ with four workers after adding the queue tests; no native compilation ran locall
 
 ## Finite experiment server lifecycle
 
+### Subsequent full-rollout gate correction
+
+Canonical34064345067 at3a967ee passed App422 and Core579 tests, including the
+repaired parallel score-portfolio source and SRS-X fixture. With package-level
+failure collection enabled, the remaining Objectives test was observable:
+`score_optimal_portfolios_preserve_all_original_candidate_identities` assumed
+that a single ten-step cooperative page contained every alternative. The score
+adapter intentionally delegates to the bounded, cancellable enumeration path,
+which may yield an empty, incomplete page before finding the first portfolio.
+
+Only the stale regression is corrected: enumerate one portfolio per page across
+work budgets1/10/1024, require bounded eventual completion, retain restart/unknown
+total checks while incomplete, and assert both original canonical candidate sets
+`[10,30]` and `[20,30]` and exact total2 at completion. No runtime algorithm or
+score/tie meaning changes. The new native test execution belongs to the fresh
+trusted canonical run; rustfmt and diff checks are the local validation.
+
+The user requested retry submission without awaiting deployment. Broader gate
+failure collection across independent later stages is explicitly reserved for
+the separate `codex/gate-independent-failure-collection` branch, not this release.
+The existing successful-canonical automatic Discord trigger and its protected
+promotion/sync stages remain unchanged. End-to-end deployment completion is not
+claimed merely because the new canonical and Pages queue runs were dispatched.
+
 `scripts/tools/run-gui-experiment.mjs` is the only new one-off GUI launcher.
 It binds 127.0.0.1:4195 with strict port handling and refuses an existing listener
 without adopting/stopping it. Its hidden, IPC-connected child uses local-audit
