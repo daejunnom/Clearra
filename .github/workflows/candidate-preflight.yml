@@ -216,25 +216,36 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
+        id: node
         with:
           node-version: 22
       - name: Check release metadata and smoke wiring
-        run: |
-          node scripts/release/validate-release-metadata.mjs --tag v0.8.0
-          node scripts/tools/validate-release-cli-smokes.mjs
-          node --test scripts/release/release-publication-evidence.test.mjs scripts/release/final-source-stage-evidence.test.mjs
+        id: metadata
+        run: node scripts/release/validate-release-metadata.mjs --tag v0.8.0
+      - name: Check independent release smoke wiring
+        id: smokes
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: node scripts/tools/validate-release-cli-smokes.mjs
+      - name: Check independent publication fixture contracts
+        id: fixtures
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: node --test scripts/release/release-publication-evidence.test.mjs scripts/release/final-source-stage-evidence.test.mjs
       - name: Compile candidate CLI
         id: compile
+        if: ${{ !cancelled() && steps.metadata.outcome == 'success' && steps.smokes.outcome == 'success' && steps.fixtures.outcome == 'success' }}
         # Fail on the real transitive import graph before spending time compiling Rust.
         # This job intentionally has no npm install or document-codec build.
         run: |
           node --input-type=module -e "await import('./apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs')"
           cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search
       - name: Check candidate startup
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: target/release/clearra --help
       - name: Verify the current typed score renderer boundary
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: cargo test --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search --lib score_finder_renderer_ -- --nocapture
       - name: Compare direct CLI and Discord execution without publishing
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail

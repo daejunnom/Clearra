@@ -15,6 +15,26 @@ test('focused CLI feedback checks publication fixture schema before native compi
   assert.ok(job.indexOf(check) < job.indexOf('name: Compile candidate CLI'));
 });
 
+function candidateCliStep(name) {
+  const job = workflow.split('  candidate-cli:')[1].split('  candidate-minimum-diagnostic:')[0];
+  return job.split(`      - name: ${name}\n`)[1]?.split(/\r?\n      - (?:name|uses):/u)[0] ??
+    job.split(`      - name: ${name}\r\n`)[1]?.split(/\r?\n      - (?:name|uses):/u)[0] ?? '';
+}
+
+test('candidate CLI continues only independent tests with successful setup or binary prerequisites', () => {
+  for (const name of ['Check independent release smoke wiring', 'Check independent publication fixture contracts']) {
+    assert.match(candidateCliStep(name), /if: \$\{\{ !cancelled\(\) && steps\.node\.outcome == 'success' \}\}/u);
+  }
+  const compile = candidateCliStep('Compile candidate CLI');
+  assert.match(compile, /if: \$\{\{ !cancelled\(\) && steps\.metadata\.outcome == 'success' && steps\.smokes\.outcome == 'success' && steps\.fixtures\.outcome == 'success' \}\}/u);
+  for (const name of ['Check candidate startup', 'Verify the current typed score renderer boundary',
+    'Compare direct CLI and Discord execution without publishing']) {
+    const step = candidateCliStep(name);
+    assert.match(step, /if: \$\{\{ !cancelled\(\) && steps\.compile\.outcome == 'success' \}\}/u);
+    assert.doesNotMatch(step, /continue-on-error|\|\| true/u);
+  }
+});
+
 function assertIsolated(source) {
   assert.match(source, /^name: Candidate Preflight$/mu);
   assert.match(source, /^    branches: \["codex\/v0\.8\.0-preflight-20260906-rng"\]$/mu);

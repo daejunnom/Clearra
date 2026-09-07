@@ -115,6 +115,19 @@ test('one compilation failure blocks only the same package and features, never m
   assert.ok(!messages.some((message) => message.includes('candidate_regressions=passed')));
 });
 
+test('candidate cancellation or missing shared process stops remaining selections', () => {
+  for (const interrupted of [
+    { status: null, signal: 'SIGTERM' }, { status: 1, error: new Error('spawn failed') },
+    { status: null }, { status: -1 },
+  ]) {
+    let calls = 0;
+    assert.throws(() => runCandidateRegressions({ environment: ENV, platform: 'win32', write() {},
+      spawnImplementation() { calls += 1; return interrupted; },
+    }), /runner interrupted/u);
+    assert.equal(calls, 1);
+  }
+});
+
 test('replay DP, exact-zero equivalence, warm reuse and Desktop feature seams are included', () => {
   for (const [packageName, filter] of [
     ['clearra-postprocess', 'exact_replay_language::tests::'],

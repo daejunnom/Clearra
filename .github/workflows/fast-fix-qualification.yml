@@ -578,26 +578,7 @@ jobs:
           PC4_LOOKUP_RESULT: ${{ needs['qualify-pc4-lookup-service'].result }}
           PC4_MANIFEST_SELECTED: ${{ needs.authority.outputs.deploy_pc4_activation_manifest }}
           PC4_MANIFEST_RESULT: ${{ needs['qualify-pc4-activation-manifest'].result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$GATE_MODE" == 'none' || "$GATE_MODE" == 'focused' ]]
-          [[ "$CARRY_RESULT" == 'success' ]]
-          check_result() {
-            local selected="$1" result="$2" label="$3"
-            if [[ "$selected" == 'true' ]]; then
-              [[ "$result" == 'success' ]] || { echo "$label qualification did not pass" >&2; exit 2; }
-            else
-              [[ "$result" == 'skipped' ]] || { echo "$label unselected job was not skipped" >&2; exit 2; }
-            fi
-          }
-          check_result "$PAGES_SELECTED" "$PAGES_RESULT" pages
-          check_result "$GUI_SELECTED" "$GUI_RESULT" desktop_gui
-          check_result "$CLI_SELECTED" "$CLI_RESULT" cli
-          check_result "$DISCORD_SELECTED" "$DISCORD_RESULT" discord_gateway
-          check_result "$CLOUD_SELECTED" "$CLOUD_RESULT" heavy_cloud_runtime
-          check_result "$PC4_LOOKUP_SELECTED" "$PC4_LOOKUP_RESULT" pc4_lookup_service
-          check_result "$PC4_MANIFEST_SELECTED" "$PC4_MANIFEST_RESULT" pc4_activation_manifest
+        run: node scripts/release/fast-fix-job-topology.mjs
       - name: Download exact impact and verified baseline evidence
         uses: actions/download-artifact@v4
         with:
