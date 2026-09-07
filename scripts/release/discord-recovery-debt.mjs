@@ -6,6 +6,7 @@ import { link, lstat, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { workflowRunTimestampOrderIsValid } from "./workflow-run-timestamps.mjs";
 
 import {
   canonicalJson,
@@ -909,7 +910,7 @@ function validateRunIdentity(run, kind, expectedRepository) {
     ? null
     : requireTimestamp(run.run_started_at, `${kind} run-started-at`);
   const updatedAt = requireTimestamp(run.updated_at, `${kind} updated-at`);
-  if (createdAt > updatedAt || (startedAt !== null && (createdAt > startedAt || startedAt > updatedAt))) {
+  if (!workflowRunTimestampOrderIsValid(createdAt, startedAt, updatedAt)) {
     throw new Error(`Discord ${kind} workflow timestamps are inconsistent`);
   }
   const isPrimary = kind === "primary";
