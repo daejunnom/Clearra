@@ -111,12 +111,14 @@ jobs:
             $original[0] as $o |
             .attempts[] |
             select(
-              .status == "completed" and
               ((.id != $o.id) or (.run_attempt != $o.run_attempt)) and
               (
-                ((.run_started_at | epoch) >= ($o.run_started_at | epoch)) or
-                ((.updated_at | epoch) >= ($o.updated_at | epoch)) or
-                (.id == $o.id and .run_attempt > $o.run_attempt)
+                .status == "pending" or
+                (.status == "completed" and (
+                  ((.run_started_at | epoch) >= ($o.run_started_at | epoch)) or
+                  ((.updated_at | epoch) >= ($o.updated_at | epoch)) or
+                  (.id == $o.id and .run_attempt > $o.run_attempt)
+                ))
               )
             ) |
             [(.id | tostring), (.run_attempt | tostring)] | @tsv
@@ -226,12 +228,14 @@ jobs:
             $original[0] as $o |
             .attempts[] |
             select(
-              .status == "completed" and
               ((.id != $o.id) or (.run_attempt != $o.run_attempt)) and
               (
-                ((.run_started_at | epoch) >= ($o.run_started_at | epoch)) or
-                ((.updated_at | epoch) >= ($o.updated_at | epoch)) or
-                (.id == $o.id and .run_attempt > $o.run_attempt)
+                .status == "pending" or
+                (.status == "completed" and (
+                  ((.run_started_at | epoch) >= ($o.run_started_at | epoch)) or
+                  ((.updated_at | epoch) >= ($o.updated_at | epoch)) or
+                  (.id == $o.id and .run_attempt > $o.run_attempt)
+                ))
               )
             ) |
             [(.id | tostring), (.run_attempt | tostring)] | @tsv

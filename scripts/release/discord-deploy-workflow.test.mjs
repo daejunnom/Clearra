@@ -15,6 +15,11 @@ const recoveryAttemptCollector = await readFile(
   new URL("./collect-discord-primary-attempt-catalog.sh", import.meta.url),
   "utf8",
 );
+
+test("both recovery resolutions collect exact jobs for pending concurrency waits", () => {
+  assert.equal([...recovery.matchAll(/\.status == "pending" or/gu)].length, 2);
+  assert.equal([...recovery.matchAll(/\/attempts\/\$run_attempt\/jobs\?per_page=100/gu)].length, 2);
+});
 const release = await readFile(
   new URL("../../.github/workflows/release-cli.yml", import.meta.url),
   "utf8",
