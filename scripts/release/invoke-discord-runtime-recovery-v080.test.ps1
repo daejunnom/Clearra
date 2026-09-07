@@ -31,7 +31,11 @@ function global:node {
     $global:LASTEXITCODE = 9
 }
 $threw = $false
-try { Invoke-NodeExact fixture.mjs verify } catch { $threw = $_.Exception.Message -ceq 'tracked recovery validator failed' }
+# Require the current complete diagnostic, including the original child status.
+# An arbitrary exception or a swallowed nonzero exit must not satisfy this test.
+try { Invoke-NodeExact fixture.mjs verify } catch {
+    $threw = $_.Exception.Message -ceq 'tracked recovery validator failed (helper=authority-validator exit_code=9); original diagnostic is on child stderr'
+}
 if (-not $threw) { throw 'nonzero validator status did not fail closed' }
 
 $mixedTraffic = @'
