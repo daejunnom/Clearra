@@ -380,7 +380,7 @@ test("recovery hard-fails artifact bytes before extraction and binds the resolut
   assert.match(recovery, /Re-resolve exact recovery authority immediately before protected mutation/u);
 });
 
-test("rollback SSH and WIF authority exist only in reviewer-protected recovery", () => {
+test("rollback SSH and WIF authority exist only in separately scoped original-bound recovery", () => {
   assert.match(recovery, /environment: discord-runtime-rollback/u);
   assert.match(recovery, /ORACLE_SSH_PRIVATE_KEY_B64: \$\{\{ secrets\.ORACLE_SSH_PRIVATE_KEY_B64 \}\}/u);
   assert.match(recovery, /base64 --decode/u);
