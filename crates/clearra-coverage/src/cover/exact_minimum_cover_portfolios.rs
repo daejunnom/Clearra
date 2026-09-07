@@ -1144,7 +1144,7 @@ mod parallel_portfolio_tests {
                 .map(|mask| PatternBitSet::from_words(3, vec![mask]).unwrap())
                 .collect();
             let config = ParallelConfiguration {
-                partitions: 8,
+                partitions: 1,
                 matrix_id: [9; 32],
                 next_query_id: AtomicU64::new(1),
             };
@@ -1216,7 +1216,7 @@ mod parallel_portfolio_tests {
             .map(|mask| PatternBitSet::from_words(3, vec![mask]).unwrap())
             .collect();
         let config = ParallelConfiguration {
-            partitions: 8,
+            partitions: 1,
             matrix_id: [10; 32],
             next_query_id: AtomicU64::new(1),
         };
@@ -1266,6 +1266,47 @@ mod parallel_portfolio_tests {
                 ExactMinimumCoverError::MemoryGuardRejected
             ))
         ));
+    }
+
+    #[test]
+    fn parallel_repair_never_blocks_first_work_dispatch() {
+        // All logical-processor counts use the same policy. A warm miss is
+        // not a negative proof; the unchanged exact task receipts own that.
+        for partitions in [2, 4, 6, 7, 11, 16] {
+            for limit in [1, 2] {
+                let required = PatternBitSet::from_words(3, vec![7]).unwrap();
+                let rows = [3, 5, 6]
+                    .into_iter()
+                    .map(|mask| PatternBitSet::from_words(3, vec![mask]).unwrap())
+                    .collect();
+                let config = ParallelConfiguration {
+                    partitions,
+                    matrix_id: [11; 32],
+                    next_query_id: AtomicU64::new(1),
+                };
+                let mut oracle = make_parallel_oracle(
+                    &config, required, rows, limit,
+                    Some(if limit == 1 { vec![0, 1] } else { vec![0, 1, 2] }),
+                    &mut |_| Ok(()), &mut || false,
+                ).unwrap();
+                assert!(oracle.warm_session.is_none());
+                assert_eq!(oracle.checked_retained_bytes(), oracle.coordinator.checked_retained_bytes());
+                let query = oracle.published_query().expect("no serial repair barrier").clone();
+                let first = oracle.take_task().expect("first task is immediately available");
+                oracle.coordinator.accept(run(&query, first)).unwrap();
+                while let Some(task) = oracle.take_task() {
+                    oracle.coordinator.accept(run(&query, task)).unwrap();
+                }
+                match oracle.coordinator.decision() {
+                    ExactAtMostParallelDecision::Found(witness) => {
+                        assert_eq!(limit, 2);
+                        assert_eq!(witness.len(), 2);
+                    }
+                    ExactAtMostParallelDecision::ProvedNone => assert_eq!(limit, 1),
+                    _ => panic!("every exact task was consumed"),
+                }
+            }
+        }
     }
 
     #[test]
@@ -1505,7 +1546,12 @@ fn make_parallel_oracle(
             .accept_warm_witness(hint, memory_guard)
             .map_err(parallel_error)?;
     }
-    let warm_session = if admission == GlobalWarmAdmission::Repair {
+    // The controller must publish cubes before doing any repair search. A
+    // 1,000-swap full-query warm pass used to serialize every worker, including
+    // each subsequent canonical-prefix query. On mobile this is unbounded wall
+    // time. Preserve the cheap, fully replayed KnownCover shortcut above and
+    // worker-local witness hints, but reserve controller repair for one shard.
+    let warm_session = if config.partitions == 1 && admission == GlobalWarmAdmission::Repair {
         let hint = coordinator.query().witness_hint().expect("admitted hint");
         let base = coordinator
             .checked_retained_bytes()
