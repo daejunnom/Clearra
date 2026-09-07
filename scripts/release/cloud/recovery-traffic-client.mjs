@@ -1,6 +1,7 @@
 // Owns the bounded Cloud Run v2 transport used by candidate tag cleanup.
 // Uses only the already federated rollback identity, with no identity fallback.
 import { spawnSync } from "node:child_process";
+import { recoveryTrafficHttpError } from "./recovery-traffic-error.mjs";
 
 export const ROLLBACK_ACCOUNT = "clearra-github-rollback@clearra-cloud.iam.gserviceaccount.com";
 const ALLOWED_PATH = /^projects\/(?:clearra-cloud|50060711800)\/locations\/asia-northeast1\/(?:services\/clearra-current-job(?:\/revisions\/clearra-current-job-[a-z0-9-]+)?|operations\/[A-Za-z0-9_-]+)$/u;
@@ -46,8 +47,7 @@ export function createRecoveryTrafficClient(token, { fetchImpl = globalThis.fetc
       throw new Error("Cloud recovery transport failed; no request or credential was logged");
     }
     if (!response.ok) {
-      await response.body?.cancel().catch(() => {});
-      throw new Error(`Cloud recovery ${method} HTTP ${response.status}; stop without widening IAM or retrying as deployer`);
+      throw await recoveryTrafficHttpError(response, { method, validateOnly });
     }
     const reader = response.body?.getReader();
     if (!reader) throw new Error("Cloud recovery response has no body");
