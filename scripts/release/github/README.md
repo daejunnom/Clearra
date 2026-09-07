@@ -23,9 +23,9 @@ the five exact legacy WIF removals; the ordered batch is re-observed after the
 phase, not between individual commands. The recovery provider is observed
 before deployment federation can open, and the primary provider is the
 absolute final mutation. A
-clean 34-mutation bootstrap with immediately visible writes performs one
+clean bootstrap with immediately visible writes performs one
 initial full plan, eight fast phase-boundary plans, and one final full audit,
-instead of 34 complete replans.
+instead of one complete replan per mutation.
 
 Each attempted mutation keeps its own bounded five-minute propagation budget
 with a closed 1/2/4/8/16/30-second backoff. Failed or ambiguous writes are
@@ -135,8 +135,10 @@ deletion, or `roles/run.admin` authority.
 `clearra-github-rollback` trusts only the recovery-pool runtime-rollback
 subject. It has the exact rollback custom role and Service Usage Consumer. It
 can read/update an existing service, list/read revisions, and read the
-resulting operation. It cannot create/update/run/delete jobs, delete revisions, read
-Artifact Registry, access the source bucket or Secrets, act as the runtime
+resulting operation. It can read only the `clearra` image repository: Cloud Run
+revalidates its image access even when an existing candidate tag is removed.
+It cannot write/delete images, create/update/run/delete jobs, delete revisions,
+access the source bucket or Secrets, act as the runtime
 account, build images, or impersonate another service account.
 
 `clearra-command-sync` directly trusts the primary-pool global-sync subject and
@@ -200,6 +202,12 @@ sole 100% traffic allocation, and seals the latest candidate as an unavoidable
 0%-traffic residue until a later revision supersedes it. The rollback identity
 therefore has no `run.revisions.delete` permission. See
 [Manage Cloud Run revisions](https://cloud.google.com/run/docs/managing/revisions#delete_revisions).
+The repository-local `roles/artifactregistry.reader` grant is also required:
+recovery attempt `34085745591/1` passed exact authority resolution but Cloud Run
+rejected `update-traffic --remove-tags` with missing
+`artifactregistry.repositories.downloadArtifacts`. This grant does not alter
+the recovery OIDC subject, environment approval, service-account act-as policy,
+or any project-wide Artifact Registry role.
 Service Usage Consumer is separate API-consumption authority; it adds no Cloud
 Run resource mutation permission.
 An interrupted earlier bootstrap may have created this exact role with the
