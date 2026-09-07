@@ -41,6 +41,7 @@ jobs:
           scripts/release/cloud/recovery-traffic-error.test.mjs
           scripts/release/cloud/recovery-prestage-preflight.test.mjs
           scripts/release/workflow-run-timestamps.test.mjs
+          scripts/release/recovery-result-chronology.test.mjs
           scripts/tools/run-release-regression-tests.test.mjs
       - name: Preserve existing no-actAs and recovery-evidence contracts
         run: >-

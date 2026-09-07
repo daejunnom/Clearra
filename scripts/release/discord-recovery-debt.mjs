@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { workflowRunTimestampOrderIsValid } from "./workflow-run-timestamps.mjs";
+import { validateRecoveryResultChronology } from "./recovery-result-chronology.mjs";
 
 import {
   canonicalJson,
@@ -733,30 +734,13 @@ export async function auditDiscordRecoveryDebt(planPath, reportRoot, options) {
         catalogArtifactDigest: resolution.catalog_artifact_digest,
       });
       const result = verifiedEvidence.result;
-      const resolutionCreatedAt = requireTimestamp(
-        candidate.resolution_artifact.artifact_created_at,
-        "recovery resolution artifact created-at",
-      );
-      const resultCreatedAt = requireTimestamp(
-        candidate.result_artifact.artifact_created_at,
-        "recovery result artifact created-at",
-      );
-      const recoveredAt = requireTimestamp(result.recovered_at, "recovered-at");
-      const recoveryStartedAt = requireTimestamp(
-        candidate.recovery_run_started_at,
-        "recovery run started-at",
-      );
-      const recoveryUpdatedAt = requireTimestamp(
-        candidate.recovery_run_updated_at,
-        "recovery run updated-at",
-      );
-      if (
-        resultCreatedAt < resolutionCreatedAt || recoveredAt < resolutionCreatedAt ||
-        recoveredAt < recoveryStartedAt ||
-        recoveredAt > resultCreatedAt || recoveredAt > recoveryUpdatedAt
-      ) {
-        throw new Error("Discord recovery result chronology differs from its exact run attempt");
-      }
+      validateRecoveryResultChronology({
+        resolutionCreatedAt: candidate.resolution_artifact.artifact_created_at,
+        resultCreatedAt: candidate.result_artifact.artifact_created_at,
+        recoveredAt: result.recovered_at,
+        recoveryStartedAt: candidate.recovery_run_started_at,
+        recoveryUpdatedAt: candidate.recovery_run_updated_at,
+      });
       qualifying.push({
         recovery_workflow_run_id: candidate.recovery_workflow_run_id,
         recovery_workflow_run_attempt: candidate.recovery_workflow_run_attempt,
