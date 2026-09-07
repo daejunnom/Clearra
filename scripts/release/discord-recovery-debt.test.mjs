@@ -882,7 +882,12 @@ test("masked success conclusions without a terminal artifact cannot clear recove
     const planPath = join(root, "plan.json");
     await writeFile(planPath, `${JSON.stringify(plan)}\n`);
     await writeReportArtifact(root, "400", "recovery-authority.json", runtimeRecoveryReports().resolution);
-    await assert.rejects(auditDiscordRecoveryDebt(planPath, root, identity), /has no exact clearance/u);
+    await assert.rejects(auditDiscordRecoveryDebt(planPath, root, identity), (error) => {
+      assert.match(error.message, /has no exact clearance/u);
+      assert.match(error.message, /result artifact missing for attempts=300\/1/u);
+      assert.match(error.message, /Complete the existing protected recovery workflow for the original run\/attempt/u);
+      return true;
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -3,10 +3,12 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import { EventEmitter } from "node:events";
 
 import {
   buildFocusedTestCommandGroups,
   resolveFocusedTestSelection,
+  runFocusedTests,
 } from "./run-focused-js-tests.mjs";
 
 let repositoryRoot;
@@ -176,4 +178,48 @@ test("rejects unsupported suffixes, directories, missing files, and duplicates",
     ),
     /duplicated/u,
   );
+});
+
+function focusedMockSpawn(outcomes, calls) {
+  return (command, args, options) => {
+    const outcome = outcomes[calls.length];
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    queueMicrotask(() => outcome.error
+      ? child.emit('error', outcome.error)
+      : child.emit('exit', outcome.code, outcome.signal ?? null));
+    return child;
+  };
+}
+
+test('focused Node assertion failure does not skip independent TypeScript contracts', async () => {
+  const calls = [];
+  await assert.rejects(runFocusedTests(['suite/alpha.test.mjs', 'suite/model.contract.ts'], {
+    repositoryRoot,
+    spawnImplementation: focusedMockSpawn([{ code: 1 }, { code: 0 }], calls),
+  }), /failed in 1 group\(s\).*node-test/u);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].args.includes('suite/model.contract.ts'));
+  assert.ok(calls.every((call) => call.options.shell === false && call.options.windowsHide === true));
+});
+
+test('focused tests retain all independent group failures and never retry', async () => {
+  const calls = [];
+  await assert.rejects(runFocusedTests(['suite/alpha.test.mjs', 'suite/model.contract.ts'], {
+    repositoryRoot,
+    spawnImplementation: focusedMockSpawn([{ code: 1 }, { code: 2 }], calls),
+  }), /failed in 2 group\(s\).*node-test.*typescript-contract/u);
+  assert.equal(calls.length, 2);
+});
+
+test('focused cancellation and shared runner errors stop subsequent groups', async () => {
+  for (const outcome of [{ code: null, signal: 'SIGTERM' }, { code: null },
+    { code: 0, signal: 'SIGINT' }, { error: new Error('shared spawn failure') }]) {
+    const calls = [];
+    await assert.rejects(runFocusedTests(['suite/alpha.test.mjs', 'suite/model.contract.ts'], {
+      repositoryRoot,
+      spawnImplementation: focusedMockSpawn([outcome], calls),
+    }), /interrupted|shared spawn failure/u);
+    assert.equal(calls.length, 1);
+  }
 });

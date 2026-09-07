@@ -768,8 +768,13 @@ export async function auditDiscordRecoveryDebt(planPath, reportRoot, options) {
       });
     }
     if (qualifying.length === 0) {
+      const missingResults = debt.candidates
+        .filter((candidate) => candidate.result_artifact === null)
+        .map((candidate) => `${candidate.recovery_workflow_run_id}/${candidate.recovery_workflow_run_attempt}`);
       throw new Error(
-        `Discord recovery debt ${debt.primary_workflow_run_id}/${debt.primary_workflow_run_attempt} has no exact clearance`,
+        `Discord recovery debt ${debt.primary_workflow_run_id}/${debt.primary_workflow_run_attempt} has no exact clearance; ` +
+        `recovery result artifact missing for attempts=${missingResults.join(',') || 'none'}. ` +
+        'An authority-resolution report alone does not prove runtime recovery. Complete the existing protected recovery workflow for the original run/attempt before retrying deployment',
       );
     }
     const clearanceIdentities = new Set(qualifying.map((entry) => JSON.stringify([

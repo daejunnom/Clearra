@@ -112,6 +112,11 @@ export function runCandidateRegressions({ environment = process.env, platform = 
     });
     if (result?.stdout) write(result.stdout);
     if (result?.stderr) write(result.stderr);
+    if (result?.error || result?.signal || !Number.isInteger(result?.status) || result.status < 0) {
+      // Keep existing independent assertion-failure collection, but stop on
+      // cancellation or a missing Cargo process shared by every selection.
+      throw new Error('Focused candidate runner interrupted; remaining selections were not executed');
+    }
     try { assertNonemptyRustSuccess(result); }
     catch {
       failures.push(`${spec.package}:${spec.filter}`);

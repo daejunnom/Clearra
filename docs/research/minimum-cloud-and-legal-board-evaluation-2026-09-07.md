@@ -678,6 +678,34 @@ workflows' independent-check improvements remain separate next-commit work on
 Focused source/mock checks are not a replacement for the new exact-SHA canonical
 run. New submission is not evidence of a completed Pages or Discord deployment.
 
+## Subsequent CI check and historical artifact preservation
+
+Canonical run `34077196918` at `a643deb` passed, including the new independent
+failure collector. The user requested integrating the remaining Candidate/Fast
+Fix changes from `4ef4484` in the next retry, while keeping P2 algorithm work on
+a separate post-v0.8.0 hotfix branch.
+
+Pages capture `34078790076` now reached the correct extraction root but failed
+because the historical accepted `91772735` build predates WASM producer receipts.
+Preservation now has its own adapter: it verifies the unchanged identity, closed
+file set/hashes, fallback, WASM manifest/runtime identity and every public byte.
+It verifies any receipt present and rejects a missing identity-listed file; it
+does not fabricate a receipt or rewrite old content. New acceptance/publication
+retains the strict mandatory receipt verifier. A preservation match is not new
+build acceptance, and the caller still owns exact artifact/run authority.
+
+Discord `34078760233` passed the renewed deadline but found unresolved runtime
+recovery for original `33583378208/1`. Recovery `33895631752` previously failed
+because CleanupOnly called the tree digester in an input directory never created
+by that route. The existing `87f2b2a` fix already uses the hash-verified upload
+digester and pins that distinction with regression tests; do not reimplement it.
+The latest automatic recovery only proved the newest run made no changes. It
+cannot clear the older staged-runtime debt. Retry the existing reviewer-protected
+recovery workflow for the exact original run/attempt using the new trusted main;
+do not waive missing terminal artifacts. Debt errors now identify the recovery
+attempts missing those artifacts and the required next action. New deployment
+results are intentionally not awaited in this iteration.
+
 ## Primary references
 
 - [GitHub workflow dispatch run-ID receipts](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)

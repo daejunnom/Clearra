@@ -41,6 +41,17 @@ export async function stampAcceptedPagesBuild(buildPath, authority) {
 }
 
 export async function verifyAcceptedPagesBuild(buildPath, authority) {
+  return verifyPagesBuild(buildPath, authority, false);
+}
+
+// Preservation is not new-build acceptance. Historical accepted/public bytes
+// may predate the WASM producer receipt; never stamp a new receipt into them.
+// Exact artifact/run authority and full public readback belong to the caller.
+export async function verifyPreservedPagesBuild(buildPath, authority) {
+  return verifyPagesBuild(buildPath, authority, true);
+}
+
+async function verifyPagesBuild(buildPath, authority, preservationOnly) {
   const expected = validateAuthority(authority);
   const root = resolve(buildPath);
   await requireDirectory(root);
@@ -87,7 +98,7 @@ export async function verifyAcceptedPagesBuild(buildPath, authority) {
     }
   }
   validateManifestFiles(identity.files);
-  await validateDeployableSurfaces(root, expected);
+  await validateDeployableSurfaces(root, expected, preservationOnly);
   const actualFiles = await collectPayloadFiles(root);
   if (JSON.stringify(actualFiles) !== JSON.stringify(identity.files)) {
     throw new Error(
@@ -151,7 +162,7 @@ function validateAuthority(authority) {
   });
 }
 
-async function validateDeployableSurfaces(root, authority) {
+async function validateDeployableSurfaces(root, authority, preservationOnly = false) {
   const indexPath = resolve(root, "index.html");
   const fallbackPath = resolve(root, "404.html");
   const [index, fallback] = await Promise.all([
@@ -168,12 +179,17 @@ async function validateDeployableSurfaces(root, authority) {
     );
   }
 
-  await verifyAcceptedWasmBuild(
-    resolve(root, "wasm"),
-    authority.sourceCommit,
-    authority.acceptedRunId,
-    authority.acceptedRunAttempt,
-  );
+  // A present receipt is always verified. Absence is allowed only for the
+  // historical preservation adapter; the exact identity-listed file set below
+  // still rejects deleting a receipt that belonged to the accepted artifact.
+  if (!preservationOnly || await pathExists(resolve(root, "wasm", "clearra-accepted-wasm-build.v1.json"))) {
+    await verifyAcceptedWasmBuild(
+      resolve(root, "wasm"),
+      authority.sourceCommit,
+      authority.acceptedRunId,
+      authority.acceptedRunAttempt,
+    );
+  }
 
   const manifestPath = resolve(root, "wasm", "clearra_wasm.manifest.json");
   let manifest;

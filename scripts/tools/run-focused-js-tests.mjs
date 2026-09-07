@@ -208,6 +208,8 @@ export function buildFocusedTestCommandGroups(selection) {
   return Object.freeze(groups);
 }
 
+class FocusedTestFailure extends Error {}
+
 async function executeCommandGroup(group, repositoryRoot, spawnImplementation) {
   process.stdout.write(
     `focused_test_group=${group.label} file_count=${group.fileCount}\n`,
@@ -222,12 +224,13 @@ async function executeCommandGroup(group, repositoryRoot, spawnImplementation) {
     child.once("error", rejectResult);
     child.once("exit", (code, signal) => resolveResult({ code, signal }));
   });
+  if (result.signal != null || !Number.isInteger(result.code) || result.code < 0) {
+    // Cancellation or an unavailable shared process runner is not a test
+    // assertion failure and must not start additional work.
+    throw new Error(`${group.label} interrupted with ${result.signal ?? 'invalid exit status'}`);
+  }
   if (result.code !== 0) {
-    throw new Error(
-      `${group.label} failed with ${
-        result.signal === null ? `exit code ${result.code}` : `signal ${result.signal}`
-      }`,
-    );
+    throw new FocusedTestFailure(`${group.label} failed with exit code ${result.code}`);
   }
 }
 
@@ -240,12 +243,20 @@ export async function runFocusedTests(
 ) {
   const selection = await resolveFocusedTestSelection(inputs, { repositoryRoot });
   const groups = buildFocusedTestCommandGroups(selection);
+  const failures = [];
   for (const group of groups) {
-    await executeCommandGroup(
-      group,
-      selection.repositoryRoot,
-      spawnImplementation,
-    );
+    try {
+      await executeCommandGroup(group, selection.repositoryRoot, spawnImplementation);
+    } catch (error) {
+      if (!(error instanceof FocusedTestFailure)) throw error;
+      // Explicit Node test and TypeScript contract inputs are independent;
+      // neither group consumes an artifact produced by the other.
+      failures.push(error.message);
+      process.stderr.write(`focused_test_group=${group.label} status=failed reason=${error.message}\n`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`Focused tests failed in ${failures.length} group(s): ${failures.join('; ')}`);
   }
   process.stdout.write(
     `focused_tests=passed file_count=${

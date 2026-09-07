@@ -16,7 +16,9 @@ import {
   PAGES_IDENTITY_FILE,
   stampAcceptedPagesBuild,
   verifyAcceptedPagesBuild,
+  verifyPreservedPagesBuild,
 } from "./accepted-pages-build.mjs";
+import { verifyCanonicalBuildAndPublic } from "./pages-canonical-capture.mjs";
 import { sealAcceptedWasmBuild } from "./accepted-wasm-build.mjs";
 import {
   CLEARRA_ARTIFACT_SCHEMA_VERSION,
@@ -50,6 +52,40 @@ test("stamps and verifies a closed accepted Pages build", async () => {
     assert.equal(identity.basePath, AUTHORITY.basePath);
     assert.equal(identity.files.some((file) => file.path === PAGES_IDENTITY_FILE), false);
     assert.deepEqual(await verifyAcceptedPagesBuild(build, AUTHORITY), identity);
+  });
+});
+
+test("historical capture preserves receipt-free accepted bytes without weakening new acceptance", async () => {
+  await withFixture(async (build) => {
+    const identity = await stampAcceptedPagesBuild(build, AUTHORITY);
+    const receipt = "wasm/clearra-accepted-wasm-build.v1.json";
+    await rm(join(build, receipt));
+    await assert.rejects(verifyPreservedPagesBuild(build, AUTHORITY), /closed regular-file set/u);
+    // Model the old producer's identity, which never listed a WASM receipt.
+    identity.files = identity.files.filter((file) => file.path !== receipt);
+    const originalBytes = `${JSON.stringify(identity, null, 2)}\n`;
+    await writeFile(join(build, PAGES_IDENTITY_FILE), originalBytes);
+    await assert.rejects(verifyAcceptedPagesBuild(build, AUTHORITY), /receipt is missing/u);
+    assert.deepEqual(await verifyPreservedPagesBuild(build, AUTHORITY), identity);
+    const options = {
+      buildPath: build, ...AUTHORITY, pageUrl: "https://example.invalid/Clearra/",
+      cacheBuster: "fixture", fetchBytes: (url) => readFile(join(build, new URL(url).pathname.slice("/Clearra/".length))),
+    };
+    const captured = await verifyCanonicalBuildAndPublic(options);
+    assert.equal(captured.file_count, identity.files.length);
+    await assert.rejects(verifyCanonicalBuildAndPublic({ ...options, fetchBytes: async () => Buffer.from("tampered") }), /identity bytes differ/u);
+    assert.equal(await readFile(join(build, PAGES_IDENTITY_FILE), "utf8"), originalBytes);
+    await assert.rejects(readFile(join(build, receipt)), { code: "ENOENT" });
+    await writeFile(join(build, "_app", "app.js"), "tampered");
+    await assert.rejects(verifyPreservedPagesBuild(build, AUTHORITY), /closed regular-file set/u);
+  });
+});
+
+test("preservation still rejects a present corrupt WASM receipt", async () => {
+  await withFixture(async (build) => {
+    await stampAcceptedPagesBuild(build, AUTHORITY);
+    await writeFile(join(build, "wasm", "clearra-accepted-wasm-build.v1.json"), "{}");
+    await assert.rejects(verifyPreservedPagesBuild(build, AUTHORITY));
   });
 });
 

@@ -3,7 +3,7 @@ import { appendFile, lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { verifyAcceptedPagesBuild } from "./accepted-pages-build.mjs";
+import { verifyPreservedPagesBuild } from "./accepted-pages-build.mjs";
 import { canonicalJson, canonicalSha256, requireExactKeys } from "./canonical-release-evidence.mjs";
 
 const SHA = /^[0-9a-f]{40}$/u;
@@ -100,7 +100,7 @@ export async function verifyCanonicalBuildAndPublic({ buildPath, sourceCommit, a
   const identityBytes = await readFile(identityPath);
   let recordedIdentity;
   try { recordedIdentity = JSON.parse(identityBytes.toString("utf8")); } catch { fail("accepted Pages identity is not JSON"); }
-  const identity = await verifyAcceptedPagesBuild(buildPath, { sourceCommit, acceptedRunId, acceptedRunAttempt, basePath, version: version ?? recordedIdentity.version });
+  const identity = await verifyPreservedPagesBuild(buildPath, { sourceCommit, acceptedRunId, acceptedRunAttempt, basePath, version: version ?? recordedIdentity.version });
   const liveIdentity = await fetchBytes(new URL(`clearra-build-identity.json?authority=${encodeURIComponent(cacheBuster)}-identity`, pageUrl).toString(), MAX_IDENTITY_BYTES);
   if (!Buffer.from(liveIdentity).equals(identityBytes)) fail("public Pages identity bytes differ from the accepted artifact");
   let totalBytes = 0;
