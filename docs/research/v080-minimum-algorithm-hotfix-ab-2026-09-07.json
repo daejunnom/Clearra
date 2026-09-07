@@ -1,0 +1,102 @@
+{
+  "schema": "clearra.local-only.minimum-algorithm-ab-plan.v1",
+  "status": "prepared-not-benchmarked",
+  "diagnostic_only": true,
+  "release_authority": false,
+  "ci_enabled": false,
+  "product_solver_enabled": false,
+  "baseline_source": "495af625393d7d8a723c48b14977a87b96d68e4f",
+  "branch": "codex/v0.8.0-hotfix-minimum-algorithm-ab",
+  "reference_source": "03b637730c5b541f4f2934be613498fbe65327fd",
+  "local_execution": {
+    "reject_ci": true,
+    "native_execution_on_this_host": false,
+    "generated_root": "_local/reports/minimum-algorithm-ab",
+    "output_create_exclusive": true,
+    "parallel_benchmark_processes": 1,
+    "server_needed_for_preparation": false,
+    "experiment_port": 4195,
+    "server_lease_seconds": 1800,
+    "refuse_existing_listener": true,
+    "forbidden_fallback_ports": [4194, 8790],
+    "cleanup": "only-owned-pid-on-exit-or-lease-expiry"
+  },
+  "contract": {
+    "objective": "minimum-cardinality-then-original-id-first-canonical-set",
+    "first_result": "exact-first-canonical-only",
+    "later_ties": "lazy-on-explicit-next-request",
+    "known_answer_is_solver_input": false,
+    "allow_timeout_as_unsat": false,
+    "allow_float_only_pruning": false,
+    "allow_canonical_dominance_deletion": false,
+    "fixture_deadline_ms": 120000,
+    "fixture_deadline_is_product_policy": false,
+    "gui_first_result_target_ms": 3000,
+    "target_priority": "P2-post-v0.8.0",
+    "missing_measurement": null
+  },
+  "fixtures": [
+    {
+      "id": "left-p7-jstris180",
+      "field": "ctk3_w0kCQBjwwAMPPAD37g",
+      "patterns": "P7",
+      "rule": "jstris-180",
+      "lines": 4,
+      "hold": true,
+      "expected_cardinality_postcondition": 25,
+      "existing_diagnostic_matrix_sha256": "63de33e1d86077c179a38f6311df893ba9abcc13c9b18fa433384f5961eeee91"
+    },
+    {"id": "right-mirror-p7-jstris180", "status": "bind-actual-matrix-before-use", "mirror_equivalence_assumed": false},
+    {"id": "left-first-i-720", "status": "bind-actual-queue-subset-before-use"},
+    {"id": "left-first-s-720", "status": "bind-actual-queue-subset-before-use"},
+    {"id": "tiny-forced-duplicate-dominated", "status": "logic-sandbox-only"},
+    {"id": "disconnected-components", "status": "logic-sandbox-only"},
+    {"id": "many-ties-unknown-count", "status": "product-receipt-fixture-pending"},
+    {"id": "unsat-cancel-memory-stale-receipt", "status": "product-receipt-fixture-pending"},
+    {"id": "large-p7p4-and-other-kicks", "status": "bind-actual-matrices-before-use"}
+  ],
+  "variants": [
+    {"id": "A", "status": "existing-baseline", "change": "none; includes existing warm-start, integer dual, work stealing and lazy ties"},
+    {"id": "B1a", "status": "planned", "change": "coverage/cardinality propagation with reasoned conflict learning"},
+    {"id": "B1b", "status": "planned", "change": "stronger integer-verified LP/rounded-cut bounds; separate from B1a"},
+    {"id": "B2", "status": "planned", "change": "fixed-K original-row canonical assumptions with scope-safe inter-query learning"},
+    {"id": "B3", "status": "planned", "change": "reversible proof-only presolve and certified independent components"},
+    {"id": "B4", "status": "planned-secondary-axis", "change": "verified bound/witness/clause sharing without blocking controller"},
+    {"id": "B1+B2", "status": "blocked-until-independent-evidence", "change": "combine only separately verified improvements"},
+    {"id": "Qnia-CP-SAT", "status": "existing-local-reference", "canonical_comparable": false,
+      "parameters": {"numWorkers": 2, "subsolvers": ["max_lp"], "randomSeed": 1, "addZeroHalfCuts": false, "useSatInprocessing": false}},
+    {"id": "Qnia-HiGHS", "status": "existing-local-reference", "canonical_comparable": false, "parameters": "record actual explicit settings per sample"}
+  ],
+  "sampling": {
+    "warmup_pairs": 1,
+    "measured_order_per_pair": ["A", "B", "B", "A", "B", "A", "A", "B"],
+    "compute_workers": [1, 2, 4, "n-1", "n"],
+    "worker_policy": "resolve actual host capacity, omit impossible/duplicate counts; count controllers separately",
+    "report": ["all-samples", "median", "minimum", "maximum", "failed-and-censored-samples"],
+    "pair_identity": ["source", "engine", "wasm", "rule", "matrix", "candidate-order", "queue-order", "host", "browser", "workers", "heap-policy", "seed", "cache-state"]
+  },
+  "phases_ms": [
+    "geometry-source", "buildup-verification", "coverage-matrix", "transpose-normalize",
+    "kernelization", "model-prepare", "incumbent-discovery", "cardinality-proof",
+    "first-canonical-proof", "result-projection", "gui-first-paint",
+    "explicit-next-canonical", "worker-load", "worker-cleanup", "public-request-total"
+  ],
+  "phase_accounting": "record absolute start/end and overlap; do not sum overlapping worker or nested timers",
+  "metrics": [
+    "original-and-kernel-dimensions", "proof-nodes", "incumbent-improvements", "bound-progress",
+    "prefix-queries", "prefix-reuse-hits", "learned-clauses", "learning-scope-rejections",
+    "cut-proposals", "certified-cuts", "cut-check-time", "lp-iterations",
+    "shards-issued-completed-stolen", "worker-cpu-and-idle", "controller-delay",
+    "peak-retained-memory", "serialization-bytes", "cancellation-latency"
+  ],
+  "proof_obligations": [
+    "raw matrix bytes and candidate/queue binding verified before normalization",
+    "K proof uses no expected-answer hint and witness covers complete original matrix",
+    "complete negative result is bound to the exact K, model, query and generation",
+    "canonical uses original IDs and exact prefix decisions; primary quotient is insufficient",
+    "first-set hash matches trusted exact baseline and lazy next semantics are unchanged",
+    "unknown, cancellation, malformed or missing receipts never become infeasibility",
+    "mock and logic tests do not constitute native/WASM/GUI performance or release evidence"
+  ],
+  "product_promotion": "after v0.8.0 deployment is independently confirmed; cherry-pick reviewed product changes only, never local reference assets or raw matrices"
+}
