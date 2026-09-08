@@ -46,7 +46,18 @@ function Invoke-NodeExact {
     # such as Verify-PrestageAuthority into Object[] values and makes strict
     # property access fail before the bounded protected restore can begin.
     & node @Arguments | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'tracked recovery validator failed' }
+    $childExitCode = $LASTEXITCODE
+    if ($childExitCode -ne 0) {
+        # Child stderr remains visible; stdout must still not pollute the caller.
+        # No raw arguments, paths, credentials, or arbitrary stderr are reprinted.
+        $isCloudCleanup = $Arguments.Count -gt 0 -and
+            [string]$Arguments[0] -ceq 'scripts/release/cloud/remove-recovery-candidate-tag.mjs'
+        if ($isCloudCleanup -and $childExitCode -eq 77) {
+            throw 'Cloud candidate-tag cleanup blocked: iam.serviceAccounts.actAs was denied. Runtime actAs remains forbidden; recovery is unverified. An authorized operator must resolve the exact candidate tag before retrying; no identity fallback is permitted.'
+        }
+        $helperKind = if ($isCloudCleanup) { 'cloud-candidate-tag-cleanup' } else { 'authority-validator' }
+        throw "tracked recovery validator failed (helper=$helperKind exit_code=$childExitCode); original diagnostic is on child stderr"
+    }
 }
 
 function Get-CloudObjectProperty {
@@ -177,6 +188,30 @@ function Get-ActiveCloudRevision {
     return Get-ExactActiveCloudRevision -Service $service
 }
 
+function Assert-PrestageCloudCleanupPermission {
+    param($Service, $Intent, [string] $PriorRevision)
+    if ((Get-ExactActiveCloudRevision -Service $Service) -cne $PriorRevision) {
+        throw 'prestage permission preflight refuses Cloud traffic outside exact prior authority'
+    }
+    $tagCount = Get-ValidatedCandidateTagEntryCount `
+        -Traffic @(Get-CloudTrafficEntries -Service $Service) `
+        -CandidateTag ([string]$Intent.cloud_candidate_tag) `
+        -CandidateRevision ([string]$Intent.cloud_candidate_revision)
+    if ($tagCount -eq 1) {
+        # This validation has no write authority and produces no recovery result.
+        # Run it BEFORE Oracle cleanup; a permanent Cloud denial must not repeat
+        # remote Oracle work. Seal-ExactCandidateCloudResidue still revalidates
+        # independently after Oracle and never trusts this preflight as evidence.
+        Invoke-NodeExact scripts/release/cloud/remove-recovery-candidate-tag.mjs `
+            --project $GcpProjectId --region $GcpRegion `
+            --intent "$ArtifactRoot/prestage/intended-candidate-authority.json" `
+            --prior-revision $PriorRevision --source-commit $SourceCommit `
+            --workflow-run-id $OriginalWorkflowRunId `
+            --workflow-run-attempt $OriginalWorkflowRunAttempt `
+            --deployment-nonce ([string]$Intent.deployment_nonce) --validate-only
+    }
+}
+
 function Seal-ExactCandidateCloudResidue {
     param(
         $Intent,
@@ -207,11 +242,16 @@ function Seal-ExactCandidateCloudResidue {
         -CandidateTag ([string]$Intent.cloud_candidate_tag) `
         -CandidateRevision ([string]$Intent.cloud_candidate_revision)
     if ($candidateTagEntryCount -eq 1) {
-        $candidateTag = [string]$Intent.cloud_candidate_tag
-        gcloud run services update-traffic clearra-current-job `
-            --project=$GcpProjectId --region=$GcpRegion `
-            "--remove-tags=$candidateTag" --quiet
-        if ($LASTEXITCODE -ne 0) { throw 'Cloud candidate residue tag removal failed' }
+        # A traffic-only PATCH must not resubmit the revision template. The
+        # helper validates first with the same rollback identity and fails closed
+        # on IAM denial; the original v1 readbacks still own recovery evidence.
+        Invoke-NodeExact scripts/release/cloud/remove-recovery-candidate-tag.mjs `
+            --project $GcpProjectId --region $GcpRegion `
+            --intent "$ArtifactRoot/prestage/intended-candidate-authority.json" `
+            --prior-revision $PriorRevision --source-commit $SourceCommit `
+            --workflow-run-id $OriginalWorkflowRunId `
+            --workflow-run-attempt $OriginalWorkflowRunAttempt `
+            --deployment-nonce ([string]$Intent.deployment_nonce)
     }
 
     if ((Get-ActiveCloudRevision -OutputPath $ServiceOutputPath) -cne $PriorRevision) {
@@ -397,6 +437,9 @@ if ($Stage -ceq 'prestage') {
     if ((Get-ActiveCloudRevision -OutputPath $cloudBefore) -cne [string]$prior.prior_revision) {
         throw 'prestage cleanup refuses Cloud traffic outside exact prior authority'
     }
+    $cloudPreflight = Get-Content -LiteralPath $cloudBefore -Raw | ConvertFrom-Json
+    Assert-PrestageCloudCleanupPermission -Service $cloudPreflight -Intent $intent `
+        -PriorRevision ([string]$prior.prior_revision)
     $manifestPath = Join-Path $EvidenceRoot "oracle-cleanup-manifest-$([Guid]::NewGuid().ToString('N')).json"
     $source = Join-Path $ArtifactRoot 'prepared/exact-source.tar.gz'
     $ctk = Join-Path $ArtifactRoot 'prepared/oracle-layers/ctk3-dist.tar'

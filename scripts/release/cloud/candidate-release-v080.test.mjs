@@ -488,7 +488,10 @@ test("smoke deploys one digest-bound managed-secret Job against the zero-traffic
         },
       };
     }
-    if (arguments_[2] === "logs" && arguments_[3] === "read") {
+    if (arguments_[0] === "logging" && arguments_[1] === "read") {
+      assert.ok(arguments_[2].includes("resource.labels.job_name=clearra-v080-candidate-smoke-1111111"));
+      assert.ok(arguments_[2].includes('labels."run.googleapis.com/execution_name"="smoke-execution-1"'));
+      assert.ok(!arguments_.some(arg => arg.startsWith("--region=")));
       logReadCount += 1;
       if (logReadCount === 1) return [];
       return [{
@@ -538,6 +541,7 @@ test("smoke deploys one digest-bound managed-secret Job against the zero-traffic
     `--set-secrets=CLEARRA_CANDIDATE_JOB_TOKEN=clearra-job-token:${jobBearerSecretVersion}`,
   ));
   assert.ok(calls.some((arguments_) => arguments_[2] === "delete"));
+  assert.ok(!calls.some(args => args.slice(0, 4).join(" ") === "run jobs logs read"));
 });
 
 test("managed smoke log readback retries boundedly and rejects ambiguous attestations", async () => {
