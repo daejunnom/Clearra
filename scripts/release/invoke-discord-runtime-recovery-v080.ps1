@@ -516,7 +516,14 @@ $oracleState = Invoke-OracleClassification `
     -OutputPath $oracleBeforePath -Intent $intent -Candidate $candidate -Prior $prior `
     -Manifest $manifest -Rollback $rollback -Nonce $nonce
 if ($oracleState.state -cnotin @('prior', 'candidate')) {
-    throw 'Oracle current state is neither exact prior nor exact candidate'
+    $oracleReason = if ([string]$oracleState.reason -cin @(
+        'active-release-outside-authority', 'active-filesystem-authority-invalid',
+        'active-digest-invalid', 'active-runtime-authority-unavailable',
+        'candidate-runtime-identity-mismatch', 'candidate-runtime-authority-invalid',
+        'prior-runtime-authority-mismatch', 'prior-runtime-authority-invalid',
+        'active-authority-field-mismatch'
+    )) { [string]$oracleState.reason } else { 'unclassified' }
+    throw "Oracle current state is neither exact prior nor exact candidate; reason=$oracleReason"
 }
 
 if ($oracleState.state -ceq 'candidate') {

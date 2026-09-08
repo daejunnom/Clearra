@@ -9,6 +9,25 @@ import { createRecoveryTrafficClient } from "./recovery-traffic-client.mjs";
 import { removeRecoveryCandidateTag } from "./remove-recovery-candidate-tag.mjs";
 
 export const DEPLOY_CLEANUP_ACCOUNT = "clearra-github-deployer@clearra-cloud.iam.gserviceaccount.com";
+export function safeFailedCandidateCleanupReason(error) {
+  // Preserve the structured transport cause without echoing raw API bodies,
+  // account names, bearer tokens, intent paths or arbitrary exception text.
+  if (error?.name === "RecoveryTrafficHttpError" && Number.isInteger(error.httpStatus)
+      && error.httpStatus >= 400 && error.httpStatus <= 599
+      && ["read", "validate", "apply"].includes(error.phase)) {
+    const diagnosis = error.diagnosis === "runtime-actas-denied"
+      ? "runtime-actas-denied" : "unclassified-http-failure";
+    return `http-${error.httpStatus}-${error.phase}-${diagnosis}`;
+  }
+  const reasons = new Map([
+    ["Cloud recovery preimage changed after validateOnly; no mutation attempted", "preimage-changed-before-apply"],
+    ["Cloud traffic is not the exact prior revision at 100 percent", "prior-traffic-not-exact"],
+    ["Cloud service is absent, changing, or differs from latest candidate authority", "service-not-exact-or-reconciling"],
+    ["Cloud candidate immutable image differs from the sealed intent", "candidate-image-mismatch"],
+    ["Approved deployer cleanup token unavailable; no alternate identity is allowed", "approved-deployer-token-unavailable"],
+  ]);
+  return reasons.get(error?.message) ?? "prior-traffic-or-exact-candidate-unverified";
+}
 export function readDeployCleanupAccessToken(run = spawnSync) {
   const result = run("gcloud", ["auth", "print-access-token", `--account=${DEPLOY_CLEANUP_ACCOUNT}`, "--quiet"], {
     shell: false, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
@@ -50,8 +69,8 @@ async function main() {
   process.stdout.write(`failed_deploy_candidate_cleanup=${result.status}\n`);
 }
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
-  main().catch(() => {
-    process.stderr.write("failed_deploy_candidate_cleanup=failed prior-traffic-or-exact-candidate-unverified\n");
+  main().catch((error) => {
+    process.stderr.write(`failed_deploy_candidate_cleanup=failed reason=${safeFailedCandidateCleanupReason(error)}\n`);
     process.exitCode = 2;
   });
 }

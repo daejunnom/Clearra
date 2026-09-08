@@ -21,6 +21,28 @@ settings_path=/etc/clearra-gateway/settings
 service_name=clearra-gateway.service
 systemctl_path=/usr/bin/systemctl
 
+# Type=simple marks the service active before its launcher reaches the stable
+# process cwd. A single immediate MainPID read can abort a valid rollback.
+# Keep the exact immutable cwd check, but give startup a bounded readiness loop.
+wait_for_prior_process() {
+  attempts=0
+  while [ "$attempts" -lt 60 ]; do
+    if "$systemctl_path" is-active --quiet "$service_name"; then
+      main_pid=$("$systemctl_path" show --property MainPID --value "$service_name")
+      case "$main_pid" in
+        ''|*[!0-9]*|0|1) ;;
+        *)
+          process_cwd=$(readlink -f -- "/proc/$main_pid/cwd" 2>/dev/null || true)
+          [ "$process_cwd" = "$prior_release/apps/clearra-discord-bot" ] && return 0
+          ;;
+      esac
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  fail "Restored Oracle process did not reach the exact prior immutable release within the startup deadline."
+}
+
 [ -x "$systemctl_path" ] || fail "systemctl is unavailable." 69
 [ ! -L "$3" ] || fail "Oracle settings backup must not be a symlink." 65
 
@@ -103,17 +125,7 @@ active_settings_sha256=$(sha256sum -- "$settings_path" | awk '{print $1}')
 [ "$active_settings_sha256" = "$prior_settings_sha256" ] ||
   fail "Restored Oracle settings digest mismatch."
 "$systemctl_path" start "$service_name"
-"$systemctl_path" is-active --quiet "$service_name" ||
-  fail "Restored Oracle service is not active."
-
-main_pid=$("$systemctl_path" show --property MainPID --value "$service_name")
-case "$main_pid" in
-  ''|*[!0-9]*|0|1) fail "Restored Oracle MainPID is invalid." ;;
-esac
-process_cwd=$(readlink -f -- "/proc/$main_pid/cwd") ||
-  fail "Restored Oracle process working directory is unavailable."
-[ "$process_cwd" = "$prior_release/apps/clearra-discord-bot" ] ||
-  fail "Restored Oracle process does not run from the prior immutable release."
+wait_for_prior_process
 
 restore_verified=1
 printf '%s\n' "oracle_restore=passed"

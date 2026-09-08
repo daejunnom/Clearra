@@ -54,6 +54,19 @@ test("remote launcher emits bytes identical to the canonical fixture", async () 
   assert.deepEqual(renderedLauncherBytes, await readFile(FIXTURE));
 });
 
+test("all persistent Vault references are checked before candidate current/settings mutation", async () => {
+  const launcher = await readFile(LAUNCHER, "utf8");
+  const body = launcher.slice(launcher.indexOf('  verify-candidate)'));
+  assert.ok(body.indexOf('\n    require_persistent_vault_references\n') < body.indexOf('    transition_started=1'));
+  const check = launcher.slice(launcher.indexOf('require_persistent_vault_references() {'), launcher.indexOf('\noperation='));
+  for (const name of ['DISCORD','JOB','PRIVATE_ADMIN','TELEMETRY_EVENT_KEY','MODERATION_IDENTITY_KEY']) {
+    assert.ok(check.includes(`CLEARRA_${name}_SECRET_OCID`));
+  }
+  assert.match(check, /show --property Environment --value/u);
+  assert.match(check, /oracle_vault_reference_missing=/u);
+  assert.doesNotMatch(check, /secret-bundle|settings_path|readFile|\.env/u);
+});
+
 test("hash-only CLI prints only the canonical SHA-256", () => {
   const expected = candidateSettingsAuthorityV080({
     sourceCommit: SOURCE_COMMIT,

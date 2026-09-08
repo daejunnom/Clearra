@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cleanupFailedDeployCandidate, readDeployCleanupAccessToken, DEPLOY_CLEANUP_ACCOUNT }
+import { cleanupFailedDeployCandidate, readDeployCleanupAccessToken, DEPLOY_CLEANUP_ACCOUNT, safeFailedCandidateCleanupReason }
   from "./remove-failed-deploy-candidate-tag.mjs";
 import { ROLLBACK_ACCOUNT } from "./recovery-traffic-client.mjs";
 const values = { project: "clearra-cloud", region: "asia-northeast1", intent: "sealed-intent.json",
   "prior-revision": "clearra-current-job-v075-701454b", "source-commit": "a".repeat(40),
   "workflow-run-id": "42", "workflow-run-attempt": "1", "deployment-nonce": "b".repeat(64) };
+test("failed candidate cleanup reports only closed cause codes, never raw exceptions", () => {
+  assert.equal(safeFailedCandidateCleanupReason({name:"RecoveryTrafficHttpError",httpStatus:403,
+    phase:"validate",diagnosis:"runtime-actas-denied",message:"private response"}), "http-403-validate-runtime-actas-denied");
+  assert.equal(safeFailedCandidateCleanupReason(new Error("Cloud recovery preimage changed after validateOnly; no mutation attempted")), "preimage-changed-before-apply");
+  for (const value of [new Error("Bearer private-value"),{name:"RecoveryTrafficHttpError",httpStatus:403,phase:"secret-value"},null]) {
+    assert.equal(safeFailedCandidateCleanupReason(value), "prior-traffic-or-exact-candidate-unverified");
+  }
+});
 test("primary failure cleanup binds intent before using only the already approved deployer", async () => {
   const order = [];
   const result = await cleanupFailedDeployCandidate(values, {

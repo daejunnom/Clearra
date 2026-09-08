@@ -21,7 +21,7 @@ test("Oracle rollback leaves only a fully verified restored service active", asy
     'mv -f -- "$temporary_settings" "$settings_path"',
     '"$systemctl_path" is-active --quiet "$service_name"',
     "Restored Oracle settings digest mismatch.",
-    "Restored Oracle process does not run from the prior immutable release.",
+    "Restored Oracle process did not reach the exact prior immutable release within the startup deadline.",
     "service_transition_started=1",
     "restore_verified=1",
   ]) {
@@ -41,10 +41,11 @@ test("Oracle rollback leaves only a fully verified restored service active", asy
   const release = source.indexOf('mv -Tf -- "$temporary_link" "$current_link"');
   const settings = source.indexOf('mv -f -- "$temporary_settings" "$settings_path"');
   const start = source.indexOf('"$systemctl_path" start "$service_name"', settings);
-  const ready = source.indexOf('"$systemctl_path" is-active --quiet "$service_name"');
-  const pid = source.indexOf('main_pid=$("$systemctl_path" show', ready);
-  const cwd = source.indexOf('process_cwd=$(readlink -f -- "/proc/$main_pid/cwd")', pid);
-  const verified = source.indexOf("restore_verified=1", cwd);
+  const ready = source.indexOf('\nwait_for_prior_process\n', start);
+  const verified = source.indexOf("restore_verified=1", ready);
+  const loop = source.slice(source.indexOf('wait_for_prior_process() {'), source.indexOf('\n[ -x "$systemctl_path" ]'));
+  assert.match(loop, /while \[ "\$attempts" -lt 60 \]/u);
+  assert.match(loop, /is-active[\s\S]*main_pid=[\s\S]*process_cwd=[\s\S]*return 0/u);
   assert.ok(
     transition >= 0 &&
       stop > transition &&
@@ -52,9 +53,7 @@ test("Oracle rollback leaves only a fully verified restored service active", asy
       settings > release &&
       start > settings &&
       ready > start &&
-      pid > ready &&
-      cwd > pid &&
-      verified > cwd,
+      verified > ready,
   );
 });
 
@@ -80,6 +79,7 @@ test(
       const shellDirectory = bashPath(harnessDirectory);
       for (const scenario of [
         "success",
+        "delayed-ready",
         "settings-failure",
         "start-failure",
         "is-active-failure",
@@ -114,6 +114,8 @@ test(
 
 function instrumentRestoreForSandbox(source) {
   const replacements = [
+    // Fake clock only; every production readiness attempt still executes.
+    ["    sleep 2", "    : fixture-clock-advanced"],
     ["release_root=/opt/clearra/releases", 'release_root="$CLEARRA_TEST_ROOT/opt/clearra/releases"'],
     ["current_link=/opt/clearra/current", 'current_link="$CLEARRA_TEST_ROOT/opt/clearra/current"'],
     ["settings_path=/etc/clearra-gateway/settings", 'settings_path="$CLEARRA_TEST_ROOT/etc/clearra-gateway/settings"'],
@@ -239,7 +241,12 @@ for argument do
 done
 case "$last_argument" in
   /proc/*/cwd)
-    if [ "$CLEARRA_TEST_SCENARIO" = "cwd-failure" ]; then
+    count=0
+    if [ -f "$CLEARRA_TEST_CWD_COUNT" ]; then count=$(cat "$CLEARRA_TEST_CWD_COUNT"); fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$CLEARRA_TEST_CWD_COUNT"
+    if [ "$CLEARRA_TEST_SCENARIO" = "cwd-failure" ] ||
+       { [ "$CLEARRA_TEST_SCENARIO" = "delayed-ready" ] && [ "$count" -lt 3 ]; }; then
       printf '%s\n' "$CLEARRA_TEST_ROOT/wrong-process-directory"
     else
       printf '%s\n' "$CLEARRA_TEST_PRIOR_RELEASE/apps/clearra-discord-bot"
@@ -286,6 +293,7 @@ export CLEARRA_TEST_ROOT="$fixture_root"
 export CLEARRA_TEST_LOG="$state_directory/systemctl.log"
 export CLEARRA_TEST_ACTIVE="$state_directory/active"
 export CLEARRA_TEST_MV_COUNT="$state_directory/mv-count"
+export CLEARRA_TEST_CWD_COUNT="$state_directory/cwd-count"
 export CLEARRA_TEST_SCENARIO="$scenario"
 export CLEARRA_TEST_PRIOR_RELEASE="$prior_release"
 PATH="$bin_directory:$PATH"
@@ -313,13 +321,16 @@ fail_contract() {
 }
 
 [ -f "$CLEARRA_TEST_LOG" ] || fail_contract
-if [ "$scenario" = "success" ]; then
+if [ "$scenario" = "success" ] || [ "$scenario" = "delayed-ready" ]; then
   [ "$restore_status" -eq 0 ] || fail_contract
   [ -f "$CLEARRA_TEST_ACTIVE" ] || fail_contract
   grep -Fx 'oracle_restore=passed' "$state_directory/stdout" >/dev/null || fail_contract
   [ "$(tail -n 1 "$CLEARRA_TEST_LOG")" = "show" ] || fail_contract
   [ "$(readlink -f -- "$fixture_root/opt/clearra/current")" = "$prior_release" ] || fail_contract
   cmp -s "$settings_path" "$settings_backup" || fail_contract
+  if [ "$scenario" = "delayed-ready" ]; then
+    [ "$(cat "$CLEARRA_TEST_CWD_COUNT")" = 3 ] || fail_contract
+  fi
 else
   [ "$restore_status" -ne 0 ] || fail_contract
   [ ! -e "$CLEARRA_TEST_ACTIVE" ] || fail_contract
