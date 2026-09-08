@@ -1380,11 +1380,20 @@ mod parallel_portfolio_tests {
             next_query_id: AtomicU64::new(1),
         };
         let mut oracle = make_parallel_oracle(
-            &config, required, rows, 2, None, &mut |_| Ok(()), &mut || false,
+            &config,
+            required,
+            rows,
+            2,
+            None,
+            &mut |_| Ok(()),
+            &mut || false,
         )
         .unwrap();
         assert!(oracle.published_query().is_some());
-        oracle.coordinator.accept_warm_witness(vec![0, 1], &mut |_| Ok(())).unwrap();
+        oracle
+            .coordinator
+            .accept_warm_witness(vec![0, 1], &mut |_| Ok(()))
+            .unwrap();
         assert!(oracle.published_query().is_none());
         assert!(oracle.take_task().is_none());
         assert!(!oracle.waiting_for_issued());
@@ -1483,6 +1492,80 @@ mod parallel_portfolio_tests {
         assert!(serial.enumeration_complete());
         assert_eq!(actual, expected);
         assert!(actual.iter().any(|rows| rows.contains(&3)));
+    }
+
+    #[test]
+    fn canonical_interval_bisection_preserves_original_first_set_and_clone() {
+        // Independent brute-force canonical authority. Duplicate/dominated
+        // original rows remain present; no optimum is supplied to the solver.
+        for seed in 0..48_u64 {
+            let masks: Vec<u64> = (0..7)
+                .map(|index| 1 + (seed * (index + 3) + index * index + 2 * index) % 6)
+                .collect();
+            if masks.iter().fold(0, |union, mask| union | mask) != 7 {
+                continue;
+            }
+            let required = PatternBitSet::from_words(3, vec![7]).unwrap();
+            let rows: Vec<_> = masks
+                .iter()
+                .map(|mask| PatternBitSet::from_words(3, vec![*mask]).unwrap())
+                .collect();
+            let mut family: Vec<Vec<usize>> = (1_u64..(1 << masks.len()))
+                .filter_map(|selection| {
+                    let rows: Vec<_> = (0..masks.len())
+                        .filter(|row| selection & (1 << row) != 0)
+                        .collect();
+                    (rows.iter().fold(0, |union, row| union | masks[*row]) == 7).then_some(rows)
+                })
+                .collect();
+            let minimum = family.iter().map(Vec::len).min().unwrap();
+            family.retain(|rows| rows.len() == minimum);
+            family.sort();
+            let enumerator = ExactMinimumCoverPortfolioEnumerator::new(&required, &rows).unwrap();
+            assert_eq!(enumerator.optimal_cardinality, minimum);
+            // Start from every valid restart frontier and a deliberately late
+            // witness, covering both positive and negative interval decisions.
+            for frontier in &family {
+                let mut pending = PendingLexSearch::try_new(
+                    frontier,
+                    family.last().map(Vec::as_slice),
+                    true,
+                    0,
+                    &mut |_| Ok(()),
+                )
+                .unwrap();
+                pending.interval_bisection = true;
+                // Force self-reduction from a valid late witness, rather than
+                // the ordinary already-covering-frontier short circuit.
+                if frontier == &family[0] {
+                    pending.phase = PendingLexPhase::Canonicalize {
+                        prefix: vec![],
+                        start_floor: 0,
+                        witness: family.last().unwrap().clone(),
+                        assisted_query_available: true,
+                    };
+                }
+                pending = pending
+                    .try_clone_with_memory_guard(0, &mut |_| Ok(()))
+                    .unwrap();
+                assert!(pending.interval_bisection);
+                let mut result = None;
+                for _ in 0..20000 {
+                    match pending
+                        .advance(&enumerator, 8, 0, &mut |_| Ok(()), &mut || false)
+                        .unwrap()
+                    {
+                        LexSearchAdvance::Pending { .. } => {}
+                        LexSearchAdvance::Found { combination, .. } => {
+                            result = Some(combination);
+                            break;
+                        }
+                        _ => panic!("canonical bisection lost a valid frontier"),
+                    }
+                }
+                assert_eq!(result.as_ref(), Some(frontier));
+            }
+        }
     }
 
     #[test]
@@ -2859,6 +2942,9 @@ struct PendingLexSearch {
     frontier: Vec<usize>,
     witness_hint: Option<Vec<usize>>,
     allow_initial_assisted_query: bool,
+    // Query strategy only: a negative interval moves the floor, never fixes
+    // the witness's next row unless the whole smaller-ID interval is closed.
+    interval_bisection: bool,
     phase: PendingLexPhase,
 }
 
@@ -2884,7 +2970,7 @@ enum PendingLexPhase {
         prefix: Vec<usize>,
         start: usize,
         witness: Vec<usize>,
-        witness_next: usize,
+        selector_end: usize,
         oracle: PendingAtMostOracle,
     },
 }
@@ -2972,6 +3058,7 @@ impl PendingLexSearch {
             frontier,
             witness_hint,
             allow_initial_assisted_query,
+            interval_bisection: super::minimum_hotfix_policy::canonical_interval_bisection(),
             phase: PendingLexPhase::Initial,
         };
         memory_guard(checked_add_bytes(
@@ -3039,6 +3126,7 @@ impl PendingLexSearch {
             frontier,
             witness_hint,
             allow_initial_assisted_query: self.allow_initial_assisted_query,
+            interval_bisection: self.interval_bisection,
             phase,
         };
         memory_guard(live).map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
@@ -3278,6 +3366,16 @@ impl PendingLexSearch {
                     }
                     let use_assisted_query = assisted_query_available;
                     assisted_query_available = false;
+                    // Existing strategy asks for any ID before the witness;
+                    // a positive result can descend only one ID at a time.
+                    // The experimental strategy halves that interval. Both
+                    // positive and negative answers still require the same
+                    // exact AtMost oracle and original-row replay authority.
+                    let selector_end = if self.interval_bisection {
+                        start + (witness_next - start).div_ceil(2)
+                    } else {
+                        witness_next
+                    };
                     let query_base = checked_add_vec_retained_bytes(
                         checked_add_vec_retained_bytes(active_live, &prefix)?,
                         &witness,
@@ -3286,7 +3384,7 @@ impl PendingLexSearch {
                         enumerator,
                         &prefix,
                         start,
-                        Some(witness_next),
+                        Some(selector_end),
                         Some(&witness),
                         use_assisted_query,
                         query_base,
@@ -3298,15 +3396,20 @@ impl PendingLexSearch {
                                 prefix,
                                 start,
                                 witness,
-                                witness_next,
+                                selector_end,
                                 oracle,
                             };
                         }
                         PendingOracleStart::ProvedNone => {
-                            prefix.push(witness_next);
+                            let next_floor = if selector_end == witness_next {
+                                prefix.push(witness_next);
+                                0
+                            } else {
+                                selector_end
+                            };
                             self.phase = PendingLexPhase::Canonicalize {
                                 prefix,
-                                start_floor: 0,
+                                start_floor: next_floor,
                                 witness,
                                 assisted_query_available,
                             };
@@ -3320,7 +3423,7 @@ impl PendingLexSearch {
                     mut prefix,
                     start,
                     witness,
-                    witness_next,
+                    selector_end,
                     mut oracle,
                 } => {
                     let remaining = max_nodes - visited_nodes;
@@ -3334,7 +3437,7 @@ impl PendingLexSearch {
                                 prefix,
                                 start,
                                 witness,
-                                witness_next,
+                                selector_end,
                                 oracle,
                             };
                             return Ok(LexSearchAdvance::Pending { visited_nodes });
@@ -3359,13 +3462,13 @@ impl PendingLexSearch {
                             let smaller = enumerator.witness_from_query_proof(
                                 &prefix,
                                 start,
-                                Some(witness_next),
+                                Some(selector_end),
                                 proof,
                                 witness_base,
                                 memory_guard,
                             )?;
                             if smaller.get(..prefix.len()) != Some(prefix.as_slice())
-                                || smaller[prefix.len()] >= witness_next
+                                || smaller[prefix.len()] >= selector_end
                             {
                                 return Err(
                                     ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof,
@@ -3383,10 +3486,16 @@ impl PendingLexSearch {
                         } => {
                             visited_nodes =
                                 checked_add_visited_nodes(visited_nodes, consumed, max_nodes)?;
-                            prefix.push(witness_next);
+                            let witness_next = witness[prefix.len()];
+                            let next_floor = if selector_end == witness_next {
+                                prefix.push(witness_next);
+                                0
+                            } else {
+                                selector_end
+                            };
                             self.phase = PendingLexPhase::Canonicalize {
                                 prefix,
-                                start_floor: 0,
+                                start_floor: next_floor,
                                 witness,
                                 assisted_query_available: false,
                             };
@@ -3496,7 +3605,7 @@ impl PendingLexPhase {
                 prefix,
                 start,
                 witness,
-                witness_next,
+                selector_end,
                 oracle,
             } => {
                 let prefix = clone_vec(prefix, base_live, memory_guard)?;
@@ -3508,7 +3617,7 @@ impl PendingLexPhase {
                     prefix,
                     start: *start,
                     witness,
-                    witness_next: *witness_next,
+                    selector_end: *selector_end,
                     oracle,
                 })
             }

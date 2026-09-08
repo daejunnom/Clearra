@@ -3535,7 +3535,7 @@ pub extern "C" fn clearra_wasm_minimum_ab_policy(flags: u32) -> i32 {
             || state.distributed_coordinator.is_some()
             || state.distributed_completion.is_some()
             || state.minimum_parallel_worker.is_some()
-            || flags > 3
+            || flags > 7
         {
             return ABI_ERROR;
         }

@@ -5,11 +5,22 @@ static AB_POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new
 
 #[cfg(feature = "minimum-hotfix-ab")]
 pub fn set_local_ab_policy(flags: u8) -> bool {
-    if flags > 3 {
+    if flags > 7 {
         return false;
     }
     AB_POLICY.store(flags, std::sync::atomic::Ordering::Relaxed);
     true
+}
+
+pub(super) fn canonical_interval_bisection() -> bool {
+    #[cfg(feature = "minimum-hotfix-ab")]
+    {
+        AB_POLICY.load(std::sync::atomic::Ordering::Relaxed) & 4 != 0
+    }
+    #[cfg(not(feature = "minimum-hotfix-ab"))]
+    {
+        false
+    }
 }
 
 pub(super) fn parallel_first_dispatch() -> bool {

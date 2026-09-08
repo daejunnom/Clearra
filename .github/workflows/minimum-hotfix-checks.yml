@@ -35,6 +35,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $filters = @(
             'exact_rounded_packing::tests',
+            'canonical_interval_bisection_preserves_original_first_set_and_clone',
             'parallel_repair_never_blocks_first_work_dispatch',
             'repair_winner_before_first_issue_has_no_transport_obligation',
             'overlapping_warm_witness_does_not_forge_or_duplicate_an_issued_receipt',
