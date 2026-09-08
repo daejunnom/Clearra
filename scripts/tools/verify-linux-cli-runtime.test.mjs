@@ -10,21 +10,43 @@ const identity = {
   supply_semantics_id: 'clearra.supply.projected-terminal-lookahead.v1',
   artifact_schema_version: 'clearra.solution-data.v1',
 };
-const outputs = () => BOOKWORM_CLI_PROBES.map(() => JSON.stringify({ runtime_identity: identity, mode: 'search' }));
+// Match the public CLI JSON envelope: the mode belongs to finesse_report,
+// never to the root shared by rules, PC and finesse results.
+const outputs = () => [
+  { runtime_identity: identity },
+  { runtime_identity: identity },
+  { runtime_identity: identity, finesse_report: { mode: 'search' } },
+].map((result) => JSON.stringify(result));
 
 test('all slim-runtime probes require the exact packaged product identity', () => {
   verifyRuntimeProbeOutputs(outputs(), source);
   assert.equal(BOOKWORM_CLI_PROBES.length, 3);
   assert.ok(BOOKWORM_CLI_PROBES.every((probe) => probe.includes('json')));
-  for (const key of Object.keys(identity)) {
-    const bad = outputs();
-    bad[1] = JSON.stringify({ runtime_identity: { ...identity, [key]: 'wrong' } });
-    assert.throws(() => verifyRuntimeProbeOutputs(bad, source), /identity differs/u);
+  for (let probe = 0; probe < BOOKWORM_CLI_PROBES.length; probe += 1) {
+    for (const key of Object.keys(identity)) {
+      const bad = outputs();
+      bad[probe] = JSON.stringify({ ...JSON.parse(bad[probe]), runtime_identity: { ...identity, [key]: 'wrong' } });
+      assert.throws(() => verifyRuntimeProbeOutputs(bad, source), /identity differs/u);
+    }
   }
   assert.throws(() => verifyRuntimeProbeOutputs(outputs().slice(1), source), /every probe/u);
   assert.throws(() => verifyRuntimeProbeOutputs(outputs(), 'HEAD'), /exact source/u);
   assert.throws(() => verifyRuntimeProbeOutputs(['not json', ...outputs().slice(1)], source));
   assert.throws(() => verifyRuntimeProbeOutputs([...outputs().slice(0, 2), JSON.stringify({ runtime_identity: identity })], source), /finesse/u);
+});
+
+test('the finesse smoke accepts the nested CLI report without a root mode', () => {
+  const actualShape = outputs();
+  assert.equal(Object.hasOwn(JSON.parse(actualShape[2]), 'mode'), false);
+  verifyRuntimeProbeOutputs(actualShape, source);
+});
+
+test('a flattened mode cannot substitute for a missing or wrong finesse report', () => {
+  for (const report of [undefined, null, 'search', {}, { mode: 'score' }, { mode: null }]) {
+    const bad = outputs();
+    bad[2] = JSON.stringify({ runtime_identity: identity, mode: 'search', finesse_report: report });
+    assert.throws(() => verifyRuntimeProbeOutputs(bad, source), /finesse_report\.mode/u);
+  }
 });
 
 test('host Ubuntu or the wrong architecture cannot stand in for the deployment baseline', () => {

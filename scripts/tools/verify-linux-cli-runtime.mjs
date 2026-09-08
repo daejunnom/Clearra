@@ -42,8 +42,8 @@ export function verifyRuntimeProbeOutputs(outputs, sourceCommit) {
       }
     }
   }
-  if (JSON.parse(outputs[2])?.mode !== 'search') {
-    throw new Error('Bookworm runtime did not execute the finesse search backend');
+  if (JSON.parse(outputs[2])?.finesse_report?.mode !== 'search') {
+    throw new Error('Bookworm runtime requires finesse_report.mode=search from the finesse search backend');
   }
 }
 
