@@ -395,11 +395,12 @@ $oracleRollbackProofPath = "/run/clearra-deploy/clearra-oracle-rollback-$deploym
 # tracked files in `/opt/clearra/releases/$scriptReleaseId`:
 # `capture-rollback-authority` runs
 # `apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs`;
-# `verify-candidate` activates the exact candidate, obtains a real `/path`, then
-# runs `produce-oracle-deployment-proof.mjs candidate` and
+# `verify-candidate` activates the exact candidate, submits the fixed bounded
+# Oracle-to-Cloud PC Job probe, then runs
+# `produce-oracle-deployment-proof.mjs candidate` and
 # `verify-oracle-candidate-proof.mjs`; `restore-prior-and-verify` runs
-# `restore-oracle-release`, obtains a fresh real `/path`, then runs
-# `produce-oracle-deployment-proof.mjs rollback` and
+# `restore-oracle-release`, submits the same bounded probe to the restored Job
+# URL, then runs `produce-oracle-deployment-proof.mjs rollback` and
 # `verify-oracle-rollback-proof.mjs`. It passes only non-secret exact arguments
 # plus the nonce and never prints credentials, settings contents, or job data.
 # Before accepting any operation, the remote launcher and every mapped helper

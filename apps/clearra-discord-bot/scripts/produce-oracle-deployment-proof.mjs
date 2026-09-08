@@ -22,13 +22,15 @@ import { releaseTreeSha256 } from "./release-tree-digest.mjs";
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const RELEASE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-// v0.7.4 rollback journals use the legacy label; the redesigned product logger
-// emits its stable capability ID. Admit only these two names for the same path.
-const OPERATION_COMMANDS = new Set(["path", "pc.path"]);
+const SOLUTION_SET_HASH_PATTERN = /^cts1:[0-9a-f]{16}$/;
+const PROBE_CONTRACT = "clearra.oracle-bounded-job-probe.v1";
 const RELEASE_ROOT = "/opt/clearra/releases";
 const CURRENT_LINK = "/opt/clearra/current";
 const SETTINGS_PATH = "/etc/clearra-gateway/settings";
 const SERVICE_NAME = "clearra-gateway.service";
+const PROBE_LAUNCHER = fileURLToPath(
+  new URL("./run-oracle-bounded-job-probe", import.meta.url),
+);
 
 export function produceOracleCandidateProof(options, dependencies = {}) {
   const sourceCommit = requiredMatch(
@@ -84,6 +86,16 @@ export function produceOracleCandidateProof(options, dependencies = {}) {
     },
     dependencies,
   );
+  const boundedJobProbe = executeOracleBoundedJobProbe(
+    {
+      phase: "candidate",
+      jobUrl,
+      deploymentNonce,
+      expectedSourceCommit: sourceCommit,
+    },
+    dependencies,
+  );
+  requireProbeFreshness(boundedJobProbe, verifiedAfter);
   const proof = Object.freeze({
     sourceCommit,
     candidateUrl,
@@ -173,6 +185,19 @@ export function produceOracleRollbackProof(options, dependencies = {}) {
     },
     dependencies,
   );
+  const boundedJobProbe = executeOracleBoundedJobProbe(
+    {
+      phase: "rollback",
+      jobUrl: priorJobUrl,
+      deploymentNonce,
+      expectedSourceCommit:
+        typeof priorHealth?.runtime?.sourceCommit === "string"
+          ? priorHealth.runtime.sourceCommit
+          : null,
+    },
+    dependencies,
+  );
+  requireProbeFreshness(boundedJobProbe, verifiedAfter);
   const proof = Object.freeze({
     priorRevision,
     priorOracleReleaseId,
@@ -256,43 +281,98 @@ export function inspectActiveOracle(options, dependencies = {}) {
   if (!journal.includes("Oracle Gateway connected as ")) {
     throw new Error("current Oracle Gateway process has no READY record");
   }
-  const verifiedAfterMs = Date.parse(options.verifiedAfter);
-  let operation = null;
-  let operationAtMs = Number.NEGATIVE_INFINITY;
-  for (const record of journal.split(/\r?\n/u).map(parseJsonLine)) {
-    if (
-      record?.event !== "clearra.operation" ||
-      record.scope !== "gateway" ||
-      record.kind !== "slash" ||
-      !OPERATION_COMMANDS.has(record.command) ||
-      record.status !== "succeeded"
-    ) {
-      continue;
-    }
-    const timestamp = canonicalJournalTimestamp(record.at);
-    if (
-      timestamp === null ||
-      timestamp.milliseconds < verifiedAfterMs ||
-      timestamp.milliseconds <= operationAtMs
-    ) {
-      continue;
-    }
-    operation = { ...record, at: timestamp.text };
-    operationAtMs = timestamp.milliseconds;
-  }
-  if (!operation) {
-    throw new Error(
-      "Oracle Gateway has no fresh successful bounded end-to-end operation",
-    );
-  }
   return Object.freeze({
     activeReleasePath: activeRelease,
     activeReleaseSha256: actualReleaseSha256,
     activeSettingsSha256: actualSettingsSha256,
     gatewayPid: pid,
     readyRecordObserved: true,
-    freshOperationAt: String(operation.at),
   });
+}
+
+export function executeOracleBoundedJobProbe(options, dependencies = {}) {
+  const phase = requiredMatch(
+    options?.phase,
+    /^(?:candidate|rollback)$/,
+    "Oracle probe phase",
+  );
+  const jobUrl = canonicalJobUrl(options?.jobUrl);
+  const deploymentNonce = requiredMatch(
+    options?.deploymentNonce,
+    SHA256_PATTERN,
+    "deployment nonce",
+  );
+  const expectedSourceCommit = options?.expectedSourceCommit === null
+    ? null
+    : requiredMatch(
+        options?.expectedSourceCommit,
+        COMMIT_PATTERN,
+        "expected source commit",
+      );
+  if (phase === "candidate" && expectedSourceCommit === null) {
+    throw new Error("candidate bounded Job probe requires its source commit");
+  }
+  const invoke = dependencies.runBoundedJobProbe ?? ((probeOptions) => {
+    const run = dependencies.run ?? runCommand;
+    const serialized = run("/bin/sh", [
+      PROBE_LAUNCHER,
+      "--phase",
+      probeOptions.phase,
+      "--job-url",
+      probeOptions.jobUrl,
+      "--deployment-nonce",
+      probeOptions.deploymentNonce,
+      "--expected-source-commit",
+      probeOptions.expectedSourceCommit ?? "none",
+    ]);
+    try {
+      return JSON.parse(serialized);
+    } catch {
+      throw new Error("Oracle bounded Job probe returned invalid JSON");
+    }
+  });
+  const value = invoke({
+    phase,
+    jobUrl,
+    deploymentNonce,
+    expectedSourceCommit,
+  });
+  const expectedKeys = [
+    "completedAt",
+    "contract",
+    "expectedSourceCommit",
+    "jobId",
+    "jobUrl",
+    "phase",
+    "solutionSetHash",
+  ];
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Oracle bounded Job probe result is invalid");
+  }
+  const actualKeys = Object.keys(value).sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index]) ||
+    value.contract !== PROBE_CONTRACT ||
+    value.phase !== phase ||
+    value.jobUrl !== jobUrl ||
+    value.expectedSourceCommit !== expectedSourceCommit ||
+    typeof value.jobId !== "string" ||
+    !/^oracle-(?:candidate|rollback)-probe-[a-z0-9-]{1,96}$/.test(
+      value.jobId,
+    ) ||
+    !SOLUTION_SET_HASH_PATTERN.test(value.solutionSetHash ?? "")
+  ) {
+    throw new Error("Oracle bounded Job probe result violates its contract");
+  }
+  canonicalTimestamp(value.completedAt);
+  return Object.freeze({ ...value });
+}
+
+function requireProbeFreshness(probe, verifiedAfter) {
+  if (Date.parse(probe.completedAt) < Date.parse(verifiedAfter)) {
+    throw new Error("Oracle bounded Job probe predates deployment authority");
+  }
 }
 
 function assertExactSettings(serialized, expected) {
@@ -344,16 +424,26 @@ function writeOneShotProof(path, proof) {
   }
   const temporaryPath = `${proofPath}.tmp`;
   let descriptor;
+  let temporaryCreated = false;
   try {
     descriptor = openSync(temporaryPath, "wx", 0o600);
+    temporaryCreated = true;
     writeFileSync(descriptor, `${JSON.stringify(proof)}\n`, "utf8");
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
     linkSync(temporaryPath, proofPath);
     unlinkSync(temporaryPath);
+    temporaryCreated = false;
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
+    if (temporaryCreated) {
+      try {
+        unlinkSync(temporaryPath);
+      } catch {
+        // Preserve the original proof-write failure while making retries safe.
+      }
+    }
   }
 }
 
@@ -379,6 +469,7 @@ function canonicalOrigin(value, label) {
   }
   if (
     url.protocol !== "https:" ||
+    !url.hostname.endsWith(".run.app") ||
     url.username ||
     url.password ||
     url.search ||
@@ -405,7 +496,9 @@ function canonicalJobUrl(value) {
     url.hash ||
     url.pathname !== "/jobs"
   ) {
-    throw new Error("prior job URL must be a credential-free HTTPS /jobs URL");
+    throw new Error(
+      "Job URL must be a credential-free HTTPS run.app /jobs URL",
+    );
   }
   return `${url.origin}/jobs`;
 }
@@ -422,18 +515,6 @@ function canonicalTimestamp(value) {
   return text;
 }
 
-function canonicalJournalTimestamp(value) {
-  if (typeof value !== "string") return null;
-  const milliseconds = Date.parse(value);
-  if (
-    !Number.isFinite(milliseconds) ||
-    new Date(milliseconds).toISOString() !== value
-  ) {
-    return null;
-  }
-  return Object.freeze({ text: value, milliseconds });
-}
-
 function requiredMatch(value, pattern, label) {
   const text = typeof value === "string" ? value.trim() : "";
   if (!pattern.test(text)) throw new Error(`${label} is invalid`);
@@ -442,14 +523,6 @@ function requiredMatch(value, pattern, label) {
 
 function normalizePath(value) {
   return String(value).replaceAll("\\", "/");
-}
-
-function parseJsonLine(line) {
-  try {
-    return JSON.parse(line);
-  } catch {
-    return null;
-  }
 }
 
 async function main() {

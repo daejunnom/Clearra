@@ -1,0 +1,146 @@
+#!/bin/sh
+
+set -eu
+umask 077
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+fail() {
+  printf '%s\n' 'oracle_bounded_job_probe_launcher=failed' >&2
+  exit "${1:-1}"
+}
+
+is_commit() {
+  value=$1
+  [ "${#value}" -eq 40 ] || return 1
+  case "$value" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+is_nonce() {
+  value=$1
+  [ "${#value}" -eq 64 ] || return 1
+  case "$value" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+canonical_job_url() {
+  /usr/bin/python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+try:
+    value = sys.argv[1]
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or not parsed.hostname.endswith(".run.app")
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path != "/jobs"
+        or value != f"https://{parsed.netloc}/jobs"
+    ):
+        raise ValueError
+    print(value)
+except (IndexError, ValueError):
+    raise SystemExit(2)
+PY
+}
+
+phase=
+job_url=
+deployment_nonce=
+expected_source_commit=
+child=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --phase)
+      [ "$#" -ge 2 ] && [ -z "$phase" ] || fail 64
+      phase=$2; shift 2 ;;
+    --job-url)
+      [ "$#" -ge 2 ] && [ -z "$job_url" ] || fail 64
+      job_url=$2; shift 2 ;;
+    --deployment-nonce)
+      [ "$#" -ge 2 ] && [ -z "$deployment_nonce" ] || fail 64
+      deployment_nonce=$2; shift 2 ;;
+    --expected-source-commit)
+      [ "$#" -ge 2 ] && [ -z "$expected_source_commit" ] || fail 64
+      expected_source_commit=$2; shift 2 ;;
+    --vault-child)
+      [ "$child" -eq 0 ] || fail 64
+      child=1; shift ;;
+    *) fail 64 ;;
+  esac
+done
+
+case "$phase" in candidate|rollback) ;; *) fail 64 ;; esac
+job_url=$(canonical_job_url "$job_url") || fail 64
+is_nonce "$deployment_nonce" || fail 64
+if [ "$expected_source_commit" != none ]; then
+  is_commit "$expected_source_commit" || fail 64
+fi
+[ "$phase" != candidate ] || [ "$expected_source_commit" != none ] || fail 64
+
+script_directory=$(/usr/bin/readlink -f -- "$(/usr/bin/dirname -- "$0")") || fail 77
+node_probe="$script_directory/run-oracle-bounded-job-probe.mjs"
+[ -f "$node_probe" ] && [ ! -L "$node_probe" ] || fail 77
+
+if [ "$child" -eq 0 ]; then
+  [ "$(/usr/bin/id -u)" -eq 0 ] || fail 77
+  service_environment=$(/usr/bin/systemctl show \
+    --property Environment --value clearra-gateway.service) || fail 77
+  job_secret_ocid=$(printf '%s' "$service_environment" | /usr/bin/python3 -c '
+import shlex, sys
+text = sys.stdin.read(65537)
+if len(text) > 65536: raise SystemExit(2)
+entries = dict(item.split("=", 1) for item in shlex.split(text) if "=" in item)
+value = entries.get("CLEARRA_JOB_SECRET_OCID", "")
+if not value.startswith("ocid1.vaultsecret.") or len(value) > 255: raise SystemExit(2)
+print(value)
+') || fail 78
+  unset service_environment
+  exec /usr/bin/timeout --signal=TERM --kill-after=5s 75s \
+    /usr/sbin/runuser --user ubuntu -- /usr/bin/env -i \
+      PATH="$PATH" \
+      CLEARRA_JOB_SECRET_OCID="$job_secret_ocid" \
+      /bin/sh "$0" \
+        --vault-child \
+        --phase "$phase" \
+        --job-url "$job_url" \
+        --deployment-nonce "$deployment_nonce" \
+        --expected-source-commit "$expected_source_commit"
+fi
+
+[ "$(/usr/bin/id -u)" -ne 0 ] || fail 77
+case "${CLEARRA_JOB_SECRET_OCID:-}" in
+  ocid1.vaultsecret.*) ;;
+  *) fail 78 ;;
+esac
+oci_cli=$(command -v oci 2>/dev/null) || fail 69
+if ! encoded_secret=$(
+  "$oci_cli" secrets secret-bundle get \
+    --auth instance_principal \
+    --secret-id "$CLEARRA_JOB_SECRET_OCID" \
+    --stage CURRENT \
+    --query 'data."secret-bundle-content".content' \
+    --raw-output \
+    2>/dev/null
+); then
+  fail 77
+fi
+unset CLEARRA_JOB_SECRET_OCID
+case "$encoded_secret" in ""|null) fail 77 ;; esac
+if ! CLEARRA_JOB_TOKEN=$(printf '%s' "$encoded_secret" | /usr/bin/base64 --decode 2>/dev/null); then
+  unset encoded_secret
+  fail 77
+fi
+unset encoded_secret
+[ -n "$CLEARRA_JOB_TOKEN" ] || fail 77
+export CLEARRA_JOB_TOKEN
+exec /usr/bin/node "$node_probe" \
+  --phase "$phase" \
+  --job-url "$job_url" \
+  --deployment-nonce "$deployment_nonce" \
+  --expected-source-commit "$expected_source_commit"

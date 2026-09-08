@@ -76,16 +76,26 @@ test("failed deployment retains the candidate endpoint until the Oracle rollback
   assert.match(primary, /New-Item -ItemType File -Path \$rollbackMarker -ErrorAction Stop/u);
 });
 
-test("Oracle proof waits preserve SSH liveness and fail closed when the observer pipe closes", async () => {
-  const [launcher, invoker] = await Promise.all([
+test("Oracle proofs use bounded automatic probes while preserving SSH liveness", async () => {
+  const [launcher, probeLauncher, invoker] = await Promise.all([
     readFile(new URL("./oracle/clearra-oracle-release-deploy-v080", import.meta.url), "utf8"),
+    readFile(new URL("../../apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe", import.meta.url), "utf8"),
     readFile(new URL("./oracle/invoke-release-deploy-v080.ps1", import.meta.url), "utf8"),
   ]);
   assert.equal((launcher.match(/trap 'exit 141' PIPE/gu) ?? []).length, 2);
   assert.equal((launcher.match(/trap - EXIT HUP INT TERM PIPE/gu) ?? []).length, 2);
   for (const phase of ["candidate", "rollback"]) {
-    assert.match(launcher, new RegExp(`'oracle_${phase}=waiting-for-ready-and-fresh-path-proof' >&2`, "u"));
+    assert.match(launcher, new RegExp(`'oracle_${phase}=retrying-bounded-job-proof attempt=1' >&2`, "u"));
   }
+  assert.equal((launcher.match(/while \[ "\$proof_attempt" -le 2 \]; do/gu) ?? []).length, 2);
+  assert.doesNotMatch(launcher, /waiting-for-ready-and-fresh-path-proof/u);
+  assert.match(primary, /bounded Oracle-to-Cloud candidate verification failed/u);
+  assert.doesNotMatch(primary, /throw 'real path candidate verification failed'/u);
+  assert.equal(
+    (launcher.match(/--verified-after "\$verified_after" >\/dev\/null\n/gu) ?? []).length,
+    2,
+  );
+  assert.match(probeLauncher, /--kill-after=5s 75s/u);
   assert.match(invoker, /'ServerAliveInterval=15'/u);
   assert.match(invoker, /'ServerAliveCountMax=4'/u);
 });

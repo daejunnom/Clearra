@@ -1765,17 +1765,23 @@ function normalizeObjectiveHelpTarget(value) {
 }
 
 function commandListHelp(locale) {
+  const pc = canonicalGroupHelpPath("pc");
+  const build = canonicalGroupHelpPath("build");
+  const setup = canonicalGroupHelpPath("setup");
+  const forward = canonicalGroupHelpPath("forward");
+  const spinStructure = canonicalGroupHelpPath("spin-structure");
+  const utility = canonicalGroupHelpPath("utility");
   if (locale === "ko") {
     return [
       "**Clearra 슬래시 명령어**",
       "렌더 파일: `/render-file` 또는 미리보기 메시지의 `앱 → 원본 GIF 받기` (명령어 필드는 해당 명령 안에서 자동 렌더링)",
-      "퍼펙트 클리어: `/pc path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder`",
-      "구축: `/build cover|probability|setup|congruent|congruent-cover|setup-cover|setup-cover-percent|setup-cover-score|evaluate-cover|evaluate-minimals|evaluate-score|evaluate-b2b-cover|evaluate-cover-percent|finesse-score`",
-      "셋업 순위와 점수: `/setup joint|build|pc|score`",
-      "정방향 탐색: `/forward spin|damage`",
-      "구조 탐색: `/spin-structure search|cover|guaranteed`",
-      "문서 유틸리티: `/utility sequence|sequence-dependencies|parity|fumen|render`",
-      "호환 경로: `/finesse search|score` 및 기존 개별 명령어는 전환 기간에만 유지됩니다.",
+      `퍼펙트 클리어: \`${pc}\``,
+      `구축: \`${build}\``,
+      `셋업 순위와 점수: \`${setup}\``,
+      `정방향 탐색: \`${forward}\``,
+      `구조 탐색: \`${spinStructure}\``,
+      `문서 유틸리티: \`${utility}\``,
+      "v0.8.0 권장 입력은 위의 그룹형 명령어입니다. `/path` 같은 기존 개별 명령어와 `/finesse search|score`는 레거시 압축 옵션을 받는 전환기 호환 경로입니다.",
       "고급 objective는 `/help arguments:objective`에서 확인할 수 있습니다.",
       "정확한 문법은 `/help arguments:<명령어> <하위-명령어>`로 확인하세요. 여러 줄 격자는 필드 옵션을 생략하고 입력 창에서 작성하며, 직접 입력은 `grid:윗줄/다음줄` 형식을 사용합니다.",
       `PC 탐색은 1–${DISCORD_PC_FIELD_MAX_ROWS}줄의 모든 목표 높이를 지원하며, 구축·전방 탐색 필드는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄을 지원합니다. 정적 CTK3, v115 Fumen, 문서 링크도 지원하며 입력 색상은 모두 채워진 칸으로 처리합니다.`,
@@ -1784,17 +1790,26 @@ function commandListHelp(locale) {
   return [
     "**Clearra slash commands**",
     "Render files: `/render-file` or `Apps → Get original GIF` on a preview message (command fields render inside their own command)",
-    "Perfect clears: `/pc path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder`",
-    "Build: `/build cover|probability|setup|congruent|congruent-cover|setup-cover|setup-cover-percent|setup-cover-score|evaluate-cover|evaluate-minimals|evaluate-score|evaluate-b2b-cover|evaluate-cover-percent|finesse-score`",
-    "Setup ranking and scoring: `/setup joint|build|pc|score`",
-    "Forward search: `/forward spin|damage`",
-    "Spin structures: `/spin-structure search|cover|guaranteed`",
-    "Document utilities: `/utility sequence|sequence-dependencies|parity|fumen|render`",
-    "Compatibility: `/finesse search|score` and legacy single-purpose names remain only for the migration window.",
+    `Perfect clears: \`${pc}\``,
+    `Build: \`${build}\``,
+    `Setup ranking and scoring: \`${setup}\``,
+    `Forward search: \`${forward}\``,
+    `Spin structures: \`${spinStructure}\``,
+    `Document utilities: \`${utility}\``,
+    "The preferred v0.8.0 input is the grouped command surface above. Legacy single-purpose names such as `/path` and `/finesse search|score` keep their compact option grammar only as migration routes.",
     "Advanced objective syntax is documented by `/help arguments:objective`.",
     "Use `/help arguments:<command> <subcommand>` for exact syntax. Omit a board option to enter a multiline grid in the guided form; direct grids use `grid:top-row/next-row`.",
     `PC search supports every target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS} rows; build/forward fields support 1 through ${DISCORD_WIDE_FIELD_MAX_ROWS} rows. Static CTK3, v115 Fumen, and document links are also accepted; input colors mean occupied cells.`,
   ].join("\n");
+}
+
+function canonicalGroupHelpPath(root) {
+  const group = CANONICAL_SEARCH_GROUPS.find((entry) => entry.name === root);
+  const subcommands = group ? Object.keys(group.subcommands) : [];
+  if (subcommands.length === 0) {
+    throw new Error(`Canonical help group is unavailable: ${root}`);
+  }
+  return `/${root} ${subcommands.join("|")}`;
 }
 
 function syntax(entry, locale = "en") {
@@ -2006,7 +2021,7 @@ function inputHelp(entry, locale = "en") {
       return [
         `\`field\` is a 1–${DISCORD_PC_FIELD_MAX_ROWS}-row initial PC board or one static document; \`next\` is one exact queue or one supported pattern source.`,
         "This path route fixes objective and count to `all` with full-oracle queue knowledge. It accepts only hold, spin profile, B2B preservation, and the rule profile; score, tiling, probability, queue-knowledge, dependency, tablebase, and max-memory controls are closed.",
-        "The typed result is an ordinary finite path family. Discord bounds that family for one response and exposes no tie, alternative-page, or cursor control.",
+        "The typed engine result is the complete finite path family. Discord projects only its numeric-smallest canonical candidate as the single published witness.",
         nativeKickHelp,
       ];
     case "pc-chance-v2":
@@ -2308,7 +2323,7 @@ function koreanInputHelp(entry) {
       return [
         `\`field\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 PC 초기 필드 또는 정적 문서이며 \`next\`는 정확한 큐 하나 또는 지원되는 패턴 공급원 하나입니다.`,
         "이 path 경로는 objective와 count를 `all`, 큐 공개 범위를 full-oracle로 고정합니다. 홀드, 스핀 프로필, B2B 보존, 규칙 프로필만 받으며 점수·타일링·확률·queue-knowledge·의존성·테이블베이스·최대 메모리 설정은 닫혀 있습니다.",
-        "타입 결과는 일반적인 유한 path family입니다. Discord는 한 응답 안에서 family만 제한하며 tie, 대안 페이지, 커서 제어를 노출하지 않습니다.",
+        "타입 엔진 결과는 완전한 유한 path family입니다. Discord는 그중 숫자로 가장 작은 canonical candidate 하나만 게시 증거로 투영합니다.",
         nativeKickHelp,
       ];
     case "pc-chance-v2":
@@ -3116,6 +3131,8 @@ const KOREAN_COMMAND_DESCRIPTIONS = Object.freeze({
 });
 
 const KOREAN_COMMAND_NOTES = Object.freeze({
+  "pc.path": "Discord는 canonical candidate ID가 가장 작은 첫 결과 하나만 결정적으로 게시하며 동률·대안 페이지·커서 제어를 노출하지 않습니다.",
+  path: "Discord는 canonical candidate ID가 가장 작은 첫 결과 하나만 결정적으로 게시하며 동률·대안 페이지·커서 제어를 노출하지 않습니다.",
   "pc.allspin-sol": "기존 allspin_sol_finder와의 호환은 명령 의도만 보장하며 상위 도구의 판정을 그대로 재현한다는 뜻이 아닙니다. 슬래시 별칭은 v0.10에 제거되고 텍스트 별칭은 장기 유지됩니다.",
   "pc.allspin-pres-chance": "기존 allspin_pres_chance와의 호환은 명령 의도만 보장하며 상위 도구의 판정을 그대로 재현한다는 뜻이 아닙니다. 슬래시 별칭은 v0.10에 제거되고 텍스트 별칭은 장기 유지됩니다.",
   "allspin-sol-finder": "명령 의도 호환만 제공하며 정확한 상위 도구 판정 일치를 보장하지 않습니다. 슬래시 별칭은 v0.10에 제거되고 텍스트 별칭은 장기 유지됩니다.",

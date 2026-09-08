@@ -516,6 +516,7 @@ validate_candidate() {
     "$validate_root/scripts/tools/package-release-cli.sh" \
     "$validate_root/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
     "$validate_root/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
+    "$validate_root/apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe" \
     "$validate_root/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
     "$validate_root/apps/clearra-discord-bot/scripts/restore-oracle-release" \
     "$validate_root/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
@@ -563,6 +564,7 @@ assemble_candidate() {
     "$assemble_root/scripts/tools/package-release-cli.sh" \
     "$assemble_root/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
     "$assemble_root/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
+    "$assemble_root/apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe" \
     "$assemble_root/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
     "$assemble_root/apps/clearra-discord-bot/scripts/restore-oracle-release" \
     "$assemble_root/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
@@ -574,6 +576,7 @@ assemble_candidate() {
 syntax_check_candidate() {
   syntax_root=$1
   /usr/bin/dash -n "$syntax_root/apps/clearra-discord-bot/scripts/restore-oracle-release"
+  /usr/bin/dash -n "$syntax_root/apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe"
   /usr/bin/dash -n "$syntax_root/apps/clearra-discord-bot/src/admin/deploy/oracle/clearra-gateway-vault-run"
   for syntax_module in \
     "$syntax_root/apps/clearra-discord-bot/scripts/classify-oracle-current-authority.mjs" \
@@ -581,6 +584,7 @@ syntax_check_candidate() {
     "$syntax_root/apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs" \
     "$syntax_root/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
     "$syntax_root/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
+    "$syntax_root/apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe.mjs" \
     "$syntax_root/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
     "$syntax_root/apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs" \
     "$syntax_root/apps/clearra-discord-bot/src/job-service/runtime-identity.mjs" \

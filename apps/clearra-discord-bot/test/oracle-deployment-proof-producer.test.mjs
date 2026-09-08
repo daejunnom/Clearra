@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { writeOperationalLog } from "../src/operational-log.mjs";
 
 import {
   inspectActiveOracle,
@@ -46,7 +45,7 @@ const runtimeIdentity = Object.freeze({
   artifactSchemaVersion: "clearra.solution-data.v1",
 });
 
-test("trusted Oracle producer observes active candidate and fresh bounded operation", () => {
+test("trusted Oracle producer observes the active candidate and a closed bounded Job probe", () => {
   let written;
   const proof = produceOracleCandidateProof(
     {
@@ -64,7 +63,6 @@ test("trusted Oracle producer observes active candidate and fresh bounded operat
       releaseId: "v0.8.0-701454b",
       releaseSha256: "a".repeat(64),
       settings: candidateSettings,
-      operationAt: "2026-08-20T00:00:01.000Z",
       writeProof(_path, value) {
         written = value;
       },
@@ -76,19 +74,13 @@ test("trusted Oracle producer observes active candidate and fresh bounded operat
   assert.equal(written, proof);
 });
 
-test("trusted Oracle producer selects the latest canonical operation regardless of journal order", () => {
+test("active Oracle inspection requires Gateway readiness but never user command activity", () => {
   const releaseId = "v0.8.0-701454b";
   const releaseSha256 = "a".repeat(64);
-  const latest = "2026-08-20T00:00:03.000Z";
-  const records = [
-    operationRecord("2026-08-19T23:59:59.000Z"),
-    operationRecord("2026-08-20T00:00:01.000Z"),
-    operationRecord("2026-08-20T00:00:02.000Z", { status: "failed" }),
-    operationRecord("2026-08-20T00:00:02.500Z", { command: "help" }),
-    operationRecord(latest),
-    operationRecord("2026-08-20T00:00:04Z"),
-  ];
-  for (const journalRecords of [records, [...records].reverse()]) {
+  for (const journalRecords of [
+    [],
+    [{ event: "clearra.operation", command: "help", status: "failed" }],
+  ]) {
     const active = inspectActiveOracle(
       {
         oracleReleaseId: releaseId,
@@ -112,36 +104,40 @@ test("trusted Oracle producer selects the latest canonical operation regardless 
         journalRecords,
       }),
     );
-    assert.equal(active.freshOperationAt, latest);
+    assert.equal(active.readyRecordObserved, true);
+    assert.equal("freshOperationAt" in active, false);
   }
 });
 
-test("Oracle proof admits the actual redesigned path telemetry and the legacy rollback label", () => {
-  const lines = [];
-  assert.equal(writeOperationalLog({ info: (line) => lines.push(line) },
-    operationRecord("2026-08-20T00:00:01.000Z")), true);
-  const redesigned = JSON.parse(lines[0]);
-  assert.equal(redesigned.command, "pc.path");
-  const options = {
-    oracleReleaseId: "v0.8.0-701454b", oracleReleaseSha256: "a".repeat(64),
-    oracleSettingsSha256: candidateSettingsSha256, verifiedAfter,
-    expectedSettings: { CLEARRA_JOB_URL: candidateJobUrl },
-  };
-  const observe = (record) => inspectActiveOracle(options, fakeRuntime({
-    releaseId: options.oracleReleaseId, settings: candidateSettings,
-    journalRecords: [record],
-  }));
-  for (const record of [redesigned, operationRecord(redesigned.at)]) {
-    assert.equal(observe(record).freshOperationAt, redesigned.at);
-  }
-  for (const override of [
-    { command: "pc.chance" }, { command: "pc.minimals" },
-    { command: "pc.path.extra" }, { command: "sfinder.path" },
-    { status: "failed" }, { status: "delegated" }, { kind: "text" },
-    { scope: "job" }, { at: "2026-08-19T23:59:59.000Z" },
-  ]) {
-    assert.throws(() => observe({ ...redesigned, ...override }), /fresh successful bounded/u);
-  }
+test("candidate producer binds the bounded Job probe to its exact deployment inputs", () => {
+  let observed;
+  produceOracleCandidateProof(
+    {
+      proofPath: "/tmp/clearra-oracle-candidate-test.json",
+      sourceCommit,
+      candidateUrl: "https://candidate.example.run.app",
+      candidateRevision: "clearra-current-job-v080-701454b",
+      oracleReleaseId: "v0.8.0-701454b",
+      oracleReleaseSha256: "a".repeat(64),
+      oracleSettingsSha256: candidateSettingsSha256,
+      deploymentNonce,
+      verifiedAfter,
+    },
+    fakeRuntime({
+      releaseId: "v0.8.0-701454b",
+      settings: candidateSettings,
+      runBoundedJobProbe(options) {
+        observed = options;
+        return probeResult(options);
+      },
+    }),
+  );
+  assert.deepEqual(observed, {
+    phase: "candidate",
+    jobUrl: candidateJobUrl,
+    deploymentNonce,
+    expectedSourceCommit: sourceCommit,
+  });
 });
 
 test("Oracle proof validates numeric PID bounds rather than rejecting a leading one", () => {
@@ -161,7 +157,7 @@ test("Oracle proof validates numeric PID bounds rather than rejecting a leading 
   }
 });
 
-test("trusted Oracle producer rejects stale settings, process, and operation evidence", () => {
+test("trusted Oracle producer rejects stale settings, process, and bounded probe evidence", () => {
   const options = {
     proofPath: "/tmp/clearra-oracle-candidate-test.json",
     sourceCommit,
@@ -205,10 +201,10 @@ test("trusted Oracle producer rejects stale settings, process, and operation evi
           releaseId: options.oracleReleaseId,
           releaseSha256: "a".repeat(64),
           settings: candidateSettings,
-          operationAt: "2026-08-19T23:59:59.000Z",
+          probeCompletedAt: "2026-08-19T23:59:59.000Z",
         }),
       ),
-    /fresh successful bounded/u,
+    /predates deployment authority/u,
   );
 });
 
@@ -241,7 +237,6 @@ test("trusted Oracle producer binds rollback to restored prior deployment", () =
       releaseId: priorReleaseId,
       releaseSha256: "b".repeat(64),
       settings: priorSettings,
-      operationAt: "2026-08-20T00:00:02.000Z",
       health: { ...legacyHealth, activeJobs: 1 },
     }),
   );
@@ -351,9 +346,10 @@ function fakeRuntime({
   pid = "4242",
   releaseSha256 = "a".repeat(64),
   settings,
-  operationAt = "2026-08-20T00:00:01.000Z",
   journalRecords,
   health = { ...legacyHealth, runtime: runtimeIdentity },
+  probeCompletedAt = "2026-08-20T00:00:01.000Z",
+  runBoundedJobProbe,
   writeProof = () => {},
 }) {
   const releasePath = `/opt/clearra/releases/${releaseId}`;
@@ -378,7 +374,7 @@ function fakeRuntime({
       if (command === "/usr/bin/journalctl") {
         return [
           "Oracle Gateway connected as ClearraBot; Gateway slash ingress enabled.",
-          ...(journalRecords ?? [operationRecord(operationAt)]).map((record) =>
+          ...(journalRecords ?? []).map((record) =>
             JSON.stringify(record)),
           "",
         ].join("\n");
@@ -388,19 +384,21 @@ function fakeRuntime({
       }
       throw new Error(`unexpected command ${command}`);
     },
+    runBoundedJobProbe: runBoundedJobProbe ?? ((options) =>
+      probeResult(options, { completedAt: probeCompletedAt })),
     writeProof,
   };
 }
 
-function operationRecord(at, overrides = {}) {
+function probeResult(options, overrides = {}) {
   return {
-    event: "clearra.operation",
-    at,
-    scope: "gateway",
-    kind: "slash",
-    command: "path",
-    status: "succeeded",
-    durationMs: 42,
+    completedAt: "2026-08-20T00:00:01.000Z",
+    contract: "clearra.oracle-bounded-job-probe.v1",
+    expectedSourceCommit: options.expectedSourceCommit,
+    jobId: `oracle-${options.phase}-probe-fixture`,
+    jobUrl: options.jobUrl,
+    phase: options.phase,
+    solutionSetHash: "cts1:0000000000000000",
     ...overrides,
   };
 }

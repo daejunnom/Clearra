@@ -44,9 +44,9 @@ function dependencies(activeOverrides = {}, commandOverrides = {}) {
       activeSettingsSha256: oracleSettingsSha256,
       gatewayPid: "4312",
       readyRecordObserved: true,
-      freshOperationAt,
       ...activeOverrides,
     }),
+    executeOracleBoundedJobProbe: () => ({ completedAt: freshOperationAt }),
     now: () => new Date(observedAt),
     run: (command, arguments_) => {
       const key = `${command} ${arguments_.join(" ")}`;
@@ -60,7 +60,7 @@ function dependencies(activeOverrides = {}, commandOverrides = {}) {
   };
 }
 
-test("produces a closed read-only Oracle candidate observation", () => {
+test("produces a closed Oracle candidate observation with one bounded Job probe", () => {
   const observation = observeOracleCandidate(fixture(), dependencies());
   assert.equal(observation.contract, ORACLE_OBSERVATION_CONTRACT);
   assert.equal(observation.activeReleasePath, `/opt/clearra/releases/${oracleReleaseId}`);
@@ -95,7 +95,7 @@ test("produces a closed read-only Oracle candidate observation", () => {
   ]);
 });
 
-test("rejects stale operation, process, release, settings, and key drift", () => {
+test("rejects stale bounded probe, process, release, settings, and key drift", () => {
   assert.throws(
     () => observeOracleCandidate(
       fixture({ verifiedAfter: "2026-08-30T00:00:00Z" }),
@@ -106,7 +106,12 @@ test("rejects stale operation, process, release, settings, and key drift", () =>
   assert.throws(
     () => observeOracleCandidate(
       fixture(),
-      dependencies({ freshOperationAt: "2026-08-29T23:59:59.000Z" }),
+      {
+        ...dependencies(),
+        executeOracleBoundedJobProbe: () => ({
+          completedAt: "2026-08-29T23:59:59.000Z",
+        }),
+      },
     ),
     /predates the observation authority/u,
   );
@@ -171,11 +176,11 @@ test("rejects process-instance and observation freshness drift", () => {
       fixture(),
       { ...dependencies(), now: () => new Date("2026-08-30T00:00:00.500Z") },
     ),
-    /timestamp predates its fresh operation/u,
+    /timestamp predates its bounded Job probe/u,
   );
 });
 
-test("remote observation launcher operation remains read-only", async () => {
+test("remote observation launcher leaves Oracle host state unchanged", async () => {
   const launcher = await readFile(launcherPath, "utf8");
   const match = launcher.match(
     /\n  observe-candidate\)\n(?<body>[\s\S]*?)\n    ;;\n\n  restore-prior-and-verify\)/u,

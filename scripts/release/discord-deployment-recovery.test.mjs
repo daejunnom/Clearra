@@ -160,6 +160,14 @@ function liveJobList(overrides = {}) {
   });
 }
 
+function withoutUnscheduledSync(jobs) {
+  return {
+    ...jobs,
+    total_count: jobs.total_count - 1,
+    jobs: jobs.jobs.filter(({ name }) => name !== "sync-observe"),
+  };
+}
+
 function runJobCatalog(entries = []) {
   return {
     schema_id: "clearra.discord-deployment-run-job-catalog.v1",
@@ -429,6 +437,53 @@ test("workflow cancellation before promote starts is a durable no-mutation proof
   assert.equal(authority.no_mutation_job_step_proof.job_name, "promote");
   assert.equal(authority.no_mutation_job_step_proof.job_conclusion, "cancelled");
   assert.equal(authority.no_mutation_job_step_proof.prestage_upload_step, null);
+});
+
+test("force-cancelled primary run may omit only the never-scheduled sync job", () => {
+  const jobs = withoutUnscheduledSync(jobList({
+    job: { conclusion: "cancelled" },
+    steps: [],
+  }));
+  const authority = resolveDiscordRecoveryAuthority(
+    run({ conclusion: "cancelled" }),
+    { total_count: 0, artifacts: [] },
+    { ...options, jobList: jobs },
+  );
+  assert.equal(authority.recovery_required, false);
+  const sync = authority.no_mutation_job_step_proof.primary_jobs.find(
+    ({ job_name: name }) => name === "sync-observe",
+  );
+  assert.deepEqual(sync, {
+    job_id: null,
+    job_name: "sync-observe",
+    job_status: null,
+    job_conclusion: null,
+    steps: [],
+  });
+  assert.deepEqual(authority.catalog_mutation_job_step_proof, {
+    job_id: null,
+    job_name: "sync-observe",
+    job_status: null,
+    job_conclusion: null,
+    capture_step: null,
+    upload_step: null,
+    mutation_step: null,
+  });
+
+  assert.throws(
+    () => resolveDiscordRecoveryAuthority(
+      run({ conclusion: "failure" }),
+      { total_count: 0, artifacts: [] },
+      {
+        ...options,
+        jobList: withoutUnscheduledSync(jobList({
+          job: { conclusion: "success" },
+          steps: [],
+        })),
+      },
+    ),
+    /closed primary topology/u,
+  );
 });
 
 test("missing prestage artifact fails closed after upload success or runtime mutation", () => {

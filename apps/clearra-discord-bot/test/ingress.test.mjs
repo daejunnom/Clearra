@@ -106,6 +106,79 @@ test("slash ingress rejects ordinary Gateway messages and handles Gateway intera
   assert.equal(responses.length, 2);
   assert.equal(responses[1].type, 4);
   assert.match(responses[1].data.content, /Clearra slash commands/u);
+  assert.match(responses[1].data.content, /score-finder\|allspin-sol\|allspin-pres-chance/u);
+  assert.match(responses[1].data.content, /forward spin\|damage\|ren/u);
+  assert.match(responses[1].data.content, /render\|to-gray\|mirror/u);
+});
+
+test("Gateway grouped /pc path reaches the canonical CLI authority while legacy /path stays separate", async () => {
+  const executions = [];
+  const edits = [];
+  const rest = {
+    async editOriginalInteraction(_applicationId, _token, message) {
+      edits.push(message.payload.content);
+    },
+  };
+  const bot = new Clearrabot(
+    rest,
+    { maxConcurrentSearches: 1 },
+    {
+      executor: {
+        async execute(arguments_, options) {
+          executions.push({ arguments_, options });
+          return { exitCode: 2, signal: null, stdout: "", stderr: "fixture" };
+        },
+      },
+    },
+  );
+  const ingress = new SlashCommandIngress(bot, {
+    acknowledger: { async defer() {} },
+  });
+  const interaction = {
+    id: "gateway-pc-path",
+    token: "gateway-token",
+    application_id: "application-id",
+    type: 2,
+    data: {
+      type: 1,
+      name: "pc",
+      options: [{
+        type: 1,
+        name: "path",
+        options: [
+          { type: 3, name: "field", value: "grid:######____" },
+          { type: 3, name: "next", value: "I" },
+          { type: 4, name: "lines", value: 1 },
+          { type: 3, name: "hold", value: "disabled" },
+          { type: 3, name: "kicktable", value: "srs-x" },
+          { type: 3, name: "spin-profile", value: "all-spin-plus" },
+          { type: 3, name: "preserve-b2b", value: "on" },
+        ],
+      }],
+    },
+  };
+
+  assert.deepEqual(
+    await ingress.acceptDispatch("INTERACTION_CREATE", interaction),
+    { accepted: true },
+  );
+  assert.deepEqual(executions[0].arguments_, [
+    "pc", "path",
+    "--lines", "1",
+    "--board-mask", "0x3f",
+    "--height", "1",
+    "--pieces", "1",
+    "--queue", "I",
+    "--no-hold",
+    "--spin-profile", "all-spin-plus",
+    "--preserve-b2b",
+    "--rule", "srs-x",
+    "--format", "json",
+    "--include-solution-data",
+  ]);
+  assert.equal(executions[0].options.timeoutClass, "pc_reverse");
+  assert.equal(edits.length, 1);
+  bot.stop();
 });
 
 test("Gateway Modal submissions are deferred exactly once before execution", async () => {

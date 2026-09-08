@@ -534,6 +534,8 @@ jobs:
           service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       - name: Set up gcloud for protected promotion
         uses: google-github-actions/setup-gcloud@v2
+      # This historical step label is sealed into recovery evidence for older
+      # attempts. The current gate uses the bounded automatic Job probe.
       - name: Materialize the protected-environment Oracle key for the real path gate
         env:
           ORACLE_SSH_PRIVATE_KEY_B64: ${{ secrets.ORACLE_SSH_PRIVATE_KEY_B64 }}
@@ -761,6 +763,8 @@ jobs:
             candidate
           if-no-files-found: error
           retention-days: 90
+      # Keep the historical recovery identifier while the implementation below
+      # verifies READY plus a bounded Oracle-to-Cloud Job probe without /path.
       - name: Activate Oracle, verify the real path, then cut Cloud to 100 percent
         shell: pwsh
         run: |
@@ -822,7 +826,7 @@ jobs:
               -OracleSettingsSha256 $settingsSha -DeploymentNonce $nonce `
               -VerifiedAfter $verifiedAfter -IdentityFile $env:CLEARRA_ORACLE_IDENTITY_FILE `
               | Set-Content -LiteralPath promotion-oracle-attestation.txt -Encoding utf8NoBOM
-            if ($LASTEXITCODE -ne 0) { throw 'real path candidate verification failed' }
+            if ($LASTEXITCODE -ne 0) { throw 'bounded Oracle-to-Cloud candidate verification failed' }
             $cloudTrafficMutationAttempted = $true
             gcloud run services update-traffic clearra-current-job `
               --project=$env:GCP_PROJECT_ID --region=$env:GCP_REGION `

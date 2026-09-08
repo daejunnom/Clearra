@@ -264,7 +264,7 @@ test("v0.8 Oracle freeze helper seals uploads and preserves the active authority
   );
   assert.match(text, /assemble_candidate "\$candidate_root" "\$release_id"\nrequire_baseline_unchanged/u);
   assert.match(text, /apps\/clearra-discord-bot\/src\/admin\/config\.mjs/u);
-  assert.match(text, /candidate_files0755" = 8/u);
+  assert.match(text, /candidate_files0755" = 9/u);
   assert.match(text, /candidate_symlinks" = 2/u);
   assert.match(text, /oracle_manifest_base64=\$manifest_base64/u);
   assert.doesNotMatch(text, /(?:cat|head|tail|sed|awk).*\$settings_path/u);

@@ -648,6 +648,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $githubWifReadme = Read-Text 'scripts/release/github/README.md'
     $remainingWorkPlan = Read-Text 'docs/v0.8.0-remaining-work-plan.md'
     $oracleProofProducer = Read-Text 'apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs'
+    $oracleBoundedJobProbe = Read-Text 'apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe.mjs'
+    $oracleBoundedJobProbeLauncher = Read-Text 'apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe'
     $oracleRuntimeAuthority = Read-Text 'apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs'
     $oracleCandidateProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs'
     $oracleRollbackProof = Read-Text 'apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs'
@@ -924,6 +926,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $oracleRollbackCapture = Read-Text 'apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs'
     $oracleReleaseDigest = Read-Text 'apps/clearra-discord-bot/scripts/release-tree-digest.mjs'
     $oracleProofProducerTest = Read-Text 'apps/clearra-discord-bot/test/oracle-deployment-proof-producer.test.mjs'
+    $oracleBoundedJobProbeTest = Read-Text 'apps/clearra-discord-bot/test/oracle-bounded-job-probe.test.mjs'
     $oracleCandidateProofTest = Read-Text 'apps/clearra-discord-bot/test/oracle-candidate-proof.test.mjs'
     $oracleRollbackProofTest = Read-Text 'apps/clearra-discord-bot/test/oracle-rollback-proof.test.mjs'
     $oracleRestoreTest = Read-Text 'apps/clearra-discord-bot/test/oracle-rollback-contract.test.mjs'
@@ -4989,10 +4992,10 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
-        'produces a closed read-only Oracle candidate observation',
-        'rejects stale operation, process, release, settings, and key drift',
+        'produces a closed Oracle candidate observation with one bounded Job probe',
+        'rejects stale bounded probe, process, release, settings, and key drift',
         'rejects process-instance and observation freshness drift',
-        'remote observation launcher operation remains read-only',
+        'remote observation launcher leaves Oracle host state unchanged',
         '9007199254740992'
     )) {
         if ($oracleObservationTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
@@ -5018,23 +5021,51 @@ function Invoke-ReleaseIdentityGateValidation {
         'active Oracle release tree digest does not match the expected artifact',
         'active Oracle settings digest does not match the expected snapshot',
         'current Oracle Gateway process has no READY record',
-        'Oracle Gateway has no fresh successful bounded end-to-end operation',
-        'canonicalJournalTimestamp',
+        'executeOracleBoundedJobProbe',
+        'Oracle bounded Job probe predates deployment authority',
         'restored prior runtime authority does not match the captured authority',
         '/run/clearra-deploy',
         'directoryMetadata.uid !== 0',
         '(directoryMetadata.mode & 0o777) !== 0o700',
-        'linkSync(temporaryPath, proofPath)'
+        'linkSync(temporaryPath, proofPath)',
+        'temporaryCreated'
     )) {
         if ($oracleProofProducer.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Trusted Oracle proof producer is missing observation/security marker '$required'"
         }
     }
     if ($oracleProofProducerTest.IndexOf(
-        'trusted Oracle producer selects the latest canonical operation regardless of journal order',
+        'candidate producer binds the bounded Job probe to its exact deployment inputs',
         [System.StringComparison]::Ordinal
     ) -lt 0) {
-        Add-ArchitectureError 'Trusted Oracle proof producer regression is missing journal-order-independent latest-operation coverage'
+        Add-ArchitectureError 'Trusted Oracle proof producer regression is missing exact bounded-probe input binding coverage'
+    }
+    foreach ($probeContract in @(
+        @{ Name = 'Node probe'; Text = $oracleBoundedJobProbe; Required = @(
+            'clearra.oracle-bounded-job-probe.v1',
+            '"pc", "--lines", "2", "--queue", "IJLOO", "--fixed", "--no-hold"',
+            'productBuildIdentityMatchesRuntime',
+            'delete process.env.CLEARRA_JOB_TOKEN',
+            'normalized_solution_set_hash'
+        ) },
+        @{ Name = 'Vault launcher'; Text = $oracleBoundedJobProbeLauncher; Required = @(
+            '--auth instance_principal',
+            '/usr/sbin/runuser --user ubuntu -- /usr/bin/env -i',
+            '--kill-after=5s 75s',
+            'CLEARRA_JOB_SECRET_OCID',
+            'exec /usr/bin/node "$node_probe"'
+        ) },
+        @{ Name = 'probe regression'; Text = $oracleBoundedJobProbeTest; Required = @(
+            'uses one fixed bounded product Job and exact runtime identity',
+            'supports captured legacy runtime while retaining result checks',
+            'fail closed without exposing credentials'
+        ) }
+    )) {
+        foreach ($required in $probeContract.Required) {
+            if ($probeContract.Text.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Oracle $($probeContract.Name) is missing bounded-probe marker '$required'"
+            }
+        }
     }
     foreach ($required in @(
         'clearra.rollback.runtime-authority.v1',
@@ -5107,7 +5138,7 @@ function Invoke-ReleaseIdentityGateValidation {
         @{ Name = 'capture'; Text = $oracleRollbackCaptureTest; Marker = 'freezes exact v0.7.4 legacy authority without inventing identity' },
         @{ Name = 'capture-v2'; Text = $oracleRollbackCaptureTest; Marker = 'rejects health or identity key drift before backup' },
         @{ Name = 'capture-interrupted-backup'; Text = $oracleRollbackCaptureTest; Marker = 'repairs only exact interrupted publication states' },
-        @{ Name = 'producer'; Text = $oracleProofProducerTest; Marker = 'rejects stale settings, process, and operation evidence' },
+        @{ Name = 'producer'; Text = $oracleProofProducerTest; Marker = 'rejects stale settings, process, and bounded probe evidence' },
         @{ Name = 'producer-v2'; Text = $oracleProofProducerTest; Marker = 'preserves strict v2 runtime authority' },
         @{ Name = 'candidate'; Text = $oracleCandidateProofTest; Marker = 'rejects every stale deployment authority' },
         @{ Name = 'rollback'; Text = $oracleRollbackProofTest; Marker = 'rejects stale authority and missing live checks' },

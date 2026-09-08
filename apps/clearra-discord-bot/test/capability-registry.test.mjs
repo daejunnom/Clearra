@@ -622,6 +622,35 @@ test("canonical slash topology uses family-specific subcommands and keeps compat
   assert.equal(findProductCapability("build.special-cover"), null);
 });
 
+test("top-level help lists the complete v0.8 grouped surface and distinguishes legacy input grammar", () => {
+  const english = formatSlashCommandHelp("", "en");
+  const korean = formatSlashCommandHelp("", "ko");
+  for (const root of ["pc", "build", "setup", "forward", "spin-structure", "utility"]) {
+    const group = findSlashCommand(root);
+    assert.ok(group?.subcommands, root);
+    const exactPath = `/${root} ${Object.keys(group.subcommands).join("|")}`;
+    assert.ok(english.includes(exactPath), exactPath);
+    assert.ok(korean.includes(exactPath), exactPath);
+  }
+  assert.match(english, /preferred v0\.8\.0 input is the grouped command surface/i);
+  assert.match(korean, /v0\.8\.0 권장 입력은 위의 그룹형 명령어/u);
+
+  const canonical = formatSlashCommandHelp("pc path", "en");
+  const compatibility = formatSlashCommandHelp("path", "en");
+  assert.match(canonical, /hold:<disabled\|empty\|IOTSZJL>/u);
+  assert.match(canonical, /spin-profile:<profile>/u);
+  assert.match(compatibility, /options:hold=use/u);
+  assert.doesNotMatch(compatibility, /spin-profile:<profile>/u);
+  for (const name of ["pc path", "path"]) {
+    const help = formatSlashCommandHelp(name, "ko");
+    assert.doesNotMatch(help, /Discord publishes/u);
+    assert.match(help, /첫 결과 하나만 결정적으로 게시/u);
+  }
+  assert.match(canonical, /complete finite path family/u);
+  assert.match(canonical, /numeric-smallest canonical candidate/u);
+  assert.match(formatSlashCommandHelp("pc path", "ko"), /완전한 유한 path family/u);
+});
+
 test("forward REN registry authority is active, bounded, and isolated from score families", () => {
   const ren = findProductCapability("forward.ren");
   assert.deepEqual(

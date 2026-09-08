@@ -407,6 +407,7 @@ assemble_candidate() {
     "$root/scripts/tools/package-release-cli.sh" \
     "$root/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
     "$root/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
+    "$root/apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe" \
     "$root/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
     "$root/apps/clearra-discord-bot/scripts/restore-oracle-release" \
     "$root/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
@@ -578,7 +579,7 @@ candidate_directories=$(/usr/bin/find "$candidate_root" -xdev -mindepth 1 -type 
 candidate_files0644=$(/usr/bin/find "$candidate_root" -xdev -type f -perm 0644 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')
 candidate_files0755=$(/usr/bin/find "$candidate_root" -xdev -type f -perm 0755 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')
 candidate_symlinks=$(/usr/bin/find "$candidate_root" -xdev -type l -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')
-[ "$candidate_files0755" = 8 ] && [ "$candidate_symlinks" = 2 ] || fail 65
+[ "$candidate_files0755" = 9 ] && [ "$candidate_symlinks" = 2 ] || fail 65
 prior_launcher=$(tool_authority "$launcher_sha256" "$canonical_launcher")
 prior_digester=$(tool_authority "$digester_sha256" "$canonical_digester")
 

@@ -474,22 +474,24 @@ free-form SSH command, or direct execution of a release helper.
 For the 20-minute production observation, invoke the same typed wrapper with
 `-Operation observe-candidate`. The approved runtime may supply the identity
 path through `CLEARRA_ORACLE_IDENTITY_FILE` so it is never materialized in a
-probe specification or report. The operation is read-only: it does not create
-a proof file, change settings/current, or restart the service. Success is one
+probe specification or report. The operation does not create a proof file,
+change settings/current, or restart the service. It does submit one fixed,
+bounded PC Job through the active Oracle Gateway's configured Cloud Run `/jobs`
+endpoint. The root launcher reads only the Job-token Vault reference from the
+effective systemd environment, resolves that token under the unprivileged
+`ubuntu` account, never prints either value, and permits no caller-selected
+command or arguments. Success is one
 `clearra.oracle.candidate-observation.v1` JSON line binding the source,
 candidate URL/revision, active release path/tree, settings digest, deployment
-nonce, PID, systemd monotonic process start, boot ID, READY evidence, fresh
-operation timestamp, observation timestamp, the exact `VerifiedAfter`, and
-runtime identity. The journal reader chooses the qualifying successful `/path`
-with the greatest canonical timestamp regardless of output order. Across the
-window, require all identity/process/`VerifiedAfter` fields to remain unchanged.
-The first sample accepts the candidate-verification operation as a baseline;
-each later sample requires `freshOperationAt` to be newer than the preceding
-remote `observedAt`, while every remote observation timestamp increases
-strictly. The production authority and report both require an exact 1,200-second
-interval, exactly two samples, sample 0 equal to `started_at`, and sample 1 equal
-to `ended_at`. Perform one confirmed real `/path` strictly after the start
-sample and before the end sample.
+nonce, PID, systemd monotonic process start, boot ID, READY evidence, bounded
+probe completion timestamp, observation timestamp, the exact `VerifiedAfter`,
+and runtime identity. Across the window, require all
+identity/process/`VerifiedAfter` fields to remain unchanged. Each sample runs a
+new probe; each later `freshOperationAt` must therefore be newer than the
+preceding remote `observedAt`, while every remote observation timestamp
+increases strictly. The production authority and report both require an exact
+1,200-second interval, exactly two samples, sample 0 equal to `started_at`, and
+sample 1 equal to `ended_at`. No user `/path` invocation is required.
 
 ## Regression commands
 

@@ -617,6 +617,7 @@ function resolveCatalogRecoveryArtifactAuthority(matches, jobList, options) {
     sourceCommit: options.sourceCommit,
     workflowRunId: options.workflowRunId,
     workflowRunAttempt: options.workflowRunAttempt,
+    allowMissingUnscheduledSync: true,
   });
   const sync = jobs.get("sync-observe");
   const stepProof = (name) => {
@@ -634,7 +635,7 @@ function resolveCatalogRecoveryArtifactAuthority(matches, jobList, options) {
   const upload = stepProof(CATALOG_UPLOAD_STEP);
   const mutation = stepProof(CATALOG_MUTATION_STEP);
   const proof = Object.freeze({
-    job_id: String(sync.id),
+    job_id: sync.id === null ? null : String(sync.id),
     job_name: sync.name,
     job_status: sync.status,
     job_conclusion: sync.conclusion,
@@ -716,6 +717,21 @@ function validateCatalogRecoveryReportFields(report, expectedName) {
     "job_id", "job_name", "job_status", "job_conclusion",
     "capture_step", "upload_step", "mutation_step",
   ], "Discord catalog mutation job-step proof");
+  const unscheduled = proof.job_id === null;
+  if (unscheduled) {
+    if (
+      proof.job_name !== "sync-observe" || proof.job_status !== null ||
+      proof.job_conclusion !== null || proof.capture_step !== null ||
+      proof.upload_step !== null || proof.mutation_step !== null ||
+      report.catalog_artifact_id !== null ||
+      report.catalog_recovery_required !== false ||
+      report.catalog_artifact_name !== expectedName ||
+      report.catalog_artifact_digest !== null ||
+      report.catalog_artifact_size !== null ||
+      report.catalog_artifact_created_at !== null
+    ) throw new Error("Discord unscheduled catalog job authority is inconsistent");
+    return;
+  }
   requireDecimalId(proof.job_id, "catalog mutation job ID");
   if (
     proof.job_name !== "sync-observe" || proof.job_status !== "completed" ||
@@ -845,11 +861,20 @@ function validateSealedPrimaryJobs(value) {
     requireExactKeys(job, [
       "job_id", "job_name", "job_status", "job_conclusion", "steps",
     ], "Discord sealed primary job proof");
+    const expectedName = PRIMARY_JOB_NAMES[jobIndex];
+    if (job.job_name !== expectedName || !Array.isArray(job.steps)) {
+      throw new Error("Discord sealed primary job proof is invalid");
+    }
+    const unscheduledSync = expectedName === "sync-observe" &&
+      job.job_id === null && job.job_status === null &&
+      job.job_conclusion === null && job.steps.length === 0;
+    if (unscheduledSync) {
+      result.set(job.job_name, job);
+      continue;
+    }
     if (
-      job.job_name !== PRIMARY_JOB_NAMES[jobIndex] ||
       requireDecimalId(job.job_id, "sealed primary job ID") !== job.job_id ||
-      job.job_status !== "completed" || !JOB_CONCLUSIONS.has(job.job_conclusion) ||
-      !Array.isArray(job.steps)
+      job.job_status !== "completed" || !JOB_CONCLUSIONS.has(job.job_conclusion)
     ) throw new Error("Discord sealed primary job proof is invalid");
     const expected = [...SUCCESSFUL_JOB_STEP_NAMES[job.job_name]];
     let priorIndex = -1;
@@ -898,11 +923,21 @@ function compareAuthorityKeys(left, right) {
   return leftAttempt < rightAttempt ? -1 : leftAttempt > rightAttempt ? 1 : 0;
 }
 
+function isUnscheduledSyncJob(job) {
+  return job?.unscheduled === true && job.id === null &&
+    job.name === "sync-observe" && job.status === null &&
+    job.conclusion === null && Array.isArray(job.steps) && job.steps.length === 0;
+}
+
 export function validateNoPrestageArtifactAuthority(value, options) {
-  const jobs = getExactPrimaryJobAuthority(value, options);
+  const jobs = getExactPrimaryJobAuthority(value, {
+    ...options,
+    allowMissingUnscheduledSync: true,
+  });
   const promote = jobs.get("promote");
   const sync = jobs.get("sync-observe");
   const isZeroStepTerminal = (job) =>
+    isUnscheduledSyncJob(job) ||
     ["skipped", "cancelled"].includes(job.conclusion) && job.steps.length === 0;
   if (
     promote.conclusion === "success" || !isZeroStepTerminal(sync)
@@ -928,11 +963,15 @@ export function validateNoPrestageArtifactAuthority(value, options) {
 }
 
 export function validatePrestageOnlyArtifactAuthority(value, options) {
-  const jobs = getExactPrimaryJobAuthority(value, options);
+  const jobs = getExactPrimaryJobAuthority(value, {
+    ...options,
+    allowMissingUnscheduledSync: true,
+  });
   const promote = jobs.get("promote");
   const sync = jobs.get("sync-observe");
   if (
-    promote.conclusion === "success" || sync.conclusion !== "skipped" || sync.steps.length !== 0
+    promote.conclusion === "success" ||
+    !(isUnscheduledSyncJob(sync) || sync.conclusion === "skipped" && sync.steps.length === 0)
   ) throw new Error("Discord prestage-only authority violates the closed dependency topology");
   const steps = promote.steps;
   const prestageUpload = steps.find((step) => step.name === PRESTAGE_UPLOAD_STEP);
@@ -957,7 +996,10 @@ export function validatePrestageOnlyArtifactAuthority(value, options) {
 }
 
 export function validateLiveArtifactAuthority(value, options) {
-  const jobs = getExactPrimaryJobAuthority(value, options);
+  const jobs = getExactPrimaryJobAuthority(value, {
+    ...options,
+    allowMissingUnscheduledSync: true,
+  });
   const promote = jobs.get("promote");
   const steps = promote.steps;
   const prestage = steps.find((step) => step.name === PRESTAGE_UPLOAD_STEP);
@@ -1030,10 +1072,16 @@ function getExactPrimaryJobAuthority(value, options) {
     if (job.name === "promote") promote.push(job);
   }
   const actualJobNames = [...seenJobNames].sort((left, right) => left.localeCompare(right, "en"));
-  if (
-    actualJobNames.length !== PRIMARY_JOB_NAMES.length ||
-    actualJobNames.some((name, index) => name !== PRIMARY_JOB_NAMES[index])
-  ) {
+  const withoutSync = PRIMARY_JOB_NAMES.filter((name) => name !== "sync-observe");
+  const missingUnscheduledSync =
+    options?.allowMissingUnscheduledSync === true &&
+    promote.length === 1 && promote[0].conclusion !== "success" &&
+    actualJobNames.length === withoutSync.length &&
+    actualJobNames.every((name, index) => name === withoutSync[index]);
+  const exactTopology =
+    actualJobNames.length === PRIMARY_JOB_NAMES.length &&
+    actualJobNames.every((name, index) => name === PRIMARY_JOB_NAMES[index]);
+  if (!exactTopology && !missingUnscheduledSync) {
     throw new Error("Discord recovery job-step authority differs from the closed primary topology");
   }
   if (promote.length > 1) throw new Error("Discord recovery promote job authority is ambiguous");
@@ -1082,7 +1130,18 @@ function getExactPrimaryJobAuthority(value, options) {
     }
     seenStepNames.add(step.name);
   }
-  return new Map(jobs.map((job) => [job.name, job]));
+  const result = new Map(jobs.map((job) => [job.name, job]));
+  if (missingUnscheduledSync) {
+    result.set("sync-observe", Object.freeze({
+      id: null,
+      name: "sync-observe",
+      status: null,
+      conclusion: null,
+      steps: Object.freeze([]),
+      unscheduled: true,
+    }));
+  }
+  return result;
 }
 
 export function validateDiscordCheckpointCandidatePrerequisites(value, options) {
@@ -1475,7 +1534,7 @@ function buildPromoteStepProof(promote, jobs) {
     primary_jobs: PRIMARY_JOB_NAMES.map((jobName) => {
       const job = jobs.get(jobName);
       return Object.freeze({
-        job_id: String(job.id),
+        job_id: job.id === null ? null : String(job.id),
         job_name: job.name,
         job_status: job.status,
         job_conclusion: job.conclusion,

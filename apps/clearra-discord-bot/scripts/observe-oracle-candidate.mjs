@@ -6,7 +6,10 @@ import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 
 import { currentRuntimeIdentityForCommit } from "../src/job-service/runtime-identity.mjs";
-import { inspectActiveOracle } from "./produce-oracle-deployment-proof.mjs";
+import {
+  executeOracleBoundedJobProbe,
+  inspectActiveOracle,
+} from "./produce-oracle-deployment-proof.mjs";
 
 export const ORACLE_OBSERVATION_CONTRACT = "clearra.oracle.candidate-observation.v1";
 
@@ -81,7 +84,6 @@ export function observeOracleCandidate(options, dependencies = {}) {
       "activeReleasePath",
       "activeReleaseSha256",
       "activeSettingsSha256",
-      "freshOperationAt",
       "gatewayPid",
       "readyRecordObserved",
     ],
@@ -109,12 +111,23 @@ export function observeOracleCandidate(options, dependencies = {}) {
   if (active.readyRecordObserved !== true) {
     throw new Error("Oracle Gateway READY record is unavailable");
   }
+  const runBoundedJobProbe = dependencies.executeOracleBoundedJobProbe ??
+    executeOracleBoundedJobProbe;
+  const boundedJobProbe = runBoundedJobProbe(
+    {
+      phase: "candidate",
+      jobUrl,
+      deploymentNonce,
+      expectedSourceCommit: sourceCommit,
+    },
+    dependencies,
+  );
   const freshOperationAt = canonicalTimestamp(
-    active.freshOperationAt,
-    "fresh operation timestamp",
+    boundedJobProbe.completedAt,
+    "bounded probe completion timestamp",
   );
   if (Date.parse(freshOperationAt) < Date.parse(verifiedAfter)) {
-    throw new Error("Oracle Gateway operation predates the observation authority");
+    throw new Error("Oracle bounded Job probe predates the observation authority");
   }
 
   const run = dependencies.run ?? runCommand;
@@ -136,7 +149,7 @@ export function observeOracleCandidate(options, dependencies = {}) {
   const now = dependencies.now ?? (() => new Date());
   const observedAt = canonicalTimestamp(now().toISOString(), "observed-at");
   if (Date.parse(observedAt) < Date.parse(freshOperationAt)) {
-    throw new Error("Oracle observation timestamp predates its fresh operation");
+    throw new Error("Oracle observation timestamp predates its bounded Job probe");
   }
 
   return Object.freeze({

@@ -170,6 +170,7 @@ validate_script_release() {
   for executable in \
     "$script_release/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs" \
     "$script_release/apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs" \
+    "$script_release/apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe" \
     "$script_release/apps/clearra-discord-bot/scripts/release-tree-digest.mjs" \
     "$script_release/apps/clearra-discord-bot/scripts/restore-oracle-release" \
     "$script_release/apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs" \
@@ -182,6 +183,8 @@ validate_script_release() {
     "$script_release/apps/clearra-discord-bot/src/job-service/runtime-identity.mjs"
   require_root_regular_readonly \
     "$script_release/apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs"
+  require_root_regular_readonly \
+    "$script_release/apps/clearra-discord-bot/scripts/run-oracle-bounded-job-probe.mjs"
   require_root_regular_readonly \
     "$script_release/apps/clearra-discord-bot/scripts/classify-oracle-current-authority.mjs"
   require_root_regular_readonly \
@@ -420,8 +423,8 @@ CLEARRA_CANDIDATE_SETTINGS_V080
     "$systemctl_path" start "$service_name"
     wait_for_service_release "$candidate_release"
 
-    deadline=$(( $(/usr/bin/date +%s) + 900 ))
-    while :; do
+    proof_attempt=1
+    while [ "$proof_attempt" -le 2 ]; do
       if "$node_path" "$producer_script" candidate \
         --proof "$proof" \
         --source-commit "$source_commit" \
@@ -431,14 +434,13 @@ CLEARRA_CANDIDATE_SETTINGS_V080
         --oracle-release-sha256 "$oracle_release_sha256" \
         --oracle-settings-sha256 "$oracle_settings_sha256" \
         --deployment-nonce "$deployment_nonce" \
-        --verified-after "$verified_after" >/dev/null 2>&1
+        --verified-after "$verified_after" >/dev/null
       then
         break
       fi
-      [ "$(/usr/bin/date +%s)" -lt "$deadline" ] || fail 70
-      # Keep the operator informed without changing the exact stdout attestation.
-      # A disconnected SSH stderr pipe must also run the transition cleanup.
-      printf '%s\n' 'oracle_candidate=waiting-for-ready-and-fresh-path-proof' >&2
+      [ "$proof_attempt" -lt 2 ] || fail 70
+      printf '%s\n' 'oracle_candidate=retrying-bounded-job-proof attempt=1' >&2
+      proof_attempt=$((proof_attempt + 1))
       /usr/bin/sleep 5
     done
     "$node_path" "$candidate_verifier" \
@@ -583,8 +585,8 @@ CLEARRA_CANDIDATE_SETTINGS_V080
     transition_started=1
     wait_for_service_release "$prior_release"
 
-    deadline=$(( $(/usr/bin/date +%s) + 900 ))
-    while :; do
+    proof_attempt=1
+    while [ "$proof_attempt" -le 2 ]; do
       if "$node_path" "$producer_script" rollback \
         --proof "$proof" \
         --prior-revision "$prior_revision" \
@@ -595,12 +597,13 @@ CLEARRA_CANDIDATE_SETTINGS_V080
         --prior-runtime-authority-sha256 "$prior_runtime_authority_sha256" \
         --prior-job-url "$prior_job_url" \
         --deployment-nonce "$deployment_nonce" \
-        --verified-after "$verified_after" >/dev/null 2>&1
+        --verified-after "$verified_after" >/dev/null
       then
         break
       fi
-      [ "$(/usr/bin/date +%s)" -lt "$deadline" ] || fail 70
-      printf '%s\n' 'oracle_rollback=waiting-for-ready-and-fresh-path-proof' >&2
+      [ "$proof_attempt" -lt 2 ] || fail 70
+      printf '%s\n' 'oracle_rollback=retrying-bounded-job-proof attempt=1' >&2
+      proof_attempt=$((proof_attempt + 1))
       /usr/bin/sleep 5
     done
     "$node_path" "$rollback_verifier" \
