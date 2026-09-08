@@ -222,7 +222,7 @@ test("plan is exact-bound, keyless, Secret-free for deployer, and emits only non
   assert.deepEqual(report.leastPrivilege.buildSourceBucketRoles, ["roles/storage.objectViewer"]);
   assert.deepEqual(report.leastPrivilege.rollbackProjectRoles, [...ROLLBACK_PROJECT_ROLES]);
   assert.deepEqual(report.leastPrivilege.rollbackCloudRunPermissions, [...ROLLBACK_RUN_PERMISSIONS]);
-  assert.deepEqual(report.leastPrivilege.rollbackArtifactRepositoryRoles, []);
+  assert.deepEqual(report.leastPrivilege.rollbackArtifactRepositoryRoles, ["roles/artifactregistry.reader"]);
   assert.deepEqual(report.leastPrivilege.rollbackRuntimeServiceAccountRoles, []);
   assert.equal(report.leastPrivilege.rollbackHasJobLifecyclePermissions, false);
   assert.equal(report.leastPrivilege.catalogWideUnmodeledImpersonationAllowed, false);
@@ -349,6 +349,7 @@ test("plan is exact-bound, keyless, Secret-free for deployer, and emits only non
     "source-bucket-build-add-storage-objectviewer",
     "build-project-remove-storage-objectviewer",
     "artifact-repository-deployer-add-reader",
+    "artifact-repository-rollback-add-reader",
   ]) {
     assert.equal(ids.has(expected), true, `missing mutation ${expected}`);
   }
@@ -363,6 +364,7 @@ test("plan is exact-bound, keyless, Secret-free for deployer, and emits only non
   const rollbackProviderIndex = orderedIds.indexOf("create-rollback-provider");
   assert.ok(orderedIds.indexOf("source-bucket-command-sync-remove-storage-objectviewer") < firstWifIndex);
   assert.ok(orderedIds.indexOf("artifact-repository-deployer-add-reader") < firstWifIndex);
+  assert.ok(orderedIds.indexOf("artifact-repository-rollback-add-reader") < firstWifIndex);
   assert.ok(
     orderedIds.indexOf("source-bucket-build-add-storage-objectviewer") <
       orderedIds.indexOf("build-project-remove-storage-objectviewer"),
@@ -414,7 +416,7 @@ test("apply converges once and the second plan is mutation-free", async () => {
     cli.calls.filter(({ argv }) =>
       argv.join(" ") === "config list --all --format=json(api_endpoint_overrides)").length,
     10,
-    "34 immediately visible mutations must use one initial full plan, eight fast phase readbacks, and one final full audit",
+    "immediately visible mutations must use one initial full plan, eight fast phase readbacks, and one final full audit",
   );
   const commands = cli.calls.map(({ argv }) => argv.join(" "));
   const planStart = "config list --all --format=json(api_endpoint_overrides)";
@@ -480,8 +482,30 @@ test("apply converges once and the second plan is mutation-free", async () => {
   assert.deepEqual(cli.repositoryRoles(BUILD_MEMBER), ["roles/artifactregistry.writer"]);
   assert.deepEqual(cli.repositoryRoles(BUILDER_MEMBER), ["roles/artifactregistry.reader"]);
   assert.deepEqual(cli.repositoryRoles(DEPLOYER_MEMBER), ["roles/artifactregistry.reader"]);
-  assert.deepEqual(cli.repositoryRoles(ROLLBACK_MEMBER), []);
+  assert.deepEqual(cli.repositoryRoles(ROLLBACK_MEMBER), ["roles/artifactregistry.reader"]);
   assert.deepEqual(cli.repositoryRoles(COMMAND_MEMBER), []);
+});
+
+test("missing recovery image read is repaired only on the exact repository and is idempotent", async () => {
+  const cli = new FakeGcloud({ ready: true });
+  removeRole(cli.repositoryPolicy, ROLLBACK_MEMBER, "roles/artifactregistry.reader");
+  const report = await plan(cli);
+  assert.deepEqual(report.plannedMutations.map(({ id }) => id), [
+    "artifact-repository-rollback-add-reader",
+  ]);
+  assert.deepEqual(report.plannedMutations[0].argv, [
+    "artifacts", "repositories", "add-iam-policy-binding", "clearra",
+    "--project=clearra-cloud", "--location=asia-northeast1",
+    `--member=${ROLLBACK_MEMBER}`, "--role=roles/artifactregistry.reader",
+    "--condition=None", "--quiet",
+  ]);
+  const applied = await applyGitHubWifBootstrap({}, { runGcloud: cli.run.bind(cli) });
+  assert.equal(applied.status, "ready");
+  assert.equal(cli.mutationCount, 1);
+  assert.equal((await plan(cli)).plannedMutations.length, 0);
+  assert.deepEqual(cli.projectRoles(ROLLBACK_MEMBER), [...ROLLBACK_PROJECT_ROLES].sort());
+  assert.deepEqual(cli.bucketRoles(ROLLBACK_MEMBER), []);
+  assert.deepEqual(roles(cli.serviceAccountPolicies.get(RUNTIME_EMAIL), ROLLBACK_MEMBER), []);
 });
 
 test("ambiguous successful mutation is re-observed instead of duplicated", async () => {
@@ -1100,7 +1124,9 @@ test("unexpected deployer, impersonation, repository, bucket, or command-sync ro
     (cli) => cli.addRepositoryRole(BUILDER_MEMBER, "roles/artifactregistry.writer"),
     (cli) => cli.addRepositoryRole(DEPLOYER_MEMBER, "roles/artifactregistry.writer"),
     (cli) => cli.addRepositoryRole(COMMAND_MEMBER, "roles/artifactregistry.reader"),
-    (cli) => cli.addRepositoryRole(ROLLBACK_MEMBER, "roles/artifactregistry.reader"),
+    (cli) => cli.addRepositoryRole(ROLLBACK_MEMBER, "roles/artifactregistry.writer"),
+    (cli) => cli.addRepositoryRole(ROLLBACK_MEMBER, "roles/artifactregistry.admin"),
+    (cli) => cli.addProjectRole(ROLLBACK_MEMBER, "roles/artifactregistry.reader"),
     (cli) => cli.addBucketRole(BUILD_MEMBER, "roles/storage.objectCreator"),
     (cli) => cli.addBucketRole(BUILDER_MEMBER, "roles/storage.objectAdmin"),
     (cli) => cli.addBucketRole(DEPLOYER_MEMBER, "roles/storage.objectViewer"),
@@ -1607,6 +1633,7 @@ class FakeGcloud {
     this.addRepositoryRole(BUILD_MEMBER, "roles/artifactregistry.writer");
     this.addRepositoryRole(BUILDER_MEMBER, "roles/artifactregistry.reader");
     this.addRepositoryRole(DEPLOYER_MEMBER, "roles/artifactregistry.reader");
+    this.addRepositoryRole(ROLLBACK_MEMBER, "roles/artifactregistry.reader");
     this.addBucketRole(BUILD_MEMBER, "roles/storage.objectViewer");
     this.addBucketRole(BUILDER_MEMBER, "roles/storage.bucketViewer");
     this.addBucketRole(BUILDER_MEMBER, "roles/storage.objectCreator");

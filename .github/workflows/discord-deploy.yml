@@ -663,6 +663,7 @@ jobs:
             throw 'Cloud runtime drifted after the sealed prestage authority'
           }
           $buildAuthority = Get-Content prepared/cloud-build-image-authority.json -Raw | ConvertFrom-Json
+          New-Item -ItemType File -Path 'prestage/cloud-candidate-deploy-attempted.marker' -ErrorAction Stop | Out-Null
           $candidateJson = & node scripts/release/cloud/candidate-release-v080.mjs deploy `
             --project $env:GCP_PROJECT_ID --source-commit $env:SOURCE_COMMIT `
             --prior-revision ([string]$prior.prior_revision) `
@@ -958,6 +959,28 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'promotion compensation Oracle restore failed' }
           New-Item -ItemType File -Path $rollbackMarker -ErrorAction Stop | Out-Null
           Write-Output 'promotion_compensation=restored-cloud-and-oracle'
+      - name: Remove only this failed deployment candidate tag
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $intentPath = Join-Path $env:GITHUB_WORKSPACE 'prestage/intended-candidate-authority.json'
+          $candidatePath = Join-Path $env:GITHUB_WORKSPACE 'prestage/cloud-candidate-deploy-attempted.marker'
+          if (-not (Test-Path -LiteralPath $intentPath -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
+            Write-Output 'failed_deploy_candidate_cleanup=no-candidate-deploy-attempt'
+            exit 0
+          }
+          $prestageState = Get-Content prestage/prestage-state.json -Raw | ConvertFrom-Json
+          $prior = Get-Content prestage/cloud-prior-authority.json -Raw | ConvertFrom-Json
+          node scripts/release/cloud/remove-failed-deploy-candidate-tag.mjs `
+            --project $env:GCP_PROJECT_ID --region $env:GCP_REGION `
+            --intent $intentPath --prior-revision ([string]$prior.prior_revision) `
+            --source-commit $env:SOURCE_COMMIT --workflow-run-id $env:GITHUB_RUN_ID `
+            --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --deployment-nonce ([string]$prestageState.deployment_nonce)
+          if ($LASTEXITCODE -ne 0) { throw 'failed candidate tag cleanup remains unverified' }
+
       - name: Always remove the temporary Oracle key
         if: always()
         shell: bash

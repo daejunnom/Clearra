@@ -983,7 +983,7 @@ async function createGitHubWifBootstrapPlanInternal(
       rollbackProjectRoles: [...ROLLBACK_PROJECT_ROLES],
       rollbackCloudRunCustomRole: ROLLBACK_RUN_ROLE_NAME,
       rollbackCloudRunPermissions: [...ROLLBACK_RUN_ROLE_PERMISSIONS],
-      rollbackArtifactRepositoryRoles: [],
+      rollbackArtifactRepositoryRoles: ["roles/artifactregistry.reader"],
       rollbackSourceBucketRoles: [],
       rollbackRuntimeServiceAccountRoles: [],
       rollbackHasBuildActAsRole: false,
@@ -1999,11 +1999,25 @@ function reconcileRepositoryRoles(policy, plannedMutations) {
     COMMAND_SYNC_MEMBER,
     "command sync must not read the build Artifact Registry repository",
   );
-  assertNoMemberRoles(
-    policy,
-    ROLLBACK_MEMBER,
-    "rollback must not read the build Artifact Registry repository",
-  );
+  const rollbackRoles = rolesForMember(policy, ROLLBACK_MEMBER, "Artifact Registry rollback authority");
+  if (rollbackRoles.some((role) => role !== "roles/artifactregistry.reader")) {
+    throw new Error("Artifact Registry rollback authority contains unexpected authority");
+  }
+  if (!rollbackRoles.includes("roles/artifactregistry.reader")) {
+    plannedMutations.push(mutation(
+      "artifact-repository-rollback-add-reader",
+      "allow Cloud Run to revalidate the exact repository image when restoring traffic or removing a candidate tag",
+      [
+        "artifacts", "repositories", "add-iam-policy-binding", ARTIFACT_REPOSITORY,
+        `--project=${PROJECT_ID}`,
+        `--location=${REGION}`,
+        `--member=${ROLLBACK_MEMBER}`,
+        "--role=roles/artifactregistry.reader",
+        "--condition=None",
+        "--quiet",
+      ],
+    ));
+  }
 }
 
 function assertExactSourceBucket(bucket) {
@@ -2592,6 +2606,11 @@ function isAllowedGcloudArguments(arguments_) {
   fixed.push([
     "artifacts", "repositories", "add-iam-policy-binding", ARTIFACT_REPOSITORY,
     `--project=${PROJECT_ID}`, `--location=${REGION}`, `--member=${DEPLOYER_MEMBER}`,
+    "--role=roles/artifactregistry.reader", "--condition=None", "--quiet",
+  ]);
+  fixed.push([
+    "artifacts", "repositories", "add-iam-policy-binding", ARTIFACT_REPOSITORY,
+    `--project=${PROJECT_ID}`, `--location=${REGION}`, `--member=${ROLLBACK_MEMBER}`,
     "--role=roles/artifactregistry.reader", "--condition=None", "--quiet",
   ]);
   for (const role of BUILDER_SOURCE_BUCKET_ROLES) {

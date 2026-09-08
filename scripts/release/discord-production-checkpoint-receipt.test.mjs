@@ -156,6 +156,7 @@ export function checkpointJobList({ completed = false } = {}) {
       const skipped = [
         "Record explicit no-op for changes outside Discord",
         "Compensate any protected-path failure after Oracle transition began",
+        "Remove only this failed deployment candidate tag",
         "Compensate catalog mutation if any later sync job step failed",
         "Upload durable catalog compensation evidence",
       ].includes(stepName);

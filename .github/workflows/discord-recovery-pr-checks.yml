@@ -1,0 +1,51 @@
+name: Discord Recovery PR Checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/discord-recovery-pr-checks.yml'
+      - 'scripts/release/**'
+      - 'scripts/tools/run-release-regression-tests*'
+  pull_request:
+    paths:
+      - '.github/workflows/discord-recovery-pr-checks.yml'
+      - 'scripts/release/**'
+      - 'scripts/tools/run-release-regression-tests*'
+  workflow_dispatch:
+
+# Unprivileged regression feedback only. No production Environment, OIDC,
+# cloud/Oracle credentials, accepted artifacts, or deployment triggers.
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-recovery-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  recovery-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run guarded traffic and inherited timestamp regressions
+        run: >-
+          node --test scripts/release/cloud/recovery-traffic.test.mjs
+          scripts/release/cloud/recovery-traffic-error.test.mjs
+          scripts/release/cloud/recovery-prestage-preflight.test.mjs
+          scripts/release/workflow-run-timestamps.test.mjs
+          scripts/release/recovery-result-chronology.test.mjs
+          scripts/tools/run-release-regression-tests.test.mjs
+      - name: Preserve existing no-actAs and recovery-evidence contracts
+        run: >-
+          node --test scripts/release/github/github-wif-bootstrap.test.mjs
+          scripts/release/discord-deploy-workflow.test.mjs
+          scripts/release/discord-deployment-recovery.test.mjs
+          scripts/release/discord-recovery-debt.test.mjs
