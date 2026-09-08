@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -33,22 +33,6 @@ import {
   parseClearraTextMessage,
   parseClearraTextRequest,
 } from "../src/clearra/text-command.mjs";
-
-function readMarkdownTree(directory) {
-  return readdirSync(directory, { withFileTypes: true })
-    .flatMap((entry) => {
-      const target = new URL(
-        `${entry.name}${entry.isDirectory() ? "/" : ""}`,
-        directory,
-      );
-      if (entry.isDirectory()) {
-        return readMarkdownTree(target);
-      }
-      return entry.isFile() && entry.name.endsWith(".md")
-        ? [readFileSync(target, "utf8")]
-        : [];
-    });
-}
 
 const legacyAliasFixture = JSON.parse(readFileSync(new URL(
   "../../../tests/fixtures/contracts/legacy_alias_equivalence.v1.json",
@@ -1268,26 +1252,12 @@ test("verify is a hidden text-only diagnostic with no slash or help discovery", 
     new URL("../src/discord/field-modal.mjs", import.meta.url),
     "utf8",
   );
-  const discordReadme = readFileSync(
-    new URL("../README.md", import.meta.url),
-    "utf8",
-  );
-  const rootReadme = readFileSync(
-    new URL("../../../README.md", import.meta.url),
-    "utf8",
-  );
-  const publicDiagnosticDocs = readMarkdownTree(
-    new URL("../../../docs/", import.meta.url),
-  ).join("\n");
-  const hiddenDiagnosticDescription =
-    /--diagnostics|(?:^|[\s`])\/verify(?=$|[\s`])|\$verify|>verify|diagnostic\.verify|VerifyKicks|`Verify`|\b(?:clearra|sfinder)\s+verify\b|\bverify\s+kicks\b|\bhidden\s+verify\b|\bverification\s+(?:scope|commands)\b|\b(?:reserved|hidden|internal|non-search)\s+diagnostic(?:s|\s+probes?)?\b|\bdiagnostic\s+(?:root|route|modal|boundary|probes?|feature)\b|\bdiagnostics?\s+intentionally\b/iu;
+  // README/docs discovery has one dependency-free owner in the metadata gate:
+  // scripts/tools/public-command-docs.test.mjs. Keep live UI/parser checks here.
   assert.equal(globalCommands.some(({ name }) => name === "verify"), false);
   assert.equal(findTextCommand("verify"), null);
   assert.doesNotMatch(catalogSource, /verify|검증/iu);
   assert.doesNotMatch(modalSource, /verify|검증/iu);
-  assert.doesNotMatch(discordReadme, hiddenDiagnosticDescription);
-  assert.doesNotMatch(rootReadme, hiddenDiagnosticDescription);
-  assert.doesNotMatch(publicDiagnosticDocs, hiddenDiagnosticDescription);
   assert.doesNotMatch(formatSlashCommandHelp("", "en"), /verify|checks:/i);
   assert.doesNotMatch(formatSlashCommandHelp("", "ko"), /검증/u);
   assert.match(formatSlashCommandHelp("verify", "en"), /Unknown Clearra command/);

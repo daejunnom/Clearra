@@ -53,6 +53,7 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/tools/run-gui-experiment.test.mjs",
   "scripts/tools/import-verified-clearra-wasm.test.mjs",
   "scripts/tools/powershell-test-process.test.mjs",
+  "scripts/tools/public-command-docs.test.mjs",
   "scripts/tools/retain-clearra-debug-builds.test.mjs",
   "scripts/tools/run-release-regression-tests.test.mjs",
   "scripts/tools/validate-release-cli-smokes.test.mjs",

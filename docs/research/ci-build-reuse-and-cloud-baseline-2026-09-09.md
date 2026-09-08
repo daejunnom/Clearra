@@ -47,7 +47,7 @@ To complete that route safely:
 3. Transfer accepted product inputs separately, with a closed manifest binding source, run, attempt, filenames and SHA256 values. Use immutable GCS generation/object bindings or an equivalently sealed build-input archive. Verify that manifest before Docker consumes the binary.
 4. Extend the Cloud Build readback/image authority and prepared-state bindings to include those accepted inputs; retain builder-only credentials and the existing protected promotion/rollback identities.
 5. Package the verified binary and CTK3 into the slim image without Cargo or CTK3 compilation. Keep container module-closure, startup/identity, warm CLI/Discord parity and candidate/rollback checks.
-6. Keep the explicitly unqualified Cloud diagnostic route distinct; it cannot turn a diagnostic image into canonical release authority.
+6. Keep the explicitly unqualified Cloud evaluation workflow distinct; its image cannot become canonical release authority.
 
 This avoids adding a second Cloud-specific Rust build to the gate. An alternative is prebuilding the entire Cloud image as a parallel canonical job, but that moves Cloud identity/IAM and image publication into the gate and requires a larger authority change. Reusing the single compatible Linux CLI is the preferred next integration.
 
@@ -79,3 +79,11 @@ Failure log: the implicit artifact service returned `Failed to ListArtifacts ...
 Fix: name all three same-run Discord handoff downloads explicitly with the existing `github.token`, current repository and current run ID, using the authenticated REST path already used by cross-run acceptance downloads. Source/run/attempt-bound artifact names, sealed byte checks, `actions: read`, protected approval and all promotion/recovery gates are unchanged. No PAT or broader permission is introduced. Fresh acceptance and Pages publication can then be requested for the new source; do not reuse old-source acceptance or wait for the new runs to complete.
 
 Fix verification: 71 focused deployment/recovery/runtime tests passed, including four new handoff authority checks; the Windows PowerShell Release Identity Gate passed again. The earlier full orchestration pool remains 628 tests at the time it was run; it is not relabeled as a rerun of the subsequently added checks.
+
+## Public-documentation preflight correction
+
+Run `34245709188`, Discord contract job `102127364577`, reported 548 passing tests and one failure. The failure was the public-command non-discovery check on this note's former line 50, not an engine or Bookworm runtime failure. The note now describes the unqualified Cloud evaluation workflow without the disallowed wording.
+
+The unchanged document policy has moved from the CTK3-dependent Discord suite into the dependency-free metadata regression pool. It still covers both public READMEs and every nested Markdown document, including research notes. Live slash/help/parser checks remain in the Discord suite. Each violation reports only the file, line and bounded matched text; all matching files are reported without dumping the entire documentation tree into Actions logs.
+
+Validation: reproduced the old committed document's single violation at line 50; the corrected tree and policy/manifest regressions passed (8 tests); the local Discord built-only suite passed (657 tests); Release Identity Gate and release CLI workflow validation passed. No CTK3, Rust or WASM rebuild was performed for this document/test-orchestration correction.
