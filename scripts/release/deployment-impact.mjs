@@ -423,7 +423,7 @@ function isHeavyCloudOnlyPath(path) {
   return (
     path.startsWith("apps/clearra-discord-bot/src/job-service/") ||
     path.startsWith("apps/clearra-discord-bot/src/cloud-run/") ||
-    /^apps\/clearra-discord-bot\/(?:Dockerfile\.|cloudbuild-(?:current-)?job-service\.yaml$)/u.test(path) ||
+    /^apps\/clearra-discord-bot\/(?:Dockerfile\.|cloudbuild-(?:current-|accepted-)?job-service\.yaml$)/u.test(path) ||
     /^apps\/clearra-discord-bot\/scripts\/(?:prepare-cloud|run-cloud|verify-cloud)/u.test(path)
   );
 }

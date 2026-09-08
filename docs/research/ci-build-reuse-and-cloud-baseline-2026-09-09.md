@@ -36,11 +36,11 @@ Do not launch competing Cargo processes against a shared writable target merely 
 
 The Bookworm switch changes the build/runtime compatibility baseline, not the search algorithm, worker budget or CPU target policy. Both existing compile paths use the same feature pair, `--release`, Thin LTO and one codegen unit. `clearra-cli` maps `wasm-cpu-runtime` to `clearra-app/parallel`; this is a native Rust CLI, not an added WASM emulator. No existing `target-cpu=native` optimization is removed. There is therefore no source-based reason to predict a material compute slowdown solely from Bookworm. Compiler, allocator and host differences can still affect measured time; retain the warm CLI/Discord parity checks rather than claim a measured zero regression or split the builds without evidence.
 
-## Cloud Run replacement assessment and remaining integration
+## Original Cloud Run replacement assessment
 
-**Not switched in this change:** the production Cloud Build still compiles its CLI and CTK3 from the exact source archive. The new Bookworm producer/probe establishes a compatible accepted CLI for a later no-recompile packaging route; it is not a claim that Cloud Build reuse is already active.
+**Historical scope of `e817ff5`:** production Cloud Build still compiled its CLI and CTK3 from the exact source archive. That change established the compatible Bookworm producer/probe only. The follow-up implementation below now connects accepted-product reuse for the next deployment; it does not change an already running deployment.
 
-To complete that route safely:
+Original integration checklist, implemented by the follow-up below:
 
 1. Download the accepted Linux CLI and CTK3 from the exact canonical run and attempt, validate their bytes against the canonical evidence/CTK3 manifest, and retain the source identity checks. Never substitute the latest release tag or an unqualified candidate artifact.
 2. Keep `exact-source.tar.gz` byte-for-byte source-only. Oracle recovery and the Cloud image authority depend on that boundary. Do not silently append generated CLI/CTK3 files to it.
@@ -49,7 +49,7 @@ To complete that route safely:
 5. Package the verified binary and CTK3 into the slim image without Cargo or CTK3 compilation. Keep container module-closure, startup/identity, warm CLI/Discord parity and candidate/rollback checks.
 6. Keep the explicitly unqualified Cloud evaluation workflow distinct; its image cannot become canonical release authority.
 
-This avoids adding a second Cloud-specific Rust build to the gate. An alternative is prebuilding the entire Cloud image as a parallel canonical job, but that moves Cloud identity/IAM and image publication into the gate and requires a larger authority change. Reusing the single compatible Linux CLI is the preferred next integration.
+This avoids adding a second Cloud-specific Rust build to the gate. An alternative was prebuilding the entire Cloud image as a parallel canonical job, but that would move Cloud identity/IAM and image publication into the gate and require a larger authority change. The follow-up uses the single compatible Linux CLI.
 
 ## Verification
 
@@ -95,3 +95,25 @@ Run `34246801516`, Linux CLI job `102131100147`, passed compilation and package 
 The verifier now reads the public nested report, and its regression cases reject a missing/wrong report even if a misleading root `mode` is supplied. Identity mutations cover every probe and every identity field. The OS/architecture, binary-digest and no-recompilation checks remain unchanged.
 
 Validation: the corrected fixture first reproduced three failures in the old verifier; all five focused cases passed after the fix. All three real probe commands also passed the corrected output verifier against the accepted Windows CLI artifact from run `34237996138`, source `21c0a7a76c929db9a8a68ae9e2f30c206b9a97b1`: the root mode was absent, `finesse_report.mode` was `search`, and the report was complete. This validates the shared CLI output contract, not a local Linux-container run. The bounded release regression pool passed **638 tests in 53 files** (24.01s); Release Identity Gate and release CLI workflow validation passed. No Rust/WASM rebuild was performed locally. Fresh acceptance must still pass the actual Bookworm runtime gate before publication.
+
+## Accepted-product packaging follow-up (next deployment only)
+
+The production workflow now downloads the Linux CLI from the **same exact canonical run and attempt** as CTK3. It verifies the binary against the canonical acceptance artifact hash/size/name and verifies CTK3's sealed files and the acceptance-bound manifest digest. A missing artifact or mismatch blocks preparation; there is no fallback compilation.
+
+The Oracle `exact-source.tar.gz` remains byte-for-byte source-only. A separate `cloud-build-inputs.tar.gz` carries an `inputs/` directory containing a copy of that unchanged archive, the accepted CLI, accepted CTK3, canonical acceptance evidence and a closed source/run/attempt-bound manifest. This transport uses the existing source staging bucket and builder identity, without adding another upload permission or credential.
+
+`cloudbuild-accepted-job-service.yaml` first verifies the externally supplied manifest hash and the inner source hash **before extraction**, then runs the full input verifier from that authenticated source. `Dockerfile.accepted-job-service` installs runtime npm dependencies with lifecycle scripts disabled, copies accepted products, runs the Bookworm CLI/identity/CTK3/module checks, and packages the image as the non-root Node user. It contains no Rust toolchain and no CTK3 build command. CLI bytes are checked again in the final image. The existing source-build Dockerfile/config remain separate for independent evaluations; production never selects them.
+
+Cloud Build requests SHA256 source provenance. The new v2 image authority requires the fetched transport's base64 SHA256 to match the local archive, binds the resolved storage generation, accepted run/attempt, manifest and product hashes, and requires both packaging steps to succeed. The existing prepared-state hash transitively binds this v2 authority; protected promotion rechecks its inputs before any runtime mutation. Historical v1 image authority and prepared-state formats are unchanged, and recovery recognizes both old and new preparation step names.
+
+Cloud Build itself remains necessary to assemble and publish the container image. The removed work is the second Rust compilation and second CTK3 compilation, not dependency installation, artifact verification, image upload, warm CLI/Discord checks or rollback protection. No measured deployment speedup is claimed before an actual run of this route.
+
+Cloud-only packaging config changes are classified as managed-runtime changes rather than unnecessarily selecting the Oracle gateway. No workflow dispatch, Cloud Build submission, deployment cancellation or runtime mutation is part of preparing this follow-up.
+
+Reference: [Cloud Build source provenance and requested SHA256 hashes](https://docs.cloud.google.com/build/docs/api/reference/rest/v1/projects.builds#SourceProvenance). For a single uploaded tarball, provenance describes that uploaded archive; the inner Git archive and individual accepted products are separately bound by the input manifest.
+
+Follow-up validation: **664 release regressions in 55 files passed** (26.77s); **8 static architecture tasks passed**, with the same 97 existing advisories and no errors (40.25s). Both workflow/config YAML files parsed successfully, all ten custom Cloud substitutions are bound, and the actual bootstrap JavaScript parsed and executed locally against a fixture archive plus the real verifier. Mutation cases cover wrong run/attempt/source, changed accepted products, altered manifests, missing or mismatched fetched-source provenance, masked verification failure and source-build fallback.
+
+The producer also verified real Linux CLI/CTK3/canonical-evidence artifacts from accepted run `34249090251`, source `01d2648ab04dbaaf3cf1374f5ad62c6fa0560084`, using a source archive produced by the existing exact-archive helper. This checks actual artifact formats and byte bindings without compiling or running the Linux executable on Windows. Docker is unavailable locally: no real container build, Cloud submission or deployment was performed, and an end-to-end packaging time is not yet measured.
+
+The in-flight Discord release still requires remote main to equal its accepted source at checkpoint finalization. Keep this follow-up on `codex/reuse-accepted-cloud-inputs` until that release is no longer active, then merge before the next explicitly requested deployment; do not move main underneath the current release. This preparation neither cancels nor retries it.

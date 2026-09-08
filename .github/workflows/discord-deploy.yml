@@ -369,6 +369,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ needs.authority.outputs.accepted_run_id }}
       - name: Verify accepted evidence and package only runtime dependencies
+        id: accepted-inputs
         shell: bash
         run: |
           set -euo pipefail
@@ -380,6 +381,7 @@ jobs:
             --expected-run-id "$ACCEPTED_RUN_ID" \
             --expected-run-attempt "$ACCEPTED_RUN_ATTEMPT"
           version="$(node scripts/release/validate-release-metadata.mjs)"
+          echo "release_version=$version" >> "$GITHUB_OUTPUT"
           node scripts/release/validate-discord-accepted-inputs.mjs \
             --repository "$GITHUB_REPOSITORY" \
             --version "$version" \
@@ -398,24 +400,59 @@ jobs:
           node scripts/release/create-exact-source-archive.mjs \
             --source-commit "$SOURCE_COMMIT" \
             --output "$GITHUB_WORKSPACE/evidence/exact-source.tar.gz"
-      - name: Build the exact source archive once in Cloud Build
+      - name: Download the already accepted Linux CLI
+        uses: actions/download-artifact@v4
+        with:
+          name: clearra-linux-cli-v${{ steps.accepted-inputs.outputs.release_version }}-run-${{ needs.authority.outputs.accepted_run_id }}-attempt-${{ needs.authority.outputs.accepted_run_attempt }}
+          path: evidence/accepted-linux-cli
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.authority.outputs.accepted_run_id }}
+      - name: Seal accepted Cloud build inputs without recompilation
+        id: cloud-inputs
+        env:
+          PRODUCT_VERSION: ${{ steps.accepted-inputs.outputs.release_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/cloud-build-inputs
+          node scripts/release/cloud/accepted-build-inputs.mjs create \
+            --source-commit "$SOURCE_COMMIT" --run-id "$ACCEPTED_RUN_ID" --run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --repository "$GITHUB_REPOSITORY" --version "$PRODUCT_VERSION" --base-path "/${GITHUB_REPOSITORY#*/}" \
+            --canonical-acceptance-evidence "$GITHUB_WORKSPACE/evidence/canonical-acceptance/clearra-canonical-acceptance-evidence.v1.json" \
+            --accepted-ctk3-dist "$GITHUB_WORKSPACE/evidence/accepted-ctk3" \
+            --linux-cli-directory "$GITHUB_WORKSPACE/evidence/accepted-linux-cli" \
+            --exact-source-archive "$GITHUB_WORKSPACE/evidence/exact-source.tar.gz" \
+            --output-directory "$GITHUB_WORKSPACE/evidence/cloud-build-inputs/inputs"
+          tar -czf evidence/cloud-build-inputs.tar.gz -C evidence/cloud-build-inputs inputs
+          echo "manifest_sha256=$(sha256sum evidence/cloud-build-inputs/inputs/clearra-cloud-build-inputs.v1.json | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "cli_sha256=$(sha256sum evidence/cloud-build-inputs/inputs/clearra | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Package accepted products in Cloud Build without recompilation
+        env:
+          PRODUCT_VERSION: ${{ steps.accepted-inputs.outputs.release_version }}
+          INPUT_MANIFEST_SHA256: ${{ steps.cloud-inputs.outputs.manifest_sha256 }}
+          CLI_SHA256: ${{ steps.cloud-inputs.outputs.cli_sha256 }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/clearra-cloud-build-config"
           tar -xzf evidence/exact-source.tar.gz \
             -C "$RUNNER_TEMP/clearra-cloud-build-config" \
-            apps/clearra-discord-bot/cloudbuild-current-job-service.yaml
-          gcloud builds submit evidence/exact-source.tar.gz \
+            apps/clearra-discord-bot/cloudbuild-accepted-job-service.yaml
+          gcloud builds submit evidence/cloud-build-inputs.tar.gz \
             --project="$GCP_PROJECT_ID" \
             --region="$GCP_REGION" \
             --gcs-source-staging-dir="gs://clearra-cloud_cloudbuild/source" \
             --service-account="projects/$GCP_PROJECT_ID/serviceAccounts/clearra-build@$GCP_PROJECT_ID.iam.gserviceaccount.com" \
-            --config="$RUNNER_TEMP/clearra-cloud-build-config/apps/clearra-discord-bot/cloudbuild-current-job-service.yaml" \
-            --substitutions="_REGION=$GCP_REGION,_REPOSITORY=clearra,_IMAGE_NAME=clearra-current-job,_TAG=source-$SOURCE_COMMIT,_SOURCE_COMMIT=$SOURCE_COMMIT" \
+            --config="$RUNNER_TEMP/clearra-cloud-build-config/apps/clearra-discord-bot/cloudbuild-accepted-job-service.yaml" \
+            --substitutions="_REGION=$GCP_REGION,_REPOSITORY=clearra,_IMAGE_NAME=clearra-current-job,_TAG=source-$SOURCE_COMMIT,_SOURCE_COMMIT=$SOURCE_COMMIT,_PRODUCT_VERSION=$PRODUCT_VERSION,_ACCEPTED_RUN_ID=$ACCEPTED_RUN_ID,_ACCEPTED_RUN_ATTEMPT=$ACCEPTED_RUN_ATTEMPT,_INPUT_MANIFEST_SHA256=$INPUT_MANIFEST_SHA256,_CLI_SHA256=$CLI_SHA256" \
             --quiet --format=json > evidence/cloud-build-readback.json
-          node scripts/release/cloud/cloud-build-image-authority-v080.mjs \
+          node scripts/release/cloud/accepted-build-image-authority.mjs create \
             --source-commit "$SOURCE_COMMIT" --project "$GCP_PROJECT_ID" \
+            --run-id "$ACCEPTED_RUN_ID" --run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --input-directory "$GITHUB_WORKSPACE/evidence/cloud-build-inputs/inputs" \
+            --input-archive "$GITHUB_WORKSPACE/evidence/cloud-build-inputs.tar.gz" \
+            --manifest-sha256 "$INPUT_MANIFEST_SHA256" \
             --exact-source-archive "$GITHUB_WORKSPACE/evidence/exact-source.tar.gz" \
             --build-readback "$GITHUB_WORKSPACE/evidence/cloud-build-readback.json" \
             --output "$GITHUB_WORKSPACE/evidence/cloud-build-image-authority.json"
@@ -531,6 +568,15 @@ jobs:
             --binding "exact_source_archive=$env:GITHUB_WORKSPACE/prepared/exact-source.tar.gz" `
             --binding "recovery_debt_clearance=$env:GITHUB_WORKSPACE/prepared/recovery-debt/recovery-debt-clearance.json"
           if ($LASTEXITCODE -ne 0) { throw 'prepared artifact verification failed' }
+          node scripts/release/cloud/accepted-build-image-authority.mjs verify `
+            --report prepared/cloud-build-image-authority.json `
+            --source-commit $env:SOURCE_COMMIT --project $env:GCP_PROJECT_ID `
+            --run-id $env:ACCEPTED_RUN_ID --run-attempt $env:ACCEPTED_RUN_ATTEMPT `
+            --input-directory prepared/cloud-build-inputs/inputs `
+            --input-archive prepared/cloud-build-inputs.tar.gz `
+            --exact-source-archive prepared/exact-source.tar.gz `
+            --build-readback prepared/cloud-build-readback.json
+          if ($LASTEXITCODE -ne 0) { throw 'accepted Cloud product authority verification failed' }
           New-Item -ItemType Directory -Path prestage | Out-Null
           $servicePath = Join-Path $env:GITHUB_WORKSPACE 'prestage/cloud-service-before.json'
           gcloud run services describe clearra-current-job --project=$env:GCP_PROJECT_ID `

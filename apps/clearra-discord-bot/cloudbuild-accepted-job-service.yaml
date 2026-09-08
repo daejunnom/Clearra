@@ -1,0 +1,74 @@
+# Production consumes the canonical Linux CLI and CTK3. The source-only build
+# config remains separate for independent, non-publishing evaluations.
+steps:
+  - id: verify-accepted-inputs
+    name: node:22-bookworm-slim
+    entrypoint: node
+    args:
+      - --input-type=module
+      - -e
+      - |
+        import { createHash } from 'node:crypto';
+        import { readFileSync, lstatSync, mkdirSync } from 'node:fs';
+        import { execFileSync } from 'node:child_process';
+        const [manifestHash, sourceCommit, runId, runAttempt] = process.argv.slice(1);
+        const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+        const regular = (path) => { const s = lstatSync(path); if (!s.isFile() || s.isSymbolicLink()) throw Error('Non-regular Cloud input'); };
+        const dir = lstatSync('inputs');
+        if (!dir.isDirectory() || dir.isSymbolicLink()) throw Error('Invalid Cloud input directory');
+        regular('inputs/clearra-cloud-build-inputs.v1.json');
+        const raw = readFileSync('inputs/clearra-cloud-build-inputs.v1.json');
+        if (!/^[0-9a-f]{64}$$/.test(manifestHash) || hash(raw) !== manifestHash) throw Error('Cloud manifest hash mismatch');
+        const m = JSON.parse(raw);
+        if (m.source_commit !== sourceCommit || m.accepted_run_id !== runId || m.accepted_run_attempt !== runAttempt) throw Error('Cloud input identity mismatch');
+        const entries = m.files.filter((f) => f.path === 'exact-source.tar.gz');
+        regular('inputs/exact-source.tar.gz');
+        const source = readFileSync('inputs/exact-source.tar.gz');
+        if (entries.length !== 1 || source.length !== entries[0].size_bytes || hash(source) !== entries[0].sha256) throw Error('Exact source hash mismatch');
+        mkdirSync('source');
+        execFileSync('tar', ['-xzf', 'inputs/exact-source.tar.gz', '-C', 'source'], {stdio: 'inherit'});
+        execFileSync(process.execPath, ['source/scripts/release/cloud/accepted-build-inputs.mjs', 'verify',
+          '--input-directory', 'inputs', '--manifest-sha256', manifestHash,
+          '--source-commit', sourceCommit, '--run-id', runId, '--run-attempt', runAttempt], {stdio: 'inherit'});
+      - ${_INPUT_MANIFEST_SHA256}
+      - ${_SOURCE_COMMIT}
+      - ${_ACCEPTED_RUN_ID}
+      - ${_ACCEPTED_RUN_ATTEMPT}
+  - id: package-accepted-runtime
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - source/apps/clearra-discord-bot/Dockerfile.accepted-job-service
+      - --build-arg
+      - CLEARRA_SOURCE_COMMIT=${_SOURCE_COMMIT}
+      - --build-arg
+      - CLEARRA_ENGINE_BUILD_ID=${_SOURCE_COMMIT}
+      - --build-arg
+      - CLEARRA_PRODUCT_VERSION=${_PRODUCT_VERSION}
+      - --build-arg
+      - CLEARRA_ACCEPTED_RUN_ID=${_ACCEPTED_RUN_ID}
+      - --build-arg
+      - CLEARRA_ACCEPTED_RUN_ATTEMPT=${_ACCEPTED_RUN_ATTEMPT}
+      - --build-arg
+      - CLEARRA_CLI_SHA256=${_CLI_SHA256}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}
+      - .
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}
+substitutions:
+  _REGION: asia-northeast1
+  _REPOSITORY: clearra
+  _IMAGE_NAME: clearra-current-job
+  _TAG: source-required
+  _SOURCE_COMMIT: required
+  _PRODUCT_VERSION: required
+  _ACCEPTED_RUN_ID: required
+  _ACCEPTED_RUN_ATTEMPT: required
+  _INPUT_MANIFEST_SHA256: required
+  _CLI_SHA256: required
+options:
+  logging: CLOUD_LOGGING_ONLY
+  sourceProvenanceHash: [SHA256]
+timeout: 3600s

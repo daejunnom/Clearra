@@ -218,7 +218,7 @@ test("Cloud Build stages the accepted archive in the exact bucket without the de
   assert.equal(candidate.split(exactStagingArgument).length - 1, 1);
   assert.ok(
     candidate.indexOf(exactStagingArgument) >
-      candidate.indexOf("gcloud builds submit evidence/exact-source.tar.gz"),
+      candidate.indexOf("gcloud builds submit evidence/cloud-build-inputs.tar.gz"),
   );
 });
 

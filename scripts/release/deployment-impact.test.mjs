@@ -37,6 +37,19 @@ test("Discord-only changes do not select Pages, GUI, or CLI", () => {
   assert.equal(impact.requiresFullGate, true);
 });
 
+test("accepted Cloud packaging configuration does not select an unrelated Oracle gateway deployment", () => {
+  for (const path of [
+    "apps/clearra-discord-bot/cloudbuild-accepted-job-service.yaml",
+    "apps/clearra-discord-bot/Dockerfile.accepted-job-service",
+  ]) {
+    const impact = classifyDeploymentImpact([path]);
+    assert.equal(impact.deployHeavyCloudRuntime, true, path);
+    assert.equal(impact.deployDiscordGateway, false, path);
+    assert.equal(impact.deployPages, false, path);
+    assert.equal(impact.deployCli, false, path);
+  }
+});
+
 test("docs and tests only select no deployment surface", () => {
   const impact = classifyDeploymentImpact([
     "docs/release.md",
