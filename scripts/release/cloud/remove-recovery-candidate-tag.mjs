@@ -48,7 +48,20 @@ export async function removeRecoveryCandidateTag(target, {
 
   // validateOnly is not evidence of runtime recovery and does not guarantee
   // the subsequent write will pass IAM. Denial never falls back to v1/deployer.
-  await wait(await request("PATCH", plan.body.name, plan.body, true));
+  // Cloud Run can return a non-persisted Operation containing a validated
+  // Service, with no `done` field. Polling that dry-run name returns 404.
+  // Accept only that explicit response shape (or an immediate completion),
+  // never relax polling/error handling for the actual mutation below.
+  const validation = await request("PATCH", plan.body.name, plan.body, true);
+  if (!validation || typeof validation !== "object" || Array.isArray(validation) || validation.error ||
+      (validation.name !== undefined && !/^projects\/(?:clearra-cloud|50060711800)\/locations\/asia-northeast1\/operations\/[A-Za-z0-9_-]+$/u.test(validation.name)) ||
+      (validation.done !== true &&
+        ((validation.done !== undefined && validation.done !== false) ||
+          typeof validation.name !== "string" ||
+          validation.metadata?.["@type"] !== "type.googleapis.com/google.cloud.run.v2.Service" ||
+          validation.metadata.name !== plan.body.name))) {
+    throw new Error("Cloud validation operation is invalid; no mutation attempted");
+  }
   const checked = await read();
   assertUnchangedBeforePatch(plan, checked.service, checked.revision);
   if (validateOnly) return { status: "validated-not-restored" };

@@ -9,6 +9,23 @@ const scriptsDirectory = resolve(import.meta.dirname, "..", "scripts");
 const restorePath = resolve(scriptsDirectory, "restore-oracle-release");
 const releaseDigestPath = resolve(scriptsDirectory, "release-tree-digest.mjs");
 
+test("Oracle rollback static gate tracks the executable restoration contract", async () => {
+  const [source, gate] = await Promise.all([
+    readFile(restorePath, "utf8"),
+    readFile(resolve(scriptsDirectory, "../../../scripts/architecture/validate_release_static_contract.ps1"), "utf8"),
+  ]);
+  const block = gate.match(/foreach \(\$required in @\(\s*'Prior Oracle release does not match its captured tree digest\.'([\s\S]*?)\)\) \{\s*if \(\$oracleRestore\.IndexOf/u);
+  assert.ok(block, "the static gate must retain the fail-closed restore contract");
+  const markers = [...block[0].matchAll(/^\s*'([^']+)'[,]?\s*$/gmu)].map((match) => match[1]);
+  assert.ok(markers.length >= 9);
+  for (const marker of markers) {
+    assert.ok(source.includes(marker), `static rollback marker drifted: ${marker}`);
+  }
+  for (const marker of ["wait_for_prior_process() {", 'while [ "$attempts" -lt 60 ]', '"$process_cwd" = "$prior_release/apps/clearra-discord-bot"']) {
+    assert.ok(markers.some((entry) => entry.includes(marker)), `static readiness protection missing: ${marker}`);
+  }
+});
+
 test("Oracle rollback leaves only a fully verified restored service active", async () => {
   const source = await readFile(restorePath, "utf8");
   for (const marker of [

@@ -115,6 +115,43 @@ test("successful validation is rechecked before one etag-bound write and indepen
   for (const call of f.calls.filter((x) => x.method === "PATCH")) assert.equal(call.body.etag, "etag-1");
 });
 
+test("non-persisted validateOnly Operation is not polled and never counts as a restoration", async () => {
+  for (const validateOnly of [true, false]) {
+    const f = fakeFlow(); const base = f.request; let polls = 0;
+    f.request = async (...args) => {
+      if (args[1].includes("/operations/")) { polls += 1; throw new Error("HTTP 404: dry-run operation is not persisted"); }
+      const result = await base(...args);
+      return args[0] === "PATCH" && args[3] === true
+        ? { name: "projects/clearra-cloud/locations/asia-northeast1/operations/validated",
+          metadata: { "@type": "type.googleapis.com/google.cloud.run.v2.Service", name: RECOVERY_SERVICE } }
+        : result;
+    };
+    assert.deepEqual(await removeRecoveryCandidateTag(f.target, { ...f, validateOnly }),
+      { status: validateOnly ? "validated-not-restored" : "tag-removal-verified" });
+    assert.equal(polls, 0);
+    assert.equal(f.calls.filter((call) => call.method === "PATCH" && call.validateOnly === false).length, validateOnly ? 0 : 1);
+  }
+});
+
+test("unbound dry-run metadata and actual mutation polling errors remain failures", async () => {
+  for (const metadata of [{}, { "@type": "other", name: RECOVERY_SERVICE },
+    { "@type": "type.googleapis.com/google.cloud.run.v2.Service", name: RECOVERY_SERVICE + "-foreign" }]) {
+    const f = fakeFlow(); const base = f.request;
+    f.request = async (...args) => args[0] === "PATCH"
+      ? { name: "projects/clearra-cloud/locations/asia-northeast1/operations/validated", metadata }
+      : base(...args);
+    await assert.rejects(removeRecoveryCandidateTag(f.target, f), /validation operation/);
+  }
+  const f = fakeFlow(); const base = f.request;
+  f.request = async (...args) => {
+    if (args[1].includes("/operations/")) throw new Error("HTTP 404: actual operation missing");
+    const result = await base(...args);
+    return args[0] === "PATCH" && args[3] === false
+      ? { name: "projects/clearra-cloud/locations/asia-northeast1/operations/actual", done: false } : result;
+  };
+  await assert.rejects(removeRecoveryCandidateTag(f.target, { ...f, pause: async () => {} }), /actual operation missing/);
+});
+
 test("state changes after validation prevent the write", async () => {
   const f = fakeFlow({ drift: true });
   await assert.rejects(removeRecoveryCandidateTag(f.target, f), /preimage changed/);
@@ -129,7 +166,12 @@ test("write denial remains failure and is not retried by this helper", async () 
 
 test("post-write template changes cannot be reported as cleanup success", async () => {
   const f = fakeFlow({ corruptAfter: true });
-  await assert.rejects(removeRecoveryCandidateTag(f.target, f), /non-traffic authority/);
+  await assert.rejects(removeRecoveryCandidateTag(f.target, f), /non-traffic authority.*service_fields=template; revision_fields=none/u);
+  const original = fixture(); const plan = planCandidateTagRemoval(original.service, original.revision, original.target);
+  const changed = after(original); changed['unknown-sensitive-field'] = 'do-not-print-this';
+  assert.throws(() => verifyCandidateTagRemoval(plan, changed, original.revision), error =>
+    error.message.includes('service_fields=unclassified-field') && !error.message.includes('unknown-sensitive-field') &&
+    !error.message.includes('do-not-print-this'));
 });
 
 test("already tagless readback skips all PATCH calls", async () => {
@@ -154,7 +196,7 @@ test("operation polling has a hard bound", async () => {
   const f = fakeFlow(); const base = f.request; let polls = 0;
   const operation = { name: "projects/clearra-cloud/locations/asia-northeast1/operations/fixture", done: false };
   f.request = async (...args) => {
-    if (args[0] === "PATCH") return operation;
+    if (args[0] === "PATCH") return args[3] === true ? { done: true } : operation;
     if (args[1].includes("/operations/")) { polls += 1; return operation; }
     return base(...args);
   };

@@ -126,9 +126,21 @@ function unchangedServiceFields(service) {
 
 export function verifyCandidateTagRemoval(plan, service, revision) {
   const after = planCandidateTagRemoval(service, revision, plan.target);
-  if (after.removed || !isDeepStrictEqual(unchangedServiceFields(plan.before), unchangedServiceFields(service)) ||
+  const beforeFields = unchangedServiceFields(plan.before);
+  const afterFields = unchangedServiceFields(service);
+  if (after.removed || !isDeepStrictEqual(beforeFields, afterFields) ||
       !isDeepStrictEqual(plan.candidateBefore, revision)) {
-    throw new Error("Cloud tag cleanup changed non-traffic authority or retained candidate routing");
+    // Field names only: never include the service/template contents or raw API
+    // values. Keep exact comparisons fail-closed, even for an unknown drift.
+    const known = new Set(["name", "uid", "createTime", "deleteTime", "expireTime", "creator", "lastModifier",
+      "client", "clientVersion", "description", "labels", "annotations", "ingress", "launchStage", "template",
+      "scaling", "invokerIamDisabled", "defaultUriDisabled", "uri", "urls", "customAudiences", "binaryAuthorization",
+      "satisfiesPzs", "satisfiesPzi", "latestReadyRevision", "latestCreatedRevision", "trafficStatuses", "reconciling",
+      "containers", "serviceAccount", "conditions", "observedGeneration", "generation", "etag", "updateTime"]);
+    const changed = (before, current) => [...new Set([...Object.keys(before), ...Object.keys(current)])]
+      .filter(key => !isDeepStrictEqual(before[key], current[key]))
+      .map(key => known.has(key) ? key : "unclassified-field").sort().slice(0, 12).join(",") || "none";
+    throw new Error(`Cloud tag cleanup changed non-traffic authority or retained candidate routing; service_fields=${changed(beforeFields, afterFields)}; revision_fields=${changed(plan.candidateBefore, revision)}; candidate_routing=${after.removed ? "present" : "absent"}`);
   }
   const expected = trafficAuthority(plan.body.traffic, plan.target);
   const actual = trafficAuthority(service.traffic, plan.target);

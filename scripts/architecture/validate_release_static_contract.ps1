@@ -5015,7 +5015,10 @@ function Invoke-ReleaseIdentityGateValidation {
         'restore_verified=1',
         '[ "$service_transition_started" -eq 1 ] && [ "$restore_verified" -ne 1 ]',
         '"$systemctl_path" stop "$service_name" >/dev/null 2>&1 || true',
-        'Restored Oracle process does not run from the prior immutable release.'
+        'wait_for_prior_process() {',
+        'while [ "$attempts" -lt 60 ]',
+        '[ "$process_cwd" = "$prior_release/apps/clearra-discord-bot" ] && return 0',
+        'Restored Oracle process did not reach the exact prior immutable release within the startup deadline.'
     )) {
         if ($oracleRestore.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Oracle rollback helper is missing fail-closed restoration marker '$required'"
