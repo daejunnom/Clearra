@@ -571,6 +571,44 @@ function Invoke-ArchitectureValidationAuthorityPolicy {
     ) 'Architecture validation authority'
 }
 
+function Assert-ReleasePowerShellRegressionBoundary {
+    param([string]$Caller, [string]$Runner)
+
+    # Check each physical owner explicitly. The Oracle fixture delegates process
+    # policy to a shared runner; requiring spawnSync in the caller rejects that
+    # valid boundary, while concatenating their text could hide a broken import.
+    foreach ($required in @(
+        'import { runPowerShellTest } from "../../tools/powershell-test-process.mjs";',
+        'runPowerShellTest(["-File", TEST_SCRIPT], { cwd: REPOSITORY_ROOT })',
+        'oracle_release_deploy_wrapper_test=pass',
+        'result.stdout.match('
+    )) {
+        if ($Caller.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Oracle prestage Node regression delegation is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'import { spawnSync } from "node:child_process";',
+        'export function runPowerShellTest(args, {',
+        'spawnImplementation = spawnSync',
+        'const result = spawnImplementation(',
+        '["-NoLogo", "-NoProfile", "-NonInteractive", ...args]',
+        'shell: false',
+        'stdio: ["ignore", "pipe", "pipe"]',
+        'windowsHide: true',
+        'export const POWERSHELL_TEST_TIMEOUT_MS = 60_000;',
+        'timeout: POWERSHELL_TEST_TIMEOUT_MS',
+        'killSignal: "SIGKILL"',
+        'if (result.error || result.status === null || result.signal)',
+        'throw error;',
+        'return result;'
+    )) {
+        if ($Runner.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Shared PowerShell regression process boundary is missing '$required'"
+        }
+    }
+}
+
 function Invoke-ReleaseIdentityGateValidation {
     $release = Read-Text '.github/workflows/release-cli.yml'
     $releasePublicationFinalizer = Read-Text '.github/workflows/finalize-release-publication.yml'
@@ -617,7 +655,8 @@ function Invoke-ReleaseIdentityGateValidation {
     $oracleDeployLauncher = Read-Text 'scripts/release/oracle/clearra-oracle-release-deploy-v080'
     $oracleDeployInvoker = Read-Text 'scripts/release/oracle/invoke-release-deploy-v080.ps1'
     $oracleDeployInvokerTest = Read-Text 'scripts/release/oracle/invoke-release-deploy-v080.test.ps1'
-    $oracleDeployInvokerNodeTest = Read-Text 'scripts/release/oracle/invoke-release-deploy-v080.test.mjs'
+    $oracleDeployInvokerNodeTest = Read-PhysicalText 'scripts/release/oracle/invoke-release-deploy-v080.test.mjs'
+    $powerShellTestProcess = Read-PhysicalText 'scripts/tools/powershell-test-process.mjs'
     $oraclePrestageHelperBundle = Read-Text 'scripts/release/oracle/create-prestage-helper-bundle.mjs'
     $oraclePrestageHelperBundleTest = Read-Text 'scripts/release/oracle/create-prestage-helper-bundle.test.mjs'
     $oracleCandidateSettings = Read-Text 'scripts/release/oracle/candidate-settings-v080.mjs'
@@ -2197,6 +2236,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 'scripts/release/validate-release-metadata.test.mjs',
                 'scripts/release/verify-remote-annotated-tag.test.mjs',
                 'scripts/tools/run-focused-js-tests.test.mjs',
+                'scripts/tools/powershell-test-process.test.mjs',
                 'scripts/tools/run-release-regression-tests.test.mjs',
                 'scripts/tools/validate-release-cli-smokes.test.mjs'
             )) {
@@ -4875,17 +4915,7 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "Typed Oracle release deploy invoker regression is missing '$required'"
         }
     }
-    foreach ($required in @(
-        'spawnSync(',
-        '"-NoLogo", "-NoProfile", "-NonInteractive", "-File", TEST_SCRIPT',
-        'shell: false',
-        'oracle_release_deploy_wrapper_test=pass',
-        'result.stdout.match('
-    )) {
-        if ($oracleDeployInvokerNodeTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
-            Add-ArchitectureError "Oracle prestage shell-free Node regression wrapper is missing '$required'"
-        }
-    }
+    Assert-ReleasePowerShellRegressionBoundary -Caller $oracleDeployInvokerNodeTest -Runner $powerShellTestProcess
     foreach ($required in @(
         'clearra.oracle.candidate-observation.v1',
         'inspectActiveOracle',

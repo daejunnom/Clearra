@@ -97,3 +97,38 @@ On Windows with Node 24.16.0, PowerShell 7.6.5, and `CI=true`, all 612 tests
 in 51 files passed in 21.9 seconds, with zero failures or skips. The fresh
 canonical dispatch remains responsible for Ubuntu/Node 22 and full product
 acceptance; local harness success is not production-deployment evidence.
+
+## Delegated process-boundary validation follow-up
+
+Canonical run
+[34234316638](https://github.com/daejunnom/Clearra/actions/runs/34234316638)
+passed metadata (including the corrected PowerShell tests), Rust, WASM,
+Pages acceptance, the CLI/desktop builds, Discord tests, sanitizer, and the
+other foundation leaves. NoProductDebt's static validation was the remaining
+failure: it still required `spawnSync`, the full PowerShell argument prefix,
+and `shell: false` inside the Oracle caller after those responsibilities had
+moved into the shared process runner. Updating that static boundary was missed
+in the preceding change. Pages queue 34234320455 consequently stopped and
+Discord 34236957813 was skipped; no new runtime permission denial occurred.
+
+The static check now reads the caller and shared runner as separate physical
+owners. It requires the exact import and file/cwd delegation in the caller,
+and the real subprocess implementation, noninteractive flags, shell-free
+execution, closed stdin, hidden process, bounded timeout, and error propagation
+in the runner. The original exact completion marker/count checks remain.
+The process-contract regression is also required in the existing single test
+manifest; no extra full test pool or product build was added.
+
+The three CI errors were reproduced locally before the change. Afterwards,
+the exact Release Identity Gate passed, as did six focused Node tests including
+the executable Oracle transport regression. A new regression executes the
+actual static boundary via its PowerShell AST, requires its single connection
+to the release identity gate, and rejects 18 in-memory weakened caller/runner
+variants without modifying repository files. This does not substitute for
+fresh canonical acceptance or claim that production deployment is complete.
+
+The full static command used by NoProductDebt also passed under Windows
+PowerShell: eight tasks, zero errors, 31.3 seconds. It still reports 97
+non-blocking module-size/cohesion warnings; those were not suppressed by this
+fix. No unrelated Rust/WASM build or full product test rerun was performed
+locally for this static-validator correction.
