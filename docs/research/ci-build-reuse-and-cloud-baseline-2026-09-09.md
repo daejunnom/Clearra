@@ -34,13 +34,13 @@ Do not launch competing Cargo processes against a shared writable target merely 
 
 ### Expected runtime performance
 
-The Bookworm switch changes the build/runtime compatibility baseline, not the search algorithm, worker budget or CPU target policy. Both existing compile paths use the same feature pair, `--release`, Thin LTO and one codegen unit. `clearra-cli` maps `wasm-cpu-runtime` to `clearra-app/parallel`; this is a native Rust CLI, not an added WASM emulator. No existing `target-cpu=native` optimization is removed. There is therefore no source-based reason to predict a material compute slowdown solely from Bookworm. Compiler, allocator and host differences can still affect measured time; retain the warm CLI/Discord parity checks rather than claim a measured zero regression or split the builds without evidence.
+The Bookworm switch changes the build/runtime compatibility baseline, not the search algorithm, worker budget or CPU target policy. Both existing compile paths use the same feature pair, `--release`, Thin LTO and one codegen unit. `clearra-cli` maps `wasm-cpu-runtime` to `clearra-app/parallel`; this is a native Rust CLI, not an added WASM emulator. No existing `target-cpu=native` optimization is removed. There is therefore no source-based reason to predict a material compute slowdown solely from Bookworm. Compiler, allocator and host differences can still affect measured time. The original recommendation to retain the warm comparison is superseded by the explicit retirement below; no measured zero regression is claimed.
 
 ## Original Cloud Run replacement assessment
 
 **Historical scope of `e817ff5`:** production Cloud Build still compiled its CLI and CTK3 from the exact source archive. That change established the compatible Bookworm producer/probe only. The follow-up implementation below now connects accepted-product reuse for the next deployment; it does not change an already running deployment.
 
-Original integration checklist, implemented by the follow-up below:
+Original integration checklist, implemented by the follow-up below (comparison items 5–6 superseded by the retirement below):
 
 1. Download the accepted Linux CLI and CTK3 from the exact canonical run and attempt, validate their bytes against the canonical evidence/CTK3 manifest, and retain the source identity checks. Never substitute the latest release tag or an unqualified candidate artifact.
 2. Keep `exact-source.tar.gz` byte-for-byte source-only. Oracle recovery and the Cloud image authority depend on that boundary. Do not silently append generated CLI/CTK3 files to it.
@@ -106,7 +106,7 @@ The Oracle `exact-source.tar.gz` remains byte-for-byte source-only. A separate `
 
 Cloud Build requests SHA256 source provenance. The new v2 image authority requires the fetched transport's base64 SHA256 to match the local archive, binds the resolved storage generation, accepted run/attempt, manifest and product hashes, and requires both packaging steps to succeed. The existing prepared-state hash transitively binds this v2 authority; protected promotion rechecks its inputs before any runtime mutation. Historical v1 image authority and prepared-state formats are unchanged, and recovery recognizes both old and new preparation step names.
 
-Cloud Build itself remains necessary to assemble and publish the container image. The removed work is the second Rust compilation and second CTK3 compilation, not dependency installation, artifact verification, image upload, warm CLI/Discord checks or rollback protection. No measured deployment speedup is claimed before an actual run of this route.
+Cloud Build itself remains necessary to assemble and publish the container image. The removed work is the second Rust compilation and second CTK3 compilation, not dependency installation, artifact verification, image upload, functional candidate smoke or rollback protection. The separate timing comparison is retired below. No measured deployment speedup is claimed before an actual run of this route.
 
 Cloud-only packaging config changes are classified as managed-runtime changes rather than unnecessarily selecting the Oracle gateway. No workflow dispatch, Cloud Build submission, deployment cancellation or runtime mutation is part of preparing this follow-up.
 
@@ -117,3 +117,15 @@ Follow-up validation: **664 release regressions in 55 files passed** (26.77s); *
 The producer also verified real Linux CLI/CTK3/canonical-evidence artifacts from accepted run `34249090251`, source `01d2648ab04dbaaf3cf1374f5ad62c6fa0560084`, using a source archive produced by the existing exact-archive helper. This checks actual artifact formats and byte bindings without compiling or running the Linux executable on Windows. Docker is unavailable locally: no real container build, Cloud submission or deployment was performed, and an end-to-end packaging time is not yet measured.
 
 The in-flight Discord release still requires remote main to equal its accepted source at checkpoint finalization. Keep this follow-up on `codex/reuse-accepted-cloud-inputs` until that release is no longer active, then merge before the next explicitly requested deployment; do not move main underneath the current release. This preparation neither cancels nor retries it.
+
+## CLI/Discord timing-comparison retirement
+
+The accepted-product path packages the exact canonical Linux CLI bytes. The removed benchmark compared that same executable and arguments through direct child-process execution and a loopback Job Service on one host, not end-to-end Discord latency or separate host performance. Its timing scopes included process startup, scheduling and HTTP transport. Three fixtures, each with one warm pair and three measured pairs, ran the solver 24 times per benchmark invocation; the Cloud variant also created and cleaned up a separate Run Job. There was no hard performance pass threshold.
+
+At the user's request, remove the production comparison and artifact steps, Candidate Preflight's repeated comparison, the standalone comparison workflow, both benchmark executables and their dedicated tests, and both container copies/imports. Keep native CLI startup/typed-output tests, accepted artifact/identity/byte checks, container module closure, the real zero-traffic candidate smoke, functional command/Job Service/canonical-result regression tests, activation and rollback. Same binary bytes do not prove that an adapter is correct or that timing will be identical across hosts; the retained functional boundaries remain required.
+
+Recovery still recognizes retired step names in historical run records, preventing old completed or failed attempts from becoming unreadable. Historical research results and the installed WIF allowance are not rewritten into new evidence; IAM is unchanged during the active release. The retired workflow cannot run from this source. Current and accepted-product container closures are both tested against the remaining functional module graph, and regression tests reject any Actions entry point that reintroduces the comparison executables.
+
+This cleanup remains on the preparation branch with the accepted-product change. It does not dispatch, cancel, retry or wait for a deployment. The current CI status is read once after local checks; an observed failure may be investigated and repaired without polling a new execution.
+
+Retirement validation: **644 release regressions in 54 files passed** (24.09s), and **80 focused Discord command, Job Service, typed-result, real candidate-smoke and container-closure tests passed**. Both edited Actions YAML files parsed, and the whitespace check passed. No Rust/WASM rebuild, Docker/Cloud build or live performance benchmark was run for this removal. Deleting the obsolete benchmark's dedicated tests does not remove the retained product/adapter tests.

@@ -33,6 +33,9 @@ const LEGACY_GITHUB_COMMAND_SYNC_SUBJECT =
   `${LEGACY_GITHUB_SUBJECT_PREFIX}:environment:discord-global-command-sync`;
 const GITHUB_WORKFLOW_REF =
   "daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main";
+// Historical authorized identity only: the comparison workflow was retired.
+// Keep the installed federation contract stable during an in-flight release;
+// removing an IAM allowance is a separate, explicit bootstrap operation.
 const GITHUB_DIAGNOSTIC_WORKFLOW_REF =
   "daejunnom/Clearra/.github/workflows/cloud-cli-diagnostic.yml@refs/heads/main";
 const GITHUB_ROLLBACK_WORKFLOW_REF =

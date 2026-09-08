@@ -227,7 +227,13 @@ test("every current promote workflow step is admitted in order by recovery", asy
     assert.ok(index > previous, `foreign or unordered current step: ${name}`);
     previous = index;
   }
-  assert.ok(actual.includes("Compare warm CLI and Discord execution on the exact zero-traffic Cloud image"));
+  for (const retired of [
+    "Compare warm CLI and Discord execution on the exact zero-traffic Cloud image",
+    "Preserve warm Cloud CLI parity diagnostics separately from release authority",
+  ]) {
+    assert.ok(!actual.includes(retired));
+    assert.ok(admitted.includes(retired), `historical recovery must still admit ${retired}`);
+  }
   assert.ok(actual.includes("Remove only this failed deployment candidate tag"));
 });
 

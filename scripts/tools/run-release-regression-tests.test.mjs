@@ -17,7 +17,6 @@ const EXPECTED_RELEASE_REGRESSIONS = Object.freeze([
   "scripts/release/candidate-preflight-workflow.test.mjs",
   "scripts/release/candidate-preflight-artifacts.test.mjs",
   "scripts/release/candidate-preflight-regressions.test.mjs",
-  "scripts/release/cloud/benchmark-cli-parity-v080.test.mjs",
   "scripts/release/cloud/accepted-build-inputs.test.mjs",
   "scripts/release/cloud/cloud-build-image-authority-v080.test.mjs",
   "scripts/release/cloud/recovery-traffic.test.mjs",

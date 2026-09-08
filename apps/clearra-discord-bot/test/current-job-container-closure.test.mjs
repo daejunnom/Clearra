@@ -3,11 +3,9 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
-const dockerfileUrl = new URL("../Dockerfile.current-job-service", import.meta.url);
 const sourceRootUrl = new URL("../", import.meta.url);
 const runtimeEntries = Object.freeze([
   "scripts/run-cloud-candidate-smoke-job.mjs",
-  "scripts/benchmark-cloud-cli-parity.mjs",
   "src/clearra/command.mjs",
   "src/job-service/main.mjs",
   "src/job-service/server.mjs",
@@ -19,36 +17,36 @@ const staticModuleSpecifier =
 const dynamicModuleSpecifier =
   /\bimport\s*\(\s*["']([^"']+)["']\s*\)/gu;
 
-test("current job image closes and imports its runtime module graph during build", async () => {
-  const dockerfile = await readFile(dockerfileUrl, "utf8");
-  const copyRules = runtimeCopyRules(dockerfile);
-  const closure = await relativeEsmClosure(runtimeEntries);
+for (const [file, stage] of [
+  ["Dockerfile.current-job-service", "node-build"],
+  ["Dockerfile.accepted-job-service", "accepted-inputs"],
+]) {
+  test(`${file} closes and imports its functional runtime module graph without timing tools`, async () => {
+    const dockerfile = await readFile(new URL(file, sourceRootUrl), "utf8");
+    const copyRules = runtimeCopyRules(dockerfile);
+    const closure = await relativeEsmClosure(runtimeEntries);
 
-  assert.match(
-    dockerfile,
-    /^COPY --from=node-build \/workspace\/apps\/clearra-discord-bot\/src \.\/src$/m,
-  );
-  assert.match(
-    dockerfile,
-    /^COPY --from=node-build \/workspace\/apps\/clearra-discord-bot\/scripts\/run-cloud-candidate-smoke-job\.mjs \.\/scripts\/run-cloud-candidate-smoke-job\.mjs$/m,
-  );
-  assert.match(
-    dockerfile,
-    /^COPY --from=node-build \/workspace\/apps\/clearra-discord-bot\/scripts\/benchmark-cloud-cli-parity\.mjs \.\/scripts\/benchmark-cloud-cli-parity\.mjs$/m,
-  );
+    for (const modulePath of ["src", "scripts/run-cloud-candidate-smoke-job.mjs"]) {
+      assert.ok(dockerfile.split(/\r?\n/u).includes(
+        `COPY --from=${stage} ${appSourcePrefix}${modulePath} ./${modulePath}`,
+      ));
+    }
+    assert.doesNotMatch(dockerfile, /benchmark-cloud-cli-parity/u);
 
-  for (const modulePath of closure) {
-    assert.ok(
-      copyRules.some((rule) => copyRulePreservesModulePath(rule, modulePath)),
-      `current-job runtime image does not copy transitive ESM dependency ${modulePath}`,
-    );
-  }
+    for (const modulePath of closure) {
+      assert.ok(
+        copyRules.some((rule) => copyRulePreservesModulePath(rule, modulePath)),
+        `${file} does not copy transitive ESM dependency ${modulePath}`,
+      );
+    }
 
-  assert.match(
-    dockerfile,
-    /^RUN node --input-type=module -e "await import\('\.\/src\/clearra\/command\.mjs'\); await import\('\.\/src\/job-service\/server\.mjs'\); await import\('\.\/scripts\/run-cloud-candidate-smoke-job\.mjs'\); await import\('\.\/scripts\/benchmark-cloud-cli-parity\.mjs'\)"$/m,
-  );
-});
+    const imports = dockerfile.match(/node --input-type=module -e "(await import[^"\r\n]+)"/u)?.[1];
+    assert.ok(imports, `${file} must import the runtime closure during packaging`);
+    for (const modulePath of [
+      "src/clearra/command.mjs", "src/job-service/server.mjs", "scripts/run-cloud-candidate-smoke-job.mjs",
+    ]) assert.ok(imports.includes(`await import('./${modulePath}')`));
+  });
+}
 
 async function relativeEsmClosure(entries) {
   const closure = new Set();
@@ -76,9 +74,9 @@ async function relativeEsmClosure(entries) {
   return closure;
 }
 
-test("job service and CLI parity import only Node builtins and source, without document codecs", async () => {
+test("job service and candidate smoke import only Node builtins and source, without document codecs", async () => {
   const closure = await relativeEsmClosure([
-    "scripts/benchmark-cloud-cli-parity.mjs", "src/job-service/server.mjs",
+    "scripts/run-cloud-candidate-smoke-job.mjs", "src/job-service/server.mjs",
   ]);
   assert.ok(!closure.has("src/discord/slash-command-input.mjs"));
   assert.ok(closure.has("src/discord/field-limits.mjs"));
@@ -100,7 +98,7 @@ function moduleSpecifiers(source) {
 
 function runtimeCopyRules(dockerfile) {
   const rules = [];
-  const copyRule = /^COPY --from=node-build (\S+) (\S+)$/gmu;
+  const copyRule = /^COPY --from=(?:node-build|accepted-inputs) (\S+) (\S+)$/gmu;
   for (const match of dockerfile.matchAll(copyRule)) {
     if (!match[1].startsWith(appSourcePrefix) || !match[2].startsWith("./")) {
       continue;

@@ -56,9 +56,12 @@ It pins repository `daejunnom/Clearra`, repository ID `1309293231`, owner ID
 `271715321`, ref `refs/heads/main`, and workflow ref
 `daejunnom/Clearra/.github/workflows/discord-deploy.yml@refs/heads/main` or
 `daejunnom/Clearra/.github/workflows/cloud-cli-diagnostic.yml@refs/heads/main`.
-The additional diagnostic workflow was explicitly approved by the user. Its
-unprotected build job uses only the main-subject builder; its protected compute
-job uses the existing environment-subject deployer. No subject/IAM role is widened.
+The additional comparison workflow was explicitly approved by the user and is
+now retired: its workflow and benchmark executables are removed. The installed
+federation contract is retained for this source-only cleanup so an in-flight
+release is unaffected; no IAM mutation or replacement evaluation is performed.
+This historical allowance does not create an executable workflow. Removing it
+from the live provider requires a separate explicit bootstrap change.
 Every exact principal uses GitHub's immutable repository subject prefix
 `repo:daejunnom@271715321/Clearra@1309293231`: the builder appends
 `:ref:refs/heads/main`, while protected Environment principals append

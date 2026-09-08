@@ -271,36 +271,13 @@ jobs:
       - name: Compile candidate CLI
         id: compile
         if: ${{ !cancelled() && steps.metadata.outcome == 'success' && steps.smokes.outcome == 'success' && steps.fixtures.outcome == 'success' }}
-        # Fail on the real transitive import graph before spending time compiling Rust.
-        # This job intentionally has no npm install or document-codec build.
-        run: |
-          node --input-type=module -e "await import('./apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs')"
-          cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search
+        run: cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search
       - name: Check candidate startup
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: target/release/clearra --help
       - name: Verify the current typed score renderer boundary
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: cargo test --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search --lib score_finder_renderer_ -- --nocapture
-      - name: Compare direct CLI and Discord execution without publishing
-        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          cpus="$(node -p 'Math.min(4, require("node:os").availableParallelism())')"
-          node apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs \
-            --executable "$GITHUB_WORKSPACE/target/release/clearra" \
-            --source-commit "$GITHUB_SHA" --cpus "$cpus" --workers "$cpus" \
-            > "$RUNNER_TEMP/unqualified-cli-parity.json"
-      - name: Preserve unqualified same-host CLI parity evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: unqualified-cli-parity-${{ github.sha }}-run-${{ github.run_id }}
-          path: ${{ runner.temp }}/unqualified-cli-parity.json
-          if-no-files-found: warn
-          retention-days: 7
       - name: Publish unqualified development binary
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         uses: actions/upload-artifact@v4

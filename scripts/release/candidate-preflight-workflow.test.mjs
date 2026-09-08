@@ -28,7 +28,7 @@ test('candidate CLI continues only independent tests with successful setup or bi
   const compile = candidateCliStep('Compile candidate CLI');
   assert.match(compile, /if: \$\{\{ !cancelled\(\) && steps\.metadata\.outcome == 'success' && steps\.smokes\.outcome == 'success' && steps\.fixtures\.outcome == 'success' \}\}/u);
   for (const name of ['Check candidate startup', 'Verify the current typed score renderer boundary',
-    'Compare direct CLI and Discord execution without publishing']) {
+    'Publish unqualified development binary']) {
     const step = candidateCliStep(name);
     assert.match(step, /if: \$\{\{ !cancelled\(\) && steps\.compile\.outcome == 'success' \}\}/u);
     assert.doesNotMatch(step, /continue-on-error|\|\| true/u);
@@ -156,21 +156,17 @@ test('Jstris diagnostic is bounded, same-binary and separate from release or GUI
   assert.doesNotMatch(workflow, /repository: Qnia28|benchmark-qnia|unqualified-qnia|qnia-cpsat-reference/u);
 });
 
-test('candidate CLI compares actual direct and Discord paths with one release binary and no Cloud mutation', () => {
+test('candidate CLI retains native startup and typed output checks without a duplicate timing benchmark', () => {
   const job = workflow.split('  candidate-cli:')[1].split('  candidate-minimum-diagnostic:')[0];
   assert.equal((job.match(/cargo build /gu) ?? []).length, 1);
-  assert.ok(job.indexOf("await import('./apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs')") >= 0);
-  assert.ok(job.indexOf("await import('./apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs')") < job.indexOf('cargo build '));
   assert.match(job, /cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search/u);
+  assert.match(job, /run: target\/release\/clearra --help/u);
   assert.match(job, /cargo test --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search --lib score_finder_renderer_ -- --nocapture/u);
   assert.match(job, /CLEARRA_SOURCE_COMMIT: \$\{\{ github\.sha \}\}/u);
   assert.match(job, /CLEARRA_ENGINE_BUILD_ID: \$\{\{ github\.sha \}\}/u);
-  assert.match(job, /Math\.min\(4, require\("node:os"\)\.availableParallelism\(\)\)/u);
-  assert.match(job, /--executable "\$GITHUB_WORKSPACE\/target\/release\/clearra"/u);
-  assert.match(job, /--source-commit "\$GITHUB_SHA" --cpus "\$cpus" --workers "\$cpus"/u);
-  assert.match(job, /if: always\(\)[\s\S]*name: unqualified-cli-parity-/u);
+  assert.match(job, /name: unqualified-candidate-cli-\$\{\{ github\.sha \}\}/u);
   assert.match(job, /steps\.compile\.outcome == 'success'/u);
-  assert.doesNotMatch(job, /target\/debug|continue-on-error:|\bgcloud\b|--workspace|ReleaseAcceptance/u);
+  assert.doesNotMatch(job, /cli-parity|Compare direct CLI|target\/debug|continue-on-error:|\bgcloud\b|--workspace|ReleaseAcceptance/u);
 });
 
 test('existing production triggers cannot consume Candidate Preflight by name or branch', () => {

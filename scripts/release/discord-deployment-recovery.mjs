@@ -102,6 +102,8 @@ const PRIMARY_PROMOTE_STEP_NAMES = new Set([
   PRESTAGE_UPLOAD_STEP,
   RUNTIME_MUTATION_STEPS[0],
   LIVE_UPLOAD_STEP,
+  // Retired timing steps remain valid only when interpreting historical runs.
+  // Removing them here would strand recovery evidence from earlier releases.
   "Compare warm CLI and Discord execution on the exact zero-traffic Cloud image",
   "Preserve warm Cloud CLI parity diagnostics separately from release authority",
   RUNTIME_MUTATION_STEPS[1],

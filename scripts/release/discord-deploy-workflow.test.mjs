@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 import { runPowerShellTest } from "../tools/powershell-test-process.mjs";
 
@@ -235,19 +235,30 @@ test("prestage and live recovery artifacts bracket every protected runtime trans
   assert.match(primary, /discord-live-recovery-authority-\$\{\{ needs\.authority\.outputs\.source_commit \}\}-run-/u);
 });
 
-test("warm Cloud CLI parity is bounded and precedes activation without replacing acceptance or recovery evidence", () => {
+test("accepted Cloud promotion keeps functional smoke and recovery evidence without a repeated timing comparison", () => {
+  const smoke = primary.indexOf("candidate-release-v080.mjs smoke");
   const uploaded = primary.indexOf("Upload live-transition authority before Oracle activation or Cloud traffic");
-  const diagnostic = primary.indexOf("Compare warm CLI and Discord execution on the exact zero-traffic Cloud image");
-  const preserved = primary.indexOf("Preserve warm Cloud CLI parity diagnostics separately from release authority");
   const activation = primary.indexOf("Activate Oracle, verify the real path, then cut Cloud to 100 percent");
-  assert.ok(uploaded >= 0 && diagnostic > uploaded && preserved > diagnostic && activation > preserved);
-  const step = primary.slice(diagnostic, preserved);
-  assert.match(step, /timeout-minutes: 20/u);
-  assert.match(step, /benchmark-cli-parity-v080\.mjs/u);
-  assert.match(step, /--source-commit \$env:SOURCE_COMMIT/u);
-  assert.match(step, /--run-id \$env:GITHUB_RUN_ID --output diagnostics\/cloud-cli-parity\.json/u);
-  assert.doesNotMatch(step, /continue-on-error|update-traffic|invoke-release-deploy|seal\s/u);
-  assert.match(primary.slice(preserved, activation), /if: always\(\) && steps\.cloud_cli_parity\.outcome != 'skipped'/u);
+  assert.ok(smoke >= 0 && uploaded > smoke && activation > uploaded);
+  assert.match(primary.slice(smoke, uploaded), /if \(\$LASTEXITCODE -ne 0\) \{ throw 'managed-secret candidate smoke failed' \}/u);
+  assert.match(primary.slice(smoke, uploaded), /--binding "cloud_candidate_smoke=\$smokePath"/u);
+  assert.doesNotMatch(primary, /cli[-_]parity|Compare warm CLI/u);
+});
+
+test("retired CLI comparison has no workflow, executable, or alternate Actions entry point", async () => {
+  for (const path of [
+    ".github/workflows/cloud-cli-diagnostic.yml",
+    "apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs",
+    "scripts/release/cloud/benchmark-cli-parity-v080.mjs",
+  ]) {
+    await assert.rejects(access(new URL(`../../${path}`, import.meta.url)), { code: "ENOENT" });
+  }
+  const workflows = new URL("../../.github/workflows/", import.meta.url);
+  for (const name of await readdir(workflows)) {
+    if (!/\.ya?ml$/u.test(name)) continue;
+    const source = await readFile(new URL(name, workflows), "utf8");
+    assert.doesNotMatch(source, /benchmark-(?:cloud-)?cli-parity|cloud_cli_parity|unqualified-cli-parity/u, name);
+  }
 });
 
 test("prestage capture executes an accepted-source helper bundle outside current", () => {
