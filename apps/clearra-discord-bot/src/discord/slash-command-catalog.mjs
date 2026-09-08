@@ -326,7 +326,7 @@ export function formatSlashCommandHelp(requestedName, locale = "en") {
   }
   if (entry.subcommands) return searchGroupHelp(entry, language);
   const lines = [
-    `**/${commandPath(entry)}** — ${localizedCommandDescription(entry, language)}`,
+    `**/${commandPath(entry)}** — ${userFacingCommandDescription(entry, language)}`,
     language === "ko"
       ? `직접 입력 문법: \`${syntax(entry, language)}\``
       : `Direct syntax: \`${syntax(entry)}\``,
@@ -334,18 +334,21 @@ export function formatSlashCommandHelp(requestedName, locale = "en") {
   if (entry.modalSchemaId !== null) {
     lines.push(language === "ko"
       ? "필수 입력을 모두 넣지 않고 명령어를 실행하면 안내 입력 창이 열립니다."
-      : "Invoke the command without all required inputs to open its guided Modal form.");
+      : "Invoke the command without all required inputs to open its guided input form.");
   }
   if (entry.kind === "search" && ["field", "base", "target"].some((name) =>
     entry.registration.options.some((option) => option.name === name)
   )) {
     lines.push(language === "ko"
       ? "여러 줄 `#`/`_` 격자는 필드 옵션을 생략하고 입력 창에서 작성하세요. 직접 입력은 `grid:윗줄/다음줄` 형식입니다."
-      : "For a multiline `#`/`_` grid, omit the board option and use the Modal. Direct input uses `grid:top-row/next-row`.");
+      : "For a multiline `#`/`_` grid, omit the board option and use the form. Direct input uses `grid:top-row/next-row`.");
   }
-  lines.push(...inputHelp(entry, language));
-  if (entry.note) {
-    lines.push(language === "ko" ? `참고: ${localizedNote(entry, language)}` : `Note: ${entry.note}`);
+  lines.push(...userFacingHelpLines(inputHelp(entry, language)));
+  const note = entry.note === null
+    ? null
+    : userFacingHelpLine(language === "ko" ? localizedNote(entry, language) : entry.note);
+  if (note) {
+    lines.push(language === "ko" ? `참고: ${note}` : `Note: ${note}`);
   }
   lines.push(language === "ko"
     ? "전체 명령어 그룹을 보려면 인수 없이 `/help`를 사용하세요."
@@ -357,7 +360,7 @@ function objectiveHelp(locale) {
   if (locale === "ko") {
     return [
       "**고급 objective**",
-      "PC objective는 slash 입력·Modal·autocomplete에 나타나지 않는 텍스트/CLI 고급 경로입니다. Build v2는 capability별로 닫힌 objective 선택지만 slash에 노출합니다.",
+      "PC objective는 Discord 텍스트 명령과 CLI에서 사용할 수 있습니다. 슬래시 명령에서는 화면에 표시되는 선택지만 사용할 수 있습니다.",
       "현재 PC objective: `all`, `unique`, `min-cover`, `tiling`",
       "Discord 텍스트 문법: `$path <필드> <큐> [줄] --objective <ID>` 또는 `>path ...`; `minimum-cover`만 `min-cover`의 호환 별칭입니다.",
       "각 문법은 `/help arguments:objective <이름>`으로 확인하세요.",
@@ -365,7 +368,7 @@ function objectiveHelp(locale) {
   }
   return [
     "**Advanced objective**",
-    "PC objectives are intentionally absent from slash options, Modals, and autocomplete; Build v2 exposes only capability-closed slash objective choices.",
+    "PC objectives are available in Discord text commands and the CLI. Slash commands accept only the choices shown by Discord.",
     "Current PC objectives: `all`, `unique`, `min-cover`, `tiling`",
     "Discord text syntax: `$path <field> <queue> [lines] --objective <ID>` or `>path ...`; only `minimum-cover` is accepted as a compatibility alias for `min-cover`.",
     "Use `/help arguments:objective <name>` for one grammar.",
@@ -389,14 +392,14 @@ function objectiveOptionHelp(name, locale) {
   const meaning = locale === "ko"
     ? ({
       all: "모든 실행 가능한 PC 해법을 유지합니다.",
-      unique: "동일한 최종 해법을 정규화해 하나씩 유지합니다.",
-      "min-cover": "큐 우주를 커버하는 최소 해법 집합을 계산합니다.",
+      unique: "동일한 최종 해법은 하나씩만 유지합니다.",
+      "min-cover": "입력 패턴의 모든 큐를 커버하는 최소 해법 집합을 계산합니다.",
       tiling: "도달성·점수·B2B를 제외한 정확한 기하 타일링만 열거합니다.",
     })[canonical]
     : ({
       all: "Retains every executable PC solution.",
-      unique: "Keeps one canonical representative of each final solution.",
-      "min-cover": "Calculates a minimum solution family covering the queue universe.",
+      unique: "Keeps one copy of each distinct final solution.",
+      "min-cover": "Calculates a minimum solution set covering every queue in the input pattern.",
       tiling: "Enumerates exact geometry tilings without reachability, scoring, or B2B semantics.",
     })[canonical];
   return [
@@ -429,14 +432,14 @@ function searchGroupHelp(entry, locale) {
   const korean = locale === "ko";
   const subcommands = Object.values(entry.subcommands);
   const lines = [
-    `**/${entry.name}** — ${localizedCommandDescription(entry, locale)}`,
+    `**/${entry.name}** — ${userFacingCommandDescription(entry, locale)}`,
     korean ? "하위 명령어:" : "Subcommands:",
     ...subcommands.map((variant) =>
-      `- \`/${entry.name} ${variant.subcommand}\` — ${localizedCommandDescription(variant, locale)}`
+      `- \`/${entry.name} ${variant.subcommand}\` — ${userFacingCommandDescription(variant, locale)}`
     ),
     korean
-      ? `각 입력 계약은 \`/help arguments:${entry.name} <하위-명령어>\`로 확인하세요.`
-      : `Use \`/help arguments:${entry.name} <subcommand>\` for each exact input contract.`,
+      ? `각 명령어의 입력 방법은 \`/help arguments:${entry.name} <하위-명령어>\`로 확인하세요.`
+      : `Use \`/help arguments:${entry.name} <subcommand>\` for each command's input syntax.`,
   ];
   return lines.join("\n");
 }
@@ -1781,7 +1784,7 @@ function commandListHelp(locale) {
       `정방향 탐색: \`${forward}\``,
       `구조 탐색: \`${spinStructure}\``,
       `문서 유틸리티: \`${utility}\``,
-      "v0.8.0 권장 입력은 위의 그룹형 명령어입니다. `/path` 같은 기존 개별 명령어와 `/finesse search|score`는 레거시 압축 옵션을 받는 전환기 호환 경로입니다.",
+      "위의 그룹형 명령어 사용을 권장합니다. `/path` 같은 기존 개별 명령어와 `/finesse search|score`도 계속 사용할 수 있습니다.",
       "고급 objective는 `/help arguments:objective`에서 확인할 수 있습니다.",
       "정확한 문법은 `/help arguments:<명령어> <하위-명령어>`로 확인하세요. 여러 줄 격자는 필드 옵션을 생략하고 입력 창에서 작성하며, 직접 입력은 `grid:윗줄/다음줄` 형식을 사용합니다.",
       `PC 탐색은 1–${DISCORD_PC_FIELD_MAX_ROWS}줄의 모든 목표 높이를 지원하며, 구축·전방 탐색 필드는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄을 지원합니다. 정적 CTK3, v115 Fumen, 문서 링크도 지원하며 입력 색상은 모두 채워진 칸으로 처리합니다.`,
@@ -1796,7 +1799,7 @@ function commandListHelp(locale) {
     `Forward search: \`${forward}\``,
     `Spin structures: \`${spinStructure}\``,
     `Document utilities: \`${utility}\``,
-    "The preferred v0.8.0 input is the grouped command surface above. Legacy single-purpose names such as `/path` and `/finesse search|score` keep their compact option grammar only as migration routes.",
+    "The grouped commands above are recommended. Existing names such as `/path` and `/finesse search|score` remain available.",
     "Advanced objective syntax is documented by `/help arguments:objective`.",
     "Use `/help arguments:<command> <subcommand>` for exact syntax. Omit a board option to enter a multiline grid in the guided form; direct grids use `grid:top-row/next-row`.",
     `PC search supports every target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS} rows; build/forward fields support 1 through ${DISCORD_WIDE_FIELD_MAX_ROWS} rows. Static CTK3, v115 Fumen, and document links are also accepted; input colors mean occupied cells.`,
@@ -2033,14 +2036,14 @@ function inputHelp(entry, locale = "en") {
       ];
     case "pc-save-v2":
       return entry.capabilityId === "pc.saves" ? [
-        `\`field\` and \`next\` use the PC contracts, but \`next\` must compile to an unambiguous fixed bag boundary; exact fixed queues and observed-suffix sources fail closed. \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS}.`,
-        "A save group is the terminal hold plus the unordered remainder of the active bag. Witnesses are deduplicated once per pattern/group.",
-        "Every group reports its exact whole-universe unconditional probability and its conditional probability given that a PC exists; the latter is display-only and never changes ranking.",
+        `\`next\` must describe an unambiguous fixed bag boundary; exact fixed queues and observed-suffix inputs are not accepted. \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS}.`,
+        "A save group combines the ending hold piece with the unordered pieces left in the active bag.",
+        "Every group reports its probability across all queues in the input pattern and its probability among successful PC queues. The second value does not change ranking.",
         nativeKickHelp,
       ] : [
-        `\`field\` and \`next\` use the PC contracts, but \`next\` must compile to an unambiguous fixed bag boundary; exact fixed queues and observed-suffix sources fail closed. \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS}.`,
-        "Best-save uses schema `clearra-save-v1`: maximize weighted terminal inventory (T6/I4/O3/J1/L1/S0/Z0), then minimize J+L, then maximize exact whole-universe group probability.",
-        "All exact best witnesses remain a normal tie list in the typed result. Discord displays the first result in deterministic order; it does not reinterpret ties as portfolios.",
+        `\`next\` must describe an unambiguous fixed bag boundary; exact fixed queues and observed-suffix inputs are not accepted. \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS}.`,
+        "Results maximize ending-piece weights (T6/I4/O3/J1/L1/S0/Z0), then minimize J+L, then maximize probability across all queues in the input pattern.",
+        "If several results tie exactly, Discord displays the first one in deterministic order.",
         nativeKickHelp,
       ];
     case "pc-allspin-exact-v1":
@@ -2048,12 +2051,12 @@ function inputHelp(entry, locale = "en") {
         `\`field\` is the initial PC field, never a target field; it accepts a 1–${DISCORD_PC_FIELD_MAX_ROWS}-row grid or one static document. \`next\` must be one exact IOTSZJL queue, not a pattern.`,
         `\`spin-profile\` is explicit and required. \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS}; omitting it serially evaluates feasible heights. \`hold=off\` emits only \`--no-hold\`.`,
         "This witness command applies its typed B2B-preservation preset internally. It rejects objective, scoring, queue-knowledge, source-piece, solution-probability, target-field, and caller-supplied preserve-B2B controls.",
-        "Resource limits may return an explicitly incomplete result; they never silently convert it to a complete witness.",
+        "Resource limits may produce an incomplete result; the output identifies it as incomplete.",
         nativeKickHelp,
       ];
     case "pc-allspin-pattern-v1":
       return [
-        `\`field\` is the initial PC field, never a target field; it accepts a 1–${DISCORD_PC_FIELD_MAX_ROWS}-row grid or one static document. \`next\` is a supported queue pattern and defines the probability universe.`,
+        `\`field\` is the initial PC field, never a target field; it accepts a 1–${DISCORD_PC_FIELD_MAX_ROWS}-row grid or one static document. \`next\` is a supported queue pattern and defines the queues used for the probability.`,
         `\`spin-profile\` is explicit and required. \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS}; omitting it serially evaluates feasible heights. \`hold=off\` emits only \`--no-hold\`.`,
         "This probability command applies its typed B2B-preservation preset internally. It rejects objective, scoring, queue-knowledge, source-piece, solution-probability, target-field, and caller-supplied preserve-B2B controls.",
         "Resource limits may return explicitly incomplete counts or probability; completeness is shown in the result.",
@@ -2062,8 +2065,8 @@ function inputHelp(entry, locale = "en") {
     case "pc-score-v2":
       if (entry.capabilityId === "pc.score") return [
         `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS} and omission evaluates feasible targets serially.`,
-        "`score-profile` defaults to `tetrio`; `spin-profile` and `initial-b2b` are named scoring inputs. This route fixes the all score-summary objective and full-oracle queue semantics, and rejects objective overrides, B2B-preservation controls, resource/execution limits, and per-solution probabilities.",
-        "Every built-in score profile currently reports `accuracy_level=basic-approximation` and `profile_specific_exact=false`; a selected profile is not evidence of exact profile-specific scoring. The direct `/score` compatibility alias remains the generic Jstris Ultra preset.",
+        "`score-profile` defaults to `tetrio`; use `spin-profile` and `initial-b2b` when those settings affect the score.",
+        "Built-in score profiles currently provide approximate scores rather than complete game-specific scoring. The direct `/score` alias uses its existing Jstris Ultra preset.",
         nativeKickHelp,
       ];
     case "pc-score-finder-v2":
@@ -2114,9 +2117,8 @@ function inputHelp(entry, locale = "en") {
       ];
     case "build-v2-cover":
       return [
-        "`base-mask`, `target-mask`, and `height` are the only accepted source form. Plain grids and target documents are rejected for this capability.",
-        "Supply exactly one of `queue` or `patterns`. Hold, queue knowledge, and objective are capability-closed; `source-pieces` exists only here.",
-        "Execution is CPU-only with no backend fallback and no Discord max-memory option. Exact portfolio alternatives are never requested or paged.",
+        "Enter `base-mask`, `target-mask`, and `height`; plain grids and target documents are not accepted.",
+        "Supply exactly one of `queue` or `patterns`. `source-pieces` is available for this command.",
         nativeKickHelp,
       ];
     case "build-v2-target":
@@ -2196,7 +2198,7 @@ function inputHelp(entry, locale = "en") {
       return [
         "`remaining` is an unordered 1–7-piece inventory. At most one piece kind may appear twice; that duplicate becomes the initial hold.",
         `/${commandPath(entry)} has the semantic ranking preset \`${entry.setupPriority}\`. Supply mode, QB observation, queue knowledge, next-cycle residue, borrowing, length, and maximum setup pieces are separate named options.`,
-        "QB mode requires `qb`; post-cycle borrowing is limited to a three-piece residue. Hidden Modal options are never silently discarded.",
+        "QB mode requires `qb`; post-cycle borrowing is limited to a three-piece residue.",
         nativeKickHelp,
       ];
     case "setup-score-v1":
@@ -2210,7 +2212,7 @@ function inputHelp(entry, locale = "en") {
       return [
         "`pieces` is an unordered IOTSZJL inventory. Repeated letters are multiplicities, not a queue, and hold is not used.",
         `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first rows or one static CTK3/v115 Fumen/URL. In a grid, use \`#\` for filled and \`_\` for empty.`,
-        "`profile` selects T-Spins, T-Spins+, All-Mini(+), or All-Spin(+). Regular and Mini results are always reported separately; `+` adds the exact immobile-T fallback.",
+        "`profile` selects T-Spins, T-Spins+, All-Mini(+), or All-Spin(+). Regular and Mini results are always reported separately; `+` also checks immobile T-spins.",
         "`lines` applies to the terminal spin and defaults to `1+`. Results are subset-minimal across the supplied inventory.",
         "`options` keys are `fill-bottom`, `fill-top`, `max-placements`, and `minimality`. Fill bottom must be below fill top.",
         nativeKickHelp,
@@ -2219,7 +2221,7 @@ function inputHelp(entry, locale = "en") {
       return [
         "`pieces` is an unordered IOTSZJL inventory; repeated letters preserve multiplicity and hold is not used.",
         `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows or a static document. Height, terminal lines, spin profile, fill bounds, maximum placements, and minimality are independent named options.`,
-        "`spin-profile` selects T-Spins, T-Spins+, All-Mini(+), or All-Spin(+). Regular and Mini results are always reported separately; `+` adds the exact immobile-T fallback.",
+        "`spin-profile` selects T-Spins, T-Spins+, All-Mini(+), or All-Spin(+). Regular and Mini results are always reported separately; `+` also checks immobile T-spins.",
         "`fill-bottom` must be below `fill-top`; `max-placements` cannot exceed the supplied inventory. Results default to subset-minimal structures.",
         nativeKickHelp,
       ];
@@ -2279,7 +2281,7 @@ function inputHelp(entry, locale = "en") {
       ];
     case "fumen-transform-v1":
       return [
-        "Transforms are closed to roundtrip, combine, split, get-page, page-shift, clean-comments, preserve-comments, to-gray, mirror, and text-to-fumen.",
+        "Choose roundtrip, combine, split, get-page, page-shift, clean-comments, preserve-comments, to-gray, mirror, or text-to-fumen.",
         "Combine accepts one canonical v115 Fumen per line in `documents` or its attachment. Get-page is one-based; positive page-shift offsets rotate left; text-to-fumen accepts one bounded Unicode comment per line.",
         "Discord returns a short summary plus the complete canonical Fumen attachment set within its count and byte limits; split pages are not portfolio alternatives.",
       ];
@@ -2335,14 +2337,14 @@ function koreanInputHelp(entry) {
       ];
     case "pc-save-v2":
       return entry.capabilityId === "pc.saves" ? [
-        `\`field\`와 \`next\`는 PC 입력 계약을 사용하지만 \`next\`는 모호하지 않은 고정 가방 경계로 컴파일되어야 합니다. 정확한 고정 큐와 관측 접미 공급원은 닫힌 실패로 거부합니다. \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}입니다.`,
-        "세이브 그룹은 종료 시 홀드와 순서를 무시한 현재 활성 가방의 남은 미노로 정의하며, 증거는 패턴·그룹별로 한 번만 집계합니다.",
-        "각 그룹은 전체 우주 기준 무조건 정확 확률과 PC 성공 조건부 확률을 함께 표시합니다. 조건부 확률은 표시값일 뿐 순위에는 사용하지 않습니다.",
+        `\`next\`는 모호하지 않은 고정 가방 경계를 나타내야 합니다. 정확한 고정 큐와 관측 접미 입력은 사용할 수 없습니다. \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}입니다.`,
+        "세이브 그룹은 종료 시 홀드 미노와 순서를 무시한 현재 가방의 남은 미노를 합친 것입니다.",
+        "각 그룹은 입력 패턴의 모든 큐에 대한 확률과 PC 성공 큐 안에서의 확률을 함께 표시합니다. 두 번째 값은 순위에 영향을 주지 않습니다.",
         nativeKickHelp,
       ] : [
-        `\`field\`와 \`next\`는 PC 입력 계약을 사용하지만 \`next\`는 모호하지 않은 고정 가방 경계로 컴파일되어야 합니다. 정확한 고정 큐와 관측 접미 공급원은 닫힌 실패로 거부합니다. \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}입니다.`,
-        "최적 세이브는 `clearra-save-v1` 스키마로 종료 인벤토리 가중치(T6/I4/O3/J1/L1/S0/Z0)를 최대화하고, J+L을 최소화한 뒤, 전체 우주 기준 그룹 정확 확률을 최대화합니다.",
-        "정확히 동률인 최적 증거는 타입 결과에서 일반 목록으로 유지합니다. Discord는 결정적으로 정렬된 첫 결과 하나만 표시하며 동률을 포트폴리오로 바꾸지 않습니다.",
+        `\`next\`는 모호하지 않은 고정 가방 경계를 나타내야 합니다. 정확한 고정 큐와 관측 접미 입력은 사용할 수 없습니다. \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}입니다.`,
+        "종료 미노 가중치(T6/I4/O3/J1/L1/S0/Z0)를 최대화하고, J+L을 최소화한 다음 입력 패턴의 모든 큐에 대한 확률을 최대화합니다.",
+        "결과가 정확히 동률이면 Discord는 결정적인 순서의 첫 결과를 표시합니다.",
         nativeKickHelp,
       ];
     case "pc-allspin-exact-v1":
@@ -2350,7 +2352,7 @@ function koreanInputHelp(entry) {
         `\`field\`는 목표 필드가 아니라 PC의 초기 필드이며 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 격자 또는 정적 문서를 받습니다. \`next\`에는 패턴이 아닌 정확한 IOTSZJL 큐 하나를 입력합니다.`,
         `\`spin-profile\`은 명시적으로 필수입니다. \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}이며 생략하면 가능한 높이를 순서대로 판정합니다. \`hold=off\`는 \`--no-hold\`만 전달합니다.`,
         "이 증거 탐색은 타입이 지정된 B2B 보존 프리셋을 내부에서 적용합니다. objective, 점수, 큐 공개 범위, 소스 미노 수, 해법 확률, 목표 필드, 호출자 preserve-B2B 설정은 받지 않습니다.",
-        "리소스 제한에 도달하면 불완전 결과임을 명시하며 완전한 증거로 표시하지 않습니다.",
+        "리소스 제한에 도달하면 결과에 불완전 상태를 명시합니다.",
         nativeKickHelp,
       ];
     case "pc-allspin-pattern-v1":
@@ -2364,8 +2366,8 @@ function koreanInputHelp(entry) {
     case "pc-score-v2":
       if (entry.capabilityId === "pc.score") return [
         `\`field\`와 \`next\`는 PC 입력 계약을 사용하며 \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}이고 생략 시 가능한 목표를 순서대로 계산합니다.`,
-        "`score-profile`은 기본값 `tetrio`이며 `spin-profile`과 `initial-b2b`는 점수 입력입니다. 이 경로는 all 점수 요약과 전체 큐 지식 의미를 고정하고 objective 재정의, B2B 보존 제어, 리소스·실행 제한, 해법별 확률을 거부합니다.",
-        "현재 모든 내장 점수 프로필은 `accuracy_level=basic-approximation`, `profile_specific_exact=false`로 보고하며, 프로필 선택은 프로필별 정확 점수의 증거가 아닙니다. 직접 `/score` 호환 별칭은 기존 Jstris Ultra 프리셋으로 남습니다.",
+        "`score-profile`의 기본값은 `tetrio`입니다. 점수에 영향을 주는 경우 `spin-profile`과 `initial-b2b`를 설정하세요.",
+        "현재 내장 점수 프로필은 게임별 모든 규칙을 완전히 재현하지 않는 근사 점수를 제공합니다. 직접 `/score` 별칭은 기존 Jstris Ultra 설정을 사용합니다.",
         nativeKickHelp,
       ];
     case "pc-score-finder-v2":
@@ -2416,9 +2418,8 @@ function koreanInputHelp(entry) {
       ];
     case "build-v2-cover":
       return [
-        "`base-mask`, `target-mask`, `height`만 source로 받으며 일반 격자나 target 문서는 이 capability에서 거부합니다.",
-        "`queue`와 `patterns` 중 정확히 하나를 입력합니다. 홀드·큐 공개 범위·objective는 capability별로 닫혀 있고 `source-pieces`는 이 경로에만 있습니다.",
-        "CPU 전용이며 backend fallback과 Discord max-memory 옵션은 없습니다. exact portfolio 대안은 요청하거나 페이지로 공개하지 않습니다.",
+        "`base-mask`, `target-mask`, `height`를 입력합니다. 일반 격자와 target 문서는 사용할 수 없습니다.",
+        "`queue`와 `patterns` 중 정확히 하나를 입력합니다. 이 명령에서는 `source-pieces`도 사용할 수 있습니다.",
         nativeKickHelp,
       ];
     case "build-v2-target":
@@ -2498,7 +2499,7 @@ function koreanInputHelp(entry) {
       return [
         "`remaining`은 순서 없는 IOTSZJL 미노 1–7개이며, 한 종류의 중복만 초기 홀드로 허용합니다.",
         `/${commandPath(entry)}에는 \`${entry.setupPriority}\` 정렬 프리셋이 적용됩니다. 모드, QB 관측, 큐 공개 범위, 다음 회차 잔여, 빌리기, 길이, 최대 셋업 미노는 각각 명명 옵션입니다.`,
-        "QB 모드에는 `qb`가 필요하고 다음 회차 빌리기는 잔여 3개일 때만 허용합니다. 입력 창에서 숨겨지는 옵션은 조용히 버리지 않습니다.",
+        "QB 모드에는 `qb`가 필요하고 다음 회차 빌리기는 잔여 3개일 때만 허용합니다.",
         nativeKickHelp,
       ];
     case "setup-score-v1":
@@ -2581,7 +2582,7 @@ function koreanInputHelp(entry) {
       ];
     case "fumen-transform-v1":
       return [
-        "변환은 roundtrip, combine, split, get-page, page-shift, clean-comments, preserve-comments, to-gray, mirror, text-to-fumen으로 닫혀 있습니다.",
+        "변환은 roundtrip, combine, split, get-page, page-shift, clean-comments, preserve-comments, to-gray, mirror, text-to-fumen 중에서 선택합니다.",
         "Combine은 `documents` 또는 첨부파일에서 줄마다 canonical v115 Fumen 하나를 받습니다. Get-page는 1부터 시작하고 양수 page-shift는 왼쪽 회전이며 text-to-fumen은 줄마다 Unicode 주석 하나를 받습니다.",
         "Discord는 짧은 요약과 제한 안의 완전한 canonical Fumen 첨부파일만 반환하며 split 페이지는 portfolio 대안이 아닙니다.",
       ];
@@ -2670,6 +2671,136 @@ function localizationProperty(property, original, localized) {
   return typeof localized === "string" && localized !== original
     ? { [property]: Object.freeze({ ko: localized }) }
     : {};
+}
+
+// `/help` is a user instruction surface, not an architecture report. Detailed
+// registry and execution-policy facts remain available to tests and telemetry,
+// but lines that only explain those internals are not rendered to users.
+const INTERNAL_HELP_TEXT = new RegExp([
+  "\\bcapabilit(?:y|ies)\\b",
+  "\\btyped\\b",
+  "\\bcanonical\\b",
+  "\\bschema\\b",
+  "\\bfull-oracle\\b",
+  "\\baccuracy_level\\b",
+  "\\bprofile_specific_exact\\b",
+  "\\bbackends?\\b",
+  "\\bfallback\\b",
+  "\\bengine\\b",
+  "\\bauthorit(?:y|ative)\\b",
+  "\\bfail(?:s|ed)? closed\\b",
+  "\\bclosed (?:grammar|contract|set)\\b",
+  "\\bclosed to\\b",
+  "\\bcontracts?\\b",
+  "\\bportfolio\\b",
+  "\\bpath family\\b",
+  "\\branking family\\b",
+  "\\bwitness(?:es)?\\b",
+  "\\bmateriali[sz](?:e|ed|ation)\\b",
+  "\\bprojection\\b",
+  "\\bcursor\\b",
+  "\\bmetadata\\b",
+  "\\bworkers?\\b",
+  "\\bCLI-owned\\b",
+  "\\bimplementation\\b",
+  "\\binternally\\b",
+  "\\bnative\\b",
+  "\\bqueue universe\\b",
+  "\\bwhole-universe\\b",
+  "\\bcompatibility row\\b",
+  "capability",
+  "타입(?:이 지정된| 결과| 엔진)?",
+  "canonical",
+  "정규 (?:포트폴리오|보고서|선택)",
+  "스키마",
+  "전체 우주",
+  "backend",
+  "fallback",
+  "닫힌 (?:문법|계약|집합|실패)",
+  "닫혀 (?:있|있습니다)",
+  "portfolio",
+  "family",
+  "권위",
+  "내부에서",
+  "cursor",
+  "커서",
+  "metadata",
+  "메타데이터",
+  "worker",
+  "native",
+  "job runner",
+  "런너",
+  "Rust 렌더 bytes",
+  "CLI가 소유",
+  "계약",
+  "증거",
+].join("|"), "iu");
+
+function userFacingHelpLine(value) {
+  if (typeof value !== "string") return null;
+  if (value.startsWith("Command-intent compatibility only;")) {
+    return "This slash alias will be removed in v0.10; its text-command alias will remain available.";
+  }
+  if (value.startsWith("명령 의도 호환만 제공하며") || value.includes("슬래시 별칭은 v0.10에 제거")) {
+    return "이 슬래시 별칭은 v0.10에서 제거되며 텍스트 명령 별칭은 계속 사용할 수 있습니다.";
+  }
+  if (INTERNAL_HELP_TEXT.test(value)) return null;
+  return value.replace(/\bserially\s+/giu, "");
+}
+
+function userFacingHelpLines(lines) {
+  return lines.map(userFacingHelpLine).filter((line) => line !== null);
+}
+
+function userFacingCommandDescription(entry, locale) {
+  const value = localizedCommandDescription(entry, locale);
+  const path = commandPath(entry);
+  const englishOverrides = {
+    "pc allspin-sol": "Find a B2B-preserving perfect-clear solution for one exact queue",
+    "allspin-sol-finder": "Find a B2B-preserving perfect-clear solution for one exact queue",
+    "build setup": "Find ways to build a target setup",
+    "build congruent": "Find builds that match the target document",
+    "build congruent-cover": "Find a covering set of builds that match the target document",
+    "build setup-cover": "Find a minimum set of setup builds",
+    "build setup-cover-percent": "Calculate setup-build coverage",
+    "build setup-cover-score": "Score setup-cover results",
+    "build evaluate-cover-percent": "Calculate how often supplied solutions cover the input queues",
+    "build evaluate-cover": "Check which input queues the supplied solutions cover",
+    "build evaluate-minimals": "Find a minimum subset of the supplied solutions",
+    "build evaluate-score": "Score the supplied solutions",
+    "build evaluate-b2b-cover": "Check B2B coverage of the supplied solutions",
+    "utility fumen": "Apply a lossless v115 Fumen transform",
+    "score": "Score perfect-clear paths",
+  };
+  const koreanOverrides = {
+    "pc allspin-sol": "정확한 큐에서 B2B를 보존하는 퍼펙트 클리어 해법을 찾습니다",
+    "allspin-sol-finder": "정확한 큐에서 B2B를 보존하는 퍼펙트 클리어 해법을 찾습니다",
+    "build setup": "목표 셋업을 만드는 방법을 찾습니다",
+    "build congruent": "목표 문서와 일치하는 구축 결과를 찾습니다",
+    "build congruent-cover": "목표 문서와 일치하는 구축 결과의 커버 집합을 찾습니다",
+    "build setup-cover": "셋업 구축의 최소 집합을 찾습니다",
+    "build setup-cover-percent": "셋업 구축 커버리지를 계산합니다",
+    "build setup-cover-score": "셋업 커버 결과의 점수를 계산합니다",
+    "build evaluate-cover-percent": "제공한 해법이 입력 큐를 커버하는 비율을 계산합니다",
+    "build evaluate-cover": "제공한 해법이 커버하는 입력 큐를 확인합니다",
+    "build evaluate-minimals": "제공한 해법의 최소 부분집합을 찾습니다",
+    "build evaluate-score": "제공한 해법의 점수를 계산합니다",
+    "build evaluate-b2b-cover": "제공한 해법의 B2B 커버리지를 확인합니다",
+    "utility fumen": "v115 Fumen에 손실 없는 문서 변환을 적용합니다",
+    "score": "퍼펙트 클리어 경로의 점수를 계산합니다",
+  };
+  const translated = entry.capabilityId === "pc.best-save"
+    ? (locale === "ko" ? "가장 유리한 세이브 결과를 찾습니다" : "Find the best saved-piece outcome")
+    : (locale === "ko" ? koreanOverrides[path] : englishOverrides[path]) ?? value;
+  return translated
+    .replace(/\s*\(basic-approximation; profile_specific_exact=false\)/giu, "")
+    .replace(/\bcanonical\s+/giu, "")
+    .replace(/\btyped\s+/giu, "")
+    .replace(/\bbounded\s+/giu, "")
+    .replace(/\bportfolio\b/giu, "solution set")
+    .replace(/\bwitness(?:es)?\b/giu, "solutions")
+    .replace(/\s{2,}/gu, " ")
+    .trim();
 }
 
 function localizedCommandDescription(entry, locale) {

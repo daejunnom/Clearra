@@ -553,9 +553,9 @@ test("PC save groups and best-save are distinct fixed-boundary Discord products"
   assert.deepEqual(buildSlashCommandArguments(bestSave, options), [
     "pc", "best-save", ...expectedTail,
   ]);
-  assert.match(formatSlashCommandHelp("pc saves", "en"), /unconditional probability/i);
-  assert.match(formatSlashCommandHelp("pc saves", "en"), /conditional probability given/i);
-  assert.match(formatSlashCommandHelp("pc best-save", "en"), /first result in deterministic order/i);
+  assert.match(formatSlashCommandHelp("pc saves", "en"), /all queues in the input pattern/i);
+  assert.match(formatSlashCommandHelp("pc saves", "en"), /among successful PC queues/i);
+  assert.match(formatSlashCommandHelp("pc best-save", "en"), /first one in deterministic order/i);
   assert.doesNotMatch(formatSlashCommandHelp("pc best-save", "en"), /canonical candidate ID/i);
   assert.doesNotMatch(formatSlashCommandHelp("pc saves", "ko"), /같은 기능/u);
   assert.doesNotMatch(formatSlashCommandHelp("pc best-save", "ko"), /같은 기능/u);
@@ -632,8 +632,8 @@ test("top-level help lists the complete v0.8 grouped surface and distinguishes l
     assert.ok(english.includes(exactPath), exactPath);
     assert.ok(korean.includes(exactPath), exactPath);
   }
-  assert.match(english, /preferred v0\.8\.0 input is the grouped command surface/i);
-  assert.match(korean, /v0\.8\.0 권장 입력은 위의 그룹형 명령어/u);
+  assert.match(english, /grouped commands above are recommended/i);
+  assert.match(korean, /위의 그룹형 명령어 사용을 권장/u);
 
   const canonical = formatSlashCommandHelp("pc path", "en");
   const compatibility = formatSlashCommandHelp("path", "en");
@@ -644,11 +644,10 @@ test("top-level help lists the complete v0.8 grouped surface and distinguishes l
   for (const name of ["pc path", "path"]) {
     const help = formatSlashCommandHelp(name, "ko");
     assert.doesNotMatch(help, /Discord publishes/u);
-    assert.match(help, /첫 결과 하나만 결정적으로 게시/u);
+    assert.match(help, /직접 입력 문법/u);
   }
-  assert.match(canonical, /complete finite path family/u);
-  assert.match(canonical, /numeric-smallest canonical candidate/u);
-  assert.match(formatSlashCommandHelp("pc path", "ko"), /완전한 유한 path family/u);
+  assert.doesNotMatch(canonical, /finite path family|canonical candidate/iu);
+  assert.doesNotMatch(formatSlashCommandHelp("pc path", "ko"), /path family|canonical candidate/iu);
 });
 
 test("forward REN registry authority is active, bounded, and isolated from score families", () => {
@@ -807,10 +806,10 @@ test("All-Spin PC capabilities preserve exact-queue and pattern-probability cont
     [true, false, "v0.10.0"],
     [false, true, null],
   ]);
-  assert.match(formatSlashCommandHelp("pc allspin-sol", "en"), /command-intent compatibility only/i);
-  assert.match(formatSlashCommandHelp("pc allspin-sol", "ko"), /명령 의도만 보장/u);
-  assert.match(formatSlashCommandHelp("allspin-pres-chance", "en"), /removal in v0\.10/i);
-  assert.match(formatSlashCommandHelp("allspin-pres-chance", "ko"), /v0\.10에 제거/u);
+  assert.match(formatSlashCommandHelp("pc allspin-sol", "en"), /slash alias will be removed in v0\.10/i);
+  assert.match(formatSlashCommandHelp("pc allspin-sol", "ko"), /슬래시 별칭은 v0\.10에서 제거/u);
+  assert.match(formatSlashCommandHelp("allspin-pres-chance", "en"), /will be removed in v0\.10/i);
+  assert.match(formatSlashCommandHelp("allspin-pres-chance", "ko"), /v0\.10에서 제거/u);
 
   const contracts = new Map(
     DISCORD_PUBLIC_SEARCH_CONTRACT.map((entry) => [entry.id, entry]),
@@ -1043,9 +1042,8 @@ test("canonical PC scoring owns typed summary authority while legacy score stays
     assert.equal(scoreMinimalsArguments.includes(forbidden), false, forbidden);
   }
   assert.equal(buildSlashCommandArguments(legacy, base).includes("--score-profile"), false);
-  assert.doesNotMatch(formatSlashCommandHelp("pc score", "en"), /profile-specific exact scoring/i);
-  assert.match(formatSlashCommandHelp("pc score", "en"), /basic-approximation/);
-  assert.match(formatSlashCommandHelp("pc score", "en"), /profile_specific_exact=false/);
+  assert.match(formatSlashCommandHelp("pc score", "en"), /approximate scores/i);
+  assert.doesNotMatch(formatSlashCommandHelp("pc score", "en"), /accuracy_level|profile_specific_exact/iu);
 });
 
 test("canonical PC routes use native typed observation, B2B, probability, tiling, and failed-queue contracts", () => {

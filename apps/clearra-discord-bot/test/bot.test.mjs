@@ -289,8 +289,8 @@ test("registered command metadata and every help page stay inside Discord limits
     const help = formatSlashCommandHelp(path);
     assert.ok(help.length <= 2_000, `/${path} help exceeds Discord's message limit`);
     assert.equal(help.startsWith(`**/${path}**`), true);
-    if (command.modalSchemaId === null) assert.doesNotMatch(help, /guided Modal form/);
-    else assert.match(help, /guided Modal form/);
+    if (command.modalSchemaId === null) assert.doesNotMatch(help, /guided input form/);
+    else assert.match(help, /guided input form/);
   }
   const englishPcHelp = formatSlashCommandHelp("path", "en");
   const koreanPcHelp = formatSlashCommandHelp("path", "ko");
@@ -305,8 +305,8 @@ test("registered command metadata and every help page stay inside Discord limits
   const koreanBuildHelp = formatSlashCommandHelp("build cover", "ko");
   assert.match(englishBuildHelp, /base-mask.*target-mask.*height.*1\.\.6/su);
   assert.match(koreanBuildHelp, /base-mask.*target-mask.*height.*1\.\.6/su);
-  assert.match(englishBuildHelp, /Plain grids.*rejected/u);
-  assert.match(koreanBuildHelp, /일반 격자.*거부/u);
+  assert.match(englishBuildHelp, /plain grids.*not accepted/iu);
+  assert.match(koreanBuildHelp, /일반 격자.*사용할 수 없/u);
 
   const englishCommandList = formatSlashCommandHelp("", "en");
   const koreanCommandList = formatSlashCommandHelp("", "ko");
@@ -321,8 +321,8 @@ test("registered command metadata and every help page stay inside Discord limits
   const koreanObjectiveHelp = formatSlashCommandHelp("objective", "ko");
   assert.match(englishObjectiveHelp, /`all`, `unique`, `min-cover`, `tiling`/);
   assert.match(koreanObjectiveHelp, /`all`, `unique`, `min-cover`, `tiling`/);
-  assert.match(englishObjectiveHelp, /PC objectives.*absent from slash options, Modals, and autocomplete/i);
-  assert.match(englishObjectiveHelp, /Build v2.*capability-closed slash objective choices/i);
+  assert.match(englishObjectiveHelp, /available in Discord text commands and the CLI/i);
+  assert.match(englishObjectiveHelp, /Slash commands accept only the choices shown by Discord/i);
   assert.match(englishObjectiveHelp, /\$path.*--objective <ID>/);
   assert.match(koreanObjectiveHelp, /minimum-cover.*min-cover/u);
   assert.match(formatSlashCommandHelp("objective minimum-cover", "en"), /objective min-cover/);
@@ -339,6 +339,11 @@ test("registered command metadata and every help page stay inside Discord limits
     ]),
   ]) {
     assert.doesNotMatch(help, /verify|검증/iu);
+    assert.doesNotMatch(
+      help,
+      /capabilit|typed|canonical|schema|full-oracle|accuracy_level|profile_specific_exact|engine|authority|closed|queue universe|whole-universe|portfolio|path family|ranking family|witness|materiali[sz]|projection|cursor|metadata|backend|fallback|worker|native|implementation|\bcontracts?\b|Modal|타입|스키마|전체 우주|정규 (?:포트폴리오|보고서|선택)|닫힌|닫혀|권위|내부에서|커서|메타데이터|런너|계약|증거/iu,
+      "help exposed architecture or execution-policy terminology",
+    );
   }
 
   for (const name of ["render-file", ...registeredSearchRoutes().map(({ path }) => path)]) {
