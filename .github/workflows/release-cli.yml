@@ -168,6 +168,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: [metadata, ctk3]
     runs-on: ubuntu-latest
+    # Build once against the same glibc baseline as Cloud Run, in parallel with
+    # the Windows/native/WASM leaves. Do not add a second Cloud-specific CLI.
+    container: rust:1.96-bookworm
+    env:
+      CARGO_HOME: /github/home/.cargo
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -188,11 +193,18 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ${{ runner.temp }}/clearra-release/cargo-target
-          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
       - name: Build standalone WASM CPU CLI
         env:
           CLEARRA_RELEASE_BUILD_ROOT: ${{ runner.temp }}/clearra-release
         run: bash scripts/tools/package-release-cli.sh dist "${{ needs.metadata.outputs.version }}"
+      - name: Verify CLI in the Cloud Run base image without rebuilding
+        uses: docker://node:22-bookworm-slim
+        with:
+          entrypoint: node
+          args: scripts/tools/verify-linux-cli-runtime.mjs --version ${{ needs.metadata.outputs.version }} --source-commit ${{ github.sha }}
       - name: Upload Linux CLI artifact
         uses: actions/upload-artifact@v4
         with:
@@ -262,9 +274,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/AppData/Local/Clearra/build
-          key: release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
       - name: Verify canonical ReleaseAcceptance shard mapping
@@ -308,9 +320,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/AppData/Local/Clearra/build
-          key: release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Run canonical release acceptance AdversarialCorrectness leaf
         run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard FoundationAdversarialCorrectness -ExecutionSurface Trusted
       - name: Seal canonical release acceptance AdversarialCorrectness leaf
@@ -349,9 +361,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/AppData/Local/Clearra/build
-          key: release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
       - name: Run canonical release acceptance DesktopHost leaf
@@ -403,6 +415,15 @@ jobs:
             --shard sanitizer `
             --output release-shard-evidence/clearra-release-acceptance-sanitizer-shard.v1.json
           if ($LASTEXITCODE -ne 0) { throw "sanitizer shard evidence failed" }
+      # Cache is an optional accelerator, never release acceptance evidence.
+      - name: Save verified sanitizer C build cache
+        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/save@v4
+        with:
+          path: ~/AppData/Local/Clearra/build
+          key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}
       - name: Upload canonical release acceptance sanitizer shard
         uses: actions/upload-artifact@v4
         with:
@@ -434,9 +455,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/AppData/Local/Clearra/build
-          key: release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
       - name: Run canonical release acceptance rust shard
@@ -458,6 +479,19 @@ jobs:
             --shard rust `
             --output release-shard-evidence/clearra-release-acceptance-rust-shard.v1.json
           if ($LASTEXITCODE -ne 0) { throw "rust shard evidence failed" }
+      # One owner seeds the native snapshot for the independent foundation leaves.
+      - name: Save verified canonical native build cache
+        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen.exe
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/AppData/Local/Clearra/build
+          key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}
       - name: Upload canonical release acceptance rust shard
         uses: actions/upload-artifact@v4
         with:
@@ -484,9 +518,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/AppData/Local/Clearra/build
-          key: release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-wasm-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-wasm-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Prepare acceptance toolchains
         shell: powershell
         run: |
@@ -503,6 +537,20 @@ jobs:
           CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
           CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildProducer -ExecutionSurface Trusted
+      # Keep WASM and native snapshots separate: parallel producers must not race
+      # to publish incomplete target trees under the same immutable cache key.
+      - name: Save verified canonical WASM build cache
+        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen.exe
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/AppData/Local/Clearra/build
+          key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}
       - name: Upload accepted WASM build
         uses: actions/upload-artifact@v4
         with:

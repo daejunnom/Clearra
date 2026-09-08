@@ -71,6 +71,19 @@ jobs:
           node-version: 22
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
+      # Read a compatible canonical build snapshot, but never publish cache or
+      # acceptance evidence from this unqualified branch.
+      - name: Restore verified WASM build inputs
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen.exe
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/AppData/Local/Clearra/build
+          key: release-acceptance-wasm-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            release-acceptance-wasm-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Prepare acceptance toolchains
         shell: powershell
         run: |
@@ -127,6 +140,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Restore verified native build inputs
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen.exe
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/AppData/Local/Clearra/build
+          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Bind trusted native regression source
         shell: powershell
         run: |
@@ -158,6 +182,17 @@ jobs:
           node-version: 22
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
+      - name: Restore verified WASM build inputs
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen.exe
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/AppData/Local/Clearra/build
+          key: release-acceptance-wasm-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            release-acceptance-wasm-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Prepare candidate toolchains
         id: toolchains
         shell: powershell
@@ -168,6 +203,9 @@ jobs:
           Assert-ClearraTrustedExecutionSurface -TaskName 'CandidateRustWasm' -ExecutionSurface Trusted -RuntimeEnvironment windows
           rustup target add wasm32-unknown-unknown
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Match the restored producer target instead of compiling the same
+          # dependencies again in the direct builder's cargo-target-wasm default.
+          "CARGO_TARGET_DIR=$(Get-ClearraCargoTargetDir)" >> $env:GITHUB_ENV
           $tool = Get-Command wasm-bindgen -ErrorAction SilentlyContinue
           if ($null -eq $tool -or (& wasm-bindgen --version) -ne 'wasm-bindgen 0.2.126') {
             cargo install wasm-bindgen-cli --version 0.2.126 --locked

@@ -43,7 +43,8 @@ function assertIsolated(source) {
   assert.doesNotMatch(source, /CLEARRA_ACCEPTED_|accepted-wasm-build\.mjs|canonical-acceptance-evidence\.mjs|\bGH_TOKEN\b|\bGITHUB_TOKEN\b/u);
   assert.doesNotMatch(source, /\bgh\s|\bgcloud\s|\bssh\s|\bscp\s|git\s+(?:push|tag)|actions\/deploy-pages|\/dispatches/u);
   const actions = [...source.matchAll(/^\s*(?:- )?uses: (\S+)/gmu)].map((match) => match[1]);
-  for (const action of actions) assert.ok(['actions/checkout@v4', 'actions/setup-node@v4', 'actions/upload-artifact@v4'].includes(action), action);
+  for (const action of actions) assert.ok(['actions/checkout@v4', 'actions/setup-node@v4',
+    'actions/upload-artifact@v4', 'actions/cache/restore@v4'].includes(action), action);
   const checkouts = source.match(/uses: actions\/checkout@v4/gmu) ?? [];
   assert.equal((source.match(/persist-credentials: false/gmu) ?? []).length, checkouts.length);
   assert.match(source, /if: github\.ref == 'refs\/heads\/codex\/v0\.8\.0-preflight-20260906-rng' && github\.ref_type == 'branch'/u);
@@ -72,6 +73,8 @@ for (const [name, mutate] of [
   ['accepted receipt', (source) => `${source}\n# node scripts/release/canonical-acceptance-evidence.mjs seal`],
   ['deployment call', (source) => `${source}\n# gh workflow run release-cli.yml --ref main`],
   ['workflow chain', (source) => source.replace('  push:', '  workflow_run:')],
+  ['canonical cache writer', (source) => source.replace('actions/cache/restore@v4', 'actions/cache/save@v4')],
+  ['automatic cache writer', (source) => source.replace('actions/cache/restore@v4', 'actions/cache@v4')],
 ]) {
   test(`rejects mutation granting ${name}`, () => assert.throws(() => assertIsolated(mutate(workflow))));
 }
@@ -102,7 +105,8 @@ test('focused Rust/WASM feedback is not another full gate and builds one indepen
   assert.match(job, /!cancelled\(\) && steps\.toolchains\.outcome == 'success' && steps\.boundaries\.outcome == 'success'/u);
   assert.match(job, /!cancelled\(\) && steps\.wasm_build\.outcome == 'success'/u);
   assert.match(job, /if: always\(\) && steps\.candidate_wasm\.outputs\.ready == 'true'/u);
-  assert.doesNotMatch(job, /continue-on-error:|actions\/cache|download-artifact/u);
+  assert.doesNotMatch(job, /continue-on-error:|actions\/cache(?:@|\/save)|download-artifact/u);
+  assert.match(job, /"CARGO_TARGET_DIR=\$\(Get-ClearraCargoTargetDir\)" >> \$env:GITHUB_ENV/u);
 });
 
 test('native regressions and WASM are sibling leaves, not a serial critical path', () => {
@@ -110,8 +114,24 @@ test('native regressions and WASM are sibling leaves, not a serial critical path
   assert.match(job, /needs: candidate-source/u);
   assert.match(job, /Assert-ClearraTrustedExecutionSurface/u);
   assert.match(job, /run: node scripts\/release\/candidate-preflight-regressions\.mjs/u);
-  assert.doesNotMatch(job, /npm ci|wasm-bindgen|rustup target|build-clearra-wasm|candidate-rust-wasm|continue-on-error/u);
+  assert.doesNotMatch(job, /npm ci|cargo install wasm-bindgen|rustup target|build-clearra-wasm|candidate-rust-wasm|continue-on-error/u);
   assert.equal((workflow.match(/run: node scripts\/release\/candidate-preflight-regressions\.mjs/gu) ?? []).length, 1);
+});
+
+test('candidate build leaves only read matching canonical cache families and still rebuild', () => {
+  const canonical = productionWorkflows[0].replaceAll('\r\n', '\n');
+  for (const [name, family] of [
+    ['candidate-full-gate', 'wasm'], ['candidate-rust-wasm', 'wasm'], ['candidate-rust', 'native'],
+  ]) {
+    const job = workflow.split(`  ${name}:`)[1].split(/^  [a-z][a-z-]*:/mu)[0].replaceAll('\r\n', '\n');
+    const cache = job.match(/      - name: Restore verified (?:WASM|native) build inputs\n([\s\S]*?)(?=      - name:)/u)?.[1];
+    assert.ok(cache, `${name} cache reader missing`);
+    assert.ok(canonical.includes(cache.trimEnd()), `${name} must match the canonical producer cache paths and keys`);
+    assert.ok(cache.includes(`key: release-acceptance-${family}-v3-`));
+    assert.match(cache, /-\$\{\{ github.sha \}\}/u);
+    assert.equal((job.match(/actions\/cache\/restore@v4/gu) ?? []).length, 1);
+    assert.doesNotMatch(job, /cache-hit/u, 'a cache hit is not a reason to skip the source build or tests');
+  }
 });
 
 test('source identity is paired and WASM is uploaded only after independent five-file verification', () => {

@@ -56,6 +56,7 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/tools/retain-clearra-debug-builds.test.mjs",
   "scripts/tools/run-release-regression-tests.test.mjs",
   "scripts/tools/validate-release-cli-smokes.test.mjs",
+  "scripts/tools/verify-linux-cli-runtime.test.mjs",
   "scripts/windows/clearra-local-services-watchdog.test.mjs",
 ]);
 

@@ -1778,10 +1778,16 @@ function Invoke-ReleaseIdentityGateValidation {
             @{ Name = 'Windows CLI'; Text = $windowsCliJob; Runner = 'windows-latest' },
             @{ Name = 'Windows GUI'; Text = $windowsGuiJob; Runner = 'windows-latest' }
         )) {
+            $productJobKeys = @('if', 'needs', 'runs-on', 'steps')
+            if ($job.Name -eq 'Linux CLI') {
+                $productJobKeys = @('if', 'needs', 'runs-on', 'container', 'env', 'steps')
+                Assert-ReleaseYamlExactScalar -Text $job.Text -Indentation 4 `
+                    -Key 'container' -Expected 'rust:1.96-bookworm' -Contract 'Linux CLI Cloud-compatible compiler'
+            }
             Assert-ReleaseYamlExactKeySet `
                 -Text $job.Text `
                 -Indentation 4 `
-                -ExpectedKeys @('if', 'needs', 'runs-on', 'steps') `
+                -ExpectedKeys $productJobKeys `
                 -Contract "$($job.Name) job"
             Assert-ReleaseYamlExactScalar `
                 -Text $job.Text `
@@ -1979,9 +1985,9 @@ function Invoke-ReleaseIdentityGateValidation {
             $releaseWasmBuildJob
         ) -join "`n"
         if ([regex]::Matches($releaseAcceptanceCacheText, 'actions/cache/restore@v4').Count -ne 6 -or
-            [regex]::Matches($release, 'actions/cache/save@v4').Count -ne 0 -or
+            [regex]::Matches($release, 'actions/cache/save@v4').Count -ne 3 -or
             [regex]::Matches($release, '(?m)^      - uses: actions/cache@v4\s*$').Count -ne 2) {
-            Add-ArchitectureError 'Canonical ReleaseAcceptance build jobs must use six restore-only cache readers without automatic or explicit cache writers'
+            Add-ArchitectureError 'Canonical ReleaseAcceptance requires six cache readers and one verified writer per native, WASM and sanitizer family'
         }
         foreach ($shardCacheJob in @(
             $releaseFoundationNoProductDebtJob,
@@ -1990,14 +1996,48 @@ function Invoke-ReleaseIdentityGateValidation {
             $releaseRustJob,
             $releaseWasmBuildJob
         )) {
+            $cacheFamily = if ($shardCacheJob -eq $releaseWasmBuildJob) { 'wasm' } else { 'native' }
             foreach ($requiredRestoreMarker in @(
                 'actions/cache/restore@v4',
                 '~/AppData/Local/Clearra/build',
-                'key: release-acceptance-${{ runner.os }}-bindgen-0.2.126-',
+                ('key: release-acceptance-' + $cacheFamily + '-v3-${{ runner.os }}-bindgen-0.2.126-'),
                 'restore-keys: |'
             )) {
                 if ($shardCacheJob.IndexOf($requiredRestoreMarker, [System.StringComparison]::Ordinal) -lt 0) {
                     Add-ArchitectureError "Canonical ReleaseAcceptance isolated restore is missing '$requiredRestoreMarker'"
+                }
+            }
+        }
+        foreach ($readerJob in @(
+            $releaseFoundationNoProductDebtJob,
+            $releaseFoundationAdversarialCorrectnessJob,
+            $releaseFoundationDesktopHostJob
+        )) {
+            if ($readerJob.Contains('actions/cache/save@v4') -or $readerJob.Contains('actions/cache@v4')) {
+                Add-ArchitectureError 'Foundation leaves must not race the native cache owner'
+            }
+        }
+        foreach ($cacheOwner in @(
+            @{ Job = $releaseRustJob; Name = 'Save verified canonical native build cache' },
+            @{ Job = $releaseWasmBuildJob; Name = 'Save verified canonical WASM build cache' },
+            @{ Job = $releaseSanitizerJob; Name = 'Save verified sanitizer C build cache' }
+        )) {
+            $cacheStepMatch = [regex]::Match($cacheOwner.Job,
+                '(?ms)^      - name: ' + [regex]::Escape($cacheOwner.Name) + '\r?\n(?<body>.*?)(?=^      - |\z)')
+            if (-not $cacheStepMatch.Success -or
+                [regex]::Matches($cacheOwner.Job, 'actions/cache/save@v4').Count -ne 1) {
+                Add-ArchitectureError "Canonical cache requires one explicit owner: $($cacheOwner.Name)"
+                continue
+            }
+            foreach ($cacheMarker in @(
+                'if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != ''true'' }}',
+                'continue-on-error: true',
+                'timeout-minutes: 2',
+                'uses: actions/cache/save@v4',
+                'key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}'
+            )) {
+                if (-not $cacheStepMatch.Groups['body'].Value.Contains($cacheMarker)) {
+                    Add-ArchitectureError "Verified optional cache writer is missing '$cacheMarker'"
                 }
             }
         }

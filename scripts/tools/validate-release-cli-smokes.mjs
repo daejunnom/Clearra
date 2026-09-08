@@ -309,7 +309,7 @@ const linuxCtk3DownloadStep = section(
 const acceptedWasmBuildRunStep = section(
   releaseAcceptanceWasmBuildJob,
   "\n      - name: Run verified WASM build producer",
-  "\n      - name: Upload accepted WASM build",
+  "\n      - name: Save verified canonical WASM build cache",
 );
 const acceptedWasmBuildUploadStep = releaseAcceptanceWasmBuildJob.slice(
   releaseAcceptanceWasmBuildJob.indexOf("\n      - name: Upload accepted WASM build"),
@@ -903,7 +903,8 @@ for (const [name, job, runner] of [
   requireExactYamlKeySet(
     job,
     4,
-    ["if", "needs", "runs-on", "steps"],
+    name === "Linux CLI" ? ["if", "needs", "runs-on", "container", "env", "steps"]
+      : ["if", "needs", "runs-on", "steps"],
     `${name} job`,
   );
   requireExactYamlScalar(
@@ -931,6 +932,28 @@ const windowsProductCacheRestoreKeys = [
   `            ${windowsProductCachePrefix}-`,
   `            ${windowsProductCachePrefix}`,
 ].join("\n");
+requireExactYamlScalar(linuxJob, "container", "rust:1.96-bookworm", "Linux CLI Cloud-compatible build baseline");
+const linuxEnvironment = section(linuxJob, "\n    env:", "\n    steps:");
+requireExactYamlKeySet(linuxEnvironment, 6, ["CARGO_HOME"], "Linux compiler container environment");
+requireExactYamlScalar(linuxEnvironment, "CARGO_HOME", "/github/home/.cargo", "Linux compiler container cache root", 6);
+const slimRuntimeStep = section(linuxJob,
+  "\n      - name: Verify CLI in the Cloud Run base image without rebuilding",
+  "\n      - name: Upload Linux CLI artifact");
+requireExactYamlKeySet(slimRuntimeStep, 8, ["uses", "with"], "Cloud-compatible CLI runtime probe");
+requireExactYamlScalar(slimRuntimeStep, "uses", "docker://node:22-bookworm-slim", "Cloud-compatible CLI runtime base", 8);
+requireExactYamlKeySet(slimRuntimeStep, 10, ["entrypoint", "args"], "Cloud-compatible CLI runtime invocation");
+requireExactYamlScalar(slimRuntimeStep, "entrypoint", "node", "Cloud-compatible CLI runtime entry", 10);
+requireExactYamlScalar(slimRuntimeStep, "args",
+  "scripts/tools/verify-linux-cli-runtime.mjs --version ${{ needs.metadata.outputs.version }} --source-commit ${{ github.sha }}",
+  "Cloud-compatible CLI runtime arguments", 10);
+const linuxProductCachePrefix = "product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}";
+requireText(linuxJob, `key: ${linuxProductCachePrefix}-` + "${{ github.sha }}",
+  "Linux CLI exact-source incremental cache key");
+requireText(linuxJob, ["restore-keys: |", `            ${linuxProductCachePrefix}-`].join("\n"),
+  "Linux CLI compatible source cache fallback");
+if (linuxJob.includes("product-v2-")) {
+  throw new Error("Bookworm CLI must not restore an incompatible Ubuntu build snapshot");
+}
 for (const [name, job] of [
   ["Windows CLI", windowsCliJob],
   ["Windows GUI", windowsGuiJob],
@@ -1422,6 +1445,7 @@ for (const [name, job, skeleton] of [
     "- id: release_toolchain_cache",
     "- name: Run canonical release acceptance sanitizer shard",
     "- name: Seal canonical release acceptance sanitizer shard",
+    "- name: Save verified sanitizer C build cache",
     "- name: Upload canonical release acceptance sanitizer shard",
   ]],
   ["rust", releaseAcceptanceRustJob, [
@@ -1432,6 +1456,7 @@ for (const [name, job, skeleton] of [
     "- name: Install JavaScript workspace",
     "- name: Run canonical release acceptance rust shard",
     "- name: Seal canonical release acceptance rust shard",
+    "- name: Save verified canonical native build cache",
     "- name: Upload canonical release acceptance rust shard",
   ]],
   ["WASM build producer", releaseAcceptanceWasmBuildJob, [
@@ -1440,6 +1465,7 @@ for (const [name, job, skeleton] of [
     "- id: release_toolchain_cache",
     "- name: Prepare acceptance toolchains",
     "- name: Run verified WASM build producer",
+    "- name: Save verified canonical WASM build cache",
     "- name: Upload accepted WASM build",
   ]],
   ["pages", releaseAcceptancePagesJob, [
@@ -1485,16 +1511,20 @@ for (const [index, job] of releaseToolchainCacheReaderJobs.entries()) {
   if ((job.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1) {
     throw new Error(`release build job ${index} must have exactly one restore-only cache reader`);
   }
-  if (job.includes("actions/cache@v4") || job.includes("actions/cache/save@v4")) {
-    throw new Error(`release build job ${index} must not own an automatic or explicit cache writer`);
+  if (job.includes("actions/cache@v4") ||
+      (index < 3 && job.includes("actions/cache/save@v4"))) {
+    throw new Error(`release build job ${index} must not own an unassigned cache writer`);
   }
+  const family = index === 4 ? "wasm" : "native";
+  const prefix = `release-acceptance-${family}-v3-` +
+    "${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}";
   for (const marker of [
     "~/.cargo/bin/wasm-bindgen.exe",
     "~/.cargo/registry",
     "~/.cargo/git",
     "~/AppData/Local/Clearra/build",
-    "release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}",
-    "release-acceptance-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-",
+    `key: ${prefix}-` + "${{ github.sha }}",
+    `restore-keys: |\n            ${prefix}-`,
   ]) {
     requireText(job, marker, `release build job ${index} cache ${marker}`);
   }
@@ -1502,11 +1532,8 @@ for (const [index, job] of releaseToolchainCacheReaderJobs.entries()) {
 if ((releaseAcceptanceSanitizerJob.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1) {
   throw new Error("sanitizer acceptance must have exactly one restore-only C build cache reader");
 }
-if (
-  releaseAcceptanceSanitizerJob.includes("actions/cache@v4") ||
-  releaseAcceptanceSanitizerJob.includes("actions/cache/save@v4")
-) {
-  throw new Error("sanitizer acceptance must not write its C build cache");
+if (releaseAcceptanceSanitizerJob.includes("actions/cache@v4")) {
+  throw new Error("sanitizer acceptance must use the bounded, verified explicit cache writer");
 }
 for (const forbidden of [
   "~/.cargo/",
@@ -1532,19 +1559,42 @@ if (
 ) {
   throw new Error("Pages acceptance must consume the accepted WASM build without a build cache");
 }
-if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 0) {
-  throw new Error("canonical acceptance must remain restore-only with no explicit cache writer");
+if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 3) {
+  throw new Error("canonical caches require exactly one native, WASM and sanitizer writer");
 }
-if (
-  releaseAcceptanceFoundationNoProductDebtJob.includes("actions/cache/save@v4") ||
-  releaseAcceptanceFoundationAdversarialCorrectnessJob.includes("actions/cache/save@v4") ||
-  releaseAcceptanceFoundationDesktopHostJob.includes("actions/cache/save@v4") ||
-  releaseAcceptanceSanitizerJob.includes("actions/cache/save@v4") ||
-  releaseAcceptanceRustJob.includes("actions/cache/save@v4") ||
-  releaseAcceptanceWasmBuildJob.includes("actions/cache/save@v4") ||
-  releaseAcceptancePagesJob.includes("actions/cache/save@v4")
-) {
-  throw new Error("no canonical acceptance shard may write a cache");
+for (const [job, name, upload, paths] of [
+  [releaseAcceptanceRustJob, "Save verified canonical native build cache",
+    "Upload canonical release acceptance rust shard", [
+      "~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git",
+      "~/AppData/Local/Clearra/build",
+    ]],
+  [releaseAcceptanceWasmBuildJob, "Save verified canonical WASM build cache",
+    "Upload accepted WASM build", [
+      "~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git",
+      "~/AppData/Local/Clearra/build",
+    ]],
+  [releaseAcceptanceSanitizerJob, "Save verified sanitizer C build cache",
+    "Upload canonical release acceptance sanitizer shard", ["~/AppData/Local/Clearra/build"]],
+]) {
+  const step = section(job, `\n      - name: ${name}`, `\n      - name: ${upload}`);
+  requireExactYamlKeySet(step, 8,
+    ["if", "continue-on-error", "timeout-minutes", "uses", "with"], name);
+  for (const [key, value] of [
+    ["if", "${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
+    ["continue-on-error", "true"], ["timeout-minutes", "2"],
+    ["uses", "actions/cache/save@v4"],
+  ]) requireExactYamlScalar(step, key, value, name, 8);
+  requireExactYamlKeySet(step, 10, ["path", "key"], name);
+  requireExactYamlScalar(step, "key",
+    "${{ steps.release_toolchain_cache.outputs.cache-primary-key }}", name, 10);
+  if (paths.length === 1) {
+    requireExactYamlScalar(step, "path", paths[0], name, 10);
+  } else {
+    requireText(step, `path: |\n${paths.map((entry) => `            ${entry}`).join("\n")}`, name);
+  }
+  if ((job.match(/actions\/cache\/save@v4/gu) ?? []).length !== 1) {
+    throw new Error(`${name} must be the sole writer for its isolated cache family`);
+  }
 }
 for (const [shard, job, caseName] of [
   ["foundation-no-product-debt", releaseAcceptanceFoundationNoProductDebtJob, "FoundationNoProductDebt"],

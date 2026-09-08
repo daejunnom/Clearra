@@ -691,13 +691,64 @@ for (const [name, mutate] of [
       ),
   ],
   [
-    "rejects a second canonical acceptance cache writer",
+    "rejects an unassigned canonical acceptance cache writer",
     (source) =>
       replaceExactlyOnce(
         source,
         "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n",
         "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/save@v4\n",
       ),
+  ],
+  [
+    "rejects a Linux product cache that cannot advance after source edits",
+    (source) => replaceExactlyOnce(source,
+      "          key: product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n",
+      "          key: product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n"),
+  ],
+  [
+    "rejects a Cloud-compatible CLI claim built against a different glibc baseline",
+    (source) => replaceExactlyOnce(source, '    container: rust:1.96-bookworm\n',
+      '    container: rust:1.96-trixie\n'),
+  ],
+  [
+    "rejects masking a slim-runtime loader failure",
+    (source) => replaceExactlyOnce(source,
+      '      - name: Verify CLI in the Cloud Run base image without rebuilding\n',
+      '      - name: Verify CLI in the Cloud Run base image without rebuilding\n        continue-on-error: true\n'),
+  ],
+  [
+    "rejects serializing the Cloud-compatible CLI behind the WASM build",
+    (source) => replaceExactlyOnce(source,
+      "  linux-cli:\n    if: github.event_name == 'workflow_dispatch'\n    needs: [metadata, ctk3]\n",
+      "  linux-cli:\n    if: github.event_name == 'workflow_dispatch'\n    needs: [metadata, ctk3, release-acceptance-wasm-build]\n"),
+  ],
+  [
+    "rejects a WASM writer publishing failed build inputs",
+    (source) => replaceExactlyOnce(source,
+      "      - name: Save verified canonical WASM build cache\n        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}\n",
+      "      - name: Save verified canonical WASM build cache\n        if: always()\n"),
+  ],
+  [
+    "rejects cache saving that adds an unbounded acceptance tail",
+    (source) => replaceExactlyOnce(source,
+      "      - name: Save verified canonical native build cache\n        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}\n        continue-on-error: true\n        timeout-minutes: 2\n",
+      "      - name: Save verified canonical native build cache\n        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}\n        continue-on-error: true\n"),
+  ],
+  [
+    "rejects native and WASM cache writers sharing an immutable key",
+    (source) => source.replaceAll('release-acceptance-wasm-v3-', 'release-acceptance-native-v3-'),
+  ],
+  [
+    "rejects optional-cache failure policy moved onto product verification",
+    (source) => replaceExactlyOnce(source,
+      "      - name: Run verified WASM build producer\n",
+      "      - name: Run verified WASM build producer\n        continue-on-error: true\n"),
+  ],
+  [
+    "rejects a cache writer using a fallback key instead of its primary source key",
+    (source) => replaceExactlyOnce(source,
+      "          key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}\n      - name: Upload accepted WASM build",
+      "          key: ${{ steps.release_toolchain_cache.outputs.cache-matched-key }}\n      - name: Upload accepted WASM build"),
   ],
   [
     "rejects a Windows product cache without exact source binding",
