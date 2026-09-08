@@ -7537,8 +7537,30 @@ impl MinimumCoverSearch {
                 return Ok(None);
             }
             let packing_lower_bound = self.packing_patterns.len();
+            // Independent integer-cut candidate: supports are rounded per
+            // disconnected component, using already governed scratch storage.
+            // A/B admission is input-independent; it changes no proof identity.
+            let rounded_lower_bound = if super::minimum_hotfix_policy::rounded_components() {
+                super::exact_rounded_packing::rounded_support_components_lower_bound(
+                    &self.target_words,
+                    covered,
+                    &self.support_pattern_order,
+                    &self.support_by_pattern,
+                    &self.selected,
+                    &self.excluded_rows,
+                    &mut self.packing_adjusted_degrees,
+                    &mut self.packing_patterns,
+                )
+                .unwrap_or(0)
+            } else {
+                0
+            };
+            if rounded_lower_bound > row_limit {
+                return Ok(None);
+            }
             let cheap_lower_bound = top_gain_lower_bound
                 .max(packing_lower_bound)
+                .max(rounded_lower_bound)
                 .max(root_dual_lower_bound);
             let dual_gap = row_limit
                 .saturating_add(1)

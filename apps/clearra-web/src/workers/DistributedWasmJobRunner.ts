@@ -67,9 +67,13 @@ export function minimumManagerTopology(
 
 interface MinimumWaveProfile {
   wave: number;
+  started_after_finalize_ms: number;
+  remote_workers: number;
+  controller_control_only: boolean;
   query_prepare_ms: number;
   upstream_gap_ms: number;
   initialize_all_ready_ms: number | null;
+  first_task_issued_ms: number | null;
   first_receipt_ms: number | null;
   last_receipt_ms: number | null;
   remote_admission_wait_ms: number;
@@ -574,9 +578,11 @@ export class DistributedWasmJobRunner {
               const waveStarted = captureSchedulingProfile ? performance.now() : 0;
               minimumWaveCount += 1;
               const wave: MinimumWaveProfile | null = captureSchedulingProfile && minimumWaves.length < MAX_MINIMUM_PROFILE_WAVES ? {
-                wave: minimumWaveCount, query_prepare_ms: waveStarted - preparationStarted,
+                wave: minimumWaveCount, started_after_finalize_ms: waveStarted - stageStarted,
+                remote_workers: minimumTopology.remoteWorkers, controller_control_only: minimumTopology.controlOnly,
+                query_prepare_ms: waveStarted - preparationStarted,
                 upstream_gap_ms: previousMinimumWaveEnd === null ? 0 : preparationStarted - previousMinimumWaveEnd,
-                initialize_all_ready_ms: null, first_receipt_ms: null, last_receipt_ms: null,
+                initialize_all_ready_ms: null, first_task_issued_ms: null, first_receipt_ms: null, last_receipt_ms: null,
                 remote_admission_wait_ms: 0, remote_drain_ms: 0, task_round_trip_max_ms: 0,
                 coordinator_compute_ms: 0, coordinator_tasks: 0, coordinator_slices: 0,
                 remote_tasks: 0, sampled_active_min: null, sampled_active_max: null, elapsed_ms: 0
@@ -620,6 +626,10 @@ export class DistributedWasmJobRunner {
                   let taskIssued = admissionStarted;
                   const dispatched = await this.pool.enqueueFromSource(() => {
                     this.requireActive();
+                    // The advisory cursor may validate a witness before the
+                    // first remote becomes ready. Do not ask an already
+                    // satisfied, unissued query to allocate another task.
+                    if (this.wasm.distributed_finish_parallel_found?.(this.jobId)) return null;
                     let task = this.wasm.distributed_finish_parallel_task!(this.jobId);
                     if (task === null && idleAssistAvailable &&
                       this.wasm.distributed_finish_parallel_assist!(this.jobId, 64)) {
@@ -629,6 +639,7 @@ export class DistributedWasmJobRunner {
                     if (wave && task !== null) {
                       wave.remote_tasks += 1;
                       taskIssued = performance.now();
+                      wave.first_task_issued_ms ??= taskIssued - waveStarted;
                     }
                     return task;
                   }, (receipt) => {
@@ -699,7 +710,29 @@ export class DistributedWasmJobRunner {
                   releaseLocalDrain();
                 }
               })();
-              await Promise.all([remoteTasks, localTasks]);
+              // Keep the positive-only global repair without holding every
+              // remote worker behind it. The dedicated ABI cannot advance a
+              // query epoch; real outstanding receipts must still drain.
+              const warmTasks = (async () => {
+                if (!minimumTopology.controlOnly ||
+                    !this.wasm.distributed_finish_parallel_warm_advance) return;
+                await yieldToWorkerHost();
+                for (;;) {
+                  this.requireActive();
+                  const started = wave ? performance.now() : 0;
+                  const pending = this.wasm.distributed_finish_parallel_warm_advance(this.jobId);
+                  if (wave) {
+                    wave.coordinator_compute_ms += performance.now() - started;
+                    wave.coordinator_slices += 1;
+                  }
+                  cancelSatisfiedSiblings();
+                  if (!pending) break;
+                  // One warm step per host turn also services ready/result
+                  // messages on low-core and all-logical-processor hosts.
+                  await yieldToWorkerHost();
+                }
+              })();
+              await Promise.all([remoteTasks, localTasks, warmTasks]);
               this.requireActive();
               parallelCompletionActive = false;
               activeMinimumWave = null;

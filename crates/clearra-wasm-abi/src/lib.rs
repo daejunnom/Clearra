@@ -1731,6 +1731,28 @@ pub extern "C" fn clearra_wasm_distributed_finish_parallel_found(job_id: u32) ->
     })
 }
 
+/// One admitted advisory step; never advances the live query epoch.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_warm_advance(job_id: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() { return status; }
+        let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        let Some((active, completion)) = state.distributed_completion.as_mut() else {
+            state.set_error("E_WASM_MINIMUM_PARALLEL_STATE", "minimum completion is not active");
+            return ABI_ERROR;
+        };
+        if *active != job_id {
+            state.set_error("E_WASM_MINIMUM_PARALLEL_STATE", "minimum completion job identity mismatch");
+            return ABI_ERROR;
+        }
+        match completion.advance_parallel_warm_guarded(outer) {
+            Ok(pending) => i32::from(pending),
+            Err(error) => { state.set_runtime_error(&error); ABI_ERROR }
+        }
+    })
+}
+
 /// Return this active task's core-minted Cancelled receipt, never ProvedNone.
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_finish_parallel_worker_cancel() -> i32 {
@@ -3497,6 +3519,30 @@ pub extern "C" fn clearra_wasm_profile_start() -> i32 {
                 );
                 ABI_ERROR
             }
+        }
+    })
+}
+
+/// Local-only same-binary factorial experiment. Absent from product builds.
+/// Configure each isolated worker before starting a job, never during search.
+#[cfg(feature = "minimum-hotfix-ab")]
+#[no_mangle]
+pub extern "C" fn clearra_wasm_minimum_ab_policy(flags: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let state = state.borrow();
+        if state.require_mutation_admission().is_err()
+            || state.runtime.has_active_finite_job()
+            || state.distributed_coordinator.is_some()
+            || state.distributed_completion.is_some()
+            || state.minimum_parallel_worker.is_some()
+            || flags > 3
+        {
+            return ABI_ERROR;
+        }
+        if clearra_coverage::cover::minimum_hotfix_policy::set_local_ab_policy(flags as u8) {
+            ABI_OK
+        } else {
+            ABI_ERROR
         }
     })
 }

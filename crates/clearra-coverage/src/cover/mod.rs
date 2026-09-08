@@ -3,7 +3,9 @@ pub mod exact_at_most_parallel;
 mod exact_dual_lower_bound;
 pub mod exact_minimum_cover;
 pub mod exact_minimum_cover_portfolios;
+mod exact_rounded_packing;
 pub mod minimum_cover_solver;
+pub mod minimum_hotfix_policy;
 
 pub use cover_selection::{
     CoverSelection, CoverSelectionLimit, CoverSelectionOptimality, CoverSelectionStrategy,

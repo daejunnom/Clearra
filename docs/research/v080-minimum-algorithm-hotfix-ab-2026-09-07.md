@@ -2,21 +2,25 @@
 
 ## 상태와 범위
 
-- 배포 기준선: `495af625393d7d8a723c48b14977a87b96d68e4f`.
+- 현재 배포 재시도 기준선: `3571fd9754f75d197c16fe33f0324cc3a19cfcca`.
+  최초 기획 기준선 `495af62`와 로컬 A/B 제품 기준선 `045a5d7`을 구분한다.
 - 준비 브랜치: `codex/v0.8.0-hotfix-minimum-algorithm-ab`.
 - Qnia 비교 기준: `03b637730c5b541f4f2934be613498fbe65327fd`.
   이번 조사에서도 이전 조사와 같은 revision임을 확인했다. 이미 확인한
   입력 차이, kernel parity, WASM RNG 수정, warm-start A/B는 다시 수행하지 않았다.
-- 이 커밋은 **알고리즘 비교와 실행 가능한 후속 A/B의 계약 준비**다.
-  새로운 제품 solver, 외부 의존성, 성능 향상 또는 3초 달성을 의미하지 않는다.
+- 최초 커밋은 계약 준비였으며, 이후 **독립 구현 후보와 실제 WASM A/B**까지
+  진행했다. M1은 회귀로 폐기했고 G는 기본 비활성이다. M2 및 모든 표본/한계는
+  `minimum-browser-hotfix-ab-2026-09-08.md`에 기록한다. 외부 CP-SAT를 제품에
+  도입했거나 3초 목표를 달성한 것은 아니다.
 - 제품 v0.8.0에는 이번 CI/배포 오류 수정만 들어간다. 본 브랜치는 main으로
   병합하지 않는다. P2 핫픽스 승격 시 제품 변경만 별도로 검토한다.
 - 외부 비교 실행기, 원본 소스, 행렬, solver 바이너리와 원시 계측은 `_local/`
   안에만 둔다. CI, Docker, Pages, CLI 패키지, 배포 승인 근거에 넣지 않는다.
-  브랜치에는 이 기록과 비실행 JSON 실험 명세만 보존한다.
+  브랜치에는 독립 작성한 제품 후보, 계약 테스트, 결과 문서 및 비실행 JSON만
+  보존한다. 외부 비교 실행기/데이터는 포함하지 않는다.
 
-현재 배포용 canonical run `34082105759`, Pages queue `34082119851`, 과거
-Discord 실행의 보호된 recovery `34082104334`는 제출만 했다. 사용자 요청에
+최신 배포용 canonical run `34199108210`, Pages queue `34199475912`, 과거
+Discord 실행 `34146085169/1`의 보호된 recovery `34199104427`은 제출만 했다. 사용자 요청에
 따라 이 새 실행들의 결과를 기다리거나 조회하지 않았다. 이 문서는 그 성공을
 전제하지 않으며 핫픽스의 실제 승격은 v0.8.0 배포 확인 이후다.
 
@@ -163,8 +167,9 @@ JSPI/SAB/COOP-COEP와 native/WASM parity를 다시 감사해야 한다.
 
 ## A/B 실행 계약
 
-기계 판독 명세는 같은 이름의 `.json` 파일이다. 지금은 모든 새 알고리즘 후보가
-`planned`이고 제품 연결은 없다. 기존 로컬 실행기는 root checkout의
+기계 판독 명세는 같은 이름의 `.json` 파일이다. G의 정수 하한과 M의 실행 중첩은
+별도 브랜치에 구현/계측했고, B1a/B2 등의 더 큰 알고리즘 변경은 여전히 후속이다.
+기존 로컬 실행기는 root checkout의
 `_local/research/benchmark-qnia-cpsat.mjs`, `qnia-pure-proof.mjs`,
 `compare-qnia-highs-cpsat-20260907.mjs`를 재사용한다. raw matrix는 ignored 상태로
 유지하고 정확한 source/hash/ID 바인딩 검증 뒤에만 가져온다.
@@ -177,7 +182,8 @@ JSPI/SAB/COOP-COEP와 native/WASM parity를 다시 감사해야 한다.
    proof, canonical, projection, GUI first paint를 별도로 기록한다.
    동일 행렬 solver-only 실험을 GUI 3초 성공으로 해석하지 않는다.
 3. 측정쌍당 같은 host/browser/WASM identity, workers, heap 정책, seed, cache 상태를
-   묶고 워밍업 후 `A B B A B A A B`로 측정한다. 실험을 동시에 돌리지 않는다.
+   묶고 워밍업 후 가능한 경우 `A B B A B A A B`로 측정한다. 실제 실행한 순서와
+   실패 표본, binary/host 수정 경계를 결과 문서에 기록한다. 실험을 동시에 돌리지 않는다.
    별도 환경에서 얻은 Qnia GUI 관측은 참고열로만 둔다.
 4. 불완전/실패/취소 표본도 기록한다. null clock을 0으로 채우거나 timeout을
    성공 표본에서 조용히 제거하지 않는다. deadline은 실험 fixture에만 적용한다.
@@ -188,8 +194,9 @@ JSPI/SAB/COOP-COEP와 native/WASM parity를 다시 감사해야 한다.
    canonical 비교에는 동일 원본 first-set hash와 exact prefix 증거를 별도로 요구한다.
    score objective/attack 등을 섞은 set은 비교에서 제외한다.
 7. 실험용 서버가 필요한 단계에서만 4195를 사용한다. 기존 소유자가 있으면
-   거부하고 4194/8790에 fallback하지 않는다. PID/lease를 기록하고 30분 만료 또는
-   소유 실험 종료 때 해당 서버만 정리한다. 이번 준비에서는 포트를 열지 않았다.
+   거부하고 4194/8790에 fallback하지 않는다. PID/lease를 기록하고 45분 만료 또는
+   소유 실험 종료 때 해당 서버만 정리한다. 4195 교체 승인은 받았으며 실제 실행
+   기록에만 서버 생성/종료를 명시한다. 4194와 8790은 변경하지 않는다.
 8. 이 호스트의 로컬 native 실행 금지 정책은 유지한다. native 비교는 이후
    명시적으로 허용된 실행 환경에서만 한다. 새 CI 결과도 이번 턴에서 조회하지 않는다.
 
@@ -216,12 +223,14 @@ WASM 교체, GUI 세션/서버 생성, CI dispatch는 이 논리 검증에 포�
 - `minimum-hotfix-logic.test.mjs`:
   `bdc4c427a47fd25f69213078589fbd31446b0974d19577cc975afd3a7a24bdd1`
 
-두 파일은 `git check-ignore`로 배제됨을 확인했다. 새 A/B 명세의 B1~B4를 이미
-제품에 구현했거나 실측한 것으로 해석하지 않는다. 다음 핫픽스 작업에서 후보
-구현 후 이 명세에 따라 실제 동등 입력의 A/B를 수행해야 한다.
+두 파일은 `git check-ignore`로 배제됨을 확인했다. 이 최초 논리 검증만으로 B1~B4
+전부를 구현/실측했다고 해석하지 않는다. 이후 실제 G/M 비교는 후속 보고서에
+구분해 기록하며, 학습/증명 재사용 등 미구현 후보를 완료로 바꾸지 않는다.
 
 ## 근거와 후속 담당 위치
 
+- 현재 실측: `minimum-browser-hotfix-ab-2026-09-08.md`,
+  `qnia-minimum-variance-ab-2026-09-08.md`.
 - 기존 실측과 결정: `qnia-cpsat-minimum-cover-comparison-2026-09-06.md`,
   `minimum-cloud-and-legal-board-evaluation-2026-09-07.md`.
 - Clearra: `crates/clearra-coverage/src/cover/exact_minimum_cover.rs`,

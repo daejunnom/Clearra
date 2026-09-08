@@ -1,0 +1,85 @@
+name: Minimum Hotfix Contracts
+
+on:
+  push:
+    branches: ["codex/v0.8.0-hotfix-minimum-algorithm-ab"]
+  workflow_dispatch:
+
+# Product code only. External comparison runners, matrices and solver binaries
+# stay local-only. This workflow grants no acceptance or deployment authority.
+permissions:
+  contents: read
+
+concurrency:
+  group: minimum-hotfix-contracts-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  exact-proof-contracts:
+    if: github.ref == 'refs/heads/codex/v0.8.0-hotfix-minimum-algorithm-ab'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile the shared exact solver tests once
+        run: cargo test --locked --release --package clearra-coverage --features minimum-hotfix-ab --lib --no-run
+      - name: Check independent cuts, canonical parity and overlapping receipts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $filters = @(
+            'exact_rounded_packing::tests',
+            'parallel_repair_never_blocks_first_work_dispatch',
+            'repair_winner_before_first_issue_has_no_transport_obligation',
+            'overlapping_warm_witness_does_not_forge_or_duplicate_an_issued_receipt',
+            'parallel_proof_and_canonical_selector_match_original_row_serial_family'
+          )
+          $failures = @()
+          foreach ($filter in $filters) {
+            $listed = & cargo test --locked --release --package clearra-coverage --features minimum-hotfix-ab --lib $filter -- --list
+            $listExit = $LASTEXITCODE
+            $listed | Write-Output
+            if ($listExit -ne 0 -or -not ($listed -match ': test$')) {
+              $failures += "$filter (missing test or failed listing)"
+              continue
+            }
+            & cargo test --locked --release --package clearra-coverage --features minimum-hotfix-ab --lib $filter -- --nocapture
+            if ($LASTEXITCODE -ne 0) { $failures += $filter }
+          }
+          if ($failures.Count -gt 0) {
+            foreach ($failure in $failures) { Write-Output "::error::Failed exact contract: $failure" }
+            exit 1
+          }
+
+  browser-host-contracts:
+    if: github.ref == 'refs/heads/codex/v0.8.0-hotfix-minimum-algorithm-ab'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: install
+        run: npm ci --ignore-scripts
+      - id: web-sync
+        run: npm run sync --workspace @clearra/web
+      - name: Type-check browser contracts
+        run: npm exec -- tsc --noEmit -p apps/clearra-web/tsconfig.contract.json
+      - name: Check actual worker lifecycle, admission and first-result transport
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.web-sync.outcome == 'success' }}
+        shell: bash
+        run: |
+          failed=0
+          for contract in BrowserWorkerBudget ClearraVerifierPool ClearraWasmRuntime DistributedWasmJobRunner HostExecutionProfile; do
+            node scripts/tools/run-typescript-contracts.mjs "apps/clearra-web/test/${contract}.contract.ts" || failed=1
+          done
+          exit "$failed"

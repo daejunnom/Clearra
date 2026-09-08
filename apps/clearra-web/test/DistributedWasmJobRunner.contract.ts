@@ -1119,6 +1119,9 @@ for (const workerCount of [2, 11, 32]) {
   assert.ok(measured.waves[0].coordinator_compute_ms >= 0);
   assert.ok(measured.waves[0].initialize_all_ready_ms >= 0);
   assert.ok(measured.waves[0].query_prepare_ms >= 0);
+  assert.ok(measured.waves[0].started_after_finalize_ms >= 0);
+  assert.ok(measured.waves[0].first_task_issued_ms >= 0);
+  assert.equal(measured.waves[0].remote_workers, workerCount - 1);
   assert.ok(measured.waves[0].elapsed_ms >= measured.waves[0].coordinator_compute_ms);
 }
 
@@ -1272,7 +1275,7 @@ const positiveProofPool = {
   async enqueue(task: ArrayBuffer, merge: (value: ArrayBuffer) => void) { merge(task); },
   cancelExactTasks() { positiveCancellationWaves += 1; },
   async completeAtomicTasks() {
-    assert.equal(positiveReceiptsMerged, 8, 'positive witness still drains every issued receipt');
+    assert.equal(positiveReceiptsMerged, positiveTasksIssued, 'positive witness still drains every issued receipt');
     positiveTransportComplete = true;
     return 1;
   }
@@ -1293,6 +1296,7 @@ await new DistributedWasmJobRunner({
 } as ClearraWasmModule, 904, 'positive-proof-cancellation-owner', finishHost, positiveProofPool as never)
   .run('clearra pc minimals --lines 4 --workers 2', plan, () => {});
 assert.equal(positiveCancellationWaves, 1, 'one validated witness broadcasts one cancellation wave per query');
+assert.equal(positiveTasksIssued, 1, 'a validated witness stops further task issuance');
 
 let rejectedReceiptCleanup = 0;
 let rejectedReceiptAdvanced = false;
@@ -1362,7 +1366,7 @@ assert.ok(performance.now() - cancelledFinishStarted < 500,
   }
 }
 
-for (const [workers, logical] of [[1, 1], [1, 2], [2, 3], [11, 12], [32, 33], [12, 12], [32, 32]]) {
+for (const [workers, logical] of [[1, 1], [1, 2], [2, 3], [6, 7], [7, 7], [11, 12], [32, 33], [12, 12], [32, 32]]) {
   const eligible = workers > 1 && workers < logical;
   for (const policy of ['auto', 'shared', 'dedicated'] as const) {
     const topology = minimumManagerTopology(workers, logical, true, true, policy);
@@ -1377,6 +1381,8 @@ for (const [workers, logical] of [[1, 1], [1, 2], [2, 3], [11, 12], [32, 33], [1
 
 for (const sample of [
   { workers: 2, logical: 3, policy: 'auto', decline: false, expected: 2 },
+  { workers: 6, logical: 7, policy: 'auto', decline: false, expected: 6 },
+  { workers: 7, logical: 7, policy: 'auto', decline: false, expected: 6 },
   { workers: 11, logical: 12, policy: 'auto', decline: false, expected: 11 },
   { workers: 32, logical: 33, policy: 'auto', decline: false, expected: 32 },
   { workers: 12, logical: 12, policy: 'auto', decline: false, expected: 11 },
@@ -1390,6 +1396,7 @@ for (const sample of [
   let issued = 0;
   let merged = 0;
   let localStarts = 0;
+  let warmSteps = 0;
   const pools: number[] = [];
   let proofPool = false;
   let actualGrant = 0n;
@@ -1422,8 +1429,16 @@ for (const sample of [
     distributed_finish_parallel_local_start() { localStarts += 1; return false; },
     distributed_finish_parallel_local_advance() { throw new Error('fixture issued no local shard'); },
     distributed_finish_parallel_merge() { merged += 1; },
+    distributed_finish_parallel_warm_advance() {
+      assert.ok(proofPool, 'remote initialization starts before advisory repair');
+      assert.equal(preparedWave, completedWave + 1, 'repair cannot advance the query epoch');
+      warmSteps += 1;
+      return warmSteps % 2 !== 0;
+    },
     distributed_finish_advance(job: number) {
       assert.equal(merged, preparedWave, 'every actual receipt drains before advancing the query');
+      assert.equal(warmSteps, sample.expected === sample.workers ? preparedWave * 2 : 0,
+        'both advisory continuation and remote receipts drain; a shared controller never runs duplicate repair');
       completedWave += 1;
       return completedWave === 2 ? wasm.distributed_finish(job, sample.workers) : null;
     }
@@ -1460,6 +1475,56 @@ for (const sample of [
   assert.deepEqual(pools, [sample.expected, sample.expected]);
   assert.equal(admitted.length, sample.decline ? 2 : 1, 'fixed completion slices survive query transitions');
   assert.equal(localStarts, sample.expected === sample.workers ? 0 : 2);
+  assert.equal(warmSteps, sample.expected === sample.workers ? 4 : 0);
+}
+
+// Reproduce the browser race: positive repair finishes while every replica
+// is still initializing. A closed task source must not become a memory error.
+{
+  let repairWon = false;
+  let remoteInitializationStarted = false;
+  let resumeReady!: () => void;
+  const ready = new Promise<void>((resolve) => { resumeReady = resolve; });
+  let cancellations = 0;
+  let drained = false;
+  await new DistributedWasmJobRunner({
+    ...wasm,
+    distributed_finish_start: () => null,
+    distributed_finish_parallel_configure() {},
+    distributed_finish_parallel_admit: () => true,
+    distributed_finish_parallel_prepare: () => Uint8Array.of(1).buffer,
+    distributed_finish_parallel_guarded_query: () => Uint8Array.of(1).buffer,
+    distributed_finish_parallel_task() { throw new Error('closed query cannot issue a descriptor'); },
+    distributed_finish_parallel_merge() { throw new Error('no task was issued'); },
+    distributed_finish_parallel_local_start() { throw new Error('dedicated manager owns no proof shard'); },
+    distributed_finish_parallel_local_advance: () => true,
+    distributed_finish_parallel_found: () => repairWon,
+    distributed_finish_parallel_warm_advance() {
+      assert.ok(remoteInitializationStarted, 'start replicas before advisory work');
+      repairWon = true;
+      resumeReady();
+      return false;
+    },
+    distributed_finish_advance(job: number) {
+      assert.ok(repairWon && drained);
+      return wasm.distributed_finish(job, 2);
+    }
+  } as ClearraWasmModule, 992, 'warm-wins-before-ready', {
+    ...finishHost, logicalProcessorCount: 3
+  }, {
+    ...pool,
+    async initialize(_q: unknown, _c: unknown, _m: unknown, _o: unknown, _r: unknown, _h: unknown, kind?: string) {
+      if (kind === 'exact-at-most') { remoteInitializationStarted = true; await ready; }
+    },
+    async enqueueFromSource(take: () => ArrayBuffer | null) {
+      await ready;
+      assert.equal(take(), null);
+      return false;
+    },
+    cancelExactTasks() { cancellations += 1; },
+    async completeAtomicTasks() { drained = true; return 2; }
+  } as never).run('clearra pc minimals --patterns P7', { ...plan, workerCount: 2 }, () => {});
+  assert.equal(cancellations, 1);
 }
 
 {

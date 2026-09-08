@@ -35,6 +35,7 @@ export type ClearraWasmModule = {
   distributed_finish_parallel_task?: (jobId: number) => ArrayBuffer | null;
   distributed_finish_parallel_merge?: (jobId: number, receipt: ArrayBuffer) => void;
   distributed_finish_parallel_found?: (jobId: number) => boolean;
+  distributed_finish_parallel_warm_advance?: (jobId: number) => boolean;
   distributed_finish_parallel_local_start?: (jobId: number) => boolean;
   distributed_finish_parallel_local_advance?: (jobId: number, maximumWork: number) => boolean;
   distributed_finish_parallel_assist?: (jobId: number, maximumChildren: number) => boolean;
@@ -238,6 +239,7 @@ type ClearraRawWasmExports = {
   clearra_wasm_distributed_finish_parallel_task?: (jobId: number) => number;
   clearra_wasm_distributed_finish_parallel_merge?: (jobId: number) => number;
   clearra_wasm_distributed_finish_parallel_found?: (jobId: number) => number;
+  clearra_wasm_distributed_finish_parallel_warm_advance?: (jobId: number) => number;
   clearra_wasm_distributed_finish_parallel_local_start?: (jobId: number) => number;
   clearra_wasm_distributed_finish_parallel_local_advance?: (jobId: number, maximumWork: number) => number;
   clearra_wasm_distributed_finish_parallel_assist?: (jobId: number, maximumChildren: number) => number;
@@ -1272,6 +1274,14 @@ function wrapRawModule(
       distributed_finish_parallel_worker_cancel() {
         requireOk(raw.clearra_wasm_distributed_finish_parallel_worker_cancel!());
         return outputBytes();
+      }
+    } : {}),
+    ...(typeof raw.clearra_wasm_distributed_finish_parallel_warm_advance === 'function' ? {
+      distributed_finish_parallel_warm_advance(jobId: number) {
+        const status = raw.clearra_wasm_distributed_finish_parallel_warm_advance!(jobId);
+        requireOk(status);
+        if (status !== 0 && status !== 1) throw new Error('invalid advisory warm status');
+        return status === 1;
       }
     } : {}),
     ...(typeof raw.clearra_wasm_distributed_finish_parallel_guard_version === 'function' &&

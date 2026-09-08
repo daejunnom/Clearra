@@ -429,7 +429,9 @@ impl ExactAtMostCoordinator {
         // Move the already materialized witness into its cube owner. Do not
         // clone the descriptor or the returned decision just to discard them.
         self.decision = ExactAtMostParallelDecision::Found(rows);
-        self.received[index] = true;
+        // An overlapping global repair is not the already issued cube's
+        // receipt. Keep that transport obligation open until its real receipt
+        // drains; otherwise the legitimate late receipt would look duplicate.
         Ok(())
     }
 
@@ -1217,6 +1219,23 @@ mod tests {
             matches!(coordinator.decision(), ExactAtMostParallelDecision::Found(rows)
             if rows == &[0, 1])
         );
+    }
+
+    #[test]
+    fn overlapping_warm_witness_does_not_forge_or_duplicate_an_issued_receipt() {
+        let query = query(&[3, 5, 6], 2);
+        let mut coordinator = ExactAtMostCoordinator::prepare(
+            query.clone(), 8, &mut |_| Ok(()), &mut || false,
+        ).unwrap();
+        let tasks = coordinator.tasks().to_vec();
+        coordinator.accept_warm_witness(vec![0, 1], &mut |_| Ok(())).unwrap();
+        assert!(!coordinator.issued_prefix_complete(tasks.len()));
+        for task in tasks {
+            coordinator.accept(terminal(&query, &task)).unwrap();
+        }
+        assert!(coordinator.issued_prefix_complete(coordinator.tasks().len()));
+        assert!(matches!(coordinator.decision(),
+            ExactAtMostParallelDecision::Found(rows) if rows == &[0, 1]));
     }
 
     #[test]

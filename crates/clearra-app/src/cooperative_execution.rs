@@ -2015,6 +2015,19 @@ impl CooperativeAppExecution {
         }
     }
 
+    /// Positive-only, single-step assistance; cannot move a live query epoch.
+    pub fn advance_minimum_parallel_warm(
+        &mut self,
+        guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, &'static str> {
+        match &mut self.state {
+            CooperativeExecutionState::MinimumFinalize(finalize) =>
+                finalize.preparation.advance_parallel_warm(guard, cancelled),
+            _ => Ok(false),
+        }
+    }
+
     /// Optional one-level idle assistance. `memory_guard` admits extra peak
     /// beyond the current whole App owner; no clone or child obligation is
     /// committed when the guard declines. Host authority remains mandatory.

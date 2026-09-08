@@ -1,11 +1,21 @@
 {
   "schema": "clearra.local-only.minimum-algorithm-ab-plan.v1",
-  "status": "prepared-not-benchmarked",
+  "status": "implemented-and-benchmarked-candidates-not-promoted",
   "diagnostic_only": true,
   "release_authority": false,
   "ci_enabled": false,
+  "product_contract_ci": {
+    "workflow": "minimum-hotfix-checks.yml",
+    "external_comparisons_included": false,
+    "deployment_authority": false,
+    "result_waited_for": false
+  },
   "product_solver_enabled": false,
+  "candidate_product_code_in_branch": true,
+  "published_product_has_hotfix": false,
   "baseline_source": "495af625393d7d8a723c48b14977a87b96d68e4f",
+  "current_deployment_source": "3571fd9754f75d197c16fe33f0324cc3a19cfcca",
+  "local_product_ab_baseline": "045a5d7",
   "branch": "codex/v0.8.0-hotfix-minimum-algorithm-ab",
   "reference_source": "03b637730c5b541f4f2934be613498fbe65327fd",
   "local_execution": {
@@ -14,9 +24,9 @@
     "generated_root": "_local/reports/minimum-algorithm-ab",
     "output_create_exclusive": true,
     "parallel_benchmark_processes": 1,
-    "server_needed_for_preparation": false,
+    "server_needed_for_preparation": true,
     "experiment_port": 4195,
-    "server_lease_seconds": 1800,
+    "server_lease_seconds": 2700,
     "refuse_existing_listener": true,
     "forbidden_fallback_ports": [4194, 8790],
     "cleanup": "only-owned-pid-on-exit-or-lease-expiry"
@@ -29,7 +39,7 @@
     "allow_timeout_as_unsat": false,
     "allow_float_only_pruning": false,
     "allow_canonical_dominance_deletion": false,
-    "fixture_deadline_ms": 120000,
+    "fixture_deadline_ms": 180000,
     "fixture_deadline_is_product_policy": false,
     "gui_first_result_target_ms": 3000,
     "target_priority": "P2-post-v0.8.0",
@@ -58,7 +68,9 @@
   "variants": [
     {"id": "A", "status": "existing-baseline", "change": "none; includes existing warm-start, integer dual, work stealing and lazy ties"},
     {"id": "B1a", "status": "planned", "change": "coverage/cardinality propagation with reasoned conflict learning"},
-    {"id": "B1b", "status": "planned", "change": "stronger integer-verified LP/rounded-cut bounds; separate from B1a"},
+    {"id": "B1b-G", "status": "implemented-measured-default-off", "change": "integer-verified component-rounded support bound; separate from scheduling", "first_ab_ms": [36149.445, 40224.185], "adopted": false},
+    {"id": "M1", "status": "rejected-regression", "change": "remove global warm repair before remote dispatch", "first_ab_ms": [36149.445, 82015.800], "adopted": false},
+    {"id": "M2", "status": "browser-benchmarked-not-promoted", "change": "retain positive-only warm repair and overlap bounded advisory steps with n-1 remote proof tasks; preserve shared-controller policy"},
     {"id": "B2", "status": "planned", "change": "fixed-K original-row canonical assumptions with scope-safe inter-query learning"},
     {"id": "B3", "status": "planned", "change": "reversible proof-only presolve and certified independent components"},
     {"id": "B4", "status": "planned-secondary-axis", "change": "verified bound/witness/clause sharing without blocking controller"},
@@ -82,6 +94,33 @@
     "explicit-next-canonical", "worker-load", "worker-cleanup", "public-request-total"
   ],
   "phase_accounting": "record absolute start/end and overlap; do not sum overlapping worker or nested timers",
+  "result_documents": ["minimum-browser-hotfix-ab-2026-09-08.md", "qnia-minimum-variance-ab-2026-09-08.md"],
+  "final_same_binary_ab": {
+    "wasm_sha256": "7c5aef79bf25a198935b58643ad55f12054aff49714c7e3e672fd6c88145c308",
+    "release_authority": false,
+    "workers6_order": ["A", "M", "M", "A"],
+    "workers6_baseline_ms": [42404.650, 24661.980],
+    "workers6_candidate_ms": [23359.350, 23758.920],
+    "workers6_first_dispatch_baseline_ms": [13694.415, 4597.090],
+    "workers6_first_dispatch_candidate_ms": [193.145, 185.260],
+    "workers7_order": ["A", "M", "M", "A", "M", "A"],
+    "workers7_baseline_ms": [25611.605, 25407.275, 40084.065],
+    "workers7_candidate_ms": [33152.790, 24861.720, 25907.040],
+    "workers7_explicit_flag": "--use-all-cpu-threads",
+    "successful_canonical_parity_samples_all_binaries": 19,
+    "non_success_samples_retained": 2,
+    "original_queues_covered_per_success": 5040,
+    "target_3000_ms_achieved": false,
+    "statistical_performance_equivalence_proven": false
+  },
+  "mobile_validation": {
+    "user_device": "Samsung Galaxy S23 Ultra / Chrome / 7 reported logical processors",
+    "actual_device_benchmarked": false,
+    "local_browser_host_actual_logical_processors": 12,
+    "configured_host_logical_processors": 7,
+    "requested_compute_workers": [6, 7],
+    "not_device_emulation": true
+  },
   "metrics": [
     "original-and-kernel-dimensions", "proof-nodes", "incumbent-improvements", "bound-progress",
     "prefix-queries", "prefix-reuse-hits", "learned-clauses", "learning-scope-rejections",

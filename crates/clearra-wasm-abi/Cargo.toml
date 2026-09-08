@@ -8,8 +8,10 @@ publish = false
 [features]
 default = []
 stage-profiling = ["clearra-wasm/stage-profiling", "dep:serde_json"]
+minimum-hotfix-ab = ["dep:clearra-coverage", "clearra-coverage/minimum-hotfix-ab"]
 
 [dependencies]
+clearra-coverage = { path = "../clearra-coverage", optional = true }
 clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-wasm = { path = "../clearra-wasm", features = ["webgpu-search"] }
 serde_json = { workspace = true, optional = true }

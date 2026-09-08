@@ -10,6 +10,8 @@ default = []
 # Native ignored probes may opt into non-authoritative solver telemetry. The
 # production dependency graph never enables this feature.
 diagnostic-probes = []
+# Local-only WASM experiments; never enabled by a product build or CI gate.
+minimum-hotfix-ab = []
 
 [dependencies]
 clearra-core-domain = { path = "../clearra-core-domain" }

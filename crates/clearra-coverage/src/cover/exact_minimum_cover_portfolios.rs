@@ -49,6 +49,7 @@ struct ParallelOracle {
     next_task: usize,
     warm_session: Option<ExactCoverSearchSession>,
     warm_remaining_steps: u64,
+    overlap_warm: bool,
 }
 
 enum ParallelWarmAdvance {
@@ -58,7 +59,7 @@ enum ParallelWarmAdvance {
 
 impl ParallelOracle {
     fn published_query(&self) -> Option<&ExactAtMostQuery> {
-        (self.warm_session.is_none()
+        ((self.warm_session.is_none() || self.overlap_warm)
             && (self.next_task != 0
                 || matches!(
                     self.coordinator.decision(),
@@ -86,6 +87,13 @@ impl ParallelOracle {
         let Some(session) = self.warm_session.as_mut() else {
             return Ok(None);
         };
+        if !matches!(
+            self.coordinator.decision(),
+            ExactAtMostParallelDecision::Pending { .. }
+        ) {
+            self.warm_session = None;
+            return Ok(Some(ParallelWarmAdvance::Pending(0)));
+        }
         let base = external_live
             .checked_add(
                 self.coordinator
@@ -170,8 +178,30 @@ impl ParallelOracle {
         !self.coordinator.issued_prefix_complete(self.next_task)
     }
 
+    // Advance only the advisory cursor, never the query/prefix state machine.
+    // The caller admits additional peak above its existing whole-object owner.
+    fn advance_overlapped_warm(
+        &mut self,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, ExactMinimumCoverPortfolioError> {
+        if !self.overlap_warm || self.warm_session.is_none() {
+            return Ok(false);
+        }
+        let before = self
+            .checked_retained_bytes()
+            .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?;
+        self.advance_warm(
+            1,
+            0,
+            &mut |peak| guard(peak.saturating_sub(before)),
+            cancelled,
+        )?;
+        Ok(self.warm_session.is_some())
+    }
+
     fn take_task(&mut self) -> Option<ExactAtMostTask> {
-        if self.warm_session.is_some()
+        if (self.warm_session.is_some() && !self.overlap_warm)
             || !matches!(
                 self.coordinator.decision(),
                 ExactAtMostParallelDecision::Pending { .. }
@@ -196,7 +226,7 @@ impl ParallelOracle {
         maximum_children: usize,
         guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
     ) -> Result<bool, ExactMinimumCoverPortfolioError> {
-        if self.warm_session.is_some() {
+        if self.warm_session.is_some() && !self.overlap_warm {
             return Ok(false);
         }
         self.coordinator
@@ -580,6 +610,17 @@ impl ExactMinimumCoverPortfolioPreparationSession {
 
     pub fn take_parallel_task(&mut self) -> Option<ExactAtMostTask> {
         self.parallel_proof.as_mut()?.oracle.take_task()
+    }
+
+    pub fn advance_parallel_warm(
+        &mut self,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, ExactMinimumCoverPortfolioError> {
+        match &mut self.parallel_proof {
+            Some(proof) => proof.oracle.advance_overlapped_warm(guard, cancelled),
+            None => Ok(false),
+        }
     }
 
     pub fn prepare_parallel_idle_assist(
@@ -1285,14 +1326,31 @@ mod parallel_portfolio_tests {
                     next_query_id: AtomicU64::new(1),
                 };
                 let mut oracle = make_parallel_oracle(
-                    &config, required, rows, limit,
-                    Some(if limit == 1 { vec![0, 1] } else { vec![0, 1, 2] }),
-                    &mut |_| Ok(()), &mut || false,
-                ).unwrap();
-                assert!(oracle.warm_session.is_none());
-                assert_eq!(oracle.checked_retained_bytes(), oracle.coordinator.checked_retained_bytes());
-                let query = oracle.published_query().expect("no serial repair barrier").clone();
-                let first = oracle.take_task().expect("first task is immediately available");
+                    &config,
+                    required,
+                    rows,
+                    limit,
+                    Some(if limit == 1 {
+                        vec![0, 1]
+                    } else {
+                        vec![0, 1, 2]
+                    }),
+                    &mut |_| Ok(()),
+                    &mut || false,
+                )
+                .unwrap();
+                assert!(oracle.overlap_warm);
+                assert!(
+                    oracle.checked_retained_bytes().unwrap()
+                        >= oracle.coordinator.checked_retained_bytes().unwrap()
+                );
+                let query = oracle
+                    .published_query()
+                    .expect("no serial repair barrier")
+                    .clone();
+                let first = oracle
+                    .take_task()
+                    .expect("first task is immediately available");
                 oracle.coordinator.accept(run(&query, first)).unwrap();
                 while let Some(task) = oracle.take_task() {
                     oracle.coordinator.accept(run(&query, task)).unwrap();
@@ -1307,6 +1365,29 @@ mod parallel_portfolio_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn repair_winner_before_first_issue_has_no_transport_obligation() {
+        let required = PatternBitSet::from_words(3, vec![7]).unwrap();
+        let rows = [3, 5, 6]
+            .into_iter()
+            .map(|mask| PatternBitSet::from_words(3, vec![mask]).unwrap())
+            .collect();
+        let config = ParallelConfiguration {
+            partitions: 6,
+            matrix_id: [12; 32],
+            next_query_id: AtomicU64::new(1),
+        };
+        let mut oracle = make_parallel_oracle(
+            &config, required, rows, 2, None, &mut |_| Ok(()), &mut || false,
+        )
+        .unwrap();
+        assert!(oracle.published_query().is_some());
+        oracle.coordinator.accept_warm_witness(vec![0, 1], &mut |_| Ok(())).unwrap();
+        assert!(oracle.published_query().is_none());
+        assert!(oracle.take_task().is_none());
+        assert!(!oracle.waiting_for_issued());
     }
 
     #[test]
@@ -1546,12 +1627,10 @@ fn make_parallel_oracle(
             .accept_warm_witness(hint, memory_guard)
             .map_err(parallel_error)?;
     }
-    // The controller must publish cubes before doing any repair search. A
-    // 1,000-swap full-query warm pass used to serialize every worker, including
-    // each subsequent canonical-prefix query. On mobile this is unbounded wall
-    // time. Preserve the cheap, fully replayed KnownCover shortcut above and
-    // worker-local witness hints, but reserve controller repair for one shard.
-    let warm_session = if config.partitions == 1 && admission == GlobalWarmAdmission::Repair {
+    // Retain the positive-only global repair: simply deleting it regressed the
+    // measured first canonical result from 36s to 82s. Publish independent
+    // cubes immediately and let the host interleave one advisory step at a time.
+    let warm_session = if admission == GlobalWarmAdmission::Repair {
         let hint = coordinator.query().witness_hint().expect("admitted hint");
         let base = coordinator
             .checked_retained_bytes()
@@ -1581,6 +1660,8 @@ fn make_parallel_oracle(
         warm_session,
         // Total global cursor work, not a fresh budget per supporter.
         warm_remaining_steps: WITNESS_ASSISTED_BREAKOUT_SWAP_BUDGET as u64,
+        overlap_warm: config.partitions > 1
+            && super::minimum_hotfix_policy::parallel_first_dispatch(),
     })
 }
 
@@ -1769,6 +1850,17 @@ impl ExactMinimumCoverPortfolioEnumerator {
 
     pub fn take_parallel_task(&mut self) -> Option<ExactAtMostTask> {
         self.parallel_oracle_mut()?.take_task()
+    }
+
+    pub fn advance_parallel_warm(
+        &mut self,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, ExactMinimumCoverPortfolioError> {
+        match self.parallel_oracle_mut() {
+            Some(oracle) => oracle.advance_overlapped_warm(guard, cancelled),
+            None => Ok(false),
+        }
     }
 
     pub fn accept_parallel_receipt(
