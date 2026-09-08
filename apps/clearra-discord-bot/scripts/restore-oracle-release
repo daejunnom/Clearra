@@ -111,7 +111,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 ln -s -- "$prior_release" "$temporary_link"
-install -o root -g root -m 0644 -- "$prior_settings" "$temporary_settings"
+install -o root -g root -m 0600 -- "$prior_settings" "$temporary_settings"
 
 service_transition_started=1
 "$systemctl_path" stop "$service_name"

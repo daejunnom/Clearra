@@ -41,6 +41,7 @@ test("Oracle rollback leaves only a fully verified restored service active", asy
     "Restored Oracle process did not reach the exact prior immutable release within the startup deadline.",
     "service_transition_started=1",
     "restore_verified=1",
+    'install -o root -g root -m 0600 -- "$prior_settings" "$temporary_settings"',
   ]) {
     assert.match(source, new RegExp(escapeRegex(marker)));
   }
@@ -226,14 +227,17 @@ FAKE_STAT
 
 cat > "$bin_directory/install" <<'FAKE_INSTALL'
 #!/bin/sh
+mode=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -o|-g|-m) shift 2 ;;
+    -o|-g) shift 2 ;;
+    -m) mode=$2; shift 2 ;;
     --) shift; break ;;
     *) break ;;
   esac
 done
-exec /usr/bin/install -m 0644 "$1" "$2"
+[ "$mode" = 0600 ] || exit 77
+exec /usr/bin/install -m "$mode" "$1" "$2"
 FAKE_INSTALL
 
 cat > "$bin_directory/mv" <<'FAKE_MV'

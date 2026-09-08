@@ -376,7 +376,7 @@ case "$operation" in
     verification_complete=0
     cleanup_candidate() {
       exit_status=$?
-      trap - EXIT HUP INT TERM
+      trap - EXIT HUP INT TERM PIPE
       if [ "$transition_started" -eq 1 ] && [ "$verification_complete" -ne 1 ]; then
         "$systemctl_path" stop "$service_name" >/dev/null 2>&1 || true
       fi
@@ -388,6 +388,7 @@ case "$operation" in
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    trap 'exit 141' PIPE
 
     # candidate-settings-v080: begin
 /usr/bin/cat > "$temporary_settings" <<CLEARRA_CANDIDATE_SETTINGS_V080
@@ -435,6 +436,9 @@ CLEARRA_CANDIDATE_SETTINGS_V080
         break
       fi
       [ "$(/usr/bin/date +%s)" -lt "$deadline" ] || fail 70
+      # Keep the operator informed without changing the exact stdout attestation.
+      # A disconnected SSH stderr pipe must also run the transition cleanup.
+      printf '%s\n' 'oracle_candidate=waiting-for-ready-and-fresh-path-proof' >&2
       /usr/bin/sleep 5
     done
     "$node_path" "$candidate_verifier" \
@@ -559,7 +563,7 @@ CLEARRA_CANDIDATE_SETTINGS_V080
     verification_complete=0
     cleanup_rollback() {
       exit_status=$?
-      trap - EXIT HUP INT TERM
+      trap - EXIT HUP INT TERM PIPE
       if [ "$transition_started" -eq 1 ] && [ "$verification_complete" -ne 1 ]; then
         "$systemctl_path" stop "$service_name" >/dev/null 2>&1 || true
       fi
@@ -569,6 +573,7 @@ CLEARRA_CANDIDATE_SETTINGS_V080
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    trap 'exit 141' PIPE
 
     "$restore_script" \
       "$prior_release" \
@@ -595,6 +600,7 @@ CLEARRA_CANDIDATE_SETTINGS_V080
         break
       fi
       [ "$(/usr/bin/date +%s)" -lt "$deadline" ] || fail 70
+      printf '%s\n' 'oracle_rollback=waiting-for-ready-and-fresh-path-proof' >&2
       /usr/bin/sleep 5
     done
     "$node_path" "$rollback_verifier" \

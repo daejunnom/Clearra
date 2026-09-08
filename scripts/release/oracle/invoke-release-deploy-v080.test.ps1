@@ -456,6 +456,8 @@ function Get-ExpectedOracleCommonClientArguments {
         '-o', 'ControlPersist=no',
         '-o', 'PermitLocalCommand=no',
         '-o', 'LogLevel=ERROR',
+        '-o', 'ServerAliveInterval=15',
+        '-o', 'ServerAliveCountMax=4',
         '-o', 'ConnectTimeout=15'
     )
 }

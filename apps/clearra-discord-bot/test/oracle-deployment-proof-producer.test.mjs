@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { writeOperationalLog } from "../src/operational-log.mjs";
 
 import {
   inspectActiveOracle,
@@ -112,6 +113,51 @@ test("trusted Oracle producer selects the latest canonical operation regardless 
       }),
     );
     assert.equal(active.freshOperationAt, latest);
+  }
+});
+
+test("Oracle proof admits the actual redesigned path telemetry and the legacy rollback label", () => {
+  const lines = [];
+  assert.equal(writeOperationalLog({ info: (line) => lines.push(line) },
+    operationRecord("2026-08-20T00:00:01.000Z")), true);
+  const redesigned = JSON.parse(lines[0]);
+  assert.equal(redesigned.command, "pc.path");
+  const options = {
+    oracleReleaseId: "v0.8.0-701454b", oracleReleaseSha256: "a".repeat(64),
+    oracleSettingsSha256: candidateSettingsSha256, verifiedAfter,
+    expectedSettings: { CLEARRA_JOB_URL: candidateJobUrl },
+  };
+  const observe = (record) => inspectActiveOracle(options, fakeRuntime({
+    releaseId: options.oracleReleaseId, settings: candidateSettings,
+    journalRecords: [record],
+  }));
+  for (const record of [redesigned, operationRecord(redesigned.at)]) {
+    assert.equal(observe(record).freshOperationAt, redesigned.at);
+  }
+  for (const override of [
+    { command: "pc.chance" }, { command: "pc.minimals" },
+    { command: "pc.path.extra" }, { command: "sfinder.path" },
+    { status: "failed" }, { status: "delegated" }, { kind: "text" },
+    { scope: "job" }, { at: "2026-08-19T23:59:59.000Z" },
+  ]) {
+    assert.throws(() => observe({ ...redesigned, ...override }), /fresh successful bounded/u);
+  }
+});
+
+test("Oracle proof validates numeric PID bounds rather than rejecting a leading one", () => {
+  const options = {
+    oracleReleaseId: "v0.8.0-701454b", oracleReleaseSha256: "a".repeat(64),
+    oracleSettingsSha256: candidateSettingsSha256, verifiedAfter,
+    expectedSettings: { CLEARRA_JOB_URL: candidateJobUrl },
+  };
+  const observe = (pid) => inspectActiveOracle(options, fakeRuntime({
+    releaseId: options.oracleReleaseId, settings: candidateSettings, pid,
+  }));
+  for (const pid of ["2", "10", "100", "1531090", "1568848", "1571414", "4194304"]) {
+    assert.equal(observe(pid).gatewayPid, pid);
+  }
+  for (const pid of ["", "0", "1", "01", "-2", "1.5", "2e3", "1extra", "9007199254740992"]) {
+    assert.throws(() => observe(pid), /MainPID is invalid/u);
   }
 });
 
@@ -302,6 +348,7 @@ test("trusted Oracle rollback producer preserves strict v2 runtime authority", (
 
 function fakeRuntime({
   releaseId,
+  pid = "4242",
   releaseSha256 = "a".repeat(64),
   settings,
   operationAt = "2026-08-20T00:00:01.000Z",
@@ -319,7 +366,7 @@ function fakeRuntime({
     },
     realpath(path) {
       if (path === "/opt/clearra/current") return releasePath;
-      if (path === "/proc/4242/cwd")
+      if (path === `/proc/${pid}/cwd`)
         return `${releasePath}/apps/clearra-discord-bot`;
       throw new Error(`unexpected realpath ${path}`);
     },
@@ -327,7 +374,7 @@ function fakeRuntime({
       if (command === "/usr/bin/systemctl" && arguments_[0] === "is-active")
         return "active\n";
       if (command === "/usr/bin/systemctl" && arguments_[0] === "show")
-        return "4242\n";
+        return `${pid}\n`;
       if (command === "/usr/bin/journalctl") {
         return [
           "Oracle Gateway connected as ClearraBot; Gateway slash ingress enabled.",

@@ -22,7 +22,9 @@ import { releaseTreeSha256 } from "./release-tree-digest.mjs";
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const RELEASE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const OPERATION_COMMAND = "path";
+// v0.7.4 rollback journals use the legacy label; the redesigned product logger
+// emits its stable capability ID. Admit only these two names for the same path.
+const OPERATION_COMMANDS = new Set(["path", "pc.path"]);
 const RELEASE_ROOT = "/opt/clearra/releases";
 const CURRENT_LINK = "/opt/clearra/current";
 const SETTINGS_PATH = "/etc/clearra-gateway/settings";
@@ -233,7 +235,8 @@ export function inspectActiveOracle(options, dependencies = {}) {
     "--value",
     SERVICE_NAME,
   ]).trim();
-  if (!/^[2-9][0-9]*$/.test(pid))
+  // Exclude PID 0/1, not every valid PID whose first digit happens to be 1.
+  if (!/^[1-9][0-9]*$/.test(pid) || !Number.isSafeInteger(Number(pid)) || Number(pid) <= 1)
     throw new Error("Oracle Gateway MainPID is invalid");
   const processCwd = normalizePath(resolvePath(`/proc/${pid}/cwd`));
   if (processCwd !== `${expectedRelease}/apps/clearra-discord-bot`) {
@@ -261,7 +264,7 @@ export function inspectActiveOracle(options, dependencies = {}) {
       record?.event !== "clearra.operation" ||
       record.scope !== "gateway" ||
       record.kind !== "slash" ||
-      record.command !== OPERATION_COMMAND ||
+      !OPERATION_COMMANDS.has(record.command) ||
       record.status !== "succeeded"
     ) {
       continue;

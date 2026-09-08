@@ -963,6 +963,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $intentPath = Join-Path $env:GITHUB_WORKSPACE 'prestage/intended-candidate-authority.json'
           $candidatePath = Join-Path $env:GITHUB_WORKSPACE 'prestage/cloud-candidate-deploy-attempted.marker'
+          $transitionPath = Join-Path $env:GITHUB_WORKSPACE 'promotion/oracle-transition-started.marker'
+          $rollbackPath = Join-Path $env:GITHUB_WORKSPACE 'promotion/rollback-complete.marker'
+          if ((Test-Path -LiteralPath $transitionPath -PathType Leaf) -and
+              -not (Test-Path -LiteralPath $rollbackPath -PathType Leaf)) {
+            # Recovery must still resolve the active Oracle's candidate /health.
+            # Removing its tag first makes that exact runtime unobservable.
+            Write-Output 'failed_deploy_candidate_cleanup=deferred-unverified-oracle-restore'
+            exit 0
+          }
           if (-not (Test-Path -LiteralPath $intentPath -PathType Leaf) -or
               -not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
             Write-Output 'failed_deploy_candidate_cleanup=no-candidate-deploy-attempt'

@@ -20,6 +20,58 @@ test("both recovery resolutions collect exact jobs for pending concurrency waits
   assert.equal([...recovery.matchAll(/\.status == "pending" or/gu)].length, 2);
   assert.equal([...recovery.matchAll(/\/attempts\/\$run_attempt\/jobs\?per_page=100/gu)].length, 2);
 });
+
+test("failed deployment retains the candidate endpoint until the Oracle rollback is proven", () => {
+  const cleanup = primary.slice(primary.indexOf("      - name: Remove only this failed deployment candidate tag"),
+    primary.indexOf("      - name: Always remove the temporary Oracle key"));
+  const guard = cleanup.indexOf("if ((Test-Path -LiteralPath $transitionPath -PathType Leaf)");
+  const deferred = cleanup.indexOf("failed_deploy_candidate_cleanup=deferred-unverified-oracle-restore");
+  const mutation = cleanup.indexOf("node scripts/release/cloud/remove-failed-deploy-candidate-tag.mjs");
+  assert.ok(guard >= 0 && deferred > guard && mutation > deferred);
+  assert.match(cleanup.slice(guard, mutation), /-not \(Test-Path -LiteralPath \$rollbackPath -PathType Leaf\)/u);
+  assert.match(cleanup.slice(deferred, mutation), /exit 0/u);
+  assert.match(primary, /New-Item -ItemType File -Path \$rollbackMarker -ErrorAction Stop/u);
+});
+
+test("Oracle proof waits preserve SSH liveness and fail closed when the observer pipe closes", async () => {
+  const [launcher, invoker] = await Promise.all([
+    readFile(new URL("./oracle/clearra-oracle-release-deploy-v080", import.meta.url), "utf8"),
+    readFile(new URL("./oracle/invoke-release-deploy-v080.ps1", import.meta.url), "utf8"),
+  ]);
+  assert.equal((launcher.match(/trap 'exit 141' PIPE/gu) ?? []).length, 2);
+  assert.equal((launcher.match(/trap - EXIT HUP INT TERM PIPE/gu) ?? []).length, 2);
+  for (const phase of ["candidate", "rollback"]) {
+    assert.match(launcher, new RegExp(`'oracle_${phase}=waiting-for-ready-and-fresh-path-proof' >&2`, "u"));
+  }
+  assert.match(invoker, /'ServerAliveInterval=15'/u);
+  assert.match(invoker, /'ServerAliveCountMax=4'/u);
+});
+
+test("candidate endpoint cleanup guard executes all transition and rollback combinations", () => {
+  const cleanup = primary.slice(primary.indexOf("      - name: Remove only this failed deployment candidate tag"),
+    primary.indexOf("      - name: Always remove the temporary Oracle key"));
+  const guard = cleanup.slice(cleanup.indexOf("$ErrorActionPreference"), cleanup.indexOf("$prestageState"));
+  for (const [transition, restored, attempted, expected] of [
+    [false, false, true, "cleanup_probe=allowed"],
+    [true, false, true, "failed_deploy_candidate_cleanup=deferred-unverified-oracle-restore"],
+    [true, true, true, "cleanup_probe=allowed"],
+    [false, false, false, "failed_deploy_candidate_cleanup=no-candidate-deploy-attempt"],
+  ]) {
+    const leaves = ["intended-candidate-authority.json",
+      ...(transition ? ["oracle-transition-started.marker"] : []),
+      ...(restored ? ["rollback-complete.marker"] : []),
+      ...(attempted ? ["cloud-candidate-deploy-attempted.marker"] : [])];
+    const script = `$env:GITHUB_WORKSPACE = [IO.Path]::GetTempPath()\n` +
+      `function Test-Path { param($LiteralPath, $PathType)\n` +
+      `return [IO.Path]::GetFileName($LiteralPath) -in @(${leaves.map(leaf => `'${leaf}'`).join(",")})\n}\n` +
+      guard + `\nWrite-Output 'cleanup_probe=allowed'\n`;
+    const result = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64")],
+    { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), expected);
+  }
+});
 const release = await readFile(
   new URL("../../.github/workflows/release-cli.yml", import.meta.url),
   "utf8",
