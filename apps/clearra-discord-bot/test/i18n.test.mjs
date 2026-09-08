@@ -264,8 +264,8 @@ test("Discord registration localizes names without redundant values or collision
       "max-memory-mib",
     ],
   );
-  assert.match(formatSlashCommandHelp("pc allspin-sol", "ko"), /명령 의도만 보장/u);
-  assert.match(formatSlashCommandHelp("allspin-pres-chance", "ko"), /v0\.10에 제거/u);
+  assert.match(formatSlashCommandHelp("pc allspin-sol", "ko"), /슬래시 별칭은 v0\.10에서 제거/u);
+  assert.match(formatSlashCommandHelp("allspin-pres-chance", "ko"), /v0\.10에서 제거/u);
 
   assert.equal(
     globalCommands.some(({ name }) => name === "verify"),
