@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { runPowerShellTest } from "../../tools/powershell-test-process.mjs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -15,18 +15,7 @@ test(
   "executes the shell-free Oracle prestage transport and watchdog regression exactly once",
   { timeout: 120_000 },
   () => {
-    const result = spawnSync(
-      process.platform === "win32" ? "pwsh.exe" : "pwsh",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", TEST_SCRIPT],
-      {
-        cwd: REPOSITORY_ROOT,
-        encoding: "utf8",
-        maxBuffer: 8 * 1024 * 1024,
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      },
-    );
+    const result = runPowerShellTest(["-File", TEST_SCRIPT], { cwd: REPOSITORY_ROOT });
     assert.ifError(result.error);
     assert.equal(
       result.status,

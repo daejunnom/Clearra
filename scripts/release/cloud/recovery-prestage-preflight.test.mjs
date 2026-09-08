@@ -4,15 +4,12 @@ import { readFile, mkdtemp, rm } from "node:fs/promises";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { powerShellTestOptions, runPowerShellTest } from "../../tools/powershell-test-process.mjs";
 
 const source = await readFile(new URL("../invoke-discord-runtime-recovery-v080.ps1", import.meta.url), "utf8");
 const functions = [...source.matchAll(/^function [\w-]+ \{[\s\S]*?^\}/gm)].map((x) => x[0]).join("\n");
 const prestage = source.slice(source.indexOf("if ($Stage -ceq 'prestage') {"), source.indexOf("\n$candidateState = Verify-LiveAuthority"));
-const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.Major"], { encoding: "utf8", timeout: 10_000 });
-const hasPwsh = !probe.error && probe.status === 0;
-if (process.env.CI === "true") assert.ok(hasPwsh, "CI must execute the PowerShell behavior tests");
-const psOptions = { skip: hasPwsh ? false : "PowerShell is not installed in this local test environment" };
+const psOptions = powerShellTestOptions();
 const setup = `
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -52,9 +49,7 @@ function executePs(body) {
     // -Command can inherit a false $? from an intentionally caught exception.
     // -File measures script completion instead. Do not append exit 0 or reset
     // production error state: uncaught throws must still fail the process.
-    return spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", scriptPath], {
-      encoding: "utf8", timeout: 20_000, shell: false, maxBuffer: 256 * 1024,
-    });
+    return runPowerShellTest(["-File", scriptPath]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

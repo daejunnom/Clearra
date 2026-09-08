@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { runPowerShellTest } from "../tools/powershell-test-process.mjs";
 
 import {
   generateBootstrap,
@@ -261,11 +262,7 @@ test("v0.8 Oracle generator CLI audits, creates once, and checks exact bytes", (
 });
 
 test("v0.8 Oracle inactive-stage wrapper passes its cross-host audit", () => {
-  const wrapperAudit = spawnSync(
-    "pwsh",
-    ["-NoProfile", "-File", wrapperTest],
-    { encoding: "utf8", windowsHide: true },
-  );
+  const wrapperAudit = runPowerShellTest(["-File", wrapperTest]);
   assert.equal(
     wrapperAudit.status,
     0,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { spawnSync } from "node:child_process";
+import { runPowerShellTest } from "../tools/powershell-test-process.mjs";
 
 const primary = await readFile(
   new URL("../../.github/workflows/discord-deploy.yml", import.meta.url),
@@ -65,9 +65,8 @@ test("candidate endpoint cleanup guard executes all transition and rollback comb
       `function Test-Path { param($LiteralPath, $PathType)\n` +
       `return [IO.Path]::GetFileName($LiteralPath) -in @(${leaves.map(leaf => `'${leaf}'`).join(",")})\n}\n` +
       guard + `\nWrite-Output 'cleanup_probe=allowed'\n`;
-    const result = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
-      Buffer.from(script, "utf16le").toString("base64")],
-    { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+    const result = runPowerShellTest(["-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64")]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), expected);
   }
@@ -271,7 +270,7 @@ test("prestage recovery separates original deployment identity from trusted help
 });
 
 test("Invoke-NodeExact discards validator stdout and preserves nonzero failure", () => {
-  const result = spawnSync("pwsh", ["-NoProfile", "-File", "scripts/release/invoke-discord-runtime-recovery-v080.test.ps1"], { encoding: "utf8" });
+  const result = runPowerShellTest(["-File", "scripts/release/invoke-discord-runtime-recovery-v080.test.ps1"]);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /discord_runtime_recovery_traffic_shape=passed/u);
   assert.match(result.stdout, /discord_runtime_recovery_invoke_node_exact=passed/u);

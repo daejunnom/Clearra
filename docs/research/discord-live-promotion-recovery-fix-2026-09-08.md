@@ -67,3 +67,33 @@ PowerShell SSH transport, workflow cleanup guard, and existing bounded Cloud
 cleanup tests. The modified POSIX scripts also pass syntax checks. New source
 must receive its own canonical acceptance before production promotion. Keep
 the existing design-plan edits and hotfix/TB work separate from this release fix.
+
+## Release regression harness follow-up
+
+Canonical run
+[34232117018](https://github.com/daejunnom/Clearra/actions/runs/34232117018)
+failed before product builds or deployment: the PowerShell availability probe
+hit its 10-second bound and the executable candidate-cleanup guard hit its
+15-second bound. In the same four-worker pool, the successful inactive-stage
+and prestage transport PowerShell fixtures took 21.0 and 23.3 seconds. This is
+consistent with cold-start/runner contention, not evidence of a new IAM denial.
+The failed assertions hid the process error behind a generic availability
+message and `null !== 0`. Pages queue 34232120674 stopped on the upstream
+acceptance failure; Discord run 34232220885 was skipped.
+
+Use one test-only PowerShell subprocess contract: explicit noninteractive,
+profile-free, shell-free arguments; closed stdin; hidden Windows processes;
+a 60-second subprocess bound with forced termination; and error-code, signal,
+and timeout diagnostics without printing invocation arguments. Apply it to
+all four PowerShell-backed release test files, including formerly unbounded
+calls. Expected script exit failures remain observable. Only a genuinely
+missing local executable may be skipped; timeouts and all CI probe failures
+remain failures. There are no automatic test retries or production timeout,
+IAM, approval, rollback, or acceptance-policy changes.
+
+The single bounded pool remains at up to four workers and retains every
+existing regression. Its manifest adds the subprocess-contract regression.
+On Windows with Node 24.16.0, PowerShell 7.6.5, and `CI=true`, all 612 tests
+in 51 files passed in 21.9 seconds, with zero failures or skips. The fresh
+canonical dispatch remains responsible for Ubuntu/Node 22 and full product
+acceptance; local harness success is not production-deployment evidence.
