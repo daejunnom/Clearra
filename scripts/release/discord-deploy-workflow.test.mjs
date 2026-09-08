@@ -16,6 +16,49 @@ const recoveryAttemptCollector = await readFile(
   "utf8",
 );
 
+function assertExactHandoffDownloads(source) {
+  const normalized = source.replaceAll('\r\n', '\n');
+  for (const [owner, label, artifact, destination] of [
+    ['candidate', 'Download the exact pre-candidate recovery-debt clearance', 'discord-recovery-debt-clearance', 'evidence/recovery-debt'],
+    ['promote', 'Download the exact prepared state', 'discord-prepared', 'prepared'],
+    ['sync-observe', 'Download the exact protected promotion evidence', 'discord-promoted', 'promoted'],
+  ]) {
+    const job = normalized.split(`\n  ${owner}:`)[1]?.split(/^  [a-z][a-z-]*:/mu)[0] ?? '';
+    const step = job.split(`      - name: ${label}\n`)[1]?.split('\n      - ')[0] ?? '';
+    assert.match(job, /^      actions: read$/mu, `${owner} only needs the existing read permission`);
+    assert.match(step, /^        uses: actions\/download-artifact@v4$/mu);
+    for (const line of [
+      `          name: ${artifact}-` + '${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}',
+      `          path: ${destination}`,
+      '          github-token: ${{ github.token }}',
+      '          repository: ${{ github.repository }}',
+      '          run-id: ${{ github.run_id }}',
+    ]) assert.ok(step.split('\n').includes(line), `${label}: ${line}`);
+    assert.doesNotMatch(step, /continue-on-error|^        if:|pattern:|merge-multiple:/mu);
+  }
+}
+
+test('same-run deployment handoffs use exact read-only REST lookup after approval, not implicit ListArtifacts', () => {
+  assertExactHandoffDownloads(primary);
+});
+
+for (const [name, replacement] of [
+  ['runtime-session fallback', ''],
+  ['foreign run', '          github-token: ${{ github.token }}\n          repository: ${{ github.repository }}\n          run-id: 123'],
+  ['foreign repository', '          github-token: ${{ github.token }}\n          repository: untrusted/other\n          run-id: ${{ github.run_id }}'],
+]) {
+  test(`prepared-state handoff rejects ${name}`, () => {
+    const normalized = primary.replaceAll('\r\n', '\n');
+    const start = normalized.indexOf('      - name: Download the exact prepared state\n');
+    const end = normalized.indexOf('\n      - name: Authenticate the protected deployer identity', start);
+    const step = normalized.slice(start, end);
+    const block = '          github-token: ${{ github.token }}\n          repository: ${{ github.repository }}\n          run-id: ${{ github.run_id }}';
+    assert.ok(step.includes(block));
+    assert.throws(() => assertExactHandoffDownloads(
+      normalized.slice(0, start) + step.replace(block, replacement) + normalized.slice(end)));
+  });
+}
+
 test("both recovery resolutions collect exact jobs for pending concurrency waits", () => {
   assert.equal([...recovery.matchAll(/\.status == "pending" or/gu)].length, 2);
   assert.equal([...recovery.matchAll(/\/attempts\/\$run_attempt\/jobs\?per_page=100/gu)].length, 2);

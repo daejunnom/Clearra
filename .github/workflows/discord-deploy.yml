@@ -342,6 +342,9 @@ jobs:
         with:
           name: discord-recovery-debt-clearance-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: evidence/recovery-debt
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
       - name: Authenticate the Cloud-Build-only identity
         uses: google-github-actions/auth@v2
         with:
@@ -482,6 +485,11 @@ jobs:
         with:
           name: discord-prepared-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: prepared
+          # Explicit read-only REST lookup also works after protected approval;
+          # do not depend on the implicit runtime ListArtifacts session.
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
       - name: Authenticate the protected deployer identity
         uses: google-github-actions/auth@v2
         with:
@@ -1032,6 +1040,9 @@ jobs:
         with:
           name: discord-promoted-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: promoted
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
       - name: Resolve one successful exact-SHA Pages deployment before global mutation
         id: pages
         env:

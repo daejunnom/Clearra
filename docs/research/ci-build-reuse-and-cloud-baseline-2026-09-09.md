@@ -61,3 +61,21 @@ This avoids adding a second Cloud-specific Rust build to the gate. An alternativ
 - After main is updated, the user-requested CI status snapshot is taken once. Do not poll to completion or treat an in-progress state as success.
 
 References: [GitHub cache behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching), [separate cache restore/save actions](https://github.com/actions/cache), [container jobs and sibling container actions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/run-jobs-in-a-container).
+
+## Post-push snapshot and deployment fix
+
+Main build-orchestration commit: `e817ff5a2f8323ef6ae668a392bda3d1a2510acd`.
+
+One usable status snapshot was obtained at **2026-09-09 00:31:38–42 KST**. The first raw run-list response was truncated before parsing and was retried once with only selected fields; there is no continued status polling.
+
+- Canonical acceptance `34237996138` / source `21c0a7a`: success.
+- Pages publication `34241279487` / source `21c0a7a`: success, including sealed public readback.
+- New-main recovery regression check `34245191186`: success.
+- Discord `34241118605`: Cloud Build and prepared-input sealing succeeded; promotion failed at **Download the exact prepared state**, before any protected runtime transition.
+- Recovery `34245260647`: success, proven no Oracle/Cloud runtime mutation; no active recovery execution needed.
+
+Failure log: the implicit artifact service returned `Failed to ListArtifacts ... (403) Forbidden`. The prepared artifact exists, is not expired, and is visible through the authenticated repository API (artifact `10063107978`). This does not prove why the intermediary denied its runtime session; do not invent an expiration or IAM diagnosis.
+
+Fix: name all three same-run Discord handoff downloads explicitly with the existing `github.token`, current repository and current run ID, using the authenticated REST path already used by cross-run acceptance downloads. Source/run/attempt-bound artifact names, sealed byte checks, `actions: read`, protected approval and all promotion/recovery gates are unchanged. No PAT or broader permission is introduced. Fresh acceptance and Pages publication can then be requested for the new source; do not reuse old-source acceptance or wait for the new runs to complete.
+
+Fix verification: 71 focused deployment/recovery/runtime tests passed, including four new handoff authority checks; the Windows PowerShell Release Identity Gate passed again. The earlier full orchestration pool remains 628 tests at the time it was run; it is not relabeled as a rerun of the subsequently added checks.
