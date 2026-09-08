@@ -102,9 +102,12 @@ const PRIMARY_PROMOTE_STEP_NAMES = new Set([
   PRESTAGE_UPLOAD_STEP,
   RUNTIME_MUTATION_STEPS[0],
   LIVE_UPLOAD_STEP,
+  "Compare warm CLI and Discord execution on the exact zero-traffic Cloud image",
+  "Preserve warm Cloud CLI parity diagnostics separately from release authority",
   RUNTIME_MUTATION_STEPS[1],
   "Upload sealed promoted state",
   "Compensate any protected-path failure after Oracle transition began",
+  "Remove only this failed deployment candidate tag",
   "Always remove the temporary Oracle key",
   "Post Authenticate the protected deployer identity",
   "Post Set up Node.js for protected release validators",
@@ -190,7 +193,8 @@ export function createDiscordSuccessfulDeploymentTopologyContract() {
         expected_conclusion: (
           (jobName === "authority" && name === "Record explicit no-op for changes outside Discord") ||
           (jobName === "promote" &&
-            name === "Compensate any protected-path failure after Oracle transition began") ||
+           ["Compensate any protected-path failure after Oracle transition began",
+            "Remove only this failed deployment candidate tag"].includes(name)) ||
           (jobName === "sync-observe" && [
             "Compensate catalog mutation if any later sync job step failed",
             "Upload durable catalog compensation evidence",
@@ -1265,7 +1269,8 @@ function validateSuccessfulStepConclusions(jobName, steps, options = {}) {
   const skipped = new Set([
     ...(jobName === "authority" ? ["Record explicit no-op for changes outside Discord"] : []),
     ...(jobName === "promote"
-      ? ["Compensate any protected-path failure after Oracle transition began"]
+      ? ["Compensate any protected-path failure after Oracle transition began",
+         "Remove only this failed deployment candidate tag"]
       : []),
     ...(jobName === "sync-observe" ? [
       "Compensate catalog mutation if any later sync job step failed",

@@ -21,6 +21,8 @@ const EXPECTED_RELEASE_REGRESSIONS = Object.freeze([
   "scripts/release/cloud/recovery-traffic.test.mjs",
   "scripts/release/cloud/recovery-traffic-error.test.mjs",
   "scripts/release/cloud/recovery-prestage-preflight.test.mjs",
+  "scripts/release/cloud/remove-failed-deploy-candidate-tag.test.mjs",
+  "scripts/release/cloud/candidate-release-v080.test.mjs",
   "scripts/release/create-exact-source-archive.test.mjs",
   "scripts/release/deployment-impact.test.mjs",
   "scripts/release/fast-fix-qualification-evidence.test.mjs",

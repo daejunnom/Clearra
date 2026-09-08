@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   DISCORD_RECOVERY_AUTHORITY_SCHEMA_ID,
   DISCORD_RECOVERY_RESULT_SCHEMA_ID,
+  DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS,
   resolveDiscordRecoveryAuthority,
   sealDiscordRecoveryResult,
   validatePrimaryRunCatalogSnapshots,
@@ -214,6 +215,21 @@ const options = {
   jobList: jobList(),
   runJobCatalog: runJobCatalog(),
 };
+
+test("every current promote workflow step is admitted in order by recovery", async () => {
+  const source = await readFile(new URL("../../.github/workflows/discord-deploy.yml", import.meta.url), "utf8");
+  const promote = source.split("\n  promote:")[1].split("\n  sync-observe:")[0];
+  const actual = [...promote.matchAll(/^      - name: (.+)$/gm)].map(match => match[1].trim());
+  const admitted = DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS.promote;
+  let previous = -1;
+  for (const name of actual) {
+    const index = admitted.indexOf(name);
+    assert.ok(index > previous, `foreign or unordered current step: ${name}`);
+    previous = index;
+  }
+  assert.ok(actual.includes("Compare warm CLI and Discord execution on the exact zero-traffic Cloud image"));
+  assert.ok(actual.includes("Remove only this failed deployment candidate tag"));
+});
 
 test("recovery accepts GitHub list/exact-attempt updated-at projection skew", () => {
   const authority = resolveDiscordRecoveryAuthority(

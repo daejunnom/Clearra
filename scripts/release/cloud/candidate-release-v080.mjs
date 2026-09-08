@@ -38,6 +38,7 @@ const CLOSED_GCLOUD_PARITY_LOG_FILTER = /^resource\.type=cloud_run_job AND resou
 // https://docs.cloud.google.com/logging/docs/api/platform-logs
 // https://docs.cloud.google.com/logging/docs/view/logging-query-language
 const CLOSED_GCLOUD_LOG_FILTER = /^--log-filter=labels\."run\.googleapis\.com\/execution_name"="[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?" AND textPayload:"candidate_smoke_job=passed"$/u;
+const CLOSED_SMOKE_LOG_ENTRY_FILTER = /^resource\.type=cloud_run_job AND resource\.labels\.project_id=[a-z][a-z0-9-]{4,28}[a-z0-9] AND resource\.labels\.location=asia-northeast1 AND resource\.labels\.job_name=clearra-v080-candidate-smoke-[0-9a-f]{7} AND labels\."run\.googleapis\.com\/execution_name"="[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?" AND textPayload:"candidate_smoke_job=passed"$/u;
 const DEFAULT_LOG_ATTEMPTS = 30;
 const DEFAULT_LOG_RETRY_DELAY_MS = 2_000;
 
@@ -114,13 +115,17 @@ export async function smokeZeroTrafficCandidate(options, dependencies = {}) {
   const startedAt = canonicalClock(now, "managed candidate smoke start");
 
   let jobCreated = false;
+  let phase = "job-create";
   try {
     await runJson(buildSmokeJobDeployArguments(authority));
     jobCreated = true;
+    phase = "job-readback";
     const job = await runJson(smokeJobDescribeArguments(authority));
     validateSmokeJobReadback(job, authority);
+    phase = "job-execute";
     const execution = await runJson(smokeJobExecuteArguments(authority));
     const executionName = validateSmokeExecution(execution);
+    phase = "log-attestation";
     const attestation = await readSmokeLogAttestation(
       runJson,
       authority,
@@ -156,10 +161,12 @@ export async function smokeZeroTrafficCandidate(options, dependencies = {}) {
     validateCloudCandidateSmokeReport(report, {
       expectedSourceCommit: authority.sourceCommit,
     });
+    phase = "job-cleanup";
     await run(smokeJobDeleteArguments(authority));
     jobCreated = false;
     return Object.freeze(report);
   } catch (error) {
+    if (error instanceof Error) error.candidatePhase = phase;
     if (jobCreated) {
       try {
         await run(smokeJobDeleteArguments(authority));
@@ -596,10 +603,11 @@ function smokeJobExecuteArguments(authority) {
 
 function smokeJobLogsArguments(authority, executionName) {
   return [
-    "run", "jobs", "logs", "read", authority.smokeJob,
+    // 'run jobs logs read' streams rendered lines even with --format=json;
+    // its JSON result is []. Logging read preserves the labels we must bind.
+    "logging", "read",
+    `resource.type=cloud_run_job AND resource.labels.project_id=${authority.projectId} AND resource.labels.location=${REGION} AND resource.labels.job_name=${authority.smokeJob} AND labels."run.googleapis.com/execution_name"="${executionName}" AND textPayload:"candidate_smoke_job=passed"`,
     `--project=${authority.projectId}`,
-    `--region=${REGION}`,
-    `--log-filter=labels."run.googleapis.com/execution_name"="${executionName}" AND textPayload:"candidate_smoke_job=passed"`,
     "--freshness=1h",
     "--order=desc",
     "--limit=10",
@@ -722,7 +730,7 @@ export function gcloudProcessInvocation(
     arguments_.some((value) =>
       typeof value !== "string" ||
       (!CLOSED_GCLOUD_ATOM.test(value) && !CLOSED_GCLOUD_LOG_FILTER.test(value) &&
-        !CLOSED_GCLOUD_PARITY_LOG_FILTER.test(value)))
+        !CLOSED_GCLOUD_PARITY_LOG_FILTER.test(value) && !CLOSED_SMOKE_LOG_ENTRY_FILTER.test(value)))
   ) {
     throw new Error("gcloud candidate arguments are not a closed command surface");
   }
@@ -808,8 +816,10 @@ async function main() {
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   try {
     await main();
-  } catch {
-    process.stderr.write("cloud_candidate_release=failed\n");
+  } catch (error) {
+    const phase = ["job-create", "job-readback", "job-execute", "log-attestation", "job-cleanup"]
+      .includes(error?.candidatePhase) ? error.candidatePhase : "preflight-or-deploy";
+    process.stderr.write(`cloud_candidate_release=failed phase=${phase}\n`);
     process.exitCode = 2;
   }
 }
