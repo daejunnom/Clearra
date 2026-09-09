@@ -21,6 +21,9 @@ import {
   PLANNED_DISCORD_LOCALES,
 } from "../src/discord/locale-rollout.mjs";
 import {
+  autocompleteSlashCommandChoices,
+  assertDiscordRegistrationLimits,
+  discordApplicationCommandSize,
   formatSlashCommandHelp,
   globalCommands,
 } from "../src/discord/slash-command-catalog.mjs";
@@ -335,6 +338,81 @@ test("Discord registration localizes names without redundant values or collision
     ["자동", "긴 셋업 우선", "짧은 셋업 우선"],
   );
   assert.match(formatSlashCommandHelp("best-setup", "ko"), /기본값은 `build`/u);
+});
+
+test("oversized grouped registrations stay localized through bounded autocomplete", () => {
+  for (const command of globalCommands) {
+    assert.ok(discordApplicationCommandSize(command) <= 8_000, command.name);
+  }
+
+  assert.deepEqual(
+    autocompleteSlashCommandChoices({
+      type: 4,
+      locale: "ko",
+      data: {
+        type: 1,
+        name: "pc",
+        options: [{
+          type: 1,
+          name: "minimals",
+          options: [{
+            type: 3,
+            name: "queue-knowledge",
+            value: "vis",
+            focused: true,
+          }],
+        }],
+      },
+    }),
+    [{ name: "공개 7개", value: "visible-7" }],
+  );
+  assert.deepEqual(
+    autocompleteSlashCommandChoices({
+      type: 4,
+      locale: "en-US",
+      data: {
+        type: 1,
+        name: "build",
+        options: [{
+          type: 1,
+          name: "probability",
+          options: [{
+            type: 3,
+            name: "result-mode",
+            value: "minimum",
+            focused: true,
+          }],
+        }],
+      },
+    }),
+    [
+      { name: "Minimum solutions", value: "minimum-solutions" },
+      {
+        name: "Highest-score minimum set",
+        value: "highest-score-minimum-set",
+      },
+    ],
+  );
+
+  const oversized = {
+    type: 1,
+    name: "oversized",
+    description: "Valid individual fields can still exceed the aggregate limit",
+    options: Array.from({ length: 25 }, (_, subcommandIndex) => ({
+      type: 1,
+      name: `s${subcommandIndex}`,
+      description: "s".repeat(100),
+      options: Array.from({ length: 25 }, (_, optionIndex) => ({
+        type: 3,
+        name: `o${optionIndex}`,
+        description: "o".repeat(100),
+      })),
+    })),
+  };
+  assert.throws(
+    () => assertDiscordRegistrationLimits([oversized]),
+    /\/oversized uses \d+ of Discord's 8000 command characters/u,
+  );
 });
 
 function effectiveKoreanChoiceName(choice) {

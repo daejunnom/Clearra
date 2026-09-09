@@ -14,6 +14,7 @@ import { Clearrabot } from "../src/bot.mjs";
 import { prepareClearraArguments } from "../src/clearra/command.mjs";
 import { OracleMessageIngress } from "../src/ingress/oracle-message-ingress.mjs";
 import {
+  discordApplicationCommandSize,
   findSlashCommand,
   formatSlashCommandHelp,
   globalCommands,
@@ -272,6 +273,10 @@ test("registered command metadata and every help page stay inside Discord limits
     for (const child of option.options ?? []) validateOption(child);
   };
   for (const command of globalCommands) {
+    assert.ok(
+      discordApplicationCommandSize(command) <= 8_000,
+      `/${command.name} exceeds Discord's aggregate command-size limit`,
+    );
     if (command.type === 3) {
       assert.ok(command.name.length >= 1 && command.name.length <= 32);
       assert.equal(Object.hasOwn(command, "description"), false);
@@ -283,6 +288,26 @@ test("registered command metadata and every help page stay inside Discord limits
     assert.ok(command.options.length <= 25);
     for (const option of command.options) validateOption(option);
   }
+
+  for (const rootName of ["pc", "build"]) {
+    const registered = globalCommands.find(({ name }) => name === rootName);
+    let autocompleteOptions = 0;
+    const inspect = (option) => {
+      if (option.autocomplete === true) {
+        autocompleteOptions += 1;
+        assert.equal(option.choices, undefined);
+      }
+      for (const nested of option.options ?? []) inspect(nested);
+    };
+    for (const option of registered.options) inspect(option);
+    assert.ok(autocompleteOptions > 0, `/${rootName} did not compact static choices`);
+  }
+
+  assert.ok(
+    findVariant("pc", "minimals").registration.options
+      .find(({ name }) => name === "queue-knowledge").choices.length > 0,
+    "wire compaction must not remove choices from the product catalog",
+  );
 
   assert.ok(formatSlashCommandHelp().length <= 2_000);
   for (const { path, command } of registeredSearchRoutes()) {

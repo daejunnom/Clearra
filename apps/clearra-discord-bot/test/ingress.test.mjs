@@ -482,6 +482,115 @@ test("Gateway help resolves access and locale before its type 4 response without
   assert.match(responses[0].data.content, /직접 입력 문법/u);
 });
 
+test("Gateway autocomplete keeps compacted choices localized and never invokes search", async () => {
+  const events = [];
+  const responses = [];
+  const interaction = {
+    id: "localized-autocomplete",
+    type: 4,
+    locale: "ko",
+    data: {
+      type: 1,
+      name: "pc",
+      options: [{
+        type: 1,
+        name: "minimals",
+        options: [{
+          type: 3,
+          name: "queue-knowledge",
+          value: "vis",
+          focused: true,
+        }],
+      }],
+    },
+  };
+  const ingress = new SlashCommandIngress(
+    {
+      interactionAccessDecision() {
+        events.push("access");
+        return { allowed: true, reason: null };
+      },
+      resolveResponseLocale() {
+        events.push("locale");
+        return { locale: "ko" };
+      },
+      async handleInteraction() {
+        events.push("handle");
+        return true;
+      },
+    },
+    {
+      acknowledger: {
+        async defer() { events.push("defer"); },
+        async respond(target, response) {
+          assert.equal(target, interaction);
+          events.push("respond");
+          responses.push(response);
+        },
+      },
+    },
+  );
+
+  assert.equal(ingress.accepts(interaction), true);
+  assert.equal(isEnabledSlashCommand(interaction), true);
+  assert.deepEqual(
+    await ingress.acceptDispatch("INTERACTION_CREATE", interaction),
+    { accepted: true },
+  );
+  assert.deepEqual(events, ["access", "locale", "respond"]);
+  assert.deepEqual(responses, [{
+    type: 8,
+    data: { choices: [{ name: "공개 7개", value: "visible-7" }] },
+  }]);
+});
+
+test("Gateway autocomplete answers access blocks with an empty type 8 response", async () => {
+  const responses = [];
+  const ingress = new SlashCommandIngress(
+    {
+      interactionAccessDecision() {
+        return { allowed: false, reason: "channel-disabled" };
+      },
+      resolveResponseLocale() {
+        return { locale: "ko" };
+      },
+      async handleInteraction() {
+        throw new Error("blocked autocomplete must not execute");
+      },
+    },
+    {
+      acknowledger: {
+        async defer() { throw new Error("autocomplete must not defer"); },
+        async respond(_interaction, response) { responses.push(response); },
+      },
+    },
+  );
+  const interaction = {
+    id: "blocked-autocomplete",
+    type: 4,
+    data: {
+      type: 1,
+      name: "build",
+      options: [{
+        type: 1,
+        name: "probability",
+        options: [{
+          type: 3,
+          name: "result-mode",
+          value: "minimum",
+          focused: true,
+        }],
+      }],
+    },
+  };
+
+  assert.deepEqual(
+    await ingress.acceptDispatch("INTERACTION_CREATE", interaction),
+    { accepted: true },
+  );
+  assert.deepEqual(responses, [{ type: 8, data: { choices: [] } }]);
+});
+
 test("Gateway help cannot bypass a localized channel access block", async () => {
   let handled = 0;
   const responses = [];

@@ -1,4 +1,5 @@
 import {
+  autocompleteSlashCommandChoices,
   findApplicationCommand,
   formatSlashCommandHelp,
 } from "../discord/slash-command-catalog.mjs";
@@ -11,6 +12,7 @@ import { readHelpArgument } from "../discord/slash-command-input.mjs";
 import { writeOperationalLog } from "../operational-log.mjs";
 
 const APPLICATION_COMMAND_INTERACTION = 2;
+const APPLICATION_COMMAND_AUTOCOMPLETE_INTERACTION = 4;
 const MODAL_SUBMIT_INTERACTION = 5;
 const EPHEMERAL_MESSAGE_FLAG = 1 << 6;
 const DEFAULT_INTERACTION_TTL_MS = 16 * 60_000;
@@ -32,19 +34,25 @@ export class SlashCommandIngress {
   accepts(interaction) {
     return Boolean(
       findCommandModalCommand(interaction) ||
-      (
-      interaction?.type === APPLICATION_COMMAND_INTERACTION &&
-      findApplicationCommand(
-        interaction.data?.type,
-        interaction.data?.name,
-      ) !== null
-      )
+      ((interaction?.type === APPLICATION_COMMAND_INTERACTION ||
+        interaction?.type === APPLICATION_COMMAND_AUTOCOMPLETE_INTERACTION) &&
+        findApplicationCommand(
+          interaction.data?.type,
+          interaction.data?.name,
+        ) !== null)
     );
   }
 
   initialResponse(interaction) {
     const decision = this.bot.interactionAccessDecision?.(interaction);
     const locale = this.localeFor(interaction);
+    if (interaction?.type === APPLICATION_COMMAND_AUTOCOMPLETE_INTERACTION) {
+      return gatewayInteractionAutocompleteResponse(
+        decision?.allowed === false
+          ? []
+          : autocompleteSlashCommandChoices(interaction, locale),
+      );
+    }
     if (decision?.allowed === false) {
       return gatewayInteractionErrorResponse(
         this.bot.accessBlockedText?.(decision, locale) ??
@@ -79,6 +87,9 @@ export class SlashCommandIngress {
   }
 
   initialResponseError(interaction) {
+    if (interaction?.type === APPLICATION_COMMAND_AUTOCOMPLETE_INTERACTION) {
+      return gatewayInteractionAutocompleteResponse([]);
+    }
     return modalErrorText(this.localeFor(interaction));
   }
 
@@ -184,7 +195,7 @@ export class SlashCommandIngress {
     }
     if (initialResponse) {
       if (typeof acknowledger.respond !== "function") {
-        throw new Error("The Discord interaction acknowledger cannot send a Modal response.");
+        throw new Error("The Discord interaction acknowledger cannot send an initial response.");
       }
       await acknowledger.respond(data, initialResponse);
       return { accepted: true };
@@ -247,7 +258,8 @@ function numericClock(clock) {
 
 export function isEnabledSlashCommand(interaction) {
   return (
-    (interaction?.type === APPLICATION_COMMAND_INTERACTION &&
+    ((interaction?.type === APPLICATION_COMMAND_INTERACTION ||
+      interaction?.type === APPLICATION_COMMAND_AUTOCOMPLETE_INTERACTION) &&
       findApplicationCommand(
         interaction.data?.type,
         interaction.data?.name,
@@ -270,5 +282,12 @@ function gatewayInteractionMessageResponse(message) {
       content: String(message).slice(0, 1900),
       allowed_mentions: { parse: [] },
     },
+  };
+}
+
+function gatewayInteractionAutocompleteResponse(choices) {
+  return {
+    type: 8,
+    data: { choices },
   };
 }

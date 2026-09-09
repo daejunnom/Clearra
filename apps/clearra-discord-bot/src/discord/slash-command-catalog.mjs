@@ -22,6 +22,11 @@ const INTEGER_OPTION = 4;
 const ATTACHMENT_OPTION = 11;
 const CHAT_INPUT_COMMAND = 1;
 const MESSAGE_COMMAND = 3;
+const AUTOCOMPLETE_OPTION_TYPES = new Set([STRING_OPTION, INTEGER_OPTION, 10]);
+const DISCORD_COMMAND_CHARACTER_LIMIT = 8_000;
+const DISCORD_COMMAND_CHARACTER_TARGET = 7_600;
+const COMPACT_DESCRIPTION_THRESHOLD = 56;
+const AUTOCOMPLETE_CHOICE_LIMIT = 25;
 const GUILD_CONTEXT = 0;
 const GUILD_INSTALL = 0;
 const MANAGE_CHANNELS_PERMISSION = String(1n << 4n);
@@ -2625,6 +2630,193 @@ function localizedRegistration(entry) {
   });
 }
 
+// Discord applies one aggregate 8,000-character budget to every command tree.
+// The product catalog deliberately keeps its complete choice and help metadata;
+// only the wire registration is compacted when a grouped command exceeds that
+// transport budget. Runtime parsing therefore remains owned by the full catalog.
+function registrationForDiscord(entry, localized) {
+  if (discordApplicationCommandSize(localized) <= DISCORD_COMMAND_CHARACTER_TARGET) {
+    return localized;
+  }
+  if (!entry.subcommands) {
+    return localized;
+  }
+
+  let compacted = replaceStaticChoicesWithAutocomplete(localized);
+  if (discordApplicationCommandSize(compacted) > DISCORD_COMMAND_CHARACTER_TARGET) {
+    compacted = compactLongLeafDescriptions(compacted);
+  }
+  return compacted;
+}
+
+function replaceStaticChoicesWithAutocomplete(node) {
+  const { choices, options, ...properties } = node;
+  if (Array.isArray(choices) && choices.length > 0 &&
+      !AUTOCOMPLETE_OPTION_TYPES.has(node.type)) {
+    throw new Error(`Discord option '${node.name}' cannot use autocomplete.`);
+  }
+  return Object.freeze({
+    ...properties,
+    ...(Array.isArray(choices) && choices.length > 0
+      ? { autocomplete: true }
+      : {}),
+    ...(Array.isArray(options)
+      ? { options: Object.freeze(options.map(replaceStaticChoicesWithAutocomplete)) }
+      : {}),
+  });
+}
+
+function compactLongLeafDescriptions(node) {
+  const { options, ...properties } = node;
+  const nested = Array.isArray(options)
+    ? Object.freeze(options.map(compactLongLeafDescriptions))
+    : null;
+  const isLeafOption = node.type !== undefined && !nested;
+  const shouldCompact = isLeafOption &&
+    localizedFieldLength(node, "description", "description_localizations") >
+      COMPACT_DESCRIPTION_THRESHOLD;
+  return Object.freeze({
+    ...properties,
+    ...(shouldCompact ? compactLeafDescription(node) : {}),
+    ...(nested ? { options: nested } : {}),
+  });
+}
+
+function compactLeafDescription(option) {
+  const englishLabel = String(option.name).replaceAll("-", " ");
+  const localizedDescriptions = Object.fromEntries(
+    Object.keys(option.description_localizations ?? {}).map((locale) => {
+      const label = option.name_localizations?.[locale] ?? englishLabel;
+      const description = locale === "ko"
+        ? `${label} 설정; 자세한 내용은 /help 참고`
+        : `Set ${label}; see /help for details`;
+      return [locale, description];
+    }),
+  );
+  return {
+    description: `Set ${englishLabel}; see /help for details`,
+    ...(Object.keys(localizedDescriptions).length > 0
+      ? { description_localizations: Object.freeze(localizedDescriptions) }
+      : {}),
+  };
+}
+
+export function discordApplicationCommandSize(command) {
+  return registrationNodeSize(command);
+}
+
+function registrationNodeSize(node) {
+  let size = localizedFieldLength(node, "name", "name_localizations");
+  if (node?.description !== undefined) {
+    size += localizedFieldLength(
+      node,
+      "description",
+      "description_localizations",
+    );
+  }
+  for (const choice of node?.choices ?? []) {
+    size += localizedFieldLength(choice, "name", "name_localizations");
+    size += characterLength(choice?.value);
+  }
+  for (const option of node?.options ?? []) {
+    size += registrationNodeSize(option);
+  }
+  return size;
+}
+
+function localizedFieldLength(node, field, localizationField) {
+  const lengths = [
+    characterLength(node?.[field]),
+    ...Object.values(node?.[localizationField] ?? {}).map(characterLength),
+  ];
+  return Math.max(...lengths);
+}
+
+function characterLength(value) {
+  return Array.from(String(value ?? "")).length;
+}
+
+export function autocompleteSlashCommandChoices(interaction, locale = null) {
+  if (interaction?.type !== 4 || interaction?.data?.type !== CHAT_INPUT_COMMAND) {
+    return [];
+  }
+  const fullRegistration = FULL_LOCALIZED_SLASH_REGISTRATIONS_BY_NAME.get(
+    interaction?.data?.name,
+  );
+  const wireRegistration = DISCORD_SLASH_REGISTRATIONS_BY_NAME.get(
+    interaction?.data?.name,
+  );
+  const focused = findFocusedOption(
+    fullRegistration?.options,
+    interaction?.data?.options,
+  );
+  const wireFocused = findFocusedOption(
+    wireRegistration?.options,
+    interaction?.data?.options,
+  );
+  if (!focused || wireFocused?.option?.autocomplete !== true ||
+      !Array.isArray(focused.option.choices)) {
+    return [];
+  }
+
+  const language = normalizeDiscordLocale(locale ?? interaction?.locale);
+  const query = searchableText(focused.value, language);
+  return focused.option.choices
+    .map((choice, index) => ({
+      choice,
+      index,
+      rank: autocompleteMatchRank(choice, query, language),
+    }))
+    .filter(({ rank }) => rank !== null)
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .slice(0, AUTOCOMPLETE_CHOICE_LIMIT)
+    .map(({ choice }) => Object.freeze({
+      name: choice.name_localizations?.[language] ?? choice.name,
+      value: choice.value,
+    }));
+}
+
+function findFocusedOption(registrationOptions, interactionOptions) {
+  if (!Array.isArray(registrationOptions) || !Array.isArray(interactionOptions)) {
+    return null;
+  }
+  for (const supplied of interactionOptions) {
+    const registered = registrationOptions.find((option) =>
+      option.name === supplied?.name
+    );
+    if (!registered) continue;
+    if (supplied.focused === true) {
+      return { option: registered, value: supplied.value };
+    }
+    const nested = findFocusedOption(
+      registered.options,
+      supplied?.options,
+    );
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function autocompleteMatchRank(choice, query, language) {
+  if (query.length === 0) return 0;
+  const candidates = [
+    choice.value,
+    choice.name,
+    choice.name_localizations?.[language],
+  ].filter((value) => value !== undefined).map((value) =>
+    searchableText(value, language)
+  );
+  if (candidates.some((value) => value === query)) return 0;
+  if (candidates.some((value) => value.startsWith(query))) return 1;
+  if (candidates.some((value) => value.includes(query))) return 2;
+  return null;
+}
+
+function searchableText(value, language) {
+  const locale = language === "ko" ? "ko-KR" : "en-US";
+  return String(value ?? "").trim().toLocaleLowerCase(locale);
+}
+
 function localizeRegistrationOption(option, commandName) {
   const path = `${commandName}.${option.name}`;
   const koreanName = KOREAN_OPTION_NAMES[path] ??
@@ -3456,6 +3648,13 @@ export function assertDiscordRegistrationLimits(commands) {
   }
   for (const command of commands) {
     assertRegistrationNode(command, `/${command?.name ?? "unknown"}`, true);
+    const size = discordApplicationCommandSize(command);
+    if (size > DISCORD_COMMAND_CHARACTER_LIMIT) {
+      throw new Error(
+        `/${command?.name ?? "unknown"} uses ${size} of Discord's ` +
+        `${DISCORD_COMMAND_CHARACTER_LIMIT} command characters.`,
+      );
+    }
   }
 }
 
@@ -3481,6 +3680,12 @@ function assertRegistrationNode(node, path, command = false) {
     if (!Array.isArray(choices) || choices.length > 25) {
       throw new Error(`${optionPath} exposes more than 25 Discord choices.`);
     }
+    if (option?.autocomplete === true && choices.length > 0) {
+      throw new Error(`${optionPath} cannot expose choices and autocomplete together.`);
+    }
+    if (option?.autocomplete === true && !AUTOCOMPLETE_OPTION_TYPES.has(option.type)) {
+      throw new Error(`${optionPath} uses autocomplete on an unsupported option type.`);
+    }
     for (const choice of choices) {
       if (String(choice?.name ?? "").length < 1 || String(choice.name).length > 100) {
         throw new Error(`${optionPath} has a choice name outside Discord's 1–100 character limit.`);
@@ -3493,8 +3698,28 @@ function assertRegistrationNode(node, path, command = false) {
   }
 }
 
+const FULL_LOCALIZED_SLASH_REGISTRATIONS = Object.freeze(
+  slashCommandCatalog.map(localizedRegistration),
+);
+const FULL_LOCALIZED_SLASH_REGISTRATIONS_BY_NAME = new Map(
+  FULL_LOCALIZED_SLASH_REGISTRATIONS.map((registration) => [
+    registration.name,
+    registration,
+  ]),
+);
+const DISCORD_SLASH_REGISTRATIONS = Object.freeze(
+  slashCommandCatalog.map((entry, index) =>
+    registrationForDiscord(entry, FULL_LOCALIZED_SLASH_REGISTRATIONS[index])
+  ),
+);
+const DISCORD_SLASH_REGISTRATIONS_BY_NAME = new Map(
+  DISCORD_SLASH_REGISTRATIONS.map((registration) => [
+    registration.name,
+    registration,
+  ]),
+);
 const GLOBAL_COMMANDS = [
-  ...slashCommandCatalog.map(localizedRegistration),
+  ...DISCORD_SLASH_REGISTRATIONS,
   ...messageCommandCatalog.map(localizedRegistration),
 ];
 assertDiscordRegistrationLimits(GLOBAL_COMMANDS);
