@@ -7,6 +7,11 @@ const primary = await readFile(
   new URL("../../.github/workflows/discord-deploy.yml", import.meta.url),
   "utf8",
 );
+
+test("recovery debt discovery is scoped to recovery runs instead of the mutable repository artifact feed", () => {
+  assert.match(primary, /node scripts\/release\/discord-recovery-debt\.mjs collect-artifacts/u);
+  assert.doesNotMatch(primary, /actions\/artifacts\?per_page=/u);
+});
 const recovery = await readFile(
   new URL("../../.github/workflows/discord-deploy-recovery.yml", import.meta.url),
   "utf8",

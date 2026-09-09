@@ -536,6 +536,52 @@ function compareSemverTags(left, right) {
   return 0;
 }
 
+// Pages and acceptance can upload artifacts while this gate runs. Enumerate the
+// recovery workflow and each of its runs, whose artifacts own recovery evidence,
+// instead of paginating the mutable repository-wide artifact feed. Every scoped
+// page still has to be complete, and a changed recovery catalog fails closed.
+export async function collectDiscordRecoveryArtifacts(repository, readPages = githubPages) {
+  if (repository !== "daejunnom/Clearra") {
+    throw new Error("Discord recovery artifact collection requires the exact repository");
+  }
+  const endpoint = `repos/${repository}/actions/workflows/discord-deploy-recovery.yml/runs?branch=main&per_page=100`;
+  const readCatalog = async () => {
+    const runs = flattenRunPages(await readPages(endpoint), "Discord recovery run catalog");
+    const identities = runs.map((run) => validateRunIdentity(run, "recovery", repository));
+    if (new Set(identities.map((run) => run.runId)).size !== identities.length) {
+      throw new Error("Discord recovery run catalog contains duplicate runs");
+    }
+    return identities.sort((left, right) => compareIds(left.runId, right.runId));
+  };
+  const before = await readCatalog();
+  const artifacts = [];
+  const ids = new Set();
+  for (const run of before) {
+    const pages = await readPages(
+      `repos/${repository}/actions/runs/${run.runId}/artifacts?per_page=100`,
+    );
+    // Preserve expiry, total-count, and duplicate recovery-evidence validation.
+    flattenArtifactPages(pages);
+    for (const page of Array.isArray(pages) ? pages : [pages]) {
+      for (const artifact of page.artifacts) {
+        const id = requireDecimal(artifact?.id, "scoped artifact ID");
+        if (requireDecimal(artifact?.workflow_run?.id, "artifact owner run ID") !== run.runId) {
+          throw new Error("Discord recovery artifact belongs to a different run");
+        }
+        if (ids.has(id)) throw new Error("Discord scoped artifact catalog contains duplicate artifacts");
+        ids.add(id);
+        artifacts.push(artifact);
+      }
+    }
+  }
+  if (canonicalJson(before) !== canonicalJson(await readCatalog())) {
+    throw new Error("Discord recovery run catalog changed during artifact collection");
+  }
+  // Existing consumers receive one complete catalog of recovery-run artifacts.
+  // This is discovery metadata only; the debt audit still verifies every report.
+  return [{ total_count: artifacts.length, artifacts }];
+}
+
 export function planDiscordRecoveryDebt(runList, primaryAttempts, recoveryAttempts, artifactPages, options) {
   const repository = requirePattern(options?.repository, REPOSITORY, "repository");
   const currentRunId = requireDecimal(options?.workflowRunId, "current workflow run ID");
@@ -1146,6 +1192,20 @@ function gitOutput(arguments_) {
   return result.stdout.trim();
 }
 
+function githubPages(endpoint) {
+  const result = spawnSync("gh", [
+    "api", "--paginate", "--slurp", "--method", "GET", endpoint,
+  ], {
+    encoding: "utf8", shell: false, windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 60_000, maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error("Discord recovery artifact metadata query failed");
+  }
+  return JSON.parse(result.stdout);
+}
+
 function buildBootstrapProof(sourceCommit) {
   const ancestry = spawnSync("git", [
     "merge-base", "--is-ancestor", BOOTSTRAP_COMMIT, sourceCommit,
@@ -1202,7 +1262,9 @@ async function main() {
       workflowRunAttempt: values["workflow-run-attempt"],
       sourceCommit: values["source-commit"],
     };
-    if (positionals[0] === "plan") {
+    if (positionals[0] === "collect-artifacts") {
+      await writeCanonicalNew(values.output, await collectDiscordRecoveryArtifacts(values.repository));
+    } else if (positionals[0] === "plan") {
       const sourceCommit = requirePattern(values["source-commit"], SHA, "source commit");
       const plan = planDiscordRecoveryDebt(
         await readJsonFile(values["run-list"], "primary run catalog"),
@@ -1236,7 +1298,7 @@ async function main() {
       await writeCanonicalNew(values.output, clearance);
       process.stdout.write(`discord_recovery_debt=clear count=${clearance.cleared_debts.length}\n`);
     } else {
-      throw new Error("recovery-debt operation must be plan or audit");
+      throw new Error("recovery-debt operation must be collect-artifacts, plan, or audit");
     }
   } catch (error) {
     process.stderr.write(

@@ -24,6 +24,7 @@ import {
 } from "./discord-production-checkpoint-receipt.test.mjs";
 import {
   auditDiscordRecoveryDebt,
+  collectDiscordRecoveryArtifacts,
   DISCORD_RECOVERY_DEBT_CLEARANCE_SCHEMA_ID,
   planDiscordRecoveryDebt,
 } from "./discord-recovery-debt.mjs";
@@ -47,6 +48,74 @@ const CATALOG_CAPTURE = "Capture and seal Discord catalog recovery authority bef
 const CATALOG_UPLOAD = "Upload Discord catalog recovery authority before global mutation";
 const CATALOG_MUTATION =
   "Authority-bound global sync and sole canonical four-surface observation";
+
+function scopedArtifactReader({ runs, artifactPages, after = runs }) {
+  let catalogs = 0;
+  const calls = [];
+  return {
+    calls,
+    async read(endpoint) {
+      calls.push(endpoint);
+      if (endpoint.includes("/workflows/discord-deploy-recovery.yml/runs?")) {
+        return catalogs++ === 0 ? runs : after;
+      }
+      const match = /\/actions\/runs\/([1-9][0-9]*)\/artifacts\?per_page=100$/u.exec(endpoint);
+      assert.ok(match, `unexpected endpoint: ${endpoint}`);
+      assert.ok(Object.hasOwn(artifactPages, match[1]), "every run must have an explicit artifact readback");
+      return artifactPages[match[1]];
+    },
+  };
+}
+
+test("recovery artifact discovery ignores concurrent Pages uploads by reading only complete run catalogs", async () => {
+  const artifact = resolutionArtifact();
+  const reader = scopedArtifactReader({
+    runs: [{ total_count: 2, workflow_runs: [recoveryRun()] },
+      { total_count: 2, workflow_runs: [recoveryRun({ id: 301 })] }],
+    artifactPages: {
+      300: [{ total_count: 1, artifacts: [artifact] }],
+      301: [{ total_count: 0, artifacts: [] }],
+    },
+  });
+  assert.deepEqual(await collectDiscordRecoveryArtifacts(REPOSITORY, reader.read),
+    [{ total_count: 1, artifacts: [artifact] }]);
+  assert.equal(reader.calls.length, 4);
+  assert.ok(reader.calls.every((endpoint) => !endpoint.includes("/actions/artifacts?")));
+});
+
+test("scoped recovery artifact discovery keeps completeness, uniqueness, and ownership fail closed", async () => {
+  const run = recoveryRun();
+  const artifact = resolutionArtifact();
+  for (const [artifactPages, message] of [
+    [[{ total_count: 1, artifacts: [artifact] }, { total_count: 2, artifacts: [] }], /page totals differ/u],
+    [[{ total_count: 2, artifacts: [artifact] }], /catalog is incomplete/u],
+    [[{ total_count: 2, artifacts: [artifact, artifact] }], /ambiguous|duplicate/u],
+    [[{ total_count: 1, artifacts: [{ ...artifact, workflow_run: { ...artifact.workflow_run, id: 999 } }] }], /different run/u],
+  ]) {
+    const reader = scopedArtifactReader({
+      runs: [{ total_count: 1, workflow_runs: [run] }],
+      artifactPages: { 300: artifactPages },
+    });
+    await assert.rejects(collectDiscordRecoveryArtifacts(REPOSITORY, reader.read), message);
+  }
+});
+
+test("scoped discovery rejects incomplete, foreign, duplicated, or changing recovery run catalogs", async () => {
+  const run = recoveryRun();
+  const complete = [{ total_count: 1, workflow_runs: [run] }];
+  for (const [runs, after, message] of [
+    [[{ total_count: 2, workflow_runs: [run] }], complete, /catalog is incomplete/u],
+    [[{ total_count: 2, workflow_runs: [run, run] }], complete, /duplicate runs/u],
+    [[{ total_count: 1, workflow_runs: [primaryRun()] }], complete, /foreign authority/u],
+    [complete, [{ total_count: 1, workflow_runs: [recoveryRun({ run_attempt: 2 })] }], /changed during/u],
+    [complete, [{ total_count: 2, workflow_runs: [run, recoveryRun({ id: 301 })] }], /changed during/u],
+  ]) {
+    const reader = scopedArtifactReader({ runs, after, artifactPages: { 300: [{ total_count: 0, artifacts: [] }] } });
+    await assert.rejects(collectDiscordRecoveryArtifacts(REPOSITORY, reader.read), message);
+  }
+  await assert.rejects(collectDiscordRecoveryArtifacts("foreign/repo", () => assert.fail("must not query")), /exact repository/u);
+  await assert.rejects(collectDiscordRecoveryArtifacts(REPOSITORY, () => { throw new Error("API failed"); }), /API failed/u);
+});
 
 function primaryRun(overrides = {}) {
   return {

@@ -194,9 +194,9 @@ jobs:
           done < <(git tag --merged "$SOURCE_COMMIT" --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V)
           jq -s '{schema_id:"clearra.discord-production-tag-authority-catalog.v1",tags:.}' \
             "$debt_root/production-tags.jsonl" > "$debt_root/production-tags.json"
-          gh api --paginate --slurp --method GET \
-            "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
-            > "$debt_root/repository-artifacts.json"
+          node scripts/release/discord-recovery-debt.mjs collect-artifacts \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$debt_root/repository-artifacts.json"
           : > "$debt_root/recovery-attempts.jsonl"
           : > "$debt_root/recovery-jobs.jsonl"
           jq -r '
