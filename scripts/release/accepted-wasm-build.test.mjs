@@ -178,6 +178,22 @@ test("producer toolchain capture uses the closed seven-command set", () => {
   ]);
 });
 
+test("Linux producer toolchain capture uses pwsh without a command shell", () => {
+  const calls = [];
+  collectAcceptedWasmProducerToolchains({
+    platform: "linux",
+    run(command, arguments_) {
+      calls.push([command, arguments_]);
+      return `${command} version\n`;
+    },
+  });
+  assert.deepEqual(calls.find(([command]) => command === "pwsh"), [
+    "pwsh",
+    ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+  ]);
+  assert.equal(calls.some(([command]) => command === "powershell"), false);
+});
+
 async function createFixture() {
   const root = await mkdtemp(join(tmpdir(), "clearra-accepted-wasm-"));
   const bindings = Buffer.from("export const ready = true;", "utf8");

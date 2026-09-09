@@ -171,6 +171,11 @@ const releaseAcceptanceSanitizerJob = section(
 const releaseAcceptanceRustJob = section(
   workflow,
   "\n  release-acceptance-rust:",
+  "\n  release-acceptance-wasm-contracts:",
+);
+const releaseAcceptanceWasmContractsJob = section(
+  workflow,
+  "\n  release-acceptance-wasm-contracts:",
   "\n  release-acceptance-wasm-build:",
 );
 const releaseAcceptanceWasmBuildJob = section(
@@ -310,6 +315,9 @@ const acceptedWasmBuildRunStep = section(
   releaseAcceptanceWasmBuildJob,
   "\n      - name: Run verified WASM build producer",
   "\n      - name: Save verified canonical WASM build cache",
+);
+const acceptedWasmContractsRunStep = releaseAcceptanceWasmContractsJob.slice(
+  releaseAcceptanceWasmContractsJob.indexOf("\n      - name: Run WASM source and host contracts"),
 );
 const acceptedWasmBuildUploadStep = releaseAcceptanceWasmBuildJob.slice(
   releaseAcceptanceWasmBuildJob.indexOf("\n      - name: Upload accepted WASM build"),
@@ -1391,7 +1399,7 @@ requireExactYamlKeySet(
   "accepted WASM build producer environment",
 );
 for (const [key, value] of [
-  ["CLEARRA_ACCEPTED_WASM_OUTPUT_DIR", "${{ runner.temp }}\\clearra-accepted-wasm"],
+  ["CLEARRA_ACCEPTED_WASM_OUTPUT_DIR", "${{ runner.temp }}/clearra-accepted-wasm"],
   ["CLEARRA_ACCEPTED_RUN_ID", "${{ github.run_id }}"],
   ["CLEARRA_ACCEPTED_RUN_ATTEMPT", "${{ github.run_attempt }}"],
 ]) {
@@ -1406,8 +1414,29 @@ for (const [key, value] of [
 requireExactYamlScalar(
   acceptedWasmBuildRunStep,
   "run",
-  "powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildProducer -ExecutionSurface Trusted",
+  "pwsh -NoProfile -File scripts/clearra.ps1 -Task WasmBuildProducer -ExecutionSurface Trusted -RuntimeEnvironment wasm",
   "accepted WASM build producer command",
+  8,
+);
+for (const [name, job, markers] of [
+  ["WASM source contracts", releaseAcceptanceWasmContractsJob, [
+    "$cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)",
+    '"CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV',
+    '"wasm_compile_context=source-contracts task_workers=1 cargo_jobs=$cargoJobs"',
+  ]],
+  ["accepted WASM artifact", releaseAcceptanceWasmBuildJob, [
+    'cargo_jobs="$(getconf _NPROCESSORS_ONLN)"',
+    'echo "CARGO_BUILD_JOBS=$cargo_jobs" >> "$GITHUB_ENV"',
+    'echo "wasm_compile_context=accepted-artifact task_workers=1 cargo_jobs=$cargo_jobs"',
+  ]],
+]) {
+  for (const marker of markers) requireText(job, marker, `${name} compile scheduler ${marker}`);
+}
+requireExactYamlScalar(
+  acceptedWasmContractsRunStep,
+  "run",
+  "powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildContracts -ExecutionSurface Trusted -RuntimeEnvironment windows",
+  "WASM source and host contracts command",
   8,
 );
 for (const [name, job, skeleton] of [
@@ -1459,9 +1488,17 @@ for (const [name, job, skeleton] of [
     "- name: Save verified canonical native build cache",
     "- name: Upload canonical release acceptance rust shard",
   ]],
+  ["WASM source and host contracts", releaseAcceptanceWasmContractsJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- name: Configure WASM contract compile parallelism",
+    "- id: release_toolchain_cache",
+    "- name: Run WASM source and host contracts",
+  ]],
   ["WASM build producer", releaseAcceptanceWasmBuildJob, [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
+    "- name: Configure WASM compile parallelism",
     "- id: release_toolchain_cache",
     "- name: Prepare acceptance toolchains",
     "- name: Run verified WASM build producer",
@@ -1501,32 +1538,37 @@ requireText(
   "canonical ReleaseAcceptance shard mapping regression",
 );
 const releaseToolchainCacheReaderJobs = [
-  releaseAcceptanceFoundationNoProductDebtJob,
-  releaseAcceptanceFoundationAdversarialCorrectnessJob,
-  releaseAcceptanceFoundationDesktopHostJob,
-  releaseAcceptanceRustJob,
-  releaseAcceptanceWasmBuildJob,
+  { name: "foundation NoProductDebt", job: releaseAcceptanceFoundationNoProductDebtJob, family: "native" },
+  { name: "foundation AdversarialCorrectness", job: releaseAcceptanceFoundationAdversarialCorrectnessJob, family: "native" },
+  { name: "foundation DesktopHost", job: releaseAcceptanceFoundationDesktopHostJob, family: "native" },
+  { name: "Rust", job: releaseAcceptanceRustJob, family: "native", ownsWriter: true },
+  { name: "WASM contracts", job: releaseAcceptanceWasmContractsJob, family: "native" },
+  { name: "WASM producer", job: releaseAcceptanceWasmBuildJob, family: "wasm", ownsWriter: true },
 ];
-for (const [index, job] of releaseToolchainCacheReaderJobs.entries()) {
+for (const { name, job, family, ownsWriter = false } of releaseToolchainCacheReaderJobs) {
   if ((job.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1) {
-    throw new Error(`release build job ${index} must have exactly one restore-only cache reader`);
+    throw new Error(`${name} release build job must have exactly one restore-only cache reader`);
   }
   if (job.includes("actions/cache@v4") ||
-      (index < 3 && job.includes("actions/cache/save@v4"))) {
-    throw new Error(`release build job ${index} must not own an unassigned cache writer`);
+      (!ownsWriter && job.includes("actions/cache/save@v4"))) {
+    throw new Error(`${name} release build job must not own an unassigned cache writer`);
   }
-  const family = index === 4 ? "wasm" : "native";
-  const prefix = `release-acceptance-${family}-v3-` +
-    "${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}";
+  const windowsNative = family === "native";
+  const manifestHash = windowsNative
+    ? "${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}"
+    : "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}";
+  const version = windowsNative ? 3 : 4;
+  const prefix = `release-acceptance-${family}-v${version}-` +
+    `\${{ runner.os }}-bindgen-0.2.126-${manifestHash}`;
+  const paths = windowsNative
+    ? ["~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git", "~/AppData/Local/Clearra/build"]
+    : ["~/.cargo/bin/wasm-bindgen", "~/.cargo/registry", "~/.cargo/git", "~/.cache/Clearra/build/cargo-target"];
   for (const marker of [
-    "~/.cargo/bin/wasm-bindgen.exe",
-    "~/.cargo/registry",
-    "~/.cargo/git",
-    "~/AppData/Local/Clearra/build",
+    ...paths,
     `key: ${prefix}-` + "${{ github.sha }}",
     `restore-keys: |\n            ${prefix}-`,
   ]) {
-    requireText(job, marker, `release build job ${index} cache ${marker}`);
+    requireText(job, marker, `${name} release build cache ${marker}`);
   }
 }
 if ((releaseAcceptanceSanitizerJob.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1) {
@@ -1570,8 +1612,8 @@ for (const [job, name, upload, paths] of [
     ]],
   [releaseAcceptanceWasmBuildJob, "Save verified canonical WASM build cache",
     "Upload accepted WASM build", [
-      "~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git",
-      "~/AppData/Local/Clearra/build",
+      "~/.cargo/bin/wasm-bindgen", "~/.cargo/registry", "~/.cargo/git",
+      "~/.cache/Clearra/build/cargo-target",
     ]],
   [releaseAcceptanceSanitizerJob, "Save verified sanitizer C build cache",
     "Upload canonical release acceptance sanitizer shard", ["~/AppData/Local/Clearra/build"]],
@@ -1665,6 +1707,9 @@ requireText(
 );
 if ((workflow.match(/-Task WasmBuildProducer -ExecutionSurface Trusted/gu) ?? []).length !== 1) {
   throw new Error("accepted WASM build must have exactly one workflow producer");
+}
+if ((workflow.match(/-Task WasmBuildContracts -ExecutionSurface Trusted/gu) ?? []).length !== 1) {
+  throw new Error("WASM source and host contracts must have exactly one workflow owner");
 }
 for (const forbidden of [
   "actions/cache/restore@v4",
@@ -1808,7 +1853,8 @@ requireExactYamlFlowSequence(failureSummaryJob, "needs", [
   "release-acceptance-foundation-no-product-debt",
   "release-acceptance-foundation-adversarial-correctness",
   "release-acceptance-foundation-desktop-host", "release-acceptance-sanitizer",
-  "release-acceptance-rust", "release-acceptance-wasm-build", "release-acceptance-pages",
+  "release-acceptance-rust", "release-acceptance-wasm-contracts",
+  "release-acceptance-wasm-build", "release-acceptance-pages",
   "release-acceptance", "windows-cli", "windows-gui", "canonical-evidence",
 ], "diagnostic summary complete dependency set");
 const expectedSummaryTail = [
@@ -2498,7 +2544,8 @@ for (const [name, job] of [
   ["Windows foundation DesktopHost acceptance", releaseAcceptanceFoundationDesktopHostJob],
   ["Windows sanitizer acceptance", releaseAcceptanceSanitizerJob],
   ["Windows Rust acceptance", releaseAcceptanceRustJob],
-  ["Windows WASM build producer", releaseAcceptanceWasmBuildJob],
+  ["Windows WASM source and host contracts", releaseAcceptanceWasmContractsJob],
+  ["Linux WASM build producer", releaseAcceptanceWasmBuildJob],
   ["Windows Pages acceptance", releaseAcceptancePagesJob],
   ["Linux acceptance fan-in", releaseAcceptanceJob],
 ]) {
@@ -2522,12 +2569,20 @@ requireExactYamlScalar(
   "github.event_name == 'workflow_dispatch'",
   "Windows foundation acceptance dispatch-only condition",
 );
+for (const [name, job, runner] of [
+  ["WASM source and host contracts", releaseAcceptanceWasmContractsJob, "windows-latest"],
+  ["accepted WASM build producer", releaseAcceptanceWasmBuildJob, "ubuntu-latest"],
+  ["Pages acceptance", releaseAcceptancePagesJob, "windows-latest"],
+]) {
+  requireExactYamlScalar(job, "runs-on", runner, `${name} runner`, 4);
+}
 for (const [name, job] of [
   ["foundation NoProductDebt", releaseAcceptanceFoundationNoProductDebtJob],
   ["foundation AdversarialCorrectness", releaseAcceptanceFoundationAdversarialCorrectnessJob],
   ["foundation DesktopHost", releaseAcceptanceFoundationDesktopHostJob],
   ["sanitizer", releaseAcceptanceSanitizerJob],
   ["rust", releaseAcceptanceRustJob],
+  ["WASM source and host contracts", releaseAcceptanceWasmContractsJob],
   ["WASM build producer", releaseAcceptanceWasmBuildJob],
   ["Pages", releaseAcceptancePagesJob],
   ["fan-in", releaseAcceptanceJob],
@@ -2575,6 +2630,13 @@ requireExactYamlFlowSequence(
   "Rust acceptance dependency on metadata and accepted CTK3",
 );
 requireExactYamlScalar(
+  releaseAcceptanceWasmContractsJob,
+  "needs",
+  "metadata",
+  "WASM source and host contracts metadata dependency",
+  4,
+);
+requireExactYamlScalar(
   releaseAcceptanceWasmBuildJob,
   "needs",
   "metadata",
@@ -2584,8 +2646,8 @@ requireExactYamlScalar(
 requireExactYamlFlowSequence(
   releaseAcceptancePagesJob,
   "needs",
-  ["metadata", "ctk3", "release-acceptance-wasm-build"],
-  "Pages acceptance dependency on metadata, accepted CTK3 and WASM build",
+  ["metadata", "ctk3", "release-acceptance-wasm-contracts", "release-acceptance-wasm-build"],
+  "Pages acceptance dependency on metadata, accepted CTK3, WASM contracts and WASM build",
 );
 requireExactYamlFlowSequence(
   releaseAcceptanceJob,

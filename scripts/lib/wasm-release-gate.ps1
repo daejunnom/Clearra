@@ -5,11 +5,33 @@ function Invoke-WasmReleaseCommand {
         [string]$Label
     )
 
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
     $result = Invoke-AdversarialCargoProcess -CargoPath $FileName -Arguments $Arguments
+    $timer.Stop()
     if ($result.ExitCode -ne 0) {
-        throw "$Label failed with exit code $($result.ExitCode)`n$($result.Output -join "`n")"
+        throw "$Label failed with exit code $($result.ExitCode) after $($timer.ElapsedMilliseconds)ms`n$($result.Output -join "`n")"
     }
-    Write-Output "wasm_stage=$Label status=passed"
+    Write-Output "wasm_stage=$Label status=passed duration_ms=$($timer.ElapsedMilliseconds)"
+}
+
+function Get-WasmCargoBuildJobs {
+    $configured = $env:CARGO_BUILD_JOBS
+    if ([string]::IsNullOrWhiteSpace($configured)) {
+        return [Math]::Max(1, [Environment]::ProcessorCount)
+    }
+    $jobs = 0
+    if (-not [int]::TryParse($configured, [ref]$jobs) -or $jobs -lt 1) {
+        throw "CARGO_BUILD_JOBS must be a positive integer: $configured"
+    }
+    return $jobs
+}
+
+function Write-WasmCargoSchedulerEvidence([string]$Owner) {
+    $cargoJobs = Get-WasmCargoBuildJobs
+    Write-Output (
+        "wasm_compile_scheduler=cargo owner=$Owner task_workers=1 cargo_jobs=$cargoJobs " +
+        "release_codegen_units=1 release_lto=thin"
+    )
 }
 
 function Assert-WasmReleaseArtifacts([string]$WasmDirectory) {
@@ -26,29 +48,74 @@ function Assert-WasmReleaseArtifacts([string]$WasmDirectory) {
     }
 }
 
-function Invoke-WasmProductArtifactBuild {
+function Invoke-WasmProductSourceContracts {
     param(
         [string]$Root,
         [string]$CargoPath,
-        [string]$NodePath,
-        [string]$Destination
+        [string]$NodePath
     )
 
-    Invoke-WasmReleaseCommand $CargoPath @(
-        'test', '--locked', '-p', 'clearra-wasm',
-        '--test', 'terminal_supply_public_contract',
-        '--', '--test-threads=1'
-    ) 'clearra-wasm terminal-supply public contract'
     Invoke-WasmReleaseCommand $NodePath @(
         '--test',
         (Join-Path $Root 'scripts/tools/wasm-product-terminal-contract.test.mjs')
     ) 'clearra-wasm product terminal contract'
+    Invoke-WasmReleaseCommand $CargoPath @(
+        'check', '--locked',
+        '-p', 'clearra-cli-command',
+        '-p', 'clearra-wasm',
+        '--lib', '--tests'
+    ) 'clearra-wasm source contract compilation'
+    Invoke-WasmReleaseCommand $CargoPath @(
+        'test', '--locked', '-p', 'clearra-wasm',
+        '--test', 'terminal_supply_public_contract',
+        '--test', 'wasm_host_contract',
+        '--', '--test-threads=1'
+    ) 'clearra-wasm source and host contract execution'
+}
+
+function Invoke-WasmProductArtifactBuild {
+    param(
+        [string]$Root,
+        [string]$NodePath,
+        [string]$Destination
+    )
+
     Invoke-WasmReleaseCommand $NodePath @(
         (Join-Path $Root 'scripts/tools/build-clearra-wasm.mjs'),
-        '--verify',
         '--destination', $Destination
-    ) 'clearra-wasm verified product build'
+    ) 'clearra-wasm product artifact build'
     Assert-WasmReleaseArtifacts $Destination
+}
+
+function Invoke-WasmBuildContractsGate {
+    param(
+        [string]$Root,
+        [string]$CargoPath,
+        [string]$CargoTargetDir
+    )
+
+    $nodeCommand = Get-Command 'node' -ErrorAction SilentlyContinue
+    if ($null -eq $nodeCommand) {
+        throw 'WASM source contracts require node on PATH'
+    }
+    New-Item -ItemType Directory -Force -Path $CargoTargetDir | Out-Null
+    $previousCargoTargetDir = $env:CARGO_TARGET_DIR
+    try {
+        $env:CARGO_TARGET_DIR = Assert-ClearraCanonicalCargoTargetDir $CargoTargetDir
+        Write-WasmCargoSchedulerEvidence 'source-contracts'
+        Invoke-WasmProductSourceContracts `
+            -Root $Root `
+            -CargoPath $CargoPath `
+            -NodePath $nodeCommand.Source
+        Write-Output 'wasm_build_contracts=passed artifact_built=false'
+    }
+    finally {
+        if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
+            Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+        } else {
+            $env:CARGO_TARGET_DIR = $previousCargoTargetDir
+        }
+    }
 }
 
 function Invoke-WasmBuildProducerGate {
@@ -86,9 +153,9 @@ function Invoke-WasmBuildProducerGate {
     $previousCargoTargetDir = $env:CARGO_TARGET_DIR
     try {
         $env:CARGO_TARGET_DIR = Assert-ClearraCanonicalCargoTargetDir $CargoTargetDir
+        Write-WasmCargoSchedulerEvidence 'accepted-artifact-producer'
         Invoke-WasmProductArtifactBuild `
             -Root $Root `
-            -CargoPath $CargoPath `
             -NodePath $nodeCommand.Source `
             -Destination $outputDirectory
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
@@ -194,9 +261,13 @@ function Invoke-WasmBuildTestGate {
                 -SourceDirectory $acceptedWasmDirectory `
                 -DestinationDirectory $stagedWasm
         } else {
-            Invoke-WasmProductArtifactBuild `
+            Write-WasmCargoSchedulerEvidence 'inline-product-verification'
+            Invoke-WasmProductSourceContracts `
                 -Root $Root `
                 -CargoPath $CargoPath `
+                -NodePath $nodeCommand.Source
+            Invoke-WasmProductArtifactBuild `
+                -Root $Root `
                 -NodePath $nodeCommand.Source `
                 -Destination $stagedWasm
         }

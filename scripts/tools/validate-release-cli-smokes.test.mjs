@@ -487,7 +487,7 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "  release-acceptance-pages:\n    if: github.event_name == 'workflow_dispatch'\n    needs: [metadata, ctk3, release-acceptance-wasm-build]\n",
+        "  release-acceptance-pages:\n    if: github.event_name == 'workflow_dispatch'\n    needs: [metadata, ctk3, release-acceptance-wasm-contracts, release-acceptance-wasm-build]\n",
         "  release-acceptance-pages:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n",
       ),
   ],
@@ -533,6 +533,24 @@ for (const [name, mutate] of [
         source,
         "  metadata:\n    runs-on: ubuntu-latest\n",
         "  metadata:\n    runs-on: windows-latest # runs-on: ubuntu-latest\n",
+      ),
+  ],
+  [
+    "rejects moving the accepted WASM producer back to the Windows runner",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "  release-acceptance-wasm-build:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n    runs-on: ubuntu-latest\n",
+        "  release-acceptance-wasm-build:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n    runs-on: windows-latest\n",
+      ),
+  ],
+  [
+    "rejects removing explicit Cargo parallelism from the accepted WASM producer",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        '          echo "CARGO_BUILD_JOBS=$cargo_jobs" >> "$GITHUB_ENV"\n',
+        "",
       ),
   ],
   [
@@ -736,7 +754,7 @@ for (const [name, mutate] of [
   ],
   [
     "rejects native and WASM cache writers sharing an immutable key",
-    (source) => source.replaceAll('release-acceptance-wasm-v3-', 'release-acceptance-native-v3-'),
+    (source) => source.replaceAll('release-acceptance-wasm-v4-', 'release-acceptance-native-v3-'),
   ],
   [
     "rejects optional-cache failure policy moved onto product verification",

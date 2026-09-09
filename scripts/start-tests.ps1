@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Quick", "All", "COnly", "COnlySplit", "COnlyAsan", "COnlyUbsan", "UXSmoke", "DesktopHost", "WorkerE2E", "WorkerE2EStress", "WorkerAcceptance", "WorkerRelease", "ProductE2E", "ProductE2EBuilt", "Acceptance", "ReleaseAcceptance", "NoProductDebt", "AdversarialCorrectness", "CSanitizer", "RustExactTests", "WasmBuildTest", "RenderGolden", "GpuWorkerAcceptance", "GpuWorkerNative", "GpuWorkerRelease", "Mvp2Acceptance", "Mvp3Acceptance", "Validate", "Local", "Strict", "Security", "SecurityFull", "NativeLocal", "DiagnoseCArtifacts", "Events")]
+    [ValidateSet("Quick", "All", "COnly", "COnlySplit", "COnlyAsan", "COnlyUbsan", "UXSmoke", "DesktopHost", "WorkerE2E", "WorkerE2EStress", "WorkerAcceptance", "WorkerRelease", "ProductE2E", "ProductE2EBuilt", "Acceptance", "ReleaseAcceptance", "NoProductDebt", "AdversarialCorrectness", "CSanitizer", "RustExactTests", "WasmBuildContracts", "WasmBuildTest", "RenderGolden", "GpuWorkerAcceptance", "GpuWorkerNative", "GpuWorkerRelease", "Mvp2Acceptance", "Mvp3Acceptance", "Validate", "Local", "Strict", "Security", "SecurityFull", "NativeLocal", "DiagnoseCArtifacts", "Events")]
     [string]$Mode = "Local",
 
     [int]$Workers = [Math]::Min([Environment]::ProcessorCount, 6),
