@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage, type ComponentMessageKey } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
@@ -135,17 +136,17 @@
     fields: Array<[string, string]>,
     selectedLanguage: WorkspaceLanguage
   ): Array<[string, string]> {
-    const labels: Record<string, readonly [string, string]> = {
-      operation_count: ['Operations', '배치 수'],
-      exact_order_count: ['Valid orders', '유효한 순서 수'],
-      universal_dependency_count: ['Required precedence relations', '필수 선행 관계'],
-      transitive_reduction_count: ['Essential dependency edges', '핵심 의존 간선'],
-      independent_pair_count: ['Independent pairs', '독립 배치 쌍']
+    const labels: Record<string, ComponentMessageKey> = {
+      operation_count: 'operations',
+      exact_order_count: 'validOrders',
+      universal_dependency_count: 'requiredPrecedenceRelations',
+      transitive_reduction_count: 'essentialDependencyEdges',
+      independent_pair_count: 'independentPairs'
     };
     return fields.flatMap(([key, value]) => {
       const publicLabel = labels[key];
       return publicLabel
-        ? [[publicLabel[selectedLanguage === 'ko' ? 1 : 0], value] as [string, string]]
+        ? [[componentMessage(selectedLanguage, publicLabel), value] as [string, string]]
         : [];
     });
   }
@@ -153,7 +154,7 @@
 
 <svelte:head>
   <title>{label('sequenceDependencies')} · Clearra</title>
-  <meta name="description" content="Exact operation-order dependency analysis" />
+  <meta name="description" content={componentMessage(language, 'surfaceExactOperationOrderDependencyAnalysis')} />
 </svelte:head>
 
 <WorkspaceShell
@@ -175,23 +176,21 @@
 >
   <div slot="controls" class="controls">
     <label class="document-field">
-      <span>{language === 'ko' ? 'Operation 문서' : 'Operation document'}</span>
+      <span>{componentMessage(language, 'operationDocument')}</span>
       <textarea
         rows="7"
         bind:value={document}
         disabled={active}
-        placeholder="ctk3_… or v115@…"
+        placeholder={componentMessage(language, 'surfaceCtk3OrV115')}
         aria-invalid={document.length > 0 && !validDocument}
       ></textarea>
       <small>
-        {language === 'ko'
-          ? '초기 필드와 구체적 operation multiset은 이 문서만 권위로 사용합니다. 큐와 홀드는 사용하지 않습니다.'
-          : 'This document alone owns the initial field and concrete operation multiset. Queue and hold are not used.'}
+        {componentMessage(language, 'thisDocumentAloneOwnsTheInitialField')}
       </small>
     </label>
     <div class="profile-grid">
       <label>
-        <span>{language === 'ko' ? '규칙 프로필' : 'Rule profile'}</span>
+        <span>{componentMessage(language, 'ruleProfile')}</span>
         <select bind:value={ruleProfile} disabled={active}>
           {#each profiles as profile}
             <option value={profile}>{profile}</option>
@@ -199,7 +198,7 @@
         </select>
       </label>
       <label>
-        <span>{language === 'ko' ? '킥 프로필' : 'Kick profile'}</span>
+        <span>{componentMessage(language, 'kickProfile')}</span>
         <select bind:value={kickProfile} disabled={active}>
           {#each profiles as profile}
             <option value={profile}>{profile}</option>
@@ -207,14 +206,14 @@
         </select>
       </label>
       <label>
-        <span>{language === 'ko' ? '제한시간 (초)' : 'Timeout (seconds)'}</span>
+        <span>{componentMessage(language, 'timeoutSeconds')}</span>
         <input type="number" min="1" max="900" step="1" bind:value={timeoutSeconds} disabled={active} />
       </label>
     </div>
   </div>
 
   <section slot="result" class="result" aria-live="polite">
-    <h2>{language === 'ko' ? '정확한 의존성 보고서' : 'Exact dependency report'}</h2>
+    <h2>{componentMessage(language, 'exactDependencyReport')}</h2>
     {#if reportFields.length > 0}
       <dl>
         {#each reportFields as [key, value]}
@@ -228,9 +227,7 @@
       <WorkspaceFailureNotice failures={runtimeView.publicFailures} {language} compact />
     {:else}
       <p class="empty">
-        {language === 'ko'
-          ? '분석을 실행하면 정확한 순서 수, 보편 선행 관계, 전이 축약, 독립 쌍과 도달성·킥 증거가 여기에 표시됩니다.'
-          : 'Run the analysis to see the exact order count, universal precedence, transitive reduction, independent pairs, and reachability/kick evidence.'}
+        {componentMessage(language, 'runTheAnalysisToSeeTheExact')}
       </p>
     {/if}
   </section>

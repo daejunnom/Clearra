@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { ChevronLeft, ChevronRight, Copy, Download } from '@lucide/svelte';
   import { getContext, onDestroy, onMount } from 'svelte';
@@ -297,9 +298,9 @@
     if (validateFieldDocumentPayload(payload)) return;
     try {
       await navigator.clipboard.writeText(payload.document);
-      actionMessage = language === 'ko' ? '문서를 복사했습니다.' : 'Document copied.';
+      actionMessage = componentMessage(language, 'documentCopied');
     } catch {
-      actionMessage = language === 'ko' ? '문서를 복사하지 못했습니다.' : 'Document copy failed.';
+      actionMessage = componentMessage(language, 'documentCopyFailed');
     }
   }
 
@@ -397,8 +398,8 @@
     {#if tool !== 'fumen' || transform !== 'text-to-fumen'}
       <label>
         <span>{tool === 'fumen' && transform === 'combine'
-          ? (language === 'ko' ? 'Fumen 문서 (한 줄에 하나)' : 'Fumen documents (one per line)')
-          : (language === 'ko' ? 'Typed field 문서' : 'Typed field document')}</span>
+          ? (componentMessage(language, 'fumenDocumentsOnePerLine'))
+          : (componentMessage(language, 'typedFieldDocument'))}</span>
         <textarea
           rows="7"
           bind:value={document}
@@ -411,42 +412,36 @@
     {#if tool === 'fumen'}
       <div class="option-grid">
         <label>
-          <span>{language === 'ko' ? '변환' : 'Transform'}</span>
+          <span>{componentMessage(language, 'transform')}</span>
           <select bind:value={transform} disabled={active}>
             {#each transforms as value}<option value={value}>{value}</option>{/each}
           </select>
         </label>
         {#if transform === 'get-page'}
-          <label><span>{language === 'ko' ? '페이지 (1부터)' : 'Page (1-based)'}</span><input type="number" min="1" step="1" bind:value={pageNumber} disabled={active} /></label>
+          <label><span>{componentMessage(language, 'page1Based')}</span><input type="number" min="1" step="1" bind:value={pageNumber} disabled={active} /></label>
         {:else if transform === 'page-shift'}
-          <label><span>{language === 'ko' ? '왼쪽 이동량' : 'Left page shift'}</span><input type="number" step="1" bind:value={pageShift} disabled={active} /></label>
+          <label><span>{componentMessage(language, 'leftPageShift')}</span><input type="number" step="1" bind:value={pageShift} disabled={active} /></label>
         {/if}
       </div>
       {#if transform === 'text-to-fumen'}
         <label>
-          <span>{language === 'ko' ? '페이지 주석 (한 줄에 하나)' : 'Page comments (one per line)'}</span>
+          <span>{componentMessage(language, 'pageCommentsOnePerLine')}</span>
           <textarea rows="7" bind:value={comments} disabled={active}></textarea>
         </label>
       {/if}
     {:else if tool === 'render'}
       <div class="option-grid">
-        <label><span>{language === 'ko' ? '형식' : 'Format'}</span><select bind:value={artifactFormat} disabled={active}><option value="png">PNG</option><option value="gif">GIF</option></select></label>
+        <label><span>{componentMessage(language, 'format')}</span><select bind:value={artifactFormat} disabled={active}><option value="png">PNG</option><option value="gif">GIF</option></select></label>
         {#if artifactFormat === 'png'}
-          <label><span>{language === 'ko' ? '페이지 (1부터)' : 'Page (1-based)'}</span><input type="number" min="1" step="1" bind:value={pageNumber} disabled={active} /></label>
+          <label><span>{componentMessage(language, 'page1Based')}</span><input type="number" min="1" step="1" bind:value={pageNumber} disabled={active} /></label>
         {/if}
       </div>
     {:else if tool === 'parity'}
-      <small>{language === 'ko'
-        ? '이 보고서는 정적 관찰만 제공하며 가능성 판정이나 가지치기 권위를 주장하지 않습니다. pending garbage는 별도 집계됩니다.'
-        : 'This report is static observation only. It claims neither feasibility nor pruning authority, and preserves pending garbage separately.'}</small>
+      <small>{componentMessage(language, 'thisReportIsStaticObservationOnlyIt')}</small>
     {:else if tool === 'to-gray'}
-      <small>{language === 'ko'
-        ? '점유 색상만 회색으로 바꾸며 페이지, operation, 주석, garbage, 크기 identity는 보존합니다.'
-        : 'Only occupied colors become gray; page, operation, comment, garbage, and dimension identity are preserved.'}</small>
+      <small>{componentMessage(language, 'onlyOccupiedColorsBecomeGrayPageOperation')}</small>
     {:else}
-      <small>{language === 'ko'
-        ? '필드, garbage, operation의 조각·회전을 함께 좌우 반전합니다. 같은 문서를 두 번 반전하면 원 identity로 돌아옵니다.'
-        : 'Field, garbage, and operation piece/rotation are mirrored together; mirroring twice restores the original identity.'}</small>
+      <small>{componentMessage(language, 'fieldGarbageAndOperationPieceRotationAre')}</small>
     {/if}
   </div>
 
@@ -455,33 +450,33 @@
       <header class="result-header">
         <h2>{label('utilityParity')}</h2>
         <nav>
-          <button type="button" disabled={parityPageIndex === 0} on:click={() => (parityPageIndex -= 1)} aria-label="Previous page"><ChevronLeft size={16} /></button>
+          <button type="button" disabled={parityPageIndex === 0} on:click={() => (parityPageIndex -= 1)} aria-label={componentMessage(language, 'surfacePreviousPage')}><ChevronLeft size={16} /></button>
           <span>{activeParityPage.page_number} / {activeParityPage.total_pages}</span>
-          <button type="button" disabled={pageLoading || (parityExhausted && parityPageIndex + 1 >= parityPages.length)} on:click={nextParityPage} aria-label="Next page"><ChevronRight size={16} /></button>
+          <button type="button" disabled={pageLoading || (parityExhausted && parityPageIndex + 1 >= parityPages.length)} on:click={nextParityPage} aria-label={componentMessage(language, 'surfaceNextPage')}><ChevronRight size={16} /></button>
         </nav>
       </header>
       <dl>
-        <div><dt>coordinate_basis</dt><dd>{activeParityPage.coordinate_basis}</dd></div>
-        <div><dt>dimensions</dt><dd>{activeParityPage.width} × {activeParityPage.height}</dd></div>
-        <div><dt>occupied_cell_count</dt><dd>{activeParityPage.occupied_cell_count}</dd></div>
-        <div><dt>checker_black / white / delta</dt><dd>{activeParityPage.checker_black_count} / {activeParityPage.checker_white_count} / {activeParityPage.checker_delta}</dd></div>
-        <div><dt>four_color_counts</dt><dd>{activeParityPage.four_color_counts.join(', ')}</dd></div>
-        <div><dt>column even / odd / delta</dt><dd>{activeParityPage.even_column_count} / {activeParityPage.odd_column_count} / {activeParityPage.column_parity_delta}</dd></div>
-        <div><dt>occupied_area_mod_four</dt><dd>{activeParityPage.occupied_area_mod_four}</dd></div>
-        <div><dt>pending_garbage_occupied_cell_count</dt><dd>{activeParityPage.pending_garbage_occupied_cell_count}</dd></div>
-        <div><dt>feasibility_claim</dt><dd>false</dd></div>
-        <div><dt>pruning_authority</dt><dd>none</dd></div>
+        <div><dt>{componentMessage(language, 'surfaceCoordinateBasis')}</dt><dd>{activeParityPage.coordinate_basis}</dd></div>
+        <div><dt>{componentMessage(language, 'surfaceDimensions')}</dt><dd>{activeParityPage.width} × {activeParityPage.height}</dd></div>
+        <div><dt>{componentMessage(language, 'surfaceOccupiedCellCount')}</dt><dd>{activeParityPage.occupied_cell_count}</dd></div>
+        <div><dt>{componentMessage(language, 'surfaceCheckerBlackWhiteDelta')}</dt><dd>{activeParityPage.checker_black_count} / {activeParityPage.checker_white_count} / {activeParityPage.checker_delta}</dd></div>
+        <div><dt>{componentMessage(language, 'surfaceFourColorCounts')}</dt><dd>{activeParityPage.four_color_counts.join(', ')}</dd></div>
+        <div><dt>{componentMessage(language, 'surfaceColumnEvenOddDelta')}</dt><dd>{activeParityPage.even_column_count} / {activeParityPage.odd_column_count} / {activeParityPage.column_parity_delta}</dd></div>
+        <div><dt>{componentMessage(language, 'surfaceOccupiedAreaModFour')}</dt><dd>{activeParityPage.occupied_area_mod_four}</dd></div>
+        <div><dt>{componentMessage(language, 'surfacePendingGarbageOccupiedCellCount')}</dt><dd>{activeParityPage.pending_garbage_occupied_cell_count}</dd></div>
+        <div><dt>{componentMessage(language, 'surfaceFeasibilityClaim')}</dt><dd>false</dd></div>
+        <div><dt>{componentMessage(language, 'surfacePruningAuthority')}</dt><dd>none</dd></div>
       </dl>
     {:else if fieldDocuments.length > 0}
       <h2>{label(titleKey)}</h2>
       <ol class="documents">
         {#each fieldDocuments as output, index (output.canonical_sha256)}
           <li>
-            <div><strong>{output.filename}</strong><span>{output.page_count} page(s) · {output.canonical_sha256}</span></div>
+            <div><strong>{output.filename}</strong><span>{output.page_count} {componentMessage(language, 'surfacePageS')} {output.canonical_sha256}</span></div>
             <code>{output.document}</code>
             <div class="actions">
-              <button type="button" on:click={() => copyDocument(output)}><Copy size={15} />{language === 'ko' ? '복사' : 'Copy'}</button>
-              <button type="button" on:click={() => downloadDocument(output)}><Download size={15} />{language === 'ko' ? '다운로드' : 'Download'}</button>
+              <button type="button" on:click={() => copyDocument(output)}><Copy size={15} />{componentMessage(language, 'copy')}</button>
+              <button type="button" on:click={() => downloadDocument(output)}><Download size={15} />{componentMessage(language, 'download')}</button>
             </div>
           </li>
         {/each}
@@ -489,14 +484,14 @@
     {:else if renderArtifact && artifactUrl}
       <h2>{label('utilityRender')}</h2>
       <figure>
-        <img src={artifactUrl} alt={language === 'ko' ? '정확한 필드 렌더 결과' : 'Exact field render result'} />
-        <figcaption>{renderArtifact.filename} · {renderArtifact.byte_length} bytes · SHA-256 {renderArtifact.sha256}</figcaption>
+        <img src={artifactUrl} alt={componentMessage(language, 'exactFieldRenderResult')} />
+        <figcaption>{renderArtifact.filename} · {renderArtifact.byte_length} {componentMessage(language, 'surfaceBytesSha256')} {renderArtifact.sha256}</figcaption>
       </figure>
-      <button class="download" type="button" on:click={downloadArtifact}><Download size={16} />{language === 'ko' ? '아티팩트 다운로드' : 'Download artifact'}</button>
+      <button class="download" type="button" on:click={downloadArtifact}><Download size={16} />{componentMessage(language, 'downloadArtifact')}</button>
     {:else if publicResultFailures.length}
       <WorkspaceFailureNotice failures={publicResultFailures} {language} compact />
     {:else}
-      <p class="empty">{language === 'ko' ? '실행하면 typed 결과가 여기에 표시됩니다.' : 'Run the utility to display its typed result.'}</p>
+      <p class="empty">{componentMessage(language, 'runTheUtilityToDisplayItsTyped')}</p>
     {/if}
     {#if actionMessage}<p class="action-message">{actionMessage}</p>{/if}
   </section>

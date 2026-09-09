@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage, type ComponentMessageKey } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
 
@@ -64,7 +65,6 @@
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
-  $: korean = language === 'ko';
 
   onMount(() => {
     language = readWorkspaceLanguage();
@@ -164,22 +164,22 @@
   }
 
   function errorLabel(code: SetupScoreValidationCode): string {
-    const messages: Record<SetupScoreValidationCode, readonly [string, string]> = {
-      document_invalid: ['선택한 형식의 색상 CTK3/Fumen 문서를 입력하세요.', 'Enter a colored CTK3/Fumen document in the selected format.'],
-      setup_source_invalid: ['Setup queue 또는 pattern을 확인하세요.', 'Enter a valid setup queue or pattern.'],
-      solution_source_invalid: ['16조각 이하의 continuation queue 또는 pattern을 입력하세요.', 'Enter a continuation queue or pattern of at most 16 pieces.'],
-      clear_height_invalid: ['Clear 높이는 1..6이어야 합니다.', 'Clear height must be between 1 and 6.'],
-      initial_b2b_invalid: ['초기 B2B 범위를 확인하세요.', 'Initial B2B is out of range.'],
-      max_patterns_invalid: ['최대 pattern 수는 1..100000이어야 합니다.', 'Maximum patterns must be between 1 and 100000.'],
-      worker_count_invalid: ['Worker 수는 1 이상이어야 합니다.', 'Worker count must be positive.']
+    const messages: Record<SetupScoreValidationCode, ComponentMessageKey> = {
+      document_invalid: 'enterAColoredCtk3FumenDocumentIn',
+      setup_source_invalid: 'enterAValidSetupQueueOrPattern',
+      solution_source_invalid: 'enterAContinuationQueueOrPatternOf',
+      clear_height_invalid: 'clearHeightMustBeBetween1And',
+      initial_b2b_invalid: 'initialB2bIsOutOfRange',
+      max_patterns_invalid: 'maximumPatternsMustBeBetween1And',
+      worker_count_invalid: 'workerCountMustBePositive'
     };
-    return messages[code][korean ? 0 : 1];
+    return componentMessage(language, messages[code]);
   }
 </script>
 
 <svelte:head>
-  <title>{korean ? 'Setup 점수' : 'Setup score'} · Clearra</title>
-  <meta name="description" content="Exact setup and continuation score ranking" />
+  <title>{componentMessage(language, 'setupScore')} · Clearra</title>
+  <meta name="description" content={componentMessage(language, 'surfaceExactSetupAndContinuationScoreRanking')} />
 </svelte:head>
 
 <WorkspaceShell
@@ -188,8 +188,8 @@
   {language}
   {active}
   statusLabel={label(runtimeView.status)}
-  workspaceLabel={korean ? 'Setup 점수' : 'Setup score'}
-  dimensionLabel={korean ? 'Clear 높이' : 'Clear height'}
+  workspaceLabel={componentMessage(language, 'setupScore')}
+  dimensionLabel={componentMessage(language, 'clearHeight')}
   dimensionValue={request.clearHeight}
   showDimension={false}
   cancelLabel={label('cancel')}
@@ -199,22 +199,22 @@
   on:cancel={cancel}
   on:run={run}
 >
-  <section slot="controls" class="controls" aria-label={korean ? 'Setup 점수 입력' : 'Setup score input'}>
+  <section slot="controls" class="controls" aria-label={componentMessage(language, 'setupScoreInput')}>
     <div class="document-heading">
       <label>
-        <span>{korean ? '문서 형식' : 'Document format'}</span>
+        <span>{componentMessage(language, 'documentFormat')}</span>
         <select value={request.documentFormat} on:change={(event) => updateRequest({ documentFormat: (event.currentTarget as HTMLSelectElement).value as SetupScoreRequest['documentFormat'] })}>
           <option value="ctk3">CTK3</option>
           <option value="fumen">Fumen</option>
         </select>
       </label>
       <label>
-        <span>{korean ? 'Clear 높이' : 'Clear height'}</span>
+        <span>{componentMessage(language, 'clearHeight')}</span>
         <input type="number" min="1" max="6" value={request.clearHeight} on:input={(event) => updateRequest({ clearHeight: Number((event.currentTarget as HTMLInputElement).value) })} />
       </label>
     </div>
     <label>
-      <span>{korean ? '색상 해법 문서' : 'Colored solution document'}</span>
+      <span>{componentMessage(language, 'coloredSolutionDocument')}</span>
       <textarea
         rows="4"
         spellcheck="false"
@@ -225,32 +225,32 @@
     </label>
     <div class="source-grid">
       <fieldset>
-        <legend>{korean ? 'Setup 공급' : 'Setup supply'}</legend>
+        <legend>{componentMessage(language, 'setupSupply')}</legend>
         <select value={request.setupSourceKind} on:change={(event) => updateRequest({ setupSourceKind: (event.currentTarget as HTMLSelectElement).value as SetupScoreSourceKind })}>
-          <option value="queue">queue</option>
-          <option value="patterns">patterns</option>
+          <option value="queue">{componentMessage(language, 'surfaceQueue')}</option>
+          <option value="patterns">{componentMessage(language, 'surfacePatterns')}</option>
         </select>
         <input value={request.setupSource} spellcheck="false" on:input={(event) => updateRequest({ setupSource: (event.currentTarget as HTMLInputElement).value })} />
       </fieldset>
       <fieldset>
-        <legend>{korean ? '연속 해법 공급' : 'Continuation supply'}</legend>
+        <legend>{componentMessage(language, 'continuationSupply')}</legend>
         <select value={request.solutionSourceKind} on:change={(event) => updateRequest({ solutionSourceKind: (event.currentTarget as HTMLSelectElement).value as SetupScoreSourceKind })}>
-          <option value="queue">queue</option>
-          <option value="patterns">patterns</option>
+          <option value="queue">{componentMessage(language, 'surfaceQueue')}</option>
+          <option value="patterns">{componentMessage(language, 'surfacePatterns')}</option>
         </select>
         <input value={request.solutionSource} spellcheck="false" on:input={(event) => updateRequest({ solutionSource: (event.currentTarget as HTMLInputElement).value })} />
       </fieldset>
     </div>
     <div class="option-grid">
-      <label><span>{korean ? '점수 프로필' : 'Score profile'}</span><select value={request.scoreProfile} on:change={(event) => updateRequest({ scoreProfile: (event.currentTarget as HTMLSelectElement).value as SetupScoreRequest['scoreProfile'] })}><option value="tetrio">tetrio</option><option value="guideline">guideline</option><option value="jstris-ultra">jstris-ultra</option></select></label>
-      <label><span>{korean ? '초기 B2B' : 'Initial B2B'}</span><input type="number" min="0" value={request.initialB2B} on:input={(event) => updateRequest({ initialB2B: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
-      <label><span>{korean ? '규칙' : 'Rule'}</span><select value={request.rule} on:change={(event) => updateRequest({ rule: (event.currentTarget as HTMLSelectElement).value as SetupScoreRequest['rule'] })}><option value="srs-plus">srs-plus</option><option value="srs">srs</option><option value="srs-x">srs-x</option><option value="jstris-180">jstris-180</option><option value="no-kick">no-kick</option></select></label>
-      <label><span>{korean ? '최대 pattern' : 'Maximum patterns'}</span><input type="number" min="1" max="100000" value={request.maxPatterns} on:input={(event) => updateRequest({ maxPatterns: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
-      <label><span>{korean ? 'Worker 수' : 'Workers'}</span><input type="number" min="1" value={request.workers} disabled={request.useAllLogicalProcessors} on:input={(event) => updateRequest({ workers: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
-      <label class="check-row"><input type="checkbox" checked={request.holdEnabled} on:change={(event) => updateRequest({ holdEnabled: (event.currentTarget as HTMLInputElement).checked })} /><span>{korean ? 'Setup Hold 사용' : 'Enable setup hold'}</span></label>
-      <label class="check-row"><input type="checkbox" checked={request.useAllLogicalProcessors} on:change={(event) => updateRequest({ useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked })} /><span>{korean ? '모든 논리 프로세서' : 'All logical processors'}</span></label>
+      <label><span>{componentMessage(language, 'scoreProfile')}</span><select value={request.scoreProfile} on:change={(event) => updateRequest({ scoreProfile: (event.currentTarget as HTMLSelectElement).value as SetupScoreRequest['scoreProfile'] })}><option value="tetrio">tetrio</option><option value="guideline">guideline</option><option value="jstris-ultra">jstris-ultra</option></select></label>
+      <label><span>{componentMessage(language, 'initialB2b')}</span><input type="number" min="0" value={request.initialB2B} on:input={(event) => updateRequest({ initialB2B: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
+      <label><span>{componentMessage(language, 'rule')}</span><select value={request.rule} on:change={(event) => updateRequest({ rule: (event.currentTarget as HTMLSelectElement).value as SetupScoreRequest['rule'] })}><option value="srs-plus">srs-plus</option><option value="srs">srs</option><option value="srs-x">srs-x</option><option value="jstris-180">jstris-180</option><option value="no-kick">no-kick</option></select></label>
+      <label><span>{componentMessage(language, 'maximumPatterns')}</span><input type="number" min="1" max="100000" value={request.maxPatterns} on:input={(event) => updateRequest({ maxPatterns: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
+      <label><span>{componentMessage(language, 'workers')}</span><input type="number" min="1" value={request.workers} disabled={request.useAllLogicalProcessors} on:input={(event) => updateRequest({ workers: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
+      <label class="check-row"><input type="checkbox" checked={request.holdEnabled} on:change={(event) => updateRequest({ holdEnabled: (event.currentTarget as HTMLInputElement).checked })} /><span>{componentMessage(language, 'enableSetupHold')}</span></label>
+      <label class="check-row"><input type="checkbox" checked={request.useAllLogicalProcessors} on:change={(event) => updateRequest({ useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked })} /><span>{componentMessage(language, 'allLogicalProcessors')}</span></label>
     </div>
-    <p class="authority">{korean ? 'Setup score는 CPU 전용이며 fallback과 memory/GPU 옵션을 노출하지 않습니다. 동일 score는 안정적인 순서로 표시하며 attack을 혼합하지 않습니다.' : 'Setup score is CPU-only and exposes no fallback, memory, or GPU option. Equal scores use a stable display order without mixing attack.'}</p>
+    <p class="authority">{componentMessage(language, 'setupScoreIsCpuOnlyAndExposes')}</p>
     {#if validationCodes.length}
       <ul class="errors" aria-live="polite">{#each validationCodes as code}<li>{errorLabel(code)}</li>{/each}</ul>
     {/if}
@@ -260,7 +260,7 @@
     view={runtimeView}
     {language}
     {elapsedMs}
-    capabilityLabel={korean ? 'Setup 점수' : 'Setup score'}
+    capabilityLabel={componentMessage(language, 'setupScore')}
   />
 </WorkspaceShell>
 

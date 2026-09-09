@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { TriangleAlert } from '@lucide/svelte';
   import { getContext, onDestroy, onMount, tick } from 'svelte';
 
@@ -235,7 +236,7 @@
 
 <svelte:head>
   <title>{label('buildProbability')} · Clearra</title>
-  <meta name="description" content="Exact full-future/oracle build probability workspace; finesse queue-information policies are reported separately" />
+  <meta name="description" content={componentMessage(language, 'surfaceExactFullFutureOracleBuildProbabilityWorkspaceFinesse')} />
 </svelte:head>
 
 <WorkspaceShell

@@ -116,10 +116,10 @@ test('normal operation report surfaces whitelist human metrics and omit machine 
   const dependencies = source('../src/lib/workspace/SequenceDependenciesWorkspace.svelte');
 
   assert.match(sequence, /publicOperationReportFields/u);
-  assert.match(sequence, /operation_count: \['Operations', '배치 수'\]/u);
+  assert.match(sequence, /operation_count: 'operations'/u);
   assert.doesNotMatch(sequence, /candidate_id|trace_key|normalized_trace/u);
   assert.match(dependencies, /publicDependencyReportFields/u);
-  assert.match(dependencies, /exact_order_count: \['Valid orders', '유효한 순서 수'\]/u);
+  assert.match(dependencies, /exact_order_count: 'validOrders'/u);
   assert.doesNotMatch(dependencies, /candidate_id|representative_order|trace_key/u);
 });
 
@@ -183,7 +183,8 @@ test('solution subsets reuse the ordinary gallery while portfolio export stays b
   assert.match(members, /<SolutionSubsetPage/u);
   assert.match(members, /solutionKeys=\{coverageSolutionKeys\}/u);
   assert.match(members, /exportKeySource=\{coverageExportKeySource\}/u);
-  assert.match(pager, /최고 점수 최소 해법 집합 전체/u);
+  assert.match(pager, /componentMessage\(language, 'allMinimumMaximumScoreSolutionSets'\)/u);
+  assert.match(source('../src/lib/i18n/componentCatalog.ts'), /최고 점수 최소 해법 집합 전체/u);
   assert.doesNotMatch(members, /member\.candidate_id/u);
   assert.doesNotMatch(members, /member\.normalized_solution_key/u);
 

@@ -223,6 +223,14 @@ impl CliHelpTopic {
             &TranslationKey::new("cli.help.top_level"),
             "Clearra command line",
         );
+        // Draft rendering is reachable by translation tooling and tests only:
+        // the released parser still rejects Japanese language selection.
+        if language == LanguageId::Ja {
+            return CliOutput::success(format!(
+                "{title}\n{}",
+                super::japanese_help_draft::help_body(self)
+            ));
+        }
         if let Self::Product(topic) = self {
             return CliOutput::success(format!("{title}\n{}", topic.help_body()));
         }

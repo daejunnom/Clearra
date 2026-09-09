@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { Search } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
@@ -369,9 +370,7 @@
                       class="setup-board"
                       style={`--rows:${result.board.height};aspect-ratio:${10 / result.board.height}`}
                       role="img"
-                      aria-label={language === 'ko'
-                        ? `Setup 보드 ${candidateIndex + 1}`
-                        : `Setup board ${candidateIndex + 1}`}
+                      aria-label={componentMessage(language, 'setupBoard', { value0: candidateIndex + 1 })}
                     >
                       {#each result.board.cells as cell}
                         <span

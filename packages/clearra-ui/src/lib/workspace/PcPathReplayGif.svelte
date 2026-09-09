@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
+  import type { WorkspaceLanguage } from './workspaceI18n';
   import { AlertTriangle } from '@lucide/svelte';
   import { onDestroy, onMount } from 'svelte';
 
@@ -7,6 +9,7 @@
   import { buildPcPathReplayFrames } from './pcPathReplayPresentation';
 
   export let witness: ClearraPcPathWitnessPayload;
+  export let language: WorkspaceLanguage = 'en';
   export let targetLines: number;
   export let expectedTerminalBoardMask: string | null = null;
   export let ariaLabel: string;
@@ -62,7 +65,7 @@
 <div class="pc-path-replay-gif">
   {#if gifUrl}
     <img src={gifUrl} alt={ariaLabel} width="200" height={Math.max(80, targetLines * 20)} />
-    <span class="frame-count">{frameCount} frames · 500ms</span>
+    <span class="frame-count">{frameCount} {componentMessage(language, 'surfaceFrames500ms')}</span>
   {:else if renderError}
     <div class="invalid-replay" role="status">
       <AlertTriangle size={18} />

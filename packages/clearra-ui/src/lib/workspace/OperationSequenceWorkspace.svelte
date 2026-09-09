@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage, type ComponentMessageKey } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
@@ -131,16 +132,16 @@
     fields: Array<[string, string]>,
     selectedLanguage: WorkspaceLanguage
   ): Array<[string, string]> {
-    const labels: Record<string, readonly [string, string]> = {
-      operation_count: ['Operations', '배치 수'],
-      cleared_line_count: ['Cleared lines', '삭제한 줄'],
-      rule_profile: ['Rule profile', '규칙 프로필'],
-      kick_profile: ['Kick profile', '킥 프로필']
+    const labels: Record<string, ComponentMessageKey> = {
+      operation_count: 'operations',
+      cleared_line_count: 'clearedLines',
+      rule_profile: 'ruleProfile',
+      kick_profile: 'kickProfile'
     };
     return fields.flatMap(([key, value]) => {
       const publicLabel = labels[key];
       return publicLabel
-        ? [[publicLabel[selectedLanguage === 'ko' ? 1 : 0], value] as [string, string]]
+        ? [[componentMessage(selectedLanguage, publicLabel), value] as [string, string]]
         : [];
     });
   }
@@ -148,7 +149,7 @@
 
 <svelte:head>
   <title>{label('operationSequence')} · Clearra</title>
-  <meta name="description" content="Lossless operation trace normalization and replay validation" />
+  <meta name="description" content={componentMessage(language, 'surfaceLosslessOperationTraceNormalizationAndReplayValidation')} />
 </svelte:head>
 
 <WorkspaceShell
@@ -170,23 +171,21 @@
 >
   <div slot="controls" class="controls">
     <label class="document-field">
-      <span>{language === 'ko' ? 'Operation trace 문서' : 'Operation trace document'}</span>
+      <span>{componentMessage(language, 'operationTraceDocument')}</span>
       <textarea
         rows="7"
         bind:value={document}
         disabled={active}
-        placeholder="ctk3_… or v115@…"
+        placeholder={componentMessage(language, 'surfaceCtk3OrV115')}
         aria-invalid={document.length > 0 && !validDocument}
       ></textarea>
       <small>
-        {language === 'ko'
-          ? '문서에 기록된 operation 순서와 좌표를 그대로 정규화하고 재생 검증합니다. 큐나 홀드를 추론하지 않습니다.'
-          : 'The recorded operation order and coordinates are normalized and replay-validated as supplied. Queue and hold are never inferred.'}
+        {componentMessage(language, 'theRecordedOperationOrderAndCoordinatesAre')}
       </small>
     </label>
     <div class="profile-grid">
       <label>
-        <span>{language === 'ko' ? '규칙 프로필' : 'Rule profile'}</span>
+        <span>{componentMessage(language, 'ruleProfile')}</span>
         <select bind:value={ruleProfile} disabled={active}>
           {#each profiles as profile}
             <option value={profile}>{profile}</option>
@@ -194,7 +193,7 @@
         </select>
       </label>
       <label>
-        <span>{language === 'ko' ? '킥 프로필' : 'Kick profile'}</span>
+        <span>{componentMessage(language, 'kickProfile')}</span>
         <select bind:value={kickProfile} disabled={active}>
           {#each profiles as profile}
             <option value={profile}>{profile}</option>
@@ -202,14 +201,14 @@
         </select>
       </label>
       <label>
-        <span>{language === 'ko' ? '제한시간 (초)' : 'Timeout (seconds)'}</span>
+        <span>{componentMessage(language, 'timeoutSeconds')}</span>
         <input type="number" min="1" max="900" step="1" bind:value={timeoutSeconds} disabled={active} />
       </label>
     </div>
   </div>
 
   <section slot="result" class="result" aria-live="polite">
-    <h2>{language === 'ko' ? '정규화된 재생 보고서' : 'Normalized replay report'}</h2>
+    <h2>{componentMessage(language, 'normalizedReplayReport')}</h2>
     {#if reportFields.length > 0}
       <dl>
         {#each reportFields as [key, value]}
@@ -223,9 +222,7 @@
       <WorkspaceFailureNotice failures={runtimeView.publicFailures} {language} compact />
     {:else}
       <p class="empty">
-        {language === 'ko'
-          ? '검증을 실행하면 배치 수, 줄 삭제와 적용한 규칙·킥 프로필이 여기에 표시됩니다.'
-          : 'Run validation to see the placement count, line clears, and applied rule and kick profiles.'}
+        {componentMessage(language, 'runValidationToSeeThePlacementCount')}
       </p>
     {/if}
   </section>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage, type ComponentMessageKey } from '../i18n/componentCatalog';
   import { createEventDispatcher } from 'svelte';
 
   import {
@@ -18,7 +19,6 @@
   export let validationCodes: BuildV2ValidationCode[] = [];
 
   const dispatch = createEventDispatcher<{ change: Partial<BuildV2Request> }>();
-  $: korean = language === 'ko';
   $: objectives = buildV2AllowedObjectives(request.capability);
   $: scoreCapable = buildV2ScoreCapable(request.capability);
 
@@ -30,26 +30,26 @@
   }
 
   function errorLabel(code: BuildV2ValidationCode): string {
-    const labels: Record<BuildV2ValidationCode, readonly [string, string]> = {
-      queue_invalid: ['Queue 또는 pattern 식을 확인하세요.', 'Enter a valid queue or pattern expression.'],
-      target_lines_invalid: ['높이는 1..24여야 합니다.', 'Height must be between 1 and 24.'],
-      build_target_empty: ['목표 셀을 하나 이상 입력하세요.', 'Enter at least one target cell.'],
-      build_target_not_tileable: ['목표 셀 수는 4의 배수여야 합니다.', 'Target cell count must be divisible by four.'],
-      build_target_overlap: ['기존 필드와 목표 셀이 겹칩니다.', 'Existing and target masks overlap.'],
-      source_pieces_invalid: ['공급 조각 수 범위를 확인하세요.', 'Source piece count is out of range.'],
-      target_document_invalid: ['형식에 맞는 색상 target 문서를 입력하세요.', 'Enter a colored target document in the selected format.'],
-      solution_document_invalid: ['형식에 맞는 제공 해법 문서를 입력하세요.', 'Enter a supplied solution document in the selected format.'],
-      objective_invalid: ['이 기능에서 허용되지 않는 objective입니다.', 'The objective is not allowed for this capability.'],
-      initial_b2b_invalid: ['초기 B2B는 0..65535여야 합니다.', 'Initial B2B must be between 0 and 65535.'],
-      worker_count_invalid: ['Worker 수는 1 이상이어야 합니다.', 'Worker count must be positive.']
+    const labels: Record<BuildV2ValidationCode, ComponentMessageKey> = {
+      queue_invalid: 'enterAValidQueueOrPatternExpression',
+      target_lines_invalid: 'heightMustBeBetween1And24',
+      build_target_empty: 'enterAtLeastOneTargetCell',
+      build_target_not_tileable: 'targetCellCountMustBeDivisibleBy',
+      build_target_overlap: 'existingAndTargetMasksOverlap',
+      source_pieces_invalid: 'sourcePieceCountIsOutOfRange',
+      target_document_invalid: 'enterAColoredTargetDocumentInThe',
+      solution_document_invalid: 'enterASuppliedSolutionDocumentInThe',
+      objective_invalid: 'theObjectiveIsNotAllowedForThis',
+      initial_b2b_invalid: 'initialB2bMustBeBetween0And',
+      worker_count_invalid: 'workerCountMustBePositive'
     };
-    return labels[code][korean ? 0 : 1];
+    return componentMessage(language, labels[code]);
   }
 </script>
 
-<section class="controls" aria-label={korean ? 'Build v2 제어' : 'Build v2 controls'}>
+<section class="controls" aria-label={componentMessage(language, 'buildV2Controls')}>
   <label>
-    <span>{korean ? '기능' : 'Capability'}</span>
+    <span>{componentMessage(language, 'capability')}</span>
     <select
       value={request.capability}
       on:change={(event) => setCapability((event.currentTarget as HTMLSelectElement).value as BuildV2Capability)}
@@ -61,7 +61,7 @@
   </label>
 
   <label>
-    <span>{korean ? 'Objective' : 'Objective'}</span>
+    <span>{componentMessage(language, 'objective')}</span>
     <select
       value={request.objective}
       on:change={(event) => dispatch('change', { objective: (event.currentTarget as HTMLSelectElement).value as BuildV2Objective })}
@@ -73,28 +73,28 @@
   </label>
 
   <label>
-    <span>{korean ? 'Queue / pattern' : 'Queue / pattern'}</span>
+    <span>{componentMessage(language, 'queuePattern')}</span>
     <input
       value={request.queue}
       spellcheck="false"
-      placeholder="IOTSZJL or *p7"
+      placeholder={componentMessage(language, 'surfaceIotszjlOrP7')}
       on:input={(event) => dispatch('change', { queue: (event.currentTarget as HTMLInputElement).value })}
     />
   </label>
 
   <div class="two-columns">
     <label>
-      <span>{korean ? 'Queue 지식' : 'Queue knowledge'}</span>
+      <span>{componentMessage(language, 'queueKnowledge')}</span>
       <select
         value={request.queueKnowledge}
         on:change={(event) => dispatch('change', { queueKnowledge: (event.currentTarget as HTMLSelectElement).value as 'oracle' | 'visible-7' })}
       >
-        <option value="oracle">oracle</option>
-        <option value="visible-7">visible-7</option>
+        <option value="oracle">{componentMessage(language, 'surfaceOracle')}</option>
+        <option value="visible-7">{componentMessage(language, 'surfaceVisible7')}</option>
       </select>
     </label>
     <label>
-      <span>{korean ? '규칙' : 'Rule'}</span>
+      <span>{componentMessage(language, 'rule')}</span>
       <select
         value={request.rule}
         on:change={(event) => dispatch('change', { rule: (event.currentTarget as HTMLSelectElement).value as BuildV2Request['rule'] })}
@@ -114,16 +114,16 @@
         checked={request.holdEnabled}
         on:change={(event) => dispatch('change', { holdEnabled: (event.currentTarget as HTMLInputElement).checked })}
       />
-      <span>{korean ? 'Hold 사용' : 'Enable hold'}</span>
+      <span>{componentMessage(language, 'enableHold')}</span>
     </label>
     <label>
-      <span>{korean ? '초기 Hold' : 'Initial hold'}</span>
+      <span>{componentMessage(language, 'initialHold')}</span>
       <select
         value={request.holdPiece}
         disabled={!request.holdEnabled}
         on:change={(event) => dispatch('change', { holdPiece: (event.currentTarget as HTMLSelectElement).value as BuildV2Request['holdPiece'] })}
       >
-        <option value="empty">empty</option>
+        <option value="empty">{componentMessage(language, 'surfaceEmpty')}</option>
         {#each ['I', 'O', 'T', 'S', 'Z', 'J', 'L'] as piece}
           <option value={piece}>{piece}</option>
         {/each}
@@ -133,10 +133,10 @@
 
   {#if scoreCapable}
     <div class="score-options">
-      <strong>{korean ? '점수 옵션' : 'Score options'}</strong>
+      <strong>{componentMessage(language, 'scoreOptions')}</strong>
       <div class="two-columns">
         <label>
-          <span>{korean ? '점수 프로필' : 'Score profile'}</span>
+          <span>{componentMessage(language, 'scoreProfile')}</span>
           <select
             value={request.scoreProfile}
             on:change={(event) => dispatch('change', { scoreProfile: (event.currentTarget as HTMLSelectElement).value as BuildV2Request['scoreProfile'] })}
@@ -147,7 +147,7 @@
           </select>
         </label>
         <label>
-          <span>{korean ? '초기 B2B' : 'Initial B2B'}</span>
+          <span>{componentMessage(language, 'initialB2b')}</span>
           <input
             type="number"
             min="0"
@@ -157,13 +157,13 @@
           />
         </label>
       </div>
-      <p>{korean ? '동점·선정·정렬은 score만 사용합니다. Attack은 canonical equal-score trace의 참고 값입니다.' : 'Equality, selection, and ordering use score only. Attack is informational data from the canonical equal-score trace.'}</p>
+      <p>{componentMessage(language, 'equalitySelectionAndOrderingUseScoreOnly')}</p>
     </div>
   {/if}
 
   <div class="two-columns">
     <label>
-      <span>{korean ? 'Worker 수' : 'Workers'}</span>
+      <span>{componentMessage(language, 'workers')}</span>
       <input
         type="number"
         min="1"
@@ -178,11 +178,11 @@
         checked={request.useAllLogicalProcessors}
         on:change={(event) => dispatch('change', { useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked })}
       />
-      <span>{korean ? '모든 논리 프로세서' : 'All logical processors'}</span>
+      <span>{componentMessage(language, 'allLogicalProcessors')}</span>
     </label>
   </div>
 
-  <p class="authority">{korean ? 'Build v2는 CPU 전용입니다. 유한 메모리 authority가 연결되기 전에는 memory 옵션을 노출하지 않습니다.' : 'Build v2 is CPU-only. Memory options remain unavailable until finite request/response authority is connected.'}</p>
+  <p class="authority">{componentMessage(language, 'buildV2IsCpuOnlyMemoryOptions')}</p>
 
   {#if validationCodes.length}
     <ul class="errors" aria-live="polite">

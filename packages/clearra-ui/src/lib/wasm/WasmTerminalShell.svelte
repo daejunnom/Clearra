@@ -1,12 +1,18 @@
 <script lang="ts">
+  import { runtimeShellCopy, runtimeShellValue, runtimeShellText, formatRuntimeShellTranscript } from '../i18n/runtimeShellCatalog';
+  import { matchReleasedWorkspaceLanguage, type WorkspaceLanguage } from '../i18n/languageManifest';
+
   import { onDestroy } from 'svelte';
 
   import { updateWasmCommandText, wasmWorkerState } from './wasmWorkerStore';
-  import { formatWasmTerminalTranscript } from './wasmTerminalTranscript';
   import { WasmTerminalWorkerController } from './WasmTerminalWorkerController';
   import { workspaceSolutionCount } from '../workspace/solutionSetAvailability';
 
   export let workerFactory: (() => Worker) | null = null;
+  export let language: WorkspaceLanguage = 'en';
+
+  $: locale = matchReleasedWorkspaceLanguage(language) ?? 'en';
+  $: copy = runtimeShellCopy(locale);
 
   const workerController = new WasmTerminalWorkerController(workerFactory);
   $: state = $wasmWorkerState;
@@ -19,7 +25,7 @@
 <main class="wasm-shell">
   <section class="command-band">
     <label>
-      Command
+      {copy.command}
       <input
         value={state.request.commandText}
         on:input={(event) =>
@@ -32,73 +38,73 @@
         type="button"
         on:click={() => workerController.run()}
         disabled={state.status === 'running' || state.status === 'cancelling'}
-      >Run</button>
+      >{copy.run}</button>
       <button
         data-testid="cancel-job"
         type="button"
         on:click={() => workerController.cancel()}
         disabled={state.status !== 'running' || state.jobId === null}
-      >Cancel</button>
+      >{copy.cancel}</button>
     </div>
   </section>
 
   <section class="status-grid">
     <div class="panel">
-      <h2>Runtime</h2>
+      <h2>{copy.runtime}</h2>
       <dl>
         <div>
-          <dt>Status</dt>
-          <dd data-testid="runtime-status">{state.status}</dd>
+          <dt>{copy.status}</dt>
+          <dd data-testid="runtime-status">{runtimeShellValue(locale, state.status)}</dd>
         </div>
         <div>
-          <dt>Boundary</dt>
-          <dd>{state.response?.capability_report.app_request_boundary ?? 'pending'}</dd>
+          <dt>{copy.boundary}</dt>
+          <dd>{state.response?.capability_report.app_request_boundary ?? copy.pending}</dd>
         </div>
         <div>
-          <dt>App Status</dt>
-          <dd>{state.response?.status ?? 'pending'}</dd>
+          <dt>{copy.appStatus}</dt>
+          <dd>{runtimeShellValue(locale, state.response?.status ?? copy.pending)}</dd>
         </div>
       </dl>
     </div>
 
     <div class="panel">
-      <h2>Worker</h2>
+      <h2>{copy.worker}</h2>
       <dl>
         <div>
-          <dt>Job</dt>
-          <dd>{state.jobId ?? 'none'}</dd>
+          <dt>{copy.job}</dt>
+          <dd>{state.jobId ?? copy.none}</dd>
         </div>
         <div>
-          <dt>Progress</dt>
+          <dt>{copy.progress}</dt>
           <dd>{state.progressDone}/{state.progressTotal}</dd>
         </div>
         <div>
-          <dt>Output</dt>
-          <dd>{state.response?.result?.kind ?? 'pending'}</dd>
+          <dt>{copy.output}</dt>
+          <dd>{state.response?.result?.kind ?? copy.pending}</dd>
         </div>
         <div>
-          <dt>Backend</dt>
-          <dd>{state.searchReport?.backend_selected ?? 'pending'}</dd>
+          <dt>{copy.backend}</dt>
+          <dd>{runtimeShellValue(locale, state.searchReport?.backend_selected ?? copy.pending)}</dd>
         </div>
         <div>
-          <dt>Workers</dt>
+          <dt>{copy.workers}</dt>
           <dd>{state.searchReport
-              ? `${state.searchReport.workers_used} (${state.searchReport.cpu_parallel_execution ? 'parallel' : 'serial'})`
-              : 'pending'}</dd>
+              ? runtimeShellText(locale, 'workersValue', { count: state.searchReport.workers_used, mode: state.searchReport.cpu_parallel_execution ? copy.parallel : copy.serial })
+              : copy.pending}</dd>
         </div>
         <div>
-          <dt>Solutions</dt>
-          <dd>{state.searchReport ? (solutionCount ?? 'not calculated') : 'pending'}</dd>
+          <dt>{copy.solutions}</dt>
+          <dd>{state.searchReport ? (solutionCount ?? copy.notCalculated) : copy.pending}</dd>
         </div>
         <div>
-          <dt>Solution hash</dt>
-          <dd>{state.searchReport?.normalized_solution_set_hash ?? 'pending'}</dd>
+          <dt>{copy.solutionHash}</dt>
+          <dd>{state.searchReport?.normalized_solution_set_hash ?? copy.pending}</dd>
         </div>
         <div>
-          <dt>Coverage</dt>
+          <dt>{copy.coverage}</dt>
           <dd>{state.searchReport
               ? `${state.searchReport.covered_pattern_count}/${state.searchReport.materialized_pattern_count}`
-              : 'pending'}</dd>
+              : copy.pending}</dd>
         </div>
       </dl>
     </div>
@@ -107,47 +113,47 @@
       <h2>WebGPU</h2>
       <dl>
         <div>
-          <dt>Connected</dt>
+          <dt>{copy.connected}</dt>
           <dd>{state.webgpuBackend
-              ? String(state.webgpuBackend.outcome_state === 'Connected')
-              : 'pending'}</dd>
+              ? runtimeShellValue(locale, state.webgpuBackend.outcome_state === 'Connected')
+              : copy.pending}</dd>
         </div>
         <div>
-          <dt>Fallback</dt>
+          <dt>{copy.fallback}</dt>
           <dd>{state.webgpuBackend
               ? state.webgpuBackend.fallback_used
-                ? (state.webgpuBackend.fallback_backend ?? 'unknown')
-                : 'false'
-              : 'pending'}</dd>
+                ? runtimeShellValue(locale, state.webgpuBackend.fallback_backend ?? 'unknown')
+                : copy.false
+              : copy.pending}</dd>
         </div>
         <div>
-          <dt>Trust</dt>
-          <dd>{state.webgpuBackend?.gpu_trust_state ?? 'pending'}</dd>
+          <dt>{copy.trust}</dt>
+          <dd>{runtimeShellValue(locale, state.webgpuBackend?.gpu_trust_state ?? copy.pending)}</dd>
         </div>
         <div>
-          <dt>Reason</dt>
+          <dt>{copy.reason}</dt>
           <dd>{state.webgpuBackend
-              ? (state.webgpuBackend.webgpu_unavailable_reason ?? 'none')
-              : 'pending'}</dd>
+              ? runtimeShellValue(locale, state.webgpuBackend.webgpu_unavailable_reason ?? 'none')
+              : copy.pending}</dd>
         </div>
         <div>
-          <dt>Shader</dt>
-          <dd>{state.webgpuBackend?.shader.shader_hash || 'pending'}</dd>
+          <dt>{copy.shader}</dt>
+          <dd>{state.webgpuBackend?.shader.shader_hash || copy.pending}</dd>
         </div>
         <div>
-          <dt>Warmup</dt>
-          <dd>{state.webgpuBackend ? String(state.webgpuBackend.gpu_warmup_performed) : 'pending'}</dd>
+          <dt>{copy.warmup}</dt>
+          <dd>{state.webgpuBackend ? runtimeShellValue(locale, state.webgpuBackend.gpu_warmup_performed) : copy.pending}</dd>
         </div>
         <div>
-          <dt>Session reused</dt>
-          <dd>{state.webgpuBackend ? String(state.webgpuBackend.gpu_session_reused) : 'pending'}</dd>
+          <dt>{copy.sessionReused}</dt>
+          <dd>{state.webgpuBackend ? runtimeShellValue(locale, state.webgpuBackend.gpu_session_reused) : copy.pending}</dd>
         </div>
       </dl>
     </div>
   </section>
 
-  <section class="terminal" aria-label="terminal-like output">
-    <pre>{formatWasmTerminalTranscript(state.terminalLines)}</pre>
+  <section class="terminal" aria-label={copy.terminalOutput}>
+    <pre>{formatRuntimeShellTranscript(locale, state.terminalLines)}</pre>
   </section>
 </main>
 

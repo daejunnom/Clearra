@@ -38,6 +38,7 @@ const bundle = await build({
         updateBuildProbabilityDraft
       } from './src/lib/workspace/buildProbabilityModel.ts';
       export { workspaceMessage } from './src/lib/workspace/workspaceI18n.ts';
+      export { componentMessage } from './src/lib/i18n/componentCatalog.ts';
       export {
         projectWorkspacePublicFailure,
         workspacePublicFailureMessage
@@ -57,6 +58,11 @@ const production = await import(
 );
 
 const MIB = 1024 * 1024;
+
+function assertComponentPhrase(source, key, pattern) {
+  assert.ok(source.includes("componentMessage(language, '" + key + "'"), key);
+  assert.match(production.componentMessage('en', key), pattern);
+}
 
 test('score-minimals UI exposes the closed mode and pages every exact portfolio tie', () => {
   const controls = readFileSync(
@@ -79,7 +85,7 @@ test('score-minimals UI exposes the closed mode and pages every exact portfolio 
   assert.match(controls, /<option value="score-minimals">/u);
   assert.match(standalone, /scoreMode: 'score-minimals'/u);
   assert.match(pager, /payload\?\.contract === 'pc\.score-minimals'/u);
-  assert.match(pager, /Equality, membership, and ordering use score only/u);
+  assertComponentPhrase(pager, 'equalityMembershipAndOrderingUseScoreOnly', /Equality, membership, and ordering use score only/u);
   assert.match(pager, /async function nextOuterPage\(\)/u);
   assert.match(pager, /async function showMemberPage\(nextMemberPage/u);
   assert.match(pager, /loadNextPage/u);
@@ -115,8 +121,8 @@ test('PC path and score-finder are reachable on both Web PC entry surfaces', () 
   assert.match(pager, /pathCandidateGroup = pathCandidateGroups\[lazyReplayPage \? 0 : pathPageIndex\] \?\? null/u);
   assert.match(pager, /loadPcReplayPage\(/u);
   assert.match(pager, /collectPcReplayGeometryExportPages\(/u);
-  assert.match(pager, /Every path can be copied; one representative replay is shown for each solution/u);
-  assert.match(pager, /Inspect representative replay steps/u);
+  assertComponentPhrase(pager, 'everyPathCanBeCopiedOneRepresentative', /Every path can be copied; one representative replay is shown for each solution/u);
+  assertComponentPhrase(pager, 'inspectRepresentativeReplaySteps', /Inspect representative replay steps/u);
   assert.match(pager, /<PcPathReplayGif/u);
   assert.match(pager, /pathCandidateGroup\.distinctPatternCount/u);
   assert.match(pager, /pathCandidateGroup\.witnessCount/u);
@@ -294,10 +300,10 @@ test('Build result UI separates ordinary families from exact portfolio paging', 
   assert.ok(initialBuildLoaderStart >= 0 && initialBuildLoaderEnd > initialBuildLoaderStart);
   assert.match(initialBuildLoader, /await loadCoveragePortfolioExactPage\(/u);
   assert.match(initialBuildLoader, /isCurrent: \(\) => activeIdentity === payloadIdentity/u);
-  assert.match(pager, /All optimal Build portfolios/u);
-  assert.match(pager, /ordinary result family, not a portfolio tie/u);
-  assert.match(pager, /Attack is informational/u);
-  assert.match(pager, /Previous score evidence/u);
+  assertComponentPhrase(pager, 'allOptimalBuildPortfolios', /All optimal Build portfolios/u);
+  assertComponentPhrase(pager, 'thisIsAnOrdinaryResultFamilyNot', /ordinary result family, not a portfolio tie/u);
+  assertComponentPhrase(pager, 'attackIsInformationalAndIsNotUsed', /Attack is informational/u);
+  assertComponentPhrase(pager, 'previousScoreEvidence', /Previous score evidence/u);
 });
 
 test('Build v2 workspace owns all surfaces without collapsing nominal document sources', () => {
@@ -326,10 +332,10 @@ test('Build v2 workspace owns all surfaces without collapsing nominal document s
   assert.match(workspace, /buildV2RequestForDesktop/u);
   assert.match(workspace, /loadNextDesktopProductPage/u);
   assert.match(workspace, /loadProductMemberPage/u);
-  assert.match(source, /colored target document remains a producer input/u);
-  assert.match(source, /never reinterpreted as a target/u);
-  assert.match(controls, /Equality, selection, and ordering use score only/u);
-  assert.match(controls, /Memory options remain unavailable/u);
+  assertComponentPhrase(source, 'theColoredTargetDocumentRemainsAProducer', /colored target document remains a producer input/u);
+  assertComponentPhrase(source, 'theSuppliedSolutionDocumentIsReplayedAnd', /never reinterpreted as a target/u);
+  assertComponentPhrase(controls, 'equalitySelectionAndOrderingUseScoreOnly', /Equality, selection, and ordering use score only/u);
+  assertComponentPhrase(controls, 'buildV2IsCpuOnlyMemoryOptions', /Memory options remain unavailable/u);
   assert.match(webRoute, /selectedTool === 'build'/u);
   assert.match(desktopRoute, /selectedTool === 'build'/u);
 });
@@ -634,7 +640,7 @@ test('build probability primary metric is explicitly oracle and distinct from fi
   );
   assert.match(resultSource, /data-metric-id=\{BUILD_PROBABILITY_PRIMARY_METRIC\.id\}/u);
   assert.match(resultSource, /label\('oracleBuildProbability'\)/u);
-  assert.match(workspaceSource, /Exact full-future\/oracle build probability workspace/u);
+  assertComponentPhrase(workspaceSource, 'surfaceExactFullFutureOracleBuildProbabilityWorkspaceFinesse', /Exact full-future\/oracle build probability workspace/u);
 });
 
 function snapshotForMemory(reportedDeviceMemoryGiB) {

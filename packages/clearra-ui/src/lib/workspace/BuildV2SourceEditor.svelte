@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { createEventDispatcher } from 'svelte';
 
   import {
@@ -11,7 +12,6 @@
   export let language: WorkspaceLanguage = 'en';
 
   const dispatch = createEventDispatcher<{ change: Partial<BuildV2Request> }>();
-  $: korean = language === 'ko';
   $: sourceKind = buildV2SourceKind(request.capability);
 
   function updateMask(field: 'baseMask' | 'targetMask', value: string) {
@@ -22,19 +22,19 @@
   }
 </script>
 
-<section class="source-editor" aria-label={korean ? 'Build 입력 소유자' : 'Build input owner'}>
+<section class="source-editor" aria-label={componentMessage(language, 'buildInputOwner')}>
   <header>
-    <h2>{korean ? 'Build 입력' : 'Build input'}</h2>
+    <h2>{componentMessage(language, 'buildInput')}</h2>
     <p>{sourceKind === 'target-document'
-      ? (korean ? '색상 target 문서를 producer 입력으로 보존합니다.' : 'The colored target document remains a producer input.')
+      ? (componentMessage(language, 'theColoredTargetDocumentRemainsAProducer'))
       : sourceKind === 'solution-document'
-        ? (korean ? '제공된 해법 문서는 검증·replay 대상이며 target으로 재해석하지 않습니다.' : 'The supplied solution document is replayed and never reinterpreted as a target.')
-        : (korean ? '기존 필드와 목표 셀 마스크를 서로 겹치지 않게 입력합니다.' : 'Enter disjoint existing-field and target-cell masks.')}</p>
+        ? (componentMessage(language, 'theSuppliedSolutionDocumentIsReplayedAnd'))
+        : (componentMessage(language, 'enterDisjointExistingFieldAndTargetCell'))}</p>
   </header>
 
   {#if sourceKind === 'mask'}
     <label>
-      <span>{korean ? '기존 필드 마스크' : 'Existing-field mask'}</span>
+      <span>{componentMessage(language, 'existingFieldMask')}</span>
       <input
         value={`0x${request.baseMask.toString(16)}`}
         spellcheck="false"
@@ -42,7 +42,7 @@
       />
     </label>
     <label>
-      <span>{korean ? '목표 셀 마스크' : 'Target-cell mask'}</span>
+      <span>{componentMessage(language, 'targetCellMask')}</span>
       <input
         value={`0x${request.targetMask.toString(16)}`}
         spellcheck="false"
@@ -50,7 +50,7 @@
       />
     </label>
     <label>
-      <span>{korean ? '공급 조각 수 (자동이면 비움)' : 'Source piece count (blank for automatic)'}</span>
+      <span>{componentMessage(language, 'sourcePieceCountBlankForAutomatic')}</span>
       <input
         type="number"
         min="1"
@@ -64,7 +64,7 @@
     </label>
   {:else if sourceKind === 'target-document'}
     <label>
-      <span>{korean ? 'Target 문서 형식' : 'Target document format'}</span>
+      <span>{componentMessage(language, 'targetDocumentFormat')}</span>
       <select
         value={request.targetFormat}
         on:change={(event) => dispatch('change', { targetFormat: (event.currentTarget as HTMLSelectElement).value as 'ctk3' | 'fumen' })}
@@ -74,7 +74,7 @@
       </select>
     </label>
     <label>
-      <span>{korean ? '색상 Target 문서' : 'Colored target document'}</span>
+      <span>{componentMessage(language, 'coloredTargetDocument')}</span>
       <textarea
         rows="10"
         spellcheck="false"
@@ -85,7 +85,7 @@
     </label>
   {:else}
     <label>
-      <span>{korean ? '제공 해법 형식' : 'Supplied solution format'}</span>
+      <span>{componentMessage(language, 'suppliedSolutionFormat')}</span>
       <select
         value={request.solutionFormat}
         on:change={(event) => dispatch('change', { solutionFormat: (event.currentTarget as HTMLSelectElement).value as 'ctk3' | 'fumen' })}
@@ -95,7 +95,7 @@
       </select>
     </label>
     <label>
-      <span>{korean ? '제공 해법 문서' : 'Supplied solution document'}</span>
+      <span>{componentMessage(language, 'suppliedSolutionDocument')}</span>
       <textarea
         rows="10"
         spellcheck="false"

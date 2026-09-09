@@ -1,5 +1,6 @@
 pub mod english_catalog;
 pub mod japanese_catalog;
+pub mod japanese_cli_draft;
 pub mod korean_catalog;
 pub mod translation_catalog;
 pub mod translation_key;

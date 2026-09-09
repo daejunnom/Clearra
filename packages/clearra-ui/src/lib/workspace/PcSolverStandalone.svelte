@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import {
     ArrowLeft,
     Check,
@@ -351,15 +352,15 @@
 </script>
 
 <svelte:head>
-  <title>Clearra PC Solver</title>
-  <meta name="description" content="Exact browser-based perfect clear solver" />
+  <title>{componentMessage(language, 'surfaceClearraPcSolver')}</title>
+  <meta name="description" content={componentMessage(language, 'surfaceExactBrowserBasedPerfectClearSolver')} />
 </svelte:head>
 
 <main class="solver-page">
   <header class="solver-header">
     <a class="brand" href={homeHref} aria-label={label('backToClearra')}>
       <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-      <strong>Clearra <span>PC Solver</span></strong>
+      <strong>Clearra <span>{componentMessage(language, 'surfacePcSolver')}</span></strong>
     </a>
     <div class="header-actions">
       <a class="back-link" href={homeHref}><ArrowLeft size={15} strokeWidth={1.8} />{label('backToClearra')}</a>
