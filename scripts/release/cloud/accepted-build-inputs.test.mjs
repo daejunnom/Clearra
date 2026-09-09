@@ -213,6 +213,7 @@ function assertPackagingFlow(workflow, cloudConfig, dockerfile) {
   assert.match(candidate, /gcloud storage cp evidence\/cloud-build-inputs\.tar\.gz "\$cloud_input_object"[\s\S]*--if-generation-match=0/u);
   assert.match(candidate, /gcloud storage objects describe "\$cloud_input_object" --format='value\(generation\)'/u);
   assert.match(candidate, /gcloud builds submit "\$cloud_input_object"/u);
+  assert.match(candidate, /--gcs-source-staging-dir="gs:\/\/clearra-cloud_cloudbuild\/source"/u);
   assert.match(candidate, /--storage-source-uri "\$cloud_input_object"[\s\S]*--storage-source-generation "\$cloud_input_generation"/u);
   assert.match(candidate, /--config=.*cloudbuild-accepted-job-service\.yaml/u);
   assert.match(candidate, /tar -czf evidence\/cloud-build-inputs\.tar\.gz -C evidence\/cloud-build-inputs inputs/u);
