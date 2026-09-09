@@ -166,11 +166,21 @@ const releaseAcceptanceFoundationJob = releaseAcceptanceFoundationNoProductDebtJ
 const releaseAcceptanceSanitizerJob = section(
   workflow,
   "\n  release-acceptance-sanitizer:",
+  "\n  release-acceptance-product-cli:",
+);
+const releaseAcceptanceProductCliJob = section(
+  workflow,
+  "\n  release-acceptance-product-cli:",
   "\n  release-acceptance-rust:",
 );
 const releaseAcceptanceRustJob = section(
   workflow,
   "\n  release-acceptance-rust:",
+  "\n  release-acceptance-rust-product:",
+);
+const releaseAcceptanceRustProductJob = section(
+  workflow,
+  "\n  release-acceptance-rust-product:",
   "\n  release-acceptance-wasm-contracts:",
 );
 const releaseAcceptanceWasmContractsJob = section(
@@ -292,14 +302,52 @@ const discordDownloadStep = section(
   "\n      - name: Install JavaScript workspace",
 );
 const releaseAcceptanceDownloadStep = section(
-  releaseAcceptanceRustJob,
+  releaseAcceptanceRustProductJob,
   "\n      - name: Download accepted CTK3 distribution",
-  "\n      - id: release_toolchain_cache",
+  "\n      - name: Install JavaScript workspace",
 );
 const releaseAcceptanceRunStep = section(
+  releaseAcceptanceRustProductJob,
+  "\n      - name: Run canonical release acceptance RustProduct shard without rebuilding",
+  "\n      - name: Seal canonical release acceptance RustProduct shard",
+);
+const releaseAcceptanceRustExactRunStep = section(
   releaseAcceptanceRustJob,
-  "\n      - name: Run canonical release acceptance rust shard",
-  "\n      - name: Seal canonical release acceptance rust shard",
+  "\n      - name: Run canonical release acceptance RustExact shard",
+  "\n      - name: Seal canonical release acceptance RustExact shard",
+);
+const productE2ECliPrepareStep = section(
+  releaseAcceptanceProductCliJob,
+  "\n      - name: Prepare exact native ProductE2E identity",
+  "\n      - name: Build and seal exact ProductE2E CLI input",
+);
+const productE2ECliJobEnvironment = section(
+  releaseAcceptanceProductCliJob,
+  "\n    env:",
+  "\n    steps:",
+);
+const productE2ECliBuildStep = section(
+  releaseAcceptanceProductCliJob,
+  "\n      - name: Build and seal exact ProductE2E CLI input",
+  "\n      - name: Upload exact ProductE2E CLI input",
+);
+const productE2ECliBuildEnvironment = section(
+  productE2ECliBuildStep,
+  "\n        env:",
+  "\n        shell:",
+);
+const productE2ECliUploadStep = releaseAcceptanceProductCliJob.slice(
+  releaseAcceptanceProductCliJob.indexOf("\n      - name: Upload exact ProductE2E CLI input"),
+);
+const productE2ECliDownloadStep = section(
+  releaseAcceptanceRustProductJob,
+  "\n      - name: Download exact ProductE2E CLI input",
+  "\n      - name: Verify exact ProductE2E CLI input",
+);
+const productE2ECliVerifyStep = section(
+  releaseAcceptanceRustProductJob,
+  "\n      - name: Verify exact ProductE2E CLI input",
+  "\n      - name: Run canonical release acceptance RustProduct shard without rebuilding",
 );
 const releaseAcceptancePagesRunStep = section(
   releaseAcceptancePagesJob,
@@ -1289,12 +1337,20 @@ requireExactYamlKeySet(
   releaseAcceptanceRunStep,
   10,
   [
+    "CLEARRA_VERIFIED_PRODUCT_E2E_CLI",
     "RUST_MIN_STACK",
     "CLEARRA_ACCEPTED_CTK3_DIST",
     "CLEARRA_ACCEPTED_RUN_ID",
     "CLEARRA_ACCEPTED_RUN_ATTEMPT",
   ],
   "canonical Rust release acceptance shard environment",
+);
+requireExactYamlScalar(
+  releaseAcceptanceRunStep,
+  "CLEARRA_VERIFIED_PRODUCT_E2E_CLI",
+  "${{ steps.product_cli.outputs.binary_path }}",
+  "canonical Rust ProductE2E verified CLI path",
+  10,
 );
 requireExactYamlScalar(releaseAcceptanceRunStep, "RUST_MIN_STACK", '"16777216"',
   "canonical Rust debug harness stack parity", 10);
@@ -1354,10 +1410,166 @@ for (const [key, value, description] of [
 requireExactYamlScalar(
   releaseAcceptanceRunStep,
   "run",
-  "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Rust -ExecutionSurface Trusted",
-  "canonical Rust release acceptance shard command",
+  "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard RustProduct -ExecutionSurface Trusted",
+  "canonical RustProduct release acceptance shard command",
   8,
 );
+requireExactYamlKeySet(
+  releaseAcceptanceRustExactRunStep,
+  8,
+  ["env", "run"],
+  "canonical RustExact release acceptance shard step",
+);
+requireExactYamlKeySet(
+  releaseAcceptanceRustExactRunStep,
+  10,
+  ["RUST_MIN_STACK"],
+  "canonical RustExact release acceptance environment",
+);
+requireExactYamlScalar(
+  releaseAcceptanceRustExactRunStep,
+  "RUST_MIN_STACK",
+  '"16777216"',
+  "canonical RustExact debug harness stack parity",
+  10,
+);
+requireExactYamlScalar(
+  releaseAcceptanceRustExactRunStep,
+  "run",
+  "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard RustExact -ExecutionSurface Trusted",
+  "canonical RustExact release acceptance shard command",
+  8,
+);
+requireExactYamlKeySet(
+  releaseAcceptanceProductCliJob,
+  4,
+  ["if", "needs", "runs-on", "timeout-minutes", "env", "steps"],
+  "exact ProductE2E CLI producer job",
+);
+requireExactYamlKeySet(
+  productE2ECliJobEnvironment,
+  6,
+  ["CARGO_INCREMENTAL"],
+  "exact ProductE2E CLI producer environment",
+);
+requireExactYamlScalar(
+  productE2ECliJobEnvironment,
+  "CARGO_INCREMENTAL",
+  '"0"',
+  "exact ProductE2E CLI producer incremental policy",
+  6,
+);
+requireExactYamlKeySet(
+  productE2ECliPrepareStep,
+  8,
+  ["id", "shell", "run"],
+  "exact ProductE2E CLI native identity step",
+);
+requireExactYamlScalar(productE2ECliPrepareStep, "id", "native",
+  "exact ProductE2E CLI native identity output owner", 8);
+requireExactYamlScalar(productE2ECliPrepareStep, "shell", "pwsh",
+  "exact ProductE2E CLI native identity shell", 8);
+for (const marker of [
+  "$cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)",
+  '"CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV',
+  "scripts/release/prepare-native-build-identity.ps1",
+  "-SourceCommit $env:GITHUB_SHA",
+  "-Workers $cargoJobs",
+  "-GitHubOutputPath $env:GITHUB_OUTPUT",
+]) {
+  requireText(productE2ECliPrepareStep, marker, `exact ProductE2E CLI identity ${marker}`);
+}
+requireExactYamlKeySet(
+  productE2ECliBuildStep,
+  8,
+  ["env", "shell", "run"],
+  "exact ProductE2E CLI build and seal step",
+);
+requireExactYamlKeySet(
+  productE2ECliBuildEnvironment,
+  10,
+  ["CLEARRA_NATIVE_LIBRARY_DIR"],
+  "exact ProductE2E CLI build environment",
+);
+requireExactYamlScalar(
+  productE2ECliBuildEnvironment,
+  "CLEARRA_NATIVE_LIBRARY_DIR",
+  "${{ steps.native.outputs.native_library_directory }}",
+  "exact ProductE2E CLI native archive directory",
+  10,
+);
+requireExactYamlScalar(productE2ECliBuildStep, "shell", "pwsh",
+  "exact ProductE2E CLI build shell", 8);
+for (const marker of [
+  "cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra",
+  "node scripts/release/product-e2e-cli-artifact.mjs seal `",
+  "--source-commit $env:GITHUB_SHA `",
+  "--run-id $env:GITHUB_RUN_ID `",
+  "--run-attempt $env:GITHUB_RUN_ATTEMPT `",
+]) {
+  requireText(productE2ECliBuildStep, marker, `exact ProductE2E CLI build ${marker}`);
+}
+for (const [name, step, action] of [
+  ["producer upload", productE2ECliUploadStep, "actions/upload-artifact@v4"],
+  ["RustProduct download", productE2ECliDownloadStep, "actions/download-artifact@v4"],
+]) {
+  requireExactYamlKeySet(step, 8, ["uses", "with"], `ProductE2E CLI ${name} step`);
+  requireExactYamlScalar(step, "uses", action, `ProductE2E CLI ${name} action`, 8);
+  requireExactYamlScalar(
+    step,
+    "name",
+    "product-e2e-cli-input-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}",
+    `ProductE2E CLI ${name} artifact identity`,
+    10,
+  );
+  requireExactYamlScalar(
+    step,
+    "path",
+    "${{ runner.temp }}/clearra-product-e2e-cli-input",
+    `ProductE2E CLI ${name} artifact path`,
+    10,
+  );
+}
+requireExactYamlKeySet(
+  productE2ECliUploadStep,
+  10,
+  ["name", "path", "if-no-files-found", "retention-days"],
+  "ProductE2E CLI producer upload inputs",
+);
+requireExactYamlScalar(productE2ECliUploadStep, "if-no-files-found", "error",
+  "ProductE2E CLI producer missing artifact policy", 10);
+requireExactYamlScalar(productE2ECliUploadStep, "retention-days", "7",
+  "ProductE2E CLI producer retention", 10);
+requireExactYamlKeySet(
+  productE2ECliDownloadStep,
+  10,
+  ["name", "path"],
+  "ProductE2E CLI RustProduct download inputs",
+);
+requireExactYamlKeySet(
+  productE2ECliVerifyStep,
+  8,
+  ["id", "shell", "run"],
+  "ProductE2E CLI RustProduct verification step",
+);
+requireExactYamlScalar(productE2ECliVerifyStep, "id", "product_cli",
+  "ProductE2E CLI verification output owner", 8);
+requireExactYamlScalar(productE2ECliVerifyStep, "shell", "pwsh",
+  "ProductE2E CLI verification shell", 8);
+for (const marker of [
+  "node scripts/release/product-e2e-cli-artifact.mjs verify `",
+  "--expected-source-commit $env:GITHUB_SHA `",
+  "--expected-run-id $env:GITHUB_RUN_ID `",
+  "--expected-run-attempt $env:GITHUB_RUN_ATTEMPT `",
+  "--github-output $env:GITHUB_OUTPUT",
+]) {
+  requireText(productE2ECliVerifyStep, marker, `ProductE2E CLI verification ${marker}`);
+}
+for (const forbidden of ["cargo build", "cmake --build", "prepare-native-build-identity.ps1"]) {
+  if (releaseAcceptanceRustProductJob.includes(forbidden)) {
+    throw new Error(`RustProduct must consume the exact CLI without rebuilding it: ${forbidden}`);
+  }
+}
 requireExactYamlKeySet(
   releaseAcceptancePagesRunStep,
   8,
@@ -1429,6 +1641,11 @@ for (const [name, job, markers] of [
     'echo "CARGO_BUILD_JOBS=$cargo_jobs" >> "$GITHUB_ENV"',
     'echo "wasm_compile_context=accepted-artifact task_workers=1 cargo_jobs=$cargo_jobs"',
   ]],
+  ["native Rust exact acceptance", releaseAcceptanceRustJob, [
+    "$cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)",
+    '"CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV',
+    '"rust_compile_context=canonical-native-exact task_workers=1 cargo_jobs=$cargoJobs"',
+  ]],
 ]) {
   for (const marker of markers) requireText(job, marker, `${name} compile scheduler ${marker}`);
 }
@@ -1477,16 +1694,33 @@ for (const [name, job, skeleton] of [
     "- name: Save verified sanitizer C build cache",
     "- name: Upload canonical release acceptance sanitizer shard",
   ]],
-  ["rust", releaseAcceptanceRustJob, [
+  ["ProductE2E CLI producer", releaseAcceptanceProductCliJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- name: Prepare exact native ProductE2E identity",
+    "- name: Build and seal exact ProductE2E CLI input",
+    "- name: Upload exact ProductE2E CLI input",
+  ]],
+  ["RustExact", releaseAcceptanceRustJob, [
+    "- uses: actions/checkout@v4",
+    "- uses: actions/setup-node@v4",
+    "- name: Configure native Rust compile parallelism",
+    "- id: release_toolchain_cache",
+    "- name: Run canonical release acceptance RustExact shard",
+    "- name: Seal canonical release acceptance RustExact shard",
+    "- name: Save verified canonical native build cache",
+    "- name: Upload canonical release acceptance RustExact shard",
+  ]],
+  ["RustProduct", releaseAcceptanceRustProductJob, [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
     "- name: Download accepted CTK3 distribution",
-    "- id: release_toolchain_cache",
     "- name: Install JavaScript workspace",
-    "- name: Run canonical release acceptance rust shard",
-    "- name: Seal canonical release acceptance rust shard",
-    "- name: Save verified canonical native build cache",
-    "- name: Upload canonical release acceptance rust shard",
+    "- name: Download exact ProductE2E CLI input",
+    "- name: Verify exact ProductE2E CLI input",
+    "- name: Run canonical release acceptance RustProduct shard without rebuilding",
+    "- name: Seal canonical release acceptance RustProduct shard",
+    "- name: Upload canonical release acceptance RustProduct shard",
   ]],
   ["WASM source and host contracts", releaseAcceptanceWasmContractsJob, [
     "- uses: actions/checkout@v4",
@@ -1606,7 +1840,7 @@ if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 3) {
 }
 for (const [job, name, upload, paths] of [
   [releaseAcceptanceRustJob, "Save verified canonical native build cache",
-    "Upload canonical release acceptance rust shard", [
+    "Upload canonical release acceptance RustExact shard", [
       "~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git",
       "~/AppData/Local/Clearra/build",
     ]],
@@ -1643,7 +1877,8 @@ for (const [shard, job, caseName] of [
   ["foundation-adversarial-correctness", releaseAcceptanceFoundationAdversarialCorrectnessJob, "FoundationAdversarialCorrectness"],
   ["foundation-desktop-host", releaseAcceptanceFoundationDesktopHostJob, "FoundationDesktopHost"],
   ["sanitizer", releaseAcceptanceSanitizerJob, "Sanitizer"],
-  ["rust", releaseAcceptanceRustJob, "Rust"],
+  ["rust-exact", releaseAcceptanceRustJob, "RustExact"],
+  ["rust-product", releaseAcceptanceRustProductJob, "RustProduct"],
   ["pages", releaseAcceptancePagesJob, "Pages"],
 ]) {
   for (const marker of [
@@ -1853,7 +2088,8 @@ requireExactYamlFlowSequence(failureSummaryJob, "needs", [
   "release-acceptance-foundation-no-product-debt",
   "release-acceptance-foundation-adversarial-correctness",
   "release-acceptance-foundation-desktop-host", "release-acceptance-sanitizer",
-  "release-acceptance-rust", "release-acceptance-wasm-contracts",
+  "release-acceptance-product-cli", "release-acceptance-rust",
+  "release-acceptance-rust-product", "release-acceptance-wasm-contracts",
   "release-acceptance-wasm-build", "release-acceptance-pages",
   "release-acceptance", "windows-cli", "windows-gui", "canonical-evidence",
 ], "diagnostic summary complete dependency set");
@@ -2623,11 +2859,25 @@ requireExactYamlScalar(
   "sanitizer acceptance metadata dependency",
   4,
 );
-requireExactYamlFlowSequence(
+requireExactYamlScalar(
+  releaseAcceptanceProductCliJob,
+  "needs",
+  "metadata",
+  "ProductE2E CLI producer metadata dependency",
+  4,
+);
+requireExactYamlScalar(
   releaseAcceptanceRustJob,
   "needs",
-  ["metadata", "ctk3"],
-  "Rust acceptance dependency on metadata and accepted CTK3",
+  "metadata",
+  "RustExact acceptance metadata dependency",
+  4,
+);
+requireExactYamlFlowSequence(
+  releaseAcceptanceRustProductJob,
+  "needs",
+  ["metadata", "ctk3", "release-acceptance-product-cli"],
+  "RustProduct acceptance dependencies on metadata, accepted CTK3, and exact CLI producer",
 );
 requireExactYamlScalar(
   releaseAcceptanceWasmContractsJob,
@@ -2659,9 +2909,10 @@ requireExactYamlFlowSequence(
     "release-acceptance-foundation-desktop-host",
     "release-acceptance-sanitizer",
     "release-acceptance-rust",
+    "release-acceptance-rust-product",
     "release-acceptance-pages",
   ],
-  "release acceptance exact six-shard fan-in dependencies",
+  "release acceptance exact seven-shard fan-in dependencies",
 );
 requireExactYamlScalar(
   releaseAcceptanceJob,

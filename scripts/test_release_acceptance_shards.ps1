@@ -24,6 +24,8 @@ $script:ReleaseAcceptanceShardTestMarkers = @{
     'foundation-desktop-host-leaf' = 'release_acceptance_shard_test=foundation-desktop-host-leaf status=passed'
     'sanitizer-order' = 'release_acceptance_shard_test=sanitizer-order status=passed'
     'rust-order' = 'release_acceptance_shard_test=rust-order status=passed'
+    'rust-exact-order' = 'release_acceptance_shard_test=rust-exact-order status=passed'
+    'rust-product-order' = 'release_acceptance_shard_test=rust-product-order status=passed'
     'pages-order' = 'release_acceptance_shard_test=pages-order status=passed'
     'shard-union-equals-full' = 'release_acceptance_shard_test=shard-union-equals-full status=passed'
 }
@@ -56,6 +58,8 @@ $full = @(
 $foundation = @('NoProductDebt', 'AdversarialCorrectness', 'DesktopHost')
 $sanitizer = @('CSanitizer')
 $rust = @('RustExactTests', 'ProductE2E', 'RenderGolden')
+$rustExactShard = @('RustExactTests', 'RenderGolden')
+$rustProductShard = @('ProductE2E')
 $pages = @('WasmBuildTest')
 
 Assert-Sequence 'full-local-order' `
@@ -79,12 +83,18 @@ Assert-Sequence 'sanitizer-order' `
 Assert-Sequence 'rust-order' `
     @(Expand-ClearraTasks -RequestedTasks @('releaseacceptance') -ReleaseAcceptanceShard Rust) `
     $rust
+Assert-Sequence 'rust-exact-order' `
+    @(Expand-ClearraTasks -RequestedTasks @('ReleaseAcceptance') -ReleaseAcceptanceShard RustExact) `
+    $rustExactShard
+Assert-Sequence 'rust-product-order' `
+    @(Expand-ClearraTasks -RequestedTasks @('ReleaseAcceptance') -ReleaseAcceptanceShard RustProduct) `
+    $rustProductShard
 Assert-Sequence 'pages-order' `
     @(Expand-ClearraTasks -RequestedTasks @('ReleaseAcceptance') -ReleaseAcceptanceShard Pages) `
     $pages
 
 $foundationLeaves = @('NoProductDebt', 'AdversarialCorrectness', 'DesktopHost')
-$shardedStages = @($foundationLeaves + $sanitizer + $rust + $pages | Sort-Object)
+$shardedStages = @($foundationLeaves + $sanitizer + $rustExactShard + $rustProductShard + $pages | Sort-Object)
 Assert-Sequence 'shard-union-equals-full' $shardedStages @($full | Sort-Object)
 
 $rejected = $false

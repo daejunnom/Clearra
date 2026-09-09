@@ -45,6 +45,18 @@ function Get-ClearraReleaseAcceptanceTasks([string]$Shard = "Full") {
                 "RenderGolden"
             )
         }
+        "RustExact" {
+            # CI may run the long native inventory independently from the
+            # ProductE2E artifact producer. RenderGolden retains the same
+            # target and native-link state as RustExactTests.
+            return [string[]]@(
+                "RustExactTests",
+                "RenderGolden"
+            )
+        }
+        "RustProduct" {
+            return [string[]]@("ProductE2E")
+        }
         "Pages" {
             return [string[]]@("WasmBuildTest")
         }
@@ -65,6 +77,8 @@ function Expand-ClearraTasks {
             "FoundationDesktopHost",
             "Sanitizer",
             "Rust",
+            "RustExact",
+            "RustProduct",
             "Pages"
         )]
         [string]$ReleaseAcceptanceShard = "Full"

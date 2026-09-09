@@ -431,9 +431,70 @@ jobs:
           path: release-shard-evidence/clearra-release-acceptance-sanitizer-shard.v1.json
           if-no-files-found: error
 
+  # Build the exact ProductE2E binary on its own runner. It starts as soon as
+  # metadata is bound, so neither RustExact nor any unrelated release leaf
+  # waits for this producer to compile.
+  release-acceptance-product-cli:
+    if: github.event_name == 'workflow_dispatch'
+    needs: metadata
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Prepare exact native ProductE2E identity
+        id: native
+        shell: pwsh
+        run: |
+          $cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)
+          "CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV
+          $nativeBuild = Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-native'
+          $identity = Join-Path $env:RUNNER_TEMP 'clearra-native-build-identity.v1.json'
+          & ./scripts/release/prepare-native-build-identity.ps1 `
+            -BuildDir $nativeBuild `
+            -OutputPath $identity `
+            -SourceCommit $env:GITHUB_SHA `
+            -Workers $cargoJobs `
+            -GitHubOutputPath $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and seal exact ProductE2E CLI input
+        env:
+          CLEARRA_NATIVE_LIBRARY_DIR: ${{ steps.native.outputs.native_library_directory }}
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-cli-target'
+          $nativeLink = "-L native=$env:CLEARRA_NATIVE_LIBRARY_DIR"
+          $existing = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($existing)) { $nativeLink } else { "$existing $nativeLink" }
+          cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $env:CARGO_TARGET_DIR 'debug/clearra.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "ProductE2E CLI was not built: $binary" }
+          node scripts/release/product-e2e-cli-artifact.mjs seal `
+            --binary $binary `
+            --native-identity (Join-Path $env:RUNNER_TEMP 'clearra-native-build-identity.v1.json') `
+            --source-commit $env:GITHUB_SHA `
+            --run-id $env:GITHUB_RUN_ID `
+            --run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --output (Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-cli-input')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload exact ProductE2E CLI input
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-e2e-cli-input-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clearra-product-e2e-cli-input
+          if-no-files-found: error
+          retention-days: 7
+
   release-acceptance-rust:
     if: github.event_name == 'workflow_dispatch'
-    needs: [metadata, ctk3]
+    needs: metadata
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -441,11 +502,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Download accepted CTK3 distribution
-        uses: actions/download-artifact@v4
-        with:
-          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
-          path: packages/ctk3/dist
+      - name: Configure native Rust compile parallelism
+        shell: pwsh
+        run: |
+          $cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)
+          "CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV
+          "rust_compile_context=canonical-native-exact task_workers=1 cargo_jobs=$cargoJobs"
       - id: release_toolchain_cache
         name: Restore canonical release toolchain cache
         uses: actions/cache/restore@v4
@@ -458,27 +520,22 @@ jobs:
           key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
             release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
-      - name: Install JavaScript workspace
-        run: npm ci --ignore-scripts
-      - name: Run canonical release acceptance rust shard
+      - name: Run canonical release acceptance RustExact shard
         env:
           # Match the candidate debug harness, not the release runtime stack.
           # Explicit small-stack tests retain their own thread stack_size limits.
           RUST_MIN_STACK: "16777216"
-          CLEARRA_ACCEPTED_CTK3_DIST: ${{ github.workspace }}/packages/ctk3/dist
-          CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
-          CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Rust -ExecutionSurface Trusted
-      - name: Seal canonical release acceptance rust shard
+        run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard RustExact -ExecutionSurface Trusted
+      - name: Seal canonical release acceptance RustExact shard
         shell: pwsh
         run: |
           node scripts/release/canonical-acceptance-evidence.mjs shard `
             --source-commit $env:GITHUB_SHA `
             --run-id $env:GITHUB_RUN_ID `
             --run-attempt $env:GITHUB_RUN_ATTEMPT `
-            --shard rust `
-            --output release-shard-evidence/clearra-release-acceptance-rust-shard.v1.json
-          if ($LASTEXITCODE -ne 0) { throw "rust shard evidence failed" }
+            --shard rust-exact `
+            --output release-shard-evidence/clearra-release-acceptance-rust-exact-shard.v1.json
+          if ($LASTEXITCODE -ne 0) { throw "RustExact shard evidence failed" }
       # One owner seeds the native snapshot for the independent foundation leaves.
       - name: Save verified canonical native build cache
         if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}
@@ -492,11 +549,71 @@ jobs:
             ~/.cargo/git
             ~/AppData/Local/Clearra/build
           key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}
-      - name: Upload canonical release acceptance rust shard
+      - name: Upload canonical release acceptance RustExact shard
         uses: actions/upload-artifact@v4
         with:
-          name: release-acceptance-rust-shard-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
-          path: release-shard-evidence/clearra-release-acceptance-rust-shard.v1.json
+          name: release-acceptance-rust-exact-shard-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: release-shard-evidence/clearra-release-acceptance-rust-exact-shard.v1.json
+          if-no-files-found: error
+
+  release-acceptance-rust-product:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, ctk3, release-acceptance-product-cli]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download accepted CTK3 distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: packages/ctk3/dist
+      - name: Install JavaScript workspace
+        run: npm ci --ignore-scripts
+      - name: Download exact ProductE2E CLI input
+        uses: actions/download-artifact@v4
+        with:
+          name: product-e2e-cli-input-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clearra-product-e2e-cli-input
+      - name: Verify exact ProductE2E CLI input
+        id: product_cli
+        shell: pwsh
+        run: |
+          node scripts/release/product-e2e-cli-artifact.mjs verify `
+            --artifact (Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-cli-input') `
+            --expected-source-commit $env:GITHUB_SHA `
+            --expected-run-id $env:GITHUB_RUN_ID `
+            --expected-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --github-output $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run canonical release acceptance RustProduct shard without rebuilding
+        env:
+          CLEARRA_VERIFIED_PRODUCT_E2E_CLI: ${{ steps.product_cli.outputs.binary_path }}
+          CLEARRA_ACCEPTED_CTK3_DIST: ${{ github.workspace }}/packages/ctk3/dist
+          CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
+          CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUST_MIN_STACK: "16777216"
+        run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard RustProduct -ExecutionSurface Trusted
+      - name: Seal canonical release acceptance RustProduct shard
+        shell: pwsh
+        run: |
+          node scripts/release/canonical-acceptance-evidence.mjs shard `
+            --source-commit $env:GITHUB_SHA `
+            --run-id $env:GITHUB_RUN_ID `
+            --run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --shard rust-product `
+            --output release-shard-evidence/clearra-release-acceptance-rust-product-shard.v1.json
+          if ($LASTEXITCODE -ne 0) { throw "RustProduct shard evidence failed" }
+      - name: Upload canonical release acceptance RustProduct shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-acceptance-rust-product-shard-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+          path: release-shard-evidence/clearra-release-acceptance-rust-product-shard.v1.json
           if-no-files-found: error
 
   release-acceptance-wasm-contracts:
@@ -675,7 +792,7 @@ jobs:
   release-acceptance:
     if: github.event_name == 'workflow_dispatch'
     needs:
-      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-pages]
+      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-rust-product, release-acceptance-pages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -980,7 +1097,7 @@ jobs:
   release-failure-summary:
     if: always() && github.event_name == 'workflow_dispatch'
     needs:
-      [metadata, ctk3, linux-cli, discord-bot, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-wasm-contracts, release-acceptance-wasm-build, release-acceptance-pages, release-acceptance, windows-cli, windows-gui, canonical-evidence]
+      [metadata, ctk3, linux-cli, discord-bot, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-product-cli, release-acceptance-rust, release-acceptance-rust-product, release-acceptance-wasm-contracts, release-acceptance-wasm-build, release-acceptance-pages, release-acceptance, windows-cli, windows-gui, canonical-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: read

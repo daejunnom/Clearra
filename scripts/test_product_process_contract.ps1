@@ -28,8 +28,13 @@ $previousAcceptedCtk3Dist = $env:CLEARRA_ACCEPTED_CTK3_DIST
 $previousSourceCommit = $env:CLEARRA_SOURCE_COMMIT
 $previousAcceptedRunId = $env:CLEARRA_ACCEPTED_RUN_ID
 $previousAcceptedRunAttempt = $env:CLEARRA_ACCEPTED_RUN_ATTEMPT
+$previousVerifiedProductE2ECli = $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI
 $previousReleaseAcceptanceMode = Get-Variable `
     -Name ClearraReleaseAcceptanceMode `
+    -Scope Script `
+    -ErrorAction SilentlyContinue
+$previousReleaseAcceptanceShard = Get-Variable `
+    -Name ClearraReleaseAcceptanceShard `
     -Scope Script `
     -ErrorAction SilentlyContinue
 
@@ -341,6 +346,25 @@ try {
         ($capturedVerifyFailure.Contains('exit 19') -and
             $capturedVerifyFailure.Contains('native-stderr-failure')) `
         'release_built_product_fails_closed_on_accepted_ctk3_verification'
+
+    $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI = $script:TestExePath
+    $script:ClearraReleaseAcceptanceShard = 'RustProduct'
+    $resolvedVerifiedProduct = @(Resolve-ClearraProductE2EBinary $testRoot)
+    Assert-ProductProcessCondition `
+        ($resolvedVerifiedProduct.Count -eq 1 -and
+            $resolvedVerifiedProduct[0] -eq $script:TestExePath) `
+        'rust_product_shard_reuses_one_verified_product_binary_without_build_output'
+
+    $script:ClearraReleaseAcceptanceShard = 'RustExact'
+    $wrongShardFailure = ''
+    try {
+        Resolve-ClearraProductE2EBinary $testRoot | Out-Null
+    } catch {
+        $wrongShardFailure = $_.Exception.Message
+    }
+    Assert-ProductProcessCondition `
+        ($wrongShardFailure -match 'only be consumed by the RustProduct') `
+        'verified_product_binary_is_rejected_outside_rust_product_shard'
 } finally {
     if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
         Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
@@ -372,10 +396,20 @@ try {
     } else {
         $env:CLEARRA_ACCEPTED_RUN_ATTEMPT = $previousAcceptedRunAttempt
     }
+    if ([string]::IsNullOrWhiteSpace($previousVerifiedProductE2ECli)) {
+        Remove-Item Env:\CLEARRA_VERIFIED_PRODUCT_E2E_CLI -ErrorAction SilentlyContinue
+    } else {
+        $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI = $previousVerifiedProductE2ECli
+    }
     if ($null -eq $previousReleaseAcceptanceMode) {
         Remove-Variable -Name ClearraReleaseAcceptanceMode -Scope Script -ErrorAction SilentlyContinue
     } else {
         $script:ClearraReleaseAcceptanceMode = $previousReleaseAcceptanceMode.Value
+    }
+    if ($null -eq $previousReleaseAcceptanceShard) {
+        Remove-Variable -Name ClearraReleaseAcceptanceShard -Scope Script -ErrorAction SilentlyContinue
+    } else {
+        $script:ClearraReleaseAcceptanceShard = $previousReleaseAcceptanceShard.Value
     }
 
     $resolvedTestRoot = [System.IO.Path]::GetFullPath($testRoot)

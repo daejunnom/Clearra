@@ -1390,7 +1390,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'clearra.release-acceptance-shard.v1',
         'createShardedReleaseGateReports',
         'delegated_evidence',
-        'isolated-six-shard',
+        'isolated-seven-shard',
         'release_version',
         'pages_base_path',
         'wasm_build_receipt_sha256',
@@ -1411,7 +1411,7 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     foreach ($requiredEvidenceTestMarker in @(
         'deterministically bind toolchains and four surfaces',
-        'six isolated shard reports preserve unique stage ownership and delegated evidence',
+        'seven isolated shard reports preserve unique stage ownership and delegated evidence',
         'shard toolchain collection invokes only the closed shard tool set',
         'Pages shard inherits Linux producer tools and checks portable Node tools at the Windows consumer',
         'rejects duplicate jobs and any failed required step',
@@ -1618,7 +1618,9 @@ function Invoke-ReleaseIdentityGateValidation {
     $releaseFoundationAdversarialCorrectnessJobStart = $release.IndexOf("`n  release-acceptance-foundation-adversarial-correctness:", [System.StringComparison]::Ordinal)
     $releaseFoundationDesktopHostJobStart = $release.IndexOf("`n  release-acceptance-foundation-desktop-host:", [System.StringComparison]::Ordinal)
     $releaseSanitizerJobStart = $release.IndexOf("`n  release-acceptance-sanitizer:", [System.StringComparison]::Ordinal)
+    $releaseProductCliJobStart = $release.IndexOf("`n  release-acceptance-product-cli:", [System.StringComparison]::Ordinal)
     $releaseRustJobStart = $release.IndexOf("`n  release-acceptance-rust:", [System.StringComparison]::Ordinal)
+    $releaseRustProductJobStart = $release.IndexOf("`n  release-acceptance-rust-product:", [System.StringComparison]::Ordinal)
     $releaseWasmContractsJobStart = $release.IndexOf("`n  release-acceptance-wasm-contracts:", [System.StringComparison]::Ordinal)
     $releaseWasmBuildJobStart = $release.IndexOf("`n  release-acceptance-wasm-build:", [System.StringComparison]::Ordinal)
     $releasePagesJobStart = $release.IndexOf("`n  release-acceptance-pages:", [System.StringComparison]::Ordinal)
@@ -1636,8 +1638,10 @@ function Invoke-ReleaseIdentityGateValidation {
         $releaseFoundationAdversarialCorrectnessJobStart -le $releaseFoundationNoProductDebtJobStart -or
         $releaseFoundationDesktopHostJobStart -le $releaseFoundationAdversarialCorrectnessJobStart -or
         $releaseSanitizerJobStart -le $releaseFoundationDesktopHostJobStart -or
-        $releaseRustJobStart -le $releaseSanitizerJobStart -or
-        $releaseWasmContractsJobStart -le $releaseRustJobStart -or
+        $releaseProductCliJobStart -le $releaseSanitizerJobStart -or
+        $releaseRustJobStart -le $releaseProductCliJobStart -or
+        $releaseRustProductJobStart -le $releaseRustJobStart -or
+        $releaseWasmContractsJobStart -le $releaseRustProductJobStart -or
         $releaseWasmBuildJobStart -le $releaseWasmContractsJobStart -or
         $releasePagesJobStart -le $releaseWasmBuildJobStart -or
         $releaseAcceptanceJobStart -le $releasePagesJobStart -or
@@ -1668,11 +1672,19 @@ function Invoke-ReleaseIdentityGateValidation {
         $releaseFoundationJob = $releaseFoundationNoProductDebtJob
         $releaseSanitizerJob = $release.Substring(
             $releaseSanitizerJobStart,
-            $releaseRustJobStart - $releaseSanitizerJobStart
+            $releaseProductCliJobStart - $releaseSanitizerJobStart
+        )
+        $releaseProductCliJob = $release.Substring(
+            $releaseProductCliJobStart,
+            $releaseRustJobStart - $releaseProductCliJobStart
         )
         $releaseRustJob = $release.Substring(
             $releaseRustJobStart,
-            $releaseWasmContractsJobStart - $releaseRustJobStart
+            $releaseRustProductJobStart - $releaseRustJobStart
+        )
+        $releaseRustProductJob = $release.Substring(
+            $releaseRustProductJobStart,
+            $releaseWasmContractsJobStart - $releaseRustProductJobStart
         )
         $releaseWasmContractsJob = $release.Substring(
             $releaseWasmContractsJobStart,
@@ -1734,9 +1746,10 @@ function Invoke-ReleaseIdentityGateValidation {
                 'release-acceptance-foundation-desktop-host',
                 'release-acceptance-sanitizer',
                 'release-acceptance-rust',
+                'release-acceptance-rust-product',
                 'release-acceptance-pages'
             ) `
-            -Contract 'Canonical acceptance exact six-shard fan-in dependencies'
+            -Contract 'Canonical acceptance exact seven-shard fan-in dependencies'
         Assert-ReleaseYamlExactScalar `
             -Text $releaseAcceptanceJob `
             -Indentation 4 `
@@ -1748,15 +1761,21 @@ function Invoke-ReleaseIdentityGateValidation {
             @{ Name = 'Foundation AdversarialCorrectness'; Text = $releaseFoundationAdversarialCorrectnessJob; Needs = @('metadata'); Runner = 'windows-latest' },
             @{ Name = 'Foundation DesktopHost'; Text = $releaseFoundationDesktopHostJob; Needs = @('metadata'); Runner = 'windows-latest' },
             @{ Name = 'Sanitizer'; Text = $releaseSanitizerJob; Needs = @('metadata'); Runner = 'windows-latest' },
-            @{ Name = 'Rust'; Text = $releaseRustJob; Needs = @('metadata', 'ctk3'); Runner = 'windows-latest' },
+            @{ Name = 'ProductE2E CLI producer'; Text = $releaseProductCliJob; Needs = @('metadata'); Runner = 'windows-latest'; HasEnv = $true },
+            @{ Name = 'RustExact'; Text = $releaseRustJob; Needs = @('metadata'); Runner = 'windows-latest' },
+            @{ Name = 'RustProduct'; Text = $releaseRustProductJob; Needs = @('metadata', 'ctk3', 'release-acceptance-product-cli'); Runner = 'windows-latest' },
             @{ Name = 'WASM contracts'; Text = $releaseWasmContractsJob; Needs = @('metadata'); Runner = 'windows-latest' },
             @{ Name = 'WASM producer'; Text = $releaseWasmBuildJob; Needs = @('metadata'); Runner = 'ubuntu-latest' },
             @{ Name = 'Pages'; Text = $releasePagesJob; Needs = @('metadata', 'ctk3', 'release-acceptance-wasm-contracts', 'release-acceptance-wasm-build'); Runner = 'windows-latest' }
         )) {
+            $shardJobKeys = @('if', 'needs', 'runs-on', 'timeout-minutes', 'steps')
+            if ($shardJob.ContainsKey('HasEnv') -and $shardJob.HasEnv) {
+                $shardJobKeys = @('if', 'needs', 'runs-on', 'timeout-minutes', 'env', 'steps')
+            }
             Assert-ReleaseYamlExactKeySet `
                 -Text $shardJob.Text `
                 -Indentation 4 `
-                -ExpectedKeys @('if', 'needs', 'runs-on', 'timeout-minutes', 'steps') `
+                -ExpectedKeys $shardJobKeys `
                 -Contract "$($shardJob.Name) canonical acceptance shard job"
             Assert-ReleaseYamlExactScalar `
                 -Text $shardJob.Text `
@@ -1961,10 +1980,11 @@ function Invoke-ReleaseIdentityGateValidation {
             'CLEARRA_ACCEPTED_CTK3_DIST: ${{ github.workspace }}/packages/ctk3/dist',
             'CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}',
             'CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}',
-            'run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Rust -ExecutionSurface Trusted'
+            'CLEARRA_VERIFIED_PRODUCT_E2E_CLI: ${{ steps.product_cli.outputs.binary_path }}',
+            'run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard RustProduct -ExecutionSurface Trusted'
         )) {
-            if ($releaseRustJob.IndexOf($requiredAcceptanceConsumerMarker, [System.StringComparison]::Ordinal) -lt 0) {
-                Add-ArchitectureError "Windows Rust acceptance CTK3 consumer is missing '$requiredAcceptanceConsumerMarker'"
+            if ($releaseRustProductJob.IndexOf($requiredAcceptanceConsumerMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                Add-ArchitectureError "Windows RustProduct acceptance CTK3 consumer is missing '$requiredAcceptanceConsumerMarker'"
             }
         }
 
@@ -1973,7 +1993,8 @@ function Invoke-ReleaseIdentityGateValidation {
             '-ReleaseAcceptanceShard FoundationAdversarialCorrectness -ExecutionSurface Trusted',
             '-ReleaseAcceptanceShard FoundationDesktopHost -ExecutionSurface Trusted',
             '-ReleaseAcceptanceShard Sanitizer -ExecutionSurface Trusted',
-            '-ReleaseAcceptanceShard Rust -ExecutionSurface Trusted',
+            '-ReleaseAcceptanceShard RustExact -ExecutionSurface Trusted',
+            '-ReleaseAcceptanceShard RustProduct -ExecutionSurface Trusted',
             '-ReleaseAcceptanceShard Pages -ExecutionSurface Trusted',
             'node scripts/release/canonical-acceptance-evidence.mjs shard `',
             '--shards release-shard-evidence \'
@@ -1982,13 +2003,13 @@ function Invoke-ReleaseIdentityGateValidation {
                 $release,
                 [regex]::Escape($requiredShardMarker)
             ).Count
-            $expectedCount = if ($requiredShardMarker -eq 'node scripts/release/canonical-acceptance-evidence.mjs shard `') { 6 } else { 1 }
+            $expectedCount = if ($requiredShardMarker -eq 'node scripts/release/canonical-acceptance-evidence.mjs shard `') { 7 } else { 1 }
             if ($markerCount -ne $expectedCount) {
                 Add-ArchitectureError "Canonical ReleaseAcceptance shard contract differs for '$requiredShardMarker'"
             }
         }
-        if ($canonicalAcceptanceEvidence.IndexOf('canonical six-shard ReleaseAcceptance fan-in', [System.StringComparison]::Ordinal) -lt 0) {
-            Add-ArchitectureError 'Canonical ReleaseAcceptance evidence must bind the six-shard fan-in command'
+        if ($canonicalAcceptanceEvidence.IndexOf('canonical seven-shard ReleaseAcceptance fan-in', [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError 'Canonical ReleaseAcceptance evidence must bind the seven-shard fan-in command'
         }
         $releaseAcceptanceCacheText = @(
             $releaseFoundationNoProductDebtJob,

@@ -82,9 +82,44 @@ function Ensure-ClearraBuiltBinary([string]$Root) {
     return $builtExePath
 }
 
+function Resolve-ClearraProductE2EBinary([string]$Root) {
+    $acceptedBinary = $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI
+    if ([string]::IsNullOrWhiteSpace($acceptedBinary)) {
+        return Ensure-ClearraBuiltBinary $Root
+    }
+
+    $releaseModeVariable = Get-Variable `
+        -Name ClearraReleaseAcceptanceMode `
+        -Scope Script `
+        -ErrorAction SilentlyContinue
+    $releaseShardVariable = Get-Variable `
+        -Name ClearraReleaseAcceptanceShard `
+        -Scope Script `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $releaseModeVariable -or
+        -not [bool]$releaseModeVariable.Value -or
+        $null -eq $releaseShardVariable -or
+        [string]$releaseShardVariable.Value -ne 'RustProduct') {
+        throw 'A verified ProductE2E CLI may only be consumed by the RustProduct ReleaseAcceptance shard.'
+    }
+    if ($env:CLEARRA_SOURCE_COMMIT -notmatch '^[0-9a-f]{40}$' -or
+        $env:CLEARRA_ACCEPTED_RUN_ID -notmatch '^[1-9][0-9]{0,19}$' -or
+        $env:CLEARRA_ACCEPTED_RUN_ATTEMPT -notmatch '^[1-9][0-9]{0,19}$') {
+        throw 'Verified ProductE2E CLI consumption requires exact source, run, and attempt authority.'
+    }
+
+    $item = Get-Item -LiteralPath $acceptedBinary -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw 'Verified ProductE2E CLI must be a regular non-reparse file.'
+    }
+    [Console]::Out.WriteLine("product_e2e_cli=reused source_commit=$($env:CLEARRA_SOURCE_COMMIT) run_id=$($env:CLEARRA_ACCEPTED_RUN_ID) run_attempt=$($env:CLEARRA_ACCEPTED_RUN_ATTEMPT)")
+    return $item.FullName
+}
+
 function Invoke-ProductE2EBuiltTask([string]$Root) {
     Assert-ClearraTrustedExecutionSurface $ExecutionSurface "built product E2E"
-    $builtExePath = Ensure-ClearraBuiltBinary $Root
+    $builtExePath = Resolve-ClearraProductE2EBinary $Root
     $productE2EArgs = @{
         UseBuiltBinary = $true
         ExePath = $builtExePath

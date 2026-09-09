@@ -193,8 +193,42 @@ test("rejects Linux CLI dropping its real renderer preflight", async () => {
 });
 
 test("rejects canonical Rust silently differing from the candidate debug stack", async () => {
-  const changed = replaceExactlyOnce(normalizedWorkflow,
+  const changed = replaceExactlyOnceAfter(normalizedWorkflow,
+    "\n  release-acceptance-rust:",
     'RUST_MIN_STACK: "16777216"', 'RUST_MIN_STACK: "2097152"');
+  const result = await runValidator(changed);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects serializing RustExact behind the ProductE2E CLI producer", async () => {
+  const changed = replaceExactlyOnceAfter(
+    normalizedWorkflow,
+    "\n  release-acceptance-rust:",
+    "    needs: metadata\n",
+    "    needs: [metadata, release-acceptance-product-cli]\n",
+  );
+  const result = await runValidator(changed);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects drift in the exact ProductE2E CLI build recipe", async () => {
+  const changed = replaceExactlyOnceAfter(
+    normalizedWorkflow,
+    "\n  release-acceptance-product-cli:",
+    "cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra",
+    "cargo build -p clearra-cli --features native-c-core,webgpu-search --bin clearra",
+  );
+  const result = await runValidator(changed);
+  assert.notEqual(result.status, 0, diagnostic(result));
+});
+
+test("rejects rebuilding the verified ProductE2E CLI in RustProduct", async () => {
+  const changed = replaceExactlyOnceAfter(
+    normalizedWorkflow,
+    "\n  release-acceptance-rust-product:",
+    "      - name: Install JavaScript workspace\n        run: npm ci --ignore-scripts\n",
+    "      - name: Install JavaScript workspace\n        run: npm ci --ignore-scripts\n      - name: Rebuild ProductE2E CLI\n        run: cargo build\n",
+  );
   const result = await runValidator(changed);
   assert.notEqual(result.status, 0, diagnostic(result));
 });
@@ -398,10 +432,11 @@ for (const [name, mutate] of [
   [
     "rejects canonical acceptance consumption of a different CTK3 artifact",
     (source) =>
-      replaceExactlyOnce(
+      replaceExactlyOnceAfter(
         source,
-        "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}\n          path: packages/ctk3/dist\n      - id: release_toolchain_cache\n",
-        "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-unbound\n          path: packages/ctk3/dist\n      - id: release_toolchain_cache\n",
+        "\n  release-acceptance-rust-product:",
+        "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}\n          path: packages/ctk3/dist\n      - name: Install JavaScript workspace\n",
+        "      - name: Download accepted CTK3 distribution\n        uses: actions/download-artifact@v4\n        with:\n          name: ctk3-unbound\n          path: packages/ctk3/dist\n      - name: Install JavaScript workspace\n",
       ),
   ],
   [
@@ -805,12 +840,12 @@ for (const [name, mutate] of [
       ),
   ],
   [
-    "rejects an incomplete six-shard fan-in",
+    "rejects an incomplete seven-shard fan-in",
     (source) =>
       replaceExactlyOnce(
         source,
-        "      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-pages]\n",
-        "      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-pages]\n",
+        "      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-rust-product, release-acceptance-pages]\n",
+        "      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-rust-product, release-acceptance-pages]\n",
       ),
   ],
   [

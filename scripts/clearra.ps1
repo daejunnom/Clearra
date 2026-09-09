@@ -23,6 +23,8 @@ param(
         "FoundationDesktopHost",
         "Sanitizer",
         "Rust",
+        "RustExact",
+        "RustProduct",
         "Pages"
     )]
     [string]$ReleaseAcceptanceShard = "Full",

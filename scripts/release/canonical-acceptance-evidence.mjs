@@ -72,12 +72,19 @@ export const RELEASE_ACCEPTANCE_SHARDS = Object.freeze(new Map([
       "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Sanitizer -ExecutionSurface Trusted",
     toolchains: Object.freeze(["cmake", "powershell"]),
   })],
-  ["rust", Object.freeze({
+  ["rust-exact", Object.freeze({
     job: "release-acceptance-rust",
-    stages: Object.freeze(["RustExactTests", "ProductE2E", "RenderGolden"]),
+    stages: Object.freeze(["RustExactTests", "RenderGolden"]),
     command:
-      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Rust -ExecutionSurface Trusted",
-    toolchains: Object.freeze(["rust", "cargo", "node", "cmake", "powershell"]),
+      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard RustExact -ExecutionSurface Trusted",
+    toolchains: Object.freeze(["rust", "cargo", "cmake", "powershell"]),
+  })],
+  ["rust-product", Object.freeze({
+    job: "release-acceptance-rust-product",
+    stages: Object.freeze(["ProductE2E"]),
+    command:
+      "powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard RustProduct -ExecutionSurface Trusted",
+    toolchains: Object.freeze(["node", "powershell"]),
   })],
   ["pages", Object.freeze({
     job: "release-acceptance-pages",
@@ -106,19 +113,19 @@ const DELEGATED_RELEASE_EVIDENCE = Object.freeze([
     evidence: "complete_required_keeps_candidate",
     deferred_by: "NoProductDebt",
     owner_stage: "RustExactTests",
-    owner_shard: "rust",
+    owner_shard: "rust-exact",
   }),
   Object.freeze({
     evidence: "renderer_png_artifact",
     deferred_by: "NoProductDebt",
     owner_stage: "RenderGolden",
-    owner_shard: "rust",
+    owner_shard: "rust-exact",
   }),
   Object.freeze({
     evidence: "renderer_gif_artifact",
     deferred_by: "NoProductDebt",
     owner_stage: "RenderGolden",
-    owner_shard: "rust",
+    owner_shard: "rust-exact",
   }),
   Object.freeze({
     evidence: "desktop_real_app_request",
@@ -130,7 +137,7 @@ const DELEGATED_RELEASE_EVIDENCE = Object.freeze([
     evidence: "adversarial_rust_tests",
     deferred_by: "AdversarialCorrectness",
     owner_stage: "RustExactTests",
-    owner_shard: "rust",
+    owner_shard: "rust-exact",
   }),
 ]);
 const SURFACE_OWNERS = Object.freeze(new Map([
@@ -191,11 +198,22 @@ const REQUIRED_JOBS = Object.freeze(new Map([
     "Seal canonical release acceptance sanitizer shard",
     "Upload canonical release acceptance sanitizer shard",
   ])],
+  ["release-acceptance-product-cli", Object.freeze([
+    "Build and seal exact ProductE2E CLI input",
+    "Upload exact ProductE2E CLI input",
+  ])],
   ["release-acceptance-rust", Object.freeze([
+    "Run canonical release acceptance RustExact shard",
+    "Seal canonical release acceptance RustExact shard",
+    "Upload canonical release acceptance RustExact shard",
+  ])],
+  ["release-acceptance-rust-product", Object.freeze([
     "Download accepted CTK3 distribution",
-    "Run canonical release acceptance rust shard",
-    "Seal canonical release acceptance rust shard",
-    "Upload canonical release acceptance rust shard",
+    "Download exact ProductE2E CLI input",
+    "Verify exact ProductE2E CLI input",
+    "Run canonical release acceptance RustProduct shard without rebuilding",
+    "Seal canonical release acceptance RustProduct shard",
+    "Upload canonical release acceptance RustProduct shard",
   ])],
   ["release-acceptance-wasm-contracts", Object.freeze([
     "Run WASM source and host contracts",
@@ -362,7 +380,7 @@ export async function readReleaseAcceptanceShardEvidence(
     actualFiles.join(",") !== expectedFiles.join(",") ||
     entries.some((entry) => !entry.isFile() || entry.isSymbolicLink())
   ) {
-    throw new Error("release shard evidence directory must contain the exact six canonical files");
+    throw new Error("release shard evidence directory must contain the exact seven canonical files");
   }
   const reports = [];
   for (const [shard, filename] of RELEASE_SHARD_FILES) {
@@ -382,7 +400,7 @@ export function createShardedReleaseGateReports(authority, shardReports) {
   const identity = validateAuthority(authority);
   const reports = validateReleaseShardReportSet(shardReports, identity);
   const pages = reports.find((report) => report.shard === "pages");
-  const rust = reports.find((report) => report.shard === "rust");
+  const rust = reports.find((report) => report.shard === "rust-exact");
   const sanitizer = reports.find((report) => report.shard === "sanitizer");
   const foundationNoProductDebt = reports.find(
     (report) => report.shard === "foundation-no-product-debt",
@@ -426,8 +444,8 @@ export function createShardedReleaseGateReports(authority, shardReports) {
     workflow_path: WORKFLOW_PATH,
     job: "release-acceptance",
     task: "ReleaseAcceptance",
-    command: "canonical six-shard ReleaseAcceptance fan-in",
-    execution_mode: "isolated-six-shard",
+    command: "canonical seven-shard ReleaseAcceptance fan-in",
+    execution_mode: "isolated-seven-shard",
     status: "passed",
     readiness_open_count: 0,
     stages: RELEASE_STAGES,
@@ -441,7 +459,7 @@ export function createShardedReleaseGateReports(authority, shardReports) {
     run_attempt: identity.runAttempt,
     workflow_path: WORKFLOW_PATH,
     job: "release-acceptance",
-    execution_mode: "isolated-six-shard",
+    execution_mode: "isolated-seven-shard",
     ...tools,
     shard_toolchains: reports.map((report) => ({
       shard: report.shard,
@@ -909,7 +927,7 @@ async function readAndValidateGateReports(directory, authority) {
     verifyCanonicalReportHash(actual, label);
     requireReportAuthority(actual, authority, label);
     if (canonicalJson(actual) !== canonicalJson(canonical)) {
-      throw new Error(`${label} differs from the canonical six-shard fan-in`);
+      throw new Error(`${label} differs from the canonical seven-shard fan-in`);
     }
   }
   return Object.freeze({
@@ -991,7 +1009,7 @@ function validateReleaseShardToolchains(value, contract) {
 
 function validateReleaseShardReportSet(shardReports, authority) {
   if (!Array.isArray(shardReports) || shardReports.length !== RELEASE_ACCEPTANCE_SHARDS.size) {
-    throw new Error("release gate requires the exact six shard reports");
+    throw new Error("release gate requires the exact seven shard reports");
   }
   const byShard = new Map();
   for (const report of shardReports) {

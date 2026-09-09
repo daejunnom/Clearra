@@ -81,11 +81,14 @@ const SHARD_TOOLCHAINS = Object.freeze({
     cmake: TOOLCHAINS.cmake,
     powershell: TOOLCHAINS.powershell,
   }),
-  rust: Object.freeze({
+  "rust-exact": Object.freeze({
     rust: TOOLCHAINS.rust,
     cargo: TOOLCHAINS.cargo,
-    node: TOOLCHAINS.node,
     cmake: TOOLCHAINS.cmake,
+    powershell: TOOLCHAINS.powershell,
+  }),
+  "rust-product": Object.freeze({
+    node: TOOLCHAINS.node,
     powershell: TOOLCHAINS.powershell,
   }),
   pages: LINUX_WASM_TOOLCHAINS,
@@ -131,11 +134,22 @@ const REQUIRED_JOB_STEPS = Object.freeze(new Map([
     "Seal canonical release acceptance sanitizer shard",
     "Upload canonical release acceptance sanitizer shard",
   ]],
+  ["release-acceptance-product-cli", [
+    "Build and seal exact ProductE2E CLI input",
+    "Upload exact ProductE2E CLI input",
+  ]],
   ["release-acceptance-rust", [
+    "Run canonical release acceptance RustExact shard",
+    "Seal canonical release acceptance RustExact shard",
+    "Upload canonical release acceptance RustExact shard",
+  ]],
+  ["release-acceptance-rust-product", [
     "Download accepted CTK3 distribution",
-    "Run canonical release acceptance rust shard",
-    "Seal canonical release acceptance rust shard",
-    "Upload canonical release acceptance rust shard",
+    "Download exact ProductE2E CLI input",
+    "Verify exact ProductE2E CLI input",
+    "Run canonical release acceptance RustProduct shard without rebuilding",
+    "Seal canonical release acceptance RustProduct shard",
+    "Upload canonical release acceptance RustProduct shard",
   ]],
   ["release-acceptance-wasm-contracts", [
     "Run WASM source and host contracts",
@@ -218,11 +232,11 @@ test("release gate reports deterministically bind toolchains and four surfaces",
   }
 });
 
-test("six isolated shard reports preserve unique stage ownership and delegated evidence", () => {
+test("seven isolated shard reports preserve unique stage ownership and delegated evidence", () => {
   const shards = Object.entries(SHARD_TOOLCHAINS).map(([shard, tools]) =>
     createReleaseAcceptanceShardEvidence(authority(), shard, tools));
   const reports = createShardedReleaseGateReports(authority(), shards);
-  assert.equal(reports.gate.execution_mode, "isolated-six-shard");
+  assert.equal(reports.gate.execution_mode, "isolated-seven-shard");
   assert.deepEqual(
     reports.gate.shards.map((entry) => entry.shard),
     [
@@ -230,7 +244,8 @@ test("six isolated shard reports preserve unique stage ownership and delegated e
       "foundation-adversarial-correctness",
       "foundation-desktop-host",
       "sanitizer",
-      "rust",
+      "rust-exact",
+      "rust-product",
       "pages",
     ],
   );
@@ -254,11 +269,11 @@ test("six isolated shard reports preserve unique stage ownership and delegated e
       entry.owner_shard,
     ]),
     [
-      ["NoProductDebt", "RustExactTests", "rust"],
-      ["NoProductDebt", "RenderGolden", "rust"],
-      ["NoProductDebt", "RenderGolden", "rust"],
+      ["NoProductDebt", "RustExactTests", "rust-exact"],
+      ["NoProductDebt", "RenderGolden", "rust-exact"],
+      ["NoProductDebt", "RenderGolden", "rust-exact"],
       ["NoProductDebt", "DesktopHost", "foundation-desktop-host"],
-      ["AdversarialCorrectness", "RustExactTests", "rust"],
+      ["AdversarialCorrectness", "RustExactTests", "rust-exact"],
     ],
   );
   for (const shard of shards) {
@@ -287,13 +302,13 @@ test("six isolated shard reports preserve unique stage ownership and delegated e
 
   const inconsistentRust = createReleaseAcceptanceShardEvidence(
     authority(),
-    "rust",
-    { ...SHARD_TOOLCHAINS.rust, rust: "rustc 9.99.0" },
+    "rust-exact",
+    { ...SHARD_TOOLCHAINS["rust-exact"], rust: "rustc 9.99.0" },
   );
   assert.throws(
     () => createShardedReleaseGateReports(
       authority(),
-      shards.map((shard) => shard.shard === "rust" ? inconsistentRust : shard),
+      shards.map((shard) => shard.shard === "rust-exact" ? inconsistentRust : shard),
     ),
     /disagree on the rust toolchain/u,
   );
@@ -307,7 +322,7 @@ test("six isolated shard reports preserve unique stage ownership and delegated e
         cmake: "cmake version 3.31.4",
       });
     }
-    if (shard.shard === "rust") {
+    if (shard.shard === "rust-exact") {
       return createReleaseAcceptanceShardEvidence(authority(), shard.shard, {
         ...SHARD_TOOLCHAINS[shard.shard],
         rust: "rustc 1.91.9 (authoritative-rust-shard)",
@@ -335,13 +350,13 @@ test("six isolated shard reports preserve unique stage ownership and delegated e
 
   const malformedRust = createReleaseAcceptanceShardEvidence(
     authority(),
-    "rust",
-    { ...SHARD_TOOLCHAINS.rust, rust: "rustc hosted-runner" },
+    "rust-exact",
+    { ...SHARD_TOOLCHAINS["rust-exact"], rust: "rustc hosted-runner" },
   );
   assert.throws(
     () => createShardedReleaseGateReports(
       authority(),
-      shards.map((shard) => shard.shard === "rust" ? malformedRust : shard),
+      shards.map((shard) => shard.shard === "rust-exact" ? malformedRust : shard),
     ),
     /rust toolchain version is not canonical/u,
   );
