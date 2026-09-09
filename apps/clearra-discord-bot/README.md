@@ -403,7 +403,7 @@ Do not rebuild or redeploy `clearra-current-job` as part of command sync.
 
 ## Command picker language and server installation
 
-The registered command schema keeps English as its default and supplies Korean
+The registered command schema keeps English as its default and currently supplies Korean
 `name_localizations` and `description_localizations` for commands, subcommands,
 options, and choices. Discord therefore shows `/경로`, `필드`, or `넥스트`
 when that user's Discord client language is Korean. The interaction payload

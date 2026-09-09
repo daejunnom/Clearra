@@ -1,4 +1,5 @@
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import { defaultWorkerCount } from './solverWorkspaceModel.ts';
 import {
   cliCommandRequestForDesktop,
@@ -193,7 +194,7 @@ export function buildSpinStructureCommand(request: SpinStructureRequest): string
 
 export function spinStructureRequestForDesktop(
   request: SpinStructureRequest,
-  language: 'en' | 'ko'
+  language: WorkspaceLanguage
 ): ClearraDesktopCliCommandRequest {
   return cliCommandRequestForDesktop(buildSpinStructureCommandArguments(request), language);
 }

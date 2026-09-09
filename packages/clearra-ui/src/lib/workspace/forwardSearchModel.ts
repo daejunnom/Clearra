@@ -6,6 +6,7 @@ import {
   type SpinProfile
 } from './solverWorkspaceModel.ts';
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import { isValidForwardChain, MAX_FORWARD_CHAIN } from './forwardSearchLimits.ts';
 import {
   cliCommandRequestForDesktop,
@@ -170,7 +171,7 @@ export function buildForwardSearchCommand(
 
 export function forwardSearchRequestForDesktop(
   request: ForwardSearchRequest,
-  language: 'en' | 'ko',
+  language: WorkspaceLanguage,
   workers: number
 ): ClearraDesktopCliCommandRequest {
   return cliCommandRequestForDesktop(

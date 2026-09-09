@@ -19,5 +19,14 @@ fn built_in_catalogs_share_key_universe() {
             korean_catalog::get(key).is_some(),
             "missing Korean key {key}"
         );
+        assert!(
+            japanese_catalog::get(key).is_some(),
+            "missing Japanese draft key {key}"
+        );
     }
+
+    assert!(TranslationCatalog::is_complete(LanguageId::En));
+    assert!(TranslationCatalog::is_complete(LanguageId::Ko));
+    assert!(TranslationCatalog::is_complete(LanguageId::Ja));
+    assert!(!LanguageId::Ja.is_released());
 }

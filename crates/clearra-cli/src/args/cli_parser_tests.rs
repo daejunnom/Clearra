@@ -928,13 +928,16 @@ fn strips_global_language_before_command_parsing() {
 
 #[test]
 fn rejects_unknown_language() {
-    assert_eq!(
-        CliParser::parse(["clearra", "--lang", "jp", "pc", "--lines", "2"]),
-        Err(CliParseError::InvalidValue {
-            option: "--lang",
-            value: "jp".to_owned()
-        })
-    );
+    for language in ["jp", "ja", "ja-JP"] {
+        assert_eq!(
+            CliParser::parse(["clearra", "--lang", language, "pc", "--lines", "2"]),
+            Err(CliParseError::InvalidValue {
+                option: "--lang",
+                value: language.to_owned()
+            })
+        );
+    }
+    assert_eq!(LanguageId::parse_known("ja-JP"), Some(LanguageId::Ja));
 }
 
 #[test]

@@ -7,6 +7,7 @@ import {
   matchDiscordLocale,
   normalizeDiscordLocale,
 } from "./i18n.mjs";
+import { releasedDiscordLocaleList } from "./locale-rollout.mjs";
 
 const STORE_VERSION = 1;
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
@@ -44,7 +45,7 @@ export function readDiscordLanguageRequest(rawOptions = []) {
   }
   const locale = values.get("language");
   if (!isSupportedDiscordLocale(locale) || values.size !== 2) {
-    throw new Error("Language must be en or ko.");
+    throw new Error(`Language must be ${releasedDiscordLocaleList()}.`);
   }
   return Object.freeze({ action, scope, locale });
 }
@@ -205,7 +206,9 @@ function parseEntries(value, label) {
 
 function requiredLocale(value) {
   if (!isSupportedDiscordLocale(value)) {
-    throw new Error("Discord locale preferences support only en and ko.");
+    throw new Error(
+      `Discord locale preferences support only ${releasedDiscordLocaleList("and")}.`,
+    );
   }
   return value;
 }

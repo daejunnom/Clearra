@@ -4,6 +4,7 @@ import type {
   ClearraFinesseReportInput,
   ClearraFinesseRepresentativeWitness
 } from '../wasm/wasmCommandClient';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import type { FinesseWitnessExport } from './solutionExport';
 
 export type BuildProbabilityFinesseMetric = 'off' | 'inputs';
@@ -29,7 +30,7 @@ const FINESSE_PIECES = new Set(['I', 'O', 'T', 'S', 'Z', 'J', 'L']);
 
 export function formatFinesseInputCount(
   value: string | number | undefined | null,
-  locale: 'en' | 'ko'
+  locale: WorkspaceLanguage
 ): string {
   if (value === undefined || value === null ||
     (typeof value === 'string' && FINESSE_UNAVAILABLE_VALUES.has(value))) {

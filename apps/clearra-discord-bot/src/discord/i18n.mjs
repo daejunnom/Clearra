@@ -1,5 +1,12 @@
+import { JAPANESE_DISCORD_MESSAGES } from "./japanese-i18n-draft.mjs";
+import {
+  SUPPORTED_DISCORD_LOCALES,
+  isReleasedDiscordLocale,
+  matchKnownDiscordLocale,
+} from "./locale-rollout.mjs";
+
 export const DEFAULT_DISCORD_LOCALE = "en";
-export const SUPPORTED_DISCORD_LOCALES = Object.freeze(["en", "ko"]);
+export { SUPPORTED_DISCORD_LOCALES, matchKnownDiscordLocale } from "./locale-rollout.mjs";
 
 const CATALOGS = Object.freeze({
   en: Object.freeze({
@@ -202,6 +209,10 @@ const CATALOGS = Object.freeze({
     "language.source.global": "global default",
     "language.name.en": "English",
     "language.name.ko": "Korean",
+    "language.name.ja": "Japanese",
+    "language.form.label": "Language",
+    "language.form.description": "Response language for this request; overrides channel and server defaults.",
+    "language.form.placeholder": "Choose response language",
     "language.guild_only": "Language settings can be changed only inside a server.",
     "language.permission.channel": "Manage Channels permission or ClearraBot administrator access is required to change the channel language.",
     "language.permission.guild": "Manage Server permission or ClearraBot administrator access is required to change the server language.",
@@ -406,6 +417,10 @@ const CATALOGS = Object.freeze({
     "language.source.global": "전체 기본값",
     "language.name.en": "영어",
     "language.name.ko": "한국어",
+    "language.name.ja": "일본어",
+    "language.form.label": "언어",
+    "language.form.description": "이 요청의 응답 언어입니다. 채널·서버 기본값보다 우선합니다.",
+    "language.form.placeholder": "응답 언어 선택",
     "language.guild_only": "언어 설정은 서버 안에서만 변경할 수 있습니다.",
     "language.permission.channel": "채널 언어를 변경하려면 채널 관리 권한 또는 ClearraBot 관리자 권한이 필요합니다.",
     "language.permission.guild": "서버 언어를 변경하려면 서버 관리 권한 또는 ClearraBot 관리자 권한이 필요합니다.",
@@ -418,11 +433,8 @@ export function normalizeDiscordLocale(value, fallback = DEFAULT_DISCORD_LOCALE)
 }
 
 export function matchDiscordLocale(value) {
-  if (typeof value !== "string") return null;
-  const normalized = value.trim().toLowerCase().replaceAll("_", "-");
-  if (normalized === "ko" || normalized.startsWith("ko-")) return "ko";
-  if (normalized === "en" || normalized.startsWith("en-")) return "en";
-  return null;
+  const locale = matchKnownDiscordLocale(value);
+  return locale !== null && isReleasedDiscordLocale(locale) ? locale : null;
 }
 
 export function isSupportedDiscordLocale(value) {
@@ -491,10 +503,39 @@ export function assertDiscordCatalogComplete() {
   return true;
 }
 
+export function discordCatalogReadiness(candidate) {
+  const englishKeys = Object.keys(CATALOGS.en).sort();
+  const candidateKeys = Object.keys(candidate).sort();
+  const englishKeySet = new Set(englishKeys);
+  const missingKeys = englishKeys.filter((key) => !Object.hasOwn(candidate, key));
+  const unexpectedKeys = candidateKeys.filter((key) => !englishKeySet.has(key));
+  const placeholderMismatches = candidateKeys
+    .filter((key) => englishKeySet.has(key))
+    .filter((key) => !samePlaceholders(CATALOGS.en[key], candidate[key]));
+  return Object.freeze({
+    complete: missingKeys.length === 0 && unexpectedKeys.length === 0 && placeholderMismatches.length === 0,
+    translated: candidateKeys.length - unexpectedKeys.length,
+    required: englishKeys.length,
+    missingKeys: Object.freeze(missingKeys),
+    unexpectedKeys: Object.freeze(unexpectedKeys),
+    placeholderMismatches: Object.freeze(placeholderMismatches),
+  });
+}
+
+export function japaneseDiscordCatalogReadiness() {
+  return discordCatalogReadiness(JAPANESE_DISCORD_MESSAGES);
+}
+
 function supportedLocale(value) {
-  return typeof value === "string" && SUPPORTED_DISCORD_LOCALES.includes(value)
-    ? value
-    : null;
+  return isReleasedDiscordLocale(value) ? value : null;
+}
+
+function samePlaceholders(reference, candidate) {
+  if (typeof reference !== "string" || typeof candidate !== "string") return false;
+  const placeholders = (value) => [...value.matchAll(/\{([a-z0-9_]+)\}/gi)]
+    .map((match) => match[1])
+    .sort();
+  return JSON.stringify(placeholders(reference)) === JSON.stringify(placeholders(candidate));
 }
 
 function safePublicValidationMessage(message, locale) {

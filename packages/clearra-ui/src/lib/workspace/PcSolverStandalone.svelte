@@ -21,6 +21,10 @@
     type HostCapabilitySnapshot
   } from '../wasm';
   import QueueTextInput from '../components/QueueTextInput.svelte';
+  import {
+    RELEASED_WORKSPACE_LANGUAGES,
+    UI_LANGUAGE_MANIFEST
+  } from '../i18n/languageManifest.ts';
   import BoardEditor from './BoardEditor.svelte';
   import { writeClipboardText } from './clipboardText';
   import {
@@ -365,8 +369,14 @@
       </button>
       <div class="language-control" aria-label={label('language')}>
         <Languages size={15} strokeWidth={1.8} />
-        <button type="button" class:active={language === 'en'} on:click={() => setLanguage('en')}>EN</button>
-        <button type="button" class:active={language === 'ko'} on:click={() => setLanguage('ko')}>KO</button>
+        {#each RELEASED_WORKSPACE_LANGUAGES as locale}
+          <button
+            type="button"
+            class:active={language === locale}
+            title={UI_LANGUAGE_MANIFEST[locale].nativeLabel}
+            on:click={() => setLanguage(locale)}
+          >{UI_LANGUAGE_MANIFEST[locale].shortLabel}</button>
+        {/each}
       </div>
     </div>
   </header>

@@ -1,4 +1,5 @@
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import {
   cliCommandRequestForDesktop,
   serializeCliCommandArguments
@@ -36,7 +37,7 @@ export function buildOperationDocumentCommand(input: OperationDocumentCommandInp
 
 export function operationDocumentRequestForDesktop(
   input: OperationDocumentCommandInput,
-  language: 'en' | 'ko'
+  language: WorkspaceLanguage
 ): ClearraDesktopCliCommandRequest {
   return cliCommandRequestForDesktop(buildOperationDocumentCommandArguments(input), language);
 }

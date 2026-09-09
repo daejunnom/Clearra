@@ -9,6 +9,7 @@ import {
   type ScoreProfile,
   type SpinProfile
 } from './solverWorkspaceModel.ts';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
 import {
   buildProbabilityFinesseCommandArguments,
@@ -344,7 +345,7 @@ export function buildProbabilityCommand(request: BuildProbabilityRequest): strin
 
 export function buildProbabilityRequestForDesktop(
   request: BuildProbabilityRequest,
-  language: 'en' | 'ko'
+  language: WorkspaceLanguage
 ): ClearraDesktopCliCommandRequest {
   return cliCommandRequestForDesktop(buildProbabilityCommandArguments(request), language);
 }

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import type { RenderCapabilityReport } from '../render/renderCapabilityReport';
 import type {
   ExecutionAvailabilityReport,
@@ -21,7 +22,7 @@ import type {
 export type ClearraDesktopCliCommandRequest = {
   app_request_model: 'clearra-cli/CommandRequest';
   command: 'cli';
-  language: 'en' | 'ko';
+  language: WorkspaceLanguage;
   arguments: string[];
 };
 

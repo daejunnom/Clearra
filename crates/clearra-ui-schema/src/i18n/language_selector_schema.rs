@@ -10,12 +10,18 @@ pub struct LanguageSelectorSchema {
 
 impl LanguageSelectorSchema {
     pub fn from_preference(preference: &LanguagePreference) -> Self {
-        let detected_language = preference.system_locale().and_then(LanguageId::parse);
+        let detected_language = preference
+            .system_locale()
+            .and_then(LanguageId::parse_known)
+            .filter(|language| language.is_released());
+        let selected_language = preference
+            .selected()
+            .filter(|language| language.is_released());
         Self {
             default_language: LanguageId::En,
             detected_language,
-            selected_language: preference.selected(),
-            options: LanguageId::ALL
+            selected_language,
+            options: LanguageId::RELEASED
                 .into_iter()
                 .map(LanguageOptionSchema::new)
                 .collect(),

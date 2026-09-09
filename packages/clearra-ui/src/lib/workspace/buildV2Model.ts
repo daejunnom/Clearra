@@ -1,4 +1,5 @@
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import {
   boardMaskHex,
   defaultWorkerCount,
@@ -316,7 +317,7 @@ export function buildV2Command(request: BuildV2Request): string {
 
 export function buildV2RequestForDesktop(
   request: BuildV2Request,
-  language: 'en' | 'ko'
+  language: WorkspaceLanguage
 ): ClearraDesktopCliCommandRequest {
   return cliCommandRequestForDesktop(buildV2CommandArguments(request), language);
 }

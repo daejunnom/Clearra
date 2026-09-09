@@ -6,7 +6,12 @@ import {
   localizedSlashCommandName,
   resolveSlashCommandInvocation,
 } from "./slash-command-catalog.mjs";
-import { DiscordInputError, normalizeDiscordLocale } from "./i18n.mjs";
+import {
+  DiscordInputError,
+  SUPPORTED_DISCORD_LOCALES,
+  normalizeDiscordLocale,
+  t,
+} from "./i18n.mjs";
 import {
   DISCORD_PC_FIELD_MAX_ROWS,
   DISCORD_WIDE_FIELD_MAX_ROWS,
@@ -407,21 +412,20 @@ function modalLabel(command, option, supplied, inputSchema, locale) {
 function localeModalLabel(locale) {
   return Object.freeze({
     type: LABEL_COMPONENT,
-    label: locale === "ko" ? "언어" : "Language",
-    description: locale === "ko"
-      ? "이 요청의 응답 언어입니다. 채널·서버 기본값보다 우선합니다."
-      : "Response language for this request; overrides channel and server defaults.",
+    label: t(locale, "language.form.label"),
+    description: t(locale, "language.form.description"),
     component: Object.freeze({
       type: STRING_SELECT_COMPONENT,
       custom_id: "locale",
-      placeholder: locale === "ko" ? "응답 언어 선택" : "Choose response language",
+      placeholder: t(locale, "language.form.placeholder"),
       required: true,
       min_values: 1,
       max_values: 1,
-      options: Object.freeze([
-        Object.freeze({ label: locale === "ko" ? "영어" : "English", value: "en", ...(locale === "en" ? { default: true } : {}) }),
-        Object.freeze({ label: locale === "ko" ? "한국어" : "Korean", value: "ko", ...(locale === "ko" ? { default: true } : {}) }),
-      ]),
+      options: Object.freeze(SUPPORTED_DISCORD_LOCALES.map((value) => Object.freeze({
+        label: t(locale, `language.name.${value}`),
+        value,
+        ...(locale === value ? { default: true } : {}),
+      }))),
     }),
   });
 }

@@ -14,6 +14,7 @@ import {
   type ClearraDesktopResourceStatus
 } from '../host';
 import type { ClearraWasmSearchReport } from '../wasm';
+import { isReleasedWorkspaceLanguage } from '../i18n/languageManifest.ts';
 import { DesktopJobStartGeneration } from './desktopJobStartGeneration';
 
 export type DesktopJobState = {
@@ -129,7 +130,7 @@ function requireCompleteDesktopCliRequest(request: ClearraDesktopRequest): Clear
   if (
     record.app_request_model !== 'clearra-cli/CommandRequest' ||
     record.command !== 'cli' ||
-    (record.language !== 'en' && record.language !== 'ko') ||
+    !isReleasedWorkspaceLanguage(record.language) ||
     !Array.isArray(record.arguments) ||
     record.arguments.length < 2 ||
     record.arguments.some((argument) => typeof argument !== 'string') ||

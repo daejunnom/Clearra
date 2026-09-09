@@ -1,4 +1,4 @@
-use super::{language_id::normalize_language, LanguageId};
+use super::LanguageId;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LanguagePreference {
@@ -38,14 +38,15 @@ impl LanguagePreference {
 }
 impl LanguagePreference {
     pub fn resolve(&self) -> LanguageId {
-        if let Some(selected) = self.selected {
+        if let Some(selected) = self.selected.filter(|language| language.is_released()) {
             return selected;
         }
 
-        match self.system_locale.as_deref() {
-            Some(locale) if normalize_language(locale).starts_with("ko") => LanguageId::Ko,
-            _ => LanguageId::En,
-        }
+        self.system_locale
+            .as_deref()
+            .and_then(LanguageId::parse_known)
+            .filter(|language| language.is_released())
+            .unwrap_or(LanguageId::En)
     }
 }
 

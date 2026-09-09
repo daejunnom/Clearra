@@ -3,6 +3,7 @@ import type {
   ClearraRenderArtifactPayload
 } from '../wasm/wasmCommandClient';
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import {
   cliCommandRequestForDesktop,
   serializeCliCommandArguments
@@ -88,7 +89,7 @@ export function buildDocumentUtilityCommand(input: DocumentUtilityCommandInput):
 
 export function documentUtilityRequestForDesktop(
   input: DocumentUtilityCommandInput,
-  language: 'en' | 'ko'
+  language: WorkspaceLanguage
 ): ClearraDesktopCliCommandRequest {
   return cliCommandRequestForDesktop(buildDocumentUtilityCommandArguments(input), language);
 }

@@ -1,6 +1,6 @@
 use crate::language::LanguageId;
 
-use super::{english_catalog, korean_catalog, TranslationKey};
+use super::{english_catalog, japanese_catalog, korean_catalog, TranslationKey};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TranslationCatalog {
@@ -23,6 +23,13 @@ impl TranslationCatalog {
     }
 }
 impl TranslationCatalog {
+    /// Japanese catalog tooling is available before product exposure so
+    /// translators can complete and validate it without enabling `--lang ja`.
+    pub fn japanese_draft() -> Self {
+        Self::new(LanguageId::Ja)
+    }
+}
+impl TranslationCatalog {
     pub fn language(self) -> LanguageId {
         self.language
     }
@@ -32,6 +39,7 @@ impl TranslationCatalog {
         match self.language {
             LanguageId::En => english_catalog::get(key.as_str()),
             LanguageId::Ko => korean_catalog::get(key.as_str()),
+            LanguageId::Ja => japanese_catalog::get(key.as_str()),
         }
     }
 }
@@ -45,6 +53,13 @@ impl TranslationCatalog {
 impl TranslationCatalog {
     pub fn all_keys() -> &'static [&'static str] {
         english_catalog::KEYS
+    }
+
+    pub fn is_complete(language: LanguageId) -> bool {
+        let catalog = Self::new(language);
+        Self::all_keys()
+            .iter()
+            .all(|key| catalog.get(&TranslationKey::new(*key)).is_some())
     }
 }
 

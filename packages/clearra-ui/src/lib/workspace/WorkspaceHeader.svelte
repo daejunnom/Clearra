@@ -3,6 +3,10 @@
   import { createEventDispatcher, getContext, onMount } from 'svelte';
 
   import ProductModeTabs from './ProductModeTabs.svelte';
+  import {
+    RELEASED_WORKSPACE_LANGUAGES,
+    UI_LANGUAGE_MANIFEST
+  } from '../i18n/languageManifest.ts';
   import { PC_SOLVER_HREF_CONTEXT } from './workspaceNavigation';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import type { WorkspaceMode } from './workspaceMode';
@@ -59,8 +63,15 @@
     </div>
     <div class="language-control" role="group" aria-label={label('language')}>
       <Languages size={16} strokeWidth={1.8} />
-      <button type="button" class:active={language === 'en'} aria-pressed={language === 'en'} on:click={() => dispatch('language', 'en')}>EN</button>
-      <button type="button" class:active={language === 'ko'} aria-pressed={language === 'ko'} on:click={() => dispatch('language', 'ko')}>KO</button>
+      {#each RELEASED_WORKSPACE_LANGUAGES as locale}
+        <button
+          type="button"
+          class:active={language === locale}
+          aria-pressed={language === locale}
+          title={UI_LANGUAGE_MANIFEST[locale].nativeLabel}
+          on:click={() => dispatch('language', locale)}
+        >{UI_LANGUAGE_MANIFEST[locale].shortLabel}</button>
+      {/each}
     </div>
   </header>
   <ProductModeTabs active={activeMode} {language} busy={active} />

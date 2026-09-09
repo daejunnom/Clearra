@@ -1,4 +1,5 @@
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import {
   defaultWorkerCount,
   parseBrowserQueueInput
@@ -143,7 +144,7 @@ export function buildSetupScoreCommand(request: SetupScoreRequest): string {
 
 export function setupScoreRequestForDesktop(
   request: SetupScoreRequest,
-  language: 'en' | 'ko'
+  language: WorkspaceLanguage
 ): ClearraDesktopCliCommandRequest {
   return cliCommandRequestForDesktop(buildSetupScoreCommandArguments(request), language);
 }

@@ -3,21 +3,33 @@ import test from "node:test";
 
 import {
   assertDiscordCatalogComplete,
+  japaneseDiscordCatalogReadiness,
   DiscordInputError,
   matchDiscordLocale,
+  matchKnownDiscordLocale,
   operationErrorText,
+  SUPPORTED_DISCORD_LOCALES,
   t,
   validationErrorText,
 } from "../src/discord/i18n.mjs";
+import {
+  JAPANESE_DISCORD_MESSAGES,
+  JAPANESE_DISCORD_SLASH_DRAFT,
+} from "../src/discord/japanese-i18n-draft.mjs";
+import {
+  DISCORD_LOCALE_MANIFEST,
+  PLANNED_DISCORD_LOCALES,
+} from "../src/discord/locale-rollout.mjs";
 import {
   formatSlashCommandHelp,
   globalCommands,
 } from "../src/discord/slash-command-catalog.mjs";
 
-test("English and Korean Discord catalogs stay complete", () => {
+test("released English and Korean Discord catalogs stay complete", () => {
   assert.equal(assertDiscordCatalogComplete(), true);
   assert.equal(t("en", "language.name.en"), "English");
   assert.equal(t("ko-KR", "language.name.ko"), "한국어");
+  assert.equal(t("en", "language.name.ja"), "Japanese");
   assert.match(formatSlashCommandHelp("path", "ko"), /퍼펙트 클리어/u);
   assert.equal(matchDiscordLocale("ko-KR"), "ko");
   assert.equal(matchDiscordLocale("en-US"), "en");
@@ -30,6 +42,29 @@ test("English and Korean Discord catalogs stay complete", () => {
     validationErrorText(new DiscordInputError("options.setup_qb_bag_capacity"), "ko"),
     /7개 미노 백/u,
   );
+});
+
+test("Japanese Discord translations remain a non-published draft until every surface is complete", () => {
+  assert.deepEqual(SUPPORTED_DISCORD_LOCALES, ["en", "ko"]);
+  assert.deepEqual(PLANNED_DISCORD_LOCALES, ["ja"]);
+  assert.equal(DISCORD_LOCALE_MANIFEST.ja.status, "planned");
+  assert.equal(matchKnownDiscordLocale("ja_JP"), "ja");
+  assert.equal(matchKnownDiscordLocale("jp"), null);
+  assert.equal(matchDiscordLocale("ja-JP"), null);
+
+  const readiness = japaneseDiscordCatalogReadiness();
+  assert.equal(readiness.complete, false);
+  assert.equal(readiness.translated, Object.keys(JAPANESE_DISCORD_MESSAGES).length);
+  assert.ok(readiness.translated > 0);
+  assert.ok(readiness.translated < readiness.required);
+  assert.deepEqual(readiness.unexpectedKeys, []);
+  assert.deepEqual(readiness.placeholderMismatches, []);
+  assert.ok(readiness.missingKeys.includes("result.kind.pc"));
+  assert.ok(Object.keys(JAPANESE_DISCORD_SLASH_DRAFT).length > 0);
+
+  for (const command of globalCommands) {
+    assertRegistrationLocaleAbsent(command, "ja");
+  }
 });
 
 test("public validation and operation errors hide deployment details", () => {
@@ -304,6 +339,21 @@ test("Discord registration localizes names without redundant values or collision
 
 function effectiveKoreanChoiceName(choice) {
   return choice.name_localizations?.ko ?? choice.name;
+}
+
+function assertRegistrationLocaleAbsent(value, locale, path = value.name) {
+  assert.equal(value.name_localizations?.[locale], undefined, `${path} exposes ${locale}`);
+  assert.equal(
+    value.description_localizations?.[locale],
+    undefined,
+    `${path} description exposes ${locale}`,
+  );
+  for (const choice of value.choices ?? []) {
+    assertRegistrationLocaleAbsent(choice, locale, `${path}[${choice.value}]`);
+  }
+  for (const option of value.options ?? []) {
+    assertRegistrationLocaleAbsent(option, locale, `${path}.${option.name}`);
+  }
 }
 
 function assertLocalizedTree(value, kind = "command", path = value.name) {

@@ -1,4 +1,5 @@
 import type { ClearraDesktopRequest } from '../host';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import {
   searchExecutionCommandArguments,
   type SearchBackend,
@@ -590,7 +591,7 @@ export function buildWorkspaceCommand(request: SolverWorkspaceRequest): string {
 
 export function workspaceRequestForDesktop(
   request: SolverWorkspaceRequest,
-  language: 'en' | 'ko'
+  language: WorkspaceLanguage
 ): ClearraDesktopRequest {
   return cliCommandRequestForDesktop(buildWorkspaceCommandArguments(request), language);
 }

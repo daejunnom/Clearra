@@ -1,0 +1,43 @@
+// Translation-only draft. Nothing in this file is registered with Discord or
+// used for replies until the locale rollout manifest marks Japanese released.
+export const JAPANESE_DISCORD_MESSAGES = Object.freeze({
+  "preview.searching": "プレビューの準備ができました。Clearraで検索しています…",
+  "preview.result": "Clearraの結果を表示しました。",
+  "preview.document": "ドキュメントのプレビューを表示しました。",
+  "search.stopped": "結果が得られる前にClearraの検索を停止しました。",
+  "search.busy": "Clearraは処理中です。しばらくしてからもう一度お試しください。",
+  "search.cancelled": "検索をキャンセルしました。",
+  "search.timeout": "制限時間内に計算を完了できませんでした。もう一度お試しください。",
+  "search.failed": "リクエストを完了できませんでした。もう一度お試しください。",
+  "search.no_text": "Clearraはテキスト出力なしで完了しました。",
+  "result.completed": "Clearraの{kind}が完了しました{partial}。",
+  "result.partial_suffix": "（一部の結果）",
+  "error.request": "Clearraはリクエストを完了できませんでした: {message}",
+  "error.validation": "コマンドの入力を確認して、もう一度お試しください。",
+  "error.form": "入力フォームを開けませんでした。もう一度お試しください。",
+  "language.current": "現在の{scope}言語: {language}（{source}）。",
+  "language.updated": "{scope}の既定言語を{language}に変更しました。",
+  "language.reset": "{scope}の言語設定を削除しました。現在の言語は{language}です。",
+  "language.scope.channel": "チャンネル",
+  "language.scope.guild": "サーバー",
+  "language.source.channel": "チャンネル設定",
+  "language.source.guild": "サーバー設定",
+  "language.source.global": "全体の既定値",
+  "language.name.en": "英語",
+  "language.name.ko": "韓国語",
+  "language.name.ja": "日本語",
+  "language.form.label": "言語",
+  "language.form.description": "このリクエストの応答言語です。チャンネルとサーバーの既定値より優先されます。",
+  "language.form.placeholder": "応答言語を選択",
+});
+
+export const JAPANESE_DISCORD_SLASH_DRAFT = Object.freeze({
+  "help.name": "ヘルプ",
+  "help.description": "Clearraコマンドの入力方法と制限を表示します",
+  "channel-settings.description": "このチャンネルのClearra設定を管理します",
+  "server-settings.description": "このサーバーのClearra設定を管理します",
+  "pc.description": "パーフェクトクリアを検索します",
+  "build.description": "指定したフィールドの構築方法を検索します",
+  "forward.description": "順番が決まったネクストから前方検索します",
+  "utility.description": "フィールドとドキュメントのツールを実行します",
+});

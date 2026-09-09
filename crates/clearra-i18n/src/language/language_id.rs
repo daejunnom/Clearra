@@ -5,16 +5,23 @@ pub enum LanguageId {
     #[default]
     En,
     Ko,
+    Ja,
 }
 
 impl LanguageId {
-    pub const ALL: [Self; 2] = [Self::En, Self::Ko];
+    /// Every locale understood by the i18n layer, including locales that are
+    /// still being translated and must not be exposed by products yet.
+    pub const ALL: [Self; 3] = [Self::En, Self::Ko, Self::Ja];
+
+    /// Locales whose CLI, GUI, and Discord surfaces are all ready for use.
+    pub const RELEASED: [Self; 2] = [Self::En, Self::Ko];
 }
 impl LanguageId {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::En => "en",
             Self::Ko => "ko",
+            Self::Ja => "ja",
         }
     }
 }
@@ -23,6 +30,7 @@ impl LanguageId {
         match self {
             Self::En => "English",
             Self::Ko => "한국어",
+            Self::Ja => "日本語",
         }
     }
 }
@@ -31,16 +39,33 @@ impl LanguageId {
         match self {
             Self::En => "English",
             Self::Ko => "Korean",
+            Self::Ja => "Japanese",
         }
     }
 }
 impl LanguageId {
+    /// Parses only locales that are safe to expose in released products.
     pub fn parse(value: &str) -> Option<Self> {
         match normalize_language(value).as_str() {
             "en" | "en-us" | "en-gb" => Some(Self::En),
             "ko" | "ko-kr" => Some(Self::Ko),
             _ => None,
         }
+    }
+
+    /// Parses a known locale for catalog tooling without making it selectable.
+    pub fn parse_known(value: &str) -> Option<Self> {
+        let normalized = normalize_language(value);
+        match normalized.split(['-', '.']).next() {
+            Some("en") => Some(Self::En),
+            Some("ko") => Some(Self::Ko),
+            Some("ja") => Some(Self::Ja),
+            _ => None,
+        }
+    }
+
+    pub fn is_released(self) -> bool {
+        Self::RELEASED.contains(&self)
     }
 }
 
@@ -71,6 +96,12 @@ mod tests {
         assert_eq!(LanguageId::parse("en"), Some(LanguageId::En));
         assert_eq!(LanguageId::parse("en_US"), Some(LanguageId::En));
         assert_eq!(LanguageId::parse("ko-KR"), Some(LanguageId::Ko));
+        assert_eq!(LanguageId::parse("en-CA"), None);
+        assert_eq!(LanguageId::parse("ko-JP"), None);
+        assert_eq!(LanguageId::parse("ja-JP"), None);
+        assert_eq!(LanguageId::parse_known("ja_JP"), Some(LanguageId::Ja));
         assert_eq!(LanguageId::parse("jp"), None);
+        assert_eq!(LanguageId::parse_known("jp"), None);
+        assert_eq!(LanguageId::RELEASED, [LanguageId::En, LanguageId::Ko]);
     }
 }

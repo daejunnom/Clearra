@@ -1,0 +1,26 @@
+pub fn get(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "ui.language.selector.label" => "言語",
+        "ui.backend.auto.label" => "自動",
+        "ui.backend.auto.description" => "この検索で利用できる最も安全な処理方法を選択します。",
+        "ui.backend.cpu.label" => "CPU",
+        "ui.backend.cpu.description" => "安定したCPU処理経路を使用します。",
+        "ui.backend.gpu.label" => "GPU",
+        "ui.backend.gpu.description" => "候補数の計算にGPUを使用します。",
+        "ui.backend.hybrid.label" => "ハイブリッド",
+        "ui.backend.hybrid.description" => "GPUで候補を生成し、CPUで構築可能性を確認します。",
+        "ui.setup.result.total_solution_count" => "解法数",
+        "ui.setup.result.retained_trace_count" => "保持された手順数",
+        "ui.setup.result.count_complete" => "件数計算完了",
+        "ui.setup.result.continue_available" => "続行可能",
+        "ui.setup.result.backend_fallback_reason" => "処理方法を変更した理由",
+        "ui.setup.result.coverage_probability" => "カバー率",
+        "ui.diagnostic.backend_fallback_used" => "別の処理方法を使用",
+        "ui.problem.opening_pc.label" => "開幕PC",
+        "ui.problem.scenario_pc.label" => "シナリオPC",
+        "ui.problem.setup.label" => "セットアップ",
+        "ui.problem.build.label" => "ビルド",
+        "cli.help.top_level" => "Clearraコマンドライン",
+        _ => return None,
+    })
+}

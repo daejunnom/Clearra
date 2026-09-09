@@ -1,5 +1,6 @@
 import type { ClearraWasmSearchPathStep } from '../wasm/wasmCommandClient.ts';
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import type {
   WorkspaceDeveloperFailureEvidence,
   WorkspacePublicFailure
@@ -254,7 +255,7 @@ export function buildSetupPathDetailCommandArguments(
 
 export function setupFinderRequestForDesktop(
   request: SetupFinderRequest,
-  language: 'en' | 'ko',
+  language: WorkspaceLanguage,
   workers: number,
   detail?: SetupPathDetailRequest
 ): ClearraDesktopCliCommandRequest {

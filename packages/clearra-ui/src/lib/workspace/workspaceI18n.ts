@@ -3,8 +3,12 @@ import type {
   ClearraSearchProgressCountKey,
   ClearraSearchProgressTelemetry
 } from '../wasm/wasmCommandClient';
+import {
+  matchReleasedWorkspaceLanguage,
+  type WorkspaceLanguage
+} from '../i18n/languageManifest.ts';
 
-export type WorkspaceLanguage = 'en' | 'ko';
+export type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 
 const en = {
   workspaceMode: 'Product mode',
@@ -1328,6 +1332,42 @@ const ko: Record<keyof typeof en, string> = {
 
 export type WorkspaceMessageKey = keyof typeof en;
 
+export const WORKSPACE_MESSAGE_KEYS = Object.freeze(
+  Object.keys(en) as WorkspaceMessageKey[]
+);
+
+const releasedCatalogs: Record<WorkspaceLanguage, Record<WorkspaceMessageKey, string>> = {
+  en,
+  ko
+};
+
+export function workspaceCatalogReadiness(candidate: Record<string, string>) {
+  const required = new Set<string>(WORKSPACE_MESSAGE_KEYS);
+  const translatedKeys = Object.keys(candidate);
+  const missingKeys = WORKSPACE_MESSAGE_KEYS.filter((key) => !Object.hasOwn(candidate, key));
+  const unexpectedKeys = translatedKeys.filter((key) => !required.has(key));
+  const placeholderMismatches = translatedKeys
+    .filter((key): key is WorkspaceMessageKey => required.has(key))
+    .filter((key) => !samePlaceholders(en[key], candidate[key]));
+  return Object.freeze({
+    complete:
+      missingKeys.length === 0 &&
+      unexpectedKeys.length === 0 &&
+      placeholderMismatches.length === 0,
+    translated: translatedKeys.length - unexpectedKeys.length,
+    required: WORKSPACE_MESSAGE_KEYS.length,
+    missingKeys: Object.freeze(missingKeys),
+    unexpectedKeys: Object.freeze(unexpectedKeys),
+    placeholderMismatches: Object.freeze(placeholderMismatches)
+  });
+}
+
+function samePlaceholders(reference: string, candidate: string): boolean {
+  const placeholders = (value: string) =>
+    [...value.matchAll(/\{([a-z0-9_]+)\}/gi)].map((match) => match[1]).sort();
+  return JSON.stringify(placeholders(reference)) === JSON.stringify(placeholders(candidate));
+}
+
 export type WorkspaceSolutionCopyFailureKey =
   | 'solutionCopyFailed'
   | 'solutionCopyTooLarge'
@@ -1352,7 +1392,7 @@ export function workspaceMessage(
   key: WorkspaceMessageKey,
   values: Record<string, string | number> = {}
 ): string {
-  let message: string = (language === 'ko' ? ko : en)[key];
+  let message: string = releasedCatalogs[language][key];
   for (const [name, value] of Object.entries(values)) {
     message = message.replaceAll(`{${name}}`, String(value));
   }
@@ -1360,7 +1400,7 @@ export function workspaceMessage(
 }
 
 export function preferredWorkspaceLanguage(value?: string | null): WorkspaceLanguage {
-  return value?.toLowerCase().startsWith('ko') ? 'ko' : 'en';
+  return matchReleasedWorkspaceLanguage(value) ?? 'en';
 }
 
 export function workspaceProbability(

@@ -22,3 +22,17 @@ fn unknown_or_absent_locale_defaults_to_english() {
         LanguageId::En
     );
 }
+
+#[test]
+fn planned_japanese_locale_stays_unexposed_until_product_catalogs_are_ready() {
+    assert_eq!(LanguageId::parse_known("ja_JP.UTF-8"), Some(LanguageId::Ja));
+    assert_eq!(LanguageId::parse("ja_JP.UTF-8"), None);
+    assert_eq!(
+        LanguagePreference::new(None, Some("ja_JP.UTF-8")).resolve(),
+        LanguageId::En
+    );
+    assert_eq!(
+        LanguagePreference::new(Some(LanguageId::Ja), None::<String>).resolve(),
+        LanguageId::En
+    );
+}

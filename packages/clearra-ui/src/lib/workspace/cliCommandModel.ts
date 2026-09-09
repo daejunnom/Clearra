@@ -1,4 +1,5 @@
 import type { ClearraDesktopCliCommandRequest } from '../host/clearraDesktopHost.ts';
+import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 
 /**
  * Serialize canonical CLI arguments for the browser command-text transport.
@@ -11,7 +12,7 @@ export function serializeCliCommandArguments(arguments_: readonly string[]): str
 
 export function cliCommandRequestForDesktop(
   arguments_: readonly string[],
-  language: 'en' | 'ko'
+  language: WorkspaceLanguage
 ): ClearraDesktopCliCommandRequest {
   const argumentsCopy = arguments_.map(requireCliCommandToken);
   return {
