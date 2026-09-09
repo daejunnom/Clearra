@@ -34,14 +34,15 @@ They are not safe to background inside one job:
   Web output.
 
 Inside `RustExactTests`, one compile invocation produces the complete library
-test inventory. App/executor prefixes that acquire process-global execution
-capacity, plus the native FFI and WebGPU harnesses, run first with one test
-thread. Remaining test names are selected by excluding those exact prefixes
-and run with `min(2, workers)` threads. Harness processes remain ordered, so
-there is no second package-level worker pool and no runner oversubscription.
-Inventory counts are checked for every partition; missing filters, duplicate
-test names, skipped tests, and nonzero partitions fail closed after all runnable
-partitions report their results.
+test inventory. The App, core-executor, native FFI, and WebGPU harnesses can
+reach process-global execution capacity indirectly through product code, so
+each whole harness runs with one test thread. Those isolated harness processes
+run first in a pool of at most two. The other five packages have no path to that
+lease and run afterward with `min(2, workers)` test threads, one harness at a
+time, so there is no competing package-level pool or runner oversubscription.
+Inventory counts are checked for every harness; missing executables, duplicate
+test names, skipped partitions, and nonzero exits fail closed after every
+runnable harness reports its result.
 
 ## Canonical DAG
 
