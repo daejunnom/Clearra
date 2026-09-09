@@ -35,12 +35,10 @@ disagreement. It also binds the deferred evidence ownership from
 `NoProductDebt` and `AdversarialCorrectness` to the actual Rust, render, and
 desktop owners before canonical acceptance evidence can be created.
 
-### Independent failure collection (deferred branch)
+### Independent failure collection
 
-`codex/gate-independent-failure-collection` adds diagnostic continuation for
-`ReleaseAcceptance` only; it is deliberately not part of the current v0.8.0
-publication source. Once separately reviewed and integrated, a failing stage
-does not prevent independent later stages from running once. In the Rust shard,
+`ReleaseAcceptance` collects independent failures: a failing stage does not
+prevent independent later stages from running once. In the Rust shard,
 `RustExactTests`, `ProductE2E`, and `RenderGolden` each build/check their own
 prerequisites, so a test failure in one is not a prerequisite failure for the
 others. Cargo's existing `--no-fail-fast` remains responsible for collecting

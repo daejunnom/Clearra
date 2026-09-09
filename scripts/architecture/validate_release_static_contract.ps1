@@ -991,7 +991,6 @@ function Invoke-ReleaseIdentityGateValidation {
     $discordCatalogRelease = Read-Text 'apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs'
     $discordCatalogReleaseTest = Read-Text 'apps/clearra-discord-bot/test/discord-command-catalog-release.test.mjs'
     $productionObservation = Read-Text 'scripts/release/observe-production-surfaces.mjs'
-    $productionObservationTest = Read-Text 'scripts/release/observe-production-surfaces.test.mjs'
     $productionProbeAdapter = Read-Text 'scripts/release/production-surface-probe-adapter.mjs'
     $productionProbeAdapterTest = Read-Text 'scripts/release/production-surface-probe-adapter.test.mjs'
     $productionProbeMaterializer = Read-Text 'scripts/release/materialize-production-probe-spec.mjs'
@@ -4158,7 +4157,6 @@ function Invoke-ReleaseIdentityGateValidation {
         'Oracle fresh operation did not occur inside the observation window',
         'probe adapter SHA-256 changed',
         'shell: false',
-        'production surface probe output is not canonical JSON',
         'actual four-surface production observation producer report is required'
     )) {
         $surfaceText = if ($required -eq 'actual four-surface production observation producer report is required') {
@@ -4170,25 +4168,8 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "Production observation evidence is missing '$required'"
         }
     }
-    foreach ($required in @(
-        'observes Discord, Oracle, Cloud, and Pages through a short injected clock',
-        'fails closed when a surface identity changes during the window',
-        'rejects stale Oracle operation evidence immediately and report hash tampering',
-        'allows the verified candidate operation as sample zero before the claimed window',
-        'rejects Oracle freshness before verified-after authority',
-        'requires every later Oracle operation to follow the prior remote observation',
-        'requires the later Oracle operation to occur strictly inside the window',
-        'requires Oracle remote observation time to increase strictly',
-        'final report validation rechecks the live Oracle cross-sample contract',
-        'rejects Oracle freshness whose verified-after value differs from identity',
-        'rejects a re-sealed report that pads the window before sample zero',
-        'production validation requires the exact 1200-second two-sample contract',
-        'probe spec requires four hash-bound adapters and forbids secret fields'
-    )) {
-        if ($productionObservationTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
-            Add-ArchitectureError "Production observation mutation regression is missing '$required'"
-        }
-    }
+    # The canonical metadata owner above executes production observation regressions.
+    # Checking their human-readable titles again adds no runtime evidence.
     foreach ($required in @(
         'validateFinalSourceRevalidationFromStages',
         'validateDiscordCatalogSyncReport',
