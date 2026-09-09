@@ -191,6 +191,7 @@ jobs:
       CATALOG_RECOVERY_REQUIRED: ${{ needs.authority.outputs.catalog_recovery_required }}
       CATALOG_ARTIFACT_ID: ${{ needs.authority.outputs.catalog_artifact_id }}
       CATALOG_ARTIFACT_DIGEST: ${{ needs.authority.outputs.catalog_artifact_digest }}
+      DISCORD_APPLICATION_ID: ${{ vars.DISCORD_APPLICATION_ID }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: asia-northeast1
       ORACLE_PRIVATE_OVERLAY_ARCHIVE: ${{ vars.ORACLE_PRIVATE_OVERLAY_ARCHIVE }}
@@ -370,7 +371,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $evidenceRoot = Join-Path $env:RUNNER_TEMP 'discord-recovery-evidence'
+          $generationRoot = Join-Path $env:RUNNER_TEMP 'discord-recovery-generations'
+          if (-not (Test-Path -LiteralPath $generationRoot -PathType Container)) {
+            [void](New-Item -ItemType Directory -Path $generationRoot)
+          }
+          $evidenceRoot = Join-Path $generationRoot 'runtime-restore-only'
+          if (Test-Path -LiteralPath $evidenceRoot) {
+            throw 'runtime restore-only evidence generation already exists'
+          }
           & scripts/release/invoke-discord-runtime-recovery-v080.ps1 `
             -Stage $env:RECOVERY_STAGE `
             -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-input') `
@@ -396,13 +404,13 @@ jobs:
         id: catalog_restore
         continue-on-error: true
         shell: bash
-        run: bash scripts/release/restore-discord-catalog-v080.sh
+        run: bash scripts/release/restore-discord-catalog-v080.sh catalog-1
       - name: Retry catalog recovery after an ordinary failure or cancellation
         if: always() && steps.catalog_restore.outcome != 'success'
         id: catalog_retry
         continue-on-error: true
         shell: bash
-        run: bash scripts/release/restore-discord-catalog-v080.sh
+        run: bash scripts/release/restore-discord-catalog-v080.sh catalog-2
       - name: Re-authenticate rollback-only identity after catalog recovery
         if: always()
         uses: google-github-actions/auth@v2
@@ -414,9 +422,26 @@ jobs:
         id: restore
         continue-on-error: true
         shell: pwsh
+        env:
+          CATALOG_PRIMARY_OUTCOME: ${{ steps.catalog_restore.outcome }}
+          CATALOG_RETRY_OUTCOME: ${{ steps.catalog_retry.outcome }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $evidenceRoot = Join-Path $env:RUNNER_TEMP 'discord-recovery-evidence'
+          $generationRoot = Join-Path $env:RUNNER_TEMP 'discord-recovery-generations'
+          $catalogGeneration = if ($env:CATALOG_PRIMARY_OUTCOME -ceq 'success' -and
+              $env:CATALOG_RETRY_OUTCOME -ceq 'skipped') {
+            'catalog-1'
+          } elseif ($env:CATALOG_PRIMARY_OUTCOME -cne 'success' -and
+              $env:CATALOG_RETRY_OUTCOME -ceq 'success') {
+            'catalog-2'
+          } else {
+            throw 'catalog recovery lacks exactly one completed evidence generation'
+          }
+          $catalogRoot = Join-Path $generationRoot $catalogGeneration
+          $evidenceRoot = Join-Path $generationRoot 'runtime-1'
+          if (Test-Path -LiteralPath $evidenceRoot) {
+            throw 'primary runtime recovery evidence generation already exists'
+          }
           & scripts/release/invoke-discord-runtime-recovery-v080.ps1 `
             -Stage $env:RECOVERY_STAGE `
             -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-input') `
@@ -426,7 +451,7 @@ jobs:
             -OriginalWorkflowRunAttempt $env:ORIGINAL_RUN_ATTEMPT `
             -RecoveryArtifactId $env:ARTIFACT_ID -RecoveryArtifactDigest $env:ARTIFACT_DIGEST `
             -RecoveryAuthorityPath (Join-Path $env:RUNNER_TEMP 'discord-recovery-protected-authority/recovery-authority.json') `
-            -CatalogDispositionPath (Join-Path $evidenceRoot 'discord-catalog-recovery-disposition.json') `
+            -CatalogDispositionPath (Join-Path $catalogRoot 'discord-catalog-recovery-disposition.json') `
             -CatalogRecoveryRequired $env:CATALOG_RECOVERY_REQUIRED `
             -CatalogArtifactId $env:CATALOG_ARTIFACT_ID -CatalogArtifactDigest $env:CATALOG_ARTIFACT_DIGEST `
             -Repository $env:GITHUB_REPOSITORY -GcpProjectId $env:GCP_PROJECT_ID `
@@ -439,19 +464,37 @@ jobs:
         id: retry
         continue-on-error: true
         shell: pwsh
+        env:
+          CATALOG_PRIMARY_OUTCOME: ${{ steps.catalog_restore.outcome }}
+          CATALOG_RETRY_OUTCOME: ${{ steps.catalog_retry.outcome }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $generationRoot = Join-Path $env:RUNNER_TEMP 'discord-recovery-generations'
+          $catalogGeneration = if ($env:CATALOG_PRIMARY_OUTCOME -ceq 'success' -and
+              $env:CATALOG_RETRY_OUTCOME -ceq 'skipped') {
+            'catalog-1'
+          } elseif ($env:CATALOG_PRIMARY_OUTCOME -cne 'success' -and
+              $env:CATALOG_RETRY_OUTCOME -ceq 'success') {
+            'catalog-2'
+          } else {
+            throw 'catalog recovery retry lacks exactly one completed evidence generation'
+          }
+          $catalogRoot = Join-Path $generationRoot $catalogGeneration
+          $evidenceRoot = Join-Path $generationRoot 'runtime-2'
+          if (Test-Path -LiteralPath $evidenceRoot) {
+            throw 'retry runtime recovery evidence generation already exists'
+          }
           & scripts/release/invoke-discord-runtime-recovery-v080.ps1 `
             -Stage $env:RECOVERY_STAGE `
             -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-input') `
-            -EvidenceRoot (Join-Path $env:RUNNER_TEMP 'discord-recovery-evidence') `
+            -EvidenceRoot $evidenceRoot `
             -SourceCommit $env:SOURCE_COMMIT `
             -TrustedHelperSourceCommit $env:TRUSTED_HELPER_SOURCE_COMMIT `
             -OriginalWorkflowRunId $env:ORIGINAL_RUN_ID `
             -OriginalWorkflowRunAttempt $env:ORIGINAL_RUN_ATTEMPT `
             -RecoveryArtifactId $env:ARTIFACT_ID -RecoveryArtifactDigest $env:ARTIFACT_DIGEST `
             -RecoveryAuthorityPath (Join-Path $env:RUNNER_TEMP 'discord-recovery-protected-authority/recovery-authority.json') `
-            -CatalogDispositionPath (Join-Path $env:RUNNER_TEMP 'discord-recovery-evidence/discord-catalog-recovery-disposition.json') `
+            -CatalogDispositionPath (Join-Path $catalogRoot 'discord-catalog-recovery-disposition.json') `
             -CatalogRecoveryRequired $env:CATALOG_RECOVERY_REQUIRED `
             -CatalogArtifactId $env:CATALOG_ARTIFACT_ID -CatalogArtifactDigest $env:CATALOG_ARTIFACT_DIGEST `
             -Repository $env:GITHUB_REPOSITORY -GcpProjectId $env:GCP_PROJECT_ID `
@@ -464,9 +507,24 @@ jobs:
         id: verify_result
         continue-on-error: true
         shell: bash
+        env:
+          CATALOG_PRIMARY_OUTCOME: ${{ steps.catalog_restore.outcome }}
+          CATALOG_RETRY_OUTCOME: ${{ steps.catalog_retry.outcome }}
+          RUNTIME_PRIMARY_OUTCOME: ${{ steps.restore.outcome }}
+          RUNTIME_RETRY_OUTCOME: ${{ steps.retry.outcome }}
         run: |
           set -euo pipefail
-          source_root="$RUNNER_TEMP/discord-recovery-evidence"
+          generation_root="$RUNNER_TEMP/discord-recovery-generations"
+          case "$CATALOG_PRIMARY_OUTCOME:$CATALOG_RETRY_OUTCOME" in
+            success:skipped) catalog_root="$generation_root/catalog-1" ;;
+            failure:success|cancelled:success) catalog_root="$generation_root/catalog-2" ;;
+            *) echo 'catalog recovery lacks exactly one completed immutable generation' >&2; exit 2 ;;
+          esac
+          case "$RUNTIME_PRIMARY_OUTCOME:$RUNTIME_RETRY_OUTCOME" in
+            success:skipped) runtime_root="$generation_root/runtime-1" ;;
+            failure:success|cancelled:success) runtime_root="$generation_root/runtime-2" ;;
+            *) echo 'runtime recovery lacks exactly one completed immutable generation' >&2; exit 2 ;;
+          esac
           terminal_root="$RUNNER_TEMP/discord-recovery-result-artifact"
           [[ ! -e "$terminal_root" && ! -L "$terminal_root" ]]
           mkdir "$terminal_root"
@@ -477,12 +535,12 @@ jobs:
             cp --no-clobber --no-dereference "$source" "$target"
             cmp --silent "$source" "$target"
           }
-          copy_exact "$source_root/recovery-result.json" "$terminal_root/recovery-result.json"
+          copy_exact "$runtime_root/recovery-result.json" "$terminal_root/recovery-result.json"
           copy_exact \
             "$RUNNER_TEMP/discord-recovery-protected-authority/recovery-authority.json" \
             "$terminal_root/protected-recovery-authority.json"
           copy_exact \
-            "$source_root/discord-catalog-recovery-disposition.json" \
+            "$catalog_root/discord-catalog-recovery-disposition.json" \
             "$terminal_root/discord-catalog-recovery-disposition.json"
           if [[ "$CATALOG_RECOVERY_REQUIRED" == true ]]; then
             copy_exact \
@@ -498,7 +556,7 @@ jobs:
               "$RUNNER_TEMP/discord-catalog-recovery-input/discord-sync-authority.json" \
               "$terminal_root/discord-sync-authority.json"
             copy_exact \
-              "$source_root/discord-catalog-restore.json" \
+              "$catalog_root/discord-catalog-restore.json" \
               "$terminal_root/discord-catalog-restore.json"
           fi
           node scripts/release/discord-deployment-recovery.mjs verify-evidence \

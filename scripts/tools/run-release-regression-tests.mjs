@@ -7,6 +7,7 @@ export const ACTIONS_TEST_WORKER_CAP = 4;
 
 export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/release/accepted-wasm-build.test.mjs",
+  "scripts/release/reusable-accepted-wasm-build.test.mjs",
   "scripts/release/accepted-pages-build.test.mjs",
   "scripts/release/canonical-acceptance-evidence.test.mjs",
   "scripts/release/canonical-acceptance-run.test.mjs",

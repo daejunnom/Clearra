@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+[[ "$#" -eq 1 ]] || {
+  echo 'usage: restore-discord-catalog-v080.sh catalog-1|catalog-2' >&2
+  exit 2
+}
+generation="$1"
+[[ "$generation" == catalog-1 || "$generation" == catalog-2 ]] || {
+  echo 'catalog recovery generation must be catalog-1 or catalog-2' >&2
+  exit 2
+}
+
 for name in SOURCE_COMMIT ORIGINAL_RUN_ID ORIGINAL_RUN_ATTEMPT GITHUB_RUN_ID \
   GITHUB_RUN_ATTEMPT GITHUB_REPOSITORY CATALOG_RECOVERY_REQUIRED RUNNER_TEMP; do
   [[ -n "${!name:-}" ]] || { echo "catalog recovery lacks required authority: $name" >&2; exit 2; }
@@ -10,13 +20,25 @@ done
 [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
 [[ "$CATALOG_RECOVERY_REQUIRED" == true || "$CATALOG_RECOVERY_REQUIRED" == false ]]
 
-evidence="$RUNNER_TEMP/discord-recovery-evidence"
+generation_root="$RUNNER_TEMP/discord-recovery-generations"
+if [[ -e "$generation_root" ]]; then
+  [[ -d "$generation_root" && ! -L "$generation_root" ]] || {
+    echo 'catalog recovery generation root is not an exact directory' >&2
+    exit 2
+  }
+else
+  mkdir "$generation_root"
+fi
+evidence="$generation_root/$generation"
 input="$RUNNER_TEMP/discord-catalog-recovery-input"
 disposition="$evidence/discord-catalog-recovery-disposition.json"
 restore="$evidence/discord-catalog-restore.json"
-mkdir -p "$evidence"
-[[ ! -L "$evidence" ]]
-rm -f -- "$disposition" "$restore"
+[[ ! -e "$evidence" && ! -L "$evidence" ]] || {
+  echo 'catalog recovery refuses to overwrite an existing evidence generation' >&2
+  exit 2
+}
+mkdir "$evidence"
+[[ -d "$evidence" && ! -L "$evidence" ]]
 
 if [[ "$CATALOG_RECOVERY_REQUIRED" == false ]]; then
   node scripts/release/discord-catalog-recovery-authority.mjs seal-disposition \

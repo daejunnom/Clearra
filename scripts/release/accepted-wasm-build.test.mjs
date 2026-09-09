@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   ACCEPTED_WASM_BUILD_RECEIPT,
   collectAcceptedWasmProducerToolchains,
+  rebindAcceptedWasmBuild,
   sealAcceptedWasmBuild,
   verifyAcceptedWasmBuild,
 } from "./accepted-wasm-build.mjs";
@@ -122,6 +125,153 @@ test("accepted WASM verification rejects cross-source and cross-attempt reuse", 
       /run attempt mismatch/u,
     );
   } finally {
+    await fixture.dispose();
+  }
+});
+const TRY_REUSE_SCRIPT = fileURLToPath(
+  new URL("./try-reuse-accepted-wasm-build.mjs", import.meta.url),
+);
+
+test("rebinds byte-identical exact-source payload under the current run authority", async () => {
+  const fixture = await createFixture();
+  const destination = `${fixture.root}-rebound`;
+  try {
+    const previous = await sealAcceptedWasmBuild(
+      fixture.root,
+      SOURCE_COMMIT,
+      RUN_ID,
+      RUN_ATTEMPT,
+      TOOLCHAINS,
+    );
+    const before = new Map(await Promise.all(previous.files.map(async (file) => [
+      file.path,
+      await readFile(join(fixture.root, file.path)),
+    ])));
+    const reuse = await rebindAcceptedWasmBuild(
+      fixture.root,
+      destination,
+      SOURCE_COMMIT,
+      RUN_ID,
+      RUN_ATTEMPT,
+      "123457",
+      "1",
+    );
+    assert.equal(reuse.previous_run_id, RUN_ID);
+    assert.equal(reuse.current_run_id, "123457");
+    assert.equal(reuse.payload_sha256, previous.payload_sha256);
+
+    const rebound = await verifyAcceptedWasmBuild(
+      destination,
+      SOURCE_COMMIT,
+      "123457",
+      "1",
+    );
+    assert.equal(rebound.payload_sha256, previous.payload_sha256);
+    assert.deepEqual(rebound.toolchains, TOOLCHAINS);
+    for (const file of rebound.files) {
+      assert.deepEqual(await readFile(join(destination, file.path)), before.get(file.path));
+    }
+    assert.equal(
+      JSON.parse(await readFile(join(fixture.root, ACCEPTED_WASM_BUILD_RECEIPT), "utf8")).run_id,
+      RUN_ID,
+    );
+    assert.equal(
+      JSON.parse(await readFile(join(destination, ACCEPTED_WASM_BUILD_RECEIPT), "utf8")).run_id,
+      "123457",
+    );
+  } finally {
+    await rm(destination, { recursive: true, force: true });
+    await fixture.dispose();
+  }
+});
+
+test("WASM rebinding rejects reruns, overlap, tampering, source drift, and an existing destination", async () => {
+  const fixture = await createFixture();
+  const destination = `${fixture.root}-rejected`;
+  try {
+    await sealAcceptedWasmBuild(
+      fixture.root,
+      SOURCE_COMMIT,
+      RUN_ID,
+      RUN_ATTEMPT,
+      TOOLCHAINS,
+    );
+    await assert.rejects(
+      rebindAcceptedWasmBuild(
+        fixture.root, destination, SOURCE_COMMIT, RUN_ID, "2", "123457", "1",
+      ),
+      /requires first-attempt canonical runs/u,
+    );
+    await assert.rejects(
+      rebindAcceptedWasmBuild(
+        fixture.root, destination, SOURCE_COMMIT, RUN_ID, "1", "123457", "2",
+      ),
+      /requires first-attempt canonical runs/u,
+    );
+    await assert.rejects(
+      rebindAcceptedWasmBuild(
+        fixture.root, fixture.root, SOURCE_COMMIT, RUN_ID, "1", "123457", "1",
+      ),
+      /must not overlap/u,
+    );
+    await assert.rejects(
+      rebindAcceptedWasmBuild(
+        fixture.root, destination, "b".repeat(40), RUN_ID, "1", "123457", "1",
+      ),
+      /source commit mismatch|expected source identity/u,
+    );
+    await writeFile(join(fixture.root, "clearra_wasm.js"), "tampered", "utf8");
+    await assert.rejects(
+      rebindAcceptedWasmBuild(
+        fixture.root, destination, SOURCE_COMMIT, RUN_ID, "1", "123457", "1",
+      ),
+      /closed regular-file set|alias differs/u,
+    );
+    await writeFile(destination, "occupied", "utf8");
+    await assert.rejects(
+      rebindAcceptedWasmBuild(
+        fixture.root, destination, SOURCE_COMMIT, RUN_ID, "1", "123457", "1",
+      ),
+      /must not already exist/u,
+    );
+  } finally {
+    await rm(destination, { recursive: true, force: true });
+    await fixture.dispose();
+  }
+});
+
+test("optional reuse CLI publishes a verified hit and turns a rejected input into a clean miss", async () => {
+  const fixture = await createFixture();
+  const destination = `${fixture.root}-cli-rebound`;
+  const rejectedDestination = `${fixture.root}-cli-rejected`;
+  const output = `${fixture.root}-github-output.txt`;
+  const rejectedOutput = `${fixture.root}-github-output-rejected.txt`;
+  try {
+    await sealAcceptedWasmBuild(
+      fixture.root,
+      SOURCE_COMMIT,
+      RUN_ID,
+      RUN_ATTEMPT,
+      TOOLCHAINS,
+    );
+    await Promise.all([writeFile(output, ""), writeFile(rejectedOutput, "")]);
+    const hit = runTryReuse(fixture.root, destination, output, "123457");
+    assert.equal(hit.status, 0, hit.stderr);
+    assert.match(await readFile(output, "utf8"), /^reused=true\npayload_sha256=[0-9a-f]{64}\n$/u);
+    await verifyAcceptedWasmBuild(destination, SOURCE_COMMIT, "123457", "1");
+
+    await writeFile(join(fixture.root, "clearra_wasm.js"), "tampered", "utf8");
+    const miss = runTryReuse(fixture.root, rejectedDestination, rejectedOutput, "123458");
+    assert.equal(miss.status, 0, miss.stderr);
+    assert.equal(await readFile(rejectedOutput, "utf8"), "reused=false\n");
+    await assert.rejects(readFile(rejectedDestination), { code: "ENOENT" });
+  } finally {
+    await Promise.all([
+      rm(destination, { recursive: true, force: true }),
+      rm(rejectedDestination, { recursive: true, force: true }),
+      rm(output, { force: true }),
+      rm(rejectedOutput, { force: true }),
+    ]);
     await fixture.dispose();
   }
 });
@@ -246,4 +396,22 @@ async function createFixture() {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function runTryReuse(source, destination, output, currentRunId) {
+  return spawnSync(process.execPath, [
+    TRY_REUSE_SCRIPT,
+    "--source", source,
+    "--destination", destination,
+    "--source-commit", SOURCE_COMMIT,
+    "--previous-run-id", RUN_ID,
+    "--previous-run-attempt", RUN_ATTEMPT,
+    "--current-run-id", currentRunId,
+    "--current-run-attempt", "1",
+    "--github-output", output,
+  ], {
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+  });
 }
