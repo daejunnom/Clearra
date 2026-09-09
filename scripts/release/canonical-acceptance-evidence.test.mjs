@@ -52,6 +52,13 @@ const TOOLCHAINS = Object.freeze({
   cmake: "cmake version 3.31.0",
   powershell: "5.1.26100.4768",
 });
+const LINUX_WASM_TOOLCHAINS = Object.freeze({
+  ...TOOLCHAINS,
+  rust: "rustc 1.91.0 (linux)",
+  cargo: "cargo 1.91.0 (linux)",
+  cmake: "cmake version 3.31.0 (linux)",
+  powershell: "7.5.3",
+});
 const SHARD_TOOLCHAINS = Object.freeze({
   "foundation-no-product-debt": Object.freeze({
     rust: TOOLCHAINS.rust,
@@ -81,7 +88,7 @@ const SHARD_TOOLCHAINS = Object.freeze({
     cmake: TOOLCHAINS.cmake,
     powershell: TOOLCHAINS.powershell,
   }),
-  pages: TOOLCHAINS,
+  pages: LINUX_WASM_TOOLCHAINS,
 });
 
 const REQUIRED_JOB_STEPS = Object.freeze(new Map([
@@ -129,6 +136,9 @@ const REQUIRED_JOB_STEPS = Object.freeze(new Map([
     "Run canonical release acceptance rust shard",
     "Seal canonical release acceptance rust shard",
     "Upload canonical release acceptance rust shard",
+  ]],
+  ["release-acceptance-wasm-contracts", [
+    "Run WASM source and host contracts",
   ]],
   ["release-acceptance-wasm-build", [
     "Run verified WASM build producer",
@@ -275,15 +285,15 @@ test("six isolated shard reports preserve unique stage ownership and delegated e
     /SHA-256 differs|closed contract/u,
   );
 
-  const inconsistentPages = createReleaseAcceptanceShardEvidence(
+  const inconsistentRust = createReleaseAcceptanceShardEvidence(
     authority(),
-    "pages",
-    { ...SHARD_TOOLCHAINS.pages, rust: "rustc 9.99.0" },
+    "rust",
+    { ...SHARD_TOOLCHAINS.rust, rust: "rustc 9.99.0" },
   );
   assert.throws(
     () => createShardedReleaseGateReports(
       authority(),
-      [...shards.slice(0, -1), inconsistentPages],
+      shards.map((shard) => shard.shard === "rust" ? inconsistentRust : shard),
     ),
     /disagree on the rust toolchain/u,
   );
@@ -333,17 +343,17 @@ test("shard toolchain collection invokes only the closed shard tool set", () => 
   assert.deepEqual(calls.map(([command]) => command), ["cmake", "powershell"]);
 });
 
-test("Pages shard toolchains are inherited from the producer and checked at the consumer", () => {
+test("Pages shard inherits Linux producer tools and checks portable Node tools at the Windows consumer", () => {
   assert.deepEqual(
-    acceptedWasmToolchainsForPages(TOOLCHAINS, {
+    acceptedWasmToolchainsForPages(LINUX_WASM_TOOLCHAINS, {
       node: TOOLCHAINS.node,
       npm: TOOLCHAINS.npm,
       powershell: TOOLCHAINS.powershell,
     }),
-    TOOLCHAINS,
+    LINUX_WASM_TOOLCHAINS,
   );
   assert.throws(
-    () => acceptedWasmToolchainsForPages(TOOLCHAINS, {
+    () => acceptedWasmToolchainsForPages(LINUX_WASM_TOOLCHAINS, {
       node: "v99.0.0",
       npm: TOOLCHAINS.npm,
       powershell: TOOLCHAINS.powershell,
@@ -521,7 +531,7 @@ async function createFixture() {
     SOURCE_COMMIT,
     RUN_ID,
     RUN_ATTEMPT,
-    TOOLCHAINS,
+    SHARD_TOOLCHAINS.pages,
   );
   await stampAcceptedPagesBuild(pages, {
     sourceCommit: SOURCE_COMMIT,

@@ -1409,7 +1409,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'deterministically bind toolchains and four surfaces',
         'six isolated shard reports preserve unique stage ownership and delegated evidence',
         'shard toolchain collection invokes only the closed shard tool set',
-        'Pages shard toolchains are inherited from the producer and checked at the consumer',
+        'Pages shard inherits Linux producer tools and checks portable Node tools at the Windows consumer',
         'rejects duplicate jobs and any failed required step',
         'hashes three real products',
         'downloaded release products differ'
@@ -1615,6 +1615,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $releaseFoundationDesktopHostJobStart = $release.IndexOf("`n  release-acceptance-foundation-desktop-host:", [System.StringComparison]::Ordinal)
     $releaseSanitizerJobStart = $release.IndexOf("`n  release-acceptance-sanitizer:", [System.StringComparison]::Ordinal)
     $releaseRustJobStart = $release.IndexOf("`n  release-acceptance-rust:", [System.StringComparison]::Ordinal)
+    $releaseWasmContractsJobStart = $release.IndexOf("`n  release-acceptance-wasm-contracts:", [System.StringComparison]::Ordinal)
     $releaseWasmBuildJobStart = $release.IndexOf("`n  release-acceptance-wasm-build:", [System.StringComparison]::Ordinal)
     $releasePagesJobStart = $release.IndexOf("`n  release-acceptance-pages:", [System.StringComparison]::Ordinal)
     $releaseAcceptanceJobStart = $release.IndexOf("`n  release-acceptance:", [System.StringComparison]::Ordinal)
@@ -1632,7 +1633,8 @@ function Invoke-ReleaseIdentityGateValidation {
         $releaseFoundationDesktopHostJobStart -le $releaseFoundationAdversarialCorrectnessJobStart -or
         $releaseSanitizerJobStart -le $releaseFoundationDesktopHostJobStart -or
         $releaseRustJobStart -le $releaseSanitizerJobStart -or
-        $releaseWasmBuildJobStart -le $releaseRustJobStart -or
+        $releaseWasmContractsJobStart -le $releaseRustJobStart -or
+        $releaseWasmBuildJobStart -le $releaseWasmContractsJobStart -or
         $releasePagesJobStart -le $releaseWasmBuildJobStart -or
         $releaseAcceptanceJobStart -le $releasePagesJobStart -or
         $windowsCliJobStart -le $releaseAcceptanceJobStart -or
@@ -1666,7 +1668,11 @@ function Invoke-ReleaseIdentityGateValidation {
         )
         $releaseRustJob = $release.Substring(
             $releaseRustJobStart,
-            $releaseWasmBuildJobStart - $releaseRustJobStart
+            $releaseWasmContractsJobStart - $releaseRustJobStart
+        )
+        $releaseWasmContractsJob = $release.Substring(
+            $releaseWasmContractsJobStart,
+            $releaseWasmBuildJobStart - $releaseWasmContractsJobStart
         )
         $releaseWasmBuildJob = $release.Substring(
             $releaseWasmBuildJobStart,
@@ -1734,13 +1740,14 @@ function Invoke-ReleaseIdentityGateValidation {
             -ExpectedValue 'ubuntu-latest' `
             -Contract 'Canonical acceptance fan-in runner'
         foreach ($shardJob in @(
-            @{ Name = 'Foundation NoProductDebt'; Text = $releaseFoundationNoProductDebtJob; Needs = @('metadata') },
-            @{ Name = 'Foundation AdversarialCorrectness'; Text = $releaseFoundationAdversarialCorrectnessJob; Needs = @('metadata') },
-            @{ Name = 'Foundation DesktopHost'; Text = $releaseFoundationDesktopHostJob; Needs = @('metadata') },
-            @{ Name = 'Sanitizer'; Text = $releaseSanitizerJob; Needs = @('metadata') },
-            @{ Name = 'Rust'; Text = $releaseRustJob; Needs = @('metadata', 'ctk3') },
-            @{ Name = 'WASM producer'; Text = $releaseWasmBuildJob; Needs = @('metadata') },
-            @{ Name = 'Pages'; Text = $releasePagesJob; Needs = @('metadata', 'ctk3', 'release-acceptance-wasm-build') }
+            @{ Name = 'Foundation NoProductDebt'; Text = $releaseFoundationNoProductDebtJob; Needs = @('metadata'); Runner = 'windows-latest' },
+            @{ Name = 'Foundation AdversarialCorrectness'; Text = $releaseFoundationAdversarialCorrectnessJob; Needs = @('metadata'); Runner = 'windows-latest' },
+            @{ Name = 'Foundation DesktopHost'; Text = $releaseFoundationDesktopHostJob; Needs = @('metadata'); Runner = 'windows-latest' },
+            @{ Name = 'Sanitizer'; Text = $releaseSanitizerJob; Needs = @('metadata'); Runner = 'windows-latest' },
+            @{ Name = 'Rust'; Text = $releaseRustJob; Needs = @('metadata', 'ctk3'); Runner = 'windows-latest' },
+            @{ Name = 'WASM contracts'; Text = $releaseWasmContractsJob; Needs = @('metadata'); Runner = 'windows-latest' },
+            @{ Name = 'WASM producer'; Text = $releaseWasmBuildJob; Needs = @('metadata'); Runner = 'ubuntu-latest' },
+            @{ Name = 'Pages'; Text = $releasePagesJob; Needs = @('metadata', 'ctk3', 'release-acceptance-wasm-contracts', 'release-acceptance-wasm-build'); Runner = 'windows-latest' }
         )) {
             Assert-ReleaseYamlExactKeySet `
                 -Text $shardJob.Text `
@@ -1757,7 +1764,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 -Text $shardJob.Text `
                 -Indentation 4 `
                 -Key 'runs-on' `
-                -ExpectedValue 'windows-latest' `
+                -ExpectedValue $shardJob.Runner `
                 -Contract "$($shardJob.Name) canonical acceptance runner"
             if ($shardJob.Needs.Count -eq 1) {
                 Assert-ReleaseYamlExactScalar `
@@ -1985,39 +1992,41 @@ function Invoke-ReleaseIdentityGateValidation {
             $releaseFoundationDesktopHostJob,
             $releaseSanitizerJob,
             $releaseRustJob,
+            $releaseWasmContractsJob,
             $releaseWasmBuildJob
         ) -join "`n"
-        if ([regex]::Matches($releaseAcceptanceCacheText, 'actions/cache/restore@v4').Count -ne 6 -or
+        if ([regex]::Matches($releaseAcceptanceCacheText, 'actions/cache/restore@v4').Count -ne 7 -or
             [regex]::Matches($release, 'actions/cache/save@v4').Count -ne 3 -or
             [regex]::Matches($release, '(?m)^      - uses: actions/cache@v4\s*$').Count -ne 2) {
-            Add-ArchitectureError 'Canonical ReleaseAcceptance requires six cache readers and one verified writer per native, WASM and sanitizer family'
+            Add-ArchitectureError 'Canonical ReleaseAcceptance requires seven cache readers and one verified writer per native, WASM and sanitizer family'
         }
-        foreach ($shardCacheJob in @(
-            $releaseFoundationNoProductDebtJob,
-            $releaseFoundationAdversarialCorrectnessJob,
-            $releaseFoundationDesktopHostJob,
-            $releaseRustJob,
-            $releaseWasmBuildJob
+        foreach ($shardCache in @(
+            @{ Name = 'Foundation NoProductDebt'; Job = $releaseFoundationNoProductDebtJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
+            @{ Name = 'Foundation AdversarialCorrectness'; Job = $releaseFoundationAdversarialCorrectnessJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
+            @{ Name = 'Foundation DesktopHost'; Job = $releaseFoundationDesktopHostJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
+            @{ Name = 'Rust'; Job = $releaseRustJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
+            @{ Name = 'WASM contracts'; Job = $releaseWasmContractsJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
+            @{ Name = 'WASM producer'; Job = $releaseWasmBuildJob; Family = 'wasm'; Version = 'v4'; BuildPath = '~/.cache/Clearra/build/cargo-target' }
         )) {
-            $cacheFamily = if ($shardCacheJob -eq $releaseWasmBuildJob) { 'wasm' } else { 'native' }
             foreach ($requiredRestoreMarker in @(
                 'actions/cache/restore@v4',
-                '~/AppData/Local/Clearra/build',
-                ('key: release-acceptance-' + $cacheFamily + '-v3-${{ runner.os }}-bindgen-0.2.126-'),
+                $shardCache.BuildPath,
+                ('key: release-acceptance-' + $shardCache.Family + '-' + $shardCache.Version + '-${{ runner.os }}-bindgen-0.2.126-'),
                 'restore-keys: |'
             )) {
-                if ($shardCacheJob.IndexOf($requiredRestoreMarker, [System.StringComparison]::Ordinal) -lt 0) {
-                    Add-ArchitectureError "Canonical ReleaseAcceptance isolated restore is missing '$requiredRestoreMarker'"
+                if ($shardCache.Job.IndexOf($requiredRestoreMarker, [System.StringComparison]::Ordinal) -lt 0) {
+                    Add-ArchitectureError "$($shardCache.Name) canonical isolated restore is missing '$requiredRestoreMarker'"
                 }
             }
         }
         foreach ($readerJob in @(
             $releaseFoundationNoProductDebtJob,
             $releaseFoundationAdversarialCorrectnessJob,
-            $releaseFoundationDesktopHostJob
+            $releaseFoundationDesktopHostJob,
+            $releaseWasmContractsJob
         )) {
             if ($readerJob.Contains('actions/cache/save@v4') -or $readerJob.Contains('actions/cache@v4')) {
-                Add-ArchitectureError 'Foundation leaves must not race the native cache owner'
+                Add-ArchitectureError 'Restore-only acceptance leaves must not race a cache owner'
             }
         }
         foreach ($cacheOwner in @(
@@ -2070,8 +2079,12 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError 'Canonical Pages acceptance must consume accepted WASM bytes without a build cache'
         }
         foreach ($requiredAcceptedWasmMarker in @(
+            'Run WASM source and host contracts',
+            '-Task WasmBuildContracts -ExecutionSurface Trusted -RuntimeEnvironment windows',
             'Run verified WASM build producer',
-            '-Task WasmBuildProducer -ExecutionSurface Trusted',
+            '-Task WasmBuildProducer -ExecutionSurface Trusted -RuntimeEnvironment wasm',
+            'wasm_compile_context=source-contracts task_workers=1 cargo_jobs=$cargoJobs',
+            'wasm_compile_context=accepted-artifact task_workers=1 cargo_jobs=$cargo_jobs',
             'Upload accepted WASM build',
             'Download accepted WASM build',
             'accepted-wasm-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}',
@@ -3601,8 +3614,11 @@ function Invoke-ReleaseIdentityGateValidation {
         Add-ArchitectureError 'WASM release build must finish the accepted Pages artifact with the exact 404 fallback'
     }
     foreach ($required in @(
+        'Invoke-WasmBuildContractsGate',
         'Invoke-WasmBuildProducerGate',
+        'Invoke-WasmProductSourceContracts',
         'Invoke-WasmProductArtifactBuild',
+        'Write-WasmCargoSchedulerEvidence',
         'Import-AcceptedWasmBuild',
         'CLEARRA_ACCEPTED_WASM_DIR',
         'clearra-wasm accepted producer input',

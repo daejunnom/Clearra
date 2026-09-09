@@ -139,13 +139,14 @@ export function collectAcceptedWasmProducerToolchains(dependencies = {}) {
   const npmInvocation = platform === "win32"
     ? ["cmd.exe", ["/d", "/s", "/c", "npm.cmd --version"], "npm"]
     : ["npm", ["--version"], "npm"];
+  const powershellCommand = platform === "win32" ? "powershell" : "pwsh";
   const invocations = new Map([
     ["cargo", ["cargo", ["--version"], "cargo"]],
     ["cmake", ["cmake", ["--version"], "cmake"]],
     ["node", ["node", ["--version"], "node"]],
     ["npm", npmInvocation],
     ["powershell", [
-      "powershell",
+      powershellCommand,
       ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
       "PowerShell",
     ]],

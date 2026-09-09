@@ -499,7 +499,7 @@ jobs:
           path: release-shard-evidence/clearra-release-acceptance-rust-shard.v1.json
           if-no-files-found: error
 
-  release-acceptance-wasm-build:
+  release-acceptance-wasm-contracts:
     if: github.event_name == 'workflow_dispatch'
     needs: metadata
     runs-on: windows-latest
@@ -509,6 +509,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Configure WASM contract compile parallelism
+        shell: pwsh
+        run: |
+          $cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)
+          "CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV
+          "wasm_compile_context=source-contracts task_workers=1 cargo_jobs=$cargoJobs"
       - id: release_toolchain_cache
         name: Restore canonical release toolchain cache
         uses: actions/cache/restore@v4
@@ -518,25 +524,56 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/AppData/Local/Clearra/build
-          key: release-acceptance-wasm-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-wasm-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
-      - name: Prepare acceptance toolchains
-        shell: powershell
+            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+      - name: Run WASM source and host contracts
+        run: powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildContracts -ExecutionSurface Trusted -RuntimeEnvironment windows
+
+  release-acceptance-wasm-build:
+    if: github.event_name == 'workflow_dispatch'
+    needs: metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Configure WASM compile parallelism
+        shell: bash
         run: |
+          set -euo pipefail
+          cargo_jobs="$(getconf _NPROCESSORS_ONLN)"
+          [[ "$cargo_jobs" =~ ^[1-9][0-9]*$ ]]
+          echo "CARGO_BUILD_JOBS=$cargo_jobs" >> "$GITHUB_ENV"
+          echo "wasm_compile_context=accepted-artifact task_workers=1 cargo_jobs=$cargo_jobs"
+      - id: release_toolchain_cache
+        name: Restore canonical release toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/Clearra/build/cargo-target
+          key: release-acceptance-wasm-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            release-acceptance-wasm-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-
+      - name: Prepare acceptance toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
           rustup target add wasm32-unknown-unknown
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $tool = Get-Command wasm-bindgen -ErrorAction SilentlyContinue
-          if ($null -eq $tool -or (& wasm-bindgen --version) -ne 'wasm-bindgen 0.2.126') {
+          if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != 'wasm-bindgen 0.2.126' ]]; then
             cargo install wasm-bindgen-cli --version 0.2.126 --locked
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          fi
       - name: Run verified WASM build producer
         env:
-          CLEARRA_ACCEPTED_WASM_OUTPUT_DIR: ${{ runner.temp }}\clearra-accepted-wasm
+          CLEARRA_ACCEPTED_WASM_OUTPUT_DIR: ${{ runner.temp }}/clearra-accepted-wasm
           CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
           CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildProducer -ExecutionSurface Trusted
+        run: pwsh -NoProfile -File scripts/clearra.ps1 -Task WasmBuildProducer -ExecutionSurface Trusted -RuntimeEnvironment wasm
       # Keep WASM and native snapshots separate: parallel producers must not race
       # to publish incomplete target trees under the same immutable cache key.
       - name: Save verified canonical WASM build cache
@@ -546,10 +583,10 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            ~/.cargo/bin/wasm-bindgen.exe
+            ~/.cargo/bin/wasm-bindgen
             ~/.cargo/registry
             ~/.cargo/git
-            ~/AppData/Local/Clearra/build
+            ~/.cache/Clearra/build/cargo-target
           key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}
       - name: Upload accepted WASM build
         uses: actions/upload-artifact@v4
@@ -560,7 +597,7 @@ jobs:
 
   release-acceptance-pages:
     if: github.event_name == 'workflow_dispatch'
-    needs: [metadata, ctk3, release-acceptance-wasm-build]
+    needs: [metadata, ctk3, release-acceptance-wasm-contracts, release-acceptance-wasm-build]
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -943,7 +980,7 @@ jobs:
   release-failure-summary:
     if: always() && github.event_name == 'workflow_dispatch'
     needs:
-      [metadata, ctk3, linux-cli, discord-bot, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-wasm-build, release-acceptance-pages, release-acceptance, windows-cli, windows-gui, canonical-evidence]
+      [metadata, ctk3, linux-cli, discord-bot, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-wasm-contracts, release-acceptance-wasm-build, release-acceptance-pages, release-acceptance, windows-cli, windows-gui, canonical-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: read

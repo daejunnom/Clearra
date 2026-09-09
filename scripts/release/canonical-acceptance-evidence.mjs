@@ -197,6 +197,9 @@ const REQUIRED_JOBS = Object.freeze(new Map([
     "Seal canonical release acceptance rust shard",
     "Upload canonical release acceptance rust shard",
   ])],
+  ["release-acceptance-wasm-contracts", Object.freeze([
+    "Run WASM source and host contracts",
+  ])],
   ["release-acceptance-wasm-build", Object.freeze([
     "Run verified WASM build producer",
     "Upload accepted WASM build",
@@ -384,8 +387,12 @@ export function createShardedReleaseGateReports(authority, shardReports) {
   const foundationNoProductDebt = reports.find(
     (report) => report.shard === "foundation-no-product-debt",
   );
+  const producerHostTools = new Set(["rust", "cargo", "cmake", "powershell"]);
   for (const tool of ["rust", "cargo", "node", "npm", "cmake", "powershell"]) {
-    const versions = reports
+    const comparableReports = producerHostTools.has(tool)
+      ? reports.filter((report) => report.shard !== "pages")
+      : reports;
+    const versions = comparableReports
       .filter((report) => Object.hasOwn(report.toolchains, tool))
       .map((report) => report.toolchains[tool]);
     if (new Set(versions).size !== 1) {
@@ -520,6 +527,7 @@ export function collectLocalToolchains(dependencies = {}) {
         Object.freeze(["/d", "/s", "/c", "npm.cmd --version"]),
       ])
     : Object.freeze(["npm", Object.freeze(["--version"])]);
+  const powershellCommand = platform === "win32" ? "powershell" : "pwsh";
   const invocations = new Map([
     ["rust", ["rustc", ["--version"], "rustc"]],
     ["cargo", ["cargo", ["--version"], "cargo"]],
@@ -528,7 +536,7 @@ export function collectLocalToolchains(dependencies = {}) {
     ["wasm_bindgen", ["wasm-bindgen", ["--version"], "wasm-bindgen"]],
     ["cmake", ["cmake", ["--version"], "cmake"]],
     ["powershell", [
-      "powershell",
+      powershellCommand,
       ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
       "PowerShell",
     ]],
@@ -543,6 +551,7 @@ export function collectReleaseShardToolchains(shard, dependencies = {}) {
   const npmInvocation = platform === "win32"
     ? ["cmd.exe", ["/d", "/s", "/c", "npm.cmd --version"], "npm"]
     : ["npm", ["--version"], "npm"];
+  const powershellCommand = platform === "win32" ? "powershell" : "pwsh";
   const invocations = new Map([
     ["rust", ["rustc", ["--version"], "rustc"]],
     ["cargo", ["cargo", ["--version"], "cargo"]],
@@ -551,7 +560,7 @@ export function collectReleaseShardToolchains(shard, dependencies = {}) {
     ["wasm_bindgen", ["wasm-bindgen", ["--version"], "wasm-bindgen"]],
     ["cmake", ["cmake", ["--version"], "cmake"]],
     ["powershell", [
-      "powershell",
+      powershellCommand,
       ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
       "PowerShell",
     ]],
@@ -565,11 +574,12 @@ function collectPagesConsumerToolchains(dependencies = {}) {
   const npmInvocation = platform === "win32"
     ? ["cmd.exe", ["/d", "/s", "/c", "npm.cmd --version"], "npm"]
     : ["npm", ["--version"], "npm"];
+  const powershellCommand = platform === "win32" ? "powershell" : "pwsh";
   const invocations = new Map([
     ["node", ["node", ["--version"], "node"]],
     ["npm", npmInvocation],
     ["powershell", [
-      "powershell",
+      powershellCommand,
       ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
       "PowerShell",
     ]],
@@ -580,7 +590,10 @@ function collectPagesConsumerToolchains(dependencies = {}) {
 export function acceptedWasmToolchainsForPages(receiptToolchains, consumerToolchains) {
   const contract = requireReleaseShard("pages");
   const producer = validateReleaseShardToolchains(receiptToolchains, contract);
-  for (const key of ["node", "npm", "powershell"]) {
+  // Node and npm interpret the generated bindings and assemble the consumer.
+  // PowerShell only orchestrates the jobs, so its Windows consumer version is
+  // allowed to differ from the Linux producer while both remain recorded.
+  for (const key of ["node", "npm"]) {
     if (consumerToolchains?.[key] !== producer[key]) {
       throw new Error(`Pages consumer disagrees with the accepted WASM ${key} toolchain`);
     }

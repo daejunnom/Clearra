@@ -121,10 +121,10 @@ ROOT=$(wslpath -a ${shellQuote(root)})
 DESTINATION=$(wslpath -a ${shellQuote(stagingDir)})
 TARGET_ROOT="\${CLEARRA_WSL_CARGO_TARGET_DIR:-\${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build/cargo-target-wasm}"
 mkdir -p "$TARGET_ROOT" "$DESTINATION"
-${options.verify ? `${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-cli-command --lib --tests
-${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --lib --tests
-${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo test --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --test wasm_host_contract` : ''}
-${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --manifest-path "$ROOT/Cargo.toml" --target wasm32-unknown-unknown --release -p clearra-wasm-abi${cargoFeatures}
+${options.verify ? `${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --locked --manifest-path "$ROOT/Cargo.toml" --package clearra-cli-command --lib --tests
+${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --locked --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --lib --tests
+${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo test --locked --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --test wasm_host_contract` : ''}
+${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --locked --manifest-path "$ROOT/Cargo.toml" --target wasm32-unknown-unknown --release -p clearra-wasm-abi${cargoFeatures}
 wasm-bindgen "$TARGET_ROOT/wasm32-unknown-unknown/release/clearra_wasm.wasm" --target web --out-dir "$DESTINATION" --out-name clearra_wasm --no-typescript
 `;
   const encoded = Buffer.from(script, 'utf8').toString('base64');
@@ -147,20 +147,20 @@ async function buildNative() {
   await mkdir(targetRoot, { recursive: true });
   if (options.verify) {
     await run('cargo', [
-      'check', '--manifest-path', resolve(root, 'Cargo.toml'),
+      'check', '--locked', '--manifest-path', resolve(root, 'Cargo.toml'),
       '--package', 'clearra-cli-command', '--lib', '--tests'
     ], { CARGO_TARGET_DIR: targetRoot });
     await run('cargo', [
-      'check', '--manifest-path', resolve(root, 'Cargo.toml'),
+      'check', '--locked', '--manifest-path', resolve(root, 'Cargo.toml'),
       '--package', 'clearra-wasm', '--lib', '--tests'
     ], { CARGO_TARGET_DIR: targetRoot });
     await run('cargo', [
-      'test', '--manifest-path', resolve(root, 'Cargo.toml'),
+      'test', '--locked', '--manifest-path', resolve(root, 'Cargo.toml'),
       '--package', 'clearra-wasm', '--test', 'wasm_host_contract'
     ], { CARGO_TARGET_DIR: targetRoot });
   }
   const cargoArgs = [
-    'build',
+    'build', '--locked',
     '--manifest-path',
     resolve(root, 'Cargo.toml'),
     '--target',
@@ -439,6 +439,7 @@ function shellQuote(value) {
 
 function run(command, args, extraEnvironment = {}) {
   return new Promise((resolveRun, rejectRun) => {
+    const startedAt = Date.now();
     const child = spawn(command, args, {
       stdio: 'inherit',
       shell: false,
@@ -448,7 +449,11 @@ function run(command, args, extraEnvironment = {}) {
       rejectRun(new Error(`failed to start ${command}: ${error.message}`));
     });
     child.once('exit', (code, signal) => {
-      if (code === 0) resolveRun();
+      if (code === 0) {
+        const commandName = command === 'cargo' ? `cargo-${args[0] ?? 'unknown'}` : command;
+        console.log(`wasm_build_command=${commandName} duration_ms=${Date.now() - startedAt}`);
+        resolveRun();
+      }
       else rejectRun(new Error(`${command} failed with code=${code} signal=${signal ?? 'none'}`));
     });
   });

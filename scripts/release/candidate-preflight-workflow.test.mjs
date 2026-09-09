@@ -94,12 +94,14 @@ test('full selection runs the unchanged eight-stage entry point once and skips l
 test('focused Rust/WASM feedback is not another full gate and builds one independent generation', () => {
   const job = workflow.split('  candidate-rust-wasm:')[1].split('  candidate-cli:')[0];
   assert.match(job, /if: needs\.candidate-source\.outputs\.full_gate == 'false'/u);
-  assert.match(job, /runs-on: windows-latest/u);
-  assert.match(job, /Assert-ClearraTrustedExecutionSurface -TaskName 'CandidateRustWasm' -ExecutionSurface Trusted -RuntimeEnvironment windows/u);
+  assert.match(job, /runs-on: ubuntu-latest/u);
+  assert.match(job, /Assert-ClearraTrustedExecutionSurface -TaskName 'CandidateRustWasm' -ExecutionSurface Trusted -RuntimeEnvironment wasm/u);
   assert.match(job, /\. \.\/scripts\/lib\/clearra-path-helpers\.ps1/u);
   assert.match(job, /git rev-parse HEAD\)\.Trim\(\) -ne \$env:GITHUB_SHA/u);
+  assert.match(job, /CARGO_BUILD_JOBS=\$cargoJobs/u);
+  assert.match(job, /task_workers=1 cargo_jobs=\$cargoJobs/u);
   assert.doesNotMatch(job, /run: node scripts\/release\/candidate-preflight-regressions\.mjs/u);
-  assert.doesNotMatch(job, /-Task ReleaseAcceptance|--workspace|--all-targets|--verify|--benchmark/u);
+  assert.doesNotMatch(job, /-Task ReleaseAcceptance|--workspace|--all-targets|--verify|--benchmark|npm ci/u);
   assert.equal((job.match(/node scripts\/tools\/build-clearra-wasm\.mjs --environment native --destination \$candidateWasmBuild/gu) ?? []).length, 1);
   assert.match(job, /Join-Path \$env:RUNNER_TEMP 'clearra-candidate-wasm-built'/u);
   assert.match(job, /!cancelled\(\) && steps\.toolchains\.outcome == 'success' && steps\.boundaries\.outcome == 'success'/u);
@@ -120,14 +122,14 @@ test('native regressions and WASM are sibling leaves, not a serial critical path
 
 test('candidate build leaves only read matching canonical cache families and still rebuild', () => {
   const canonical = productionWorkflows[0].replaceAll('\r\n', '\n');
-  for (const [name, family] of [
-    ['candidate-full-gate', 'wasm'], ['candidate-rust-wasm', 'wasm'], ['candidate-rust', 'native'],
+  for (const [name, family, version] of [
+    ['candidate-full-gate', 'native', 3], ['candidate-rust-wasm', 'wasm', 4], ['candidate-rust', 'native', 3],
   ]) {
     const job = workflow.split(`  ${name}:`)[1].split(/^  [a-z][a-z-]*:/mu)[0].replaceAll('\r\n', '\n');
     const cache = job.match(/      - name: Restore verified (?:WASM|native) build inputs\n([\s\S]*?)(?=      - name:)/u)?.[1];
     assert.ok(cache, `${name} cache reader missing`);
     assert.ok(canonical.includes(cache.trimEnd()), `${name} must match the canonical producer cache paths and keys`);
-    assert.ok(cache.includes(`key: release-acceptance-${family}-v3-`));
+    assert.ok(cache.includes(`key: release-acceptance-${family}-v${version}-`));
     assert.match(cache, /-\$\{\{ github.sha \}\}/u);
     assert.equal((job.match(/actions\/cache\/restore@v4/gu) ?? []).length, 1);
     assert.doesNotMatch(job, /cache-hit/u, 'a cache hit is not a reason to skip the source build or tests');

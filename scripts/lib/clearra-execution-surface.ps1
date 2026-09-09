@@ -67,6 +67,7 @@ function Assert-ClearraRequestedTaskSurfaces(
         "AdversarialCorrectness",
         "CSanitizer",
         "RustExactTests",
+        "WasmBuildContracts",
         "WasmBuildProducer",
         "WasmBuildTest",
         "RenderGolden",
