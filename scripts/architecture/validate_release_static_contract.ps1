@@ -836,8 +836,14 @@ function Invoke-ReleaseIdentityGateValidation {
         '-RecoveryAuthorityPath',
         'contains(fromJSON(''["failure","cancelled","timed_out"]''), github.event.workflow_run.conclusion)',
         'GCP_COMMAND_SYNC_SERVICE_ACCOUNT',
+        'DISCORD_APPLICATION_ID: ${{ vars.DISCORD_APPLICATION_ID }}',
         'TRUSTED_HELPER_SOURCE_COMMIT: ${{ github.sha }}',
         '-TrustedHelperSourceCommit $env:TRUSTED_HELPER_SOURCE_COMMIT',
+        'discord-recovery-generations',
+        'restore-discord-catalog-v080.sh catalog-1',
+        'restore-discord-catalog-v080.sh catalog-2',
+        'catalog recovery lacks exactly one completed immutable generation',
+        'runtime recovery lacks exactly one completed immutable generation',
         'github.ref == ''refs/heads/main''',
         'force-cancel path'
     )) {

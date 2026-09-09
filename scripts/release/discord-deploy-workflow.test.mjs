@@ -11,6 +11,10 @@ const recovery = await readFile(
   new URL("../../.github/workflows/discord-deploy-recovery.yml", import.meta.url),
   "utf8",
 );
+const catalogRecovery = await readFile(
+  new URL("./restore-discord-catalog-v080.sh", import.meta.url),
+  "utf8",
+);
 const recoveryAttemptCollector = await readFile(
   new URL("./collect-discord-primary-attempt-catalog.sh", import.meta.url),
   "utf8",
@@ -469,6 +473,20 @@ test("rollback SSH and WIF authority exist only in separately scoped original-bo
   );
   assert.match(recovery, /if-no-files-found: error/u);
   assert.match(recovery, /force-cancel path/u);
+});
+
+test("recovery uses immutable N=2 evidence generations and selects one terminal authority", () => {
+  assert.match(recovery, /DISCORD_APPLICATION_ID: \$\{\{ vars\.DISCORD_APPLICATION_ID \}\}/u);
+  assert.match(recovery, /restore-discord-catalog-v080\.sh catalog-1/u);
+  assert.match(recovery, /restore-discord-catalog-v080\.sh catalog-2/u);
+  for (const generation of [
+    "runtime-restore-only", "catalog-1", "catalog-2", "runtime-1", "runtime-2",
+  ]) assert.ok(`${recovery}\n${catalogRecovery}`.includes(generation), generation);
+  assert.doesNotMatch(recovery, /discord-recovery-evidence/u);
+  assert.doesNotMatch(catalogRecovery, /rm -f -- "\$disposition" "\$restore"/u);
+  assert.match(catalogRecovery, /refuses to overwrite an existing evidence generation/u);
+  assert.match(recovery, /catalog recovery lacks exactly one completed immutable generation/u);
+  assert.match(recovery, /runtime recovery lacks exactly one completed immutable generation/u);
 });
 
 test("Oracle key materialization uses the Ubuntu runner's supported base64 decoder", () => {

@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  canonicalJson,
   canonicalSha256,
   sealCanonicalReport,
 } from "../../../scripts/release/canonical-release-evidence.mjs";
@@ -21,6 +27,50 @@ const COMMIT = "1".repeat(40);
 const APPLICATION_ID = "223456789012345678";
 const CATALOG_FILE_SHA256 = "c".repeat(64);
 const AUTHORITY_FILE_SHA256 = "d".repeat(64);
+const CATALOG_RELEASE_SOURCE = readFileSync(
+  new URL("../scripts/discord-command-catalog-release.mjs", import.meta.url),
+  "utf8",
+);
+
+test("CLI evaluation does not deadlock against the sync-authority import cycle", () => {
+  assert.doesNotMatch(CATALOG_RELEASE_SOURCE, /\bawait main\(\);/u);
+  assert.match(CATALOG_RELEASE_SOURCE, /void main\(\)\.catch\(\(error\) =>/u);
+
+  const root = mkdtempSync(join(tmpdir(), "clearra-discord-catalog-cycle-"));
+  try {
+    const catalogPath = join(root, "catalog.json");
+    const authorityPath = join(root, "authority.json");
+    const priorPath = join(root, "prior.json");
+    const outputPath = join(root, "output.json");
+    const catalog = createCanonicalDiscordCatalog({
+      sourceCommit: COMMIT,
+      commands: [{ name: "help", description: "Show help" }],
+    });
+    writeFileSync(catalogPath, `${canonicalJson(catalog)}\n`, { flag: "wx", mode: 0o600 });
+    writeFileSync(authorityPath, "{}\n", { flag: "wx", mode: 0o600 });
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(new URL("../scripts/discord-command-catalog-release.mjs", import.meta.url)),
+      "sync",
+      "--source-commit", COMMIT,
+      "--application-id", APPLICATION_ID,
+      "--catalog", catalogPath,
+      "--sync-authority", authorityPath,
+      "--sync-authority-file-sha256", "0".repeat(64),
+      "--prior-snapshot", priorPath,
+      "--output", outputPath,
+    ], {
+      encoding: "utf8",
+      env: { ...process.env, DISCORD_TOKEN: "test-only-token" },
+      timeout: 5_000,
+    });
+    assert.equal(result.signal, null, result.error?.message);
+    assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+    assert.doesNotMatch(result.stderr, /unsettled top-level await/u);
+    assert.match(result.stderr, /sync authority file SHA-256 differs/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("creates a deterministic canonical catalog without Discord response identity", () => {
   const catalog = createCanonicalDiscordCatalog({

@@ -943,12 +943,14 @@ async function main() {
 }
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
-  try {
-    await main();
-  } catch (error) {
+  // Do not hold this module's evaluation open while main() dynamically loads
+  // the sync-authority module. That module imports the validators above, so a
+  // top-level await here would form an evaluation cycle and Node would exit 13
+  // with an unsettled top-level-await diagnostic.
+  void main().catch((error) => {
     process.stderr.write(
       `discord_catalog_release=failed reason=${error instanceof Error ? error.message : String(error)}\n`,
     );
     process.exitCode = 2;
-  }
+  });
 }
