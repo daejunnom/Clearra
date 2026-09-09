@@ -10,6 +10,7 @@ if(CLEARRA_ENABLE_STAGE_PROFILING)
     )
 endif()
 clearra_core_enable_strict_warnings(clearra_core)
+clearra_core_enable_reproducible_msvc_archive(clearra_core)
 
 option(
     CLEARRA_BUILD_TEST_ORACLE
@@ -32,4 +33,5 @@ if(CLEARRA_BUILD_TEST_ORACLE)
         PRIVATE clearra_core_sanitizer_options
     )
     clearra_core_enable_strict_warnings(clearra_core_test_oracle)
+    clearra_core_enable_reproducible_msvc_archive(clearra_core_test_oracle)
 endif()

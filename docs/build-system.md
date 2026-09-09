@@ -61,6 +61,11 @@ longer matches. This prevents unrelated Rust changes from rebuilding C and
 prevents repeated runs from accumulating one full cache generation per input
 signature.
 
+On MSVC, the C objects and static archives use `/Brepro`. The native-link cache
+hashes `clearra_core.lib`; reproducible archive bytes let unchanged C inputs
+reuse the existing `clearra-core-ffi` Cargo artifacts instead of invalidating
+that package and all dependent Rust crates after every hosted checkout.
+
 The budget is checked both before reuse and when the owning runner exits. A
 failed or forcibly stopped run is recovered by the next owning runner before
 it starts work. Repository-local `target` and `build` directories are legacy

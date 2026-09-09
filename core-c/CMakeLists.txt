@@ -13,6 +13,7 @@ option(
 
 include(cmake/sanitizer_options.cmake)
 include(cmake/compiler_warnings.cmake)
+include(cmake/reproducible_msvc_archive.cmake)
 include(CTest)
 
 set(CLEARRA_CORE_SOURCES)

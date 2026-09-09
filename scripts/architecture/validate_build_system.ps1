@@ -4,6 +4,7 @@ foreach ($requiredPath in @(
         "core-c/CMakeLists.txt",
         "core-c/include/clearra_core.h",
         "core-c/src/clearra_core.c",
+        "core-c/cmake/reproducible_msvc_archive.cmake",
         "core-c/tests/version_tests.c",
         "scripts/build-core-c.ps1",
         "scripts/build-core-c.sh",
@@ -133,6 +134,7 @@ $coreCmake = Read-Text "core-c/CMakeLists.txt"
 foreach ($requiredMarker in @(
         "project(clearra_core_c LANGUAGES C)",
         "include(CTest)",
+        "include(cmake/reproducible_msvc_archive.cmake)",
         "if(BUILD_TESTING)",
         "include(cmake/test_targets.cmake)"
     )) {
@@ -143,10 +145,14 @@ foreach ($requiredMarker in @(
 $coreBuildSurface = @(
     $coreCmake
     Read-Text "core-c/cmake/library_target.cmake"
+    Read-Text "core-c/cmake/reproducible_msvc_archive.cmake"
     Read-Text "core-c/cmake/test_targets.cmake"
 ) -join "`n"
 foreach ($requiredMarker in @(
         "add_library(clearra_core STATIC",
+        "clearra_core_enable_reproducible_msvc_archive(clearra_core)",
+        "target_compile_options(`${target_name} PRIVATE /Brepro)",
+        "PROPERTY STATIC_LIBRARY_OPTIONS /Brepro",
         "CLEARRA_CORE_SPLIT_TESTS",
         "clearra_core_all_tests",
         'target_compile_definitions(${test_name}_object PRIVATE main=${test_main})',
