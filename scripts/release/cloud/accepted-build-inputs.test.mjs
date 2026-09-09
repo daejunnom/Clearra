@@ -123,7 +123,7 @@ async function buildFixture(t) {
     images: [tag], results: {images: [{name: tag, digest: `sha256:${'a'.repeat(64)}`}]},
     options: {sourceProvenanceHash: ['SHA256']},
     sourceProvenance: {resolvedStorageSource: {bucket: 'clearra-cloud_cloudbuild', object: 'source/transport.tgz', generation: '7'},
-      fileHashes: {'gs://clearra-cloud_cloudbuild/source/transport.tgz#7': {fileHash: [{type: 'SHA256', value: Buffer.from(archiveHash, 'hex').toString('base64')}]}}},
+      fileHashes: {'gs://clearra-cloud_cloudbuild/source/transport.tgz#7': {fileHash: [{type: 'SHA256', value: `${Buffer.from(archiveHash, 'hex').toString('base64url')}=`}]}}},
     steps: [{id: 'verify-accepted-inputs', name: 'node:22-bookworm-slim', status: 'SUCCESS'},
       {id: 'package-accepted-runtime', name: 'gcr.io/cloud-builders/docker', status: 'SUCCESS', args: ['build', '-f', 'source/apps/clearra-discord-bot/Dockerfile.accepted-job-service']}] };
   const buildReadbackPath = join(f.root, 'build.json');
@@ -148,7 +148,7 @@ test('v2 binds accepted inputs, actual fetched transport, generation and immutab
 
 for (const [label, mutate] of [
   ['missing provenance', (b) => {delete b.sourceProvenance.fileHashes;}],
-  ['wrong archive hash', (b) => {Object.values(b.sourceProvenance.fileHashes)[0].fileHash[0].value = Buffer.alloc(32).toString('base64');}],
+  ['wrong archive hash', (b) => {Object.values(b.sourceProvenance.fileHashes)[0].fileHash[0].value = `${Buffer.alloc(32).toString('base64url')}=`;}],
   ['wrong storage path', (b) => {b.sourceProvenance.resolvedStorageSource.object = 'other.tgz';}],
   ['wrong storage generation', (b) => {b.sourceProvenance.resolvedStorageSource.generation = '8';}],
   ['unresolved generation', (b) => {delete b.sourceProvenance.resolvedStorageSource.generation;}],
@@ -165,13 +165,17 @@ for (const [label, mutate] of [
   });
 }
 
-test('provenance accepts only the generation-qualified path and exact base64 SHA256 of the uploaded archive', () => {
+test('provenance accepts only the generation-qualified path and exact padded base64url SHA256 of the uploaded archive', () => {
+  const archiveHash = '27246655a4bd601b3f926604428d0406fc035440b3ccbd935621fbdb54d8ff31';
   const b = { options: {sourceProvenanceHash: ['SHA256']}, sourceProvenance: {resolvedStorageSource: {bucket: 'bucket', object: 'source.tgz', generation: '42'},
-    fileHashes: {'gs://bucket/source.tgz#42': {fileHash: [{type: 'SHA256', value: Buffer.from('a'.repeat(64), 'hex').toString('base64')}]}}} };
+    fileHashes: {'gs://bucket/source.tgz#42': {fileHash: [{type: 'SHA256', value: `${Buffer.from(archiveHash, 'hex').toString('base64url')}=`}]}}} };
   const expected = {...b.sourceProvenance.resolvedStorageSource};
-  verifyTransportProvenance(b, 'a'.repeat(64), expected);
+  verifyTransportProvenance(b, archiveHash, expected);
+  b.sourceProvenance.fileHashes['gs://bucket/source.tgz#42'].fileHash[0].value = Buffer.from(archiveHash, 'hex').toString('base64');
+  assert.throws(() => verifyTransportProvenance(b, archiveHash, expected), /SHA-256 differs/u);
+  b.sourceProvenance.fileHashes['gs://bucket/source.tgz#42'].fileHash[0].value = `${Buffer.from(archiveHash, 'hex').toString('base64url')}=`;
   b.sourceProvenance.fileHashes['gs://bucket/source.tgz#42'].fileHash.push({...b.sourceProvenance.fileHashes['gs://bucket/source.tgz#42'].fileHash[0]});
-  assert.throws(() => verifyTransportProvenance(b, 'a'.repeat(64), expected), /SHA-256 differs/u);
+  assert.throws(() => verifyTransportProvenance(b, archiveHash, expected), /SHA-256 differs/u);
 });
 
 test('the real Cloud bootstrap verifies the source before extraction and executes the real input verifier', async (t) => {

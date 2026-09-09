@@ -11,6 +11,20 @@ import { sha256File, verifyAcceptedCloudInputs } from './accepted-build-inputs.m
 
 export const ACCEPTED_BUILD_AUTHORITY = 'clearra.cloud-build-image-authority.v2';
 
+function cloudBuildSha256Hex(value) {
+  // Cloud Build serializes bytes through its JSON API as padded base64url,
+  // not RFC 4648's standard base64 alphabet used by Buffer#toString('base64').
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}=$/u.test(value)) {
+    throw new Error('Cloud fetched archive SHA-256 differs from the sealed local transport');
+  }
+  const unpadded = value.slice(0, -1);
+  const bytes = Buffer.from(unpadded, 'base64url');
+  if (bytes.length !== 32 || bytes.toString('base64url') !== unpadded) {
+    throw new Error('Cloud fetched archive SHA-256 differs from the sealed local transport');
+  }
+  return bytes.toString('hex');
+}
+
 function parseExpectedStorageSource(uri, generation) {
   const match = /^gs:\/\/([^/]+)\/(.+)$/u.exec(uri ?? '');
   if (!match || !/^[1-9][0-9]*$/u.test(generation ?? '')) {
@@ -72,7 +86,7 @@ export function verifyTransportProvenance(build, archiveHash, expectedSource) {
   }
   const sha256 = hashes[name].fileHash.filter((hash) => hash.type === 'SHA256');
   if (!/^[0-9a-f]{64}$/u.test(archiveHash) || sha256.length !== 1 ||
-      sha256[0].value !== Buffer.from(archiveHash, 'hex').toString('base64')) {
+      cloudBuildSha256Hex(sha256[0].value) !== archiveHash) {
     throw new Error('Cloud fetched archive SHA-256 differs from the sealed local transport');
   }
 }
