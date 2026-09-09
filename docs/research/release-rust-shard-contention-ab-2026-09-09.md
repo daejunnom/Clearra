@@ -113,24 +113,37 @@ seconds. The two long isolated harnesses each took about 90.2 seconds while
 overlapping, and the five parallel-safe harnesses took about 21.8 seconds in
 total. This validates function and error-free scheduling, not warm reuse.
 
-## Hosted A/B acceptance criteria
+## Hosted cache A/B result
 
 The non-publishing branch
-`codex/release-rust-shard-contention-ci-v3` uses a temporary cache key that is
-both branch-scoped and disjoint from every canonical release key. Its hosted
-sequence has three runs:
+`codex/release-rust-shard-contention-ci-v3` used a temporary cache key that was
+both branch-scoped and disjoint from every canonical release key. The seed run
+[`34340958034`](https://github.com/daejunnom/Clearra/actions/runs/34340958034)
+started without a matching cache, refreshed the native link state, and compiled
+the nine harnesses in 571.125 seconds. App and core-executor took 53.082 and
+57.102 seconds while overlapping. It passed 1,563 tests from the 1,575-entry
+inventory, retained the 12 source-declared ignored tests, and saved a
+535,549,288-byte compressed cache. Cache packaging and upload extended the job
+by about 182 seconds.
 
-1. The completed read-only run validates the isolated scheduler and creates an
-   archive produced with `/Brepro`, but deliberately cannot save it.
-2. Run `34340958034` repeats the exact Rust shard and may save successful build
-   inputs only under the isolated A/B key. This is the seed run.
-3. A source-identical follow-up commit restores the seed run's cache. It must
-   report `native-link-cache=reused`, preserve all 1,575 inventory entries, and
-   finish with no shared-resource contention.
+The source-tree-identical warm run
+[`34343038410`](https://github.com/daejunnom/Clearra/actions/runs/34343038410)
+restored that exact 535,549,288-byte seed cache in about 40 seconds. It still
+reported `native-link-cache=refreshed` and compiled for 572.073 seconds, 0.948
+seconds slower than the seed. App and core-executor each took about 88.7
+seconds while overlapping. It again passed all 1,563 runnable tests with the
+same 1,575-entry inventory and no shared-resource contention. The cache saved
+after this run contained only 36,010,151 bytes, so it could not seed another
+equivalent full build even if the raw-cache freshness issue were absent.
 
-Compile time and cache size are recorded for both runs. A cache hit alone is not
-enough to claim a total improvement: hosted wall time must improve, and exact
-test counts and failure semantics must remain unchanged.
+The raw Cargo/native cache hypothesis is therefore rejected for this hosted
+path. A cache restore event is not evidence of compiler reuse: the exact warm
+A/B showed neither native-link reuse nor compile-wall improvement. `/Brepro`
+retains its same-path archive determinism value, and the isolated scheduler
+retains its functional and test-wall evidence, but neither is represented as a
+fix for the dominant hosted compile/link bottleneck. This feature branch stays
+separate from `main` pending a build-cache design that produces measurable
+end-to-end improvement.
 
 ## Larger remaining opportunities
 
@@ -138,7 +151,8 @@ The measured job shows that further material improvement belongs to build
 architecture, not wider unsafe test threading:
 
 1. Evaluate a content-addressed compiler cache whose key includes exact C
-   source/configuration/toolchain/archive identity.
+   source/configuration/toolchain/archive identity. Do not repeat the rejected
+   raw target-directory cache experiment.
 2. Evaluate a non-authoritative, source/run/attempt-bound native CLI producer in
    parallel with RustExactTests so ProductE2E can verify and execute exact bytes
    instead of rebuilding for roughly 155 seconds.
