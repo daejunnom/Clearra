@@ -332,15 +332,21 @@ test("Windows toolchain collection invokes npm through a closed command interpre
 });
 
 test("shard toolchain collection invokes only the closed shard tool set", () => {
-  const calls = [];
-  const tools = collectReleaseShardToolchains("sanitizer", {
-    run(command, arguments_) {
-      calls.push([command, arguments_]);
-      return `${command} version\n`;
-    },
-  });
-  assert.deepEqual(Object.keys(tools), ["cmake", "powershell"]);
-  assert.deepEqual(calls.map(([command]) => command), ["cmake", "powershell"]);
+  for (const [platform, powershellCommand] of [
+    ["win32", "powershell"],
+    ["linux", "pwsh"],
+  ]) {
+    const calls = [];
+    const tools = collectReleaseShardToolchains("sanitizer", {
+      platform,
+      run(command, arguments_) {
+        calls.push([command, arguments_]);
+        return `${command} version\n`;
+      },
+    });
+    assert.deepEqual(Object.keys(tools), ["cmake", "powershell"]);
+    assert.deepEqual(calls.map(([command]) => command), ["cmake", powershellCommand]);
+  }
 });
 
 test("Pages shard inherits Linux producer tools and checks portable Node tools at the Windows consumer", () => {
