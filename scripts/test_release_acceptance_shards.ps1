@@ -164,6 +164,29 @@ Assert-Sequence `
     -Name 'rust-package-inventory' `
     -Actual @($rustPackageSpecs.Package | Sort-Object) `
     -Expected @($expectedRustPackages | Sort-Object)
+$compileArguments = @(New-RustExactCompileArguments $rustPackageSpecs)
+foreach ($package in $expectedRustPackages) {
+    if (@($compileArguments | Where-Object { $_ -eq $package }).Count -ne 1) {
+        throw "RustExactTests compile inventory must contain package '$package' exactly once."
+    }
+}
+$fakeHarness = (Resolve-Path -LiteralPath (
+    Join-Path $repositoryRoot 'scripts/lib/rust-exact-tests.ps1'
+)).Path
+$fakeCompilerOutput = @($rustPackageSpecs | ForEach-Object {
+    [ordered]@{
+        reason = 'compiler-artifact'
+        executable = $fakeHarness
+        profile = [ordered]@{ test = $true }
+        target = [ordered]@{ name = $_.Target; kind = @('lib') }
+    } | ConvertTo-Json -Compress -Depth 4
+})
+$parsedCompilerOutput = ConvertFrom-RustExactCompileOutput `
+    -Output $fakeCompilerOutput `
+    -PackageSpecs $rustPackageSpecs
+if ($parsedCompilerOutput.Executables.Count -ne $expectedRustPackages.Count) {
+    throw 'RustExactTests did not recover every exact library harness from Cargo JSON evidence.'
+}
 $serialWholePackages = @($rustPackageSpecs | Where-Object SerialWholePackage | ForEach-Object Package)
 $serialWholePackageKey = ($serialWholePackages | Sort-Object) -join '|'
 $expectedSerialWholePackageKey = (@('clearra-core-ffi', 'clearra-webgpu') | Sort-Object) -join '|'
