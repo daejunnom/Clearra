@@ -334,6 +334,18 @@ test("registered command metadata and every help page stay inside Discord limits
     koreanCommandList,
     englishObjectiveHelp,
     koreanObjectiveHelp,
+    ...["all", "unique", "min-cover", "minimum-cover", "tiling"].flatMap((objective) => [
+      formatSlashCommandHelp(`objective ${objective}`, "en"),
+      formatSlashCommandHelp(`objective ${objective}`, "ko"),
+    ]),
+    ...slashCommandCatalog
+      .filter(({ kind, subcommands }) => kind === "search" && subcommands)
+      .flatMap(({ name }) => [
+        formatSlashCommandHelp(name, "en"),
+        formatSlashCommandHelp(name, "ko"),
+      ]),
+    formatSlashCommandHelp("render-file", "en"),
+    formatSlashCommandHelp("render-file", "ko"),
     ...registeredSearchRoutes().flatMap(({ path }) => [
       formatSlashCommandHelp(path, "en"),
       formatSlashCommandHelp(path, "ko"),
