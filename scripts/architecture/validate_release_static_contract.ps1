@@ -2080,6 +2080,7 @@ function Invoke-ReleaseIdentityGateValidation {
         }
         foreach ($requiredAcceptedWasmMarker in @(
             'Run WASM source and host contracts',
+            'rust_compile_context=canonical-native task_workers=1 cargo_jobs=$cargoJobs',
             '-Task WasmBuildContracts -ExecutionSurface Trusted -RuntimeEnvironment windows',
             'Run verified WASM build producer',
             '-Task WasmBuildProducer -ExecutionSurface Trusted -RuntimeEnvironment wasm',

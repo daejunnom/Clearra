@@ -1419,6 +1419,11 @@ requireExactYamlScalar(
   8,
 );
 for (const [name, job, markers] of [
+  ["native Rust acceptance", releaseAcceptanceRustJob, [
+    "$cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)",
+    '"CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV',
+    '"rust_compile_context=canonical-native task_workers=1 cargo_jobs=$cargoJobs"',
+  ]],
   ["WASM source contracts", releaseAcceptanceWasmContractsJob, [
     "$cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)",
     '"CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV',
@@ -1480,6 +1485,7 @@ for (const [name, job, skeleton] of [
   ["rust", releaseAcceptanceRustJob, [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
+    "- name: Configure native Rust compile parallelism",
     "- name: Download accepted CTK3 distribution",
     "- id: release_toolchain_cache",
     "- name: Install JavaScript workspace",

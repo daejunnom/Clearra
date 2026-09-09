@@ -183,8 +183,16 @@ $pureSelectionModuleIndex = $searchBackend.LastIndexOf(
     '#[cfg(all(test, feature = "webgpu-search"))]',
     [System.StringComparison]::Ordinal
 )
-if ($pureSelectionModuleIndex -lt 0 -or
-    $searchBackend.Substring($pureSelectionModuleIndex).Contains('score_resource_test_guard')) {
+$pureSelectionModuleEnd = $searchBackend.IndexOf(
+    'static SCORE_RESOURCE_TEST_LOCK',
+    $pureSelectionModuleIndex,
+    [System.StringComparison]::Ordinal
+)
+if ($pureSelectionModuleIndex -lt 0 -or $pureSelectionModuleEnd -le $pureSelectionModuleIndex -or
+    $searchBackend.Substring(
+        $pureSelectionModuleIndex,
+        $pureSelectionModuleEnd - $pureSelectionModuleIndex
+    ).Contains('score_resource_test_guard')) {
     throw 'Pure WebGPU workload-selection tests must not reserve the process-global score resource.'
 }
 Write-Output 'release_acceptance_shard_test=rust-global-resource-first-and-parallel-safe status=passed'
