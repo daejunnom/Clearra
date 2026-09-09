@@ -13,8 +13,9 @@ concurrency:
   cancel-in-progress: false
 
 # This workflow can neither produce canonical acceptance evidence nor publish a
-# product. The seed commit measures both independent candidates. A subsequent
-# source-tree-identical warm marker commit measures only compiler-cache reuse.
+# product. The seed commit measures both independent candidates. A cache-seed
+# retry is allowed only when the initial cache job produced no measurement. A
+# subsequent source-tree-identical warm marker measures only cache reuse.
 jobs:
   ab-source:
     runs-on: ubuntu-latest
@@ -32,7 +33,7 @@ jobs:
           [[ "$GITHUB_REF" == 'refs/heads/codex/release-build-architecture-ab' ]]
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           phase="$(tr -d '\r\n' < scripts/release/release-build-architecture-ab-phase.txt)"
-          [[ "$phase" == 'seed' || "$phase" == 'warm' ]]
+          [[ "$phase" == 'seed' || "$phase" == 'cache-seed' || "$phase" == 'warm' ]]
           echo "phase=$phase" >> "$GITHUB_OUTPUT"
           echo "release_build_architecture_ab_phase=$phase"
       - name: Verify non-authoritative A/B boundaries
@@ -46,7 +47,6 @@ jobs:
       CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
       CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
       RUST_MIN_STACK: "16777216"
-      RUSTC_WRAPPER: sccache
       CARGO_INCREMENTAL: "0"
       SCCACHE_GHA_ENABLED: "on"
     steps:
@@ -78,6 +78,9 @@ jobs:
         with:
           version: v0.16.0
           disable_annotations: true
+      - name: Activate sccache only after installation
+        shell: pwsh
+        run: "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
       - name: Reset compiler-cache counters
         shell: pwsh
         run: sccache --zero-stats

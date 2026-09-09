@@ -23,7 +23,7 @@ test('A/B workflow is isolated, non-publishing, and never grants release authori
 });
 
 test('compiler-cache candidate is content-addressed and never restores a raw Cargo target', () => {
-  assert.match(workflow, /RUSTC_WRAPPER: sccache/u);
+  assert.match(workflow, /run: "RUSTC_WRAPPER=sccache" >> \$env:GITHUB_ENV/u);
   assert.match(workflow, /SCCACHE_GHA_ENABLED: "on"/u);
   assert.match(nativeIdentity, /SCCACHE_GHA_VERSION=\$compilerCacheNamespace/u);
   assert.match(workflow, /mozilla-actions\/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba/u);
@@ -49,5 +49,5 @@ test('exact CLI consumer is bound to producer source, run, attempt, recipe, and 
 test('warm commit repeats only the compiler-cache candidate', () => {
   assert.match(workflow, /if: needs\.ab-source\.outputs\.phase == 'seed'[\s\S]*?exact-cli-producer/u);
   assert.match(workflow, /phase=\$\{\{ needs\.ab-source\.outputs\.phase \}\}/u);
-  assert.match(workflow, /\[\[ "\$phase" == 'seed' \|\| "\$phase" == 'warm' \]\]/u);
+  assert.match(workflow, /\[\[ "\$phase" == 'seed' \|\| "\$phase" == 'cache-seed' \|\| "\$phase" == 'warm' \]\]/u);
 });

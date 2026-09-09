@@ -122,7 +122,8 @@ $trackedInputs = @(
     "scripts/lib/clearra-core-c-task-helpers.ps1",
     "scripts/lib/clearra-native-helpers.ps1",
     "scripts/lib/core-c-build.ps1",
-    "scripts/lib/product-process-surface.ps1"
+    "scripts/lib/product-process-surface.ps1",
+    "scripts/release/prepare-native-build-identity.ps1"
 )
 $trackedMaterial = Get-CommandOutput "git" (@("-C", $root, "ls-files", "--stage", "--") + $trackedInputs)
 if ([string]::IsNullOrWhiteSpace($trackedMaterial)) {
