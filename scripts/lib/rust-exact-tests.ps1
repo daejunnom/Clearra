@@ -307,8 +307,23 @@ function Invoke-RustExactHarnessPartitionPool {
     for ($offset = 0; $offset -lt $Requests.Count; $offset += $MaxConcurrency) {
         $last = [Math]::Min($Requests.Count - 1, $offset + $MaxConcurrency - 1)
         $running = New-Object System.Collections.Generic.List[object]
-        foreach ($request in @($Requests[$offset..$last])) {
-            $running.Add((Start-RustExactHarnessPartitionProcess -Request $request))
+        try {
+            foreach ($request in @($Requests[$offset..$last])) {
+                $running.Add((Start-RustExactHarnessPartitionProcess -Request $request))
+            }
+        } catch {
+            foreach ($started in $running) {
+                try {
+                    if (-not $started.Process.HasExited) {
+                        $started.Process.Kill()
+                    }
+                    $started.Process.WaitForExit()
+                } catch {
+                } finally {
+                    $started.Process.Dispose()
+                }
+            }
+            throw
         }
         foreach ($process in $running) {
             $results.Add((Complete-RustExactHarnessPartitionProcess -Running $process))
