@@ -206,6 +206,7 @@ function Invoke-RustExactHarnessPartition {
     $output = $result.Output -join "`n"
     $failure = $null
     $passed = 0
+    $observed = 0
     if ($result.ExitCode -ne 0) {
         $failure = "exit-code-$($result.ExitCode)"
     } else {
@@ -229,6 +230,7 @@ function Invoke-RustExactHarnessPartition {
         TestThreads = $TestThreads
         ExpectedTests = $ExpectedTests
         Passed = $passed
+        Observed = $observed
         ElapsedMilliseconds = $timer.ElapsedMilliseconds
         Output = @($result.Output)
         Failure = $failure
@@ -299,11 +301,23 @@ function Invoke-RustExactTestsGate {
                     -Package $spec.Package `
                     -Executable $compiled.Executables[$spec.Package]
             )
+            foreach ($testName in @($inventories[$spec.Package])) {
+                $matchingFilters = @($spec.GlobalResourceFilters | Where-Object {
+                    $testName.StartsWith($_, [System.StringComparison]::Ordinal)
+                })
+                if ($matchingFilters.Count -gt 1) {
+                    throw "Rust exact test '$testName' in package '$($spec.Package)' matches overlapping global-resource filters."
+                }
+            }
         }
 
         $failures = New-Object System.Collections.Generic.List[string]
         $allOutput = New-Object System.Collections.Generic.List[string]
         $passed = 0
+        $observedTests = 0
+        $expectedInventoryTests = @($packageSpecs | ForEach-Object {
+            @($inventories[$_.Package]).Count
+        } | Measure-Object -Sum).Sum
         $parallelTestThreads = [Math]::Min(2, [Math]::Max(1, $Workers))
 
         # Run every test that can reserve process-global native/GPU capacity
@@ -321,6 +335,7 @@ function Invoke-RustExactTestsGate {
                 $run.Output | ForEach-Object { $allOutput.Add([string]$_) }
                 Write-Output "rust_exact_phase=global-resource package=$($spec.Package) tests=$($inventory.Count) test_threads=1 elapsed_ms=$($run.ElapsedMilliseconds)"
                 $passed += $run.Passed
+                $observedTests += $run.Observed
                 if ($null -ne $run.Failure) {
                     $failures.Add("$($spec.Package):global-resource:$($run.Failure)")
                 }
@@ -343,6 +358,7 @@ function Invoke-RustExactTestsGate {
                 $run.Output | ForEach-Object { $allOutput.Add([string]$_) }
                 Write-Output "rust_exact_phase=global-resource package=$($spec.Package) filter=$filter tests=$($selected.Count) test_threads=1 elapsed_ms=$($run.ElapsedMilliseconds)"
                 $passed += $run.Passed
+                $observedTests += $run.Observed
                 if ($null -ne $run.Failure) {
                     $failures.Add("$($spec.Package):global-resource:$($filter):$($run.Failure)")
                 }
@@ -378,6 +394,7 @@ function Invoke-RustExactTestsGate {
             $run.Output | ForEach-Object { $allOutput.Add([string]$_) }
             Write-Output "rust_exact_phase=parallel-safe package=$($spec.Package) tests=$($selected.Count) test_threads=$parallelTestThreads elapsed_ms=$($run.ElapsedMilliseconds)"
             $passed += $run.Passed
+            $observedTests += $run.Observed
             if ($null -ne $run.Failure) {
                 $failures.Add("$($spec.Package):parallel-safe:$($run.Failure)")
             }
@@ -390,6 +407,9 @@ function Invoke-RustExactTestsGate {
         if ($passed -lt 1) {
             throw 'Rust exact test stage executed zero tests'
         }
+        if ($observedTests -ne $expectedInventoryTests) {
+            throw "Rust exact partition union differs from the compiled inventory: expected=$expectedInventoryTests observed=$observedTests"
+        }
         $output = $allOutput -join "`n"
         Assert-AdversarialRustCasesInOutput `
             -Output $output `
@@ -401,7 +421,7 @@ function Invoke-RustExactTestsGate {
         }
         Write-Output 'adversarial_rust_tests=executed owner=RustExactTests'
         Write-Output 'no_product_debt_evidence=complete_required_keeps_candidate status=passed source=rust-test owner=RustExactTests'
-        Write-Output "rust_exact_tests=passed tests=$passed packages=$($packages.Count) parallel_safe_threads=$parallelTestThreads"
+        Write-Output "rust_exact_tests=passed tests=$passed inventory=$observedTests packages=$($packages.Count) parallel_safe_threads=$parallelTestThreads"
     }
     finally {
         if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
