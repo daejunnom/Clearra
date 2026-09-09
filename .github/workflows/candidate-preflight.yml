@@ -66,17 +66,20 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      # Read a compatible canonical build snapshot, but never publish cache or
-      # acceptance evidence from this unqualified branch.
-      - name: Restore verified native build inputs
+      # This temporary A/B branch has no release or deployment authority. Its
+      # writable cache family is branch-specific and cannot be restored by the
+      # canonical release workflow; canonical input is read only as a fallback.
+      - id: candidate_native_cache
+        name: Restore isolated Rust shard A/B inputs
         uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             ~/AppData/Local/Clearra/build
-          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: candidate-rust-shard-ab-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
+            candidate-rust-shard-ab-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
             release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Check the Rust shard partition contract
         shell: powershell
@@ -88,6 +91,15 @@ jobs:
           $candidateWorkers = [Math]::Max(1, [Environment]::ProcessorCount)
           & powershell -NoProfile -File scripts/clearra.ps1 -Task RustExactTests -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $candidateWorkers -VerboseLog -ShowWarnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Save isolated Rust shard A/B inputs
+        if: success() && steps.candidate_native_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/AppData/Local/Clearra/build
+          key: ${{ steps.candidate_native_cache.outputs.cache-primary-key }}
   # Native regressions and WASM compilation have no artifact dependency. Keep
   # every regression, but let both source-bound leaves start immediately.
   candidate-rust:
