@@ -3,73 +3,47 @@ function Get-RustExactPackageSpecs {
         [pscustomobject]@{
             Package = 'clearra-app'
             Target = 'clearra_app'
-            SerialWholePackage = $false
-            GlobalResourceFilters = @(
-                'app_services::execution_constraint_backend_tests::',
-                'build_setup_product_projection::tests::',
-                'build_solution_probability_result::tests::',
-                'build_solution_probability_result::build_v2_colored_result::tests::',
-                'build_solution_probability_result::build_v2_facade::tests::',
-                'build_solution_probability_result::build_v2_result::tests::',
-                'commands::build_v2_app_command::tests::',
-                'cooperative_execution::pc_allspin_projection_tests::',
-                'cooperative_execution::raw_pc_tiling_cooperative_tests::',
-                'pc_chance_probability_result::tests::',
-                'pc_replay_page_source::memory_tests::',
-                'product_capability_contract_tests::'
-            )
+            SerialWholePackage = $true
         },
         [pscustomobject]@{
             Package = 'clearra-core-executor'
             Target = 'clearra_core_executor'
-            SerialWholePackage = $false
-            GlobalResourceFilters = @(
-                'backend::wasm_cpu_search_backend::coverage_summary_tests::',
-                'backend::wasm_cpu::result::tests::',
-                'service::pc_service_tests::'
-            )
+            SerialWholePackage = $true
         },
         [pscustomobject]@{
             Package = 'clearra-core-ffi'
             Target = 'clearra_core_ffi'
             SerialWholePackage = $true
-            GlobalResourceFilters = @()
         },
         [pscustomobject]@{
             Package = 'clearra-webgpu'
             Target = 'clearra_webgpu'
             SerialWholePackage = $true
-            GlobalResourceFilters = @()
         },
         [pscustomobject]@{
             Package = 'clearra-core-domain'
             Target = 'clearra_core_domain'
             SerialWholePackage = $false
-            GlobalResourceFilters = @()
         },
         [pscustomobject]@{
             Package = 'clearra-coverage'
             Target = 'clearra_coverage'
             SerialWholePackage = $false
-            GlobalResourceFilters = @()
         },
         [pscustomobject]@{
             Package = 'clearra-objectives'
             Target = 'clearra_objectives'
             SerialWholePackage = $false
-            GlobalResourceFilters = @()
         },
         [pscustomobject]@{
             Package = 'clearra-scoring'
             Target = 'clearra_scoring'
             SerialWholePackage = $false
-            GlobalResourceFilters = @()
         },
         [pscustomobject]@{
             Package = 'clearra-postprocess'
             Target = 'clearra_postprocess'
             SerialWholePackage = $false
-            GlobalResourceFilters = @()
         }
     )
 }
@@ -177,13 +151,9 @@ function Get-RustExactHarnessInventory {
     return @($names)
 }
 
-function Invoke-RustExactHarnessPartition {
+function New-RustExactHarnessArguments {
     param(
-        [string]$Package,
-        [string]$Executable,
-        [string]$Partition,
         [int]$TestThreads,
-        [int]$ExpectedTests,
         [AllowEmptyString()][string]$Filter = '',
         [string[]]$SkipFilters = @()
     )
@@ -197,18 +167,25 @@ function Invoke-RustExactHarnessPartition {
     if (-not [string]::IsNullOrWhiteSpace($Filter)) {
         $arguments.Add($Filter)
     }
+    return @($arguments.ToArray())
+}
 
-    $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    $result = Invoke-AdversarialCargoProcessOnce `
-        -CargoPath $Executable `
-        -Arguments @($arguments.ToArray())
-    $timer.Stop()
-    $output = $result.Output -join "`n"
+function ConvertFrom-RustExactHarnessProcessResult {
+    param(
+        [string]$Package,
+        [string]$Partition,
+        [int]$TestThreads,
+        [int]$ExpectedTests,
+        [object]$Result,
+        [long]$ElapsedMilliseconds
+    )
+
+    $output = $Result.Output -join "`n"
     $failure = $null
     $passed = 0
     $observed = 0
-    if ($result.ExitCode -ne 0) {
-        $failure = "exit-code-$($result.ExitCode)"
+    if ($Result.ExitCode -ne 0) {
+        $failure = "exit-code-$($Result.ExitCode)"
     } else {
         $summary = [regex]::Match(
             $output,
@@ -231,10 +208,113 @@ function Invoke-RustExactHarnessPartition {
         ExpectedTests = $ExpectedTests
         Passed = $passed
         Observed = $observed
-        ElapsedMilliseconds = $timer.ElapsedMilliseconds
-        Output = @($result.Output)
+        ElapsedMilliseconds = $ElapsedMilliseconds
+        Output = @($Result.Output)
         Failure = $failure
     }
+}
+
+function Invoke-RustExactHarnessPartition {
+    param(
+        [string]$Package,
+        [string]$Executable,
+        [string]$Partition,
+        [int]$TestThreads,
+        [int]$ExpectedTests,
+        [AllowEmptyString()][string]$Filter = '',
+        [string[]]$SkipFilters = @()
+    )
+
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $result = Invoke-AdversarialCargoProcessOnce `
+        -CargoPath $Executable `
+        -Arguments @(New-RustExactHarnessArguments `
+            -TestThreads $TestThreads `
+            -Filter $Filter `
+            -SkipFilters $SkipFilters)
+    $timer.Stop()
+    return ConvertFrom-RustExactHarnessProcessResult `
+        -Package $Package `
+        -Partition $Partition `
+        -TestThreads $TestThreads `
+        -ExpectedTests $ExpectedTests `
+        -Result $result `
+        -ElapsedMilliseconds $timer.ElapsedMilliseconds
+}
+
+function Start-RustExactHarnessPartitionProcess {
+    param([object]$Request)
+
+    $arguments = @(New-RustExactHarnessArguments `
+        -TestThreads $Request.TestThreads `
+        -Filter $Request.Filter `
+        -SkipFilters @($Request.SkipFilters))
+    $quotedArguments = $arguments | ForEach-Object {
+        '"' + $_.Replace('"', '\"') + '"'
+    }
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Request.Executable
+    $startInfo.Arguments = $quotedArguments -join ' '
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    return [pscustomobject]@{
+        Request = $Request
+        Process = $process
+        StandardOutput = $process.StandardOutput.ReadToEndAsync()
+        StandardError = $process.StandardError.ReadToEndAsync()
+        Timer = [System.Diagnostics.Stopwatch]::StartNew()
+    }
+}
+
+function Complete-RustExactHarnessPartitionProcess {
+    param([object]$Running)
+
+    try {
+        $Running.Process.WaitForExit()
+        $Running.Timer.Stop()
+        $standardOutput = $Running.StandardOutput.GetAwaiter().GetResult()
+        $standardError = $Running.StandardError.GetAwaiter().GetResult()
+        $result = [pscustomobject]@{
+            ExitCode = $Running.Process.ExitCode
+            Output = @($standardError, $standardOutput) |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        }
+        return ConvertFrom-RustExactHarnessProcessResult `
+            -Package $Running.Request.Package `
+            -Partition $Running.Request.Partition `
+            -TestThreads $Running.Request.TestThreads `
+            -ExpectedTests $Running.Request.ExpectedTests `
+            -Result $result `
+            -ElapsedMilliseconds $Running.Timer.ElapsedMilliseconds
+    } finally {
+        $Running.Process.Dispose()
+    }
+}
+
+function Invoke-RustExactHarnessPartitionPool {
+    param(
+        [object[]]$Requests,
+        [int]$MaxConcurrency
+    )
+
+    $results = New-Object System.Collections.Generic.List[object]
+    for ($offset = 0; $offset -lt $Requests.Count; $offset += $MaxConcurrency) {
+        $last = [Math]::Min($Requests.Count - 1, $offset + $MaxConcurrency - 1)
+        $running = New-Object System.Collections.Generic.List[object]
+        foreach ($request in @($Requests[$offset..$last])) {
+            $running.Add((Start-RustExactHarnessPartitionProcess -Request $request))
+        }
+        foreach ($process in $running) {
+            $results.Add((Complete-RustExactHarnessPartitionProcess -Running $process))
+        }
+    }
+    return @($results.ToArray())
 }
 
 function Invoke-RustExactTestsGate {
@@ -301,14 +381,6 @@ function Invoke-RustExactTestsGate {
                     -Package $spec.Package `
                     -Executable $compiled.Executables[$spec.Package]
             )
-            foreach ($testName in @($inventories[$spec.Package])) {
-                $matchingFilters = @($spec.GlobalResourceFilters | Where-Object {
-                    $testName.StartsWith($_, [System.StringComparison]::Ordinal)
-                })
-                if ($matchingFilters.Count -gt 1) {
-                    throw "Rust exact test '$testName' in package '$($spec.Package)' matches overlapping global-resource filters."
-                }
-            }
         }
 
         $failures = New-Object System.Collections.Generic.List[string]
@@ -320,68 +392,44 @@ function Invoke-RustExactTestsGate {
         } | Measure-Object -Sum).Sum
         $parallelTestThreads = [Math]::Min(2, [Math]::Max(1, $Workers))
 
-        # Run every test that can reserve process-global native/GPU capacity
-        # before the parallel-safe partitions. This avoids blocked test-thread
-        # convoys while preserving the exact same library-test inventory.
-        foreach ($spec in $packageSpecs) {
-            $inventory = @($inventories[$spec.Package])
-            if ($spec.SerialWholePackage) {
-                $run = Invoke-RustExactHarnessPartition `
-                    -Package $spec.Package `
-                    -Executable $compiled.Executables[$spec.Package] `
-                    -Partition 'global-resource' `
-                    -TestThreads 1 `
-                    -ExpectedTests $inventory.Count
-                $run.Output | ForEach-Object { $allOutput.Add([string]$_) }
-                Write-Output "rust_exact_phase=global-resource package=$($spec.Package) tests=$($inventory.Count) test_threads=1 elapsed_ms=$($run.ElapsedMilliseconds)"
-                $passed += $run.Passed
-                $observedTests += $run.Observed
-                if ($null -ne $run.Failure) {
-                    $failures.Add("$($spec.Package):global-resource:$($run.Failure)")
-                }
-                continue
+        # App and executor tests can reach the same process-global lease through
+        # product code even when a test body has no explicit guard. Keep each
+        # affected harness internally serial, but run independent processes in
+        # a two-wide pool. This removes in-process lease convoys without turning
+        # package order into a new tail.
+        $resourceRequests = @($packageSpecs | Where-Object SerialWholePackage | ForEach-Object {
+            [pscustomobject]@{
+                Package = $_.Package
+                Executable = $compiled.Executables[$_.Package]
+                Partition = 'global-resource-isolated'
+                TestThreads = 1
+                ExpectedTests = @($inventories[$_.Package]).Count
+                Filter = ''
+                SkipFilters = @()
             }
-            foreach ($filter in @($spec.GlobalResourceFilters)) {
-                $selected = @($inventory | Where-Object {
-                    $_.StartsWith($filter, [System.StringComparison]::Ordinal)
-                })
-                if ($selected.Count -lt 1) {
-                    throw "Rust exact global-resource filter '$filter' selected no tests in package '$($spec.Package)'."
-                }
-                $run = Invoke-RustExactHarnessPartition `
-                    -Package $spec.Package `
-                    -Executable $compiled.Executables[$spec.Package] `
-                    -Partition "global-resource:$filter" `
-                    -TestThreads 1 `
-                    -ExpectedTests $selected.Count `
-                    -Filter $filter
-                $run.Output | ForEach-Object { $allOutput.Add([string]$_) }
-                Write-Output "rust_exact_phase=global-resource package=$($spec.Package) filter=$filter tests=$($selected.Count) test_threads=1 elapsed_ms=$($run.ElapsedMilliseconds)"
-                $passed += $run.Passed
-                $observedTests += $run.Observed
-                if ($null -ne $run.Failure) {
-                    $failures.Add("$($spec.Package):global-resource:$($filter):$($run.Failure)")
-                }
+        })
+        $resourceRuns = @(Invoke-RustExactHarnessPartitionPool `
+            -Requests $resourceRequests `
+            -MaxConcurrency $parallelTestThreads)
+        foreach ($run in $resourceRuns) {
+            $run.Output | ForEach-Object { $allOutput.Add([string]$_) }
+            Write-Output "rust_exact_phase=global-resource package=$($run.Package) tests=$($run.ExpectedTests) test_threads=1 process_pool=$parallelTestThreads elapsed_ms=$($run.ElapsedMilliseconds)"
+            $passed += $run.Passed
+            $observedTests += $run.Observed
+            if ($null -ne $run.Failure) {
+                $failures.Add("$($run.Package):global-resource-isolated:$($run.Failure)")
             }
         }
 
-        # All remaining tests are disjoint from the global-resource prefixes.
-        # Each harness owns one small pool; harnesses themselves remain ordered
-        # so independent packages do not oversubscribe the Windows runner.
+        # All remaining packages have no product path to the process-global
+        # lease. Each harness owns one small pool; harnesses remain ordered so
+        # independent packages do not oversubscribe the Windows runner.
         foreach ($spec in $packageSpecs) {
             if ($spec.SerialWholePackage) {
                 continue
             }
             $inventory = @($inventories[$spec.Package])
-            $skipFilters = @($spec.GlobalResourceFilters)
-            $selected = @($inventory | Where-Object {
-                $testName = $_
-                $matchesGlobalResource = @($skipFilters | Where-Object {
-                    $testName.StartsWith($_, [System.StringComparison]::Ordinal)
-                }).Count -gt 0
-                -not $matchesGlobalResource
-            })
-            if ($selected.Count -lt 1) {
+            if ($inventory.Count -lt 1) {
                 throw "Rust exact parallel-safe partition is empty for package '$($spec.Package)'."
             }
             $run = Invoke-RustExactHarnessPartition `
@@ -389,10 +437,9 @@ function Invoke-RustExactTestsGate {
                 -Executable $compiled.Executables[$spec.Package] `
                 -Partition 'parallel-safe' `
                 -TestThreads $parallelTestThreads `
-                -ExpectedTests $selected.Count `
-                -SkipFilters $skipFilters
+                -ExpectedTests $inventory.Count
             $run.Output | ForEach-Object { $allOutput.Add([string]$_) }
-            Write-Output "rust_exact_phase=parallel-safe package=$($spec.Package) tests=$($selected.Count) test_threads=$parallelTestThreads elapsed_ms=$($run.ElapsedMilliseconds)"
+            Write-Output "rust_exact_phase=parallel-safe package=$($spec.Package) tests=$($inventory.Count) test_threads=$parallelTestThreads elapsed_ms=$($run.ElapsedMilliseconds)"
             $passed += $run.Passed
             $observedTests += $run.Observed
             if ($null -ne $run.Failure) {

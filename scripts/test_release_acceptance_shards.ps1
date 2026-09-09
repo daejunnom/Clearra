@@ -143,8 +143,9 @@ if ($compileIndex -lt 0 -or $continueIndex -le $compileIndex -or $partitionFailu
 }
 if ($rustExact.IndexOf('rust_exact_phase=global-resource', [System.StringComparison]::Ordinal) -lt 0 -or
     $rustExact.IndexOf('rust_exact_phase=parallel-safe', [System.StringComparison]::Ordinal) -lt 0 -or
-    $rustExact.IndexOf('[Math]::Min(2, [Math]::Max(1, $Workers))', [System.StringComparison]::Ordinal) -lt 0) {
-    throw 'RustExactTests must run the global-resource partition first and cap the remaining pool at two threads.'
+    $rustExact.IndexOf('[Math]::Min(2, [Math]::Max(1, $Workers))', [System.StringComparison]::Ordinal) -lt 0 -or
+    $rustExact.IndexOf('Invoke-RustExactHarnessPartitionPool', [System.StringComparison]::Ordinal) -lt 0) {
+    throw 'RustExactTests must run isolated global-resource harnesses first and cap both pools at two.'
 }
 
 . (Join-Path $repositoryRoot 'scripts/lib/rust-exact-tests.ps1')
@@ -189,15 +190,14 @@ if ($parsedCompilerOutput.Executables.Count -ne $expectedRustPackages.Count) {
 }
 $serialWholePackages = @($rustPackageSpecs | Where-Object SerialWholePackage | ForEach-Object Package)
 $serialWholePackageKey = ($serialWholePackages | Sort-Object) -join '|'
-$expectedSerialWholePackageKey = (@('clearra-core-ffi', 'clearra-webgpu') | Sort-Object) -join '|'
+$expectedSerialWholePackageKey = (@(
+    'clearra-app',
+    'clearra-core-executor',
+    'clearra-core-ffi',
+    'clearra-webgpu'
+) | Sort-Object) -join '|'
 if ($serialWholePackageKey -ne $expectedSerialWholePackageKey) {
-    throw 'Only native FFI and WebGPU packages may use the whole-package global-resource partition.'
-}
-foreach ($package in @('clearra-app', 'clearra-core-executor')) {
-    $spec = $rustPackageSpecs | Where-Object Package -eq $package
-    if ($null -eq $spec -or @($spec.GlobalResourceFilters).Count -lt 1) {
-        throw "RustExactTests lost the explicit global-resource filters for '$package'."
-    }
+    throw 'Every package that can reach the process-global lease must use an isolated serial harness.'
 }
 $searchBackend = Get-Content -LiteralPath (
     Join-Path $repositoryRoot 'crates/clearra-core-executor/src/backend/wasm_cpu_search_backend.rs'

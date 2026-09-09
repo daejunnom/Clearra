@@ -124,8 +124,9 @@ compile time but may change output quality or runtime performance, so this
 change parallelizes the dependency graph without weakening the shipped profile.
 
 Rust test execution is separately observable through `rust_exact_phase`
-records. `test_threads=1` on a `global-resource` record is intentional; a
-`parallel-safe` record uses at most two threads. A local warm-harness A/B on the
+records. `test_threads=1` on a `global-resource` record is intentional, while
+up to two isolated harness processes may run together. A `parallel-safe` record
+uses at most two threads. A local warm-harness A/B on the
 219-test `clearra-coverage` package measured about 15.2 seconds serial, 9.7
 seconds with two threads, and 9.3 seconds with four. The two-thread ceiling
 therefore captures most of the measured gain without adding another competing

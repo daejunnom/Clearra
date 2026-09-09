@@ -207,14 +207,14 @@ still execute their historical evidence when they are run outside
 `ReleaseAcceptance`.
 
 `RustExactTests` compiles its complete nine-package library inventory once. It
-then executes test prefixes that reserve process-global execution capacity
-first with one test thread. Native FFI and WebGPU library harnesses remain in
-that serial partition as whole packages. The remainder is proven disjoint from
-those prefixes by the compiled harness inventory and runs in ordered harnesses
-with at most two test threads. This avoids a blocked global-resource test
-occupying one worker while another waits for the same authority, without
-dropping or ignoring a test. Every partition keeps running after an earlier
-test failure and the stage fails only after reporting all partition failures.
+then executes the App, core-executor, native-FFI, and WebGPU harnesses first.
+Each of those harnesses uses one test thread because product calls can acquire
+process-global execution capacity even when an individual test has no explicit
+guard. Independent harness processes run in a pool of at most two. The other
+five packages cannot reach that lease and run afterward in ordered harnesses
+with at most two test threads. This avoids an in-process blocked-resource convoy
+without dropping or ignoring a test. Every harness keeps running after an
+earlier harness failure and the stage fails only after reporting all failures.
 
 Renderer goldens, sanitizer/aggregate C tests, and packaged CLI smokes remain
 serial where their process-global state, shared build surface, exact output
