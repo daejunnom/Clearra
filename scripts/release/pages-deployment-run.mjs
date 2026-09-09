@@ -13,6 +13,8 @@ const SOURCE_COMMIT = /^[0-9a-f]{40}$/u;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const DECIMAL_ID = /^[1-9][0-9]*$/u;
 const WORKFLOW_PATH = ".github/workflows/pages.yml";
+const PAGES_POLL_SECONDS = 15;
+const MAX_PAGES_WAIT_SECONDS = 3600;
 
 export async function resolvePagesDeploymentRun(options, dependencies = {}) {
   const repository = requirePattern(options?.repository, REPOSITORY, "repository");
@@ -22,24 +24,49 @@ export async function resolvePagesDeploymentRun(options, dependencies = {}) {
     "Pages deployment source commit",
   );
   const runCommand = dependencies.run ?? run;
-  const response = parseCommandJson(await runCommand("gh", [
-    "api",
-    "--method",
-    "GET",
-    `repos/${repository}/actions/workflows/pages.yml/runs`,
-    "-f",
-    "event=workflow_dispatch",
-    "-f",
-    "branch=main",
-    "-f",
-    `head_sha=${sourceCommit}`,
-    "-f",
-    "per_page=100",
-  ]));
-  return validatePagesDeploymentRunList(response, { repository, sourceCommit });
+  const sleep = dependencies.sleep ?? ((milliseconds) =>
+    new Promise((resolve_) => setTimeout(resolve_, milliseconds)));
+  const waitSeconds = requireWaitSeconds(options?.waitSeconds);
+  let waitedSeconds = 0;
+
+  for (;;) {
+    const response = parseCommandJson(await runCommand("gh", [
+      "api",
+      "--method",
+      "GET",
+      `repos/${repository}/actions/workflows/pages.yml/runs`,
+      "-f",
+      "event=workflow_dispatch",
+      "-f",
+      "branch=main",
+      "-f",
+      `head_sha=${sourceCommit}`,
+      "-f",
+      "per_page=100",
+    ]));
+    const result = selectPagesDeploymentRunList(response, { repository, sourceCommit });
+    if (result !== null) return result;
+    if (waitedSeconds >= waitSeconds) {
+      if (waitSeconds === 0) {
+        throw new Error("Pages deployment authority requires exactly one successful exact-SHA run");
+      }
+      throw new Error("Pages deployment authority was unavailable before the bounded wait expired");
+    }
+    const delaySeconds = Math.min(PAGES_POLL_SECONDS, waitSeconds - waitedSeconds);
+    await sleep(delaySeconds * 1000);
+    waitedSeconds += delaySeconds;
+  }
 }
 
 export function validatePagesDeploymentRunList(value, options) {
+  const result = selectPagesDeploymentRunList(value, options);
+  if (result === null) {
+    throw new Error("Pages deployment authority requires exactly one successful exact-SHA run");
+  }
+  return result;
+}
+
+function selectPagesDeploymentRunList(value, options) {
   const repository = requirePattern(options?.repository, REPOSITORY, "repository");
   const sourceCommit = requirePattern(
     options?.sourceCommit,
@@ -82,9 +109,10 @@ export function validatePagesDeploymentRunList(value, options) {
       successful.push({ id, attempt });
     }
   }
-  if (successful.length !== 1) {
+  if (successful.length > 1) {
     throw new Error("Pages deployment authority requires exactly one successful exact-SHA run");
   }
+  if (successful.length === 0) return null;
   const result = successful[0];
   return Object.freeze({
     id: result.id,
@@ -93,6 +121,19 @@ export function validatePagesDeploymentRunList(value, options) {
       `clearra-pages-deployment-authority-${sourceCommit}` +
       `-run-${result.id}-attempt-${result.attempt}`,
   });
+}
+
+function requireWaitSeconds(value) {
+  if (value === undefined) return 0;
+  const text = String(value);
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(text)) {
+    throw new Error("Pages wait seconds must be a nonnegative decimal integer");
+  }
+  const seconds = Number(text);
+  if (!Number.isSafeInteger(seconds) || seconds > MAX_PAGES_WAIT_SECONDS) {
+    throw new Error(`Pages wait seconds must not exceed ${MAX_PAGES_WAIT_SECONDS}`);
+  }
+  return seconds;
 }
 
 export async function verifyPagesDeploymentReport(path, options) {
@@ -228,6 +269,7 @@ async function main() {
       "accepted-run-id": { type: "string" },
       "accepted-run-attempt": { type: "string" },
       report: { type: "string" },
+      "wait-seconds": { type: "string", default: "0" },
       format: { type: "string", default: "summary" },
     },
     strict: true,
@@ -239,6 +281,7 @@ async function main() {
       const result = await resolvePagesDeploymentRun({
         repository: values.repository,
         sourceCommit: values["source-commit"],
+        waitSeconds: values["wait-seconds"],
       });
       process.stdout.write(`${formatResult(result, values.format)}\n`);
     } else if (positionals[0] === "verify-report") {

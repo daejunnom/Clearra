@@ -56,6 +56,64 @@ test("resolves exactly one first-attempt same-SHA Pages deployment", async () =>
   assert.ok(calls[0][1].includes(`head_sha=${SOURCE}`));
 });
 
+test("boundedly waits for the exact Pages deployment without weakening selection", async () => {
+  const responses = [
+    { total_count: 0, workflow_runs: [] },
+    {
+      total_count: 1,
+      workflow_runs: [run({ status: "in_progress", conclusion: null })],
+    },
+    { total_count: 1, workflow_runs: [run()] },
+  ];
+  const sleeps = [];
+  const result = await resolvePagesDeploymentRun(
+    { repository: REPOSITORY, sourceCommit: SOURCE, waitSeconds: "30" },
+    {
+      run: async () => JSON.stringify(responses.shift()),
+      sleep: async (milliseconds) => sleeps.push(milliseconds),
+    },
+  );
+  assert.equal(result.id, "701");
+  assert.deepEqual(sleeps, [15_000, 15_000]);
+  assert.equal(responses.length, 0);
+});
+
+test("bounded Pages wait expires exactly and never turns ambiguity into authority", async () => {
+  const sleeps = [];
+  let calls = 0;
+  await assert.rejects(
+    resolvePagesDeploymentRun(
+      { repository: REPOSITORY, sourceCommit: SOURCE, waitSeconds: "20" },
+      {
+        run: async () => {
+          calls += 1;
+          return JSON.stringify({ total_count: 0, workflow_runs: [] });
+        },
+        sleep: async (milliseconds) => sleeps.push(milliseconds),
+      },
+    ),
+    /bounded wait expired/u,
+  );
+  assert.equal(calls, 3);
+  assert.deepEqual(sleeps, [15_000, 5_000]);
+
+  let ambiguitySleeps = 0;
+  await assert.rejects(
+    resolvePagesDeploymentRun(
+      { repository: REPOSITORY, sourceCommit: SOURCE, waitSeconds: "30" },
+      {
+        run: async () => JSON.stringify({
+          total_count: 2,
+          workflow_runs: [run(), run({ id: 702 })],
+        }),
+        sleep: async () => { ambiguitySleeps += 1; },
+      },
+    ),
+    /exactly one successful/u,
+  );
+  assert.equal(ambiguitySleeps, 0);
+});
+
 test("fails closed for ambiguous, truncated, rerun, or foreign Pages histories", () => {
   const options = { repository: REPOSITORY, sourceCommit: SOURCE };
   assert.throws(

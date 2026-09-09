@@ -262,6 +262,7 @@ test("Pages authority is proven before Cloud preparation and every protected mut
   assert.ok(candidateResolve >= 0 && candidateVerify > candidateResolve);
   assert.ok(cloudAuth > candidateVerify && cloudBuild > cloudAuth);
   assert.equal((primary.match(/pages-deployment-run\.mjs resolve/gu) ?? []).length, 1);
+  assert.match(candidate, /pages-deployment-run\.mjs resolve[\s\S]*--wait-seconds 1800/u);
 
   const promote = primary.slice(primary.indexOf("  promote:"), primary.indexOf("  sync-observe:"));
   const preparedDownload = promote.indexOf("Download the exact prepared state");

@@ -357,6 +357,7 @@ jobs:
           set -euo pipefail
           node scripts/release/pages-deployment-run.mjs resolve \
             --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --wait-seconds 1800 \
             --format github-output >> "$GITHUB_OUTPUT"
       - name: Download the exact Pages deployment authority before candidate work
         uses: actions/download-artifact@v4
