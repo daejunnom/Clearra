@@ -139,10 +139,12 @@ deletion, or `roles/run.admin` authority.
 subject. It has the exact rollback custom role and Service Usage Consumer. It
 can read/update an existing service, list/read revisions, and read the
 resulting operation. It can read only the `clearra` image repository: Cloud Run
-revalidates its image access even when an existing candidate tag is removed.
-It cannot write/delete images, create/update/run/delete jobs, delete revisions,
-access the source bucket or Secrets, act as the runtime
-account, build images, or impersonate another service account.
+revalidates its image and runtime-service-account access even when an existing
+candidate tag is removed. It therefore has Service Account User on exactly
+`clearra-current-job`, never at project scope and never on another service
+account. It cannot write/delete images, create/update/run/delete jobs, delete
+revisions, access the source bucket or Secrets, build images, or impersonate
+any other service account.
 
 `clearra-command-sync` directly trusts the primary-pool global-sync subject and
 the recovery-pool runtime-rollback subject, and retains Cloud Run Viewer. Both

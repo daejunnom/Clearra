@@ -223,7 +223,9 @@ test("plan is exact-bound, keyless, Secret-free for deployer, and emits only non
   assert.deepEqual(report.leastPrivilege.rollbackProjectRoles, [...ROLLBACK_PROJECT_ROLES]);
   assert.deepEqual(report.leastPrivilege.rollbackCloudRunPermissions, [...ROLLBACK_RUN_PERMISSIONS]);
   assert.deepEqual(report.leastPrivilege.rollbackArtifactRepositoryRoles, ["roles/artifactregistry.reader"]);
-  assert.deepEqual(report.leastPrivilege.rollbackRuntimeServiceAccountRoles, []);
+  assert.deepEqual(report.leastPrivilege.rollbackRuntimeServiceAccountRoles, [
+    "roles/iam.serviceAccountUser",
+  ]);
   assert.equal(report.leastPrivilege.rollbackHasJobLifecyclePermissions, false);
   assert.equal(report.leastPrivilege.catalogWideUnmodeledImpersonationAllowed, false);
   assert.deepEqual(report.leastPrivilege.exactGlobalSecretAccessorServiceAccounts, {
@@ -505,7 +507,40 @@ test("missing recovery image read is repaired only on the exact repository and i
   assert.equal((await plan(cli)).plannedMutations.length, 0);
   assert.deepEqual(cli.projectRoles(ROLLBACK_MEMBER), [...ROLLBACK_PROJECT_ROLES].sort());
   assert.deepEqual(cli.bucketRoles(ROLLBACK_MEMBER), []);
-  assert.deepEqual(roles(cli.serviceAccountPolicies.get(RUNTIME_EMAIL), ROLLBACK_MEMBER), []);
+  assert.deepEqual(
+    roles(cli.serviceAccountPolicies.get(RUNTIME_EMAIL), ROLLBACK_MEMBER),
+    ["roles/iam.serviceAccountUser"],
+  );
+});
+
+test("missing rollback runtime actAs is repaired only on the exact runtime account", async () => {
+  const cli = new FakeGcloud({ ready: true });
+  removeRole(
+    cli.serviceAccountPolicies.get(RUNTIME_EMAIL),
+    ROLLBACK_MEMBER,
+    "roles/iam.serviceAccountUser",
+  );
+
+  const report = await plan(cli);
+  assert.deepEqual(report.plannedMutations.map(({ id }) => id), [
+    "runtime-rollback-act-as-add-iam-serviceaccountuser",
+  ]);
+  assert.deepEqual(report.plannedMutations[0].argv, [
+    "iam", "service-accounts", "add-iam-policy-binding", RUNTIME_EMAIL,
+    `--project=${PROJECT_ID}`, `--member=${ROLLBACK_MEMBER}`,
+    "--role=roles/iam.serviceAccountUser", "--condition=None", "--quiet",
+  ]);
+
+  const applied = await applyGitHubWifBootstrap({}, { runGcloud: cli.run.bind(cli) });
+  assert.equal(applied.status, "ready");
+  assert.equal(cli.mutationCount, 1);
+  assert.equal((await plan(cli)).plannedMutations.length, 0);
+  assert.deepEqual(cli.projectRoles(ROLLBACK_MEMBER), [...ROLLBACK_PROJECT_ROLES].sort());
+  assert.deepEqual(cli.bucketRoles(ROLLBACK_MEMBER), []);
+  assert.deepEqual(
+    roles(cli.serviceAccountPolicies.get(RUNTIME_EMAIL), ROLLBACK_MEMBER),
+    ["roles/iam.serviceAccountUser"],
+  );
 });
 
 test("ambiguous successful mutation is re-observed instead of duplicated", async () => {
@@ -1118,7 +1153,7 @@ test("unexpected deployer, impersonation, repository, bucket, or command-sync ro
     (cli) => cli.addServiceAccountRole(BUILD_EMAIL, COMMAND_MEMBER, "roles/iam.serviceAccountUser"),
     (cli) => cli.addServiceAccountRole(RUNTIME_EMAIL, BUILDER_MEMBER, "roles/iam.serviceAccountUser"),
     (cli) => cli.addServiceAccountRole(RUNTIME_EMAIL, COMMAND_MEMBER, "roles/iam.serviceAccountUser"),
-    (cli) => cli.addServiceAccountRole(RUNTIME_EMAIL, ROLLBACK_MEMBER, "roles/iam.serviceAccountUser"),
+    (cli) => cli.addServiceAccountRole(RUNTIME_EMAIL, ROLLBACK_MEMBER, "roles/iam.serviceAccountTokenCreator"),
     (cli) => cli.addServiceAccountRole(COMMAND_EMAIL, DEPLOYER_MEMBER, "roles/iam.serviceAccountAdmin"),
     (cli) => cli.addRepositoryRole(BUILD_MEMBER, "roles/artifactregistry.reader"),
     (cli) => cli.addRepositoryRole(BUILDER_MEMBER, "roles/artifactregistry.writer"),
@@ -1605,6 +1640,7 @@ class FakeGcloud {
     this.addProjectRole(COMMAND_MEMBER, "roles/run.viewer");
     this.addServiceAccountRole(BUILD_EMAIL, BUILDER_MEMBER, "roles/iam.serviceAccountUser");
     this.addServiceAccountRole(RUNTIME_EMAIL, DEPLOYER_MEMBER, "roles/iam.serviceAccountUser");
+    this.addServiceAccountRole(RUNTIME_EMAIL, ROLLBACK_MEMBER, "roles/iam.serviceAccountUser");
     this.serviceAccountPolicies.set(BUILDER_EMAIL, {
       bindings: [{ role: "roles/iam.workloadIdentityUser", members: [BUILDER_WIF_MEMBER] }],
     });

@@ -701,7 +701,10 @@ async function createGitHubWifBootstrapPlanInternal(
   assertClosedServiceAccountPolicy({
     policy: runtimePolicy,
     requiredTuples: [],
-    managedTuples: [[DEPLOYER_MEMBER, "roles/iam.serviceAccountUser"]],
+    managedTuples: [DEPLOYER_MEMBER, ROLLBACK_MEMBER].map((member) => [
+      member,
+      "roles/iam.serviceAccountUser",
+    ]),
     label: "runtime service-account IAM policy",
   });
   reconcileResourceRoles({
@@ -711,6 +714,15 @@ async function createGitHubWifBootstrapPlanInternal(
     resourceId: RUNTIME_EMAIL,
     idPrefix: "runtime-act-as",
     label: "runtime service-account authority",
+    plannedMutations,
+  });
+  reconcileResourceRoles({
+    policy: runtimePolicy,
+    member: ROLLBACK_MEMBER,
+    desired: ["roles/iam.serviceAccountUser"],
+    resourceId: RUNTIME_EMAIL,
+    idPrefix: "runtime-rollback-act-as",
+    label: "rollback runtime service-account authority",
     plannedMutations,
   });
   assertNoMemberRoles(
@@ -988,7 +1000,7 @@ async function createGitHubWifBootstrapPlanInternal(
       rollbackCloudRunPermissions: [...ROLLBACK_RUN_ROLE_PERMISSIONS],
       rollbackArtifactRepositoryRoles: ["roles/artifactregistry.reader"],
       rollbackSourceBucketRoles: [],
-      rollbackRuntimeServiceAccountRoles: [],
+      rollbackRuntimeServiceAccountRoles: ["roles/iam.serviceAccountUser"],
       rollbackHasBuildActAsRole: false,
       rollbackHasCloudBuildRole: false,
       rollbackHasSecretManagerRole: false,
@@ -1609,7 +1621,10 @@ function assertCatalogWideImpersonationBoundary(serviceAccountPolicies) {
   const tupleKey = (member, role) => `${role}\u0000${member}`;
   const allowedByTarget = new Map([
     [BUILD_EMAIL, new Set([tupleKey(BUILDER_MEMBER, "roles/iam.serviceAccountUser")])],
-    [RUNTIME_EMAIL, new Set([tupleKey(DEPLOYER_MEMBER, "roles/iam.serviceAccountUser")])],
+    [RUNTIME_EMAIL, new Set([
+      tupleKey(DEPLOYER_MEMBER, "roles/iam.serviceAccountUser"),
+      tupleKey(ROLLBACK_MEMBER, "roles/iam.serviceAccountUser"),
+    ])],
     [COMMAND_SYNC_EMAIL, new Set([
       ...COMMAND_SYNC_WIF_MEMBERS,
       ...COMMAND_SYNC_REMOVABLE_LEGACY_WIF_MEMBERS,
@@ -2568,6 +2583,10 @@ function isAllowedGcloudArguments(arguments_) {
   }).argv);
   fixed.push(serviceAccountBindingMutation({
     id: "validator", action: "add", email: RUNTIME_EMAIL, member: DEPLOYER_MEMBER,
+    role: "roles/iam.serviceAccountUser", reason: "validator",
+  }).argv);
+  fixed.push(serviceAccountBindingMutation({
+    id: "validator", action: "add", email: RUNTIME_EMAIL, member: ROLLBACK_MEMBER,
     role: "roles/iam.serviceAccountUser", reason: "validator",
   }).argv);
   for (const [email, members] of [

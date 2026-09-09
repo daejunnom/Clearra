@@ -53,7 +53,7 @@ function Invoke-NodeExact {
         $isCloudCleanup = $Arguments.Count -gt 0 -and
             [string]$Arguments[0] -ceq 'scripts/release/cloud/remove-recovery-candidate-tag.mjs'
         if ($isCloudCleanup -and $childExitCode -eq 77) {
-            throw 'Cloud candidate-tag cleanup blocked: iam.serviceAccounts.actAs was denied. Runtime actAs remains forbidden; recovery is unverified. An authorized operator must resolve the exact candidate tag before retrying; no identity fallback is permitted.'
+            throw 'Cloud candidate-tag preimage validation unexpectedly reached iam.serviceAccounts.actAs denial. The exact rollback-to-runtime binding is missing or drifted; recovery is unverified.'
         }
         $helperKind = if ($isCloudCleanup) { 'cloud-candidate-tag-cleanup' } else { 'authority-validator' }
         throw "tracked recovery validator failed (helper=$helperKind exit_code=$childExitCode); original diagnostic is on child stderr"

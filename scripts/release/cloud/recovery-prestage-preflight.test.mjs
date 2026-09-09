@@ -113,7 +113,7 @@ try {
     Invoke-NodeExact scripts/release/cloud/remove-recovery-candidate-tag.mjs --fixture-actual-cleanup
     throw 'unexpected success'
 } catch {
-    if ($_.Exception.Message -notmatch 'Cloud candidate-tag cleanup blocked: iam.serviceAccounts.actAs was denied') { throw }
+    if ($_.Exception.Message -notmatch 'Cloud candidate-tag preimage validation unexpectedly reached iam.serviceAccounts.actAs denial') { throw }
     if ($_.Exception.Message -match 'tracked recovery validator failed') { throw 'root cause was lost' }
 }
 if ($script:Calls -ne 1) { throw 'denial was retried' }
@@ -204,7 +204,7 @@ $script:ChildExit = 77
 Invoke-NodeExact scripts/release/cloud/remove-recovery-candidate-tag.mjs --fixture-actual-cleanup
 `);
   assert.equal(result.status, 1, result.stderr || String(result.error));
-  assert.match(result.stderr, /Cloud candidate-tag cleanup blocked/);
+  assert.match(result.stderr, /Cloud candidate-tag preimage validation unexpectedly reached/);
   assert.doesNotMatch(result.stdout, /fixture-success-stream-must-not-escape/);
 });
 
@@ -215,7 +215,7 @@ try {
     Invoke-NodeExact scripts/release/cloud/remove-recovery-candidate-tag.mjs --fixture-actual-cleanup
     throw 'unexpected success'
 } catch {
-    if ($_.Exception.Message -notmatch 'iam.serviceAccounts.actAs was denied') { throw }
+    if ($_.Exception.Message -notmatch 'preimage validation unexpectedly reached iam.serviceAccounts.actAs denial') { throw }
 }
 throw 'fixture-assertion-failed-after-caught-denial'
 `);

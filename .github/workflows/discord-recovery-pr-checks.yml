@@ -43,7 +43,7 @@ jobs:
           scripts/release/workflow-run-timestamps.test.mjs
           scripts/release/recovery-result-chronology.test.mjs
           scripts/tools/run-release-regression-tests.test.mjs
-      - name: Preserve existing no-actAs and recovery-evidence contracts
+      - name: Preserve exact runtime actAs and recovery-evidence contracts
         run: >-
           node --test scripts/release/github/github-wif-bootstrap.test.mjs
           scripts/release/discord-deploy-workflow.test.mjs
