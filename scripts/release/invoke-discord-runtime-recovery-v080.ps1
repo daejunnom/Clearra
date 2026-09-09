@@ -212,6 +212,38 @@ function Assert-PrestageCloudCleanupPreimage {
     }
 }
 
+function Remove-ExactCloudCandidateTag {
+    param(
+        $Intent,
+        [string] $PriorRevision
+    )
+    # Revalidate the sealed candidate, exact prior traffic and service etag
+    # immediately before mutation.  The v2 PATCH helper remains read-only here:
+    # Cloud Run v2 revalidates the revision template and demands runtime actAs
+    # even when updateMask contains only traffic.
+    Invoke-NodeExact scripts/release/cloud/remove-recovery-candidate-tag.mjs `
+        --project $GcpProjectId --region $GcpRegion `
+        --intent "$ArtifactRoot/prestage/intended-candidate-authority.json" `
+        --prior-revision $PriorRevision --source-commit $SourceCommit `
+        --workflow-run-id $OriginalWorkflowRunId `
+        --workflow-run-attempt $OriginalWorkflowRunAttempt `
+        --deployment-nonce ([string]$Intent.deployment_nonce) --validate-only
+
+    # The Cloud Run v1 traffic command changes only tag/traffic assignments and
+    # requires run.services.update, which the rollback-only role already owns.
+    # Keep stdout out of the PowerShell success stream and let stderr retain the
+    # provider diagnostic.  The caller performs a second exact service/revision
+    # readback and refuses to seal recovery on any drift.
+    $candidateTag = [string]$Intent.cloud_candidate_tag
+    & gcloud run services update-traffic clearra-current-job `
+        --project=$GcpProjectId --region=$GcpRegion `
+        "--remove-tags=$candidateTag" --quiet | Out-Null
+    $childExitCode = $LASTEXITCODE
+    if ($childExitCode -ne 0) {
+        throw "Cloud candidate-tag traffic update failed (exit_code=$childExitCode)"
+    }
+}
+
 function Seal-ExactCandidateCloudResidue {
     param(
         $Intent,
@@ -242,16 +274,7 @@ function Seal-ExactCandidateCloudResidue {
         -CandidateTag ([string]$Intent.cloud_candidate_tag) `
         -CandidateRevision ([string]$Intent.cloud_candidate_revision)
     if ($candidateTagEntryCount -eq 1) {
-        # A traffic-only PATCH must not resubmit the revision template. The
-        # helper validates first with the same rollback identity and fails closed
-        # on IAM denial; the original v1 readbacks still own recovery evidence.
-        Invoke-NodeExact scripts/release/cloud/remove-recovery-candidate-tag.mjs `
-            --project $GcpProjectId --region $GcpRegion `
-            --intent "$ArtifactRoot/prestage/intended-candidate-authority.json" `
-            --prior-revision $PriorRevision --source-commit $SourceCommit `
-            --workflow-run-id $OriginalWorkflowRunId `
-            --workflow-run-attempt $OriginalWorkflowRunAttempt `
-            --deployment-nonce ([string]$Intent.deployment_nonce)
+        Remove-ExactCloudCandidateTag -Intent $Intent -PriorRevision $PriorRevision
     }
 
     if ((Get-ActiveCloudRevision -OutputPath $ServiceOutputPath) -cne $PriorRevision) {

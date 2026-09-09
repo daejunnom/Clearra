@@ -233,13 +233,16 @@ test("response bodies are bounded and malformed JSON fails closed", async () => 
   }
 });
 
-test("PowerShell calls the narrow helper only after existing authority checks and retains final evidence sealing", async () => {
+test("PowerShell validates with the narrow helper before one v1 tag mutation and retains final evidence sealing", async () => {
   const text = await readFile(new URL("../invoke-discord-runtime-recovery-v080.ps1", import.meta.url), "utf8");
-  assert.match(text, /if \(\$candidateTagEntryCount -eq 1\)[\s\S]*remove-recovery-candidate-tag\.mjs/u);
+  assert.match(text, /if \(\$candidateTagEntryCount -eq 1\)[\s\S]*Remove-ExactCloudCandidateTag/u);
+  assert.match(text, /function Remove-ExactCloudCandidateTag[\s\S]*remove-recovery-candidate-tag\.mjs[\s\S]*--validate-only/u);
+  assert.match(text, /gcloud run services update-traffic clearra-current-job/u);
+  assert.match(text, /"--remove-tags=\$candidateTag" --quiet/u);
   assert.match(text, /--intent "\$ArtifactRoot\/prestage\/intended-candidate-authority\.json"/u);
   assert.match(text, /--prior-revision \$PriorRevision/u);
   assert.match(text, /--workflow-run-attempt \$OriginalWorkflowRunAttempt/u);
   assert.match(text, /Cloud candidate residue is not the exact immutable latest revision/u);
   assert.match(text, /--binding "cloud_candidate_residue_readback=/u);
-  assert.doesNotMatch(text, /--remove-tags=/u);
+  assert.doesNotMatch(text, /--deployment-nonce \(\[string\]\$Intent\.deployment_nonce\)\s*\r?\n\s*\}/u);
 });

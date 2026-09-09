@@ -11,7 +11,8 @@ foreach ($functionName in @(
     'Get-CloudTrafficPercent',
     'Get-ExactActiveCloudRevision',
     'Get-ValidatedCandidateTagEntryCount',
-    'Test-CloudTrafficEntryMatchesCandidate'
+    'Test-CloudTrafficEntryMatchesCandidate',
+    'Remove-ExactCloudCandidateTag'
 )) {
     $pattern = '(?ms)^function ' + [regex]::Escape($functionName) + ' \{.*?^\}'
     $match = [regex]::Match($source, $pattern)

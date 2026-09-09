@@ -17,12 +17,21 @@ ${functions}
 $script:Calls = 0
 $script:ChildExit = 0
 $script:ChildArgs = @()
+$script:GcloudCalls = 0
+$script:GcloudExit = 0
+$script:GcloudArgs = @()
 function node {
     $script:Calls += 1
     $script:ChildArgs = @($args)
     [Console]::Error.WriteLine('fixture-child-diagnostic')
     Write-Output 'fixture-success-stream-must-not-escape'
     $global:LASTEXITCODE = $script:ChildExit
+}
+function gcloud {
+    $script:GcloudCalls += 1
+    $script:GcloudArgs = @($args)
+    Write-Output 'fixture-gcloud-success-stream-must-not-escape'
+    $global:LASTEXITCODE = $script:GcloudExit
 }
 $GcpProjectId = 'clearra-cloud'
 $GcpRegion = 'asia-northeast1'
@@ -71,7 +80,8 @@ test("prestage checks the Cloud cleanup preimage after prior authority and befor
   assert.ok(prior >= 0 && preflight > prior && oracle > preflight && seal > oracle);
   assert.match(prestage, /--binding "cloud_cleanup_readback=/);
   assert.match(prestage, /--binding "cloud_candidate_residue_readback=/);
-  assert.match(source, /if \(\$candidateTagEntryCount -eq 1\)[\s\S]*remove-recovery-candidate-tag\.mjs/);
+  assert.match(source, /if \(\$candidateTagEntryCount -eq 1\)[\s\S]*Remove-ExactCloudCandidateTag/);
+  assert.match(source, /function Remove-ExactCloudCandidateTag[\s\S]*--validate-only[\s\S]*gcloud run services update-traffic clearra-current-job[\s\S]*--remove-tags=/);
 });
 
 test("tagless prior state needs no cleanup readback helper and emits no authority", psOptions, () => {
@@ -96,7 +106,7 @@ if (($expected -join '|') -cne ($script:ChildArgs -join '|')) { throw 'preflight
   assert.match(result.stderr, /fixture-child-diagnostic/);
 });
 
-test("an actAs denial from the actual cleanup helper remains the top-level cause", psOptions, () => {
+test("an unexpected actAs denial from the read-only helper remains the top-level cause", psOptions, () => {
   runPs(`
 $script:ChildExit = 77
 try {
@@ -107,6 +117,31 @@ try {
     if ($_.Exception.Message -match 'tracked recovery validator failed') { throw 'root cause was lost' }
 }
 if ($script:Calls -ne 1) { throw 'denial was retried' }
+`);
+});
+
+test("candidate tag removal uses the read-only exact preimage then one v1 traffic mutation", psOptions, () => {
+  const result = runPs(`
+$output = @(Remove-ExactCloudCandidateTag -Intent $intent -PriorRevision $prior.prior_revision)
+if ($script:Calls -ne 1 -or $script:GcloudCalls -ne 1 -or $output.Count -ne 0) {
+    throw 'candidate tag removal call count or stdout differs'
+}
+if ($script:ChildArgs[-1] -cne '--validate-only') { throw 'preimage helper was not read-only' }
+$expected = @('run', 'services', 'update-traffic', 'clearra-current-job',
+    '--project=clearra-cloud', '--region=asia-northeast1', '--remove-tags=candidate-fixture', '--quiet')
+if (($expected -join '|') -cne ($script:GcloudArgs -join '|')) { throw 'v1 traffic mutation arguments differ' }
+`);
+  assert.doesNotMatch(result.stdout, /fixture-gcloud-success-stream-must-not-escape/);
+});
+
+test("candidate tag removal fails closed after one v1 traffic command failure", psOptions, () => {
+  runPs(`
+$script:GcloudExit = 23
+try { Remove-ExactCloudCandidateTag -Intent $intent -PriorRevision $prior.prior_revision; throw 'unexpected success' }
+catch {
+    if ($_.Exception.Message -cne 'Cloud candidate-tag traffic update failed (exit_code=23)') { throw }
+}
+if ($script:Calls -ne 1 -or $script:GcloudCalls -ne 1) { throw 'failed traffic mutation was retried' }
 `);
 });
 
