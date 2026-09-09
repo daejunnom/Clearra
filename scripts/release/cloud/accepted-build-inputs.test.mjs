@@ -123,7 +123,7 @@ async function buildFixture(t) {
     images: [tag], results: {images: [{name: tag, digest: `sha256:${'a'.repeat(64)}`}]},
     options: {sourceProvenanceHash: ['SHA256']},
     sourceProvenance: {resolvedStorageSource: {bucket: 'clearra-cloud_cloudbuild', object: 'source/transport.tgz', generation: '7'},
-      fileHashes: {'gs://clearra-cloud_cloudbuild/source/transport.tgz': {fileHash: [{type: 'SHA256', value: Buffer.from(archiveHash, 'hex').toString('base64')}]}}},
+      fileHashes: {'gs://clearra-cloud_cloudbuild/source/transport.tgz#7': {fileHash: [{type: 'SHA256', value: Buffer.from(archiveHash, 'hex').toString('base64')}]}}},
     steps: [{id: 'verify-accepted-inputs', name: 'node:22-bookworm-slim', status: 'SUCCESS'},
       {id: 'package-accepted-runtime', name: 'gcr.io/cloud-builders/docker', status: 'SUCCESS', args: ['build', '-f', 'source/apps/clearra-discord-bot/Dockerfile.accepted-job-service']}] };
   const buildReadbackPath = join(f.root, 'build.json');
@@ -149,6 +149,7 @@ for (const [label, mutate] of [
   ['missing provenance', (b) => {delete b.sourceProvenance.fileHashes;}],
   ['wrong archive hash', (b) => {Object.values(b.sourceProvenance.fileHashes)[0].fileHash[0].value = Buffer.alloc(32).toString('base64');}],
   ['wrong storage path', (b) => {b.sourceProvenance.resolvedStorageSource.object = 'other.tgz';}],
+  ['wrong storage generation', (b) => {b.sourceProvenance.resolvedStorageSource.generation = '8';}],
   ['unresolved generation', (b) => {delete b.sourceProvenance.resolvedStorageSource.generation;}],
   ['hash not requested', (b) => {b.options.sourceProvenanceHash = [];}],
   ['different accepted run', (b) => {b.substitutions._ACCEPTED_RUN_ID = '43';}],
@@ -163,11 +164,11 @@ for (const [label, mutate] of [
   });
 }
 
-test('provenance accepts only one exact base64 SHA256 of the single uploaded archive', () => {
+test('provenance accepts only the generation-qualified path and exact base64 SHA256 of the uploaded archive', () => {
   const b = { options: {sourceProvenanceHash: ['SHA256']}, sourceProvenance: {resolvedStorageSource: {bucket: 'bucket', object: 'source.tgz', generation: '42'},
-    fileHashes: {'gs://bucket/source.tgz': {fileHash: [{type: 'SHA256', value: Buffer.from('a'.repeat(64), 'hex').toString('base64')}]}}} };
+    fileHashes: {'gs://bucket/source.tgz#42': {fileHash: [{type: 'SHA256', value: Buffer.from('a'.repeat(64), 'hex').toString('base64')}]}}} };
   verifyTransportProvenance(b, 'a'.repeat(64));
-  b.sourceProvenance.fileHashes['gs://bucket/source.tgz'].fileHash.push({...b.sourceProvenance.fileHashes['gs://bucket/source.tgz'].fileHash[0]});
+  b.sourceProvenance.fileHashes['gs://bucket/source.tgz#42'].fileHash.push({...b.sourceProvenance.fileHashes['gs://bucket/source.tgz#42'].fileHash[0]});
   assert.throws(() => verifyTransportProvenance(b, 'a'.repeat(64)), /SHA-256 differs/u);
 });
 

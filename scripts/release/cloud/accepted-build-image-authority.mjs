@@ -54,7 +54,7 @@ export function verifyTransportProvenance(build, archiveHash) {
     throw new Error('Cloud packaging requires resolved source generation and SHA256 provenance');
   }
   const hashes = build.sourceProvenance?.fileHashes;
-  const name = `gs://${source.bucket}/${source.object}`;
+  const name = `gs://${source.bucket}/${source.object}#${source.generation}`;
   if (!hashes || Object.keys(hashes).length !== 1 || !Array.isArray(hashes[name]?.fileHash)) {
     throw new Error('Cloud input archive provenance path differs');
   }
