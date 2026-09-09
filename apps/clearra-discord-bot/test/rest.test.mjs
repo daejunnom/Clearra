@@ -110,6 +110,25 @@ test("Discord global command reads request complete localization dictionaries", 
   );
 });
 
+test('command readbacks always request fresh API data across client and intermediary caches', async () => {
+  let requestCount = 0;
+  const client = new DiscordRestClient('test-token', async (url, options) => {
+    requestCount += 1;
+    assert.equal(new URL(url).hostname, 'discord.com');
+    assert.equal(new URL(url).searchParams.get('with_localizations'), 'true');
+    assert.equal(options.cache, 'no-store');
+    assert.equal(options.redirect, 'error');
+    assert.equal(options.headers.get('cache-control'), 'no-cache, no-store, max-age=0');
+    assert.equal(options.headers.get('pragma'), 'no-cache');
+    assert.equal(options.headers.has('if-none-match'), false);
+    assert.equal(options.headers.has('if-modified-since'), false);
+    return Response.json([{ name: 'help', version: String(requestCount) }]);
+  });
+  assert.equal((await client.getGlobalCommands('223456789012345678'))[0].version, '1');
+  assert.equal((await client.getGlobalCommands('223456789012345678'))[0].version, '2');
+  assert.equal(requestCount, 2);
+});
+
 test("Discord channel message edits PATCH retained attachments without reuploading", async () => {
   const client = new DiscordRestClient("token", async (url, options) => {
     assert.equal(

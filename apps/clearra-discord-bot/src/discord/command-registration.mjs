@@ -1,4 +1,12 @@
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
+// A removed field is a change too. Server-owned defaults (notably application
+// installation contexts) remain outside this list unless explicitly requested.
+const RESETTABLE_CATALOG_FIELDS = new Set([
+  "options", "choices", "channel_types", "file_types",
+  "name_localizations", "description_localizations",
+  "required", "autocomplete", "min_value", "max_value", "min_length", "max_length",
+  "default_member_permissions", "default_permission", "nsfw",
+]);
 
 export function loadCommandRegistrationCredentials(environment = process.env) {
   const token = environment.DISCORD_TOKEN?.trim() ?? "";
@@ -299,6 +307,15 @@ function firstCatalogMismatch(expected, actual, path) {
       return `${path} expected an object, received ${describeValue(actual)}`;
     }
     const expectedKeys = Object.keys(expected);
+    for (const key of Object.keys(actual)) {
+      if (
+        RESETTABLE_CATALOG_FIELDS.has(key) &&
+        !Object.hasOwn(expected, key) &&
+        !isResetDiscordDefault(key, actual[key])
+      ) {
+        return `${path}.${key} retained a field absent from the Clearra catalog`;
+      }
+    }
     if (isLocalizationPath(path)) {
       const unexpectedKeys = Object.keys(actual).filter(
         (key) => !Object.hasOwn(expected, key),
@@ -332,6 +349,19 @@ function firstCatalogMismatch(expected, actual, path) {
 
 function isOmittedDiscordDefault(key, value) {
   return value === false && (key === "required" || key === "autocomplete");
+}
+
+function isResetDiscordDefault(key, value) {
+  if (["options", "choices", "channel_types", "file_types"].includes(key)) {
+    return Array.isArray(value) && value.length === 0;
+  }
+  if (key === "name_localizations" || key === "description_localizations") {
+    return value === null || (isObject(value) && Object.keys(value).length === 0);
+  }
+  if (["required", "autocomplete", "nsfw"].includes(key)) return value === false;
+  if (key === "default_member_permissions") return value === null;
+  if (key === "default_permission") return value === true;
+  return false;
 }
 
 function isObject(value) {

@@ -320,12 +320,18 @@ starting after its useful Discord lifetime.
 ## Global slash-command synchronization
 
 The synchronizer first reads the global catalog with complete localization
-dictionaries. An exact match is a no-op so routine releases do not churn
+dictionaries. API reads use `cache: no-store`, `Cache-Control: no-cache,
+no-store, max-age=0`, and `Pragma: no-cache`; redirects and conditional cache
+responses cannot supply registration evidence. These policies cover the manual
+registrar, release synchronization, independent readback, and rollback through
+the shared REST client. An exact match is a no-op so routine releases do not churn
 Discord command versions or client caches. A mismatch causes exactly one global
 bulk overwrite, never one request per guild; the write response is verified,
 then bounded readback polling must return the same command IDs, versions,
 localizations, options, and choices before the sync reports success. A stale
-readback never causes a second write. The transport also never replays an
+readback never causes a second write. Removed choices, nested options, whole
+localization maps, input limits, or permission restrictions count as changes;
+only empty/reset server defaults are equivalent to omission. The transport also never replays an
 ambiguous 5xx/network PUT: bounded GET readback decides whether that one write
 landed. If an unmanaged USER or MESSAGE command exists, synchronization stops
 instead of silently erasing it with Discord's all-types bulk-overwrite API.
@@ -335,9 +341,24 @@ installation. Its documented global-command read-repair handles commands a
 client already knows about, but Discord exposes no API with which a bot can
 invalidate a desktop client's local list of newly added commands. If one client
 still shows an old list after API readback succeeds, retry an existing command
-or reload that Discord client (`Ctrl+R` on desktop). Do not delete and recreate
+or reload that Discord client (`Ctrl+R` on desktop). Reloading is a user recovery
+action, not an immediate-update guarantee. The slash picker is owned by Discord
+and does not fetch its schema from Clearra's Pages site, service worker, Cloud
+Run health endpoint, or attachment CDN. Discord documents instant updates for
+guild commands and read-repair for global commands; Clearra keeps its global
+installation/DM scope. See the [application-command registration contract](https://docs.discord.com/developers/interactions/application-commands#registering-a-command).
+Do not delete and recreate
 commands, mirror them into every guild, or repeat the bulk overwrite; those
 paths increase version churn, command duplication, and permission drift.
+
+Production synchronization succeeds only after the existing four-surface
+observation gate. That step explicitly passes `GH_TOKEN` to its child processes
+and holds `pages: read` for the Pages deployment API. Missing GitHub reader
+authority fails before the Discord write. Pages/Cloud identity requests also
+revalidate intermediary caches and retain their source/sequence URL parameters.
+A later gate failure still restores the verified prior catalog, so a successful
+command PUT alone does not mean the new command list remains deployed. Child
+probe failures identify the surface and exit code without printing raw stderr.
 
 For a manual sync from a trusted local terminal, use the masked compatibility
 wrapper on Windows PowerShell 5.1 or newer:

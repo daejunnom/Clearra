@@ -313,6 +313,31 @@ test("Pages adapter validates the sealed report, live deployment status, and acc
   );
 });
 
+test('Pages HTTP identity reads bypass a simulated stale intermediary cache', async (t) => {
+  const live = pagesIdentityFixture();
+  const stale = { ...live, sourceCommit: 'f'.repeat(40) };
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    requests += 1;
+    assert.equal(new URL(url).searchParams.get('source'), COMMIT);
+    assert.equal(new URL(url).searchParams.get('observation'), '0');
+    const headers = new Headers(options.headers);
+    const fresh = options.cache === 'no-store' &&
+      headers.get('cache-control') === 'no-cache, no-store, max-age=0' &&
+      headers.get('pragma') === 'no-cache';
+    return Response.json(fresh ? live : stale);
+  });
+  const result = await probePagesProductionSurface({
+    sourceCommit: COMMIT,
+    deploymentReport: pagesDeploymentReportFixture(live),
+    sequence: 0,
+    async fetchDeploymentStatus() { return { status: 'succeed' }; },
+    now: () => NOW,
+  });
+  assert.equal(result.identity.source_commit, COMMIT);
+  assert.equal(requests, 1);
+});
+
 function cloudServiceFixture() {
   return {
     metadata: {

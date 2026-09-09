@@ -1113,6 +1113,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pages: read
       id-token: write
     env:
       SOURCE_COMMIT: ${{ needs.authority.outputs.source_commit }}
@@ -1259,9 +1260,12 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Authority-bound global sync and sole canonical four-surface observation
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          [[ -n "$GH_TOKEN" ]] || { echo 'GitHub read authority is required before Discord mutation' >&2; exit 2; }
           prepared_root="$GITHUB_WORKSPACE/promoted/prepared"
           candidate_root="$GITHUB_WORKSPACE/promoted/candidate"
           promotion_root="$GITHUB_WORKSPACE/promoted/promotion"

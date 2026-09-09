@@ -604,6 +604,28 @@ test("global sync stays command-only and owns the sole four-surface observer", (
   assert.equal((primary.match(/pages-deployment-run\.mjs resolve/gu) ?? []).length, 1);
 });
 
+function assertObservationGithubReadAuthority(source) {
+  const normalized = source.replaceAll('\r\n', '\n');
+  const sync = normalized.split('\n  sync-observe:')[1] ?? '';
+  const permissions = sync.split('\n    permissions:\n')[1]?.split('\n    env:')[0] ?? '';
+  assert.match(permissions, /^      pages: read$/mu);
+  assert.doesNotMatch(permissions, /^      (?:contents|actions|pages): write$/mu);
+  const observation = sync.split('      - name: Authority-bound global sync and sole canonical four-surface observation\n')[1]?.split('\n      - name:')[0] ?? '';
+  assert.match(observation, /env:\n          GH_TOKEN: \$\{\{ github.token \}\}/u);
+  const required = observation.indexOf('[[ -n "$GH_TOKEN" ]]');
+  const mutation = observation.indexOf('discord-command-catalog-release.mjs sync');
+  assert.ok(required >= 0 && mutation > required, 'GitHub reader authority must be present before the one command write');
+}
+
+test('canonical four-surface observation inherits read-only GitHub Pages authority', () => {
+  assertObservationGithubReadAuthority(primary);
+  assert.throws(() => assertObservationGithubReadAuthority(primary.replace('      pages: read', '      pages: none')));
+  const marker = '      - name: Authority-bound global sync and sole canonical four-surface observation';
+  const start = primary.indexOf(marker);
+  assert.throws(() => assertObservationGithubReadAuthority(primary.slice(0, start) +
+    primary.slice(start).replace('GH_TOKEN: ${{ github.token }}', 'UNUSED_GITHUB_AUTHORITY: ${{ github.token }}')));
+});
+
 test("the repository/organization SSH secret scope is explicitly forbidden", () => {
   assert.match(primary, /ORACLE_SSH_PRIVATE_KEY_B64 is forbidden as a repository or organization secret/u);
   assert.doesNotMatch(`${primary}\n${recovery}`, /ORACLE_SSH_PRIVATE_KEY(?!_B64)/u);

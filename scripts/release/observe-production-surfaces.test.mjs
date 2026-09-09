@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -6,6 +10,7 @@ import {
   sealCanonicalReport,
 } from "./canonical-release-evidence.mjs";
 import {
+  createCommandProbes,
   observeProductionSurfaces,
   PRODUCTION_OBSERVATION_SCHEMA_ID,
   PRODUCTION_SURFACE_PROBE_SCHEMA_ID,
@@ -15,6 +20,41 @@ import {
 
 const COMMIT = "1".repeat(40);
 const HASH = "a".repeat(64);
+
+test('a failed child identifies its surface and exit without reflecting stderr', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'clearra-probe-process-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'probe.mjs');
+  const source = 'process.stderr.write("private diagnostic must remain hidden"); process.exitCode = 42;\n';
+  await writeFile(path, source);
+  const spec = validProbeSpec();
+  for (const adapter of spec.probes) {
+    adapter.path = path;
+    adapter.sha256 = createHash('sha256').update(source).digest('hex');
+  }
+  const probes = await createCommandProbes(spec);
+  await assert.rejects(probes.get('pages')({ sequence: 0 }), (error) => {
+    assert.match(error.message, /pages production surface probe did not exit successfully \(exit=42, signal=none\)/u);
+    assert.doesNotMatch(error.message, /private diagnostic/u);
+    return true;
+  });
+});
+
+test('a successful child drains its complete canonical response before parsing', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'clearra-probe-process-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'probe.mjs');
+  const payload = { data: 'x'.repeat(60 * 1024) };
+  const source = `process.stdout.write(${JSON.stringify(JSON.stringify(payload) + '\n')});\n`;
+  await writeFile(path, source);
+  const spec = validProbeSpec();
+  for (const adapter of spec.probes) {
+    adapter.path = path;
+    adapter.sha256 = createHash('sha256').update(source).digest('hex');
+  }
+  const probes = await createCommandProbes(spec);
+  assert.deepEqual(await probes.get('pages')({ sequence: 0 }), payload);
+});
 
 test("observes Discord, Oracle, Cloud, and Pages through a short injected clock", async () => {
   const clock = fakeClock("2026-08-30T00:00:00.000Z");

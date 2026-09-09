@@ -283,6 +283,66 @@ test("global command synchronization preserves matching command versions", async
   assert.equal(writes, 0);
 });
 
+test('removed choices, restrictions, and whole localization maps cannot pass as unchanged', () => {
+  const expected = [{
+    name: 'search', description: 'Search',
+    options: [{ type: 3, name: 'query', description: 'Query' }],
+  }];
+  const retainedFields = [
+    ['choices', [{ name: 'Old choice', value: 'old' }]],
+    ['options', [{ type: 3, name: 'old', description: 'Old' }]],
+    ['channel_types', [0]], ['file_types', ['.txt']],
+    ['name_localizations', { ko: '이전이름' }],
+    ['description_localizations', { ko: '이전설명' }],
+    ['required', true], ['autocomplete', true],
+    ['min_value', 0], ['max_value', 9], ['min_length', 1], ['max_length', 10],
+  ];
+  for (const [key, value] of retainedFields) {
+    const stale = structuredClone(expected);
+    stale[0].options[0][key] = value;
+    assert.throws(() => verifyGlobalCommandRegistration(expected, stale), /retained a field absent/u, key);
+  }
+  for (const [key, value] of [
+    ['name_localizations', { ko: '이전이름' }],
+    ['default_member_permissions', '32'], ['default_permission', false], ['nsfw', true],
+  ]) {
+    const stale = structuredClone(expected);
+    stale[0][key] = value;
+    assert.throws(() => verifyGlobalCommandRegistration(expected, stale), /retained a field absent/u, key);
+  }
+  const noOptions = [{ name: 'search', description: 'Search' }];
+  assert.throws(() => verifyGlobalCommandRegistration(noOptions, expected), /options retained/u);
+  assert.deepEqual(verifyGlobalCommandRegistration(noOptions, [{
+    ...noOptions[0], options: [], name_localizations: null, description_localizations: {},
+    default_member_permissions: null, default_permission: true, nsfw: false,
+  }]), { count: 1, names: ['search'] });
+});
+
+test('removing static choices for autocomplete performs one verified write', async () => {
+  const catalog = [{
+    name: 'search', description: 'Search',
+    options: [{ type: 3, name: 'query', description: 'Query', autocomplete: true }],
+  }];
+  const exact = [{ ...structuredClone(catalog[0]),
+    id: '123456789012345678', application_id: '223456789012345678', version: '323456789012345678',
+  }];
+  let state = structuredClone(exact);
+  state[0].options[0].choices = [{ name: 'Old choice', value: 'old' }];
+  let writes = 0;
+  const result = await synchronizeGlobalCommandRegistration({
+    async getGlobalCommands() { return structuredClone(state); },
+    async registerGlobalCommands(_applicationId, commands) {
+      writes += 1;
+      assert.deepEqual(commands, catalog);
+      state = structuredClone(exact);
+      return structuredClone(state);
+    },
+  }, '223456789012345678', catalog);
+  assert.equal(result.changed, true);
+  assert.equal(writes, 1);
+  assert.equal(Object.hasOwn(state[0].options[0], 'choices'), false);
+});
+
 test("global command synchronization manages an exact message context command", async () => {
   const catalog = [
     { name: "render-file", type: 1, description: "Download a GIF" },

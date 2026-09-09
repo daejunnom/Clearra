@@ -431,6 +431,7 @@ export async function createCommandProbes(spec) {
         executable,
         arguments_,
         adapter.timeout_seconds * 1000,
+        adapter.surface,
       );
       return adapter.surface === "oracle"
         ? normalizeOracleProbeResult(raw, spec.source_commit, adapter.arguments)
@@ -1053,7 +1054,8 @@ function validateProbeFunctions(probes) {
   return map;
 }
 
-async function runProbeCommand(executable, arguments_, timeoutMilliseconds) {
+async function runProbeCommand(executable, arguments_, timeoutMilliseconds, surface) {
+  const label = `${surface} production surface probe`;
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(executable, arguments_, {
       shell: false,
@@ -1065,21 +1067,22 @@ async function runProbeCommand(executable, arguments_, timeoutMilliseconds) {
     let settled = false;
     const timer = setTimeout(() => {
       child.kill();
-      finish(new Error("production surface probe timed out"));
+      finish(new Error(`${label} timed out`));
     }, timeoutMilliseconds);
     child.stdout.on("data", (chunk) => {
       size += chunk.length;
       if (size > MAX_PROBE_OUTPUT_BYTES) {
         child.kill();
-        finish(new Error("production surface probe output exceeded its bound"));
+        finish(new Error(`${label} output exceeded its bound`));
         return;
       }
       chunks.push(chunk);
     });
-    child.on("error", () => finish(new Error("production surface probe failed to start")));
-    child.on("exit", (code, signal) => {
+    child.on("error", () => finish(new Error(`${label} failed to start`)));
+    // close follows stream drainage; exit may precede the last stdout chunk.
+    child.on("close", (code, signal) => {
       if (code !== 0 || signal) {
-        finish(new Error("production surface probe did not exit successfully"));
+        finish(new Error(`${label} did not exit successfully (exit=${code}, signal=${signal ?? "none"})`));
         return;
       }
       const output = Buffer.concat(chunks).toString("utf8");
@@ -1087,11 +1090,11 @@ async function runProbeCommand(executable, arguments_, timeoutMilliseconds) {
       try {
         value = JSON.parse(output);
       } catch {
-        finish(new Error("production surface probe did not return one JSON object"));
+        finish(new Error(`${label} did not return one JSON object`));
         return;
       }
       if (output !== `${canonicalJson(value)}\n`) {
-        finish(new Error("production surface probe output is not canonical JSON"));
+        finish(new Error(`${label} output is not canonical JSON`));
         return;
       }
       finish(null, value);

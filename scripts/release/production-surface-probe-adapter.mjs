@@ -397,6 +397,8 @@ export async function readPagesDeploymentStatusControlPlane(report) {
       "Accept: application/vnd.github+json",
       "--header",
       "X-GitHub-Api-Version: 2022-11-28",
+      "--header",
+      "Cache-Control: no-cache, no-store, max-age=0",
     ],
     DEFAULT_CONTROL_PLANE_TIMEOUT_MS,
     MAX_CONTROL_PLANE_BYTES,
@@ -727,9 +729,9 @@ async function runJsonCommand(executable, arguments_, timeoutMs, maxBytes, label
       chunks.push(chunk);
     });
     child.on("error", () => finish(new Error(`${label} failed to start`)));
-    child.on("exit", (code, signal) => {
+    child.on("close", (code, signal) => {
       if (code !== 0 || signal) {
-        finish(new Error(`${label} did not exit successfully`));
+        finish(new Error(`${label} did not exit successfully (exit=${code}, signal=${signal ?? "none"})`));
         return;
       }
       try {
@@ -759,7 +761,11 @@ async function fetchJsonBounded(url, label) {
       method: "GET",
       redirect: "error",
       cache: "no-store",
-      headers: { accept: "application/json" },
+      headers: {
+        accept: "application/json",
+        "cache-control": "no-cache, no-store, max-age=0",
+        pragma: "no-cache",
+      },
       signal: controller.signal,
     });
   } catch {

@@ -198,6 +198,10 @@ export class DiscordRestClient {
       const headers = new Headers({
         "user-agent": "Clearrabot/0.1",
       });
+      if (method === "GET") {
+        headers.set("cache-control", "no-cache, no-store, max-age=0");
+        headers.set("pragma", "no-cache");
+      }
       if (authenticate) headers.set("authorization", `Bot ${this.token}`);
       let body;
       if (files.length > 0) {
@@ -235,7 +239,7 @@ export class DiscordRestClient {
         response = await fetchWithTimeout(
           this.fetch,
           `${API_ROOT}${path}`,
-          { method, headers, body },
+          { method, headers, body, cache: "no-store", redirect: "error" },
           this.requestTimeoutMs,
         );
       } catch (error) {
