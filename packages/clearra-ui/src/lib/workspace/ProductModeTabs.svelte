@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { goto } from '$app/navigation';
   import {
     Blocks,
@@ -32,9 +33,9 @@
   $: allTabs = [
     { mode: 'pc', icon: Grid3X3, text: label('pcSearch') },
     { mode: 'setup', icon: Layers3, text: label('setupFinder') },
-    { mode: 'setup-score', icon: Layers3, text: language === 'ko' ? 'Setup 점수' : 'Setup score' },
-    { mode: 'spin-structure', icon: RotateCw, text: language === 'ko' ? 'Spin 구조' : 'Spin structure' },
-    { mode: 'build', icon: Blocks, text: language === 'ko' ? 'Build 도구' : 'Build tools' },
+    { mode: 'setup-score', icon: Layers3, text: componentMessage(language, 'setupScore') },
+    { mode: 'spin-structure', icon: RotateCw, text: componentMessage(language, 'spinStructure') },
+    { mode: 'build', icon: Blocks, text: componentMessage(language, 'buildTools') },
     { mode: 'build-probability', icon: Blocks, text: label('buildProbability') },
     { mode: 'sequence', icon: ListOrdered, text: label('operationSequence') },
     { mode: 'sequence-dependencies', icon: GitBranch, text: label('sequenceDependencies') },

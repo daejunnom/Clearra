@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { WorkspaceLocale } from '../i18n/languageManifest';
   import { Check, Circle, LoaderCircle, OctagonX } from '@lucide/svelte';
 
   import type { ClearraSearchProgressTelemetry } from '../wasm/wasmCommandClient';
@@ -54,9 +55,10 @@
             : 'progressPending'
       );
 
-  const formatters: Record<WorkspaceLanguage, Intl.NumberFormat> = {
+  const formatters: Record<WorkspaceLocale, Intl.NumberFormat> = {
     en: new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }),
-    ko: new Intl.NumberFormat('ko', { notation: 'compact', maximumFractionDigits: 1 })
+    ko: new Intl.NumberFormat('ko', { notation: 'compact', maximumFractionDigits: 1 }),
+    ja: new Intl.NumberFormat('ja', { notation: 'compact', maximumFractionDigits: 1 })
   };
 
   function count(value: string | null): string {

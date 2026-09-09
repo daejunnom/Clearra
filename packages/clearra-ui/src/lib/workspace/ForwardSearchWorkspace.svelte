@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
@@ -238,7 +239,7 @@
 
 <svelte:head>
   <title>{label(toolLabelKey)} · Clearra</title>
-  <meta name="description" content="Exact forward damage, spin, and REN search workspace" />
+  <meta name="description" content={componentMessage(language, 'surfaceExactForwardDamageSpinAndRenSearchWorkspace')} />
 </svelte:head>
 
 <WorkspaceShell

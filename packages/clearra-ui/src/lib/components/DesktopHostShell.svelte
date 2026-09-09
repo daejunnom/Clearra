@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { runtimeShellCopy, runtimeShellValue } from '../i18n/runtimeShellCatalog';
+  import { matchReleasedWorkspaceLanguage } from '../i18n/languageManifest';
+
   import { onDestroy, onMount } from 'svelte';
 
   import {
@@ -11,6 +14,8 @@
   import RenderStatusPanel from '../render/RenderStatusPanel.svelte';
 
   $: state = $desktopJobState;
+  $: locale = matchReleasedWorkspaceLanguage(state.request.language) ?? 'en';
+  $: copy = runtimeShellCopy(locale);
   $: capability = state.result?.capability_report.render_capability ?? null;
   $: jobActive = state.status === 'running' || state.status === 'cancelling';
   $: progressMaximum = Math.max(state.progressTotal, 1);
@@ -26,11 +31,11 @@
     <header class="topbar">
       <div>
         <h1>Clearra</h1>
-        <p>{state.status}</p>
+        <p>{runtimeShellValue(locale, state.status)}</p>
       </div>
       <div class="actions">
         <button type="button" on:click={startDesktopJob} disabled={jobActive}>
-          Run
+          {copy.run}
         </button>
         <button
           class="cancel"
@@ -38,92 +43,92 @@
           on:click={cancelDesktopJob}
           disabled={!jobActive || state.status === 'cancelling'}
         >
-          Cancel
+          {copy.cancel}
         </button>
       </div>
     </header>
 
     <div class="layout">
-      <section class="panel" aria-label="Canonical CLI request">
-        <h2>CLI request</h2>
+      <section class="panel" aria-label={copy.canonicalRequest}>
+        <h2>{copy.cliRequest}</h2>
         <p class="request-command">{state.request.arguments.join(' ')}</p>
         <dl>
           <div>
-            <dt>Language</dt>
+            <dt>{copy.language}</dt>
             <dd>{state.request.language}</dd>
           </div>
           <div>
-            <dt>Arguments</dt>
+            <dt>{copy.arguments}</dt>
             <dd>{state.request.arguments.length}</dd>
           </div>
         </dl>
       </section>
 
-      <section class="panel" aria-label="Backend status">
-        <h2>Backend</h2>
+      <section class="panel" aria-label={copy.backendStatus}>
+        <h2>{copy.backend}</h2>
         <dl>
           <div>
-            <dt>Requested</dt>
-            <dd>{state.backendStatus?.backend_requested ?? 'pending'}</dd>
+            <dt>{copy.requested}</dt>
+            <dd>{runtimeShellValue(locale, state.backendStatus?.backend_requested ?? 'pending')}</dd>
           </div>
           <div>
-            <dt>Selected</dt>
-            <dd>{state.backendStatus?.backend_selected ?? 'pending'}</dd>
+            <dt>{copy.selected}</dt>
+            <dd>{runtimeShellValue(locale, state.backendStatus?.backend_selected ?? 'pending')}</dd>
           </div>
           <div>
-            <dt>Fallback</dt>
-            <dd>{state.backendStatus?.fallback_used ? 'used' : 'none'}</dd>
+            <dt>{copy.fallback}</dt>
+            <dd>{state.backendStatus?.fallback_used ? copy.used : copy.none}</dd>
           </div>
           <div>
-            <dt>Boundary</dt>
+            <dt>{copy.boundary}</dt>
             <dd>clearra-cli/CommandRequest</dd>
           </div>
           <div>
-            <dt>Job</dt>
-            <dd>{state.jobId ?? 'none'}</dd>
+            <dt>{copy.job}</dt>
+            <dd>{state.jobId ?? copy.none}</dd>
           </div>
         </dl>
       </section>
 
-      <RenderStatusPanel {capability} />
+      <RenderStatusPanel {capability} language={locale} />
     </div>
 
-    <section class="job-status" aria-label="Job progress">
+    <section class="job-status" aria-label={copy.jobProgress}>
       <div class="progress-heading">
-        <h2>{state.progressLabel || 'Job'}</h2>
+        <h2>{state.progressLabel ? runtimeShellValue(locale, state.progressLabel) : copy.job}</h2>
         <span>{state.progressDone} / {state.progressTotal}</span>
       </div>
       <progress value={state.progressDone} max={progressMaximum}></progress>
       <dl class="runtime-status">
         <div>
-          <dt>Budget</dt>
-          <dd>{state.resourceStatus?.budget_status ?? 'pending'}</dd>
+          <dt>{copy.budget}</dt>
+          <dd>{runtimeShellValue(locale, state.resourceStatus?.budget_status ?? 'pending')}</dd>
         </div>
         <div>
-          <dt>Memory</dt>
-          <dd>{state.memoryStatus?.state ?? 'pending'}</dd>
+          <dt>{copy.memory}</dt>
+          <dd>{runtimeShellValue(locale, state.memoryStatus?.state ?? 'pending')}</dd>
         </div>
         <div>
-          <dt>Complete</dt>
-          <dd>{state.resourceStatus?.probability_complete ?? 'pending'}</dd>
+          <dt>{copy.complete}</dt>
+          <dd>{runtimeShellValue(locale, state.resourceStatus?.probability_complete ?? 'pending')}</dd>
         </div>
       </dl>
     </section>
 
-    <section class="diagnostics" aria-label="Diagnostics">
-      <h2>Diagnostics</h2>
+    <section class="diagnostics" aria-label={copy.diagnostics}>
+      <h2>{copy.diagnostics}</h2>
       {#if state.diagnostics.length === 0}
-        <p>None</p>
+        <p>{copy.noDiagnostics}</p>
       {:else}
         <ul>
           {#each state.diagnostics as diagnostic}
-            <li><strong>{diagnostic.code}</strong><span>{diagnostic.severity}</span></li>
+            <li><strong>{diagnostic.code}</strong><span>{runtimeShellValue(locale, diagnostic.severity)}</span></li>
           {/each}
         </ul>
       {/if}
     </section>
 
-    <section class="result" aria-label="Result">
+    <section class="result" aria-label={copy.result}>
       <pre>{JSON.stringify(state.result ?? state.validation ?? { status: state.status, error: state.error }, null, 2)}</pre>
     </section>
   </section>

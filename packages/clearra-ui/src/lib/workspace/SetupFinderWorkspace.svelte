@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
 
@@ -607,7 +608,7 @@
 
 <svelte:head>
   <title>{label('setupFinder')} · Clearra</title>
-  <meta name="description" content="Exact 4-line perfect-clear setup finder" />
+  <meta name="description" content={componentMessage(language, 'surfaceExact4LinePerfectClearSetupFinder')} />
 </svelte:head>
 
 <WorkspaceShell

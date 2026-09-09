@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
 
@@ -194,8 +195,8 @@
 </script>
 
 <svelte:head>
-  <title>{language === 'ko' ? 'Build 도구' : 'Build tools'} · Clearra</title>
-  <meta name="description" content="Typed Build target production, supplied-solution evaluation, exact portfolio paging, and score-only result inspection" />
+  <title>{componentMessage(language, 'buildTools')} · Clearra</title>
+  <meta name="description" content={componentMessage(language, 'surfaceTypedBuildTargetProductionSuppliedSolutionEvaluationExact')} />
 </svelte:head>
 
 <WorkspaceShell
@@ -203,7 +204,7 @@
   {language}
   {active}
   statusLabel={label(runtimeView.status)}
-  workspaceLabel={language === 'ko' ? 'Build 도구' : 'Build tools'}
+  workspaceLabel={componentMessage(language, 'buildTools')}
   dimensionLabel={label('fieldHeight')}
   dimensionValue={request.height}
   dimensionMin={1}

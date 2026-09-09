@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage, type ComponentMessageKey } from '../i18n/componentCatalog';
   // SRP rationale: this component's single change reason is browsing one
   // validated product-result family: navigation, selected-family export binding
   // and source release. Payload validation, backend enumeration, replay rendering
@@ -144,9 +145,7 @@
     (winner) => winner.normalized_solution_key
   ) ?? [];
   $: scoreWinnerCaptions = scoreWinners.map((winner, index) =>
-    korean
-      ? `결과 ${scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1} · 점수 ${winner.score} · 참고 공격력 ${winner.informational_attack}`
-      : `Result ${scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1} · Score ${winner.score} · Informational attack ${winner.informational_attack}`
+    componentMessage(language, 'resultScoreInformationalAttack', { value0: scorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1, value1: winner.score, value2: winner.informational_attack })
   );
   $: buildV2 = payload?.content.payload_kind === 'build-v2'
     ? payload.content.payload
@@ -175,9 +174,7 @@
     (candidate) => candidate.candidate_key
   );
   $: buildCandidateCaptions = buildCandidatePage.map((candidate) =>
-    korean
-      ? `커버 패턴 ${candidate.covered_pattern_count}`
-      : `Covered patterns ${candidate.covered_pattern_count}`
+    componentMessage(language, 'coveredPatterns', { value0: candidate.covered_pattern_count })
   );
   $: buildScorePageCount = buildV2?.kind === 'score-portfolio'
     ? Math.max(1, Math.ceil(buildV2.winners.length / PRODUCT_MEMBER_PAGE_SIZE))
@@ -193,9 +190,7 @@
     ? buildV2.winners.map((winner) => winner.candidate_key)
     : [];
   $: buildScoreCaptions = buildScoreWinners.map((winner, index) =>
-    korean
-      ? `결과 ${buildScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1} · 점수 ${winner.score} · 참고 공격력 ${winner.informational_attack}`
-      : `Result ${buildScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1} · Score ${winner.score} · Informational attack ${winner.informational_attack}`
+    componentMessage(language, 'resultScoreInformationalAttack2', { value0: buildScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1, value1: winner.score, value2: winner.informational_attack })
   );
   $: setupRankedFamily = payload?.content.payload_kind === 'setup-ranked-family'
     ? payload.content.payload
@@ -237,10 +232,7 @@
     buildCoveragePortfolio !== null ||
     buildV2?.kind === 'portfolio' ||
     buildV2?.kind === 'score-portfolio';
-  $: korean = language === 'ko';
-  $: invalidPreviewLabel = korean
-    ? '보드 미리보기를 생성할 수 없습니다.'
-    : 'Board preview is unavailable.';
+  $: invalidPreviewLabel = componentMessage(language, 'boardPreviewIsUnavailable');
   $: scoreMinimalCoverage = payload?.contract === 'pc.score-minimals' ||
     payload?.contract === 'build.highest-score-minimum-set';
   $: scoreOnlyPortfolio = scoreMinimalCoverage || buildV2?.kind === 'score-portfolio';
@@ -631,46 +623,46 @@
   }
 
   function objectiveLabel(value: string): string {
-    const labels: Record<string, readonly [string, string]> = {
-      all: ['All solutions', '전체 해법'],
-      unique: ['Unique solutions', '중복 없는 해법'],
-      'min-cover': ['Minimum solutions', '최소 해법'],
-      'max-probability-minimum': ['Most probable minimum solutions', '확률이 가장 높은 최소 해법'],
-      'max-score-cover': ['Highest-score minimum set', '최고 점수 최소 해법 집합']
+    const labels: Record<string, ComponentMessageKey> = {
+      all: 'allSolutions',
+      unique: 'uniqueSolutions',
+      'min-cover': 'minimumSolutions',
+      'max-probability-minimum': 'mostProbableMinimumSolutions',
+      'max-score-cover': 'highestScoreMinimumSet'
     };
     const label = labels[value];
-    return label ? label[korean ? 1 : 0] : (korean ? '선택한 목표' : 'Selected objective');
+    return label ? componentMessage(language, label) : (componentMessage(language, 'selectedObjective'));
   }
 
   function lengthPreferenceLabel(value: 'longer' | 'shorter'): string {
-    if (value === 'longer') return korean ? '긴 Setup 우선' : 'Longer setups first';
-    return korean ? '짧은 Setup 우선' : 'Shorter setups first';
+    if (value === 'longer') return componentMessage(language, 'longerSetupsFirst');
+    return componentMessage(language, 'shorterSetupsFirst');
   }
 
   function spinPartitionLabel(value: 'regular' | 'mini'): string {
-    if (value === 'regular') return korean ? 'Regular spin' : 'Regular spin';
-    return korean ? 'Mini spin' : 'Mini spin';
+    if (value === 'regular') return componentMessage(language, 'regularSpin');
+    return componentMessage(language, 'miniSpin');
   }
 
   function rotationLabel(value: string): string {
-    const labels: Record<string, readonly [string, string]> = {
-      '0': ['Spawn rotation', '기본 회전'],
-      '1': ['Right rotation', '오른쪽 회전'],
-      '2': ['Reverse rotation', '반대 회전'],
-      '3': ['Left rotation', '왼쪽 회전']
+    const labels: Record<string, ComponentMessageKey> = {
+      '0': 'spawnRotation',
+      '1': 'rightRotation',
+      '2': 'reverseRotation',
+      '3': 'leftRotation'
     };
     const label = labels[value];
-    return label ? label[korean ? 1 : 0] : (korean ? '회전' : 'Rotation');
+    return label ? componentMessage(language, label) : (componentMessage(language, 'rotation'));
   }
 
   function holdDecisionLabel(value: string): string {
-    const labels: Record<string, readonly [string, string]> = {
-      none: ['No hold', '홀드 없음'],
-      store: ['Stored in hold', '홀드에 저장'],
-      swap: ['Swapped hold', '홀드 교체']
+    const labels: Record<string, ComponentMessageKey> = {
+      none: 'noHold',
+      store: 'storedInHold',
+      swap: 'swappedHold'
     };
     const label = labels[value];
-    return label ? label[korean ? 1 : 0] : (korean ? '홀드 사용' : 'Hold used');
+    return label ? componentMessage(language, label) : (componentMessage(language, 'holdUsed'));
   }
 
   function memberOrdinalBase(pageNumber: string): string {
@@ -684,33 +676,31 @@
 
 {#if payload && !error}
   {#if (payload.content.payload_kind === 'coverage-portfolio' || buildPortfolioActive) && coveragePage}
-    <section class="product-pager" aria-label={korean ? '최적 해법 페이지' : 'Optimal solution pages'}>
+    <section class="product-pager" aria-label={componentMessage(language, 'optimalSolutionPages')}>
       <header>
         <div>
           <strong>{buildPortfolioActive
-            ? (korean ? 'Build 최적 포트폴리오 전체' : 'All optimal Build portfolios')
+            ? (componentMessage(language, 'allOptimalBuildPortfolios'))
             : scoreMinimalCoverage
-              ? (korean ? '최고 점수 최소 해법 집합 전체' : 'All minimum maximum-score solution sets')
-              : (korean ? '동일 최소 크기의 전체 해법' : 'All equal minimum-size solutions')}</strong>
-          <span>{korean ? '해법' : 'Solution'} {coveragePage.alternative_index}{coveragePage.total_alternative_count ? ` / ${coveragePage.total_alternative_count}` : ''}</span>
+              ? (componentMessage(language, 'allMinimumMaximumScoreSolutionSets'))
+              : (componentMessage(language, 'allEqualMinimumSizeSolutions'))}</strong>
+          <span>{componentMessage(language, 'solution')} {coveragePage.alternative_index}{coveragePage.total_alternative_count ? ` / ${coveragePage.total_alternative_count}` : ''}</span>
           {#if scoreOnlyPortfolio}
-            <span>{korean ? '점수만 동점·선정·정렬에 사용하며 공격력은 참고 정보입니다.' : 'Equality, membership, and ordering use score only; attack is informational.'}</span>
+            <span>{componentMessage(language, 'equalityMembershipAndOrderingUseScoreOnly')}</span>
           {/if}
         </div>
-        <nav aria-label={korean ? '해법 페이지 이동' : 'Solution page navigation'}>
-          <button type="button" disabled={loadingMember || navigatingOuter || !previousOuterAvailable} on:click={previousOuterPage} aria-label={korean ? '이전 해법' : 'Previous solution'}><ChevronLeft size={16} /></button>
-          <button type="button" disabled={loadingMember || navigatingOuter || !nextOuterAvailable} on:click={nextOuterPage} aria-label={korean ? '다음 해법' : 'Next solution'}>{#if prefetchInFlight && outerPageIndex + 1 >= coveragePages.length}<LoaderCircle class="spin" size={16} />{:else}<ChevronRight size={16} />{/if}</button>
+        <nav aria-label={componentMessage(language, 'solutionPageNavigation')}>
+          <button type="button" disabled={loadingMember || navigatingOuter || !previousOuterAvailable} on:click={previousOuterPage} aria-label={componentMessage(language, 'previousSolution')}><ChevronLeft size={16} /></button>
+          <button type="button" disabled={loadingMember || navigatingOuter || !nextOuterAvailable} on:click={nextOuterPage} aria-label={componentMessage(language, 'nextSolution')}>{#if prefetchInFlight && outerPageIndex + 1 >= coveragePages.length}<LoaderCircle class="spin" size={16} />{:else}<ChevronRight size={16} />{/if}</button>
         </nav>
       </header>
       <div class="member-meta">
-        <span>{korean ? '최소 해법 크기' : 'Minimum cardinality'}: {coveragePage.optimal_cardinality}</span>
-        <span>{korean ? '구성원 페이지' : 'Member page'}: {memberPageNumber} / {coveragePage.total_member_pages}</span>
+        <span>{componentMessage(language, 'minimumCardinality')}: {coveragePage.optimal_cardinality}</span>
+        <span>{componentMessage(language, 'memberPage')}: {memberPageNumber} / {coveragePage.total_member_pages}</span>
       </div>
       {#if coveragePage.optimal_cardinality === '0'}
         <p class="empty-result" role="status">
-          {korean
-            ? '요청한 패턴 집합에서 필요한 해법이 없습니다. 탐색은 정상적으로 완료되었습니다.'
-            : 'No solution is required for this pattern set. The search completed successfully.'}
+          {componentMessage(language, 'noSolutionIsRequiredForThisPattern')}
         </p>
       {:else}
         <SolutionSubsetPage
@@ -725,15 +715,15 @@
         />
       {/if}
       <footer>
-        <button type="button" disabled={loadingMember || navigatingOuter || memberPageNumber === '1'} on:click={() => showMemberPage(decrementCanonicalDecimal(memberPageNumber))}><ChevronLeft size={15} />{korean ? '이전 100개' : 'Previous 100'}</button>
-        <button type="button" disabled={loadingMember || navigatingOuter || compareCanonicalDecimals(memberPageNumber, coveragePage.total_member_pages) >= 0} on:click={() => showMemberPage(incrementCanonicalDecimal(memberPageNumber))}>{korean ? '다음 100개' : 'Next 100'}<ChevronRight size={15} /></button>
+        <button type="button" disabled={loadingMember || navigatingOuter || memberPageNumber === '1'} on:click={() => showMemberPage(decrementCanonicalDecimal(memberPageNumber))}><ChevronLeft size={15} />{componentMessage(language, 'previous100')}</button>
+        <button type="button" disabled={loadingMember || navigatingOuter || compareCanonicalDecimals(memberPageNumber, coveragePage.total_member_pages) >= 0} on:click={() => showMemberPage(incrementCanonicalDecimal(memberPageNumber))}>{componentMessage(language, 'next100')}<ChevronRight size={15} /></button>
       </footer>
       {#if buildV2?.kind === 'score-portfolio'}
         <div class="build-score-evidence">
           <div class="member-meta">
-            <span>{korean ? '점수 프로필' : 'Score profile'}: {buildV2.score_profile}</span>
-            <span>{korean ? '초기 B2B' : 'Initial B2B'}: {buildV2.initial_b2b}</span>
-            <span>{korean ? '점수 증거 페이지' : 'Score evidence page'}: {buildScorePageIndex + 1} / {buildScorePageCount}</span>
+            <span>{componentMessage(language, 'scoreProfile')}: {buildV2.score_profile}</span>
+            <span>{componentMessage(language, 'initialB2b')}: {buildV2.initial_b2b}</span>
+            <span>{componentMessage(language, 'scoreEvidencePage')}: {buildScorePageIndex + 1} / {buildScorePageCount}</span>
           </div>
           <SolutionSubsetPage
             solutionKeys={buildScoreSolutionKeys}
@@ -747,25 +737,25 @@
             {language}
           />
           <footer>
-            <button type="button" disabled={buildScorePageIndex === 0} on:click={() => (buildScorePageIndex -= 1)}><ChevronLeft size={15} />{korean ? '이전 점수 증거' : 'Previous score evidence'}</button>
-            <button type="button" disabled={buildScorePageIndex + 1 >= buildScorePageCount} on:click={() => (buildScorePageIndex += 1)}>{korean ? '다음 점수 증거' : 'Next score evidence'}<ChevronRight size={15} /></button>
+            <button type="button" disabled={buildScorePageIndex === 0} on:click={() => (buildScorePageIndex -= 1)}><ChevronLeft size={15} />{componentMessage(language, 'previousScoreEvidence')}</button>
+            <button type="button" disabled={buildScorePageIndex + 1 >= buildScorePageCount} on:click={() => (buildScorePageIndex += 1)}>{componentMessage(language, 'nextScoreEvidence')}<ChevronRight size={15} /></button>
           </footer>
         </div>
       {/if}
     </section>
   {:else if buildPortfolioActive && loadingMember}
-    <p class="pager-loading" role="status"><LoaderCircle class="spin" size={16} />{korean ? '첫 Build 포트폴리오 페이지를 불러오는 중입니다.' : 'Loading the first Build portfolio page.'}</p>
+    <p class="pager-loading" role="status"><LoaderCircle class="spin" size={16} />{componentMessage(language, 'loadingTheFirstBuildPortfolioPage')}</p>
   {:else if buildV2 && (buildV2.kind === 'candidate-family' || buildV2.kind === 'probability')}
-    <section class="product-pager build-family" aria-label={korean ? 'Build 결과' : 'Build result'}>
+    <section class="product-pager build-family" aria-label={componentMessage(language, 'buildResult')}>
       <header>
         <div>
           <strong>{buildV2.kind === 'probability'
-            ? (korean ? 'Build 구축 확률' : 'Build probability')
-            : (korean ? 'Build 해법' : 'Build solutions')}</strong>
-          <span>{korean ? '일반 결과 family이며 포트폴리오 동점이 아닙니다.' : 'This is an ordinary result family, not a portfolio tie.'}</span>
+            ? (componentMessage(language, 'buildProbability'))
+            : (componentMessage(language, 'buildSolutions'))}</strong>
+          <span>{componentMessage(language, 'thisIsAnOrdinaryResultFamilyNot')}</span>
         </div>
         {#if buildV2.kind === 'candidate-family' && buildCandidatePageCount > 1}
-          <nav aria-label={korean ? 'Build 후보 페이지 이동' : 'Build candidate navigation'}>
+          <nav aria-label={componentMessage(language, 'buildCandidateNavigation')}>
             <button type="button" disabled={buildCandidatePageIndex === 0} on:click={() => (buildCandidatePageIndex -= 1)}><ChevronLeft size={16} /></button>
             <span>{buildCandidatePageIndex + 1} / {buildCandidatePageCount}</span>
             <button type="button" disabled={buildCandidatePageIndex + 1 >= buildCandidatePageCount} on:click={() => (buildCandidatePageIndex += 1)}><ChevronRight size={16} /></button>
@@ -773,10 +763,10 @@
         {/if}
       </header>
       <div class="member-meta">
-        <span>{korean ? '목표' : 'Objective'}: {objectiveLabel(buildV2.objective)}</span>
-        <span>{korean ? '도달 후보' : 'Reachable candidates'}: {buildV2.reachable_candidate_count} / {buildV2.source_candidate_count}</span>
-        <span>{korean ? '커버 패턴' : 'Covered patterns'}: {buildV2.covered_pattern_count} / {buildV2.pattern_count}</span>
-        <span>{korean ? '합집합 확률' : 'Union probability'}: {buildV2.union_probability}</span>
+        <span>{componentMessage(language, 'objective')}: {objectiveLabel(buildV2.objective)}</span>
+        <span>{componentMessage(language, 'reachableCandidates')}: {buildV2.reachable_candidate_count} / {buildV2.source_candidate_count}</span>
+        <span>{componentMessage(language, 'coveredPatterns2')}: {buildV2.covered_pattern_count} / {buildV2.pattern_count}</span>
+        <span>{componentMessage(language, 'unionProbability')}: {buildV2.union_probability}</span>
       </div>
       {#if buildV2.kind === 'candidate-family'}
         <SolutionSubsetPage
@@ -793,14 +783,14 @@
       {/if}
     </section>
   {:else if buildSetupFamily}
-    <section class="product-pager build-family" aria-label={korean ? 'Build setup 후보 결과' : 'Build setup candidates'}>
+    <section class="product-pager build-family" aria-label={componentMessage(language, 'buildSetupCandidates')}>
       <header>
         <div>
-          <strong>{korean ? 'Build setup 후보 전체' : 'Complete Build setup candidate family'}</strong>
-          <span>{korean ? '동점 메타데이터가 없는 정상 후보 family입니다.' : 'This is an ordinary candidate family without tie metadata.'}</span>
+          <strong>{componentMessage(language, 'completeBuildSetupCandidateFamily')}</strong>
+          <span>{componentMessage(language, 'thisIsAnOrdinaryCandidateFamilyWithout')}</span>
         </div>
         {#if buildCandidatePageCount > 1}
-          <nav aria-label={korean ? 'Build setup 후보 페이지 이동' : 'Build setup candidate navigation'}>
+          <nav aria-label={componentMessage(language, 'buildSetupCandidateNavigation')}>
             <button type="button" disabled={buildCandidatePageIndex === 0} on:click={() => (buildCandidatePageIndex -= 1)}><ChevronLeft size={16} /></button>
             <span>{buildCandidatePageIndex + 1} / {buildCandidatePageCount}</span>
             <button type="button" disabled={buildCandidatePageIndex + 1 >= buildCandidatePageCount} on:click={() => (buildCandidatePageIndex += 1)}><ChevronRight size={16} /></button>
@@ -808,9 +798,9 @@
         {/if}
       </header>
       <div class="member-meta">
-        <span>{korean ? '목표' : 'Objective'}: {objectiveLabel(buildSetupFamily.objective)}</span>
-        <span>{korean ? '도달 후보' : 'Reachable candidates'}: {buildSetupFamily.reachable_candidate_count} / {buildSetupFamily.source_candidate_count}</span>
-        <span>{korean ? '합집합 확률' : 'Union probability'}: {buildSetupFamily.union_probability}</span>
+        <span>{componentMessage(language, 'objective')}: {objectiveLabel(buildSetupFamily.objective)}</span>
+        <span>{componentMessage(language, 'reachableCandidates')}: {buildSetupFamily.reachable_candidate_count} / {buildSetupFamily.source_candidate_count}</span>
+        <span>{componentMessage(language, 'unionProbability')}: {buildSetupFamily.union_probability}</span>
       </div>
       <SolutionSubsetPage
         solutionKeys={buildCandidateSolutionKeys}
@@ -825,14 +815,14 @@
       />
     </section>
   {:else if setupRankedFamily}
-    <section class="product-pager ordinary-family" aria-label={korean ? 'Setup 순위 결과' : 'Setup ranking result'}>
+    <section class="product-pager ordinary-family" aria-label={componentMessage(language, 'setupRankingResult')}>
       <header>
         <div>
-          <strong>{korean ? 'Setup 순위' : 'Setup ranking'}</strong>
-          <span>{korean ? '일반 순위 family이며 동점 포트폴리오로 재분류하지 않습니다.' : 'This is an ordinary ranked family and is not reclassified as a tie portfolio.'}</span>
+          <strong>{componentMessage(language, 'setupRanking')}</strong>
+          <span>{componentMessage(language, 'thisIsAnOrdinaryRankedFamilyAnd')}</span>
         </div>
         {#if setupRankedPageCount > 1}
-          <nav aria-label={korean ? 'Setup 후보 페이지 이동' : 'Setup candidate navigation'}>
+          <nav aria-label={componentMessage(language, 'setupCandidateNavigation')}>
             <button type="button" disabled={setupRankedPageIndex === 0} on:click={() => (setupRankedPageIndex -= 1)}><ChevronLeft size={16} /></button>
             <span>{setupRankedPageIndex + 1} / {setupRankedPageCount}</span>
             <button type="button" disabled={setupRankedPageIndex + 1 >= setupRankedPageCount} on:click={() => (setupRankedPageIndex += 1)}><ChevronRight size={16} /></button>
@@ -840,25 +830,25 @@
         {/if}
       </header>
       <div class="member-meta">
-        <span>{korean ? '후보' : 'Candidates'}: {setupRankedFamily.candidate_count}</span>
-        <span>{korean ? '길이 선호' : 'Length preference'}: {lengthPreferenceLabel(setupRankedFamily.resolved_length_preference)}</span>
-        <span>{korean ? '규칙' : 'Rule'}: {setupRankedFamily.rule_profile}</span>
+        <span>{componentMessage(language, 'candidates')}: {setupRankedFamily.candidate_count}</span>
+        <span>{componentMessage(language, 'lengthPreference')}: {lengthPreferenceLabel(setupRankedFamily.resolved_length_preference)}</span>
+        <span>{componentMessage(language, 'rule')}: {setupRankedFamily.rule_profile}</span>
       </div>
       <ol start={setupRankedPageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
         {#each setupRankedCandidates as candidate, index (candidate.candidate_id)}
-          <li><strong>{korean ? '셋업' : 'Setup'} {setupRankedPageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1}</strong></li>
+          <li><strong>{componentMessage(language, 'setup')} {setupRankedPageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1}</strong></li>
         {/each}
       </ol>
     </section>
   {:else if setupScoreFamily}
-    <section class="product-pager ordinary-family" aria-label={korean ? 'Setup 점수 순위' : 'Setup score ranking'}>
+    <section class="product-pager ordinary-family" aria-label={componentMessage(language, 'setupScoreRanking')}>
       <header>
         <div>
-          <strong>{korean ? 'Setup 점수 순위' : 'Setup score ranking'}</strong>
-          <span>{korean ? '동일 score도 일반 순위 family의 구성원입니다. Attack은 동점 판정에 혼합하지 않습니다.' : 'Equal scores remain members of the ordinary ranking family. Attack is not mixed into equality.'}</span>
+          <strong>{componentMessage(language, 'setupScoreRanking')}</strong>
+          <span>{componentMessage(language, 'equalScoresRemainMembersOfTheOrdinary')}</span>
         </div>
         {#if setupScorePageCount > 1}
-          <nav aria-label={korean ? 'Setup 점수 후보 페이지 이동' : 'Setup score candidate navigation'}>
+          <nav aria-label={componentMessage(language, 'setupScoreCandidateNavigation')}>
             <button type="button" disabled={setupScorePageIndex === 0} on:click={() => (setupScorePageIndex -= 1)}><ChevronLeft size={16} /></button>
             <span>{setupScorePageIndex + 1} / {setupScorePageCount}</span>
             <button type="button" disabled={setupScorePageIndex + 1 >= setupScorePageCount} on:click={() => (setupScorePageIndex += 1)}><ChevronRight size={16} /></button>
@@ -866,29 +856,29 @@
         {/if}
       </header>
       <div class="member-meta">
-        <span>{korean ? '후보' : 'Candidates'}: {setupScoreFamily.candidate_count}</span>
-        <span>{korean ? '평균 우선순위 점수' : 'Average priority score'}: {setupScoreFamily.average_priority_score}</span>
-        <span>{korean ? '점수 프로필' : 'Score profile'}: {setupScoreFamily.score_profile}</span>
-        <span>{korean ? '초기 B2B' : 'Initial B2B'}: {setupScoreFamily.initial_b2b}</span>
+        <span>{componentMessage(language, 'candidates')}: {setupScoreFamily.candidate_count}</span>
+        <span>{componentMessage(language, 'averagePriorityScore')}: {setupScoreFamily.average_priority_score}</span>
+        <span>{componentMessage(language, 'scoreProfile')}: {setupScoreFamily.score_profile}</span>
+        <span>{componentMessage(language, 'initialB2b')}: {setupScoreFamily.initial_b2b}</span>
       </div>
       <ol start={setupScorePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
         {#each setupScoreCandidates as candidate (candidate.candidate_id)}
           <li class="score-row">
-            <strong>{korean ? '셋업' : 'Setup'} {candidate.rank}</strong>
-            <span>{korean ? '순위' : 'Rank'} {candidate.rank} · {korean ? '기대 점수' : 'Expected score'} {candidate.unconditional_expected_score} · {korean ? 'Setup 확률' : 'Setup probability'} {candidate.setup_covered_probability} · {korean ? '연속 성공 확률' : 'Continuation probability'} {candidate.continuation_probability}</span>
+            <strong>{componentMessage(language, 'setup')} {candidate.rank}</strong>
+            <span>{componentMessage(language, 'rank')} {candidate.rank} · {componentMessage(language, 'expectedScore')} {candidate.unconditional_expected_score} · {componentMessage(language, 'setupProbability')} {candidate.setup_covered_probability} · {componentMessage(language, 'continuationProbability')} {candidate.continuation_probability}</span>
           </li>
         {/each}
       </ol>
     </section>
   {:else if spinStructureFamily}
-    <section class="product-pager ordinary-family" aria-label={korean ? 'Spin 구조 family' : 'Spin structure family'}>
+    <section class="product-pager ordinary-family" aria-label={componentMessage(language, 'spinStructureFamily')}>
       <header>
         <div>
-          <strong>{korean ? 'Spin 구조 결과' : 'Spin structure results'}</strong>
-          <span>{korean ? 'Search와 guaranteed는 일반 완전 family이며 cover 동점 포트폴리오가 아닙니다.' : 'Search and guaranteed are ordinary complete families, not cover tie portfolios.'}</span>
+          <strong>{componentMessage(language, 'spinStructureResults')}</strong>
+          <span>{componentMessage(language, 'searchAndGuaranteedAreOrdinaryCompleteFamilies')}</span>
         </div>
         {#if spinStructurePageCount > 1}
-          <nav aria-label={korean ? 'Spin 구조 후보 페이지 이동' : 'Spin structure candidate navigation'}>
+          <nav aria-label={componentMessage(language, 'spinStructureCandidateNavigation')}>
             <button type="button" disabled={spinStructurePageIndex === 0} on:click={() => (spinStructurePageIndex -= 1)}><ChevronLeft size={16} /></button>
             <span>{spinStructurePageIndex + 1} / {spinStructurePageCount}</span>
             <button type="button" disabled={spinStructurePageIndex + 1 >= spinStructurePageCount} on:click={() => (spinStructurePageIndex += 1)}><ChevronRight size={16} /></button>
@@ -896,63 +886,64 @@
         {/if}
       </header>
       <div class="member-meta">
-        <span>{korean ? '전체' : 'Candidates'}: {spinStructureFamily.candidate_count}</span>
-        <span>Regular: {spinStructureFamily.regular_count}</span>
-        <span>Mini: {spinStructureFamily.mini_count}</span>
-        <span>{korean ? '최소 배치' : 'Minimum placements'}: {spinStructureFamily.minimum_placements ?? '—'}</span>
+        <span>{componentMessage(language, 'candidates')}: {spinStructureFamily.candidate_count}</span>
+        <span>{componentMessage(language, 'surfaceRegular')} {spinStructureFamily.regular_count}</span>
+        <span>{componentMessage(language, 'surfaceMini')} {spinStructureFamily.mini_count}</span>
+        <span>{componentMessage(language, 'minimumPlacements')}: {spinStructureFamily.minimum_placements ?? '—'}</span>
         {#if spinStructureFamily.guaranteed_final_piece}
-          <span>{korean ? '보장 마지막 조각' : 'Guaranteed final piece'}: {spinStructureFamily.guaranteed_final_piece}</span>
+          <span>{componentMessage(language, 'guaranteedFinalPiece')}: {spinStructureFamily.guaranteed_final_piece}</span>
         {/if}
         {#if spinStructureFamily.dependency_report_included}
-          <span>{korean ? '의존 간선' : 'Dependency edges'}: {spinStructureFamily.dependency_edge_count}</span>
+          <span>{componentMessage(language, 'dependencyEdges')}: {spinStructureFamily.dependency_edge_count}</span>
         {/if}
       </div>
       <ol start={spinStructurePageIndex * PRODUCT_MEMBER_PAGE_SIZE + 1}>
         {#each spinStructureCandidates as candidate, index (candidate.candidate_id)}
           <li>
-            <strong>{korean ? '구조' : 'Structure'} {spinStructurePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1}</strong>
-            <span>{spinPartitionLabel(candidate.partition)} · {candidate.placement_count} {korean ? '배치' : 'placements'}</span>
+            <strong>{componentMessage(language, 'structure')} {spinStructurePageIndex * PRODUCT_MEMBER_PAGE_SIZE + index + 1}</strong>
+            <span>{spinPartitionLabel(candidate.partition)} · {candidate.placement_count} {componentMessage(language, 'placements')}</span>
           </li>
         {/each}
       </ol>
     </section>
   {:else if (payload.content.payload_kind === 'pc-path-family' || payload.content.payload_kind === 'build-path-family') && pathFamily}
-    <section class="product-pager path-family" aria-busy={navigatingOuter} aria-label={korean ? '전체 리플레이 경로' : 'Complete replay paths'}>
+    <section class="product-pager path-family" aria-busy={navigatingOuter} aria-label={componentMessage(language, 'completeReplayPaths')}>
       <header>
         <div>
-          <strong>{buildPathFamily ? (korean ? '구축 리플레이 경로' : 'Build replay paths') : (korean ? 'PC 리플레이 경로' : 'PC replay paths')}</strong>
-          <span>{korean ? '전체 경로는 복사할 수 있으며, 같은 해법의 대표 리플레이 하나씩 표시합니다.' : 'Every path can be copied; one representative replay is shown for each solution.'}</span>
+          <strong>{buildPathFamily ? (componentMessage(language, 'buildReplayPaths')) : (componentMessage(language, 'pcReplayPaths'))}</strong>
+          <span>{componentMessage(language, 'everyPathCanBeCopiedOneRepresentative')}</span>
         </div>
-        <nav aria-label={korean ? '해법별 리플레이 이동' : 'Solution replay navigation'}>
-          <button type="button" disabled={navigatingOuter || BigInt(pathOrdinal) <= 1n} on:click={() => showReplayGeometry(-1)} aria-label={korean ? '이전 해법' : 'Previous solution'}><ChevronLeft size={16} /></button>
+        <nav aria-label={componentMessage(language, 'solutionReplayNavigation')}>
+          <button type="button" disabled={navigatingOuter || BigInt(pathOrdinal) <= 1n} on:click={() => showReplayGeometry(-1)} aria-label={componentMessage(language, 'previousSolution')}><ChevronLeft size={16} /></button>
           <span>{pathOrdinal} / {pathPageCount}</span>
-          <button type="button" disabled={navigatingOuter || BigInt(pathOrdinal) >= BigInt(pathPageCount)} on:click={() => showReplayGeometry(1)} aria-label={korean ? '다음 해법' : 'Next solution'}><ChevronRight size={16} /></button>
+          <button type="button" disabled={navigatingOuter || BigInt(pathOrdinal) >= BigInt(pathPageCount)} on:click={() => showReplayGeometry(1)} aria-label={componentMessage(language, 'nextSolution')}><ChevronRight size={16} /></button>
         </nav>
       </header>
       <div class="member-meta">
-        <span>{korean ? '해법' : 'Solutions'}: {pathPageCount}</span>
-        <span>{korean ? '전체 경로' : 'All paths'}: {pathFamily.witness_count}</span>
-        <span>{korean ? '구체화 패턴' : 'Materialized patterns'}: {pathFamily.materialized_pattern_count}</span>
+        <span>{componentMessage(language, 'solutions2')}: {pathPageCount}</span>
+        <span>{componentMessage(language, 'allPaths')}: {pathFamily.witness_count}</span>
+        <span>{componentMessage(language, 'materializedPatterns')}: {pathFamily.materialized_pattern_count}</span>
       </div>
       {#if pathCandidateGroup}
         {@const witness = pathCandidateGroup.representative}
         <article class="path-representative">
           {#key witness.candidate_id + ':' + witness.normalized_trace_key}
             <PcPathReplayGif
+              {language}
               {witness}
               {targetLines}
               expectedTerminalBoardMask={buildPathFamily ? witness.steps.at(-1)?.board_after_line_clear_mask ?? null : null}
               ariaLabel={buildPathFamily
-                ? (korean ? `구축 리플레이 ${pathPageIndex + 1}` : `Build replay ${pathPageIndex + 1}`)
-                : (korean ? `PC 리플레이 ${pathOrdinal}` : `PC replay ${pathOrdinal}`)}
+                ? (componentMessage(language, 'buildReplay', { value0: pathPageIndex + 1 }))
+                : (componentMessage(language, 'pcReplay', { value0: pathOrdinal }))}
               invalidLabel={invalidPreviewLabel}
             />
           {/key}
           <div class="path-evidence">
-            <strong>{korean ? '해법' : 'Solution'} {pathOrdinal}</strong>
-            <span>{korean ? '서로 다른 패턴' : 'Distinct patterns'}: {lazyReplayPage?.geometry_pattern_count ?? pathCandidateGroup.distinctPatternCount} / {pathFamily.materialized_pattern_count}</span>
-            <span>{korean ? '보존된 경로' : 'Retained paths'}: {lazyReplayPage?.geometry_witness_count ?? pathCandidateGroup.witnessCount}</span>
-            <span>{korean ? '소비 조각' : 'Consumed pieces'}: {witness.consumed_piece_count} · {korean ? '최종 홀드' : 'Terminal hold'}: {witness.terminal_hold_piece ?? (korean ? '없음' : 'None')}</span>
+            <strong>{componentMessage(language, 'solution')} {pathOrdinal}</strong>
+            <span>{componentMessage(language, 'distinctPatterns')}: {lazyReplayPage?.geometry_pattern_count ?? pathCandidateGroup.distinctPatternCount} / {pathFamily.materialized_pattern_count}</span>
+            <span>{componentMessage(language, 'retainedPaths')}: {lazyReplayPage?.geometry_witness_count ?? pathCandidateGroup.witnessCount}</span>
+            <span>{componentMessage(language, 'consumedPieces')}: {witness.consumed_piece_count} · {componentMessage(language, 'terminalHold')}: {witness.terminal_hold_piece ?? (componentMessage(language, 'none'))}</span>
             <SolutionCopyFormatControl
               bind:value={solutionCopyFormat}
               {language}
@@ -960,10 +951,10 @@
               loadPages={pathCandidateGroup ? loadVisiblePathPages : null}
             />
             <details>
-              <summary>{korean ? '대표 경로 단계 확인' : 'Inspect representative replay steps'} ({witness.steps.length})</summary>
+              <summary>{componentMessage(language, 'inspectRepresentativeReplaySteps')} ({witness.steps.length})</summary>
               <ul>
                 {#each witness.steps as step, index (step.step_index)}
-                  <li><span>#{index + 1} · {step.active_piece} {rotationLabel(step.rotation)} ({step.x}, {step.y}) · {holdDecisionLabel(step.hold_decision)} · {korean ? '클리어' : 'Cleared'} {step.cleared_lines}</span></li>
+                  <li><span>#{index + 1} · {step.active_piece} {rotationLabel(step.rotation)} ({step.x}, {step.y}) · {holdDecisionLabel(step.hold_decision)} · {componentMessage(language, 'cleared')} {step.cleared_lines}</span></li>
                 {/each}
               </ul>
             </details>
@@ -972,13 +963,13 @@
       {/if}
     </section>
   {:else if payload.content.payload_kind === 'score-pattern-winner-family' && scoreFamily}
-    <section class="product-pager score-family" aria-label={korean ? '패턴별 최고 점수 해법' : 'Per-pattern score winners'}>
+    <section class="product-pager score-family" aria-label={componentMessage(language, 'perPatternScoreWinners')}>
       <header>
         <div>
-          <strong>{korean ? '패턴별 최고 점수 해법' : 'Per-pattern maximum-score solutions'}</strong>
-          <span>{korean ? '공격력은 동점 판정과 정렬에 사용하지 않습니다.' : 'Attack is informational and is not used for equality or ordering.'}</span>
+          <strong>{componentMessage(language, 'perPatternMaximumScoreSolutions')}</strong>
+          <span>{componentMessage(language, 'attackIsInformationalAndIsNotUsed')}</span>
         </div>
-        <nav aria-label={korean ? '점수 해법 페이지 이동' : 'Score winner page navigation'}>
+        <nav aria-label={componentMessage(language, 'scoreWinnerPageNavigation')}>
           <button type="button" disabled={scorePageIndex === 0} on:click={() => (scorePageIndex -= 1)}><ChevronLeft size={16} /></button>
           <span>{scorePageIndex + 1} / {scorePageCount}</span>
           <button type="button" disabled={scorePageIndex + 1 >= scorePageCount} on:click={() => (scorePageIndex += 1)}><ChevronRight size={16} /></button>

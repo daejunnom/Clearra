@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { Download } from '@lucide/svelte';
 
   import type { ClearraSolutionSetArtifactFormatPayload } from '../wasm/wasmCommandClient';
@@ -21,7 +22,6 @@
   export let loadProductMemberPage: ProductMemberPageLoader | null = null;
   export let releaseProductPages: ProductPageRelease | null = null;
 
-  $: korean = language === 'ko';
   $: productResult = view.response?.product_result_payload ?? null;
   $: artifact = view.response?.solution_set_artifact ?? null;
   $: artifactError = artifact ? validateSolutionSetArtifactPayload(artifact) : null;
@@ -47,10 +47,10 @@
   }
 </script>
 
-<section class="result" aria-label={korean ? 'Build v2 결과' : 'Build v2 result'}>
+<section class="result" aria-label={componentMessage(language, 'buildV2Result')}>
   <header>
     <div>
-      <h2>{korean ? '결과' : 'Result'}</h2>
+      <h2>{componentMessage(language, 'result')}</h2>
       <span>{view.status} · {elapsed}</span>
     </div>
     {#if view.backendReport}
@@ -71,16 +71,16 @@
   {:else if view.status === 'completed'}
     <WorkspaceFailureNotice failures={missingPayloadFailures} {language} compact />
   {:else if view.status === 'idle'}
-    <p class="empty">{korean ? '입력을 확인한 뒤 실행하세요.' : 'Review the input and run the capability.'}</p>
+    <p class="empty">{componentMessage(language, 'reviewTheInputAndRunTheCapability')}</p>
   {:else if view.status === 'running' || view.status === 'validating'}
-    <p class="empty">{korean ? '검증된 Build 결과를 계산하고 있습니다.' : 'Computing the validated Build result.'}</p>
+    <p class="empty">{componentMessage(language, 'computingTheValidatedBuildResult')}</p>
   {/if}
 
   {#if artifact && !artifactError}
-    <section class="artifact" aria-label={korean ? '해법 문서 artifact' : 'Solution document artifact'}>
+    <section class="artifact" aria-label={componentMessage(language, 'solutionDocumentArtifact')}>
       <div>
-        <strong>{korean ? '완전한 해법 문서' : 'Complete solution documents'}</strong>
-        <span>{artifact.selection_kind} · {artifact.solution_count} {korean ? '개' : 'solutions'}</span>
+        <strong>{componentMessage(language, 'completeSolutionDocuments')}</strong>
+        <span>{artifact.selection_kind} · {artifact.solution_count} {componentMessage(language, 'solutions')}</span>
       </div>
       <div class="artifact-actions">
         {#each artifact.formats as format (format.format)}

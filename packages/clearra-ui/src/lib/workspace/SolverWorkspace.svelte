@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { TriangleAlert } from '@lucide/svelte';
   import { getContext, onDestroy, onMount } from 'svelte';
 
@@ -261,7 +262,7 @@
 
 <svelte:head>
   <title>Clearra</title>
-  <meta name="description" content="Exact perfect-clear search workspace" />
+  <meta name="description" content={componentMessage(language, 'surfaceExactPerfectClearSearchWorkspace')} />
 </svelte:head>
 
 <WorkspaceShell

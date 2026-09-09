@@ -1,5 +1,6 @@
 <!-- SRP rationale: this component has one change reason: the complete CTK document-editing workspace interaction contract. -->
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import {
     AlertTriangle,
@@ -876,10 +877,10 @@
 
 <svelte:head>
   <title>{label('ctkDrawer')} · Clearra</title>
-  <meta name="description" content="Multi-page Fumen and CTK field editor" />
+  <meta name="description" content={componentMessage(language, 'surfaceMultiPageFumenAndCtkFieldEditor')} />
   {#if viewerMode}
-    <meta property="og:title" content="Clearra CTK Viewer" />
-    <meta property="og:description" content="Open this Fumen or CTK3 document in Clearra." />
+    <meta property="og:title" content={componentMessage(language, 'surfaceClearraCtkViewer')} />
+    <meta property="og:description" content={componentMessage(language, 'surfaceOpenThisFumenOrCtk3DocumentInClearra')} />
   {/if}
 </svelte:head>
 
@@ -1130,12 +1131,10 @@
       <div class="control-section render-section">
         <h2>{label('utilityRender')}</h2>
         <p class="render-help">
-          {language === 'ko'
-            ? `브라우저의 로컬 WASM에서만 실행합니다. PNG는 현재 ${pageIndex + 1}페이지, GIF는 전체 문서를 렌더합니다.`
-            : `Runs only in local browser WASM. PNG renders current page ${pageIndex + 1}; GIF renders the full document.`}
+          {componentMessage(language, 'runsOnlyInLocalBrowserWasmPng', { value0: pageIndex + 1 })}
         </p>
         <div class="export-row">
-          <div class="segments" role="group" aria-label={language === 'ko' ? '렌더 형식' : 'Render format'}>
+          <div class="segments" role="group" aria-label={componentMessage(language, 'renderFormat')}>
             <button type="button" class:active={renderFormat === 'png'} disabled={renderActive} on:click={() => (renderFormat = 'png')}>PNG</button>
             <button type="button" class:active={renderFormat === 'gif'} disabled={renderActive} on:click={() => (renderFormat = 'gif')}>GIF</button>
           </div>
@@ -1169,18 +1168,18 @@
       <h2>{label('utilityRender')}</h2>
       {#if renderArtifact && renderArtifactUrl}
         <figure>
-          <img src={renderArtifactUrl} alt={language === 'ko' ? 'CTK 로컬 렌더 결과' : 'Local CTK render result'} />
+          <img src={renderArtifactUrl} alt={componentMessage(language, 'localCtkRenderResult')} />
           <figcaption>
-            {renderArtifact.filename} · {renderArtifact.byte_length} bytes · SHA-256 {renderArtifact.sha256}
+            {renderArtifact.filename} · {renderArtifact.byte_length} {componentMessage(language, 'surfaceBytesSha256')} {renderArtifact.sha256}
           </figcaption>
         </figure>
         <button class="render-download" type="button" on:click={downloadRenderArtifact}>
-          <Download size={15} />{language === 'ko' ? '렌더 다운로드' : 'Download render'}
+          <Download size={15} />{componentMessage(language, 'downloadRender')}
         </button>
       {:else if publicRenderFailures.length}
         <WorkspaceFailureNotice failures={publicRenderFailures} {language} compact />
       {:else}
-        <p class="render-pending">{language === 'ko' ? '로컬 렌더를 준비하고 있습니다.' : 'Preparing the local render.'}</p>
+        <p class="render-pending">{componentMessage(language, 'preparingTheLocalRender')}</p>
       {/if}
     {/if}
   </section>

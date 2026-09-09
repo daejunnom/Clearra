@@ -8,6 +8,7 @@ pub mod cover_args;
 mod execution_backend_aliases;
 pub mod failed_queue_args;
 pub mod inspect_args;
+mod japanese_help_draft;
 mod parse_continue_args;
 mod parse_convert_args;
 mod parse_cover_args;

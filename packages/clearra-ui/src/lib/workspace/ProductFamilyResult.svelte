@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { componentMessage } from '../i18n/componentCatalog';
   import ProductResultPager from './ProductResultPager.svelte';
   import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import type {
@@ -18,7 +19,6 @@
   export let loadProductMemberPage: ProductMemberPageLoader | null = null;
   export let releaseProductPages: ProductPageRelease | null = null;
 
-  $: korean = language === 'ko';
   $: productResult = view.response?.product_result_payload ?? null;
   $: elapsed = `${(elapsedMs / 1000).toFixed(1)}s`;
   $: missingPayloadFailures = view.status === 'completed' && !productResult
@@ -26,10 +26,10 @@
     : [];
 </script>
 
-<section class="result" aria-label={`${capabilityLabel} ${korean ? '결과' : 'result'}`}>
+<section class="result" aria-label={`${capabilityLabel} ${componentMessage(language, 'result2')}`}>
   <header>
     <div>
-      <h2>{capabilityLabel} · {korean ? '결과' : 'Result'}</h2>
+      <h2>{capabilityLabel} · {componentMessage(language, 'result')}</h2>
       <span>{view.status} · {elapsed}</span>
     </div>
     {#if view.backendReport}
@@ -50,9 +50,9 @@
   {:else if view.status === 'completed'}
     <WorkspaceFailureNotice failures={missingPayloadFailures} {language} compact />
   {:else if view.status === 'idle'}
-    <p class="empty">{korean ? '입력을 확인한 뒤 실행하세요.' : 'Review the input and run the capability.'}</p>
+    <p class="empty">{componentMessage(language, 'reviewTheInputAndRunTheCapability')}</p>
   {:else if view.status === 'running' || view.status === 'validating'}
-    <p class="empty">{korean ? '검증된 결과를 계산하고 있습니다.' : 'Computing the validated result.'}</p>
+    <p class="empty">{componentMessage(language, 'computingTheValidatedResult')}</p>
   {/if}
 </section>
 

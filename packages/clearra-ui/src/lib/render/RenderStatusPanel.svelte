@@ -1,27 +1,34 @@
 <script lang="ts">
+  import { runtimeShellCopy, runtimeShellValue } from '../i18n/runtimeShellCatalog';
+  import { matchReleasedWorkspaceLanguage, type WorkspaceLanguage } from '../i18n/languageManifest';
+
   import type { RenderCapabilityReport } from './renderCapabilityReport';
 
   export let capability: RenderCapabilityReport | null;
+  export let language: WorkspaceLanguage = 'en';
+
+  $: locale = matchReleasedWorkspaceLanguage(language) ?? 'en';
+  $: copy = runtimeShellCopy(locale);
 
   $: formatsSupported = Boolean(capability?.png_supported && capability?.gif_supported);
-  $: supportStatus = capability === null ? 'pending' : formatsSupported ? 'supported' : 'unsupported';
-  $: exactStatus = capability === null ? 'pending' : String(capability.render_exact);
-  $: reason = capability === null ? 'pending' : capability.unsupported_reason ?? 'none';
+  $: supportStatus = capability === null ? copy.pending : formatsSupported ? copy.supported : copy.unsupported;
+  $: exactStatus = capability === null ? copy.pending : runtimeShellValue(locale, capability.render_exact);
+  $: reason = capability === null ? copy.pending : runtimeShellValue(locale, capability.unsupported_reason ?? 'none');
 </script>
 
-<section class="panel" aria-label="Render status">
-  <h2>Render</h2>
+<section class="panel" aria-label={copy.renderStatus}>
+  <h2>{copy.render}</h2>
   <dl>
     <div>
       <dt>PNG/GIF</dt>
       <dd>{supportStatus}</dd>
     </div>
     <div>
-      <dt>Exact</dt>
+      <dt>{copy.exact}</dt>
       <dd>{exactStatus}</dd>
     </div>
     <div>
-      <dt>Reason</dt>
+      <dt>{copy.reason}</dt>
       <dd>{reason}</dd>
     </div>
   </dl>

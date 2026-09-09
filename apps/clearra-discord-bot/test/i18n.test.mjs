@@ -56,13 +56,13 @@ test("Japanese Discord translations remain a non-published draft until every sur
   assert.equal(matchDiscordLocale("ja-JP"), null);
 
   const readiness = japaneseDiscordCatalogReadiness();
-  assert.equal(readiness.complete, false);
+  assert.equal(readiness.complete, true);
   assert.equal(readiness.translated, Object.keys(JAPANESE_DISCORD_MESSAGES).length);
   assert.ok(readiness.translated > 0);
-  assert.ok(readiness.translated < readiness.required);
+  assert.equal(readiness.translated, readiness.required);
   assert.deepEqual(readiness.unexpectedKeys, []);
   assert.deepEqual(readiness.placeholderMismatches, []);
-  assert.ok(readiness.missingKeys.includes("result.kind.pc"));
+  assert.deepEqual(readiness.missingKeys, []);
   assert.ok(Object.keys(JAPANESE_DISCORD_SLASH_DRAFT).length > 0);
 
   for (const command of globalCommands) {
