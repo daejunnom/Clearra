@@ -212,10 +212,12 @@ function assertPackagingFlow(workflow, cloudConfig, dockerfile) {
   assert.doesNotMatch(download, /pattern:|continue-on-error|merge-multiple:/u);
   assert.match(candidate, /gcloud storage cp evidence\/cloud-build-inputs\.tar\.gz "\$cloud_input_object"[\s\S]*--if-generation-match=0/u);
   assert.match(candidate, /gcloud storage objects describe "\$cloud_input_object" --format='value\(generation\)'/u);
-  assert.match(candidate, /gcloud builds submit "\$cloud_input_object"/u);
-  assert.match(candidate, /--gcs-source-staging-dir="gs:\/\/clearra-cloud_cloudbuild\/source"/u);
+  assert.match(candidate, /storageSource:[\s\S]*bucket: %s[\s\S]*object: %s[\s\S]*generation: %s/u);
+  assert.match(candidate, /gcloud builds submit --no-source/u);
+  assert.doesNotMatch(candidate, /gcloud builds submit "\$cloud_input_object"|--gcs-source-staging-dir/u);
   assert.match(candidate, /--storage-source-uri "\$cloud_input_object"[\s\S]*--storage-source-generation "\$cloud_input_generation"/u);
-  assert.match(candidate, /--config=.*cloudbuild-accepted-job-service\.yaml/u);
+  assert.match(candidate, /cloud_build_config=.*cloudbuild-accepted-job-service\.yaml/u);
+  assert.match(candidate, /--config="\$resolved_cloud_build_config"/u);
   assert.match(candidate, /tar -czf evidence\/cloud-build-inputs\.tar\.gz -C evidence\/cloud-build-inputs inputs/u);
   assert.match(candidate, /accepted-build-inputs\.mjs create/u);
   assert.match(candidate, /accepted-build-image-authority\.mjs create/u);
@@ -246,7 +248,7 @@ test('production only packages exact-run accepted products and verifies the hand
   assertPackagingFlow(workflow, config, dockerfile);
   for (const changed of [
     workflow.replace('name: clearra-linux-cli-v${{ steps.accepted-inputs.outputs.release_version }}', 'name: clearra-linux-cli-v0.8.0'),
-    workflow.replace('gcloud builds submit "$cloud_input_object"', 'gcloud builds submit evidence/exact-source.tar.gz'),
+    workflow.replace('gcloud builds submit --no-source', 'gcloud builds submit evidence/exact-source.tar.gz'),
     workflow.replace('accepted-build-image-authority.mjs verify', 'echo skip-verification'),
   ]) assert.throws(() => assertPackagingFlow(changed, config, dockerfile));
   assert.throws(() => assertPackagingFlow(workflow, config.replace('sourceProvenanceHash: [SHA256]', ''), dockerfile));
