@@ -168,7 +168,14 @@ test("grouped text routes share slash lowering and document canonical selection"
   assert.equal(guaranteed.command.capabilityId, "spin-structure.guaranteed");
   assert.deepEqual(guaranteed.arguments_.slice(0, 2), ["spin-structure", "guaranteed"]);
   assert.equal(guaranteed.arguments_.includes("--no-dependency-report"), true);
-  assert.match(formatSlashCommandHelp("spin-structure cover", "en"), /first canonical portfolio/i);
+  assert.match(
+    formatSlashCommandHelp("spin-structure cover", "en"),
+    /minimum solution set.*covers/i,
+  );
+  assert.doesNotMatch(
+    formatSlashCommandHelp("spin-structure cover", "en"),
+    /canonical|portfolio/i,
+  );
   assert.doesNotMatch(formatSlashCommandHelp("spin-structure cover", "en"), /attack.*select/i);
 });
 
