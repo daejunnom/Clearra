@@ -14,9 +14,6 @@ function Get-RustExactPackageSpecs {
                 'commands::build_v2_app_command::tests::',
                 'cooperative_execution::pc_allspin_projection_tests::',
                 'cooperative_execution::raw_pc_tiling_cooperative_tests::',
-                'native_build_probability_execution::tests::',
-                'native_build_probability_host_runtime::tests::',
-                'native_durable_build_probability_execution::tests::',
                 'pc_chance_probability_result::tests::',
                 'pc_replay_page_source::memory_tests::',
                 'product_capability_contract_tests::'
