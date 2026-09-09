@@ -301,6 +301,7 @@ function Assert-AuditedSrpBoundaries() {
         'scripts/clearra.ps1' = @()
         'scripts/lib/product-process-surface.ps1' = @(
             'Get-ClearraBuiltBinaryPath', 'Ensure-ClearraBuiltBinary',
+            'Resolve-ClearraProductE2EBinary',
             'Invoke-ProductE2EBuiltTask',
             'Set-ClearraReleaseUxSmokeBinaryArgs', 'Invoke-ProductProcessE2ETask'
         )
