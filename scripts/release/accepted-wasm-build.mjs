@@ -1,7 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, readFile, readdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { isClearraWasmBuildContract } from "../tools/clearra-wasm-build-contract.mjs";
@@ -131,6 +140,102 @@ export async function verifyAcceptedWasmBuild(
   }
   await validateWasmPayload(root, expected.sourceCommit);
   return Object.freeze({ ...receipt, toolchains: tools });
+}
+
+// A previous canonical attempt is an untrusted transport input here. Rebinding
+// is allowed only for the same exact source, after the old receipt and every
+// payload byte have been verified. The payload is copied into a private staging
+// directory and receives a fresh current-run receipt before an atomic publish.
+export async function rebindAcceptedWasmBuild(
+  previousBuildPath,
+  destinationBuildPath,
+  sourceCommit,
+  previousRunId,
+  previousRunAttempt,
+  currentRunId,
+  currentRunAttempt,
+) {
+  const previousAuthority = validateAuthority(
+    sourceCommit,
+    previousRunId,
+    previousRunAttempt,
+  );
+  const currentAuthority = validateAuthority(
+    sourceCommit,
+    currentRunId,
+    currentRunAttempt,
+  );
+  if (previousAuthority.runAttempt !== "1" || currentAuthority.runAttempt !== "1") {
+    throw new Error("accepted WASM reuse requires first-attempt canonical runs");
+  }
+  if (
+    previousAuthority.runId === currentAuthority.runId &&
+    previousAuthority.runAttempt === currentAuthority.runAttempt
+  ) {
+    throw new Error("accepted WASM reuse requires a different canonical run attempt");
+  }
+
+  const previousRoot = resolve(previousBuildPath);
+  const destinationRoot = resolve(destinationBuildPath);
+  if (
+    previousRoot === destinationRoot ||
+    pathContains(previousRoot, destinationRoot) ||
+    pathContains(destinationRoot, previousRoot)
+  ) {
+    throw new Error("accepted WASM reuse source and destination must not overlap");
+  }
+  await requireMissingPath(destinationRoot, "accepted WASM reuse destination");
+  const previousReceipt = await verifyAcceptedWasmBuild(
+    previousRoot,
+    previousAuthority.sourceCommit,
+    previousAuthority.runId,
+    previousAuthority.runAttempt,
+  );
+
+  const destinationParent = dirname(destinationRoot);
+  await mkdir(destinationParent, { recursive: true });
+  const stagingRoot = await mkdtemp(resolve(destinationParent, ".clearra-wasm-rebind-"));
+  let published = false;
+  try {
+    for (const file of previousReceipt.files) {
+      const bytes = await readFile(resolve(previousRoot, file.path));
+      await writeFile(resolve(stagingRoot, file.path), bytes, { flag: "wx" });
+    }
+    const currentReceipt = await sealAcceptedWasmBuild(
+      stagingRoot,
+      currentAuthority.sourceCommit,
+      currentAuthority.runId,
+      currentAuthority.runAttempt,
+      previousReceipt.toolchains,
+    );
+    if (
+      currentReceipt.payload_sha256 !== previousReceipt.payload_sha256 ||
+      currentReceipt.manifest_sha256 !== previousReceipt.manifest_sha256 ||
+      JSON.stringify(currentReceipt.files) !== JSON.stringify(previousReceipt.files)
+    ) {
+      throw new Error("accepted WASM reuse changed the verified payload bytes");
+    }
+    await verifyAcceptedWasmBuild(
+      stagingRoot,
+      currentAuthority.sourceCommit,
+      currentAuthority.runId,
+      currentAuthority.runAttempt,
+    );
+    await requireMissingPath(destinationRoot, "accepted WASM reuse destination");
+    await rename(stagingRoot, destinationRoot);
+    published = true;
+    return Object.freeze({
+      previous_run_id: previousAuthority.runId,
+      previous_run_attempt: previousAuthority.runAttempt,
+      current_run_id: currentAuthority.runId,
+      current_run_attempt: currentAuthority.runAttempt,
+      payload_sha256: currentReceipt.payload_sha256,
+      manifest_sha256: currentReceipt.manifest_sha256,
+      files: currentReceipt.files,
+    });
+  } finally {
+    if (!published) await rm(stagingRoot, { recursive: true, force: true });
+  }
 }
 
 export function collectAcceptedWasmProducerToolchains(dependencies = {}) {
@@ -362,6 +467,18 @@ async function pathExists(path) {
     if (error?.code === "ENOENT") return false;
     throw error;
   }
+}
+
+async function requireMissingPath(path, description) {
+  if (await pathExists(path)) {
+    throw new Error(`${description} must not already exist: ${path}`);
+  }
+}
+
+function pathContains(parent, child) {
+  const relation = relative(parent, child);
+  return relation.length > 0 && relation !== ".." &&
+    !relation.startsWith(`..${sep}`) && !isAbsolute(relation);
 }
 
 function runVersionCommand(command, arguments_) {
