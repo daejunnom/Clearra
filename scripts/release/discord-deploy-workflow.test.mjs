@@ -15,6 +15,10 @@ const recoveryAttemptCollector = await readFile(
   new URL("./collect-discord-primary-attempt-catalog.sh", import.meta.url),
   "utf8",
 );
+const runtimeRecovery = await readFile(
+  new URL("./invoke-discord-runtime-recovery-v080.ps1", import.meta.url),
+  "utf8",
+);
 
 function assertExactHandoffDownloads(source) {
   const normalized = source.replaceAll('\r\n', '\n');
@@ -242,6 +246,61 @@ test("Cloud Build submits the byte-identical, generation-locked accepted archive
   assert.match(candidate, /printf '  storageSource:\\n'[\s\S]*printf '    bucket: %s\\n' "\$cloud_input_bucket"[\s\S]*printf '    object: %s\\n' "\$cloud_input_object_name"[\s\S]*printf '    generation: %s\\n' "\$cloud_input_generation"/u);
   assert.match(candidate, /gcloud builds submit --no-source/u);
   assert.doesNotMatch(candidate, /gcloud builds submit (?:evidence\/cloud-build-inputs\.tar\.gz|"\$cloud_input_object")|--gcs-source-staging-dir/u);
+});
+
+test("Pages authority is proven before Cloud preparation and every protected mutation", () => {
+  const candidate = primary.slice(
+    primary.indexOf("  candidate:"),
+    primary.indexOf("  promote:"),
+  );
+  const candidateResolve = candidate.indexOf(
+    "Resolve one successful exact-SHA Pages deployment before candidate work",
+  );
+  const candidateVerify = candidate.indexOf("Verify Pages authority before Cloud packaging");
+  const cloudAuth = candidate.indexOf("Authenticate the Cloud-Build-only identity");
+  const cloudBuild = candidate.indexOf("Package accepted products in Cloud Build without recompilation");
+  assert.ok(candidateResolve >= 0 && candidateVerify > candidateResolve);
+  assert.ok(cloudAuth > candidateVerify && cloudBuild > cloudAuth);
+  assert.equal((primary.match(/pages-deployment-run\.mjs resolve/gu) ?? []).length, 1);
+
+  const promote = primary.slice(primary.indexOf("  promote:"), primary.indexOf("  sync-observe:"));
+  const preparedDownload = promote.indexOf("Download the exact prepared state");
+  const pagesVerify = promote.indexOf("Verify prepared Pages authority before protected mutation");
+  const protectedAuth = promote.indexOf("Authenticate the protected deployer identity");
+  const oracleMutation = promote.indexOf(
+    "Freeze and stage Oracle, deploy and smoke zero traffic, then seal live authority",
+  );
+  assert.ok(preparedDownload >= 0 && pagesVerify > preparedDownload);
+  assert.ok(protectedAuth > pagesVerify && oracleMutation > protectedAuth);
+
+  const sync = primary.slice(primary.indexOf("  sync-observe:"));
+  const lateResolve = sync.slice(
+    sync.indexOf("Resolve one successful exact-SHA Pages deployment before global mutation"),
+    sync.indexOf("Download the exact Pages deployment authority"),
+  );
+  assert.doesNotMatch(lateResolve, /pages-deployment-run\.mjs resolve|gh api/u);
+  assert.match(lateResolve, /promoted\/prepared\/pages-authority/u);
+});
+
+test("rollback restores and proves Cloud before restoring Oracle runtime authority", () => {
+  const live = runtimeRecovery.slice(runtimeRecovery.indexOf("$candidateState = Verify-LiveAuthority"));
+  const cloudMutation = live.indexOf("--to-revisions=\"$($prior.prior_revision)=100\"");
+  const cloudReadback = live.indexOf("$cloudRevisionBeforeOracle = Get-ActiveCloudRevision");
+  const oracleClassify = live.indexOf("$oracleState = Invoke-OracleClassification");
+  const oracleRestore = live.indexOf("-Operation restore-prior-and-verify");
+  assert.ok(cloudMutation >= 0 && cloudReadback > cloudMutation);
+  assert.ok(oracleClassify > cloudReadback && oracleRestore > oracleClassify);
+
+  const promoteJob = primary.slice(
+    primary.indexOf("  promote:"),
+    primary.indexOf("  sync-observe:"),
+  );
+  const promote = promoteJob.slice(promoteJob.indexOf("$cloudPriorVerified = $false"));
+  const compensationCloud = promote.indexOf("gcloud run services update-traffic");
+  const compensationReadback = promote.indexOf("$cloudPriorVerified = $true");
+  const compensationOracle = promote.indexOf("Restore-PriorOracle");
+  assert.ok(compensationCloud >= 0 && compensationReadback > compensationCloud);
+  assert.ok(compensationOracle > compensationReadback);
 });
 
 test("prestage and live recovery artifacts bracket every protected runtime transition", () => {
@@ -518,7 +577,7 @@ test("global sync stays command-only and owns the sole four-surface observer", (
   assert.doesNotMatch(sync, /GCP_ROLLBACK_SERVICE_ACCOUNT/u);
   assert.equal((primary.match(/observe-production-surfaces\.mjs/gu) ?? []).length, 1);
   assert.doesNotMatch(primary, /sleep 1200|discord-deployment-observation/u);
-  assert.match(primary, /pages-deployment-run\.mjs resolve/u);
+  assert.equal((primary.match(/pages-deployment-run\.mjs resolve/gu) ?? []).length, 1);
 });
 
 test("the repository/organization SSH secret scope is explicitly forbidden", () => {

@@ -95,6 +95,7 @@ const PRIMARY_PROMOTE_STEP_NAMES = new Set([
   "Check out the exact accepted source for protected promotion",
   "Set up Node.js for protected release validators",
   "Download the exact prepared state",
+  "Verify prepared Pages authority before protected mutation",
   "Authenticate the protected deployer identity",
   "Set up gcloud for protected promotion",
   "Materialize the protected-environment Oracle key for the real path gate",
@@ -116,7 +117,10 @@ const PRIMARY_PROMOTE_STEP_NAMES = new Set([
   "Post Check out the exact accepted source for protected promotion",
   "Complete job",
 ]);
-const SUCCESSFUL_JOB_STEP_NAMES = Object.freeze({
+// This superset admits bounded historical failure evidence while recovery is
+// deciding what may have mutated.  It is deliberately not the exact topology
+// used to authorize a new successful checkpoint.
+const RECOVERY_JOB_STEP_NAMES = Object.freeze({
   authority: new Set([
     "Set up job",
     "Check out main for exact authority resolution",
@@ -133,6 +137,9 @@ const SUCCESSFUL_JOB_STEP_NAMES = Object.freeze({
     "Check out the exact accepted source for candidate preparation",
     "Set up Node.js for immutable candidate preparation",
     "Download the exact pre-candidate recovery-debt clearance",
+    "Resolve one successful exact-SHA Pages deployment before candidate work",
+    "Download the exact Pages deployment authority before candidate work",
+    "Verify Pages authority before Cloud packaging",
     "Authenticate the Cloud-Build-only identity",
     "Set up gcloud for Cloud-Build-only preparation",
     "Download canonical acceptance evidence without rebuilding products",
@@ -179,7 +186,45 @@ const SUCCESSFUL_JOB_STEP_NAMES = Object.freeze({
   ]),
 });
 
+const SUCCESSFUL_JOB_STEP_NAMES = Object.freeze({
+  authority: RECOVERY_JOB_STEP_NAMES.authority,
+  "Prepare immutable Discord candidate inputs": new Set([
+    "Set up job",
+    "Check out the exact accepted source for candidate preparation",
+    "Set up Node.js for immutable candidate preparation",
+    "Download the exact pre-candidate recovery-debt clearance",
+    "Resolve one successful exact-SHA Pages deployment before candidate work",
+    "Download the exact Pages deployment authority before candidate work",
+    "Verify Pages authority before Cloud packaging",
+    "Authenticate the Cloud-Build-only identity",
+    "Set up gcloud for Cloud-Build-only preparation",
+    "Download canonical acceptance evidence without rebuilding products",
+    "Download the already accepted CTK3 distribution",
+    "Verify accepted evidence and package only runtime dependencies",
+    "Download the already accepted Linux CLI",
+    "Seal accepted Cloud build inputs without recompilation",
+    "Package accepted products in Cloud Build without recompilation",
+    "Seal the approval-free accepted-input and immutable-build state",
+    "Upload sealed prepared state",
+    "Post Authenticate the Cloud-Build-only identity",
+    "Post Set up Node.js for immutable candidate preparation",
+    "Post Check out the exact accepted source for candidate preparation",
+    "Complete job",
+  ]),
+  promote: new Set([...PRIMARY_PROMOTE_STEP_NAMES].filter((name) => ![
+    "Compare warm CLI and Discord execution on the exact zero-traffic Cloud image",
+    "Preserve warm Cloud CLI parity diagnostics separately from release authority",
+  ].includes(name))),
+  "sync-observe": RECOVERY_JOB_STEP_NAMES["sync-observe"],
+});
+
 export const DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_NAMES = PRIMARY_JOB_NAMES;
+export const DISCORD_RECOVERY_JOB_STEPS = Object.freeze(
+  Object.fromEntries(PRIMARY_JOB_NAMES.map((name) => [
+    name,
+    Object.freeze([...RECOVERY_JOB_STEP_NAMES[name]]),
+  ])),
+);
 export const DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS = Object.freeze(
   Object.fromEntries(PRIMARY_JOB_NAMES.map((name) => [
     name,
@@ -876,7 +921,7 @@ function validateSealedPrimaryJobs(value) {
       requireDecimalId(job.job_id, "sealed primary job ID") !== job.job_id ||
       job.job_status !== "completed" || !JOB_CONCLUSIONS.has(job.job_conclusion)
     ) throw new Error("Discord sealed primary job proof is invalid");
-    const expected = [...SUCCESSFUL_JOB_STEP_NAMES[job.job_name]];
+    const expected = [...RECOVERY_JOB_STEP_NAMES[job.job_name]];
     let priorIndex = -1;
     let priorNumber = 0;
     for (const step of job.steps) {
@@ -1092,7 +1137,7 @@ function getExactPrimaryJobAuthority(value, options) {
     throw new Error("Discord recovery promote job conclusion is invalid");
   }
   for (const job of jobs) {
-    const expected = [...SUCCESSFUL_JOB_STEP_NAMES[job.name]];
+    const expected = [...RECOVERY_JOB_STEP_NAMES[job.name]];
     let priorIndex = -1;
     let priorNumber = 0;
     const names = new Set();

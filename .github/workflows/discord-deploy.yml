@@ -348,6 +348,35 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ github.run_id }}
+      - name: Resolve one successful exact-SHA Pages deployment before candidate work
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/pages-deployment-run.mjs resolve \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --format github-output >> "$GITHUB_OUTPUT"
+      - name: Download the exact Pages deployment authority before candidate work
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.pages.outputs.pages_artifact_name }}
+          path: evidence/pages-authority
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.pages.outputs.pages_run_id }}
+      - name: Verify Pages authority before Cloud packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/pages-deployment-run.mjs verify-report \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "${{ steps.pages.outputs.pages_run_id }}" \
+            --workflow-run-attempt "${{ steps.pages.outputs.pages_run_attempt }}" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" \
+            --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --report "$GITHUB_WORKSPACE/evidence/pages-authority/pages-deployment-authority.json"
       - name: Authenticate the Cloud-Build-only identity
         uses: google-github-actions/auth@v2
         with:
@@ -550,6 +579,20 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ github.run_id }}
+      - name: Verify prepared Pages authority before protected mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$GITHUB_WORKSPACE/prepared/pages-authority/pages-deployment-authority.json"
+          pages_run_id="$(jq -er '.workflow_run_id | select(type == "string" and test("^[1-9][0-9]*$"))' "$report")"
+          pages_run_attempt="$(jq -er '.workflow_run_attempt | select(type == "string" and test("^[1-9][0-9]*$"))' "$report")"
+          node scripts/release/pages-deployment-run.mjs verify-report \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$pages_run_id" \
+            --workflow-run-attempt "$pages_run_attempt" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" \
+            --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --report "$report"
       - name: Authenticate the protected deployer identity
         uses: google-github-actions/auth@v2
         with:
@@ -879,11 +922,7 @@ jobs:
           } catch {
             $primary = $_
             $recoveryErrors = [Collections.Generic.List[string]]::new()
-            try {
-              Restore-PriorOracle
-            } catch {
-              $recoveryErrors.Add('Oracle restore failed')
-            }
+            $cloudPriorVerified = $false
             if ($cloudTrafficMutationAttempted) {
               try {
                 gcloud run services update-traffic clearra-current-job `
@@ -906,8 +945,18 @@ jobs:
                   [string]$recoveryTraffic[0].revisionName -cne [string]$prior.prior_revision) {
                 throw 'Cloud restore readback differs from the exact prior revision'
               }
+              $cloudPriorVerified = $true
             } catch {
               $recoveryErrors.Add('Cloud restore readback failed')
+            }
+            if ($cloudPriorVerified) {
+              try {
+                Restore-PriorOracle
+              } catch {
+                $recoveryErrors.Add('Oracle restore failed')
+              }
+            } else {
+              $recoveryErrors.Add('Oracle restore blocked by unproven prior Cloud authority')
             }
             if ($recoveryErrors.Count -eq 0) {
               try {
@@ -1093,22 +1142,25 @@ jobs:
           run-id: ${{ github.run_id }}
       - name: Resolve one successful exact-SHA Pages deployment before global mutation
         id: pages
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/release/pages-deployment-run.mjs resolve \
-            --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
-            --format github-output >> "$GITHUB_OUTPUT"
+          report="$GITHUB_WORKSPACE/promoted/prepared/pages-authority/pages-deployment-authority.json"
+          pages_run_id="$(jq -er '.workflow_run_id | select(type == "string" and test("^[1-9][0-9]*$"))' "$report")"
+          pages_run_attempt="$(jq -er '.workflow_run_attempt | select(type == "string" and test("^[1-9][0-9]*$"))' "$report")"
+          echo "pages_run_id=$pages_run_id" >> "$GITHUB_OUTPUT"
+          echo "pages_run_attempt=$pages_run_attempt" >> "$GITHUB_OUTPUT"
       - name: Download the exact Pages deployment authority
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ steps.pages.outputs.pages_artifact_name }}
-          path: pages-authority
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.pages.outputs.pages_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir pages-authority
+          cp --no-clobber --no-dereference \
+            "$GITHUB_WORKSPACE/promoted/prepared/pages-authority/pages-deployment-authority.json" \
+            "$GITHUB_WORKSPACE/pages-authority/pages-deployment-authority.json"
+          cmp --silent \
+            "$GITHUB_WORKSPACE/promoted/prepared/pages-authority/pages-deployment-authority.json" \
+            "$GITHUB_WORKSPACE/pages-authority/pages-deployment-authority.json"
       - name: Verify Pages authority before Discord global mutation
         shell: bash
         run: |

@@ -403,6 +403,9 @@ const JOB_STEPS = {
     "Set up job", "Check out the exact accepted source for candidate preparation",
     "Set up Node.js for immutable candidate preparation",
     "Download the exact pre-candidate recovery-debt clearance",
+    "Resolve one successful exact-SHA Pages deployment before candidate work",
+    "Download the exact Pages deployment authority before candidate work",
+    "Verify Pages authority before Cloud packaging",
     "Authenticate the Cloud-Build-only identity",
     "Set up gcloud for Cloud-Build-only preparation",
     "Download canonical acceptance evidence without rebuilding products",
@@ -417,6 +420,7 @@ const JOB_STEPS = {
   promote: [
     "Set up job", "Check out the exact accepted source for protected promotion",
     "Set up Node.js for protected release validators", "Download the exact prepared state",
+    "Verify prepared Pages authority before protected mutation",
     "Authenticate the protected deployer identity", "Set up gcloud for protected promotion",
     "Materialize the protected-environment Oracle key for the real path gate",
     "Capture and seal prestage recovery authority", PRESTAGE_UPLOAD, MUTATIONS[0],

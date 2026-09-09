@@ -534,6 +534,22 @@ $cloudState = if ($cloudStateRevision -ceq [string]$prior.prior_revision) {
 } else {
     throw 'Cloud current state is neither exact prior nor exact candidate'
 }
+
+# Oracle's prior runtime authority can point at the untagged Cloud service URL.
+# Restore and prove that URL first; otherwise an already-restored Oracle release
+# can be rejected merely because the service still routes to the candidate.
+if ($cloudState -ceq 'candidate') {
+    gcloud run services update-traffic clearra-current-job `
+        --project=$GcpProjectId --region=$GcpRegion `
+        --to-revisions="$($prior.prior_revision)=100" --quiet
+    if ($LASTEXITCODE -ne 0) { throw 'exact prior Cloud recovery failed' }
+}
+$cloudAfterPath = Join-Path $EvidenceRoot "cloud-restore-readback-$guardId.json"
+$cloudRevisionBeforeOracle = Get-ActiveCloudRevision -OutputPath $cloudAfterPath
+if ($cloudRevisionBeforeOracle -cne [string]$prior.prior_revision) {
+    throw 'Cloud recovery readback is not exact prior before Oracle recovery'
+}
+
 $oracleBeforePath = Join-Path $EvidenceRoot "oracle-current-$guardId.json"
 $oracleState = Invoke-OracleClassification `
     -OutputPath $oracleBeforePath -Intent $intent -Candidate $candidate -Prior $prior `
@@ -573,13 +589,6 @@ $oracleAfter = Invoke-OracleClassification `
     -Manifest $manifest -Rollback $rollback -Nonce $nonce
 if ($oracleAfter.state -cne 'prior') { throw 'Oracle recovery readback is not exact prior' }
 
-if ($cloudState -ceq 'candidate') {
-    gcloud run services update-traffic clearra-current-job `
-        --project=$GcpProjectId --region=$GcpRegion `
-        --to-revisions="$($prior.prior_revision)=100" --quiet
-    if ($LASTEXITCODE -ne 0) { throw 'exact prior Cloud recovery failed' }
-}
-$cloudAfterPath = Join-Path $EvidenceRoot "cloud-restore-readback-$guardId.json"
 $cloudRevisionAfterPath = Join-Path $EvidenceRoot "cloud-revision-cleanup-readback-$guardId.json"
 Seal-ExactCandidateCloudResidue -Intent $intent `
     -PriorRevision ([string]$prior.prior_revision) `

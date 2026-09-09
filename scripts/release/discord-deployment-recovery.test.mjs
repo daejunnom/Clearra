@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   DISCORD_RECOVERY_AUTHORITY_SCHEMA_ID,
+  DISCORD_RECOVERY_JOB_STEPS,
   DISCORD_RECOVERY_RESULT_SCHEMA_ID,
   DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS,
   resolveDiscordRecoveryAuthority,
@@ -228,7 +229,7 @@ test("every current promote workflow step is admitted in order by recovery", asy
   const source = await readFile(new URL("../../.github/workflows/discord-deploy.yml", import.meta.url), "utf8");
   const promote = source.split("\n  promote:")[1].split("\n  sync-observe:")[0];
   const actual = [...promote.matchAll(/^      - name: (.+)$/gm)].map(match => match[1].trim());
-  const admitted = DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS.promote;
+  const admitted = DISCORD_RECOVERY_JOB_STEPS.promote;
   let previous = -1;
   for (const name of actual) {
     const index = admitted.indexOf(name);
