@@ -1,4 +1,8 @@
-import { normalizeDiscordLocale } from "./i18n.mjs";
+import {
+  SUPPORTED_DISCORD_LOCALES,
+  normalizeDiscordLocale,
+  t,
+} from "./i18n.mjs";
 import {
   DISCORD_PC_FIELD_MAX_ROWS,
   DISCORD_WIDE_FIELD_MAX_ROWS,
@@ -362,7 +366,7 @@ function objectiveHelp(locale) {
       "**고급 objective**",
       "PC objective는 Discord 텍스트 명령과 CLI에서 사용할 수 있습니다. 슬래시 명령에서는 화면에 표시되는 선택지만 사용할 수 있습니다.",
       "현재 PC objective: `all`, `unique`, `min-cover`, `tiling`",
-      "Discord 텍스트 문법: `$path <필드> <큐> [줄] --objective <ID>` 또는 `>path ...`; `minimum-cover`만 `min-cover`의 호환 별칭입니다.",
+      "Discord 텍스트 문법: `$path <필드> <큐> [줄] --objective <ID>` 또는 `>path ...`; `min-cover` 대신 `minimum-cover`도 입력할 수 있습니다.",
       "각 문법은 `/help arguments:objective <이름>`으로 확인하세요.",
     ].join("\n");
   }
@@ -370,7 +374,7 @@ function objectiveHelp(locale) {
     "**Advanced objective**",
     "PC objectives are available in Discord text commands and the CLI. Slash commands accept only the choices shown by Discord.",
     "Current PC objectives: `all`, `unique`, `min-cover`, `tiling`",
-    "Discord text syntax: `$path <field> <queue> [lines] --objective <ID>` or `>path ...`; only `minimum-cover` is accepted as a compatibility alias for `min-cover`.",
+    "Discord text syntax: `$path <field> <queue> [lines] --objective <ID>` or `>path ...`; `minimum-cover` is also accepted in place of `min-cover`.",
     "Use `/help arguments:objective <name>` for one grammar.",
   ].join("\n");
 }
@@ -400,7 +404,7 @@ function objectiveOptionHelp(name, locale) {
       all: "Retains every executable PC solution.",
       unique: "Keeps one copy of each distinct final solution.",
       "min-cover": "Calculates a minimum solution set covering every queue in the input pattern.",
-      tiling: "Enumerates exact geometry tilings without reachability, scoring, or B2B semantics.",
+      tiling: "Lists exact geometry tilings without checking buildability, scores, or B2B preservation.",
     })[canonical];
   return [
     `**objective ${canonical}**`,
@@ -1728,10 +1732,10 @@ function languageOption() {
     name: "language",
     description: "Language to use for ClearraBot responses and input forms",
     required: true,
-    choices: Object.freeze([
-      Object.freeze({ name: "English", value: "en" }),
-      Object.freeze({ name: "Korean", value: "ko" }),
-    ]),
+    choices: Object.freeze(SUPPORTED_DISCORD_LOCALES.map((locale) => Object.freeze({
+      name: t("en", `language.name.${locale}`),
+      value: locale,
+    }))),
   });
 }
 

@@ -324,7 +324,8 @@ test("registered command metadata and every help page stay inside Discord limits
   assert.match(englishObjectiveHelp, /available in Discord text commands and the CLI/i);
   assert.match(englishObjectiveHelp, /Slash commands accept only the choices shown by Discord/i);
   assert.match(englishObjectiveHelp, /\$path.*--objective <ID>/);
-  assert.match(koreanObjectiveHelp, /minimum-cover.*min-cover/u);
+  assert.match(koreanObjectiveHelp, /`minimum-cover`/u);
+  assert.match(koreanObjectiveHelp, /`min-cover`/u);
   assert.match(formatSlashCommandHelp("objective minimum-cover", "en"), /objective min-cover/);
   assert.match(formatSlashCommandHelp("objective tiling-only", "en"), /Unknown objective/);
   assert.match(formatSlashCommandHelp("objective minimum_cover", "en"), /Unknown objective/);
