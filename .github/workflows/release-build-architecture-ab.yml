@@ -1,8 +1,7 @@
 name: Release Build Architecture A/B
 
 on:
-  push:
-    branches: ["codex/release-build-architecture-ab"]
+  workflow_dispatch:
 
 permissions:
   contents: read

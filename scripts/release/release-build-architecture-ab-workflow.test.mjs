@@ -6,7 +6,8 @@ const workflow = readFileSync(new URL('../../.github/workflows/release-build-arc
 const nativeIdentity = readFileSync(new URL('./prepare-native-build-identity.ps1', import.meta.url), 'utf8');
 
 test('A/B workflow is isolated, non-publishing, and never grants release authority', () => {
-  assert.match(workflow, /branches: \["codex\/release-build-architecture-ab"\]/u);
+  assert.match(workflow, /on:\r?\n  workflow_dispatch:/u);
+  assert.doesNotMatch(workflow, /\r?\n  push:/u);
   assert.match(workflow, /persist-credentials: false/u);
   assert.match(workflow, /authority: 'non-authoritative-product-input'|non-authoritative ProductE2E CLI/u);
   for (const forbidden of [
