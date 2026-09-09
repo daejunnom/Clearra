@@ -9,7 +9,7 @@ const values = { project: "clearra-cloud", region: "asia-northeast1", intent: "s
 test("failed candidate cleanup reports only closed cause codes, never raw exceptions", () => {
   assert.equal(safeFailedCandidateCleanupReason({name:"RecoveryTrafficHttpError",httpStatus:403,
     phase:"validate",diagnosis:"runtime-actas-denied",message:"private response"}), "http-403-validate-runtime-actas-denied");
-  assert.equal(safeFailedCandidateCleanupReason(new Error("Cloud recovery preimage changed after validateOnly; no mutation attempted")), "preimage-changed-before-apply");
+  assert.equal(safeFailedCandidateCleanupReason(new Error("Cloud recovery preimage changed during guarded reread; no mutation attempted")), "preimage-changed-before-apply");
   for (const value of [new Error("Bearer private-value"),{name:"RecoveryTrafficHttpError",httpStatus:403,phase:"secret-value"},null]) {
     assert.equal(safeFailedCandidateCleanupReason(value), "prior-traffic-or-exact-candidate-unverified");
   }

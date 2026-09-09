@@ -111,7 +111,7 @@ export function planCandidateTagRemoval(service, revision, target) {
 export function assertUnchangedBeforePatch(plan, service, revision) {
   const reread = planCandidateTagRemoval(service, revision, plan.target);
   if (!isDeepStrictEqual(reread, plan)) {
-    throw new Error("Cloud recovery preimage changed after validateOnly; no mutation attempted");
+    throw new Error("Cloud recovery preimage changed during guarded reread; no mutation attempted");
   }
 }
 

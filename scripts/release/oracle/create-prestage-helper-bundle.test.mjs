@@ -43,6 +43,9 @@ async function fixture() {
   git(root, "init", "--initial-branch=main");
   git(root, "config", "user.name", "Clearra Test");
   git(root, "config", "user.email", "clearra-test@example.invalid");
+  // The fixture proves byte-for-byte Git authority.  Do not let a Windows
+  // user's global autocrlf policy rewrite the temporary repository's blobs.
+  git(root, "config", "core.autocrlf", "false");
   git(root, "add", "--", ...FILES);
   git(root, "commit", "-m", "fixture");
   return { root, sourceCommit: git(root, "rev-parse", "HEAD") };

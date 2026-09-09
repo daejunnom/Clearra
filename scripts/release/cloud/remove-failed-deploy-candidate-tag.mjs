@@ -20,7 +20,7 @@ export function safeFailedCandidateCleanupReason(error) {
     return `http-${error.httpStatus}-${error.phase}-${diagnosis}`;
   }
   const reasons = new Map([
-    ["Cloud recovery preimage changed after validateOnly; no mutation attempted", "preimage-changed-before-apply"],
+    ["Cloud recovery preimage changed during guarded reread; no mutation attempted", "preimage-changed-before-apply"],
     ["Cloud traffic is not the exact prior revision at 100 percent", "prior-traffic-not-exact"],
     ["Cloud service is absent, changing, or differs from latest candidate authority", "service-not-exact-or-reconciling"],
     ["Cloud candidate immutable image differs from the sealed intent", "candidate-image-mismatch"],

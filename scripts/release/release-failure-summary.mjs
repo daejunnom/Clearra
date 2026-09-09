@@ -12,8 +12,12 @@ export const DIAGNOSTIC_JOB_DEPENDENCIES = Object.freeze({
   'release-acceptance-foundation-desktop-host': ['metadata'],
   'release-acceptance-sanitizer': ['metadata'],
   'release-acceptance-rust': ['metadata', 'ctk3'],
+  'release-acceptance-wasm-contracts': ['metadata'],
   'release-acceptance-wasm-build': ['metadata'],
-  'release-acceptance-pages': ['metadata', 'ctk3', 'release-acceptance-wasm-build'],
+  'release-acceptance-pages': [
+    'metadata', 'ctk3', 'release-acceptance-wasm-contracts',
+    'release-acceptance-wasm-build',
+  ],
   'release-acceptance': [
     'metadata', 'release-acceptance-foundation-no-product-debt',
     'release-acceptance-foundation-adversarial-correctness',

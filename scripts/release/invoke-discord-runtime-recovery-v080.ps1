@@ -188,20 +188,20 @@ function Get-ActiveCloudRevision {
     return Get-ExactActiveCloudRevision -Service $service
 }
 
-function Assert-PrestageCloudCleanupPermission {
+function Assert-PrestageCloudCleanupPreimage {
     param($Service, $Intent, [string] $PriorRevision)
     if ((Get-ExactActiveCloudRevision -Service $Service) -cne $PriorRevision) {
-        throw 'prestage permission preflight refuses Cloud traffic outside exact prior authority'
+        throw 'prestage cleanup preflight refuses Cloud traffic outside exact prior authority'
     }
     $tagCount = Get-ValidatedCandidateTagEntryCount `
         -Traffic @(Get-CloudTrafficEntries -Service $Service) `
         -CandidateTag ([string]$Intent.cloud_candidate_tag) `
         -CandidateRevision ([string]$Intent.cloud_candidate_revision)
     if ($tagCount -eq 1) {
-        # This validation has no write authority and produces no recovery result.
-        # Run it BEFORE Oracle cleanup; a permanent Cloud denial must not repeat
-        # remote Oracle work. Seal-ExactCandidateCloudResidue still revalidates
-        # independently after Oracle and never trusts this preflight as evidence.
+        # This read-only, double-read preimage check has no write authority and
+        # produces no recovery result.  Cloud Run validateOnly is intentionally
+        # avoided because it revalidates the runtime identity and demands actAs
+        # even when updateMask contains only traffic.
         Invoke-NodeExact scripts/release/cloud/remove-recovery-candidate-tag.mjs `
             --project $GcpProjectId --region $GcpRegion `
             --intent "$ArtifactRoot/prestage/intended-candidate-authority.json" `
@@ -438,7 +438,7 @@ if ($Stage -ceq 'prestage') {
         throw 'prestage cleanup refuses Cloud traffic outside exact prior authority'
     }
     $cloudPreflight = Get-Content -LiteralPath $cloudBefore -Raw | ConvertFrom-Json
-    Assert-PrestageCloudCleanupPermission -Service $cloudPreflight -Intent $intent `
+    Assert-PrestageCloudCleanupPreimage -Service $cloudPreflight -Intent $intent `
         -PriorRevision ([string]$prior.prior_revision)
     $manifestPath = Join-Path $EvidenceRoot "oracle-cleanup-manifest-$([Guid]::NewGuid().ToString('N')).json"
     $source = Join-Path $ArtifactRoot 'prepared/exact-source.tar.gz'

@@ -38,7 +38,7 @@ function after(f) {
   value.etag = "etag-2"; value.generation = value.observedGeneration = "18";
   return value;
 }
-function fakeFlow({ denyValidation = false, denyWrite = false, drift = false, corruptAfter = false } = {}) {
+function fakeFlow({ denyWrite = false, drift = false, corruptAfter = false } = {}) {
   const f = fixture(); const calls = []; let reads = 0;
   const request = async (method, path, body, validateOnly) => {
     calls.push({ method, path, body: structuredClone(body), validateOnly });
@@ -50,7 +50,7 @@ function fakeFlow({ denyValidation = false, denyWrite = false, drift = false, co
       if (corruptAfter && reads > 2) value.template.serviceAccount = "changed";
       return value;
     }
-    if ((validateOnly && denyValidation) || (!validateOnly && denyWrite)) throw new Error("HTTP 403");
+    if (!validateOnly && denyWrite) throw new Error("HTTP 403");
     return { done: true };
   };
   return { ...f, calls, request };
@@ -95,53 +95,34 @@ test("unchanged preimage requires the exact etag, template, candidate and traffi
   assert.throws(() => assertUnchangedBeforePatch(plan, f.service, f.revision), /preimage changed/);
 });
 
-test("validation denial causes zero writes and no alternate API or identity retry", async () => {
-  const f = fakeFlow({ denyValidation: true });
-  await assert.rejects(removeRecoveryCandidateTag(f.target, f), /403/);
-  assert.equal(f.calls.filter((x) => x.method === "PATCH" && x.validateOnly === false).length, 0);
-  assert.equal(f.calls.length, 3);
-});
-
-test("validate-only explicitly does not restore and never sends an actual PATCH", async () => {
+test("read-only preflight performs two exact reads and never sends a PATCH", async () => {
   const f = fakeFlow();
-  assert.deepEqual(await removeRecoveryCandidateTag(f.target, { ...f, validateOnly: true }), { status: "validated-not-restored" });
-  assert.equal(f.calls.filter((x) => x.method === "PATCH").length, 1);
+  assert.deepEqual(await removeRecoveryCandidateTag(f.target, { ...f, validateOnly: true }),
+    { status: "preimage-validated-not-restored" });
+  assert.equal(f.calls.filter((x) => x.method === "GET").length, 4);
+  assert.equal(f.calls.filter((x) => x.method === "PATCH").length, 0);
 });
 
-test("successful validation is rechecked before one etag-bound write and independent readback", async () => {
+test("guarded reread precedes one etag-bound write and independent readback", async () => {
   const f = fakeFlow();
   assert.deepEqual(await removeRecoveryCandidateTag(f.target, f), { status: "tag-removal-verified" });
-  assert.deepEqual(f.calls.filter((x) => x.method === "PATCH").map((x) => x.validateOnly), [true, false]);
+  assert.deepEqual(f.calls.filter((x) => x.method === "PATCH").map((x) => x.validateOnly), [false]);
   for (const call of f.calls.filter((x) => x.method === "PATCH")) assert.equal(call.body.etag, "etag-1");
 });
 
-test("non-persisted validateOnly Operation is not polled and never counts as a restoration", async () => {
-  for (const validateOnly of [true, false]) {
-    const f = fakeFlow(); const base = f.request; let polls = 0;
-    f.request = async (...args) => {
-      if (args[1].includes("/operations/")) { polls += 1; throw new Error("HTTP 404: dry-run operation is not persisted"); }
-      const result = await base(...args);
-      return args[0] === "PATCH" && args[3] === true
-        ? { name: "projects/clearra-cloud/locations/asia-northeast1/operations/validated",
-          metadata: { "@type": "type.googleapis.com/google.cloud.run.v2.Service", name: RECOVERY_SERVICE } }
-        : result;
-    };
-    assert.deepEqual(await removeRecoveryCandidateTag(f.target, { ...f, validateOnly }),
-      { status: validateOnly ? "validated-not-restored" : "tag-removal-verified" });
-    assert.equal(polls, 0);
-    assert.equal(f.calls.filter((call) => call.method === "PATCH" && call.validateOnly === false).length, validateOnly ? 0 : 1);
-  }
+test("read-only preflight never creates or polls an operation", async () => {
+  const f = fakeFlow(); const base = f.request; let polls = 0;
+  f.request = async (...args) => {
+    if (args[1].includes("/operations/")) polls += 1;
+    return base(...args);
+  };
+  assert.deepEqual(await removeRecoveryCandidateTag(f.target, { ...f, validateOnly: true }),
+    { status: "preimage-validated-not-restored" });
+  assert.equal(polls, 0);
+  assert.equal(f.calls.filter((call) => call.method === "PATCH").length, 0);
 });
 
-test("unbound dry-run metadata and actual mutation polling errors remain failures", async () => {
-  for (const metadata of [{}, { "@type": "other", name: RECOVERY_SERVICE },
-    { "@type": "type.googleapis.com/google.cloud.run.v2.Service", name: RECOVERY_SERVICE + "-foreign" }]) {
-    const f = fakeFlow(); const base = f.request;
-    f.request = async (...args) => args[0] === "PATCH"
-      ? { name: "projects/clearra-cloud/locations/asia-northeast1/operations/validated", metadata }
-      : base(...args);
-    await assert.rejects(removeRecoveryCandidateTag(f.target, f), /validation operation/);
-  }
+test("actual mutation polling errors remain failures", async () => {
   const f = fakeFlow(); const base = f.request;
   f.request = async (...args) => {
     if (args[1].includes("/operations/")) throw new Error("HTTP 404: actual operation missing");
@@ -152,7 +133,7 @@ test("unbound dry-run metadata and actual mutation polling errors remain failure
   await assert.rejects(removeRecoveryCandidateTag(f.target, { ...f, pause: async () => {} }), /actual operation missing/);
 });
 
-test("state changes after validation prevent the write", async () => {
+test("state changes during the guarded reread prevent the write", async () => {
   const f = fakeFlow({ drift: true });
   await assert.rejects(removeRecoveryCandidateTag(f.target, f), /preimage changed/);
   assert.equal(f.calls.filter((x) => x.validateOnly === false).length, 0);
@@ -196,7 +177,7 @@ test("operation polling has a hard bound", async () => {
   const f = fakeFlow(); const base = f.request; let polls = 0;
   const operation = { name: "projects/clearra-cloud/locations/asia-northeast1/operations/fixture", done: false };
   f.request = async (...args) => {
-    if (args[0] === "PATCH") return args[3] === true ? { done: true } : operation;
+    if (args[0] === "PATCH") return operation;
     if (args[1].includes("/operations/")) { polls += 1; return operation; }
     return base(...args);
   };

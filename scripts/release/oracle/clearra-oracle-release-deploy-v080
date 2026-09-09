@@ -217,7 +217,20 @@ wait_for_service_release() {
         '' | *[!0-9]* | 0 | 1 ) ;;
         * )
           cwd=$(/usr/bin/readlink -f -- "/proc/$pid/cwd" 2>/dev/null || true)
-          [ "$cwd" = "$expected_release/apps/clearra-discord-bot" ] && return 0
+          # A live MainPID/CWD is only process authority.  The gateway needs
+          # materially longer to obtain its Discord session and emit READY on
+          # Oracle than it needs to enter the service cgroup.  Bind readiness
+          # to this exact PID so an older journal record cannot release the
+          # deployment early.  The surrounding 60 x 2 second loop is the hard
+          # bound; this must never become an unbounded /path-style wait.
+          if [ "$cwd" = "$expected_release/apps/clearra-discord-bot" ] &&
+            /usr/bin/journalctl \
+              "_SYSTEMD_UNIT=$service_name" "_PID=$pid" \
+              --no-pager -n 500 -o cat 2>/dev/null |
+              /usr/bin/grep -Fq 'Oracle Gateway connected as '
+          then
+            return 0
+          fi
           ;;
       esac
     fi
@@ -561,12 +574,16 @@ CLEARRA_CANDIDATE_SETTINGS_V080
       exit 0
     fi
 
-    transition_started=0
-    verification_complete=0
+    restore_started=0
+    restore_ready=0
     cleanup_rollback() {
       exit_status=$?
       trap - EXIT HUP INT TERM PIPE
-      if [ "$transition_started" -eq 1 ] && [ "$verification_complete" -ne 1 ]; then
+      # Stop only a partially restored process.  Once the exact prior release
+      # has reached its PID-bound READY record, a later proof/API failure must
+      # fail the workflow without turning a verified prior runtime into a
+      # production outage.
+      if [ "$restore_started" -eq 1 ] && [ "$restore_ready" -ne 1 ]; then
         "$systemctl_path" stop "$service_name" >/dev/null 2>&1 || true
       fi
       exit "$exit_status"
@@ -582,8 +599,9 @@ CLEARRA_CANDIDATE_SETTINGS_V080
       "$prior_release_sha256" \
       "$prior_settings_backup" \
       "$prior_settings_sha256" >/dev/null
-    transition_started=1
+    restore_started=1
     wait_for_service_release "$prior_release"
+    restore_ready=1
 
     proof_attempt=1
     while [ "$proof_attempt" -le 2 ]; do
@@ -616,7 +634,6 @@ CLEARRA_CANDIDATE_SETTINGS_V080
       --prior-runtime-authority-sha256 "$prior_runtime_authority_sha256" \
       --prior-job-url "$prior_job_url" \
       --deployment-nonce "$deployment_nonce" >/dev/null
-    verification_complete=1
     printf '%s\n' "oracle_rollback=verified"
     ;;
 

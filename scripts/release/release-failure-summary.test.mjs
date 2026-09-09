@@ -23,7 +23,7 @@ test('all-success summary never creates acceptance authority', () => {
   const report = collectReleaseFailureSummary(allSuccess());
   assert.equal(report.status, 'all-jobs-succeeded');
   assert.equal(report.release_authority, false);
-  assert.equal(report.jobs.length, 15);
+  assert.equal(report.jobs.length, 16);
   assert.match(renderReleaseFailureSummary(report), /cannot authorize acceptance or publication/);
 });
 

@@ -89,6 +89,17 @@ test("Oracle proofs use bounded automatic probes while preserving SSH liveness",
   }
   assert.equal((launcher.match(/while \[ "\$proof_attempt" -le 2 \]; do/gu) ?? []).length, 2);
   assert.doesNotMatch(launcher, /waiting-for-ready-and-fresh-path-proof/u);
+  assert.match(launcher, /while \[ "\$attempts" -lt 60 \]; do/u);
+  assert.match(launcher, /"_SYSTEMD_UNIT=\$service_name" "_PID=\$pid"/u);
+  assert.match(launcher, /\/usr\/bin\/grep -Fq 'Oracle Gateway connected as '/u);
+  const rollbackCleanup = launcher.slice(
+    launcher.indexOf("    restore_started=0"),
+    launcher.indexOf("    proof_attempt=1", launcher.indexOf("    restore_started=0")),
+  );
+  assert.match(rollbackCleanup, /restore_ready=0/u);
+  assert.match(rollbackCleanup, /\[ "\$restore_started" -eq 1 \] && \[ "\$restore_ready" -ne 1 \]/u);
+  assert.match(rollbackCleanup, /wait_for_service_release "\$prior_release"\r?\n    restore_ready=1/u);
+  assert.doesNotMatch(rollbackCleanup, /verification_complete/u);
   assert.match(primary, /bounded Oracle-to-Cloud candidate verification failed/u);
   assert.doesNotMatch(primary, /throw 'real path candidate verification failed'/u);
   assert.equal(
