@@ -1,0 +1,234 @@
+name: Release Build Architecture A/B
+
+on:
+  push:
+    branches: ["codex/release-build-architecture-ab"]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-build-architecture-ab-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+# This workflow can neither produce canonical acceptance evidence nor publish a
+# product. The seed commit measures both independent candidates. A subsequent
+# source-tree-identical warm marker commit measures only compiler-cache reuse.
+jobs:
+  ab-source:
+    runs-on: ubuntu-latest
+    outputs:
+      phase: ${{ steps.phase.outputs.phase }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Bind isolated A/B source and phase
+        id: phase
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == 'refs/heads/codex/release-build-architecture-ab' ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          phase="$(tr -d '\r\n' < scripts/release/release-build-architecture-ab-phase.txt)"
+          [[ "$phase" == 'seed' || "$phase" == 'warm' ]]
+          echo "phase=$phase" >> "$GITHUB_OUTPUT"
+          echo "release_build_architecture_ab_phase=$phase"
+      - name: Verify non-authoritative A/B boundaries
+        run: node --test scripts/release/product-e2e-cli-artifact.test.mjs scripts/release/release-build-architecture-ab-workflow.test.mjs
+
+  compiler-cache:
+    needs: ab-source
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      RUST_MIN_STACK: "16777216"
+      RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "on"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Fetch locked Rust dependencies outside the compile timer
+        run: cargo fetch --locked
+      - name: Prepare exact native cache identity
+        id: native
+        shell: pwsh
+        run: |
+          $cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)
+          "CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV
+          $nativeBuild = Join-Path $env:LOCALAPPDATA 'Clearra/build/core-c-library-cache'
+          $identity = Join-Path $env:RUNNER_TEMP 'clearra-native-build-identity.v1.json'
+          & ./scripts/release/prepare-native-build-identity.ps1 `
+            -BuildDir $nativeBuild `
+            -OutputPath $identity `
+            -SourceCommit $env:GITHUB_SHA `
+            -Workers $cargoJobs `
+            -BuildTestOracle `
+            -GitHubEnvironmentPath $env:GITHUB_ENV `
+            -GitHubOutputPath $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install checksum-verified sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.16.0
+          disable_annotations: true
+      - name: Reset compiler-cache counters
+        shell: pwsh
+        run: sccache --zero-stats
+      - name: Run exact Rust inventory through the content-addressed compiler cache
+        id: rust_exact
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          & powershell -NoProfile -File scripts/clearra.ps1 `
+            -Task RustExactTests `
+            -ExecutionSurface Trusted `
+            -RuntimeEnvironment windows `
+            -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) `
+            -VerboseLog
+          $exitCode = $LASTEXITCODE
+          $timer.Stop()
+          "compiler_cache_rust_exact_wall_ms=$($timer.ElapsedMilliseconds) phase=${{ needs.ab-source.outputs.phase }} namespace=${{ steps.native.outputs.compiler_cache_namespace }}"
+          if ($exitCode -ne 0) { exit $exitCode }
+      - name: Report exact compiler-cache statistics
+        if: always()
+        shell: pwsh
+        run: |
+          sccache --show-stats
+          sccache --show-stats --stats-format json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'sccache-stats.json') -Encoding UTF8
+      - name: Preserve non-authoritative compiler-cache evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-compiler-cache-${{ needs.ab-source.outputs.phase }}-${{ github.sha }}-run-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/clearra-native-build-identity.v1.json
+            ${{ runner.temp }}/sccache-stats.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  exact-cli-producer:
+    if: needs.ab-source.outputs.phase == 'seed'
+    needs: ab-source
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Fetch locked Rust dependencies outside the producer timer
+        run: cargo fetch --locked
+      - name: Prepare exact native product identity
+        id: native
+        shell: pwsh
+        run: |
+          $cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)
+          "CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV
+          $nativeBuild = Join-Path $env:LOCALAPPDATA 'Clearra/build/core-c-library-cache'
+          $identity = Join-Path $env:RUNNER_TEMP 'clearra-native-build-identity.v1.json'
+          & ./scripts/release/prepare-native-build-identity.ps1 `
+            -BuildDir $nativeBuild `
+            -OutputPath $identity `
+            -SourceCommit $env:GITHUB_SHA `
+            -Workers $cargoJobs `
+            -GitHubOutputPath $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and seal one exact non-authoritative ProductE2E CLI
+        id: producer
+        env:
+          CLEARRA_NATIVE_LIBRARY_DIR: ${{ steps.native.outputs.native_library_directory }}
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'clearra-product-cli-target'
+          $nativeLink = "-L native=$env:CLEARRA_NATIVE_LIBRARY_DIR"
+          $existing = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($existing)) { $nativeLink } else { "$existing $nativeLink" }
+          cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $env:CARGO_TARGET_DIR 'debug/clearra.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "ProductE2E CLI was not built: $binary" }
+          $artifact = Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-cli-input'
+          node scripts/release/product-e2e-cli-artifact.mjs seal `
+            --binary $binary `
+            --native-identity (Join-Path $env:RUNNER_TEMP 'clearra-native-build-identity.v1.json') `
+            --source-commit $env:GITHUB_SHA `
+            --run-id $env:GITHUB_RUN_ID `
+            --run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --output $artifact
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $timer.Stop()
+          "exact_cli_producer_wall_ms=$($timer.ElapsedMilliseconds)"
+      - name: Upload exact non-authoritative ProductE2E CLI input
+        uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-product-e2e-cli-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clearra-product-e2e-cli-input
+          if-no-files-found: error
+          retention-days: 7
+
+  exact-cli-consumer:
+    if: needs.ab-source.outputs.phase == 'seed'
+    needs: [ab-source, exact-cli-producer]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install and build the CTK3 consumer dependency
+        run: |
+          npm ci --ignore-scripts
+          npm run build --workspace @clearra/ctk3
+      - name: Download the exact producer input
+        uses: actions/download-artifact@v4
+        with:
+          name: unqualified-product-e2e-cli-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clearra-product-e2e-cli-input
+      - name: Verify exact source, run, attempt, recipe, and byte identity
+        id: receipt
+        shell: pwsh
+        run: |
+          node scripts/release/product-e2e-cli-artifact.mjs verify `
+            --artifact (Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-cli-input') `
+            --expected-source-commit $env:GITHUB_SHA `
+            --expected-run-id $env:GITHUB_RUN_ID `
+            --expected-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --github-output $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise ProductE2E and both terminal adapters without rebuilding
+        env:
+          CLEARRA_VERIFIED_PRODUCT_E2E_CLI: ${{ steps.receipt.outputs.binary_path }}
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          & powershell -NoProfile -File scripts/product-e2e.ps1 `
+            -UseBuiltBinary `
+            -ExePath $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI `
+            -ExecutionSurface Trusted `
+            -VerboseLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs --clearra $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node packages/clearra-ui/scripts/verify-terminal-supply-product.mjs --clearra $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $timer.Stop()
+          "exact_cli_consumer_product_wall_ms=$($timer.ElapsedMilliseconds) rebuild=false"
