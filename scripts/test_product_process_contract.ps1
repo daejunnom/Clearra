@@ -219,6 +219,10 @@ try {
     $script:ReportPath = ''
     $script:ProductE2EProgressScope = [pscustomobject]@{ Name = 'product-e2e' }
     $script:ProductE2ECurrentCaseName = 'contract probe'
+    $script:ProductE2EExactProbeCache =
+        [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    $script:ProductE2EExactProbeExecutions = 0
+    $script:ProductE2EExactProbeReuses = 0
     $script:TerminalSupplyScope = $null
     $script:ClearraReleaseAcceptanceMode = $false
     Remove-Item Env:\CLEARRA_ACCEPTED_CTK3_DIST -ErrorAction SilentlyContinue
@@ -243,6 +247,49 @@ try {
     Assert-ProductProcessCondition `
         ($commandResult[0].ExitCode -eq 0 -and $commandResult[0].Command -eq 'clearra help') `
         'non_built_product_command_preserves_the_typed_result_contract'
+
+    $nativeCallCountBeforeExactProbe = $script:NativeProgressCalls.Count
+    $freshProbe = Invoke-ProductE2EClearra `
+        -CommandArgs @('--format', 'json', 'pc', '--backend', 'cpu') `
+        -ReuseExactReadOnlyProbe
+    $reusedProbe = Invoke-ProductE2EClearra `
+        -CommandArgs @('--format', 'json', 'pc', '--backend', 'cpu') `
+        -ReuseExactReadOnlyProbe
+    $independentProbe = Invoke-ProductE2EClearra `
+        -CommandArgs @('--format', 'json', 'pc', '--backend', 'cpu')
+    $distinctProbe = Invoke-ProductE2EClearra `
+        -CommandArgs @('--format', 'json', 'pc', '--backend', 'hybrid') `
+        -ReuseExactReadOnlyProbe
+    Assert-ProductProcessCondition `
+        (($script:NativeProgressCalls.Count - $nativeCallCountBeforeExactProbe) -eq 3 -and
+            -not $freshProbe.ProbeReused -and
+            $reusedProbe.ProbeReused -and
+            -not $independentProbe.ProbeReused -and
+            -not $distinctProbe.ProbeReused -and
+            $script:ProductE2EExactProbeExecutions -eq 2 -and
+            $script:ProductE2EExactProbeReuses -eq 1) `
+        'exact_read_only_probe_reuse_is_argument_exact_explicit_and_preserves_default_independence'
+
+    $script:ProductE2ECurrentCaseName = 'failed exact probe'
+    $script:NativeProgressFailureLabel = 'failed exact probe'
+    $nativeCallCountBeforeFailedProbe = $script:NativeProgressCalls.Count
+    $failedProbeOne = Invoke-ProductE2EClearra `
+        -CommandArgs @('--format', 'json', 'pc', '--backend', 'gpu', '--no-backend-fallback') `
+        -ReuseExactReadOnlyProbe
+    $failedProbeTwo = Invoke-ProductE2EClearra `
+        -CommandArgs @('--format', 'json', 'pc', '--backend', 'gpu', '--no-backend-fallback') `
+        -ReuseExactReadOnlyProbe
+    $script:NativeProgressFailureLabel = ''
+    $script:ProductE2ECurrentCaseName = 'contract probe'
+    Assert-ProductProcessCondition `
+        (($script:NativeProgressCalls.Count - $nativeCallCountBeforeFailedProbe) -eq 2 -and
+            $failedProbeOne.ExitCode -eq 19 -and
+            $failedProbeTwo.ExitCode -eq 19 -and
+            -not $failedProbeOne.ProbeReused -and
+            -not $failedProbeTwo.ProbeReused -and
+            $script:ProductE2EExactProbeExecutions -eq 4 -and
+            $script:ProductE2EExactProbeReuses -eq 1) `
+        'failed_exact_read_only_probes_are_never_reused'
 
     $nativeCallCountBeforeBuiltProduct = $script:NativeProgressCalls.Count
     $builtProductOutput = @(Invoke-ProductE2EBuiltTask $testRoot)

@@ -40,6 +40,10 @@ if ($OutputExcerptLines -lt 1) {
 Remove-StaleProductE2EClearraCliBinary
 
 $script:ProductE2ECurrentCaseName = ""
+$script:ProductE2EExactProbeCache =
+    [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+$script:ProductE2EExactProbeExecutions = 0
+$script:ProductE2EExactProbeReuses = 0
 $productE2ETotal = if ($StaticFixtureOnly.IsPresent) { 2 } else { 16 }
 $script:ProductE2EProgressScope = New-ClearraProgressScope `
     -Name "product-e2e" `
@@ -107,4 +111,7 @@ if ($StaticFixtureOnly.IsPresent) {
     [Console]::Out.WriteLine("[product-e2e] fixture evidence | product_e2e_route=static-fixture-contract | process-launch=False | execution_complete=false")
 } else {
     [Console]::Out.WriteLine("[product-e2e] gate summary | product_e2e_route=process | process-launch=True")
+    [Console]::Out.WriteLine(
+        "[product-e2e] exact read-only probes | executions=$script:ProductE2EExactProbeExecutions | reuses=$script:ProductE2EExactProbeReuses"
+    )
 }

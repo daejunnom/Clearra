@@ -3,11 +3,50 @@
 function Invoke-ProductE2EClearra {
     param(
         [Parameter(Mandatory)]
-        [string[]]$CommandArgs
+        [string[]]$CommandArgs,
+        [switch]$ReuseExactReadOnlyProbe
     )
 
     Push-Location $Root
     try {
+        # ProductE2E owns one immutable executable for the lifetime of this script.
+        # Reuse is opt-in so unrelated cases remain independent process evidence.
+        $cacheKey = $null
+        if ($ReuseExactReadOnlyProbe.IsPresent) {
+            $cacheVariable = Get-Variable `
+                -Name ProductE2EExactProbeCache `
+                -Scope Script `
+                -ErrorAction SilentlyContinue
+            if ($null -eq $cacheVariable) {
+                $script:ProductE2EExactProbeCache =
+                    [System.Collections.Generic.Dictionary[string, object]]::new(
+                        [System.StringComparer]::Ordinal
+                    )
+            }
+            if ($null -eq (Get-Variable -Name ProductE2EExactProbeExecutions -Scope Script -ErrorAction SilentlyContinue)) {
+                $script:ProductE2EExactProbeExecutions = 0
+            }
+            if ($null -eq (Get-Variable -Name ProductE2EExactProbeReuses -Scope Script -ErrorAction SilentlyContinue)) {
+                $script:ProductE2EExactProbeReuses = 0
+            }
+            $cacheIdentity = [ordered]@{
+                schema = 1
+                execution = if ($UseBuiltBinary.IsPresent) { 'built-release-binary' } else { 'cargo-run' }
+                arguments = @($CommandArgs)
+            }
+            $cacheKey = $cacheIdentity | ConvertTo-Json -Compress -Depth 3
+            if ($script:ProductE2EExactProbeCache.ContainsKey($cacheKey)) {
+                $cached = $script:ProductE2EExactProbeCache[$cacheKey]
+                $script:ProductE2EExactProbeReuses += 1
+                return [pscustomobject]@{
+                    Command = $cached.Command
+                    ExitCode = $cached.ExitCode
+                    Output = $cached.Output
+                    ProbeReused = $true
+                }
+            }
+        }
+
         if ($UseBuiltBinary.IsPresent) {
             $resolvedExe = Resolve-ProductE2EBinary
             if ([string]::IsNullOrWhiteSpace($resolvedExe)) {
@@ -66,11 +105,19 @@ function Invoke-ProductE2EClearra {
             }
         }
 
-        return [pscustomobject]@{
+        $result = [pscustomobject]@{
             Command = "clearra $($CommandArgs -join ' ')"
             ExitCode = $exitCode
             Output = $text
+            ProbeReused = $false
         }
+        if ($ReuseExactReadOnlyProbe.IsPresent) {
+            $script:ProductE2EExactProbeExecutions += 1
+            if ($result.ExitCode -eq 0) {
+                $script:ProductE2EExactProbeCache[$cacheKey] = $result
+            }
+        }
+        return $result
     } finally {
         Pop-Location
     }
@@ -220,7 +267,9 @@ function Invoke-ProductE2EBackendParityCase {
 
         try {
             foreach ($command in $commands) {
-                $result = Invoke-ProductE2EClearra $command.Args
+                $result = Invoke-ProductE2EClearra `
+                    -CommandArgs $command.Args `
+                    -ReuseExactReadOnlyProbe
                 $outputs[$command.Label] = $result
                 $lastOutput = $result.Output
                 if ($result.ExitCode -ne 0) {
@@ -289,7 +338,9 @@ function Invoke-ProductE2EBackendCapabilityReportCase {
 
         try {
             foreach ($command in $commands) {
-                $result = Invoke-ProductE2EClearra $command.Args
+                $result = Invoke-ProductE2EClearra `
+                    -CommandArgs $command.Args `
+                    -ReuseExactReadOnlyProbe
                 $lastOutput = $result.Output
                 if ($result.ExitCode -ne 0) {
                     throw "$($command.Label) backend command failed with exit $($result.ExitCode)"
@@ -330,7 +381,8 @@ function Invoke-ProductE2EBackendEquivalenceCase(
     [string[]]$CpuArgs,
     [string[]]$GpuArgs,
     [string[]]$HybridArgs,
-    [string]$FixturePath
+    [string]$FixturePath,
+    [switch]$ReuseExactReadOnlyProbes
 ) {
     Invoke-ClearraProgressCase -Scope $script:ProductE2EProgressScope -Name $Name -Body {
         $script:ProductE2ECurrentCaseName = $Name
@@ -356,7 +408,9 @@ function Invoke-ProductE2EBackendEquivalenceCase(
 
         try {
             foreach ($command in $commands) {
-                $result = Invoke-ProductE2EClearra $command.Args
+                $result = Invoke-ProductE2EClearra `
+                    -CommandArgs $command.Args `
+                    -ReuseExactReadOnlyProbe:$ReuseExactReadOnlyProbes.IsPresent
                 $lastOutput = $result.Output
                 if ($result.ExitCode -ne 0) {
                     throw "$($command.Label) backend command failed with exit $($result.ExitCode)"
@@ -405,7 +459,8 @@ function Invoke-ProductE2EOpening2LBackendEquivalenceCase {
         -FixturePath "tests/fixtures/pc/opening_2l_empty.json" `
         -CpuArgs @("--format", "json", "pc", "--lines", "2", "--queue", "IIOOOIIOOO", "--fixed", "--no-hold", "--objective", "min-cover", "--backend", "cpu") `
         -GpuArgs @("--format", "json", "pc", "--lines", "2", "--queue", "IIOOOIIOOO", "--fixed", "--no-hold", "--objective", "min-cover", "--backend", "gpu", "--allow-backend-fallback") `
-        -HybridArgs @("--format", "json", "pc", "--lines", "2", "--queue", "IIOOOIIOOO", "--fixed", "--no-hold", "--objective", "min-cover", "--backend", "hybrid", "--allow-backend-fallback")
+        -HybridArgs @("--format", "json", "pc", "--lines", "2", "--queue", "IIOOOIIOOO", "--fixed", "--no-hold", "--objective", "min-cover", "--backend", "hybrid", "--allow-backend-fallback") `
+        -ReuseExactReadOnlyProbes
 }
 
 function Invoke-ProductE2EScenario4LBackendEquivalenceCase {
@@ -523,7 +578,9 @@ function Invoke-ProductE2EGpuAllowFallbackReasonCase {
         $result = $null
 
         try {
-            $result = Invoke-ProductE2EClearra $commandArgs
+            $result = Invoke-ProductE2EClearra `
+                -CommandArgs $commandArgs `
+                -ReuseExactReadOnlyProbe
             if ($result.ExitCode -ne 0) {
                 throw "expected exit 0 but got $($result.ExitCode)"
             }
@@ -566,7 +623,9 @@ function Invoke-ProductE2EGpuBackendTrustStateCase {
         $result = $null
 
         try {
-            $result = Invoke-ProductE2EClearra $commandArgs
+            $result = Invoke-ProductE2EClearra `
+                -CommandArgs $commandArgs `
+                -ReuseExactReadOnlyProbe
             if ($result.ExitCode -ne 0) {
                 throw "expected exit 0 but got $($result.ExitCode)"
             }
