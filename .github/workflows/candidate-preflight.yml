@@ -2,7 +2,7 @@ name: Candidate Preflight
 
 on:
   push:
-    branches: ["codex/v0.8.0-preflight-20260906-rng"]
+    branches: ["codex/release-rust-shard-contention-ci-v3"]
   workflow_dispatch:
     inputs:
       full_gate:
@@ -24,7 +24,7 @@ concurrency:
 # evidence and cannot publish a release or change Pages/Discord/Cloud traffic.
 jobs:
   candidate-source:
-    if: github.ref == 'refs/heads/codex/v0.8.0-preflight-20260906-rng' && github.ref_type == 'branch'
+    if: github.ref == 'refs/heads/codex/release-rust-shard-contention-ci-v3' && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     outputs:
       full_gate: ${{ steps.source.outputs.full_gate }}
@@ -39,10 +39,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == 'refs/heads/codex/v0.8.0-preflight-20260906-rng' && "$GITHUB_REF_TYPE" == 'branch' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/codex/release-rust-shard-contention-ci-v3' && "$GITHUB_REF_TYPE" == 'branch' ]]
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           case "$GITHUB_EVENT_NAME" in
-            push) echo 'full_gate=false' >> "$GITHUB_OUTPUT" ;;
+            push) echo 'full_gate=true' >> "$GITHUB_OUTPUT" ;;
             workflow_dispatch)
               [[ "$REQUEST_FULL_GATE" == 'true' || "$REQUEST_FULL_GATE" == 'false' ]]
               echo "full_gate=$REQUEST_FULL_GATE" >> "$GITHUB_OUTPUT"
@@ -66,61 +66,28 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install JavaScript workspace
-        run: npm ci --ignore-scripts
       # Read a compatible canonical build snapshot, but never publish cache or
       # acceptance evidence from this unqualified branch.
       - name: Restore verified native build inputs
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/bin/wasm-bindgen.exe
             ~/.cargo/registry
             ~/.cargo/git
             ~/AppData/Local/Clearra/build
           key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
             release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
-      - name: Prepare acceptance toolchains
+      - name: Check the Rust shard partition contract
         shell: powershell
-        run: |
-          rustup target add wasm32-unknown-unknown
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $tool = Get-Command wasm-bindgen -ErrorAction SilentlyContinue
-          if ($null -eq $tool -or (& wasm-bindgen --version) -ne 'wasm-bindgen 0.2.126') {
-            cargo install wasm-bindgen-cli --version 0.2.126 --locked
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-      - name: Check non-publishing workflow and artifact boundaries
-        run: node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/candidate-preflight-artifacts.test.mjs
-      - name: Run the complete gate once without release authority
+        run: powershell -NoProfile -File scripts/test_release_acceptance_shards.ps1
+      - name: Run the exact Rust shard once without release authority
         id: full_gate
         shell: powershell
         run: |
           $candidateWorkers = [Math]::Max(1, [Environment]::ProcessorCount)
-          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Full -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $candidateWorkers -VerboseLog -ShowWarnings
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task RustExactTests -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $candidateWorkers -VerboseLog -ShowWarnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Preserve only source-verified candidate WASM if it was built
-        if: always()
-        id: candidate_wasm
-        shell: powershell
-        run: |
-          $candidateWasmSource = Join-Path $env:LOCALAPPDATA 'Clearra/build/cargo-target/clearra-web-public/wasm'
-          $candidateWasmOutput = Join-Path $env:RUNNER_TEMP 'clearra-unqualified-candidate-wasm'
-          & node scripts/release/candidate-preflight-artifacts.mjs --from $candidateWasmSource --output $candidateWasmOutput --source-commit $env:GITHUB_SHA
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Upload verified but unqualified candidate WASM
-        if: always() && steps.candidate_wasm.outputs.ready == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: unqualified-candidate-wasm-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/clearra-unqualified-candidate-wasm
-          if-no-files-found: error
-          retention-days: 7
-
   # Native regressions and WASM compilation have no artifact dependency. Keep
   # every regression, but let both source-bound leaves start immediately.
   candidate-rust:
