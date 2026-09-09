@@ -362,7 +362,42 @@ const linuxCtk3DownloadStep = section(
 const acceptedWasmBuildRunStep = section(
   releaseAcceptanceWasmBuildJob,
   "\n      - name: Run verified WASM build producer",
-  "\n      - name: Save verified canonical WASM build cache",
+  "\n      - name: Verify the current-run accepted WASM artifact",
+);
+const reusableWasmResolveStep = section(
+  releaseAcceptanceWasmBuildJob,
+  "\n      - id: reusable_wasm",
+  "\n      - id: reusable_wasm_download",
+);
+const reusableWasmDownloadStep = section(
+  releaseAcceptanceWasmBuildJob,
+  "\n      - id: reusable_wasm_download",
+  "\n      - id: rebound_wasm",
+);
+const reboundWasmStep = section(
+  releaseAcceptanceWasmBuildJob,
+  "\n      - id: rebound_wasm",
+  "\n      - name: Configure WASM compile parallelism",
+);
+const acceptedWasmConfigureStep = section(
+  releaseAcceptanceWasmBuildJob,
+  "\n      - name: Configure WASM compile parallelism",
+  "\n      - id: release_toolchain_cache",
+);
+const acceptedWasmCacheRestoreStep = section(
+  releaseAcceptanceWasmBuildJob,
+  "\n      - id: release_toolchain_cache",
+  "\n      - name: Prepare acceptance toolchains",
+);
+const acceptedWasmToolchainStep = section(
+  releaseAcceptanceWasmBuildJob,
+  "\n      - name: Prepare acceptance toolchains",
+  "\n      - name: Run verified WASM build producer",
+);
+const acceptedWasmBuildVerifyStep = section(
+  releaseAcceptanceWasmBuildJob,
+  "\n      - name: Verify the current-run accepted WASM artifact",
+  "\n      # Keep WASM and native snapshots separate:",
 );
 const acceptedWasmContractsRunStep = releaseAcceptanceWasmContractsJob.slice(
   releaseAcceptanceWasmContractsJob.indexOf("\n      - name: Run WASM source and host contracts"),
@@ -1597,8 +1632,15 @@ requireExactYamlScalar(
 requireExactYamlKeySet(
   acceptedWasmBuildRunStep,
   8,
-  ["env", "run"],
+  ["if", "env", "run"],
   "accepted WASM build producer step",
+);
+requireExactYamlScalar(
+  acceptedWasmBuildRunStep,
+  "if",
+  "steps.rebound_wasm.outputs.reused != 'true'",
+  "accepted WASM fresh producer condition",
+  8,
 );
 requireExactYamlKeySet(
   acceptedWasmBuildRunStep,
@@ -1630,6 +1672,123 @@ requireExactYamlScalar(
   "accepted WASM build producer command",
   8,
 );
+requireExactYamlKeySet(
+  reusableWasmResolveStep,
+  8,
+  ["name", "env", "shell", "run"],
+  "reusable WASM resolver step",
+);
+requireExactYamlScalar(
+  reusableWasmResolveStep,
+  "GH_TOKEN",
+  "${{ github.token }}",
+  "reusable WASM resolver token",
+  10,
+);
+requireExactYamlScalar(
+  reusableWasmResolveStep,
+  "shell",
+  "bash",
+  "reusable WASM resolver shell",
+  8,
+);
+for (const marker of [
+  "node scripts/release/reusable-accepted-wasm-build.mjs \\",
+  '--repository "$GITHUB_REPOSITORY" \\',
+  '--source-commit "$GITHUB_SHA" \\',
+  '--current-run-id "$GITHUB_RUN_ID" \\',
+  '--current-run-attempt "$GITHUB_RUN_ATTEMPT" \\',
+  '--github-output "$GITHUB_OUTPUT"',
+]) {
+  requireText(reusableWasmResolveStep, marker, `reusable WASM resolver ${marker}`);
+}
+requireExactYamlKeySet(
+  reusableWasmDownloadStep,
+  8,
+  ["name", "if", "continue-on-error", "uses", "with"],
+  "reusable WASM download step",
+);
+for (const [key, value] of [
+  ["if", "steps.reusable_wasm.outputs.reuse_available == 'true'"],
+  ["continue-on-error", "true"],
+  ["uses", "actions/download-artifact@v4"],
+]) {
+  requireExactYamlScalar(reusableWasmDownloadStep, key, value, "reusable WASM download", 8);
+}
+for (const [key, value] of [
+  ["name", "${{ steps.reusable_wasm.outputs.reuse_artifact_name }}"],
+  ["path", "${{ runner.temp }}/clearra-prior-accepted-wasm"],
+  ["github-token", "${{ github.token }}"],
+  ["repository", "${{ github.repository }}"],
+  ["run-id", "${{ steps.reusable_wasm.outputs.reuse_run_id }}"],
+]) {
+  requireExactYamlScalar(reusableWasmDownloadStep, key, value, `reusable WASM download ${key}`, 10);
+}
+requireExactYamlKeySet(
+  reboundWasmStep,
+  8,
+  ["name", "if", "shell", "run"],
+  "reusable WASM rebind step",
+);
+for (const [key, value] of [
+  ["if", "steps.reusable_wasm_download.outcome == 'success'"],
+  ["shell", "bash"],
+]) {
+  requireExactYamlScalar(reboundWasmStep, key, value, `reusable WASM rebind ${key}`, 8);
+}
+for (const marker of [
+  "node scripts/release/try-reuse-accepted-wasm-build.mjs \\",
+  '--source "$RUNNER_TEMP/clearra-prior-accepted-wasm" \\',
+  '--destination "$RUNNER_TEMP/clearra-accepted-wasm" \\',
+  '--source-commit "$GITHUB_SHA" \\',
+  '--previous-run-id "${{ steps.reusable_wasm.outputs.reuse_run_id }}" \\',
+  '--previous-run-attempt "${{ steps.reusable_wasm.outputs.reuse_run_attempt }}" \\',
+  '--current-run-id "$GITHUB_RUN_ID" \\',
+  '--current-run-attempt "$GITHUB_RUN_ATTEMPT" \\',
+  '--github-output "$GITHUB_OUTPUT"',
+]) {
+  requireText(reboundWasmStep, marker, `reusable WASM rebind ${marker}`);
+}
+for (const [name, step, expectedKeys] of [
+  ["compile scheduler", acceptedWasmConfigureStep, ["if", "shell", "run"]],
+  ["cache restore", acceptedWasmCacheRestoreStep, ["name", "if", "uses", "with"]],
+  ["toolchain setup", acceptedWasmToolchainStep, ["if", "shell", "run"]],
+]) {
+  requireExactYamlKeySet(step, 8, expectedKeys, `accepted WASM ${name} step`);
+  requireExactYamlScalar(
+    step,
+    "if",
+    "steps.rebound_wasm.outputs.reused != 'true'",
+    `accepted WASM ${name} reuse condition`,
+    8,
+  );
+}
+requireExactYamlKeySet(
+  acceptedWasmBuildVerifyStep,
+  8,
+  ["shell", "run"],
+  "accepted WASM current-run verification step",
+);
+requireExactYamlScalar(
+  acceptedWasmBuildVerifyStep,
+  "shell",
+  "bash",
+  "accepted WASM current-run verification shell",
+  8,
+);
+for (const marker of [
+  "node scripts/release/accepted-wasm-build.mjs \\",
+  '--verify "$RUNNER_TEMP/clearra-accepted-wasm" \\',
+  '--expected-source-commit "$GITHUB_SHA" \\',
+  '--expected-run-id "$GITHUB_RUN_ID" \\',
+  '--expected-run-attempt "$GITHUB_RUN_ATTEMPT"',
+]) {
+  requireText(
+    acceptedWasmBuildVerifyStep,
+    marker,
+    `accepted WASM current-run verification ${marker}`,
+  );
+}
 for (const [name, job, markers] of [
   ["WASM source contracts", releaseAcceptanceWasmContractsJob, [
     "$cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)",
@@ -1732,10 +1891,14 @@ for (const [name, job, skeleton] of [
   ["WASM build producer", releaseAcceptanceWasmBuildJob, [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
+    "- id: reusable_wasm",
+    "- id: reusable_wasm_download",
+    "- id: rebound_wasm",
     "- name: Configure WASM compile parallelism",
     "- id: release_toolchain_cache",
     "- name: Prepare acceptance toolchains",
     "- name: Run verified WASM build producer",
+    "- name: Verify the current-run accepted WASM artifact",
     "- name: Save verified canonical WASM build cache",
     "- name: Upload accepted WASM build",
   ]],
@@ -1838,25 +2001,26 @@ if (
 if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 3) {
   throw new Error("canonical caches require exactly one native, WASM and sanitizer writer");
 }
-for (const [job, name, upload, paths] of [
+for (const [job, name, upload, paths, saveCondition] of [
   [releaseAcceptanceRustJob, "Save verified canonical native build cache",
     "Upload canonical release acceptance RustExact shard", [
       "~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git",
       "~/AppData/Local/Clearra/build",
-    ]],
+    ], "${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
   [releaseAcceptanceWasmBuildJob, "Save verified canonical WASM build cache",
     "Upload accepted WASM build", [
       "~/.cargo/bin/wasm-bindgen", "~/.cargo/registry", "~/.cargo/git",
       "~/.cache/Clearra/build/cargo-target",
-    ]],
+    ], "${{ success() && steps.rebound_wasm.outputs.reused != 'true' && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
   [releaseAcceptanceSanitizerJob, "Save verified sanitizer C build cache",
-    "Upload canonical release acceptance sanitizer shard", ["~/AppData/Local/Clearra/build"]],
+    "Upload canonical release acceptance sanitizer shard", ["~/AppData/Local/Clearra/build"],
+    "${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
 ]) {
   const step = section(job, `\n      - name: ${name}`, `\n      - name: ${upload}`);
   requireExactYamlKeySet(step, 8,
     ["if", "continue-on-error", "timeout-minutes", "uses", "with"], name);
   for (const [key, value] of [
-    ["if", "${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
+    ["if", saveCondition],
     ["continue-on-error", "true"], ["timeout-minutes", "2"],
     ["uses", "actions/cache/save@v4"],
   ]) requireExactYamlScalar(step, key, value, name, 8);

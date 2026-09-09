@@ -220,6 +220,14 @@ it does not restore the Cargo build cache or rebuild WASM. The six acceptance
 shards and their eight-stage semantic order remain unchanged, and final
 canonical evidence additionally requires the producer job and receipt.
 
+A fresh canonical retry of the same exact SHA may import the retained WASM
+payload from an earlier completed non-successful first attempt only when that
+attempt's producer job and immutable artifact upload succeeded. The importer
+verifies the old receipt and every byte, copies only its closed payload, and
+seals and verifies a new current-run receipt. Every lookup/download/validation
+miss executes the ordinary build. Cross-commit reuse remains invalid because
+the compiled product identity contains the source SHA.
+
 The successful dispatch also retains its exact Pages-ready Web/WASM build. A
 later Pages deployment verifies and reuses that accepted artifact; it does not
 reinstall Rust or JavaScript dependencies, rerun UI/Web tests, or rebuild WASM

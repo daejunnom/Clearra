@@ -952,6 +952,9 @@ function Invoke-ReleaseIdentityGateValidation {
     $acceptedCtk3DistTest = Read-Text 'scripts/tools/accepted-ctk3-dist.test.mjs'
     $acceptedWasmBuild = Read-Text 'scripts/release/accepted-wasm-build.mjs'
     $acceptedWasmBuildTest = Read-Text 'scripts/release/accepted-wasm-build.test.mjs'
+    $reusableAcceptedWasmBuild = Read-Text 'scripts/release/reusable-accepted-wasm-build.mjs'
+    $reusableAcceptedWasmBuildTest = Read-Text 'scripts/release/reusable-accepted-wasm-build.test.mjs'
+    $tryReuseAcceptedWasmBuild = Read-Text 'scripts/release/try-reuse-accepted-wasm-build.mjs'
     $acceptedPagesBuild = Read-Text 'scripts/release/accepted-pages-build.mjs'
     $acceptedPagesBuildTest = Read-Text 'scripts/release/accepted-pages-build.test.mjs'
     $discordPackage = Read-Text 'apps/clearra-discord-bot/package.json'
@@ -2055,9 +2058,21 @@ function Invoke-ReleaseIdentityGateValidation {
             }
         }
         foreach ($cacheOwner in @(
-            @{ Job = $releaseRustJob; Name = 'Save verified canonical native build cache' },
-            @{ Job = $releaseWasmBuildJob; Name = 'Save verified canonical WASM build cache' },
-            @{ Job = $releaseSanitizerJob; Name = 'Save verified sanitizer C build cache' }
+            @{
+                Job = $releaseRustJob
+                Name = 'Save verified canonical native build cache'
+                Condition = 'if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != ''true'' }}'
+            },
+            @{
+                Job = $releaseWasmBuildJob
+                Name = 'Save verified canonical WASM build cache'
+                Condition = 'if: ${{ success() && steps.rebound_wasm.outputs.reused != ''true'' && steps.release_toolchain_cache.outputs.cache-hit != ''true'' }}'
+            },
+            @{
+                Job = $releaseSanitizerJob
+                Name = 'Save verified sanitizer C build cache'
+                Condition = 'if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != ''true'' }}'
+            }
         )) {
             $cacheStepMatch = [regex]::Match($cacheOwner.Job,
                 '(?ms)^      - name: ' + [regex]::Escape($cacheOwner.Name) + '\r?\n(?<body>.*?)(?=^      - |\z)')
@@ -2067,7 +2082,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 continue
             }
             foreach ($cacheMarker in @(
-                'if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != ''true'' }}',
+                $cacheOwner.Condition,
                 'continue-on-error: true',
                 'timeout-minutes: 2',
                 'uses: actions/cache/save@v4',
@@ -2108,6 +2123,15 @@ function Invoke-ReleaseIdentityGateValidation {
             '-Task WasmBuildContracts -ExecutionSurface Trusted -RuntimeEnvironment windows',
             'Run verified WASM build producer',
             '-Task WasmBuildProducer -ExecutionSurface Trusted -RuntimeEnvironment wasm',
+            'Resolve one reusable exact-source WASM artifact',
+            'scripts/release/reusable-accepted-wasm-build.mjs',
+            'Download the resolved exact-source WASM artifact',
+            'run-id: ${{ steps.reusable_wasm.outputs.reuse_run_id }}',
+            'Rebind byte-identical WASM payload to this canonical run',
+            'scripts/release/try-reuse-accepted-wasm-build.mjs',
+            '--previous-run-attempt "${{ steps.reusable_wasm.outputs.reuse_run_attempt }}"',
+            'if: steps.rebound_wasm.outputs.reused != ''true''',
+            'Verify the current-run accepted WASM artifact',
             'wasm_compile_context=source-contracts task_workers=1 cargo_jobs=$cargoJobs',
             'wasm_compile_context=accepted-artifact task_workers=1 cargo_jobs=$cargo_jobs',
             'Upload accepted WASM build',
@@ -3586,6 +3610,9 @@ function Invoke-ReleaseIdentityGateValidation {
         'payload_sha256',
         'collectPayloadFiles',
         'validateWasmPayload',
+        'rebindAcceptedWasmBuild',
+        'accepted WASM reuse source and destination must not overlap',
+        'accepted WASM reuse changed the verified payload bytes',
         'accepted WASM build does not match its closed regular-file set and hashes',
         'flag: "wx"',
         '--expected-source-commit',
@@ -3600,11 +3627,53 @@ function Invoke-ReleaseIdentityGateValidation {
         'binds the closed payload, source, run, and producer toolchains',
         'rejects tampering and unsealed extra files',
         'rejects cross-source and cross-attempt reuse',
+        'rebinds byte-identical exact-source payload under the current run authority',
+        'rejects reruns, overlap, tampering, source drift, and an existing destination',
+        'optional reuse CLI publishes a verified hit and turns a rejected input into a clean miss',
         'fails closed for a partial or mismatched product payload',
         'uses the closed seven-command set'
     )) {
         if ($acceptedWasmBuildTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Accepted WASM build regression coverage is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'resolveReusableAcceptedWasmBuild',
+        'workflow_dispatch',
+        'head_branch !== "main"',
+        'run.attempt === "1"',
+        'status === "completed"',
+        'REUSABLE_CONCLUSIONS',
+        'Upload accepted WASM build',
+        'artifact.expired !== false',
+        'artifact.archive_download_url !== expectedDownload',
+        'reuse_available: "false"',
+        'lookup-or-authority-rejected'
+    )) {
+        if ($reusableAcceptedWasmBuild.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Reusable accepted WASM resolver is missing fail-closed marker '$required'"
+        }
+    }
+    foreach ($required in @(
+        'selects the latest complete failed exact-source WASM producer',
+        'skips an invalid newer candidate and uses an independently valid older attempt',
+        'never reuses a successful prior canonical run or an active prior run',
+        'expired, ambiguous, wrong-run, or failed-upload artifacts have no reuse authority',
+        'rejects truncated history, foreign identity, reruns, and a missing current run'
+    )) {
+        if ($reusableAcceptedWasmBuildTest.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Reusable accepted WASM regression coverage is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        'rebindAcceptedWasmBuild',
+        'reused=true',
+        'reused=false',
+        'failed after publishing its destination',
+        'downloaded-candidate-rejected'
+    )) {
+        if ($tryReuseAcceptedWasmBuild.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Optional accepted WASM reuse adapter is missing '$required'"
         }
     }
     foreach ($required in @(

@@ -11,6 +11,7 @@ import {
 
 const EXPECTED_RELEASE_REGRESSIONS = Object.freeze([
   "scripts/release/accepted-wasm-build.test.mjs",
+  "scripts/release/reusable-accepted-wasm-build.test.mjs",
   "scripts/release/accepted-pages-build.test.mjs",
   "scripts/release/canonical-acceptance-evidence.test.mjs",
   "scripts/release/canonical-acceptance-run.test.mjs",

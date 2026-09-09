@@ -88,6 +88,39 @@ The closed receipt binds:
 - the Cargo, CMake, Node, npm, PowerShell, Rust, and wasm-bindgen versions used
   by the producer.
 
+### Exact-source accepted-WASM retry hotpath
+
+The accepted-WASM producer may avoid recompilation only when a previous fresh
+canonical dispatch for the **same exact Git commit** completed unsuccessfully
+after its one WASM producer job and artifact upload had succeeded. The resolver
+enumerates a complete, bounded exact-SHA workflow history, rejects reruns and
+prior successful acceptance, and binds one completed producer job to one
+unexpired immutable artifact by run, attempt, name, ID, digest, timestamps, and
+workflow identity. An active, foreign, truncated, duplicated, expired, missing,
+or failed-upload candidate has no reuse authority.
+
+The downloaded artifact remains an untrusted transport input. Clearra verifies
+its prior source/run/attempt receipt, manifest identity, aliases, complete file
+set, hashes, and recorded producer toolchains. It then copies only the sealed
+payload files into a private staging directory, proves that the manifest and
+payload digests are unchanged, seals a new receipt for the current run and
+attempt, verifies that receipt, and atomically publishes the current output.
+Only that current-run artifact reaches the Pages shard. Download or validation
+failure falls back to the ordinary cold/warm Cargo build; no partial directory
+can suppress that build. Cache restore, toolchain installation, compilation,
+and cache save are skipped on a verified hit, while the final current-run
+artifact verification and upload always execute.
+
+This is deliberately not a cross-commit content cache. The browser product
+embeds `CLEARRA_SOURCE_COMMIT` and `CLEARRA_ENGINE_BUILD_ID` at compile time and
+the WASM manifest requires both to equal the accepted source. Even when all
+other compile inputs are unchanged, a different commit therefore has a
+different product identity and cannot use the byte-identical hotpath. Removing
+that identity merely to increase cache hits would weaken exact-source
+publication and is forbidden. A build performed before comparing bytes also
+cannot shorten compilation, so post-build equality is verification rather than
+the hotpath predicate.
+
 The Pages shard depends on both siblings, downloads the artifact, verifies the
 receipt before and after copying it into the Pages staging tree, and does not
 install Rust targets, restore a build cache, or invoke a WASM build. Its probes
@@ -148,6 +181,10 @@ The caches are split by host and purpose:
   the Linux wasm-bindgen executable, Cargo registries/Git sources, and only the
   dedicated Cargo target directory. The WASM producer is its one verified
   optional writer.
+- An exact-SHA retry may instead consume the retained accepted-WASM artifact
+  from one earlier failed/cancelled/timed-out first attempt as described above.
+  This artifact path is separately verified and never turns an Actions cache
+  into release evidence.
 - Sanitizer uses its source-bound C-build cache and remains isolated from Cargo
   and wasm-bindgen data.
 
@@ -157,6 +194,14 @@ non-authoritative if cache publication fails. Parallel jobs never write the
 same immutable cache key. The Pages consumer has no Cargo/toolchain cache. If a
 cache is absent or expired, its owner performs a correct cold build; product and
 evidence contracts are unchanged.
+
+A real retained artifact from failed run `34364394835` was downloaded and
+rebound locally as a transport/verification A/B. Download took 4.889 seconds,
+rebind plus sealing took 0.309 seconds, the current receipt verified, and both
+the primary `.wasm` and JavaScript binding hashes remained byte-identical. This
+is one local network sample, not a hosted Actions speed guarantee; it does show
+that the hotpath work is seconds rather than recompiling that run's 6 minute 24
+second producer step.
 
 ## Expected effect and verification boundary
 

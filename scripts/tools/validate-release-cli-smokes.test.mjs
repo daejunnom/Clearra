@@ -589,6 +589,64 @@ for (const [name, mutate] of [
       ),
   ],
   [
+    "rejects reusable WASM lookup without exact source binding",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        '          node scripts/release/reusable-accepted-wasm-build.mjs \\\n' +
+          '            --repository "$GITHUB_REPOSITORY" \\\n' +
+          '            --source-commit "$GITHUB_SHA" \\\n',
+        '          node scripts/release/reusable-accepted-wasm-build.mjs \\\n' +
+          '            --repository "$GITHUB_REPOSITORY" \\\n' +
+          '            --source-commit main \\\n',
+      ),
+  ],
+  [
+    "rejects reusable WASM download without the resolved prior run",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "          run-id: ${{ steps.reusable_wasm.outputs.reuse_run_id }}\n",
+        "",
+      ),
+  ],
+  [
+    "rejects reusable WASM rebinding without prior attempt authority",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        '            --previous-run-attempt "${{ steps.reusable_wasm.outputs.reuse_run_attempt }}" \\\n',
+        '            --previous-run-attempt 1 \\\n',
+      ),
+  ],
+  [
+    "rejects skipping the fresh WASM producer after a reuse miss",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "      - name: Run verified WASM build producer\n        if: steps.rebound_wasm.outputs.reused != 'true'\n",
+        "      - name: Run verified WASM build producer\n        if: false\n",
+      ),
+  ],
+  [
+    "rejects removal of current-run WASM verification after reuse or build",
+    (source) => {
+      const start = source.indexOf("      - name: Verify the current-run accepted WASM artifact\n");
+      const end = source.indexOf("      # Keep WASM and native snapshots separate:", start);
+      assert.ok(start >= 0 && end > start);
+      return source.slice(0, start) + source.slice(end);
+    },
+  ],
+  [
+    "rejects saving a build cache from a reused WASM payload",
+    (source) =>
+      replaceExactlyOnce(
+        source,
+        "        if: ${{ success() && steps.rebound_wasm.outputs.reused != 'true' && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}\n",
+        "        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}\n",
+      ),
+  ],
+  [
     "rejects noncanonical conditional keys with whitespace before the colon",
     (source) =>
       replaceExactlyOnce(
@@ -778,7 +836,7 @@ for (const [name, mutate] of [
   [
     "rejects a WASM writer publishing failed build inputs",
     (source) => replaceExactlyOnce(source,
-      "      - name: Save verified canonical WASM build cache\n        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}\n",
+      "      - name: Save verified canonical WASM build cache\n        if: ${{ success() && steps.rebound_wasm.outputs.reused != 'true' && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}\n",
       "      - name: Save verified canonical WASM build cache\n        if: always()\n"),
   ],
   [

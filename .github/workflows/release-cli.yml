@@ -657,7 +657,45 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - id: reusable_wasm
+        name: Resolve one reusable exact-source WASM artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          node scripts/release/reusable-accepted-wasm-build.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --current-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --github-output "$GITHUB_OUTPUT"
+      - id: reusable_wasm_download
+        name: Download the resolved exact-source WASM artifact
+        if: steps.reusable_wasm.outputs.reuse_available == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.reusable_wasm.outputs.reuse_artifact_name }}
+          path: ${{ runner.temp }}/clearra-prior-accepted-wasm
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.reusable_wasm.outputs.reuse_run_id }}
+      - id: rebound_wasm
+        name: Rebind byte-identical WASM payload to this canonical run
+        if: steps.reusable_wasm_download.outcome == 'success'
+        shell: bash
+        run: |
+          node scripts/release/try-reuse-accepted-wasm-build.mjs \
+            --source "$RUNNER_TEMP/clearra-prior-accepted-wasm" \
+            --destination "$RUNNER_TEMP/clearra-accepted-wasm" \
+            --source-commit "$GITHUB_SHA" \
+            --previous-run-id "${{ steps.reusable_wasm.outputs.reuse_run_id }}" \
+            --previous-run-attempt "${{ steps.reusable_wasm.outputs.reuse_run_attempt }}" \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --current-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --github-output "$GITHUB_OUTPUT"
       - name: Configure WASM compile parallelism
+        if: steps.rebound_wasm.outputs.reused != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -667,6 +705,7 @@ jobs:
           echo "wasm_compile_context=accepted-artifact task_workers=1 cargo_jobs=$cargo_jobs"
       - id: release_toolchain_cache
         name: Restore canonical release toolchain cache
+        if: steps.rebound_wasm.outputs.reused != 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -678,6 +717,7 @@ jobs:
           restore-keys: |
             release-acceptance-wasm-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-
       - name: Prepare acceptance toolchains
+        if: steps.rebound_wasm.outputs.reused != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -686,15 +726,24 @@ jobs:
             cargo install wasm-bindgen-cli --version 0.2.126 --locked
           fi
       - name: Run verified WASM build producer
+        if: steps.rebound_wasm.outputs.reused != 'true'
         env:
           CLEARRA_ACCEPTED_WASM_OUTPUT_DIR: ${{ runner.temp }}/clearra-accepted-wasm
           CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
           CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: pwsh -NoProfile -File scripts/clearra.ps1 -Task WasmBuildProducer -ExecutionSurface Trusted -RuntimeEnvironment wasm
+      - name: Verify the current-run accepted WASM artifact
+        shell: bash
+        run: |
+          node scripts/release/accepted-wasm-build.mjs \
+            --verify "$RUNNER_TEMP/clearra-accepted-wasm" \
+            --expected-source-commit "$GITHUB_SHA" \
+            --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-run-attempt "$GITHUB_RUN_ATTEMPT"
       # Keep WASM and native snapshots separate: parallel producers must not race
       # to publish incomplete target trees under the same immutable cache key.
       - name: Save verified canonical WASM build cache
-        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && steps.rebound_wasm.outputs.reused != 'true' && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/cache/save@v4
