@@ -104,16 +104,29 @@ Different output paths are not claimed to be interchangeable. GitHub Actions
 uses a stable native build path, so the same-path property is the relevant
 contract.
 
+The first hosted `/Brepro` validation in run
+[`34339611080`](https://github.com/daejunnom/Clearra/actions/runs/34339611080)
+passed all 1,575 inventory entries without shared-resource contention. Its
+canonical fallback cache contained the older non-reproducible archive, so the
+expected result was `native-link-cache=refreshed`. Compilation took 569.269
+seconds. The two long isolated harnesses each took about 90.2 seconds while
+overlapping, and the five parallel-safe harnesses took about 21.8 seconds in
+total. This validates function and error-free scheduling, not warm reuse.
+
 ## Hosted A/B acceptance criteria
 
 The non-publishing branch
-`codex/release-rust-shard-contention-ci-v3` must complete twice:
+`codex/release-rust-shard-contention-ci-v3` uses a temporary cache key that is
+both branch-scoped and disjoint from every canonical release key. Its hosted
+sequence has three runs:
 
-1. The first run validates the isolated scheduler and seeds an archive produced
-   with `/Brepro`.
-2. A source-identical follow-up commit restores that run's cache. It must report
-   `native-link-cache=reused`, preserve all 1,575 inventory entries, and finish
-   with no shared-resource contention.
+1. The completed read-only run validates the isolated scheduler and creates an
+   archive produced with `/Brepro`, but deliberately cannot save it.
+2. Run `34340958034` repeats the exact Rust shard and may save successful build
+   inputs only under the isolated A/B key. This is the seed run.
+3. A source-identical follow-up commit restores the seed run's cache. It must
+   report `native-link-cache=reused`, preserve all 1,575 inventory entries, and
+   finish with no shared-resource contention.
 
 Compile time and cache size are recorded for both runs. A cache hit alone is not
 enough to claim a total improvement: hosted wall time must improve, and exact
