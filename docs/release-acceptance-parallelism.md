@@ -152,9 +152,11 @@ regressions continue as an independent Windows sibling. Artifact upload and
 download remain real critical-path costs.
 
 Focused tests prove the split task dispatch, receipt closure and tamper
-rejection, platform-aware toolchain collection, exact dependency and artifact
-names, cache isolation, Pages no-rebuild behavior, six-shard fan-in, and final
-evidence binding. A local eight-logical-processor WSL check completed the merged
+rejection, platform-aware toolchain collection, exact per-shard toolchain
+sealing, same-family Rust/Cargo/CMake hosted-runner patch compatibility,
+major/minor drift rejection, exact dependency and artifact names, cache
+isolation, Pages no-rebuild behavior, six-shard fan-in, and final evidence
+binding. A local eight-logical-processor WSL check completed the merged
 `cargo check` in 32.22 seconds, linked and ran both contract binaries in 2
 minutes 6 seconds, and completed a cold release WASM artifact build in 6 minutes
 21 seconds. Those measurements prove the Linux commands and expose the final

@@ -394,7 +394,10 @@ export function createShardedReleaseGateReports(authority, shardReports) {
       : reports;
     const versions = comparableReports
       .filter((report) => Object.hasOwn(report.toolchains, tool))
-      .map((report) => report.toolchains[tool]);
+      .map((report) => releaseShardToolchainCompatibilityKey(
+        tool,
+        report.toolchains[tool],
+      ));
     if (new Set(versions).size !== 1) {
       throw new Error(`release shards disagree on the ${tool} toolchain version`);
     }
@@ -1031,6 +1034,24 @@ function validateToolchains(value) {
     tools[key] = requireNonEmptyString(value[key], `toolchains.${key}`);
   }
   return Object.freeze(tools);
+}
+
+function releaseShardToolchainCompatibilityKey(tool, value) {
+  const version = requireNonEmptyString(value, `release shard ${tool} toolchain`);
+  const patchCompatiblePatterns = {
+    rust: /^rustc ([0-9]+)\.([0-9]+)\.[0-9]+(?: .*)?$/u,
+    cargo: /^cargo ([0-9]+)\.([0-9]+)\.[0-9]+(?: .*)?$/u,
+    cmake: /^cmake version ([0-9]+)\.([0-9]+)\.[0-9]+(?: .*)?$/u,
+  };
+  const pattern = patchCompatiblePatterns[tool];
+  if (!pattern) {
+    return version;
+  }
+  const match = pattern.exec(version);
+  if (!match) {
+    throw new Error(`release shard ${tool} toolchain version is not canonical`);
+  }
+  return `${tool} ${match[1]}.${match[2]}`;
 }
 
 function requireReportAuthority(report, authority, label) {
