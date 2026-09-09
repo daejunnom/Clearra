@@ -176,6 +176,17 @@ foreach ($package in @('clearra-app', 'clearra-core-executor')) {
         throw "RustExactTests lost the explicit global-resource filters for '$package'."
     }
 }
+$searchBackend = Get-Content -LiteralPath (
+    Join-Path $repositoryRoot 'crates/clearra-core-executor/src/backend/wasm_cpu_search_backend.rs'
+) -Raw
+$pureSelectionModuleIndex = $searchBackend.LastIndexOf(
+    '#[cfg(all(test, feature = "webgpu-search"))]',
+    [System.StringComparison]::Ordinal
+)
+if ($pureSelectionModuleIndex -lt 0 -or
+    $searchBackend.Substring($pureSelectionModuleIndex).Contains('score_resource_test_guard')) {
+    throw 'Pure WebGPU workload-selection tests must not reserve the process-global score resource.'
+}
 Write-Output 'release_acceptance_shard_test=rust-global-resource-first-and-parallel-safe status=passed'
 
 & (Join-Path $PSScriptRoot 'test_independent_gate_sequence.ps1')
