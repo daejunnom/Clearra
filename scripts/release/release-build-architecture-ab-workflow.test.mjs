@@ -23,7 +23,7 @@ test('A/B workflow is isolated, non-publishing, and never grants release authori
 });
 
 test('compiler-cache candidate is content-addressed and never restores a raw Cargo target', () => {
-  assert.match(workflow, /run: "RUSTC_WRAPPER=sccache" >> \$env:GITHUB_ENV/u);
+  assert.match(workflow, /run: \|\n\s+"RUSTC_WRAPPER=sccache" >> \$env:GITHUB_ENV/u);
   assert.match(workflow, /SCCACHE_GHA_ENABLED: "on"/u);
   assert.match(nativeIdentity, /SCCACHE_GHA_VERSION=\$compilerCacheNamespace/u);
   assert.match(workflow, /mozilla-actions\/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba/u);

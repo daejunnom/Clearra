@@ -80,7 +80,8 @@ jobs:
           disable_annotations: true
       - name: Activate sccache only after installation
         shell: pwsh
-        run: "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+        run: |
+          "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
       - name: Reset compiler-cache counters
         shell: pwsh
         run: sccache --zero-stats
