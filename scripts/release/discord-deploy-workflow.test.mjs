@@ -232,15 +232,13 @@ test("approval-free preparation uses only builder WIF and never SSH/runtime muta
   assert.doesNotMatch(candidate, /candidate-release-v080\.mjs deploy|run services update-traffic/u);
 });
 
-test("Cloud Build stages the accepted archive in the exact bucket without the default project-wide ownership probe", () => {
+test("Cloud Build submits the byte-identical, generation-locked accepted archive", () => {
   const candidate = primary.slice(primary.indexOf("  candidate:"), primary.indexOf("  promote:"));
-  const exactStagingArgument =
-    '--gcs-source-staging-dir="gs://clearra-cloud_cloudbuild/source"';
-  assert.equal(candidate.split(exactStagingArgument).length - 1, 1);
-  assert.ok(
-    candidate.indexOf(exactStagingArgument) >
-      candidate.indexOf("gcloud builds submit evidence/cloud-build-inputs.tar.gz"),
-  );
+  assert.match(candidate, /cloud_input_object="gs:\/\/clearra-cloud_cloudbuild\/source\/accepted-\$\{SOURCE_COMMIT\}-deploy-\$\{GITHUB_RUN_ID\}-attempt-\$\{GITHUB_RUN_ATTEMPT\}\.tar\.gz"/u);
+  assert.match(candidate, /gcloud storage cp evidence\/cloud-build-inputs\.tar\.gz "\$cloud_input_object"[\s\S]*--if-generation-match=0/u);
+  assert.match(candidate, /cloud_input_generation="\$\(gcloud storage objects describe "\$cloud_input_object" --format='value\(generation\)'\)"/u);
+  assert.match(candidate, /gcloud builds submit "\$cloud_input_object"/u);
+  assert.doesNotMatch(candidate, /gcloud builds submit evidence\/cloud-build-inputs\.tar\.gz|--gcs-source-staging-dir/u);
 });
 
 test("prestage and live recovery artifacts bracket every protected runtime transition", () => {

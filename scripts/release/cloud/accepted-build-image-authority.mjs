@@ -11,6 +11,14 @@ import { sha256File, verifyAcceptedCloudInputs } from './accepted-build-inputs.m
 
 export const ACCEPTED_BUILD_AUTHORITY = 'clearra.cloud-build-image-authority.v2';
 
+function parseExpectedStorageSource(uri, generation) {
+  const match = /^gs:\/\/([^/]+)\/(.+)$/u.exec(uri ?? '');
+  if (!match || !/^[1-9][0-9]*$/u.test(generation ?? '')) {
+    throw new Error('Cloud packaging requires the exact uploaded storage source and generation');
+  }
+  return { bucket: match[1], object: match[2], generation };
+}
+
 export async function createAcceptedBuildImageAuthority(options) {
   const manifest = await verifyAcceptedCloudInputs(options.inputDirectory, options);
   const legacy = { ...await createCloudBuildImageAuthority(options) };
@@ -36,7 +44,7 @@ export async function createAcceptedBuildImageAuthority(options) {
     throw new Error('Cloud packaging must verify inputs and package successfully without a source-build fallback');
   }
   const archiveHash = await sha256File(options.inputArchivePath);
-  verifyTransportProvenance(build, archiveHash);
+  verifyTransportProvenance(build, archiveHash, options.expectedStorageSource);
   return sealCanonicalReport({ ...legacy, schema_id: ACCEPTED_BUILD_AUTHORITY,
     accepted_run_id: options.runId, accepted_run_attempt: options.runAttempt,
     cloud_input_archive_sha256: archiveHash, cloud_input_manifest_sha256: options.manifestSha256,
@@ -47,11 +55,15 @@ export async function createAcceptedBuildImageAuthority(options) {
   });
 }
 
-export function verifyTransportProvenance(build, archiveHash) {
+export function verifyTransportProvenance(build, archiveHash, expectedSource) {
   const source = build.sourceProvenance?.resolvedStorageSource;
   if (!source || !/^[1-9][0-9]*$/u.test(String(source.generation ?? '')) ||
       !build.options?.sourceProvenanceHash?.includes('SHA256')) {
     throw new Error('Cloud packaging requires resolved source generation and SHA256 provenance');
+  }
+  if (!expectedSource || source.bucket !== expectedSource.bucket ||
+      source.object !== expectedSource.object || String(source.generation) !== String(expectedSource.generation)) {
+    throw new Error('Cloud input archive resolved to a different storage object or generation');
   }
   const hashes = build.sourceProvenance?.fileHashes;
   const name = `gs://${source.bucket}/${source.object}#${source.generation}`;
@@ -69,7 +81,9 @@ export async function verifyAcceptedBuildImageAuthority(reportPath, options) {
   await sha256File(reportPath); // Reject links before reading the report.
   const report = JSON.parse(await readFile(reportPath, 'utf8'));
   verifyCanonicalReportHash(report, 'accepted Cloud image authority');
-  const actual = await createAcceptedBuildImageAuthority({ ...options, manifestSha256: report.cloud_input_manifest_sha256 });
+  const actual = await createAcceptedBuildImageAuthority({ ...options,
+    manifestSha256: report.cloud_input_manifest_sha256,
+    expectedStorageSource: report.resolved_storage_source });
   if (canonicalJson(actual) !== canonicalJson(report)) throw new Error('Accepted Cloud image authority differs');
   return actual;
 }
@@ -78,6 +92,7 @@ async function main() {
   const { values, positionals } = parseArgs({ strict: true, allowPositionals: true, options: Object.fromEntries([
     'source-commit', 'project', 'exact-source-archive', 'build-readback', 'input-directory',
     'input-archive', 'manifest-sha256', 'run-id', 'run-attempt', 'output', 'report',
+    'storage-source-uri', 'storage-source-generation',
   ].map((key) => [key, { type: 'string' }])) });
   const options = { sourceCommit: values['source-commit'], projectId: values.project,
     exactSourceArchivePath: values['exact-source-archive'], buildReadbackPath: values['build-readback'],
@@ -85,6 +100,8 @@ async function main() {
     manifestSha256: values['manifest-sha256'], runId: values['run-id'], runAttempt: values['run-attempt'] };
   if (positionals.length !== 1) throw new Error('Use create or verify for accepted Cloud image authority');
   if (positionals[0] === 'create') {
+    options.expectedStorageSource = parseExpectedStorageSource(
+      values['storage-source-uri'], values['storage-source-generation']);
     const report = await createAcceptedBuildImageAuthority(options);
     await writeFile(values.output, `${canonicalJson(report)}\n`, { flag: 'wx', mode: 0o600 });
     console.log(`${ACCEPTED_BUILD_AUTHORITY} ${report.report_sha256}`);

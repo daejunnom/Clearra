@@ -129,7 +129,8 @@ async function buildFixture(t) {
   const buildReadbackPath = join(f.root, 'build.json');
   await writeFile(buildReadbackPath, JSON.stringify(build));
   return {...f, build, archiveHash, buildOptions: {...f.expected, projectId: PROJECT, exactSourceArchivePath: f.sourcePath,
-    inputDirectory: f.options.outputDirectory, inputArchivePath, buildReadbackPath}};
+    inputDirectory: f.options.outputDirectory, inputArchivePath, buildReadbackPath,
+    expectedStorageSource: {...build.sourceProvenance.resolvedStorageSource}}};
 }
 
 test('v2 binds accepted inputs, actual fetched transport, generation and immutable image; approval rechecks all bytes', async (t) => {
@@ -167,9 +168,10 @@ for (const [label, mutate] of [
 test('provenance accepts only the generation-qualified path and exact base64 SHA256 of the uploaded archive', () => {
   const b = { options: {sourceProvenanceHash: ['SHA256']}, sourceProvenance: {resolvedStorageSource: {bucket: 'bucket', object: 'source.tgz', generation: '42'},
     fileHashes: {'gs://bucket/source.tgz#42': {fileHash: [{type: 'SHA256', value: Buffer.from('a'.repeat(64), 'hex').toString('base64')}]}}} };
-  verifyTransportProvenance(b, 'a'.repeat(64));
+  const expected = {...b.sourceProvenance.resolvedStorageSource};
+  verifyTransportProvenance(b, 'a'.repeat(64), expected);
   b.sourceProvenance.fileHashes['gs://bucket/source.tgz#42'].fileHash.push({...b.sourceProvenance.fileHashes['gs://bucket/source.tgz#42'].fileHash[0]});
-  assert.throws(() => verifyTransportProvenance(b, 'a'.repeat(64)), /SHA-256 differs/u);
+  assert.throws(() => verifyTransportProvenance(b, 'a'.repeat(64), expected), /SHA-256 differs/u);
 });
 
 test('the real Cloud bootstrap verifies the source before extraction and executes the real input verifier', async (t) => {
@@ -208,7 +210,10 @@ function assertPackagingFlow(workflow, cloudConfig, dockerfile) {
     '          run-id: ${{ needs.authority.outputs.accepted_run_id }}',
   ]) assert.ok(download.split('\n').includes(line), line);
   assert.doesNotMatch(download, /pattern:|continue-on-error|merge-multiple:/u);
-  assert.match(candidate, /gcloud builds submit evidence\/cloud-build-inputs\.tar\.gz/u);
+  assert.match(candidate, /gcloud storage cp evidence\/cloud-build-inputs\.tar\.gz "\$cloud_input_object"[\s\S]*--if-generation-match=0/u);
+  assert.match(candidate, /gcloud storage objects describe "\$cloud_input_object" --format='value\(generation\)'/u);
+  assert.match(candidate, /gcloud builds submit "\$cloud_input_object"/u);
+  assert.match(candidate, /--storage-source-uri "\$cloud_input_object"[\s\S]*--storage-source-generation "\$cloud_input_generation"/u);
   assert.match(candidate, /--config=.*cloudbuild-accepted-job-service\.yaml/u);
   assert.match(candidate, /tar -czf evidence\/cloud-build-inputs\.tar\.gz -C evidence\/cloud-build-inputs inputs/u);
   assert.match(candidate, /accepted-build-inputs\.mjs create/u);
@@ -240,7 +245,7 @@ test('production only packages exact-run accepted products and verifies the hand
   assertPackagingFlow(workflow, config, dockerfile);
   for (const changed of [
     workflow.replace('name: clearra-linux-cli-v${{ steps.accepted-inputs.outputs.release_version }}', 'name: clearra-linux-cli-v0.8.0'),
-    workflow.replace('gcloud builds submit evidence/cloud-build-inputs.tar.gz', 'gcloud builds submit evidence/exact-source.tar.gz'),
+    workflow.replace('gcloud builds submit "$cloud_input_object"', 'gcloud builds submit evidence/exact-source.tar.gz'),
     workflow.replace('accepted-build-image-authority.mjs verify', 'echo skip-verification'),
   ]) assert.throws(() => assertPackagingFlow(changed, config, dockerfile));
   assert.throws(() => assertPackagingFlow(workflow, config.replace('sourceProvenanceHash: [SHA256]', ''), dockerfile));
