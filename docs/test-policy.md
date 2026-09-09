@@ -206,11 +206,21 @@ to the later owners. The public standalone tasks remain self-contained and
 still execute their historical evidence when they are run outside
 `ReleaseAcceptance`.
 
-Native FFI/exact Rust tests, renderer goldens, sanitizer/aggregate C tests, and
-packaged CLI smokes remain serial where their process-global state, shared build
-surface, exact output evidence, or ordered product contract requires it. Their
-Cargo/CMake compilation continues to receive the bounded runner CPU count; this
-metadata optimization does not weaken deterministic execution evidence.
+`RustExactTests` compiles its complete nine-package library inventory once. It
+then executes test prefixes that reserve process-global execution capacity
+first with one test thread. Native FFI and WebGPU library harnesses remain in
+that serial partition as whole packages. The remainder is proven disjoint from
+those prefixes by the compiled harness inventory and runs in ordered harnesses
+with at most two test threads. This avoids a blocked global-resource test
+occupying one worker while another waits for the same authority, without
+dropping or ignoring a test. Every partition keeps running after an earlier
+test failure and the stage fails only after reporting all partition failures.
+
+Renderer goldens, sanitizer/aggregate C tests, and packaged CLI smokes remain
+serial where their process-global state, shared build surface, exact output
+evidence, or ordered product contract requires it. Cargo/CMake compilation
+continues to receive the bounded runner CPU count; test-harness concurrency is
+a separate bounded policy and does not weaken deterministic execution evidence.
 
 Canonical Actions builds the verified WASM product once in the dedicated
 `release-acceptance-wasm-build` producer. Its receipt closes the complete file

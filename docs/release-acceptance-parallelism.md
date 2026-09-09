@@ -33,6 +33,16 @@ They are not safe to background inside one job:
 - `WasmBuildTest` consumes the accepted WASM bytes to produce the Pages-ready
   Web output.
 
+Inside `RustExactTests`, one compile invocation produces the complete library
+test inventory. App/executor prefixes that acquire process-global execution
+capacity, plus the native FFI and WebGPU harnesses, run first with one test
+thread. Remaining test names are selected by excluding those exact prefixes
+and run with `min(2, workers)` threads. Harness processes remain ordered, so
+there is no second package-level worker pool and no runner oversubscription.
+Inventory counts are checked for every partition; missing filters, duplicate
+test names, skipped tests, and nonzero partitions fail closed after all runnable
+partitions report their results.
+
 ## Canonical DAG
 
 The local command remains unchanged and serial:
@@ -112,6 +122,15 @@ value from being mistaken for compiler serialization. The release profile stays
 at `codegen-units = 1` with thin LTO. Increasing codegen units could reduce
 compile time but may change output quality or runtime performance, so this
 change parallelizes the dependency graph without weakening the shipped profile.
+
+Rust test execution is separately observable through `rust_exact_phase`
+records. `test_threads=1` on a `global-resource` record is intentional; a
+`parallel-safe` record uses at most two threads. A local warm-harness A/B on the
+219-test `clearra-coverage` package measured about 15.2 seconds serial, 9.7
+seconds with two threads, and 9.3 seconds with four. The two-thread ceiling
+therefore captures most of the measured gain without adding another competing
+pool. This measurement is local directional evidence, not hosted release
+authority.
 
 Moving the `wasm32-unknown-unknown` build from Windows to Linux is not expected
 to slow the shipped program: target, source identity, Rust profile, and

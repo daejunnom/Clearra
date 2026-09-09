@@ -39,8 +39,10 @@ publication source. Once separately reviewed and integrated, a failing stage
 does not prevent independent later stages from running once. In the Rust shard,
 `RustExactTests`, `ProductE2E`, and `RenderGolden` each build/check their own
 prerequisites, so a test failure in one is not a prerequisite failure for the
-others. Cargo's existing `--no-fail-fast` remains responsible for collecting
-failures within the Rust exact-test package list. No automatic retry is added.
+others. The Rust exact-test scheduler compiles the full package list once, runs
+global-resource partitions first, then runs their disjoint remainder, and
+collects every executable partition failure before failing the stage. Cargo's
+`--no-fail-fast` remains on the compile inventory. No automatic retry is added.
 
 This does not turn an unsuccessful build into a usable artifact. ProductE2E
 still stops its own consumers when its binary build fails. WASM/CTK3 consumer

@@ -1242,18 +1242,16 @@ mod coverage_summary_tests {
 mod tests {
     use clearra_pc_graph::request::RequestedSearchBackend;
 
-    use super::{score_resource_test_guard, select_webgpu_for_workload};
+    use super::select_webgpu_for_workload;
 
     #[test]
     fn auto_uses_cpu_for_small_geometry_and_gpu_for_large_geometry() {
-        let _resource_guard = score_resource_test_guard();
         assert!(!select_webgpu_for_workload(RequestedSearchBackend::Auto, 5));
         assert!(select_webgpu_for_workload(RequestedSearchBackend::Auto, 7));
     }
 
     #[test]
     fn explicit_backend_selection_is_not_overridden_by_workload_size() {
-        let _resource_guard = score_resource_test_guard();
         assert!(!select_webgpu_for_workload(RequestedSearchBackend::Cpu, 20));
         assert!(select_webgpu_for_workload(RequestedSearchBackend::Gpu, 1));
         assert!(select_webgpu_for_workload(

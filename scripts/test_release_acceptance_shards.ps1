@@ -26,6 +26,7 @@ $script:ReleaseAcceptanceShardTestMarkers = @{
     'rust-order' = 'release_acceptance_shard_test=rust-order status=passed'
     'pages-order' = 'release_acceptance_shard_test=pages-order status=passed'
     'shard-union-equals-full' = 'release_acceptance_shard_test=shard-union-equals-full status=passed'
+    'rust-package-inventory' = 'release_acceptance_shard_test=rust-package-inventory status=passed'
 }
 
 function Assert-Sequence {
@@ -132,14 +133,49 @@ foreach ($contract in @(
 Write-Output 'release_acceptance_shard_test=delegated-evidence-owners status=passed'
 
 $continueIndex = $rustExact.IndexOf('$arguments.Add(''--no-fail-fast'')', [System.StringComparison]::Ordinal)
-$harnessIndex = $rustExact.IndexOf('$arguments.Add(''--'')', [System.StringComparison]::Ordinal)
-if ($continueIndex -lt 0 -or $harnessIndex -le $continueIndex) {
-    throw 'RustExactTests must collect all package failures using the Cargo-level no-fail-fast option.'
+$compileIndex = $rustExact.IndexOf('$arguments.Add(''--no-run'')', [System.StringComparison]::Ordinal)
+$partitionFailureIndex = $rustExact.IndexOf(
+    'Rust exact tests failed after collecting every partition:',
+    [System.StringComparison]::Ordinal
+)
+if ($compileIndex -lt 0 -or $continueIndex -le $compileIndex -or $partitionFailureIndex -lt 0) {
+    throw 'RustExactTests must compile all packages together and collect every executable partition failure.'
 }
-if ($rustExact.IndexOf('if ($result.ExitCode -ne 0)', [System.StringComparison]::Ordinal) -lt 0 -or
-    $rustExact.IndexOf('throw "Rust exact tests failed with exit code $($result.ExitCode)"', [System.StringComparison]::Ordinal) -lt 0) {
-    throw 'RustExactTests must still fail the release gate on a nonzero Cargo exit.'
+if ($rustExact.IndexOf('rust_exact_phase=global-resource', [System.StringComparison]::Ordinal) -lt 0 -or
+    $rustExact.IndexOf('rust_exact_phase=parallel-safe', [System.StringComparison]::Ordinal) -lt 0 -or
+    $rustExact.IndexOf('[Math]::Min(2, [Math]::Max(1, $Workers))', [System.StringComparison]::Ordinal) -lt 0) {
+    throw 'RustExactTests must run the global-resource partition first and cap the remaining pool at two threads.'
 }
-Write-Output 'release_acceptance_shard_test=rust-collects-package-failures-without-authority status=passed'
+
+. (Join-Path $repositoryRoot 'scripts/lib/rust-exact-tests.ps1')
+$rustPackageSpecs = @(Get-RustExactPackageSpecs)
+$expectedRustPackages = @(
+    'clearra-app',
+    'clearra-core-executor',
+    'clearra-core-ffi',
+    'clearra-webgpu',
+    'clearra-core-domain',
+    'clearra-coverage',
+    'clearra-objectives',
+    'clearra-scoring',
+    'clearra-postprocess'
+)
+Assert-Sequence `
+    -Name 'rust-package-inventory' `
+    -Actual @($rustPackageSpecs.Package | Sort-Object) `
+    -Expected @($expectedRustPackages | Sort-Object)
+$serialWholePackages = @($rustPackageSpecs | Where-Object SerialWholePackage | ForEach-Object Package)
+$serialWholePackageKey = ($serialWholePackages | Sort-Object) -join '|'
+$expectedSerialWholePackageKey = (@('clearra-core-ffi', 'clearra-webgpu') | Sort-Object) -join '|'
+if ($serialWholePackageKey -ne $expectedSerialWholePackageKey) {
+    throw 'Only native FFI and WebGPU packages may use the whole-package global-resource partition.'
+}
+foreach ($package in @('clearra-app', 'clearra-core-executor')) {
+    $spec = $rustPackageSpecs | Where-Object Package -eq $package
+    if ($null -eq $spec -or @($spec.GlobalResourceFilters).Count -lt 1) {
+        throw "RustExactTests lost the explicit global-resource filters for '$package'."
+    }
+}
+Write-Output 'release_acceptance_shard_test=rust-global-resource-first-and-parallel-safe status=passed'
 
 & (Join-Path $PSScriptRoot 'test_independent_gate_sequence.ps1')
