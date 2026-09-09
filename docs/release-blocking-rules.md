@@ -26,8 +26,12 @@ Foundation AdversarialCorrectness, Foundation DesktopHost, Sanitizer, Rust
 (`RustExactTests -> ProductE2E -> RenderGolden`), and Pages (`WasmBuildTest`).
 Each job seals its exact source/run/attempt, command, ordered stages, and
 toolchains. A separate Linux fan-in accepts exactly one canonical report from
-each shard, rejects toolchain disagreement, and reconstructs the unchanged full
-eight-stage gate. It also binds the deferred evidence ownership from
+each shard and reconstructs the unchanged full eight-stage gate. Every exact
+toolchain string remains sealed per shard and the product-producing shard's
+exact version remains canonical. Cross-shard validation accepts hosted-runner
+patch drift only for the same Rust, Cargo, and CMake major/minor family; it
+rejects malformed versions, major/minor drift, and any Node, npm, or PowerShell
+disagreement. It also binds the deferred evidence ownership from
 `NoProductDebt` and `AdversarialCorrectness` to the actual Rust, render, and
 desktop owners before canonical acceptance evidence can be created.
 

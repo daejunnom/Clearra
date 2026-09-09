@@ -442,12 +442,30 @@ jobs:
           tar -xzf evidence/exact-source.tar.gz \
             -C "$RUNNER_TEMP/clearra-cloud-build-config" \
             apps/clearra-discord-bot/cloudbuild-accepted-job-service.yaml
-          gcloud builds submit evidence/cloud-build-inputs.tar.gz \
+          cloud_input_bucket="clearra-cloud_cloudbuild"
+          cloud_input_object_name="source/accepted-${SOURCE_COMMIT}-deploy-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          cloud_input_object="gs://${cloud_input_bucket}/${cloud_input_object_name}"
+          gcloud storage cp evidence/cloud-build-inputs.tar.gz "$cloud_input_object" \
+            --if-generation-match=0 --quiet
+          cloud_input_generation="$(gcloud storage objects describe "$cloud_input_object" --format='value(generation)')"
+          [[ "$cloud_input_generation" =~ ^[1-9][0-9]*$ ]] || { echo 'Cloud input generation is invalid' >&2; exit 2; }
+          cloud_build_config="$RUNNER_TEMP/clearra-cloud-build-config/apps/clearra-discord-bot/cloudbuild-accepted-job-service.yaml"
+          resolved_cloud_build_config="$RUNNER_TEMP/clearra-cloud-build-config/resolved-accepted-job-service.yaml"
+          ! grep -Eq '^source:' "$cloud_build_config" || { echo 'Base Cloud Build config unexpectedly owns source' >&2; exit 2; }
+          test ! -e "$resolved_cloud_build_config"
+          {
+            printf 'source:\n'
+            printf '  storageSource:\n'
+            printf '    bucket: %s\n' "$cloud_input_bucket"
+            printf '    object: %s\n' "$cloud_input_object_name"
+            printf '    generation: %s\n' "$cloud_input_generation"
+            cat "$cloud_build_config"
+          } > "$resolved_cloud_build_config"
+          gcloud builds submit --no-source \
             --project="$GCP_PROJECT_ID" \
             --region="$GCP_REGION" \
-            --gcs-source-staging-dir="gs://clearra-cloud_cloudbuild/source" \
             --service-account="projects/$GCP_PROJECT_ID/serviceAccounts/clearra-build@$GCP_PROJECT_ID.iam.gserviceaccount.com" \
-            --config="$RUNNER_TEMP/clearra-cloud-build-config/apps/clearra-discord-bot/cloudbuild-accepted-job-service.yaml" \
+            --config="$resolved_cloud_build_config" \
             --substitutions="_REGION=$GCP_REGION,_REPOSITORY=clearra,_IMAGE_NAME=clearra-current-job,_TAG=source-$SOURCE_COMMIT,_SOURCE_COMMIT=$SOURCE_COMMIT,_PRODUCT_VERSION=$PRODUCT_VERSION,_ACCEPTED_RUN_ID=$ACCEPTED_RUN_ID,_ACCEPTED_RUN_ATTEMPT=$ACCEPTED_RUN_ATTEMPT,_INPUT_MANIFEST_SHA256=$INPUT_MANIFEST_SHA256,_CLI_SHA256=$CLI_SHA256" \
             --quiet --format=json > evidence/cloud-build-readback.json
           node scripts/release/cloud/accepted-build-image-authority.mjs create \
@@ -456,6 +474,8 @@ jobs:
             --input-directory "$GITHUB_WORKSPACE/evidence/cloud-build-inputs/inputs" \
             --input-archive "$GITHUB_WORKSPACE/evidence/cloud-build-inputs.tar.gz" \
             --manifest-sha256 "$INPUT_MANIFEST_SHA256" \
+            --storage-source-uri "$cloud_input_object" \
+            --storage-source-generation "$cloud_input_generation" \
             --exact-source-archive "$GITHUB_WORKSPACE/evidence/exact-source.tar.gz" \
             --build-readback "$GITHUB_WORKSPACE/evidence/cloud-build-readback.json" \
             --output "$GITHUB_WORKSPACE/evidence/cloud-build-image-authority.json"

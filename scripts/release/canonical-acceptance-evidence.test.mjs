@@ -297,6 +297,54 @@ test("six isolated shard reports preserve unique stage ownership and delegated e
     ),
     /disagree on the rust toolchain/u,
   );
+
+  const compatiblePatchDrift = shards.map((shard) => {
+    if (shard.shard === "foundation-no-product-debt") {
+      return createReleaseAcceptanceShardEvidence(authority(), shard.shard, {
+        ...SHARD_TOOLCHAINS[shard.shard],
+        rust: "rustc 1.91.2 (hosted-runner)",
+        cargo: "cargo 1.91.7 (hosted-runner)",
+        cmake: "cmake version 3.31.4",
+      });
+    }
+    if (shard.shard === "rust") {
+      return createReleaseAcceptanceShardEvidence(authority(), shard.shard, {
+        ...SHARD_TOOLCHAINS[shard.shard],
+        rust: "rustc 1.91.9 (authoritative-rust-shard)",
+        cargo: "cargo 1.91.8 (authoritative-rust-shard)",
+        cmake: "cmake version 3.31.6",
+      });
+    }
+    if (shard.shard === "sanitizer") {
+      return createReleaseAcceptanceShardEvidence(authority(), shard.shard, {
+        ...SHARD_TOOLCHAINS[shard.shard],
+        cmake: "cmake version 3.31.5",
+      });
+    }
+    return shard;
+  });
+  const compatibleReports = createShardedReleaseGateReports(
+    authority(),
+    compatiblePatchDrift,
+  );
+  assert.equal(
+    compatibleReports.toolchainManifest.rust,
+    "rustc 1.91.9 (authoritative-rust-shard)",
+  );
+  assert.equal(compatibleReports.toolchainManifest.cmake, "cmake version 3.31.5");
+
+  const malformedRust = createReleaseAcceptanceShardEvidence(
+    authority(),
+    "rust",
+    { ...SHARD_TOOLCHAINS.rust, rust: "rustc hosted-runner" },
+  );
+  assert.throws(
+    () => createShardedReleaseGateReports(
+      authority(),
+      shards.map((shard) => shard.shard === "rust" ? malformedRust : shard),
+    ),
+    /rust toolchain version is not canonical/u,
+  );
 });
 
 test("toolchain collection uses closed commands and keeps only first version lines", () => {
