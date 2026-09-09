@@ -21,6 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       phase: ${{ steps.phase.outputs.phase }}
+      producer_source_commit: ${{ steps.phase.outputs.producer_source_commit }}
+      producer_run_id: ${{ steps.phase.outputs.producer_run_id }}
+      producer_run_attempt: ${{ steps.phase.outputs.producer_run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,6 +38,15 @@ jobs:
           phase="$(tr -d '\r\n' < scripts/release/release-build-architecture-ab-phase.txt)"
           [[ "$phase" == 'seed' || "$phase" == 'cache-seed' || "$phase" == 'warm' ]]
           echo "phase=$phase" >> "$GITHUB_OUTPUT"
+          producer_source_commit="$(jq -r '.producer_source_commit' scripts/release/release-build-architecture-ab-seed.json)"
+          producer_run_id="$(jq -r '.producer_run_id' scripts/release/release-build-architecture-ab-seed.json)"
+          producer_run_attempt="$(jq -r '.producer_run_attempt' scripts/release/release-build-architecture-ab-seed.json)"
+          [[ "$producer_source_commit" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$producer_run_id" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$producer_run_attempt" =~ ^[1-9][0-9]{0,19}$ ]]
+          echo "producer_source_commit=$producer_source_commit" >> "$GITHUB_OUTPUT"
+          echo "producer_run_id=$producer_run_id" >> "$GITHUB_OUTPUT"
+          echo "producer_run_attempt=$producer_run_attempt" >> "$GITHUB_OUTPUT"
           echo "release_build_architecture_ab_phase=$phase"
       - name: Verify non-authoritative A/B boundaries
         run: node --test scripts/release/product-e2e-cli-artifact.test.mjs scripts/release/release-build-architecture-ab-workflow.test.mjs
@@ -201,7 +213,7 @@ jobs:
       - name: Install and build the CTK3 consumer dependency
         run: |
           npm ci --ignore-scripts
-          npm run build --workspace @clearra/ctk3
+          npm run build --workspace ctk3
       - name: Download the exact producer input
         uses: actions/download-artifact@v4
         with:
@@ -236,3 +248,65 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $timer.Stop()
           "exact_cli_consumer_product_wall_ms=$($timer.ElapsedMilliseconds) rebuild=false"
+
+  # The initial producer succeeded before its consumer found a harness-only
+  # workspace-name typo. Reuse those already-recorded exact bytes: do not spend
+  # another hosted compile on an identical producer measurement.
+  exact-cli-recorded-consumer:
+    if: needs.ab-source.outputs.phase == 'warm'
+    needs: ab-source
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.ab-source.outputs.producer_source_commit }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.ab-source.outputs.producer_source_commit }}
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ needs.ab-source.outputs.producer_source_commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install and build the CTK3 consumer dependency
+        run: |
+          npm ci --ignore-scripts
+          npm run build --workspace ctk3
+      - name: Download the already-recorded exact producer input
+        uses: actions/download-artifact@v4
+        with:
+          name: unqualified-product-e2e-cli-${{ needs.ab-source.outputs.producer_source_commit }}-run-${{ needs.ab-source.outputs.producer_run_id }}-attempt-${{ needs.ab-source.outputs.producer_run_attempt }}
+          path: ${{ runner.temp }}/clearra-product-e2e-cli-input
+          run-id: ${{ needs.ab-source.outputs.producer_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify the recorded source, run, attempt, recipe, and bytes
+        id: receipt
+        shell: pwsh
+        run: |
+          node scripts/release/product-e2e-cli-artifact.mjs verify `
+            --artifact (Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-cli-input') `
+            --expected-source-commit $env:CLEARRA_SOURCE_COMMIT `
+            --expected-run-id '${{ needs.ab-source.outputs.producer_run_id }}' `
+            --expected-run-attempt '${{ needs.ab-source.outputs.producer_run_attempt }}' `
+            --github-output $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise ProductE2E and both terminal adapters without rebuilding
+        env:
+          CLEARRA_VERIFIED_PRODUCT_E2E_CLI: ${{ steps.receipt.outputs.binary_path }}
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          & powershell -NoProfile -File scripts/product-e2e.ps1 `
+            -UseBuiltBinary `
+            -ExePath $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI `
+            -ExecutionSurface Trusted `
+            -VerboseLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs --clearra $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node packages/clearra-ui/scripts/verify-terminal-supply-product.mjs --clearra $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $timer.Stop()
+          "recorded_exact_cli_consumer_product_wall_ms=$($timer.ElapsedMilliseconds) rebuild=false producer_reused=true"

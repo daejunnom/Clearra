@@ -44,6 +44,8 @@ test('exact CLI consumer is bound to producer source, run, attempt, recipe, and 
     'rebuild=false',
   ]) assert.ok(workflow.includes(marker), `missing exact producer/consumer marker: ${marker}`);
   assert.equal(workflow.includes('continue-on-error'), false);
+  assert.match(workflow, /run-id: \$\{\{ needs\.ab-source\.outputs\.producer_run_id \}\}/u);
+  assert.match(workflow, /producer_reused=true/u);
 });
 
 test('warm commit repeats only the compiler-cache candidate', () => {
