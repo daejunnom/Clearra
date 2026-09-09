@@ -2,7 +2,7 @@ name: Candidate Preflight
 
 on:
   push:
-    branches: ["codex/v0.8.0-preflight-20260906-rng"]
+    branches: ["codex/release-rust-shard-contention-ci"]
   workflow_dispatch:
     inputs:
       full_gate:
@@ -24,7 +24,7 @@ concurrency:
 # evidence and cannot publish a release or change Pages/Discord/Cloud traffic.
 jobs:
   candidate-source:
-    if: github.ref == 'refs/heads/codex/v0.8.0-preflight-20260906-rng' && github.ref_type == 'branch'
+    if: github.ref == 'refs/heads/codex/release-rust-shard-contention-ci' && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     outputs:
       full_gate: ${{ steps.source.outputs.full_gate }}
@@ -39,10 +39,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == 'refs/heads/codex/v0.8.0-preflight-20260906-rng' && "$GITHUB_REF_TYPE" == 'branch' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/codex/release-rust-shard-contention-ci' && "$GITHUB_REF_TYPE" == 'branch' ]]
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           case "$GITHUB_EVENT_NAME" in
-            push) echo 'full_gate=false' >> "$GITHUB_OUTPUT" ;;
+            push) echo 'full_gate=true' >> "$GITHUB_OUTPUT" ;;
             workflow_dispatch)
               [[ "$REQUEST_FULL_GATE" == 'true' || "$REQUEST_FULL_GATE" == 'false' ]]
               echo "full_gate=$REQUEST_FULL_GATE" >> "$GITHUB_OUTPUT"
@@ -94,14 +94,15 @@ jobs:
             cargo install wasm-bindgen-cli --version 0.2.126 --locked
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-      - name: Check non-publishing workflow and artifact boundaries
-        run: node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/candidate-preflight-artifacts.test.mjs
-      - name: Run the complete gate once without release authority
+      - name: Check the Rust shard partition contract
+        shell: powershell
+        run: powershell -NoProfile -File scripts/test_release_acceptance_shards.ps1
+      - name: Run the exact Rust shard once without release authority
         id: full_gate
         shell: powershell
         run: |
           $candidateWorkers = [Math]::Max(1, [Environment]::ProcessorCount)
-          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Full -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $candidateWorkers -VerboseLog -ShowWarnings
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task RustExactTests -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $candidateWorkers -VerboseLog -ShowWarnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve only source-verified candidate WASM if it was built
         if: always()
