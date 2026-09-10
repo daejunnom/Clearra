@@ -35,8 +35,23 @@ canonical acceptance → Discord 배포 → 실패 복구는 기존 GitHub `work
 
 Pages 게시 큐는 정확한 승인 실행과 rollback capture를 기다릴 때 기존 bounded polling을 사용한다. 게시 실행의 정확한 dispatch 영수증을 확인하면 `publicationStatus: dispatched`로 끝난다. 이후 완료는 Pages 실행 자체의 상태와 증거가 소유하므로 중복 폴링을 제거했다. 큐 성공을 게시 성공으로 간주하지 않는다. 실제 Cloud/Discord/Oracle/Pages 상태의 증명도 읽기를 수행해야 한다. 완료 이벤트만으로 프로세스, revision, catalog 또는 캐시된 응답의 정확성을 대신 판정하지 않는다.
 
-1,200초 관찰 시간, 마지막 Oracle 증거 제거, 권한을 여러 job으로 재구성하는 변경은 이번 읽기 성능 A/B의 동등성 범위에 포함되지 않는다. 특히 마지막 Oracle 결과를 제거하면 별도 종료 증거가 없어지고, 관찰 시간 단축은 릴리즈 수용 정책을 바꾸므로 시간 절감 수치만으로 채택하지 않았다.
+1,200초 관찰 시간, 마지막 Oracle 증거 제거, 권한을 여러 job으로 재구성하는 변경은 위 읽기 성능 A/B의 동등성 범위에 포함되지 않는다. 특히 마지막 Oracle 결과를 제거하면 별도 종료 증거가 없어지고, 관찰 시간 단축은 릴리즈 수용 정책을 바꾸므로 시간 절감 수치만으로 채택하지 않았다.
+
+## 관찰 중 실패와 증거 처리 실패의 후속 개선
+
+추가 사용자 승인에 따라 같은 개선 브랜치에서 아래 변경을 적용한다. 성공을 위한 1,200초와 정확히 두 번의 authoritative four-surface 표본은 유지한다.
+
+- `prepareDiscordProductionCheckpointInputs`는 시간 경과에 의존하지 않는 acceptance, source/run/attempt, recovery clearance, catalog preimage/readback, artifact metadata와 release artifact 검증을 소유한다. 동기화 직후 이 함수를 실행하고, 최종 checkpoint도 같은 함수를 다시 사용한다. 준비 검증은 관찰 파일이나 미래 job 완료를 요구하지 않는다. 과거 실패 실행 `34440716341/1`의 REST SHA-256을 확인한 보존 아티팩트로 실행했고, Windows CLI 시작 비용을 포함해 281ms에 통과했다. 네트워크나 운영 변경은 이 재현에 포함되지 않는다.
+- 관찰 대기에는 60초 간격의 public HTTP guard를 넣는다. Cloud stable/tagged health와 Pages identity를 병렬로 확인한다. 같은 주소의 연속 통신 실패 두 번은 중단하며 성공하면 누적을 초기화한다. 정상 응답의 배포 identity가 달라지면 즉시 중단한다. 한 번의 GET은 10초 상한이다. 관찰 전체에서 최대 19회, GET 최대 57회이며 gcloud/SSH/Oracle Job이나 추가 권한을 요구하지 않는다. Oracle와 Discord의 상세 상태는 기존 시작/종료 표본에서 검증한다. 따라서 이 guard를 네 표면 전체의 연속 가동 증명으로 해석하지 않는다.
+- guard는 실패만 판정하고 release 성공 증거를 생산하지 않는다. monotonic deadline을 고정해 guard 실행 시간을 다음 대기에서 차감하며, 취소 신호는 sleep과 활성 probe에 전달한다. 첫 guard에서 실패하는 주입 시계 회귀는 1,200초 중 60초에서 종료한다. 정상 guard가 매번 10초를 소비해도 성공 대기는 총 1,200초다. 이 값은 제어 흐름 검증이며 운영 MTTR 측정값이 아니다.
+- 실패한 관찰은 기존 ERR/INT/TERM 경로에서 catalog를 먼저 복원한다. 실패 증거 업로드는 1분, checkpoint prerequisite 조회는 총 2분 및 개별 gh 요청 15초로 제한한다. 원래 실행이 종료되면 기존 `workflow_run: completed` 이벤트가 별도 runtime recovery를 시작한다. 복구는 남은 관찰 시간을 채우지 않지만, 기존 production 직렬화와 `discord-runtime-rollback` 승인 경계는 유지한다. 실행 중인 원본과 복구가 동시에 traffic을 변경하는 새 경로는 만들지 않는다.
+- 관찰이 성공한 경우 sync/checkpoint 업로드는 최대 3회, 단계 전체 최대 5분이다. 최초 업로드 전에 허용된 JSON leaf들의 원본 bytes와 source/run/attempt/name을 묶고, 재시도 직전 같은 파일 집합과 digest인지 재검증한다. 모든 기존 입력, synchronized state의 bound files, 완료된 관찰 보고서와 현재 네 표면을 다시 확인해야 재시도한다. 관찰 종료 15분이 지난 증거, 누락/변경된 증거, 현재 상태 불명, 취소는 재시도를 허용하지 않는다. 복구용 첫 사전 아티팩트는 이 재시도 대상이 아니다.
+- 재시도 중에는 release 확정을 보류한다. 재시도 업로드는 같은 실행의 같은 이름만 교체하고, 성공한 최종 artifact ID/digest만 반환한다. partial upload의 오래된 ID를 성공 영수증으로 재사용하지 않는다. 최종 봉인은 검증 오류를 즉시 실패시키며, `EIO/EBUSY/EAGAIN/EINTR/ETIMEDOUT`에 한해 live 재검증 후 최대 3회 로컬 I/O를 시도한다. 원자적 쓰기가 이미 완료됐으면 byte-identical 결과만 허용한다. 한도 초과나 재검증 실패는 단계 실패로 남겨 기존 catalog/runtime 복구를 실행한다. `continue-on-error`는 composite 내부 업로드에만 있으며 외부 단계 실패를 성공으로 숨기지 않는다.
+
+운영 이벤트 수신 경로가 없는 HTTP 상태는 위의 제한된 폴링으로 보완하고, workflow 간 인계는 기존 이벤트를 사용한다. 새 웹훅 서버, IAM 역할, CI gate 또는 테스트 파일은 추가하지 않았다. 성공 시간만 비교하지 않고 검출 지연, 복구 시작 지연, 복구 완료 시간과 거짓 실패율을 구분한다. 60초 간격은 bounded fallback의 설정이며 운영 실패 분포에서 통계적으로 최적이라고 주장하지 않는다.
 
 ## 확인
 
 복구 변경은 기존 회귀 97개와 실제 실패 아티팩트의 원본 ZIP 해시 및 sync preimage 검증을 통과했다. 개선 변경은 HTTP, 관찰, authority/spec, 워크플로, 체크포인트 관련 검증을 통과했다. 프로세스 timeout/취소는 Windows와 Linux에서 실행했고, PowerShell 문법 및 실제 Oracle의 읽기 명령으로 변경한 SSH wrapper를 확인했다.
+
+후속 조기 실패/증거 재시도 변경은 관련 기존 테스트 파일 7개의 117개 검증을 통과했다. 5개 동작 사례를 기존 파일에 추가했으며 CI gate 목록은 바꾸지 않았다. JS syntax, composite YAML 구문, workflow actionlint도 확인했다. actionlint 1.7.12가 아직 지원하지 않는 기존 `concurrency.queue: max` 진단만 제외했고 해당 설정은 변경하지 않았다. 운영 중 업로드 장애를 인위적으로 발생시키거나 새 관찰/배포를 이 로컬 검증에서 실행하지 않았다.

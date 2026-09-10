@@ -575,7 +575,7 @@ function requireReadyRevision(revision) {
   }
 }
 
-function validateCloudHealth(value, sourceCommit, label) {
+export function validateCloudHealth(value, sourceCommit, label) {
   requireExactKeys(value, [
     "status",
     "activeJobs",

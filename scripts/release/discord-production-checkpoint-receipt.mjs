@@ -56,7 +56,9 @@ export function checkpointCandidateArtifactName(sourceCommit, runId, runAttempt)
     requirePattern(runAttempt, DECIMAL, "workflow run attempt");
 }
 
-export async function createDiscordProductionCheckpointCandidate(options) {
+// These inputs already exist immediately after command sync. Validate them before
+// opening the observation window; finalization calls this same owner again.
+export async function prepareDiscordProductionCheckpointInputs(options) {
   const repository = requirePattern(options?.repository, REPOSITORY, "repository");
   const sourceCommit = requirePattern(options?.sourceCommit, SHA, "source commit");
   const workflowRunId = requirePattern(options?.workflowRunId, DECIMAL, "workflow run ID");
@@ -154,20 +156,6 @@ export async function createDiscordProductionCheckpointCandidate(options) {
     syncReport.value.expected_catalog_sha256 !== desired.value.catalog_sha256
   ) throw new Error("Discord checkpoint catalog disposition differs from its exact preimage");
 
-  const observation = await readCanonicalFile(
-    options?.productionObservation,
-    "production observation",
-  );
-  validateProductionObservationReport(observation.value, {
-    expectedSourceCommit: sourceCommit,
-    expectedDurationSeconds: PRODUCTION_OBSERVATION_SECONDS,
-    expectedIntervalSeconds: PRODUCTION_OBSERVATION_SECONDS,
-    expectedObservationCount: 2,
-  });
-  const prerequisiteProof = validateDiscordCheckpointCandidatePrerequisites(
-    options?.jobList,
-    { repository, sourceCommit, workflowRunId, workflowRunAttempt },
-  );
   const topologyContract = createDiscordSuccessfulDeploymentTopologyContract();
 
   const catalogDisposition = sealCanonicalReport({
@@ -196,8 +184,8 @@ export async function createDiscordProductionCheckpointCandidate(options) {
     discord_sync_report: syncReport.value,
     discord_sync_report_file_sha256: syncReport.fileSha256,
   });
-  return Object.freeze(sealCanonicalReport({
-    schema_id: DISCORD_PRODUCTION_CHECKPOINT_CANDIDATE_SCHEMA_ID,
+  validateReleaseArtifacts(acceptance.value.final_source_fragments.release_artifacts, sourceCommit);
+  return Object.freeze({
     repository,
     repository_id: REPOSITORY_ID,
     source_commit: sourceCommit,
@@ -210,23 +198,45 @@ export async function createDiscordProductionCheckpointCandidate(options) {
     release_artifacts: acceptance.value.final_source_fragments.release_artifacts,
     deployment_topology_contract: topologyContract,
     deployment_topology_contract_sha256: topologyContract.report_sha256,
-    deployment_prerequisite_job_proof: prerequisiteProof,
-    deployment_prerequisite_job_proof_sha256: prerequisiteProof.report_sha256,
     recovery_debt_clearance: clearance.value,
     recovery_debt_clearance_sha256: clearance.value.report_sha256,
     recovery_debt_clearance_file_sha256: clearance.fileSha256,
     catalog_disposition: catalogDisposition,
     catalog_disposition_sha256: catalogDisposition.report_sha256,
-    production_observation: observation.value,
-    production_observation_sha256: observation.value.report_sha256,
-    production_observation_file_sha256: observation.fileSha256,
     expected_artifact_name: checkpointCandidateArtifactName(
       sourceCommit,
       workflowRunId,
       workflowRunAttempt,
     ),
     expected_artifact_leaf: DISCORD_PRODUCTION_CHECKPOINT_CANDIDATE_FILE,
+  });
+}
+
+export async function createDiscordProductionCheckpointCandidate(options) {
+  const prepared = await prepareDiscordProductionCheckpointInputs(options);
+  const observation = await readCanonicalFile(
+    options?.productionObservation, "production observation",
+  );
+  validateProductionObservationReport(observation.value, {
+    expectedSourceCommit: prepared.source_commit,
+    expectedDurationSeconds: PRODUCTION_OBSERVATION_SECONDS,
+    expectedIntervalSeconds: PRODUCTION_OBSERVATION_SECONDS,
+    expectedObservationCount: 2,
+  });
+  const prerequisiteProof = validateDiscordCheckpointCandidatePrerequisites(
+    options?.jobList, options,
+  );
+  const candidate = Object.freeze(sealCanonicalReport({
+    schema_id: DISCORD_PRODUCTION_CHECKPOINT_CANDIDATE_SCHEMA_ID,
+    ...prepared,
+    deployment_prerequisite_job_proof: prerequisiteProof,
+    deployment_prerequisite_job_proof_sha256: prerequisiteProof.report_sha256,
+    production_observation: observation.value,
+    production_observation_sha256: observation.value.report_sha256,
+    production_observation_file_sha256: observation.fileSha256,
   }));
+  validateDiscordProductionCheckpointCandidate(candidate, options);
+  return candidate;
 }
 
 export function validateDiscordProductionCheckpointCandidate(value, expected = {}) {
@@ -438,10 +448,17 @@ async function writeCanonicalNew(path, value) {
   const temporary = `${target}.tmp-${process.pid}-${Date.now().toString(36)}`;
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await handle.writeFile(`${canonicalJson(value)}\n`, "utf8");
-    await handle.sync();
-  } finally { await handle.close(); }
-  try { await link(temporary, target); } finally {
+    try {
+      await handle.writeFile(`${canonicalJson(value)}\n`, "utf8");
+      await handle.sync();
+    } finally { await handle.close(); }
+    try { await link(temporary, target); }
+    catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const existing = await readCanonicalFile(target, "already sealed checkpoint");
+      if (canonicalJson(existing.value) !== canonicalJson(value)) throw error;
+    }
+  } finally {
     await unlink(temporary).catch((error) => {
       if (error?.code !== "ENOENT") throw error;
     });
@@ -511,10 +528,10 @@ async function main() {
   try {
     if (
       positionals.length !== 1 ||
-      !["seal-candidate", "verify-candidate", "verify-prerequisites"].includes(positionals[0])
+      !["verify-inputs", "seal-candidate", "verify-candidate", "verify-prerequisites"].includes(positionals[0])
     ) {
       throw new Error(
-        "Discord checkpoint operation must be seal-candidate, verify-candidate, or verify-prerequisites",
+        "Discord checkpoint operation must be verify-inputs, seal-candidate, verify-candidate, or verify-prerequisites",
       );
     }
     const identity = {
@@ -531,8 +548,8 @@ async function main() {
       process.stdout.write(
         `discord_checkpoint_prerequisites=verified sha256=${proof.report_sha256}\n`,
       );
-    } else if (positionals[0] === "seal-candidate") {
-      const candidate = await createDiscordProductionCheckpointCandidate({
+    } else if (["seal-candidate", "verify-inputs"].includes(positionals[0])) {
+      const options = {
         ...identity,
         version: values.version,
         basePath: values["base-path"],
@@ -547,10 +564,21 @@ async function main() {
         syncAuthority: values["sync-authority"],
         syncReport: values["sync-report"],
         productionObservation: values["production-observation"],
-        jobList: JSON.parse(await readFile(resolve(values["job-list"]), "utf8")),
-      });
-      await writeCanonicalNew(values.output, candidate);
-      process.stdout.write(`discord_checkpoint_candidate=sealed sha256=${candidate.report_sha256}\n`);
+      };
+      if (positionals[0] === "verify-inputs") {
+        const prepared = await prepareDiscordProductionCheckpointInputs(options);
+        process.stdout.write(`discord_checkpoint_inputs=verified source=${prepared.source_commit}\n`);
+      } else {
+        options.jobList = JSON.parse(await readFile(resolve(values["job-list"]), "utf8"));
+        const candidate = await createDiscordProductionCheckpointCandidate(options);
+        const { retryEvidenceWrite, verifyEvidenceRetrySafety } = await import("./production-evidence-retry.mjs");
+        await retryEvidenceWrite(
+          () => writeCanonicalNew(values.output, candidate),
+          () => verifyEvidenceRetrySafety(resolve(process.env.GITHUB_WORKSPACE ?? "."), "sync"),
+          { onRetry: () => process.stdout.write("checkpoint_seal=retrying-io-after-live-readback release_status=pending\n") },
+        );
+        process.stdout.write(`discord_checkpoint_candidate=sealed sha256=${candidate.report_sha256}\n`);
+      }
     } else {
       const input = await readCanonicalFile(values.report, "Discord checkpoint candidate");
       validateDiscordProductionCheckpointCandidate(input.value, identity);

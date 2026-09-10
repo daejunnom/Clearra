@@ -542,7 +542,7 @@ test("canonical dispatch owns every Discord authority regression in one bounded 
   assert.equal((release.match(new RegExp(name, "gu")) ?? []).length, 1);
 });
 
-test("catalog preimage and checkpoint candidate are durable before their dependent mutations", () => {
+test("catalog preimage and checkpoint candidate are durable before their dependent mutations", async () => {
   const capture = primary.indexOf(
     "Capture and seal Discord catalog recovery authority before mutation",
   );
@@ -573,6 +573,14 @@ test("catalog preimage and checkpoint candidate are durable before their depende
   assert.match(primary, /verify-prerequisites/u);
   assert.match(primary, /verify-candidate/u);
   assert.doesNotMatch(primary, /discord_completed_at|candidate_upload_completed_at/u);
+  const inputCheck = primary.indexOf("production-evidence-retry.mjs verify-inputs", mutation);
+  const observationCall = primary.indexOf("node scripts/release/observe-production-surfaces.mjs", mutation);
+  assert.ok(inputCheck > mutation && inputCheck < observationCall);
+  const upload = await readFile(new URL("../../.github/actions/upload-production-evidence/action.yml", import.meta.url), "utf8");
+  assert.equal((upload.match(/uses: actions\/upload-artifact@v4/gu) ?? []).length, 3);
+  assert.match(upload, /steps\.revalidate_one\.outcome == 'success'/u);
+  assert.match(upload, /steps\.revalidate_two\.outcome == 'success'/u);
+  assert.match(upload, /evidence_publication=failed release_status=blocked recovery_required=true/u);
 });
 
 test("primary and recovery enumerate every exact workflow rerun attempt", () => {

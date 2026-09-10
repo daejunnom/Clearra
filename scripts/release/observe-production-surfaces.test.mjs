@@ -16,10 +16,90 @@ import {
   PRODUCTION_SURFACE_PROBE_SCHEMA_ID,
   validateProductionObservationReport,
   validateProductionProbeSpec,
+  waitForObservation,
+  verifyProductionObservationStillCurrent,
 } from "./observe-production-surfaces.mjs";
+import { createProductionObservationGuard } from "./production-observation-guard.mjs";
 
 const COMMIT = "1".repeat(40);
 const HASH = "a".repeat(64);
+
+test("observation wait aborts on a guard failure without paying the remaining window", async () => {
+  let elapsed = 0;
+  const clock = { now: () => elapsed, wait: async (ms) => { elapsed += ms; } };
+  await assert.rejects(waitForObservation({
+    milliseconds: 1_200_000, clock, guard: async () => { throw new Error("runtime failed"); },
+  }), /runtime failed/u);
+  assert.equal(elapsed, 60_000);
+  elapsed = 0;
+  let checks = 0;
+  await waitForObservation({
+    milliseconds: 1_200_000, clock, guard: async () => { checks += 1; elapsed += 10_000; },
+  });
+  assert.equal(elapsed, 1_200_000, "guard I/O does not extend the successful wait");
+  assert.equal(checks, 19);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(waitForObservation({
+    milliseconds: 1_200_000, clock, guard: async () => {}, signal: controller.signal,
+  }), { name: "AbortError" });
+});
+
+test("public guards tolerate isolated transport misses but reject persistent loss and returned drift", async () => {
+  const probes = probeSet(new Map());
+  const baselines = new Map(await Promise.all(Object.entries(probes).map(async ([surface, probe]) =>
+    [surface, await probe({ surface, sequence: 0 })])));
+  const pagesValue = { sourceCommit: COMMIT };
+  baselines.get("pages").freshness.identity_readback_sha256 = canonicalSha256(pagesValue);
+  const cloud = baselines.get("cloud").identity;
+  const health = { status: "ok", activeJobs: 0, workerLimit: 8, runtime: {
+    schema: "clearra.runtime.identity.v2", sourceCommit: COMMIT, engineBuildId: COMMIT,
+    contractSchemaVersion: cloud.contract_schema_version,
+    supplySemanticsId: cloud.supply_semantics_id, artifactSchemaVersion: cloud.artifact_schema_version,
+  } };
+  let mode = "miss";
+  const guard = createProductionObservationGuard({ fetchJson: async (url) => {
+    if (url.includes("clearra-build-identity")) return mode === "drift" ? { sourceCommit: "foreign" } : pagesValue;
+    if (mode === "miss" && url.startsWith(cloud.stable_url)) throw new Error("temporary network failure");
+    return health;
+  } });
+  await guard({ baselines, sequence: 1 });
+  mode = "healthy";
+  await guard({ baselines, sequence: 2 });
+  mode = "miss";
+  await guard({ baselines, sequence: 3 });
+  await assert.rejects(guard({ baselines, sequence: 4 }), /Cloud stable.*failed twice/u);
+  mode = "drift";
+  await assert.rejects(guard({ baselines, sequence: 5 }), /Pages identity changed/u);
+});
+
+test("evidence retry requires all four current identities and a new Oracle operation", async () => {
+  const spec = validProbeSpec(1200);
+  const report = await observeProductionSurfaces({
+    sourceCommit: COMMIT, durationSeconds: 1200, intervalSeconds: 1200,
+    clock: fakeClock("2026-08-30T00:00:00.000Z"),
+    probes: probeSet(new Map()), probeSpec: spec,
+  });
+  const probes = probeSet(new Map());
+  const originalOracle = probes.oracle;
+  probes.oracle = async (context) => {
+    const value = await originalOracle(context);
+    value.freshness = oracleFreshnessAt(value.identity,
+      new Date(Date.parse(report.ended_at) + 1_000).toISOString(),
+      new Date(Date.parse(report.ended_at) + 2_000).toISOString());
+    return value;
+  };
+  await verifyProductionObservationStillCurrent({ report, spec, probes });
+  const originalCloud = probes.cloud;
+  probes.cloud = async (context) => {
+    const value = await originalCloud(context);
+    value.identity.revision = "foreign-revision";
+    return value;
+  };
+  await assert.rejects(verifyProductionObservationStillCurrent({ report, spec, probes }), /cloud changed/u);
+  delete probes.oracle;
+  await assert.rejects(verifyProductionObservationStillCurrent({ report, spec, probes }), /required identity set/u);
+});
 
 test('a failed child identifies its surface and exit without reflecting stderr', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'clearra-probe-process-'));
