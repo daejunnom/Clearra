@@ -84,11 +84,50 @@ test("prestage checks the Cloud cleanup preimage after prior authority and befor
   assert.match(source, /function Remove-ExactCloudCandidateTag[\s\S]*--validate-only[\s\S]*gcloud run services update-traffic clearra-current-job[\s\S]*--remove-tags=/);
 });
 
-test("tagless prior state needs no cleanup readback helper and emits no authority", psOptions, () => {
+test("tagless prior state preserves unrouted revisions without cleanup mutation", psOptions, () => {
   runPs(`
 $script:Service.status.traffic = @($script:Service.status.traffic[0])
 $result = @(Assert-PrestageCloudCleanupPreimage -Service $script:Service -Intent $intent -PriorRevision $prior.prior_revision)
 if ($script:Calls -ne 0 -or $result.Count -ne 0) { throw 'tagless preflight must not invoke the cleanup helper' }
+$intent | Add-Member -NotePropertyName cloud_image_digest -NotePropertyValue ('asia-northeast1-docker.pkg.dev/clearra-cloud/clearra/clearra-current-job@sha256:' + 'a' * 64)
+$script:Service | Add-Member -NotePropertyName spec -NotePropertyValue ([pscustomobject]@{ traffic = $script:Service.status.traffic })
+$script:Service.status | Add-Member -NotePropertyName latestCreatedRevisionName -NotePropertyValue $intent.cloud_candidate_revision
+$script:Revision = [pscustomobject]@{
+    metadata = [pscustomobject]@{ name = $intent.cloud_candidate_revision; uid = 'immutable-revision' }
+    spec = [pscustomobject]@{ containers = @([pscustomobject]@{ image = $intent.cloud_image_digest }) }
+}
+function Get-ActiveCloudRevision {
+    param([string] $OutputPath)
+    $script:Service | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutputPath -Encoding utf8NoBOM
+    return $prior.prior_revision
+}
+function gcloud {
+    if (($args[0..2] -join ' ') -cne 'run revisions list') { throw 'unexpected Cloud mutation' }
+    ConvertTo-Json -InputObject @($script:Revision) -Depth 8
+    $global:LASTEXITCODE = 0
+}
+$servicePath = Join-Path $PSScriptRoot 'service-readback.json'
+$residuePath = Join-Path $PSScriptRoot 'residue-readback.json'
+foreach ($matchesIntent in @($true, $false)) {
+    if (-not $matchesIntent) {
+        $script:Revision.spec.containers[0].image = 'asia-northeast1-docker.pkg.dev/clearra-cloud/clearra/clearra-current-job@sha256:' + 'b' * 64
+    }
+    Seal-ExactCandidateCloudResidue -Intent $intent -PriorRevision $prior.prior_revision -ServiceOutputPath $servicePath -RevisionOutputPath $residuePath -AllowUnownedTaglessRevision
+    $receipt = Get-Content -LiteralPath $residuePath -Raw | ConvertFrom-Json
+    if ($receipt.observed_revision_matches_intent -ne $matchesIntent -or
+        $receipt.observed_revision_image_digest -cne $script:Revision.spec.containers[0].image -or
+        $receipt.deletion_deferred_until_superseded -ne $matchesIntent) { throw 'residue ownership was misstated' }
+}
+try {
+    Seal-ExactCandidateCloudResidue -Intent $intent -PriorRevision $prior.prior_revision -ServiceOutputPath $servicePath -RevisionOutputPath $residuePath
+    throw 'unexpected live-recovery success'
+} catch { if ($_.Exception.Message -notmatch 'differs from prestage intent') { throw } }
+$script:Service.spec.traffic += [pscustomobject]@{ revisionName = $intent.cloud_candidate_revision; tag = $intent.cloud_candidate_tag }
+try {
+    Seal-ExactCandidateCloudResidue -Intent $intent -PriorRevision $prior.prior_revision -ServiceOutputPath $servicePath -RevisionOutputPath $residuePath -AllowUnownedTaglessRevision
+    throw 'unexpected routed-revision success'
+} catch { if ($_.Exception.Message -notmatch 'unowned revision retains routing') { throw } }
+if ($script:Calls -ne 0) { throw 'unowned revision reached a cleanup helper' }
 `);
 });
 

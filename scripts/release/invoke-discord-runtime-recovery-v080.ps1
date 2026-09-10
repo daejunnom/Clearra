@@ -249,7 +249,8 @@ function Seal-ExactCandidateCloudResidue {
         $Intent,
         [string] $PriorRevision,
         [string] $ServiceOutputPath,
-        [string] $RevisionOutputPath
+        [string] $RevisionOutputPath,
+        [switch] $AllowUnownedTaglessRevision
     )
     $revisionJson = & gcloud run revisions list `
         --project=$GcpProjectId --region=$GcpRegion `
@@ -257,11 +258,18 @@ function Seal-ExactCandidateCloudResidue {
     if ($LASTEXITCODE -ne 0) { throw 'Cloud candidate residue inventory failed' }
     $revisions = @($revisionJson | ConvertFrom-Json)
     if ($revisions.Count -gt 1) { throw 'Cloud candidate residue inventory is ambiguous' }
+    $observedImage = $null
+    $matchesIntent = $false
     if ($revisions.Count -eq 1) {
         $revision = $revisions[0]
         if ([string]$revision.metadata.name -cne [string]$Intent.cloud_candidate_revision -or
             @($revision.spec.containers).Count -ne 1 -or
-            [string]$revision.spec.containers[0].image -cne [string]$Intent.cloud_image_digest) {
+            [string]$revision.spec.containers[0].image -cnotmatch '^asia-northeast1-docker\.pkg\.dev/clearra-cloud/clearra/clearra-current-job@sha256:[0-9a-f]{64}$') {
+            throw 'Cloud candidate residue differs from prestage intent'
+        }
+        $observedImage = [string]$revision.spec.containers[0].image
+        $matchesIntent = $observedImage -ceq [string]$Intent.cloud_image_digest
+        if (-not $matchesIntent -and -not $AllowUnownedTaglessRevision) {
             throw 'Cloud candidate residue differs from prestage intent'
         }
     }
@@ -269,6 +277,19 @@ function Seal-ExactCandidateCloudResidue {
     [void](Get-ActiveCloudRevision -OutputPath $ServiceOutputPath)
     $serviceBefore = Get-Content -LiteralPath $ServiceOutputPath -Raw | ConvertFrom-Json
     $trafficBefore = @(Get-CloudTrafficEntries -Service $serviceBefore)
+    # A rejected redeploy can leave an older immutable revision with this name.
+    # It is outside this attempt's cleanup authority. Admit it only when neither
+    # desired nor observed routing references it; never remove its tag or image.
+    if ($revisions.Count -eq 1 -and -not $matchesIntent) {
+        $allTraffic = @($serviceBefore.spec.traffic) + $trafficBefore
+        if (@($allTraffic | Where-Object {
+            Test-CloudTrafficEntryMatchesCandidate -Entry $_ `
+                -CandidateTag ([string]$Intent.cloud_candidate_tag) `
+                -CandidateRevision ([string]$Intent.cloud_candidate_revision)
+        }).Count -ne 0) {
+            throw 'Cloud unowned revision retains routing; no cleanup mutation is authorized'
+        }
+    }
     $candidateTagEntryCount = Get-ValidatedCandidateTagEntryCount `
         -Traffic $trafficBefore `
         -CandidateTag ([string]$Intent.cloud_candidate_tag) `
@@ -281,7 +302,7 @@ function Seal-ExactCandidateCloudResidue {
         throw 'Cloud residue readback differs from the exact prior authority'
     }
     $service = Get-Content -LiteralPath $ServiceOutputPath -Raw | ConvertFrom-Json
-    $trafficAfter = @(Get-CloudTrafficEntries -Service $service)
+    $trafficAfter = @($service.spec.traffic) + @(Get-CloudTrafficEntries -Service $service)
     if (@($trafficAfter | Where-Object {
         Test-CloudTrafficEntryMatchesCandidate `
             -Entry $_ `
@@ -296,7 +317,8 @@ function Seal-ExactCandidateCloudResidue {
         --filter="metadata.name=$($Intent.cloud_candidate_revision)" --format=json
     if ($LASTEXITCODE -ne 0) { throw 'Cloud candidate residue readback failed' }
     $revisionReadback = @($revisionReadbackJson | ConvertFrom-Json)
-    if ($revisionReadback.Count -ne $revisions.Count) {
+    if ((ConvertTo-Json -InputObject $revisionReadback -Depth 100 -Compress) -cne
+        (ConvertTo-Json -InputObject $revisions -Depth 100 -Compress)) {
         throw 'Cloud candidate residue changed during guarded recovery'
     }
     $latestCreated = Get-CloudRequiredTextProperty `
@@ -308,11 +330,13 @@ function Seal-ExactCandidateCloudResidue {
         $revision = $revisionReadback[0]
         if ([string]$revision.metadata.name -cne [string]$Intent.cloud_candidate_revision -or
             @($revision.spec.containers).Count -ne 1 -or
-            [string]$revision.spec.containers[0].image -cne [string]$Intent.cloud_image_digest -or
+            [string]$revision.spec.containers[0].image -cne $observedImage -or
             $latestCreated -cne [string]$Intent.cloud_candidate_revision) {
             throw 'Cloud candidate residue is not the exact immutable latest revision'
         }
-        $disposition = 'preserved-latest-zero-traffic-tagless'
+        $disposition = if ($matchesIntent) { 'preserved-latest-zero-traffic-tagless' } else {
+            'preserved-unowned-zero-traffic-tagless'
+        }
     } elseif ($latestCreated -ceq [string]$Intent.cloud_candidate_revision) {
         throw 'Cloud latest-created revision is absent from the exact residue inventory'
     }
@@ -325,11 +349,13 @@ function Seal-ExactCandidateCloudResidue {
         candidate_revision = [string]$Intent.cloud_candidate_revision
         candidate_image_digest = [string]$Intent.cloud_image_digest
         candidate_revision_present = ($revisionReadback.Count -eq 1)
+        observed_revision_image_digest = $observedImage
+        observed_revision_matches_intent = $matchesIntent
         candidate_traffic_percent = 0
         candidate_tag = [string]$Intent.cloud_candidate_tag
         candidate_tag_present = $false
         latest_created_revision = $latestCreated
-        deletion_deferred_until_superseded = ($revisionReadback.Count -eq 1)
+        deletion_deferred_until_superseded = $matchesIntent
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $RevisionOutputPath -Encoding utf8NoBOM
 }
 
@@ -484,7 +510,8 @@ if ($Stage -ceq 'prestage') {
     $cloudRevisionAfter = Join-Path $EvidenceRoot 'cloud-prestage-revision-cleanup-readback.json'
     Seal-ExactCandidateCloudResidue -Intent $intent `
         -PriorRevision ([string]$prior.prior_revision) `
-        -ServiceOutputPath $cloudAfter -RevisionOutputPath $cloudRevisionAfter
+        -ServiceOutputPath $cloudAfter -RevisionOutputPath $cloudRevisionAfter `
+        -AllowUnownedTaglessRevision
     $oracleBackupCleanup = Join-Path $EvidenceRoot 'oracle-backup-cleanup.json'
     & scripts/release/oracle/invoke-release-deploy-v080.ps1 `
         -Operation cleanup-prestage-backup -SourceCommit $TrustedHelperSourceCommit `

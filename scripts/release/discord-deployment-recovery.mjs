@@ -974,6 +974,11 @@ function isUnscheduledSyncJob(job) {
     job.conclusion === null && Array.isArray(job.steps) && job.steps.length === 0;
 }
 
+function isZeroStepTerminal(job) {
+  return isUnscheduledSyncJob(job) ||
+    ["skipped", "cancelled"].includes(job.conclusion) && job.steps.length === 0;
+}
+
 export function validateNoPrestageArtifactAuthority(value, options) {
   const jobs = getExactPrimaryJobAuthority(value, {
     ...options,
@@ -981,9 +986,6 @@ export function validateNoPrestageArtifactAuthority(value, options) {
   });
   const promote = jobs.get("promote");
   const sync = jobs.get("sync-observe");
-  const isZeroStepTerminal = (job) =>
-    isUnscheduledSyncJob(job) ||
-    ["skipped", "cancelled"].includes(job.conclusion) && job.steps.length === 0;
   if (
     promote.conclusion === "success" || !isZeroStepTerminal(sync)
   ) throw new Error("Discord no-prestage authority violates the closed dependency topology");
@@ -1015,8 +1017,7 @@ export function validatePrestageOnlyArtifactAuthority(value, options) {
   const promote = jobs.get("promote");
   const sync = jobs.get("sync-observe");
   if (
-    promote.conclusion === "success" ||
-    !(isUnscheduledSyncJob(sync) || sync.conclusion === "skipped" && sync.steps.length === 0)
+    promote.conclusion === "success" || !isZeroStepTerminal(sync)
   ) throw new Error("Discord prestage-only authority violates the closed dependency topology");
   const steps = promote.steps;
   const prestageUpload = steps.find((step) => step.name === PRESTAGE_UPLOAD_STEP);

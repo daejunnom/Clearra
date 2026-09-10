@@ -644,16 +644,27 @@ test("prestage-only authority selects bounded inactive and zero-traffic cleanup"
       },
     ],
   });
-  const authority = resolveDiscordRecoveryAuthority(
-    run({ conclusion: "timed_out" }),
+  for (const conclusion of ["skipped", "cancelled"]) {
+    prestageOnlyJobList.jobs.find((job) => job.name === "sync-observe").conclusion = conclusion;
+    const authority = resolveDiscordRecoveryAuthority(
+      run({ conclusion: "cancelled" }),
+      { total_count: 1, artifacts: [artifact({ name: PRESTAGE_ARTIFACT_NAME })] },
+      { ...options, jobList: prestageOnlyJobList },
+    );
+    assert.equal(authority.recovery_required, true);
+    assert.equal(authority.recovery_stage, "prestage");
+    assert.equal(authority.artifact_name, PRESTAGE_ARTIFACT_NAME);
+    assert.equal(authority.prestage_only_job_step_proof.prestage_upload_step.conclusion, "success");
+    assert.equal(authority.prestage_only_job_step_proof.live_upload_step.conclusion, "skipped");
+  }
+  prestageOnlyJobList.jobs.find((job) => job.name === "sync-observe").steps = [{
+    name: "Set up job", number: 1, status: "completed", conclusion: "success",
+  }];
+  assert.throws(() => resolveDiscordRecoveryAuthority(
+    run(),
     { total_count: 1, artifacts: [artifact({ name: PRESTAGE_ARTIFACT_NAME })] },
     { ...options, jobList: prestageOnlyJobList },
-  );
-  assert.equal(authority.recovery_required, true);
-  assert.equal(authority.recovery_stage, "prestage");
-  assert.equal(authority.artifact_name, PRESTAGE_ARTIFACT_NAME);
-  assert.equal(authority.prestage_only_job_step_proof.prestage_upload_step.conclusion, "success");
-  assert.equal(authority.prestage_only_job_step_proof.live_upload_step.conclusion, "skipped");
+  ), /closed dependency topology/u);
 });
 
 test("prestage-only resolution rejects a deleted live artifact or activation that began", () => {
