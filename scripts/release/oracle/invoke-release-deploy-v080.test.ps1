@@ -1397,20 +1397,33 @@ try {
         }
     }
     $global:clearraOracleTestMockOutput = $observationObject | ConvertTo-Json -Compress -Depth 4
-    [void]@(& $wrapper `
-        -Operation observe-candidate `
-        -ScriptReleaseId $scriptReleaseId `
-        -ScriptReleaseSha256 $scriptReleaseSha256 `
-        -SourceCommit $sourceCommit `
-        -CandidateUrl $candidateUrl `
-        -CandidateRevision $candidateRevision `
-        -OracleReleaseId $scriptReleaseId `
-        -OracleReleaseSha256 $scriptReleaseSha256 `
-        -OracleSettingsSha256 ('c' * 64) `
-        -DeploymentNonce $deploymentNonce `
-        -VerifiedAfter $verifiedAfter `
-        -EvidenceOutput $observationEvidencePath `
-        -IdentityFile $lockedIdentityPath)
+    $originalStdout = [Console]::Out
+    $observationStdout = [IO.StringWriter]::new()
+    try {
+        [Console]::SetOut($observationStdout)
+        & $wrapper `
+            -Operation observe-candidate `
+            -ScriptReleaseId $scriptReleaseId `
+            -ScriptReleaseSha256 $scriptReleaseSha256 `
+            -SourceCommit $sourceCommit `
+            -CandidateUrl $candidateUrl `
+            -CandidateRevision $candidateRevision `
+            -OracleReleaseId $scriptReleaseId `
+            -OracleReleaseSha256 $scriptReleaseSha256 `
+            -OracleSettingsSha256 ('c' * 64) `
+            -DeploymentNonce $deploymentNonce `
+            -VerifiedAfter $verifiedAfter `
+            -EvidenceOutput $observationEvidencePath `
+            -IdentityFile $lockedIdentityPath |
+            ForEach-Object { [Console]::Out.WriteLine($_) }
+    } finally {
+        [Console]::SetOut($originalStdout)
+    }
+    $observationWire = $observationStdout.ToString()
+    $observationStdout.Dispose()
+    if ($observationWire -cne [IO.File]::ReadAllText($observationEvidencePath)) {
+        throw 'Oracle observation stdout differs from its canonical evidence bytes.'
+    }
     $observationEvidence = Read-CanonicalEvidenceFile -Path $observationEvidencePath
     if ($observationEvidence.freshOperationAt -cne '2026-08-30T00:00:01.000Z' -or
         $observationEvidence.observedAt -cne '2026-08-30T00:00:02.000Z' -or

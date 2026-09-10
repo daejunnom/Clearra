@@ -1359,4 +1359,10 @@ switch ($Operation) {
 if ($null -ne $evidenceOutputPath) {
     Write-CanonicalEvidenceOutput -Path $evidenceOutputPath -Value $validatedEvidence
 }
-$output
+if ($Operation -ceq 'observe-candidate') {
+    # The production probe consumes the same canonical JSON as file evidence.
+    # Write one LF explicitly so stdout is identical on Windows and Linux.
+    [Console]::Out.Write("$(ConvertTo-CanonicalJson -Value $validatedEvidence)`n")
+} else {
+    $output
+}
