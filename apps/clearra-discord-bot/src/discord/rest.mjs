@@ -126,60 +126,17 @@ export class DiscordRestClient {
     if (!Number.isSafeInteger(limit) || limit < 1) {
       throw new RangeError("The Discord attachment size limit is invalid.");
     }
-    let response;
-    try {
-      response = await fetchWithTimeout(
-        this.fetch,
-        parsed,
-        {
-          method: "GET",
-          headers: { "user-agent": "Clearrabot/0.1" },
-          redirect: "error",
-        },
-        this.requestTimeoutMs,
-      );
-    } catch (error) {
-      throw discordNetworkError(error);
-    }
-    if (!response.ok) {
-      const error = new Error(`Discord attachment ${response.status}.`);
-      error.discordStatus = response.status;
-      throw error;
-    }
-    const declaredLength = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > limit) {
-      throw new Error("The Discord attachment is too large.");
-    }
-    if (!response.body) {
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > limit) throw new Error("The Discord attachment is too large.");
-      return bytes;
-    }
-
-    const chunks = [];
-    const reader = response.body.getReader();
-    let length = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        length += value.byteLength;
-        if (length > limit) {
-          await reader.cancel();
-          throw new Error("The Discord attachment is too large.");
-        }
-        chunks.push(value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    const bytes = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return bytes;
+    return fetchWithTimeout(
+      this.fetch,
+      parsed,
+      {
+        method: "GET",
+        headers: { "user-agent": "Clearrabot/0.1" },
+        redirect: "error",
+      },
+      this.requestTimeoutMs,
+      (response) => readAttachment(response, limit),
+    );
   }
 
   async request(
@@ -234,20 +191,22 @@ export class DiscordRestClient {
         body = JSON.stringify(payload);
       }
 
-      let response;
-      try {
-        response = await fetchWithTimeout(
-          this.fetch,
-          `${API_ROOT}${path}`,
-          { method, headers, body, cache: "no-store", redirect: "error" },
-          this.requestTimeoutMs,
-        );
-      } catch (error) {
-        throw discordNetworkError(error);
-      }
+      const { response, data } = await fetchWithTimeout(
+        this.fetch,
+        `${API_ROOT}${path}`,
+        { method, headers, body, cache: "no-store", redirect: "error" },
+        this.requestTimeoutMs,
+        async (response) => {
+          const retryServerError = response.status >= 500 && attempt < 3 &&
+            options.retryServerErrors !== false;
+          const data = response.status === 204 || retryServerError ? null :
+            response.ok || (response.status === 429 && attempt < 4)
+              ? await response.json() : await response.text();
+          return { response, data };
+        },
+      );
       if (response.status === 429 && attempt < 4) {
-        const rateLimit = await response.json();
-        const delayMs = Math.ceil(Number(rateLimit.retry_after ?? 1) * 1000);
+        const delayMs = Math.ceil(Number(data.retry_after ?? 1) * 1000);
         if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > MAX_RATE_LIMIT_DELAY_MS) {
           throw new Error("Discord API returned an unsafe rate-limit delay.");
         }
@@ -265,7 +224,7 @@ export class DiscordRestClient {
         continue;
       }
       if (!response.ok) {
-        const detail = (await response.text()).slice(0, 1000);
+        const detail = data.slice(0, 1000);
         const error = new Error(`Discord API ${response.status}: ${detail}`);
         error.discordStatus = response.status;
         const discordCode = discordApiErrorCode(detail);
@@ -273,10 +232,51 @@ export class DiscordRestClient {
         error.discordAmbiguous = response.status >= 500;
         throw error;
       }
-      if (response.status === 204) return null;
-      return response.json();
+      return data;
     }
   }
+}
+
+async function readAttachment(response, limit) {
+  if (!response.ok) {
+    const error = new Error(`Discord attachment ${response.status}.`);
+    error.discordStatus = response.status;
+    throw error;
+  }
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > limit) {
+    throw new Error("The Discord attachment is too large.");
+  }
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > limit) throw new Error("The Discord attachment is too large.");
+    return bytes;
+  }
+
+  const chunks = [];
+  const reader = response.body.getReader();
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > limit) {
+        await reader.cancel();
+        throw new Error("The Discord attachment is too large.");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 export function textMessage(content) {
@@ -320,16 +320,25 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function fetchWithTimeout(fetchImplementation, url, options, timeoutMs) {
+async function fetchWithTimeout(fetchImplementation, url, options, timeoutMs, consume) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
   try {
-    return await fetchImplementation(url, {
+    response = await fetchImplementation(url, {
       ...options,
       signal: controller.signal,
     });
+    // Fetch resolves at the headers; the deadline owns the entire body read.
+    return await consume(response);
+  } catch (error) {
+    if (controller.signal.aborted) throw discordNetworkError({ name: "TimeoutError" });
+    if (response === undefined) throw discordNetworkError(error);
+    throw error;
   } finally {
     clearTimeout(timeout);
+    // Retried server errors and rejected attachments must release their body.
+    if (response?.body && !response.bodyUsed) controller.abort();
   }
 }
 

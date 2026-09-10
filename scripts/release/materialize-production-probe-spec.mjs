@@ -14,6 +14,7 @@ import {
 } from "./canonical-release-evidence.mjs";
 import {
   PRODUCTION_OBSERVATION_SECONDS,
+  ORACLE_PROBE_TIMEOUT_SECONDS,
   PRODUCTION_PROBE_SPEC_SCHEMA_ID,
   validateProductionProbeSpec,
 } from "./observe-production-surfaces.mjs";
@@ -318,7 +319,7 @@ function validateOracleAuthority(value, sourceCommit) {
     throw new Error("Oracle deployment nonce is invalid");
   }
   canonicalTimestamp(value.verified_after, "Oracle verified-after time");
-  requireTimeout(value.timeout_seconds, "Oracle probe timeout");
+  requireTimeout(value.timeout_seconds, "Oracle probe timeout", ORACLE_PROBE_TIMEOUT_SECONDS);
   if (
     value.script_release_id !== value.oracle_release_id ||
     value.script_release_sha256 !== value.oracle_release_sha256 ||
@@ -439,9 +440,9 @@ function requireCredentialFreeHttpsOrigin(value, label) {
   return normalized;
 }
 
-function requireTimeout(value, label) {
-  if (!Number.isSafeInteger(value) || value < 1 || value > 60) {
-    throw new Error(`${label} must be 1 through 60 seconds`);
+function requireTimeout(value, label, maximum = 60) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new Error(`${label} must be 1 through ${maximum} seconds`);
   }
 }
 

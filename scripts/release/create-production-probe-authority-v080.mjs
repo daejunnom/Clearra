@@ -24,7 +24,9 @@ import {
   PRODUCTION_PROBE_AUTHORITY_SCHEMA_ID,
   validateProductionProbeAuthority,
 } from "./materialize-production-probe-spec.mjs";
-import { PRODUCTION_OBSERVATION_SECONDS } from "./observe-production-surfaces.mjs";
+import {
+  PRODUCTION_OBSERVATION_SECONDS, ORACLE_PROBE_TIMEOUT_SECONDS,
+} from "./observe-production-surfaces.mjs";
 import { validatePagesDeploymentAuthorityReport } from "./pages-deployment-authority.mjs";
 import { candidateSettingsAuthorityV080 } from "./oracle/candidate-settings-v080.mjs";
 import { parseCanonicalManifest } from "./oracle/create-inactive-stage-v080.mjs";
@@ -198,7 +200,7 @@ export async function createProductionProbeAuthorityV080(options) {
       oracle_settings_sha256: settings.sha256,
       deployment_nonce: promotedState.value.deployment_nonce,
       verified_after: verifiedAfter,
-      timeout_seconds: 60,
+      timeout_seconds: ORACLE_PROBE_TIMEOUT_SECONDS,
     },
     pages: {
       deployment_report_path: pages.path,
