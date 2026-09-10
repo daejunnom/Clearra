@@ -60,7 +60,10 @@ test("queues capture and Pages only after exact success and canonical history ve
   const f = fixture({ mutateRun: (run, count) => count === 1 ?
     { ...run, status: "in_progress", conclusion: null } : run });
   const result = await queuePagesPublication(options, f.dependencies);
-  assert.deepEqual(result, { acceptanceRunId: "10", captureRunId: "20", pagesRunId: "30", sourceCommit });
+  assert.deepEqual(result, {
+    acceptanceRunId: "10", captureRunId: "20", pagesRunId: "30", sourceCommit,
+    publicationStatus: "dispatched",
+  });
   assert.deepEqual(f.posts().map((call) => call.body), [
     { ref: "main", inputs: { mode: "capture", snapshot_sha: snapshotSha,
       expected_current_main: sourceCommit, legacy_release_tag: "", current_pages_sha: "",
@@ -141,9 +144,13 @@ test("uncertain or foreign dispatch receipts are never guessed or retried", asyn
   assert.equal(f.posts().length, 1);
 });
 
-test("a failed Pages child is reported without redispatching publication", async () => {
+test("Pages owns completion after the queue validates its dispatch receipt", async () => {
   const f = fixture({ mutateRun: (run) => run.id === 30 ? { ...run, conclusion: "failure" } : run });
-  await assert.rejects(queuePagesPublication(options, f.dependencies), /stopped after pages.yml/u);
+  const result = await queuePagesPublication(options, f.dependencies);
+  assert.equal(result.publicationStatus, "dispatched");
+  assert.equal(result.pagesRunId, "30");
+  assert.equal(f.calls.filter((call) =>
+    call.method === "GET" && call.endpoint === `${base}/actions/runs/30`).length, 0);
   assert.equal(f.posts().length, 2);
 });
 

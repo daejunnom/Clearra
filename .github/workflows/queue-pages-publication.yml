@@ -33,7 +33,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Await exact acceptance, capture rollback, then publish Pages
+      - name: Await exact acceptance, capture rollback, then dispatch Pages
         env:
           GH_TOKEN: ${{ github.token }}
           ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}

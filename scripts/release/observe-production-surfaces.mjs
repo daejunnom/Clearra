@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { runBoundedCommand } from "./bounded-command.mjs";
 import { createHash } from "node:crypto";
 import {
   lstat,
@@ -29,6 +29,8 @@ export const PRODUCTION_SURFACE_PROBE_SCHEMA_ID =
 export const PRODUCTION_PROBE_SPEC_SCHEMA_ID =
   "clearra.production-observation-probe-spec.v1";
 export const PRODUCTION_OBSERVATION_SECONDS = 1200;
+// Includes the remote 75s job wrapper, its 5s cleanup, SSH, and evidence reads.
+export const ORACLE_PROBE_TIMEOUT_SECONDS = 120;
 
 const REQUIRED_SURFACES = Object.freeze([
   "cloud",
@@ -88,22 +90,36 @@ export async function observeProductionSurfaces({
   let startedMilliseconds = null;
   let startedAt = null;
   let lastObservedMilliseconds = null;
+  let startedElapsedMilliseconds = null;
+  const elapsedNow = () => clock.elapsed?.() ?? clock.now();
+  const maximumSamples = Math.ceil(durationSeconds / intervalSeconds) + 1;
 
   for (;;) {
-    const results = await Promise.all(REQUIRED_SURFACES.map(async (surface) => {
+    const controller = new AbortController();
+    const pending = REQUIRED_SURFACES.map(async (surface) => {
       const result = await probeMap.get(surface)({
         surface,
         sourceCommit: commit,
         sequence,
+        signal: controller.signal,
       });
       return validateSurfaceProbeResult(result, {
         expectedSurface: surface,
         expectedSourceCommit: commit,
       });
-    }));
+    });
+    let results;
+    try { results = await Promise.all(pending); }
+    catch (error) {
+      controller.abort();
+      await Promise.allSettled(pending);
+      throw error;
+    }
     const observedMilliseconds = exactClockMilliseconds(clock.now());
+    const observedElapsedMilliseconds = elapsedNow();
     if (startedMilliseconds === null) {
       startedMilliseconds = observedMilliseconds;
+      startedElapsedMilliseconds = observedElapsedMilliseconds;
       startedAt = new Date(observedMilliseconds).toISOString();
     }
     lastObservedMilliseconds = observedMilliseconds;
@@ -149,8 +165,11 @@ export async function observeProductionSurfaces({
     }
     sequence += 1;
 
-    const elapsedMilliseconds = observedMilliseconds - startedMilliseconds;
+    const elapsedMilliseconds = observedElapsedMilliseconds - startedElapsedMilliseconds;
     if (elapsedMilliseconds >= durationSeconds * 1000) break;
+    if (sequence >= maximumSamples) {
+      throw new Error("production observation exceeded its bounded sample count");
+    }
     const remainingMilliseconds = durationSeconds * 1000 - elapsedMilliseconds;
     await clock.wait(Math.min(intervalSeconds * 1000, remainingMilliseconds));
   }
@@ -400,9 +419,9 @@ export function validateProductionProbeSpec(value, expectedSourceCommit) {
     if (
       !Number.isSafeInteger(probe.timeout_seconds) ||
       probe.timeout_seconds < 1 ||
-      probe.timeout_seconds > 60
+      probe.timeout_seconds > (probe.surface === "oracle" ? ORACLE_PROBE_TIMEOUT_SECONDS : 60)
     ) {
-      throw new Error(`${probe.surface} probe timeout must be 1 through 60 seconds`);
+      throw new Error(`${probe.surface} probe timeout exceeds its bounded execution budget`);
     }
   }
   assertExactIdentitySet(surfaces, REQUIRED_SURFACES, "probe adapter surfaces");
@@ -415,7 +434,7 @@ export async function createCommandProbes(spec) {
   const entries = await Promise.all(spec.probes.map(async (adapter) => {
     const path = resolve(adapter.path);
     await verifyProbeAdapterFile(adapter, path);
-    return [adapter.surface, async ({ sequence }) => {
+    return [adapter.surface, async ({ sequence, signal }) => {
       await verifyProbeAdapterFile(adapter, path);
       const executable = adapter.runtime === "node"
         ? process.execPath
@@ -432,6 +451,7 @@ export async function createCommandProbes(spec) {
         arguments_,
         adapter.timeout_seconds * 1000,
         adapter.surface,
+        signal,
       );
       return adapter.surface === "oracle"
         ? normalizeOracleProbeResult(raw, spec.source_commit, adapter.arguments)
@@ -1054,60 +1074,20 @@ function validateProbeFunctions(probes) {
   return map;
 }
 
-async function runProbeCommand(executable, arguments_, timeoutMilliseconds, surface) {
+async function runProbeCommand(executable, arguments_, timeoutMilliseconds, surface, signal) {
   const label = `${surface} production surface probe`;
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, arguments_, {
-      shell: false,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const chunks = [];
-    let size = 0;
-    let settled = false;
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(new Error(`${label} timed out`));
-    }, timeoutMilliseconds);
-    child.stdout.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > MAX_PROBE_OUTPUT_BYTES) {
-        child.kill();
-        finish(new Error(`${label} output exceeded its bound`));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    child.on("error", () => finish(new Error(`${label} failed to start`)));
-    // close follows stream drainage; exit may precede the last stdout chunk.
-    child.on("close", (code, signal) => {
-      if (code !== 0 || signal) {
-        finish(new Error(`${label} did not exit successfully (exit=${code}, signal=${signal ?? "none"})`));
-        return;
-      }
-      const output = Buffer.concat(chunks).toString("utf8");
-      let value;
-      try {
-        value = JSON.parse(output);
-      } catch {
-        finish(new Error(`${label} did not return one JSON object`));
-        return;
-      }
-      if (output !== `${canonicalJson(value)}\n`) {
-        finish(new Error(`${label} output is not canonical JSON`));
-        return;
-      }
-      finish(null, value);
-    });
-
-    function finish(error, value) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) rejectPromise(error);
-      else resolvePromise(value);
-    }
+  const bytes = await runBoundedCommand(executable, arguments_, {
+    timeoutMs: timeoutMilliseconds, maxBytes: MAX_PROBE_OUTPUT_BYTES, label, signal,
+    killGraceMs: 3_000,
   });
+  const output = bytes.toString("utf8");
+  let value;
+  try { value = JSON.parse(output); }
+  catch { throw new Error(`${label} did not return one JSON object`); }
+  if (output !== `${canonicalJson(value)}\n`) {
+    throw new Error(`${label} output is not canonical JSON`);
+  }
+  return value;
 }
 
 async function readCanonicalJson(path, label) {
@@ -1209,6 +1189,7 @@ function assertExactIdentitySet(actual, expected, label) {
 
 const systemClock = Object.freeze({
   now: () => Date.now(),
+  elapsed: () => performance.now(),
   wait: (milliseconds) => new Promise((resolvePromise) =>
     setTimeout(resolvePromise, milliseconds)),
 });

@@ -176,6 +176,8 @@ export function observeOracleCandidate(options, dependencies = {}) {
 
 function runCommand(command, arguments_) {
   const result = spawnSync(command, arguments_, {
+    timeout: 90_000,
+    killSignal: "SIGKILL",
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
     shell: false,

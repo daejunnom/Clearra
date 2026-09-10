@@ -1345,7 +1345,8 @@ jobs:
             --source-commit "$SOURCE_COMMIT" \
             --probe-spec "$GITHUB_WORKSPACE/sync/production-probe-spec.json" \
             --output "$GITHUB_WORKSPACE/sync/production-observation.json"
-          pwsh -NoProfile -File scripts/release/oracle/invoke-release-deploy-v080.ps1 \
+          timeout --signal=TERM --kill-after=5s 120s \
+            pwsh -NoProfile -File scripts/release/oracle/invoke-release-deploy-v080.ps1 \
             -Operation observe-candidate -ScriptReleaseId "$release_id" -ScriptReleaseSha256 "$release_sha" \
             -SourceCommit "$SOURCE_COMMIT" -CandidateUrl "$candidate_url" -CandidateRevision "$candidate_revision" \
             -OracleReleaseId "$release_id" -OracleReleaseSha256 "$release_sha" -OracleSettingsSha256 "$settings_sha" \

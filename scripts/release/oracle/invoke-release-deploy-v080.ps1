@@ -829,6 +829,47 @@ function Invoke-ExactSshResult {
             throw 'Oracle remote argument is outside the non-secret token grammar.'
         }
     }
+    $sshCommand = Get-Command ssh -ErrorAction Stop
+    # Preserve PowerShell command-provider resolution (including offline
+    # transport adapters); native SSH processes receive the execution deadline.
+    if ($Operation -eq 'observe-candidate' -and $sshCommand.CommandType -eq 'Application') {
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new($sshCommand.Source)
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        foreach ($argument in @($sshArguments) + @($RemoteArguments)) {
+            $startInfo.ArgumentList.Add($argument)
+        }
+        $sshProcess = [System.Diagnostics.Process]::new()
+        $sshProcess.StartInfo = $startInfo
+        try {
+            if (-not $sshProcess.Start()) { throw 'Oracle observation SSH did not start.' }
+            $stdoutTask = $sshProcess.StandardOutput.ReadToEndAsync()
+            $stderrTask = $sshProcess.StandardError.ReadToEndAsync()
+            if (-not $sshProcess.WaitForExit(90000)) {
+                $sshProcess.Kill($true)
+                [void]$sshProcess.WaitForExit(2000)
+                throw 'Oracle observation SSH exceeded its 90-second command deadline.'
+            }
+            $streams = [System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)
+            if (-not [System.Threading.Tasks.Task]::WaitAll($streams, 2000)) {
+                throw 'Oracle observation SSH exceeded its output drainage deadline.'
+            }
+            $output = $stdoutTask.GetAwaiter().GetResult()
+            $stderr = $stderrTask.GetAwaiter().GetResult()
+            if ($stderr.Length -gt 0) { [Console]::Error.Write($stderr) }
+            $lines = if ($output.Length -eq 0) { @() } else {
+                @($output.TrimEnd([char[]]"`r`n") -split '\r?\n')
+            }
+            return [pscustomobject]@{
+                ExitCode = [int]$sshProcess.ExitCode
+                Output = [object[]]@($lines)
+            }
+        } finally {
+            $sshProcess.Dispose()
+        }
+    }
     $result = @(& ssh @sshArguments @RemoteArguments)
     return [pscustomobject]@{
         ExitCode = [int]$LASTEXITCODE

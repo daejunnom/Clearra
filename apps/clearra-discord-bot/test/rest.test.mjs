@@ -374,23 +374,27 @@ test("Discord GIF file components upload an explicit attachment-only payload", a
 });
 
 test("Discord requests fail closed on a bounded network timeout", async () => {
-  const client = new DiscordRestClient(
-    null,
-    async (_url, options) => new Promise((_resolve, reject) => {
-      options.signal.addEventListener(
-        "abort",
-        () => reject(options.signal.reason),
-        { once: true },
-      );
-    }),
-    { requestTimeoutMs: 5 },
-  );
-
-  await assert.rejects(
-    client.editOriginalInteraction("application", "interaction", {
-      payload: { content: "done" },
-      files: [],
-    }),
-    /timed out/,
-  );
+  for (const phase of ["headers", "body", "attachment"]) {
+    const client = new DiscordRestClient(null, async (_url, options) => {
+      if (phase === "headers") return new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      });
+      return new Response(new ReadableStream({
+        start(controller) {
+          options.signal.addEventListener("abort", () => controller.error(options.signal.reason),
+            { once: true });
+        },
+      }));
+    }, { requestTimeoutMs: 5 });
+    const operation = phase === "attachment"
+      ? client.downloadAttachment("https://cdn.discordapp.com/attachments/channel/file/result.bin", 1024)
+      : client.editOriginalInteraction("application", "interaction", {
+        payload: { content: "done" }, files: [],
+      });
+    await assert.rejects(operation, (error) => {
+      assert.match(error.message, /timed out/, phase);
+      assert.equal(error.discordAmbiguous, true);
+      return true;
+    });
+  }
 });

@@ -18,6 +18,7 @@ import {
   probeCloudProductionSurface,
   probeDiscordProductionSurface,
   probePagesProductionSurface,
+  fetchJsonBounded,
 } from "./production-surface-probe-adapter.mjs";
 
 const COMMIT = "1".repeat(40);
@@ -25,6 +26,17 @@ const HASH = "a".repeat(64);
 const APPLICATION_ID = "223456789012345678";
 const IMAGE_DIGEST = `sha256:${"f".repeat(64)}`;
 const NOW = "2026-08-30T00:00:10.000Z";
+
+test("production HTTP deadline includes a body that stalls after successful headers", async () => {
+  await assert.rejects(fetchJsonBounded("https://example.test/health", "test health", {
+    timeoutMs: 10,
+    fetchImplementation: async (_url, { signal }) => new Response(new ReadableStream({
+      start(controller) {
+        signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+      },
+    })),
+  }), /request timed out/u);
+});
 
 function fileSha256(value) {
   return createHash("sha256")

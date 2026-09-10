@@ -92,9 +92,10 @@ export async function queuePagesPublication(options, dependencies) {
     accepted_sha: sourceCommit, rollback_snapshot_sha: snapshotSha,
     rollback_capture_run_id: captureRunId,
   });
-  await waitFor("pages.yml", pagesRunId);
-  record(`Pages workflow completed: ${runUrl(pagesRunId)}`);
-  return { acceptanceRunId, captureRunId, pagesRunId, sourceCommit };
+  // The queue has no transition left after dispatch. Pages owns its completion
+  // status and deployment evidence; keeping this runner polling adds no proof.
+  record(`Pages workflow dispatched; completion belongs to the Pages run: ${runUrl(pagesRunId)}`);
+  return { acceptanceRunId, captureRunId, pagesRunId, sourceCommit, publicationStatus: "dispatched" };
 }
 
 export function githubApi(method, endpoint, body) {

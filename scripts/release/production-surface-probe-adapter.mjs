@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { runBoundedCommand } from "./bounded-command.mjs";
 import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -200,18 +200,14 @@ export async function probeCloudProductionSurface({
   }
 
   const observedAt = canonicalTimestamp(now(), "Cloud probe observation time");
-  const serviceReadback = await runControlPlane({
-    kind: "service",
-    projectId: project,
-    region: location,
-    name: service,
-  });
-  const revisionReadback = await runControlPlane({
-    kind: "revision",
-    projectId: project,
-    region: location,
-    name: expectedRevision,
-  });
+  const [serviceReadback, revisionReadback] = await readTogether([
+    (signal) => runControlPlane({
+      kind: "service", projectId: project, region: location, name: service, signal,
+    }),
+    (signal) => runControlPlane({
+      kind: "revision", projectId: project, region: location, name: expectedRevision, signal,
+    }),
+  ]);
   const authority = validateCloudControlPlane({
     serviceReadback,
     revisionReadback,
@@ -223,14 +219,16 @@ export async function probeCloudProductionSurface({
   if (new URL(authority.taggedUrl).origin !== smokeReport.candidate_url) {
     throw new Error("Cloud tagged URL differs from the candidate smoke authority");
   }
-  const stableHealth = await fetchJson(
-    cacheBustedHealthUrl(authority.stableUrl, commit, observationSequence),
-    "Cloud stable health",
-  );
-  const taggedHealth = await fetchJson(
-    cacheBustedHealthUrl(authority.taggedUrl, commit, observationSequence),
-    "Cloud tagged health",
-  );
+  const [stableHealth, taggedHealth] = await readTogether([
+    (signal) => fetchJson(
+      cacheBustedHealthUrl(authority.stableUrl, commit, observationSequence),
+      "Cloud stable health", { signal },
+    ),
+    (signal) => fetchJson(
+      cacheBustedHealthUrl(authority.taggedUrl, commit, observationSequence),
+      "Cloud tagged health", { signal },
+    ),
+  ]);
   validateCloudHealth(stableHealth, commit, "Cloud stable health");
   validateCloudHealth(taggedHealth, commit, "Cloud tagged health");
   if (
@@ -669,7 +667,7 @@ function validatePagesIdentity(value, {
   rejectSecretMaterial(value, "Pages live build identity");
 }
 
-async function runGcloudJson({ kind, projectId, region, name }) {
+async function runGcloudJson({ kind, projectId, region, name, signal }) {
   const resource = kind === "service" ? "services" : "revisions";
   return runJsonCommand(
     process.platform === "win32" ? "gcloud.cmd" : "gcloud",
@@ -685,92 +683,84 @@ async function runGcloudJson({ kind, projectId, region, name }) {
     DEFAULT_CONTROL_PLANE_TIMEOUT_MS,
     MAX_CONTROL_PLANE_BYTES,
     "Cloud control-plane readback",
+    signal,
   );
 }
 
-async function runJsonCommand(executable, arguments_, timeoutMs, maxBytes, label) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, arguments_, {
-      shell: false,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const chunks = [];
-    let size = 0;
-    let settled = false;
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(new Error(`${label} timed out`));
-    }, timeoutMs);
-    child.stdout.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > maxBytes) {
-        child.kill();
-        finish(new Error(`${label} exceeded its output bound`));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    child.on("error", () => finish(new Error(`${label} failed to start`)));
-    child.on("close", (code, signal) => {
-      if (code !== 0 || signal) {
-        finish(new Error(`${label} did not exit successfully (exit=${code}, signal=${signal ?? "none"})`));
-        return;
-      }
-      try {
-        const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        requirePlainObject(value, label);
-        finish(null, value);
-      } catch {
-        finish(new Error(`${label} did not return one JSON object`));
-      }
-    });
-    function finish(error, value) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) rejectPromise(error);
-      else resolvePromise(value);
-    }
-  });
-}
-
-async function fetchJsonBounded(url, label) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DEFAULT_HTTP_TIMEOUT_MS);
-  let response;
+async function runJsonCommand(executable, arguments_, timeoutMs, maxBytes, label, signal) {
+  const output = await runBoundedCommand(executable, arguments_, { timeoutMs, maxBytes, label, signal });
   try {
-    response = await fetch(url, {
-      method: "GET",
-      redirect: "error",
-      cache: "no-store",
-      headers: {
-        accept: "application/json",
-        "cache-control": "no-cache, no-store, max-age=0",
-        pragma: "no-cache",
-      },
-      signal: controller.signal,
-    });
-  } catch {
-    throw new Error(`${label} request failed`);
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!response.ok) throw new Error(`${label} returned HTTP ${response.status}`);
-  const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_HTTP_BYTES) {
-    throw new Error(`${label} exceeded its response bound`);
-  }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_HTTP_BYTES) {
-    throw new Error(`${label} exceeded its response bound`);
-  }
-  try {
-    const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    const value = JSON.parse(output.toString("utf8"));
     requirePlainObject(value, label);
     return value;
   } catch {
-    throw new Error(`${label} did not return one UTF-8 JSON object`);
+    throw new Error(`${label} did not return one JSON object`);
+  }
+}
+
+export async function fetchJsonBounded(url, label, {
+  fetchImplementation = fetch, timeoutMs = DEFAULT_HTTP_TIMEOUT_MS, signal,
+} = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response;
+    try {
+      response = await fetchImplementation(url, {
+        method: "GET", redirect: "error", cache: "no-store",
+        headers: {
+          accept: "application/json", "cache-control": "no-cache, no-store, max-age=0",
+          pragma: "no-cache",
+        },
+        signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+      });
+    } catch {
+      throw new Error(`${label} request failed`);
+    }
+    if (!response.ok) throw new Error(`${label} returned HTTP ${response.status}`);
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_HTTP_BYTES) {
+      throw new Error(`${label} exceeded its response bound`);
+    }
+    const chunks = [];
+    let length = 0;
+    if (response.body) {
+      const reader = response.body.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          length += value.byteLength;
+          if (length > MAX_HTTP_BYTES) throw new Error(`${label} exceeded its response bound`);
+          chunks.push(value);
+        }
+      } finally { reader.releaseLock(); }
+    }
+    try {
+      const bytes = Buffer.concat(chunks, length);
+      const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      requirePlainObject(value, label);
+      return value;
+    } catch {
+      throw new Error(`${label} did not return one UTF-8 JSON object`);
+    }
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`${label} request timed out`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
+}
+
+async function readTogether(readers) {
+  const controller = new AbortController();
+  const pending = readers.map((read) => read(controller.signal));
+  try { return await Promise.all(pending); }
+  catch (error) {
+    controller.abort();
+    await Promise.allSettled(pending);
+    throw error;
   }
 }
 
