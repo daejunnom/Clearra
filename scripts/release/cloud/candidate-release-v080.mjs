@@ -16,6 +16,7 @@ import {
   CLOUD_CANDIDATE_SMOKE_SCHEMA_ID,
   validateCloudCandidateSmokeReport,
 } from "../cloud-candidate-smoke-report.mjs";
+import { validateCloudScaleReadback } from "./scale-readback.mjs";
 
 export const CLOUD_CANDIDATE_CONTRACT = "clearra.cloud.zero-traffic-candidate.v1";
 export const CLOUD_SMOKE_CONTRACT = CLOUD_CANDIDATE_SMOKE_SCHEMA_ID;
@@ -342,8 +343,8 @@ function validateCandidateResources(service, revision) {
       throw new Error(`${label} resource readback drifted`);
     }
   }
-  validateScaleReadback(service, "service");
-  validateScaleReadback(revision, "revision");
+  validateCloudScaleReadback(service, "candidate service");
+  validateCloudScaleReadback(revision, "candidate revision");
   if (
     String(serviceTemplate?.metadata?.annotations?.["run.googleapis.com/startup-cpu-boost"] ?? "") !== "true" ||
     String(revision?.metadata?.annotations?.["run.googleapis.com/startup-cpu-boost"] ?? "") !== "true"
@@ -366,38 +367,6 @@ function validateCandidateResources(service, revision) {
   if (!ready.some((condition) => condition?.type === "Ready" && condition?.status === "True")) {
     throw new Error("Cloud candidate revision is not Ready");
   }
-}
-
-function validateScaleReadback(resource, label) {
-  const annotations = resource?.metadata?.annotations ?? {};
-  const scaling = resource?.spec?.scaling ?? {};
-  const minimums = [
-    annotations["autoscaling.knative.dev/minScale"],
-    annotations["run.googleapis.com/minScale"],
-    scaling.minInstanceCount,
-  ].filter((value) => value !== undefined);
-  const maximums = [
-    annotations["autoscaling.knative.dev/maxScale"],
-    annotations["run.googleapis.com/maxScale"],
-    scaling.maxInstanceCount,
-  ].filter((value) => value !== undefined);
-  // Cloud Run canonicalizes an explicit zero minimum to the omitted/default
-  // representation. Every value that is present must agree exactly; the
-  // non-default maximum must remain explicitly observable as four.
-  if (
-    minimums.some((value) => !isExactScaleValue(value, 0)) ||
-    maximums.length === 0 ||
-    maximums.some((value) => !isExactScaleValue(value, 4))
-  ) {
-    throw new Error(`Cloud candidate ${label} scale readback drifted`);
-  }
-}
-
-function isExactScaleValue(value, expected) {
-  return (
-    (typeof value === "number" && Number.isSafeInteger(value) && value === expected) ||
-    (typeof value === "string" && value === String(expected))
-  );
 }
 
 export function validateSmokeJobReadback(job, authority) {

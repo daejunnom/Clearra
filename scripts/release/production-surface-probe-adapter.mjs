@@ -35,6 +35,7 @@ import {
 import {
   validateCloudCandidateSmokeReport,
 } from "./cloud-candidate-smoke-report.mjs";
+import { validateCloudScaleReadback } from "./cloud/scale-readback.mjs";
 import {
   validatePagesDeploymentAuthorityReport,
 } from "./pages-deployment-authority.mjs";
@@ -527,8 +528,8 @@ function validateCloudRevisionAuthority({
   const revisionSpec = revisionReadback.spec;
   requireCloudContainerShape(serviceSpec, "Cloud service template");
   requireCloudContainerShape(revisionSpec, "Cloud active revision");
-  requireScaleAuthority(serviceReadback, "service", 0, 4);
-  requireScaleAuthority(revisionReadback, "revision", 0, 4);
+  validateCloudScaleReadback(serviceReadback, "service");
+  validateCloudScaleReadback(revisionReadback, "revision");
   requireStartupBoost(serviceTemplate, "Cloud service template");
   requireStartupBoost(revisionReadback, "Cloud active revision");
   requireReadyRevision(revisionReadback);
@@ -555,24 +556,6 @@ function requireCloudContainerShape(spec, label) {
     String(containers[0]?.resources?.limits?.memory ?? "") !== "16Gi"
   ) {
     throw new Error(`${label} resource contract differs from 8 CPU/16Gi/concurrency-one`);
-  }
-}
-
-function requireScaleAuthority(resource, level, expectedMin, expectedMax) {
-  const annotations = resource.metadata?.annotations ?? {};
-  const scaling = resource.spec?.scaling ?? {};
-  const min = firstDefined(
-    annotations["autoscaling.knative.dev/minScale"],
-    annotations["run.googleapis.com/minScale"],
-    scaling.minInstanceCount,
-  );
-  const max = firstDefined(
-    annotations["autoscaling.knative.dev/maxScale"],
-    annotations["run.googleapis.com/maxScale"],
-    scaling.maxInstanceCount,
-  );
-  if (Number(min) !== expectedMin || Number(max) !== expectedMax) {
-    throw new Error(`Cloud ${level} scale authority is not min-zero/max-four`);
   }
 }
 
@@ -891,10 +874,6 @@ function extractImageDigest(value) {
   const text = typeof value === "string" ? value : "";
   const match = text.match(/(?:^|@)(sha256:[0-9a-f]{64})$/u);
   return match?.[1] ?? "";
-}
-
-function firstDefined(...values) {
-  return values.find((value) => value !== undefined && value !== null);
 }
 
 function requireDiscordApplicationId(value) {

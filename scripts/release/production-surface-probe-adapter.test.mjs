@@ -343,7 +343,6 @@ function cloudServiceFixture() {
     metadata: {
       name: "clearra-current-job",
       annotations: {
-        "run.googleapis.com/minScale": "0",
         "run.googleapis.com/maxScale": "4",
       },
     },
@@ -381,7 +380,6 @@ function cloudRevisionFixture() {
     metadata: {
       name: "clearra-current-job-v080-1111111",
       annotations: {
-        "autoscaling.knative.dev/minScale": "0",
         "autoscaling.knative.dev/maxScale": "4",
         "run.googleapis.com/startup-cpu-boost": "true",
       },
