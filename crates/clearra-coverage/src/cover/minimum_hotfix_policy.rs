@@ -54,6 +54,20 @@ pub(super) fn distinct_dual_capacity() -> bool {
     }
 }
 
+/// Local A/B only: 1 tries 64 direct Lagrangian steps before Mirror-Prox;
+/// 2 replaces residual proposals with 200 steps. Root certification is unchanged.
+#[cfg(feature = "minimum-hotfix-ab")]
+pub(super) fn lagrangian_mode() -> u8 {
+    let flags = AB_POLICY.load(std::sync::atomic::Ordering::Relaxed);
+    if flags & 4096 != 0 {
+        2
+    } else if flags & 2048 != 0 {
+        1
+    } else {
+        0
+    }
+}
+
 pub(super) fn idle_assistance(_requested_partitions: usize) -> bool {
     #[cfg(feature = "minimum-hotfix-ab")]
     {

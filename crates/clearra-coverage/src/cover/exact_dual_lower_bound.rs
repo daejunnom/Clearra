@@ -923,10 +923,24 @@ impl DualProposalWorkspace {
             return None;
         }
         self.reset_proposal_state();
+        #[cfg(feature = "minimum-hotfix-ab")]
+        if row_limit != usize::MAX {
+            let mode = super::minimum_hotfix_policy::lagrangian_mode();
+            if mode != 0 {
+                let steps = if mode == 1 { 64 } else { iterations };
+                let bound = self.direct_lagrangian_bound(row_limit, steps);
+                if mode == 2 || bound.is_some_and(|bound| bound > row_limit) {
+                    return bound;
+                }
+                // The hybrid arm retains the original proposal after a miss.
+                // The existing proof-wide budget accounts for both methods.
+                self.reset_proposal_state();
+            }
+        }
         self.maybe_seed_residual_proposal(row_limit, support_by_pattern.len(), target_words.len());
         let mut accumulated_samples = 0_usize;
 
-        for iteration in 0..iterations {
+        for iteration in 0..iterations.min(self.remaining_iterations) {
             #[cfg(feature = "diagnostic-probes")]
             let iteration_started = Instant::now();
             // Charge only work that this invocation actually enters. A
@@ -1180,6 +1194,118 @@ impl DualProposalWorkspace {
         (self.best_numerator != 0 && self.best_denominator != 0)
             .then(|| usize::try_from(self.best_numerator.div_ceil(self.best_denominator)).ok())
             .flatten()
+    }
+
+    /// Experimental direct subgradient proposal for
+    /// L(u) = sum(u) - sum_rows(max(0, load(row) - 1)).
+    /// Every prune replays this expression with checked integers over all
+    /// eligible rows. No floating objective or missing certificate is authority.
+    /// Reuses governed buffers and leaves the persistent root dual untouched.
+    #[cfg(feature = "minimum-hotfix-ab")]
+    fn direct_lagrangian_bound(&mut self, row_limit: usize, steps: usize) -> Option<usize> {
+        self.p.fill(f64::INFINITY);
+        for row in 0..self.eligible_rows.len() {
+            let constraints =
+                &self.row_constraints[self.row_offsets[row]..self.row_offsets[row + 1]];
+            let weight = 1.0 / constraints.len() as f64;
+            for &constraint in constraints {
+                self.p[constraint] = self.p[constraint].min(weight);
+            }
+        }
+        for (index, pattern) in self.patterns.iter().enumerate() {
+            if let Ok(cached) = self.cached_patterns.binary_search(pattern) {
+                self.p[index] = 0.5 * self.p[index]
+                    + 0.5 * (self.cached_weights[cached] as f64 / CERTIFICATE_SCALE as f64);
+            }
+        }
+        let mut best = 0;
+        let mut best_proposal = f64::NEG_INFINITY;
+        let mut stale = 0;
+        let mut factor = 1.5;
+        let iterations = steps.min(self.remaining_iterations);
+        for iteration in 0..iterations {
+            self.remaining_iterations = self.remaining_iterations.checked_sub(1)?;
+            self.gradient_p.fill(1.0);
+            let mut objective = self.p.iter().sum::<f64>();
+            for row in 0..self.eligible_rows.len() {
+                let constraints =
+                    &self.row_constraints[self.row_offsets[row]..self.row_offsets[row + 1]];
+                let load = constraints
+                    .iter()
+                    .map(|&constraint| self.p[constraint])
+                    .sum::<f64>();
+                if load > 1.0 {
+                    objective += 1.0 - load;
+                    for &constraint in constraints {
+                        self.gradient_p[constraint] -= 1.0;
+                    }
+                }
+            }
+            if !objective.is_finite() {
+                return None;
+            }
+            if objective > best_proposal + 1e-8 {
+                best_proposal = objective;
+                stale = 0;
+            } else {
+                stale += 1;
+            }
+            if stale == 25 {
+                factor *= 0.5;
+                stale = 0;
+            }
+            if iteration % 16 == 0 || iteration + 1 == iterations || objective > row_limit as f64 {
+                let mut numerator = 0_u128;
+                for (slot, &weight) in self.candidate_weights.iter_mut().zip(&self.p) {
+                    let scaled = weight * CERTIFICATE_SCALE as f64;
+                    if !scaled.is_finite() || scaled < 0.0 || scaled >= u128::MAX as f64 {
+                        return None;
+                    }
+                    *slot = scaled.floor() as u128;
+                    numerator = numerator.checked_add(*slot)?;
+                }
+                let mut penalty = 0_u128;
+                for row in 0..self.eligible_rows.len() {
+                    let load = self.row_constraints
+                        [self.row_offsets[row]..self.row_offsets[row + 1]]
+                        .iter()
+                        .try_fold(0_u128, |sum, &constraint| {
+                            sum.checked_add(self.candidate_weights[constraint])
+                        })?;
+                    penalty = penalty.checked_add(load.saturating_sub(CERTIFICATE_SCALE))?;
+                }
+                let bound = usize::try_from(
+                    numerator
+                        .saturating_sub(penalty)
+                        .div_ceil(CERTIFICATE_SCALE),
+                )
+                .ok()?;
+                best = best.max(bound);
+                if best > row_limit {
+                    return Some(best);
+                }
+            }
+            let norm = self
+                .p
+                .iter()
+                .zip(&self.gradient_p)
+                .map(|(&weight, &gradient)| {
+                    if weight <= 0.0 && gradient < 0.0 {
+                        0.0
+                    } else {
+                        gradient * gradient
+                    }
+                })
+                .sum::<f64>();
+            if norm == 0.0 {
+                break;
+            }
+            let step = factor * ((row_limit as f64 + 1.0) - objective).max(0.0) / norm;
+            for (weight, &gradient) in self.p.iter_mut().zip(&self.gradient_p) {
+                *weight = (*weight + step * gradient).max(0.0);
+            }
+        }
+        Some(best)
     }
 
     fn prepare_residual(
