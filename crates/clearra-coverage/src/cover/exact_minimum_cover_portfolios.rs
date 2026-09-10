@@ -46,6 +46,7 @@ impl Clone for ParallelConfiguration {
 #[derive(Clone)]
 struct ParallelOracle {
     coordinator: ExactAtMostCoordinator,
+    requested_partitions: usize,
     next_task: usize,
     warm_session: Option<ExactCoverSearchSession>,
     warm_remaining_steps: u64,
@@ -228,7 +229,7 @@ impl ParallelOracle {
     ) -> Result<bool, ExactMinimumCoverPortfolioError> {
         // Scheduling policy belongs to this issuer; the explicit coordinator
         // primitive keeps its proof/cancellation contract in every build.
-        if !super::minimum_hotfix_policy::idle_assistance() {
+        if !super::minimum_hotfix_policy::idle_assistance(self.requested_partitions) {
             return Ok(false);
         }
         if self.warm_session.is_some() && !self.overlap_warm {
@@ -1744,6 +1745,7 @@ fn make_parallel_oracle(
     };
     Ok(ParallelOracle {
         coordinator,
+        requested_partitions: config.partitions,
         next_task: 0,
         warm_session,
         // Total global cursor work, not a fresh budget per supporter.
@@ -1899,7 +1901,15 @@ impl ExactMinimumCoverPortfolioEnumerator {
     fn parallel_oracle(&self) -> Option<&ParallelOracle> {
         match &self.pending_search.as_ref()?.phase {
             PendingLexPhase::PivotOracle { oracle, .. }
-            | PendingLexPhase::CanonicalOracle { oracle, .. } => oracle.parallel.as_ref(),
+            | PendingLexPhase::CanonicalOracle { oracle, .. } => {
+                // The bounded local probe owns this query until it either
+                // decides it or relinquishes it. No remote task may race it.
+                if oracle.session.is_none() {
+                    oracle.parallel.as_ref()
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -1907,7 +1917,13 @@ impl ExactMinimumCoverPortfolioEnumerator {
     fn parallel_oracle_mut(&mut self) -> Option<&mut ParallelOracle> {
         match &mut self.pending_search.as_mut()?.phase {
             PendingLexPhase::PivotOracle { oracle, .. }
-            | PendingLexPhase::CanonicalOracle { oracle, .. } => oracle.parallel.as_mut(),
+            | PendingLexPhase::CanonicalOracle { oracle, .. } => {
+                if oracle.session.is_none() {
+                    oracle.parallel.as_mut()
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -1929,7 +1945,15 @@ impl ExactMinimumCoverPortfolioEnumerator {
     /// pages but has no external shard scheduler. Preserve the exact frontier,
     /// witness and any owned serial cursor; never discard an issued query.
     pub fn disable_parallel_if_quiescent(&mut self) -> Result<(), ExactMinimumCoverPortfolioError> {
-        if self.parallel_oracle().is_some() {
+        let pending_parallel =
+            self.pending_search
+                .as_ref()
+                .is_some_and(|pending| match &pending.phase {
+                    PendingLexPhase::PivotOracle { oracle, .. }
+                    | PendingLexPhase::CanonicalOracle { oracle, .. } => oracle.parallel.is_some(),
+                    _ => false,
+                });
+        if pending_parallel {
             return Err(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof);
         }
         self.parallel = None;
@@ -2993,6 +3017,10 @@ enum PendingLexPhase {
 struct PendingAtMostOracle {
     session: Option<ExactCoverSearchSession>,
     parallel: Option<ParallelOracle>,
+    // When both cursors are present, the partition frontier is still unissued.
+    // The local exact cursor may decide the whole query; a bounded miss only
+    // releases that unchanged frontier, without fabricating shard receipts.
+    probe_remaining_steps: u64,
 }
 
 enum LexSearchAdvance {
@@ -3840,9 +3868,41 @@ impl PendingAtMostOracle {
                 },
                 cancelled,
             )?;
+            let probe_remaining_steps = if assisted_query {
+                0
+            } else {
+                super::minimum_hotfix_policy::canonical_probe_steps(config.partitions)
+            };
+            let session = if probe_remaining_steps == 0 {
+                None
+            } else {
+                let parallel_live = parallel
+                    .checked_retained_bytes()
+                    .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?;
+                let query = parallel.coordinator.query();
+                Some(
+                    ExactCoverSearchSession::prepare_at_most_with_memory_guard_and_control(
+                        query.required(),
+                        query.rows(),
+                        slots,
+                        None,
+                        &mut |owned| {
+                            memory_guard(
+                                base_live
+                                    .checked_add(parallel_live)
+                                    .and_then(|live| live.checked_add(owned))
+                                    .ok_or(ExactMinimumCoverError::ProjectionOverflow)?,
+                            )
+                        },
+                        cancelled,
+                    )
+                    .map_err(ExactMinimumCoverPortfolioError::MinimumCover)?,
+                )
+            };
             return Ok(PendingOracleStart::Ready(Self {
-                session: None,
+                session,
                 parallel: Some(parallel),
+                probe_remaining_steps,
             }));
         }
         let session = ExactCoverSearchSession::prepare_at_most_with_memory_guard_and_control(
@@ -3865,6 +3925,7 @@ impl PendingAtMostOracle {
         let oracle = Self {
             session: Some(session),
             parallel: None,
+            probe_remaining_steps: 0,
         };
         memory_guard(checked_add_bytes(
             base_live,
@@ -3879,10 +3940,13 @@ impl PendingAtMostOracle {
     }
 
     fn checked_retained_capacity_bytes(&self) -> Option<u128> {
-        if let Some(parallel) = &self.parallel {
-            return parallel.checked_retained_bytes();
-        }
-        self.session.as_ref()?.checked_retained_capacity_bytes()
+        self.parallel
+            .as_ref()
+            .map_or(Some(0), ParallelOracle::checked_retained_bytes)?
+            .checked_add(self.session.as_ref().map_or(
+                Some(0),
+                ExactCoverSearchSession::checked_retained_capacity_bytes,
+            )?)
     }
 
     fn try_clone_with_memory_guard(
@@ -3901,9 +3965,28 @@ impl PendingAtMostOracle {
                     .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?,
             )
             .map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
+            let parallel = parallel.clone();
+            let session = self
+                .session
+                .as_ref()
+                .map(|session| {
+                    session
+                        .try_clone_with_memory_guard(
+                            checked_add_bytes(
+                                base_live,
+                                parallel.checked_retained_bytes().ok_or(
+                                    ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof,
+                                )?,
+                            )?,
+                            memory_guard,
+                        )
+                        .map_err(ExactMinimumCoverPortfolioError::MinimumCover)
+                })
+                .transpose()?;
             let cloned = Self {
-                session: None,
-                parallel: Some(parallel.clone()),
+                session,
+                parallel: Some(parallel),
+                probe_remaining_steps: self.probe_remaining_steps,
             };
             memory_guard(
                 base_live
@@ -3926,6 +4009,7 @@ impl PendingAtMostOracle {
         Ok(Self {
             session: Some(session),
             parallel: None,
+            probe_remaining_steps: 0,
         })
     }
 
@@ -3936,6 +4020,61 @@ impl PendingAtMostOracle {
         memory_guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PendingOracleAdvance, ExactMinimumCoverPortfolioError> {
+        if self.parallel.is_some() && self.session.is_some() {
+            let parallel_live = self
+                .parallel
+                .as_ref()
+                .and_then(ParallelOracle::checked_retained_bytes)
+                .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?;
+            let budget = max_nodes.min(self.probe_remaining_steps);
+            let advance = self
+                .session
+                .as_mut()
+                .expect("local probe owns the query")
+                .advance(
+                    budget,
+                    &mut |owned| {
+                        memory_guard(
+                            active_live
+                                .checked_add(parallel_live)
+                                .and_then(|live| live.checked_add(owned))
+                                .ok_or(ExactMinimumCoverError::ProjectionOverflow)?,
+                        )
+                    },
+                    cancelled,
+                )
+                .map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
+            return Ok(match advance {
+                ExactMinimumCoverSessionAdvance::Pending { visited_nodes } => {
+                    self.probe_remaining_steps = self
+                        .probe_remaining_steps
+                        .checked_sub(visited_nodes)
+                        .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?;
+                    if self.probe_remaining_steps == 0 {
+                        // There are still no issued tasks. Relinquish only the
+                        // speculative cursor, retaining every proof obligation.
+                        self.session = None;
+                    }
+                    PendingOracleAdvance::Pending { visited_nodes }
+                }
+                ExactMinimumCoverSessionAdvance::Found {
+                    result,
+                    visited_nodes,
+                } => PendingOracleAdvance::Found {
+                    proof: result.into_parts().0,
+                    visited_nodes,
+                },
+                ExactMinimumCoverSessionAdvance::ProvedNone { visited_nodes } => {
+                    PendingOracleAdvance::ProvedNone { visited_nodes }
+                }
+                ExactMinimumCoverSessionAdvance::Cancelled { visited_nodes } => {
+                    PendingOracleAdvance::Cancelled { visited_nodes }
+                }
+                ExactMinimumCoverSessionAdvance::Finished => {
+                    return Err(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof);
+                }
+            });
+        }
         if let Some(parallel) = &mut self.parallel {
             if cancelled() {
                 return Ok(PendingOracleAdvance::Cancelled { visited_nodes: 0 });

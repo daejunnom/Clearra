@@ -1,12 +1,46 @@
 // Local-only A/B switches: no input, known optimum or candidate identity may
 // select a policy. Non-experimental builds have compile-time fixed behavior.
 #[cfg(feature = "minimum-hotfix-ab")]
-static AB_POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(185);
+static AB_POLICY: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(185);
 
 #[cfg(feature = "minimum-hotfix-ab")]
-pub fn set_local_ab_policy(flags: u8) -> bool {
+pub fn set_local_ab_policy(flags: u16) -> bool {
     AB_POLICY.store(flags, std::sync::atomic::Ordering::Relaxed);
     true
+}
+
+/// Total cooperative work before an unissued canonical query is delegated.
+/// These budgets include preparation; exhausting one never proves infeasibility.
+pub(super) fn canonical_probe_steps(_requested_partitions: usize) -> u64 {
+    #[cfg(feature = "minimum-hotfix-ab")]
+    {
+        let flags = AB_POLICY.load(std::sync::atomic::Ordering::Relaxed);
+        if flags & 1024 != 0 {
+            128
+        } else if flags & 512 != 0 {
+            32
+        } else if flags & 256 != 0 {
+            8
+        } else {
+            0
+        }
+    }
+    #[cfg(not(feature = "minimum-hotfix-ab"))]
+    {
+        if combined_canonical_policy_is_admitted(_requested_partitions) {
+            32
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(not(feature = "minimum-hotfix-ab"))]
+fn combined_canonical_policy_is_admitted(requested_partitions: usize) -> bool {
+    // The N + bounded-probe combination improved requests of 32/44/48
+    // partitions, but regressed 16. Keep the previous low-fanout policy.
+    // This threshold concerns scheduler work, not a CPU model or fixture.
+    requested_partitions >= 32
 }
 
 pub(super) fn distinct_dual_capacity() -> bool {
@@ -20,16 +54,16 @@ pub(super) fn distinct_dual_capacity() -> bool {
     }
 }
 
-pub(super) fn idle_assistance() -> bool {
+pub(super) fn idle_assistance(_requested_partitions: usize) -> bool {
     #[cfg(feature = "minimum-hotfix-ab")]
     {
         AB_POLICY.load(std::sync::atomic::Ordering::Relaxed) & 64 == 0
     }
     #[cfg(not(feature = "minimum-hotfix-ab"))]
     {
-        // Disabling racing helped the measured high-parallelism fixture but
-        // regressed its low-parallelism runs. Keep it an independent A/B axis.
-        true
+        // Retain the positive-only global warm repair in either policy.
+        // Only redundant idle assistance changes with the bounded probe.
+        !combined_canonical_policy_is_admitted(_requested_partitions)
     }
 }
 

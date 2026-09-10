@@ -3541,11 +3541,11 @@ pub extern "C" fn clearra_wasm_minimum_ab_policy(flags: u32) -> i32 {
             || state.distributed_coordinator.is_some()
             || state.distributed_completion.is_some()
             || state.minimum_parallel_worker.is_some()
-            || flags > u8::MAX as u32
+            || flags > u16::MAX as u32
         {
             return ABI_ERROR;
         }
-        if clearra_coverage::cover::minimum_hotfix_policy::set_local_ab_policy(flags as u8) {
+        if clearra_coverage::cover::minimum_hotfix_policy::set_local_ab_policy(flags as u16) {
             ABI_OK
         } else {
             ABI_ERROR
