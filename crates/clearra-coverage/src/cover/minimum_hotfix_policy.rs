@@ -1,15 +1,47 @@
 // Local-only A/B switches: no input, known optimum or candidate identity may
 // select a policy. Non-experimental builds have compile-time fixed behavior.
 #[cfg(feature = "minimum-hotfix-ab")]
-static AB_POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(25);
+static AB_POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(185);
 
 #[cfg(feature = "minimum-hotfix-ab")]
 pub fn set_local_ab_policy(flags: u8) -> bool {
-    if flags > 31 {
-        return false;
-    }
     AB_POLICY.store(flags, std::sync::atomic::Ordering::Relaxed);
     true
+}
+
+pub(super) fn distinct_dual_capacity() -> bool {
+    #[cfg(feature = "minimum-hotfix-ab")]
+    {
+        AB_POLICY.load(std::sync::atomic::Ordering::Relaxed) & 32 != 0
+    }
+    #[cfg(not(feature = "minimum-hotfix-ab"))]
+    {
+        true
+    }
+}
+
+pub(super) fn idle_assistance() -> bool {
+    #[cfg(feature = "minimum-hotfix-ab")]
+    {
+        AB_POLICY.load(std::sync::atomic::Ordering::Relaxed) & 64 == 0
+    }
+    #[cfg(not(feature = "minimum-hotfix-ab"))]
+    {
+        // Disabling racing helped the measured high-parallelism fixture but
+        // regressed its low-parallelism runs. Keep it an independent A/B axis.
+        true
+    }
+}
+
+pub(super) fn small_canonical_tail() -> bool {
+    #[cfg(feature = "minimum-hotfix-ab")]
+    {
+        AB_POLICY.load(std::sync::atomic::Ordering::Relaxed) & 128 != 0
+    }
+    #[cfg(not(feature = "minimum-hotfix-ab"))]
+    {
+        true
+    }
 }
 
 pub(super) fn residual_partition_budget(requested: usize, candidate_rows: usize) -> usize {

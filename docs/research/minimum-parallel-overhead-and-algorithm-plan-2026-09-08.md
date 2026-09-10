@@ -1,5 +1,12 @@
 # 최소 해법: 병렬 비용의 원인과 알고리즘 A/B 후보 재정리
 
+> 2026-09-10 추가 후속: 아래 **6.1–6.3 전체 후보**를 다시 평가했다.
+> T/F, assistance 대조, reasoned PB/CDCL 및 incremental assumption scout,
+> reference 설정 대조와 실제 4195 batch 결과는
+> [전체 후보 평가와 장비별 계측](minimum-sections6-evaluation-2026-09-10.md)에 있다.
+> T+F를 성능 브랜치 일반 설정에 적용하고, 낮은 병렬도에서 회귀한 assistance off는
+> 독립 A/B로 남겼다. 11 worker 결과를 다른 PC의 기본 정책으로 일반화하지 않는다.
+
 > 2026-09-10 후속: H와 O1의 남은 후보 수 기반 분할 예산을 독립 A/B하고,
 > 이득이 재현된 조합을 성능 브랜치 기본값으로 적용했다. V0의 profiling
 > 소유권 충돌도 수정했다. [실측·검증·남은 한계](minimum-impact-and-partition-ab-2026-09-10.md)를

@@ -226,6 +226,11 @@ impl ParallelOracle {
         maximum_children: usize,
         guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
     ) -> Result<bool, ExactMinimumCoverPortfolioError> {
+        // Scheduling policy belongs to this issuer; the explicit coordinator
+        // primitive keeps its proof/cancellation contract in every build.
+        if !super::minimum_hotfix_policy::idle_assistance() {
+            return Ok(false);
+        }
         if self.warm_session.is_some() && !self.overlap_warm {
             return Ok(false);
         }
@@ -2973,6 +2978,15 @@ enum PendingLexPhase {
         selector_end: usize,
         oracle: PendingAtMostOracle,
     },
+    // Fixed-K tail on the immutable original matrix. The cursor advances one
+    // original-ID combination per work unit; no full family is materialized.
+    SmallCanonicalTail {
+        witness: Vec<usize>,
+        uncovered: Vec<u64>,
+        prefix_len: usize,
+        left: usize,
+        right: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -3364,6 +3378,37 @@ impl PendingLexSearch {
                         };
                         continue;
                     }
+                    if super::minimum_hotfix_policy::small_canonical_tail()
+                        && enumerator.optimal_cardinality - prefix.len() <= 2
+                        // Bound direct pair enumeration to a small suffix.
+                        // Larger tails retain the existing exact oracle.
+                        && enumerator.input.row_words.len().saturating_sub(start) <= 256
+                    {
+                        let live = checked_add_vec_retained_bytes(
+                            checked_add_vec_retained_bytes(active_live, &prefix)?,
+                            &witness,
+                        )?;
+                        let mut uncovered = try_vec_with_memory_guard(
+                            enumerator.input.target_words.len(),
+                            live,
+                            memory_guard,
+                            "exact_minimum_cover_small_tail_uncovered",
+                        )?;
+                        for (word, &target) in enumerator.input.target_words.iter().enumerate() {
+                            let covered = prefix
+                                .iter()
+                                .fold(0, |bits, &row| bits | enumerator.input.row_words[row][word]);
+                            uncovered.push(target & !covered);
+                        }
+                        self.phase = PendingLexPhase::SmallCanonicalTail {
+                            witness,
+                            uncovered,
+                            prefix_len: prefix.len(),
+                            left: start,
+                            right: start.saturating_add(1),
+                        };
+                        continue;
+                    }
                     let use_assisted_query = assisted_query_available;
                     assisted_query_available = false;
                     // Existing strategy asks for any ID before the witness;
@@ -3418,6 +3463,65 @@ impl PendingLexSearch {
                             return Ok(LexSearchAdvance::Cancelled { visited_nodes });
                         }
                     }
+                }
+                PendingLexPhase::SmallCanonicalTail {
+                    mut witness,
+                    uncovered,
+                    prefix_len,
+                    mut left,
+                    mut right,
+                } => {
+                    let rows = &enumerator.input.row_words;
+                    let slots = enumerator.optimal_cardinality - prefix_len;
+                    while left < rows.len() && left <= witness[prefix_len] {
+                        if cancelled() {
+                            return Ok(LexSearchAdvance::Cancelled { visited_nodes });
+                        }
+                        if visited_nodes == max_nodes {
+                            self.phase = PendingLexPhase::SmallCanonicalTail {
+                                witness,
+                                uncovered,
+                                prefix_len,
+                                left,
+                                right,
+                            };
+                            return Ok(LexSearchAdvance::Pending { visited_nodes });
+                        }
+                        if slots == 2 && right >= rows.len() {
+                            left += 1;
+                            right = left.saturating_add(1);
+                            continue;
+                        }
+                        visited_nodes = checked_add_visited_nodes(visited_nodes, 1, max_nodes)?;
+                        let covers = uncovered.iter().enumerate().all(|(word, &required)| {
+                            let covered =
+                                rows[left][word] | if slots == 2 { rows[right][word] } else { 0 };
+                            required & !covered == 0
+                        });
+                        if covers {
+                            witness[prefix_len] = left;
+                            if slots == 2 {
+                                witness[prefix_len + 1] = right;
+                            }
+                            if !enumerator.valid_witness(&witness) {
+                                return Err(
+                                    ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof,
+                                );
+                            }
+                            return Ok(LexSearchAdvance::Found {
+                                combination: witness,
+                                visited_nodes,
+                            });
+                        }
+                        if slots == 2 {
+                            right += 1;
+                        } else {
+                            left += 1;
+                        }
+                    }
+                    // An admitted, replayed witness belongs to this very tail.
+                    // Exhaustion is therefore corruption, never an UNSAT proof.
+                    return Err(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof);
                 }
                 PendingLexPhase::CanonicalOracle {
                     mut prefix,
@@ -3522,6 +3626,12 @@ impl PendingLexPhase {
         let mut bytes = 0_u128;
         match self {
             Self::Initial | Self::Pivot { .. } => {}
+            Self::SmallCanonicalTail {
+                witness, uncovered, ..
+            } => {
+                bytes = bytes.checked_add(checked_vec_retained_bytes(witness).ok()?)?;
+                bytes = bytes.checked_add(checked_vec_retained_bytes(uncovered).ok()?)?;
+            }
             Self::PivotOracle { prefix, oracle, .. } => {
                 bytes = bytes.checked_add(checked_vec_retained_bytes(prefix).ok()?)?;
                 bytes = bytes.checked_add(oracle.checked_retained_capacity_bytes()?)?;
@@ -3564,6 +3674,30 @@ impl PendingLexPhase {
         };
         match self {
             Self::Initial => Ok(Self::Initial),
+            Self::SmallCanonicalTail {
+                witness,
+                uncovered,
+                prefix_len,
+                left,
+                right,
+            } => {
+                let witness = clone_vec(witness, base_live, memory_guard)?;
+                let live = checked_add_vec_retained_bytes(base_live, &witness)?;
+                let mut copy = try_vec_with_memory_guard(
+                    uncovered.len(),
+                    live,
+                    memory_guard,
+                    "exact_minimum_cover_cloned_small_tail",
+                )?;
+                copy.extend_from_slice(uncovered);
+                Ok(Self::SmallCanonicalTail {
+                    witness,
+                    uncovered: copy,
+                    prefix_len: *prefix_len,
+                    left: *left,
+                    right: *right,
+                })
+            }
             Self::Pivot {
                 next_pivot_exclusive,
             } => Ok(Self::Pivot {

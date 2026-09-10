@@ -212,6 +212,63 @@ impl CertifiedResidualDual {
             .checked_add(checked_vec_retained_bytes(&self.weights)?)
     }
 
+    /// Boolean rows are distinct: k rows can contribute at most the sum of
+    /// the k largest *eligible residual* loads, rather than k copies of the
+    /// largest original load. All arithmetic is checked integer arithmetic.
+    /// Replaying the incidence also re-certifies this inequality independently
+    /// of the root denominator. Missing/overflowed work has no proof authority.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn distinct_capacity_assessment(
+        &self,
+        target: &[u64],
+        covered: &[u64],
+        supports: &[Vec<usize>],
+        selected: &[bool],
+        excluded: &[u64],
+        slots: usize,
+    ) -> Option<(usize, Option<u128>)> {
+        if selected.len() > MAX_DUAL_ROW_COUNT || slots == 0 || slots > selected.len() {
+            return None;
+        }
+        let numerator = self.certified_uncovered_numerator(target, covered)?;
+        let mut loads = [0_u128; MAX_DUAL_ROW_COUNT];
+        for (&pattern, &weight) in self.patterns.iter().zip(&self.weights) {
+            if weight == 0
+                || target[pattern / 64] & !covered[pattern / 64] & (1_u64 << (pattern % 64)) == 0
+            {
+                continue;
+            }
+            for &row in supports.get(pattern)? {
+                if !*selected.get(row)? && excluded.get(row / 64)? & (1_u64 << (row % 64)) == 0 {
+                    loads[row] = loads[row].checked_add(weight)?;
+                }
+            }
+        }
+        let loads = &mut loads[..selected.len()];
+        loads.sort_unstable_by(|a, b| b.cmp(a));
+        let mut capacity = 0_u128;
+        let mut lower_bound = 0;
+        let mut capacity_without_one = 0;
+        for (index, load) in loads.iter().take(slots).enumerate() {
+            capacity = capacity.checked_add(*load)?;
+            if index + 1 < slots {
+                capacity_without_one = capacity;
+            }
+            if lower_bound == 0 && capacity >= numerator {
+                lower_bound = index + 1;
+            }
+        }
+        if capacity < numerator {
+            return Some((slots.checked_add(1)?, None));
+        }
+        Some((
+            lower_bound,
+            numerator
+                .checked_sub(capacity_without_one)
+                .filter(|n| *n != 0),
+        ))
+    }
+
     #[cfg(test)]
     pub(super) fn from_checked_row_weights_for_test(
         weights: &[u128],

@@ -664,9 +664,6 @@ export class DistributedWasmJobRunner {
                 await localDrained;
                 this.requireActive();
                 await dispatchRemoteTasks();
-                const drainStarted = wave ? performance.now() : 0;
-                await this.pool.completeAtomicTasks();
-                if (wave) wave.remote_drain_ms = performance.now() - drainStarted;
               })();
               const localTasks = (async () => {
                 let lastLocalYield = performance.now();
@@ -734,6 +731,12 @@ export class DistributedWasmJobRunner {
               })();
               await Promise.all([remoteTasks, localTasks, warmTasks]);
               this.requireActive();
+              // Warm callbacks can still cancel satisfied/redundant siblings
+              // after the last remote receipt. Keep their query's pool active
+              // until every issuer is done, then drain and close it once.
+              const drainStarted = wave ? performance.now() : 0;
+              await this.pool.completeAtomicTasks();
+              if (wave) wave.remote_drain_ms = performance.now() - drainStarted;
               parallelCompletionActive = false;
               activeMinimumWave = null;
               if (captureSchedulingProfile) {

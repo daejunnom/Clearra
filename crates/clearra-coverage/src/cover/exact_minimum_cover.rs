@@ -7520,6 +7520,23 @@ impl MinimumCoverSearch {
             if root_dual_lower_bound > row_limit {
                 return Ok(None);
             }
+            if super::minimum_hotfix_policy::distinct_dual_capacity() {
+                if let Some((bound, minimum)) = self.root_dual.as_ref().and_then(|certificate| {
+                    certificate.distinct_capacity_assessment(
+                        &self.target_words,
+                        covered,
+                        &self.support_by_pattern,
+                        &self.selected,
+                        &self.excluded_rows,
+                        row_limit,
+                    )
+                }) {
+                    if bound > row_limit {
+                        return Ok(None);
+                    }
+                    minimum_root_row_weight = minimum_root_row_weight.max(minimum);
+                }
+            }
             #[cfg(feature = "diagnostic-probes")]
             let packing_started = Instant::now();
             let packing_exceeds =

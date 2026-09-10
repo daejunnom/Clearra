@@ -1556,6 +1556,47 @@ for (const sample of [
   assert.equal(exactInitializations, 0);
 }
 
+// A negative remote frontier can drain before the advisory warm cursor.
+// Disabling optional assistance made this ordering reproducible in-browser.
+// The pool must accept same-query sibling checks until the last owner returns.
+{
+  let active = false;
+  let warmSteps = 0;
+  let closed = false;
+  await new DistributedWasmJobRunner({
+    ...wasm,
+    distributed_finish_start: () => null,
+    distributed_finish_parallel_configure() {},
+    distributed_finish_parallel_admit: () => true,
+    distributed_finish_parallel_prepare: () => Uint8Array.of(1).buffer,
+    distributed_finish_parallel_guarded_query: () => Uint8Array.of(1).buffer,
+    distributed_finish_parallel_task: () => null,
+    distributed_finish_parallel_merge() {},
+    distributed_finish_parallel_local_start: () => false,
+    distributed_finish_parallel_local_advance: () => true,
+    distributed_finish_parallel_assist: () => false,
+    distributed_finish_parallel_last_task_key: () => new ArrayBuffer(56),
+    distributed_finish_parallel_redundant: () => true,
+    distributed_finish_parallel_found: () => false,
+    distributed_finish_parallel_warm_advance() { return ++warmSteps < 2; },
+    distributed_finish_advance(job: number) {
+      assert.ok(closed);
+      return wasm.distributed_finish(job, 2);
+    }
+  } as ClearraWasmModule, 993, 'negative-frontier-before-warm', {
+    ...finishHost, logicalProcessorCount: 3
+  }, {
+    ...pool,
+    async initialize() { active = true; },
+    cancelRedundantExactTasks() { assert.ok(active, 'warm owner still uses this query pool'); },
+    async completeAtomicTasks() {
+      assert.equal(warmSteps, 2, 'every issuer must finish before the pool closes');
+      active = false; closed = true; return 2;
+    }
+  } as never).run('clearra pc minimals --patterns P7', { ...plan, workerCount: 2 }, () => {});
+  assert.ok(closed);
+}
+
 function verifierFlags(value: boolean) {
   return {
     candidatesVerified: value,
