@@ -17,6 +17,7 @@ import {
   validateCanonicalDiscordCatalog,
   validateDiscordCatalogRestoreReport,
   validateDiscordCatalogSnapshot,
+  validateDiscordCatalogSyncReport,
 } from "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
 
 export const DISCORD_CATALOG_RECOVERY_AUTHORITY_SCHEMA_ID =
@@ -86,6 +87,32 @@ export async function verifyDiscordCatalogRecoveryAuthority(path, options) {
   return Object.freeze({ report, fileSha256: input.fileSha256 });
 }
 
+// The intended command payload and Discord's server-defaulted readback have
+// separate digests. Only a completed sync bound to this exact durable preimage
+// may authorize its observed digest for recovery.
+export function validateDiscordCatalogRecoverySyncReport(report, authority) {
+  validateDiscordCatalogSyncReport(report, {
+    expectedSourceCommit: authority.source_commit,
+    expectedApplicationId: authority.application_id,
+    expectedCatalogFileSha256: authority.desired_catalog_file_sha256,
+    expectedSyncAuthorityFileSha256: authority.sync_authority_file_sha256,
+  });
+  if (
+    report.expected_catalog_sha256 !== authority.desired_catalog_sha256 ||
+    report.command_sync_authority_sha256 !== authority.sync_authority_sha256 ||
+    report.prior_snapshot_sha256 !== authority.prior_snapshot_sha256 ||
+    report.prior_catalog_sha256 !== authority.prior_catalog_sha256 ||
+    report.current_before_sha256 !== authority.prior_catalog_sha256
+  ) throw new Error("Discord recovery sync report differs from its durable authority");
+  return report;
+}
+
+async function readRecoverySyncReport(path, authority) {
+  const input = await readCanonicalFile(path, "Discord recovery sync report");
+  validateDiscordCatalogRecoverySyncReport(input.value, authority);
+  return input;
+}
+
 export async function sealDiscordCatalogRecoveryDisposition(options) {
   const identity = {
     repository: requirePattern(options?.repository, REPOSITORY, "repository"),
@@ -142,11 +169,19 @@ export async function sealDiscordCatalogRecoveryDisposition(options) {
   });
   const authority = authorityInput.report;
   const restore = restoreInput.value;
+  const sync = options?.syncReport === undefined ? null :
+    await readRecoverySyncReport(options.syncReport, authority);
+  const allowedPreimages = [authority.desired_catalog_sha256, authority.prior_catalog_sha256];
+  if (sync !== null) {
+    allowedPreimages.push(sync.value.current_after_sha256);
+    if (Date.parse(sync.value.ended_at) > Date.parse(restore.started_at)) {
+      throw new Error("Discord recovery sync report postdates the restore");
+    }
+  }
   if (
     restore.prior_snapshot_sha256 !== authority.prior_snapshot_sha256 ||
     restore.prior_catalog_sha256 !== authority.prior_catalog_sha256 ||
-    ![authority.desired_catalog_sha256, authority.prior_catalog_sha256]
-      .includes(restore.current_before_sha256) ||
+    !allowedPreimages.includes(restore.current_before_sha256) ||
     restore.current_after_sha256 !== authority.prior_catalog_sha256
   ) throw new Error("Discord catalog recovery disposition is not an exact digest-guarded restore");
   return Object.freeze(sealCanonicalReport({
@@ -169,10 +204,16 @@ export async function sealDiscordCatalogRecoveryDisposition(options) {
     restore_report_file_sha256: restoreInput.fileSha256,
     current_before_sha256: restore.current_before_sha256,
     current_after_sha256: restore.current_after_sha256,
+    ...(sync === null ? {} : {
+      discord_sync_report: sync.value,
+      discord_sync_report_file_sha256: sync.fileSha256,
+      discord_sync_recovery_authority: authority,
+    }),
   }));
 }
 
 export function validateDiscordCatalogRecoveryDisposition(report, expected = {}) {
+  const hasSync = Object.hasOwn(report ?? {}, "discord_sync_report");
   requireExactKeys(report, [
     "schema_id", "repository", "source_commit", "original_workflow_run_id",
     "original_workflow_run_attempt", "recovery_workflow_run_id",
@@ -181,6 +222,10 @@ export function validateDiscordCatalogRecoveryDisposition(report, expected = {})
     "catalog_authority_file_sha256", "prior_snapshot_sha256", "prior_catalog_sha256",
     "desired_catalog_sha256", "restore_report_sha256", "restore_report_file_sha256",
     "current_before_sha256", "current_after_sha256", "report_sha256",
+    ...(hasSync ? [
+      "discord_sync_report", "discord_sync_report_file_sha256",
+      "discord_sync_recovery_authority",
+    ] : []),
   ], "Discord catalog recovery disposition");
   verifyCanonicalReportHash(report, "Discord catalog recovery disposition");
   if (report.schema_id !== DISCORD_CATALOG_RECOVERY_DISPOSITION_SCHEMA_ID) {
@@ -225,9 +270,29 @@ export function validateDiscordCatalogRecoveryDisposition(report, expected = {})
     "prior_catalog_sha256", "desired_catalog_sha256", "restore_report_sha256",
     "restore_report_file_sha256", "current_before_sha256", "current_after_sha256",
   ]) requirePattern(report[field], SHA256, `catalog disposition ${field}`);
+  const allowedPreimages = [report.desired_catalog_sha256, report.prior_catalog_sha256];
+  if (hasSync) {
+    const authority = report.discord_sync_recovery_authority;
+    verifyCanonicalReportHash(authority, "Discord recovery sync authority");
+    if (
+      authority.report_sha256 !== report.catalog_authority_sha256 ||
+      authority.source_commit !== report.source_commit ||
+      authority.workflow_run_id !== report.original_workflow_run_id ||
+      authority.workflow_run_attempt !== report.original_workflow_run_attempt ||
+      authority.desired_catalog_sha256 !== report.desired_catalog_sha256 ||
+      authority.prior_catalog_sha256 !== report.prior_catalog_sha256 ||
+      authority.prior_snapshot_sha256 !== report.prior_snapshot_sha256
+    ) throw new Error("Discord recovery sync authority differs from the disposition");
+    validateDiscordCatalogRecoverySyncReport(report.discord_sync_report, authority);
+    const syncFileHash = createHash("sha256")
+      .update(`${canonicalJson(report.discord_sync_report)}\n`).digest("hex");
+    if (syncFileHash !== report.discord_sync_report_file_sha256) {
+      throw new Error("Discord recovery sync report bytes differ from its digest");
+    }
+    allowedPreimages.push(report.discord_sync_report.current_after_sha256);
+  }
   if (
-    ![report.desired_catalog_sha256, report.prior_catalog_sha256]
-      .includes(report.current_before_sha256) ||
+    !allowedPreimages.includes(report.current_before_sha256) ||
     report.current_after_sha256 !== report.prior_catalog_sha256
   ) throw new Error("Discord catalog recovery disposition digest guard is invalid");
   return report;
@@ -292,6 +357,7 @@ function parseCli() {
       "prior-snapshot": { type: "string" },
       "desired-catalog": { type: "string" },
       "sync-authority": { type: "string" },
+      "sync-report": { type: "string" },
       "original-workflow-run-id": { type: "string" },
       "original-workflow-run-attempt": { type: "string" },
       "recovery-workflow-run-id": { type: "string" },
@@ -311,8 +377,8 @@ function parseCli() {
 
 async function main() {
   const { values, positionals } = parseCli();
-  if (positionals.length !== 1 || !["seal", "verify", "seal-disposition"].includes(positionals[0])) {
-    throw new Error("Discord catalog recovery operation must be seal, verify, or seal-disposition");
+  if (positionals.length !== 1 || !["seal", "verify", "verify-sync", "seal-disposition"].includes(positionals[0])) {
+    throw new Error("Discord catalog recovery operation must be seal, verify, verify-sync, or seal-disposition");
   }
   const options = {
     repository: values.repository,
@@ -323,6 +389,7 @@ async function main() {
     priorSnapshot: values["prior-snapshot"],
     desiredCatalog: values["desired-catalog"],
     syncAuthority: values["sync-authority"],
+    syncReport: values["sync-report"],
   };
   if (positionals[0] === "seal") {
     await writeCanonicalNew(values.output, await sealDiscordCatalogRecoveryAuthority(options));
@@ -330,6 +397,10 @@ async function main() {
   } else if (positionals[0] === "verify") {
     await verifyDiscordCatalogRecoveryAuthority(values.report, options);
     process.stdout.write("discord_catalog_recovery=verified\n");
+  } else if (positionals[0] === "verify-sync") {
+    const authority = await verifyDiscordCatalogRecoveryAuthority(values.report, options);
+    const sync = await readRecoverySyncReport(options.syncReport, authority.report);
+    process.stdout.write(`${sync.value.current_after_sha256}\n`);
   } else {
     const disposition = await sealDiscordCatalogRecoveryDisposition({
       ...options,

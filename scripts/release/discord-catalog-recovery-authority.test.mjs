@@ -133,6 +133,63 @@ test("catalog recovery authority binds the exact durable preimage and desired ca
       () => validateDiscordCatalogRecoveryDisposition(disposition, { required: false }),
       /requirement differs/u,
     );
+    // Discord may add writable defaults without changing the intended catalog.
+    // Recovery must use the exact recorded readback and retain that proof.
+    const observed = createCanonicalDiscordCatalog({
+      sourceCommit: SOURCE,
+      commands: catalog.commands.map((command) => ({ nsfw: false, ...command })),
+    });
+    assert.notEqual(observed.catalog_sha256, catalog.catalog_sha256);
+    const syncReport = sealCanonicalReport({
+      schema_id: "clearra.discord.command-catalog-sync.v1",
+      source_commit: SOURCE,
+      application_id: APPLICATION,
+      started_at: "2026-08-31T00:00:10.000Z",
+      ended_at: "2026-08-31T00:00:11.000Z",
+      status: "synchronized",
+      changed: true,
+      command_count: catalog.command_count,
+      expected_catalog_sha256: catalog.catalog_sha256,
+      accepted_run_id: syncAuthority.accepted_run_id,
+      accepted_run_attempt: syncAuthority.accepted_run_attempt,
+      accepted_ctk3_manifest_sha256: syncAuthority.accepted_ctk3_manifest_sha256,
+      canonical_acceptance_evidence_sha256: syncAuthority.canonical_acceptance_evidence_sha256,
+      canonical_acceptance_evidence_file_sha256: syncAuthority.canonical_acceptance_evidence_file_sha256,
+      command_catalog_file_sha256: catalogFileSha256,
+      command_sync_authority_sha256: syncAuthority.report_sha256,
+      command_sync_authority_file_sha256: report.sync_authority_file_sha256,
+      prior_snapshot_sha256: snapshot.snapshot_sha256,
+      prior_catalog_sha256: snapshot.catalog_sha256,
+      current_before_sha256: snapshot.catalog_sha256,
+      current_after_sha256: observed.catalog_sha256,
+    });
+    const syncReportPath = join(root, "discord-sync-report.json");
+    await writeFile(syncReportPath, `${canonicalJson(syncReport)}\n`);
+    const { report_sha256: ignoredRestoreHash, ...restoreFields } = restore;
+    void ignoredRestoreHash;
+    const observedRestore = sealCanonicalReport({
+      ...restoreFields,
+      expected_current_sha256: observed.catalog_sha256,
+      current_before_sha256: observed.catalog_sha256,
+    });
+    await writeFile(restorePath, `${canonicalJson(observedRestore)}\n`);
+    await assert.rejects(
+      sealDiscordCatalogRecoveryDisposition(dispositionOptions),
+      /digest-guarded restore/u,
+    );
+    const observedDisposition = await sealDiscordCatalogRecoveryDisposition({
+      ...dispositionOptions, syncReport: syncReportPath,
+    });
+    validateDiscordCatalogRecoveryDisposition(observedDisposition, {
+      artifactId: "77", artifactDigest: dispositionOptions.artifactDigest, required: true,
+    });
+    assert.equal(observedDisposition.current_before_sha256, observed.catalog_sha256);
+    const { report_sha256: ignoredObservedHash, ...observedFields } = observedDisposition;
+    void ignoredObservedHash;
+    assert.throws(() => validateDiscordCatalogRecoveryDisposition(
+      sealCanonicalReport({ ...observedFields, current_before_sha256: "9".repeat(64) }),
+      { artifactId: "77", artifactDigest: dispositionOptions.artifactDigest, required: true },
+    ), /digest guard/u);
     await writeFile(catalogPath, `${canonicalJson({ ...catalog, catalog_sha256: "e".repeat(64) })}\n`);
     await assert.rejects(
       verifyDiscordCatalogRecoveryAuthority(reportPath, options),

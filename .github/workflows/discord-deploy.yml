@@ -1470,6 +1470,9 @@ jobs:
           [[ -f sync/discord-catalog.json ]] || { echo 'catalog compensation lacks desired catalog' >&2; exit 2; }
           desired_digest="$(jq -r .catalog_sha256 sync/discord-catalog.json)"
           prior_digest="$(jq -r .catalog_sha256 sync/discord-prior-catalog.json)"
+          if [[ -f sync/discord-sync-report.json ]]; then
+            desired_digest="$(jq -r .current_after_sha256 sync/discord-sync-report.json)"
+          fi
           [[ "$desired_digest" =~ ^[0-9a-f]{64}$ && "$prior_digest" =~ ^[0-9a-f]{64}$ ]] || {
             echo 'catalog compensation digest authority is invalid' >&2
             exit 2

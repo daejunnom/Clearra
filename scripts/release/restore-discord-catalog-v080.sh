@@ -67,18 +67,63 @@ node scripts/release/discord-catalog-recovery-authority.mjs verify \
   --sync-authority "$input/discord-sync-authority.json" \
   --report "$input/discord-catalog-recovery-authority.json"
 
+desired="$(jq -r .catalog_sha256 "$input/discord-catalog.json")"
+prior="$(jq -r .catalog_sha256 "$input/discord-prior-catalog.json")"
+[[ "$desired" =~ ^[0-9a-f]{64}$ && "$prior" =~ ^[0-9a-f]{64}$ ]]
+expected="$desired"
+sync_args=()
+# A completed sync records Discord's exact server-defaulted state. Recover that
+# preimage from the original attempt's immutable artifact, never from live state
+# or from an operator-supplied digest. Without it the legacy guard stays strict.
+sync_name="discord-sync-inputs-$SOURCE_COMMIT-run-$ORIGINAL_RUN_ID-attempt-$ORIGINAL_RUN_ATTEMPT"
+artifact_list="$RUNNER_TEMP/discord-recovery-protected-authority/original-artifacts.json"
+sync_count="$(jq --arg name "$sync_name" '[.artifacts[] | select(.name == $name)] | length' "$artifact_list")"
+[[ "$sync_count" == 0 || "$sync_count" == 1 ]] || {
+  echo 'Discord recovery has ambiguous completed sync artifacts' >&2
+  exit 2
+}
+if [[ "$sync_count" == 1 ]]; then
+  sync_root="$RUNNER_TEMP/discord-catalog-sync-$generation"
+  [[ ! -e "$sync_root" && ! -L "$sync_root" ]]
+  mkdir "$sync_root"
+  jq -e --arg name "$sync_name" --arg source "$SOURCE_COMMIT" --arg run "$ORIGINAL_RUN_ID" '
+    .artifacts[] | select(.name == $name) |
+    select(.expired == false and .size_in_bytes > 0 and .size_in_bytes <= 20971520) |
+    select((.workflow_run.id | tostring) == $run and .workflow_run.head_sha == $source) |
+    select(.workflow_run.head_branch == "main") |
+    select(.workflow_run.head_repository_id == .workflow_run.repository_id)
+  ' "$artifact_list" > "$sync_root/artifact.json"
+  sync_id="$(jq -r .id "$sync_root/artifact.json")"
+  sync_digest="$(jq -r .digest "$sync_root/artifact.json")"
+  [[ "$sync_id" =~ ^[1-9][0-9]*$ && "$sync_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+  timeout --signal=TERM --kill-after=5s 60s gh api \
+    "repos/$GITHUB_REPOSITORY/actions/artifacts/$sync_id/zip" > "$sync_root/sync.zip"
+  printf '%s  %s\n' "${sync_digest#sha256:}" "$sync_root/sync.zip" | sha256sum --check --status
+  sync_members="$(unzip -Z1 "$sync_root/sync.zip" | awk '$0 == "discord-sync-report.json" { count++ } END { print count+0 }')"
+  [[ "$sync_members" == 0 || "$sync_members" == 1 ]]
+  if [[ "$sync_members" == 1 ]]; then
+    unzip -p "$sync_root/sync.zip" discord-sync-report.json > "$sync_root/discord-sync-report.json"
+    sync_args=(--sync-report "$sync_root/discord-sync-report.json")
+    expected="$(node scripts/release/discord-catalog-recovery-authority.mjs verify-sync \
+      --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
+      --workflow-run-id "$ORIGINAL_RUN_ID" --workflow-run-attempt "$ORIGINAL_RUN_ATTEMPT" \
+      --application-id "$DISCORD_APPLICATION_ID" \
+      --prior-snapshot "$input/discord-prior-catalog.json" \
+      --desired-catalog "$input/discord-catalog.json" \
+      --sync-authority "$input/discord-sync-authority.json" \
+      --report "$input/discord-catalog-recovery-authority.json" "${sync_args[@]}")"
+    [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+  fi
+fi
 token="$(gcloud secrets versions access latest --secret=discord-bot-token --project="$GCP_PROJECT_ID")"
 [[ -n "$token" ]] || { echo 'Discord token access returned empty during recovery' >&2; exit 2; }
 echo "::add-mask::$token"
 trap 'unset token' EXIT INT TERM
-desired="$(jq -r .catalog_sha256 "$input/discord-catalog.json")"
-prior="$(jq -r .catalog_sha256 "$input/discord-prior-catalog.json")"
-[[ "$desired" =~ ^[0-9a-f]{64}$ && "$prior" =~ ^[0-9a-f]{64}$ ]]
 DISCORD_TOKEN="$token" node \
   apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs restore \
   --source-commit "$SOURCE_COMMIT" --application-id "$DISCORD_APPLICATION_ID" \
   --prior-snapshot "$input/discord-prior-catalog.json" \
-  --expected-current-digest "$desired" --also-allow-current-digest "$prior" \
+  --expected-current-digest "$expected" --also-allow-current-digest "$prior" \
   --output "$restore"
 unset token
 trap - EXIT INT TERM
@@ -95,4 +140,4 @@ node scripts/release/discord-catalog-recovery-authority.mjs seal-disposition \
   --desired-catalog "$input/discord-catalog.json" \
   --sync-authority "$input/discord-sync-authority.json" \
   --authority-report "$input/discord-catalog-recovery-authority.json" \
-  --restore-report "$restore" --output "$disposition"
+  --restore-report "$restore" "${sync_args[@]}" --output "$disposition"

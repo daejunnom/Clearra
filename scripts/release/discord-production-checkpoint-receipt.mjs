@@ -145,12 +145,13 @@ export async function createDiscordProductionCheckpointCandidate(options) {
     expectedCatalogFileSha256: desired.fileSha256,
     expectedSyncAuthority: syncAuthority.value,
     expectedSyncAuthorityFileSha256: syncAuthority.fileSha256,
+    expectedPriorSnapshot: prior.value,
   });
   if (
     syncReport.value.prior_snapshot_sha256 !== prior.value.snapshot_sha256 ||
     syncReport.value.prior_catalog_sha256 !== prior.value.catalog_sha256 ||
     syncReport.value.current_before_sha256 !== prior.value.catalog_sha256 ||
-    syncReport.value.current_after_sha256 !== desired.value.catalog_sha256
+    syncReport.value.expected_catalog_sha256 !== desired.value.catalog_sha256
   ) throw new Error("Discord checkpoint catalog disposition differs from its exact preimage");
 
   const observation = await readCanonicalFile(
@@ -395,8 +396,17 @@ function validateCatalogDisposition(value, candidate) {
     value.discord_sync_authority?.report_sha256 !==
       value.discord_sync_report?.command_sync_authority_sha256 ||
     value.discord_sync_report?.current_before_sha256 !== value.prior_catalog_sha256 ||
-    value.discord_sync_report?.current_after_sha256 !== value.desired_catalog_sha256
+    value.discord_sync_report?.expected_catalog_sha256 !== value.desired_catalog_sha256
   ) throw new Error("Discord production catalog disposition is inconsistent");
+  const discord = candidate.production_observation.surfaces
+    .find(({ surface }) => surface === "discord");
+  if (
+    discord?.identity.command_catalog_readback_sha256 !==
+      value.discord_sync_report.current_after_sha256 ||
+    discord.identity.command_catalog_sha256 !== value.desired_catalog_sha256 ||
+    discord.identity.command_catalog_sync_report_sha256 !==
+      value.discord_sync_report.report_sha256
+  ) throw new Error("Discord checkpoint observation differs from its synchronized catalog");
   for (const field of [
     "catalog_recovery_authority_file_sha256", "prior_snapshot_sha256",
     "prior_catalog_sha256", "prior_snapshot_file_sha256", "desired_catalog_sha256",

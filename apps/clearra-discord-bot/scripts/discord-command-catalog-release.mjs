@@ -308,6 +308,7 @@ export async function synchronizeDiscordCatalogRelease({
     expectedCatalogFileSha256: catalogFileHash,
     expectedSyncAuthority: syncAuthority,
     expectedSyncAuthorityFileSha256: authorityFileHash,
+    expectedPriorSnapshot: priorSnapshot,
   });
   return Object.freeze({ priorSnapshot, report });
 }
@@ -321,6 +322,7 @@ export function validateDiscordCatalogSyncReport(
     expectedCatalogFileSha256,
     expectedSyncAuthority,
     expectedSyncAuthorityFileSha256,
+    expectedPriorSnapshot,
   } = {},
 ) {
   requireExactKeys(value, [
@@ -401,6 +403,16 @@ export function validateDiscordCatalogSyncReport(
   }
   if (value.current_before_sha256 !== value.prior_catalog_sha256) {
     throw new Error("Discord sync prior snapshot is not its exact current preimage");
+  }
+  if (expectedPriorSnapshot !== undefined) {
+    validateDiscordCatalogSnapshot(expectedPriorSnapshot, {
+      expectedSourceCommit: value.source_commit,
+      expectedApplicationId: value.application_id,
+    });
+    if (
+      value.prior_snapshot_sha256 !== expectedPriorSnapshot.snapshot_sha256 ||
+      value.prior_catalog_sha256 !== expectedPriorSnapshot.catalog_sha256
+    ) throw new Error("Discord sync report differs from its durable prior snapshot");
   }
   if (expectedCatalog !== undefined) {
     validateCanonicalDiscordCatalog(expectedCatalog, value.source_commit);

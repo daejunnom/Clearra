@@ -403,12 +403,16 @@ jobs:
         if: always()
         id: catalog_restore
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: bash scripts/release/restore-discord-catalog-v080.sh catalog-1
       - name: Retry catalog recovery after an ordinary failure or cancellation
         if: always() && steps.catalog_restore.outcome != 'success'
         id: catalog_retry
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: bash scripts/release/restore-discord-catalog-v080.sh catalog-2
       - name: Re-authenticate rollback-only identity after catalog recovery

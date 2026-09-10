@@ -194,14 +194,6 @@ export async function candidateFixture(prerequisiteProof) {
     .find(({ job_name: name }) => name === "sync-observe").steps
     .find(({ name }) => name ===
       "Authority-bound global sync and sole canonical four-surface observation").started_at;
-  const observation = await observeProductionSurfaces({
-    sourceCommit: SOURCE,
-    durationSeconds: 1200,
-    intervalSeconds: 1200,
-    clock: fakeClock(observationStartedAt),
-    probes: probeSet(observationStartedAt),
-    probeSpec: probeSpec(),
-  });
   const clearance = sealCanonicalReport({
     schema_id: "clearra.discord-recovery-debt-clearance.v1",
     repository: REPOSITORY,
@@ -218,7 +210,16 @@ export async function candidateFixture(prerequisiteProof) {
   const syncReport = sealCanonicalReport({
     command_sync_authority_sha256: syncAuthority.report_sha256,
     current_before_sha256: priorCatalogSha,
-    current_after_sha256: desiredCatalogSha,
+    expected_catalog_sha256: desiredCatalogSha,
+    current_after_sha256: "b".repeat(64),
+  });
+  const observation = await observeProductionSurfaces({
+    sourceCommit: SOURCE,
+    durationSeconds: 1200,
+    intervalSeconds: 1200,
+    clock: fakeClock(observationStartedAt),
+    probes: probeSet(observationStartedAt, syncReport),
+    probeSpec: probeSpec(),
   });
   const catalogAuthority = sealCanonicalReport({
     source_commit: SOURCE,
@@ -307,13 +308,14 @@ function probeSpec() {
   };
 }
 
-function probeSet(observationStartedAt) {
+function probeSet(observationStartedAt, syncReport) {
   const identities = {
     discord: {
       source_commit: SOURCE, application_id: APPLICATION_ID,
-      command_catalog_sha256: HASH, command_catalog_prior_snapshot_sha256: "a".repeat(64),
+      command_catalog_sha256: syncReport.expected_catalog_sha256,
+      command_catalog_prior_snapshot_sha256: "a".repeat(64),
       command_catalog_readback_sha256: "b".repeat(64),
-      command_catalog_sync_report_sha256: "c".repeat(64),
+      command_catalog_sync_report_sha256: syncReport.report_sha256,
       accepted_run_id: ACCEPTED_RUN_ID, accepted_run_attempt: ACCEPTED_RUN_ATTEMPT,
       accepted_ctk3_manifest_sha256: "1".repeat(64),
       canonical_acceptance_evidence_sha256: "2".repeat(64),
