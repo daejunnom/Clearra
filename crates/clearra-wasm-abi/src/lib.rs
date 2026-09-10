@@ -463,17 +463,23 @@ impl WasmAbiState {
                 false
             }
         };
+        self.has_external_compute_owner() || profile_active
+    }
+
+    fn has_external_compute_owner(&self) -> bool {
         self.distributed_coordinator.is_some()
             || self.distributed_ready_result.is_some()
             || self.distributed_completion.is_some()
             || self.minimum_parallel_worker.is_some()
             || self.distributed_verifier.is_some()
             || self.gpu_warmup.is_some()
-            || profile_active
     }
 
     fn has_worker_job_start_conflict(&self) -> bool {
-        self.transfer_input.capacity() != 0 || self.has_external_worker_owner()
+        // A profile observes the serial job; it does not compete with that
+        // job for the executor. Keep it counted by governed-output admission,
+        // while still rejecting actual distributed/transfer owners here.
+        self.transfer_input.capacity() != 0 || self.has_external_compute_owner()
     }
 
     fn has_worker_advance_conflict(&self) -> bool {
@@ -3535,7 +3541,7 @@ pub extern "C" fn clearra_wasm_minimum_ab_policy(flags: u32) -> i32 {
             || state.distributed_coordinator.is_some()
             || state.distributed_completion.is_some()
             || state.minimum_parallel_worker.is_some()
-            || flags > 7
+            || flags > 31
         {
             return ABI_ERROR;
         }

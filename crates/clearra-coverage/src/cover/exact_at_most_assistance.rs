@@ -578,9 +578,11 @@ mod tests {
             2,
         )
         .unwrap();
-        let mut core =
-            ExactAtMostCoordinator::prepare(query.clone(), 2, &mut |_| Ok(()), &mut || false)
-                .unwrap();
+        // This checks closing one of several roots, independently of the
+        // production policy for the queue depth of a tiny matrix.
+        let mut core = ExactAtMostCoordinator::prepare_with_branch_order(
+            query.clone(), 2, false, &mut |_| Ok(()), &mut || false,
+        ).unwrap();
         let roots = core.tasks.clone();
         assert!(roots.len() > 1);
         assert!(
