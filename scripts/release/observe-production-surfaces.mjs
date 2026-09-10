@@ -7,6 +7,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as waitWithSignal } from "node:timers/promises";
 
 import {
   canonicalJson,
@@ -59,6 +60,8 @@ export async function observeProductionSurfaces({
   durationSeconds = PRODUCTION_OBSERVATION_SECONDS,
   intervalSeconds = 30,
   clock = systemClock,
+  guard,
+  signal,
 }) {
   const commit = requireSourceCommit(sourceCommit);
   const probeMap = validateProbeFunctions(probes);
@@ -95,13 +98,14 @@ export async function observeProductionSurfaces({
   const maximumSamples = Math.ceil(durationSeconds / intervalSeconds) + 1;
 
   for (;;) {
+    signal?.throwIfAborted();
     const controller = new AbortController();
     const pending = REQUIRED_SURFACES.map(async (surface) => {
       const result = await probeMap.get(surface)({
         surface,
         sourceCommit: commit,
         sequence,
-        signal: controller.signal,
+        signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
       });
       return validateSurfaceProbeResult(result, {
         expectedSurface: surface,
@@ -171,7 +175,11 @@ export async function observeProductionSurfaces({
       throw new Error("production observation exceeded its bounded sample count");
     }
     const remainingMilliseconds = durationSeconds * 1000 - elapsedMilliseconds;
-    await clock.wait(Math.min(intervalSeconds * 1000, remainingMilliseconds));
+    await waitForObservation({
+      milliseconds: Math.min(intervalSeconds * 1000, remainingMilliseconds),
+      clock, signal, guard,
+      baselines: new Map(results.map((result) => [result.surface, result])),
+    });
   }
 
   const endedMilliseconds = lastObservedMilliseconds;
@@ -208,6 +216,62 @@ export async function observeProductionSurfaces({
     expectedObservationCount: observations.get(REQUIRED_SURFACES[0]).length,
   });
   return report;
+}
+
+// Guards can reject early; only the two authoritative samples can accept a release.
+export async function waitForObservation({ milliseconds, clock = systemClock, signal, guard, baselines }) {
+  if (!guard) return clock.wait(milliseconds, signal);
+  const now = () => clock.elapsed?.() ?? clock.now();
+  const start = now();
+  const deadline = start + milliseconds;
+  const maximumTicks = Math.ceil(milliseconds / 60_000) + 1;
+  for (let tick = 0; tick < maximumTicks; tick += 1) {
+    signal?.throwIfAborted();
+    const remaining = deadline - now();
+    if (remaining <= 0) return;
+    await clock.wait(Math.max(0, Math.min(deadline, start + (tick + 1) * 60_000) - now()), signal);
+    signal?.throwIfAborted();
+    if (now() >= deadline) return;
+    await guard({ baselines, sequence: tick + 1, signal });
+  }
+  throw new Error("production observation guard exceeded its bounded wait count");
+}
+
+// Revalidate an already completed observation before retrying evidence I/O.
+// This does not create another observation window or authorize a release.
+export async function verifyProductionObservationStillCurrent({ report, spec, probes, signal }) {
+  validateProductionObservationReport(report, { expectedSourceCommit: spec.source_commit });
+  validateProductionProbeSpec(spec, report.source_commit);
+  if (report.probe_spec_sha256 !== canonicalSha256(spec)) {
+    throw new Error("evidence retry probe spec differs from the completed observation");
+  }
+  const adapters = spec.probes.map(({ surface, sha256 }) => ({ surface, sha256 }));
+  if (canonicalJson(report.probe_adapters) !== canonicalJson(adapters)) {
+    throw new Error("evidence retry adapter authority differs from the observation");
+  }
+  const map = validateProbeFunctions(probes);
+  const controller = new AbortController();
+  const pending = report.surfaces.map(async (prior) => {
+    const result = await map.get(prior.surface)({
+      surface: prior.surface, sequence: 2, sourceCommit: report.source_commit,
+      signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+    });
+    validateSurfaceProbeResult(result, {
+      expectedSurface: prior.surface, expectedSourceCommit: report.source_commit,
+    });
+    if (canonicalJson(result.identity) !== canonicalJson(prior.identity)) {
+      throw new Error(`${prior.surface} changed after the completed observation`);
+    }
+    if (prior.surface === "oracle") {
+      validateOracleObservationSample({
+        identity: result.identity, priorObservation: prior.observations.at(-1),
+        observationStartedAt: report.started_at,
+        observation: { observed_at: new Date().toISOString(), freshness: result.freshness },
+      });
+    }
+  });
+  try { await Promise.all(pending); }
+  catch (error) { controller.abort(); await Promise.allSettled(pending); throw error; }
 }
 
 export function validateProductionObservationReport(
@@ -1190,8 +1254,7 @@ function assertExactIdentitySet(actual, expected, label) {
 const systemClock = Object.freeze({
   now: () => Date.now(),
   elapsed: () => performance.now(),
-  wait: (milliseconds) => new Promise((resolvePromise) =>
-    setTimeout(resolvePromise, milliseconds)),
+  wait: (milliseconds, signal) => waitWithSignal(milliseconds, undefined, { signal }),
 });
 
 function parseCliArguments(args) {
@@ -1231,13 +1294,24 @@ async function main() {
     );
   }
   const probes = await createCommandProbes(spec);
-  const report = await observeProductionSurfaces({
+  const { createProductionObservationGuard } = await import("./production-observation-guard.mjs");
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  process.on("SIGTERM", abort);
+  process.on("SIGINT", abort);
+  let report;
+  try { report = await observeProductionSurfaces({
     sourceCommit,
     probes,
     probeSpec: spec,
     durationSeconds: PRODUCTION_OBSERVATION_SECONDS,
     intervalSeconds: spec.interval_seconds,
-  });
+    guard: createProductionObservationGuard(),
+    signal: controller.signal,
+  }); } finally {
+    process.removeListener("SIGTERM", abort);
+    process.removeListener("SIGINT", abort);
+  }
   await writeCanonicalJsonNew(values["--output"], report);
   process.stdout.write(`${PRODUCTION_OBSERVATION_SCHEMA_ID} ${report.report_sha256}\n`);
 }

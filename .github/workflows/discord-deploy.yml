@@ -1260,8 +1260,11 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Authority-bound global sync and sole canonical four-surface observation
+        id: observation
         env:
           GH_TOKEN: ${{ github.token }}
+          CATALOG_ARTIFACT_ID: ${{ steps.catalog_recovery_artifact.outputs.artifact-id }}
+          CATALOG_ARTIFACT_DIGEST: ${{ steps.catalog_recovery_artifact.outputs.artifact-digest }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1324,6 +1327,7 @@ jobs:
             --sync-authority-file-sha256 "$sync_authority_sha" \
             --prior-snapshot "$GITHUB_WORKSPACE/sync/discord-prior-catalog.json" \
             --output "$GITHUB_WORKSPACE/sync/discord-sync-report.json"
+          node scripts/release/production-evidence-retry.mjs verify-inputs
           node scripts/release/create-production-probe-authority-v080.mjs \
             --source-commit "$SOURCE_COMMIT" --application-id "$DISCORD_APPLICATION_ID" \
             --project-id "$GCP_PROJECT_ID" \
@@ -1371,13 +1375,18 @@ jobs:
           unset token
       - name: Upload durable sync and sole canonical observation evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        timeout-minutes: ${{ steps.observation.outcome == 'success' && 5 || 1 }}
+        uses: ./.github/actions/upload-production-evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CATALOG_ARTIFACT_ID: ${{ steps.catalog_recovery_artifact.outputs.artifact-id }}
+          CATALOG_ARTIFACT_DIGEST: ${{ steps.catalog_recovery_artifact.outputs.artifact-digest }}
         with:
           name: discord-sync-inputs-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: sync
-          if-no-files-found: error
-          retention-days: 90
+          kind: sync
+          allow-retry: ${{ steps.observation.outcome == 'success' }}
       - name: Capture exact completed deployment prerequisites for the checkpoint candidate
+        timeout-minutes: 2
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -1388,13 +1397,16 @@ jobs:
           mkdir -p "$candidate_root"
           [[ ! -e "$job_list" && ! -L "$job_list" ]]
           verified=false
-          for poll in $(seq 1 30); do
+          for poll in $(seq 1 5); do
             temporary="$candidate_root/checkpoint-prerequisite-jobs.$poll.json"
-            gh api --paginate --slurp \
+            if ! timeout --signal=TERM --kill-after=5s 15s gh api --paginate --slurp \
               -H 'Accept: application/vnd.github+json' \
               -H 'X-GitHub-Api-Version: 2022-11-28' \
               "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?filter=all&per_page=100" \
-              > "$temporary"
+              > "$temporary"; then
+              sleep 2
+              continue
+            fi
             if node scripts/release/discord-production-checkpoint-receipt.mjs verify-prerequisites \
               --repository "$GITHUB_REPOSITORY" --source-commit "$SOURCE_COMMIT" \
               --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
@@ -1411,7 +1423,9 @@ jobs:
             exit 2
           }
       - name: Seal canonical Discord production checkpoint candidate
+        timeout-minutes: 5
         env:
+          GH_TOKEN: ${{ github.token }}
           CATALOG_ARTIFACT_ID: ${{ steps.catalog_recovery_artifact.outputs.artifact-id }}
           CATALOG_ARTIFACT_DIGEST: ${{ steps.catalog_recovery_artifact.outputs.artifact-digest }}
         shell: bash
@@ -1453,12 +1467,16 @@ jobs:
             --report "$candidate"
       - name: Upload canonical Discord production checkpoint candidate
         id: checkpoint_candidate_artifact
-        uses: actions/upload-artifact@v4
+        timeout-minutes: 5
+        uses: ./.github/actions/upload-production-evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CATALOG_ARTIFACT_ID: ${{ steps.catalog_recovery_artifact.outputs.artifact-id }}
+          CATALOG_ARTIFACT_DIGEST: ${{ steps.catalog_recovery_artifact.outputs.artifact-digest }}
         with:
           name: discord-production-checkpoint-candidate-${{ needs.authority.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: checkpoint-candidate/discord-production-checkpoint-candidate.json
-          if-no-files-found: error
-          retention-days: 90
+          kind: checkpoint
+          allow-retry: 'true'
       - name: Compensate catalog mutation if any later sync job step failed
         if: failure() || cancelled()
         shell: bash
@@ -1495,6 +1513,7 @@ jobs:
           unset token
           trap - EXIT INT TERM
       - name: Upload durable catalog compensation evidence
+        timeout-minutes: 1
         if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:

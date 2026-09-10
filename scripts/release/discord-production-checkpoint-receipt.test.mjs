@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -27,6 +29,7 @@ import {
   observeProductionSurfaces,
   PRODUCTION_SURFACE_PROBE_SCHEMA_ID,
 } from "./observe-production-surfaces.mjs";
+import { retryEvidenceWrite, snapshotEvidenceUpload } from "./production-evidence-retry.mjs";
 
 const REPOSITORY = "daejunnom/Clearra";
 export const SOURCE = "1".repeat(40);
@@ -38,6 +41,46 @@ const HASH = "a".repeat(64);
 const APPLICATION_ID = "223456789012345678";
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+test("evidence I/O retry requires a live revalidation and never retries invalid or uncertain state", async () => {
+  const calls = [];
+  const transient = () => Object.assign(new Error("temporary I/O"), { code: "EIO" });
+  const result = await retryEvidenceWrite(async () => {
+    calls.push("write");
+    if (calls.length === 1) throw transient();
+    return "sealed";
+  }, async () => { calls.push("verify-live"); }, { waitForRetry: async () => {} });
+  assert.equal(result, "sealed");
+  assert.deepEqual(calls, ["write", "verify-live", "write"]);
+  let writes = 0;
+  await assert.rejects(retryEvidenceWrite(async () => { writes += 1; throw transient(); },
+    async () => { throw new Error("live identity changed"); }, { waitForRetry: async () => {} }), /live identity changed/u);
+  assert.equal(writes, 1);
+  await assert.rejects(retryEvidenceWrite(async () => { throw new Error("invalid schema"); },
+    async () => { assert.fail("validation failures cannot request a retry"); }), /invalid schema/u);
+  writes = 0;
+  await assert.rejects(retryEvidenceWrite(async () => { writes += 1; throw transient(); },
+    async () => {}, { waitForRetry: async () => {} }), /temporary I\/O/u);
+  assert.equal(writes, 3);
+});
+
+test("upload snapshots bind bytes and reject foreign attempts or unexpected leaves", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "clearra-evidence-upload-"));
+  assert.ok(root.startsWith(join(tmpdir(), "clearra-evidence-upload-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "sync"));
+  const file = join(root, "sync", "discord-sync-report.json");
+  await writeFile(file, '{"example":1}\n');
+  const env = { SOURCE_COMMIT: SOURCE, GITHUB_RUN_ID: RUN_ID, GITHUB_RUN_ATTEMPT: RUN_ATTEMPT };
+  const name = `discord-sync-inputs-${SOURCE}-run-${RUN_ID}-attempt-${RUN_ATTEMPT}`;
+  const before = await snapshotEvidenceUpload(root, "sync", name, env);
+  await writeFile(file, '{"example":2}\n');
+  const after = await snapshotEvidenceUpload(root, "sync", name, env);
+  assert.notEqual(before.report_sha256, after.report_sha256);
+  await assert.rejects(snapshotEvidenceUpload(root, "sync", `${name}-foreign`, env), /active attempt/u);
+  await writeFile(join(root, "sync", "unexpected.json"), '{}\n');
+  await assert.rejects(snapshotEvidenceUpload(root, "sync", name, env), /unexpected leaves/u);
+});
+
 test("checkpoint prerequisite proof is exact, ordered, and stops before its own upload", () => {
   const jobs = checkpointJobList();
   const proof = validateDiscordCheckpointCandidatePrerequisites(jobs, identity());

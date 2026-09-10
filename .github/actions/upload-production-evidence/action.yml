@@ -1,0 +1,107 @@
+name: Upload production evidence with bounded recovery
+description: Retry only identical evidence after the completed deployment is revalidated.
+inputs:
+  name:
+    description: Exact source/run/attempt artifact name
+    required: true
+  kind:
+    description: sync or checkpoint
+    required: true
+  allow-retry:
+    description: Whether the authoritative observation step succeeded
+    default: 'false'
+outputs:
+  artifact-id:
+    description: ID of the successful immutable upload
+    value: ${{ steps.receipt.outputs.artifact-id }}
+  artifact-digest:
+    description: SHA-256 of the successful immutable upload
+    value: ${{ steps.receipt.outputs.artifact-digest }}
+runs:
+  using: composite
+  steps:
+    - id: snapshot
+      if: always()
+      shell: bash
+      env:
+        EVIDENCE_NAME: ${{ inputs.name }}
+        EVIDENCE_KIND: ${{ inputs.kind }}
+      run: |
+        set -euo pipefail
+        manifest="$RUNNER_TEMP/production-evidence-$EVIDENCE_KIND-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+        node scripts/release/production-evidence-retry.mjs prepare \
+          --kind "$EVIDENCE_KIND" --name "$EVIDENCE_NAME" --manifest "$manifest"
+        case "$EVIDENCE_KIND" in
+          sync) path=sync ;;
+          checkpoint) path=checkpoint-candidate/discord-production-checkpoint-candidate.json ;;
+          *) exit 2 ;;
+        esac
+        echo "path=$path" >> "$GITHUB_OUTPUT"
+        echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+    - id: first
+      if: ${{ always() && steps.snapshot.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ steps.snapshot.outputs.path }}
+        if-no-files-found: error
+        retention-days: 90
+    - id: revalidate_one
+      if: ${{ !cancelled() && inputs.allow-retry == 'true' && steps.first.outcome == 'failure' }}
+      shell: bash
+      env:
+        EVIDENCE_NAME: ${{ inputs.name }}
+        EVIDENCE_KIND: ${{ inputs.kind }}
+        EVIDENCE_MANIFEST: ${{ steps.snapshot.outputs.manifest }}
+      run: |
+        set -euo pipefail
+        sleep 2
+        timeout --signal=TERM --kill-after=5s 135s node scripts/release/production-evidence-retry.mjs retry \
+          --kind "$EVIDENCE_KIND" --name "$EVIDENCE_NAME" --manifest "$EVIDENCE_MANIFEST"
+    - id: second
+      if: ${{ !cancelled() && steps.revalidate_one.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ steps.snapshot.outputs.path }}
+        if-no-files-found: error
+        retention-days: 90
+        overwrite: true
+    - id: revalidate_two
+      if: ${{ !cancelled() && steps.second.outcome == 'failure' }}
+      shell: bash
+      env:
+        EVIDENCE_NAME: ${{ inputs.name }}
+        EVIDENCE_KIND: ${{ inputs.kind }}
+        EVIDENCE_MANIFEST: ${{ steps.snapshot.outputs.manifest }}
+      run: |
+        set -euo pipefail
+        sleep 4
+        timeout --signal=TERM --kill-after=5s 135s node scripts/release/production-evidence-retry.mjs retry \
+          --kind "$EVIDENCE_KIND" --name "$EVIDENCE_NAME" --manifest "$EVIDENCE_MANIFEST"
+    - id: third
+      if: ${{ !cancelled() && steps.revalidate_two.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ steps.snapshot.outputs.path }}
+        if-no-files-found: error
+        retention-days: 90
+        overwrite: true
+    - id: receipt
+      if: always()
+      shell: bash
+      env:
+        ARTIFACT_ID: ${{ (steps.third.outcome == 'success' && steps.third.outputs.artifact-id) || (steps.second.outcome == 'success' && steps.second.outputs.artifact-id) || (steps.first.outcome == 'success' && steps.first.outputs.artifact-id) }}
+        ARTIFACT_DIGEST: ${{ (steps.third.outcome == 'success' && steps.third.outputs.artifact-digest) || (steps.second.outcome == 'success' && steps.second.outputs.artifact-digest) || (steps.first.outcome == 'success' && steps.first.outputs.artifact-digest) }}
+      run: |
+        set -euo pipefail
+        [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || {
+          echo 'evidence_publication=failed release_status=blocked recovery_required=true' >&2
+          exit 2
+        }
+        echo "artifact-id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+        echo "artifact-digest=$ARTIFACT_DIGEST" >> "$GITHUB_OUTPUT"
