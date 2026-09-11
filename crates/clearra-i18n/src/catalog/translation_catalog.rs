@@ -23,9 +23,7 @@ impl TranslationCatalog {
     }
 }
 impl TranslationCatalog {
-    /// Japanese catalog tooling is available before product exposure so
-    /// translators can complete and validate it without enabling `--lang ja`.
-    pub fn japanese_draft() -> Self {
+    pub fn japanese() -> Self {
         Self::new(LanguageId::Ja)
     }
 }

@@ -33,7 +33,7 @@ test("locale preferences resolve explicit, channel, server, interaction, then En
       channelId: CHANNEL_ID,
       interactionLocale: "ja",
     }),
-    { locale: "en", source: "global" },
+    { locale: "ja", source: "interaction" },
   );
   await preferences.setGuild(GUILD_ID, "ko");
   assert.deepEqual(
@@ -83,15 +83,15 @@ test("language requests and Discord management permissions are bounded", () => {
       { name: "language", value: "ko" },
     ],
   }]), { action: "set", scope: "channel", locale: "ko" });
-  assert.throws(
-    () => readDiscordLanguageRequest([{
+  assert.deepEqual(
+    readDiscordLanguageRequest([{
       name: "set",
       options: [
         { name: "scope", value: "guild" },
         { name: "language", value: "ja" },
       ],
     }]),
-    /en or ko/,
+    { action: "set", scope: "guild", locale: "ja" },
   );
 
   const interaction = (permissions) => ({

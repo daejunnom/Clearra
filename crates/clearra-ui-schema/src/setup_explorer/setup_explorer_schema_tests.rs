@@ -204,12 +204,17 @@ fn setup_explorer_schema_exposes_language_selector_and_localized_columns() {
         schema.language_selector().default_language(),
         LanguageId::En
     );
-    assert_eq!(schema.language_selector().options().len(), 2);
+    assert_eq!(schema.language_selector().options().len(), 3);
     assert!(schema
         .language_selector()
         .options()
         .iter()
         .any(|option| option.id() == LanguageId::Ko && option.native_label() == "한국어"));
+    assert!(schema
+        .language_selector()
+        .options()
+        .iter()
+        .any(|option| option.id() == LanguageId::Ja && option.native_label() == "日本語"));
 
     let total_solution_count = schema
         .scenario_result_columns()

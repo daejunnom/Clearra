@@ -1,4 +1,5 @@
 import { JAPANESE_DISCORD_MESSAGES } from "./japanese-i18n-draft.mjs";
+import { japaneseValidationErrorText } from "./japanese-validation-draft.mjs";
 import {
   SUPPORTED_DISCORD_LOCALES,
   isReleasedDiscordLocale,
@@ -425,6 +426,7 @@ const CATALOGS = Object.freeze({
     "language.permission.channel": "채널 언어를 변경하려면 채널 관리 권한 또는 ClearraBot 관리자 권한이 필요합니다.",
     "language.permission.guild": "서버 언어를 변경하려면 서버 관리 권한 또는 ClearraBot 관리자 권한이 필요합니다.",
   }),
+  ja: Object.freeze(JAPANESE_DISCORD_MESSAGES),
 });
 
 export function normalizeDiscordLocale(value, fallback = DEFAULT_DISCORD_LOCALE) {
@@ -460,14 +462,15 @@ export class DiscordInputError extends Error {
 }
 
 export function validationErrorText(error, locale) {
+  const language = normalizeDiscordLocale(locale);
+  if (language === "ja") return japaneseValidationErrorText(error);
   if (error instanceof DiscordInputError) {
-    const language = normalizeDiscordLocale(locale);
     return t(language, "error.request", {
       message: t(language, `input.${error.code}`, error.details),
     });
   }
   const message = error instanceof Error ? error.message : String(error ?? "");
-  if (normalizeDiscordLocale(locale) === "en") {
+  if (language === "en") {
     return t("en", "error.request", { message: safePublicValidationMessage(message, "en") });
   }
   return t("ko", "error.request", {

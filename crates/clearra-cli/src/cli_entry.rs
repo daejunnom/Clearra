@@ -13,9 +13,33 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
+    let args = args.into_iter().map(Into::into).collect::<Vec<String>>();
+    let selected_language = args
+        .windows(2)
+        .find(|pair| pair[0] == "--lang")
+        .and_then(|pair| clearra_i18n::LanguageId::parse(&pair[1]));
+    let error_language = clearra_i18n::LanguageResolver::resolve_from_selected(selected_language);
     match CliParser::parse(args) {
         Ok(invocation) => route_invocation(invocation),
-        Err(error) => error.into_output(),
+        Err(error) => error.into_output().localized_for(error_language),
+    }
+}
+
+#[cfg(test)]
+mod japanese_i18n_tests {
+    use super::*;
+
+    #[test]
+    fn released_japanese_localizes_help_and_parse_failures() {
+        let help = run_with_args(["clearra", "--lang", "ja", "--help"]);
+        assert!(help.stdout().contains("Clearraコマンドライン"));
+        assert!(help.stdout().contains("使い方: clearra"));
+        assert!(!help.stdout().contains("usage: clearra"));
+
+        let invalid = run_with_args(["clearra", "--lang", "ja", "--format", "invalid", "--help"]);
+        assert!(invalid.stderr().starts_with("error "));
+        assert!(invalid.stderr().contains("出力形式"));
+        assert!(!invalid.stderr().contains("output format"));
     }
 }
 

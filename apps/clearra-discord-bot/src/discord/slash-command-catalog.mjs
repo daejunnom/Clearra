@@ -8,6 +8,12 @@ import {
   DISCORD_WIDE_FIELD_MAX_ROWS,
 } from "./field-limits.mjs";
 import {
+  formatJapaneseDiscordHelp,
+  japaneseDiscordChoiceName,
+  japaneseDiscordDescription,
+  japaneseDiscordName,
+} from "./japanese-discord-localization.mjs";
+import {
   activeDiscordGenericCompatibilityRoutes,
   activeDiscordSearchCapabilities,
   findProductCapability,
@@ -320,6 +326,9 @@ export function resolveSlashCommandInvocation(command, rawOptions = []) {
 
 export function formatSlashCommandHelp(requestedName, locale = "en") {
   const language = normalizeDiscordLocale(locale);
+  if (language === "ja") {
+    return formatJapaneseDiscordHelp(formatSlashCommandHelp(requestedName, "en"));
+  }
   const objectiveTarget = normalizeObjectiveHelpTarget(requestedName);
   if (objectiveTarget === "objective") return objectiveHelp(language);
   if (objectiveTarget?.startsWith("objective ")) {
@@ -462,9 +471,10 @@ function commandPath(entry) {
 export function localizedSlashCommandName(name, locale = "en") {
   const command = findSlashCommand(name);
   if (!command) return String(name ?? "");
-  return normalizeDiscordLocale(locale) === "ko"
-    ? KOREAN_COMMAND_NAMES[command.name] ?? command.name
-    : command.name;
+  const language = normalizeDiscordLocale(locale);
+  if (language === "ko") return KOREAN_COMMAND_NAMES[command.name] ?? command.name;
+  if (language === "ja") return japaneseDiscordName(command.name);
+  return command.name;
 }
 
 function capabilityVariant(capability, route) {
@@ -2608,18 +2618,25 @@ function koreanInputHelp(entry) {
 function localizedRegistration(entry) {
   const registration = entry.registration;
   const koreanName = KOREAN_COMMAND_NAMES[entry.name] ?? registration.name;
+  const japaneseName = japaneseDiscordName(registration.name);
   const hasDescription = typeof registration.description === "string";
   const koreanDescription = hasDescription
     ? localizedCommandDescription(entry, "ko")
     : null;
+  const japaneseDescription = hasDescription
+    ? japaneseDiscordDescription(registration.description)
+    : null;
   return Object.freeze({
     ...registration,
-    ...localizationProperty("name_localizations", registration.name, koreanName),
+    ...localizationProperty("name_localizations", registration.name, {
+      ko: koreanName,
+      ja: japaneseName,
+    }),
     ...(hasDescription
       ? localizationProperty(
           "description_localizations",
           registration.description,
-          koreanDescription,
+          { ko: koreanDescription, ja: japaneseDescription },
         )
       : {}),
     ...(registration.options
@@ -2689,7 +2706,9 @@ function compactLeafDescription(option) {
       const label = option.name_localizations?.[locale] ?? englishLabel;
       const description = locale === "ko"
         ? `${label} 설정; 자세한 내용은 /help 참고`
-        : `Set ${label}; see /help for details`;
+        : locale === "ja"
+          ? japaneseDiscordDescription(`Set ${englishLabel}; see /help for details`)
+          : `Set ${label}; see /help for details`;
       return [locale, description];
     }),
   );
@@ -2813,7 +2832,7 @@ function autocompleteMatchRank(choice, query, language) {
 }
 
 function searchableText(value, language) {
-  const locale = language === "ko" ? "ko-KR" : "en-US";
+  const locale = language === "ko" ? "ko-KR" : language === "ja" ? "ja-JP" : "en-US";
   return String(value ?? "").trim().toLocaleLowerCase(locale);
 }
 
@@ -2824,13 +2843,18 @@ function localizeRegistrationOption(option, commandName) {
   const koreanDescription = KOREAN_OPTION_DESCRIPTIONS[path] ??
     koreanRangeOptionDescription(option) ??
     KOREAN_OPTION_DESCRIPTIONS[option.name] ?? option.description;
+  const japaneseName = japaneseDiscordName(option.name);
+  const japaneseDescription = japaneseDiscordDescription(option.description);
   return Object.freeze({
     ...option,
-    ...localizationProperty("name_localizations", option.name, koreanName),
+    ...localizationProperty("name_localizations", option.name, {
+      ko: koreanName,
+      ja: japaneseName,
+    }),
     ...localizationProperty(
       "description_localizations",
       option.description,
-      koreanDescription,
+      { ko: koreanDescription, ja: japaneseDescription },
     ),
     ...(option.options
       ? { options: Object.freeze(option.options.map((nested) =>
@@ -2843,7 +2867,10 @@ function localizeRegistrationOption(option, commandName) {
           ...localizationProperty(
             "name_localizations",
             choice.name,
-            koreanChoiceName(choice.name, choice.value, path),
+            {
+              ko: koreanChoiceName(choice.name, choice.value, path),
+              ja: japaneseDiscordChoiceName(choice.name),
+            },
           ),
         }))) }
       : {}),
@@ -2864,8 +2891,11 @@ function koreanRangeOptionDescription(option) {
 }
 
 function localizationProperty(property, original, localized) {
-  return typeof localized === "string" && localized !== original
-    ? { [property]: Object.freeze({ ko: localized }) }
+  const entries = Object.entries(localized).filter(([, value]) =>
+    typeof value === "string" && value !== original
+  );
+  return entries.length > 0
+    ? { [property]: Object.freeze(Object.fromEntries(entries)) }
     : {};
 }
 
@@ -3184,6 +3214,7 @@ function koreanChoiceName(name, value, path = "") {
   }
   if (value === "en") return "영어";
   if (value === "ko") return "한국어";
+  if (value === "ja") return "일본어";
   if (value === "channel") return "채널";
   if (value === "guild") return "서버";
   if (value === "all") return "전체";

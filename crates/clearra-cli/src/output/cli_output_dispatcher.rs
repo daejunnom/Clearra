@@ -2,6 +2,7 @@ use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
 
 use std::io::{self, Write};
 
+use clearra_i18n::LanguageId;
 use clearra_output::artifact::ByteArtifactPublicationOutcome;
 use clearra_output::artifact::{ArtifactCommit, ArtifactPublicationOutcome};
 #[cfg(not(target_arch = "wasm32"))]
@@ -90,6 +91,18 @@ impl CliOutput {
         let warning = warning.into();
         self.warning_before = warning.clone();
         self.warning_after = warning;
+        self
+    }
+
+    pub(crate) fn localized_for(mut self, language: LanguageId) -> Self {
+        if language == LanguageId::Ja {
+            self.stdout = clearra_i18n::catalog::japanese_cli_draft::localize_text(&self.stdout);
+            self.stderr = clearra_i18n::catalog::japanese_cli_draft::localize_text(&self.stderr);
+            self.warning_before =
+                clearra_i18n::catalog::japanese_cli_draft::localize_text(&self.warning_before);
+            self.warning_after =
+                clearra_i18n::catalog::japanese_cli_draft::localize_text(&self.warning_after);
+        }
         self
     }
 

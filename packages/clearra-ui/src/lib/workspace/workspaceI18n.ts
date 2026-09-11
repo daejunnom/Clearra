@@ -7,6 +7,7 @@ import {
   matchReleasedWorkspaceLanguage,
   type WorkspaceLanguage
 } from '../i18n/languageManifest.ts';
+import { japaneseWorkspaceMessages } from '../i18n/japaneseWorkspaceCatalog.ts';
 
 export type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 
@@ -1338,7 +1339,8 @@ export const WORKSPACE_MESSAGE_KEYS = Object.freeze(
 
 const releasedCatalogs: Record<WorkspaceLanguage, Record<WorkspaceMessageKey, string>> = {
   en,
-  ko
+  ko,
+  ja: japaneseWorkspaceMessages
 };
 
 export function workspaceCatalogReadiness(candidate: Record<string, string>) {
@@ -1600,5 +1602,9 @@ const workspaceProgressNumberFormatters: Record<
   ko: {
     exact: new Intl.NumberFormat('ko'),
     compact: new Intl.NumberFormat('ko', { notation: 'compact', maximumFractionDigits: 1 })
+  },
+  ja: {
+    exact: new Intl.NumberFormat('ja'),
+    compact: new Intl.NumberFormat('ja', { notation: 'compact', maximumFractionDigits: 1 })
   }
 };

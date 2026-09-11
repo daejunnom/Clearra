@@ -42,10 +42,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn planned_language_cannot_bypass_release_status_through_explicit_resolution() {
+    fn released_japanese_can_be_selected_explicitly() {
         let report = LanguageResolver::resolve_report_from_selected(Some(LanguageId::Ja));
 
-        assert_ne!(report.language(), LanguageId::Ja);
-        assert_ne!(report.source(), SystemLocaleSource::UserSelected);
+        assert_eq!(report.language(), LanguageId::Ja);
+        assert_eq!(report.source(), SystemLocaleSource::UserSelected);
     }
 }

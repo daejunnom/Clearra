@@ -199,7 +199,7 @@ mod tests {
         assert_eq!(snapshot.scenario_result_column_count(), 40);
         assert_eq!(snapshot.execution_backend_option_count(), 4);
         assert_eq!(snapshot.execution_backend_preset_count(), 4);
-        assert_eq!(snapshot.language_option_count(), 2);
+        assert_eq!(snapshot.language_option_count(), 3);
         assert_eq!(snapshot.backend_result_contract_field_count(), 28);
         assert_eq!(snapshot.problem_preset_option_count(), 4);
         assert_eq!(snapshot.scenario_editor_field_count(), 14);

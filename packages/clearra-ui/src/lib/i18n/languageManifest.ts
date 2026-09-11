@@ -1,7 +1,7 @@
 export const UI_LANGUAGE_MANIFEST = {
   en: { status: 'released', nativeLabel: 'English', shortLabel: 'EN' },
   ko: { status: 'released', nativeLabel: '한국어', shortLabel: 'KO' },
-  ja: { status: 'planned', nativeLabel: '日本語', shortLabel: 'JA' }
+  ja: { status: 'released', nativeLabel: '日本語', shortLabel: 'JA' }
 } as const;
 
 export type WorkspaceLocale = keyof typeof UI_LANGUAGE_MANIFEST;

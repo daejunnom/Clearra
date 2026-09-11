@@ -183,14 +183,12 @@ test("draft translation failures cannot silently copy new English strings", () =
   }
 });
 
-test("Japanese draft generation cannot publish or select the planned language", () => {
-  const before = JSON.stringify(globalCommands);
-  japaneseDiscordRegistrationDraft();
+test("Japanese full-surface fixtures match the released product paths", () => {
+  const fixture = japaneseDiscordRegistrationDraft();
   japaneseDiscordFullCommandDraft();
-  formatJapaneseDiscordHelpDraft("pc path");
-  assert.equal(JSON.stringify(globalCommands), before);
-  assert.equal(matchDiscordLocale("ja-JP"), null);
-  assert.equal(t("ja", "language.name.ja"), "Japanese");
-  assert.deepEqual(formatSlashCommandHelp("pc path", "ja"), formatSlashCommandHelp("pc path", "en"));
-  assert.doesNotMatch(JSON.stringify(globalCommands), /"ja"\s*:/u);
+  assert.equal(matchDiscordLocale("ja-JP"), "ja");
+  assert.equal(t("ja", "language.name.ja"), "日本語");
+  assert.deepEqual(formatSlashCommandHelp("pc path", "ja"), formatJapaneseDiscordHelpDraft("pc path"));
+  assert.match(JSON.stringify(globalCommands), /"ja"\s*:/u);
+  assert.equal(fixture.length, globalCommands.length);
 });

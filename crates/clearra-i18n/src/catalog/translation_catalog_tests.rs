@@ -28,5 +28,5 @@ fn built_in_catalogs_share_key_universe() {
     assert!(TranslationCatalog::is_complete(LanguageId::En));
     assert!(TranslationCatalog::is_complete(LanguageId::Ko));
     assert!(TranslationCatalog::is_complete(LanguageId::Ja));
-    assert!(!LanguageId::Ja.is_released());
+    assert!(LanguageId::Ja.is_released());
 }

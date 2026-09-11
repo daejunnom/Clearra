@@ -28,7 +28,7 @@ import {
   globalCommands,
 } from "../src/discord/slash-command-catalog.mjs";
 
-test("released English and Korean Discord catalogs stay complete", () => {
+test("released English, Korean, and Japanese Discord catalogs stay complete", () => {
   assert.equal(assertDiscordCatalogComplete(), true);
   assert.equal(t("en", "language.name.en"), "English");
   assert.equal(t("ko-KR", "language.name.ko"), "한국어");
@@ -36,7 +36,8 @@ test("released English and Korean Discord catalogs stay complete", () => {
   assert.match(formatSlashCommandHelp("path", "ko"), /퍼펙트 클리어/u);
   assert.equal(matchDiscordLocale("ko-KR"), "ko");
   assert.equal(matchDiscordLocale("en-US"), "en");
-  assert.equal(matchDiscordLocale("ja"), null);
+  assert.equal(t("ja", "language.name.ja"), "日本語");
+  assert.equal(matchDiscordLocale("ja"), "ja");
   assert.match(
     validationErrorText(new DiscordInputError("options.setup_qb_bag_capacity"), "en"),
     /seven-piece bag/u,
@@ -47,13 +48,13 @@ test("released English and Korean Discord catalogs stay complete", () => {
   );
 });
 
-test("Japanese Discord translations remain a non-published draft until every surface is complete", () => {
-  assert.deepEqual(SUPPORTED_DISCORD_LOCALES, ["en", "ko"]);
-  assert.deepEqual(PLANNED_DISCORD_LOCALES, ["ja"]);
-  assert.equal(DISCORD_LOCALE_MANIFEST.ja.status, "planned");
+test("Japanese Discord translations are released only as a complete surface", () => {
+  assert.deepEqual(SUPPORTED_DISCORD_LOCALES, ["en", "ko", "ja"]);
+  assert.deepEqual(PLANNED_DISCORD_LOCALES, []);
+  assert.equal(DISCORD_LOCALE_MANIFEST.ja.status, "released");
   assert.equal(matchKnownDiscordLocale("ja_JP"), "ja");
   assert.equal(matchKnownDiscordLocale("jp"), null);
-  assert.equal(matchDiscordLocale("ja-JP"), null);
+  assert.equal(matchDiscordLocale("ja-JP"), "ja");
 
   const readiness = japaneseDiscordCatalogReadiness();
   assert.equal(readiness.complete, true);
@@ -65,9 +66,8 @@ test("Japanese Discord translations remain a non-published draft until every sur
   assert.deepEqual(readiness.missingKeys, []);
   assert.ok(Object.keys(JAPANESE_DISCORD_SLASH_DRAFT).length > 0);
 
-  for (const command of globalCommands) {
-    assertRegistrationLocaleAbsent(command, "ja");
-  }
+  assert.match(formatSlashCommandHelp("path", "ja"), /パーフェクトクリア/u);
+  assert.ok(globalCommands.some((command) => command.name_localizations?.ja));
 });
 
 test("public validation and operation errors hide deployment details", () => {

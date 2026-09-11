@@ -1,7 +1,7 @@
 export const DISCORD_LOCALE_MANIFEST = Object.freeze({
   en: Object.freeze({ status: "released", nativeLabel: "English" }),
   ko: Object.freeze({ status: "released", nativeLabel: "한국어" }),
-  ja: Object.freeze({ status: "planned", nativeLabel: "日本語" }),
+  ja: Object.freeze({ status: "released", nativeLabel: "日本語" }),
 });
 
 export const SUPPORTED_DISCORD_LOCALES = Object.freeze(

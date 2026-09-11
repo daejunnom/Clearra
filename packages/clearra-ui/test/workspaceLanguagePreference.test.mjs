@@ -39,6 +39,8 @@ test('denied preference storage cannot abort mounting or discard the session lan
     });
     preferences.persistWorkspaceLanguage('ko');
     assert.equal(preferences.readWorkspaceLanguage(), 'ko');
+    preferences.persistWorkspaceLanguage('ja');
+    assert.equal(preferences.readWorkspaceLanguage(), 'ja');
 
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,

@@ -1,6 +1,5 @@
 import type { WorkspaceMessageKey } from '../workspace/workspaceI18n';
 
-// Preparation only: Japanese remains excluded by the release manifest.
 export const japaneseWorkspaceMessages = Object.freeze({
   workspaceMode: '製品モード',
   pcSearch: 'PC探索',

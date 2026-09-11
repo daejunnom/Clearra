@@ -9,12 +9,11 @@ pub enum LanguageId {
 }
 
 impl LanguageId {
-    /// Every locale understood by the i18n layer, including locales that are
-    /// still being translated and must not be exposed by products yet.
+    /// Every locale understood by the i18n layer.
     pub const ALL: [Self; 3] = [Self::En, Self::Ko, Self::Ja];
 
     /// Locales whose CLI, GUI, and Discord surfaces are all ready for use.
-    pub const RELEASED: [Self; 2] = [Self::En, Self::Ko];
+    pub const RELEASED: [Self; 3] = [Self::En, Self::Ko, Self::Ja];
 }
 impl LanguageId {
     pub fn as_str(self) -> &'static str {
@@ -49,11 +48,12 @@ impl LanguageId {
         match normalize_language(value).as_str() {
             "en" | "en-us" | "en-gb" => Some(Self::En),
             "ko" | "ko-kr" => Some(Self::Ko),
+            "ja" | "ja-jp" => Some(Self::Ja),
             _ => None,
         }
     }
 
-    /// Parses a known locale for catalog tooling without making it selectable.
+    /// Parses a known locale prefix for catalog and system-locale tooling.
     pub fn parse_known(value: &str) -> Option<Self> {
         let normalized = normalize_language(value);
         match normalized.split(['-', '.']).next() {
@@ -98,10 +98,13 @@ mod tests {
         assert_eq!(LanguageId::parse("ko-KR"), Some(LanguageId::Ko));
         assert_eq!(LanguageId::parse("en-CA"), None);
         assert_eq!(LanguageId::parse("ko-JP"), None);
-        assert_eq!(LanguageId::parse("ja-JP"), None);
+        assert_eq!(LanguageId::parse("ja-JP"), Some(LanguageId::Ja));
         assert_eq!(LanguageId::parse_known("ja_JP"), Some(LanguageId::Ja));
         assert_eq!(LanguageId::parse("jp"), None);
         assert_eq!(LanguageId::parse_known("jp"), None);
-        assert_eq!(LanguageId::RELEASED, [LanguageId::En, LanguageId::Ko]);
+        assert_eq!(
+            LanguageId::RELEASED,
+            [LanguageId::En, LanguageId::Ko, LanguageId::Ja]
+        );
     }
 }

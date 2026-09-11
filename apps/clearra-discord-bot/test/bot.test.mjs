@@ -108,7 +108,7 @@ test("slash catalog registers only curated active commands", () => {
     {
       type: 3,
       name: "Get original GIF",
-      name_localizations: { ko: "원본 GIF 받기" },
+      name_localizations: { ko: "원본 GIF 받기", ja: "元のGIFを取得" },
       integration_types: [0],
       contexts: [0],
     },

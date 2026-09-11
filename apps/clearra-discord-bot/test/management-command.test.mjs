@@ -56,26 +56,26 @@ test("management command parsers keep slash and hidden text recovery syntax stri
     () => readTextManagementRequest("$bot-control server pause now", "$"),
     /action is invalid/,
   );
-  assert.throws(
-    () => readDiscordManagementRequest("server-settings", [{
+  assert.deepEqual(
+    readDiscordManagementRequest("server-settings", [{
       name: "language-set",
       options: [{ name: "language", value: "ja" }],
     }]),
-    /en or ko/,
+    { scope: "guild", action: "language-set", locale: "ja" },
   );
 });
 
-test("bot-control help documents every hidden syntax in English and Korean", () => {
-  for (const locale of ["en", "ko"]) {
+test("bot-control help documents every hidden syntax in every released language", () => {
+  for (const locale of ["en", "ko", "ja"]) {
     const help = formatTextManagementHelp(locale);
     assert.ok(help.length <= 2_000);
     assert.match(help, /\$bot-control help/);
     assert.match(help, /channel language show/);
-    assert.match(help, /channel language set en\|ko/);
+    assert.match(help, /channel language set en\|ko\|ja/);
     assert.match(help, /channel language reset/);
     assert.match(help, /channel disable\|enable/);
     assert.match(help, /server language show/);
-    assert.match(help, /server language set en\|ko/);
+    assert.match(help, /server language set en\|ko\|ja/);
     assert.match(help, /server language reset/);
     assert.match(help, /server pause\|resume/);
     assert.match(help, />/);

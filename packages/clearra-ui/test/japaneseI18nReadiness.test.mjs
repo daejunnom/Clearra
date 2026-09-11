@@ -30,13 +30,13 @@ const production = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
 
-test('Japanese GUI locale remains planned after its complete catalog is prepared', () => {
-  assert.deepEqual(production.RELEASED_WORKSPACE_LANGUAGES, ['en', 'ko']);
-  assert.equal(production.UI_LANGUAGE_MANIFEST.ja.status, 'planned');
+test('Japanese GUI locale is released with its complete catalog', () => {
+  assert.deepEqual(production.RELEASED_WORKSPACE_LANGUAGES, ['en', 'ko', 'ja']);
+  assert.equal(production.UI_LANGUAGE_MANIFEST.ja.status, 'released');
   assert.equal(production.matchKnownWorkspaceLocale('ja_JP'), 'ja');
   assert.equal(production.matchKnownWorkspaceLocale('jp'), null);
-  assert.equal(production.matchReleasedWorkspaceLanguage('ja-JP'), null);
-  assert.equal(production.preferredWorkspaceLanguage('ja-JP'), 'en');
+  assert.equal(production.matchReleasedWorkspaceLanguage('ja-JP'), 'ja');
+  assert.equal(production.preferredWorkspaceLanguage('ja-JP'), 'ja');
 
   const readiness = production.workspaceCatalogReadiness(
     production.japaneseWorkspaceMessages
@@ -68,6 +68,7 @@ test('Japanese workspace phrases are translated while identifiers and native lan
     }
   }
   assert.deepEqual(unchanged, invariantKeys);
+  assert.match(production.workspaceMessage('ja', 'pcSearch'), /探索/u);
 });
 
 test('readiness rejects missing keys and changed interpolation even after Japanese preparation', () => {

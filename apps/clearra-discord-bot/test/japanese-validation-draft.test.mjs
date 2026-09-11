@@ -16,7 +16,7 @@ const constants = source.slice(source.indexOf("const KOREAN_VALIDATION_MESSAGES 
 const reference = runInNewContext(`${constants}\n({messages:KOREAN_VALIDATION_MESSAGES, patterns:KOREAN_VALIDATION_PATTERNS, names:KOREAN_INPUT_NAMES})`, {}, { timeout: 1000 });
 const wrap = (message) => JAPANESE_DISCORD_MESSAGES["error.request"].replace("{message}", message);
 
-test("Japanese validation draft covers every existing exact message, pattern, and input name", () => {
+test("Japanese validation covers every existing exact message, pattern, and input name", () => {
   assert.deepEqual([...JAPANESE_VALIDATION_MESSAGES.keys()].sort(), [...reference.messages.keys()].sort());
   assert.deepEqual(JAPANESE_VALIDATION_PATTERNS.map(([regex]) => regex.source), Array.from(reference.patterns, ([regex]) => regex.source));
   assert.deepEqual(Object.keys(JAPANESE_INPUT_NAMES).sort(), Object.keys(reference.names).sort());
@@ -26,7 +26,7 @@ test("Japanese validation draft covers every existing exact message, pattern, an
     assert.notEqual(japanese, english);
     assert.equal(japaneseValidationErrorText(new Error(english)), wrap(japanese));
   }
-  assert.equal(matchDiscordLocale("ja-JP"), null);
+  assert.equal(matchDiscordLocale("ja-JP"), "ja");
 });
 
 test("Japanese validation preserves numeric limits and recognizable input labels", () => {

@@ -1,5 +1,5 @@
-// Translation-only draft. Product locale resolution continues to reject Japanese.
-// Keep keys and interpolation placeholders identical to the English catalog.
+// Released Japanese reply catalog. Keep keys and interpolation placeholders
+// identical to the English catalog.
 import {
   JAPANESE_NAMES,
   JAPANESE_DESCRIPTIONS,

@@ -17,6 +17,7 @@ import {
   DISCORD_WIDE_FIELD_MAX_ROWS,
   requiresDiscordFieldModal,
 } from "./slash-command-input.mjs";
+import { translateJapaneseModalNode } from "./japanese-discord-localization.mjs";
 
 const APPLICATION_COMMAND_INTERACTION = 2;
 const MODAL_SUBMIT_INTERACTION = 5;
@@ -162,6 +163,11 @@ export function buildCommandModalResponse(interaction, locale = "en") {
     interaction?.type !== APPLICATION_COMMAND_INTERACTION ||
     interaction.data?.type !== CHAT_INPUT_COMMAND
   ) return null;
+  const language = normalizeDiscordLocale(locale);
+  if (language === "ja") {
+    const response = buildCommandModalResponse(interaction, "en");
+    return response === null ? null : translateJapaneseModalNode(response);
+  }
   const rootCommand = findSlashCommand(interaction.data?.name);
   const invocation = rootCommand
     ? resolveSlashCommandInvocation(rootCommand, interaction.data?.options ?? [])
@@ -169,8 +175,6 @@ export function buildCommandModalResponse(interaction, locale = "en") {
   const command = invocation?.command ?? null;
   const inputSchema = inputSchemaFor(command);
   if (!command || !inputSchema) return null;
-  const language = normalizeDiscordLocale(locale);
-
   const supplied = readSlashValues(invocation.rawOptions, command);
   const typedDocumentAttachment =
     [

@@ -2,6 +2,7 @@ import {
   isSupportedDiscordLocale,
   normalizeDiscordLocale,
 } from "./i18n.mjs";
+import { formatJapaneseTextManagementHelp } from "./japanese-discord-localization.mjs";
 import { canManageDiscordLocale } from "./locale-preferences.mjs";
 
 const MANAGEMENT_COMMANDS = new Map([
@@ -141,17 +142,21 @@ export function isTextManagementCandidate(content, prefix) {
 }
 
 export function formatTextManagementHelp(locale = "en") {
-  return normalizeDiscordLocale(locale) === "ko"
+  const language = normalizeDiscordLocale(locale);
+  if (language === "ja") {
+    return formatJapaneseTextManagementHelp(formatTextManagementHelp("en"));
+  }
+  return language === "ko"
     ? [
         "**ClearraBot 관리자 명령어**",
         "`$` 대신 `>` 접두사도 사용할 수 있습니다.",
         "`$bot-control help`",
         "`$bot-control channel language show`",
-        "`$bot-control channel language set en|ko`",
+        "`$bot-control channel language set en|ko|ja`",
         "`$bot-control channel language reset`",
         "`$bot-control channel disable|enable`",
         "`$bot-control server language show`",
-        "`$bot-control server language set en|ko`",
+        "`$bot-control server language set en|ko|ja`",
         "`$bot-control server language reset`",
         "`$bot-control server pause|resume`",
         "이 도움말과 명령은 ClearraBot 관리자만 사용할 수 있습니다.",
@@ -161,11 +166,11 @@ export function formatTextManagementHelp(locale = "en") {
         "The `>` prefix can be used instead of `$`.",
         "`$bot-control help`",
         "`$bot-control channel language show`",
-        "`$bot-control channel language set en|ko`",
+        "`$bot-control channel language set en|ko|ja`",
         "`$bot-control channel language reset`",
         "`$bot-control channel disable|enable`",
         "`$bot-control server language show`",
-        "`$bot-control server language set en|ko`",
+        "`$bot-control server language set en|ko|ja`",
         "`$bot-control server language reset`",
         "`$bot-control server pause|resume`",
         "This help page and these commands are available only to ClearraBot administrators.",

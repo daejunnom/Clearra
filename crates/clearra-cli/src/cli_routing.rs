@@ -28,9 +28,16 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
     let verbose_paths = invocation.verbose_paths();
     let include_solution_data = invocation.include_solution_data();
     let solution_stdout_format = invocation.solution_stdout_format();
+    let localize_text = solution_stdout_format.is_none()
+        && matches!(
+            format,
+            crate::output::RenderFormat::Text
+                | crate::output::RenderFormat::TextVerbose
+                | crate::output::RenderFormat::TextDiagnostics
+        );
     let solution_artifact_output = invocation.solution_artifact_output().cloned();
     let explicit_ties = invocation.explicit_ties().clone();
-    file_input_guard::with_verbose_paths(verbose_paths, || {
+    let output = file_input_guard::with_verbose_paths(verbose_paths, || {
         let command = invocation.into_command();
         if let ParsedCliCommand::Help(topic) = command {
             if solution_artifact_output.is_some() || solution_stdout_format.is_some() {
@@ -242,7 +249,12 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
         } else {
             output
         }
-    })
+    });
+    if localize_text {
+        output.localized_for(language)
+    } else {
+        output
+    }
 }
 
 #[cfg(feature = "wasm-cpu-runtime")]

@@ -486,7 +486,7 @@ mod case_run_with_args_selects_korean_help_label_without_translating_contract_ke
 
         assert_eq!(output.exit_code(), ExitCode::Success);
         assert!(output.stdout().contains("Clearra 명령줄"));
-        assert!(output.stdout().contains("--lang en|ko"));
+        assert!(output.stdout().contains("--lang en|ko|ja"));
         assert!(output.stdout().contains("usage: clearra"));
         assert!(output
             .stdout()

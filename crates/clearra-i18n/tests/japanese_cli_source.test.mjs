@@ -107,9 +107,10 @@ test('all 33 help topics preserve every command syntax line and option spelling'
   }
 });
 
-test('Japanese draft preparation leaves the released language gate closed', () => {
+test('Japanese source preparation and runtime catalog open the coordinated release gate', () => {
   const language = read('crates/clearra-i18n/src/language/language_id.rs');
-  assert.match(language, /pub const RELEASED: \[Self; 2\] = \[Self::En, Self::Ko\]/);
+  assert.match(language, /pub const RELEASED: \[Self; 3\] = \[Self::En, Self::Ko, Self::Ja\]/);
   const releasedParser = language.slice(language.indexOf('pub fn parse('), language.indexOf('pub fn parse_known('));
-  assert.doesNotMatch(releasedParser, /Self::Ja/);
+  assert.match(releasedParser, /"ja" \| "ja-jp" => Some\(Self::Ja\)/);
+  assert.match(catalog, /pub fn localize_text\(source: &str\) -> String/);
 });

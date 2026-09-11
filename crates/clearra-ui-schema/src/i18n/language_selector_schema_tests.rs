@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn language_selector_defaults_to_english_and_exposes_korean_option() {
+fn language_selector_defaults_to_english_and_exposes_released_options() {
     let schema = LanguageSelectorSchema::mvp();
 
     assert_eq!(schema.default_language(), LanguageId::En);
@@ -13,7 +13,7 @@ fn language_selector_defaults_to_english_and_exposes_korean_option() {
     assert!(schema
         .options()
         .iter()
-        .all(|option| option.id() != LanguageId::Ja));
+        .any(|option| option.id() == LanguageId::Ja && option.native_label() == "日本語"));
 }
 
 #[test]
@@ -27,15 +27,16 @@ fn explicit_selection_wins_over_detected_locale() {
 }
 
 #[test]
-fn planned_japanese_locale_is_known_but_not_selectable() {
+fn released_japanese_locale_is_detected_and_selectable() {
     let preference = LanguagePreference::new(Some(LanguageId::Ja), Some("ja-JP"));
     let schema = LanguageSelectorSchema::from_preference(&preference);
 
     assert_eq!(LanguageId::parse_known("ja-JP"), Some(LanguageId::Ja));
-    assert_eq!(schema.detected_language(), None);
-    assert_eq!(schema.resolved_language(), LanguageId::En);
+    assert_eq!(schema.detected_language(), Some(LanguageId::Ja));
+    assert_eq!(schema.selected_language(), Some(LanguageId::Ja));
+    assert_eq!(schema.resolved_language(), LanguageId::Ja);
     assert!(schema
         .options()
         .iter()
-        .all(|option| option.id() != LanguageId::Ja));
+        .any(|option| option.id() == LanguageId::Ja));
 }

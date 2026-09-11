@@ -4,7 +4,7 @@ use super::{CliHelpTopic, ProductHelpTopic};
 pub(super) fn help_body(topic: CliHelpTopic) -> &'static str {
     match topic {
         CliHelpTopic::TopLevel => {
-            r#"使い方: clearra [--format text|json|ctk3|fumen] [--lang en|ko] [--verbose] [--verbose-paths] [--include-solution-data] [--solution-output PATH] [--solution-artifact-format compact|json|ctk3|fumen] <pc|pc-scenario|pc-replay|percent|failed-queue|setup-finder|build|build-probability|finesse|damage|spin-finder|ren|spin-structure|build-coverage|rules|scoring|convert|continue|sfinder> [オプション]
+            r#"使い方: clearra [--format text|json|ctk3|fumen] [--lang en|ko|ja] [--verbose] [--verbose-paths] [--include-solution-data] [--solution-output PATH] [--solution-artifact-format compact|json|ctk3|fumen] <pc|pc-scenario|pc-replay|percent|failed-queue|setup-finder|build|build-probability|finesse|damage|spin-finder|ren|spin-structure|build-coverage|rules|scoring|convert|continue|sfinder> [オプション]
 グローバルオプションはコマンドの前後のどちらにも指定できます。
 finesseの検索: clearra finesse search --base-mask HEX --target-mask HEX --height N (--queue QUEUE | --patterns PATTERN) [--hold empty|PIECE|--no-hold] [--pattern-knowledge both|oracle|visible-7] [--rule RULE]
 finesseの評価: clearra finesse score --initial-mask HEX --height N --placements PIECE:rotation:x:y,... (--queue QUEUE | --patterns PATTERN) [--hold empty|PIECE|--no-hold] [--pattern-knowledge both|oracle|visible-7] [--rule RULE]
@@ -181,7 +181,7 @@ mod tests {
     use clearra_i18n::LanguageId;
 
     #[test]
-    fn every_help_topic_has_japanese_body_without_enabling_the_locale() {
+    fn every_help_topic_has_a_released_japanese_body() {
         let topics = [
             CliHelpTopic::TopLevel,
             CliHelpTopic::Pc,
@@ -224,8 +224,8 @@ mod tests {
             let rendered = topic.into_output(LanguageId::Ja);
             assert!(rendered.stdout().contains(body), "{topic:?}");
         }
-        assert_eq!(LanguageId::parse("ja"), None);
+        assert_eq!(LanguageId::parse("ja"), Some(LanguageId::Ja));
         assert_eq!(LanguageId::parse_known("ja-JP"), Some(LanguageId::Ja));
-        assert!(!LanguageId::Ja.is_released());
+        assert!(LanguageId::Ja.is_released());
     }
 }

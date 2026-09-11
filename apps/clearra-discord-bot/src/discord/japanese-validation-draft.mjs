@@ -1,6 +1,5 @@
-// Review-only Japanese validation adapter. Released locale resolution does not
-// import this module or expose Japanese before the coordinated activation gate.
-import { DiscordInputError } from "./i18n.mjs";
+// Japanese validation adapter. Unknown diagnostics stay behind the reviewed
+// generic error instead of exposing internal runtime details.
 import { JAPANESE_DISCORD_MESSAGES } from "./japanese-i18n-draft.mjs";
 
 export const JAPANESE_VALIDATION_MESSAGES = new Map([
@@ -93,7 +92,7 @@ function interpolate(template, values) {
 
 export function japaneseValidationErrorText(error) {
   let translated = generic();
-  if (error instanceof DiscordInputError) {
+  if (error?.name === "DiscordInputError" && typeof error?.code === "string") {
     const template = JAPANESE_DISCORD_MESSAGES[`input.${error.code}`];
     if (template !== undefined) translated = interpolate(template, error.details ?? {});
   } else {

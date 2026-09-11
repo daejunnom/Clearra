@@ -928,7 +928,7 @@ fn strips_global_language_before_command_parsing() {
 
 #[test]
 fn rejects_unknown_language() {
-    for language in ["jp", "ja", "ja-JP"] {
+    for language in ["jp", "fr", "ja-KR"] {
         assert_eq!(
             CliParser::parse(["clearra", "--lang", language, "pc", "--lines", "2"]),
             Err(CliParseError::InvalidValue {
@@ -936,6 +936,11 @@ fn rejects_unknown_language() {
                 value: language.to_owned()
             })
         );
+    }
+    for language in ["ja", "ja-JP"] {
+        let invocation = CliParser::parse(["clearra", "--lang", language, "pc", "--lines", "2"])
+            .expect("released Japanese invocation");
+        assert_eq!(invocation.language(), LanguageId::Ja);
     }
     assert_eq!(LanguageId::parse_known("ja-JP"), Some(LanguageId::Ja));
 }

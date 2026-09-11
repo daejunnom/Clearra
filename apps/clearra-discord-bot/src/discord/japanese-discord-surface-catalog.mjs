@@ -329,6 +329,7 @@ export const JAPANESE_NAMES = Object.freeze({
 export const JAPANESE_CHOICES = Object.freeze({
   "English": "英語",
   "Korean": "韓国語",
+  "Japanese": "日本語",
   "1 line": "1ライン",
   "2 line": "2ライン",
   "3 line": "3ライン",

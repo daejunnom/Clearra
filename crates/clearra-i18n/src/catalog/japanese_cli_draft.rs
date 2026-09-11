@@ -1,9 +1,7 @@
-//! Source-bound Japanese CLI/validation/renderer message drafts.
+//! Source-bound Japanese CLI, validation, and renderer messages.
 //!
-//! These templates prepare translation without changing released parsers or
-//! JSON contracts. Callers must supply a source template before interpolation;
-//! this catalog deliberately returns `None` for unreviewed text, without an
-//! English fallback. Runtime language propagation remains an activation gate.
+//! JSON keys and native document payloads stay outside this catalog. Unknown
+//! prose remains unchanged instead of being guessed at runtime.
 
 /// English source templates and reviewed Japanese translations.
 pub const MESSAGES: &[(&str, &str)] = &[
@@ -424,6 +422,140 @@ pub fn get(source_template: &str) -> Option<&'static str> {
         .find_map(|(english, japanese)| (*english == source_template).then_some(*japanese))
 }
 
+/// Translates one rendered source template while preserving interpolated values.
+pub fn translate_rendered(source: &str) -> Option<String> {
+    if let Some(exact) = get(source) {
+        return Some(exact.to_owned());
+    }
+    MESSAGES.iter().find_map(|(english, japanese)| {
+        let values = match_template(english, source)?;
+        render_translation(japanese, &values)
+    })
+}
+
+/// Localizes reviewed CLI prose without changing text-contract field names.
+pub fn localize_text(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    for segment in source.split_inclusive('\n') {
+        let (line, newline) = segment
+            .strip_suffix('\n')
+            .map(|line| {
+                (
+                    line.strip_suffix('\r').unwrap_or(line),
+                    &segment[line.len()..],
+                )
+            })
+            .unwrap_or((segment, ""));
+        output.push_str(&localize_line(line));
+        output.push_str(newline);
+    }
+    output
+}
+
+fn localize_line(line: &str) -> String {
+    if let Some(translated) = translate_rendered(line) {
+        return translated;
+    }
+    if let Some(rest) = line.strip_prefix("error ") {
+        if let Some((code, message)) = rest.split_once(' ') {
+            if let Some(translated) = translate_rendered(message) {
+                return format!("error {code} {translated}");
+            }
+        }
+    }
+    if let Some((field, value)) = line.split_once(": ") {
+        if is_contract_field(field) {
+            if let Some(translated) = translate_rendered(value) {
+                return format!("{field}: {translated}");
+            }
+        }
+    }
+    line.to_owned()
+}
+
+fn is_contract_field(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+#[derive(Clone)]
+struct PlaceholderValue<'a> {
+    name: &'a str,
+    value: &'a str,
+    position: usize,
+}
+
+fn match_template<'a>(template: &'a str, source: &'a str) -> Option<Vec<PlaceholderValue<'a>>> {
+    let mut template_cursor = 0usize;
+    let mut source_cursor = 0usize;
+    let mut position = 0usize;
+    let mut values = Vec::new();
+
+    while let Some(relative_open) = template[template_cursor..].find('{') {
+        let open = template_cursor + relative_open;
+        let close = open + template[open..].find('}')?;
+        let prefix = &template[template_cursor..open];
+        if !source[source_cursor..].starts_with(prefix) {
+            return None;
+        }
+        source_cursor += prefix.len();
+        let suffix_start = close + 1;
+        let next_open = template[suffix_start..]
+            .find('{')
+            .map(|offset| suffix_start + offset)
+            .unwrap_or(template.len());
+        let delimiter = &template[suffix_start..next_open];
+        let value_end = if delimiter.is_empty() {
+            if next_open == template.len() {
+                source.len()
+            } else {
+                return None;
+            }
+        } else {
+            source_cursor + source[source_cursor..].find(delimiter)?
+        };
+        values.push(PlaceholderValue {
+            name: &template[open + 1..close],
+            value: &source[source_cursor..value_end],
+            position,
+        });
+        position += 1;
+        source_cursor = value_end;
+        template_cursor = suffix_start;
+    }
+
+    let tail = &template[template_cursor..];
+    if source[source_cursor..] != *tail {
+        return None;
+    }
+    Some(values)
+}
+
+fn render_translation(template: &str, values: &[PlaceholderValue<'_>]) -> Option<String> {
+    let mut result = String::with_capacity(template.len());
+    let mut cursor = 0usize;
+    let mut positional = 0usize;
+    while let Some(relative_open) = template[cursor..].find('{') {
+        let open = cursor + relative_open;
+        let close = open + template[open..].find('}')?;
+        result.push_str(&template[cursor..open]);
+        let name = &template[open + 1..close];
+        let value = if name.is_empty() {
+            let value = values.iter().find(|value| value.position == positional)?;
+            positional += 1;
+            value.value
+        } else {
+            values.iter().find(|value| value.name == name)?.value
+        };
+        result.push_str(value);
+        cursor = close + 1;
+    }
+    result.push_str(&template[cursor..]);
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,6 +581,22 @@ mod tests {
             assert_eq!(get(english), Some(*japanese));
         }
         assert_eq!(get("unreviewed source template"), None);
-        assert!(!crate::LanguageId::Ja.is_released());
+        assert!(crate::LanguageId::Ja.is_released());
+    }
+
+    #[test]
+    fn rendered_messages_preserve_values_and_text_contract_fields() {
+        assert_eq!(
+            translate_rendered("option '--workers' got invalid value 'many'").as_deref(),
+            Some("オプション「--workers」の値「many」は無効です。")
+        );
+        assert_eq!(
+            localize_text("status: running\nscore: 42\n"),
+            "status: 実行中\nscore: 42\n"
+        );
+        assert_eq!(
+            localize_text("error E_CLI_INVALID unknown command 'missing'"),
+            "error E_CLI_INVALID 不明なコマンド「missing」です。"
+        );
     }
 }

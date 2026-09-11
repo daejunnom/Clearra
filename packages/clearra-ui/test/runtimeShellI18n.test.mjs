@@ -97,7 +97,7 @@ test('host helper and terminal literal inventory has reviewed Japanese source co
   }
 });
 
-test('all three shells compile with catalog-backed labels and reject unreleased Japanese', () => {
+test('all three shells compile with catalog-backed labels and accept released Japanese', () => {
   for (const path of [
     'components/DesktopHostShell.svelte', 'render/RenderStatusPanel.svelte', 'wasm/WasmTerminalShell.svelte'
   ]) {
@@ -113,8 +113,8 @@ test('all three shells compile with catalog-backed labels and reject unreleased 
       assert.ok(['Clearra', 'WebGPU', 'PNG/GIF', 'clearra-cli/CommandRequest'].includes(text), `${path}: ${text}`);
     }
   }
-  assert.equal(api.UI_LANGUAGE_MANIFEST.ja.status, 'planned');
-  assert.deepEqual(api.RELEASED_WORKSPACE_LANGUAGES, ['en', 'ko']);
-  assert.equal(api.matchReleasedWorkspaceLanguage('ja'), null);
-  assert.equal(api.matchReleasedWorkspaceLanguage('ja-JP'), null);
+  assert.equal(api.UI_LANGUAGE_MANIFEST.ja.status, 'released');
+  assert.deepEqual(api.RELEASED_WORKSPACE_LANGUAGES, ['en', 'ko', 'ja']);
+  assert.equal(api.matchReleasedWorkspaceLanguage('ja'), 'ja');
+  assert.equal(api.matchReleasedWorkspaceLanguage('ja-JP'), 'ja');
 });
