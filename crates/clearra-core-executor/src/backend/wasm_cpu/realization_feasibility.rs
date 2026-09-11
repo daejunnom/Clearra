@@ -10,6 +10,11 @@ use super::{
     WasmExactSearchError, MAX_BOARD64_PIECES,
 };
 
+// The selected v2 profile skips this optional exact prepass. Returning
+// Unknown supplies no negative evidence; the complete BuildUp traversal keeps
+// authority over physical transitions, hold history and completion.
+const PRODUCT_REALIZATION_FEASIBILITY_PREPASS_ENABLED: bool = false;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FeasibilityKind {
     Feasible,
@@ -74,6 +79,9 @@ impl RealizationFeasibilityWorkspace {
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
     ) -> bool {
+        if !PRODUCT_REALIZATION_FEASIBILITY_PREPASS_ENABLED {
+            return false;
+        }
         let operation_count = candidate.row_ids().len();
         if operation_count == 0 || operation_count > MAX_BOARD64_PIECES {
             return false;
@@ -150,6 +158,15 @@ impl RealizationFeasibilityWorkspace {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_realization_feasibility_projection_invalid",
             ));
+        }
+        if !PRODUCT_REALIZATION_FEASIBILITY_PREPASS_ENABLED {
+            return Ok(RealizationFeasibility {
+                kind: FeasibilityKind::Unknown,
+                explored_states: 0,
+                generation: 0,
+                operation_count: operation_count as u8,
+                partial_dependency_graph: None,
+            });
         }
         if !self.begin_generation(state_count) {
             return Ok(RealizationFeasibility {

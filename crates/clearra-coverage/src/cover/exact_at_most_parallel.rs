@@ -429,13 +429,35 @@ impl ExactAtMostCoordinator {
         // Move the already materialized witness into its cube owner. Do not
         // clone the descriptor or the returned decision just to discard them.
         self.decision = ExactAtMostParallelDecision::Found(rows);
-        self.received[index] = true;
+        // An overlapping global repair is not the already issued cube's
+        // receipt. Keep that transport obligation open until its real receipt
+        // drains; otherwise the legitimate late receipt would look duplicate.
         Ok(())
     }
 
     pub fn prepare(
         query: ExactAtMostQuery,
         target_partitions: usize,
+        memory_guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ExactAtMostParallelError> {
+        let target_partitions = super::minimum_hotfix_policy::residual_partition_budget(
+            target_partitions,
+            query.rows().len(),
+        );
+        Self::prepare_with_branch_order(
+            query,
+            target_partitions,
+            super::minimum_hotfix_policy::impact_branching(),
+            memory_guard,
+            cancelled,
+        )
+    }
+
+    fn prepare_with_branch_order(
+        query: ExactAtMostQuery,
+        target_partitions: usize,
+        impact_branching: bool,
         memory_guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ExactAtMostParallelError> {
@@ -469,7 +491,7 @@ impl ExactAtMostCoordinator {
                     .and_then(|n| n.checked_add(frontier_bytes(&tasks).ok()?))
                     .ok_or_else(overflow)?,
             )?;
-            let Some(rows) = supporters(&query, &tasks[cursor], cancelled)? else {
+            let Some(mut rows) = supporters(&query, &tasks[cursor], cancelled)? else {
                 cursor += 1;
                 continue;
             };
@@ -478,6 +500,28 @@ impl ExactAtMostCoordinator {
                 continue;
             }
             let parent = &tasks[cursor];
+            if impact_branching {
+                // Change the search tree, not its authority: put high-impact
+                // alternatives first so early witnesses and disjoint negative
+                // cubes need not inherit incidental original-ID order. Every
+                // supporter remains, and child i excludes exactly predecessors
+                // in this permutation. The final original-ID canonical pass
+                // is unchanged. Sorting is in-place and allocates no workspace.
+                let gain = |row: usize| -> usize {
+                    (0..query.required().word_count())
+                        .map(|word| {
+                            let covered = parent.forced_rows.iter().fold(0_u64, |bits, &forced| {
+                                bits | query.rows()[forced].word_at(word)
+                            });
+                            (query.rows()[row].word_at(word)
+                                & query.required().word_at(word)
+                                & !covered)
+                                .count_ones() as usize
+                        })
+                        .sum()
+                };
+                rows.sort_unstable_by(|&a, &b| gain(b).cmp(&gain(a)).then(a.cmp(&b)));
+            }
             let projected_indices = rows
                 .len()
                 .checked_mul(parent.forced_rows.len() + 1 + parent.excluded_rows.len() + rows.len())
@@ -1220,17 +1264,60 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_warm_witness_does_not_forge_or_duplicate_an_issued_receipt() {
+        let query = query(&[3, 5, 6], 2);
+        let mut coordinator =
+            ExactAtMostCoordinator::prepare(query.clone(), 8, &mut |_| Ok(()), &mut || false)
+                .unwrap();
+        let tasks = coordinator.tasks().to_vec();
+        coordinator
+            .accept_warm_witness(vec![0, 1], &mut |_| Ok(()))
+            .unwrap();
+        assert!(!coordinator.issued_prefix_complete(tasks.len()));
+        for task in tasks {
+            coordinator.accept(terminal(&query, &task)).unwrap();
+        }
+        assert!(coordinator.issued_prefix_complete(coordinator.tasks().len()));
+        assert!(matches!(coordinator.decision(),
+            ExactAtMostParallelDecision::Found(rows) if rows == &[0, 1]));
+    }
+
+    #[test]
     fn partitions_are_disjoint_exhaustive_and_match_brute_force() {
+        check_partition_family(false);
+    }
+
+    #[test]
+    fn impact_partition_order_preserves_every_cover_and_exact_decision() {
+        let original = query(&[1, 3, 5, 7], 2);
+        let changed = ExactAtMostCoordinator::prepare_with_branch_order(
+            original,
+            2,
+            true,
+            &mut |_| Ok(()),
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(changed.tasks()[0].forced_rows(), &[3]);
+        assert_eq!(changed.tasks()[1].forced_rows(), &[1]);
+        assert_eq!(changed.tasks()[1].excluded_rows(), &[3]);
+        check_partition_family(true);
+    }
+
+    fn check_partition_family(impact_branching: bool) {
         // Every four-row matrix over a three-bit universe, every cardinality.
         for encoded in 0..4096_u64 {
             let masks: Vec<_> = (0..4).map(|index| (encoded >> (3 * index)) & 7).collect();
             for limit in 0..=4 {
                 let query = query(&masks, limit);
-                let mut coordinator =
-                    ExactAtMostCoordinator::prepare(query.clone(), 5, &mut |_| Ok(()), &mut || {
-                        false
-                    })
-                    .unwrap();
+                let mut coordinator = ExactAtMostCoordinator::prepare_with_branch_order(
+                    query.clone(),
+                    5,
+                    impact_branching,
+                    &mut |_| Ok(()),
+                    &mut || false,
+                )
+                .unwrap();
                 let mut exists = false;
                 for set in 0..16_u64 {
                     if set.count_ones() as usize > limit {
@@ -1283,9 +1370,16 @@ mod tests {
     #[test]
     fn missing_stale_forged_duplicate_and_cancelled_never_prove_none() {
         let query = query(&[3, 5, 6], 1);
-        let mut coordinator =
-            ExactAtMostCoordinator::prepare(query.clone(), 4, &mut |_| Ok(()), &mut || false)
-                .unwrap();
+        // Pin multiple protocol obligations; the production scheduling budget
+        // can legitimately keep this tiny matrix in one shard.
+        let mut coordinator = ExactAtMostCoordinator::prepare_with_branch_order(
+            query.clone(),
+            4,
+            false,
+            &mut |_| Ok(()),
+            &mut || false,
+        )
+        .unwrap();
         assert!(coordinator.tasks().len() > 1);
         let task = coordinator.tasks()[0].clone();
         let mut stale = terminal(&query, &task);

@@ -3,8 +3,11 @@ use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_reg
 use clearra_problem::SearchProblem;
 
 use super::{
-    geometry_apdp::ExactArmPairIndex, geometry_projection::ProjectionCatalog,
-    geometry_separator::SeparatorCatalog, mix_digest, piece_index, WasmExactSearchError,
+    geometry_apdp::ExactArmPairIndex,
+    geometry_projection::ProjectionCatalog,
+    geometry_separator::SeparatorCatalog,
+    inverse_projection::{inverse_projection_policy, ProjectionRowFilter},
+    mix_digest, piece_index, WasmExactSearchError,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,6 +249,7 @@ impl GeometryCatalog {
         }
 
         let registry = standard_tetromino_registry();
+        let inverse_policy = inverse_projection_policy();
         let realization_capacity = checked_realization_count_upper_bound(width, height)
             .and_then(|count| usize::try_from(count).ok())
             .ok_or(WasmExactSearchError::InvalidProblem(
@@ -279,6 +283,30 @@ impl GeometryCatalog {
                 local_rows.sort_unstable();
                 local_rows.dedup();
                 for x in 0..=max_x {
+                    let row_filter = ProjectionRowFilter::compile(
+                        inverse_policy,
+                        width,
+                        height,
+                        shape.cells(),
+                        &local_rows,
+                        x as i8,
+                        |row| {
+                            let row_mask = if width == 64 {
+                                u64::MAX
+                            } else {
+                                (1_u64 << width) - 1
+                            };
+                            ((required_cells & !initial_board)
+                                >> (u32::from(row) * u32::from(width)))
+                                & row_mask
+                        },
+                    );
+                    if row_filter
+                        .as_ref()
+                        .is_some_and(|filter| !filter.columns_possible())
+                    {
+                        continue;
+                    }
                     let mut target_rows = [0_u8; 4];
                     enumerate_row_projections(
                         width,
@@ -292,6 +320,7 @@ impl GeometryCatalog {
                         &mut target_rows,
                         0,
                         x as i8,
+                        row_filter.as_ref(),
                         &mut realizations,
                     );
                 }
@@ -886,6 +915,7 @@ fn enumerate_row_projections(
     target_rows: &mut [u8; 4],
     row_index: usize,
     x: i8,
+    row_filter: Option<&ProjectionRowFilter>,
     output: &mut Vec<Realization>,
 ) {
     if row_index == local_rows.len() {
@@ -936,6 +966,9 @@ fn enumerate_row_projections(
     }
     let maximum = height - 1 - remaining_span;
     for target_row in minimum..=maximum {
+        if row_filter.is_some_and(|filter| !filter.row_allowed(row_index, target_row)) {
+            continue;
+        }
         target_rows[row_index] = target_row;
         enumerate_row_projections(
             width,
@@ -949,6 +982,7 @@ fn enumerate_row_projections(
             target_rows,
             row_index + 1,
             x,
+            row_filter,
             output,
         );
     }

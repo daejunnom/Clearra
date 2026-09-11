@@ -8,25 +8,25 @@ use std::{
 };
 
 use clearra_pc_graph::request::GpuDeviceSelection;
-#[cfg(feature = "stage-profiling")]
-use clearra_wasm::ExecutorSearchProfileSession;
 #[cfg(target_arch = "wasm32")]
 use clearra_wasm::prewarm_gpu_search_async;
+#[cfg(feature = "stage-profiling")]
+use clearra_wasm::ExecutorSearchProfileSession;
 use clearra_wasm::{
-    GovernedWasmJson, GpuSearchWarmupReport, PortfolioPageLoadState, ProductPageSourceOwner,
-    ProductPageStore, TilingSolutionPageStore, WasmCommandRuntimeError,
-    WasmDistributedCompletionAdvance, WasmDistributedCompletionSession, WasmDistributedCoordinator,
-    WasmDistributedFallbackReason, WasmDistributedMode, WasmDistributedPreparation,
-    WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
+    install_pc4_compact_tablebase, release_pc4_compact_tablebase,
+    serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
+    serialize_coverage_portfolio_retained_page, serialize_distributed_final_events,
+    serialize_parity_report_exhausted, serialize_parity_report_page,
+    serialize_pc_replay_page_advance, GovernedWasmJson, GpuSearchWarmupReport,
+    PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore, TilingSolutionPageStore,
+    WasmCommandRuntimeError, WasmDistributedCompletionAdvance, WasmDistributedCompletionSession,
+    WasmDistributedCoordinator, WasmDistributedFallbackReason, WasmDistributedMode,
+    WasmDistributedPreparation, WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
     WasmDistributedVerifierRuntime, WasmHostCapabilities, WasmMinimumParallelWorker,
-    WasmWorkerAdvanceStatus, WasmWorkerJobId, WasmWorkerJobRuntime, install_pc4_compact_tablebase,
-    release_pc4_compact_tablebase, serialize_coverage_portfolio_advance_state,
-    serialize_coverage_portfolio_load_advance_state, serialize_coverage_portfolio_retained_page,
-    serialize_distributed_final_events, serialize_parity_report_exhausted,
-    serialize_parity_report_page, serialize_pc_replay_page_advance,
+    WasmWorkerAdvanceStatus, WasmWorkerJobId, WasmWorkerJobRuntime,
 };
 #[cfg(test)]
-use clearra_wasm::{PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT, WasmWorkerJobStatus};
+use clearra_wasm::{WasmWorkerJobStatus, PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT};
 
 const ABI_VERSION: u32 = 1;
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
@@ -310,13 +310,9 @@ impl AbiTilingSolutionPageStore {
                 producer_graph_bytes,
                 ..
             } => {
-                debug_assert!(
-                    producer_graph_bytes
-                        .checked_add(
-                            core::mem::size_of::<Option<AbiTilingSolutionPageStore>>() as u128
-                        )
-                        .is_some_and(|actual| actual <= *memory_limit_bytes)
-                );
+                debug_assert!(producer_graph_bytes
+                    .checked_add(core::mem::size_of::<Option<AbiTilingSolutionPageStore>>() as u128)
+                    .is_some_and(|actual| actual <= *memory_limit_bytes));
                 true
             }
         }
@@ -463,17 +459,23 @@ impl WasmAbiState {
                 false
             }
         };
+        self.has_external_compute_owner() || profile_active
+    }
+
+    fn has_external_compute_owner(&self) -> bool {
         self.distributed_coordinator.is_some()
             || self.distributed_ready_result.is_some()
             || self.distributed_completion.is_some()
             || self.minimum_parallel_worker.is_some()
             || self.distributed_verifier.is_some()
             || self.gpu_warmup.is_some()
-            || profile_active
     }
 
     fn has_worker_job_start_conflict(&self) -> bool {
-        self.transfer_input.capacity() != 0 || self.has_external_worker_owner()
+        // A profile observes the serial job; it does not compete with that
+        // job for the executor. Keep it counted by governed-output admission,
+        // while still rejecting actual distributed/transfer owners here.
+        self.transfer_input.capacity() != 0 || self.has_external_compute_owner()
     }
 
     fn has_worker_advance_conflict(&self) -> bool {
@@ -1725,6 +1727,39 @@ pub extern "C" fn clearra_wasm_distributed_finish_parallel_found(job_id: u32) ->
                     "E_WASM_MINIMUM_PARALLEL_STATE",
                     "minimum completion job identity mismatch",
                 );
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+/// One admitted advisory step; never advances the live query epoch.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_finish_parallel_warm_advance(job_id: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        let outer = minimum_coordinator_outer_bytes(&state).unwrap_or(u128::MAX);
+        let Some((active, completion)) = state.distributed_completion.as_mut() else {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion is not active",
+            );
+            return ABI_ERROR;
+        };
+        if *active != job_id {
+            state.set_error(
+                "E_WASM_MINIMUM_PARALLEL_STATE",
+                "minimum completion job identity mismatch",
+            );
+            return ABI_ERROR;
+        }
+        match completion.advance_parallel_warm_guarded(outer) {
+            Ok(pending) => i32::from(pending),
+            Err(error) => {
+                state.set_runtime_error(&error);
                 ABI_ERROR
             }
         }
@@ -3501,6 +3536,30 @@ pub extern "C" fn clearra_wasm_profile_start() -> i32 {
     })
 }
 
+/// Local-only same-binary factorial experiment. Absent from product builds.
+/// Configure each isolated worker before starting a job, never during search.
+#[cfg(feature = "minimum-hotfix-ab")]
+#[no_mangle]
+pub extern "C" fn clearra_wasm_minimum_ab_policy(flags: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let state = state.borrow();
+        if state.require_mutation_admission().is_err()
+            || state.runtime.has_active_finite_job()
+            || state.distributed_coordinator.is_some()
+            || state.distributed_completion.is_some()
+            || state.minimum_parallel_worker.is_some()
+            || flags > u16::MAX as u32
+        {
+            return ABI_ERROR;
+        }
+        if clearra_coverage::cover::minimum_hotfix_policy::set_local_ab_policy(flags as u16) {
+            ABI_OK
+        } else {
+            ABI_ERROR
+        }
+    })
+}
+
 #[cfg(feature = "stage-profiling")]
 #[no_mangle]
 pub extern "C" fn clearra_wasm_profile_finish() -> i32 {
@@ -3941,13 +4000,11 @@ mod tests {
             let state = state.borrow();
             assert_eq!(state.input, b"must not be parsed or discarded");
             assert_eq!(state.transfer_input, [0xff]);
-            assert!(
-                state
-                    .minimum_parallel_worker
-                    .as_ref()
-                    .unwrap()
-                    .has_active_shard()
-            );
+            assert!(state
+                .minimum_parallel_worker
+                .as_ref()
+                .unwrap()
+                .has_active_shard());
             assert!(!state.output_outstanding);
         });
         assert_eq!(
@@ -4955,12 +5012,10 @@ mod tests {
             let state = state.borrow();
             assert!(state.output.is_empty());
             assert!(!state.output_outstanding);
-            assert!(
-                state
-                    .tiling_solution_page_store
-                    .as_ref()
-                    .is_some_and(AbiTilingSolutionPageStore::is_governed)
-            );
+            assert!(state
+                .tiling_solution_page_store
+                .as_ref()
+                .is_some_and(AbiTilingSolutionPageStore::is_governed));
         });
         assert_eq!(clearra_wasm_tiling_solution_count_available(), 1);
         assert_eq!(clearra_wasm_tiling_solution_release(), ABI_OK);
@@ -4983,12 +5038,10 @@ mod tests {
             let page = String::from_utf8(state.output_bytes().to_vec())
                 .expect("continuation page remains UTF-8");
             assert_eq!(page, expected_output);
-            assert!(
-                state
-                    .tiling_solution_page_store
-                    .as_ref()
-                    .is_some_and(AbiTilingSolutionPageStore::is_governed)
-            );
+            assert!(state
+                .tiling_solution_page_store
+                .as_ref()
+                .is_some_and(AbiTilingSolutionPageStore::is_governed));
         });
         assert_eq!(
             clearra_wasm_tiling_solution_page(200, 100),
@@ -5524,21 +5577,17 @@ mod tests {
             state.record_distributed_verifier_candidate_count(i32::MAX as usize),
             i32::MAX
         );
-        assert!(
-            state
-                .distributed_verifier_last_candidate_count
-                .is_some_and(|count| count.exact)
-        );
+        assert!(state
+            .distributed_verifier_last_candidate_count
+            .is_some_and(|count| count.exact));
 
         assert_eq!(
             state.record_distributed_verifier_candidate_count(i32::MAX as usize + 1),
             i32::MAX
         );
-        assert!(
-            state
-                .distributed_verifier_last_candidate_count
-                .is_some_and(|count| !count.exact)
-        );
+        assert!(state
+            .distributed_verifier_last_candidate_count
+            .is_some_and(|count| !count.exact));
 
         state.reset_distributed_state();
         assert!(state.distributed_verifier_last_candidate_count.is_none());

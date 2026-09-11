@@ -46,9 +46,11 @@ impl Clone for ParallelConfiguration {
 #[derive(Clone)]
 struct ParallelOracle {
     coordinator: ExactAtMostCoordinator,
+    requested_partitions: usize,
     next_task: usize,
     warm_session: Option<ExactCoverSearchSession>,
     warm_remaining_steps: u64,
+    overlap_warm: bool,
 }
 
 enum ParallelWarmAdvance {
@@ -58,7 +60,7 @@ enum ParallelWarmAdvance {
 
 impl ParallelOracle {
     fn published_query(&self) -> Option<&ExactAtMostQuery> {
-        (self.warm_session.is_none()
+        ((self.warm_session.is_none() || self.overlap_warm)
             && (self.next_task != 0
                 || matches!(
                     self.coordinator.decision(),
@@ -86,6 +88,13 @@ impl ParallelOracle {
         let Some(session) = self.warm_session.as_mut() else {
             return Ok(None);
         };
+        if !matches!(
+            self.coordinator.decision(),
+            ExactAtMostParallelDecision::Pending { .. }
+        ) {
+            self.warm_session = None;
+            return Ok(Some(ParallelWarmAdvance::Pending(0)));
+        }
         let base = external_live
             .checked_add(
                 self.coordinator
@@ -170,8 +179,30 @@ impl ParallelOracle {
         !self.coordinator.issued_prefix_complete(self.next_task)
     }
 
+    // Advance only the advisory cursor, never the query/prefix state machine.
+    // The caller admits additional peak above its existing whole-object owner.
+    fn advance_overlapped_warm(
+        &mut self,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, ExactMinimumCoverPortfolioError> {
+        if !self.overlap_warm || self.warm_session.is_none() {
+            return Ok(false);
+        }
+        let before = self
+            .checked_retained_bytes()
+            .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?;
+        self.advance_warm(
+            1,
+            0,
+            &mut |peak| guard(peak.saturating_sub(before)),
+            cancelled,
+        )?;
+        Ok(self.warm_session.is_some())
+    }
+
     fn take_task(&mut self) -> Option<ExactAtMostTask> {
-        if self.warm_session.is_some()
+        if (self.warm_session.is_some() && !self.overlap_warm)
             || !matches!(
                 self.coordinator.decision(),
                 ExactAtMostParallelDecision::Pending { .. }
@@ -196,7 +227,12 @@ impl ParallelOracle {
         maximum_children: usize,
         guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
     ) -> Result<bool, ExactMinimumCoverPortfolioError> {
-        if self.warm_session.is_some() {
+        // Scheduling policy belongs to this issuer; the explicit coordinator
+        // primitive keeps its proof/cancellation contract in every build.
+        if !super::minimum_hotfix_policy::idle_assistance(self.requested_partitions) {
+            return Ok(false);
+        }
+        if self.warm_session.is_some() && !self.overlap_warm {
             return Ok(false);
         }
         self.coordinator
@@ -580,6 +616,17 @@ impl ExactMinimumCoverPortfolioPreparationSession {
 
     pub fn take_parallel_task(&mut self) -> Option<ExactAtMostTask> {
         self.parallel_proof.as_mut()?.oracle.take_task()
+    }
+
+    pub fn advance_parallel_warm(
+        &mut self,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, ExactMinimumCoverPortfolioError> {
+        match &mut self.parallel_proof {
+            Some(proof) => proof.oracle.advance_overlapped_warm(guard, cancelled),
+            None => Ok(false),
+        }
     }
 
     pub fn prepare_parallel_idle_assist(
@@ -1144,7 +1191,7 @@ mod parallel_portfolio_tests {
                 .map(|mask| PatternBitSet::from_words(3, vec![mask]).unwrap())
                 .collect();
             let config = ParallelConfiguration {
-                partitions: 8,
+                partitions: 1,
                 matrix_id: [9; 32],
                 next_query_id: AtomicU64::new(1),
             };
@@ -1216,7 +1263,7 @@ mod parallel_portfolio_tests {
             .map(|mask| PatternBitSet::from_words(3, vec![mask]).unwrap())
             .collect();
         let config = ParallelConfiguration {
-            partitions: 8,
+            partitions: 1,
             matrix_id: [10; 32],
             next_query_id: AtomicU64::new(1),
         };
@@ -1266,6 +1313,96 @@ mod parallel_portfolio_tests {
                 ExactMinimumCoverError::MemoryGuardRejected
             ))
         ));
+    }
+
+    #[test]
+    fn parallel_repair_never_blocks_first_work_dispatch() {
+        // All logical-processor counts use the same policy. A warm miss is
+        // not a negative proof; the unchanged exact task receipts own that.
+        for partitions in [2, 4, 6, 7, 11, 16] {
+            for limit in [1, 2] {
+                let required = PatternBitSet::from_words(3, vec![7]).unwrap();
+                let rows = [3, 5, 6]
+                    .into_iter()
+                    .map(|mask| PatternBitSet::from_words(3, vec![mask]).unwrap())
+                    .collect();
+                let config = ParallelConfiguration {
+                    partitions,
+                    matrix_id: [11; 32],
+                    next_query_id: AtomicU64::new(1),
+                };
+                let mut oracle = make_parallel_oracle(
+                    &config,
+                    required,
+                    rows,
+                    limit,
+                    Some(if limit == 1 {
+                        vec![0, 1]
+                    } else {
+                        vec![0, 1, 2]
+                    }),
+                    &mut |_| Ok(()),
+                    &mut || false,
+                )
+                .unwrap();
+                assert!(oracle.overlap_warm);
+                assert!(
+                    oracle.checked_retained_bytes().unwrap()
+                        >= oracle.coordinator.checked_retained_bytes().unwrap()
+                );
+                let query = oracle
+                    .published_query()
+                    .expect("no serial repair barrier")
+                    .clone();
+                let first = oracle
+                    .take_task()
+                    .expect("first task is immediately available");
+                oracle.coordinator.accept(run(&query, first)).unwrap();
+                while let Some(task) = oracle.take_task() {
+                    oracle.coordinator.accept(run(&query, task)).unwrap();
+                }
+                match oracle.coordinator.decision() {
+                    ExactAtMostParallelDecision::Found(witness) => {
+                        assert_eq!(limit, 2);
+                        assert_eq!(witness.len(), 2);
+                    }
+                    ExactAtMostParallelDecision::ProvedNone => assert_eq!(limit, 1),
+                    _ => panic!("every exact task was consumed"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repair_winner_before_first_issue_has_no_transport_obligation() {
+        let required = PatternBitSet::from_words(3, vec![7]).unwrap();
+        let rows = [3, 5, 6]
+            .into_iter()
+            .map(|mask| PatternBitSet::from_words(3, vec![mask]).unwrap())
+            .collect();
+        let config = ParallelConfiguration {
+            partitions: 6,
+            matrix_id: [12; 32],
+            next_query_id: AtomicU64::new(1),
+        };
+        let mut oracle = make_parallel_oracle(
+            &config,
+            required,
+            rows,
+            2,
+            None,
+            &mut |_| Ok(()),
+            &mut || false,
+        )
+        .unwrap();
+        assert!(oracle.published_query().is_some());
+        oracle
+            .coordinator
+            .accept_warm_witness(vec![0, 1], &mut |_| Ok(()))
+            .unwrap();
+        assert!(oracle.published_query().is_none());
+        assert!(oracle.take_task().is_none());
+        assert!(!oracle.waiting_for_issued());
     }
 
     #[test]
@@ -1361,6 +1498,80 @@ mod parallel_portfolio_tests {
         assert!(serial.enumeration_complete());
         assert_eq!(actual, expected);
         assert!(actual.iter().any(|rows| rows.contains(&3)));
+    }
+
+    #[test]
+    fn canonical_interval_bisection_preserves_original_first_set_and_clone() {
+        // Independent brute-force canonical authority. Duplicate/dominated
+        // original rows remain present; no optimum is supplied to the solver.
+        for seed in 0..48_u64 {
+            let masks: Vec<u64> = (0..7)
+                .map(|index| 1 + (seed * (index + 3) + index * index + 2 * index) % 6)
+                .collect();
+            if masks.iter().fold(0, |union, mask| union | mask) != 7 {
+                continue;
+            }
+            let required = PatternBitSet::from_words(3, vec![7]).unwrap();
+            let rows: Vec<_> = masks
+                .iter()
+                .map(|mask| PatternBitSet::from_words(3, vec![*mask]).unwrap())
+                .collect();
+            let mut family: Vec<Vec<usize>> = (1_u64..(1 << masks.len()))
+                .filter_map(|selection| {
+                    let rows: Vec<_> = (0..masks.len())
+                        .filter(|row| selection & (1 << row) != 0)
+                        .collect();
+                    (rows.iter().fold(0, |union, row| union | masks[*row]) == 7).then_some(rows)
+                })
+                .collect();
+            let minimum = family.iter().map(Vec::len).min().unwrap();
+            family.retain(|rows| rows.len() == minimum);
+            family.sort();
+            let enumerator = ExactMinimumCoverPortfolioEnumerator::new(&required, &rows).unwrap();
+            assert_eq!(enumerator.optimal_cardinality, minimum);
+            // Start from every valid restart frontier and a deliberately late
+            // witness, covering both positive and negative interval decisions.
+            for frontier in &family {
+                let mut pending = PendingLexSearch::try_new(
+                    frontier,
+                    family.last().map(Vec::as_slice),
+                    true,
+                    0,
+                    &mut |_| Ok(()),
+                )
+                .unwrap();
+                pending.interval_bisection = true;
+                // Force self-reduction from a valid late witness, rather than
+                // the ordinary already-covering-frontier short circuit.
+                if frontier == &family[0] {
+                    pending.phase = PendingLexPhase::Canonicalize {
+                        prefix: vec![],
+                        start_floor: 0,
+                        witness: family.last().unwrap().clone(),
+                        assisted_query_available: true,
+                    };
+                }
+                pending = pending
+                    .try_clone_with_memory_guard(0, &mut |_| Ok(()))
+                    .unwrap();
+                assert!(pending.interval_bisection);
+                let mut result = None;
+                for _ in 0..20000 {
+                    match pending
+                        .advance(&enumerator, 8, 0, &mut |_| Ok(()), &mut || false)
+                        .unwrap()
+                    {
+                        LexSearchAdvance::Pending { .. } => {}
+                        LexSearchAdvance::Found { combination, .. } => {
+                            result = Some(combination);
+                            break;
+                        }
+                        _ => panic!("canonical bisection lost a valid frontier"),
+                    }
+                }
+                assert_eq!(result.as_ref(), Some(frontier));
+            }
+        }
     }
 
     #[test]
@@ -1505,6 +1716,9 @@ fn make_parallel_oracle(
             .accept_warm_witness(hint, memory_guard)
             .map_err(parallel_error)?;
     }
+    // Retain the positive-only global repair: simply deleting it regressed the
+    // measured first canonical result from 36s to 82s. Publish independent
+    // cubes immediately and let the host interleave one advisory step at a time.
     let warm_session = if admission == GlobalWarmAdmission::Repair {
         let hint = coordinator.query().witness_hint().expect("admitted hint");
         let base = coordinator
@@ -1531,10 +1745,13 @@ fn make_parallel_oracle(
     };
     Ok(ParallelOracle {
         coordinator,
+        requested_partitions: config.partitions,
         next_task: 0,
         warm_session,
         // Total global cursor work, not a fresh budget per supporter.
         warm_remaining_steps: WITNESS_ASSISTED_BREAKOUT_SWAP_BUDGET as u64,
+        overlap_warm: config.partitions > 1
+            && super::minimum_hotfix_policy::parallel_first_dispatch(),
     })
 }
 
@@ -1684,7 +1901,15 @@ impl ExactMinimumCoverPortfolioEnumerator {
     fn parallel_oracle(&self) -> Option<&ParallelOracle> {
         match &self.pending_search.as_ref()?.phase {
             PendingLexPhase::PivotOracle { oracle, .. }
-            | PendingLexPhase::CanonicalOracle { oracle, .. } => oracle.parallel.as_ref(),
+            | PendingLexPhase::CanonicalOracle { oracle, .. } => {
+                // The bounded local probe owns this query until it either
+                // decides it or relinquishes it. No remote task may race it.
+                if oracle.session.is_none() {
+                    oracle.parallel.as_ref()
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -1692,7 +1917,13 @@ impl ExactMinimumCoverPortfolioEnumerator {
     fn parallel_oracle_mut(&mut self) -> Option<&mut ParallelOracle> {
         match &mut self.pending_search.as_mut()?.phase {
             PendingLexPhase::PivotOracle { oracle, .. }
-            | PendingLexPhase::CanonicalOracle { oracle, .. } => oracle.parallel.as_mut(),
+            | PendingLexPhase::CanonicalOracle { oracle, .. } => {
+                if oracle.session.is_none() {
+                    oracle.parallel.as_mut()
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -1714,7 +1945,15 @@ impl ExactMinimumCoverPortfolioEnumerator {
     /// pages but has no external shard scheduler. Preserve the exact frontier,
     /// witness and any owned serial cursor; never discard an issued query.
     pub fn disable_parallel_if_quiescent(&mut self) -> Result<(), ExactMinimumCoverPortfolioError> {
-        if self.parallel_oracle().is_some() {
+        let pending_parallel =
+            self.pending_search
+                .as_ref()
+                .is_some_and(|pending| match &pending.phase {
+                    PendingLexPhase::PivotOracle { oracle, .. }
+                    | PendingLexPhase::CanonicalOracle { oracle, .. } => oracle.parallel.is_some(),
+                    _ => false,
+                });
+        if pending_parallel {
             return Err(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof);
         }
         self.parallel = None;
@@ -1723,6 +1962,17 @@ impl ExactMinimumCoverPortfolioEnumerator {
 
     pub fn take_parallel_task(&mut self) -> Option<ExactAtMostTask> {
         self.parallel_oracle_mut()?.take_task()
+    }
+
+    pub fn advance_parallel_warm(
+        &mut self,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, ExactMinimumCoverPortfolioError> {
+        match self.parallel_oracle_mut() {
+            Some(oracle) => oracle.advance_overlapped_warm(guard, cancelled),
+            None => Ok(false),
+        }
     }
 
     pub fn accept_parallel_receipt(
@@ -2516,17 +2766,27 @@ impl ExactMinimumCoverPortfolioEnumerator {
             }
             let pending_live =
                 checked_page_transaction_live_bytes(enumerator_live, &working, &portfolios)?;
-            let decision = working
+            let pending_search = working
                 .pending_search
                 .as_mut()
-                .expect("pending canonical search was initialized")
-                .advance(
-                    self,
-                    max_work_steps - work_steps,
-                    pending_live,
-                    memory_guard,
-                    cancelled,
-                )?;
+                .expect("pending canonical search was initialized");
+            let remaining_work = max_work_steps - work_steps;
+            // Transactional public paging establishes a clone/cancellation
+            // boundary after one inner work unit even when a newly entered
+            // fast phase could finish synchronously. The exclusively owned
+            // product path still consumes the caller's full batch.
+            let slice_work = if transactional {
+                remaining_work.min(1)
+            } else {
+                remaining_work
+            };
+            let decision = pending_search.advance(
+                self,
+                slice_work,
+                pending_live,
+                memory_guard,
+                cancelled,
+            )?;
             match decision {
                 LexSearchAdvance::Cancelled { visited_nodes } => {
                     let _discarded_transactional_work = visited_nodes;
@@ -2721,6 +2981,9 @@ struct PendingLexSearch {
     frontier: Vec<usize>,
     witness_hint: Option<Vec<usize>>,
     allow_initial_assisted_query: bool,
+    // Query strategy only: a negative interval moves the floor, never fixes
+    // the witness's next row unless the whole smaller-ID interval is closed.
+    interval_bisection: bool,
     phase: PendingLexPhase,
 }
 
@@ -2746,8 +3009,17 @@ enum PendingLexPhase {
         prefix: Vec<usize>,
         start: usize,
         witness: Vec<usize>,
-        witness_next: usize,
+        selector_end: usize,
         oracle: PendingAtMostOracle,
+    },
+    // Fixed-K tail on the immutable original matrix. The cursor advances one
+    // original-ID combination per work unit; no full family is materialized.
+    SmallCanonicalTail {
+        witness: Vec<usize>,
+        uncovered: Vec<u64>,
+        prefix_len: usize,
+        left: usize,
+        right: usize,
     },
 }
 
@@ -2755,6 +3027,10 @@ enum PendingLexPhase {
 struct PendingAtMostOracle {
     session: Option<ExactCoverSearchSession>,
     parallel: Option<ParallelOracle>,
+    // When both cursors are present, the partition frontier is still unissued.
+    // The local exact cursor may decide the whole query; a bounded miss only
+    // releases that unchanged frontier, without fabricating shard receipts.
+    probe_remaining_steps: u64,
 }
 
 enum LexSearchAdvance {
@@ -2834,6 +3110,7 @@ impl PendingLexSearch {
             frontier,
             witness_hint,
             allow_initial_assisted_query,
+            interval_bisection: super::minimum_hotfix_policy::canonical_interval_bisection(),
             phase: PendingLexPhase::Initial,
         };
         memory_guard(checked_add_bytes(
@@ -2901,6 +3178,7 @@ impl PendingLexSearch {
             frontier,
             witness_hint,
             allow_initial_assisted_query: self.allow_initial_assisted_query,
+            interval_bisection: self.interval_bisection,
             phase,
         };
         memory_guard(live).map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
@@ -3138,8 +3416,49 @@ impl PendingLexSearch {
                         };
                         continue;
                     }
+                    if super::minimum_hotfix_policy::small_canonical_tail()
+                        && enumerator.optimal_cardinality - prefix.len() <= 2
+                        // Bound direct pair enumeration to a small suffix.
+                        // Larger tails retain the existing exact oracle.
+                        && enumerator.input.row_words.len().saturating_sub(start) <= 256
+                    {
+                        let live = checked_add_vec_retained_bytes(
+                            checked_add_vec_retained_bytes(active_live, &prefix)?,
+                            &witness,
+                        )?;
+                        let mut uncovered = try_vec_with_memory_guard(
+                            enumerator.input.target_words.len(),
+                            live,
+                            memory_guard,
+                            "exact_minimum_cover_small_tail_uncovered",
+                        )?;
+                        for (word, &target) in enumerator.input.target_words.iter().enumerate() {
+                            let covered = prefix
+                                .iter()
+                                .fold(0, |bits, &row| bits | enumerator.input.row_words[row][word]);
+                            uncovered.push(target & !covered);
+                        }
+                        self.phase = PendingLexPhase::SmallCanonicalTail {
+                            witness,
+                            uncovered,
+                            prefix_len: prefix.len(),
+                            left: start,
+                            right: start.saturating_add(1),
+                        };
+                        continue;
+                    }
                     let use_assisted_query = assisted_query_available;
                     assisted_query_available = false;
+                    // Existing strategy asks for any ID before the witness;
+                    // a positive result can descend only one ID at a time.
+                    // The experimental strategy halves that interval. Both
+                    // positive and negative answers still require the same
+                    // exact AtMost oracle and original-row replay authority.
+                    let selector_end = if self.interval_bisection {
+                        start + (witness_next - start).div_ceil(2)
+                    } else {
+                        witness_next
+                    };
                     let query_base = checked_add_vec_retained_bytes(
                         checked_add_vec_retained_bytes(active_live, &prefix)?,
                         &witness,
@@ -3148,7 +3467,7 @@ impl PendingLexSearch {
                         enumerator,
                         &prefix,
                         start,
-                        Some(witness_next),
+                        Some(selector_end),
                         Some(&witness),
                         use_assisted_query,
                         query_base,
@@ -3160,15 +3479,20 @@ impl PendingLexSearch {
                                 prefix,
                                 start,
                                 witness,
-                                witness_next,
+                                selector_end,
                                 oracle,
                             };
                         }
                         PendingOracleStart::ProvedNone => {
-                            prefix.push(witness_next);
+                            let next_floor = if selector_end == witness_next {
+                                prefix.push(witness_next);
+                                0
+                            } else {
+                                selector_end
+                            };
                             self.phase = PendingLexPhase::Canonicalize {
                                 prefix,
-                                start_floor: 0,
+                                start_floor: next_floor,
                                 witness,
                                 assisted_query_available,
                             };
@@ -3178,11 +3502,70 @@ impl PendingLexSearch {
                         }
                     }
                 }
+                PendingLexPhase::SmallCanonicalTail {
+                    mut witness,
+                    uncovered,
+                    prefix_len,
+                    mut left,
+                    mut right,
+                } => {
+                    let rows = &enumerator.input.row_words;
+                    let slots = enumerator.optimal_cardinality - prefix_len;
+                    while left < rows.len() && left <= witness[prefix_len] {
+                        if cancelled() {
+                            return Ok(LexSearchAdvance::Cancelled { visited_nodes });
+                        }
+                        if visited_nodes == max_nodes {
+                            self.phase = PendingLexPhase::SmallCanonicalTail {
+                                witness,
+                                uncovered,
+                                prefix_len,
+                                left,
+                                right,
+                            };
+                            return Ok(LexSearchAdvance::Pending { visited_nodes });
+                        }
+                        if slots == 2 && right >= rows.len() {
+                            left += 1;
+                            right = left.saturating_add(1);
+                            continue;
+                        }
+                        visited_nodes = checked_add_visited_nodes(visited_nodes, 1, max_nodes)?;
+                        let covers = uncovered.iter().enumerate().all(|(word, &required)| {
+                            let covered =
+                                rows[left][word] | if slots == 2 { rows[right][word] } else { 0 };
+                            required & !covered == 0
+                        });
+                        if covers {
+                            witness[prefix_len] = left;
+                            if slots == 2 {
+                                witness[prefix_len + 1] = right;
+                            }
+                            if !enumerator.valid_witness(&witness) {
+                                return Err(
+                                    ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof,
+                                );
+                            }
+                            return Ok(LexSearchAdvance::Found {
+                                combination: witness,
+                                visited_nodes,
+                            });
+                        }
+                        if slots == 2 {
+                            right += 1;
+                        } else {
+                            left += 1;
+                        }
+                    }
+                    // An admitted, replayed witness belongs to this very tail.
+                    // Exhaustion is therefore corruption, never an UNSAT proof.
+                    return Err(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof);
+                }
                 PendingLexPhase::CanonicalOracle {
                     mut prefix,
                     start,
                     witness,
-                    witness_next,
+                    selector_end,
                     mut oracle,
                 } => {
                     let remaining = max_nodes - visited_nodes;
@@ -3196,7 +3579,7 @@ impl PendingLexSearch {
                                 prefix,
                                 start,
                                 witness,
-                                witness_next,
+                                selector_end,
                                 oracle,
                             };
                             return Ok(LexSearchAdvance::Pending { visited_nodes });
@@ -3221,13 +3604,13 @@ impl PendingLexSearch {
                             let smaller = enumerator.witness_from_query_proof(
                                 &prefix,
                                 start,
-                                Some(witness_next),
+                                Some(selector_end),
                                 proof,
                                 witness_base,
                                 memory_guard,
                             )?;
                             if smaller.get(..prefix.len()) != Some(prefix.as_slice())
-                                || smaller[prefix.len()] >= witness_next
+                                || smaller[prefix.len()] >= selector_end
                             {
                                 return Err(
                                     ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof,
@@ -3245,10 +3628,16 @@ impl PendingLexSearch {
                         } => {
                             visited_nodes =
                                 checked_add_visited_nodes(visited_nodes, consumed, max_nodes)?;
-                            prefix.push(witness_next);
+                            let witness_next = witness[prefix.len()];
+                            let next_floor = if selector_end == witness_next {
+                                prefix.push(witness_next);
+                                0
+                            } else {
+                                selector_end
+                            };
                             self.phase = PendingLexPhase::Canonicalize {
                                 prefix,
-                                start_floor: 0,
+                                start_floor: next_floor,
                                 witness,
                                 assisted_query_available: false,
                             };
@@ -3275,6 +3664,12 @@ impl PendingLexPhase {
         let mut bytes = 0_u128;
         match self {
             Self::Initial | Self::Pivot { .. } => {}
+            Self::SmallCanonicalTail {
+                witness, uncovered, ..
+            } => {
+                bytes = bytes.checked_add(checked_vec_retained_bytes(witness).ok()?)?;
+                bytes = bytes.checked_add(checked_vec_retained_bytes(uncovered).ok()?)?;
+            }
             Self::PivotOracle { prefix, oracle, .. } => {
                 bytes = bytes.checked_add(checked_vec_retained_bytes(prefix).ok()?)?;
                 bytes = bytes.checked_add(oracle.checked_retained_capacity_bytes()?)?;
@@ -3317,6 +3712,30 @@ impl PendingLexPhase {
         };
         match self {
             Self::Initial => Ok(Self::Initial),
+            Self::SmallCanonicalTail {
+                witness,
+                uncovered,
+                prefix_len,
+                left,
+                right,
+            } => {
+                let witness = clone_vec(witness, base_live, memory_guard)?;
+                let live = checked_add_vec_retained_bytes(base_live, &witness)?;
+                let mut copy = try_vec_with_memory_guard(
+                    uncovered.len(),
+                    live,
+                    memory_guard,
+                    "exact_minimum_cover_cloned_small_tail",
+                )?;
+                copy.extend_from_slice(uncovered);
+                Ok(Self::SmallCanonicalTail {
+                    witness,
+                    uncovered: copy,
+                    prefix_len: *prefix_len,
+                    left: *left,
+                    right: *right,
+                })
+            }
             Self::Pivot {
                 next_pivot_exclusive,
             } => Ok(Self::Pivot {
@@ -3358,7 +3777,7 @@ impl PendingLexPhase {
                 prefix,
                 start,
                 witness,
-                witness_next,
+                selector_end,
                 oracle,
             } => {
                 let prefix = clone_vec(prefix, base_live, memory_guard)?;
@@ -3370,7 +3789,7 @@ impl PendingLexPhase {
                     prefix,
                     start: *start,
                     witness,
-                    witness_next: *witness_next,
+                    selector_end: *selector_end,
                     oracle,
                 })
             }
@@ -3459,9 +3878,41 @@ impl PendingAtMostOracle {
                 },
                 cancelled,
             )?;
+            let probe_remaining_steps = if assisted_query {
+                0
+            } else {
+                super::minimum_hotfix_policy::canonical_probe_steps(config.partitions)
+            };
+            let session = if probe_remaining_steps == 0 {
+                None
+            } else {
+                let parallel_live = parallel
+                    .checked_retained_bytes()
+                    .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?;
+                let query = parallel.coordinator.query();
+                Some(
+                    ExactCoverSearchSession::prepare_at_most_with_memory_guard_and_control(
+                        query.required(),
+                        query.rows(),
+                        slots,
+                        None,
+                        &mut |owned| {
+                            memory_guard(
+                                base_live
+                                    .checked_add(parallel_live)
+                                    .and_then(|live| live.checked_add(owned))
+                                    .ok_or(ExactMinimumCoverError::ProjectionOverflow)?,
+                            )
+                        },
+                        cancelled,
+                    )
+                    .map_err(ExactMinimumCoverPortfolioError::MinimumCover)?,
+                )
+            };
             return Ok(PendingOracleStart::Ready(Self {
-                session: None,
+                session,
                 parallel: Some(parallel),
+                probe_remaining_steps,
             }));
         }
         let session = ExactCoverSearchSession::prepare_at_most_with_memory_guard_and_control(
@@ -3484,6 +3935,7 @@ impl PendingAtMostOracle {
         let oracle = Self {
             session: Some(session),
             parallel: None,
+            probe_remaining_steps: 0,
         };
         memory_guard(checked_add_bytes(
             base_live,
@@ -3498,10 +3950,13 @@ impl PendingAtMostOracle {
     }
 
     fn checked_retained_capacity_bytes(&self) -> Option<u128> {
-        if let Some(parallel) = &self.parallel {
-            return parallel.checked_retained_bytes();
-        }
-        self.session.as_ref()?.checked_retained_capacity_bytes()
+        self.parallel
+            .as_ref()
+            .map_or(Some(0), ParallelOracle::checked_retained_bytes)?
+            .checked_add(self.session.as_ref().map_or(
+                Some(0),
+                ExactCoverSearchSession::checked_retained_capacity_bytes,
+            )?)
     }
 
     fn try_clone_with_memory_guard(
@@ -3520,9 +3975,28 @@ impl PendingAtMostOracle {
                     .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?,
             )
             .map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
+            let parallel = parallel.clone();
+            let session = self
+                .session
+                .as_ref()
+                .map(|session| {
+                    session
+                        .try_clone_with_memory_guard(
+                            checked_add_bytes(
+                                base_live,
+                                parallel.checked_retained_bytes().ok_or(
+                                    ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof,
+                                )?,
+                            )?,
+                            memory_guard,
+                        )
+                        .map_err(ExactMinimumCoverPortfolioError::MinimumCover)
+                })
+                .transpose()?;
             let cloned = Self {
-                session: None,
-                parallel: Some(parallel.clone()),
+                session,
+                parallel: Some(parallel),
+                probe_remaining_steps: self.probe_remaining_steps,
             };
             memory_guard(
                 base_live
@@ -3545,6 +4019,7 @@ impl PendingAtMostOracle {
         Ok(Self {
             session: Some(session),
             parallel: None,
+            probe_remaining_steps: 0,
         })
     }
 
@@ -3555,6 +4030,61 @@ impl PendingAtMostOracle {
         memory_guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PendingOracleAdvance, ExactMinimumCoverPortfolioError> {
+        if self.parallel.is_some() && self.session.is_some() {
+            let parallel_live = self
+                .parallel
+                .as_ref()
+                .and_then(ParallelOracle::checked_retained_bytes)
+                .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?;
+            let budget = max_nodes.min(self.probe_remaining_steps);
+            let advance = self
+                .session
+                .as_mut()
+                .expect("local probe owns the query")
+                .advance(
+                    budget,
+                    &mut |owned| {
+                        memory_guard(
+                            active_live
+                                .checked_add(parallel_live)
+                                .and_then(|live| live.checked_add(owned))
+                                .ok_or(ExactMinimumCoverError::ProjectionOverflow)?,
+                        )
+                    },
+                    cancelled,
+                )
+                .map_err(ExactMinimumCoverPortfolioError::MinimumCover)?;
+            return Ok(match advance {
+                ExactMinimumCoverSessionAdvance::Pending { visited_nodes } => {
+                    self.probe_remaining_steps = self
+                        .probe_remaining_steps
+                        .checked_sub(visited_nodes)
+                        .ok_or(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof)?;
+                    if self.probe_remaining_steps == 0 {
+                        // There are still no issued tasks. Relinquish only the
+                        // speculative cursor, retaining every proof obligation.
+                        self.session = None;
+                    }
+                    PendingOracleAdvance::Pending { visited_nodes }
+                }
+                ExactMinimumCoverSessionAdvance::Found {
+                    result,
+                    visited_nodes,
+                } => PendingOracleAdvance::Found {
+                    proof: result.into_parts().0,
+                    visited_nodes,
+                },
+                ExactMinimumCoverSessionAdvance::ProvedNone { visited_nodes } => {
+                    PendingOracleAdvance::ProvedNone { visited_nodes }
+                }
+                ExactMinimumCoverSessionAdvance::Cancelled { visited_nodes } => {
+                    PendingOracleAdvance::Cancelled { visited_nodes }
+                }
+                ExactMinimumCoverSessionAdvance::Finished => {
+                    return Err(ExactMinimumCoverPortfolioError::InvalidMinimumCoverProof);
+                }
+            });
+        }
         if let Some(parallel) = &mut self.parallel {
             if cancelled() {
                 return Ok(PendingOracleAdvance::Cancelled { visited_nodes: 0 });

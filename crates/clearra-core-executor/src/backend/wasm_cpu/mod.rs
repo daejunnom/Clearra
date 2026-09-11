@@ -24,6 +24,7 @@ mod geometry_family;
 mod geometry_parallel_tests;
 mod geometry_projection;
 mod geometry_separator;
+mod inverse_projection;
 mod kick_profiles;
 #[cfg(feature = "parallel")]
 mod parallel_coverage;

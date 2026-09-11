@@ -63,6 +63,15 @@ impl CooperativeMinimumPreparation {
     pub(super) fn parallel_query_satisfied(&self) -> bool {
         self.parallel_work().parallel_query_satisfied()
     }
+    pub(super) fn advance_parallel_warm(
+        &mut self,
+        guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, &'static str> {
+        self.parallel_work_mut()
+            .advance_parallel_warm(guard, cancelled)
+            .map_err(|_| "minimum advisory warm step rejected")
+    }
     pub(super) fn parallel_query(&self) -> Option<&clearra_coverage::cover::ExactAtMostQuery> {
         self.parallel_work().parallel_query()
     }

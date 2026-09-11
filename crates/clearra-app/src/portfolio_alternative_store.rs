@@ -695,6 +695,23 @@ impl CoveragePortfolioAlternativeSetPreparation {
         .map_err(PortfolioAlternativeError::Enumeration)
     }
 
+    pub(crate) fn advance_parallel_warm(
+        &mut self,
+        guard: &mut impl FnMut(u128) -> Result<(), clearra_coverage::cover::ExactMinimumCoverError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, PortfolioAlternativeError> {
+        match &mut self.state {
+            CoveragePortfolioAlternativeSetPreparationState::Proving(proof) => {
+                proof.advance_parallel_warm(guard, cancelled)
+            }
+            CoveragePortfolioAlternativeSetPreparationState::SelectingCanonical(enumerator) => {
+                enumerator.advance_parallel_warm(guard, cancelled)
+            }
+            CoveragePortfolioAlternativeSetPreparationState::Finished => return Ok(false),
+        }
+        .map_err(PortfolioAlternativeError::Enumeration)
+    }
+
     pub(crate) fn parallel_task_is_redundant(
         &self,
         identity: clearra_coverage::cover::ExactAtMostQueryIdentity,

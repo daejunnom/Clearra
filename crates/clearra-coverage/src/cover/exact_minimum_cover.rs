@@ -5,10 +5,10 @@
 use crate::pattern::pattern_bitset::PatternBitSet;
 
 use super::exact_dual_lower_bound::{
-    CertifiedResidualDual, DualProposalWorkspace, MAX_DUAL_INCIDENCE_COUNT,
     checked_maximum_persistent_dual_certificate_bytes,
     checked_maximum_residual_dual_workspace_bytes, checked_residual_dual_memory_projection,
-    should_attempt_residual_dual, should_prepare_root_dual,
+    should_attempt_residual_dual, should_prepare_root_dual, CertifiedResidualDual,
+    DualProposalWorkspace, MAX_DUAL_INCIDENCE_COUNT,
 };
 
 #[cfg(feature = "diagnostic-probes")]
@@ -7520,6 +7520,23 @@ impl MinimumCoverSearch {
             if root_dual_lower_bound > row_limit {
                 return Ok(None);
             }
+            if super::minimum_hotfix_policy::distinct_dual_capacity() {
+                if let Some((bound, minimum)) = self.root_dual.as_ref().and_then(|certificate| {
+                    certificate.distinct_capacity_assessment(
+                        &self.target_words,
+                        covered,
+                        &self.support_by_pattern,
+                        &self.selected,
+                        &self.excluded_rows,
+                        row_limit,
+                    )
+                }) {
+                    if bound > row_limit {
+                        return Ok(None);
+                    }
+                    minimum_root_row_weight = minimum_root_row_weight.max(minimum);
+                }
+            }
             #[cfg(feature = "diagnostic-probes")]
             let packing_started = Instant::now();
             let packing_exceeds =
@@ -7537,8 +7554,30 @@ impl MinimumCoverSearch {
                 return Ok(None);
             }
             let packing_lower_bound = self.packing_patterns.len();
+            // Independent integer-cut candidate: supports are rounded per
+            // disconnected component, using already governed scratch storage.
+            // A/B admission is input-independent; it changes no proof identity.
+            let rounded_lower_bound = if super::minimum_hotfix_policy::rounded_components() {
+                super::exact_rounded_packing::rounded_support_components_lower_bound(
+                    &self.target_words,
+                    covered,
+                    &self.support_pattern_order,
+                    &self.support_by_pattern,
+                    &self.selected,
+                    &self.excluded_rows,
+                    &mut self.packing_adjusted_degrees,
+                    &mut self.packing_patterns,
+                )
+                .unwrap_or(0)
+            } else {
+                0
+            };
+            if rounded_lower_bound > row_limit {
+                return Ok(None);
+            }
             let cheap_lower_bound = top_gain_lower_bound
                 .max(packing_lower_bound)
+                .max(rounded_lower_bound)
                 .max(root_dual_lower_bound);
             let dual_gap = row_limit
                 .saturating_add(1)
@@ -9311,13 +9350,11 @@ mod tests {
                                 candidate.remove_row,
                             )
                         };
-                        assert!(
-                            word_masks
-                                .swap_candidates
-                                .iter()
-                                .map(candidate_tuple)
-                                .eq(reference.swap_candidates.iter().map(candidate_tuple))
-                        );
+                        assert!(word_masks
+                            .swap_candidates
+                            .iter()
+                            .map(candidate_tuple)
+                            .eq(reference.swap_candidates.iter().map(candidate_tuple)));
                         match new {
                             OptionalHeuristicStep::Found(_) => {
                                 saw_found = true;
@@ -9500,21 +9537,16 @@ mod tests {
         let mut capacity_changes = 0;
         for word in 0..128_u64 {
             let capacity_before = memo.entries.capacity();
-            assert!(
-                !memo
-                    .should_prune_or_record(&[word], 3, 0, &mut |_| Ok(()))
-                    .expect("new exact state")
-            );
+            assert!(!memo
+                .should_prune_or_record(&[word], 3, 0, &mut |_| Ok(()))
+                .expect("new exact state"));
             capacity_changes += usize::from(memo.entries.capacity() != capacity_before);
-            assert!(
-                memo.should_prune_or_record(&[word], 3, 0, &mut |_| Ok(()))
-                    .expect("same depth prunes")
-            );
-            assert!(
-                !memo
-                    .should_prune_or_record(&[word], 2, 0, &mut |_| Ok(()))
-                    .expect("shallower depth remains searchable")
-            );
+            assert!(memo
+                .should_prune_or_record(&[word], 3, 0, &mut |_| Ok(()))
+                .expect("same depth prunes"));
+            assert!(!memo
+                .should_prune_or_record(&[word], 2, 0, &mut |_| Ok(()))
+                .expect("shallower depth remains searchable"));
         }
         assert!(
             capacity_changes <= 6,
@@ -9538,21 +9570,19 @@ mod tests {
             + core::mem::size_of::<ExactCoveredStateMemoEntry>())
             as u128;
         let mut spare_capacity_denials = 0;
-        assert!(
-            !capped
-                .should_prune_or_record(&[7], 1, 0, &mut |required_memory_bytes| {
-                    if required_memory_bytes > max_memory_bytes {
-                        spare_capacity_denials += 1;
-                        Err(ExactMinimumCoverError::MemoryCapacityExceeded {
-                            required_memory_bytes,
-                            max_memory_bytes,
-                        })
-                    } else {
-                        Ok(())
-                    }
-                })
-                .expect("exact next state fits without spare capacity")
-        );
+        assert!(!capped
+            .should_prune_or_record(&[7], 1, 0, &mut |required_memory_bytes| {
+                if required_memory_bytes > max_memory_bytes {
+                    spare_capacity_denials += 1;
+                    Err(ExactMinimumCoverError::MemoryCapacityExceeded {
+                        required_memory_bytes,
+                        max_memory_bytes,
+                    })
+                } else {
+                    Ok(())
+                }
+            })
+            .expect("exact next state fits without spare capacity"));
         assert_eq!(spare_capacity_denials, 1);
         assert_eq!(
             capped.checked_heap_retained_bytes().unwrap(),
@@ -9858,8 +9888,8 @@ mod tests {
         (required, rows, 4 + FILLER_CYCLES * 2)
     }
 
-    fn large_augmented_selector_fixture()
-    -> (PatternBitSet, Vec<PatternBitSet>, usize, Vec<usize>, usize) {
+    fn large_augmented_selector_fixture(
+    ) -> (PatternBitSet, Vec<PatternBitSet>, usize, Vec<usize>, usize) {
         let (base_required, base_rows, limit) = witness_assisted_fixture();
         let base_pattern_count = base_required.pattern_count();
         let pattern_count = base_pattern_count + 1;
@@ -9907,16 +9937,12 @@ mod tests {
             (0..base_pattern_count).map(PatternId::new),
         )
         .expect("selector-free required");
-        assert!(
-            base_replay
-                .is_superset(&required_without_selector)
-                .expect("same augmented universe")
-        );
-        assert!(
-            !base_replay
-                .is_superset(&required)
-                .expect("same augmented universe")
-        );
+        assert!(base_replay
+            .is_superset(&required_without_selector)
+            .expect("same augmented universe"));
+        assert!(!base_replay
+            .is_superset(&required)
+            .expect("same augmented universe"));
         (
             required,
             rows,
@@ -10099,11 +10125,9 @@ mod tests {
             panic!("preferred selector pivot must find a positive witness")
         };
         assert_eq!(selected.len(), limit);
-        assert!(
-            selected
-                .iter()
-                .any(|row| dense_rows[*row].source_index >= first_selector_source_row)
-        );
+        assert!(selected
+            .iter()
+            .any(|row| dense_rows[*row].source_index >= first_selector_source_row));
 
         let mut cursor = ExactCoverSearchSession::prepare_at_most_with_memory_guard_and_control(
             &required,
@@ -11248,11 +11272,9 @@ mod tests {
             .expect("three-row augmented cover");
         assert_eq!(hit.row_indices().len(), 3);
         assert!(hit.row_indices().iter().any(|row| *row <= 1));
-        assert!(
-            exact_cover_at_most(&required, &rows, 2)
-                .expect("augmented negative proof")
-                .is_none()
-        );
+        assert!(exact_cover_at_most(&required, &rows, 2)
+            .expect("augmented negative proof")
+            .is_none());
     }
 
     #[test]
@@ -11583,42 +11605,36 @@ mod tests {
                 words: vec![0b100],
             },
         ];
-        assert!(
-            witness_unique_missing_constraint_rows_with_memory_guard(
-                &rows,
-                &[0b111],
-                1,
-                &[0],
-                0,
-                &mut |_| Ok(()),
-            )
-            .expect("multi-missing hint")
-            .is_none()
-        );
-        assert!(
-            witness_unique_missing_constraint_rows_with_memory_guard(
-                &rows,
-                &[0b111],
-                2,
-                &[1, 0],
-                0,
-                &mut |_| Ok(()),
-            )
-            .expect("out-of-order hint")
-            .is_none()
-        );
-        assert!(
-            witness_unique_missing_constraint_rows_with_memory_guard(
-                &rows,
-                &[0b111],
-                1,
-                &[3],
-                0,
-                &mut |_| Ok(()),
-            )
-            .expect("out-of-range hint")
-            .is_none()
-        );
+        assert!(witness_unique_missing_constraint_rows_with_memory_guard(
+            &rows,
+            &[0b111],
+            1,
+            &[0],
+            0,
+            &mut |_| Ok(()),
+        )
+        .expect("multi-missing hint")
+        .is_none());
+        assert!(witness_unique_missing_constraint_rows_with_memory_guard(
+            &rows,
+            &[0b111],
+            2,
+            &[1, 0],
+            0,
+            &mut |_| Ok(()),
+        )
+        .expect("out-of-order hint")
+        .is_none());
+        assert!(witness_unique_missing_constraint_rows_with_memory_guard(
+            &rows,
+            &[0b111],
+            1,
+            &[3],
+            0,
+            &mut |_| Ok(()),
+        )
+        .expect("out-of-range hint")
+        .is_none());
     }
 
     #[test]
@@ -11651,18 +11667,16 @@ mod tests {
         assert_eq!(preferred.bit, 1);
         assert_eq!(preferred.row_indices, vec![1, 2]);
 
-        assert!(
-            witness_unique_missing_constraint_rows_with_memory_guard(
-                &rows,
-                &[1_u64 << 5, 1_u64 << 1],
-                1,
-                &[0],
-                0,
-                &mut |_| Ok(()),
-            )
-            .expect("fully covered hint")
-            .is_none()
-        );
+        assert!(witness_unique_missing_constraint_rows_with_memory_guard(
+            &rows,
+            &[1_u64 << 5, 1_u64 << 1],
+            1,
+            &[0],
+            0,
+            &mut |_| Ok(()),
+        )
+        .expect("fully covered hint")
+        .is_none());
     }
 
     #[test]
@@ -11695,16 +11709,14 @@ mod tests {
             })
             .sum::<usize>();
         assert_eq!(total, WITNESS_ASSISTED_PREFERRED_TOTAL_BREAKOUT_SWAP_BUDGET);
-        assert!(
-            preferred
-                .row_indices
-                .iter()
-                .enumerate()
-                .all(|(position, _)| preferred_witness_breakout_budget(
-                    preferred.row_indices.len(),
-                    position
-                ) <= WITNESS_ASSISTED_BREAKOUT_SWAP_BUDGET)
-        );
+        assert!(preferred
+            .row_indices
+            .iter()
+            .enumerate()
+            .all(|(position, _)| preferred_witness_breakout_budget(
+                preferred.row_indices.len(),
+                position
+            ) <= WITNESS_ASSISTED_BREAKOUT_SWAP_BUDGET));
     }
 
     #[test]
@@ -11819,36 +11831,32 @@ mod tests {
         assert_eq!(seed, vec![0, 2, 3]);
         assert!(warm_peak > base_live);
 
-        assert!(
-            warm_seed_with_forced_supporter_memory_guard(
-                &rows,
-                &target,
-                2,
-                &[3, 2],
-                0,
-                0b100,
-                0,
-                base_live,
-                &mut |_| Ok(()),
-            )
-            .expect("invalid-order hint is non-authoritative")
-            .is_none()
-        );
-        assert!(
-            warm_seed_with_forced_supporter_memory_guard(
-                &rows,
-                &target,
-                2,
-                &[0, 2],
-                0,
-                0b100,
-                0,
-                base_live,
-                &mut |_| Ok(()),
-            )
-            .expect("incomplete hint is non-authoritative")
-            .is_none()
-        );
+        assert!(warm_seed_with_forced_supporter_memory_guard(
+            &rows,
+            &target,
+            2,
+            &[3, 2],
+            0,
+            0b100,
+            0,
+            base_live,
+            &mut |_| Ok(()),
+        )
+        .expect("invalid-order hint is non-authoritative")
+        .is_none());
+        assert!(warm_seed_with_forced_supporter_memory_guard(
+            &rows,
+            &target,
+            2,
+            &[0, 2],
+            0,
+            0b100,
+            0,
+            base_live,
+            &mut |_| Ok(()),
+        )
+        .expect("incomplete hint is non-authoritative")
+        .is_none());
 
         let max_memory_bytes = warm_peak - 1;
         assert!(matches!(
@@ -11882,37 +11890,33 @@ mod tests {
             build_support_by_pattern_with_memory_guard(&rows, &target, base_live, &mut |_| Ok(()))
                 .expect("support index");
         let mut cancelled_seed = seed.clone();
-        assert!(
-            improve_fixed_cardinality_cover_with_memory_guard(
-                &rows,
-                &target,
-                &support,
-                &mut cancelled_seed,
-                WITNESS_ASSISTED_BREAKOUT_SWAP_BUDGET,
-                Some(0),
-                base_live,
-                &mut |_| Ok(()),
-                &mut || true,
-            )
-            .expect("cancelled warm breakout")
-        );
+        assert!(improve_fixed_cardinality_cover_with_memory_guard(
+            &rows,
+            &target,
+            &support,
+            &mut cancelled_seed,
+            WITNESS_ASSISTED_BREAKOUT_SWAP_BUDGET,
+            Some(0),
+            base_live,
+            &mut |_| Ok(()),
+            &mut || true,
+        )
+        .expect("cancelled warm breakout"));
         assert_eq!(cancelled_seed, seed);
 
         let mut completed = seed;
-        assert!(
-            !improve_fixed_cardinality_cover_with_memory_guard(
-                &rows,
-                &target,
-                &support,
-                &mut completed,
-                WITNESS_ASSISTED_BREAKOUT_SWAP_BUDGET,
-                Some(0),
-                base_live,
-                &mut |_| Ok(()),
-                &mut || false,
-            )
-            .expect("warm breakout retry")
-        );
+        assert!(!improve_fixed_cardinality_cover_with_memory_guard(
+            &rows,
+            &target,
+            &support,
+            &mut completed,
+            WITNESS_ASSISTED_BREAKOUT_SWAP_BUDGET,
+            Some(0),
+            base_live,
+            &mut |_| Ok(()),
+            &mut || false,
+        )
+        .expect("warm breakout retry"));
         assert_eq!(completed.len(), 2);
         assert!(completed.contains(&0));
         assert_eq!(

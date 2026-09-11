@@ -8,6 +8,7 @@ use super::{
     extended_board::{logical_row_for_physical, lower_row_mask, ExtendedBoard},
     extended_geometry_domain::ExtendedArmPairIndex,
     geometry_projection::ProjectionCatalog,
+    inverse_projection::{inverse_projection_policy, ProjectionRowFilter},
     mix_digest, piece_index, WasmExactSearchError,
 };
 
@@ -161,6 +162,7 @@ impl ExtendedInverseCatalog {
         }
 
         let registry = standard_tetromino_registry();
+        let inverse_policy = inverse_projection_policy();
         let mut realizations = Vec::new();
         for piece in PieceKind::STANDARD_TETROMINOES {
             let definition = registry
@@ -182,6 +184,22 @@ impl ExtendedInverseCatalog {
                 local_rows.sort_unstable();
                 local_rows.dedup();
                 for x in 0..=max_x {
+                    let available = required_cells.without(initial_board);
+                    let row_filter = ProjectionRowFilter::compile(
+                        inverse_policy,
+                        width,
+                        height,
+                        shape.cells(),
+                        &local_rows,
+                        x as i8,
+                        |row| u64::from(available.row_bits(width, row)),
+                    );
+                    if row_filter
+                        .as_ref()
+                        .is_some_and(|filter| !filter.columns_possible())
+                    {
+                        continue;
+                    }
                     let mut target_rows = [0_u8; 4];
                     enumerate_row_projections(
                         width,
@@ -195,6 +213,7 @@ impl ExtendedInverseCatalog {
                         &mut target_rows,
                         0,
                         x as i8,
+                        row_filter.as_ref(),
                         &mut realizations,
                     );
                 }
@@ -442,6 +461,7 @@ fn enumerate_row_projections(
     target_rows: &mut [u8; 4],
     row_index: usize,
     x: i8,
+    row_filter: Option<&ProjectionRowFilter>,
     output: &mut Vec<ExtendedRealization>,
 ) {
     if row_index == local_rows.len() {
@@ -492,6 +512,9 @@ fn enumerate_row_projections(
     }
     let maximum = height - 1 - remaining_span;
     for target_row in minimum..=maximum {
+        if row_filter.is_some_and(|filter| !filter.row_allowed(row_index, target_row)) {
+            continue;
+        }
         target_rows[row_index] = target_row;
         enumerate_row_projections(
             width,
@@ -505,6 +528,7 @@ fn enumerate_row_projections(
             target_rows,
             row_index + 1,
             x,
+            row_filter,
             output,
         );
     }

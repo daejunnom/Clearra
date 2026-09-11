@@ -370,10 +370,9 @@ mod tests {
         let query = query(&[3, 5, 6], 1);
         let mut core = coordinator(&query);
         let parent = core.tasks[0].clone();
-        assert!(
-            core.prepare_idle_assist(1, 64, &mut |_| Ok(()), &mut || false)
-                .unwrap()
-        );
+        assert!(core
+            .prepare_idle_assist(1, 64, &mut |_| Ok(()), &mut || false)
+            .unwrap());
         let children = core.tasks[1..].to_vec();
         assert!(
             !core
@@ -395,10 +394,9 @@ mod tests {
             !core.issued_prefix_complete(core.tasks.len()),
             "running original still owes a receipt"
         );
-        assert!(
-            core.task_is_redundant(query.identity(), parent.partition_id())
-                .unwrap()
-        );
+        assert!(core
+            .task_is_redundant(query.identity(), parent.partition_id())
+            .unwrap());
         let cancelled =
             ExactAtMostReceipt::from_parts(parent, ExactAtMostShardOutcome::Cancelled).unwrap();
         assert_eq!(
@@ -417,10 +415,9 @@ mod tests {
         let query = query(&[3, 5, 6], 1);
         let mut core = coordinator(&query);
         let parent = core.tasks[0].clone();
-        assert!(
-            core.prepare_idle_assist(1, 64, &mut |_| Ok(()), &mut || false)
-                .unwrap()
-        );
+        assert!(core
+            .prepare_idle_assist(1, 64, &mut |_| Ok(()), &mut || false)
+            .unwrap());
         let child = core.tasks[1].clone();
         core.accept(run(&query, &parent)).unwrap();
         assert_eq!(core.decision(), &ExactAtMostParallelDecision::ProvedNone);
@@ -493,40 +490,36 @@ mod tests {
         let original_bytes = source.checked_retained_bytes().unwrap();
         let mut observed = source.clone();
         let mut peak = 0;
-        assert!(
-            observed
-                .prepare_idle_assist(
-                    1,
-                    64,
-                    &mut |bytes| {
-                        peak = peak.max(bytes);
-                        Ok(())
-                    },
-                    &mut || false
-                )
-                .unwrap()
-        );
+        assert!(observed
+            .prepare_idle_assist(
+                1,
+                64,
+                &mut |bytes| {
+                    peak = peak.max(bytes);
+                    Ok(())
+                },
+                &mut || false
+            )
+            .unwrap());
         assert!(observed.checked_retained_bytes().unwrap() <= original_bytes + peak);
         let mut tight = source.clone();
-        assert!(
-            !tight
-                .prepare_idle_assist(
-                    1,
-                    64,
-                    &mut |required_memory_bytes| {
-                        if required_memory_bytes >= peak {
-                            Err(ExactMinimumCoverError::MemoryCapacityExceeded {
-                                required_memory_bytes,
-                                max_memory_bytes: peak - 1,
-                            })
-                        } else {
-                            Ok(())
-                        }
-                    },
-                    &mut || false
-                )
-                .unwrap()
-        );
+        assert!(!tight
+            .prepare_idle_assist(
+                1,
+                64,
+                &mut |required_memory_bytes| {
+                    if required_memory_bytes >= peak {
+                        Err(ExactMinimumCoverError::MemoryCapacityExceeded {
+                            required_memory_bytes,
+                            max_memory_bytes: peak - 1,
+                        })
+                    } else {
+                        Ok(())
+                    }
+                },
+                &mut || false
+            )
+            .unwrap());
         assert_eq!(tight.tasks, original_tasks);
         assert_eq!(tight.checked_retained_bytes(), Some(original_bytes));
         assert!(tight.assistance.is_none());
@@ -536,11 +529,9 @@ mod tests {
                 .unwrap(),
             "ordinary unissued task has priority"
         );
-        assert!(
-            !tight
-                .prepare_idle_assist(1, 1, &mut |_| Ok(()), &mut || false)
-                .unwrap()
-        );
+        assert!(!tight
+            .prepare_idle_assist(1, 1, &mut |_| Ok(()), &mut || false)
+            .unwrap());
         assert_eq!(
             tight.prepare_idle_assist(1, 64, &mut |_| Ok(()), &mut || true),
             Err(ExactAtMostParallelError::Cancelled)
@@ -578,15 +569,21 @@ mod tests {
             2,
         )
         .unwrap();
-        let mut core =
-            ExactAtMostCoordinator::prepare(query.clone(), 2, &mut |_| Ok(()), &mut || false)
-                .unwrap();
+        // This checks closing one of several roots, independently of the
+        // production policy for the queue depth of a tiny matrix.
+        let mut core = ExactAtMostCoordinator::prepare_with_branch_order(
+            query.clone(),
+            2,
+            false,
+            &mut |_| Ok(()),
+            &mut || false,
+        )
+        .unwrap();
         let roots = core.tasks.clone();
         assert!(roots.len() > 1);
-        assert!(
-            core.prepare_idle_assist(roots.len(), 64, &mut |_| Ok(()), &mut || false)
-                .unwrap()
-        );
+        assert!(core
+            .prepare_idle_assist(roots.len(), 64, &mut |_| Ok(()), &mut || false)
+            .unwrap());
         let children = core.tasks[roots.len()..].to_vec();
         for child in &children {
             core.accept(run(&query, child)).unwrap();
@@ -621,11 +618,9 @@ mod tests {
         )
         .unwrap();
         let mut core = coordinator(&query);
-        assert!(
-            !core
-                .prepare_idle_assist(1, usize::MAX, &mut |_| Ok(()), &mut || false)
-                .unwrap()
-        );
+        assert!(!core
+            .prepare_idle_assist(1, usize::MAX, &mut |_| Ok(()), &mut || false)
+            .unwrap());
         assert_eq!(core.tasks.len(), 1);
         assert!(core.assistance.is_none());
     }
@@ -634,10 +629,9 @@ mod tests {
     fn a_unit_constraint_does_not_block_a_later_exact_assist_pivot() {
         let query = query(&[1, 2, 2, 4, 4], 3);
         let mut core = coordinator(&query);
-        assert!(
-            core.prepare_idle_assist(1, 64, &mut |_| Ok(()), &mut || false)
-                .unwrap()
-        );
+        assert!(core
+            .prepare_idle_assist(1, 64, &mut |_| Ok(()), &mut || false)
+            .unwrap());
         assert_eq!(core.tasks[1].forced_rows, [1]);
         assert_eq!(core.tasks[2].forced_rows, [2]);
         assert_eq!(core.tasks[2].excluded_rows, [1]);
@@ -662,11 +656,9 @@ mod tests {
         .unwrap();
         let mut core = coordinator(&query);
         let before = core.checked_retained_bytes();
-        assert!(
-            !core
-                .prepare_idle_assist(1, 64, &mut |_| Ok(()), &mut || false)
-                .unwrap()
-        );
+        assert!(!core
+            .prepare_idle_assist(1, 64, &mut |_| Ok(()), &mut || false)
+            .unwrap());
         assert_eq!(core.tasks.len(), 1);
         assert_eq!(core.checked_retained_bytes(), before);
         assert_eq!(

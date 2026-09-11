@@ -261,6 +261,30 @@ impl WasmDistributedCompletionSession {
         self.execution.minimum_parallel_query_satisfied()
     }
 
+    pub fn advance_parallel_warm_guarded(
+        &mut self,
+        outer_bytes: u128,
+    ) -> Result<bool, WasmCommandRuntimeError> {
+        if self.finished || self.coordinator_shard.is_some() || self.coordinator_task.is_some() {
+            return Ok(false);
+        }
+        let Some((_, app_bytes)) = self.minimum_coordinator_memory_envelope() else {
+            return Ok(false);
+        };
+        let Some(memory) = self.coordinator_memory.as_ref() else {
+            return Ok(false);
+        };
+        let result = self
+            .execution
+            .advance_minimum_parallel_warm(
+                &mut |extra| memory.ensure(app_bytes, outer_bytes, extra),
+                &mut || self.control.is_cancelled(),
+            )
+            .map_err(|reason| distributed_error("E_WASM_MINIMUM_PARALLEL_STATE", reason));
+        self.coordinator_app_memory = None;
+        result
+    }
+
     pub fn prepare_parallel(
         &mut self,
         partitions: usize,
@@ -287,6 +311,24 @@ impl WasmDistributedCompletionSession {
         self.execution
             .enable_minimum_parallel(partitions)
             .map_err(|reason| distributed_error("E_WASM_MINIMUM_PARALLEL_STATE", reason))?;
+        // An all-logical/shared controller already owns a proof shard. Keep
+        // its existing positive-only repair before publication instead of
+        // losing that witness or creating an extra full-CPU participant. A
+        // dedicated n-1 controller may overlap this cursor with remote work.
+        let shared_controller = self
+            .parallel_host_grant
+            .is_some_and(|(compute, _)| self.maximum_compute_workers >= compute)
+            || (self.parallel_remote_memory_cap.is_some() && !self.parallel_control_only);
+        if shared_controller
+            && self.published_parallel_query
+                != self
+                    .execution
+                    .minimum_parallel_query()
+                    .map(|query| query.identity())
+            && self.advance_parallel_warm_guarded(outer_bytes)?
+        {
+            return Ok(None);
+        }
         let app_bytes = if self.coordinator_memory.is_some() {
             Some(
                 self.minimum_coordinator_memory_envelope()
@@ -532,6 +574,16 @@ impl WasmDistributedCompletionSession {
         &mut self,
         outer_bytes: u128,
     ) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
+        // A replay-validated advisory witness can win before any cube is
+        // issued. Its hidden/closed query has no descriptor to allocate: this
+        // is an empty task source, not a failed memory reservation. Outstanding
+        // real receipts still belong to the unchanged query and must drain.
+        if self.execution.minimum_parallel_query().is_none()
+            && self.execution.minimum_parallel_query_satisfied()
+        {
+            self.last_parallel_task_key = None;
+            return Ok(None);
+        }
         let app_bytes = self
             .minimum_coordinator_memory_envelope()
             .map(|envelope| envelope.1);
