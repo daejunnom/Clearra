@@ -491,9 +491,68 @@ impl BuildCompletion {
     }
 }
 
+#[cfg(feature = "minimum-physical-ab")]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RequiredWitnessCachePolicy {
+    Off,
+    PerProbe,
+    SharedCandidate,
+}
+
+#[cfg(feature = "minimum-physical-ab")]
+struct RequiredPhysicalCandidate {
+    candidate: GeometryCandidate,
+    completion: BuildCompletion,
+    feasibility_policy: super::realization_feasibility::RealizationFeasibilityPolicy,
+}
+
+#[cfg(feature = "minimum-physical-ab")]
+struct RequiredPhysicalReuse {
+    problem: std::sync::Arc<SearchProblem>,
+    catalog: std::sync::Arc<GeometryCatalog>,
+    reuse_projection: bool,
+    transition_policy: RequiredWitnessCachePolicy,
+    current: Option<RequiredPhysicalCandidate>,
+    active: bool,
+    projection_generation: Option<u32>,
+    transitions: Vec<CachedWitnessTransition>,
+    // Projection generation reused/fresh; transition table reused/fresh/off.
+    counters: [u64; 5],
+}
+
+#[cfg(feature = "minimum-physical-ab")]
+impl RequiredPhysicalReuse {
+    fn owns(&self, problem: &SearchProblem, catalog: &GeometryCatalog) -> bool {
+        std::ptr::eq(self.problem.as_ref(), problem)
+            && std::ptr::eq(self.catalog.as_ref(), catalog)
+    }
+
+    fn matches(
+        &self, catalog: &GeometryCatalog, candidate: &GeometryCandidate,
+        completion: BuildCompletion,
+    ) -> bool {
+        self.active
+            && std::ptr::eq(self.catalog.as_ref(), catalog)
+            && self.current.as_ref().is_some_and(|current| {
+                current.candidate.identity == candidate.identity
+                    && current.candidate.row_ids() == candidate.row_ids()
+                    && current.candidate.target_index == candidate.target_index
+                    && current.completion == completion
+                    && current.feasibility_policy
+                        == super::realization_feasibility::realization_feasibility_policy()
+            })
+    }
+}
+
 #[derive(Default)]
 pub(super) struct BuildUpWorkspace {
+    #[cfg(feature = "minimum-physical-ab")]
+    required_probe_remaining_nodes: Option<usize>,
     realization_feasibility: RealizationFeasibilityWorkspace,
+    #[cfg(feature = "minimum-physical-ab")]
+    required_feasibility_reuse: Option<RequiredFeasibilityReuse>,
+    #[cfg(feature = "minimum-physical-ab")]
+    required_physical_reuse: Option<RequiredPhysicalReuse>,
     piece_order_languages: PieceOrderLanguageCache,
     standard_bag_coverage: Option<StandardBagCoverage>,
     standard_bag_coverage_initialized: bool,
@@ -513,9 +572,309 @@ pub(super) struct BuildUpWorkspace {
     projection_generation: u32,
 }
 
+/// Private selected-queue reuse only. Holding this Arc prevents address reuse
+/// from turning another catalog into the same source. No second DAG is stored.
+#[cfg(feature = "minimum-physical-ab")]
+struct RequiredFeasibilityReuse {
+    catalog: std::sync::Arc<GeometryCatalog>,
+    memo: Option<RequiredFeasibilityMemo>,
+    hits: u64,
+    misses: u64,
+}
+
+#[cfg(feature = "minimum-physical-ab")]
+struct RequiredFeasibilityMemo {
+    candidate: GeometryCandidate,
+    completion: BuildCompletion,
+    precompute_dependencies: bool,
+    policy: super::realization_feasibility::RealizationFeasibilityPolicy,
+    proof: RealizationFeasibility,
+}
+
 impl BuildUpWorkspace {
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn replace_required_probe_node_budget(&mut self, budget: Option<usize>) -> Option<usize> {
+        core::mem::replace(&mut self.required_probe_remaining_nodes, budget)
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    fn charge_required_probe_node(&mut self) -> Result<(), WasmExactSearchError> {
+        if let Some(remaining) = &mut self.required_probe_remaining_nodes {
+            *remaining = remaining.checked_sub(1).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_required_queue_witness_budget_exceeded")
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn configure_required_feasibility_reuse(
+        &mut self,
+        catalog: Option<std::sync::Arc<GeometryCatalog>>,
+    ) {
+        // Configure once for the immutable provider owner, before probing.
+        // Reconfiguration deliberately drops the memo and its local counters.
+        self.required_feasibility_reuse = catalog.map(|catalog| RequiredFeasibilityReuse {
+            catalog,
+            memo: None,
+            hits: 0,
+            misses: 0,
+        });
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn required_feasibility_reuse_counters(&self) -> (u64, u64) {
+        self.required_feasibility_reuse
+            .as_ref()
+            .map_or((0, 0), |reuse| (reuse.hits, reuse.misses))
+    }
+
+    fn analyze_candidate_feasibility(
+        &mut self,
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        projection: &mut CandidateProjection,
+        completion: BuildCompletion,
+        precompute_dependencies: bool,
+        control: &ExecutionControl,
+    ) -> Result<RealizationFeasibility, WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        #[cfg(feature = "minimum-physical-ab")]
+        {
+            let policy = super::realization_feasibility::realization_feasibility_policy();
+            let cached = self.required_feasibility_reuse.as_ref().and_then(|reuse| {
+                let memo = reuse.memo.as_ref()?;
+                if !std::ptr::eq(reuse.catalog.as_ref(), catalog)
+                    || memo.candidate.identity != candidate.identity
+                    || memo.candidate.row_ids() != candidate.row_ids()
+                    || memo.candidate.target_index != candidate.target_index
+                    || memo.completion != completion
+                    || memo.precompute_dependencies != precompute_dependencies
+                    || memo.policy != policy
+                {
+                    return None;
+                }
+                self.realization_feasibility.reusable_proof(memo.proof)
+            });
+            if let Some(proof) = cached {
+                if let Some(reuse) = self.required_feasibility_reuse.as_mut() {
+                    reuse.hits = reuse.hits.saturating_add(1);
+                }
+                return Ok(proof);
+            }
+            if let Some(reuse) = self.required_feasibility_reuse.as_mut() {
+                // Clear before analyze: cancellation/allocation/work failure
+                // may change workspace generations and cannot publish a memo.
+                reuse.memo = None;
+                reuse.misses = reuse.misses.saturating_add(1);
+            }
+        }
+
+        let proof = self.realization_feasibility.analyze(
+            catalog,
+            candidate,
+            projection,
+            completion,
+            precompute_dependencies,
+            control,
+        )?;
+
+        #[cfg(feature = "minimum-physical-ab")]
+        if !control.is_cancelled()
+            && self.realization_feasibility.reusable_proof(proof).is_some()
+        {
+            if let Some(reuse) = self.required_feasibility_reuse.as_mut() {
+                if std::ptr::eq(reuse.catalog.as_ref(), catalog) {
+                    reuse.memo = Some(RequiredFeasibilityMemo {
+                        candidate: *candidate,
+                        completion,
+                        precompute_dependencies,
+                        policy: super::realization_feasibility::realization_feasibility_policy(),
+                        proof,
+                    });
+                }
+            }
+        }
+        Ok(proof)
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn configure_required_physical_reuse(
+        &mut self,
+        problem: std::sync::Arc<SearchProblem>,
+        catalog: std::sync::Arc<GeometryCatalog>,
+        reuse_projection: bool,
+        transition_policy: u8,
+    ) -> Result<(), WasmExactSearchError> {
+        let transition_policy = match transition_policy {
+            0 => RequiredWitnessCachePolicy::Off,
+            1 => RequiredWitnessCachePolicy::PerProbe,
+            2 => RequiredWitnessCachePolicy::SharedCandidate,
+            _ => return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_required_queue_transition_policy_invalid",
+            )),
+        };
+        // Validate before changing either axis. This is one private owner,
+        // not a global policy or a cache shared by unrelated product jobs.
+        self.required_physical_reuse = Some(RequiredPhysicalReuse {
+            problem, catalog, reuse_projection, transition_policy,
+            current: None, active: false, projection_generation: None,
+            transitions: Vec::new(), counters: [0; 5],
+        });
+        Ok(())
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn required_physical_reuse_counters(&self) -> [u64; 5] {
+        self.required_physical_reuse.as_ref().map_or([0; 5], |reuse| reuse.counters)
+    }
+
+    fn begin_required_physical_candidate(
+        &mut self, problem: &SearchProblem, catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate, completion: BuildCompletion,
+    ) {
+        #[cfg(feature = "minimum-physical-ab")]
+        if let Some(reuse) = self.required_physical_reuse.as_mut() {
+            // matches also validates the policy. Temporarily activate only to
+            // compare this owner's previous key before beginning a new probe.
+            reuse.active = reuse.owns(problem, catalog);
+            let same = reuse.matches(catalog, candidate, completion);
+            if !same {
+                reuse.transitions.clear();
+                reuse.projection_generation = None;
+                reuse.current = reuse.active.then(|| RequiredPhysicalCandidate {
+                    candidate: *candidate,
+                    completion,
+                    feasibility_policy:
+                        super::realization_feasibility::realization_feasibility_policy(),
+                });
+            }
+        }
+        #[cfg(not(feature = "minimum-physical-ab"))]
+        let _ = (problem, catalog, candidate, completion);
+    }
+
+    fn abort_required_physical_candidate(&mut self) {
+        #[cfg(feature = "minimum-physical-ab")]
+        if let Some(reuse) = self.required_physical_reuse.as_mut() {
+            reuse.active = false;
+            // compile may have taken and dropped projection storage on error.
+            reuse.projection_generation = None;
+        }
+    }
+
+    fn required_physical_retained_bytes(&self) -> usize {
+        #[cfg(feature = "minimum-physical-ab")]
+        {
+            self.required_physical_reuse.as_ref().map_or(0, |reuse|
+                reuse.transitions.capacity() * core::mem::size_of::<CachedWitnessTransition>())
+        }
+        #[cfg(not(feature = "minimum-physical-ab"))]
+        { 0 }
+    }
+
+    fn finish_required_physical_candidate(
+        &mut self, problem: &SearchProblem, catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate, completion: BuildCompletion,
+        projection: &CandidateProjection,
+    ) {
+        #[cfg(feature = "minimum-physical-ab")]
+        if let Some(reuse) = self.required_physical_reuse.as_mut() {
+            if reuse.owns(problem, catalog)
+                && reuse.matches(catalog, candidate, completion)
+                && reuse.reuse_projection
+            {
+                reuse.projection_generation = Some(projection.generation);
+            }
+            reuse.active = false;
+        }
+        #[cfg(not(feature = "minimum-physical-ab"))]
+        let _ = (problem, catalog, candidate, completion, projection);
+    }
+
+    fn reuse_required_projection_generation(
+        &mut self, catalog: &GeometryCatalog, candidate: &GeometryCandidate,
+        completion: BuildCompletion,
+    ) -> bool {
+        #[cfg(feature = "minimum-physical-ab")]
+        if let Some(reuse) = self.required_physical_reuse.as_mut() {
+            if reuse.matches(catalog, candidate, completion) {
+                let reused = reuse.reuse_projection
+                    && reuse.projection_generation == Some(self.projection_generation)
+                    && self.projection_generation != 0;
+                let counter = usize::from(!reused);
+                reuse.counters[counter] = reuse.counters[counter].saturating_add(1);
+                return reused;
+            }
+        }
+        #[cfg(not(feature = "minimum-physical-ab"))]
+        let _ = (catalog, candidate, completion);
+        false
+    }
+
+    fn take_required_witness_transitions(
+        &mut self, problem: &SearchProblem, catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate, completion: BuildCompletion,
+        transition_count: usize,
+    ) -> Vec<CachedWitnessTransition> {
+        #[cfg(feature = "minimum-physical-ab")]
+        if let Some(reuse) = self.required_physical_reuse.as_mut() {
+            if reuse.owns(problem, catalog) && reuse.matches(catalog, candidate, completion) {
+                match reuse.transition_policy {
+                    RequiredWitnessCachePolicy::Off => {
+                        reuse.counters[4] = reuse.counters[4].saturating_add(1);
+                        return Vec::new();
+                    }
+                    RequiredWitnessCachePolicy::SharedCandidate => {
+                        let mut cache = std::mem::take(&mut reuse.transitions);
+                        let reused = cache.len() == transition_count;
+                        let counter = if reused { 2 } else { 3 };
+                        reuse.counters[counter] = reuse.counters[counter].saturating_add(1);
+                        if !reused {
+                            cache.clear();
+                            cache.resize(transition_count, CachedWitnessTransition::Unknown);
+                        }
+                        return cache;
+                    }
+                    RequiredWitnessCachePolicy::PerProbe => {
+                        reuse.counters[3] = reuse.counters[3].saturating_add(1);
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "minimum-physical-ab"))]
+        let _ = (problem, catalog, candidate, completion);
+        vec![CachedWitnessTransition::Unknown; transition_count]
+    }
+
+    fn restore_required_witness_transitions(
+        &mut self, problem: &SearchProblem, catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate, completion: BuildCompletion,
+        cache: Vec<CachedWitnessTransition>,
+    ) {
+        #[cfg(feature = "minimum-physical-ab")]
+        if let Some(reuse) = self.required_physical_reuse.as_mut() {
+            if reuse.owns(problem, catalog)
+                && reuse.matches(catalog, candidate, completion)
+                && reuse.transition_policy == RequiredWitnessCachePolicy::SharedCandidate
+            {
+                // Each cached entry is already exact. An interrupted DFS leaves
+                // unvisited entries Unknown and never publishes a supply result.
+                reuse.transitions = cache;
+                return;
+            }
+        }
+        #[cfg(not(feature = "minimum-physical-ab"))]
+        let _ = (problem, catalog, candidate, completion);
+        drop(cache);
+    }
+
+
     pub fn retained_bytes(&self) -> usize {
         self.realization_feasibility.retained_bytes()
+            + self.required_physical_retained_bytes()
             + self.piece_order_languages.retained_bytes()
             + self
                 .standard_bag_coverage
@@ -892,10 +1251,12 @@ impl CandidateProjection {
         reserve_state_storage(&mut deleted_rows, state_count, 0_u16)?;
         reserve_state_storage(&mut physical_boards, state_count, 0_u64)?;
         reserve_state_storage(&mut state_generations, state_count, 0_u32)?;
-        workspace.projection_generation = workspace.projection_generation.wrapping_add(1);
-        if workspace.projection_generation == 0 {
-            state_generations.fill(0);
-            workspace.projection_generation = 1;
+        if !workspace.reuse_required_projection_generation(catalog, candidate, _completion) {
+            workspace.projection_generation = workspace.projection_generation.wrapping_add(1);
+            if workspace.projection_generation == 0 {
+                state_generations.fill(0);
+                workspace.projection_generation = 1;
+            }
         }
         Ok(Self {
             operation_cells,
@@ -1222,7 +1583,14 @@ fn verify_candidate_for_completion_mode(
         .configure_kick_profile(kick_profile_id);
     let projection_span =
         SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmCandidateProjection, profile_scale);
-    let mut projection = CandidateProjection::compile(catalog, candidate, workspace, completion)?;
+    workspace.begin_required_physical_candidate(problem, catalog, candidate, completion);
+    let mut projection = match CandidateProjection::compile(catalog, candidate, workspace, completion) {
+        Ok(projection) => projection,
+        Err(error) => {
+            workspace.abort_required_physical_candidate();
+            return Err(error);
+        }
+    };
     projection_span.finish(projection.state_count() as u64);
     let result = verify_candidate_with_projection(
         problem,
@@ -1240,6 +1608,7 @@ fn verify_candidate_for_completion_mode(
         finesse_spin_coverage_requested,
         control,
     );
+    workspace.finish_required_physical_candidate(problem, catalog, candidate, completion, &projection);
     workspace.recycle_projection(projection);
     result
 }
@@ -1266,7 +1635,7 @@ fn verify_candidate_with_projection(
     )?;
     let feasibility_span =
         SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmCandidateFeasibility, profile_scale);
-    let feasibility = workspace.realization_feasibility.analyze(
+    let feasibility = workspace.analyze_candidate_feasibility(
         catalog,
         candidate,
         projection,
@@ -1783,7 +2152,34 @@ fn find_first_pattern_witness(
         .ok_or(WasmExactSearchError::InvalidProblem(
             "wasm_witness_transition_storage_overflow",
         ))?;
-    let mut transition_cache = vec![CachedWitnessTransition::Unknown; transition_count];
+    let mut transition_cache = workspace.take_required_witness_transitions(
+        problem, catalog, candidate, completion, transition_count,
+    );
+    let result = find_first_pattern_witness_with_transitions(
+        problem, catalog, candidate, pattern_index, initial_hold_code,
+        projection, workspace, completion, feasibility, control,
+        &mut transition_cache,
+    );
+    workspace.restore_required_witness_transitions(
+        problem, catalog, candidate, completion, transition_cache,
+    );
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_first_pattern_witness_with_transitions(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    pattern_index: &PatternPiecePositionIndex,
+    initial_hold_code: u8,
+    projection: &mut CandidateProjection,
+    workspace: &mut BuildUpWorkspace,
+    completion: BuildCompletion,
+    feasibility: RealizationFeasibility,
+    control: &ExecutionControl,
+    transition_cache: &mut Vec<CachedWitnessTransition>,
+) -> Result<Option<CandidateWitness>, WasmExactSearchError> {
     if let Some(fixed_sequence) = problem
         .piece_source()
         .fixed_sequence()
@@ -1813,7 +2209,7 @@ fn find_first_pattern_witness(
             &operation_masks_by_piece,
             root,
             workspace,
-            &mut transition_cache,
+            transition_cache,
             &mut failed,
             &mut path,
             &mut visited_product_states,
@@ -1869,7 +2265,7 @@ fn find_first_pattern_witness(
             word_index,
             root,
             workspace,
-            &mut transition_cache,
+            transition_cache,
             &mut failed,
             &mut path,
             &mut visited_product_states,
@@ -2073,6 +2469,8 @@ fn visit_fixed_witness_state(
     if control.is_cancelled() {
         return Err(WasmExactSearchError::Cancelled);
     }
+    #[cfg(feature = "minimum-physical-ab")]
+    workspace.charge_required_probe_node()?;
     if failed.contains(&state) {
         return Ok(false);
     }
@@ -2177,6 +2575,8 @@ fn visit_witness_state(
     if control.is_cancelled() {
         return Err(WasmExactSearchError::Cancelled);
     }
+    #[cfg(feature = "minimum-physical-ab")]
+    workspace.charge_required_probe_node()?;
     if state.active_patterns == 0 || failed.contains(&state) {
         return Ok(None);
     }
@@ -2497,7 +2897,9 @@ fn witness_transition(
     transition_cache: &mut [CachedWitnessTransition],
 ) -> Option<BuildEdge> {
     let cache_index = subset * projection.operation_count() + operation_index;
-    match transition_cache[cache_index] {
+    // The private OFF policy uses an empty table. Uncached physical verification
+    // still runs, and an incomplete search never turns Unknown into Impossible.
+    match transition_cache.get(cache_index).copied().unwrap_or(CachedWitnessTransition::Unknown) {
         CachedWitnessTransition::Impossible => return None,
         CachedWitnessTransition::Legal(edge) => return Some(edge),
         CachedWitnessTransition::Unknown => {}
@@ -2537,10 +2939,14 @@ fn witness_transition(
             y: lock_y,
             cleared_lines,
         };
-        transition_cache[cache_index] = CachedWitnessTransition::Legal(edge);
+        if let Some(entry) = transition_cache.get_mut(cache_index) {
+            *entry = CachedWitnessTransition::Legal(edge);
+        }
         return Some(edge);
     }
-    transition_cache[cache_index] = CachedWitnessTransition::Impossible;
+    if let Some(entry) = transition_cache.get_mut(cache_index) {
+        *entry = CachedWitnessTransition::Impossible;
+    }
     None
 }
 
@@ -3401,7 +3807,7 @@ pub(super) fn exact_scoring_execution_graph_memory_projection(
                 "wasm_scoring_identity_not_in_geometry_catalog",
             ))?;
         realization_sum = realization_sum
-            .checked_add(catalog.realizations(row_id).len() as u128)
+            .checked_add(u128::from(catalog.skeleton(row_id).realization_count))
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_scoring_projection_realization_count_overflow",
             ))?;

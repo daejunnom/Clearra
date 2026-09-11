@@ -6,6 +6,90 @@ const BUMPER_DOMAIN_MAX_RESIDUAL_CELLS: u32 = 24;
 
 const ALL_STANDARD_PIECES: u8 = 0x7f;
 
+#[cfg(any(
+    test,
+    feature = "wasm-stage-profiling",
+    feature = "minimum-physical-ab"
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeometryApdpScanPolicy {
+    Legacy,
+    Off,
+    Fused,
+}
+
+#[cfg(any(
+    test,
+    feature = "wasm-stage-profiling",
+    feature = "minimum-physical-ab"
+))]
+std::thread_local! {
+    static APDP_SCAN_POLICY: std::cell::Cell<GeometryApdpScanPolicy> =
+        const { std::cell::Cell::new(GeometryApdpScanPolicy::Legacy) };
+}
+
+#[cfg(any(
+    test,
+    feature = "wasm-stage-profiling",
+    feature = "minimum-physical-ab"
+))]
+pub fn set_geometry_apdp_scan_policy(policy: GeometryApdpScanPolicy) -> GeometryApdpScanPolicy {
+    APDP_SCAN_POLICY.with(|current| current.replace(policy))
+}
+
+#[cfg(any(
+    test,
+    feature = "wasm-stage-profiling",
+    feature = "minimum-physical-ab"
+))]
+pub fn geometry_apdp_scan_policy() -> GeometryApdpScanPolicy {
+    APDP_SCAN_POLICY.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GeometryApdpScanCounters {
+    pub advanced_domain_calls: u64,
+    pub minimum_domain_calls: u64,
+    pub eligible_pivot_calls: u64,
+    pub legacy_queries: u64,
+    pub off_queries: u64,
+    pub fused_queries: u64,
+    pub completeness_rows: u64,
+    pub recount_rows: u64,
+    pub incomplete_domains: u64,
+}
+
+#[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+std::thread_local! {
+    static APDP_SCAN_DIAGNOSTICS_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static APDP_SCAN_COUNTERS: std::cell::Cell<GeometryApdpScanCounters> =
+        std::cell::Cell::new(GeometryApdpScanCounters::default());
+}
+
+#[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+pub fn set_geometry_apdp_scan_diagnostics(enabled: bool) {
+    APDP_SCAN_COUNTERS.with(|slot| slot.set(GeometryApdpScanCounters::default()));
+    APDP_SCAN_DIAGNOSTICS_ENABLED.with(|slot| slot.set(enabled));
+}
+
+#[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+pub fn geometry_apdp_scan_counters() -> GeometryApdpScanCounters {
+    APDP_SCAN_COUNTERS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+fn record_apdp_scan(update: impl FnOnce(&mut GeometryApdpScanCounters)) {
+    if !APDP_SCAN_DIAGNOSTICS_ENABLED.with(std::cell::Cell::get) {
+        return;
+    }
+    APDP_SCAN_COUNTERS.with(|slot| {
+        let mut counters = slot.get();
+        update(&mut counters);
+        slot.set(counters);
+    });
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DomainPropagation {
     pub pivot_required_cells: u64,
@@ -46,6 +130,10 @@ impl DomainPropagation {
         remaining: u64,
         feasible_piece_mask: u8,
     ) -> DomainCompilation {
+        #[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+        record_apdp_scan(|value| {
+            value.advanced_domain_calls = value.advanced_domain_calls.saturating_add(1);
+        });
         let mut result = Self {
             pivot_required_cells: 0,
             pivot_piece_mask: 0,
@@ -173,32 +261,18 @@ impl DomainPropagation {
 
         if result.pivot_required_cells.count_ones() == 3
             && partial_shape_kind(catalog.width(), result.pivot_required_cells) != 0
-            && apdp_domain_is_complete(
-                catalog,
-                remaining,
-                feasible_piece_mask,
-                result.pivot_required_cells,
-            )
         {
-            let (count, piece_mask) = exact_parent_rows(
+            if let Some((count, piece_mask)) = selected_apdp_parent_domain(
                 catalog,
                 remaining,
                 feasible_piece_mask,
                 result.pivot_required_cells,
-                true,
-            );
-            if count == 0 {
-                result.pivot_support_count = 0;
-                return DomainCompilation {
-                    status: DomainStatus::Empty,
-                    propagation: result,
-                    cell_piece_masks,
-                };
-            }
-            if count < result.pivot_support_count {
-                result.pivot_support_count = count;
-                result.pivot_piece_mask = piece_mask;
-                result.apdp_required_cells = result.pivot_required_cells;
+            ) {
+                if count < result.pivot_support_count {
+                    result.pivot_support_count = count;
+                    result.pivot_piece_mask = piece_mask;
+                    result.apdp_required_cells = result.pivot_required_cells;
+                }
             }
         }
 
@@ -214,6 +288,10 @@ impl DomainPropagation {
         remaining: u64,
         feasible_piece_mask: u8,
     ) -> (DomainStatus, Self) {
+        #[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+        record_apdp_scan(|value| {
+            value.minimum_domain_calls = value.minimum_domain_calls.saturating_add(1);
+        });
         let mut result = Self::empty();
         result.pivot_support_count = usize::MAX;
         let mut cells = remaining;
@@ -392,6 +470,54 @@ fn apdp_row_supports(catalog: &GeometryCatalog, row_id: u32, required: u64) -> b
     catalog.apdp_index().row_supports(row_id, required)
 }
 
+fn selected_apdp_parent_domain(
+    catalog: &GeometryCatalog,
+    remaining: u64,
+    feasible_piece_mask: u8,
+    required: u64,
+) -> Option<(usize, u8)> {
+    #[cfg(any(
+        test,
+        feature = "wasm-stage-profiling",
+        feature = "minimum-physical-ab"
+    ))]
+    {
+        let policy = geometry_apdp_scan_policy();
+        record_apdp_scan(|value| {
+            value.eligible_pivot_calls = value.eligible_pivot_calls.saturating_add(1);
+            match policy {
+                GeometryApdpScanPolicy::Legacy => value.legacy_queries = value.legacy_queries.saturating_add(1),
+                GeometryApdpScanPolicy::Off => value.off_queries = value.off_queries.saturating_add(1),
+                GeometryApdpScanPolicy::Fused => value.fused_queries = value.fused_queries.saturating_add(1),
+            }
+        });
+        match policy {
+            GeometryApdpScanPolicy::Off => return None,
+            GeometryApdpScanPolicy::Fused => {
+                return complete_apdp_parent_domain(catalog, remaining, feasible_piece_mask, required);
+            }
+            GeometryApdpScanPolicy::Legacy => {}
+        }
+    }
+    if !apdp_domain_is_complete(catalog, remaining, feasible_piece_mask, required) {
+        return None;
+    }
+    #[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+    record_apdp_scan(|value| {
+        value.recount_rows = value.recount_rows.saturating_add(
+            catalog.support(required.trailing_zeros() as u8).len() as u64,
+        );
+    });
+    Some(exact_parent_rows(
+        catalog,
+        remaining,
+        feasible_piece_mask,
+        required,
+        true,
+    ))
+}
+
+// Retain the existing two-pass path as the product default and the A/B control.
 fn apdp_domain_is_complete(
     catalog: &GeometryCatalog,
     remaining: u64,
@@ -400,7 +526,7 @@ fn apdp_domain_is_complete(
 ) -> bool {
     let first = required.trailing_zeros() as u8;
     let mut saw_parent = false;
-    for row_id in catalog.support(first).iter().copied() {
+    for (_scan_index, row_id) in catalog.support(first).iter().copied().enumerate() {
         let row = catalog.skeleton(row_id);
         if row.cells & required != required
             || !row_feasible(catalog, row_id, remaining, feasible_piece_mask)
@@ -411,10 +537,64 @@ fn apdp_domain_is_complete(
         if !catalog.apdp_row_is_static_exact(row_id)
             || !catalog.apdp_index().row_supports(row_id, required)
         {
+            #[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+            record_apdp_scan(|value| {
+                value.completeness_rows = value.completeness_rows.saturating_add(_scan_index as u64 + 1);
+                value.incomplete_domains = value.incomplete_domains.saturating_add(1);
+            });
             return false;
         }
     }
+    #[cfg(any(test, feature = "wasm-stage-profiling", feature = "minimum-physical-ab"))]
+    record_apdp_scan(|value| {
+        value.completeness_rows = value.completeness_rows.saturating_add(catalog.support(first).len() as u64);
+        value.incomplete_domains = value.incomplete_domains.saturating_add(u64::from(!saw_parent));
+    });
     saw_parent
+}
+
+#[cfg(any(
+    test,
+    feature = "wasm-stage-profiling",
+    feature = "minimum-physical-ab"
+))]
+fn complete_apdp_parent_domain(
+    catalog: &GeometryCatalog,
+    remaining: u64,
+    feasible_piece_mask: u8,
+    required: u64,
+) -> Option<(usize, u8)> {
+    let first = required.trailing_zeros() as u8;
+    let mut count = 0;
+    let mut piece_mask = 0;
+    for (scan_index, row_id) in catalog.support(first).iter().copied().enumerate() {
+        let row = catalog.skeleton(row_id);
+        if row.cells & required != required
+            || !row_feasible(catalog, row_id, remaining, feasible_piece_mask)
+        {
+            continue;
+        }
+        if !catalog.apdp_row_is_static_exact(row_id)
+            || !catalog.apdp_index().row_supports(row_id, required)
+        {
+            // Incomplete static support cannot remove a temporal parent or
+            // authorize the partial result accumulated before this row.
+            record_apdp_scan(|value| {
+                value.completeness_rows = value.completeness_rows.saturating_add(scan_index as u64 + 1);
+                value.incomplete_domains = value.incomplete_domains.saturating_add(1);
+            });
+            return None;
+        }
+        count += 1;
+        piece_mask |= 1_u8 << piece_index(row.piece);
+    }
+    // The completeness check and parent aggregation share this one traversal.
+    // Absence of any full parent is handled by the full-placement domain.
+    record_apdp_scan(|value| {
+        value.completeness_rows = value.completeness_rows.saturating_add(catalog.support(first).len() as u64);
+        value.incomplete_domains = value.incomplete_domains.saturating_add(u64::from(count == 0));
+    });
+    (count != 0).then_some((count, piece_mask))
 }
 
 fn bumper_domain(
@@ -486,4 +666,148 @@ fn union_cells(parents: &mut [u8; 64], left: u8, right: u8) {
         core::mem::swap(&mut left_root, &mut right_root);
     }
     parents[right_root as usize] = left_root;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use clearra_core_domain::pc::pc_target::PcTarget;
+    use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+    use clearra_pc_graph::request::OpeningPcSearchQuery;
+    use clearra_problem::ProblemCompiler;
+
+    use super::{
+        ALL_STANDARD_PIECES, DomainPropagation, DomainStatus, GeometryApdpScanPolicy,
+        GeometryCatalog, apdp_domain_is_complete, complete_apdp_parent_domain, exact_parent_rows,
+        geometry_apdp_scan_policy, partial_shape_kind, row_feasible, selected_apdp_parent_domain,
+        set_geometry_apdp_scan_policy,
+    };
+
+    struct RestorePolicy(GeometryApdpScanPolicy);
+
+    impl Drop for RestorePolicy {
+        fn drop(&mut self) {
+            set_geometry_apdp_scan_policy(self.0);
+        }
+    }
+
+    #[test]
+    fn apdp_scan_policies_preserve_static_and_temporal_full_parent_domains() {
+        let _restore = RestorePolicy(geometry_apdp_scan_policy());
+        let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
+            .with_objective(ObjectivePolicy::unique());
+        let problem = ProblemCompiler::compile_opening_pc(&query).expect("four-line problem");
+        let catalog = GeometryCatalog::compile(&problem).expect("inverse lock-clear catalog");
+        let remaining = catalog.required_cells();
+        let mut partials = BTreeSet::new();
+        for row_id in 0..catalog.skeleton_count() as u32 {
+            let row = catalog.skeleton(row_id);
+            let mut cells = row.cells;
+            while cells != 0 {
+                let bit = cells & cells.wrapping_neg();
+                cells &= cells - 1;
+                let partial = row.cells & !bit;
+                if partial_shape_kind(catalog.width(), partial) != 0 {
+                    partials.insert(partial);
+                }
+            }
+        }
+        let mut complete_domains = 0;
+        let mut temporal_domains = 0;
+        for required in partials {
+            let baseline_complete =
+                apdp_domain_is_complete(&catalog, remaining, ALL_STANDARD_PIECES, required);
+            let baseline = baseline_complete.then(|| {
+                exact_parent_rows(&catalog, remaining, ALL_STANDARD_PIECES, required, true)
+            });
+            assert_eq!(
+                complete_apdp_parent_domain(&catalog, remaining, ALL_STANDARD_PIECES, required),
+                baseline,
+                "partial {required:#x}"
+            );
+            if let Some(parent_domain) = baseline {
+                complete_domains += 1;
+                assert_eq!(
+                    parent_domain,
+                    exact_parent_rows(&catalog, remaining, ALL_STANDARD_PIECES, required, false)
+                );
+            } else {
+                let has_temporal_parent = catalog
+                    .support(required.trailing_zeros() as u8)
+                    .iter()
+                    .copied()
+                    .any(|row_id| {
+                        catalog.skeleton(row_id).cells & required == required
+                            && row_feasible(&catalog, row_id, remaining, ALL_STANDARD_PIECES)
+                            && !catalog.apdp_row_is_static_exact(row_id)
+                    });
+                temporal_domains += usize::from(has_temporal_parent);
+            }
+            for (policy, expected) in [
+                (GeometryApdpScanPolicy::Legacy, baseline),
+                (GeometryApdpScanPolicy::Fused, baseline),
+                (GeometryApdpScanPolicy::Off, None),
+            ] {
+                set_geometry_apdp_scan_policy(policy);
+                assert_eq!(
+                    selected_apdp_parent_domain(&catalog, remaining, ALL_STANDARD_PIECES, required),
+                    expected
+                );
+            }
+        }
+        assert!(
+            complete_domains > 0,
+            "fixture must exercise complete static domains"
+        );
+        assert!(temporal_domains > 0, "fixture must retain temporal parents");
+
+        // Compare the rows actually admitted by the full domain, including
+        // bounded residual fields with forced three-cell owner groups.
+        for residual in [
+            remaining,
+            0x407,
+            0x100007,
+            0x300c03,
+            0xf,
+            0x407 | 0x380e0000,
+        ] {
+            let mut baseline = None;
+            for policy in [
+                GeometryApdpScanPolicy::Legacy,
+                GeometryApdpScanPolicy::Off,
+                GeometryApdpScanPolicy::Fused,
+            ] {
+                set_geometry_apdp_scan_policy(policy);
+                let compiled = DomainPropagation::compile(&catalog, residual, ALL_STANDARD_PIECES);
+                let rows = if compiled.status == DomainStatus::Empty {
+                    Vec::new()
+                } else {
+                    (0..catalog.skeleton_count() as u32)
+                        .filter(|row_id| {
+                            compiled.propagation.row_allowed(
+                                &catalog,
+                                *row_id,
+                                residual,
+                                ALL_STANDARD_PIECES,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let observed = (
+                    compiled.status,
+                    compiled.propagation.pivot_required_cells,
+                    rows,
+                );
+                if let Some(expected) = &baseline {
+                    assert_eq!(
+                        &observed, expected,
+                        "policy {policy:?}, residual {residual:#x}"
+                    );
+                } else {
+                    baseline = Some(observed);
+                }
+            }
+        }
+    }
 }

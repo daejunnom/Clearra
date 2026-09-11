@@ -2,7 +2,7 @@
 
 #include "../cache/cache_identity.h"
 
-#define CLEARRA_APDP_PROOF_VERSION UINT64_C(1)
+#define CLEARRA_APDP_PROOF_VERSION UINT64_C(2)
 #define CLEARRA_APDP_SHAPE_ARM UINT8_C(1)
 #define CLEARRA_APDP_SHAPE_ELBOW UINT8_C(2)
 
@@ -68,6 +68,21 @@ static uint8_t pair_flag(uint8_t left_kind, uint8_t right_kind) {
     return CLEARRA_APDP_SUPPORT_ARM_ELBOW;
 }
 
+static bool overlap_is_domino(
+    ClearraBoard64Layout layout,
+    uint64_t overlap) {
+    if (popcount64(overlap) != 2u) {
+        return false;
+    }
+    uint64_t first_bit = overlap & (~overlap + UINT64_C(1));
+    uint8_t first = lowest_bit_index(first_bit);
+    uint8_t second = lowest_bit_index(overlap & ~first_bit);
+    uint8_t difference = (uint8_t)(second - first);
+    return difference == layout.width ||
+           (difference == 1u &&
+            first / layout.width == second / layout.width);
+}
+
 static uint8_t support_flags_for_row(
     ClearraBoard64Layout layout,
     uint64_t row_cells) {
@@ -94,7 +109,8 @@ static uint8_t support_flags_for_row(
              right < count;
              ++right) {
             if (kinds[right] == 0u ||
-                (partials[left] | partials[right]) != row_cells) {
+                (partials[left] | partials[right]) != row_cells ||
+                !overlap_is_domino(layout, partials[left] & partials[right])) {
                 continue;
             }
             flags |= pair_flag(kinds[left], kinds[right]);
@@ -136,7 +152,8 @@ static bool row_has_exact_partial_pair(
         uint64_t bit = cells & (~cells + UINT64_C(1));
         uint64_t other = row_cells & ~bit;
         if (partial_shape_kind(layout, other) != 0u &&
-            (required_cells | other) == row_cells) {
+            (required_cells | other) == row_cells &&
+            overlap_is_domino(layout, required_cells & other)) {
             return true;
         }
         cells &= ~bit;
@@ -165,6 +182,30 @@ bool clearra_geometry_apdp_row_supports_required_cells(
         catalog->layout,
         catalog->skeleton_cell_mask[row_id],
         required_same_tile_cells);
+}
+
+static bool row_has_complete_static_parent_domain(
+    const ClearraGeometryCatalog *catalog,
+    uint32_t row_id) {
+    if (catalog->skeleton_realization_offset == 0 ||
+        catalog->skeleton_realization_count == 0 ||
+        catalog->realization_refs == 0) {
+        return false;
+    }
+    uint32_t begin = catalog->skeleton_realization_offset[row_id];
+    uint32_t count = catalog->skeleton_realization_count[row_id];
+    if (count == 0u || begin > catalog->realization_count ||
+        count > catalog->realization_count - begin) {
+        return false;
+    }
+    for (uint32_t index = 0u; index < count; ++index) {
+        const ClearraInverseClearTemplate *realization =
+            clearra_geometry_catalog_template_at_index(catalog, begin + index);
+        if (realization == 0 || realization->minimum_deleted_row_mask != 0u) {
+            return false;
+        }
+    }
+    return true;
 }
 
 ClearraGeometryApdpStatus clearra_geometry_apdp_propagate(
@@ -212,10 +253,15 @@ ClearraGeometryApdpStatus clearra_geometry_apdp_propagate(
                 &ignored)) {
             continue;
         }
-        if (!clearra_geometry_apdp_row_supports_required_cells(
+        if (!row_has_complete_static_parent_domain(search->catalog, row_id) ||
+            !clearra_geometry_apdp_row_supports_required_cells(
                 search->catalog, row_id, required_same_tile_cells)) {
-            result.filtered_parent_row_count++;
-            continue;
+            /* A static partial index cannot disprove a temporal parent. The
+             * complete full-placement domain remains authoritative, including
+             * every realization of this skeleton and every previously visited
+             * parent. Do not expose a partial count as pruning evidence. */
+            *out_result = (ClearraGeometryApdpResult){0};
+            return CLEARRA_GEOMETRY_APDP_SKIPPED;
         }
         result.exact_parent_row_count++;
         result.parent_piece_mask |= UINT64_C(1)

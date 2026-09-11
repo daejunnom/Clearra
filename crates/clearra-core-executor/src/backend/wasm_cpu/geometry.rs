@@ -837,6 +837,10 @@ impl CompileFrame {
     }
 }
 
+#[cfg(any(test, feature = "minimum-physical-ab"))]
+#[path = "geometry_open_family.rs"]
+mod open_family;
+
 enum CompileAdvance {
     Pending,
     Complete,
@@ -865,6 +869,8 @@ struct FamilyCompiler {
     component_compositions: usize,
     tablebase_pruned_states: usize,
     resource_authoritative: bool,
+    #[cfg(any(test, feature = "minimum-physical-ab"))]
+    open_root: Option<open_family::OpenRootTraversal>,
 }
 
 impl FamilyCompiler {
@@ -914,6 +920,8 @@ impl FamilyCompiler {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             resource_authoritative: true,
+            #[cfg(any(test, feature = "minimum-physical-ab"))]
+            open_root: None,
         })
     }
 
@@ -945,6 +953,8 @@ impl FamilyCompiler {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             resource_authoritative: false,
+            #[cfg(any(test, feature = "minimum-physical-ab"))]
+            open_root: None,
         }
     }
 
@@ -977,6 +987,8 @@ impl FamilyCompiler {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             resource_authoritative: false,
+            #[cfg(any(test, feature = "minimum-physical-ab"))]
+            open_root: None,
         }
     }
 
@@ -992,6 +1004,14 @@ impl FamilyCompiler {
     }
 
     fn advance(&mut self, catalog: &GeometryCatalog) -> CompileAdvance {
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        if self
+            .open_root
+            .as_ref()
+            .is_some_and(|stream| stream.has_cursor())
+        {
+            return CompileAdvance::Pending;
+        }
         if self.stack.is_empty() {
             return CompileAdvance::Complete;
         }
@@ -1234,6 +1254,12 @@ impl FamilyCompiler {
         }
         if frame.chosen_row == NO_ROW && frame.chosen_component_family == FAMILY_INVALID {
             self.root_family = suffix_family;
+            #[cfg(any(test, feature = "minimum-physical-ab"))]
+            if let Some(stream) = self.open_root.as_mut() {
+                if !stream.publish_fallback(suffix_family) {
+                    return CompileAdvance::ResourceIncomplete;
+                }
+            }
             return CompileAdvance::Complete;
         }
 
@@ -1271,6 +1297,8 @@ impl FamilyCompiler {
     }
 
     fn add_branch_to_parent(&mut self, mut branch: u32) -> bool {
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        let original_branch = branch;
         let Some(parent_index) = self.stack.len().checked_sub(1) else {
             return false;
         };
@@ -1278,6 +1306,12 @@ impl FamilyCompiler {
             let existing = self.stack[parent_index].union_levels[level];
             if existing == FAMILY_INVALID {
                 self.stack[parent_index].union_levels[level] = branch;
+                #[cfg(any(test, feature = "minimum-physical-ab"))]
+                if parent_index == 0 {
+                    if let Some(stream) = self.open_root.as_mut() {
+                        return stream.publish(original_branch);
+                    }
+                }
                 return true;
             }
             self.stack[parent_index].union_levels[level] = FAMILY_INVALID;
@@ -1340,6 +1374,10 @@ impl FamilyCompiler {
     }
 
     fn retained_bytes(&self) -> usize {
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        let cursor_bytes = self.open_root.as_ref().map_or(0, |cursor| cursor.retained_bytes());
+        #[cfg(not(any(test, feature = "minimum-physical-ab")))]
+        let cursor_bytes = 0;
         target_bytes(&self.targets)
             + self.admissible_prefixes.capacity() * core::mem::size_of::<u32>()
             + self.stack.capacity() * core::mem::size_of::<CompileFrame>()
@@ -1347,6 +1385,7 @@ impl FamilyCompiler {
             + self.projection_cache.retained_bytes()
             + self.family.retained_bytes()
             + self.component_entries.capacity() * core::mem::size_of::<ComponentFamilyEntry>()
+            + cursor_bytes
     }
 
     fn set_retained_limit_bytes(&mut self, limit: u128) -> bool {
@@ -1551,6 +1590,67 @@ struct TraversalTask {
     continuation_count: u8,
 }
 
+/// One arena-node interpretation. Storage and ownership remain with the
+/// caller, so closed enumeration and an open compiler can share this decoder
+/// without cloning the family arena or lending raw family IDs to consumers.
+enum TraversalStep {
+    Skip,
+    Continue(TraversalTask),
+    Fork(TraversalTask, TraversalTask),
+    Candidate(u8),
+}
+
+#[inline]
+fn advance_traversal_task(
+    family: &GeometrySolutionFamily,
+    catalog: &GeometryCatalog,
+    rows: &mut [u32; MAX_BOARD64_PIECES],
+    target_depth: u8,
+    mut task: TraversalTask,
+) -> Result<TraversalStep, ()> {
+    if task.family == FAMILY_INVALID {
+        return Ok(TraversalStep::Skip);
+    }
+    if task.family == FAMILY_EMPTY {
+        if task.continuation_count != 0 {
+            task.continuation_count -= 1;
+            task.family = task.continuations[task.continuation_count as usize];
+            return Ok(TraversalStep::Continue(task));
+        }
+        if task.depth != target_depth {
+            return Err(());
+        }
+        return Ok(TraversalStep::Candidate(task.depth));
+    }
+    let node = family.node(task.family).ok_or(())?;
+    match node.kind {
+        FamilyNodeKind::Append => {
+            if task.depth >= target_depth || node.row_id as usize >= catalog.skeleton_count() {
+                return Err(());
+            }
+            rows[task.depth as usize] = node.row_id;
+            task.depth += 1;
+            task.family = node.left;
+            Ok(TraversalStep::Continue(task))
+        }
+        FamilyNodeKind::Union => {
+            let mut right = task;
+            right.family = node.right;
+            task.family = node.left;
+            Ok(TraversalStep::Fork(task, right))
+        }
+        FamilyNodeKind::Product => {
+            if task.continuation_count as usize >= MAX_BOARD64_PIECES {
+                return Err(());
+            }
+            task.continuations[task.continuation_count as usize] = node.right;
+            task.continuation_count += 1;
+            task.family = node.left;
+            Ok(TraversalStep::Continue(task))
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 #[cfg(feature = "parallel")]
 struct TraversalSeed {
@@ -1709,46 +1809,21 @@ impl FamilyEnumerator {
     ) -> Result<Option<GeometryCandidate>, ()> {
         while let Some(mut task) = self.tasks.pop() {
             loop {
-                if task.family == FAMILY_INVALID {
-                    break;
-                }
-                if task.family == FAMILY_EMPTY {
-                    if task.continuation_count != 0 {
-                        task.continuation_count -= 1;
-                        task.family = task.continuations[task.continuation_count as usize];
-                        continue;
-                    }
-                    if task.depth != self.target_depth {
-                        return Err(());
-                    }
-                    return self.candidate(catalog, task.depth).map(Some).ok_or(());
-                }
-
-                let node = self.family.node(task.family).ok_or(())?;
-                match node.kind {
-                    FamilyNodeKind::Append => {
-                        if task.depth >= self.target_depth
-                            || node.row_id as usize >= catalog.skeleton_count()
-                        {
-                            return Err(());
-                        }
-                        self.rows[task.depth as usize] = node.row_id;
-                        task.depth += 1;
-                        task.family = node.left;
-                    }
-                    FamilyNodeKind::Union => {
-                        let mut right = task;
-                        right.family = node.right;
+                match advance_traversal_task(
+                    &self.family,
+                    catalog,
+                    &mut self.rows,
+                    self.target_depth,
+                    task,
+                )? {
+                    TraversalStep::Skip => break,
+                    TraversalStep::Continue(next) => task = next,
+                    TraversalStep::Fork(left, right) => {
                         self.push_task(right)?;
-                        task.family = node.left;
+                        task = left;
                     }
-                    FamilyNodeKind::Product => {
-                        if task.continuation_count as usize >= MAX_BOARD64_PIECES {
-                            return Err(());
-                        }
-                        task.continuations[task.continuation_count as usize] = node.right;
-                        task.continuation_count += 1;
-                        task.family = node.left;
+                    TraversalStep::Candidate(depth) => {
+                        return self.candidate(catalog, depth).map(Some).ok_or(());
                     }
                 }
             }
@@ -2661,6 +2736,41 @@ fn checked_target_nested_retained_bytes(targets: &[TargetGroup]) -> Option<u128>
 }
 
 impl GeometrySearch {
+    /// Called only by the explicit physical-probe source. Keep its immutable
+    /// target dictionary when ordinary enumeration releases its family.
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn retain_current_targets_for_required_queue_probe(&mut self) {
+        if self.external_targets.is_some() {
+            return;
+        }
+        self.external_targets = self
+            .enumerator
+            .as_ref()
+            .map(|owner| Arc::clone(&owner.targets))
+            .or_else(|| {
+                self.compiler
+                    .as_ref()
+                    .map(|owner| Arc::clone(&owner.targets))
+            });
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn shared_targets_for_required_queue_probe(&self) -> Option<Arc<[TargetGroup]>> {
+        self.external_targets
+            .as_ref()
+            .map(Arc::clone)
+            .or_else(|| {
+                self.enumerator
+                    .as_ref()
+                    .map(|owner| Arc::clone(&owner.targets))
+            })
+            .or_else(|| {
+                self.compiler
+                    .as_ref()
+                    .map(|owner| Arc::clone(&owner.targets))
+            })
+    }
+
     #[cfg(feature = "parallel")]
     pub fn placeholder() -> Self {
         Self {
@@ -3378,11 +3488,7 @@ impl GeometrySearch {
     }
 
     pub fn target(&self, target_index: u32) -> Option<&TargetGroup> {
-        self.enumerator
-            .as_ref()
-            .map(|enumerator| enumerator.targets.as_ref())
-            .or(self.external_targets.as_deref())?
-            .get(target_index as usize)
+        self.targets()?.get(target_index as usize)
     }
 
     pub fn targets(&self) -> Option<&[TargetGroup]> {
@@ -3390,6 +3496,15 @@ impl GeometrySearch {
             .as_ref()
             .map(|enumerator| enumerator.targets.as_ref())
             .or(self.external_targets.as_deref())
+            .or_else(|| {
+                #[cfg(any(test, feature = "minimum-physical-ab"))]
+                {
+                    self.compiler.as_ref().filter(|compiler| compiler.open_root.is_some())
+                        .map(|compiler| compiler.targets.as_ref())
+                }
+                #[cfg(not(any(test, feature = "minimum-physical-ab")))]
+                { None }
+            })
     }
 
     pub fn finish_external(

@@ -9,6 +9,7 @@ publish = false
 default = []
 webgpu-search = ["clearra-app/webgpu-search"]
 stage-profiling = ["clearra-app/wasm-stage-profiling"]
+minimum-physical-ab = ["clearra-core-executor/minimum-physical-ab"]
 
 [dependencies]
 clearra-app = { path = "../clearra-app", default-features = false, features = ["bitmap-render"] }

@@ -260,6 +260,26 @@ impl WebGpuGeometryExactCoverBackend {
         Self::connect_selected(WebGpuAdapterSelection::Auto).await
     }
 
+    /// Keep experimental minimum-cover dispatch on the existing device owner.
+    /// A browser GPUAdapter cannot create a second device after it is consumed.
+    #[cfg(feature = "minimum-hotfix-ab")]
+    pub(crate) async fn minimum_device_handles(
+        selection: WebGpuAdapterSelection,
+    ) -> Result<(wgpu::Device, wgpu::Queue, WebGpuAdapterSummary), WebGpuUnavailableResult> {
+        match Self::connect_selected(selection).await {
+            WebGpuGeometryExactCoverSessionOutcome::Connected(session) => {
+                let handles = (
+                    session.context.device.clone(),
+                    session.context.queue.clone(),
+                    session.context.adapter.clone(),
+                );
+                session.recycle();
+                Ok(handles)
+            }
+            WebGpuGeometryExactCoverSessionOutcome::Unavailable(error) => Err(error),
+        }
+    }
+
     pub async fn connect_selected(
         selection: WebGpuAdapterSelection,
     ) -> WebGpuGeometryExactCoverSessionOutcome {

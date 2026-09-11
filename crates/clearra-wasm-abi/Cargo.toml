@@ -9,6 +9,7 @@ publish = false
 default = []
 stage-profiling = ["clearra-wasm/stage-profiling", "dep:serde_json"]
 minimum-hotfix-ab = ["dep:clearra-coverage", "clearra-coverage/minimum-hotfix-ab"]
+minimum-physical-ab = ["clearra-wasm/minimum-physical-ab", "minimum-hotfix-ab"]
 
 [dependencies]
 clearra-coverage = { path = "../clearra-coverage", optional = true }

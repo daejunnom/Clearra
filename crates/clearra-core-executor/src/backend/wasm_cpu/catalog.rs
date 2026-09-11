@@ -2,9 +2,14 @@ use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState}
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_problem::SearchProblem;
 
+#[path = "catalog_parent_storage.rs"]
+mod parent_storage;
+use parent_storage::ProjectionOutput;
+
 use super::{
     geometry_apdp::ExactArmPairIndex, geometry_projection::ProjectionCatalog,
     geometry_separator::SeparatorCatalog, mix_digest, piece_index, WasmExactSearchError,
+    inverse_projection::{inverse_projection_policy, ProjectionRowFilter},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +46,8 @@ pub(super) struct GeometryCatalog {
     required_cells: u64,
     skeletons: Vec<SkeletonRow>,
     realizations: Vec<Realization>,
+    #[cfg(any(test, feature = "minimum-physical-ab"))]
+    deferred_parents: Option<parent_storage::DeferredParents>,
     skeleton_occupied_rows: Vec<u16>,
     skeleton_requirement_domains: Option<Vec<u64>>,
     support_offsets: Vec<u32>,
@@ -101,9 +108,7 @@ impl GeometryCatalog {
         let row_count_usize = usize::try_from(row_count).ok()?;
         let clear_state_count = 1_u128.checked_shl(u32::from(height))?;
 
-        let raw_and_ordered_realizations = realization_count
-            .checked_mul(2)?
-            .checked_mul(core::mem::size_of::<Realization>() as u128)?;
+        let raw_and_ordered_realizations = parent_storage::parent_storage_peak_bytes(realization_count)?;
         let skeleton_bytes = row_count.checked_mul(core::mem::size_of::<SkeletonRow>() as u128)?;
         let temporal_bytes = row_count
             .checked_mul(core::mem::size_of::<u16>() as u128)?
@@ -128,7 +133,8 @@ impl GeometryCatalog {
 
         let instantiation_value_count = realization_count.checked_mul(clear_state_count)?;
         let (instantiation_offset_bytes, instantiation_value_bytes) =
-            if instantiation_value_count <= MAX_INSTANTIATION_TABLE_VALUES as u128 {
+            if parent_storage::instantiation_table_enabled()
+                && instantiation_value_count <= MAX_INSTANTIATION_TABLE_VALUES as u128 {
                 (
                     row_count
                         .checked_mul(clear_state_count)?
@@ -246,19 +252,13 @@ impl GeometryCatalog {
         }
 
         let registry = standard_tetromino_registry();
+        let inverse_policy = inverse_projection_policy();
         let realization_capacity = checked_realization_count_upper_bound(width, height)
             .and_then(|count| usize::try_from(count).ok())
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_geometry_catalog_projection_overflow",
             ))?;
-        let mut realizations = Vec::new();
-        realizations
-            .try_reserve_exact(realization_capacity)
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_geometry_catalog_realization_storage_unavailable",
-                )
-            })?;
+        let mut realizations = ProjectionOutput::new(realization_capacity)?;
         for piece in PieceKind::STANDARD_TETROMINOES {
             let definition = registry
                 .get(piece)
@@ -279,6 +279,16 @@ impl GeometryCatalog {
                 local_rows.sort_unstable();
                 local_rows.dedup();
                 for x in 0..=max_x {
+                    let row_filter = ProjectionRowFilter::compile(
+                        inverse_policy, width, height, shape.cells(), &local_rows, x as i8,
+                        |row| {
+                            let row_mask = if width == 64 { u64::MAX } else { (1_u64 << width) - 1 };
+                            ((required_cells & !initial_board) >> (u32::from(row) * u32::from(width))) & row_mask
+                        },
+                    );
+                    if row_filter.as_ref().is_some_and(|filter| !filter.columns_possible()) {
+                        continue;
+                    }
                     let mut target_rows = [0_u8; 4];
                     enumerate_row_projections(
                         width,
@@ -292,51 +302,19 @@ impl GeometryCatalog {
                         &mut target_rows,
                         0,
                         x as i8,
+                        row_filter.as_ref(),
                         &mut realizations,
                     );
                 }
             }
         }
-        realizations.sort_unstable();
-        realizations.dedup();
-
-        let mut skeletons = Vec::new();
-        skeletons
-            .try_reserve_exact(realizations.len())
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_geometry_catalog_skeleton_storage_unavailable",
-                )
-            })?;
-        let mut ordered_realizations = Vec::new();
-        ordered_realizations
-            .try_reserve_exact(realizations.len())
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_geometry_catalog_realization_storage_unavailable",
-                )
-            })?;
-        let mut cursor = 0;
-        while cursor < realizations.len() {
-            let piece = realizations[cursor].piece;
-            let cells = realizations[cursor].cells;
-            let start = ordered_realizations.len();
-            while cursor < realizations.len()
-                && realizations[cursor].piece == piece
-                && realizations[cursor].cells == cells
-            {
-                ordered_realizations.push(realizations[cursor]);
-                cursor += 1;
-            }
-            let count = ordered_realizations.len() - start;
-            skeletons.push(SkeletonRow {
-                piece,
-                cells,
-                realization_start: start as u32,
-                realization_count: count as u16,
-            });
-        }
-        drop(realizations);
+        let compiled_rows = realizations.finish()?;
+        let skeletons = compiled_rows.skeletons;
+        let ordered_realizations = compiled_rows.realizations;
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        let parents_deferred = compiled_rows.deferred.is_some();
+        #[cfg(not(any(test, feature = "minimum-physical-ab")))]
+        let parents_deferred = false;
 
         let mut support_offsets = Vec::new();
         support_offsets
@@ -384,18 +362,39 @@ impl GeometryCatalog {
         let separator_catalog = SeparatorCatalog::compile(width, height, &skeletons).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_separator_catalog_storage_unavailable"),
         )?;
-        let (skeleton_occupied_rows, skeleton_requirement_domains) =
+        let (skeleton_occupied_rows, skeleton_requirement_domains) = if !parent_storage::instantiation_table_enabled() {
+            let mut occupied = Vec::new();
+            occupied.try_reserve_exact(skeletons.len()).map_err(|_| WasmExactSearchError::InvalidProblem(
+                "wasm_geometry_temporal_metadata_storage_unavailable"))?;
+            occupied.extend(skeletons.iter().map(|row| occupied_rows(width, row.cells)));
+            (occupied, None)
+        } else {
             compile_skeleton_temporal_metadata(width, height, &skeletons, &ordered_realizations)
                 .ok_or(WasmExactSearchError::InvalidProblem(
                     "wasm_geometry_temporal_metadata_storage_unavailable",
-                ))?;
+                ))?
+        };
 
         let (clear_state_count, instantiation_offsets, instantiated_realizations) =
-            compile_instantiation_table(width, height, &skeletons, &ordered_realizations);
+            if parent_storage::instantiation_table_enabled() {
+                compile_instantiation_table(width, height, &skeletons, &ordered_realizations)
+            } else { (1_usize << height, None, Vec::new()) };
 
         let mut identity_digest = mix_digest(0, u64::from(width));
         identity_digest = mix_digest(identity_digest, u64::from(height));
         identity_digest = mix_digest(identity_digest, initial_board);
+        if parents_deferred {
+            // This complete logical recipe determines every temporal parent.
+            // Bind its representation version without eagerly materializing
+            // parents for a legacy digest. Tablebases must match this identity.
+            identity_digest = mix_digest(identity_digest, 0x4c504152454e5431); // LPARENT1
+            identity_digest = mix_digest(identity_digest, required_cells);
+            for row in &skeletons {
+                identity_digest = mix_digest(identity_digest, piece_index(row.piece) as u64);
+                identity_digest = mix_digest(identity_digest, row.cells);
+                identity_digest = mix_digest(identity_digest, u64::from(row.realization_count));
+            }
+        }
         for realization in &ordered_realizations {
             identity_digest = mix_digest(identity_digest, piece_index(realization.piece) as u64);
             identity_digest = mix_digest(identity_digest, realization.cells);
@@ -421,6 +420,8 @@ impl GeometryCatalog {
             required_cells,
             skeletons,
             realizations: ordered_realizations,
+            #[cfg(any(test, feature = "minimum-physical-ab"))]
+            deferred_parents: compiled_rows.deferred,
             skeleton_occupied_rows,
             skeleton_requirement_domains,
             support_offsets,
@@ -468,6 +469,12 @@ impl GeometryCatalog {
 
     pub fn realizations(&self, row_id: u32) -> &[Realization] {
         let row = self.skeleton(row_id);
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        if let Some(deferred) = &self.deferred_parents {
+            let values = deferred[row_id as usize]
+                .get_or_init(|| parent_storage::materialize(self.width, self.height, row));
+            return &values[..row.realization_count as usize];
+        }
         let start = row.realization_start as usize;
         &self.realizations[start..start + row.realization_count as usize]
     }
@@ -585,7 +592,18 @@ impl GeometryCatalog {
     }
 
     pub fn realization_count(&self) -> usize {
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        if self.deferred_parents.is_some() {
+            return self.skeletons.last().map_or(0, |row|
+                row.realization_start as usize + row.realization_count as usize);
+        }
         self.realizations.len()
+    }
+
+    #[cfg(any(test, feature = "minimum-physical-ab"))]
+    pub fn deferred_parent_counts(&self) -> Option<(usize, usize)> {
+        self.deferred_parents.as_ref().map(|families|
+            (families.iter().filter(|family| family.get().is_some()).count(), families.len()))
     }
 
     pub fn instantiated_realization_count(&self) -> usize {
@@ -597,8 +615,14 @@ impl GeometryCatalog {
     }
 
     pub fn retained_bytes(&self) -> usize {
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        let deferred_bytes = self.deferred_parents.as_ref().map_or(0, |families|
+            families.capacity() * core::mem::size_of::<std::sync::OnceLock<[Realization; 4]>>());
+        #[cfg(not(any(test, feature = "minimum-physical-ab")))]
+        let deferred_bytes = 0;
         self.skeletons.capacity() * core::mem::size_of::<SkeletonRow>()
             + self.realizations.capacity() * core::mem::size_of::<Realization>()
+            + deferred_bytes
             + self.skeleton_occupied_rows.capacity() * core::mem::size_of::<u16>()
             + self
                 .skeleton_requirement_domains
@@ -886,7 +910,8 @@ fn enumerate_row_projections(
     target_rows: &mut [u8; 4],
     row_index: usize,
     x: i8,
-    output: &mut Vec<Realization>,
+    row_filter: Option<&ProjectionRowFilter>,
+    output: &mut ProjectionOutput,
 ) {
     if row_index == local_rows.len() {
         let mut mask = 0_u64;
@@ -904,22 +929,7 @@ fn enumerate_row_projections(
         if mask & initial_board != 0 || mask & !required_cells != 0 {
             return;
         }
-        let mut required_deleted_rows = 0_u16;
-        for index in 1..local_rows.len() {
-            let local_gap = local_rows[index] - local_rows[index - 1];
-            let first_deleted = target_rows[index - 1] + local_gap;
-            for row in first_deleted..target_rows[index] {
-                required_deleted_rows |= 1_u16 << row;
-            }
-        }
-        output.push(Realization {
-            piece,
-            cells: mask,
-            required_deleted_rows,
-            rotation,
-            x,
-            target_anchor_y: target_rows[0] as i8,
-        });
+        output.push_projection(piece, mask, rotation, x, local_rows, target_rows);
         return;
     }
 
@@ -936,6 +946,9 @@ fn enumerate_row_projections(
     }
     let maximum = height - 1 - remaining_span;
     for target_row in minimum..=maximum {
+        if row_filter.is_some_and(|filter| !filter.row_allowed(row_index, target_row)) {
+            continue;
+        }
         target_rows[row_index] = target_row;
         enumerate_row_projections(
             width,
@@ -949,6 +962,7 @@ fn enumerate_row_projections(
             target_rows,
             row_index + 1,
             x,
+            row_filter,
             output,
         );
     }

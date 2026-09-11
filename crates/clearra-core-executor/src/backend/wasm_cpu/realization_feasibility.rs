@@ -11,6 +11,33 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(super) enum RealizationFeasibilityPolicy {
+    Legacy = 0,
+    Off = 1,
+    RelaxationOnly = 2,
+}
+
+#[cfg(any(test, feature = "minimum-physical-ab"))]
+std::thread_local! {
+    static FEASIBILITY_POLICY: std::cell::Cell<RealizationFeasibilityPolicy> =
+        const { std::cell::Cell::new(RealizationFeasibilityPolicy::Legacy) };
+}
+
+#[inline]
+pub(super) fn realization_feasibility_policy() -> RealizationFeasibilityPolicy {
+    #[cfg(any(test, feature = "minimum-physical-ab"))]
+    { FEASIBILITY_POLICY.with(std::cell::Cell::get) }
+    #[cfg(not(any(test, feature = "minimum-physical-ab")))]
+    { RealizationFeasibilityPolicy::Legacy }
+}
+
+#[cfg(any(test, feature = "minimum-physical-ab"))]
+pub(super) fn set_realization_feasibility_policy(policy: RealizationFeasibilityPolicy) -> RealizationFeasibilityPolicy {
+    FEASIBILITY_POLICY.with(|current| current.replace(policy))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FeasibilityKind {
     Feasible,
     Infeasible,
@@ -74,6 +101,9 @@ impl RealizationFeasibilityWorkspace {
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
     ) -> bool {
+        if realization_feasibility_policy() == RealizationFeasibilityPolicy::Off {
+            return false;
+        }
         let operation_count = candidate.row_ids().len();
         if operation_count == 0 || operation_count > MAX_BOARD64_PIECES {
             return false;
@@ -151,6 +181,18 @@ impl RealizationFeasibilityWorkspace {
                 "wasm_realization_feasibility_projection_invalid",
             ));
         }
+        if realization_feasibility_policy() != RealizationFeasibilityPolicy::Legacy {
+            // Removing the optional prepass supplies no negative evidence and
+            // no dependency graph. Complete BuildUp still checks every physical
+            // transition, hold history, completion and scoring condition.
+            return Ok(RealizationFeasibility {
+                kind: FeasibilityKind::Unknown,
+                explored_states: 0,
+                generation: 0,
+                operation_count: operation_count as u8,
+                partial_dependency_graph: None,
+            });
+        }
         if !self.begin_generation(state_count) {
             return Ok(RealizationFeasibility {
                 kind: FeasibilityKind::Unknown,
@@ -194,6 +236,33 @@ impl RealizationFeasibilityWorkspace {
             generation: self.generation,
             operation_count: operation_count as u8,
             partial_dependency_graph: None,
+        })
+    }
+
+    /// Reuses the current exact candidate's geometric evidence only after the
+    /// source-scoped caller has compared full identity, row IDs and policies.
+    /// Unknown and interrupted generations never become a negative proof.
+    #[cfg(any(test, feature = "minimum-physical-ab"))]
+    pub(super) fn reusable_proof(
+        &self,
+        proof: RealizationFeasibility,
+    ) -> Option<RealizationFeasibility> {
+        if proof.kind == FeasibilityKind::Unknown
+            || proof.generation == 0
+            || proof.generation != self.generation
+            || proof.operation_count == 0
+            || usize::from(proof.operation_count) > MAX_BOARD64_PIECES
+            || self.failed_generations.len() < (1_usize << proof.operation_count)
+            || (proof.partial_dependency_graph.is_some()
+                && !self.has_current_partial_dependency_graph(proof))
+        {
+            return None;
+        }
+        // The evidence remains complete, but its construction work belongs to
+        // the original probe, not every later selected queue.
+        Some(RealizationFeasibility {
+            explored_states: 0,
+            ..proof
         })
     }
 
@@ -531,6 +600,18 @@ mod tests {
         assert_eq!(workspace.permitted_operation_mask(proof, 0b001), 0b010);
         assert_eq!(workspace.permitted_operation_mask(proof, 0b010), 0b001);
         assert_eq!(workspace.permitted_operation_mask(proof, 0b011), 0b100);
+        let reused = workspace.reusable_proof(proof).expect("current complete evidence");
+        assert_eq!(reused.explored_states(), 0);
+        assert_eq!(workspace.permitted_operation_mask(reused, 0b001), 0b010);
+        assert_eq!(workspace.permitted_operation_mask(reused, 0b010), 0b001);
+        assert!(workspace.reusable_proof(RealizationFeasibility {
+            kind: FeasibilityKind::Unknown,
+            ..proof
+        }).is_none());
+        assert!(workspace.reusable_proof(RealizationFeasibility {
+            generation: proof.generation.wrapping_add(1),
+            ..proof
+        }).is_none());
     }
 
     #[test]
@@ -565,6 +646,7 @@ mod tests {
         let generation = 7;
         let mut workspace = RealizationFeasibilityWorkspace {
             generation,
+            failed_generations: vec![0; 8],
             live_generations: vec![0; 8],
             transition_masks: vec![0; 8],
             ..RealizationFeasibilityWorkspace::default()

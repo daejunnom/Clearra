@@ -8,6 +8,8 @@ mod geometry_exact_cover_result;
 mod geometry_exact_cover_timing;
 pub mod shader_contract;
 pub mod webgpu_backend;
+#[cfg(feature = "minimum-hotfix-ab")]
+pub mod minimum_batch;
 
 pub use geometry_exact_cover_backend::{
     WebGpuExactCoverCatalog, WebGpuGeometryCatalogIdentity, WebGpuGeometryExactCoverBackend,

@@ -9,6 +9,14 @@ pub mod wasm_host_capabilities;
 pub mod wasm_worker_job;
 pub mod webgpu;
 
+#[cfg(feature = "minimum-physical-ab")]
+pub use clearra_core_executor::backend::{
+    minimum_physical_apdp_scan_counters, set_minimum_physical_ab_policy,
+    set_minimum_physical_apdp_diagnostics, set_minimum_physical_inverse_ab_policy,
+    set_minimum_physical_feasibility_ab_policy,
+    set_minimum_physical_parent_ab_policy,
+};
+
 pub use clearra_app::{
     CoveragePortfolioPageStore, PortfolioAlternativeAdvance, PortfolioAlternativeError,
     PortfolioAlternativePage, PortfolioMemberPage, PortfolioPageLoadAdvance,

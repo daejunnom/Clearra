@@ -609,6 +609,113 @@ void residual_memo_requires_exact_piece_counts(void) {
     clearra_geometry_residual_memo_release(&memo);
 }
 
+static void apdp_mixed_temporal_parent_domain_matches_full_support(void) {
+    ClearraBoard64Layout layout;
+    EXPECT_U64(clearra_board64_make_layout(10u, 4u, &layout), CLEARRA_BOARD64_OK);
+    uint32_t piece_kinds[3] = {CLR_PIECE_L, CLR_PIECE_J, CLR_PIECE_L};
+    uint64_t row_masks[3] = {
+        UINT64_C(0x407), UINT64_C(0x1007), UINT64_C(0x100007),
+    };
+    uint32_t realization_offsets[3] = {0u, 1u, 2u};
+    uint32_t realization_counts[3] = {1u, 1u, 1u};
+    ClearraInverseClearTemplate realizations[3] = {
+        {.canonical_cell_ownership = UINT64_C(0x407)},
+        {.canonical_cell_ownership = UINT64_C(0x1007)},
+        {.canonical_cell_ownership = UINT64_C(0x100007),
+         .minimum_deleted_row_mask = UINT16_C(2)},
+    };
+    ClearraInverseClearTemplate *realization_refs[3] = {
+        &realizations[0], &realizations[1], &realizations[2],
+    };
+    uint32_t support_rows[3] = {0u, 1u, 2u};
+    uint8_t support_flags[3] = {0u};
+    EXPECT_TRUE(clearra_geometry_apdp_compile_support_flags(
+        layout, row_masks, 3u, support_flags));
+    ClearraGeometryCatalog catalog = {
+        .layout = layout,
+        .skeleton_count = 3u,
+        .realization_count = 3u,
+        .skeleton_piece_kind = piece_kinds,
+        .skeleton_cell_mask = row_masks,
+        .skeleton_realization_offset = realization_offsets,
+        .skeleton_realization_count = realization_counts,
+        .skeleton_apdp_support_flags = support_flags,
+        .realization_refs = realization_refs,
+        .cell_support_offsets = {0u, 3u},
+        .cell_support_row_ids = support_rows,
+    };
+    clr_packing_problem problem = clr_packing_problem_zero();
+    ClearraGeometryExactCoverSearch search = {.catalog = &catalog, .problem = &problem};
+    ClearraActivePieceFamily active_family = {0};
+    const uint64_t required = UINT64_C(7);
+    const uint64_t extra_cells[3] = {
+        UINT64_C(0x400), UINT64_C(0x1000), UINT64_C(0x100000),
+    };
+
+    /* Enumerate support and inventory subdomains, with the non-static parent
+     * both before and after static parents. A skipped scan must not leak the
+     * partial count accumulated before discovering its incomplete domain. */
+    for (uint8_t order = 0u; order < 2u; ++order) {
+        support_rows[0] = order == 0u ? 0u : 2u;
+        support_rows[2] = order == 0u ? 2u : 0u;
+        for (uint8_t inventory = 0u; inventory < 4u; ++inventory) {
+            problem.piece_multiset_window.counts[CLR_PIECE_J] = inventory & 1u;
+            problem.piece_multiset_window.counts[CLR_PIECE_L] = (inventory >> 1u) & 1u;
+            for (uint8_t subset = 0u; subset < 8u; ++subset) {
+                uint64_t remaining = required;
+                for (uint8_t row = 0u; row < 3u; ++row) {
+                    if ((subset & (uint8_t)(1u << row)) != 0u) {
+                        remaining |= extra_cells[row];
+                    }
+                }
+                uint32_t full_count = 0u;
+                uint64_t full_piece_mask = 0u;
+                bool has_temporal_parent = false;
+                for (uint8_t row = 0u; row < 3u; ++row) {
+                    if ((row_masks[row] & remaining) == row_masks[row] &&
+                        problem.piece_multiset_window.counts[piece_kinds[row]] != 0u) {
+                        full_count++;
+                        full_piece_mask |= UINT64_C(1) << piece_kinds[row];
+                        has_temporal_parent |= row == 2u;
+                    }
+                }
+                ClearraGeometryApdpResult result = {
+                    .exact_parent_row_digest = UINT64_MAX,
+                    .exact_parent_row_count = UINT32_MAX,
+                    .filtered_parent_row_count = UINT32_MAX,
+                };
+                ClearraGeometryApdpStatus status = clearra_geometry_apdp_propagate(
+                    &search, &active_family, remaining, required, &result);
+                if (has_temporal_parent) {
+                    EXPECT_U64(status, CLEARRA_GEOMETRY_APDP_SKIPPED);
+                    EXPECT_U64(result.exact_parent_row_digest, 0u);
+                    EXPECT_U64(result.exact_parent_row_count, 0u);
+                    EXPECT_U64(result.parent_piece_mask, 0u);
+                } else {
+                    EXPECT_U64(status, full_count == 0u
+                        ? CLEARRA_GEOMETRY_APDP_EMPTY : CLEARRA_GEOMETRY_APDP_SUPPORTED);
+                    EXPECT_U64(result.exact_parent_row_count, full_count);
+                    EXPECT_U64(result.parent_piece_mask, full_piece_mask);
+                }
+                EXPECT_U64(result.filtered_parent_row_count, 0u);
+            }
+        }
+    }
+
+    /* A zero intersection of deletion requirements is not a certificate that
+     * every temporal parent is static. Scan all realizations of a skeleton. */
+    support_rows[0] = 0u;
+    catalog.cell_support_offsets[1] = 1u;
+    realization_counts[0] = 2u;
+    realizations[1].canonical_cell_ownership = row_masks[0];
+    realizations[1].minimum_deleted_row_mask = UINT16_C(2);
+    ClearraGeometryApdpResult result;
+    EXPECT_U64(clearra_geometry_apdp_propagate(
+        &search, &active_family, row_masks[0], required, &result),
+        CLEARRA_GEOMETRY_APDP_SKIPPED);
+    EXPECT_U64(result.filtered_parent_row_count, 0u);
+}
+
 void geometry_apdp_marks_inverse_clear_skeleton_non_static(void) {
     ClearraBoard64Layout layout;
     EXPECT_U64(
@@ -624,6 +731,7 @@ void geometry_apdp_marks_inverse_clear_skeleton_non_static(void) {
         layout, skeleton_masks, 2u, support_flags));
     EXPECT_U64(support_flags[0], 0u);
     EXPECT_TRUE(support_flags[1] != 0u);
+    apdp_mixed_temporal_parent_domain_matches_full_support();
 }
 
 void frontier_hash_collision_does_not_merge_distinct_partial_states(void) {

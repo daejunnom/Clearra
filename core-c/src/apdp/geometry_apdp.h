@@ -34,6 +34,10 @@ bool clearra_geometry_apdp_row_supports_required_cells(
     uint32_t row_id,
     uint64_t required_same_tile_cells);
 
+/* The caller must prove that required_same_tile_cells belong to one full
+ * placement. SKIPPED preserves the full domain whenever any feasible parent
+ * has an unrepresented or non-static temporal realization; its result carries
+ * no partial pruning evidence. A supported static domain retains all parents. */
 ClearraGeometryApdpStatus clearra_geometry_apdp_propagate(
     const ClearraGeometryExactCoverSearch *search,
     const ClearraActivePieceFamily *active_family,

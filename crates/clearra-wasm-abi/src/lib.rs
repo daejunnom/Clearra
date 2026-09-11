@@ -3553,6 +3553,72 @@ pub extern "C" fn clearra_wasm_minimum_ab_policy(flags: u32) -> i32 {
     })
 }
 
+/// Private physical CPU A/B. A setting must reach every isolated worker before
+/// preparation starts; completed or missing workers provide no search evidence.
+#[cfg(feature = "minimum-physical-ab")]
+#[no_mangle]
+pub extern "C" fn clearra_wasm_minimum_physical_ab_policy(apdp: u32, component: u32) -> i32 {
+    configure_idle_physical_policy(|| clearra_wasm::set_minimum_physical_ab_policy(apdp, component))
+}
+
+#[cfg(feature = "minimum-physical-ab")]
+#[no_mangle]
+pub extern "C" fn clearra_wasm_minimum_physical_inverse_ab_policy(inverse: u32) -> i32 {
+    configure_idle_physical_policy(|| clearra_wasm::set_minimum_physical_inverse_ab_policy(inverse))
+}
+
+#[cfg(feature = "minimum-physical-ab")]
+#[no_mangle]
+pub extern "C" fn clearra_wasm_minimum_physical_feasibility_ab_policy(feasibility: u32) -> i32 {
+    configure_idle_physical_policy(|| clearra_wasm::set_minimum_physical_feasibility_ab_policy(feasibility))
+}
+
+#[cfg(feature = "minimum-physical-ab")]
+#[no_mangle]
+pub extern "C" fn clearra_wasm_minimum_physical_parent_ab_policy(policy: u32) -> i32 {
+    configure_idle_physical_policy(|| clearra_wasm::set_minimum_physical_parent_ab_policy(policy))
+}
+
+/// Diagnostics are disabled by default and excluded from adoption timings.
+#[cfg(feature = "minimum-physical-ab")]
+#[no_mangle]
+pub extern "C" fn clearra_wasm_minimum_physical_apdp_diagnostics(enabled: u32) -> i32 {
+    configure_idle_physical_policy(|| {
+        if enabled > 1 { return false; }
+        clearra_wasm::set_minimum_physical_apdp_diagnostics(enabled == 1);
+        true
+    })
+}
+
+/// Read after the last receipt and before worker release. WASM i64 is exposed
+/// as BigInt, preserving exact counters; the private GUI serializes it as text.
+#[cfg(feature = "minimum-physical-ab")]
+#[no_mangle]
+pub extern "C" fn clearra_wasm_minimum_physical_apdp_counter(index: u32) -> u64 {
+    clearra_wasm::minimum_physical_apdp_scan_counters()
+        .get(index as usize).copied().unwrap_or(u64::MAX)
+}
+
+#[cfg(feature = "minimum-physical-ab")]
+fn configure_idle_physical_policy(configure: impl FnOnce() -> bool) -> i32 {
+    ABI_STATE.with(|state| {
+        let state = state.borrow();
+        if state.require_mutation_admission().is_err()
+            || state.runtime.has_active_finite_job()
+            || state.distributed_coordinator.is_some()
+            || state.distributed_completion.is_some()
+            || state.minimum_parallel_worker.is_some()
+        {
+            return ABI_ERROR;
+        }
+        if configure() {
+            ABI_OK
+        } else {
+            ABI_ERROR
+        }
+    })
+}
+
 #[cfg(feature = "stage-profiling")]
 #[no_mangle]
 pub extern "C" fn clearra_wasm_profile_finish() -> i32 {

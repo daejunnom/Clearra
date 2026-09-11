@@ -48,17 +48,18 @@ const stagingLease = await acquireManagedTransientDirectory(
   resolve(dirname(destinationDir), '.clearra-wasm-stage')
 );
 const stagingDir = stagingLease.path;
-const wasmBuildContract = await createClearraWasmBuildContract(root);
-const benchmarkSourceSnapshot = options.benchmarkProvenance
-  ? finesseSourceSnapshot(root)
-  : null;
-const benchmarkProducer = options.benchmarkProvenance
-  ? await benchmarkProducerIdentity()
-  : null;
-const benchmarkToolchain = options.benchmarkProvenance
-  ? await benchmarkToolchainIdentity()
-  : null;
+let wasmBuildContract;
 try {
+  wasmBuildContract = await createClearraWasmBuildContract(root);
+  const benchmarkSourceSnapshot = options.benchmarkProvenance
+    ? finesseSourceSnapshot(root)
+    : null;
+  const benchmarkProducer = options.benchmarkProvenance
+    ? await benchmarkProducerIdentity()
+    : null;
+  const benchmarkToolchain = options.benchmarkProvenance
+    ? await benchmarkToolchainIdentity()
+    : null;
   if (options.environment === 'wsl') {
     if (process.platform !== 'win32') {
       throw new Error('--environment wsl is available only from a Windows host');
@@ -109,7 +110,8 @@ try {
 
 async function buildWithWsl() {
   const distribution = process.env.CLEARRA_WSL_DISTRIBUTION || 'Ubuntu';
-  const cargoFeatures = options.stageProfiling ? ' --features stage-profiling' : '';
+  const selectedFeatures = cargoFeatureNames();
+  const cargoFeatures = selectedFeatures.length ? ` --features ${selectedFeatures.join(',')}` : '';
   const identityEnvironment =
     wasmBuildContract.runtime_identity.source_commit === CLEARRA_UNVERIFIED_BUILD_ID
       ? ''
@@ -169,7 +171,8 @@ async function buildNative() {
     '-p',
     'clearra-wasm-abi'
   ];
-  if (options.stageProfiling) cargoArgs.push('--features', 'stage-profiling');
+  const selectedFeatures = cargoFeatureNames();
+  if (selectedFeatures.length) cargoArgs.push('--features', selectedFeatures.join(','));
   await run('cargo', cargoArgs, { CARGO_TARGET_DIR: targetRoot });
   await run(process.env.WASM_BINDGEN || 'wasm-bindgen', [
     resolve(targetRoot, 'wasm32-unknown-unknown', 'release', 'clearra_wasm.wasm'),
@@ -188,6 +191,7 @@ function parseArguments(args) {
   let environment = process.env.CLEARRA_WASM_BUILD_ENVIRONMENT || 'native';
   let verify = false;
   let stageProfiling = false;
+  let minimumPhysicalAb = false;
   let benchmarkProvenance = false;
   let sourceRoot = null;
   for (let index = 0; index < args.length; index += 1) {
@@ -198,6 +202,10 @@ function parseArguments(args) {
     }
     if (argument === '--stage-profiling') {
       stageProfiling = true;
+      continue;
+    }
+    if (argument === '--minimum-physical-ab') {
+      minimumPhysicalAb = true;
       continue;
     }
     if (argument === '--benchmark-provenance') {
@@ -231,14 +239,25 @@ function parseArguments(args) {
   if (!['native', 'wsl'].includes(environment)) {
     throw new Error(`unsupported WASM build environment: ${environment}`);
   }
+  if (minimumPhysicalAb && !destination) {
+    throw new Error('--minimum-physical-ab requires an explicit private artifact destination');
+  }
   return {
     destination,
     environment,
     verify,
     stageProfiling,
+    minimumPhysicalAb,
     benchmarkProvenance,
     sourceRoot,
   };
+}
+
+function cargoFeatureNames() {
+  return [
+    ...(options.stageProfiling ? ['stage-profiling'] : []),
+    ...(options.minimumPhysicalAb ? ['minimum-physical-ab'] : []),
+  ];
 }
 
 async function writeManifest(outputDir, buildContract) {
@@ -322,6 +341,8 @@ async function writeBenchmarkProvenance(outputDir, manifest, snapshot, toolchain
     build_options: {
       environment: options.environment,
       stage_profiling: options.stageProfiling,
+      minimum_physical_ab: options.minimumPhysicalAb,
+      cargo_features: cargoFeatureNames(),
     },
   };
   await writeFile(
@@ -371,13 +392,17 @@ async function assertDefaultRustBuildEnvironment() {
   if (options.environment === 'wsl') {
     const distribution = process.env.CLEARRA_WSL_DISTRIBUTION || 'Ubuntu';
     const keys = PERFORMANCE_RUST_ENV_KEYS.join(' ');
+    // WSL's Windows command-line reconstruction must not expand $key before
+    // the loop has assigned it. Encode the script just like buildWithWsl.
+    const script = `for key in ${keys}; do if [ -n "\${!key}" ]; then printf '%s\\n' "$key"; fi; done; printf '%s\\n' checked`;
+    const encoded = Buffer.from(script, 'utf8').toString('base64');
     const result = await capture('wsl.exe', [
       '-d',
       distribution,
       '--',
       'bash',
       '-lc',
-      `for key in ${keys}; do if [ -n "\${!key}" ]; then printf '%s\\n' "$key"; fi; done; printf '%s\\n' checked`,
+      `printf '%s' '${encoded}' | base64 -d | bash`,
     ]);
     const configured = result.split(/\r?\n/).filter((entry) => entry !== 'checked');
     if (configured.length > 0) {

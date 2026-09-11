@@ -664,6 +664,10 @@ pub(crate) struct WasmExactSearchSession {
     problem_retention: SearchProblemRetention,
     catalog: Arc<GeometryCatalog>,
     geometry: GeometrySearch,
+    #[cfg(feature = "minimum-physical-ab")]
+    required_queue_retain_targets: bool,
+    #[cfg(feature = "minimum-physical-ab")]
+    bounded_root_ab: Option<(bool, u64, u64)>,
     buildup_workspace: BuildUpWorkspace,
     coverage_evaluator: CoverageProductEvaluator,
     covered_patterns: PatternBitSet,
@@ -749,6 +753,94 @@ pub(crate) struct WasmExactSearchSession {
 }
 
 impl WasmExactSearchSession {
+    /// Same complete physical verification and objective finalizer, with a
+    /// constructor-frozen experimental geometry traversal and finite work cap.
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(crate) fn new_bounded_root_ab_under_authority(
+        problem: Arc<SearchProblem>, external_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+        stream_branches: bool, max_geometry_work: u64,
+    ) -> Result<Self, WasmExactSearchError> {
+        let mut session = Self::new_shared_required_queue_source_under_authority(
+            problem, external_bytes, authority,
+        )?;
+        session.bounded_root_ab = Some((stream_branches, max_geometry_work, 0));
+        Ok(session)
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(crate) fn bounded_root_ab_progress(&self) -> Option<(u64, usize)> {
+        self.bounded_root_ab.map(|(_, _, used)| (used, self.packing_candidate_count))
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn checked_required_queue_source_retained_upper_bound_bytes(&self) -> Option<u128> {
+        self.problem.checked_build_probability_pointee_retained_bytes()?
+            .checked_add(self.catalog.retained_bytes() as u128)?
+            .checked_add(core::mem::size_of::<GeometryCatalog>() as u128)?
+            .checked_add(4 * core::mem::size_of::<usize>() as u128)?
+            .checked_add(super::required_queue_probe::checked_shared_target_owner_bytes(
+                self.geometry.shared_targets_for_required_queue_probe().as_deref(),
+            )?)
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn new_shared_required_queue_source_under_authority(
+        problem: Arc<SearchProblem>, external_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::validate_tiling_session_problem(problem.as_ref())?;
+        super::required_queue_probe::validate_problem(problem.as_ref())?;
+        let problem_bytes = problem.checked_build_probability_pointee_retained_bytes()
+            .ok_or(WasmExactSearchError::InvalidProblem("wasm_required_queue_problem_accounting_unavailable"))?;
+        if external_bytes < problem_bytes + 2 * core::mem::size_of::<usize>() as u128 {
+            return Err(WasmExactSearchError::InvalidProblem("wasm_required_queue_problem_accounting_understated"));
+        }
+        let admission = admit_budget_bound_search_execution_under_terminal_authority(
+            problem.as_ref(), external_bytes, authority, 1,
+        ).map_err(WasmExactSearchError::resource_admission)?;
+        let mut session = Self::new_with_preacquired_execution_admission(problem, false,
+            SearchProblemRetention::ParentAuthorizedSharedInput {
+                checked_external_retained_upper_bound_bytes: external_bytes,
+            }, admission)?;
+        session.required_queue_retain_targets = true;
+        Ok(session)
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn into_required_queue_verifier_under_terminal_authority(
+        self, external_bytes: u128, max_cached_failures: usize,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<super::WasmRequiredQueueVerifier, crate::WasmCpuSearchError> {
+        let problem = Arc::clone(&self.problem);
+        let catalog = Arc::clone(&self.catalog);
+        let targets = self.geometry.shared_targets_for_required_queue_probe();
+        // Geometry completion does not admit public dense candidate IDs.
+        // The retained full targets permit a subsequent any-queue physical
+        // membership pass after releasing this one-slot producer's lease.
+        drop(self);
+        super::required_queue_probe::WasmRequiredQueueVerifier::from_shared_inputs_with_targets(
+            problem, catalog, targets, external_bytes, max_cached_failures, authority,
+        )
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn required_queue_verifier_under_terminal_authority(
+        &self,
+        checked_external_retained_upper_bound_bytes: u128,
+        max_cached_failures: usize,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<super::WasmRequiredQueueVerifier, crate::WasmCpuSearchError> {
+        super::required_queue_probe::WasmRequiredQueueVerifier::from_shared_inputs_with_targets(
+            Arc::clone(&self.problem),
+            Arc::clone(&self.catalog),
+            self.geometry.shared_targets_for_required_queue_probe(),
+            checked_external_retained_upper_bound_bytes,
+            max_cached_failures,
+            authority,
+        )
+    }
+
     fn initialization_memory_projection_unavailable(
         execution_admission: &ExecutionAdmission,
     ) -> WasmExactSearchError {
@@ -1328,6 +1420,10 @@ impl WasmExactSearchSession {
             problem_retention,
             catalog,
             geometry,
+            #[cfg(feature = "minimum-physical-ab")]
+            required_queue_retain_targets: false,
+            #[cfg(feature = "minimum-physical-ab")]
+            bounded_root_ab: None,
             buildup_workspace: BuildUpWorkspace::default(),
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
@@ -1753,8 +1849,20 @@ impl WasmExactSearchSession {
                 let limit = self
                     .checked_geometry_retained_limit(checked_candidate_bytes)?
                     .expect("parent-authorized geometry has a retained limit");
-                self.geometry
-                    .advance_with_retained_limit(&self.catalog, limit)
+                #[cfg(feature = "minimum-physical-ab")]
+                if let Some((stream, cap, used)) = self.bounded_root_ab.as_mut() {
+                    let observed = self.geometry.advance_bounded_root(
+                        &self.catalog, *stream, cap.saturating_sub(*used), limit, control,
+                    );
+                    *used = used.checked_add(observed.work_steps).ok_or(
+                        WasmExactSearchError::InvalidProblem("open_family_work_overflow"),
+                    )?;
+                    observed.advance
+                } else {
+                    self.geometry.advance_with_retained_limit(&self.catalog, limit)
+                }
+                #[cfg(not(feature = "minimum-physical-ab"))]
+                self.geometry.advance_with_retained_limit(&self.catalog, limit)
             } else {
                 self.geometry.advance(&self.catalog)
             };
@@ -1776,6 +1884,11 @@ impl WasmExactSearchSession {
                     }
                 }
                 GeometryAdvance::ResourceIncomplete(reason) => {
+                    #[cfg(feature = "minimum-physical-ab")]
+                    if self.bounded_root_ab.is_some() {
+                        self.finished = true;
+                        return Err(WasmExactSearchError::InvalidProblem(reason));
+                    }
                     self.mark_truncated(reason);
                     return self.complete();
                 }
@@ -1794,6 +1907,39 @@ impl WasmExactSearchSession {
         &mut self,
         produced_candidate_count: usize,
     ) -> Result<DistributedGeometryAdvance, WasmExactSearchError> {
+        self.advance_distributed_geometry_using(produced_candidate_count, |geometry, catalog, limit| {
+            match limit {
+                Some(limit) => geometry.advance_with_retained_limit(catalog, limit),
+                None => geometry.advance(catalog),
+            }
+        })
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub(super) fn advance_distributed_bounded_root(
+        &mut self, produced_candidate_count: usize, stream_branches: bool,
+        remaining_work: u64, control: &ExecutionControl,
+    ) -> (Result<DistributedGeometryAdvance, WasmExactSearchError>, u64, u128) {
+        let mut work = 0;
+        let mut peak = 0;
+        let result = self.advance_distributed_geometry_using(produced_candidate_count,
+            |geometry, catalog, limit| {
+                let Some(limit) = limit else {
+                    return GeometryAdvance::ResourceIncomplete("open_family_geometry_authority_missing");
+                };
+                let observed = geometry.advance_bounded_root(catalog, stream_branches,
+                    remaining_work, limit, control);
+                work = observed.work_steps;
+                peak = observed.retained_peak_upper_bound;
+                observed.advance
+            });
+        (result, work, peak)
+    }
+
+    fn advance_distributed_geometry_using(
+        &mut self, produced_candidate_count: usize,
+        advance: impl FnOnce(&mut GeometrySearch, &GeometryCatalog, Option<u128>) -> GeometryAdvance,
+    ) -> Result<DistributedGeometryAdvance, WasmExactSearchError> {
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_search_session_already_finished",
@@ -1811,7 +1957,28 @@ impl WasmExactSearchSession {
                 "candidate_budget_exceeded",
             ));
         }
-        Ok(match self.geometry.advance(&self.catalog) {
+        #[cfg(feature = "minimum-physical-ab")]
+        if self.required_queue_retain_targets {
+            self.geometry.retain_current_targets_for_required_queue_probe();
+        }
+        #[cfg(feature = "minimum-physical-ab")]
+        let required_queue_bounded = self.required_queue_retain_targets;
+        #[cfg(not(feature = "minimum-physical-ab"))]
+        let required_queue_bounded = false;
+        let geometry_limit = if required_queue_bounded {
+            // The complete-source capture buffer has already been admitted as
+            // external storage. Also leave room for the one returned packet.
+            let packet_future = core::mem::size_of::<GeometryCandidate>() as u128
+                + (MAX_BOARD64_PIECES * core::mem::size_of::<u32>()) as u128;
+            self.ensure_session_memory_bound(packet_future)?;
+            let limit = self.checked_geometry_retained_limit(packet_future)?
+                .ok_or(WasmExactSearchError::InvalidProblem("wasm_required_queue_geometry_authority_missing"))?;
+            Some(limit)
+        } else {
+            None
+        };
+        let geometry_advance = advance(&mut self.geometry, &self.catalog, geometry_limit);
+        Ok(match geometry_advance {
             GeometryAdvance::Pending => DistributedGeometryAdvance::Pending,
             GeometryAdvance::Candidate(candidate) => DistributedGeometryAdvance::Candidate {
                 target_index: candidate.target_index,
@@ -4522,6 +4689,10 @@ impl WasmExactSearchSession {
                 format!("{:016x}", self.catalog.identity_digest()),
             ),
             field("geometry_skeleton_count", self.catalog.skeleton_count()),
+            #[cfg(feature = "minimum-physical-ab")]
+            field("deferred_parent_families", self.catalog.deferred_parent_counts().map_or(0, |(_, total)| total)),
+            #[cfg(feature = "minimum-physical-ab")]
+            field("materialized_parent_families", self.catalog.deferred_parent_counts().map_or(0, |(ready, _)| ready)),
             field(
                 "concrete_realization_count",
                 self.catalog.realization_count(),
@@ -5350,91 +5521,100 @@ mod tests {
 
     #[test]
     fn score_portfolio_retains_every_exact_scoring_candidate_before_app_reduction() {
-        let query = PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(2, 0),
-            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
-                PieceKind::I,
-                PieceKind::I,
-                PieceKind::O,
-                PieceKind::O,
-                PieceKind::O,
-            ])),
-            PieceWindow::new(5),
-        )
-        .with_allow_hold(false)
-        .with_exact_pieces(Some(5))
-        .with_count_policy(PcCountPolicy::CountAll)
-        .with_objective(ObjectivePolicy::minimum_cover().with_score_summary());
-        let generic_problem = ProblemCompiler::compile_scenario_pc(&query)
-            .expect("generic score plus minimum-cover problem");
-        let generic_result = WasmCpuSearchBackend::execute_with_control(
-            &generic_problem,
-            &ExecutionControl::default(),
-        )
-        .expect("generic score plus minimum-cover producer");
-        assert_eq!(
-            generic_result.bool_field("minimum_cover_complete"),
-            Some(true)
-        );
-        assert_eq!(
-            generic_result.bool_field("minimum_cover_proven_minimum"),
-            Some(true)
-        );
-        assert_eq!(
-            generic_result.field("minimum_cover_incomplete_reason"),
-            Some("none")
-        );
-        assert!(
-            generic_result
-                .usize_field("minimum_cover_source_solution_count")
-                .is_some_and(
-                    |source| source > generic_result.normalized_solution_identities().len()
-                ),
-            "generic min-cover plus score must retain the historical Core reduction"
-        );
+        super::super::inverse_parent::assert_inverse_parent_policy_parity(|| {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(2, 0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                    PieceKind::I,
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::O,
+                    PieceKind::O,
+                ])),
+                PieceWindow::new(5),
+            )
+            .with_allow_hold(false)
+            .with_exact_pieces(Some(5))
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_objective(ObjectivePolicy::minimum_cover().with_score_summary());
+            let generic_problem = ProblemCompiler::compile_scenario_pc(&query)
+                .expect("generic score plus minimum-cover problem");
+            let generic_result = WasmCpuSearchBackend::execute_with_control(
+                &generic_problem,
+                &ExecutionControl::default(),
+            )
+            .expect("generic score plus minimum-cover producer");
+            assert_eq!(
+                generic_result.bool_field("minimum_cover_complete"),
+                Some(true)
+            );
+            assert_eq!(
+                generic_result.bool_field("minimum_cover_proven_minimum"),
+                Some(true)
+            );
+            assert_eq!(
+                generic_result.field("minimum_cover_incomplete_reason"),
+                Some("none")
+            );
+            assert!(
+                generic_result
+                    .usize_field("minimum_cover_source_solution_count")
+                    .is_some_and(
+                        |source| source > generic_result.normalized_solution_identities().len()
+                    ),
+                "generic min-cover plus score must retain the historical Core reduction"
+            );
 
-        let problem = ProblemCompiler::compile_scenario_pc(&query)
-            .expect("multi-candidate score-portfolio problem")
-            .with_pc_score_portfolio_v2_evidence();
+            let problem = ProblemCompiler::compile_scenario_pc(&query)
+                .expect("multi-candidate score-portfolio problem")
+                .with_pc_score_portfolio_v2_evidence();
 
-        let result =
-            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
-                .expect("multi-candidate score-portfolio producer");
-        let identities = result.normalized_solution_identities();
-        let batch = result
-            .exact_scoring_execution_batch()
-            .expect("complete exact scoring candidate dictionary");
+            let result =
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .expect("multi-candidate score-portfolio producer");
+            let identities = result.normalized_solution_identities();
+            let batch = result
+                .exact_scoring_execution_batch()
+                .expect("complete exact scoring candidate dictionary");
 
-        assert!(
-            identities.len() > 1,
-            "fixture must exercise the reduction boundary"
-        );
-        assert_eq!(
-            result.usize_field("minimum_cover_source_solution_count"),
-            Some(identities.len())
-        );
-        assert_eq!(
-            result.usize_field("minimum_cover_selected_solution_count"),
-            Some(identities.len())
-        );
-        assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
-        assert_eq!(
-            result.field("minimum_cover_incomplete_reason"),
-            Some("deferred-to-coordinator")
-        );
-        assert!(identities.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(batch.graphs().len(), identities.len());
-        assert!(result
-            .pc_chance_coverage_evidence()
-            .is_some_and(|evidence| evidence.complete()));
-        assert!(batch.graphs().iter().enumerate().all(|(index, graph)| {
-            graph.candidate_id() == (index + 1) as u64 && graph.identity() == identities[index]
-        }));
-        assert_eq!(result.solution_coverages().len(), identities.len());
-        assert_eq!(
-            result.normalized_solution_coverages().len(),
-            identities.len()
-        );
+            assert!(
+                identities.len() > 1,
+                "fixture must exercise the reduction boundary"
+            );
+            assert_eq!(
+                result.usize_field("minimum_cover_source_solution_count"),
+                Some(identities.len())
+            );
+            assert_eq!(
+                result.usize_field("minimum_cover_selected_solution_count"),
+                Some(identities.len())
+            );
+            assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
+            assert_eq!(
+                result.field("minimum_cover_incomplete_reason"),
+                Some("deferred-to-coordinator")
+            );
+            assert!(identities.windows(2).all(|pair| pair[0] < pair[1]));
+            assert_eq!(batch.graphs().len(), identities.len());
+            assert!(result
+                .pc_chance_coverage_evidence()
+                .is_some_and(|evidence| evidence.complete()));
+            assert!(batch.graphs().iter().enumerate().all(|(index, graph)| {
+                graph.candidate_id() == (index + 1) as u64 && graph.identity() == identities[index]
+            }));
+            assert_eq!(result.solution_coverages().len(), identities.len());
+            assert_eq!(
+                result.normalized_solution_coverages().len(),
+                identities.len()
+            );
+            (
+                generic_result.normalized_solution_keys().to_vec(),
+                generic_result.normalized_solution_coverages().to_vec(),
+                result.normalized_solution_keys().to_vec(),
+                result.normalized_solution_coverages().to_vec(),
+                batch.clone(),
+            )
+        });
     }
 
     #[test]
@@ -5967,36 +6147,45 @@ mod tests {
     #[cfg(feature = "parallel")]
     #[test]
     fn native_parallel_minimum_cover_retains_complete_problem_bound_source_rows() {
-        for score_portfolio in [false, true] {
-            let problem = native_parallel_minimum_problem(score_portfolio);
-            let mut session = WasmExactSearchSession::new(&problem).expect("minimum session");
-            let result = session
-                .execute_parallel_if_worthwhile(2, &ExecutionControl::default())
-                .expect("parallel minimum source")
-                .expect("fixture takes native family workers");
-            let evidence = result
-                .pc_chance_coverage_evidence()
-                .expect("typed minimum source evidence");
-            assert!(evidence.complete(), "score_portfolio={score_portfolio}");
-            assert!(evidence.problem().matches_search_problem(&problem));
-            assert_eq!(result.normalized_solution_coverages().len(), 4);
-            assert_eq!(evidence.row_count(), 4);
-            assert_eq!(
-                evidence.coverage_union().words(),
-                result.coverage_pattern_words()
-            );
-            assert_eq!(
-                result.field("minimum_cover_incomplete_reason"),
-                Some("deferred-to-coordinator")
-            );
-            if score_portfolio {
-                let batch = result
-                    .exact_scoring_execution_batch()
-                    .expect("score evidence");
-                assert!(batch.complete());
-                assert_eq!(batch.graphs().len(), 4);
+        super::super::inverse_parent::assert_inverse_parent_policy_parity(|| {
+            let mut actual = Vec::new();
+            for score_portfolio in [false, true] {
+                let problem = native_parallel_minimum_problem(score_portfolio);
+                let mut session = WasmExactSearchSession::new(&problem).expect("minimum session");
+                let result = session
+                    .execute_parallel_if_worthwhile(2, &ExecutionControl::default())
+                    .expect("parallel minimum source")
+                    .expect("fixture takes native family workers");
+                let evidence = result
+                    .pc_chance_coverage_evidence()
+                    .expect("typed minimum source evidence");
+                assert!(evidence.complete(), "score_portfolio={score_portfolio}");
+                assert!(evidence.problem().matches_search_problem(&problem));
+                assert_eq!(result.normalized_solution_coverages().len(), 4);
+                assert_eq!(evidence.row_count(), 4);
+                assert_eq!(
+                    evidence.coverage_union().words(),
+                    result.coverage_pattern_words()
+                );
+                assert_eq!(
+                    result.field("minimum_cover_incomplete_reason"),
+                    Some("deferred-to-coordinator")
+                );
+                if score_portfolio {
+                    let batch = result
+                        .exact_scoring_execution_batch()
+                        .expect("score evidence");
+                    assert!(batch.complete());
+                    assert_eq!(batch.graphs().len(), 4);
+                }
+                actual.push((
+                    result.normalized_solution_keys().to_vec(),
+                    result.normalized_solution_coverages().to_vec(),
+                    result.exact_scoring_execution_batch().cloned(),
+                ));
             }
-        }
+            actual
+        });
     }
 
     #[cfg(feature = "parallel")]
@@ -6213,33 +6402,41 @@ mod tests {
 
     #[test]
     fn observation_policy_marks_candidate_rows_incomplete_before_execution() {
-        let query = PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(2, 0xf3fcf),
-            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
-            PieceWindow::new(1),
-        )
-        .with_allow_hold(false)
-        .with_exact_pieces(Some(1))
-        .with_count_policy(PcCountPolicy::CountUnique)
-        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
-        let problem = ProblemCompiler::compile_scenario_percent(&query)
-            .expect("problem")
-            .with_pc_chance_probability_v2_evidence();
+        super::super::inverse_parent::assert_inverse_parent_policy_parity(|| {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(2, 0xf3fcf),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+                PieceWindow::new(1),
+            )
+            .with_allow_hold(false)
+            .with_exact_pieces(Some(1))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
+            let problem = ProblemCompiler::compile_scenario_percent(&query)
+                .expect("problem")
+                .with_pc_chance_probability_v2_evidence();
 
-        let session = WasmExactSearchSession::new(&problem).expect("observation session");
+            let session = WasmExactSearchSession::new(&problem).expect("observation session");
 
-        assert!(!session.coverage_rows_complete);
-        assert!(session.pc_chance_coverage_evidence_available);
-        drop(session);
+            assert!(!session.coverage_rows_complete);
+            assert!(session.pc_chance_coverage_evidence_available);
+            drop(session);
 
-        let result =
-            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
-                .expect("observation result");
-        let evidence = result
-            .pc_chance_coverage_evidence()
-            .expect("observation retains only incomplete candidate rows");
-        assert!(!evidence.complete());
-        assert!(evidence.problem().matches_search_problem(&problem));
+            let result =
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .expect("observation result");
+            let evidence = result
+                .pc_chance_coverage_evidence()
+                .expect("observation retains only incomplete candidate rows");
+            assert!(!evidence.complete());
+            assert!(evidence.problem().matches_search_problem(&problem));
+            (
+                result.normalized_solution_keys().to_vec(),
+                result.normalized_solution_coverages().to_vec(),
+                result.coverage_pattern_words().to_vec(),
+                evidence.complete(),
+            )
+        });
     }
 
     #[test]

@@ -2017,6 +2017,10 @@ impl ExtendedBuildProbabilitySession {
                     .saturating_add(self.searched_build_nodes),
             ),
             field("geometry_searched_nodes", self.geometry.expanded_nodes()),
+            #[cfg(feature = "minimum-physical-ab")]
+            field("deferred_parent_families", self.catalog.deferred_parent_counts().map_or(0, |(_, total)| total)),
+            #[cfg(feature = "minimum-physical-ab")]
+            field("materialized_parent_families", self.catalog.deferred_parent_counts().map_or(0, |(ready, _)| ready)),
             field("buildup_searched_nodes", self.searched_build_nodes),
             field(
                 "geometry_domain_pruned_states",

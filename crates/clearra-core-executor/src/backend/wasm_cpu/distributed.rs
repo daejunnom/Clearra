@@ -202,6 +202,59 @@ pub struct WasmCpuCandidateProducer {
 }
 
 impl WasmCpuCandidateProducer {
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn new_shared_required_queue_source_under_terminal_authority(
+        problem: Arc<SearchProblem>,
+        checked_external_retained_upper_bound_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, WasmCpuSearchError> {
+        Ok(Self {
+            session: WasmExactSearchSession::new_shared_required_queue_source_under_authority(
+                problem, checked_external_retained_upper_bound_bytes, authority,
+            ).map_err(map_typed_error)?,
+            preparation_progress_steps: 0,
+            candidate_count: 0,
+            candidate_digest: 0,
+            verification_required: true,
+            finished: false,
+        })
+    }
+
+    /// Shared immutable input graph retained after consuming this source.
+    /// Caller-owned dictionaries, packet buffers and controller state are extra.
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn checked_required_queue_source_retained_upper_bound_bytes(&self) -> Option<u128> {
+        self.session.checked_required_queue_source_retained_upper_bound_bytes()
+    }
+
+    /// A separate physical probe owner: its subset evidence never enters the
+    /// distributed verifier's legacy complete-row reduction or finish result.
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn required_queue_verifier_under_terminal_authority(
+        &self,
+        checked_external_retained_upper_bound_bytes: u128,
+        max_cached_failures: usize,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<super::WasmRequiredQueueVerifier, WasmCpuSearchError> {
+        self.session.required_queue_verifier_under_terminal_authority(
+            checked_external_retained_upper_bound_bytes,
+            max_cached_failures,
+            authority,
+        )
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn into_required_queue_verifier_under_terminal_authority(
+        self,
+        checked_external_retained_upper_bound_bytes: u128,
+        max_cached_failures: usize,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<super::WasmRequiredQueueVerifier, WasmCpuSearchError> {
+        self.session.into_required_queue_verifier_under_terminal_authority(
+            checked_external_retained_upper_bound_bytes, max_cached_failures, authority,
+        )
+    }
+
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
         Self::new_typed(problem).map_err(|error| error.reason())
     }
@@ -262,6 +315,48 @@ impl WasmCpuCandidateProducer {
         if was_preparing {
             self.preparation_progress_steps = self.preparation_progress_steps.saturating_add(1);
         }
+        self.consume_geometry_advance(advance, control)
+    }
+
+    /// Experimental bounded root source. Returns observation, consumed work,
+    /// and admitted geometry peak even when the source is interrupted. A
+    /// resource-incomplete source is an error here, never Completed(summary).
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn advance_bounded_root(
+        &mut self, stream_branches: bool, remaining_work: u64, control: &ExecutionControl,
+    ) -> (Result<WasmCandidateProducerAdvance, &'static str>, u64, u128) {
+        if self.finished {
+            return (Err("wasm_distributed_geometry_already_finished"), 0, 0);
+        }
+        if !self.verification_required {
+            self.finished = true;
+            return (Err("open_family_requires_verifying_source"), 0, 0);
+        }
+        if control.is_cancelled() {
+            self.finished = true;
+            return (Ok(WasmCandidateProducerAdvance::Cancelled), 0, 0);
+        }
+        let was_preparing = self.session.geometry_target_preparation_pending();
+        let (advance, work, peak) = self.session.advance_distributed_bounded_root(
+            self.candidate_count, stream_branches, remaining_work, control);
+        if was_preparing {
+            self.preparation_progress_steps = self.preparation_progress_steps.saturating_add(1);
+        }
+        let result = match advance {
+            Ok(DistributedGeometryAdvance::ResourceIncomplete(reason)) => {
+                self.finished = true;
+                Err(reason)
+            }
+            Err(error) => { self.finished = true; Err(map_error(error)) }
+            Ok(advance) => self.consume_geometry_advance(advance, control),
+        };
+        if result.is_err() { self.finished = true; }
+        (result, work, peak)
+    }
+
+    fn consume_geometry_advance(
+        &mut self, advance: DistributedGeometryAdvance, control: &ExecutionControl,
+    ) -> Result<WasmCandidateProducerAdvance, &'static str> {
         match advance {
             DistributedGeometryAdvance::Pending => Ok(WasmCandidateProducerAdvance::Pending),
             DistributedGeometryAdvance::Candidate {
@@ -355,6 +450,41 @@ pub struct WasmDistributedVerifier {
 }
 
 impl WasmDistributedVerifier {
+    /// Shared immutable input graph retained after consuming this source.
+    /// Caller-owned dictionaries, packet buffers and controller state are extra.
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn checked_required_queue_source_retained_upper_bound_bytes(&self) -> Option<u128> {
+        self.session.checked_required_queue_source_retained_upper_bound_bytes()
+    }
+
+    /// A separate physical probe owner: its subset evidence never enters the
+    /// distributed verifier's legacy complete-row reduction or finish result.
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn required_queue_verifier_under_terminal_authority(
+        &self,
+        checked_external_retained_upper_bound_bytes: u128,
+        max_cached_failures: usize,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<super::WasmRequiredQueueVerifier, WasmCpuSearchError> {
+        self.session.required_queue_verifier_under_terminal_authority(
+            checked_external_retained_upper_bound_bytes,
+            max_cached_failures,
+            authority,
+        )
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn into_required_queue_verifier_under_terminal_authority(
+        self,
+        checked_external_retained_upper_bound_bytes: u128,
+        max_cached_failures: usize,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<super::WasmRequiredQueueVerifier, WasmCpuSearchError> {
+        self.session.into_required_queue_verifier_under_terminal_authority(
+            checked_external_retained_upper_bound_bytes, max_cached_failures, authority,
+        )
+    }
+
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
         Ok(Self {
             session: WasmExactSearchSession::new_external_geometry(problem).map_err(map_error)?,
@@ -628,7 +758,7 @@ pub(super) fn map_error(error: WasmExactSearchError) -> &'static str {
     error.reason()
 }
 
-fn map_typed_error(error: WasmExactSearchError) -> WasmCpuSearchError {
+pub(super) fn map_typed_error(error: WasmExactSearchError) -> WasmCpuSearchError {
     match error {
         WasmExactSearchError::InvalidProblem(reason) => {
             WasmCpuSearchError::InvalidProblem { reason }

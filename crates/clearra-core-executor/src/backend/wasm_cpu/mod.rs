@@ -20,10 +20,15 @@ mod geometry_apdp;
 mod geometry_component;
 mod geometry_domain;
 mod geometry_family;
+#[cfg(feature = "minimum-physical-ab")]
+mod minimum_physical_policy;
 #[cfg(all(test, feature = "parallel"))]
 mod geometry_parallel_tests;
 mod geometry_projection;
 mod geometry_separator;
+mod inverse_projection;
+#[cfg(any(test, feature = "minimum-physical-ab"))]
+mod inverse_parent;
 mod kick_profiles;
 #[cfg(feature = "parallel")]
 mod parallel_coverage;
@@ -37,6 +42,14 @@ mod queue_observation_policy;
 mod reachability;
 mod realization_feasibility;
 mod result;
+#[cfg(feature = "minimum-physical-ab")]
+mod required_queue_probe;
+#[cfg(feature = "minimum-physical-ab")]
+mod implicit_pc_oracle;
+#[cfg(feature = "minimum-physical-ab")]
+pub use implicit_pc_oracle::{WasmImplicitPcMinimumOracle, WasmImplicitPcSourceLimits, WasmImplicitPcSourceObservation};
+#[cfg(feature = "minimum-physical-ab")]
+pub use required_queue_probe::{WasmCandidateIdentityEvidence, WasmCandidateIdentityProbeObservation, WasmRequiredPatternEvidence, WasmRequiredQueueProbeLimits, WasmRequiredQueueProbeObservation, WasmRequiredQueueVerifier};
 mod setup_all_paths;
 mod setup_coverage_graph;
 mod setup_finder;
@@ -67,6 +80,16 @@ pub use distributed::{
     WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
     WasmDistributedResultMerger, WasmDistributedVerifier,
 };
+#[cfg(feature = "minimum-physical-ab")]
+pub use minimum_physical_policy::set_minimum_physical_ab_policy;
+#[cfg(feature = "minimum-physical-ab")]
+pub use minimum_physical_policy::set_minimum_physical_parent_ab_policy;
+#[cfg(feature = "minimum-physical-ab")]
+pub use minimum_physical_policy::{minimum_physical_apdp_scan_counters, set_minimum_physical_apdp_diagnostics};
+#[cfg(feature = "minimum-physical-ab")]
+pub use minimum_physical_policy::set_minimum_physical_inverse_ab_policy;
+#[cfg(feature = "minimum-physical-ab")]
+pub use minimum_physical_policy::set_minimum_physical_feasibility_ab_policy;
 pub use pc4_tablebase::{
     compile_pc4_compact_tablebase, install_pc4_compact_tablebase, release_pc4_compact_tablebase,
     Pc4CompactTablebase, Pc4CompactTablebaseArtifact, Pc4TablebaseError, Pc4TablebaseLookup,

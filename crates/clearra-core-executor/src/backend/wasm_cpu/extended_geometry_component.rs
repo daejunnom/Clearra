@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use super::{
     extended_board::ExtendedBoard,
     extended_inverse_catalog::{DenseExtendedGeometryCatalog, ExtendedInverseCatalog},
+    geometry_component::{component_join_policy, ComponentJoinPolicy, ComponentSignatureJoinIndex},
     geometry_family::{GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID},
     piece_index,
 };
@@ -33,6 +34,9 @@ pub(super) fn compile_component_plan(
     feasible_mask: u8,
     family: &mut GeometrySolutionFamily,
 ) -> ExtendedComponentPlanResult {
+    if component_join_policy() == ComponentJoinPolicy::Off {
+        return ExtendedComponentPlanResult::NotApplicable;
+    }
     if remaining.count_ones() < 8 || remaining.count_ones() > 64 {
         return ExtendedComponentPlanResult::NotApplicable;
     }
@@ -63,6 +67,9 @@ pub(super) fn compile_dense_component_plan(
     feasible_mask: u8,
     family: &mut GeometrySolutionFamily,
 ) -> ExtendedComponentPlanResult {
+    if component_join_policy() == ComponentJoinPolicy::Off {
+        return ExtendedComponentPlanResult::NotApplicable;
+    }
     let components =
         match decompose_hypergraph(catalog, dense_catalog, dense_remaining, feasible_mask) {
             HypergraphDecomposition::Connected => {
@@ -90,7 +97,8 @@ pub(super) fn compile_dense_component_plan(
         family: FAMILY_EMPTY,
     }];
 
-    for component in components {
+    let component_count = components.len();
+    for (component_index, component) in components.into_iter().enumerate() {
         let table = match compiler.compile(component, family) {
             Ok(table) => table,
             Err(DenseComponentCompileError::BudgetExceeded) => {
@@ -111,6 +119,7 @@ pub(super) fn compile_dense_component_plan(
             table.as_ref(),
             used_counts,
             targets,
+            component_index + 1 == component_count,
             family,
         ) {
             Ok(entries) => entries,
@@ -346,6 +355,23 @@ fn product_signature_tables(
     right: &[ExtendedComponentEntry],
     used_counts: [u8; 7],
     targets: &[[u8; 7]],
+    complete: bool,
+    family: &mut GeometrySolutionFamily,
+) -> Result<Vec<ExtendedComponentEntry>, ()> {
+    // An intermediate component sum is only a lower bound on target counts.
+    // Exact complements are valid only for the last component, when every
+    // remaining cell is consumed. Keep the partial convolution unchanged.
+    if complete && component_join_policy() == ComponentJoinPolicy::Complement {
+        return product_signature_tables_complement(left, right, used_counts, targets, family);
+    }
+    product_signature_tables_legacy(left, right, used_counts, targets, family)
+}
+
+fn product_signature_tables_legacy(
+    left: &[ExtendedComponentEntry],
+    right: &[ExtendedComponentEntry],
+    used_counts: [u8; 7],
+    targets: &[[u8; 7]],
     family: &mut GeometrySolutionFamily,
 ) -> Result<Vec<ExtendedComponentEntry>, ()> {
     let mut product = Vec::new();
@@ -357,6 +383,33 @@ fn product_signature_tables(
             if !counts_admissible(used_counts, counts, targets) {
                 continue;
             }
+            let branch = family
+                .product(left_entry.family, right_entry.family)
+                .ok_or(())?;
+            merge_signature_entry(&mut product, counts, branch, family).map_err(|_| ())?;
+        }
+    }
+    Ok(product)
+}
+
+fn product_signature_tables_complement(
+    left: &[ExtendedComponentEntry],
+    right: &[ExtendedComponentEntry],
+    used_counts: [u8; 7],
+    targets: &[[u8; 7]],
+    family: &mut GeometrySolutionFamily,
+) -> Result<Vec<ExtendedComponentEntry>, ()> {
+    let Ok(mut index) = ComponentSignatureJoinIndex::new(
+        right.iter().map(|entry| entry.counts),
+        targets.iter().copied(),
+    ) else {
+        return product_signature_tables_legacy(left, right, used_counts, targets, family);
+    };
+    let mut product = Vec::new();
+    for left_entry in left {
+        for right_index in index.matching_right_indices(used_counts, left_entry.counts) {
+            let right_entry = &right[*right_index];
+            let counts = add_counts(left_entry.counts, right_entry.counts).ok_or(())?;
             let branch = family
                 .product(left_entry.family, right_entry.family)
                 .ok_or(())?;
@@ -442,4 +495,99 @@ fn union_cells(parents: &mut [u8; 64], left: u8, right: u8) {
         core::mem::swap(&mut left_root, &mut right_root);
     }
     parents[usize::from(right_root)] = left_root;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::wasm_cpu::geometry_component::with_component_join_policy;
+
+    fn fixture() -> (
+        GeometrySolutionFamily,
+        [ExtendedComponentEntry; 2],
+        [ExtendedComponentEntry; 2],
+    ) {
+        let mut family = GeometrySolutionFamily::new();
+        let mut entry = |row, counts| ExtendedComponentEntry {
+            counts,
+            family: family.append(row, FAMILY_EMPTY).expect("fixture family"),
+        };
+        let left = [
+            entry(0, [8, 0, 0, 0, 0, 0, 0]),
+            entry(1, [7, 1, 0, 0, 0, 0, 0]),
+        ];
+        let right = [
+            entry(2, [7, 1, 0, 0, 0, 0, 0]),
+            entry(3, [8, 0, 0, 0, 0, 0, 0]),
+        ];
+        (family, left, right)
+    }
+
+    #[test]
+    fn final_complement_preserves_legacy_families_with_counts_above_fifteen() {
+        let (mut family, left, right) = fixture();
+        let used = [0, 0, 1, 0, 0, 0, 0];
+        let targets = [
+            [15, 1, 1, 0, 0, 0, 0],
+            [16, 0, 1, 0, 0, 0, 0],
+            [15, 1, 1, 0, 0, 0, 0],
+        ];
+        let legacy = with_component_join_policy(ComponentJoinPolicy::Legacy, || {
+            product_signature_tables(&left, &right, used, &targets, true, &mut family)
+                .expect("legacy products")
+        });
+        let legacy_nodes = family.node_count();
+        let complement = with_component_join_policy(ComponentJoinPolicy::Complement, || {
+            product_signature_tables(&left, &right, used, &targets, true, &mut family)
+                .expect("complement products")
+        });
+        let expected = legacy
+            .iter()
+            .filter(|entry| counts_complete(used, entry.counts, &targets))
+            .map(|entry| (entry.counts, entry.family))
+            .collect::<Vec<_>>();
+        let actual = complement
+            .iter()
+            .map(|entry| (entry.counts, entry.family))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(family.node_count(), legacy_nodes);
+        assert_eq!(complement.len(), 2);
+        assert_eq!(
+            complement
+                .iter()
+                .map(|entry| family.path_count(entry.family).expect("valid family"))
+                .sum::<u128>(),
+            3,
+        );
+    }
+
+    #[test]
+    fn complement_policy_keeps_incomplete_intermediate_count_signatures() {
+        let (mut family, left, right) = fixture();
+        let used = [0; 7];
+        let targets = [[17, 1, 0, 0, 0, 0, 0]];
+        let legacy = with_component_join_policy(ComponentJoinPolicy::Legacy, || {
+            product_signature_tables(&left, &right, used, &targets, false, &mut family)
+                .expect("legacy partial products")
+        });
+        let complement = with_component_join_policy(ComponentJoinPolicy::Complement, || {
+            product_signature_tables(&left, &right, used, &targets, false, &mut family)
+                .expect("complement partial products")
+        });
+        assert_eq!(
+            complement
+                .iter()
+                .map(|entry| (entry.counts, entry.family))
+                .collect::<Vec<_>>(),
+            legacy
+                .iter()
+                .map(|entry| (entry.counts, entry.family))
+                .collect::<Vec<_>>(),
+        );
+        assert!(!complement.is_empty());
+        assert!(complement
+            .iter()
+            .all(|entry| !counts_complete(used, entry.counts, &targets)));
+    }
 }

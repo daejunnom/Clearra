@@ -3279,7 +3279,7 @@ mod tests {
         field: BuildProbabilityField,
         requested: bool,
         expected_solution_count: usize,
-    ) {
+    ) -> CoreExecutionResult {
         let expected_height = field.height().to_string();
         let serial = run_serial_without_finesse(problem, field);
         let distributed = run_distributed_without_finesse(problem, field);
@@ -3313,34 +3313,46 @@ mod tests {
         ] {
             assert_eq!(distributed.unique_field(field), serial.unique_field(field));
         }
+        serial
     }
 
     #[test]
     fn compact_and_extended_include_and_omit_match_serial_and_distributed() {
-        let compact =
-            BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
-                .expect("compact one-I field");
-        let extended =
-            BuildProbabilityField::from_words_preserving_height(24, [0; 4], [0xf, 0, 0, 0])
-                .expect("extended one-I field");
-        for policy in [
-            PcSolutionProbabilityPolicy::Omit,
-            PcSolutionProbabilityPolicy::Include,
-        ] {
-            let requested = matches!(policy, PcSolutionProbabilityPolicy::Include);
-            assert_serial_distributed_probability_parity(
-                &exact_probability_problem(4, 1, policy),
-                compact,
-                requested,
-                1,
-            );
-            assert_serial_distributed_probability_parity(
-                &exact_probability_problem(24, 1, policy),
-                extended,
-                requested,
-                1,
-            );
-        }
+        super::super::inverse_parent::assert_inverse_parent_policy_parity(|| {
+            let mut actual = Vec::new();
+            let compact =
+                BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+                    .expect("compact one-I field");
+            let extended =
+                BuildProbabilityField::from_words_preserving_height(24, [0; 4], [0xf, 0, 0, 0])
+                    .expect("extended one-I field");
+            for policy in [
+                PcSolutionProbabilityPolicy::Omit,
+                PcSolutionProbabilityPolicy::Include,
+            ] {
+                let requested = matches!(policy, PcSolutionProbabilityPolicy::Include);
+                let compact_result = assert_serial_distributed_probability_parity(
+                    &exact_probability_problem(4, 1, policy),
+                    compact,
+                    requested,
+                    1,
+                );
+                let extended_result = assert_serial_distributed_probability_parity(
+                    &exact_probability_problem(24, 1, policy),
+                    extended,
+                    requested,
+                    1,
+                );
+                for result in [compact_result, extended_result] {
+                    actual.push((
+                        result.normalized_solution_keys().to_vec(),
+                        result.normalized_solution_coverages().to_vec(),
+                        result.solution_probabilities().to_vec(),
+                    ));
+                }
+            }
+            actual
+        });
     }
 
     #[test]

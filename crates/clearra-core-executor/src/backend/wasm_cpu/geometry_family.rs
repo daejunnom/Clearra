@@ -230,6 +230,15 @@ impl GeometrySolutionFamily {
         if needs_chunk {
             if self.chunks.len() == self.chunks.capacity() {
                 let requested = self.chunks.len().checked_add(1)?;
+                let planned_peak = (requested as u128)
+                    .checked_mul(core::mem::size_of::<Vec<FamilyNode>>() as u128)?
+                    .checked_add(self.retained_bytes() as u128)?;
+                if self
+                    .retained_limit_bytes
+                    .is_some_and(|limit| planned_peak > limit)
+                {
+                    return None;
+                }
                 let mut replacement = Vec::new();
                 replacement.try_reserve_exact(requested).ok()?;
                 let replacement_bytes = (replacement.capacity() as u128)
@@ -244,6 +253,15 @@ impl GeometrySolutionFamily {
                 }
                 let old = core::mem::replace(&mut self.chunks, replacement);
                 self.chunks.extend(old);
+            }
+            let planned_peak = (FAMILY_NODE_CHUNK_CAPACITY as u128)
+                .checked_mul(core::mem::size_of::<FamilyNode>() as u128)?
+                .checked_add(self.retained_bytes() as u128)?;
+            if self
+                .retained_limit_bytes
+                .is_some_and(|limit| planned_peak > limit)
+            {
+                return None;
             }
             let mut chunk = Vec::new();
             chunk.try_reserve_exact(FAMILY_NODE_CHUNK_CAPACITY).ok()?;

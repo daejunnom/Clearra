@@ -7,9 +7,11 @@ license.workspace = true
 [features]
 default = []
 stage-profiling = ["dep:wasm-bindgen"]
+minimum-hotfix-ab = ["dep:clearra-coverage"]
 
 [dependencies]
 bytemuck = "1"
+clearra-coverage = { path = "../clearra-coverage", optional = true, features = ["minimum-hotfix-ab"] }
 clearra-core-domain = { path = "../clearra-core-domain" }
 futures-channel = "0.3"
 

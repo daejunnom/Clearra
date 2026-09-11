@@ -155,6 +155,30 @@ enum WasmSearchSessionInner {
 }
 
 impl WasmCpuSearchSession {
+    /// Private A/B path. Uses one owner for geometry, full physical coverage
+    /// and the existing exact objective. It is never selected by product policy.
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn new_bounded_root_ab_under_authority(
+        problem: Arc<SearchProblem>, external_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+        stream_branches: bool, max_geometry_work: u64,
+    ) -> Result<Self, WasmCpuSearchError> {
+        Ok(Self { inner: WasmSearchSessionInner::Cpu(
+            WasmExactSearchSession::new_bounded_root_ab_under_authority(
+                problem, external_bytes, authority, stream_branches, max_geometry_work,
+            ).map_err(map_error)?,
+        ) })
+    }
+
+    #[cfg(feature = "minimum-physical-ab")]
+    pub fn bounded_root_ab_progress(&self) -> Option<(u64, usize)> {
+        match &self.inner {
+            WasmSearchSessionInner::Cpu(session) => session.bounded_root_ab_progress(),
+            #[cfg(feature = "webgpu-search")]
+            WasmSearchSessionInner::WebGpu(_) => None,
+        }
+    }
+
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmCpuSearchError> {
         if let Some(unavailable_reason) = explicit_gpu_unavailable_reason(problem) {
             if !problem.backend_policy().allow_backend_fallback() {

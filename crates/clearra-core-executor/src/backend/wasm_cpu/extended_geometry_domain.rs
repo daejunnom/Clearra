@@ -47,7 +47,9 @@ impl ExtendedArmPairIndex {
             let mut flags = 0_u8;
             for left in 0..partial_count {
                 for right in left + 1..partial_count {
-                    if partials[left].union(partials[right]) != row.cells {
+                    if partials[left].union(partials[right]) != row.cells
+                        || !overlap_is_domino(width, partials[left].intersection(partials[right]))
+                    {
                         continue;
                     }
                     flags |= match (kinds[left], kinds[right]) {
@@ -558,6 +560,17 @@ fn single_cell(cell: u16) -> ExtendedBoard {
     board
 }
 
+fn overlap_is_domino(width: u8, overlap: ExtendedBoard) -> bool {
+    if width == 0 || overlap.count_ones() != 2 {
+        return false;
+    }
+    let mut cells = overlap.cells();
+    let first = cells.next().expect("two-cell overlap");
+    let second = cells.next().expect("two-cell overlap");
+    let width = u16::from(width);
+    second - first == width || (second - first == 1 && first / width == second / width)
+}
+
 fn partial_shape_kind(width: u8, cells: ExtendedBoard) -> u8 {
     if width == 0 || cells.count_ones() != 3 {
         return 0;
@@ -611,4 +624,64 @@ fn union_cells(parents: &mut [u16; 256], left: u16, right: u16) {
         core::mem::swap(&mut left_root, &mut right_root);
     }
     parents[usize::from(right_root)] = left_root;
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_problem::BuildProbabilityField;
+
+    use super::{
+        ExtendedBoard, ExtendedInverseCatalog, overlap_is_domino, partial_shape_kind, single_cell,
+    };
+
+    fn board(cells: &[u16]) -> ExtendedBoard {
+        cells.iter().fold(ExtendedBoard::EMPTY, |value, cell| {
+            value.union(single_cell(*cell))
+        })
+    }
+
+    #[test]
+    fn extended_apdp_preserves_static_o_and_t_parents_across_word_boundary() {
+        use super::super::inverse_parent::{inverse_parent_policy, set_inverse_parent_policy, InverseParentPolicy};
+        struct Restore(InverseParentPolicy);
+        impl Drop for Restore { fn drop(&mut self) { set_inverse_parent_policy(self.0); } }
+        let _restore = Restore(inverse_parent_policy());
+        assert!(overlap_is_domino(10, board(&[63, 64])));
+        assert!(overlap_is_domino(10, board(&[63, 73])));
+        assert!(!overlap_is_domino(10, board(&[63, 74])));
+        assert!(!overlap_is_domino(10, board(&[69, 70])));
+
+        for parent_policy in [InverseParentPolicy::EagerTable, InverseParentPolicy::EagerRaw,
+            InverseParentPolicy::Deferred] {
+        set_inverse_parent_policy(parent_policy);
+        for (piece, cells) in [
+            (PieceKind::O, [63, 64, 73, 74]),
+            (PieceKind::T, [63, 64, 65, 74]),
+        ] {
+            let target = board(&cells);
+            let field =
+                BuildProbabilityField::from_words_preserving_height(8, [0; 4], target.words())
+                    .expect("extended static target");
+            let catalog = ExtendedInverseCatalog::compile(field).expect("small extended catalog");
+            assert_eq!(catalog.deferred_parent_counts(),
+                (parent_policy == InverseParentPolicy::Deferred).then_some((0, catalog.skeletons().len())));
+            let row_id = catalog
+                .skeletons()
+                .iter()
+                .position(|row| row.piece == piece && row.cells == target)
+                .expect("original complete placement") as u32;
+            assert!(catalog.apdp_row_is_static_exact(row_id));
+            if parent_policy == InverseParentPolicy::Deferred {
+                assert_eq!(catalog.deferred_parent_counts(), Some((1, catalog.skeletons().len())));
+            }
+            for cell in cells {
+                let partial = target.without(single_cell(cell));
+                if partial_shape_kind(10, partial) != 0 {
+                    assert!(catalog.apdp_index().row_supports(row_id, partial));
+                }
+            }
+        }
+        }
+    }
 }

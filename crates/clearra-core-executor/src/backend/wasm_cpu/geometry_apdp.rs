@@ -58,7 +58,9 @@ impl ExactArmPairIndex {
             let mut flags = 0_u8;
             for left in 0..partial_count {
                 for right in left + 1..partial_count {
-                    if partials[left] | partials[right] != row.cells {
+                    if partials[left] | partials[right] != row.cells
+                        || !overlap_is_domino(width, partials[left] & partials[right])
+                    {
                         continue;
                     }
                     flags |= match (kinds[left], kinds[right]) {
@@ -169,6 +171,15 @@ impl ExactArmPairIndex {
     }
 }
 
+fn overlap_is_domino(width: u8, overlap: u64) -> bool {
+    if width == 0 || overlap.count_ones() != 2 {
+        return false;
+    }
+    let first = overlap.trailing_zeros() as u8;
+    let second = (overlap & (overlap - 1)).trailing_zeros() as u8;
+    second - first == width || (second - first == 1 && first / width == second / width)
+}
+
 pub(super) fn partial_shape_kind(width: u8, mut cells: u64) -> u8 {
     if width == 0 || cells.count_ones() != 3 {
         return 0;
@@ -193,5 +204,73 @@ pub(super) fn partial_shape_kind(width: u8, mut cells: u64) -> u8 {
         APDP_ELBOW
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+
+    use super::{ExactArmPairIndex, SkeletonRow, overlap_is_domino};
+
+    // Independent cell-adjacency traversal; no Arm/Elbow classification or
+    // Arm-Pair decomposition is used to form the expected parent set.
+    fn connected(cells: u64) -> bool {
+        if cells == 0 {
+            return false;
+        }
+        let mut reached = cells & cells.wrapping_neg();
+        loop {
+            let mut next = reached;
+            for cell in 0..16_u32 {
+                if reached & (1_u64 << cell) == 0 {
+                    continue;
+                }
+                for other in 0..16_u32 {
+                    let distance = (cell % 4).abs_diff(other % 4) + (cell / 4).abs_diff(other / 4);
+                    if distance == 1 && cells & (1_u64 << other) != 0 {
+                        next |= 1_u64 << other;
+                    }
+                }
+            }
+            if next == reached {
+                return reached == cells;
+            }
+            reached = next;
+        }
+    }
+
+    #[test]
+    fn arm_pair_index_preserves_every_connected_full_parent_once() {
+        let rows = (0_u64..1 << 16)
+            .filter(|cells| cells.count_ones() == 4 && connected(*cells))
+            .map(|cells| SkeletonRow {
+                piece: PieceKind::I,
+                cells,
+                realization_start: 0,
+                realization_count: 1,
+            })
+            .collect::<Vec<_>>();
+        let index = ExactArmPairIndex::compile(4, &rows).expect("small parent index");
+        for partial in (0_u64..1 << 16).filter(|cells| cells.count_ones() == 3 && connected(*cells))
+        {
+            let expected = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(row_id, row)| {
+                    (row.cells & partial == partial).then_some(row_id as u32)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(index.parent_rows(partial), expected, "partial {partial:#x}");
+        }
+    }
+
+    #[test]
+    fn arm_pair_overlap_requires_adjacent_cells_without_row_wrap() {
+        assert!(overlap_is_domino(4, 0b0011));
+        assert!(overlap_is_domino(4, 0b0001_0001));
+        assert!(!overlap_is_domino(4, 0b0010_0001));
+        assert!(!overlap_is_domino(4, 0b0001_1000));
+        assert!(!overlap_is_domino(4, 0b0111));
     }
 }

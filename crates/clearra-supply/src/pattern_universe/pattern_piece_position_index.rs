@@ -231,6 +231,85 @@ impl PatternPiecePositionIndexCompileSession {
 }
 
 impl PatternPiecePositionIndex {
+    /// Borrowed exact selection compiler. The caller admits the supplied
+    /// length bound and storage before entering; no universe clone is made.
+    /// Cancellation is checked between queues, including before allocation.
+    pub fn compile_subset_borrowed_with_control(
+        universe: &MaterializedPatternUniverse,
+        patterns: &PatternBitSet,
+        sequence_len_upper_bound: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PatternPiecePositionIndexError> {
+        if cancelled() { return Err(PatternPiecePositionIndexError::Cancelled); }
+        if patterns.pattern_count() != universe.pattern_count() {
+            return Err(PatternPiecePositionIndexError::UniverseMismatch);
+        }
+        let count = usize::try_from(patterns.count_ones())
+            .map_err(|_| PatternPiecePositionIndexError::StorageOverflow)?;
+        let word_count = count.div_ceil(u64::BITS as usize);
+        let storage_len = sequence_len_upper_bound.checked_mul(STANDARD_PIECE_COUNT)
+            .and_then(|count| count.checked_mul(word_count))
+            .ok_or(PatternPiecePositionIndexError::StorageOverflow)?;
+        let mut local_pattern_ids = Vec::new();
+        local_pattern_ids.try_reserve_exact(count)
+            .map_err(|_| PatternPiecePositionIndexError::StorageUnavailable)?;
+        let mut position_piece_words = Vec::new();
+        position_piece_words.try_reserve_exact(storage_len)
+            .map_err(|_| PatternPiecePositionIndexError::StorageUnavailable)?;
+        position_piece_words.resize(storage_len, 0);
+        for (local, pattern) in patterns.covered_patterns_before(universe.pattern_count()).enumerate() {
+            if cancelled() { return Err(PatternPiecePositionIndexError::Cancelled); }
+            if universe.sequence_len_at(pattern.index()) > sequence_len_upper_bound {
+                return Err(PatternPiecePositionIndexError::SequenceLengthBoundExceeded);
+            }
+            let full = u32::try_from(pattern.index())
+                .map_err(|_| PatternPiecePositionIndexError::PatternIdCapacityExceeded)?;
+            local_pattern_ids.push(full);
+            let sequence = universe.sequence_at(pattern.index());
+            let word = local / u64::BITS as usize;
+            let bit = 1_u64 << (local % u64::BITS as usize);
+            for (position, piece) in sequence.iter().copied().enumerate() {
+                let offset = (position * STANDARD_PIECE_COUNT + standard_piece_index(piece)) * word_count + word;
+                position_piece_words[offset] |= bit;
+            }
+        }
+        Ok(Self { global_pattern_count: universe.pattern_count(), local_pattern_ids,
+            sequence_len: sequence_len_upper_bound, word_count, position_piece_words })
+    }
+
+    /// One canonical queue without cloning the universe or compiling other queues.
+    /// The local root mask is exactly bit zero; global identity is retained.
+    pub fn compile_one_borrowed(
+        universe: &MaterializedPatternUniverse,
+        global_pattern_id: u32,
+    ) -> Result<Self, PatternPiecePositionIndexError> {
+        let global = global_pattern_id as usize;
+        if global >= universe.pattern_count() {
+            return Err(PatternPiecePositionIndexError::PatternIdSelectionInvalid);
+        }
+        let sequence = universe.sequence_at(global);
+        let storage_len = sequence.len().checked_mul(STANDARD_PIECE_COUNT)
+            .ok_or(PatternPiecePositionIndexError::StorageOverflow)?;
+        let mut position_piece_words = Vec::new();
+        position_piece_words.try_reserve_exact(storage_len)
+            .map_err(|_| PatternPiecePositionIndexError::StorageUnavailable)?;
+        position_piece_words.resize(storage_len, 0);
+        for (position, piece) in sequence.iter().copied().enumerate() {
+            position_piece_words[position * STANDARD_PIECE_COUNT + standard_piece_index(piece)] = 1;
+        }
+        let mut local_pattern_ids = Vec::new();
+        local_pattern_ids.try_reserve_exact(1)
+            .map_err(|_| PatternPiecePositionIndexError::StorageUnavailable)?;
+        local_pattern_ids.push(global_pattern_id);
+        Ok(Self {
+            global_pattern_count: universe.pattern_count(),
+            local_pattern_ids,
+            sequence_len: sequence.len(),
+            word_count: 1,
+            position_piece_words,
+        })
+    }
+
     pub fn compile(
         universe: &MaterializedPatternUniverse,
     ) -> Result<Self, PatternPiecePositionIndexError> {
@@ -417,6 +496,8 @@ pub enum PatternPiecePositionIndexError {
     StorageUnavailable,
     PatternIdSelectionInvalid,
     CompileSessionFinished,
+    Cancelled,
+    SequenceLengthBoundExceeded,
 }
 
 #[cfg(test)]

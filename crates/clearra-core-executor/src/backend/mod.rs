@@ -30,6 +30,16 @@ pub mod search_backend_executor;
 pub mod search_backend_warmup;
 pub mod wasm_build_probability_backend;
 mod wasm_cpu;
+#[cfg(feature = "minimum-physical-ab")]
+pub use wasm_cpu::set_minimum_physical_ab_policy;
+#[cfg(feature = "minimum-physical-ab")]
+pub use wasm_cpu::set_minimum_physical_parent_ab_policy;
+#[cfg(feature = "minimum-physical-ab")]
+pub use wasm_cpu::{minimum_physical_apdp_scan_counters, set_minimum_physical_apdp_diagnostics};
+#[cfg(feature = "minimum-physical-ab")]
+pub use wasm_cpu::set_minimum_physical_inverse_ab_policy;
+#[cfg(feature = "minimum-physical-ab")]
+pub use wasm_cpu::set_minimum_physical_feasibility_ab_policy;
 pub mod wasm_cpu_search_backend;
 pub mod wasm_setup_parallel_backend;
 pub mod wasm_setup_search_backend;
@@ -102,6 +112,8 @@ pub use wasm_build_probability_backend::{
 };
 #[cfg(feature = "webgpu-search")]
 pub use wasm_cpu::WasmWebGpuCandidateProducer;
+#[cfg(feature = "minimum-physical-ab")]
+pub use wasm_cpu::{WasmImplicitPcMinimumOracle, WasmImplicitPcSourceLimits, WasmImplicitPcSourceObservation, WasmCandidateIdentityEvidence, WasmCandidateIdentityProbeObservation, WasmRequiredPatternEvidence, WasmRequiredQueueProbeLimits, WasmRequiredQueueProbeObservation, WasmRequiredQueueVerifier};
 pub use wasm_cpu::{
     canonical_wasm_candidate_packet_batch_sha256, compile_pc4_compact_tablebase,
     encode_canonical_wasm_candidate_packet_batch, install_pc4_compact_tablebase,

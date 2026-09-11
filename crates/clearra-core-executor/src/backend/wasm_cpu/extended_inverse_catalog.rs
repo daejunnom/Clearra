@@ -4,10 +4,15 @@ use clearra_piece_registry::{
 };
 use clearra_problem::BuildProbabilityField;
 
+#[path = "extended_parent_storage.rs"]
+mod parent_storage;
+use parent_storage::{ParentIter, ProjectionOutput};
+
 use super::{
     extended_board::{logical_row_for_physical, lower_row_mask, ExtendedBoard},
     extended_geometry_domain::ExtendedArmPairIndex,
     geometry_projection::ProjectionCatalog,
+    inverse_projection::{inverse_projection_policy, ProjectionRowFilter},
     mix_digest, piece_index, WasmExactSearchError,
 };
 
@@ -44,6 +49,8 @@ pub(super) struct ExtendedInverseCatalog {
     required_cells: ExtendedBoard,
     skeletons: Vec<ExtendedSkeletonRow>,
     realizations: Vec<ExtendedRealization>,
+    #[cfg(any(test, feature = "minimum-physical-ab"))]
+    deferred_parents: Option<parent_storage::DeferredParents>,
     support_offsets: Vec<u32>,
     support_rows: Vec<u32>,
     apdp_index: ExtendedArmPairIndex,
@@ -139,6 +146,43 @@ impl DenseExtendedGeometryCatalog {
 }
 
 impl ExtendedInverseCatalog {
+    #[cfg(test)]
+    pub(super) fn temporal_parent_signature(&self)
+        -> Vec<(PieceKind, ExtendedBoard, u32, RotationState, i8, i8)> {
+        (0..self.skeletons.len() as u32).flat_map(|row_id| self.realizations(row_id))
+            .map(|parent| (parent.piece, parent.cells, parent.required_deleted_rows,
+                parent.rotation, parent.x, parent.target_anchor_y)).collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn temporal_parent_reconstruction_matches(&self) -> bool {
+        use super::inverse_parent::{InverseParentCursor, ParentAdvance};
+        for (row_id, skeleton) in self.skeletons.iter().enumerate() {
+            let cells: Vec<_> = skeleton.cells.cells().collect();
+            let Ok(cells) = cells.try_into() else { return false; };
+            let Some(mut cursor) = InverseParentCursor::new(self.width, self.height, skeleton.piece, cells)
+                else { return false; };
+            let mut generated = Vec::new();
+            for _ in 0..4 {
+                match cursor.advance() {
+                    ParentAdvance::Parent(parent) => generated.push(ExtendedRealization {
+                        piece: skeleton.piece, cells: skeleton.cells,
+                        required_deleted_rows: parent.required_deleted_rows, rotation: parent.rotation,
+                        x: parent.x, target_anchor_y: parent.target_anchor_y,
+                    }),
+                    ParentAdvance::Pending => {}
+                    ParentAdvance::Complete => return false,
+                }
+            }
+            if !matches!(cursor.advance(), ParentAdvance::Complete) { return false; }
+            generated.sort_unstable();
+            if generated != self.realizations(row_id as u32).collect::<Vec<_>>() {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn compile(field: BuildProbabilityField) -> Result<Self, WasmExactSearchError> {
         let width = field.width();
         let height = field.height();
@@ -161,7 +205,8 @@ impl ExtendedInverseCatalog {
         }
 
         let registry = standard_tetromino_registry();
-        let mut realizations = Vec::new();
+        let inverse_policy = inverse_projection_policy();
+        let mut realizations = ProjectionOutput::new();
         for piece in PieceKind::STANDARD_TETROMINOES {
             let definition = registry
                 .get(piece)
@@ -182,6 +227,14 @@ impl ExtendedInverseCatalog {
                 local_rows.sort_unstable();
                 local_rows.dedup();
                 for x in 0..=max_x {
+                    let available = required_cells.without(initial_board);
+                    let row_filter = ProjectionRowFilter::compile(
+                        inverse_policy, width, height, shape.cells(), &local_rows, x as i8,
+                        |row| u64::from(available.row_bits(width, row)),
+                    );
+                    if row_filter.as_ref().is_some_and(|filter| !filter.columns_possible()) {
+                        continue;
+                    }
                     let mut target_rows = [0_u8; 4];
                     enumerate_row_projections(
                         width,
@@ -195,35 +248,19 @@ impl ExtendedInverseCatalog {
                         &mut target_rows,
                         0,
                         x as i8,
+                        row_filter.as_ref(),
                         &mut realizations,
-                    );
+                    )?;
                 }
             }
         }
-        realizations.sort_unstable();
-        realizations.dedup();
-
-        let mut skeletons = Vec::new();
-        let mut ordered_realizations = Vec::with_capacity(realizations.len());
-        let mut cursor = 0usize;
-        while cursor < realizations.len() {
-            let piece = realizations[cursor].piece;
-            let cells = realizations[cursor].cells;
-            let start = ordered_realizations.len();
-            while cursor < realizations.len()
-                && realizations[cursor].piece == piece
-                && realizations[cursor].cells == cells
-            {
-                ordered_realizations.push(realizations[cursor]);
-                cursor += 1;
-            }
-            skeletons.push(ExtendedSkeletonRow {
-                piece,
-                cells,
-                realization_start: start as u32,
-                realization_count: (ordered_realizations.len() - start) as u32,
-            });
-        }
+        let compiled = realizations.finish()?;
+        let skeletons = compiled.skeletons;
+        let ordered_realizations = compiled.realizations;
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        let parents_deferred = compiled.deferred.is_some();
+        #[cfg(not(any(test, feature = "minimum-physical-ab")))]
+        let parents_deferred = false;
 
         let cell_count = usize::from(width) * usize::from(height);
         let mut by_cell = (0..cell_count).map(|_| Vec::new()).collect::<Vec<_>>();
@@ -259,7 +296,16 @@ impl ExtendedInverseCatalog {
         {
             identity_digest = mix_digest(identity_digest, word);
         }
-        for realization in &ordered_realizations {
+        if parents_deferred {
+            // A separate decoder-versioned identity keeps eager tablebase
+            // provenance from being accepted as a deferred parent catalog.
+            identity_digest = mix_digest(identity_digest, 0x4c504152454e5431); // LPARENT1
+            for row in &skeletons {
+                identity_digest = mix_digest(identity_digest, piece_index(row.piece) as u64);
+                for word in row.cells.words() { identity_digest = mix_digest(identity_digest, word); }
+                identity_digest = mix_digest(identity_digest, u64::from(row.realization_count));
+            }
+        } else { for realization in &ordered_realizations {
             identity_digest = mix_digest(identity_digest, piece_index(realization.piece) as u64);
             for word in realization.cells.words() {
                 identity_digest = mix_digest(identity_digest, word);
@@ -274,7 +320,7 @@ impl ExtendedInverseCatalog {
             );
             identity_digest = mix_digest(identity_digest, realization.x as u8 as u64);
             identity_digest = mix_digest(identity_digest, realization.target_anchor_y as u8 as u64);
-        }
+        } }
         identity_digest = mix_digest(identity_digest, apdp_index.identity_digest());
         identity_digest = mix_digest(identity_digest, projection_catalog.identity_digest());
 
@@ -285,6 +331,8 @@ impl ExtendedInverseCatalog {
             required_cells,
             skeletons,
             realizations: ordered_realizations,
+            #[cfg(any(test, feature = "minimum-physical-ab"))]
+            deferred_parents: compiled.deferred,
             support_offsets,
             support_rows,
             apdp_index,
@@ -329,13 +377,28 @@ impl ExtendedInverseCatalog {
         row_id: u32,
         deleted_rows: u32,
     ) -> impl Iterator<Item = ExtendedInstantiation> + '_ {
+        self.realizations(row_id)
+            .filter_map(move |realization| self.instantiate(realization, deleted_rows))
+    }
+
+    fn realizations(&self, row_id: u32) -> ParentIter<'_> {
         let row = self.skeleton(row_id);
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        if let Some(families) = &self.deferred_parents {
+            let parents = families[row_id as usize]
+                .get_or_init(|| parent_storage::materialize(self.width, self.height, row));
+            return ParentIter::Deferred { skeleton: row,
+                parents: parents[..row.realization_count as usize].iter().copied() };
+        }
         let start = row.realization_start as usize;
         let end = start + row.realization_count as usize;
-        self.realizations[start..end]
-            .iter()
-            .copied()
-            .filter_map(move |realization| self.instantiate(realization, deleted_rows))
+        ParentIter::Eager(self.realizations[start..end].iter().copied())
+    }
+
+    #[cfg(any(test, feature = "minimum-physical-ab"))]
+    pub fn deferred_parent_counts(&self) -> Option<(usize, usize)> {
+        self.deferred_parents.as_ref().map(|families|
+            (families.iter().filter(|family| family.get().is_some()).count(), families.len()))
     }
 
     pub const fn identity_digest(&self) -> u64 {
@@ -355,18 +418,20 @@ impl ExtendedInverseCatalog {
     }
 
     pub fn apdp_row_is_static_exact(&self, row_id: u32) -> bool {
-        let row = self.skeleton(row_id);
-        let start = row.realization_start as usize;
-        let end = start + row.realization_count as usize;
         self.apdp_index.row_support_flags(row_id) != 0
-            && self.realizations[start..end]
-                .iter()
+            && self.realizations(row_id)
                 .all(|realization| realization.required_deleted_rows == 0)
     }
 
     pub fn retained_bytes(&self) -> usize {
+        #[cfg(any(test, feature = "minimum-physical-ab"))]
+        let deferred_bytes = self.deferred_parents.as_ref().map_or(0, |families|
+            families.capacity() * core::mem::size_of::<std::sync::OnceLock<[super::inverse_parent::TemporalParent; 4]>>());
+        #[cfg(not(any(test, feature = "minimum-physical-ab")))]
+        let deferred_bytes = 0;
         self.skeletons.capacity() * core::mem::size_of::<ExtendedSkeletonRow>()
             + self.realizations.capacity() * core::mem::size_of::<ExtendedRealization>()
+            + deferred_bytes
             + self.support_offsets.capacity() * core::mem::size_of::<u32>()
             + self.support_rows.capacity() * core::mem::size_of::<u32>()
             + self.apdp_index.retained_bytes()
@@ -442,8 +507,9 @@ fn enumerate_row_projections(
     target_rows: &mut [u8; 4],
     row_index: usize,
     x: i8,
-    output: &mut Vec<ExtendedRealization>,
-) {
+    row_filter: Option<&ProjectionRowFilter>,
+    output: &mut ProjectionOutput,
+) -> Result<(), WasmExactSearchError> {
     if row_index == local_rows.len() {
         let mut mask = ExtendedBoard::EMPTY;
         for cell in cells {
@@ -453,30 +519,14 @@ fn enumerate_row_projections(
             let target_y = target_rows[local_row_index];
             let target_x = x + cell.x();
             if target_x < 0 || target_x >= width as i8 {
-                return;
+                return Ok(());
             }
             mask.insert(u16::from(target_y) * u16::from(width) + target_x as u16);
         }
         if mask.intersects(initial_board) || !mask.is_subset_of(required_cells) {
-            return;
+            return Ok(());
         }
-        let mut required_deleted_rows = 0_u32;
-        for index in 1..local_rows.len() {
-            let local_gap = local_rows[index] - local_rows[index - 1];
-            let first_deleted = target_rows[index - 1] + local_gap;
-            for row in first_deleted..target_rows[index] {
-                required_deleted_rows |= 1_u32 << row;
-            }
-        }
-        output.push(ExtendedRealization {
-            piece,
-            cells: mask,
-            required_deleted_rows,
-            rotation,
-            x,
-            target_anchor_y: target_rows[0] as i8,
-        });
-        return;
+        return output.push_projection(piece, mask, rotation, x, local_rows, target_rows);
     }
 
     let local_row = local_rows[row_index];
@@ -488,10 +538,13 @@ fn enumerate_row_projections(
     };
     let remaining_span = local_last - local_row;
     if remaining_span >= height {
-        return;
+        return Ok(());
     }
     let maximum = height - 1 - remaining_span;
     for target_row in minimum..=maximum {
+        if row_filter.is_some_and(|filter| !filter.row_allowed(row_index, target_row)) {
+            continue;
+        }
         target_rows[row_index] = target_row;
         enumerate_row_projections(
             width,
@@ -505,7 +558,9 @@ fn enumerate_row_projections(
             target_rows,
             row_index + 1,
             x,
+            row_filter,
             output,
-        );
+        )?;
     }
+    Ok(())
 }

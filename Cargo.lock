@@ -670,6 +670,7 @@ version = "0.8.0"
 dependencies = [
  "bytemuck",
  "clearra-core-domain",
+ "clearra-coverage",
  "futures-channel",
  "pollster",
  "wasm-bindgen",

@@ -35,6 +35,8 @@ pub mod tiling_solution_store;
 
 #[cfg(feature = "webgpu-search")]
 pub use backend::WasmWebGpuCandidateProducer;
+#[cfg(feature = "minimum-physical-ab")]
+pub use backend::{WasmImplicitPcMinimumOracle, WasmImplicitPcSourceLimits, WasmImplicitPcSourceObservation, WasmCandidateIdentityEvidence, WasmCandidateIdentityProbeObservation, WasmRequiredPatternEvidence, WasmRequiredQueueProbeLimits, WasmRequiredQueueProbeObservation, WasmRequiredQueueVerifier};
 pub use backend::{
     canonical_wasm_candidate_packet_batch_sha256, compile_pc4_compact_tablebase,
     encode_canonical_wasm_candidate_packet_batch, install_pc4_compact_tablebase,

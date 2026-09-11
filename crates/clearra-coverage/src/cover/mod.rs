@@ -1,5 +1,11 @@
 pub mod cover_selection;
 pub mod exact_at_most_parallel;
+#[cfg(feature = "minimum-hotfix-ab")]
+pub mod experimental_batch;
+#[cfg(any(test, feature = "minimum-hotfix-ab"))]
+pub mod joint_diagram_domain;
+#[cfg(any(test, feature = "minimum-hotfix-ab"))]
+pub mod implicit_minimum;
 mod exact_dual_lower_bound;
 pub mod exact_minimum_cover;
 pub mod exact_minimum_cover_portfolios;
