@@ -15,6 +15,11 @@ import {
   cliCommandRequestForDesktop,
   serializeCliCommandArguments
 } from '../src/lib/workspace/cliCommandModel.ts';
+import {
+  buildProbabilityCommandArguments,
+  buildProbabilityRequestForDesktop,
+  createDefaultBuildProbabilityRequest
+} from '../src/lib/workspace/buildProbabilityModel.ts';
 
 const canonicalGuiPcFullSolutionArguments = readFileSync(
   new URL('../../../tests/fixtures/contracts/gui_pc_full_solution_argv.tsv', import.meta.url),
@@ -115,6 +120,23 @@ test('minimum-cover GUI emits one canonical pc minimals command without a DTO co
     'command',
     'language'
   ]);
+});
+
+test('queue-less Build minimum uses its finite standard bag as the sole source window', () => {
+  const request = {
+    ...createDefaultBuildProbabilityRequest(),
+    height: 4,
+    targetMask: 0xfn,
+    sourcePieces: 0xffff_ffff,
+    resultMode: 'minimum-solutions',
+    workers: 1
+  };
+  const arguments_ = buildProbabilityCommandArguments(request);
+
+  assert.deepEqual(arguments_.slice(0, 3), ['clearra', 'build', 'cover']);
+  assert.equal(arguments_[arguments_.indexOf('--patterns') + 1], 'P2');
+  assert.equal(arguments_.includes('--source-pieces'), false);
+  assert.deepEqual(buildProbabilityRequestForDesktop(request, 'en').arguments, arguments_);
 });
 
 test('browser command text and Desktop argv preserve literal process markers and C0 whitespace', () => {

@@ -285,6 +285,7 @@ test('Build result modes lower to CLI-owned products without changing engine agg
     minimumWithExplicitSourceWindow[minimumWithExplicitSourceWindow.indexOf('--patterns') + 1],
     'P2'
   );
+  assert.equal(minimumWithExplicitSourceWindow.includes('--source-pieces'), false);
 
   const tenPieceMinimum = production.buildProbabilityCommandArguments({
     ...base,
