@@ -194,9 +194,27 @@ impl AppOnlinePc4LookupSession {
 mod tests {
     use super::*;
     use clearra_pc4_tablebase::{
-        ArtifactDescriptor, DatasetSnapshotManifest, GraphTargetEncoding, Pc4ArtifactRole,
-        Pc4ProfileManifest, ProfileAvailability, ProfileQualification, SnapshotIdentity,
+        ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, GraphTargetEncoding,
+        ManifestContentIdentity, Pc4ArtifactRole, Pc4ProfileManifest, ProfileAvailability,
+        ProfileQualification, SnapshotIdentity, SnapshotVerificationAttestation,
+        SnapshotVerificationFailure, SnapshotVerificationRequest,
     };
+
+    struct SyntheticVerifier;
+
+    impl DatasetSnapshotVerifier for SyntheticVerifier {
+        fn verify(
+            &mut self,
+            request: SnapshotVerificationRequest<'_>,
+        ) -> Result<SnapshotVerificationAttestation, SnapshotVerificationFailure> {
+            Ok(SnapshotVerificationAttestation::new(
+                request.snapshot_identity().clone(),
+                request.manifest_content_identity().clone(),
+                "synthetic-app-lookup-verification",
+            )
+            .expect("synthetic verification attestation"))
+        }
+    }
 
     fn lookup_session(value: u64) -> LookupSessionId {
         LookupSessionId::new(value).expect("non-zero lookup session")
@@ -243,10 +261,15 @@ mod tests {
                 )
             })
             .collect();
-        DatasetSnapshotManifest::new(identity, profiles)
-            .expect("manifest")
-            .activate()
-            .expect("all profiles qualified")
+        DatasetSnapshotManifest::new(
+            identity,
+            ManifestContentIdentity::new("synthetic-app-lookup-manifest")
+                .expect("manifest content identity"),
+            profiles,
+        )
+        .expect("manifest")
+        .activate(&mut SyntheticVerifier)
+        .expect("all profiles qualified")
     }
 
     fn new_session(

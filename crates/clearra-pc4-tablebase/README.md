@@ -24,6 +24,15 @@ repository does not embed a Hugging Face revision or dataset digest. Discovery
 may follow a moving upstream reference, but it must resolve that reference to
 an immutable identity before constructing a manifest.
 
+An otherwise complete manifest still cannot construct an `ActivatedSnapshot`
+without passing the host-owned `DatasetSnapshotVerifier` port. The request
+binds the exact immutable snapshot, manifest content identity, and all profile
+qualifications; the returned attestation is rejected if either identity drifts.
+This crate deliberately does not guess a signature encoding or cryptographic
+algorithm. A future host adapter must validate the upstream signed generation
+under the separately qualified format, while current tests use explicitly
+named synthetic verifiers and confer no production authority.
+
 V-star recommendations, policy/value arrays, Krylov data, and n-PC probability
 are outside this crate and are not fetched or decoded by it.
 
