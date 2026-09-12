@@ -707,33 +707,16 @@ export class DistributedWasmJobRunner {
                   releaseLocalDrain();
                 }
               })();
-              // Keep the positive-only global repair without holding every
-              // remote worker behind it. The dedicated ABI cannot advance a
-              // query epoch; real outstanding receipts must still drain.
-              const warmTasks = (async () => {
-                if (!minimumTopology.controlOnly ||
-                    !this.wasm.distributed_finish_parallel_warm_advance) return;
-                await yieldToWorkerHost();
-                for (;;) {
-                  this.requireActive();
-                  const started = wave ? performance.now() : 0;
-                  const pending = this.wasm.distributed_finish_parallel_warm_advance(this.jobId);
-                  if (wave) {
-                    wave.coordinator_compute_ms += performance.now() - started;
-                    wave.coordinator_slices += 1;
-                  }
-                  cancelSatisfiedSiblings();
-                  if (!pending) break;
-                  // One warm step per host turn also services ready/result
-                  // messages on low-core and all-logical-processor hosts.
-                  await yieldToWorkerHost();
-                }
-              })();
-              await Promise.all([remoteTasks, localTasks, warmTasks]);
+              // A dedicated manager assigns every admitted compute lane to a
+              // remote worker, so it must remain control-only. Running the
+              // advisory warm cursor here would add a hidden compute lane and
+              // consume the browser UI's reserved logical processor. Shared
+              // and explicit all-logical topologies keep their admitted local
+              // proof lane through localTasks above.
+              await Promise.all([remoteTasks, localTasks]);
               this.requireActive();
-              // Warm callbacks can still cancel satisfied/redundant siblings
-              // after the last remote receipt. Keep their query's pool active
-              // until every issuer is done, then drain and close it once.
+              // Keep the query pool active until every local and remote issuer
+              // is done, then drain and close it once.
               const drainStarted = wave ? performance.now() : 0;
               await this.pool.completeAtomicTasks();
               if (wave) wave.remote_drain_ms = performance.now() - drainStarted;

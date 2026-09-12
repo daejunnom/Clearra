@@ -1379,6 +1379,16 @@ for (const [workers, logical] of [[1, 1], [1, 2], [2, 3], [6, 7], [7, 7], [11, 1
     'an old ABI cannot acquire an unguarded dedicated replica');
 }
 
+for (const workers of [2, 11, 32]) {
+  const logical = workers + 1;
+  const topology = minimumManagerTopology(workers, logical, true, true);
+  assert.equal(topology.controlOnly, true);
+  assert.equal(topology.remoteWorkers, workers,
+    'the reserved-main-thread topology assigns every admitted compute lane to a remote worker');
+  assert.equal(topology.remoteWorkers + 1, logical,
+    'remote compute plus the browser UI consumes no more than the reported logical budget');
+}
+
 for (const sample of [
   { workers: 2, logical: 3, policy: 'auto', decline: false, expected: 2 },
   { workers: 6, logical: 7, policy: 'auto', decline: false, expected: 6 },
@@ -1396,8 +1406,9 @@ for (const sample of [
   let issued = 0;
   let merged = 0;
   let localStarts = 0;
-  let warmSteps = 0;
+  let managerWarmSteps = 0;
   const pools: number[] = [];
+  const proofTelemetry: Array<{ active: number; ready: number; maximum: number }> = [];
   let proofPool = false;
   let actualGrant = 0n;
   const guardWasm = {
@@ -1432,13 +1443,11 @@ for (const sample of [
     distributed_finish_parallel_warm_advance() {
       assert.ok(proofPool, 'remote initialization starts before advisory repair');
       assert.equal(preparedWave, completedWave + 1, 'repair cannot advance the query epoch');
-      warmSteps += 1;
-      return warmSteps % 2 !== 0;
+      managerWarmSteps += 1;
+      return managerWarmSteps % 2 !== 0;
     },
     distributed_finish_advance(job: number) {
       assert.equal(merged, preparedWave, 'every actual receipt drains before advancing the query');
-      assert.equal(warmSteps, sample.expected === sample.workers ? preparedWave * 2 : 0,
-        'both advisory continuation and remote receipts drain; a shared controller never runs duplicate repair');
       completedWave += 1;
       return completedWave === 2 ? wasm.distributed_finish(job, sample.workers) : null;
     }
@@ -1462,12 +1471,18 @@ for (const sample of [
     ...finishHost, logicalProcessorCount: sample.logical
   }, guardPool as never, undefined, undefined, sample.policy as MinimumManagerPolicy).run(
     'clearra pc minimals --patterns P7', { ...plan, workerCount: sample.workers }, (event) => {
-      if (event.event === 'progress') {
-        const telemetry = (event as unknown as { telemetry?: { active_workers: number; ready_workers: number } }).telemetry;
-        if (proofPool && telemetry) {
-          assert.ok(telemetry.active_workers <= sample.workers);
-          assert.ok(telemetry.ready_workers <= sample.workers, 'control-only manager is not a ready compute worker');
-        }
+      if (event.event === 'progress' && proofPool && event.progress.telemetry?.phase === 'merging') {
+        const telemetry = event.progress.telemetry;
+        proofTelemetry.push({
+          active: telemetry.active_workers,
+          ready: telemetry.ready_workers,
+          maximum: telemetry.worker_count
+        });
+        assert.ok(telemetry.active_workers <= sample.workers);
+        assert.ok(telemetry.ready_workers <= sample.workers,
+          'control-only manager is not a ready compute worker');
+        assert.equal(telemetry.worker_count, sample.workers,
+          'the admitted maximum stays stable through exact completion');
       }
     }
   );
@@ -1475,56 +1490,79 @@ for (const sample of [
   assert.deepEqual(pools, [sample.expected, sample.expected]);
   assert.equal(admitted.length, sample.decline ? 2 : 1, 'fixed completion slices survive query transitions');
   assert.equal(localStarts, sample.expected === sample.workers ? 0 : 2);
-  assert.equal(warmSteps, sample.expected === sample.workers ? 4 : 0);
+  assert.ok(proofTelemetry.length > 0, 'exact completion publishes phase-correct worker telemetry');
+  assert.ok(proofTelemetry.some((telemetry) => telemetry.active === sample.expected),
+    'active telemetry reports the remote lanes that are actually computing');
+  assert.equal(managerWarmSteps, 0,
+    'a dedicated control-only manager cannot run a hidden advisory compute lane');
 }
 
-// Reproduce the browser race: positive repair finishes while every replica
-// is still initializing. A closed task source must not become a memory error.
+// A dedicated manager starts ready-first dispatch while remote initialization
+// is still pending, but never turns initialization latency into hidden local
+// proof work.
 {
-  let repairWon = false;
+  let queryIssued = false;
+  let taskIssued = false;
   let remoteInitializationStarted = false;
+  let remoteInitializationCompleted = false;
+  let dispatchWaitedForReady = false;
   let resumeReady!: () => void;
   const ready = new Promise<void>((resolve) => { resumeReady = resolve; });
-  let cancellations = 0;
+  let receiptMerged = false;
   let drained = false;
   await new DistributedWasmJobRunner({
     ...wasm,
     distributed_finish_start: () => null,
     distributed_finish_parallel_configure() {},
     distributed_finish_parallel_admit: () => true,
-    distributed_finish_parallel_prepare: () => Uint8Array.of(1).buffer,
+    distributed_finish_parallel_prepare() {
+      if (queryIssued) return null;
+      queryIssued = true;
+      return Uint8Array.of(1).buffer;
+    },
     distributed_finish_parallel_guarded_query: () => Uint8Array.of(1).buffer,
-    distributed_finish_parallel_task() { throw new Error('closed query cannot issue a descriptor'); },
-    distributed_finish_parallel_merge() { throw new Error('no task was issued'); },
+    distributed_finish_parallel_task() {
+      if (taskIssued) return null;
+      taskIssued = true;
+      return Uint8Array.of(7).buffer;
+    },
+    distributed_finish_parallel_merge() { receiptMerged = true; },
     distributed_finish_parallel_local_start() { throw new Error('dedicated manager owns no proof shard'); },
     distributed_finish_parallel_local_advance: () => true,
-    distributed_finish_parallel_found: () => repairWon,
+    distributed_finish_parallel_found: () => false,
     distributed_finish_parallel_warm_advance() {
-      assert.ok(remoteInitializationStarted, 'start replicas before advisory work');
-      repairWon = true;
-      resumeReady();
-      return false;
+      throw new Error('dedicated manager must not compute while remote workers initialize');
     },
     distributed_finish_advance(job: number) {
-      assert.ok(repairWon && drained);
+      assert.ok(remoteInitializationCompleted && receiptMerged && drained);
       return wasm.distributed_finish(job, 2);
     }
-  } as ClearraWasmModule, 992, 'warm-wins-before-ready', {
+  } as ClearraWasmModule, 992, 'ready-first-dedicated-manager', {
     ...finishHost, logicalProcessorCount: 3
   }, {
     ...pool,
     async initialize(_q: unknown, _c: unknown, _m: unknown, _o: unknown, _r: unknown, _h: unknown, kind?: string) {
-      if (kind === 'exact-at-most') { remoteInitializationStarted = true; await ready; }
-    },
-    async enqueueFromSource(take: () => ArrayBuffer | null) {
+      if (kind !== 'exact-at-most') return;
+      remoteInitializationStarted = true;
+      queueMicrotask(() => {
+        remoteInitializationCompleted = true;
+        resumeReady();
+      });
       await ready;
-      assert.equal(take(), null);
-      return false;
     },
-    cancelExactTasks() { cancellations += 1; },
+    async enqueueFromSource(take: () => ArrayBuffer | null, merge: (receipt: ArrayBuffer) => void) {
+      assert.ok(remoteInitializationStarted);
+      dispatchWaitedForReady ||= !remoteInitializationCompleted;
+      await ready;
+      const task = take();
+      if (task === null) return false;
+      merge(task);
+      return true;
+    },
     async completeAtomicTasks() { drained = true; return 2; }
   } as never).run('clearra pc minimals --patterns P7', { ...plan, workerCount: 2 }, () => {});
-  assert.equal(cancellations, 1);
+  assert.equal(dispatchWaitedForReady, true,
+    'remote task dispatch begins before the full initialization promise resolves');
 }
 
 {
@@ -1554,47 +1592,6 @@ for (const sample of [
   assert.equal(attempts, 2, 'one dedicated attempt plus one admitted shared fallback, never repeated waves');
   assert.equal(issued, 0);
   assert.equal(exactInitializations, 0);
-}
-
-// A negative remote frontier can drain before the advisory warm cursor.
-// Disabling optional assistance made this ordering reproducible in-browser.
-// The pool must accept same-query sibling checks until the last owner returns.
-{
-  let active = false;
-  let warmSteps = 0;
-  let closed = false;
-  await new DistributedWasmJobRunner({
-    ...wasm,
-    distributed_finish_start: () => null,
-    distributed_finish_parallel_configure() {},
-    distributed_finish_parallel_admit: () => true,
-    distributed_finish_parallel_prepare: () => Uint8Array.of(1).buffer,
-    distributed_finish_parallel_guarded_query: () => Uint8Array.of(1).buffer,
-    distributed_finish_parallel_task: () => null,
-    distributed_finish_parallel_merge() {},
-    distributed_finish_parallel_local_start: () => false,
-    distributed_finish_parallel_local_advance: () => true,
-    distributed_finish_parallel_assist: () => false,
-    distributed_finish_parallel_last_task_key: () => new ArrayBuffer(56),
-    distributed_finish_parallel_redundant: () => true,
-    distributed_finish_parallel_found: () => false,
-    distributed_finish_parallel_warm_advance() { return ++warmSteps < 2; },
-    distributed_finish_advance(job: number) {
-      assert.ok(closed);
-      return wasm.distributed_finish(job, 2);
-    }
-  } as ClearraWasmModule, 993, 'negative-frontier-before-warm', {
-    ...finishHost, logicalProcessorCount: 3
-  }, {
-    ...pool,
-    async initialize() { active = true; },
-    cancelRedundantExactTasks() { assert.ok(active, 'warm owner still uses this query pool'); },
-    async completeAtomicTasks() {
-      assert.equal(warmSteps, 2, 'every issuer must finish before the pool closes');
-      active = false; closed = true; return 2;
-    }
-  } as never).run('clearra pc minimals --patterns P7', { ...plan, workerCount: 2 }, () => {});
-  assert.ok(closed);
 }
 
 function verifierFlags(value: boolean) {
