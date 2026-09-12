@@ -1,5 +1,5 @@
 # Prepare the real native archive and test the CLI in the same managed owner.
-param([string]$ExecutionSurface = '')
+param([string]$ExecutionSurface = '', [switch]$FetchDependencies)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $Root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
@@ -15,6 +15,13 @@ if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
 }
 Assert-ClearraCanonicalCargoTargetDir $env:CARGO_TARGET_DIR | Out-Null
 Assert-ClearraTrustedExecutionSurface $ExecutionSurface 'native CLI process contracts'
+if ($FetchDependencies) {
+    Push-Location $Root
+    try {
+        & cargo fetch --locked
+        if ($LASTEXITCODE -ne 0) { throw "native CLI dependency fetch failed: $LASTEXITCODE" }
+    } finally { Pop-Location }
+}
 $previousFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
 $previousDebug = $env:CARGO_PROFILE_TEST_DEBUG
 try {

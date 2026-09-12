@@ -45,12 +45,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Fetch locked Rust dependencies
-        run: cargo fetch --locked
       - name: Build native archive and execute real CLI process tests
         shell: pwsh
         run: |
-          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command pwsh -ArgumentsJson '["-NoProfile","-File","scripts/tools/check-native-cli-contracts.ps1","-ExecutionSurface","Trusted"]'
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command pwsh -ArgumentsJson '["-NoProfile","-File","scripts/tools/check-native-cli-contracts.ps1","-ExecutionSurface","Trusted","-FetchDependencies"]'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   pc4-contracts:
@@ -66,12 +64,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Fetch locked Rust dependencies
-        run: cargo fetch --locked
       - name: Verify materializer, graph paths and App contracts
         shell: pwsh
         run: |
-          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command node -ArgumentsJson '["scripts/tools/check-pc4-app-contracts.mjs","--row-normalization"]'
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command node -ArgumentsJson '["scripts/tools/check-pc4-app-contracts.mjs","--row-normalization","--fetch"]'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   surface-contracts:

@@ -61,7 +61,9 @@ function Read-ClearraBuildTransactionRecord([string]$TransactionRoot) {
     if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
         throw "Managed build transaction metadata is missing: $marker"
     }
-    if ((Get-Item -LiteralPath $marker).Length -gt 16384) { throw 'Build transaction metadata is too large.' }
+    # Dotfiles are Hidden on Unix too. LiteralPath alone does not opt Get-Item
+    # into returning them; keep the size guard without treating them as absent.
+    if ((Get-Item -LiteralPath $marker -Force).Length -gt 16384) { throw 'Build transaction metadata is too large.' }
     $record = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
     $expected = @('schema_version','purpose','source_root','source_id','session_id','transaction_root',
                   'cargo_target_dir','owner_pid','status','created_utc','completed_utc') | Sort-Object

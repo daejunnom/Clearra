@@ -17,9 +17,13 @@ if (process.argv.includes('--row-normalization')) {
     ['pc4-row-app', [...common, 'pc4_']],
   );
 }
+// Even fetch probes rustc, so it must inherit this live managed owner.
+// Keep fetch and offline tests in one generation rather than replacing it.
+if (process.argv.includes('--fetch')) checks.unshift(['fetch-locked', ['fetch', '--locked']]);
 for (const [name, args] of checks) {
   console.log(`app_contract_check=${name} status=started`);
-  const result = spawnSync('cargo', [...args, '--', '--test-threads=2'], {
+  const command = args[0] === 'test' ? [...args, '--', '--test-threads=2'] : args;
+  const result = spawnSync('cargo', command, {
     cwd: transaction.source_root,
     env: { ...process.env, CARGO_PROFILE_TEST_DEBUG: '0' },
     stdio: 'inherit', windowsHide: true,

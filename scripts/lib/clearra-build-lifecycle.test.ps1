@@ -39,6 +39,17 @@ try {
 $first = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
 $firstSession = $first.session_id
 $experimentRoot = $first.transaction_root
+$firstMarker = Join-Path $experimentRoot '.clearra-build-transaction.json'
+if (Test-StartTestsWindows) {
+    [IO.File]::SetAttributes($firstMarker, ([IO.File]::GetAttributes($firstMarker) -bor [IO.FileAttributes]::Hidden))
+}
+# Unix dotfiles are already Hidden. Exercise the real read and size check on
+# both platforms, not just an assertion that the source contains -Force.
+$hiddenRecord = Read-ClearraBuildTransactionRecord $experimentRoot
+Assert-ArtifactPathCondition ($hiddenRecord.session_id -eq $firstSession) 'hidden_transaction_marker_is_readable'
+if (Test-StartTestsWindows) {
+    [IO.File]::SetAttributes($firstMarker, ([IO.File]::GetAttributes($firstMarker) -band (-bnot [IO.FileAttributes]::Hidden)))
+}
 $cargoRoot = Get-ClearraCargoTargetDir
 Assert-ArtifactPathCondition (Test-ClearraBuildTransactionOwner) 'owner_public_predicate_matches_bound_session'
 Assert-ArtifactPathCondition ($first.purpose -eq 'experiment' -and $cargoRoot -eq (Join-Path $experimentRoot 'cargo-target')) 'experiment_uses_one_bound_cargo_target'
