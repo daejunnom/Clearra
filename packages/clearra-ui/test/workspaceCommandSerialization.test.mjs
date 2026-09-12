@@ -6,6 +6,9 @@ import {
   buildWorkspaceCommand,
   buildWorkspaceCommandArguments,
   createDefaultWorkspaceRequest,
+  normalizeWorkspaceInitialField,
+  scenarioPieceWindow,
+  workspaceValidationCodes,
   workspaceRequestForDesktop
 } from '../src/lib/workspace/solverWorkspaceModel.ts';
 import {
@@ -54,6 +57,37 @@ test('ordinary PC full solutions use one canonical argv envelope in browser and 
     'asynchronously ready browser workers must not enter the native all-worker barrier');
   assert.deepEqual(tokenizeBrowserCommandForContract(browserCommand), arguments_);
   assert.deepEqual(desktopRequest.arguments, arguments_);
+});
+
+test('completed initial rows compact without shrinking the requested PC target frame', () => {
+  const request = {
+    ...createDefaultWorkspaceRequest(),
+    lines: 2,
+    boardMask: 0x3ffffn,
+    queue: 'IOT',
+    holdEnabled: false,
+    scoreMode: 'off',
+    backend: 'cpu',
+    workers: 1
+  };
+  const normalized = normalizeWorkspaceInitialField(request);
+
+  assert.equal(normalized.clearedRows, 1);
+  assert.equal(normalized.request.lines, 2);
+  assert.equal(normalized.request.boardMask, 0xffn);
+  assert.equal(scenarioPieceWindow(request), 3);
+  assert.equal(workspaceValidationCodes(request, 'web').includes('scenario_not_tileable'), false);
+
+  const arguments_ = buildWorkspaceCommandArguments(normalized.request);
+  assert.equal(arguments_[arguments_.indexOf('--lines') + 1], '2');
+  assert.equal(arguments_[arguments_.indexOf('--height') + 1], '2');
+  assert.equal(arguments_[arguments_.indexOf('--pieces') + 1], '3');
+  assert.equal(arguments_[arguments_.indexOf('--board-mask') + 1], '0x00000000000000ff');
+  assert.deepEqual(
+    tokenizeBrowserCommandForContract(buildWorkspaceCommand(normalized.request)),
+    arguments_
+  );
+  assert.deepEqual(workspaceRequestForDesktop(normalized.request, 'en').arguments, arguments_);
 });
 
 test('minimum-cover GUI emits one canonical pc minimals command without a DTO count authority', () => {

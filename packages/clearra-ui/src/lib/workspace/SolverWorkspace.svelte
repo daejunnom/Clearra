@@ -34,8 +34,8 @@
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
     buildWorkspaceCommand,
-    clearCompletedRows,
     createDefaultWorkspaceRequest,
+    normalizeWorkspaceInitialField,
     normalizeWorkspaceRequest,
     trimBoardMask,
     workspaceRequestForDesktop,
@@ -189,19 +189,12 @@
   async function run() {
     if (active || validationCodes.length) return;
     const automaticRequest = normalizeWorkspaceRequest(withAutomaticBackend(request));
-    const normalized = clearCompletedRows(automaticRequest.boardMask, automaticRequest.lines);
-    const executionRequest = normalized.clearedRows > 0
-      ? {
-          ...automaticRequest,
-          lines: normalized.remainingLines,
-          boardMask: normalized.boardMask
-        }
-      : automaticRequest;
+    const normalized = normalizeWorkspaceInitialField(automaticRequest);
+    const executionRequest = normalized.request;
     if (normalized.clearedRows > 0) {
       request = {
         ...request,
-        lines: normalized.remainingLines,
-        boardMask: normalized.boardMask
+        boardMask: executionRequest.boardMask
       };
     }
     clearedRowsWarning = normalized.clearedRows;
