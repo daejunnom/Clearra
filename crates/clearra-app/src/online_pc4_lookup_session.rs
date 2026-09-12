@@ -134,10 +134,33 @@ pub enum Pc4OfflineFallbackDisposition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppOnlinePc4LookupStep {
     NeedRange(RangeRequest),
-    Hit(LookupHit),
+    Hit(AppQualifiedPc4LookupHit),
     Miss,
     Failed(LookupFailure),
     Cancelled,
+}
+
+/// Raw graph-record hit carried together with the exact target qualification
+/// that authorized this lookup session. It is not candidate completeness:
+/// traversal and exact placement materialization still have to finish.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppQualifiedPc4LookupHit {
+    target: QualifiedPc4TargetIdentity,
+    lookup: LookupHit,
+}
+
+impl AppQualifiedPc4LookupHit {
+    pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
+    }
+
+    pub const fn lookup(&self) -> &LookupHit {
+        &self.lookup
+    }
+
+    pub fn into_parts(self) -> (QualifiedPc4TargetIdentity, LookupHit) {
+        (self.target, self.lookup)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -191,7 +214,10 @@ impl AppOnlinePc4LookupSession {
     pub fn step(&self) -> AppOnlinePc4LookupStep {
         match self.machine.step() {
             LookupStep::NeedRange(request) => AppOnlinePc4LookupStep::NeedRange(request),
-            LookupStep::Hit(hit) => AppOnlinePc4LookupStep::Hit(hit),
+            LookupStep::Hit(hit) => AppOnlinePc4LookupStep::Hit(AppQualifiedPc4LookupHit {
+                target: self.request.target().clone(),
+                lookup: hit,
+            }),
             LookupStep::Miss => AppOnlinePc4LookupStep::Miss,
             LookupStep::Failed(failure) => AppOnlinePc4LookupStep::Failed(failure),
             LookupStep::Cancelled => AppOnlinePc4LookupStep::Cancelled,

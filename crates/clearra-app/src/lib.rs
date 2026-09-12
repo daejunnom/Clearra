@@ -207,8 +207,8 @@ pub use gui_bridge::{
 #[cfg(feature = "online-pc4-tablebase")]
 pub use online_pc4_lookup_session::{
     AppOnlinePc4LookupSession, AppOnlinePc4LookupStartError, AppOnlinePc4LookupStep,
-    Pc4FallbackCause, Pc4OfflineFallbackAuthorization, Pc4OfflineFallbackDisposition,
-    Pc4OfflineFallbackSignal, Pc4OnlineLookupRequest,
+    AppQualifiedPc4LookupHit, Pc4FallbackCause, Pc4OfflineFallbackAuthorization,
+    Pc4OfflineFallbackDisposition, Pc4OfflineFallbackSignal, Pc4OnlineLookupRequest,
 };
 pub use parity_page_store::{ParityReportPageSource, ParityReportPageStore};
 pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
