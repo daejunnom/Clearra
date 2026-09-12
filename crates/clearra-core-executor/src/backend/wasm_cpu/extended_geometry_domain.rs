@@ -175,6 +175,14 @@ impl ExtendedDomainWorkspace {
         if feasible_piece_mask == 0 {
             return ExtendedDomainResult::Empty;
         }
+        if ProjectionReachabilityCache::extended_cheap_residual_impossible(
+            catalog.projection_catalog(),
+            targets,
+            used_counts,
+            remaining,
+        ) {
+            return ExtendedDomainResult::ProjectionImpossible;
+        }
 
         self.reset_union_find();
         let mut propagation = ExtendedDomainPropagation {
@@ -289,12 +297,11 @@ impl ExtendedDomainWorkspace {
         if advanced
             && remaining.count_ones() >= 24
             && adaptive
-            && self.projection_cache.extended_residual_impossible(
+            && self.projection_cache.extended_exact_residual_impossible(
                 catalog.projection_catalog(),
                 targets,
                 used_counts,
                 remaining,
-                true,
             )
         {
             return ExtendedDomainResult::ProjectionImpossible;

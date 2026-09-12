@@ -22,6 +22,7 @@ pub(super) struct ProjectionCatalog {
     piece_minimum: [Vec<u8>; 7],
     piece_maximum: [Vec<u8>; 7],
     piece_checker_options: [u8; 7],
+    piece_four_color_options: [u8; 7],
     // Serialized into the GPU constraint catalog only when that backend is built.
     #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
     standard_checker_rule_certified: bool,
@@ -47,7 +48,15 @@ struct ProjectedRow {
     piece: PieceKind,
     signature: u64,
     checker_delta: i8,
+    four_color_residue: u8,
     columns: [u8; 10],
+}
+
+#[derive(Clone, Copy)]
+struct ResidualProjection {
+    signature: u64,
+    checker_delta: i8,
+    four_color_residue: u8,
 }
 
 impl ProjectionCatalog {
@@ -57,6 +66,7 @@ impl ProjectionCatalog {
         for row in rows {
             let mut columns = [0_u8; 10];
             let mut checker_delta = 0_i8;
+            let mut four_color_residue = 0_u8;
             let mut cells = row.cells;
             while cells != 0 {
                 let cell = cells.trailing_zeros() as u8;
@@ -65,11 +75,13 @@ impl ProjectionCatalog {
                 let y = cell / width;
                 columns[x as usize] += 1;
                 checker_delta += if (x + y).is_multiple_of(2) { 1 } else { -1 };
+                four_color_residue = (four_color_residue + x) & 3;
             }
             projected_rows.push(ProjectedRow {
                 piece: row.piece,
                 signature: pack_cells(width, projection_bits(height), row.cells),
                 checker_delta,
+                four_color_residue,
                 columns,
             });
         }
@@ -82,16 +94,19 @@ impl ProjectionCatalog {
         for row in rows {
             let mut columns = [0_u8; 10];
             let mut checker_delta = 0_i8;
+            let mut four_color_residue = 0_u8;
             for cell in row.cells.cells() {
                 let x = (cell % u16::from(width)) as u8;
                 let y = (cell / u16::from(width)) as u8;
                 columns[x as usize] += 1;
                 checker_delta += if (x + y).is_multiple_of(2) { 1 } else { -1 };
+                four_color_residue = (four_color_residue + x) & 3;
             }
             projected_rows.push(ProjectedRow {
                 piece: row.piece,
                 signature: pack_extended_cells(width, projection_bits(height), row.cells),
                 checker_delta,
+                four_color_residue,
                 columns,
             });
         }
@@ -122,6 +137,7 @@ impl ProjectionCatalog {
             core::array::from_fn(|_| vec![u8::MAX; width as usize]);
         let mut piece_maximum: [Vec<u8>; 7] = core::array::from_fn(|_| vec![0; width as usize]);
         let mut piece_checker_options = [0_u8; 7];
+        let mut piece_four_color_options = [0_u8; 7];
 
         for row in rows {
             let signature = row.signature;
@@ -136,6 +152,7 @@ impl ProjectionCatalog {
             if (0..5).contains(&checker_index) {
                 piece_checker_options[piece] |= 1_u8 << checker_index;
             }
+            piece_four_color_options[piece] |= 1_u8 << row.four_color_residue;
         }
         for options in &mut piece_options {
             options.sort_unstable();
@@ -185,39 +202,48 @@ impl ProjectionCatalog {
             piece_minimum,
             piece_maximum,
             piece_checker_options,
+            piece_four_color_options,
             standard_checker_rule_certified,
             identity_digest,
         })
     }
 
-    pub fn demand_signature(&self, cells: u64) -> u64 {
-        pack_cells(self.width, self.bits_per_column, cells)
-    }
-
-    pub fn checker_delta(&self, mut cells: u64) -> i8 {
-        let mut delta = 0_i8;
+    fn project_residual(&self, mut cells: u64) -> ResidualProjection {
+        let mut signature = 0_u64;
+        let mut checker_delta = 0_i8;
+        let mut four_color_residue = 0_u8;
         while cells != 0 {
             let cell = cells.trailing_zeros() as u8;
             cells &= cells - 1;
             let x = cell % self.width;
             let y = cell / self.width;
-            delta += if (x + y).is_multiple_of(2) { 1 } else { -1 };
+            signature += 1_u64 << (usize::from(x) * usize::from(self.bits_per_column));
+            checker_delta += if (x + y).is_multiple_of(2) { 1 } else { -1 };
+            four_color_residue = (four_color_residue + x) & 3;
         }
-        delta
+        ResidualProjection {
+            signature,
+            checker_delta,
+            four_color_residue,
+        }
     }
 
-    pub fn extended_demand_signature(&self, cells: ExtendedBoard) -> u64 {
-        pack_extended_cells(self.width, self.bits_per_column, cells)
-    }
-
-    pub fn extended_checker_delta(&self, cells: ExtendedBoard) -> i8 {
-        let mut delta = 0_i8;
+    fn project_extended_residual(&self, cells: ExtendedBoard) -> ResidualProjection {
+        let mut signature = 0_u64;
+        let mut checker_delta = 0_i8;
+        let mut four_color_residue = 0_u8;
         for cell in cells.cells() {
             let x = (cell % u16::from(self.width)) as u8;
             let y = (cell / u16::from(self.width)) as u8;
-            delta += if (x + y).is_multiple_of(2) { 1 } else { -1 };
+            signature += 1_u64 << (usize::from(x) * usize::from(self.bits_per_column));
+            checker_delta += if (x + y).is_multiple_of(2) { 1 } else { -1 };
+            four_color_residue = (four_color_residue + x) & 3;
         }
-        delta
+        ResidualProjection {
+            signature,
+            checker_delta,
+            four_color_residue,
+        }
     }
 
     pub const fn identity_digest(&self) -> u64 {
@@ -285,6 +311,33 @@ impl ProjectionCatalog {
         true
     }
 
+    /// Returns every reachable value of `sum(x) mod 4` for the remaining
+    /// piece multiset. On a tetromino-aligned residual, its low bit is exactly
+    /// the vertical-parity projection, so that rule is intentionally not
+    /// computed a second time.
+    fn four_color_domain(&self, counts: [u8; 7]) -> u8 {
+        let mut domain = 1_u8;
+        for (piece, count) in counts.into_iter().enumerate() {
+            for _ in 0..count {
+                domain = convolve_mod_four(domain, self.piece_four_color_options[piece]);
+                if domain == 0 {
+                    return 0;
+                }
+                if domain == 0b1111 {
+                    return domain;
+                }
+            }
+        }
+        domain
+    }
+
+    fn cheap_counts_may_match(&self, counts: [u8; 7], demand: ResidualProjection) -> bool {
+        if self.four_color_domain(counts) & (1_u8 << demand.four_color_residue) == 0 {
+            return false;
+        }
+        self.cheap_bounds_allow(counts, demand.signature)
+    }
+
     fn add_projection(&self, left: u64, right: u64) -> Option<u64> {
         let mut result = 0_u64;
         for x in 0..self.width as usize {
@@ -337,16 +390,75 @@ impl ProjectionCatalog {
 }
 
 impl ProjectionReachabilityCache {
-    pub fn residual_impossible(
+    /// Cheap, allocation-free negative filter shared by ordinary and extended
+    /// ILC geometry. It uses the residual target-frame cells and only residue
+    /// options compiled from rows that the active catalog can actually emit.
+    /// Any valid completion partitions `remaining` into these catalog rows,
+    /// and `sum(x) mod 4` is additive across that partition. Consequently line
+    /// count, an existing field, kick rules, and temporal skeleton
+    /// normalization are already represented by the caller/catalog; the
+    /// filter never assumes a blank even-line opening.
+    pub fn cheap_residual_impossible(
+        catalog: &ProjectionCatalog,
+        targets: &[TargetGroup],
+        used_counts: [u8; 7],
+        remaining: u64,
+    ) -> bool {
+        let demand = catalog.project_residual(remaining);
+        if demand.checker_delta % 2 != 0 {
+            return true;
+        }
+        let mut saw_target = false;
+        for target in targets {
+            let counts = target.key.counts();
+            if !counts_dominate(counts, used_counts) {
+                continue;
+            }
+            saw_target = true;
+            let residual_counts = core::array::from_fn(|piece| counts[piece] - used_counts[piece]);
+            if catalog.cheap_counts_may_match(residual_counts, demand) {
+                return false;
+            }
+        }
+        saw_target
+    }
+
+    pub fn extended_cheap_residual_impossible(
+        catalog: &ProjectionCatalog,
+        targets: &[[u8; 7]],
+        used_counts: [u8; 7],
+        remaining: ExtendedBoard,
+    ) -> bool {
+        let demand = catalog.project_extended_residual(remaining);
+        if demand.checker_delta % 2 != 0 {
+            return true;
+        }
+        let mut saw_target = false;
+        for counts in targets.iter().copied() {
+            if !counts_dominate(counts, used_counts) {
+                continue;
+            }
+            saw_target = true;
+            let residual_counts = core::array::from_fn(|piece| counts[piece] - used_counts[piece]);
+            if catalog.cheap_counts_may_match(residual_counts, demand) {
+                return false;
+            }
+        }
+        saw_target
+    }
+
+    /// Exact column/checker refinement. Callers run the cheap residue filter
+    /// first; this method is reserved for nodes admitted to the bounded exact
+    /// projection cache.
+    pub fn exact_residual_impossible(
         &mut self,
         catalog: &ProjectionCatalog,
         targets: &[TargetGroup],
         used_counts: [u8; 7],
         remaining: u64,
-        exact_projection_enabled: bool,
     ) -> bool {
-        let demand = catalog.demand_signature(remaining);
-        let checker_delta = catalog.checker_delta(remaining);
+        let demand = catalog.project_residual(remaining);
+        let checker_delta = demand.checker_delta;
         if checker_delta % 2 != 0 {
             return true;
         }
@@ -366,9 +478,8 @@ impl ProjectionReachabilityCache {
             if self.counts_may_match(
                 catalog,
                 residual_counts,
-                demand,
+                demand.signature,
                 Some(checker_bit as u32),
-                exact_projection_enabled,
             ) {
                 return false;
             }
@@ -376,16 +487,15 @@ impl ProjectionReachabilityCache {
         saw_target
     }
 
-    pub fn extended_residual_impossible(
+    pub fn extended_exact_residual_impossible(
         &mut self,
         catalog: &ProjectionCatalog,
         targets: &[[u8; 7]],
         used_counts: [u8; 7],
         remaining: ExtendedBoard,
-        exact_projection_enabled: bool,
     ) -> bool {
-        let demand = catalog.extended_demand_signature(remaining);
-        let checker_delta = catalog.extended_checker_delta(remaining);
+        let demand = catalog.project_extended_residual(remaining);
+        let checker_delta = demand.checker_delta;
         if checker_delta % 2 != 0 {
             return true;
         }
@@ -413,9 +523,8 @@ impl ProjectionReachabilityCache {
             if self.counts_may_match(
                 catalog,
                 residual_counts,
-                demand,
+                demand.signature,
                 checker_bit.filter(|_| exact_checker_domain),
-                exact_projection_enabled,
             ) {
                 return false;
             }
@@ -455,12 +564,8 @@ impl ProjectionReachabilityCache {
         counts: [u8; 7],
         demand: u64,
         checker_bit: Option<u32>,
-        exact_projection_enabled: bool,
     ) -> bool {
-        if !catalog.cheap_bounds_allow(counts, demand) {
-            return false;
-        }
-        if !exact_projection_enabled || !catalog.exact_projection_is_budgeted(counts) {
+        if !catalog.exact_projection_is_budgeted(counts) {
             return true;
         }
         match self.entry(catalog, counts) {
@@ -474,6 +579,26 @@ impl ProjectionReachabilityCache {
             ProjectionCacheEntry::Unavailable => true,
         }
     }
+}
+
+fn convolve_mod_four(domain: u8, options: u8) -> u8 {
+    let domain = domain & 0b1111;
+    (if options & 0b0001 != 0 { domain } else { 0 })
+        | (if options & 0b0010 != 0 {
+            ((domain << 1) | (domain >> 3)) & 0b1111
+        } else {
+            0
+        })
+        | (if options & 0b0100 != 0 {
+            ((domain << 2) | (domain >> 2)) & 0b1111
+        } else {
+            0
+        })
+        | (if options & 0b1000 != 0 {
+            ((domain << 3) | (domain >> 1)) & 0b1111
+        } else {
+            0
+        })
 }
 
 fn compile_reachable_projections(
@@ -562,4 +687,207 @@ fn pack_projection_counts(counts: [u8; 7]) -> u64 {
 
 fn counts_dominate(counts: [u8; 7], used_counts: [u8; 7]) -> bool {
     (0..7).all(|piece| counts[piece] >= used_counts[piece])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn projected_row(piece: PieceKind, cells: &[(u8, u8)]) -> ProjectedRow {
+        let mut columns = [0_u8; 10];
+        let mut checker_delta = 0_i8;
+        let mut four_color_residue = 0_u8;
+        let mut mask = 0_u64;
+        for &(x, y) in cells {
+            columns[usize::from(x)] += 1;
+            checker_delta += if (x + y).is_multiple_of(2) { 1 } else { -1 };
+            four_color_residue = (four_color_residue + x) & 3;
+            mask |= 1_u64 << (u64::from(y) * 10 + u64::from(x));
+        }
+        ProjectedRow {
+            piece,
+            signature: pack_cells(10, projection_bits(6), mask),
+            checker_delta,
+            four_color_residue,
+            columns,
+        }
+    }
+
+    fn counts(piece: PieceKind, count: u8) -> [u8; 7] {
+        let mut counts = [0_u8; 7];
+        counts[piece_index(piece)] = count;
+        counts
+    }
+
+    fn projection_from_signature(
+        catalog: &ProjectionCatalog,
+        signature: u64,
+    ) -> ResidualProjection {
+        let mut four_color_residue = 0_u8;
+        for x in 0..usize::from(catalog.width) {
+            let count = ((signature >> (x * usize::from(catalog.bits_per_column)))
+                & catalog.column_value_mask) as u8;
+            four_color_residue = (four_color_residue + ((x as u8 & 3) * (count & 3))) & 3;
+        }
+        ResidualProjection {
+            signature,
+            checker_delta: 0,
+            four_color_residue,
+        }
+    }
+
+    fn legacy_identity_digest(width: u8, height: u8, rows: &[ProjectedRow]) -> u64 {
+        let bits_per_column = projection_bits(height);
+        let mut piece_options: [Vec<u64>; 7] = core::array::from_fn(|_| Vec::new());
+        let mut piece_checker_options = [0_u8; 7];
+        for row in rows {
+            let piece = piece_index(row.piece);
+            piece_options[piece].push(row.signature);
+            let checker_index = row.checker_delta.div_euclid(2) + 2;
+            if (0..5).contains(&checker_index) {
+                piece_checker_options[piece] |= 1_u8 << checker_index;
+            }
+        }
+        for options in &mut piece_options {
+            options.sort_unstable();
+            options.dedup();
+        }
+
+        let mut digest = mix_digest(0, u64::from(width));
+        digest = mix_digest(digest, u64::from(height));
+        digest = mix_digest(digest, u64::from(bits_per_column));
+        for (row_id, row) in rows.iter().enumerate() {
+            digest = mix_digest(digest, row_id as u64);
+            digest = mix_digest(digest, row.signature);
+        }
+        for (piece, options) in piece_options.iter().enumerate() {
+            digest = mix_digest(digest, piece as u64);
+            digest = mix_digest(digest, u64::from(piece_checker_options[piece]));
+            for option in options {
+                digest = mix_digest(digest, *option);
+            }
+        }
+        digest
+    }
+
+    #[test]
+    fn four_color_rejects_a_residual_that_column_bounds_cannot_distinguish() {
+        let rows = [
+            projected_row(PieceKind::I, &[(0, 0), (0, 1), (2, 0), (2, 1)]),
+            projected_row(PieceKind::I, &[(1, 0), (1, 1), (3, 0), (3, 1)]),
+        ];
+        let catalog = ProjectionCatalog::compile_projected(10, 6, &rows).expect("catalog");
+        let demand_cells = 0b1111_u64;
+        let demand = catalog.project_residual(demand_cells);
+
+        assert!(catalog.cheap_bounds_allow(counts(PieceKind::I, 1), demand.signature));
+        assert_eq!(catalog.four_color_domain(counts(PieceKind::I, 1)), 0b0001);
+        assert!(!catalog.cheap_counts_may_match(counts(PieceKind::I, 1), demand));
+    }
+
+    #[test]
+    fn derived_four_color_options_preserve_the_legacy_catalog_identity() {
+        let rows = [
+            projected_row(PieceKind::I, &[(0, 0), (1, 0), (2, 0), (3, 0)]),
+            projected_row(PieceKind::T, &[(4, 0), (5, 0), (6, 0), (5, 1)]),
+            projected_row(PieceKind::O, &[(7, 0), (8, 0), (7, 1), (8, 1)]),
+        ];
+        let catalog = ProjectionCatalog::compile_projected(10, 6, &rows).expect("catalog");
+
+        assert_eq!(
+            catalog.identity_digest(),
+            legacy_identity_digest(10, 6, &rows)
+        );
+    }
+
+    #[test]
+    fn optimized_mod_four_convolution_matches_the_exhaustive_definition() {
+        for domain in 0..16_u8 {
+            for options in 0..16_u8 {
+                let mut expected = 0_u8;
+                for left in 0..4_u8 {
+                    for right in 0..4_u8 {
+                        if domain & (1_u8 << left) != 0 && options & (1_u8 << right) != 0 {
+                            expected |= 1_u8 << ((left + right) & 3);
+                        }
+                    }
+                }
+                assert_eq!(convolve_mod_four(domain, options), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn mod_four_domain_also_enforces_vertical_parity_without_a_second_rule() {
+        let rows = [
+            projected_row(PieceKind::I, &[(0, 0), (0, 1), (0, 2), (0, 3)]),
+            projected_row(PieceKind::I, &[(0, 0), (1, 0), (2, 0), (3, 0)]),
+        ];
+        let catalog = ProjectionCatalog::compile_projected(10, 6, &rows).expect("catalog");
+        let domain = catalog.four_color_domain(counts(PieceKind::I, 1));
+
+        assert_eq!(domain, 0b0101);
+        assert_eq!(
+            domain & 0b1010,
+            0,
+            "odd vertical-parity residues stay impossible"
+        );
+    }
+
+    #[test]
+    fn every_catalog_row_combination_remains_admissible() {
+        let rows = [
+            projected_row(PieceKind::I, &[(0, 0), (1, 0), (2, 0), (3, 0)]),
+            projected_row(PieceKind::I, &[(4, 0), (4, 1), (4, 2), (4, 3)]),
+            projected_row(PieceKind::T, &[(5, 0), (6, 0), (7, 0), (6, 1)]),
+            projected_row(PieceKind::T, &[(8, 0), (8, 1), (8, 2), (9, 1)]),
+        ];
+        let catalog = ProjectionCatalog::compile_projected(10, 6, &rows).expect("catalog");
+        let mut residual_counts = counts(PieceKind::I, 1);
+        residual_counts[piece_index(PieceKind::T)] = 1;
+
+        for i_row in &rows[..2] {
+            for t_row in &rows[2..] {
+                let demand = catalog
+                    .add_projection(i_row.signature, t_row.signature)
+                    .expect("rows fit height");
+                let demand = projection_from_signature(&catalog, demand);
+                assert!(
+                    catalog.cheap_counts_may_match(residual_counts, demand),
+                    "an exact catalog-row sum must never be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normalized_residuals_cover_one_through_six_line_targets() {
+        let mut rows = Vec::new();
+        for y in [0_u8, 2, 4] {
+            for x in [0_u8, 2, 4, 6, 8] {
+                rows.push(projected_row(
+                    PieceKind::O,
+                    &[(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)],
+                ));
+            }
+        }
+        let catalog = ProjectionCatalog::compile_projected(10, 6, &rows).expect("catalog");
+
+        for lines in 1..=6_u8 {
+            // A 10-wide target can have two pre-filled cells on odd line counts.
+            // The projection sees only the normalized residual required cells.
+            let piece_count = (10 * lines) / 4;
+            let mut demand = 0_u64;
+            for index in 0..piece_count {
+                demand = catalog
+                    .add_projection(demand, rows[usize::from(index)].signature)
+                    .expect("selected rows fit the six-line projection");
+            }
+            let demand = projection_from_signature(&catalog, demand);
+            assert!(
+                catalog.cheap_counts_may_match(counts(PieceKind::O, piece_count), demand),
+                "{lines}L normalized residual was rejected"
+            );
+        }
+    }
 }
