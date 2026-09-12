@@ -406,6 +406,14 @@ pub struct PcCandidateReducerInput {
 }
 
 impl PcCandidateReducerInput {
+    #[cfg(test)]
+    pub(crate) fn from_test_parts(
+        source: PcCandidateSourceBinding,
+        candidates: Vec<StandardBoard64TilingIdentity>,
+    ) -> Self {
+        Self { source, candidates }
+    }
+
     pub const fn source(&self) -> &PcCandidateSourceBinding {
         &self.source
     }

@@ -67,6 +67,8 @@ pub mod response;
 pub mod run_request;
 pub mod search_backend_warmup;
 mod search_output_surface_postprocess;
+#[cfg(feature = "online-pc4-tablebase")]
+mod setup_pc_candidate_acceleration;
 mod setup_ranked_family_result;
 #[cfg(test)]
 mod setup_ranked_fixture;
@@ -297,6 +299,15 @@ pub use request_profile_selection::{
     RequestProfileSelection, RequestProfileSelectionError, RequestStructuralProfiles,
 };
 pub use search_backend_warmup::{prewarm_search_backend, GpuSearchWarmupReport};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use setup_pc_candidate_acceleration::{
+    admit_setup_pc_candidate_input, PreparedSetupPcCandidateInput,
+    SetupPcAccelerationCompatibilityProof, SetupPcAccelerationDisposition,
+    SetupPcAccelerationObjective, SetupPcAccelerationRequestBinding,
+    SetupPcAccelerationRequestError, SetupPcAccelerationTarget, SetupPcCandidateAvailability,
+    SetupPcCandidateProviderFailure, SetupPcNoAccelerationReason,
+    SETUP_PC_CANDIDATE_ACCELERATION_CONTRACT,
+};
 pub use setup_ranked_family_result::{
     setup_ranked_candidate_id, SetupRankedCandidateIdentity, SetupRankedFamilyResult,
     SetupRankedFamilyResultError, SetupRankedFamilySnapshot,
