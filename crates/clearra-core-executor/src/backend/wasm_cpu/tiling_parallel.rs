@@ -1583,7 +1583,12 @@ mod tests {
 
     #[test]
     fn pc_root_distribution_filters_before_count_digest_and_rank() {
-        let problem = pc_root_problem(PcExecutionPolicy::mvp_default(), true);
+        let problem = pc_root_problem(
+            PcExecutionPolicy::mvp_default()
+                .with_workers(1)
+                .with_worker_hardware_limit(1),
+            true,
+        );
         let control = ExecutionControl::default();
         let serial = WasmCpuSearchBackend::execute_with_control(&problem, &control)
             .expect("serial filtered PC result");
