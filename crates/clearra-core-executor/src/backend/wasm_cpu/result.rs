@@ -28,7 +28,7 @@ use clearra_pc_graph::request::RequestedSearchBackend;
 use clearra_problem::{PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem};
 use clearra_replay::ExactScoringExecutionBatch;
 use clearra_rules::profile::rule_capability::RuleCapability;
-use clearra_supply::pattern_universe::PackingPatternMembershipKind;
+use clearra_supply::pattern_universe::{PackingPatternMembershipKind, PieceMultisetKey};
 
 use crate::{
     pc_chance_coverage_evidence::{
@@ -936,7 +936,7 @@ impl WasmExactSearchSession {
     /// external-geometry verifier or WebGPU adapter. A caller must yield after
     /// every `false` result; candidates are not admissible until this returns
     /// `true`.
-    pub(super) fn advance_external_geometry_preparation(
+    pub(crate) fn advance_external_geometry_preparation(
         &mut self,
         control: &ExecutionControl,
     ) -> Result<bool, WasmExactSearchError> {
@@ -969,6 +969,133 @@ impl WasmExactSearchSession {
                 WasmExactSearchError::InvalidProblem("external_geometry_preparation_state_invalid"),
             ),
         }
+    }
+
+    /// Validates one provider-neutral, canonical tiling identity against this
+    /// session's compiled Geometry domain without committing any search state.
+    ///
+    /// Callers that own a complete precomputed candidate universe use this as
+    /// a preflight over the whole ordered universe before forwarding any
+    /// candidate to the ordinary BuildUp/coverage/replay/scoring reducer.
+    pub(crate) fn validate_external_geometry_identity(
+        &self,
+        identity: StandardBoard64TilingIdentity,
+    ) -> Result<(), WasmExactSearchError> {
+        self.external_geometry_identity_parts(identity).map(|_| ())
+    }
+
+    /// Revalidates and forwards one precomputed candidate through the same
+    /// reducer used by distributed CPU/WebGPU Geometry producers.
+    pub(crate) fn process_external_geometry_identity_with_ordinal(
+        &mut self,
+        identity: StandardBoard64TilingIdentity,
+        ordinal: u64,
+        control: &ExecutionControl,
+    ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+        let (target_index, row_ids, row_count) = self.external_geometry_identity_parts(identity)?;
+        self.process_external_candidate_with_ordinal(
+            target_index,
+            &row_ids[..row_count],
+            ordinal,
+            control,
+        )
+    }
+
+    pub(crate) fn external_geometry_metrics(&self) -> (usize, usize) {
+        (
+            self.geometry.expanded_nodes(),
+            self.geometry.peak_frontier(),
+        )
+    }
+
+    fn external_geometry_identity_parts(
+        &self,
+        identity: StandardBoard64TilingIdentity,
+    ) -> Result<(u32, [u32; MAX_BOARD64_PIECES], usize), WasmExactSearchError> {
+        if self.geometry.target_preparation_pending() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_precomputed_geometry_targets_not_prepared",
+            ));
+        }
+        if identity.initial_board_mask() != self.catalog.initial_board() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_precomputed_geometry_initial_board_mismatch",
+            ));
+        }
+
+        let row_count = identity.placement_count();
+        let required_cells = self.catalog.required_cells();
+        if required_cells.count_ones() % 4 != 0
+            || row_count > MAX_BOARD64_PIECES
+            || row_count != required_cells.count_ones() as usize / 4
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_precomputed_geometry_target_domain_mismatch",
+            ));
+        }
+
+        let mut row_ids = [0_u32; MAX_BOARD64_PIECES];
+        let mut covered_cells = 0_u64;
+        for (index, row_slot) in row_ids.iter_mut().enumerate().take(row_count) {
+            let placement =
+                identity
+                    .placement(index)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_precomputed_geometry_identity_placement_missing",
+                    ))?;
+            *row_slot = self
+                .catalog
+                .skeleton_id(placement.piece(), placement.cells_mask())
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_precomputed_geometry_identity_not_in_catalog",
+                ))?;
+            covered_cells |= placement.cells_mask();
+        }
+        if covered_cells != required_cells {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_precomputed_geometry_target_domain_mismatch",
+            ));
+        }
+
+        let multiset = PieceMultisetKey::from_pieces((0..row_count).map(|index| {
+            identity
+                .placement(index)
+                .expect("the identity placement count was validated")
+                .piece()
+        }));
+        let targets = self
+            .geometry
+            .targets()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_precomputed_geometry_targets_not_prepared",
+            ))?;
+        let mut matching_targets = targets.iter().filter(|target| target.key == multiset);
+        let target = matching_targets
+            .next()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_precomputed_geometry_identity_supply_mismatch",
+            ))?;
+        if matching_targets.next().is_some() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_precomputed_geometry_identity_supply_ambiguous",
+            ));
+        }
+
+        let reconstructed = GeometryCandidate::from_rows(
+            &self.catalog,
+            target.pattern_index_id,
+            &row_ids[..row_count],
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_precomputed_geometry_identity_reconstruction_failed",
+        ))?;
+        if reconstructed.identity != identity {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_precomputed_geometry_identity_reconstruction_mismatch",
+            ));
+        }
+
+        Ok((target.pattern_index_id, row_ids, row_count))
     }
 
     pub(super) fn distributed_progress(&self) -> WasmDistributedProgress {

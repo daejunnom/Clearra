@@ -5,6 +5,7 @@ use clearra_core_domain::{
     execution_cancellation::ExecutionControl,
     objective::objective_kind::ObjectiveKind,
     resource::{ExecutionAvailabilityReason, ExecutionAvailabilityState, ResourceReport},
+    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
 use clearra_problem::{SearchOutputPolicy, SearchProblem};
 
@@ -341,6 +342,82 @@ impl WasmCpuSearchBackend {
         estimated_pre_geometry_parallel_work(problem, required_piece_count) > 1
     }
 
+    /// Reduces one already-complete, strictly canonical precomputed Geometry
+    /// universe through Core's ordinary CPU verification and finalization path.
+    ///
+    /// Exhausting `candidates` is the only completion operation accepted by
+    /// this API. The caller must retain its typed source/completeness authority;
+    /// Core independently validates every identity against the compiled
+    /// initial board, target cells, Geometry catalog, and exact supply group
+    /// before committing any candidate. This method neither accepts transport
+    /// packets nor manufactures provider evidence.
+    pub fn execute_complete_precomputed_geometry_candidates_with_control(
+        problem: &SearchProblem,
+        candidates: &[StandardBoard64TilingIdentity],
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
+        if candidates.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(WasmCpuSearchError::InvalidProblem {
+                reason: "wasm_precomputed_geometry_candidates_not_strictly_canonical",
+            });
+        }
+        if control.is_cancelled() {
+            return Err(WasmCpuSearchError::Cancelled);
+        }
+
+        let mut session =
+            WasmExactSearchSession::new_external_geometry(problem).map_err(map_error)?;
+        if !candidates.is_empty() {
+            while !session
+                .advance_external_geometry_preparation(control)
+                .map_err(map_error)?
+            {}
+
+            // Validate the complete universe before the first candidate can
+            // mutate BuildUp, coverage, replay, or scoring state. A late
+            // foreign identity therefore fails closed with no partial result.
+            for identity in candidates.iter().copied() {
+                session
+                    .validate_external_geometry_identity(identity)
+                    .map_err(map_error)?;
+            }
+
+            for (index, identity) in candidates.iter().copied().enumerate() {
+                let ordinal =
+                    u64::try_from(index).map_err(|_| WasmCpuSearchError::InvalidProblem {
+                        reason: "wasm_precomputed_geometry_candidate_ordinal_overflow",
+                    })?;
+                match session
+                    .process_external_geometry_identity_with_ordinal(identity, ordinal, control)
+                    .map_err(map_error)?
+                {
+                    None => {}
+                    Some(ExactSearchAdvance::Completed(result)) => return Ok(result),
+                    Some(ExactSearchAdvance::Cancelled) => {
+                        return Err(WasmCpuSearchError::Cancelled)
+                    }
+                    Some(ExactSearchAdvance::Pending) => {
+                        return Err(WasmCpuSearchError::InvalidProblem {
+                            reason: "wasm_precomputed_geometry_candidate_state_invalid",
+                        })
+                    }
+                }
+            }
+        }
+
+        let (expanded_nodes, peak_frontier) = session.external_geometry_metrics();
+        match session
+            .complete_external_geometry(expanded_nodes, peak_frontier)
+            .map_err(map_error)?
+        {
+            ExactSearchAdvance::Completed(result) => Ok(result),
+            ExactSearchAdvance::Cancelled => Err(WasmCpuSearchError::Cancelled),
+            ExactSearchAdvance::Pending => Err(WasmCpuSearchError::InvalidProblem {
+                reason: "wasm_precomputed_geometry_completion_state_invalid",
+            }),
+        }
+    }
+
     pub fn execute_with_control(
         problem: &SearchProblem,
         control: &ExecutionControl,
@@ -628,6 +705,244 @@ fn score_resource_test_guard() -> std::sync::MutexGuard<'static, ()> {
     SCORE_RESOURCE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod precomputed_geometry_tests {
+    use clearra_core_domain::{
+        execution_cancellation::ExecutionControl,
+        piece::piece_kind::PieceKind,
+        solution::normalized_tiling_solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
+    };
+    use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+    use clearra_pc_graph::request::{
+        PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+        PieceWindow, RequestedSearchBackend,
+    };
+    use clearra_problem::{ProblemCompiler, SearchProblem};
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use super::{score_resource_test_guard, WasmCpuSearchBackend, WasmCpuSearchError};
+
+    fn one_i_problem(retain_replay: bool, reject_all: bool) -> SearchProblem {
+        let mut query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_retained_trace_limit(if retain_replay { 1 } else { 0 })
+        .with_objective(ObjectivePolicy::all().with_score_summary())
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_workers(1)
+                .with_max_memory_mib(Some(64)),
+        );
+        if reject_all {
+            query = query.with_allowed_colored_solution_identities(std::iter::empty());
+        }
+        ProblemCompiler::compile_scenario_pc(&query).expect("one-I test problem")
+    }
+
+    fn one_i_over_o_hole_problem() -> SearchProblem {
+        let o_cells = 0x0c03;
+        let initial_board = 0x0f_ffff ^ o_cells;
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, initial_board),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_workers(1),
+        );
+        ProblemCompiler::compile_scenario_pc(&query).expect("I-supply over O-hole problem")
+    }
+
+    fn assert_invalid_reason(
+        result: Result<crate::CoreExecutionResult, WasmCpuSearchError>,
+        expected: &'static str,
+    ) {
+        assert!(matches!(
+            result,
+            Err(WasmCpuSearchError::InvalidProblem { reason }) if reason == expected
+        ));
+    }
+
+    #[test]
+    fn complete_precomputed_geometry_matches_ordinary_build_coverage_replay_and_scoring() {
+        let _resource_guard = score_resource_test_guard();
+        let problem = one_i_problem(true, false);
+        let control = ExecutionControl::default();
+        let ordinary = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+            .expect("ordinary exact search");
+        assert_eq!(ordinary.normalized_solution_identities().len(), 1);
+        assert!(!ordinary.path_steps().is_empty());
+        assert!(ordinary.exact_scoring_execution_batch().is_some());
+
+        let injected =
+            WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+                &problem,
+                ordinary.normalized_solution_identities(),
+                &control,
+            )
+            .expect("precomputed candidate reduction");
+
+        assert_eq!(
+            injected.normalized_solution_identities(),
+            ordinary.normalized_solution_identities()
+        );
+        assert_eq!(
+            injected.normalized_solution_keys(),
+            ordinary.normalized_solution_keys()
+        );
+        assert_eq!(injected.path_steps(), ordinary.path_steps());
+        assert_eq!(
+            injected.coverage_pattern_words(),
+            ordinary.coverage_pattern_words()
+        );
+        assert_eq!(injected.solution_coverages(), ordinary.solution_coverages());
+        assert_eq!(
+            injected.exact_scoring_execution_batches(),
+            ordinary.exact_scoring_execution_batches()
+        );
+        for field in [
+            "unique_solution_count",
+            "normalized_solution_set_hash",
+            "build_variant_count",
+            "count_complete",
+            "coverage_complete",
+            "score_requested",
+        ] {
+            assert_eq!(injected.field(field), ordinary.field(field), "{field}");
+        }
+    }
+
+    #[test]
+    fn complete_precomputed_geometry_rejects_noncanonical_and_foreign_identities() {
+        let _resource_guard = score_resource_test_guard();
+        let problem = one_i_problem(false, false);
+        let control = ExecutionControl::default();
+        let ordinary = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+            .expect("ordinary exact search");
+        let identity = ordinary.normalized_solution_identities()[0];
+        let placement = identity.placement(0).expect("one I placement");
+
+        assert_invalid_reason(
+            WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+                &problem,
+                &[identity, identity],
+                &control,
+            ),
+            "wasm_precomputed_geometry_candidates_not_strictly_canonical",
+        );
+
+        let foreign_initial = StandardBoard64TilingIdentity::from_placements(0, [placement])
+            .expect("foreign initial-board identity");
+        let mut descending = [identity, foreign_initial];
+        descending.sort_unstable();
+        descending.reverse();
+        assert_invalid_reason(
+            WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+                &problem,
+                &descending,
+                &control,
+            ),
+            "wasm_precomputed_geometry_candidates_not_strictly_canonical",
+        );
+        assert_invalid_reason(
+            WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+                &problem,
+                &[foreign_initial],
+                &control,
+            ),
+            "wasm_precomputed_geometry_initial_board_mismatch",
+        );
+
+        let empty = StandardBoard64TilingIdentity::from_placements(
+            identity.initial_board_mask(),
+            std::iter::empty(),
+        )
+        .expect("empty identity");
+        assert_invalid_reason(
+            WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+                &problem,
+                &[empty],
+                &control,
+            ),
+            "wasm_precomputed_geometry_target_domain_mismatch",
+        );
+
+        let foreign_catalog = StandardBoard64TilingIdentity::from_placements(
+            identity.initial_board_mask(),
+            [PiecePlacementMask::new(
+                PieceKind::O,
+                placement.cells_mask(),
+            )],
+        )
+        .expect("normalized but non-O geometry");
+        assert_invalid_reason(
+            WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+                &problem,
+                &[foreign_catalog],
+                &control,
+            ),
+            "wasm_precomputed_geometry_identity_not_in_catalog",
+        );
+
+        let supply_problem = one_i_over_o_hole_problem();
+        let o_identity = StandardBoard64TilingIdentity::from_placements(
+            0x0f_ffff ^ 0x0c03,
+            [PiecePlacementMask::new(PieceKind::O, 0x0c03)],
+        )
+        .expect("catalog-valid O geometry outside the I supply group");
+        assert_invalid_reason(
+            WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+                &supply_problem,
+                &[o_identity],
+                &control,
+            ),
+            "wasm_precomputed_geometry_identity_supply_mismatch",
+        );
+    }
+
+    #[test]
+    fn complete_empty_precomputed_universe_preserves_ordinary_empty_result() {
+        let _resource_guard = score_resource_test_guard();
+        let problem = one_i_problem(false, true);
+        let control = ExecutionControl::default();
+        let ordinary = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+            .expect("ordinary filtered empty search");
+        assert!(ordinary.normalized_solution_identities().is_empty());
+
+        let injected =
+            WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+                &problem,
+                &[],
+                &control,
+            )
+            .expect("complete empty precomputed universe");
+        assert_eq!(
+            injected.normalized_solution_identities(),
+            ordinary.normalized_solution_identities()
+        );
+        for field in [
+            "solution_found",
+            "unique_solution_count",
+            "normalized_solution_set_hash",
+            "count_complete",
+            "coverage_complete",
+        ] {
+            assert_eq!(injected.field(field), ordinary.field(field), "{field}");
+        }
+    }
 }
 
 #[cfg(test)]
