@@ -34,13 +34,15 @@ mod native_forward_execution;
 mod native_spin_structure_execution;
 mod objective_contract;
 #[cfg(feature = "online-pc4-tablebase")]
+mod online_pc4_fixed_queue_candidate_session;
+#[cfg(feature = "online-pc4-tablebase")]
 mod online_pc4_lookup_session;
 mod parity_page_store;
 #[cfg(feature = "online-pc4-tablebase")]
-mod pc4_input_disclosure_policy;
-#[cfg(feature = "online-pc4-tablebase")]
 #[cfg_attr(not(test), allow(dead_code))]
 mod pc4_fixed_queue_candidate_runtime;
+#[cfg(feature = "online-pc4-tablebase")]
+mod pc4_input_disclosure_policy;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_lookup_graph_runtime_adapter;
 mod pc_allspin_result;
@@ -212,6 +214,12 @@ pub use gui_bridge::{
     GuiStatePersistenceContract, GuiValidatedForm,
 };
 #[cfg(feature = "online-pc4-tablebase")]
+pub use online_pc4_fixed_queue_candidate_session::{
+    AppOnlinePc4FixedQueueCandidateFailure, AppOnlinePc4FixedQueueCandidateGuard,
+    AppOnlinePc4FixedQueueCandidateRequest, AppOnlinePc4FixedQueueCandidateSession,
+    AppOnlinePc4FixedQueueCandidateStartError, AppOnlinePc4FixedQueueCandidateStep,
+};
+#[cfg(feature = "online-pc4-tablebase")]
 pub use online_pc4_lookup_session::{
     AppOnlinePc4LookupSession, AppOnlinePc4LookupStartError, AppOnlinePc4LookupStep,
     AppOnlinePc4RangeDisposition, AppOnlinePc4RangeError, AppQualifiedPc4LookupHit,
@@ -236,6 +244,8 @@ pub use pc4_lookup_graph_runtime_adapter::{
     Pc4LookupMaterializationError, Pc4LookupMaterializationField, Pc4LookupPlacementMaterializer,
 };
 pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc_candidate_page_boundary::graph_candidate_adapter::Pc4GraphCandidateAdapterBudgets;
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc_candidate_page_boundary::{
     PcCandidateBoundaryError, PcCandidateCollection, PcCandidateCollectionCompleteness,
