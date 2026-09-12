@@ -303,8 +303,7 @@ pub use search_backend_warmup::{prewarm_search_backend, GpuSearchWarmupReport};
 pub use setup_pc_candidate_acceleration::{
     admit_setup_pc_candidate_input, PreparedSetupPcCandidateInput,
     SetupPcAccelerationCompatibilityProof, SetupPcAccelerationDisposition,
-    SetupPcAccelerationObjective, SetupPcAccelerationRequestBinding,
-    SetupPcAccelerationRequestError, SetupPcAccelerationTarget, SetupPcCandidateAvailability,
+    SetupPcAccelerationObjective, SetupPcAccelerationRequestBinding, SetupPcCandidateAvailability,
     SetupPcCandidateProviderFailure, SetupPcNoAccelerationReason,
     SETUP_PC_CANDIDATE_ACCELERATION_CONTRACT,
 };

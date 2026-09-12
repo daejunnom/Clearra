@@ -6,7 +6,9 @@
 
 mod qualification_binding;
 
-use clearra_pc4_tablebase::{Pc4RuleProfile, QualifiedSnapshotIdentity};
+use clearra_pc4_tablebase::{
+    Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, QualifiedPc4TargetIdentity,
+};
 
 use crate::{
     PcCandidateProviderKind, PcCandidateReducerInput, PcCandidateRequestIdentity,
@@ -19,30 +21,7 @@ use qualification_binding::{
 #[cfg(test)]
 use crate::PcCandidateSourceBinding;
 
-pub const SETUP_PC_CANDIDATE_ACCELERATION_CONTRACT: &str = "setup-complete-pc-candidate-input.v1";
-
-/// A target in the PC4 graph state domain.
-///
-/// `PC4` does not imply that every 1--4 line terminal meaning is qualified.
-/// Admission still requires an exact per-target compatibility proof. This
-/// small type intentionally does not reuse the current even-line-only
-/// `PcTarget`, because odd-line Setup acceleration must remain representable
-/// while feature-off qualification is developed.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SetupPcAccelerationTarget(u8);
-
-impl SetupPcAccelerationTarget {
-    pub fn new(lines: u8) -> Result<Self, SetupPcAccelerationRequestError> {
-        if !(1..=4).contains(&lines) {
-            return Err(SetupPcAccelerationRequestError::TargetOutsidePc4Domain { lines });
-        }
-        Ok(Self(lines))
-    }
-
-    pub const fn lines(self) -> u8 {
-        self.0
-    }
-}
+pub const SETUP_PC_CANDIDATE_ACCELERATION_CONTRACT: &str = "setup-complete-pc-candidate-input.v2";
 
 /// Exact Setup result meaning whose candidate-source substitution was checked.
 ///
@@ -61,25 +40,28 @@ pub struct SetupPcAccelerationRequestBinding {
     request_identity: PcCandidateRequestIdentity,
     profile: Pc4RuleProfile,
     initial_board_mask: u64,
-    target: SetupPcAccelerationTarget,
+    target: Pc4TargetLines,
     objective: SetupPcAccelerationObjective,
 }
 
 impl SetupPcAccelerationRequestBinding {
-    pub fn new(
+    /// Binds the Setup request to the shared PC4 target value. This value only
+    /// validates the graph-domain range; admission still requires a qualified
+    /// `SetupSearch` target identity for the same profile and snapshot.
+    pub const fn new(
         request_identity: PcCandidateRequestIdentity,
         profile: Pc4RuleProfile,
         initial_board_mask: u64,
-        target_lines: u8,
+        target: Pc4TargetLines,
         objective: SetupPcAccelerationObjective,
-    ) -> Result<Self, SetupPcAccelerationRequestError> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             request_identity,
             profile,
             initial_board_mask,
-            target: SetupPcAccelerationTarget::new(target_lines)?,
+            target,
             objective,
-        })
+        }
     }
 
     pub const fn request_identity(&self) -> PcCandidateRequestIdentity {
@@ -94,18 +76,13 @@ impl SetupPcAccelerationRequestBinding {
         self.initial_board_mask
     }
 
-    pub const fn target(&self) -> SetupPcAccelerationTarget {
+    pub const fn target(&self) -> Pc4TargetLines {
         self.target
     }
 
     pub const fn objective(&self) -> SetupPcAccelerationObjective {
         self.objective
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SetupPcAccelerationRequestError {
-    TargetOutsidePc4Domain { lines: u8 },
 }
 
 /// Differential-qualification authority for one exact Setup substitution.
@@ -115,12 +92,14 @@ pub enum SetupPcAccelerationRequestError {
 /// output, or a synthetic KAT into production qualification. A future trusted
 /// verifier may mint this inside `clearra-app` only after comparing the complete
 /// graph-derived PC family against the existing offline Setup path for this
-/// exact request/profile/field/target/objective/generation binding.
+/// exact request/profile/field/target/objective/generation binding. The common
+/// target identity is embedded so an application-local proof cannot duplicate
+/// or substitute target-completeness authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupPcAccelerationCompatibilityProof {
     request: SetupPcAccelerationRequestBinding,
     source_identity: PcCandidateSourceIdentity,
-    snapshot: QualifiedSnapshotIdentity,
+    target: QualifiedPc4TargetIdentity,
     evidence_identity: String,
 }
 
@@ -133,8 +112,8 @@ impl SetupPcAccelerationCompatibilityProof {
         self.source_identity
     }
 
-    pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
-        &self.snapshot
+    pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
     }
 
     pub fn evidence_identity(&self) -> &str {
@@ -145,15 +124,13 @@ impl SetupPcAccelerationCompatibilityProof {
     fn synthetic(
         request: SetupPcAccelerationRequestBinding,
         source: &PcCandidateSourceBinding,
+        target: QualifiedPc4TargetIdentity,
         evidence_identity: impl Into<String>,
     ) -> Self {
         Self {
             request,
             source_identity: source.source_identity(),
-            snapshot: source
-                .qualified_snapshot()
-                .expect("synthetic proof requires an online qualified snapshot")
-                .clone(),
+            target,
             evidence_identity: evidence_identity.into(),
         }
     }
@@ -228,6 +205,8 @@ pub enum SetupPcNoAccelerationReason {
     QualificationProfileMismatch,
     QualificationInitialBoardMismatch,
     TargetNotQualified,
+    TargetProfileNotQualified,
+    TargetUseCaseNotQualified,
     ObjectiveNotQualified,
     CandidateSourceNotQualified,
     SnapshotGenerationNotQualified,
@@ -255,6 +234,10 @@ impl SetupPcNoAccelerationReason {
                 "setup_pc_acceleration_qualification_initial_board_mismatch"
             }
             Self::TargetNotQualified => "setup_pc_acceleration_target_not_qualified",
+            Self::TargetProfileNotQualified => "setup_pc_acceleration_target_profile_not_qualified",
+            Self::TargetUseCaseNotQualified => {
+                "setup_pc_acceleration_target_use_case_not_qualified"
+            }
             Self::ObjectiveNotQualified => "setup_pc_acceleration_objective_not_qualified",
             Self::CandidateSourceNotQualified => {
                 "setup_pc_acceleration_candidate_source_not_qualified"
@@ -321,6 +304,9 @@ pub fn admit_setup_pc_candidate_input(
     let source_profile = source.profile();
     let request_profile = request.profile;
     let qualified_profile = qualification.request.profile;
+    let target_profile = qualification.target.profile();
+    let target_lines = qualification.target.target_lines();
+    let target_use_case = qualification.target.use_case();
     if let Err(rejection) = qualification_binding::validate(
         CandidateBinding::new(
             source_request_identity.as_bytes(),
@@ -333,7 +319,7 @@ pub fn admit_setup_pc_candidate_input(
             request.request_identity.as_bytes(),
             &request_profile,
             request.initial_board_mask,
-            request.target.lines(),
+            request.target.get(),
             &request.objective,
         ),
         QualificationBinding::new(
@@ -341,9 +327,13 @@ pub fn admit_setup_pc_candidate_input(
             qualification.source_identity.as_bytes(),
             &qualified_profile,
             qualification.request.initial_board_mask,
-            qualification.request.target.lines(),
+            qualification.request.target.get(),
             &qualification.request.objective,
-            &qualification.snapshot,
+            &target_profile,
+            target_lines.get(),
+            &target_use_case,
+            &Pc4TerminalUseCase::SetupSearch,
+            qualification.target.snapshot(),
             &qualification.evidence_identity,
         ),
     ) {
@@ -381,6 +371,12 @@ const fn rejection_reason(rejection: QualificationBindingRejection) -> SetupPcNo
             SetupPcNoAccelerationReason::QualificationInitialBoardMismatch
         }
         QualificationBindingRejection::Target => SetupPcNoAccelerationReason::TargetNotQualified,
+        QualificationBindingRejection::TargetProfile => {
+            SetupPcNoAccelerationReason::TargetProfileNotQualified
+        }
+        QualificationBindingRejection::TargetUseCase => {
+            SetupPcNoAccelerationReason::TargetUseCaseNotQualified
+        }
         QualificationBindingRejection::Objective => {
             SetupPcNoAccelerationReason::ObjectiveNotQualified
         }
@@ -406,8 +402,9 @@ mod tests {
     };
     use clearra_pc4_tablebase::{
         ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, GraphTargetEncoding,
-        ManifestContentIdentity, Pc4ArtifactRole, Pc4ProfileManifest, ProfileAvailability,
-        ProfileQualification, SnapshotIdentity, SnapshotVerificationAttestation,
+        ManifestContentIdentity, Pc4ArtifactRole, Pc4ProfileManifest, Pc4TerminalUseCase,
+        ProfileAvailability, ProfileQualification, ProfileTargetCompletenessQualification,
+        QualifiedPc4TargetIdentity, SnapshotIdentity, SnapshotVerificationAttestation,
         SnapshotVerificationFailure, SnapshotVerificationRequest,
     };
 
@@ -430,7 +427,12 @@ mod tests {
         }
     }
 
-    fn qualified_snapshot(generation: &str) -> QualifiedSnapshotIdentity {
+    fn qualified_target(
+        generation: &str,
+        profile: Pc4RuleProfile,
+        use_case: Pc4TerminalUseCase,
+        target_lines: u8,
+    ) -> QualifiedPc4TargetIdentity {
         let identity = SnapshotIdentity::new(
             "synthetic/repository",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -439,49 +441,83 @@ mod tests {
         .expect("snapshot identity");
         let profiles = Pc4RuleProfile::ALL
             .into_iter()
-            .map(|profile| {
-                let prefix = profile.as_str();
+            .map(|candidate_profile| {
+                let prefix = candidate_profile.as_str();
                 let artifact = |role, suffix: &str| {
+                    let byte_len = match role {
+                        Pc4ArtifactRole::FieldHashIndex | Pc4ArtifactRole::GraphOffsets => 24,
+                        Pc4ArtifactRole::Graph => 64,
+                    };
                     ArtifactDescriptor::new(
                         role,
                         format!("{prefix}/{suffix}"),
-                        64,
+                        byte_len,
                         format!("{prefix}-{suffix}-identity"),
                     )
                     .expect("artifact descriptor")
                 };
-                ProfileAvailability::qualified(
-                    Pc4ProfileManifest::new(
-                        profile,
-                        1,
-                        GraphTargetEncoding::U24LittleEndian,
-                        64,
-                        artifact(Pc4ArtifactRole::FieldHashIndex, "field.idx"),
-                        artifact(Pc4ArtifactRole::GraphOffsets, "offsets.idx"),
-                        artifact(Pc4ArtifactRole::Graph, "graph.bin"),
-                        ProfileQualification::new(
-                            format!("{prefix}-index-spec"),
-                            format!("{prefix}-graph-spec"),
-                            format!("{prefix}-provenance"),
-                            format!("{prefix}-kat"),
-                        )
-                        .expect("profile qualification"),
+                let manifest = Pc4ProfileManifest::new(
+                    candidate_profile,
+                    1,
+                    GraphTargetEncoding::U24LittleEndian,
+                    64,
+                    artifact(Pc4ArtifactRole::FieldHashIndex, "field.idx"),
+                    artifact(Pc4ArtifactRole::GraphOffsets, "offsets.idx"),
+                    artifact(Pc4ArtifactRole::Graph, "graph.bin"),
+                    ProfileQualification::new(
+                        format!("{prefix}-index-spec"),
+                        format!("{prefix}-graph-spec"),
+                        format!("{prefix}-provenance"),
+                        format!("{prefix}-kat"),
                     )
-                    .expect("profile manifest"),
+                    .expect("profile qualification"),
                 )
+                .expect("profile manifest");
+                let manifest = if candidate_profile == profile {
+                    let target_qualifications = [
+                        Pc4TerminalUseCase::PcSearch,
+                        Pc4TerminalUseCase::SetupSearch,
+                    ]
+                    .into_iter()
+                    .flat_map(|qualified_use_case| {
+                        (Pc4TargetLines::MIN..=Pc4TargetLines::MAX).map(move |qualified_lines| {
+                            ProfileTargetCompletenessQualification::new(
+                                qualified_use_case,
+                                Pc4TargetLines::new(qualified_lines).expect("target lines"),
+                                format!("terminal:{qualified_use_case:?}:{qualified_lines}"),
+                                format!("outgoing:{qualified_use_case:?}:{qualified_lines}"),
+                                format!("answers:{qualified_use_case:?}:{qualified_lines}"),
+                                format!("parity:{qualified_use_case:?}:{qualified_lines}"),
+                            )
+                            .expect("target qualification")
+                        })
+                    })
+                    .collect();
+                    manifest
+                        .with_target_qualifications(target_qualifications)
+                        .expect("unique target qualification")
+                } else {
+                    manifest
+                };
+                ProfileAvailability::qualified(manifest)
             })
             .collect();
-        DatasetSnapshotManifest::new(
+        let activated = DatasetSnapshotManifest::new(
             identity,
-            ManifestContentIdentity::new(format!("manifest-{generation}"))
+            ManifestContentIdentity::new(format!("manifest-{generation}-{}", profile.as_str()))
                 .expect("manifest identity"),
             profiles,
         )
         .expect("snapshot manifest")
         .activate(&mut SyntheticVerifier)
-        .expect("verified snapshot")
-        .qualified_identity()
-        .clone()
+        .expect("verified snapshot");
+        activated
+            .qualified_target(
+                profile,
+                use_case,
+                Pc4TargetLines::new(target_lines).expect("target lines"),
+            )
+            .expect("qualified target")
     }
 
     fn source(
@@ -491,13 +527,19 @@ mod tests {
         profile: Pc4RuleProfile,
         initial_board_mask: u64,
     ) -> PcCandidateSourceBinding {
+        let target = qualified_target(
+            generation,
+            profile,
+            Pc4TerminalUseCase::SetupSearch,
+            Pc4TargetLines::MAX,
+        );
         PcCandidateSourceBinding::online_pc4(
             PcCandidateSessionId::new(NonZeroU64::new(1).expect("session")),
             PcCandidateRequestIdentity::from_sha256([request_byte; 32]),
             PcCandidateSourceIdentity::from_sha256([source_byte; 32]),
             profile,
             initial_board_mask,
-            qualified_snapshot(generation),
+            target.snapshot().clone(),
         )
     }
 
@@ -512,10 +554,9 @@ mod tests {
             PcCandidateRequestIdentity::from_sha256([request_byte; 32]),
             profile,
             initial_board_mask,
-            target_lines,
+            Pc4TargetLines::new(target_lines).expect("target inside graph domain"),
             objective,
         )
-        .expect("request binding")
     }
 
     fn reducer(source: PcCandidateSourceBinding) -> PcCandidateReducerInput {
@@ -527,13 +568,34 @@ mod tests {
         PcCandidateReducerInput::from_test_parts(source, vec![candidate])
     }
 
+    fn proof(
+        request: SetupPcAccelerationRequestBinding,
+        source: &PcCandidateSourceBinding,
+        use_case: Pc4TerminalUseCase,
+        evidence_identity: impl Into<String>,
+    ) -> SetupPcAccelerationCompatibilityProof {
+        let generation = source
+            .qualified_snapshot()
+            .expect("synthetic proof requires an online source")
+            .snapshot_identity()
+            .generation();
+        let target = qualified_target(
+            generation,
+            request.profile(),
+            use_case,
+            request.target().get(),
+        );
+        SetupPcAccelerationCompatibilityProof::synthetic(request, source, target, evidence_identity)
+    }
+
     fn admitted_for(
         source: PcCandidateSourceBinding,
         request: SetupPcAccelerationRequestBinding,
     ) -> SetupPcAccelerationDisposition {
-        let proof = SetupPcAccelerationCompatibilityProof::synthetic(
+        let proof = proof(
             request.clone(),
             &source,
+            Pc4TerminalUseCase::SetupSearch,
             "synthetic-differential-proof",
         );
         admit_setup_pc_candidate_input(
@@ -570,18 +632,9 @@ mod tests {
     }
 
     #[test]
-    fn targets_outside_one_through_four_lines_are_rejected_before_admission() {
+    fn request_binding_uses_the_shared_one_through_four_line_target_type() {
         for lines in [0, 5, 6] {
-            assert_eq!(
-                SetupPcAccelerationRequestBinding::new(
-                    PcCandidateRequestIdentity::from_sha256([1; 32]),
-                    Pc4RuleProfile::Srs,
-                    0,
-                    lines,
-                    SetupPcAccelerationObjective::RankedJoint,
-                ),
-                Err(SetupPcAccelerationRequestError::TargetOutsidePc4Domain { lines })
-            );
+            assert!(Pc4TargetLines::new(lines).is_err());
         }
     }
 
@@ -664,6 +717,103 @@ mod tests {
     }
 
     #[test]
+    fn pc_search_target_authority_cannot_authorize_setup_acceleration() {
+        let source = source("generation-a", 1, 2, Pc4RuleProfile::Srs, 0);
+        let request = request(
+            1,
+            Pc4RuleProfile::Srs,
+            0,
+            4,
+            SetupPcAccelerationObjective::RankedJoint,
+        );
+        let proof = proof(
+            request.clone(),
+            &source,
+            Pc4TerminalUseCase::PcSearch,
+            "synthetic-wrong-use-case-proof",
+        );
+        assert_eq!(proof.target().use_case(), Pc4TerminalUseCase::PcSearch);
+        assert_eq!(
+            admit_setup_pc_candidate_input(
+                request,
+                SetupPcCandidateAvailability::Complete(reducer(source)),
+                Some(&proof),
+            ),
+            SetupPcAccelerationDisposition::ReferToOfflineFallbackOwner {
+                reason: SetupPcNoAccelerationReason::TargetUseCaseNotQualified,
+            }
+        );
+    }
+
+    #[test]
+    fn target_authority_for_another_profile_cannot_cross_the_setup_request() {
+        let source = source("generation-a", 1, 2, Pc4RuleProfile::Srs, 0);
+        let request = request(
+            1,
+            Pc4RuleProfile::Srs,
+            0,
+            4,
+            SetupPcAccelerationObjective::RankedJoint,
+        );
+        let target = qualified_target(
+            "generation-a",
+            Pc4RuleProfile::SrsX,
+            Pc4TerminalUseCase::SetupSearch,
+            4,
+        );
+        let proof = SetupPcAccelerationCompatibilityProof::synthetic(
+            request.clone(),
+            &source,
+            target,
+            "synthetic-wrong-profile-proof",
+        );
+        assert_eq!(
+            admit_setup_pc_candidate_input(
+                request,
+                SetupPcCandidateAvailability::Complete(reducer(source)),
+                Some(&proof),
+            ),
+            SetupPcAccelerationDisposition::ReferToOfflineFallbackOwner {
+                reason: SetupPcNoAccelerationReason::TargetProfileNotQualified,
+            }
+        );
+    }
+
+    #[test]
+    fn target_authority_for_another_line_count_cannot_cross_the_setup_request() {
+        let source = source("generation-a", 1, 2, Pc4RuleProfile::Srs, 0);
+        let request = request(
+            1,
+            Pc4RuleProfile::Srs,
+            0,
+            4,
+            SetupPcAccelerationObjective::RankedJoint,
+        );
+        let target = qualified_target(
+            "generation-a",
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::SetupSearch,
+            3,
+        );
+        let proof = SetupPcAccelerationCompatibilityProof::synthetic(
+            request.clone(),
+            &source,
+            target,
+            "synthetic-wrong-target-proof",
+        );
+        assert_eq!(
+            admit_setup_pc_candidate_input(
+                request,
+                SetupPcCandidateAvailability::Complete(reducer(source)),
+                Some(&proof),
+            ),
+            SetupPcAccelerationDisposition::ReferToOfflineFallbackOwner {
+                reason: SetupPcNoAccelerationReason::TargetNotQualified,
+            }
+        );
+    }
+
+    #[test]
     fn candidate_source_must_match_request_profile_and_initial_board() {
         let base_request = request(
             1,
@@ -686,9 +836,10 @@ mod tests {
                 SetupPcNoAccelerationReason::InitialBoardMismatch,
             ),
         ] {
-            let proof = SetupPcAccelerationCompatibilityProof::synthetic(
+            let proof = proof(
                 base_request.clone(),
                 &mixed,
+                Pc4TerminalUseCase::SetupSearch,
                 "synthetic-mixed-binding-proof",
             );
             assert_eq!(
@@ -712,9 +863,10 @@ mod tests {
             4,
             SetupPcAccelerationObjective::RankedJoint,
         );
-        let proof = SetupPcAccelerationCompatibilityProof::synthetic(
+        let proof = proof(
             qualified_request.clone(),
             &qualified_source,
+            Pc4TerminalUseCase::SetupSearch,
             "synthetic-exact-proof",
         );
 
@@ -785,8 +937,12 @@ mod tests {
             4,
             SetupPcAccelerationObjective::RankedJoint,
         );
-        let proof =
-            SetupPcAccelerationCompatibilityProof::synthetic(request.clone(), &source, "  ");
+        let proof = proof(
+            request.clone(),
+            &source,
+            Pc4TerminalUseCase::SetupSearch,
+            "  ",
+        );
         assert_eq!(
             admit_setup_pc_candidate_input(
                 request,

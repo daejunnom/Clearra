@@ -11,6 +11,8 @@ pub(crate) enum QualificationBindingRejection {
     QualifiedProfile,
     QualifiedInitialBoard,
     Target,
+    TargetProfile,
+    TargetUseCase,
     Objective,
     CandidateSource,
     SnapshotGeneration,
@@ -69,46 +71,60 @@ impl<'a, Profile, Objective> RequestBinding<'a, Profile, Objective> {
     }
 }
 
-pub(crate) struct QualificationBinding<'a, Profile, Objective, Snapshot> {
+pub(crate) struct QualificationBinding<'a, Profile, Objective, UseCase, Snapshot> {
     request_identity: &'a [u8; 32],
     source_identity: &'a [u8; 32],
-    profile: &'a Profile,
+    request_profile: &'a Profile,
     initial_board_mask: u64,
-    target_lines: u8,
+    request_target_lines: u8,
     objective: &'a Objective,
-    snapshot: &'a Snapshot,
+    target_profile: &'a Profile,
+    target_lines: u8,
+    target_use_case: &'a UseCase,
+    expected_use_case: &'a UseCase,
+    target_snapshot: &'a Snapshot,
     evidence_identity: &'a str,
 }
 
-impl<'a, Profile, Objective, Snapshot> QualificationBinding<'a, Profile, Objective, Snapshot> {
+impl<'a, Profile, Objective, UseCase, Snapshot>
+    QualificationBinding<'a, Profile, Objective, UseCase, Snapshot>
+{
     #[allow(clippy::too_many_arguments)]
     pub(crate) const fn new(
         request_identity: &'a [u8; 32],
         source_identity: &'a [u8; 32],
-        profile: &'a Profile,
+        request_profile: &'a Profile,
         initial_board_mask: u64,
-        target_lines: u8,
+        request_target_lines: u8,
         objective: &'a Objective,
-        snapshot: &'a Snapshot,
+        target_profile: &'a Profile,
+        target_lines: u8,
+        target_use_case: &'a UseCase,
+        expected_use_case: &'a UseCase,
+        target_snapshot: &'a Snapshot,
         evidence_identity: &'a str,
     ) -> Self {
         Self {
             request_identity,
             source_identity,
-            profile,
+            request_profile,
             initial_board_mask,
-            target_lines,
+            request_target_lines,
             objective,
-            snapshot,
+            target_profile,
+            target_lines,
+            target_use_case,
+            expected_use_case,
+            target_snapshot,
             evidence_identity,
         }
     }
 }
 
-pub(crate) fn validate<Profile: Eq, Objective: Eq, Snapshot: Eq>(
+pub(crate) fn validate<Profile: Eq, Objective: Eq, UseCase: Eq, Snapshot: Eq>(
     candidate: CandidateBinding<'_, Profile, Snapshot>,
     request: RequestBinding<'_, Profile, Objective>,
-    qualification: QualificationBinding<'_, Profile, Objective, Snapshot>,
+    qualification: QualificationBinding<'_, Profile, Objective, UseCase, Snapshot>,
 ) -> Result<(), QualificationBindingRejection> {
     if candidate.request_identity != request.request_identity {
         return Err(QualificationBindingRejection::RequestIdentity);
@@ -122,13 +138,13 @@ pub(crate) fn validate<Profile: Eq, Objective: Eq, Snapshot: Eq>(
     if qualification.request_identity != request.request_identity {
         return Err(QualificationBindingRejection::QualifiedRequestIdentity);
     }
-    if qualification.profile != request.profile {
+    if qualification.request_profile != request.profile {
         return Err(QualificationBindingRejection::QualifiedProfile);
     }
     if qualification.initial_board_mask != request.initial_board_mask {
         return Err(QualificationBindingRejection::QualifiedInitialBoard);
     }
-    if qualification.target_lines != request.target_lines {
+    if qualification.request_target_lines != request.target_lines {
         return Err(QualificationBindingRejection::Target);
     }
     if qualification.objective != request.objective {
@@ -137,7 +153,16 @@ pub(crate) fn validate<Profile: Eq, Objective: Eq, Snapshot: Eq>(
     if qualification.source_identity != candidate.source_identity {
         return Err(QualificationBindingRejection::CandidateSource);
     }
-    if qualification.snapshot != candidate.snapshot {
+    if qualification.target_profile != request.profile {
+        return Err(QualificationBindingRejection::TargetProfile);
+    }
+    if qualification.target_lines != request.target_lines {
+        return Err(QualificationBindingRejection::Target);
+    }
+    if qualification.target_use_case != qualification.expected_use_case {
+        return Err(QualificationBindingRejection::TargetUseCase);
+    }
+    if qualification.target_snapshot != candidate.snapshot {
         return Err(QualificationBindingRejection::SnapshotGeneration);
     }
     if qualification.evidence_identity.trim().is_empty() {
@@ -154,6 +179,12 @@ mod tests {
     enum Objective {
         Joint,
         Build,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum UseCase {
+        Pc,
+        Setup,
     }
 
     fn validate_fixture(
@@ -181,6 +212,7 @@ mod tests {
         let request_identity = [request_identity; 32];
         let qualified_request = [qualified_request; 32];
         let qualified_source = [qualified_source; 32];
+        let setup_use_case = UseCase::Setup;
         validate(
             CandidateBinding::new(
                 &candidate_request,
@@ -203,6 +235,10 @@ mod tests {
                 qualified_board,
                 qualified_target,
                 &qualified_objective,
+                &qualified_profile,
+                qualified_target,
+                &setup_use_case,
+                &setup_use_case,
                 &qualified_snapshot,
                 evidence,
             ),
@@ -499,5 +535,46 @@ mod tests {
         for (actual, expected) in cases {
             assert_eq!(actual, Err(expected));
         }
+    }
+
+    #[test]
+    fn target_profile_and_use_case_are_independent_authority_dimensions() {
+        let candidate_request = [1; 32];
+        let candidate_source = [2; 32];
+        let setup_use_case = UseCase::Setup;
+        let pc_use_case = UseCase::Pc;
+        let validate_target = |target_profile: u8, target_lines: u8, target_use_case: UseCase| {
+            validate(
+                CandidateBinding::new(&candidate_request, &candidate_source, &3, 4, &5),
+                RequestBinding::new(&candidate_request, &3, 4, 4, &Objective::Joint),
+                QualificationBinding::new(
+                    &candidate_request,
+                    &candidate_source,
+                    &3,
+                    4,
+                    4,
+                    &Objective::Joint,
+                    &target_profile,
+                    target_lines,
+                    &target_use_case,
+                    &setup_use_case,
+                    &5,
+                    "evidence",
+                ),
+            )
+        };
+
+        assert_eq!(
+            validate_target(9, 4, UseCase::Setup),
+            Err(QualificationBindingRejection::TargetProfile)
+        );
+        assert_eq!(
+            validate_target(3, 3, UseCase::Setup),
+            Err(QualificationBindingRejection::Target)
+        );
+        assert_eq!(
+            validate_target(3, 4, pc_use_case),
+            Err(QualificationBindingRejection::TargetUseCase)
+        );
     }
 }
