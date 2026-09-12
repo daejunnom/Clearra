@@ -9,9 +9,9 @@ use crate::{
     FixedQueueTraversalFamilyRequest, FixedQueueTraversalGuard, FixedQueueTraversalPageBudgets,
     FixedQueueTraversalPageError, FixedQueueTraversalPrepareError, Pc4ExactProbability,
     Pc4ObservationFrontierCursor, Pc4ObservationFrontierEntry, Pc4ObservationFrontierFamily,
-    Pc4ObservationFrontierGuard, Pc4ObservationFrontierPageError,
-    QualifiedCompleteAdjacencyProvider, QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity,
-    TerminalDepthContract,
+    Pc4ObservationFrontierGuard, Pc4ObservationFrontierPageError, Pc4ObservationQueueScope,
+    Pc4ObservationRevealLedgerFamily, QualifiedCompleteAdjacencyProvider,
+    QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity, TerminalDepthContract,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -356,6 +356,22 @@ impl Pc4ObservationGraphFamily {
 
     pub const fn budgets(&self) -> Pc4ObservationGraphBudgets {
         self.budgets
+    }
+
+    pub const fn queue_scope(&self) -> &Pc4ObservationQueueScope {
+        self.frontier.queue_scope()
+    }
+
+    /// Produces a reveal-rank ledger from this graph family's own canonical bag
+    /// enumerator. No caller-provided reveal list can be substituted.
+    pub fn reveal_ledger_family(&self) -> Pc4ObservationRevealLedgerFamily {
+        Pc4ObservationRevealLedgerFamily::from_graph_parts(
+            Arc::clone(&self.target),
+            self.source_field_id,
+            Arc::new(self.frontier.queue_scope().clone()),
+            self.frontier.reveal_family(),
+            self.frontier.budgets().reveal().page_sequences(),
+        )
     }
 
     pub fn cursor(&self) -> Pc4ObservationGraphCursor {

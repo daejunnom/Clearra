@@ -6,8 +6,9 @@ use crate::manifest::tests::qualified_target_identity;
 use crate::{
     FixedQueueAdjacencyQuery, FixedQueueHoldBudgets, FixedQueueHoldDecision, FixedQueueHoldState,
     FixedQueueTerminalQuery, Pc4BagProfile, Pc4BagRevealBudgets, Pc4BagState, Pc4GraphPiece,
-    Pc4ObservationFrontierBudgets, Pc4ObservationFrontierRequest, Pc4RuleProfile,
-    Pc4TerminalUseCase, QualifiedCompleteAdjacency, QualifiedPc4GraphEdge,
+    Pc4ObservationFrontierBudgets, Pc4ObservationFrontierRequest,
+    Pc4ObservationRevealLedgerPageError, Pc4RuleProfile, Pc4TerminalUseCase,
+    QualifiedCompleteAdjacency, QualifiedPc4GraphEdge,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -301,6 +302,152 @@ fn exact_probability_target_source_and_replay_evidence_survive_graph_paging() {
         })
         .collect::<Vec<_>>();
     assert_eq!(reveal_probabilities, vec![(0, 1, 2), (1, 1, 2)]);
+}
+
+#[test]
+fn graph_derived_reveal_ledger_is_scope_bound_ranked_and_exactly_normalized() {
+    let graph = family();
+    let ledger = graph.reveal_ledger_family();
+    let scope = ledger.queue_scope();
+
+    assert_eq!(scope, graph.queue_scope());
+    assert_eq!(ledger.target(), graph.target());
+    assert_eq!(ledger.source_field_id(), graph.source_field_id());
+    assert_eq!(scope.initial_visible_queue(), [Pc4GraphPiece::I]);
+    assert_eq!(scope.preview_length(), 0);
+    assert_eq!(scope.hidden_draws(), 1);
+    assert_eq!(
+        scope.initial_hold(),
+        FixedQueueHoldState::Occupied(Pc4GraphPiece::T)
+    );
+    assert_eq!(scope.placement_count(), 1);
+    assert_eq!(ledger.total_outcomes(), 2);
+
+    let foreign_ledger = graph.reveal_ledger_family();
+    let mut foreign_cursor = foreign_ledger.cursor();
+    assert_eq!(
+        ledger.next_page(&mut foreign_cursor, nonzero(1), &guard()),
+        Err(Pc4ObservationRevealLedgerPageError::CursorMismatch)
+    );
+    assert_eq!(foreign_cursor.emitted_outcomes(), 0);
+
+    let cancelled_guard = guard();
+    cancelled_guard.cancelled.set(true);
+    let mut cursor = ledger.cursor();
+    assert_eq!(
+        ledger.next_page(&mut cursor, nonzero(1), &cancelled_guard),
+        Err(Pc4ObservationRevealLedgerPageError::Cancelled)
+    );
+    assert_eq!(cursor.emitted_outcomes(), 0);
+    assert!(!cursor.is_exhausted());
+
+    let first = ledger
+        .next_page(&mut cursor, nonzero(1), &guard())
+        .expect("first canonical ledger page");
+    assert_eq!(first.outcomes().len(), 1);
+    assert_eq!(first.outcomes()[0].rank(), 0);
+    assert_eq!(first.outcomes()[0].pieces(), [Pc4GraphPiece::I]);
+    assert_eq!(first.outcomes()[0].probability().numerator(), 1);
+    assert_eq!(first.outcomes()[0].probability().denominator(), 2);
+    assert_eq!(
+        first.outcomes()[0].terminal_bag_state(),
+        Pc4BagState::new(
+            scope.hidden_source_state().profile(),
+            [0, 1, 0, 0, 0, 0, 0],
+            3,
+        )
+        .expect("terminal I remainder")
+    );
+    assert_eq!(first.complete_probability(), None);
+    assert!(!first.is_exhausted());
+
+    let second = ledger
+        .next_page(&mut cursor, nonzero(1), &guard())
+        .expect("terminal canonical ledger page");
+    assert_eq!(second.outcomes().len(), 1);
+    assert_eq!(second.outcomes()[0].rank(), 1);
+    assert_eq!(second.outcomes()[0].pieces(), [Pc4GraphPiece::O]);
+    assert_eq!(
+        second.outcomes()[0].terminal_bag_state(),
+        Pc4BagState::new(
+            scope.hidden_source_state().profile(),
+            [1, 0, 0, 0, 0, 0, 0],
+            3,
+        )
+        .expect("terminal O remainder")
+    );
+    assert_eq!(
+        second.complete_probability(),
+        Some(Pc4ExactProbability::one())
+    );
+    assert!(second.is_exhausted());
+    assert_eq!(cursor.emitted_outcomes(), ledger.total_outcomes());
+    assert!(cursor.is_exhausted());
+
+    let exhausted = ledger
+        .next_page(&mut cursor, nonzero(1), &guard())
+        .expect("exhaustion does not re-emit any reveal rank");
+    assert!(exhausted.outcomes().is_empty());
+    assert_eq!(
+        exhausted.complete_probability(),
+        Some(Pc4ExactProbability::one())
+    );
+    assert_eq!(cursor.emitted_outcomes(), ledger.total_outcomes());
+}
+
+#[test]
+fn reveal_ledger_page_limit_and_late_stale_guard_leave_rank_and_mass_uncommitted() {
+    struct StaleAtCommitGuard {
+        snapshot_checks: Cell<usize>,
+    }
+
+    impl FixedQueueTraversalGuard for StaleAtCommitGuard {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_current_snapshot(&self, _expected: &QualifiedSnapshotIdentity) -> bool {
+            let checks = self.snapshot_checks.get();
+            self.snapshot_checks.set(checks + 1);
+            checks == 0
+        }
+    }
+
+    let graph = family();
+    let ledger = graph.reveal_ledger_family();
+    let mut cursor = ledger.cursor();
+    assert_eq!(
+        ledger.next_page(&mut cursor, nonzero(2), &guard()),
+        Err(Pc4ObservationRevealLedgerPageError::PageLimitExceeded {
+            limit: 1,
+            attempted: 2,
+        })
+    );
+    assert_eq!(cursor.emitted_outcomes(), 0);
+    let late_stale = StaleAtCommitGuard {
+        snapshot_checks: Cell::new(0),
+    };
+    assert_eq!(
+        ledger.next_page(&mut cursor, nonzero(1), &late_stale),
+        Err(Pc4ObservationRevealLedgerPageError::StaleSnapshot)
+    );
+    assert_eq!(late_stale.snapshot_checks.get(), 2);
+    assert_eq!(cursor.emitted_outcomes(), 0);
+    assert!(!cursor.is_exhausted());
+
+    let retried = ledger
+        .next_page(&mut cursor, nonzero(1), &guard())
+        .expect("retry emits the same uncommitted rank");
+    assert_eq!(retried.outcomes()[0].rank(), 0);
+    assert_eq!(retried.complete_probability(), None);
+    let complete = ledger
+        .next_page(&mut cursor, nonzero(1), &guard())
+        .expect("retry retains exactly one probability per reveal");
+    assert_eq!(complete.outcomes()[0].rank(), 1);
+    assert_eq!(
+        complete.complete_probability(),
+        Some(Pc4ExactProbability::one())
+    );
 }
 
 #[test]

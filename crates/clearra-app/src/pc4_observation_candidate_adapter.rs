@@ -7,6 +7,7 @@ use core::{convert::Infallible, fmt, num::NonZeroUsize};
 use std::sync::Arc;
 
 use clearra_core_domain::{
+    board::standard_pc_board::StandardPcBoard,
     piece::piece_kind::PieceKind,
     solution::normalized_tiling_solution::{
         NormalizedTilingSolutionError, PiecePlacementMask, StandardBoard64TilingIdentity,
@@ -19,13 +20,17 @@ use clearra_pc4_tablebase::{
     FixedQueueHoldState, FixedQueueHoldStep, FixedQueuePathMaterializationRequest,
     FixedQueueTraversalGuard, MaterializationGuard, Pc4BagState, Pc4ExactProbability,
     Pc4GraphPiece, Pc4ObservationGraphCursor, Pc4ObservationGraphFamily,
-    Pc4ObservationGraphPageError, Pc4ObservationGraphPath, Pc4PlacementMaterializer,
-    QualifiedCompleteAdjacencyProvider, QualifiedPc4TargetIdentity,
+    Pc4ObservationGraphPageError, Pc4ObservationGraphPath, Pc4ObservationRevealLedgerCursor,
+    Pc4ObservationRevealLedgerFamily, Pc4ObservationRevealLedgerPageError,
+    Pc4ObservationRevealOutcome, Pc4PlacementMaterializer, QualifiedCompleteAdjacencyProvider,
+    QualifiedPc4TargetIdentity,
 };
 
 use super::pc_candidate_page_boundary::{
-    PcCandidatePageGuard, PcCandidateProviderKind, PcCandidateSourceBinding,
+    PcCandidateBoundaryError, PcCandidatePageGuard, PcCandidateProviderKind,
+    PcCandidateReducerInput, PcCandidateRequestIdentity, PcCandidateSourceBinding,
 };
+use crate::pc4_input_disclosure_policy::{Pc4PreparedOnlineInput, Pc4PreparedQueueInput};
 
 pub use super::pc_candidate_page_boundary::graph_candidate_adapter::{
     ManifestQualifiedPc4Terminal as ManifestQualifiedPc4ObservationTerminal,
@@ -116,6 +121,7 @@ impl Pc4ObservationCandidateBudgets {
 
 pub struct Pc4ObservationCandidateAdapterRequest<'a> {
     target: &'a QualifiedPc4TargetIdentity,
+    prepared_input: &'a Pc4PreparedOnlineInput,
     source: &'a PcCandidateSourceBinding,
     source_field_id: u32,
     materialization_budgets: ConcretePathMaterializationBudgets,
@@ -125,6 +131,7 @@ pub struct Pc4ObservationCandidateAdapterRequest<'a> {
 impl<'a> Pc4ObservationCandidateAdapterRequest<'a> {
     pub const fn new(
         target: &'a QualifiedPc4TargetIdentity,
+        prepared_input: &'a Pc4PreparedOnlineInput,
         source: &'a PcCandidateSourceBinding,
         source_field_id: u32,
         materialization_budgets: ConcretePathMaterializationBudgets,
@@ -132,6 +139,7 @@ impl<'a> Pc4ObservationCandidateAdapterRequest<'a> {
     ) -> Self {
         Self {
             target,
+            prepared_input,
             source,
             source_field_id,
             materialization_budgets,
@@ -145,6 +153,11 @@ pub enum Pc4ObservationCandidateBindingError {
     SourceIsNotOnlinePc4,
     SourceSnapshotMismatch,
     SourceProfileMismatch,
+    PreparedInputTargetMismatch,
+    PreparedInputNotPatternOrHidden,
+    QueueScopeMismatch,
+    RequestIdentityMismatch,
+    InitialBoardMismatch,
     GraphTargetMismatch,
     GraphSourceFieldMismatch,
     ProviderTargetMismatch,
@@ -161,6 +174,15 @@ impl Pc4ObservationCandidateBindingError {
             Self::SourceIsNotOnlinePc4 => "pc4_observation_candidate_source_is_not_online_pc4",
             Self::SourceSnapshotMismatch => "pc4_observation_candidate_source_snapshot_mismatch",
             Self::SourceProfileMismatch => "pc4_observation_candidate_source_profile_mismatch",
+            Self::PreparedInputTargetMismatch => {
+                "pc4_observation_candidate_prepared_input_target_mismatch"
+            }
+            Self::PreparedInputNotPatternOrHidden => {
+                "pc4_observation_candidate_prepared_input_not_pattern_or_hidden"
+            }
+            Self::QueueScopeMismatch => "pc4_observation_candidate_queue_scope_mismatch",
+            Self::RequestIdentityMismatch => "pc4_observation_candidate_request_identity_mismatch",
+            Self::InitialBoardMismatch => "pc4_observation_candidate_initial_board_mismatch",
             Self::GraphTargetMismatch => "pc4_observation_candidate_graph_target_mismatch",
             Self::GraphSourceFieldMismatch => {
                 "pc4_observation_candidate_graph_source_field_mismatch"
@@ -228,6 +250,7 @@ pub enum Pc4ObservationCandidateError<ProviderError, TerminalError, Materializer
     IncompleteCannotFinalize,
     CandidateIdentity(NormalizedTilingSolutionError),
     ObservationGraph(Pc4ObservationGraphPageError<ProviderError, TerminalError>),
+    RevealLedger(Pc4ObservationRevealLedgerPageError),
     Materialization(ConcretePathMaterializationError<MaterializerError>),
     ConcretePage(ConcretePathPageError),
 }
@@ -252,6 +275,7 @@ impl<ProviderError, TerminalError, MaterializerError>
             }
             Self::CandidateIdentity(_) => "pc4_observation_candidate_identity_invalid",
             Self::ObservationGraph(error) => error.reason(),
+            Self::RevealLedger(error) => error.reason(),
             Self::Materialization(error) => error.reason(),
             Self::ConcretePage(error) => error.reason(),
         }
@@ -269,7 +293,8 @@ impl<ProviderError, TerminalError, MaterializerError> fmt::Display
 pub type Pc4ObservationCandidateSessionError =
     Pc4ObservationCandidateError<Infallible, Infallible, Infallible>;
 
-/// Exact random evidence for one successful hidden reveal.
+/// Exact random evidence for one canonical hidden reveal, including reveals
+/// whose complete graph traversal has no terminal path.
 ///
 /// Probability is deliberately owned here, once per canonical reveal rank.
 /// Candidate and hold provenance types contain no probability field, so
@@ -412,17 +437,16 @@ impl Pc4ObservationCandidateOutcome {
 /// Provider-neutral, canonical candidate evidence minted only after the source
 /// observation graph and every concrete path product have been exhausted.
 ///
-/// `successful_reveals` intentionally omits reveal branches with no terminal
-/// graph path because `Pc4ObservationGraphFamily` does not emit those entries.
-/// Consequently this is complete all-solution candidate evidence, not an
-/// aggregate probability result and not `PcCandidateReducerInput`.
+/// Every reveal rank from the graph-derived ledger is present exactly once.
+/// Empty `candidates` is therefore exact zero-solution evidence, not omission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pc4CompleteObservationCandidateFamily {
     contract_id: &'static str,
     target: QualifiedPc4TargetIdentity,
     source: PcCandidateSourceBinding,
     canonical_candidates: Vec<StandardBoard64TilingIdentity>,
-    successful_reveals: Vec<Pc4ObservationCandidateOutcome>,
+    reveal_outcomes: Vec<Pc4ObservationCandidateOutcome>,
+    total_reveal_probability: Pc4ExactProbability,
     replay_provenance_count: usize,
     retained_element_count: usize,
 }
@@ -440,13 +464,23 @@ impl Pc4CompleteObservationCandidateFamily {
         &self.source
     }
 
-    /// Canonical union across all successful reveal outcomes.
+    /// Canonical union across every reveal outcome.
     pub fn canonical_candidates(&self) -> &[StandardBoard64TilingIdentity] {
         &self.canonical_candidates
     }
 
+    pub fn reveal_outcomes(&self) -> &[Pc4ObservationCandidateOutcome] {
+        &self.reveal_outcomes
+    }
+
+    /// Compatibility name retained for the feature-gated pre-ledger surface.
+    /// The returned slice now also contains zero-solution outcomes.
     pub fn successful_reveals(&self) -> &[Pc4ObservationCandidateOutcome] {
-        &self.successful_reveals
+        self.reveal_outcomes()
+    }
+
+    pub const fn total_reveal_probability(&self) -> Pc4ExactProbability {
+        self.total_reveal_probability
     }
 
     pub const fn replay_provenance_count(&self) -> usize {
@@ -455,6 +489,13 @@ impl Pc4CompleteObservationCandidateFamily {
 
     pub const fn retained_element_count(&self) -> usize {
         self.retained_element_count
+    }
+
+    /// Clones only the canonical union into the shared reducer seam. The
+    /// complete family remains available so exact per-outcome probability and
+    /// provenance evidence are not collapsed into reducer input.
+    pub fn reducer_input(&self) -> Result<PcCandidateReducerInput, PcCandidateBoundaryError> {
+        PcCandidateReducerInput::from_complete_observation_union(self)
     }
 }
 
@@ -470,7 +511,7 @@ pub enum Pc4ObservationCandidateAdvanceStatus {
 pub struct Pc4ObservationCandidateAdvance {
     discovered_concrete_paths: usize,
     observed_concrete_paths: usize,
-    observed_successful_reveals: usize,
+    observed_reveal_outcomes: usize,
     observed_candidate_memberships: usize,
     status: Pc4ObservationCandidateAdvanceStatus,
 }
@@ -485,7 +526,11 @@ impl Pc4ObservationCandidateAdvance {
     }
 
     pub const fn observed_successful_reveals(self) -> usize {
-        self.observed_successful_reveals
+        self.observed_reveal_outcomes
+    }
+
+    pub const fn observed_reveal_outcomes(self) -> usize {
+        self.observed_reveal_outcomes
     }
 
     pub const fn observed_candidate_memberships(self) -> usize {
@@ -549,7 +594,8 @@ impl PendingCandidate {
 
 struct PreparedBatch {
     pending: Vec<PendingCandidate>,
-    new_reveals: Vec<Pc4ObservationRevealEvidence>,
+    new_path_reveals: Vec<Pc4ObservationRevealEvidence>,
+    new_ledger_reveals: Vec<Pc4ObservationRevealEvidence>,
     new_memberships: Vec<(u128, StandardBoard64TilingIdentity)>,
     next_replay_count: usize,
     next_retained_element_count: usize,
@@ -557,7 +603,8 @@ struct PreparedBatch {
 
 struct CandidateAccumulator {
     pending: Vec<PendingCandidate>,
-    seen_reveals: Vec<Pc4ObservationRevealEvidence>,
+    seen_path_reveals: Vec<Pc4ObservationRevealEvidence>,
+    ledger_reveals: Vec<Pc4ObservationRevealEvidence>,
     seen_memberships: Vec<(u128, StandardBoard64TilingIdentity)>,
     replay_count: usize,
     retained_element_count: usize,
@@ -567,7 +614,8 @@ impl CandidateAccumulator {
     fn new() -> Self {
         Self {
             pending: Vec::new(),
-            seen_reveals: Vec::new(),
+            seen_path_reveals: Vec::new(),
+            ledger_reveals: Vec::new(),
             seen_memberships: Vec::new(),
             replay_count: 0,
             retained_element_count: 0,
@@ -578,6 +626,7 @@ impl CandidateAccumulator {
         &self,
         binding: &ObservationCandidateBinding,
         pending: Vec<PendingCandidate>,
+        mut ledger_reveals: Vec<Pc4ObservationRevealEvidence>,
     ) -> Result<
         PreparedBatch,
         Pc4ObservationCandidateError<ProviderError, TerminalError, MaterializerError>,
@@ -601,6 +650,14 @@ impl CandidateAccumulator {
                 )
                 .ok_or(Pc4ObservationCandidateError::CounterOverflow)
         })?;
+        let batch_retained_elements =
+            ledger_reveals
+                .iter()
+                .try_fold(batch_retained_elements, |count, reveal| {
+                    count
+                        .checked_add(reveal.revealed_pieces.len())
+                        .ok_or(Pc4ObservationCandidateError::CounterOverflow)
+                })?;
         let next_retained_element_count = self
             .retained_element_count
             .checked_add(batch_retained_elements)
@@ -628,16 +685,16 @@ impl CandidateAccumulator {
         }
         batch_reveals.dedup_by_key(|reveal| reveal.reveal_rank);
 
-        let mut new_reveals = Vec::new();
-        new_reveals
+        let mut new_path_reveals = Vec::new();
+        new_path_reveals
             .try_reserve_exact(batch_reveals.len())
             .map_err(|_| Pc4ObservationCandidateError::AllocationFailed)?;
         for reveal in batch_reveals {
             match self
-                .seen_reveals
+                .seen_path_reveals
                 .binary_search_by_key(&reveal.reveal_rank, |seen| seen.reveal_rank)
             {
-                Ok(index) if self.seen_reveals[index] != reveal => {
+                Ok(index) if self.seen_path_reveals[index] != reveal => {
                     return Err(Pc4ObservationCandidateError::Semantic(
                         Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
                             reveal_rank: reveal.reveal_rank,
@@ -645,13 +702,69 @@ impl CandidateAccumulator {
                     ));
                 }
                 Ok(_) => {}
-                Err(_) => new_reveals.push(reveal),
+                Err(_) => new_path_reveals.push(reveal),
+            }
+        }
+
+        ledger_reveals.sort_unstable_by_key(Pc4ObservationRevealEvidence::reveal_rank);
+        for pair in ledger_reveals.windows(2) {
+            if pair[0].reveal_rank == pair[1].reveal_rank {
+                return Err(Pc4ObservationCandidateError::Semantic(
+                    Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
+                        reveal_rank: pair[0].reveal_rank,
+                    },
+                ));
+            }
+        }
+        let mut new_ledger_reveals = Vec::new();
+        new_ledger_reveals
+            .try_reserve_exact(ledger_reveals.len())
+            .map_err(|_| Pc4ObservationCandidateError::AllocationFailed)?;
+        for reveal in ledger_reveals {
+            match self
+                .ledger_reveals
+                .binary_search_by_key(&reveal.reveal_rank, |seen| seen.reveal_rank)
+            {
+                Ok(_) => {
+                    return Err(Pc4ObservationCandidateError::Semantic(
+                        Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
+                            reveal_rank: reveal.reveal_rank,
+                        },
+                    ));
+                }
+                Err(_) => new_ledger_reveals.push(reveal),
+            }
+        }
+
+        for reveal in new_path_reveals.iter().chain(self.seen_path_reveals.iter()) {
+            if let Ok(index) = self
+                .ledger_reveals
+                .binary_search_by_key(&reveal.reveal_rank, |seen| seen.reveal_rank)
+            {
+                if self.ledger_reveals[index] != *reveal {
+                    return Err(Pc4ObservationCandidateError::Semantic(
+                        Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
+                            reveal_rank: reveal.reveal_rank,
+                        },
+                    ));
+                }
+            }
+            if let Ok(index) = new_ledger_reveals
+                .binary_search_by_key(&reveal.reveal_rank, |seen| seen.reveal_rank)
+            {
+                if new_ledger_reveals[index] != *reveal {
+                    return Err(Pc4ObservationCandidateError::Semantic(
+                        Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
+                            reveal_rank: reveal.reveal_rank,
+                        },
+                    ));
+                }
             }
         }
         let next_reveal_count = self
-            .seen_reveals
+            .ledger_reveals
             .len()
-            .checked_add(new_reveals.len())
+            .checked_add(new_ledger_reveals.len())
             .ok_or(Pc4ObservationCandidateError::CounterOverflow)?;
         enforce_budget(
             Pc4ObservationCandidateBudgetKind::RevealOutcomes,
@@ -692,7 +805,8 @@ impl CandidateAccumulator {
 
         Ok(PreparedBatch {
             pending,
-            new_reveals,
+            new_path_reveals,
+            new_ledger_reveals,
             new_memberships,
             next_replay_count,
             next_retained_element_count,
@@ -707,8 +821,11 @@ impl CandidateAccumulator {
         self.pending
             .try_reserve_exact(batch.pending.len())
             .map_err(|_| Pc4ObservationCandidateError::AllocationFailed)?;
-        self.seen_reveals
-            .try_reserve_exact(batch.new_reveals.len())
+        self.seen_path_reveals
+            .try_reserve_exact(batch.new_path_reveals.len())
+            .map_err(|_| Pc4ObservationCandidateError::AllocationFailed)?;
+        self.ledger_reveals
+            .try_reserve_exact(batch.new_ledger_reveals.len())
             .map_err(|_| Pc4ObservationCandidateError::AllocationFailed)?;
         self.seen_memberships
             .try_reserve_exact(batch.new_memberships.len())
@@ -718,8 +835,11 @@ impl CandidateAccumulator {
 
     fn commit_batch(&mut self, batch: PreparedBatch) {
         self.pending.extend(batch.pending);
-        self.seen_reveals.extend(batch.new_reveals);
-        self.seen_reveals
+        self.seen_path_reveals.extend(batch.new_path_reveals);
+        self.seen_path_reveals
+            .sort_unstable_by_key(Pc4ObservationRevealEvidence::reveal_rank);
+        self.ledger_reveals.extend(batch.new_ledger_reveals);
+        self.ledger_reveals
             .sort_unstable_by_key(Pc4ObservationRevealEvidence::reveal_rank);
         self.seen_memberships.extend(batch.new_memberships);
         self.seen_memberships.sort_unstable();
@@ -730,6 +850,7 @@ impl CandidateAccumulator {
     fn finish<ProviderError, TerminalError, MaterializerError, G>(
         mut self,
         binding: ObservationCandidateBinding,
+        total_reveal_probability: Pc4ExactProbability,
         guard: &G,
     ) -> Result<
         Pc4CompleteObservationCandidateFamily,
@@ -739,6 +860,28 @@ impl CandidateAccumulator {
         G: Pc4ObservationCandidateGuard,
     {
         check_guard(&binding.source, guard)?;
+        if total_reveal_probability != Pc4ExactProbability::one() {
+            return Err(Pc4ObservationCandidateError::IncompleteCannotFinalize);
+        }
+        for path_reveal in &self.seen_path_reveals {
+            let index = self
+                .ledger_reveals
+                .binary_search_by_key(&path_reveal.reveal_rank, |reveal| reveal.reveal_rank)
+                .map_err(|_| {
+                    Pc4ObservationCandidateError::Semantic(
+                        Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
+                            reveal_rank: path_reveal.reveal_rank,
+                        },
+                    )
+                })?;
+            if self.ledger_reveals[index] != *path_reveal {
+                return Err(Pc4ObservationCandidateError::Semantic(
+                    Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
+                        reveal_rank: path_reveal.reveal_rank,
+                    },
+                ));
+            }
+        }
         self.pending.sort_unstable_by(|left, right| {
             left.reveal
                 .reveal_rank
@@ -747,23 +890,29 @@ impl CandidateAccumulator {
                 .then_with(|| left.provenance.cmp(&right.provenance))
         });
 
-        let mut successful_reveals: Vec<Pc4ObservationCandidateOutcome> = Vec::new();
-        successful_reveals
-            .try_reserve_exact(self.seen_reveals.len())
+        let mut reveal_outcomes: Vec<Pc4ObservationCandidateOutcome> = Vec::new();
+        reveal_outcomes
+            .try_reserve_exact(self.ledger_reveals.len())
             .map_err(|_| Pc4ObservationCandidateError::AllocationFailed)?;
-        for pending in self.pending {
-            if successful_reveals
-                .last()
-                .is_none_or(|outcome| outcome.reveal.reveal_rank != pending.reveal.reveal_rank)
-            {
-                successful_reveals.push(Pc4ObservationCandidateOutcome {
-                    reveal: pending.reveal,
-                    candidates: Vec::new(),
-                });
+        reveal_outcomes.extend(self.ledger_reveals.into_iter().map(|reveal| {
+            Pc4ObservationCandidateOutcome {
+                reveal,
+                candidates: Vec::new(),
             }
-            let outcome = successful_reveals
-                .last_mut()
-                .expect("a reveal outcome was just inserted or already present");
+        }));
+        for pending in self.pending {
+            let outcome_index = reveal_outcomes
+                .binary_search_by_key(&pending.reveal.reveal_rank, |outcome| {
+                    outcome.reveal.reveal_rank
+                })
+                .map_err(|_| {
+                    Pc4ObservationCandidateError::Semantic(
+                        Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
+                            reveal_rank: pending.reveal.reveal_rank,
+                        },
+                    )
+                })?;
+            let outcome = &mut reveal_outcomes[outcome_index];
             if outcome
                 .candidates
                 .last()
@@ -804,7 +953,7 @@ impl CandidateAccumulator {
             .try_reserve_exact(self.seen_memberships.len())
             .map_err(|_| Pc4ObservationCandidateError::AllocationFailed)?;
         canonical_candidates.extend(
-            successful_reveals
+            reveal_outcomes
                 .iter()
                 .flat_map(|outcome| outcome.candidates.iter())
                 .map(Pc4ObservationCanonicalCandidate::identity),
@@ -818,7 +967,8 @@ impl CandidateAccumulator {
             target: binding.target,
             source: binding.source,
             canonical_candidates,
-            successful_reveals,
+            reveal_outcomes,
+            total_reveal_probability,
             replay_provenance_count: self.replay_count,
             retained_element_count: self.retained_element_count,
         })
@@ -831,6 +981,9 @@ pub struct Pc4ObservationCandidateSession {
     binding: ObservationCandidateBinding,
     graph_family: Pc4ObservationGraphFamily,
     graph_cursor: Pc4ObservationGraphCursor,
+    reveal_ledger_family: Pc4ObservationRevealLedgerFamily,
+    reveal_ledger_cursor: Pc4ObservationRevealLedgerCursor,
+    complete_reveal_probability: Option<Pc4ExactProbability>,
     pending_graph_paths: Vec<Pc4ObservationGraphPath>,
     active_concrete_family: Option<ActiveConcretePathFamily>,
     accumulator: CandidateAccumulator,
@@ -850,7 +1003,11 @@ impl Pc4ObservationCandidateSession {
     }
 
     pub fn observed_successful_reveal_count(&self) -> usize {
-        self.accumulator.seen_reveals.len()
+        self.accumulator.ledger_reveals.len()
+    }
+
+    pub fn observed_reveal_outcome_count(&self) -> usize {
+        self.accumulator.ledger_reveals.len()
     }
 
     pub fn observed_candidate_membership_count(&self) -> usize {
@@ -859,6 +1016,8 @@ impl Pc4ObservationCandidateSession {
 
     pub fn is_exhausted(&self) -> bool {
         self.graph_cursor.is_exhausted()
+            && self.reveal_ledger_cursor.is_exhausted()
+            && self.complete_reveal_probability.is_some()
             && self.pending_graph_paths.is_empty()
             && self.active_concrete_family.is_none()
     }
@@ -902,10 +1061,56 @@ impl Pc4ObservationCandidateSession {
             .try_reserve_exact(limit.get())
             .map_err(|_| Pc4ObservationCandidateError::AllocationFailed)?;
         let mut next_graph_cursor = self.graph_cursor.clone();
+        let mut next_reveal_ledger_cursor = self.reveal_ledger_cursor.clone();
+        let mut next_complete_reveal_probability = self.complete_reveal_probability;
         let mut next_pending_graph_paths = self.pending_graph_paths.clone();
         let mut next_active_concrete_family = self.active_concrete_family.clone();
         let mut graph_page_advanced = false;
         let mut graph_paths_materialized = 0usize;
+
+        let mut ledger_reveals = Vec::new();
+        if !next_reveal_ledger_cursor.is_exhausted() {
+            let remaining_reveal_capacity = self
+                .binding
+                .adapter_budgets
+                .reveal_outcomes()
+                .checked_sub(self.accumulator.ledger_reveals.len())
+                .ok_or(Pc4ObservationCandidateError::CounterOverflow)?;
+            if remaining_reveal_capacity == 0 {
+                return Err(Pc4ObservationCandidateError::BudgetExceeded(
+                    Pc4ObservationCandidateBudgetExceeded {
+                        kind: Pc4ObservationCandidateBudgetKind::RevealOutcomes,
+                        limit: self.binding.adapter_budgets.reveal_outcomes(),
+                        attempted: self
+                            .accumulator
+                            .ledger_reveals
+                            .len()
+                            .checked_add(1)
+                            .ok_or(Pc4ObservationCandidateError::CounterOverflow)?,
+                    },
+                ));
+            }
+            let ledger_limit = remaining_reveal_capacity
+                .min(self.reveal_ledger_family.page_limit())
+                .min(limit.get());
+            let ledger_page = self
+                .reveal_ledger_family
+                .next_page(
+                    &mut next_reveal_ledger_cursor,
+                    NonZeroUsize::new(ledger_limit).expect("remaining reveal capacity is non-zero"),
+                    guard,
+                )
+                .map_err(map_reveal_ledger_error)?;
+            ledger_reveals
+                .try_reserve_exact(ledger_page.outcomes().len())
+                .map_err(|_| Pc4ObservationCandidateError::AllocationFailed)?;
+            for outcome in ledger_page.outcomes() {
+                ledger_reveals.push(reveal_evidence_from_ledger(outcome)?);
+            }
+            if ledger_page.is_exhausted() {
+                next_complete_reveal_probability = ledger_page.complete_probability();
+            }
+        }
 
         while discoveries.len() < limit.get() {
             check_guard(&self.binding.source, guard)?;
@@ -1000,21 +1205,27 @@ impl Pc4ObservationCandidateSession {
         }
 
         let discovered_concrete_paths = discoveries.len();
-        let prepared = self.accumulator.prepare_batch(&self.binding, discoveries)?;
+        let prepared =
+            self.accumulator
+                .prepare_batch(&self.binding, discoveries, ledger_reveals)?;
         self.accumulator.reserve_batch(&prepared)?;
         check_guard(&self.binding.source, guard)?;
         let exhausted = next_graph_cursor.is_exhausted()
+            && next_reveal_ledger_cursor.is_exhausted()
+            && next_complete_reveal_probability.is_some()
             && next_pending_graph_paths.is_empty()
             && next_active_concrete_family.is_none();
         self.accumulator.commit_batch(prepared);
         self.graph_cursor = next_graph_cursor;
+        self.reveal_ledger_cursor = next_reveal_ledger_cursor;
+        self.complete_reveal_probability = next_complete_reveal_probability;
         self.pending_graph_paths = next_pending_graph_paths;
         self.active_concrete_family = next_active_concrete_family;
 
         Ok(Pc4ObservationCandidateAdvance {
             discovered_concrete_paths,
             observed_concrete_paths: self.accumulator.replay_count,
-            observed_successful_reveals: self.accumulator.seen_reveals.len(),
+            observed_reveal_outcomes: self.accumulator.ledger_reveals.len(),
             observed_candidate_memberships: self.accumulator.seen_memberships.len(),
             status: if exhausted {
                 Pc4ObservationCandidateAdvanceStatus::ExhaustedAwaitingFinalize
@@ -1035,7 +1246,12 @@ impl Pc4ObservationCandidateSession {
             return Err(Pc4ObservationCandidateError::IncompleteCannotFinalize);
         }
         self.accumulator
-            .finish::<Infallible, Infallible, Infallible, _>(self.binding, guard)
+            .finish::<Infallible, Infallible, Infallible, _>(
+                self.binding,
+                self.complete_reveal_probability
+                    .ok_or(Pc4ObservationCandidateError::IncompleteCannotFinalize)?,
+                guard,
+            )
     }
 }
 
@@ -1058,6 +1274,7 @@ where
             Pc4ObservationCandidateBindingError::GraphSourceFieldMismatch,
         ));
     }
+    validate_queue_scope_binding(&request, graph_family)?;
     if request.adapter_budgets.graph_paths_per_advance()
         > graph_family.budgets().page_output_paths()
     {
@@ -1081,14 +1298,79 @@ where
         .ok_or(Pc4ObservationCandidateError::CounterOverflow)?;
 
     let binding = ObservationCandidateBinding::from_request(request);
+    let reveal_ledger_family = graph_family.reveal_ledger_family();
+    let reveal_ledger_cursor = reveal_ledger_family.cursor();
     Ok(Pc4ObservationCandidateSession {
         graph_cursor: graph_family.cursor(),
         graph_family: graph_family.clone(),
+        reveal_ledger_family,
+        reveal_ledger_cursor,
+        complete_reveal_probability: None,
         binding,
         pending_graph_paths: Vec::new(),
         active_concrete_family: None,
         accumulator: CandidateAccumulator::new(),
     })
+}
+
+fn validate_queue_scope_binding<ProviderError, TerminalError, MaterializerError>(
+    request: &Pc4ObservationCandidateAdapterRequest<'_>,
+    graph_family: &Pc4ObservationGraphFamily,
+) -> Result<(), Pc4ObservationCandidateError<ProviderError, TerminalError, MaterializerError>> {
+    if request.prepared_input.target() != request.target {
+        return Err(Pc4ObservationCandidateError::Binding(
+            Pc4ObservationCandidateBindingError::PreparedInputTargetMismatch,
+        ));
+    }
+    let Pc4PreparedQueueInput::PatternOrHidden {
+        visible_queue,
+        scope,
+        bag_state,
+        ..
+    } = request.prepared_input.queue()
+    else {
+        return Err(Pc4ObservationCandidateError::Binding(
+            Pc4ObservationCandidateBindingError::PreparedInputNotPatternOrHidden,
+        ));
+    };
+    let graph_scope = graph_family.queue_scope();
+    if visible_queue.as_slice() != graph_scope.initial_visible_queue()
+        || scope.visible_piece_count() != graph_scope.initial_visible_queue().len()
+        || scope.preview_length() != graph_scope.preview_length()
+        || scope.hidden_draws() != graph_scope.hidden_draws()
+        || scope.placement_count() != graph_scope.placement_count()
+        || bag_state.as_ref().copied() != Some(graph_scope.hidden_source_state())
+    {
+        return Err(Pc4ObservationCandidateError::Binding(
+            Pc4ObservationCandidateBindingError::QueueScopeMismatch,
+        ));
+    }
+
+    let initial_board = StandardPcBoard::from_words(
+        request.target.target_lines().get(),
+        [request.source.initial_board_mask(), 0, 0, 0],
+    )
+    .map_err(|_| {
+        Pc4ObservationCandidateError::Binding(
+            Pc4ObservationCandidateBindingError::InitialBoardMismatch,
+        )
+    })?;
+    let expected_request_identity = PcCandidateRequestIdentity::derive_pc4_candidate_universe(
+        request.prepared_input,
+        initial_board,
+        graph_scope.initial_hold(),
+    )
+    .map_err(|_| {
+        Pc4ObservationCandidateError::Binding(
+            Pc4ObservationCandidateBindingError::RequestIdentityMismatch,
+        )
+    })?;
+    if request.source.request_identity() != expected_request_identity {
+        return Err(Pc4ObservationCandidateError::Binding(
+            Pc4ObservationCandidateBindingError::RequestIdentityMismatch,
+        ));
+    }
+    Ok(())
 }
 
 fn validate_source_binding<ProviderError, TerminalError, MaterializerError, G>(
@@ -1223,6 +1505,20 @@ fn build_pending_candidates<ProviderError, TerminalError, MaterializerError>(
     Ok(pending)
 }
 
+fn reveal_evidence_from_ledger<ProviderError, TerminalError, MaterializerError>(
+    outcome: &Pc4ObservationRevealOutcome,
+) -> Result<
+    Pc4ObservationRevealEvidence,
+    Pc4ObservationCandidateError<ProviderError, TerminalError, MaterializerError>,
+> {
+    Ok(Pc4ObservationRevealEvidence {
+        reveal_rank: outcome.rank(),
+        revealed_pieces: try_copy_slice(outcome.pieces())?,
+        probability: outcome.probability(),
+        terminal_bag_state: outcome.terminal_bag_state(),
+    })
+}
+
 fn try_copy_slice<T: Copy, ProviderError, TerminalError, MaterializerError>(
     source: &[T],
 ) -> Result<Vec<T>, Pc4ObservationCandidateError<ProviderError, TerminalError, MaterializerError>> {
@@ -1281,6 +1577,18 @@ fn map_graph_page_error<ProviderError, TerminalError, MaterializerError>(
         Pc4ObservationGraphPageError::Cancelled => Pc4ObservationCandidateError::Cancelled,
         Pc4ObservationGraphPageError::StaleSnapshot => Pc4ObservationCandidateError::StaleSnapshot,
         other => Pc4ObservationCandidateError::ObservationGraph(other),
+    }
+}
+
+fn map_reveal_ledger_error<ProviderError, TerminalError, MaterializerError>(
+    error: Pc4ObservationRevealLedgerPageError,
+) -> Pc4ObservationCandidateError<ProviderError, TerminalError, MaterializerError> {
+    match error {
+        Pc4ObservationRevealLedgerPageError::Cancelled => Pc4ObservationCandidateError::Cancelled,
+        Pc4ObservationRevealLedgerPageError::StaleSnapshot => {
+            Pc4ObservationCandidateError::StaleSnapshot
+        }
+        other => Pc4ObservationCandidateError::RevealLedger(other),
     }
 }
 

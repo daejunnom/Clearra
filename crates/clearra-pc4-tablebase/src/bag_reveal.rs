@@ -107,12 +107,41 @@ impl Pc4ExactProbability {
         denominator: 1,
     };
 
+    pub const fn zero() -> Self {
+        Self {
+            numerator: 0,
+            denominator: 1,
+        }
+    }
+
+    pub const fn one() -> Self {
+        Self::ONE
+    }
+
     pub const fn numerator(self) -> u128 {
         self.numerator
     }
 
     pub const fn denominator(self) -> u128 {
         self.denominator
+    }
+
+    /// Adds two canonical probabilities without first multiplying both full
+    /// denominators. `None` is a representational overflow, never rounding.
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        let denominator_gcd = gcd(self.denominator, other.denominator);
+        let left_multiplier = other.denominator / denominator_gcd;
+        let right_multiplier = self.denominator / denominator_gcd;
+        let numerator = self
+            .numerator
+            .checked_mul(left_multiplier)?
+            .checked_add(other.numerator.checked_mul(right_multiplier)?)?;
+        let denominator = self.denominator.checked_mul(left_multiplier)?;
+        let divisor = gcd(numerator, denominator);
+        Some(Self {
+            numerator: numerator / divisor,
+            denominator: denominator / divisor,
+        })
     }
 
     fn multiply(self, numerator: u32, denominator: u32) -> Option<Self> {
@@ -237,6 +266,15 @@ impl Pc4BagRevealSequence {
 
     pub const fn terminal_state(&self) -> Pc4BagState {
         self.terminal_state
+    }
+
+    pub(crate) fn into_parts(self) -> (u128, Vec<Pc4GraphPiece>, Pc4ExactProbability, Pc4BagState) {
+        (
+            self.rank,
+            self.pieces,
+            self.probability,
+            self.terminal_state,
+        )
     }
 }
 
@@ -677,6 +715,13 @@ mod tests {
             assert_eq!(actual.probability(), expected.probability);
             assert_eq!(actual.terminal_state(), expected.terminal_state);
         }
+        let total_probability = lazy
+            .iter()
+            .try_fold(Pc4ExactProbability::zero(), |sum, sequence| {
+                sum.checked_add(sequence.probability())
+            })
+            .expect("small reveal probability sum remains representable");
+        assert_eq!(total_probability, Pc4ExactProbability::one());
     }
 
     #[test]
@@ -740,6 +785,38 @@ mod tests {
         );
         assert_eq!(sequences[1].probability().denominator(), 4);
         assert_eq!(sequences[2].probability().denominator(), 4);
+    }
+
+    #[test]
+    fn checked_probability_addition_is_reduced_exact_and_overflow_checked() {
+        let one_sixth = Pc4ExactProbability {
+            numerator: 1,
+            denominator: 6,
+        };
+        let one_third = Pc4ExactProbability {
+            numerator: 1,
+            denominator: 3,
+        };
+
+        assert_eq!(
+            Pc4ExactProbability::zero().checked_add(one_sixth),
+            Some(one_sixth)
+        );
+        assert_eq!(
+            one_sixth.checked_add(one_third),
+            Some(Pc4ExactProbability {
+                numerator: 1,
+                denominator: 2,
+            })
+        );
+        assert_eq!(
+            Pc4ExactProbability {
+                numerator: u128::MAX,
+                denominator: 1,
+            }
+            .checked_add(Pc4ExactProbability::one()),
+            None
+        );
     }
 
     #[test]
