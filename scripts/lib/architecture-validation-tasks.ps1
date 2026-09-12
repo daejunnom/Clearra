@@ -118,6 +118,7 @@ function New-AdvisoryMarkerAuditTasks() {
 function New-CurrentArchitectureValidationTasks() {
     return @(
         New-ArchitectureValidationTask "Dependency Architecture" "Invoke-DependencyArchitectureValidation" -RequiresWorkspaceDependencyGraph
+        New-ArchitectureValidationTask "PC4 Full Solution Authority" "Invoke-Pc4FullSolutionAuthorityContractValidation" -RequiresWorkspaceDependencyGraph
         New-ArchitectureValidationTask "No Product Debt Architecture" "Invoke-NoProductDebtStaticValidation"
         New-ArchitectureValidationTask "Forbidden API Architecture" "Invoke-ReleaseForbiddenApiValidation"
         New-ArchitectureValidationTask "Public ABI Architecture" "Invoke-PublicAbiContractValidation"

@@ -45,6 +45,35 @@ impl Pc4RuleProfile {
     }
 }
 
+/// A terminal row target that can be represented inside the PC4 graph state
+/// domain. Construction does not qualify that target for product use.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Pc4TargetLines(u8);
+
+impl Pc4TargetLines {
+    pub const MIN: u8 = 1;
+    pub const MAX: u8 = 4;
+
+    pub fn new(value: u8) -> Result<Self, ManifestError> {
+        if !(Self::MIN..=Self::MAX).contains(&value) {
+            return Err(ManifestError::TargetLinesOutsideGraphDomain { actual: value });
+        }
+        Ok(Self(value))
+    }
+
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// Product use case whose terminal/completeness semantics were qualified.
+/// PC completion evidence must never authorize Setup traversal or vice versa.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Pc4TerminalUseCase {
+    PcSearch,
+    SetupSearch,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GraphTargetEncoding {
     U24LittleEndian,
@@ -224,6 +253,77 @@ impl ProfileQualification {
     }
 }
 
+/// Independent completeness evidence for one profile and terminal target.
+///
+/// A qualified graph format alone does not prove that an early PC or Setup
+/// terminal predicate is complete. Each enabled target binds its semantics,
+/// full outgoing-edge statement, known answers, and exact offline parity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileTargetCompletenessQualification {
+    use_case: Pc4TerminalUseCase,
+    target_lines: Pc4TargetLines,
+    terminal_semantics_identity: String,
+    outgoing_edge_completeness_identity: String,
+    known_answer_identity: String,
+    offline_exact_parity_identity: String,
+}
+
+impl ProfileTargetCompletenessQualification {
+    pub fn new(
+        use_case: Pc4TerminalUseCase,
+        target_lines: Pc4TargetLines,
+        terminal_semantics_identity: impl Into<String>,
+        outgoing_edge_completeness_identity: impl Into<String>,
+        known_answer_identity: impl Into<String>,
+        offline_exact_parity_identity: impl Into<String>,
+    ) -> Result<Self, ManifestError> {
+        Ok(Self {
+            use_case,
+            target_lines,
+            terminal_semantics_identity: required_identity(
+                terminal_semantics_identity.into(),
+                "profile_target_terminal_semantics_identity_missing",
+            )?,
+            outgoing_edge_completeness_identity: required_identity(
+                outgoing_edge_completeness_identity.into(),
+                "profile_target_outgoing_completeness_identity_missing",
+            )?,
+            known_answer_identity: required_identity(
+                known_answer_identity.into(),
+                "profile_target_known_answer_identity_missing",
+            )?,
+            offline_exact_parity_identity: required_identity(
+                offline_exact_parity_identity.into(),
+                "profile_target_offline_exact_parity_identity_missing",
+            )?,
+        })
+    }
+
+    pub const fn use_case(&self) -> Pc4TerminalUseCase {
+        self.use_case
+    }
+
+    pub const fn target_lines(&self) -> Pc4TargetLines {
+        self.target_lines
+    }
+
+    pub fn terminal_semantics_identity(&self) -> &str {
+        &self.terminal_semantics_identity
+    }
+
+    pub fn outgoing_edge_completeness_identity(&self) -> &str {
+        &self.outgoing_edge_completeness_identity
+    }
+
+    pub fn known_answer_identity(&self) -> &str {
+        &self.known_answer_identity
+    }
+
+    pub fn offline_exact_parity_identity(&self) -> &str {
+        &self.offline_exact_parity_identity
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pc4ProfileManifest {
     profile: Pc4RuleProfile,
@@ -234,6 +334,7 @@ pub struct Pc4ProfileManifest {
     graph_offsets: ArtifactDescriptor,
     graph: ArtifactDescriptor,
     qualification: ProfileQualification,
+    target_qualifications: Vec<ProfileTargetCompletenessQualification>,
 }
 
 impl Pc4ProfileManifest {
@@ -288,7 +389,33 @@ impl Pc4ProfileManifest {
             graph_offsets,
             graph,
             qualification,
+            target_qualifications: Vec::new(),
         })
+    }
+
+    /// Adds independently qualified terminal targets to this profile.
+    ///
+    /// An empty set keeps the snapshot reader usable but leaves every PC and
+    /// Setup target feature-off. Duplicate target claims fail closed.
+    pub fn with_target_qualifications(
+        mut self,
+        mut target_qualifications: Vec<ProfileTargetCompletenessQualification>,
+    ) -> Result<Self, ManifestError> {
+        target_qualifications.sort_unstable_by_key(|qualification| {
+            (qualification.use_case(), qualification.target_lines())
+        });
+        if let Some(duplicate) = target_qualifications.windows(2).find(|pair| {
+            pair[0].use_case() == pair[1].use_case()
+                && pair[0].target_lines() == pair[1].target_lines()
+        }) {
+            return Err(ManifestError::DuplicateTargetQualification {
+                profile: self.profile,
+                use_case: duplicate[0].use_case(),
+                target_lines: duplicate[0].target_lines(),
+            });
+        }
+        self.target_qualifications = target_qualifications;
+        Ok(self)
     }
 
     pub const fn profile(&self) -> Pc4RuleProfile {
@@ -321,6 +448,23 @@ impl Pc4ProfileManifest {
 
     pub const fn qualification(&self) -> &ProfileQualification {
         &self.qualification
+    }
+
+    pub fn target_qualifications(&self) -> &[ProfileTargetCompletenessQualification] {
+        &self.target_qualifications
+    }
+
+    pub fn target_qualification(
+        &self,
+        use_case: Pc4TerminalUseCase,
+        target_lines: Pc4TargetLines,
+    ) -> Option<&ProfileTargetCompletenessQualification> {
+        self.target_qualifications
+            .binary_search_by_key(&(use_case, target_lines), |qualification| {
+                (qualification.use_case(), qualification.target_lines())
+            })
+            .ok()
+            .map(|index| &self.target_qualifications[index])
     }
 
     pub(crate) const fn artifact(&self, role: Pc4ArtifactRole) -> &ArtifactDescriptor {
@@ -590,7 +734,90 @@ impl ActivatedSnapshot {
             .find(|candidate| candidate.profile() == profile)
             .expect("activated snapshot contains every PC4 profile")
     }
+
+    /// Mints a target-bound identity only when that exact profile/target
+    /// completeness claim was part of the verified immutable manifest.
+    pub fn qualified_target(
+        &self,
+        profile: Pc4RuleProfile,
+        use_case: Pc4TerminalUseCase,
+        target_lines: Pc4TargetLines,
+    ) -> Result<QualifiedPc4TargetIdentity, TargetQualificationError> {
+        let qualification = self
+            .profile(profile)
+            .target_qualification(use_case, target_lines)
+            .ok_or(TargetQualificationError::Unavailable {
+                profile,
+                use_case,
+                target_lines,
+            })?;
+        Ok(QualifiedPc4TargetIdentity {
+            snapshot: self.qualified_identity.clone(),
+            profile,
+            use_case,
+            qualification: qualification.clone(),
+        })
+    }
 }
+
+/// Snapshot-, profile-, and target-bound completeness authority.
+///
+/// Future candidate producers must require this identity rather than deriving
+/// target completeness from a graph hit or a generic activated snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QualifiedPc4TargetIdentity {
+    snapshot: QualifiedSnapshotIdentity,
+    profile: Pc4RuleProfile,
+    use_case: Pc4TerminalUseCase,
+    qualification: ProfileTargetCompletenessQualification,
+}
+
+impl QualifiedPc4TargetIdentity {
+    pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
+        &self.snapshot
+    }
+
+    pub const fn profile(&self) -> Pc4RuleProfile {
+        self.profile
+    }
+
+    pub const fn use_case(&self) -> Pc4TerminalUseCase {
+        self.use_case
+    }
+
+    pub const fn target_lines(&self) -> Pc4TargetLines {
+        self.qualification.target_lines()
+    }
+
+    pub const fn qualification(&self) -> &ProfileTargetCompletenessQualification {
+        &self.qualification
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TargetQualificationError {
+    Unavailable {
+        profile: Pc4RuleProfile,
+        use_case: Pc4TerminalUseCase,
+        target_lines: Pc4TargetLines,
+    },
+}
+
+impl TargetQualificationError {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Unavailable { .. } => "pc4_online_target_completeness_unavailable",
+        }
+    }
+}
+
+impl fmt::Display for TargetQualificationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for TargetQualificationError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ActivationError {
@@ -661,6 +888,14 @@ pub enum ManifestError {
     GraphTooLargeForOffsetContract {
         profile: Pc4RuleProfile,
     },
+    TargetLinesOutsideGraphDomain {
+        actual: u8,
+    },
+    DuplicateTargetQualification {
+        profile: Pc4RuleProfile,
+        use_case: Pc4TerminalUseCase,
+        target_lines: Pc4TargetLines,
+    },
     ProfileSetIncomplete,
 }
 
@@ -680,6 +915,12 @@ impl ManifestError {
             Self::IndexLengthMismatch { .. } => "pc4_online_index_length_mismatch",
             Self::GraphTooLargeForOffsetContract { .. } => {
                 "pc4_online_graph_offset_contract_overflow"
+            }
+            Self::TargetLinesOutsideGraphDomain { .. } => {
+                "pc4_online_target_lines_outside_graph_domain"
+            }
+            Self::DuplicateTargetQualification { .. } => {
+                "pc4_online_duplicate_target_qualification"
             }
             Self::ProfileSetIncomplete => "pc4_online_profile_set_incomplete",
         }
@@ -892,6 +1133,25 @@ pub(crate) mod tests {
         .expect("synthetic profile manifest")
     }
 
+    fn target_qualification(target_lines: u8) -> ProfileTargetCompletenessQualification {
+        target_qualification_for(Pc4TerminalUseCase::PcSearch, target_lines)
+    }
+
+    fn target_qualification_for(
+        use_case: Pc4TerminalUseCase,
+        target_lines: u8,
+    ) -> ProfileTargetCompletenessQualification {
+        ProfileTargetCompletenessQualification::new(
+            use_case,
+            Pc4TargetLines::new(target_lines).expect("target inside graph domain"),
+            format!("terminal:{use_case:?}:{target_lines}"),
+            format!("outgoing-complete:{use_case:?}:{target_lines}"),
+            format!("target-kat:{use_case:?}:{target_lines}"),
+            format!("offline-parity:{use_case:?}:{target_lines}"),
+        )
+        .expect("synthetic profile-target qualification")
+    }
+
     pub(crate) fn activated_snapshot(field_count: u32, graph_bytes: u64) -> ActivatedSnapshot {
         activated_snapshot_with_manifest_content(
             field_count,
@@ -933,6 +1193,53 @@ pub(crate) mod tests {
         .expect("synthetic snapshot activation")
         .qualified_identity()
         .clone()
+    }
+
+    pub(crate) fn qualified_target_identity(
+        generation: impl Into<String>,
+        manifest_content_identity: impl Into<String>,
+        profile: Pc4RuleProfile,
+        use_case: Pc4TerminalUseCase,
+        target_lines: u8,
+    ) -> QualifiedPc4TargetIdentity {
+        let profiles = Pc4RuleProfile::ALL
+            .into_iter()
+            .map(|candidate_profile| {
+                let manifest = qualified_profile(
+                    candidate_profile,
+                    2,
+                    8,
+                    GraphTargetEncoding::U24LittleEndian,
+                );
+                let manifest = if candidate_profile == profile {
+                    manifest
+                        .with_target_qualifications(vec![target_qualification_for(
+                            use_case,
+                            target_lines,
+                        )])
+                        .expect("synthetic target qualification")
+                } else {
+                    manifest
+                };
+                ProfileAvailability::qualified(manifest)
+            })
+            .collect();
+        DatasetSnapshotManifest::new(
+            SnapshotIdentity::new("synthetic/repository", SYNTHETIC_REVISION_A, generation)
+                .expect("synthetic target snapshot identity"),
+            ManifestContentIdentity::new(manifest_content_identity)
+                .expect("synthetic target manifest content identity"),
+            profiles,
+        )
+        .expect("synthetic target manifest")
+        .activate(&mut SyntheticVerifier)
+        .expect("synthetic target snapshot activation")
+        .qualified_target(
+            profile,
+            use_case,
+            Pc4TargetLines::new(target_lines).expect("target inside graph domain"),
+        )
+        .expect("synthetic qualified target")
     }
 
     fn qualified_manifest(
@@ -1062,6 +1369,179 @@ pub(crate) mod tests {
             Err(ActivationError::UnsupportedProfile {
                 profile: Pc4RuleProfile::SrsX,
                 reason: UnsupportedProfileReason::MissingProfileSpecificIndex,
+            })
+        );
+    }
+
+    #[test]
+    fn target_lines_are_bounded_to_the_one_through_four_row_graph_domain() {
+        assert_eq!(Pc4TargetLines::new(1).expect("one row").get(), 1);
+        assert_eq!(Pc4TargetLines::new(4).expect("four rows").get(), 4);
+        for actual in [0, 5, u8::MAX] {
+            assert_eq!(
+                Pc4TargetLines::new(actual),
+                Err(ManifestError::TargetLinesOutsideGraphDomain { actual })
+            );
+        }
+    }
+
+    #[test]
+    fn profile_target_completeness_is_independent_and_duplicate_targets_fail_closed() {
+        let target_one = target_qualification(1);
+        let target_three = target_qualification(3);
+        let setup_target_one = target_qualification_for(Pc4TerminalUseCase::SetupSearch, 1);
+        let profile = qualified_profile(
+            Pc4RuleProfile::SrsPlus,
+            2,
+            8,
+            GraphTargetEncoding::U24LittleEndian,
+        )
+        .with_target_qualifications(vec![
+            setup_target_one.clone(),
+            target_three.clone(),
+            target_one.clone(),
+        ])
+        .expect("distinct target qualifications");
+
+        assert_eq!(
+            profile
+                .target_qualifications()
+                .iter()
+                .map(|qualification| {
+                    (qualification.use_case(), qualification.target_lines().get())
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (Pc4TerminalUseCase::PcSearch, 1),
+                (Pc4TerminalUseCase::PcSearch, 3),
+                (Pc4TerminalUseCase::SetupSearch, 1),
+            ]
+        );
+        assert_eq!(
+            profile
+                .target_qualification(
+                    Pc4TerminalUseCase::PcSearch,
+                    Pc4TargetLines::new(1).expect("one row"),
+                )
+                .expect("one-row target"),
+            &target_one
+        );
+        assert!(profile
+            .target_qualification(
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(2).expect("two rows"),
+            )
+            .is_none());
+        assert_eq!(
+            profile
+                .target_qualification(
+                    Pc4TerminalUseCase::SetupSearch,
+                    Pc4TargetLines::new(1).expect("one row"),
+                )
+                .expect("separately qualified Setup target"),
+            &setup_target_one
+        );
+
+        assert_eq!(
+            qualified_profile(
+                Pc4RuleProfile::SrsPlus,
+                2,
+                8,
+                GraphTargetEncoding::U24LittleEndian,
+            )
+            .with_target_qualifications(vec![target_three.clone(), target_three]),
+            Err(ManifestError::DuplicateTargetQualification {
+                profile: Pc4RuleProfile::SrsPlus,
+                use_case: Pc4TerminalUseCase::PcSearch,
+                target_lines: Pc4TargetLines::new(3).expect("three rows"),
+            })
+        );
+    }
+
+    #[test]
+    fn activated_snapshot_mints_only_manifest_qualified_profile_targets() {
+        let profiles = Pc4RuleProfile::ALL
+            .into_iter()
+            .map(|profile| {
+                let manifest =
+                    qualified_profile(profile, 2, 8, GraphTargetEncoding::U24LittleEndian);
+                let manifest = if profile == Pc4RuleProfile::SrsX {
+                    manifest
+                        .with_target_qualifications(vec![target_qualification(2)])
+                        .expect("qualified two-row target")
+                } else {
+                    manifest
+                };
+                ProfileAvailability::qualified(manifest)
+            })
+            .collect();
+        let snapshot = DatasetSnapshotManifest::new(
+            SnapshotIdentity::new(
+                "synthetic/repository",
+                SYNTHETIC_REVISION_A,
+                "generation-targets",
+            )
+            .expect("identity"),
+            ManifestContentIdentity::new("synthetic-target-qualified-manifest")
+                .expect("manifest content"),
+            profiles,
+        )
+        .expect("manifest")
+        .activate(&mut SyntheticVerifier)
+        .expect("snapshot verification");
+
+        let target_two = Pc4TargetLines::new(2).expect("two rows");
+        let qualified = snapshot
+            .qualified_target(
+                Pc4RuleProfile::SrsX,
+                Pc4TerminalUseCase::PcSearch,
+                target_two,
+            )
+            .expect("qualified target identity");
+        assert_eq!(qualified.snapshot(), snapshot.qualified_identity());
+        assert_eq!(qualified.profile(), Pc4RuleProfile::SrsX);
+        assert_eq!(qualified.use_case(), Pc4TerminalUseCase::PcSearch);
+        assert_eq!(qualified.target_lines(), target_two);
+        assert_eq!(
+            qualified
+                .qualification()
+                .outgoing_edge_completeness_identity(),
+            "outgoing-complete:PcSearch:2"
+        );
+        assert_eq!(
+            snapshot.qualified_target(
+                Pc4RuleProfile::SrsX,
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(1).expect("one"),
+            ),
+            Err(TargetQualificationError::Unavailable {
+                profile: Pc4RuleProfile::SrsX,
+                use_case: Pc4TerminalUseCase::PcSearch,
+                target_lines: Pc4TargetLines::new(1).expect("one"),
+            })
+        );
+        assert_eq!(
+            snapshot.qualified_target(
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                target_two,
+            ),
+            Err(TargetQualificationError::Unavailable {
+                profile: Pc4RuleProfile::Srs,
+                use_case: Pc4TerminalUseCase::PcSearch,
+                target_lines: target_two,
+            })
+        );
+        assert_eq!(
+            snapshot.qualified_target(
+                Pc4RuleProfile::SrsX,
+                Pc4TerminalUseCase::SetupSearch,
+                target_two,
+            ),
+            Err(TargetQualificationError::Unavailable {
+                profile: Pc4RuleProfile::SrsX,
+                use_case: Pc4TerminalUseCase::SetupSearch,
+                target_lines: target_two,
             })
         );
     }
