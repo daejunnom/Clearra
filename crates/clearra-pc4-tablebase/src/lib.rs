@@ -4,6 +4,7 @@
 //! upstream snapshot, qualify it, and satisfy the emitted bounded Range
 //! requests. No dataset revision or digest is compiled into the product.
 
+mod bag_draw;
 mod fixed_queue_hold;
 mod fixed_queue_traversal;
 mod graph;
@@ -13,6 +14,10 @@ mod manifest;
 mod materializer;
 mod protocol;
 
+pub use bag_draw::{
+    draw_pc4_bag, Pc4BagDrawBatch, Pc4BagDrawError, Pc4BagDrawTransition, Pc4BagDrawWeight,
+    Pc4BagProfile, Pc4BagProfileError, Pc4BagState, Pc4BagStateError, PC4_BAG_PIECES,
+};
 pub use fixed_queue_hold::{
     expand_fixed_queue_hold, FixedQueueHoldBudgetExceeded, FixedQueueHoldBudgetKind,
     FixedQueueHoldBudgets, FixedQueueHoldDecision, FixedQueueHoldExpansionError,
