@@ -10,12 +10,13 @@ use clearra_core_executor::{
     materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
 };
 use clearra_pc4_tablebase::{
-    decode_hydra_graph_record_v1, hydra_field_hash_v1_to_clearra_board64_mask, ActivatedSnapshot,
-    ClearraPlacementIdentity, DecodedHydraGraphRecordV1, FixedQueueAdjacencyQuery,
-    GraphTargetEncoding, HydraFieldHashOutsideDomain, HydraGraphRecordDecodeError, LookupHit,
-    MaterializationOutput, Pc4GraphPiece, Pc4PlacementMaterializer, Pc4RuleProfile,
-    PlacementIdentityError, PlacementRotation, QualifiedCompleteAdjacency,
-    QualifiedCompleteAdjacencyProvider, QualifiedPc4GraphEdge, QualifiedPc4TargetIdentity,
+    decode_hydra_graph_record_v1, hydra_field_hash_v1_to_clearra_board64_mask,
+    ActivatedProfileError, ActivatedSnapshot, ClearraPlacementIdentity, DecodedHydraGraphRecordV1,
+    FixedQueueAdjacencyQuery, GraphTargetEncoding, HydraFieldHashOutsideDomain,
+    HydraGraphRecordDecodeError, LookupHit, MaterializationOutput, Pc4GraphPiece,
+    Pc4PlacementMaterializer, Pc4RuleProfile, PlacementIdentityError, PlacementRotation,
+    QualifiedCompleteAdjacency, QualifiedCompleteAdjacencyProvider, QualifiedPc4GraphEdge,
+    QualifiedPc4TargetIdentity, UnsupportedProfileReason,
 };
 use clearra_rules::kicks::KickTableProfileId;
 
@@ -88,12 +89,17 @@ pub enum Pc4LookupGraphCacheBudgetKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Pc4LookupGraphCacheStartError {
     TargetSnapshotMismatch,
+    ProfileNotQualified {
+        profile: Pc4RuleProfile,
+        reason: UnsupportedProfileReason,
+    },
 }
 
 impl Pc4LookupGraphCacheStartError {
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::TargetSnapshotMismatch => "pc4_lookup_graph_cache_target_snapshot_mismatch",
+            Self::ProfileNotQualified { .. } => "pc4_online_profile_not_qualified",
         }
     }
 }
@@ -227,7 +233,13 @@ impl Pc4LookupGraphCache {
         if target.snapshot() != snapshot.qualified_identity() {
             return Err(Pc4LookupGraphCacheStartError::TargetSnapshotMismatch);
         }
-        let profile = snapshot.profile(target.profile());
+        let profile = snapshot
+            .profile(target.profile())
+            .map_err(|error| match error {
+                ActivatedProfileError::NotQualified { profile, reason } => {
+                    Pc4LookupGraphCacheStartError::ProfileNotQualified { profile, reason }
+                }
+            })?;
         Ok(Self {
             snapshot: snapshot.clone(),
             target,
@@ -804,6 +816,22 @@ mod tests {
     }
 
     fn activated_snapshot(generation: &str, field_count: u32) -> ActivatedSnapshot {
+        activated_snapshot_with_profile_filter(generation, field_count, None)
+    }
+
+    fn partially_activated_snapshot(
+        generation: &str,
+        field_count: u32,
+        qualified_profile: Pc4RuleProfile,
+    ) -> ActivatedSnapshot {
+        activated_snapshot_with_profile_filter(generation, field_count, Some(qualified_profile))
+    }
+
+    fn activated_snapshot_with_profile_filter(
+        generation: &str,
+        field_count: u32,
+        qualified_profile: Option<Pc4RuleProfile>,
+    ) -> ActivatedSnapshot {
         let profiles = Pc4RuleProfile::ALL
             .into_iter()
             .map(|profile| {
@@ -867,7 +895,14 @@ mod tests {
                     .collect(),
                 )
                 .expect("unique target qualifications");
-                ProfileAvailability::qualified(manifest)
+                if qualified_profile.is_none() || qualified_profile == Some(profile) {
+                    ProfileAvailability::qualified(manifest)
+                } else {
+                    ProfileAvailability::Unsupported {
+                        profile,
+                        reason: UnsupportedProfileReason::MissingProfileArtifacts,
+                    }
+                }
             })
             .collect();
         DatasetSnapshotManifest::new(
@@ -1105,6 +1140,30 @@ mod tests {
             Err(Pc4LookupGraphCacheError::GraphRecordDecode(_))
         ));
         assert_eq!(cache.usage(), Pc4LookupGraphCacheUsage::default());
+    }
+
+    #[test]
+    fn runtime_cache_uses_only_the_profile_qualified_in_its_activated_snapshot() {
+        let partial =
+            partially_activated_snapshot("generation-partial-runtime", 4, Pc4RuleProfile::Srs);
+        let active_target = target(&partial, Pc4RuleProfile::Srs, Pc4TerminalUseCase::PcSearch);
+        assert!(Pc4LookupGraphCache::new(&partial, active_target, limits()).is_ok());
+
+        // The synthetic full snapshot intentionally carries the same nominal
+        // attestation identity. Availability from it must not authorize a
+        // profile absent from the activated snapshot passed to the cache.
+        let full = activated_snapshot("generation-partial-runtime", 4);
+        let unavailable_target =
+            target(&full, Pc4RuleProfile::SrsPlus, Pc4TerminalUseCase::PcSearch);
+        assert_eq!(unavailable_target.snapshot(), partial.qualified_identity());
+        assert_eq!(
+            Pc4LookupGraphCache::new(&partial, unavailable_target, limits())
+                .expect_err("another snapshot's profile claim must not be reused"),
+            Pc4LookupGraphCacheStartError::ProfileNotQualified {
+                profile: Pc4RuleProfile::SrsPlus,
+                reason: UnsupportedProfileReason::MissingProfileArtifacts,
+            }
+        );
     }
 
     #[test]

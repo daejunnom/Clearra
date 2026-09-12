@@ -10,7 +10,7 @@ use clearra_pc4_tablebase::{
     Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, PinnedPc4Generation,
     QualifiedPc4TargetIdentity, RangeAdmissionAttempt, RangeAdmissionError, RangeAdmissionGuard,
     RangeAdmissionInput, RangeAdmissionLimits, RangeAdmissionOutcome, RangeAdmissionSession,
-    RangeRequest, RangeTransportFailure, SupplyError,
+    RangeRequest, RangeTransportFailure, SupplyError, UnsupportedProfileReason,
 };
 
 #[cfg(test)]
@@ -237,6 +237,10 @@ impl AppQualifiedPc4LookupHit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppOnlinePc4LookupStartError {
     TargetSnapshotMismatch,
+    ProfileNotQualified {
+        profile: Pc4RuleProfile,
+        reason: UnsupportedProfileReason,
+    },
     Lookup(LookupStartError),
 }
 
@@ -244,6 +248,7 @@ impl AppOnlinePc4LookupStartError {
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::TargetSnapshotMismatch => "pc4_online_target_snapshot_mismatch",
+            Self::ProfileNotQualified { .. } => "pc4_online_profile_not_qualified",
             Self::Lookup(error) => error.reason(),
         }
     }
@@ -251,7 +256,12 @@ impl AppOnlinePc4LookupStartError {
 
 impl From<LookupStartError> for AppOnlinePc4LookupStartError {
     fn from(value: LookupStartError) -> Self {
-        Self::Lookup(value)
+        match value {
+            LookupStartError::ProfileNotQualified { profile, reason } => {
+                Self::ProfileNotQualified { profile, reason }
+            }
+            error => Self::Lookup(error),
+        }
     }
 }
 
@@ -326,7 +336,7 @@ impl AppOnlinePc4LookupSession {
                 request.lookup_session(),
             ),
         }
-        .map_err(AppOnlinePc4LookupStartError::Lookup)?;
+        .map_err(AppOnlinePc4LookupStartError::from)?;
         let range_admission = RangeAdmissionSession::new(
             request.lookup_session(),
             request.target().snapshot().clone(),
@@ -532,6 +542,13 @@ mod tests {
     }
 
     fn snapshot(generation: &str) -> ActivatedSnapshot {
+        snapshot_with_profile_filter(generation, None)
+    }
+
+    fn snapshot_with_profile_filter(
+        generation: &str,
+        qualified_profile: Option<Pc4RuleProfile>,
+    ) -> ActivatedSnapshot {
         let identity = SnapshotIdentity::new(
             "synthetic/repository",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -590,7 +607,14 @@ mod tests {
                 } else {
                     manifest
                 };
-                ProfileAvailability::qualified(manifest)
+                if qualified_profile.is_none() || qualified_profile == Some(profile) {
+                    ProfileAvailability::qualified(manifest)
+                } else {
+                    ProfileAvailability::Unsupported {
+                        profile,
+                        reason: UnsupportedProfileReason::MissingProfileArtifacts,
+                    }
+                }
             })
             .collect();
         DatasetSnapshotManifest::new(
@@ -605,11 +629,15 @@ mod tests {
     }
 
     fn pinned_generation(generation: &str) -> PinnedPc4Generation {
+        pin_snapshot(snapshot(generation))
+    }
+
+    fn pin_snapshot(snapshot: ActivatedSnapshot) -> PinnedPc4Generation {
         let mut registry = Pc4GenerationRegistry::new(
             Pc4GenerationRetentionLimit::new(1).expect("one retained generation"),
         );
         let token = match registry
-            .stage(registry.version(), Arc::new(snapshot(generation)))
+            .stage(registry.version(), Arc::new(snapshot))
             .expect("stage synthetic generation")
         {
             Pc4GenerationStageOutcome::Staged { token, .. } => token,
@@ -703,6 +731,43 @@ mod tests {
 
         assert_eq!(error, AppOnlinePc4LookupStartError::TargetSnapshotMismatch);
         assert_eq!(error.reason(), "pc4_online_target_snapshot_mismatch");
+    }
+
+    #[test]
+    fn app_lookup_does_not_reuse_a_profile_absent_from_the_pinned_snapshot() {
+        let full = snapshot("generation-partial-app");
+        let srs_target = full
+            .qualified_target(
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(4).expect("4L target"),
+            )
+            .expect("full snapshot SRS target");
+        let partial =
+            snapshot_with_profile_filter("generation-partial-app", Some(Pc4RuleProfile::SrsPlus));
+        assert_eq!(srs_target.snapshot(), partial.qualified_identity());
+        let generation = pin_snapshot(partial);
+
+        let error = match AppOnlinePc4LookupSession::start(
+            generation,
+            Pc4OnlineLookupRequest::new(
+                lookup_session(100),
+                srs_target,
+                15,
+                range_limits(),
+                Pc4OfflineFallbackAuthorization::NotAuthorized,
+            ),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("unavailable pinned profile must fail before Range I/O"),
+        };
+        assert_eq!(
+            error,
+            AppOnlinePc4LookupStartError::ProfileNotQualified {
+                profile: Pc4RuleProfile::Srs,
+                reason: UnsupportedProfileReason::MissingProfileArtifacts,
+            }
+        );
     }
 
     #[test]

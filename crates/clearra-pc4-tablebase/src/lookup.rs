@@ -2,9 +2,10 @@ use core::cmp::Ordering;
 
 use crate::{
     manifest::{
-        ActivatedSnapshot, FieldIdIndexRelation, Pc4ArtifactRole, Pc4ProfileManifest,
-        Pc4RuleProfile, QualifiedSnapshotIdentity, FIELD_HASH_INDEX_MAGIC, FIELD_HASH_RECORD_BYTES,
-        GRAPH_OFFSETS_MAGIC, GRAPH_OFFSET_BYTES, INDEX_HEADER_BYTES, RANGE_INDEX_VERSION,
+        ActivatedProfileError, ActivatedSnapshot, FieldIdIndexRelation, Pc4ArtifactRole,
+        Pc4ProfileManifest, Pc4RuleProfile, QualifiedSnapshotIdentity, UnsupportedProfileReason,
+        FIELD_HASH_INDEX_MAGIC, FIELD_HASH_RECORD_BYTES, GRAPH_OFFSETS_MAGIC, GRAPH_OFFSET_BYTES,
+        INDEX_HEADER_BYTES, RANGE_INDEX_VERSION,
     },
     protocol::{
         LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
@@ -100,14 +101,26 @@ impl FormatMismatch {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LookupStartError {
-    FieldHashOutsidePc4Domain { field_hash: u64 },
-    FieldIdOutsidePc4Domain { field_id: u32, field_count: u32 },
-    ReverseFieldIdLookupNotQualified { profile: Pc4RuleProfile },
+    ProfileNotQualified {
+        profile: Pc4RuleProfile,
+        reason: UnsupportedProfileReason,
+    },
+    FieldHashOutsidePc4Domain {
+        field_hash: u64,
+    },
+    FieldIdOutsidePc4Domain {
+        field_id: u32,
+        field_count: u32,
+    },
+    ReverseFieldIdLookupNotQualified {
+        profile: Pc4RuleProfile,
+    },
 }
 
 impl LookupStartError {
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::ProfileNotQualified { .. } => "pc4_online_profile_not_qualified",
             Self::FieldHashOutsidePc4Domain { .. } => "pc4_online_field_hash_outside_pc4_domain",
             Self::FieldIdOutsidePc4Domain { .. } => "pc4_online_field_id_outside_pc4_domain",
             Self::ReverseFieldIdLookupNotQualified { .. } => {
@@ -201,12 +214,13 @@ impl LookupMachine {
         field_hash: u64,
         lookup_session: LookupSessionId,
     ) -> Result<Self, LookupStartError> {
+        let profile_manifest = qualified_profile(snapshot, profile)?;
         if field_hash > MAX_FIELD_HASH {
             return Err(LookupStartError::FieldHashOutsidePc4Domain { field_hash });
         }
         Ok(Self::start_with_selector(
             snapshot,
-            profile,
+            profile_manifest.clone(),
             lookup_session,
             LookupSelector::FieldHash(field_hash),
             Some(field_hash),
@@ -225,7 +239,7 @@ impl LookupMachine {
         field_id: u32,
         lookup_session: LookupSessionId,
     ) -> Result<Self, LookupStartError> {
-        let profile_manifest = snapshot.profile(profile);
+        let profile_manifest = qualified_profile(snapshot, profile)?;
         if profile_manifest.field_id_index_relation() != FieldIdIndexRelation::RecordOrdinal {
             return Err(LookupStartError::ReverseFieldIdLookupNotQualified { profile });
         }
@@ -238,7 +252,7 @@ impl LookupMachine {
         }
         Ok(Self::start_with_selector(
             snapshot,
-            profile,
+            profile_manifest.clone(),
             lookup_session,
             LookupSelector::FieldId(field_id),
             None,
@@ -247,7 +261,7 @@ impl LookupMachine {
 
     fn start_with_selector(
         snapshot: &ActivatedSnapshot,
-        profile: Pc4RuleProfile,
+        profile: Pc4ProfileManifest,
         lookup_session: LookupSessionId,
         selector: LookupSelector,
         field_hash: Option<u64>,
@@ -255,7 +269,7 @@ impl LookupMachine {
         let mut machine = Self {
             lookup_session,
             snapshot: snapshot.qualified_identity().clone(),
-            profile: snapshot.profile(profile).clone(),
+            profile,
             selector,
             field_hash,
             next_request_id: 1,
@@ -512,6 +526,17 @@ impl LookupMachine {
     }
 }
 
+fn qualified_profile(
+    snapshot: &ActivatedSnapshot,
+    profile: Pc4RuleProfile,
+) -> Result<&Pc4ProfileManifest, LookupStartError> {
+    snapshot.profile(profile).map_err(|error| match error {
+        ActivatedProfileError::NotQualified { profile, reason } => {
+            LookupStartError::ProfileNotQualified { profile, reason }
+        }
+    })
+}
+
 fn validate_response(request: &RangeRequest, response: &RangeResponse) -> Result<(), SupplyError> {
     if response.lookup_session != request.lookup_session() {
         return Err(SupplyError::LookupSessionMismatch);
@@ -640,7 +665,7 @@ mod tests {
     use super::*;
     use crate::manifest::tests::{
         activated_snapshot, activated_snapshot_with_field_id_relation,
-        activated_snapshot_with_manifest_content,
+        activated_snapshot_with_manifest_content, partially_activated_snapshot,
     };
 
     const HASHES: [u64; 3] = [0, 15, 30];
@@ -781,6 +806,38 @@ mod tests {
                 graph_record: vec![20, 21],
             })
         );
+    }
+
+    #[test]
+    fn lookup_start_is_available_only_for_the_independently_qualified_profile() {
+        let snapshot = partially_activated_snapshot(
+            Pc4RuleProfile::Srs,
+            HASHES.len() as u32,
+            GRAPH.len() as u64,
+        );
+
+        assert!(LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15, session(1),).is_ok());
+        for profile in [
+            Pc4RuleProfile::SrsPlus,
+            Pc4RuleProfile::SrsX,
+            Pc4RuleProfile::Jstris180,
+            Pc4RuleProfile::NoKick,
+        ] {
+            let expected = LookupStartError::ProfileNotQualified {
+                profile,
+                reason: UnsupportedProfileReason::MissingProfileArtifacts,
+            };
+            assert_eq!(
+                LookupMachine::start(&snapshot, profile, 15, session(2))
+                    .expect_err("unavailable hash profile must not start"),
+                expected
+            );
+            assert_eq!(
+                LookupMachine::start_by_field_id(&snapshot, profile, 0, session(3))
+                    .expect_err("unavailable direct-ID profile must not start"),
+                expected
+            );
+        }
     }
 
     #[test]

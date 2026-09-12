@@ -16,6 +16,7 @@ pub(crate) const RANGE_INDEX_VERSION: u32 = 1;
 const MAX_U24: u64 = 0x00ff_ffff;
 const HYDRA_FIELD_HASH_MASK: u64 = 0x00ff_ffff_ffff;
 const MAX_GRAPH_RECORD_BYTES: u32 = 16 * 1024 * 1024;
+const PC4_RULE_PROFILE_COUNT: usize = Pc4RuleProfile::ALL.len();
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Pc4RuleProfile {
@@ -43,6 +44,16 @@ impl Pc4RuleProfile {
             Self::Jstris180 => "jstris-180",
             Self::NoKick => "no-kick",
         }
+    }
+}
+
+const fn pc4_rule_profile_index(profile: Pc4RuleProfile) -> usize {
+    match profile {
+        Pc4RuleProfile::Srs => 0,
+        Pc4RuleProfile::SrsPlus => 1,
+        Pc4RuleProfile::SrsX => 2,
+        Pc4RuleProfile::Jstris180 => 3,
+        Pc4RuleProfile::NoKick => 4,
     }
 }
 
@@ -589,6 +600,30 @@ pub enum ProfileAvailability {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActivatedProfileError {
+    NotQualified {
+        profile: Pc4RuleProfile,
+        reason: UnsupportedProfileReason,
+    },
+}
+
+impl ActivatedProfileError {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::NotQualified { .. } => "pc4_online_profile_not_qualified",
+        }
+    }
+}
+
+impl fmt::Display for ActivatedProfileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for ActivatedProfileError {}
+
 impl ProfileAvailability {
     pub fn qualified(manifest: Pc4ProfileManifest) -> Self {
         Self::Qualified(Box::new(manifest))
@@ -606,14 +641,14 @@ impl ProfileAvailability {
 pub struct DatasetSnapshotManifest {
     identity: SnapshotIdentity,
     content_identity: ManifestContentIdentity,
-    profiles: Vec<ProfileAvailability>,
+    profiles: [ProfileAvailability; PC4_RULE_PROFILE_COUNT],
 }
 
 impl DatasetSnapshotManifest {
     pub fn new(
         identity: SnapshotIdentity,
         content_identity: ManifestContentIdentity,
-        profiles: Vec<ProfileAvailability>,
+        mut profiles: Vec<ProfileAvailability>,
     ) -> Result<Self, ManifestError> {
         if profiles.len() != Pc4RuleProfile::ALL.len() {
             return Err(ManifestError::ProfileSetIncomplete);
@@ -628,6 +663,10 @@ impl DatasetSnapshotManifest {
                 return Err(ManifestError::ProfileSetIncomplete);
             }
         }
+        profiles.sort_unstable_by_key(ProfileAvailability::profile);
+        let profiles = profiles
+            .try_into()
+            .map_err(|_| ManifestError::ProfileSetIncomplete)?;
         Ok(Self {
             identity,
             content_identity,
@@ -644,34 +683,19 @@ impl DatasetSnapshotManifest {
     }
 
     pub fn profile_availability(&self, profile: Pc4RuleProfile) -> &ProfileAvailability {
-        self.profiles
-            .iter()
-            .find(|candidate| candidate.profile() == profile)
-            .expect("validated manifest contains every PC4 profile")
+        &self.profiles[pc4_rule_profile_index(profile)]
     }
 
     pub fn activate<V>(self, verifier: &mut V) -> Result<ActivatedSnapshot, ActivationError>
     where
         V: DatasetSnapshotVerifier + ?Sized,
     {
-        let mut profiles = Vec::with_capacity(Pc4RuleProfile::ALL.len());
-        for profile in Pc4RuleProfile::ALL {
-            match self
-                .profiles
-                .iter()
-                .find(|candidate| candidate.profile() == profile)
-                .expect("validated manifest contains every PC4 profile")
-            {
-                ProfileAvailability::Qualified(manifest) => {
-                    profiles.push(manifest.as_ref().clone());
-                }
-                ProfileAvailability::Unsupported { reason, .. } => {
-                    return Err(ActivationError::UnsupportedProfile {
-                        profile,
-                        reason: *reason,
-                    });
-                }
-            }
+        if !self
+            .profiles
+            .iter()
+            .any(|profile| matches!(profile, ProfileAvailability::Qualified(_)))
+        {
+            return Err(ActivationError::NoQualifiedProfiles);
         }
 
         let attestation = verifier
@@ -695,7 +719,7 @@ impl DatasetSnapshotManifest {
 
         Ok(ActivatedSnapshot {
             qualified_identity: QualifiedSnapshotIdentity::from_verified_attestation(attestation),
-            profiles,
+            profiles: self.profiles,
         })
     }
 }
@@ -802,7 +826,7 @@ pub trait DatasetSnapshotVerifier {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActivatedSnapshot {
     qualified_identity: QualifiedSnapshotIdentity,
-    profiles: Vec<Pc4ProfileManifest>,
+    profiles: [ProfileAvailability; PC4_RULE_PROFILE_COUNT],
 }
 
 impl ActivatedSnapshot {
@@ -822,11 +846,23 @@ impl ActivatedSnapshot {
         &self.qualified_identity
     }
 
-    pub fn profile(&self, profile: Pc4RuleProfile) -> &Pc4ProfileManifest {
-        self.profiles
-            .iter()
-            .find(|candidate| candidate.profile() == profile)
-            .expect("activated snapshot contains every PC4 profile")
+    pub fn profile_availability(&self, profile: Pc4RuleProfile) -> &ProfileAvailability {
+        &self.profiles[pc4_rule_profile_index(profile)]
+    }
+
+    pub fn profile(
+        &self,
+        profile: Pc4RuleProfile,
+    ) -> Result<&Pc4ProfileManifest, ActivatedProfileError> {
+        match self.profile_availability(profile) {
+            ProfileAvailability::Qualified(manifest) => Ok(manifest),
+            ProfileAvailability::Unsupported { reason, .. } => {
+                Err(ActivatedProfileError::NotQualified {
+                    profile,
+                    reason: *reason,
+                })
+            }
+        }
     }
 
     /// Mints a target-bound identity only when that exact profile/target
@@ -837,8 +873,12 @@ impl ActivatedSnapshot {
         use_case: Pc4TerminalUseCase,
         target_lines: Pc4TargetLines,
     ) -> Result<QualifiedPc4TargetIdentity, TargetQualificationError> {
-        let qualification = self
-            .profile(profile)
+        let profile_manifest = self.profile(profile).map_err(|error| match error {
+            ActivatedProfileError::NotQualified { profile, reason } => {
+                TargetQualificationError::ProfileNotQualified { profile, reason }
+            }
+        })?;
+        let qualification = profile_manifest
             .target_qualification(use_case, target_lines)
             .ok_or(TargetQualificationError::Unavailable {
                 profile,
@@ -894,6 +934,10 @@ impl QualifiedPc4TargetIdentity {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TargetQualificationError {
+    ProfileNotQualified {
+        profile: Pc4RuleProfile,
+        reason: UnsupportedProfileReason,
+    },
     Unavailable {
         profile: Pc4RuleProfile,
         use_case: Pc4TerminalUseCase,
@@ -904,6 +948,7 @@ pub enum TargetQualificationError {
 impl TargetQualificationError {
     pub const fn reason(self) -> &'static str {
         match self {
+            Self::ProfileNotQualified { .. } => "pc4_online_profile_not_qualified",
             Self::Unavailable { .. } => "pc4_online_target_completeness_unavailable",
         }
     }
@@ -919,10 +964,7 @@ impl std::error::Error for TargetQualificationError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ActivationError {
-    UnsupportedProfile {
-        profile: Pc4RuleProfile,
-        reason: UnsupportedProfileReason,
-    },
+    NoQualifiedProfiles,
     VerificationRejected,
     VerificationProviderError,
     VerificationBindingDrift {
@@ -939,7 +981,7 @@ pub enum SnapshotVerificationBinding {
 impl ActivationError {
     pub const fn reason(&self) -> &'static str {
         match self {
-            Self::UnsupportedProfile { .. } => "pc4_online_unsupported_profile",
+            Self::NoQualifiedProfiles => "pc4_online_no_qualified_profiles",
             Self::VerificationRejected => "pc4_online_snapshot_verification_rejected",
             Self::VerificationProviderError => "pc4_online_snapshot_verification_provider_error",
             Self::VerificationBindingDrift { .. } => {
@@ -1336,6 +1378,46 @@ pub(crate) mod tests {
         )
     }
 
+    pub(crate) fn partially_activated_snapshot(
+        qualified_profile: Pc4RuleProfile,
+        field_count: u32,
+        graph_bytes: u64,
+    ) -> ActivatedSnapshot {
+        let profiles = Pc4RuleProfile::ALL
+            .into_iter()
+            .map(|profile| {
+                if profile == qualified_profile {
+                    ProfileAvailability::qualified(qualified_profile_with_field_id_relation(
+                        profile,
+                        field_count,
+                        graph_bytes,
+                        GraphTargetEncoding::U24LittleEndian,
+                        FieldIdIndexRelation::RecordOrdinal,
+                    ))
+                } else {
+                    ProfileAvailability::Unsupported {
+                        profile,
+                        reason: UnsupportedProfileReason::MissingProfileArtifacts,
+                    }
+                }
+            })
+            .collect();
+        DatasetSnapshotManifest::new(
+            SnapshotIdentity::new(
+                "synthetic/repository",
+                SYNTHETIC_REVISION_A,
+                "generation-partial",
+            )
+            .expect("synthetic partial identity"),
+            ManifestContentIdentity::new("synthetic-partial-manifest")
+                .expect("synthetic partial manifest content identity"),
+            profiles,
+        )
+        .expect("synthetic partial manifest")
+        .activate(&mut SyntheticVerifier)
+        .expect("one qualified profile activates")
+    }
+
     pub(crate) fn activated_snapshot_with_manifest_content(
         field_count: u32,
         graph_bytes: u64,
@@ -1544,36 +1626,102 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn production_activation_requires_every_profile_to_be_qualified() {
-        let mut profiles: Vec<_> = Pc4RuleProfile::ALL
-            .into_iter()
-            .map(|profile| {
-                ProfileAvailability::qualified(qualified_profile(
-                    profile,
-                    2,
-                    8,
-                    GraphTargetEncoding::U24LittleEndian,
-                ))
-            })
-            .collect();
-        profiles[2] = ProfileAvailability::Unsupported {
-            profile: Pc4RuleProfile::SrsX,
-            reason: UnsupportedProfileReason::MissingProfileSpecificIndex,
-        };
-        let manifest = DatasetSnapshotManifest::new(
+    fn activation_preserves_one_qualified_and_four_typed_unavailable_profiles() {
+        let active = qualified_profile(
+            Pc4RuleProfile::Srs,
+            2,
+            8,
+            GraphTargetEncoding::U24LittleEndian,
+        )
+        .with_target_qualifications(vec![target_qualification(4)])
+        .expect("qualified active target");
+        let unavailable = [
+            (
+                Pc4RuleProfile::SrsPlus,
+                UnsupportedProfileReason::MissingProfileArtifacts,
+            ),
+            (
+                Pc4RuleProfile::SrsX,
+                UnsupportedProfileReason::MissingProfileSpecificIndex,
+            ),
+            (
+                Pc4RuleProfile::Jstris180,
+                UnsupportedProfileReason::MissingFormatSpecification,
+            ),
+            (
+                Pc4RuleProfile::NoKick,
+                UnsupportedProfileReason::MissingKnownAnswers,
+            ),
+        ];
+        let mut profiles = vec![ProfileAvailability::qualified(active)];
+        profiles.extend(
+            unavailable
+                .into_iter()
+                .map(|(profile, reason)| ProfileAvailability::Unsupported { profile, reason }),
+        );
+        let snapshot = DatasetSnapshotManifest::new(
             SnapshotIdentity::new("repository", SYNTHETIC_REVISION_A, "generation")
                 .expect("identity"),
-            ManifestContentIdentity::new("synthetic-incomplete-manifest")
+            ManifestContentIdentity::new("synthetic-partial-manifest")
                 .expect("manifest content identity"),
             profiles,
         )
-        .expect("staging manifest");
+        .expect("partial manifest")
+        .activate(&mut SyntheticVerifier)
+        .expect("at least one qualified profile activates");
+
+        assert!(snapshot.profile(Pc4RuleProfile::Srs).is_ok());
+        assert!(snapshot
+            .qualified_target(
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(4).expect("4L target"),
+            )
+            .is_ok());
+        for (profile, reason) in unavailable {
+            assert!(matches!(
+                snapshot.profile_availability(profile),
+                ProfileAvailability::Unsupported {
+                    profile: actual_profile,
+                    reason: actual_reason,
+                } if *actual_profile == profile && *actual_reason == reason
+            ));
+            assert_eq!(
+                snapshot.profile(profile),
+                Err(ActivatedProfileError::NotQualified { profile, reason })
+            );
+            assert_eq!(
+                snapshot.qualified_target(
+                    profile,
+                    Pc4TerminalUseCase::PcSearch,
+                    Pc4TargetLines::new(4).expect("4L target"),
+                ),
+                Err(TargetQualificationError::ProfileNotQualified { profile, reason })
+            );
+        }
+    }
+
+    #[test]
+    fn activation_rejects_a_manifest_with_no_qualified_profiles() {
+        let profiles = Pc4RuleProfile::ALL
+            .into_iter()
+            .map(|profile| ProfileAvailability::Unsupported {
+                profile,
+                reason: UnsupportedProfileReason::MissingProfileArtifacts,
+            })
+            .collect();
+        let manifest = DatasetSnapshotManifest::new(
+            SnapshotIdentity::new("repository", SYNTHETIC_REVISION_A, "generation-none")
+                .expect("identity"),
+            ManifestContentIdentity::new("synthetic-all-unavailable-manifest")
+                .expect("manifest content identity"),
+            profiles,
+        )
+        .expect("complete availability manifest");
+
         assert_eq!(
             manifest.activate(&mut SyntheticVerifier),
-            Err(ActivationError::UnsupportedProfile {
-                profile: Pc4RuleProfile::SrsX,
-                reason: UnsupportedProfileReason::MissingProfileSpecificIndex,
-            })
+            Err(ActivationError::NoQualifiedProfiles)
         );
     }
 
