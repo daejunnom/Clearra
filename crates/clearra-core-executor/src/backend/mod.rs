@@ -105,8 +105,9 @@ pub use wasm_cpu::WasmWebGpuCandidateProducer;
 pub use wasm_cpu::{
     canonical_wasm_candidate_packet_batch_sha256, compile_pc4_compact_tablebase,
     encode_canonical_wasm_candidate_packet_batch, install_pc4_compact_tablebase,
-    release_pc4_compact_tablebase, Pc4CompactTablebase, Pc4CompactTablebaseArtifact,
-    Pc4TablebaseError, Pc4TablebaseLookup, WasmBuildProbabilityCandidateProducer,
+    materialize_pc4_ilc_transition, release_pc4_compact_tablebase, Pc4CompactTablebase,
+    Pc4CompactTablebaseArtifact, Pc4IlcMaterializationError, Pc4IlcPlacement, Pc4TablebaseError,
+    Pc4TablebaseLookup, WasmBuildProbabilityCandidateProducer,
     WasmBuildProbabilityDistributedResultMerger, WasmBuildProbabilityDistributedVerifier,
     WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
     WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,

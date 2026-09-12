@@ -4098,7 +4098,7 @@ const fn full_row_mask(width: u8) -> u64 {
     }
 }
 
-fn compact_target_board(width: u8, height: u8, board: u64, deleted_rows: u16) -> u64 {
+pub(super) fn compact_target_board(width: u8, height: u8, board: u64, deleted_rows: u16) -> u64 {
     let row_bits = full_row_mask(width);
     let mut compacted = 0_u64;
     let mut output_row = 0_u8;

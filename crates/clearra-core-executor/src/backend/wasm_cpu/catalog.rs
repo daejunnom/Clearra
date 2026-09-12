@@ -216,6 +216,20 @@ impl GeometryCatalog {
         let height = u8::try_from(problem.visible_height()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_target_frame_height_overflow")
         })?;
+        Self::compile_for_required_cells_on_dimensions(width, height, initial_board, required_cells)
+    }
+
+    /// Compile the same inverse lock-clear catalog for an already qualified
+    /// compact target frame. This keeps PC4 graph-edge materialization on the
+    /// exact ILC implementation without manufacturing a product search
+    /// request or giving a graph record any search authority beyond its
+    /// source/target cells.
+    pub(super) fn compile_for_required_cells_on_dimensions(
+        width: u8,
+        height: u8,
+        initial_board: u64,
+        required_cells: u64,
+    ) -> Result<Self, WasmExactSearchError> {
         let cell_count = usize::from(width) * usize::from(height);
         if width == 0 || height == 0 || cell_count > u64::BITS as usize || height > 16 {
             return Err(WasmExactSearchError::InvalidProblem(
