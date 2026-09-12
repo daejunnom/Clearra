@@ -17,6 +17,7 @@ mod manifest;
 mod materializer;
 mod observation_frontier;
 mod protocol;
+mod range_admission;
 mod range_fragment_cache;
 
 pub use bag_draw::{
@@ -92,6 +93,11 @@ pub use observation_frontier::{
 };
 pub use protocol::{
     LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
+};
+pub use range_admission::{
+    RangeAdmissionAttempt, RangeAdmissionBinding, RangeAdmissionBudgetKind, RangeAdmissionError,
+    RangeAdmissionGuard, RangeAdmissionInput, RangeAdmissionLimits, RangeAdmissionOutcome,
+    RangeAdmissionSession, RangeAdmissionUsage, RangeHttpResponse,
 };
 pub use range_fragment_cache::{
     RangeFragmentCache, RangeFragmentCacheBudgetKind, RangeFragmentCacheError,
