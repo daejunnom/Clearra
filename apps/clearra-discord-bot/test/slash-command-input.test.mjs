@@ -836,6 +836,11 @@ test("automatic PC targets use field blocks and the exact required piece window"
     [2],
     "completed input rows compact inside the preserved two-line target frame",
   );
+  assert.deepEqual(
+    automaticPcLines({ occupied: (0xffn << 20n) | 0x3ffn, pieceCount: 3 }),
+    [2],
+    "cells above the raw target become valid after an initial completed row clears",
+  );
   assert.throws(
     () => automaticPcLines({ occupied: 0n, pieceCount: 4 }),
     /no valid automatic/,
@@ -860,6 +865,17 @@ test("native PC slash inputs compact completed rows without shrinking explicit l
   assert.equal(pathArguments[pathArguments.indexOf("--height") + 1], "2");
   assert.equal(pathArguments[pathArguments.indexOf("--pieces") + 1], "3");
   assert.equal(pathArguments[pathArguments.indexOf("--board-mask") + 1], "0xff");
+
+  const shiftedPathArguments = buildSlashCommandArguments(pc.subcommands.path, [
+    { name: "field", value: "grid:########__/__________/##########" },
+    { name: "next", value: "IOT" },
+    { name: "lines", value: 2 },
+    { name: "hold", value: "disabled" },
+  ]);
+  assert.equal(shiftedPathArguments[shiftedPathArguments.indexOf("--lines") + 1], "2");
+  assert.equal(shiftedPathArguments[shiftedPathArguments.indexOf("--height") + 1], "2");
+  assert.equal(shiftedPathArguments[shiftedPathArguments.indexOf("--pieces") + 1], "3");
+  assert.equal(shiftedPathArguments[shiftedPathArguments.indexOf("--board-mask") + 1], "0x3fc00");
 
   const scoreFinderArguments = buildSlashCommandArguments(pc.subcommands["score-finder"], [
     { name: "field", value: field },
