@@ -19,16 +19,19 @@ the coordinator merges a compact, replay-safe summary per root. Work is assigned
 to the next ready worker, so an idle worker steals the next unclaimed batch rather
 than waiting for a fixed shard owner.
 
-Natural roots are never split into synthetic sub-roots. The browser chooses a
-root batch size dynamically as
+Natural roots are never split into synthetic sub-roots. One requested compute
+slot remains the coordinator and the rest are verifier workers. The browser
+chooses a root batch size dynamically as
 
 ```text
 ceil(root_count / (active_verifiers * 4)), capped at 64 roots
 ```
 
-This gives P7 with 140 roots and 8 workers a five-root batch. It leaves four
-dispatch waves per worker for load balancing while preserving enough work inside
-each durable worker transaction to amortize transport and verification overhead.
+This gives P7 with 140 roots and 8 requested compute slots seven verifiers and a
+five-root batch. Seven requested slots use six verifiers and a six-root batch.
+Both leave about four dispatch waves per verifier for load balancing while
+preserving enough work inside each durable worker transaction to amortize
+transport and verification overhead.
 
 ## Benchmark boundary
 
@@ -48,16 +51,21 @@ each durable worker transaction to amortize transport and verification overhead.
 
 ## Measurements
 
-| Source / policy | VM workers | Time | Searching active workers | Worker batches | Result |
+| Source / policy | Requested slots | Time | GUI active slots while searching | Worker batches | Result |
 | --- | ---: | ---: | ---: | ---: | --- |
 | pre-v0.8 exact artifact `b10b4356` | 8 requested, 7 compute | 104.73 s | 7.00 mean | legacy | exact |
 | current baseline `c97090b` | 7 | 241.76 s | 5.72 mean, 2–7 | 14,580 | exact |
 | current baseline `c97090b` | 8 | 233.81 s | 6.49 mean, 2–8 | 14,581 | exact |
-| root-worker v1, dynamic five-root batches | 7 | 153.46 s | 7.00 mean, 7–7 | 24 | exact |
+| root-worker v1, dynamic six-root batches | 7 | 153.46 s | 7.00 mean, 7–7 | 24 | exact |
 | root-worker v1, dynamic five-root batches | 8 | **142.17 s** | 7.95 mean, 7–8 | 28 | exact |
 | root-worker v2, one root per batch | 8 | 159.74 s | 8.00 mean, 8–8 | 140 | exact |
-| final-policy repeat, dynamic five-root batches | 7 | 176.44 s | 7.00 mean, 7–7 | 24 | exact |
+| final-policy repeat, dynamic six-root batches | 7 | 176.44 s | 7.00 mean, 7–7 | 24 | exact |
 | final-policy repeat, dynamic five-root batches | 8 | 168.28 s | 8.00 mean, 8–8 | 28 | exact |
+
+For the current root-worker path, the GUI active count includes the coordinator
+until production completes. The 7-slot runs therefore use six verifier workers;
+the 8-slot runs use seven. After the 140 roots have been dispatched, only the
+remaining verifier work appears in the drain count.
 
 The best comparable optimized sample is 142.17 seconds: 39.2% faster than the
 233.81-second current-baseline 8-worker run. Seven to eight workers improved the
