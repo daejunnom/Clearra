@@ -25,6 +25,7 @@ const CANDIDATE_MAGIC: u32 = 0x4342_4131;
 const PARTIAL_MAGIC: u32 = 0x5052_5431;
 const PARTIAL_BATCH_MAGIC: u32 = 0x5052_4231;
 const TILING_ROOT_CHUNK_MAGIC: u32 = 0x5452_4331;
+const PC_ROOT_SUMMARY_MAGIC: u32 = 0x5052_5331;
 const WIRE_VERSION: u32 = 8;
 const MAX_WIRE_ITEMS: usize = 16_000_000;
 
@@ -400,6 +401,32 @@ pub(crate) fn checked_candidate_vec_retained_bytes(
 }
 
 pub fn encode_tiling_root_chunk(chunk: &WasmTilingRootChunk) -> Vec<u8> {
+    if let Some((candidate_count, candidate_digest)) = chunk.pc_candidate_summary() {
+        let mut output = Vec::with_capacity(94);
+        put_u32(&mut output, PC_ROOT_SUMMARY_MAGIC);
+        put_u32(&mut output, WIRE_VERSION);
+        output.push(chunk.pass_index());
+        put_u32(&mut output, chunk.root_ordinal().unwrap_or(u32::MAX));
+        put_u64(&mut output, candidate_count as u64);
+        put_u64(&mut output, candidate_digest);
+        match chunk.candidate_family_count() {
+            Some(count) => {
+                output.push(1);
+                put_u128(&mut output, count);
+            }
+            None => {
+                output.push(0);
+                put_u128(&mut output, 0);
+            }
+        }
+        put_u64(&mut output, chunk.expanded_nodes() as u64);
+        put_u64(&mut output, chunk.peak_frontier() as u64);
+        put_u64(&mut output, chunk.domain_pruned_states() as u64);
+        put_u64(&mut output, chunk.hall_pruned_states() as u64);
+        put_u64(&mut output, chunk.column_pruned_states() as u64);
+        put_u64(&mut output, chunk.component_compositions() as u64);
+        return output;
+    }
     let mut output = Vec::with_capacity(91 + chunk.identities().len() * 32);
     put_u32(&mut output, TILING_ROOT_CHUNK_MAGIC);
     put_u32(&mut output, WIRE_VERSION);
@@ -435,6 +462,13 @@ pub fn encode_tiling_root_chunk(chunk: &WasmTilingRootChunk) -> Vec<u8> {
 }
 
 pub fn decode_tiling_root_chunk(input: &[u8]) -> Result<WasmTilingRootChunk, DistributedWireError> {
+    if input
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .is_some_and(|bytes| u32::from_le_bytes(bytes) == PC_ROOT_SUMMARY_MAGIC)
+    {
+        return decode_pc_root_summary(input);
+    }
     let mut reader = Reader::new(input);
     reader.require_header(TILING_ROOT_CHUNK_MAGIC)?;
     let pass_index = reader.u8()?;
@@ -495,11 +529,57 @@ pub fn decode_tiling_root_chunk(input: &[u8]) -> Result<WasmTilingRootChunk, Dis
     ))
 }
 
+fn decode_pc_root_summary(input: &[u8]) -> Result<WasmTilingRootChunk, DistributedWireError> {
+    let mut reader = Reader::new(input);
+    reader.require_header(PC_ROOT_SUMMARY_MAGIC)?;
+    let pass_index = reader.u8()?;
+    let root_ordinal = reader.u32()?;
+    let candidate_count = reader.usize_u64()?;
+    let candidate_digest = reader.u64()?;
+    let candidate_family_count = match reader.u8()? {
+        0 => {
+            reader.u128()?;
+            None
+        }
+        1 => Some(reader.u128()?),
+        _ => {
+            return Err(DistributedWireError(
+                "pc_root_candidate_family_flag_invalid",
+            ));
+        }
+    };
+    let expanded_nodes = reader.usize_u64()?;
+    let peak_frontier = reader.usize_u64()?;
+    let domain_pruned_states = reader.usize_u64()?;
+    let hall_pruned_states = reader.usize_u64()?;
+    let column_pruned_states = reader.usize_u64()?;
+    let component_compositions = reader.usize_u64()?;
+    reader.finish()?;
+    Ok(WasmTilingRootChunk::from_pc_root_summary_parts(
+        pass_index,
+        root_ordinal,
+        candidate_count,
+        candidate_digest,
+        candidate_family_count,
+        expanded_nodes,
+        peak_frontier,
+        domain_pruned_states,
+        hall_pruned_states,
+        column_pruned_states,
+        component_compositions,
+    ))
+}
+
 pub fn is_tiling_root_chunk(input: &[u8]) -> bool {
     input
         .get(..4)
         .and_then(|bytes| bytes.try_into().ok())
-        .is_some_and(|bytes| u32::from_le_bytes(bytes) == TILING_ROOT_CHUNK_MAGIC)
+        .is_some_and(|bytes| {
+            matches!(
+                u32::from_le_bytes(bytes),
+                TILING_ROOT_CHUNK_MAGIC | PC_ROOT_SUMMARY_MAGIC
+            )
+        })
 }
 
 trait CheckedWireSink {
@@ -3842,6 +3922,31 @@ mod tests {
         assert!(is_tiling_root_chunk(&encoded));
         assert_eq!(
             decode_tiling_root_chunk(&encoded).expect("tiling root chunk"),
+            chunk
+        );
+    }
+
+    #[test]
+    fn pc_root_summary_round_trips_without_candidate_identities() {
+        let chunk = WasmTilingRootChunk::from_pc_root_summary_parts(
+            0,
+            9,
+            4_094_016,
+            0x1234_5678_9abc_def0,
+            Some(1),
+            31,
+            7,
+            5,
+            3,
+            2,
+            1,
+        );
+
+        let encoded = encode_tiling_root_chunk(&chunk);
+        assert!(is_tiling_root_chunk(&encoded));
+        assert_eq!(encoded.len(), 94);
+        assert_eq!(
+            decode_tiling_root_chunk(&encoded).expect("PC root summary"),
             chunk
         );
     }

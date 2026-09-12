@@ -131,7 +131,7 @@ wasm-bindgen "$TARGET_ROOT/wasm32-unknown-unknown/release/clearra_wasm.wasm" --t
   await run('wsl.exe', [
     '-d',
     distribution,
-    '--',
+    '--exec',
     'bash',
     '-lc',
     `printf '%s' '${encoded}' | base64 -d | bash`
@@ -349,11 +349,11 @@ async function benchmarkToolchainIdentity() {
     return {
       environment: 'wsl',
       distribution,
-      rustc: await capture('wsl.exe', ['-d', distribution, '--', 'bash', '-lc', 'rustc -Vv']),
-      cargo: await capture('wsl.exe', ['-d', distribution, '--', 'bash', '-lc', 'cargo -V']),
+      rustc: await capture('wsl.exe', ['-d', distribution, '--exec', 'bash', '-lc', 'rustc -Vv']),
+      cargo: await capture('wsl.exe', ['-d', distribution, '--exec', 'bash', '-lc', 'cargo -V']),
       wasm_bindgen: await capture(
         'wsl.exe',
-        ['-d', distribution, '--', 'bash', '-lc', 'wasm-bindgen --version']
+        ['-d', distribution, '--exec', 'bash', '-lc', 'wasm-bindgen --version']
       ),
       rust_build_environment: 'default',
     };
@@ -374,7 +374,7 @@ async function assertDefaultRustBuildEnvironment() {
     const result = await capture('wsl.exe', [
       '-d',
       distribution,
-      '--',
+      '--exec',
       'bash',
       '-lc',
       `for key in ${keys}; do if [ -n "\${!key}" ]; then printf '%s\\n' "$key"; fi; done; printf '%s\\n' checked`,

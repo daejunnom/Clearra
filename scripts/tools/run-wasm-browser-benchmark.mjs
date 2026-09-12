@@ -13,6 +13,9 @@ if (!fs.existsSync(benchmarkEntry) || !fs.statSync(benchmarkEntry).isFile()) {
   );
 }
 const timeoutMs = positiveInteger(options.timeout ?? '3600000', 'timeout');
+const benchmarkPort = options.port === undefined
+  ? 0
+  : positiveInteger(options.port, 'port');
 const cacheBase = process.platform === 'win32'
   ? process.env.LOCALAPPDATA || process.env.TEMP || resolve(process.env.USERPROFILE || '.', 'AppData', 'Local')
   : process.env.XDG_CACHE_HOME || resolve(process.env.HOME || '.', '.cache');
@@ -54,7 +57,8 @@ try {
       }
       serveStatic(root, request, response);
     });
-    server.listen(0, '127.0.0.1', () => {
+    server.once('error', rejectResult);
+    server.listen(benchmarkPort, '127.0.0.1', () => {
       const address = server.address();
       if (!address || typeof address === 'string') {
         rejectResult(new Error('benchmark server did not expose a TCP port'));
@@ -69,7 +73,7 @@ try {
       if (options['runtime-prewarm-workers']) {
         url.searchParams.set('runtimePrewarmWorkers', options['runtime-prewarm-workers']);
       }
-      browser = spawn(resolveBrowser(options.browser), [
+      const browserArgs = [
         `--user-data-dir=${profile}`,
         '--headless=new',
         '--remote-debugging-port=0',
@@ -80,7 +84,14 @@ try {
         '--disable-sync',
         '--metrics-recording-only',
         url.href,
-      ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+      ];
+      if (options['no-sandbox'] === 'true') {
+        browserArgs.splice(browserArgs.length - 1, 0, '--no-sandbox');
+      }
+      browser = spawn(resolveBrowser(options.browser), browserArgs, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        windowsHide: true
+      });
       processMemoryProbe = startProcessMemoryProbe(browser.pid, profile, options);
       let browserError = '';
       browser.stderr.on('data', (chunk) => { browserError += chunk.toString(); });
