@@ -1,3 +1,7 @@
+// SRP rationale: this module has one behavior-level change reason: defining,
+// validating, and activating one immutable PC4 dataset snapshot manifest and
+// its exact range-index identities.
+
 use core::fmt;
 
 pub(crate) const INDEX_HEADER_BYTES: u64 = 16;
@@ -68,6 +72,22 @@ pub struct SnapshotIdentity {
     repository: String,
     revision: String,
     generation: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ManifestContentIdentity(String);
+
+impl ManifestContentIdentity {
+    pub fn new(value: impl Into<String>) -> Result<Self, ManifestError> {
+        Ok(Self(required_identity(
+            value.into(),
+            "manifest_content_identity_missing",
+        )?))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl SnapshotIdentity {
@@ -346,12 +366,14 @@ impl ProfileAvailability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatasetSnapshotManifest {
     identity: SnapshotIdentity,
+    content_identity: ManifestContentIdentity,
     profiles: Vec<ProfileAvailability>,
 }
 
 impl DatasetSnapshotManifest {
     pub fn new(
         identity: SnapshotIdentity,
+        content_identity: ManifestContentIdentity,
         profiles: Vec<ProfileAvailability>,
     ) -> Result<Self, ManifestError> {
         if profiles.len() != Pc4RuleProfile::ALL.len() {
@@ -367,11 +389,19 @@ impl DatasetSnapshotManifest {
                 return Err(ManifestError::ProfileSetIncomplete);
             }
         }
-        Ok(Self { identity, profiles })
+        Ok(Self {
+            identity,
+            content_identity,
+            profiles,
+        })
     }
 
     pub const fn identity(&self) -> &SnapshotIdentity {
         &self.identity
+    }
+
+    pub const fn content_identity(&self) -> &ManifestContentIdentity {
+        &self.content_identity
     }
 
     pub fn profile_availability(&self, profile: Pc4RuleProfile) -> &ProfileAvailability {
@@ -381,7 +411,10 @@ impl DatasetSnapshotManifest {
             .expect("validated manifest contains every PC4 profile")
     }
 
-    pub fn activate(self) -> Result<ActivatedSnapshot, ActivationError> {
+    pub fn activate<V>(self, verifier: &mut V) -> Result<ActivatedSnapshot, ActivationError>
+    where
+        V: DatasetSnapshotVerifier + ?Sized,
+    {
         let mut profiles = Vec::with_capacity(Pc4RuleProfile::ALL.len());
         for profile in Pc4RuleProfile::ALL {
             match self
@@ -401,22 +434,118 @@ impl DatasetSnapshotManifest {
                 }
             }
         }
+
+        let attestation = verifier
+            .verify(SnapshotVerificationRequest { manifest: &self })
+            .map_err(|failure| match failure {
+                SnapshotVerificationFailure::Rejected => ActivationError::VerificationRejected,
+                SnapshotVerificationFailure::ProviderError => {
+                    ActivationError::VerificationProviderError
+                }
+            })?;
+        if attestation.snapshot_identity() != &self.identity {
+            return Err(ActivationError::VerificationBindingDrift {
+                binding: SnapshotVerificationBinding::SnapshotIdentity,
+            });
+        }
+        if attestation.manifest_content_identity() != &self.content_identity {
+            return Err(ActivationError::VerificationBindingDrift {
+                binding: SnapshotVerificationBinding::ManifestContentIdentity,
+            });
+        }
+
         Ok(ActivatedSnapshot {
-            identity: self.identity,
+            attestation,
             profiles,
         })
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SnapshotVerificationRequest<'a> {
+    manifest: &'a DatasetSnapshotManifest,
+}
+
+impl<'a> SnapshotVerificationRequest<'a> {
+    pub const fn snapshot_identity(self) -> &'a SnapshotIdentity {
+        self.manifest.identity()
+    }
+
+    pub const fn manifest_content_identity(self) -> &'a ManifestContentIdentity {
+        self.manifest.content_identity()
+    }
+
+    pub fn profile_availability(self, profile: Pc4RuleProfile) -> &'a ProfileAvailability {
+        self.manifest.profile_availability(profile)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotVerificationAttestation {
+    snapshot_identity: SnapshotIdentity,
+    manifest_content_identity: ManifestContentIdentity,
+    evidence_identity: String,
+}
+
+impl SnapshotVerificationAttestation {
+    pub fn new(
+        snapshot_identity: SnapshotIdentity,
+        manifest_content_identity: ManifestContentIdentity,
+        evidence_identity: impl Into<String>,
+    ) -> Result<Self, ManifestError> {
+        Ok(Self {
+            snapshot_identity,
+            manifest_content_identity,
+            evidence_identity: required_identity(
+                evidence_identity.into(),
+                "snapshot_verification_evidence_identity_missing",
+            )?,
+        })
+    }
+
+    pub const fn snapshot_identity(&self) -> &SnapshotIdentity {
+        &self.snapshot_identity
+    }
+
+    pub const fn manifest_content_identity(&self) -> &ManifestContentIdentity {
+        &self.manifest_content_identity
+    }
+
+    pub fn evidence_identity(&self) -> &str {
+        &self.evidence_identity
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotVerificationFailure {
+    Rejected,
+    ProviderError,
+}
+
+pub trait DatasetSnapshotVerifier {
+    fn verify(
+        &mut self,
+        request: SnapshotVerificationRequest<'_>,
+    ) -> Result<SnapshotVerificationAttestation, SnapshotVerificationFailure>;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActivatedSnapshot {
-    identity: SnapshotIdentity,
+    attestation: SnapshotVerificationAttestation,
     profiles: Vec<Pc4ProfileManifest>,
 }
 
 impl ActivatedSnapshot {
     pub const fn identity(&self) -> &SnapshotIdentity {
-        &self.identity
+        self.attestation.snapshot_identity()
+    }
+
+    pub const fn manifest_content_identity(&self) -> &ManifestContentIdentity {
+        self.attestation.manifest_content_identity()
+    }
+
+    pub const fn verification_attestation(&self) -> &SnapshotVerificationAttestation {
+        &self.attestation
     }
 
     pub fn profile(&self, profile: Pc4RuleProfile) -> &Pc4ProfileManifest {
@@ -433,12 +562,28 @@ pub enum ActivationError {
         profile: Pc4RuleProfile,
         reason: UnsupportedProfileReason,
     },
+    VerificationRejected,
+    VerificationProviderError,
+    VerificationBindingDrift {
+        binding: SnapshotVerificationBinding,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotVerificationBinding {
+    SnapshotIdentity,
+    ManifestContentIdentity,
 }
 
 impl ActivationError {
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::UnsupportedProfile { .. } => "pc4_online_unsupported_profile",
+            Self::VerificationRejected => "pc4_online_snapshot_verification_rejected",
+            Self::VerificationProviderError => "pc4_online_snapshot_verification_provider_error",
+            Self::VerificationBindingDrift { .. } => {
+                "pc4_online_snapshot_verification_binding_drift"
+            }
         }
     }
 }
@@ -562,6 +707,89 @@ fn require_role(
 pub(crate) mod tests {
     use super::*;
 
+    pub(crate) struct SyntheticVerifier;
+
+    impl DatasetSnapshotVerifier for SyntheticVerifier {
+        fn verify(
+            &mut self,
+            request: SnapshotVerificationRequest<'_>,
+        ) -> Result<SnapshotVerificationAttestation, SnapshotVerificationFailure> {
+            Ok(SnapshotVerificationAttestation::new(
+                request.snapshot_identity().clone(),
+                request.manifest_content_identity().clone(),
+                "synthetic-verification-evidence",
+            )
+            .expect("synthetic verification evidence identity"))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum VerificationMode {
+        Accept,
+        Reject,
+        ProviderError,
+        DriftSnapshot,
+        DriftManifestContent,
+    }
+
+    struct ControlledVerifier {
+        mode: VerificationMode,
+        calls: usize,
+    }
+
+    impl ControlledVerifier {
+        const fn new(mode: VerificationMode) -> Self {
+            Self { mode, calls: 0 }
+        }
+    }
+
+    impl DatasetSnapshotVerifier for ControlledVerifier {
+        fn verify(
+            &mut self,
+            request: SnapshotVerificationRequest<'_>,
+        ) -> Result<SnapshotVerificationAttestation, SnapshotVerificationFailure> {
+            self.calls += 1;
+            match self.mode {
+                VerificationMode::Reject => Err(SnapshotVerificationFailure::Rejected),
+                VerificationMode::ProviderError => Err(SnapshotVerificationFailure::ProviderError),
+                VerificationMode::Accept
+                | VerificationMode::DriftSnapshot
+                | VerificationMode::DriftManifestContent => {
+                    for profile in Pc4RuleProfile::ALL {
+                        assert!(matches!(
+                            request.profile_availability(profile),
+                            ProfileAvailability::Qualified(_)
+                        ));
+                    }
+                    let snapshot_identity = if matches!(self.mode, VerificationMode::DriftSnapshot)
+                    {
+                        SnapshotIdentity::new(
+                            "synthetic/other-repository",
+                            "immutable-other-revision",
+                            "other-generation",
+                        )
+                        .expect("drift identity")
+                    } else {
+                        request.snapshot_identity().clone()
+                    };
+                    let manifest_content_identity =
+                        if matches!(self.mode, VerificationMode::DriftManifestContent) {
+                            ManifestContentIdentity::new("synthetic-other-manifest-content")
+                                .expect("drift manifest content identity")
+                        } else {
+                            request.manifest_content_identity().clone()
+                        };
+                    Ok(SnapshotVerificationAttestation::new(
+                        snapshot_identity,
+                        manifest_content_identity,
+                        "synthetic-controlled-verification",
+                    )
+                    .expect("controlled verification attestation"))
+                }
+            }
+        }
+    }
+
     pub(crate) fn descriptor(
         profile: Pc4RuleProfile,
         role: Pc4ArtifactRole,
@@ -610,6 +838,28 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn activated_snapshot(field_count: u32, graph_bytes: u64) -> ActivatedSnapshot {
+        qualified_manifest(
+            SnapshotIdentity::new(
+                "synthetic/repository",
+                "immutable-revision-a",
+                "generation-a",
+            )
+            .expect("synthetic identity"),
+            ManifestContentIdentity::new(format!("synthetic-manifest:{field_count}:{graph_bytes}"))
+                .expect("synthetic manifest content identity"),
+            field_count,
+            graph_bytes,
+        )
+        .activate(&mut SyntheticVerifier)
+        .expect("fully qualified synthetic snapshot")
+    }
+
+    fn qualified_manifest(
+        identity: SnapshotIdentity,
+        content_identity: ManifestContentIdentity,
+        field_count: u32,
+        graph_bytes: u64,
+    ) -> DatasetSnapshotManifest {
         let profiles = Pc4RuleProfile::ALL
             .into_iter()
             .map(|profile| {
@@ -625,18 +875,8 @@ pub(crate) mod tests {
                 ))
             })
             .collect();
-        DatasetSnapshotManifest::new(
-            SnapshotIdentity::new(
-                "synthetic/repository",
-                "immutable-revision-a",
-                "generation-a",
-            )
-            .expect("synthetic identity"),
-            profiles,
-        )
-        .expect("synthetic manifest")
-        .activate()
-        .expect("fully qualified synthetic snapshot")
+        DatasetSnapshotManifest::new(identity, content_identity, profiles)
+            .expect("synthetic manifest")
     }
 
     fn role_name(role: Pc4ArtifactRole) -> &'static str {
@@ -687,11 +927,13 @@ pub(crate) mod tests {
         };
         let manifest = DatasetSnapshotManifest::new(
             SnapshotIdentity::new("repository", "immutable", "generation").expect("identity"),
+            ManifestContentIdentity::new("synthetic-incomplete-manifest")
+                .expect("manifest content identity"),
             profiles,
         )
         .expect("staging manifest");
         assert_eq!(
-            manifest.activate(),
+            manifest.activate(&mut SyntheticVerifier),
             Err(ActivationError::UnsupportedProfile {
                 profile: Pc4RuleProfile::SrsX,
                 reason: UnsupportedProfileReason::MissingProfileSpecificIndex,
@@ -742,6 +984,8 @@ pub(crate) mod tests {
                 "generation-b",
             )
             .expect("second identity"),
+            ManifestContentIdentity::new("synthetic-second-manifest")
+                .expect("second manifest content identity"),
             Pc4RuleProfile::ALL
                 .into_iter()
                 .map(|profile| {
@@ -755,9 +999,106 @@ pub(crate) mod tests {
                 .collect(),
         )
         .expect("second manifest")
-        .activate()
+        .activate(&mut SyntheticVerifier)
         .expect("second activation");
         assert_ne!(first.identity(), second.identity());
         assert_eq!(first.identity().revision(), "immutable-revision-a");
+    }
+
+    #[test]
+    fn activation_preserves_exact_verified_snapshot_and_manifest_bindings() {
+        let manifest = qualified_manifest(
+            SnapshotIdentity::new(
+                "synthetic/repository",
+                "immutable-revision-verified",
+                "generation-verified",
+            )
+            .expect("snapshot identity"),
+            ManifestContentIdentity::new("synthetic-manifest-content-verified")
+                .expect("manifest content identity"),
+            2,
+            8,
+        );
+        let mut verifier = ControlledVerifier::new(VerificationMode::Accept);
+
+        let activated = manifest
+            .activate(&mut verifier)
+            .expect("accepted exact binding activates");
+
+        assert_eq!(verifier.calls, 1);
+        assert_eq!(activated.identity().generation(), "generation-verified");
+        assert_eq!(
+            activated.manifest_content_identity().as_str(),
+            "synthetic-manifest-content-verified"
+        );
+        assert_eq!(
+            activated.verification_attestation().evidence_identity(),
+            "synthetic-controlled-verification"
+        );
+    }
+
+    #[test]
+    fn verifier_rejection_and_provider_error_fail_closed() {
+        for (mode, expected) in [
+            (
+                VerificationMode::Reject,
+                ActivationError::VerificationRejected,
+            ),
+            (
+                VerificationMode::ProviderError,
+                ActivationError::VerificationProviderError,
+            ),
+        ] {
+            let manifest = qualified_manifest(
+                SnapshotIdentity::new(
+                    "synthetic/repository",
+                    "immutable-revision-failure",
+                    "generation-failure",
+                )
+                .expect("snapshot identity"),
+                ManifestContentIdentity::new("synthetic-manifest-content-failure")
+                    .expect("manifest content identity"),
+                2,
+                8,
+            );
+            let mut verifier = ControlledVerifier::new(mode);
+
+            assert_eq!(manifest.activate(&mut verifier), Err(expected));
+            assert_eq!(verifier.calls, 1);
+        }
+    }
+
+    #[test]
+    fn verifier_binding_drift_fails_closed() {
+        for (mode, binding) in [
+            (
+                VerificationMode::DriftSnapshot,
+                SnapshotVerificationBinding::SnapshotIdentity,
+            ),
+            (
+                VerificationMode::DriftManifestContent,
+                SnapshotVerificationBinding::ManifestContentIdentity,
+            ),
+        ] {
+            let manifest = qualified_manifest(
+                SnapshotIdentity::new(
+                    "synthetic/repository",
+                    "immutable-revision-binding",
+                    "generation-binding",
+                )
+                .expect("snapshot identity"),
+                ManifestContentIdentity::new("synthetic-manifest-content-binding")
+                    .expect("manifest content identity"),
+                2,
+                8,
+            );
+            let mut verifier = ControlledVerifier::new(mode);
+
+            assert_eq!(
+                manifest.activate(&mut verifier),
+                Err(ActivationError::VerificationBindingDrift { binding })
+            );
+            assert_eq!(verifier.calls, 1);
+        }
     }
 }

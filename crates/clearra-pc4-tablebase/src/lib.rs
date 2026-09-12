@@ -45,8 +45,10 @@ pub use lookup::{
 };
 pub use manifest::{
     ActivatedSnapshot, ActivationError, ArtifactDescriptor, DatasetSnapshotManifest,
-    GraphTargetEncoding, ManifestError, Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile,
-    ProfileAvailability, ProfileQualification, SnapshotIdentity, UnsupportedProfileReason,
+    DatasetSnapshotVerifier, GraphTargetEncoding, ManifestContentIdentity, ManifestError,
+    Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile, ProfileAvailability, ProfileQualification,
+    SnapshotIdentity, SnapshotVerificationAttestation, SnapshotVerificationBinding,
+    SnapshotVerificationFailure, SnapshotVerificationRequest, UnsupportedProfileReason,
 };
 pub use materializer::{
     materialize_qualified_graph_edge, ClearraPlacementIdentity, MaterializationGuard,
