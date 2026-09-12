@@ -831,6 +831,11 @@ test("automatic PC targets use field blocks and the exact required piece window"
     automaticPcLines({ occupied: 0x3n << 20n, pieceCount: 7 }),
     [3],
   );
+  assert.deepEqual(
+    automaticPcLines({ occupied: 0x3ffffn, pieceCount: 3 }),
+    [2],
+    "completed input rows compact inside the preserved two-line target frame",
+  );
   assert.throws(
     () => automaticPcLines({ occupied: 0n, pieceCount: 4 }),
     /no valid automatic/,
@@ -839,6 +844,44 @@ test("automatic PC targets use field blocks and the exact required piece window"
     () => automaticPcLines({ occupied: (1n << 20n) - 1n, pieceCount: 1 }),
     /no valid automatic/,
   );
+});
+
+test("native PC slash inputs compact completed rows without shrinking explicit lines", () => {
+  const pc = findSlashCommand("pc");
+  const field = "grid:########__/##########";
+  const pathArguments = buildSlashCommandArguments(pc.subcommands.path, [
+    { name: "field", value: field },
+    { name: "next", value: "IOT" },
+    { name: "lines", value: 2 },
+    { name: "hold", value: "disabled" },
+  ]);
+
+  assert.equal(pathArguments[pathArguments.indexOf("--lines") + 1], "2");
+  assert.equal(pathArguments[pathArguments.indexOf("--height") + 1], "2");
+  assert.equal(pathArguments[pathArguments.indexOf("--pieces") + 1], "3");
+  assert.equal(pathArguments[pathArguments.indexOf("--board-mask") + 1], "0xff");
+
+  const scoreFinderArguments = buildSlashCommandArguments(pc.subcommands["score-finder"], [
+    { name: "field", value: field },
+    { name: "next", value: "IOT" },
+    { name: "lines", value: 2 },
+    { name: "hold", value: "disabled" },
+  ]);
+  assert.equal(scoreFinderArguments[scoreFinderArguments.indexOf("--lines") + 1], "2");
+  assert.equal(scoreFinderArguments[scoreFinderArguments.indexOf("--height") + 1], "2");
+  assert.equal(scoreFinderArguments[scoreFinderArguments.indexOf("--pieces") + 1], "3");
+  assert.equal(scoreFinderArguments[scoreFinderArguments.indexOf("--board-mask") + 1], "0xff");
+
+  const allspinArguments = buildSlashCommandArguments(pc.subcommands["allspin-sol"], [
+    { name: "field", value: field },
+    { name: "next", value: "IOT" },
+    { name: "lines", value: 2 },
+    { name: "spin-profile", value: "all-spin-plus" },
+  ]);
+  assert.equal(allspinArguments[allspinArguments.indexOf("--lines") + 1], "2");
+  assert.equal(allspinArguments[allspinArguments.indexOf("--height") + 1], "2");
+  assert.equal(allspinArguments[allspinArguments.indexOf("--pieces") + 1], "3");
+  assert.equal(allspinArguments[allspinArguments.indexOf("--board-mask") + 1], "0xff");
 });
 
 test("PC slash lines can be explicit or expand to serial automatic targets", () => {

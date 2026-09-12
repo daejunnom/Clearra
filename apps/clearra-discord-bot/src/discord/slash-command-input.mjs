@@ -762,7 +762,8 @@ function nativePcArguments(command, values, mode = {}) {
   if ((field.occupied & ~target) !== 0n) {
     throw new Error("field has occupied cells above the requested PC target.");
   }
-  const emptyCount = popcount(target & ~field.occupied);
+  const initialBoard = clearCompletedPcRows(field.occupied, lines);
+  const emptyCount = popcount(target & ~initialBoard);
   if (emptyCount % 4 !== 0) {
     throw new Error("the PC target does not contain a whole number of tetrominoes.");
   }
@@ -838,7 +839,7 @@ function nativePcArguments(command, values, mode = {}) {
   return [
     ...command.argvPrefix,
     "--lines", String(lines),
-    "--board-mask", `0x${field.occupied.toString(16)}`,
+    "--board-mask", `0x${initialBoard.toString(16)}`,
     "--height", String(lines),
     "--pieces", String(emptyCount / 4),
     ...(!typedSave && /^[IOTSZJL]+$/i.test(next)
@@ -876,7 +877,8 @@ function nativePcScoreFinderArguments(command, values) {
   if ((field.occupied & ~target) !== 0n) {
     throw new Error("field has occupied cells above the requested PC target.");
   }
-  const emptyCount = popcount(target & ~field.occupied);
+  const initialBoard = clearCompletedPcRows(field.occupied, lines);
+  const emptyCount = popcount(target & ~initialBoard);
   if (emptyCount % 4 !== 0) {
     throw new Error("the PC target does not contain a whole number of tetrominoes.");
   }
@@ -891,7 +893,7 @@ function nativePcScoreFinderArguments(command, values) {
   return [
     ...command.argvPrefix,
     "--lines", String(lines),
-    "--board-mask", `0x${field.occupied.toString(16)}`,
+    "--board-mask", `0x${initialBoard.toString(16)}`,
     "--height", String(lines),
     "--pieces", String(emptyCount / 4),
     "--queue", queue,
@@ -915,7 +917,8 @@ function nativePcAllspinArguments(command, values, exactQueue) {
   if ((field.occupied & ~target) !== 0n) {
     throw new Error("field has occupied cells above the requested PC target.");
   }
-  const emptyCount = popcount(target & ~field.occupied);
+  const initialBoard = clearCompletedPcRows(field.occupied, lines);
+  const emptyCount = popcount(target & ~initialBoard);
   if (emptyCount < 4 || emptyCount % 4 !== 0) {
     throw new Error("the PC target must contain a positive whole number of tetrominoes.");
   }
@@ -945,10 +948,10 @@ function nativePcAllspinArguments(command, values, exactQueue) {
   // scenario trio for that field would select PcScenarioQuery, whose typed
   // All-Spin boundary correctly rejects an empty initial board. Only a real
   // initial field may enter the scenario contract.
-  const initialFieldArguments = field.occupied === 0n
+  const initialFieldArguments = initialBoard === 0n
     ? []
     : [
-        "--board-mask", `0x${field.occupied.toString(16)}`,
+        "--board-mask", `0x${initialBoard.toString(16)}`,
         "--height", String(lines),
         "--pieces", String(emptyCount / 4),
       ];
@@ -2310,6 +2313,19 @@ function occupiedHeight(mask) {
   return Math.ceil(bits / 10);
 }
 
+function clearCompletedPcRows(occupied, height) {
+  const fullRow = (1n << 10n) - 1n;
+  let boardMask = 0n;
+  let writeRow = 0;
+  for (let readRow = 0; readRow < height; readRow += 1) {
+    const row = (occupied >> BigInt(readRow * 10)) & fullRow;
+    if (row === fullRow) continue;
+    boardMask |= row << BigInt(writeRow * 10);
+    writeRow += 1;
+  }
+  return boardMask;
+}
+
 export function automaticPcLines({ occupied, pieceCount }) {
   if (typeof occupied !== "bigint" || occupied < 0n) {
     throw new Error("Clearra received an invalid PC field mask.");
@@ -2332,7 +2348,8 @@ export function automaticPcLines({ occupied, pieceCount }) {
     if (lineCount < height) return false;
     const target = (1n << BigInt(lineCount * 10)) - 1n;
     if ((occupied & ~target) !== 0n) return false;
-    const missingCellCount = popcount(target & ~occupied);
+    const initialBoard = clearCompletedPcRows(occupied, lineCount);
+    const missingCellCount = popcount(target & ~initialBoard);
     return missingCellCount > 0 &&
       missingCellCount % 4 === 0 &&
       missingCellCount / 4 <= pieceCount;
