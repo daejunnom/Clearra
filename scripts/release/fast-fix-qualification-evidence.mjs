@@ -51,7 +51,7 @@ export const ACCEPTED_COMPONENT_LEDGER_WORKFLOW_PATHS = Object.freeze([
 export const COMPONENT_QUALIFICATION_COMMANDS = Object.freeze(new Map([
   ["pages", "node scripts/tools/run-focused-js-tests.mjs apps/clearra-web/test/ClearraWasmRuntime.contract.ts packages/clearra-ui/test/pagesEssentialSurface.test.mjs"],
   ["desktop_gui", "node scripts/tools/run-focused-js-tests.mjs packages/clearra-ui/test/desktopProductPageCancellation.test.mjs packages/clearra-ui/test/uiRuntimeContracts.test.mjs"],
-  ["cli", "cargo test -p clearra-cli --test product_cli_surface_contract -- --test-threads=1"],
+  ["cli", `pwsh -NoProfile -File scripts/tools/invoke-clearra-build.ps1 -SourceRoot . -Purpose product -Command cargo -ArgumentsJson '["test","-p","clearra-cli","--test","product_cli_surface_contract","--","--test-threads=1"]'`],
   ["discord_gateway", "node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/capability-registry.test.mjs apps/clearra-discord-bot/test/cli-authority-result-paths.test.mjs"],
   ["heavy_cloud_runtime", "node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/cloud-candidate-smoke-job.test.mjs apps/clearra-discord-bot/test/current-job-container-closure.test.mjs"],
   ["pc4_lookup_service", "unsupported-before-v0.9-fail-closed"],

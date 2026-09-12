@@ -42,6 +42,11 @@ if ($EnableUbsan.IsPresent) {
     $configureArgs += "-DCLEARRA_CORE_ENABLE_UBSAN=ON"
 }
 
+$sourceRoot = Resolve-ClearraBuildSourceRoot
+Assert-ClearraRequestedBuildPath -Path $BuildDir -RepositoryRoot $sourceRoot | Out-Null
+Assert-CoreCManagedConfigureArgs $configureArgs
+try {
+Ensure-ClearraBuildArtifactCache -RepositoryRoot $sourceRoot
 $result = Invoke-CoreCTest `
     -BuildDir $BuildDir `
     -Configuration $Configuration `
@@ -73,8 +78,15 @@ if ($Json.IsPresent -or $VerboseLog.IsPresent) {
 }
 
 if ($result.Status -eq "Failed" -or
+    ($result.Status -eq 'Degraded' -and (Get-ClearraBuildPurpose) -eq 'product') -or
     ((Test-ClearraTrustedExecutionSurface $ExecutionSurface) -and -not $result.TestExecuted)) {
     exit 1
 }
 
+if ($result.Status -in @('Passed', 'BuiltOnly') -and (Test-ClearraBuildTransactionOwner)) {
+    Complete-ClearraBuildTransaction
+}
 exit 0
+} finally {
+    Exit-ClearraBuildArtifactCacheUsage
+}

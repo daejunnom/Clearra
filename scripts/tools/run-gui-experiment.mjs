@@ -6,6 +6,8 @@ import { createServer as createPortProbe } from 'node:net';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { acquireBuildOwner } from './clearra-build-owner.mjs';
+import { frontendPaths, writeFrontendTypeForwarder } from './clearra-frontend-paths.mjs';
 
 export const EXPERIMENT_PORT = 4195;
 export const DEFAULT_LEASE_MINUTES = 30;
@@ -67,18 +69,25 @@ export function watchOwnedChild(child, { leaseMs, processEvents = process,
 }
 
 export async function startExperiment(options, { checkPort = assertPortUnused,
-  forkProcess = fork, watch = watchOwnedChild } = {}) {
+  forkProcess = fork, watch = watchOwnedChild, acquireOwner = acquireBuildOwner } = {}) {
   await checkPort();
-  const child = forkProcess(SELF, ['--owned-server', '--source-root', options.sourceRoot,
-    '--lease-minutes', String(options.leaseMs / 60_000)], {
-    cwd: resolve(options.sourceRoot, 'apps/clearra-web'),
-    execArgv: [], windowsHide: true, detached: false,
-    stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-  });
-  return watch(child, options);
+  const owner = await acquireOwner({ sourceRoot: options.sourceRoot, purpose: 'experiment' });
+  let success = false;
+  try {
+    const child = forkProcess(SELF, ['--owned-server', '--source-root', options.sourceRoot,
+      '--lease-minutes', String(options.leaseMs / 60_000)], {
+      cwd: resolve(options.sourceRoot, 'apps/clearra-web'),
+      env: owner.environment,
+      execArgv: [], windowsHide: true, detached: false,
+      stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+    });
+    await watch(child, options);
+    success = true;
+  } finally { await owner.finish(success); }
 }
 
 export async function serveOwnedExperiment(options, { events = process, loadVite,
+  publishTypes = () => writeFrontendTypeForwarder(frontendPaths('web', { sourceRoot: options.sourceRoot, requireOwner: true })),
   setTimer = setTimeout, clearTimer = clearTimeout, exit = code => process.exit(code) } = {}) {
   if (!events.connected) throw new Error('owned server requires its creating parent IPC connection');
   let server;
@@ -100,9 +109,10 @@ export async function serveOwnedExperiment(options, { events = process, loadVite
       createRequire(resolve(options.sourceRoot, 'package.json')).resolve('vite')).href);
     if (stopped) return;
     server = await api.createServer({ root: resolve(options.sourceRoot, 'apps/clearra-web'),
-      configFile: resolve(options.sourceRoot, 'apps/clearra-web/vite.config.ts'), mode: 'local-audit',
+      configFile: resolve(options.sourceRoot, 'apps/clearra-web/vite.config.ts'), configLoader: 'runner', mode: 'local-audit',
       server: { host: '127.0.0.1', port: EXPERIMENT_PORT, strictPort: true, hmr: false } });
     if (stopped) { await server.close(); return; }
+    await publishTypes();
     await server.listen(); // strictPort protects the race after the preflight probe.
     if (!stopped) process.stdout.write(`experiment=http://127.0.0.1:4195 lease_minutes=${options.leaseMs / 60_000} no_auto_restart=true\n`);
   } catch (error) {

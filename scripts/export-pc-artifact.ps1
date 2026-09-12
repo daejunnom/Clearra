@@ -38,7 +38,9 @@ $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')
 . (Join-Path $PSScriptRoot 'lib/clearra-path-helpers.ps1')
 . (Join-Path $PSScriptRoot 'lib/clearra-execution-surface.ps1')
 . (Join-Path $PSScriptRoot 'lib/clearra-application-control.ps1')
+$Root = Resolve-ClearraBuildSourceRoot
 
+Assert-ClearraBuildEnvironmentBeforeMutation $Root
 Assert-ClearraTrustedExecutionSurface $ExecutionSurface 'PC artifact export'
 if ($Workers -lt 1) {
     throw '-Workers must be at least 1.'
@@ -86,7 +88,9 @@ if (-not [string]::IsNullOrWhiteSpace($SfinderOutputPath)) {
 }
 
 $resolvedExecutable = if ([string]::IsNullOrWhiteSpace($ExecutablePath)) {
-    Join-Path (Get-ClearraCargoTargetDir) 'release/clearra-pc-artifact.exe'
+    # Export is a read-only artifact consumer. Selecting its default must not
+    # create an owner that replaces the very experiment being consumed.
+    Join-Path (Get-ClearraBuildTransactionRoot -RepositoryRoot $Root) 'cargo-target/release/clearra-pc-artifact.exe'
 } else {
     [System.IO.Path]::GetFullPath($ExecutablePath)
 }

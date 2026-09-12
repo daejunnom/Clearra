@@ -13,26 +13,9 @@ function Resolve-ClearraRoot {
 function Test-StartTestsWindows {
     return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 }
+. (Join-Path $PSScriptRoot 'clearra-build-path-policy.ps1')
 function Get-ClearraArtifactRoot {
-    $base = $null
-    if (Test-StartTestsWindows) {
-        $base = $env:LOCALAPPDATA
-        if ([string]::IsNullOrWhiteSpace($base)) {
-            $base = [System.Environment]::GetFolderPath("LocalApplicationData")
-        }
-    } else {
-        $base = $env:XDG_CACHE_HOME
-        if ([string]::IsNullOrWhiteSpace($base) -and
-            -not [string]::IsNullOrWhiteSpace($env:HOME)) {
-            $base = Join-Path $env:HOME ".cache"
-        }
-    }
-    if ([string]::IsNullOrWhiteSpace($base)) {
-        $base = [System.IO.Path]::GetTempPath()
-    }
-    $path = [System.IO.Path]::GetFullPath((Join-Path $base "Clearra/build"))
-    Assert-ClearraPathOutsideRepository $path | Out-Null
-    return $path
+    return (Get-ClearraCanonicalBuildRoot)
 }
 function Get-ClearraReportRoot {
     $base = $null
@@ -103,17 +86,18 @@ function Resolve-ClearraReportPath(
 }
 function Resolve-ClearraArtifactPath(
     [string]$ArtifactPath,
-    [string]$RepositoryRoot = $script:ClearraPathPolicyRepositoryRoot
+    [string]$RepositoryRoot = (Resolve-ClearraBuildSourceRoot)
 ) {
     if ([string]::IsNullOrWhiteSpace($ArtifactPath)) {
         throw "Internal artifact path must not be empty."
     }
+    $transaction = Get-ClearraBuildTransactionRoot -RepositoryRoot $RepositoryRoot
     $candidate = if ([System.IO.Path]::IsPathRooted($ArtifactPath)) {
         $ArtifactPath
     } else {
-        Join-Path (Get-ClearraArtifactRoot) $ArtifactPath
+        Join-Path $transaction $ArtifactPath
     }
-    return (Assert-ClearraPathOutsideRepository $candidate $RepositoryRoot)
+    return (Assert-ClearraPathInBuildTransaction $candidate $transaction $RepositoryRoot)
 }
 function Assert-ClearraRepositoryArtifactPolicy(
     [string]$RepositoryRoot = $script:ClearraPathPolicyRepositoryRoot
@@ -137,25 +121,10 @@ function Assert-ClearraRepositoryArtifactPolicy(
 function Remove-ClearraRepositoryLocalBuildArtifacts(
     [string]$RepositoryRoot = $script:ClearraPathPolicyRepositoryRoot
 ) {
-    $repository = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
-    foreach ($name in @('target', 'build')) {
-        $candidate = [System.IO.Path]::GetFullPath((Join-Path $repository $name))
-        $expected = $repository + [System.IO.Path]::DirectorySeparatorChar + $name
-        $comparison = if (Test-StartTestsWindows) {
-            [System.StringComparison]::OrdinalIgnoreCase
-        } else {
-            [System.StringComparison]::Ordinal
-        }
-        if (-not $candidate.Equals($expected, $comparison)) {
-            throw "Refusing to clean an unexpected repository-local build path: $candidate"
-        }
-        if (Test-Path -LiteralPath $candidate) {
-            Remove-Item -LiteralPath $candidate -Recurse -Force
-        }
-    }
+    throw 'Repository-local legacy cleanup is forbidden during build initialization; use an explicit reviewed cleanup plan.'
 }
 function Get-StartTestsTransientBuildRoots {
-    return [string[]]@((Get-ClearraArtifactRoot))
+    return [string[]]@((Get-ClearraBuildTransactionRoot))
 }
 function New-TransientBuildDir([string]$Prefix) {
     $base = (Get-StartTestsTransientBuildRoots | Select-Object -First 1)
@@ -167,7 +136,8 @@ function New-TransientBuildDir([string]$Prefix) {
     }
     $slotRoot = [System.IO.Path]::GetFullPath((Join-Path $base 'transient'))
     $path = [System.IO.Path]::GetFullPath((Join-Path $slotRoot $Prefix))
-    Assert-ClearraPathOutsideRepository $path | Out-Null
+    Assert-ClearraPathInBuildTransaction $path $base (Resolve-ClearraBuildSourceRoot) | Out-Null
+    Ensure-ClearraBuildArtifactCache
     New-Item -ItemType Directory -Force -Path $slotRoot | Out-Null
     if ($script:ClearraTransientBuildSlotLocks.ContainsKey($path)) {
         throw "Transient build slot is already active in this process: $path"
@@ -194,6 +164,7 @@ function New-TransientBuildDir([string]$Prefix) {
 
     try {
         if (Test-Path -LiteralPath $path) {
+            Assert-ClearraBuildTreeNoReparse $path
             Remove-Item -LiteralPath $path -Recurse -Force
         }
         New-Item -ItemType Directory -Force -Path $path | Out-Null
@@ -206,12 +177,12 @@ function New-TransientBuildDir([string]$Prefix) {
     }
 }
 function Get-StartTestsPersistentBuildDir([string]$Name) {
-    Ensure-ClearraBuildArtifactCache
     $base = (Get-StartTestsTransientBuildRoots | Select-Object -First 1)
     if ([string]::IsNullOrWhiteSpace($base)) {
         throw "No persistent build root is available; pass -CoreCBuildDir explicitly."
     }
     $path = Resolve-ClearraArtifactPath (Join-Path $base $Name)
+    Ensure-ClearraBuildArtifactCache
     New-Item -ItemType Directory -Force -Path $path | Out-Null
     return $path
 }
@@ -224,7 +195,8 @@ function Assert-ClearraCanonicalCargoTargetDir([string]$Path) {
         throw "Cargo target directory must not be empty."
     }
 
-    $canonical = [System.IO.Path]::GetFullPath((Get-ClearraCargoTargetDir)).TrimEnd('\', '/')
+    $canonical = Join-Path (Get-ClearraBuildTransactionRoot) 'cargo-target'
+    Assert-ClearraCanonicalBuildPath $Path (Resolve-ClearraBuildSourceRoot) | Out-Null
     $candidate = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
     $comparison = if (Test-StartTestsWindows) {
         [System.StringComparison]::OrdinalIgnoreCase
@@ -265,6 +237,8 @@ function Remove-TransientBuildDir([string]$BuildDir) {
 
     try {
         if ($isAllowed) {
+            Assert-ClearraPathInBuildTransaction $buildPath (Get-ClearraBuildTransactionRoot) (Resolve-ClearraBuildSourceRoot) | Out-Null
+            if (Test-Path -LiteralPath $buildPath) { Assert-ClearraBuildTreeNoReparse $buildPath }
             Remove-Item -LiteralPath $buildPath -Recurse -Force -ErrorAction SilentlyContinue
         }
     } finally {

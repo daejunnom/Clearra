@@ -38,27 +38,11 @@ if ($RunVerifySecurity.IsPresent -and
     Assert-ClearraTrustedExecutionSurface $ExecutionSurface "runner security execution"
 }
 
-$Root = Resolve-ClearraRoot
+$Root = Resolve-ClearraBuildSourceRoot
+Assert-ClearraRequestedBuildPath -Path $CoreCBuildDir -RepositoryRoot $Root | Out-Null
 $trustedExecution = Test-ClearraTrustedExecutionSurface $ExecutionSurface
 $applicationControl = Get-ClearraApplicationControlStatus
 $nativeTestExecutionAllowed = $trustedExecution
-$previousCargoTargetDir = $env:CARGO_TARGET_DIR
-$setCargoTargetDir = $false
-$cargoTargetDir = if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
-    Get-ClearraCargoTargetDir
-} else {
-    Assert-ClearraCanonicalCargoTargetDir $previousCargoTargetDir
-}
-$coreBuildDir = if ([string]::IsNullOrWhiteSpace($CoreCBuildDir)) {
-    $defaultCoreBuildName = if ($trustedExecution) {
-        "core-c-test-cache"
-    } else {
-        "core-c-library-cache"
-    }
-    Resolve-ClearraArtifactPath $defaultCoreBuildName $Root
-} else {
-    Resolve-ClearraArtifactPath $CoreCBuildDir $Root
-}
 
 function Invoke-VerifyNative(
     [string]$FileName,
@@ -145,14 +129,21 @@ function Write-VerifyReport(
     Write-Output "verification_report: $resolved"
 }
 
-New-Item -ItemType Directory -Force -Path $cargoTargetDir, $coreBuildDir | Out-Null
-if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
-    $env:CARGO_TARGET_DIR = $cargoTargetDir
-    $setCargoTargetDir = $true
-}
-
-Push-Location $Root
+$verifyLocationPushed = $false
 try {
+    Ensure-ClearraBuildArtifactCache -RepositoryRoot $Root
+    $cargoTargetDir = Get-ClearraCargoTargetDir
+    $coreBuildName = if (-not [string]::IsNullOrWhiteSpace($CoreCBuildDir)) {
+        $CoreCBuildDir
+    } elseif ($trustedExecution) {
+        'core-c-test-cache'
+    } else {
+        'core-c-library-cache'
+    }
+    $coreBuildDir = Resolve-ClearraArtifactPath $coreBuildName $Root
+    New-Item -ItemType Directory -Force -Path $coreBuildDir | Out-Null
+    Push-Location $Root
+    $verifyLocationPushed = $true
     $progress = New-ClearraProgressScope `
         -Name "verify" `
         -Total 8 `
@@ -264,9 +255,8 @@ try {
         $script:VerifyRustMode `
         $script:VerifyWasmMode `
         $productRoute
+    if (Test-ClearraBuildTransactionOwner) { Complete-ClearraBuildTransaction }
 } finally {
-    Pop-Location
-    if ($setCargoTargetDir) {
-        Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
-    }
+    if ($verifyLocationPushed) { Pop-Location }
+    Exit-ClearraBuildArtifactCacheUsage
 }

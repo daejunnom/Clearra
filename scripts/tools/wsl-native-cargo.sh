@@ -9,7 +9,8 @@ case "$PATH" in *"/mnt/"*) printf 'Windows PATH entry leaked into WSL native exe
 # fallback. A Windows host may deploy the source package into WSL ext4 and then
 # select this surface deliberately.
 
-ROOT="${CLEARRA_WSL_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+AUTHORITY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="${CLEARRA_WSL_WORKSPACE:-$AUTHORITY_ROOT}"
 ROOT="$(cd "$ROOT" && pwd)"
 ROOT_FS="$(stat -f -c %T "$ROOT")"
 case "$ROOT_FS" in
@@ -29,20 +30,45 @@ if [[ ! -f "$ROOT/Cargo.toml" || ! -f "$ROOT/core-c/cmake/source_manifest.cmake"
     printf 'Clearra WSL workspace is incomplete: %s\n' "$ROOT" >&2
     exit 2
 fi
-CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build"
+command -v node >/dev/null 2>&1 || { printf 'node is required for the managed Clearra build owner\n' >&2; exit 2; }
+# Cargo can otherwise create an alternate target before the Rust wrapper runs.
+for argument in "$@"; do
+    case "$argument" in
+        --target-dir|--target-dir=*|--build-dir|--build-dir=*|--artifact-dir|--artifact-dir=*|--out-dir|--out-dir=*|--config|--config=*)
+            printf 'Independent Cargo output/config overrides are forbidden: %s\n' "$argument" >&2
+            exit 2
+            ;;
+    esac
+done
+if [[ -z "${CLEARRA_BUILD_SESSION_ID:-}" ]]; then
+    for override in CLEARRA_WSL_NATIVE_BUILD_ROOT CLEARRA_CORE_C_BUILD_DIR CLEARRA_RELEASE_BUILD_ROOT; do
+        [[ -z "${!override:-}" ]] || { printf 'Unmanaged build override is forbidden: %s\n' "$override" >&2; exit 2; }
+    done
+    exec node "$AUTHORITY_ROOT/scripts/tools/invoke-clearra-build.mjs" \
+        --source-root "$ROOT" --purpose "${CLEARRA_BUILD_PURPOSE:-experiment}" \
+        -- bash "$AUTHORITY_ROOT/scripts/tools/wsl-native-cargo.sh" "$@"
+fi
+BUILD_TRANSACTION="$(node "$AUTHORITY_ROOT/scripts/tools/clearra-build-paths.mjs" --source-root "$ROOT" --field transaction)"
+MANAGED_CARGO_TARGET="$(node "$AUTHORITY_ROOT/scripts/tools/clearra-build-paths.mjs" --source-root "$ROOT" --field cargo-target)"
 BUILD_VARIANT=standard
 if [[ "${CLEARRA_WSL_ENABLE_STAGE_PROFILING:-0}" == "1" ]]; then
     BUILD_VARIANT=stage-profiled
 fi
-BUILD_ROOT="${CLEARRA_WSL_NATIVE_BUILD_ROOT:-$CACHE_ROOT/native-c-core-variants/$BUILD_VARIANT}"
-case "$BUILD_ROOT" in
-    "$CACHE_ROOT"/native-c-core-variants/* | /tmp/clearra-native-c-core*) ;;
-    *) printf 'WSL native build root must remain under the Clearra user cache: %s\n' "$BUILD_ROOT" >&2; exit 2 ;;
-esac
+BUILD_ROOT="$BUILD_TRANSACTION/core-c-native-$BUILD_VARIANT"
+[[ -z "${CLEARRA_WSL_NATIVE_BUILD_ROOT:-}" || "$CLEARRA_WSL_NATIVE_BUILD_ROOT" == "$BUILD_ROOT" ]] || {
+    printf 'WSL native build root must equal the managed transaction output\n' >&2; exit 2;
+}
+[[ -z "${CLEARRA_WSL_CARGO_TARGET_DIR:-}" || "$CLEARRA_WSL_CARGO_TARGET_DIR" == "$MANAGED_CARGO_TARGET" ]] || {
+    printf 'WSL Cargo target must equal the managed transaction target\n' >&2; exit 2;
+}
+[[ -z "${CLEARRA_CORE_C_BUILD_DIR:-}" || "$CLEARRA_CORE_C_BUILD_DIR" == "$BUILD_ROOT" ]] || {
+    printf 'Core C output must equal the managed transaction output\n' >&2; exit 2;
+}
+[[ -z "${CLEARRA_RELEASE_BUILD_ROOT:-}" || "$CLEARRA_RELEASE_BUILD_ROOT" == "$BUILD_TRANSACTION" ]] || {
+    printf 'Release build root must equal the managed transaction root\n' >&2; exit 2;
+}
+export CARGO_TARGET_DIR="$MANAGED_CARGO_TARGET"
 mkdir -p "$BUILD_ROOT"
-CACHE_LAYOUT_MARKER="$CACHE_ROOT/.wsl-native-cache-v3"
-LEGACY_CORE_BUILD_ROOT="$CACHE_ROOT/core-c-artifact-cache"
-LEGACY_UNKEYED_BUILD_ROOT="$CACHE_ROOT/native-c-core"
 
 if [[ -f "$HOME/.cargo/env" ]]; then
     # shellcheck disable=SC1091
@@ -108,13 +134,11 @@ done
 if [[ ! -f "$library" || ! -f "$stamp" || \
       "$(<"$stamp")" != "$input_digest" || "$native_core_rebuilt" == 1 ]]; then
     temporary_library="$library.tmp.$$"
-    rm -f -- "$temporary_library"
     ar rcs "$temporary_library" "${objects[@]}"
     mv -f -- "$temporary_library" "$library"
     printf '%s\n' "$input_digest" > "$stamp"
 fi
 
-export CARGO_TARGET_DIR="${CLEARRA_WSL_CARGO_TARGET_DIR:-$CACHE_ROOT/cargo-target}"
 export CLEARRA_RUNTIME_ENVIRONMENT=wsl
 export CLEARRA_RUNTIME_ROOT="$ROOT"
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L native=$BUILD_ROOT"
@@ -125,17 +149,6 @@ cd "$ROOT"
 # variant's archive changes; Cargo then relinks the dependent binaries.
 if [[ "$native_core_rebuilt" == 1 ]]; then
     touch "$ROOT/crates/clearra-core-ffi/src/lib.rs"
-fi
-if [[ ! -f "$CACHE_LAYOUT_MARKER" ]]; then
-    case "$LEGACY_CORE_BUILD_ROOT" in
-        "$CACHE_ROOT"/core-c-artifact-cache) rm -rf -- "$LEGACY_CORE_BUILD_ROOT" ;;
-        *) printf 'Refusing unsafe legacy cache path: %s\n' "$LEGACY_CORE_BUILD_ROOT" >&2; exit 2 ;;
-    esac
-    case "$LEGACY_UNKEYED_BUILD_ROOT" in
-        "$CACHE_ROOT"/native-c-core) rm -rf -- "$LEGACY_UNKEYED_BUILD_ROOT" ;;
-        *) printf 'Refusing unsafe legacy cache path: %s\n' "$LEGACY_UNKEYED_BUILD_ROOT" >&2; exit 2 ;;
-    esac
-    printf '3\n' > "$CACHE_LAYOUT_MARKER"
 fi
 # The native archive lives outside Cargo's source graph. The keyed archive
 # cache and FFI-owner invalidation above make content changes observable while

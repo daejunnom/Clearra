@@ -4,11 +4,9 @@
   "version": "0.8.0",
   "type": "module",
   "scripts": {
-    "sync": "svelte-kit sync",
-    "predev": "npm run sync",
-    "dev": "vite --host 127.0.0.1",
-    "prebuild": "npm run sync",
-    "build": "vite build",
+    "sync": "node ../../scripts/tools/build-clearra-frontend.mjs --app desktop --task sync",
+    "dev": "node ../../scripts/tools/build-clearra-frontend.mjs --app desktop --task dev",
+    "build": "node ../../scripts/tools/build-clearra-frontend.mjs --app desktop --task build",
     "tauri": "tauri"
   },
   "dependencies": {

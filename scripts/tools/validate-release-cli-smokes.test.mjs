@@ -632,7 +632,7 @@ for (const [name, mutate] of [
     "rejects removal of current-run WASM verification after reuse or build",
     (source) => {
       const start = source.indexOf("      - name: Verify the current-run accepted WASM artifact\n");
-      const end = source.indexOf("      # Keep WASM and native snapshots separate:", start);
+      const end = source.indexOf("      - name: Save verified canonical WASM build cache", start);
       assert.ok(start >= 0 && end > start);
       return source.slice(0, start) + source.slice(end);
     },
@@ -813,8 +813,8 @@ for (const [name, mutate] of [
   [
     "rejects a Linux product cache that cannot advance after source edits",
     (source) => replaceExactlyOnce(source,
-      "          key: product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n",
-      "          key: product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n"),
+      "          key: product-linux-bookworm-rust-1.96-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n",
+      "          key: product-linux-bookworm-rust-1.96-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n"),
   ],
   [
     "rejects a Cloud-compatible CLI claim built against a different glibc baseline",
@@ -847,7 +847,7 @@ for (const [name, mutate] of [
   ],
   [
     "rejects native and WASM cache writers sharing an immutable key",
-    (source) => source.replaceAll('release-acceptance-wasm-v4-', 'release-acceptance-native-v3-'),
+    (source) => source.replaceAll('release-acceptance-wasm-v5-', 'release-acceptance-native-v4-'),
   ],
   [
     "rejects optional-cache failure policy moved onto product verification",
@@ -866,8 +866,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n            ${{ runner.temp }}/clearra-release/cargo-target\n          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n",
-        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n            ${{ runner.temp }}/clearra-release/cargo-target\n          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}\n",
+        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n",
+        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}\n",
       ),
   ],
   [
@@ -875,8 +875,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n            ${{ runner.temp }}/clearra-release/cargo-target\n          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n          restore-keys: |\n            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-\n            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}\n",
-        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n            ${{ runner.temp }}/clearra-release/cargo-target\n          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n          restore-keys: |\n            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-\n",
+        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n          restore-keys: |\n            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-\n            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}\n",
+        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n          restore-keys: |\n            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-\n",
       ),
   ],
   [
@@ -889,12 +889,12 @@ for (const [name, mutate] of [
       ),
   ],
   [
-    "rejects removal of the isolated restore-only build snapshot",
+    "rejects restoring managed generations through the dependency-only cache",
     (source) =>
       replaceExactlyOnce(
         source,
-        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/bin/wasm-bindgen.exe\n            ~/.cargo/registry\n            ~/.cargo/git\n            ~/AppData/Local/Clearra/build\n          key: release-acceptance-",
         "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/bin/wasm-bindgen.exe\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: release-acceptance-",
+        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/bin/wasm-bindgen.exe\n            ~/.cargo/registry\n            ~/.cargo/git\n            ~/AppData/Local/Clearra/build\n          key: release-acceptance-",
       ),
   ],
   [
@@ -985,22 +985,59 @@ for (const [name, mutate] of [
     },
   ],
   [
-    "rejects restoring Cargo payload in the sanitizer-only cache",
+    "rejects an added sanitizer cache that restores managed build generations",
     (source) =>
       replaceExactlyOnce(
         source,
-        "          path: ~/AppData/Local/Clearra/build\n          key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}\n",
-        "          path: |\n            ~/.cargo/registry\n            ~/AppData/Local/Clearra/build\n          key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}\n",
+        "      - name: Run canonical release acceptance sanitizer shard\n",
+        "      - uses: actions/cache/restore@v4\n        with:\n          path: ~/AppData/Local/Clearra/build\n          key: obsolete-sanitizer-cache\n      - name: Run canonical release acceptance sanitizer shard\n",
       ),
   ],
   [
-    "rejects a sanitizer cache without its dedicated source-bound key",
+    "rejects adding a sanitizer writer outside the managed product owner",
     (source) =>
       replaceExactlyOnce(
         source,
-        "          key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}\n",
-        "          key: release-acceptance-sanitizer-${{ runner.os }}\n",
+        "      - name: Run canonical release acceptance sanitizer shard\n",
+        "      - uses: actions/cache/save@v4\n        with:\n          path: /tmp/unmanaged-sanitizer\n          key: obsolete-sanitizer-cache\n      - name: Run canonical release acceptance sanitizer shard\n",
       ),
+  ],
+  [
+    "rejects release Cargo without a live same-step product owner",
+    (source) => source.replaceAll(
+      "Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product",
+      "# product owner removed",
+    ),
+  ],
+  [
+    "rejects reclassifying canonical product builds as experiments",
+    (source) => replaceExactlyOnce(source,
+      "  CLEARRA_BUILD_PURPOSE: product\n", "  CLEARRA_BUILD_PURPOSE: experiment\n"),
+  ],
+  [
+    "rejects a successful release owner without transaction completion",
+    (source) => source.replaceAll("            Complete-ClearraBuildTransaction\n", ""),
+  ],
+  [
+    "rejects a direct release owner that leaks its lease",
+    (source) => source.replaceAll("            Exit-ClearraBuildArtifactCacheUsage\n", ""),
+  ],
+  [
+    "rejects release completion before payload validation",
+    (source) => source.replaceAll("          try {\n",
+      "          try {\n            Complete-ClearraBuildTransaction\n"),
+  ],
+  [
+    "rejects substituting a different ProductE2E native identity field",
+    (source) => replaceExactlyOnce(source,
+      "$nativeIdentity.runtime_paths.native_library_directory",
+      "$nativeIdentity.unverified_library_directory"),
+  ],
+  [
+    "rejects publishing a guessed ProductE2E path instead of the owner output",
+    (source) => replaceExactlyOnce(source,
+      "          path: ${{ steps.native.outputs.artifact_path }}\n",
+      "          path: ${{ runner.temp }}/unbound-product-e2e-cli-input\n"),
   ],
 ]) {
   test(name, async () => {

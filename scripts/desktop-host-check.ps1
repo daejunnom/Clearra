@@ -16,6 +16,8 @@ $ClearraScriptRoot = $PSScriptRoot
 . (Join-Path $PSScriptRoot "lib/progress.ps1")
 . (Join-Path $PSScriptRoot "lib/clearra-execution-surface.ps1")
 . (Join-Path $PSScriptRoot "lib/clearra-start-helpers.ps1")
+$Root = Resolve-ClearraBuildSourceRoot
+Assert-ClearraBuildEnvironmentBeforeMutation $Root
 Assert-ClearraTrustedExecutionSurface $ExecutionSurface "desktop host"
 
 function Invoke-DesktopHostCommand {
@@ -62,6 +64,11 @@ function Invoke-DesktopHostCommand {
     }
 }
 
+$desktopLocationPushed = $false
+try {
+Ensure-ClearraBuildArtifactCache -RepositoryRoot $Root
+Push-Location $Root
+$desktopLocationPushed = $true
 $applicationControl = Get-ClearraApplicationControlStatus
 $script:ApplicationControl = $applicationControl
 $stepCount = if ($ArchitectureValidatedByNoProductDebt.IsPresent) { 4 } else { 5 }
@@ -107,12 +114,6 @@ if ($ArchitectureValidatedByNoProductDebt.IsPresent) {
         )
 }
 
-$previousCargoTargetDir = $env:CARGO_TARGET_DIR
-Push-Location $Root
-try {
-    if (-not [string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
-        Assert-ClearraCanonicalCargoTargetDir $previousCargoTargetDir | Out-Null
-    }
     $env:CARGO_TARGET_DIR = Get-ClearraCargoTargetDir
 
     Invoke-DesktopHostCommand `
@@ -137,12 +138,9 @@ try {
 
     Complete-ClearraProgressLine $script:Scope
     Write-Output "[desktop-host] passed | product=apps/clearra-desktop | tauri=compiled | wasm_cpu_app_request=executed | async_job_e2e=executed | frontend_source=compiled-in-memory | wsl_used=false"
+    if (Test-ClearraBuildTransactionOwner) { Complete-ClearraBuildTransaction }
 }
 finally {
-    if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
-        Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
-    } else {
-        $env:CARGO_TARGET_DIR = $previousCargoTargetDir
-    }
-    Pop-Location
+    if ($desktopLocationPushed) { Pop-Location }
+    Exit-ClearraBuildArtifactCacheUsage
 }

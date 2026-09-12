@@ -1,3 +1,6 @@
-# Clearra runners set CARGO_TARGET_DIR to the platform artifact root. Keep this
-# file free of global linker flags: ManagedLocal does not build or launch test
-# harnesses, and product manifests belong to the explicit product build only.
+# The managed owner supplies CARGO_TARGET_DIR, the platform guard and transaction.
+# Unmanaged Cargo fails before compilation instead of creating another target.
+# This prevents accidental bypass; it is not an operating-system sandbox.
+[build]
+rustc-wrapper = "clearra-build-root-required"
+incremental = false

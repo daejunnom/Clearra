@@ -2,6 +2,7 @@ $script:ClearraCoreCTestsLibRoot = Split-Path -Parent $PSCommandPath
 . (Join-Path $script:ClearraCoreCTestsLibRoot "core-c-build.ps1")
 . (Join-Path $script:ClearraCoreCTestsLibRoot "clearra-application-control.ps1")
 . (Join-Path $script:ClearraCoreCTestsLibRoot "clearra-runtime-environment.ps1")
+. (Join-Path $script:ClearraCoreCTestsLibRoot "clearra-build-wsl-dispatch.ps1")
 function New-CoreCTestResult(
     [string]$Status,
     [string]$Reason,
@@ -43,7 +44,7 @@ function Get-CoreCTestLayout([string[]]$ConfigureArgs) {
     return "aggregate"
 }
 function Get-CoreCTestInternalAggregateCount() {
-    $repoRoot = Resolve-Path -LiteralPath (Join-Path $script:ClearraCoreCTestsLibRoot "..\..")
+    $repoRoot = Resolve-ClearraBuildSourceRoot
     $cmakePath = Join-Path $repoRoot "core-c\cmake\test_targets.cmake"
     if (-not (Test-Path -LiteralPath $cmakePath)) {
         return 0
@@ -89,6 +90,7 @@ function Invoke-CoreCTestWsl(
     [int]$Workers,
     [string]$WslDistribution
 ) {
+    Assert-CoreCActiveBuildTransaction | Out-Null
     $allowedConfigureArgs = @(
         '^-DBUILD_TESTING=(ON|OFF)$',
         '^-DCLEARRA_CORE_SPLIT_TESTS=(ON|OFF)$',
@@ -112,26 +114,25 @@ function Invoke-CoreCTestWsl(
         $testName = $match.Groups['name'].Value
     }
 
-    $repositoryRoot = [string](Resolve-Path -LiteralPath (Join-Path $script:ClearraCoreCTestsLibRoot '..\..'))
+    $repositoryRoot = Resolve-ClearraBuildSourceRoot
     $sync = Sync-ClearraWslExt4Workspace $repositoryRoot $WslDistribution
     $workerCount = [Math]::Max(1, $Workers)
-    $arguments = @(
-        '-d', $WslDistribution, '--',
-        'env', "CLEARRA_WSL_WORKSPACE=$($sync.workspace)",
-        'bash', "$($sync.workspace)/scripts/tools/wsl-core-c-tests.sh",
-        '--workers', [string]$workerCount
-    )
+    $commandArguments = @('--workers', [string]$workerCount)
     if (Test-CoreCTestConfigureArgEnabled $ConfigureArgs 'CLEARRA_CORE_ENABLE_ASAN') {
-        $arguments += @('--sanitizer', 'address')
+        $commandArguments += @('--sanitizer', 'address')
     } elseif (Test-CoreCTestConfigureArgEnabled $ConfigureArgs 'CLEARRA_CORE_ENABLE_UBSAN') {
-        $arguments += @('--sanitizer', 'undefined')
+        $commandArguments += @('--sanitizer', 'undefined')
     }
     if (Test-CoreCTestConfigureArgEnabled $ConfigureArgs 'CLEARRA_ENABLE_STAGE_PROFILING') {
-        $arguments += '--profile'
+        $commandArguments += '--profile'
     }
     if (-not [string]::IsNullOrWhiteSpace($testName)) {
-        $arguments += @('--test', $testName)
+        $commandArguments += @('--test', $testName)
     }
+    $arguments = New-ClearraIndependentWslBuildArguments `
+        -LinuxSourceRoot $sync.workspace -Distribution $WslDistribution `
+        -ScriptName 'wsl-core-c-tests.sh' -CommandArguments $commandArguments
+    $wslTransaction = Get-ClearraIndependentWslTransactionRoot $sync.workspace $WslDistribution
 
     $result = Invoke-CoreCNativeCapture 'wsl.exe' $arguments 'WSL aggregate C tests'
     if ($result.ExitCode -ne 0) {
@@ -147,7 +148,7 @@ function Invoke-CoreCTestWsl(
         -TestCount 1 `
         -TestLayout 'wsl-aggregate' `
         -InternalTestCount $internalTestCount `
-        -BuildDir $sync.workspace `
+        -BuildDir $wslTransaction `
         -Output $result.Output `
         -Command "wsl.exe $($arguments -join ' ')"
 }
@@ -164,6 +165,9 @@ function Invoke-CoreCTest(
     [string]$RuntimeEnvironment = 'auto',
     [string]$WslDistribution = 'Ubuntu'
 ) {
+    $record = Assert-CoreCActiveBuildTransaction
+    Assert-ClearraRequestedBuildPath -Path $BuildDir -RepositoryRoot $record.source_root | Out-Null
+    Assert-CoreCManagedConfigureArgs $ConfigureArgs
     $workerCount = [Math]::Min(
         [Math]::Max(1, $Workers),
         [Math]::Max(1, [Environment]::ProcessorCount)

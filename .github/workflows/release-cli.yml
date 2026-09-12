@@ -16,6 +16,7 @@ concurrency:
 env:
   CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
   CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+  CLEARRA_BUILD_PURPOSE: product
 
 jobs:
   metadata:
@@ -192,13 +193,10 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ${{ runner.temp }}/clearra-release/cargo-target
-          key: product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: product-linux-bookworm-rust-1.96-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            product-linux-bookworm-rust-1.96-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
       - name: Build standalone WASM CPU CLI
-        env:
-          CLEARRA_RELEASE_BUILD_ROOT: ${{ runner.temp }}/clearra-release
         run: bash scripts/tools/package-release-cli.sh dist "${{ needs.metadata.outputs.version }}"
       - name: Verify CLI in the Cloud Run base image without rebuilding
         uses: docker://node:22-bookworm-slim
@@ -273,10 +271,9 @@ jobs:
             ~/.cargo/bin/wasm-bindgen.exe
             ~/.cargo/registry
             ~/.cargo/git
-            ~/AppData/Local/Clearra/build
-          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
       - name: Verify canonical ReleaseAcceptance shard mapping
@@ -319,10 +316,9 @@ jobs:
             ~/.cargo/bin/wasm-bindgen.exe
             ~/.cargo/registry
             ~/.cargo/git
-            ~/AppData/Local/Clearra/build
-          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Run canonical release acceptance AdversarialCorrectness leaf
         run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard FoundationAdversarialCorrectness -ExecutionSurface Trusted
       - name: Seal canonical release acceptance AdversarialCorrectness leaf
@@ -360,10 +356,9 @@ jobs:
             ~/.cargo/bin/wasm-bindgen.exe
             ~/.cargo/registry
             ~/.cargo/git
-            ~/AppData/Local/Clearra/build
-          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Install JavaScript workspace
         run: npm ci --ignore-scripts
       - name: Run canonical release acceptance DesktopHost leaf
@@ -395,14 +390,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - id: release_toolchain_cache
-        name: Restore sanitizer C build cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/AppData/Local/Clearra/build
-          key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            release-acceptance-sanitizer-${{ runner.os }}-
       - name: Run canonical release acceptance sanitizer shard
         run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Sanitizer -ExecutionSurface Trusted
       - name: Seal canonical release acceptance sanitizer shard
@@ -415,15 +402,6 @@ jobs:
             --shard sanitizer `
             --output release-shard-evidence/clearra-release-acceptance-sanitizer-shard.v1.json
           if ($LASTEXITCODE -ne 0) { throw "sanitizer shard evidence failed" }
-      # Cache is an optional accelerator, never release acceptance evidence.
-      - name: Save verified sanitizer C build cache
-        if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}
-        continue-on-error: true
-        timeout-minutes: 2
-        uses: actions/cache/save@v4
-        with:
-          path: ~/AppData/Local/Clearra/build
-          key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}
       - name: Upload canonical release acceptance sanitizer shard
         uses: actions/upload-artifact@v4
         with:
@@ -448,47 +426,52 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Prepare exact native ProductE2E identity
+      - name: Build and seal exact ProductE2E CLI input
         id: native
         shell: pwsh
         run: |
-          $cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)
-          "CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV
-          $nativeBuild = Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-native'
-          $identity = Join-Path $env:RUNNER_TEMP 'clearra-native-build-identity.v1.json'
-          & ./scripts/release/prepare-native-build-identity.ps1 `
-            -BuildDir $nativeBuild `
-            -OutputPath $identity `
-            -SourceCommit $env:GITHUB_SHA `
-            -Workers $cargoJobs `
-            -GitHubOutputPath $env:GITHUB_OUTPUT
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build and seal exact ProductE2E CLI input
-        env:
-          CLEARRA_NATIVE_LIBRARY_DIR: ${{ steps.native.outputs.native_library_directory }}
-        shell: pwsh
-        run: |
-          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-cli-target'
-          $nativeLink = "-L native=$env:CLEARRA_NATIVE_LIBRARY_DIR"
-          $existing = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
-          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($existing)) { $nativeLink } else { "$existing $nativeLink" }
-          cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $binary = Join-Path $env:CARGO_TARGET_DIR 'debug/clearra.exe'
-          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "ProductE2E CLI was not built: $binary" }
-          node scripts/release/product-e2e-cli-artifact.mjs seal `
-            --binary $binary `
-            --native-identity (Join-Path $env:RUNNER_TEMP 'clearra-native-build-identity.v1.json') `
-            --source-commit $env:GITHUB_SHA `
-            --run-id $env:GITHUB_RUN_ID `
-            --run-attempt $env:GITHUB_RUN_ATTEMPT `
-            --output (Join-Path $env:RUNNER_TEMP 'clearra-product-e2e-cli-input')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          . ./scripts/lib/clearra-path-helpers.ps1
+          Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product
+          try {
+            $cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)
+            $env:CARGO_BUILD_JOBS = "$cargoJobs"
+            $nativeBuild = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-native'
+            $identity = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'clearra-native-build-identity.v1.json'
+            & ./scripts/release/prepare-native-build-identity.ps1 `
+              -BuildDir $nativeBuild `
+              -OutputPath $identity `
+              -SourceCommit $env:GITHUB_SHA `
+              -Workers $cargoJobs `
+              -GitHubOutputPath $env:GITHUB_OUTPUT
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $nativeIdentity = Get-Content -LiteralPath $identity -Raw | ConvertFrom-Json
+            $env:CLEARRA_NATIVE_LIBRARY_DIR = $nativeIdentity.runtime_paths.native_library_directory
+            if ([string]::IsNullOrWhiteSpace($env:CLEARRA_NATIVE_LIBRARY_DIR)) { throw 'Native identity has no library directory' }
+            $nativeLink = "-L native=$env:CLEARRA_NATIVE_LIBRARY_DIR"
+            $existing = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
+            $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($existing)) { $nativeLink } else { "$existing $nativeLink" }
+            cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $binary = Join-Path $env:CARGO_TARGET_DIR 'debug/clearra.exe'
+            if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "ProductE2E CLI was not built: $binary" }
+            node scripts/release/product-e2e-cli-artifact.mjs seal `
+              --binary $binary `
+              --native-identity $identity `
+              --source-commit $env:GITHUB_SHA `
+              --run-id $env:GITHUB_RUN_ID `
+              --run-attempt $env:GITHUB_RUN_ATTEMPT `
+              --output (Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-cli-input')
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "artifact_path=$(Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-cli-input')" >> $env:GITHUB_OUTPUT
+            Complete-ClearraBuildTransaction
+          } finally {
+            Exit-ClearraBuildArtifactCacheUsage
+          }
       - name: Upload exact ProductE2E CLI input
         uses: actions/upload-artifact@v4
         with:
           name: product-e2e-cli-input-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/clearra-product-e2e-cli-input
+          path: ${{ steps.native.outputs.artifact_path }}
           if-no-files-found: error
           retention-days: 7
 
@@ -516,10 +499,9 @@ jobs:
             ~/.cargo/bin/wasm-bindgen.exe
             ~/.cargo/registry
             ~/.cargo/git
-            ~/AppData/Local/Clearra/build
-          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Run canonical release acceptance RustExact shard
         env:
           # Match the candidate debug harness, not the release runtime stack.
@@ -536,7 +518,7 @@ jobs:
             --shard rust-exact `
             --output release-shard-evidence/clearra-release-acceptance-rust-exact-shard.v1.json
           if ($LASTEXITCODE -ne 0) { throw "RustExact shard evidence failed" }
-      # One owner seeds the native snapshot for the independent foundation leaves.
+      # One writer seeds native tool/dependency inputs for the independent leaves.
       - name: Save verified canonical native build cache
         if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
@@ -547,7 +529,6 @@ jobs:
             ~/.cargo/bin/wasm-bindgen.exe
             ~/.cargo/registry
             ~/.cargo/git
-            ~/AppData/Local/Clearra/build
           key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}
       - name: Upload canonical release acceptance RustExact shard
         uses: actions/upload-artifact@v4
@@ -640,10 +621,9 @@ jobs:
             ~/.cargo/bin/wasm-bindgen.exe
             ~/.cargo/registry
             ~/.cargo/git
-            ~/AppData/Local/Clearra/build
-          key: release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-native-v3-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
       - name: Run WASM source and host contracts
         run: powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildContracts -ExecutionSurface Trusted -RuntimeEnvironment windows
 
@@ -712,10 +692,9 @@ jobs:
             ~/.cargo/bin/wasm-bindgen
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cache/Clearra/build/cargo-target
-          key: release-acceptance-wasm-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-${{ github.sha }}
+          key: release-acceptance-wasm-v5-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-wasm-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-
+            release-acceptance-wasm-v5-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-
       - name: Prepare acceptance toolchains
         if: steps.rebound_wasm.outputs.reused != 'true'
         shell: bash
@@ -723,7 +702,7 @@ jobs:
           set -euo pipefail
           rustup target add wasm32-unknown-unknown
           if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != 'wasm-bindgen 0.2.126' ]]; then
-            cargo install wasm-bindgen-cli --version 0.2.126 --locked
+            pwsh -NoProfile -File scripts/tools/invoke-clearra-build.ps1 -SourceRoot "$GITHUB_WORKSPACE" -Purpose product -Command cargo -ArgumentsJson '["install","wasm-bindgen-cli","--version","0.2.126","--locked"]'
           fi
       - name: Run verified WASM build producer
         if: steps.rebound_wasm.outputs.reused != 'true'
@@ -740,8 +719,8 @@ jobs:
             --expected-source-commit "$GITHUB_SHA" \
             --expected-run-id "$GITHUB_RUN_ID" \
             --expected-run-attempt "$GITHUB_RUN_ATTEMPT"
-      # Keep WASM and native snapshots separate: parallel producers must not race
-      # to publish incomplete target trees under the same immutable cache key.
+      # Cache only dependency/tool downloads. Managed product generations and
+      # live-owner leases are never restored or saved by Actions cache.
       - name: Save verified canonical WASM build cache
         if: ${{ success() && steps.rebound_wasm.outputs.reused != 'true' && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
@@ -752,7 +731,6 @@ jobs:
             ~/.cargo/bin/wasm-bindgen
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cache/Clearra/build/cargo-target
           key: ${{ steps.release_toolchain_cache.outputs.cache-primary-key }}
       - name: Upload accepted WASM build
         uses: actions/upload-artifact@v4
@@ -884,144 +862,147 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ${{ runner.temp }}/clearra-release/cargo-target
-          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
-            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}
-      - name: Configure external release target
-        shell: pwsh
-        run: |
-          $targetDir = Join-Path $env:RUNNER_TEMP 'clearra-release\cargo-target'
-          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-          "CARGO_TARGET_DIR=$targetDir" >> $env:GITHUB_ENV
+            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}
       - name: Build and exercise standalone WASM CPU CLI
+        id: windows_cli_build
         shell: pwsh
         run: |
-          cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search
-          $builtCli = Join-Path $env:CARGO_TARGET_DIR 'release\clearra.exe'
-          if (-not (Test-Path -LiteralPath $builtCli -PathType Leaf)) {
-            throw "Clearra CLI executable was not produced: $builtCli"
-          }
-          $version = '${{ needs.metadata.outputs.version }}'
-          $artifactDir = Join-Path $PWD.Path 'dist'
-          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-          $cli = Join-Path $artifactDir "Clearra-CLI-v$version-windows-x86_64.exe"
-          Copy-Item -LiteralPath $builtCli -Destination $cli -Force
-          function Invoke-ClearraJsonSmoke {
-            param(
-              [Parameter(Mandatory)] [string] $Name,
-              [Parameter(Mandatory)] [string[]] $CommandArguments,
-              [hashtable] $ExpectedSummary = @{},
-              [hashtable] $ExpectedResourceReport = @{},
-              [string] $ExpectedKind,
-              [string] $ExpectedCommandKind,
-              [Nullable[bool]] $ExpectedTilingFamilyComplete,
-              [string] $ExpectedTilingFamilyIncompleteReason
-            )
-            $jsonLines = & $cli @CommandArguments
-            $exitCode = $LASTEXITCODE
-            if ($exitCode -ne 0) { throw "Clearra CLI $Name smoke failed: $exitCode" }
-            $json = $jsonLines -join "`n"
-            try {
-              $parsed = $json | ConvertFrom-Json -ErrorAction Stop
-            } catch {
-              throw "Clearra CLI $Name smoke returned invalid JSON"
+          . ./scripts/lib/clearra-path-helpers.ps1
+          Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product
+          try {
+            cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $builtCli = Join-Path $env:CARGO_TARGET_DIR 'release\clearra.exe'
+            if (-not (Test-Path -LiteralPath $builtCli -PathType Leaf)) {
+              throw "Clearra CLI executable was not produced: $builtCli"
             }
-            if ($null -eq $parsed) { throw "Clearra CLI $Name smoke returned empty JSON" }
-            $identity = $parsed.runtime_identity
-            if ($null -eq $identity -or
-                $identity.source_commit -ne $env:GITHUB_SHA -or
-                $identity.engine_build_id -ne $env:GITHUB_SHA -or
-                $identity.contract_schema_version -ne 'clearra.search.contract.v2' -or
-                $identity.supply_semantics_id -ne 'clearra.supply.projected-terminal-lookahead.v1' -or
-                $identity.artifact_schema_version -ne 'clearra.solution-data.v1') {
-              throw "Clearra CLI $Name smoke returned a mismatched product build identity"
-            }
-            if ($ExpectedKind -and $parsed.kind -ne $ExpectedKind) {
-              throw "Clearra CLI $Name smoke expected kind=$ExpectedKind, received $($parsed.kind)"
-            }
-            if ($ExpectedCommandKind -and
-                $parsed.contract.command.kind -ne $ExpectedCommandKind) {
-              throw "Clearra CLI $Name smoke expected contract.command.kind=$ExpectedCommandKind, received $($parsed.contract.command.kind)"
-            }
-            if ($null -ne $ExpectedTilingFamilyComplete -and
-                $parsed.contract.pc.tiling.family_complete -ne $ExpectedTilingFamilyComplete) {
-              throw "Clearra CLI $Name smoke expected contract.pc.tiling.family_complete=$ExpectedTilingFamilyComplete, received $($parsed.contract.pc.tiling.family_complete)"
-            }
-            if ($ExpectedTilingFamilyIncompleteReason -and
-                $parsed.contract.pc.tiling.family_incomplete_reason -ne $ExpectedTilingFamilyIncompleteReason) {
-              throw "Clearra CLI $Name smoke expected contract.pc.tiling.family_incomplete_reason=$ExpectedTilingFamilyIncompleteReason, received $($parsed.contract.pc.tiling.family_incomplete_reason)"
-            }
-            foreach ($entry in $ExpectedSummary.GetEnumerator()) {
-              $property = $parsed.summary.PSObject.Properties[$entry.Key]
-              if ($null -eq $property -or $property.Value -ne $entry.Value) {
-                $actual = if ($null -eq $property) { '<missing>' } else { $property.Value }
-                throw "Clearra CLI $Name smoke expected summary.$($entry.Key)=$($entry.Value), received $actual"
-              }
-            }
-            foreach ($entry in $ExpectedResourceReport.GetEnumerator()) {
-              $property = $parsed.resource_report.PSObject.Properties[$entry.Key]
-              if ($null -eq $property -or $property.Value -ne $entry.Value) {
-                $actual = if ($null -eq $property) { '<missing>' } else { $property.Value }
-                throw "Clearra CLI $Name smoke expected resource_report.$($entry.Key)=$($entry.Value), received $actual"
-              }
-            }
-            if ($Name -eq 'rules-export-srs-x') {
+            $version = '${{ needs.metadata.outputs.version }}'
+            $artifactDir = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'release-artifacts'
+            New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+            $cli = Join-Path $artifactDir "Clearra-CLI-v$version-windows-x86_64.exe"
+            Copy-Item -LiteralPath $builtCli -Destination $cli -Force
+            "artifact_path=$cli" >> $env:GITHUB_OUTPUT
+            function Invoke-ClearraJsonSmoke {
+              param(
+                [Parameter(Mandatory)] [string] $Name,
+                [Parameter(Mandatory)] [string[]] $CommandArguments,
+                [hashtable] $ExpectedSummary = @{},
+                [hashtable] $ExpectedResourceReport = @{},
+                [string] $ExpectedKind,
+                [string] $ExpectedCommandKind,
+                [Nullable[bool]] $ExpectedTilingFamilyComplete,
+                [string] $ExpectedTilingFamilyIncompleteReason
+              )
+              $jsonLines = & $cli @CommandArguments
+              $exitCode = $LASTEXITCODE
+              if ($exitCode -ne 0) { throw "Clearra CLI $Name smoke failed: $exitCode" }
+              $json = $jsonLines -join "`n"
               try {
-                $embedded = $parsed.summary.json | ConvertFrom-Json -ErrorAction Stop
+                $parsed = $json | ConvertFrom-Json -ErrorAction Stop
               } catch {
-                throw 'Clearra CLI SRS-X export returned invalid embedded JSON'
+                throw "Clearra CLI $Name smoke returned invalid JSON"
               }
-              $halfTurnCount = @(
-                $embedded.entries | Where-Object {
-                  "$($_.from):$($_.to)" -in @('0:2', '2:0', 'R:L', 'L:R')
+              if ($null -eq $parsed) { throw "Clearra CLI $Name smoke returned empty JSON" }
+              $identity = $parsed.runtime_identity
+              if ($null -eq $identity -or
+                  $identity.source_commit -ne $env:GITHUB_SHA -or
+                  $identity.engine_build_id -ne $env:GITHUB_SHA -or
+                  $identity.contract_schema_version -ne 'clearra.search.contract.v2' -or
+                  $identity.supply_semantics_id -ne 'clearra.supply.projected-terminal-lookahead.v1' -or
+                  $identity.artifact_schema_version -ne 'clearra.solution-data.v1') {
+                throw "Clearra CLI $Name smoke returned a mismatched product build identity"
+              }
+              if ($ExpectedKind -and $parsed.kind -ne $ExpectedKind) {
+                throw "Clearra CLI $Name smoke expected kind=$ExpectedKind, received $($parsed.kind)"
+              }
+              if ($ExpectedCommandKind -and
+                  $parsed.contract.command.kind -ne $ExpectedCommandKind) {
+                throw "Clearra CLI $Name smoke expected contract.command.kind=$ExpectedCommandKind, received $($parsed.contract.command.kind)"
+              }
+              if ($null -ne $ExpectedTilingFamilyComplete -and
+                  $parsed.contract.pc.tiling.family_complete -ne $ExpectedTilingFamilyComplete) {
+                throw "Clearra CLI $Name smoke expected contract.pc.tiling.family_complete=$ExpectedTilingFamilyComplete, received $($parsed.contract.pc.tiling.family_complete)"
+              }
+              if ($ExpectedTilingFamilyIncompleteReason -and
+                  $parsed.contract.pc.tiling.family_incomplete_reason -ne $ExpectedTilingFamilyIncompleteReason) {
+                throw "Clearra CLI $Name smoke expected contract.pc.tiling.family_incomplete_reason=$ExpectedTilingFamilyIncompleteReason, received $($parsed.contract.pc.tiling.family_incomplete_reason)"
+              }
+              foreach ($entry in $ExpectedSummary.GetEnumerator()) {
+                $property = $parsed.summary.PSObject.Properties[$entry.Key]
+                if ($null -eq $property -or $property.Value -ne $entry.Value) {
+                  $actual = if ($null -eq $property) { '<missing>' } else { $property.Value }
+                  throw "Clearra CLI $Name smoke expected summary.$($entry.Key)=$($entry.Value), received $actual"
                 }
-              ).Count
-              if ($embedded.id -ne 'srs-x' -or
-                  $embedded.source_rule -ne 'srs-x' -or
-                  $embedded.entries.Count -ne 84 -or
-                  $halfTurnCount -ne 28) {
-                throw 'Clearra CLI SRS-X export did not preserve its canonical 84-transition profile'
+              }
+              foreach ($entry in $ExpectedResourceReport.GetEnumerator()) {
+                $property = $parsed.resource_report.PSObject.Properties[$entry.Key]
+                if ($null -eq $property -or $property.Value -ne $entry.Value) {
+                  $actual = if ($null -eq $property) { '<missing>' } else { $property.Value }
+                  throw "Clearra CLI $Name smoke expected resource_report.$($entry.Key)=$($entry.Value), received $actual"
+                }
+              }
+              if ($Name -eq 'rules-export-srs-x') {
+                try {
+                  $embedded = $parsed.summary.json | ConvertFrom-Json -ErrorAction Stop
+                } catch {
+                  throw 'Clearra CLI SRS-X export returned invalid embedded JSON'
+                }
+                $halfTurnCount = @(
+                  $embedded.entries | Where-Object {
+                    "$($_.from):$($_.to)" -in @('0:2', '2:0', 'R:L', 'L:R')
+                  }
+                ).Count
+                if ($embedded.id -ne 'srs-x' -or
+                    $embedded.source_rule -ne 'srs-x' -or
+                    $embedded.entries.Count -ne 84 -or
+                    $halfTurnCount -ne 28) {
+                  throw 'Clearra CLI SRS-X export did not preserve its canonical 84-transition profile'
+                }
+              }
+              if ($Name -eq 'terminal-supply-p0') {
+                $json | node scripts/tools/validate-release-cli-smokes.mjs `
+                  --validate-terminal-supply-json `
+                  --expected-source-commit $env:GITHUB_SHA
+                if ($LASTEXITCODE -ne 0) {
+                  throw 'Clearra CLI terminal-supply smoke violated the product contract'
+                }
               }
             }
-            if ($Name -eq 'terminal-supply-p0') {
-              $json | node scripts/tools/validate-release-cli-smokes.mjs `
-                --validate-terminal-supply-json `
-                --expected-source-commit $env:GITHUB_SHA
-              if ($LASTEXITCODE -ne 0) {
-                throw 'Clearra CLI terminal-supply smoke violated the product contract'
-              }
-            }
+            Invoke-ClearraJsonSmoke -Name 'rules' -CommandArguments @('--format', 'json', 'rules', 'list')
+            Invoke-ClearraJsonSmoke -Name 'rules-export-srs-x' `
+              -CommandArguments @('--format', 'json', 'rules', 'export', '--profile', 'srs-x') `
+              -ExpectedSummary @{ action = 'export'; profile = 'srs-x' }
+            Invoke-ClearraJsonSmoke -Name 'solver' -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IJLOO', '--fixed', '--no-hold')
+            Invoke-ClearraJsonSmoke -Name 'pc-tiling' `
+              -CommandArguments @('--format', 'json', 'pc', 'tiling', '--lines', '2', '--queue', 'IIOOO', '--no-hold', '--backend', 'cpu', '--workers', '1') `
+              -ExpectedKind 'pc-tiling-family.v1' `
+              -ExpectedCommandKind 'pc-tiling-family.v1' `
+              -ExpectedTilingFamilyComplete $true `
+              -ExpectedTilingFamilyIncompleteReason 'none' `
+              -ExpectedSummary @{ coverage_probability = 'not-calculated'; probability_calculated = $false; probability_complete = $false; supply_probability_complete = $false; resource_probability_complete = $false } `
+              -ExpectedResourceReport @{ truncated = $false; truncation_reason = $null; probability_complete = $false }
+            Invoke-ClearraJsonSmoke -Name 'failed-queue' -CommandArguments @('--format', 'json', 'failed-queue', '--lines', '2', '--patterns', 'P5', '--backend', 'cpu', '--failed-count', '7')
+            Invoke-ClearraJsonSmoke -Name 'build-probability' `
+              -CommandArguments @('--format', 'json', 'build-probability', '--base-mask', '0x0', '--target-mask', '0xf', '--height', '4', '--queue', 'I', '--no-hold', '--no-mirror', '--backend', 'cpu', '--workers', '1') `
+              -ExpectedSummary @{ actual_backend = 'wasm-cpu-build-probability'; probability_calculated = $true; solution_found = $true }
+            Invoke-ClearraJsonSmoke -Name 'pc-srs-x' `
+              -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IIOOO', '--fixed', '--no-hold', '--rule', 'srs-x', '--backend', 'cpu', '--workers', '1') `
+              -ExpectedSummary @{ rule_profile = 'srs-x'; effective_kick_model = 'srs-x'; solution_found = $true }
+            Invoke-ClearraJsonSmoke -Name 'terminal-supply-p0' `
+              -CommandArguments @('--format', 'json', '--include-solution-data', 'pc-scenario', '--field', '0x1c0701c07', '--visible-height', '4', '--queue', 'STOILJZ', '--max-pieces', '7', '--exact-pieces', '7', '--count-policy', 'count-unique', '--backend', 'cpu', '--workers', '1') `
+              -ExpectedSummary @{ actual_backend = 'wasm-cpu'; unique_solution_count = 18; normalized_unique_solution_count = 18; solution_count_calculated = $true; solution_set_materialized = $true; solution_keys_materialized_count = 18; solution_keys_complete = $true; count_complete = $true; supply_window_resolution = 'projected-terminal-lookahead'; projects_unplaced_lookahead = $true; projects_standard_bag_lookahead = $false; source_sequence_length = 7; total_possible_pattern_count = '1'; normalized_solution_set_hash = 'cts1:8a7fc484d9b49994'; actual_normalized_solution_set_hash = 'cts1:8a7fc484d9b49994' }
+            Complete-ClearraBuildTransaction
+          } finally {
+            Exit-ClearraBuildArtifactCacheUsage
           }
-          Invoke-ClearraJsonSmoke -Name 'rules' -CommandArguments @('--format', 'json', 'rules', 'list')
-          Invoke-ClearraJsonSmoke -Name 'rules-export-srs-x' `
-            -CommandArguments @('--format', 'json', 'rules', 'export', '--profile', 'srs-x') `
-            -ExpectedSummary @{ action = 'export'; profile = 'srs-x' }
-          Invoke-ClearraJsonSmoke -Name 'solver' -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IJLOO', '--fixed', '--no-hold')
-          Invoke-ClearraJsonSmoke -Name 'pc-tiling' `
-            -CommandArguments @('--format', 'json', 'pc', 'tiling', '--lines', '2', '--queue', 'IIOOO', '--no-hold', '--backend', 'cpu', '--workers', '1') `
-            -ExpectedKind 'pc-tiling-family.v1' `
-            -ExpectedCommandKind 'pc-tiling-family.v1' `
-            -ExpectedTilingFamilyComplete $true `
-            -ExpectedTilingFamilyIncompleteReason 'none' `
-            -ExpectedSummary @{ coverage_probability = 'not-calculated'; probability_calculated = $false; probability_complete = $false; supply_probability_complete = $false; resource_probability_complete = $false } `
-            -ExpectedResourceReport @{ truncated = $false; truncation_reason = $null; probability_complete = $false }
-          Invoke-ClearraJsonSmoke -Name 'failed-queue' -CommandArguments @('--format', 'json', 'failed-queue', '--lines', '2', '--patterns', 'P5', '--backend', 'cpu', '--failed-count', '7')
-          Invoke-ClearraJsonSmoke -Name 'build-probability' `
-            -CommandArguments @('--format', 'json', 'build-probability', '--base-mask', '0x0', '--target-mask', '0xf', '--height', '4', '--queue', 'I', '--no-hold', '--no-mirror', '--backend', 'cpu', '--workers', '1') `
-            -ExpectedSummary @{ actual_backend = 'wasm-cpu-build-probability'; probability_calculated = $true; solution_found = $true }
-          Invoke-ClearraJsonSmoke -Name 'pc-srs-x' `
-            -CommandArguments @('--format', 'json', 'pc', '--lines', '2', '--queue', 'IIOOO', '--fixed', '--no-hold', '--rule', 'srs-x', '--backend', 'cpu', '--workers', '1') `
-            -ExpectedSummary @{ rule_profile = 'srs-x'; effective_kick_model = 'srs-x'; solution_found = $true }
-          Invoke-ClearraJsonSmoke -Name 'terminal-supply-p0' `
-            -CommandArguments @('--format', 'json', '--include-solution-data', 'pc-scenario', '--field', '0x1c0701c07', '--visible-height', '4', '--queue', 'STOILJZ', '--max-pieces', '7', '--exact-pieces', '7', '--count-policy', 'count-unique', '--backend', 'cpu', '--workers', '1') `
-            -ExpectedSummary @{ actual_backend = 'wasm-cpu'; unique_solution_count = 18; normalized_unique_solution_count = 18; solution_count_calculated = $true; solution_set_materialized = $true; solution_keys_materialized_count = 18; solution_keys_complete = $true; count_complete = $true; supply_window_resolution = 'projected-terminal-lookahead'; projects_unplaced_lookahead = $true; projects_standard_bag_lookahead = $false; source_sequence_length = 7; total_possible_pattern_count = '1'; normalized_solution_set_hash = 'cts1:8a7fc484d9b49994'; actual_normalized_solution_set_hash = 'cts1:8a7fc484d9b49994' }
       - name: Upload Windows CLI artifact
         uses: actions/upload-artifact@v4
         with:
           name: clearra-windows-cli-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
-          path: dist/Clearra-CLI-v${{ needs.metadata.outputs.version }}-windows-x86_64.exe
+          path: ${{ steps.windows_cli_build.outputs.artifact_path }}
           if-no-files-found: error
 
   windows-gui:
@@ -1039,36 +1020,40 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ${{ runner.temp }}/clearra-release/cargo-target
-          key: product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
-            product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}
+            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}
       - name: Install frontend toolchain
         run: npm ci --ignore-scripts
-      - name: Configure external release target
-        shell: pwsh
-        run: |
-          $targetDir = Join-Path $env:RUNNER_TEMP 'clearra-release\cargo-target'
-          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-          "CARGO_TARGET_DIR=$targetDir" >> $env:GITHUB_ENV
       - name: Build standalone SvelteKit and Tauri GUI
-        run: npm run tauri -w @clearra/desktop -- build --no-bundle
-      - name: Stage Windows GUI executable
+        id: windows_gui_build
         shell: pwsh
         run: |
-          $version = '${{ needs.metadata.outputs.version }}'
-          $gui = Join-Path $env:CARGO_TARGET_DIR 'release\clearra-desktop.exe'
-          if (-not (Test-Path -LiteralPath $gui -PathType Leaf)) {
-            throw "Clearra GUI executable was not produced: $gui"
+          . ./scripts/lib/clearra-path-helpers.ps1
+          Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product
+          try {
+            npm run tauri -w @clearra/desktop -- build --no-bundle
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $version = '${{ needs.metadata.outputs.version }}'
+            $gui = Join-Path $env:CARGO_TARGET_DIR 'release\clearra-desktop.exe'
+            if (-not (Test-Path -LiteralPath $gui -PathType Leaf)) {
+              throw "Clearra GUI executable was not produced: $gui"
+            }
+            $artifactDir = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'release-artifacts'
+            New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+            $artifact = Join-Path $artifactDir "Clearra-GUI-v$version-windows-x86_64.exe"
+            Copy-Item -LiteralPath $gui -Destination $artifact
+            "artifact_path=$artifact" >> $env:GITHUB_OUTPUT
+            Complete-ClearraBuildTransaction
+          } finally {
+            Exit-ClearraBuildArtifactCacheUsage
           }
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item -LiteralPath $gui -Destination "dist\Clearra-GUI-v$version-windows-x86_64.exe"
       - name: Upload Windows GUI artifact
         uses: actions/upload-artifact@v4
         with:
           name: clearra-windows-gui-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
-          path: dist/Clearra-GUI-v${{ needs.metadata.outputs.version }}-windows-x86_64.exe
+          path: ${{ steps.windows_gui_build.outputs.artifact_path }}
           if-no-files-found: error
 
   canonical-evidence:

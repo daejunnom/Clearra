@@ -18,36 +18,56 @@ $pathHelpers = Read-Text "scripts/lib/clearra-path-helpers.ps1"
 foreach ($requiredCargoTargetPolicy in @(
     "function Get-ClearraCargoTargetDir",
     "function Assert-ClearraCanonicalCargoTargetDir",
-    "function Remove-ClearraRepositoryLocalBuildArtifacts",
+    "clearra-build-path-policy.ps1",
     "clearra-artifact-cache.ps1"
 )) {
     if ($pathHelpers -notlike "*$requiredCargoTargetPolicy*") {
         Add-ArchitectureError "Cargo execution-surface policy is missing '$requiredCargoTargetPolicy'"
     }
 }
-$artifactCache = Read-Text "scripts/lib/clearra-artifact-cache.ps1"
+$artifactCache = (Read-Text "scripts/lib/clearra-artifact-cache.ps1") +
+    (Read-Text "scripts/lib/clearra-build-transaction-record.ps1") +
+    (Read-Text "scripts/lib/clearra-build-path-policy.ps1")
 foreach ($requiredCachePolicy in @(
     "function Initialize-ClearraBuildArtifactCache",
     "function Ensure-ClearraBuildArtifactCache",
-    "function Enter-ClearraArtifactCacheUsageLock",
+    "function Enter-ClearraBuildLease",
     "function Exit-ClearraBuildArtifactCacheUsage",
     "function Invoke-ClearraBuildArtifactCacheRetention",
-    "function Test-ClearraInheritedArtifactCacheOwner",
+    "function Get-ClearraInheritedBuildTransaction",
+    "function Complete-ClearraBuildTransaction",
+    "function Get-ClearraBuildTransactionRoot",
+    "function Assert-ClearraRequestedBuildPath",
     "CLEARRA_BUILD_CACHE_OWNER_PID",
-    "CLEARRA_MAX_BUILD_CACHE_GIB",
+    "CLEARRA_BUILD_TRANSACTION_ROOT",
+    "CLEARRA_BUILD_SOURCE_ID",
+    "CLEARRA_BUILD_PURPOSE",
     "CARGO_INCREMENTAL = '0'",
-    ".clearra-cache-state.json",
-    "input-change-reuse",
-    "workspace-or-schema-reset",
-    "budget-reset",
-    "post-run-budget-reset"
+    ".clearra-build-transaction.json",
+    "Select-Object -Skip 5",
+    "CreateNew"
 )) {
     if ($artifactCache -notlike "*$requiredCachePolicy*") {
         Add-ArchitectureError "bounded artifact-cache policy is missing '$requiredCachePolicy'"
     }
 }
-if ($artifactCache -like '*input-change-reset*') {
-    Add-ArchitectureError "ordinary source changes must preserve the incremental CMake/Cargo cache"
+$policyTokens = $null
+if ($artifactCache -notmatch 'Select-Object\s+-Skip\s+5(?![0-9])') {
+    Add-ArchitectureError 'Product retention must keep exactly five completed generations.'
+}
+$policyParseErrors = $null
+$pathPolicyAst = [Management.Automation.Language.Parser]::ParseInput($pathHelpers, [ref]$policyTokens, [ref]$policyParseErrors)
+$legacyCleanup = $pathPolicyAst.Find({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Remove-ClearraRepositoryLocalBuildArtifacts'
+}, $false)
+$legacyDeletes = $null -ne $legacyCleanup -and (
+    $legacyCleanup.Body.EndBlock.Statements.Count -ne 1 -or
+    $legacyCleanup.Body.EndBlock.Statements[0] -isnot [Management.Automation.Language.ThrowStatementAst])
+if ($artifactCache -match 'budget-reset|post-run-budget-reset|workspace-or-schema-reset' -or $legacyDeletes) {
+    Add-ArchitectureError "generation retention must not reset the entire build root or silently delete legacy source-local outputs"
+}
+if ($activeCargoConfig -notmatch 'rustc-wrapper\s*=\s*"clearra-build-root-required"') {
+    Add-ArchitectureError "unmanaged Cargo must fail before compiling into a new output tree"
 }
 $clearraRunner = Read-Text "scripts/clearra.ps1"
 foreach ($requiredRunnerCachePolicy in @(

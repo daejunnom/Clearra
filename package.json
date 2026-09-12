@@ -2,6 +2,9 @@
   "name": "clearra-workspace",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build:ctk3": "npm run build --workspace ctk3"
+  },
   "workspaces": [
     "apps/*",
     "packages/*"

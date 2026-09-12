@@ -4,17 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "sync": "svelte-kit sync",
+    "sync": "node ../../scripts/tools/build-clearra-frontend.mjs --app web --task sync",
     "wasm:build": "node ../../scripts/tools/build-clearra-wasm.mjs --environment native",
     "wasm:build:wsl": "node ../../scripts/tools/build-clearra-wasm.mjs --environment wsl",
-    "predev": "npm run sync && npm run wasm:build",
-    "dev": "vite --host 127.0.0.1 --port 4194 --strictPort",
-    "dev:wsl": "npm run sync && npm run wasm:build:wsl && vite --host 127.0.0.1 --port 4194 --strictPort",
-    "prebuild": "npm run sync && npm run wasm:build",
-    "build": "vite build && node scripts/prepare-pages-fallback.mjs",
-    "build:wsl": "npm run sync && npm run wasm:build:wsl && vite build",
-    "pretest": "npm run sync",
-    "test": "npm exec tsc -- --noEmit -p tsconfig.contract.json && node ../../scripts/tools/run-typescript-contracts.mjs ./test"
+    "dev": "node ../../scripts/tools/build-clearra-frontend.mjs --app web --task dev",
+    "dev:wsl": "node ../../scripts/tools/build-clearra-frontend.mjs --app web --task dev --environment wsl",
+    "build": "node ../../scripts/tools/build-clearra-frontend.mjs --app web --task build",
+    "build:wsl": "node ../../scripts/tools/build-clearra-frontend.mjs --app web --task build --environment wsl",
+    "test": "node ../../scripts/tools/build-clearra-frontend.mjs --app web --task test"
   },
   "dependencies": {
     "@clearra/ui": "0.1.0",

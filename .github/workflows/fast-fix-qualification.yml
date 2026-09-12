@@ -439,6 +439,9 @@ jobs:
     if: needs.authority.outputs.gate_mode == 'focused' && needs.authority.outputs.deploy_cli == 'true'
     needs: authority
     runs-on: ubuntu-latest
+    env:
+      CLI_COMPONENT_COMMAND: >-
+        pwsh -NoProfile -File scripts/tools/invoke-clearra-build.ps1 -SourceRoot . -Purpose product -Command cargo -ArgumentsJson '["test","-p","clearra-cli","--test","product_cli_surface_contract","--","--test-threads=1"]'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -447,13 +450,14 @@ jobs:
         with:
           node-version: 22
       - name: Run closed CLI component test
-        run: cargo test -p clearra-cli --test product_cli_surface_contract -- --test-threads=1
+        run: >-
+          pwsh -NoProfile -File scripts/tools/invoke-clearra-build.ps1 -SourceRoot . -Purpose product -Command cargo -ArgumentsJson '["test","-p","clearra-cli","--test","product_cli_surface_contract","--","--test-threads=1"]'
       - name: Seal CLI qualification evidence
         run: >-
           node scripts/release/fast-fix-qualification-evidence.mjs component
           --repository "$GITHUB_REPOSITORY" --source-commit "${{ needs.authority.outputs.source_commit }}"
           --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --component cli
-          --command "cargo test -p clearra-cli --test product_cli_surface_contract -- --test-threads=1"
+          --command "$CLI_COMPONENT_COMMAND"
           --output "$RUNNER_TEMP/cli.json"
       - uses: actions/upload-artifact@v4
         with:

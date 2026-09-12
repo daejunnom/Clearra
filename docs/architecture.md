@@ -849,6 +849,11 @@ Default product gates never invoke WSL or replace native evidence with a WASM
 process. Release-built Windows packages and the browser WASM artifact are
 independent product surfaces.
 
+ManagedLocal builds the C library with `BUILD_TESTING=OFF`; it does not turn
+source-generated Rust execution into an approved Windows execution surface.
+Build transactions use the one physical root and experiment/product retention
+contract documented in [Build System](build-system.md).
+
 Source runners never inject `/MANIFESTUAC` or `/MANIFEST:EMBED` into transient
 Cargo/C artifacts. The release package is the sole owner of the reviewed PE
 execution-level manifest and its signature; unpackaged source tools use the

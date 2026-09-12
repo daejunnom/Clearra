@@ -112,6 +112,9 @@ jobs:
           node-version: ${{ inputs.mode == 'bootstrap-capture' && '22.23.2' || '22' }}
           cache: npm
           cache-dependency-path: snapshot-source/package-lock.json
+      - name: Require managed frontend policy before legacy source compilation
+        if: ${{ inputs.mode == 'bootstrap-capture' }}
+        run: node authority-source/scripts/tools/validate-managed-frontend-source.mjs --source-root snapshot-source
       - uses: actions/cache@v4
         if: ${{ inputs.mode == 'bootstrap-capture' }}
         with:
@@ -119,8 +122,7 @@ jobs:
             ~/.cargo/bin/wasm-bindgen
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cache/Clearra/build/cargo-target-wasm
-          key: pages-rollback-wasm-${{ runner.os }}-rust-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('snapshot-source/Cargo.lock') }}-bindgen-0.2.126
+          key: pages-rollback-wasm-dependencies-v2-${{ runner.os }}-rust-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('snapshot-source/Cargo.lock') }}-bindgen-0.2.126
       - name: Prepare Rust WASM toolchain
         if: ${{ inputs.mode == 'bootstrap-capture' }}
         env:
@@ -133,7 +135,7 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown
           if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.126" ]]; then
-            cargo install wasm-bindgen-cli --version 0.2.126 --locked
+            pwsh -NoProfile -File authority-source/scripts/tools/invoke-clearra-build.ps1 -SourceRoot "$GITHUB_WORKSPACE/authority-source" -Purpose product -Command cargo -ArgumentsJson '["install","wasm-bindgen-cli","--version","0.2.126","--locked"]'
           fi
       - name: Install GUI dependencies
         if: ${{ inputs.mode == 'bootstrap-capture' }}
@@ -150,7 +152,7 @@ jobs:
           CLEARRA_WEB_BASE_PATH="/${GITHUB_REPOSITORY#*/}" \
           CLEARRA_SOURCE_COMMIT="$SNAPSHOT_SHA" \
           CLEARRA_ENGINE_BUILD_ID="$SNAPSHOT_SHA" \
-          npm run build --workspace apps/clearra-web
+          pwsh -NoProfile -File "$GITHUB_WORKSPACE/snapshot-source/scripts/tools/invoke-clearra-build.ps1" -SourceRoot "$GITHUB_WORKSPACE/snapshot-source" -Purpose product -Command npm -ArgumentsJson '["run","build","--workspace","apps/clearra-web"]'
       - name: Download exact accepted Pages build without rebuilding
         if: ${{ inputs.mode == 'capture' }}
         uses: actions/download-artifact@v4

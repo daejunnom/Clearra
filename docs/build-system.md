@@ -52,27 +52,81 @@ debug and release artifacts for `clearra-core-ffi`; unchanged native builds
 reuse the existing Cargo graph. This selective invalidation is runner-owned,
 does not use `build.rs`, and does not invoke WSL.
 
-The external artifact root is an incremental cache, not a disposable snapshot
-of the complete repository. A source or script change updates the cache input
-signature but preserves the CMake and Cargo trees so those build systems can
-invalidate their own affected nodes. The complete artifact root is removed
-only when its size budget is exceeded or its workspace/schema identity no
-longer matches. This prevents unrelated Rust changes from rebuilding C and
-prevents repeated runs from accumulating one full cache generation per input
-signature.
+## One build root and bounded generations
 
-The budget is checked both before reuse and when the owning runner exits. A
-failed or forcibly stopped run is recovered by the next owning runner before
-it starts work. Repository-local `target` and `build` directories are legacy
-surfaces and are removed before the canonical external cache is initialized.
+All managed compilation uses one physical root per host. Windows uses
+`%LOCALAPPDATA%/Clearra/build`; WSL maps the same Windows directory via
+`/mnt/<drive>/...`, without a second ext4 cache. Independent Linux CI hosts
+use `${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build`. The platform selects the
+root. Conflicting root/target/wrapper overrides and symlink/junction escapes
+are rejected before creating a build transaction.
 
-Disposable work uses one locked slot per purpose under
-`<artifact-root>/transient`. WASM publication staging and the headless browser
-profile follow the same fixed-slot rule: a normal exit removes the slot, while
-the next invocation reclaims a slot whose owner no longer exists. Temporary
-files are atomically replaced at a stable path where the consumer contract
-allows replacement; timestamp, PID, and GUID directory generations are not a
-retention mechanism.
+```text
+Clearra/build/
+  experiments/<source-root-id>/current/   one whole build per source root
+    cargo-target/                       Rust, host and WASM targets
+    core-c-.../                         C variants
+    wasm-stage/                        unpublished staging
+  products/<UTC-timestamp>-<session>/     newest five completed generations
+    cargo-target/
+  .leases/                              active ownership only
+```
+
+A purpose is the canonical source root, not the command, package or executable.
+Its ID is the first 24 hexadecimal characters of SHA-256 over the normalized
+absolute root; Windows case and WSL mount aliases normalize identically.
+A new independent experiment removes the previous **whole** current generation,
+including hashed dependencies and incremental variants. Nested commands share
+one generation. Independent owners of the same purpose are rejected; different
+source roots may build in parallel under the one physical root.
+
+Products are explicitly selected with `CLEARRA_BUILD_PURPOSE=product` or
+`-Purpose product` / `--purpose product`. Only owner-confirmed completion counts
+toward the newest five generations. Normal failure/cancellation exit removes
+failed products. Force-killed owners leave active records/leases that are not
+silently taken over. Unknown or modified ownership records fail closed;
+recovery requires explicitly authorized, path-verified maintenance.
+
+Independent product owners on the same host cannot overlap: a catalog lease
+also prevents crashed/incomplete product builds from accumulating new random
+generations. Parallel child builds within the selected owner remain supported;
+independent CI hosts are unaffected. A later product request with an unresolved
+active record or lease fails before compiling and requires explicit cleanup.
+
+The shared schema binds `CLEARRA_BUILD_ROOT`, `CLEARRA_BUILD_PURPOSE`,
+`CLEARRA_BUILD_SOURCE_ROOT`, source/session IDs, owner PID,
+`CLEARRA_BUILD_TRANSACTION_ROOT` and the exact canonical `CARGO_TARGET_DIR`.
+`RUSTC_WRAPPER` validates ownership and compiler output paths. Repository
+Cargo configuration rejects unmanaged Cargo before compilation. Use
+`scripts/tools/invoke-clearra-build.ps1` or the Node counterpart
+`scripts/tools/invoke-clearra-build.mjs` (also used by Bookworm).
+This prevents accidental path bypass; it is not an operating-system sandbox
+against deliberately replacing configuration or using an unmodified old branch.
+
+```powershell
+./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command cargo `
+  -ArgumentsJson '["check","--locked","-p","clearra-cli-command"]'
+./scripts/tools/invoke-clearra-build.ps1 -Purpose product -Command cargo `
+  -ArgumentsJson '["build","--locked","--release","-p","clearra-cli"]'
+```
+
+```sh
+node scripts/tools/invoke-clearra-build.mjs --source-root "$PWD" \
+  --purpose experiment -- cargo check --locked -p clearra-cli-command
+```
+
+The owner sets `CARGO_INCREMENTAL=0`. Clean independent generations trade
+rebuild speed for the requested storage bound. Compiler reuse belongs inside
+one owner; global dependency downloads/toolchains are not build generations.
+CI must not restore compiled trees into new generations. Related producer,
+verification and consumer commands share one owner step rather than inheriting
+expired owner state from a previous step.
+
+Publication is separate from compilation. The current 4194 WASM, accepted
+release exports and deployed files keep their publication contracts.
+Repository-local legacy build trees are not silently removed on build start.
+The separately authorized one-time migration removes enumerated generated
+outputs only, preserving sources, worktrees, reports and published runtimes.
 
 ## Standard Workspace Policy
 
@@ -95,8 +149,8 @@ executable. The retired Windows native C execution path is not linked into the
 desktop release.
 
 `scripts/desktop-host-check.ps1` runs the isolated manifest with
-the same canonical `CARGO_TARGET_DIR` used by every other Cargo task, normally
-`%LOCALAPPDATA%\Clearra\build\cargo-target`. Task-specific target trees are
+the same canonical `CARGO_TARGET_DIR` used by other tasks in its owner transaction,
+`<transaction-root>/cargo-target`. Task-specific target trees are
 forbidden because they multiply unsigned Cargo build-script executables. Build
 artifacts do not enter the repository. No other app or crate may use the Tauri
 build-script exception.
@@ -149,6 +203,11 @@ publisher. This bounded history lets an already-running development worker keep
 its generation while the next search adopts the newly verified manifest.
 
 ## Reason
+
+Default product, test, desktop, and artifact commands never invoke `wsl.exe`
+as a fallback after a Windows policy failure. Explicitly selected WSL developer
+tools retain their independent environment/source binding. The separate browser product
+is a WASM surface. A degraded result does not classify a policy failure as success.
 
 Cargo build scripts add executable launch points to a normal workspace build.
 Clearra keeps CMake and native link setup in the developer runner so the default

@@ -27,12 +27,13 @@ test('candidate CLI continues only independent tests with successful setup or bi
   }
   const compile = candidateCliStep('Compile candidate CLI');
   assert.match(compile, /if: \$\{\{ !cancelled\(\) && steps\.metadata\.outcome == 'success' && steps\.smokes\.outcome == 'success' && steps\.fixtures\.outcome == 'success' \}\}/u);
-  for (const name of ['Check candidate startup', 'Verify the current typed score renderer boundary',
-    'Publish unqualified development binary']) {
-    const step = candidateCliStep(name);
-    assert.match(step, /if: \$\{\{ !cancelled\(\) && steps\.compile\.outcome == 'success' \}\}/u);
-    assert.doesNotMatch(step, /continue-on-error|\|\| true/u);
-  }
+  assert.match(compile, /Ensure-ClearraBuildArtifactCache -RepositoryRoot \$env:GITHUB_WORKSPACE -Purpose experiment/u);
+  assert.match(compile, /& \$candidateCli --help/u);
+  assert.match(compile, /\$startupExitCode = \$LASTEXITCODE[\s\S]*cargo test[\s\S]*if \(\$startupExitCode -ne 0\)/u);
+  assert.doesNotMatch(compile, /continue-on-error|\|\| true/u);
+  const upload = candidateCliStep('Publish unqualified development binary');
+  assert.match(upload, /if: \$\{\{ !cancelled\(\) && steps\.compile\.outputs\.binary_path != '' \}\}/u);
+  assert.match(upload, /path: \$\{\{ steps\.compile\.outputs\.binary_path \}\}/u);
 });
 
 function assertIsolated(source) {
@@ -87,7 +88,7 @@ test('full selection runs the unchanged eight-stage entry point once and skips l
   assert.match(workflow, /runs-on: windows-latest/u);
   assert.match(workflow, /-ExecutionSurface Trusted -RuntimeEnvironment windows/u);
   assert.match(workflow, /RUST_MIN_STACK: "16777216"/u);
-  assert.match(workflow, /wasm-bindgen-cli --version 0\.2\.126 --locked/u);
+  assert.match(workflow, /"wasm-bindgen-cli","--version","0\.2\.126","--locked"/u);
   assert.doesNotMatch(workflow, /-ExecutionPolicy|Unblock-File|Set-AuthenticodeSignature|\bwsl\b/u);
 });
 
@@ -103,27 +104,29 @@ test('focused Rust/WASM feedback is not another full gate and builds one indepen
   assert.doesNotMatch(job, /run: node scripts\/release\/candidate-preflight-regressions\.mjs/u);
   assert.doesNotMatch(job, /-Task ReleaseAcceptance|--workspace|--all-targets|--verify|--benchmark|npm ci/u);
   assert.equal((job.match(/node scripts\/tools\/build-clearra-wasm\.mjs --environment native --destination \$candidateWasmBuild/gu) ?? []).length, 1);
-  assert.match(job, /Join-Path \$env:RUNNER_TEMP 'clearra-candidate-wasm-built'/u);
+  assert.match(job, /Join-Path \$env:CLEARRA_BUILD_TRANSACTION_ROOT 'candidate-wasm-built'/u);
   assert.match(job, /!cancelled\(\) && steps\.toolchains\.outcome == 'success' && steps\.boundaries\.outcome == 'success'/u);
-  assert.match(job, /!cancelled\(\) && steps\.wasm_build\.outcome == 'success'/u);
+  assert.match(job, /id: candidate_wasm/u);
   assert.match(job, /if: always\(\) && steps\.candidate_wasm\.outputs\.ready == 'true'/u);
   assert.doesNotMatch(job, /continue-on-error:|actions\/cache(?:@|\/save)|download-artifact/u);
-  assert.match(job, /"CARGO_TARGET_DIR=\$\(Get-ClearraCargoTargetDir\)" >> \$env:GITHUB_ENV/u);
+  assert.match(job, /Ensure-ClearraBuildArtifactCache -RepositoryRoot \$env:GITHUB_WORKSPACE -Purpose experiment/u);
+  assert.doesNotMatch(job, /CARGO_TARGET_DIR[^\r\n]*GITHUB_ENV/u);
 });
 
 test('native regressions and WASM are sibling leaves, not a serial critical path', () => {
   const job = workflow.split('  candidate-rust:')[1].split('  candidate-rust-wasm:')[0];
   assert.match(job, /needs: candidate-source/u);
   assert.match(job, /Assert-ClearraTrustedExecutionSurface/u);
-  assert.match(job, /run: node scripts\/release\/candidate-preflight-regressions\.mjs/u);
+  assert.match(job, /& node scripts\/release\/candidate-preflight-regressions\.mjs/u);
+  assert.match(job, /Ensure-ClearraBuildArtifactCache -RepositoryRoot \$env:GITHUB_WORKSPACE -Purpose experiment/u);
   assert.doesNotMatch(job, /npm ci|cargo install wasm-bindgen|rustup target|build-clearra-wasm|candidate-rust-wasm|continue-on-error/u);
-  assert.equal((workflow.match(/run: node scripts\/release\/candidate-preflight-regressions\.mjs/gu) ?? []).length, 1);
+  assert.equal((workflow.match(/& node scripts\/release\/candidate-preflight-regressions\.mjs/gu) ?? []).length, 1);
 });
 
 test('candidate build leaves only read matching canonical cache families and still rebuild', () => {
   const canonical = productionWorkflows[0].replaceAll('\r\n', '\n');
   for (const [name, family, version] of [
-    ['candidate-full-gate', 'native', 3], ['candidate-rust-wasm', 'wasm', 4], ['candidate-rust', 'native', 3],
+    ['candidate-full-gate', 'native', 4], ['candidate-rust-wasm', 'wasm', 5], ['candidate-rust', 'native', 4],
   ]) {
     const job = workflow.split(`  ${name}:`)[1].split(/^  [a-z][a-z-]*:/mu)[0].replaceAll('\r\n', '\n');
     const cache = job.match(/      - name: Restore verified (?:WASM|native) build inputs\n([\s\S]*?)(?=      - name:)/u)?.[1];
@@ -131,6 +134,7 @@ test('candidate build leaves only read matching canonical cache families and sti
     assert.ok(canonical.includes(cache.trimEnd()), `${name} must match the canonical producer cache paths and keys`);
     assert.ok(cache.includes(`key: release-acceptance-${family}-v${version}-`));
     assert.match(cache, /-\$\{\{ github.sha \}\}/u);
+    assert.doesNotMatch(cache, /Clearra\/build|cargo-target/u, 'CI caches must not restore owner generations');
     assert.equal((job.match(/actions\/cache\/restore@v4/gu) ?? []).length, 1);
     assert.doesNotMatch(job, /cache-hit/u, 'a cache hit is not a reason to skip the source build or tests');
   }
@@ -139,7 +143,9 @@ test('candidate build leaves only read matching canonical cache families and sti
 test('source identity is paired and WASM is uploaded only after independent five-file verification', () => {
   assert.match(workflow, /CLEARRA_SOURCE_COMMIT: \$\{\{ github\.sha \}\}/u);
   assert.match(workflow, /CLEARRA_ENGINE_BUILD_ID: \$\{\{ github\.sha \}\}/u);
-  assert.match(workflow, /Preserve only source-verified candidate WASM if it was built\r?\n        if: always\(\)/u);
+  const fullGate = workflow.split('  candidate-full-gate:')[1].split('  candidate-rust:')[0];
+  assert.match(fullGate, /try \{[\s\S]*-Task ReleaseAcceptance[\s\S]*\} finally \{[\s\S]*candidate-preflight-artifacts\.mjs/u);
+  assert.match(fullGate, /Join-Path \$env:CARGO_TARGET_DIR 'clearra-web-public\/wasm'/u);
   assert.match(workflow, /if: always\(\) && steps\.candidate_wasm\.outputs\.ready == 'true'/u);
   assert.match(workflow, /name: unqualified-candidate-wasm-\$\{\{ github\.sha \}\}-run-/u);
   assert.match(workflow, /candidate-preflight-artifacts\.mjs --from \$candidateWasmSource --output \$candidateWasmOutput --source-commit \$env:GITHUB_SHA/u);
@@ -162,12 +168,12 @@ test('candidate CLI retains native startup and typed output checks without a dup
   const job = workflow.split('  candidate-cli:')[1].split('  candidate-minimum-diagnostic:')[0];
   assert.equal((job.match(/cargo build /gu) ?? []).length, 1);
   assert.match(job, /cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search/u);
-  assert.match(job, /run: target\/release\/clearra --help/u);
+  assert.match(job, /& \$candidateCli --help/u);
   assert.match(job, /cargo test --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search --lib score_finder_renderer_ -- --nocapture/u);
   assert.match(job, /CLEARRA_SOURCE_COMMIT: \$\{\{ github\.sha \}\}/u);
   assert.match(job, /CLEARRA_ENGINE_BUILD_ID: \$\{\{ github\.sha \}\}/u);
   assert.match(job, /name: unqualified-candidate-cli-\$\{\{ github\.sha \}\}/u);
-  assert.match(job, /steps\.compile\.outcome == 'success'/u);
+  assert.match(job, /steps\.compile\.outputs\.binary_path != ''/u);
   assert.doesNotMatch(job, /cli-parity|Compare direct CLI|target\/debug|continue-on-error:|\bgcloud\b|--workspace|ReleaseAcceptance/u);
 });
 

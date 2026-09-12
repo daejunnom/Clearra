@@ -305,7 +305,7 @@ function Invoke-WasmBuildTestGate {
             'test', '--workspace', '@clearra/web'
         ) 'clearra-web worker contracts'
         Invoke-WasmReleaseCommand $npmCommand.Source @(
-            'exec', '--workspace', '@clearra/web', '--', 'vite', 'build'
+            'exec', '--workspace', '@clearra/web', '--', 'vite', 'build', '--configLoader', 'runner'
         ) 'clearra-web frontend build'
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'apps/clearra-web/scripts/prepare-pages-fallback.mjs')

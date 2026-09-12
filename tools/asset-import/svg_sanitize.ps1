@@ -23,6 +23,7 @@ try {
     $tool = Join-Path $targetDir "debug/clearra-asset-import.exe"
     & $tool sanitize --input (Resolve-Path -LiteralPath $InputSvg) --output $OutputSvg
     if ($LASTEXITCODE -ne 0) { throw "SVG sanitize failed" }
+    if (Test-ClearraBuildTransactionOwner) { Complete-ClearraBuildTransaction }
 } finally {
     Pop-Location
     Exit-ClearraBuildArtifactCacheUsage

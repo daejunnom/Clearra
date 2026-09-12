@@ -316,11 +316,6 @@ const releaseAcceptanceRustExactRunStep = section(
   "\n      - name: Run canonical release acceptance RustExact shard",
   "\n      - name: Seal canonical release acceptance RustExact shard",
 );
-const productE2ECliPrepareStep = section(
-  releaseAcceptanceProductCliJob,
-  "\n      - name: Prepare exact native ProductE2E identity",
-  "\n      - name: Build and seal exact ProductE2E CLI input",
-);
 const productE2ECliJobEnvironment = section(
   releaseAcceptanceProductCliJob,
   "\n    env:",
@@ -330,11 +325,6 @@ const productE2ECliBuildStep = section(
   releaseAcceptanceProductCliJob,
   "\n      - name: Build and seal exact ProductE2E CLI input",
   "\n      - name: Upload exact ProductE2E CLI input",
-);
-const productE2ECliBuildEnvironment = section(
-  productE2ECliBuildStep,
-  "\n        env:",
-  "\n        shell:",
 );
 const productE2ECliUploadStep = releaseAcceptanceProductCliJob.slice(
   releaseAcceptanceProductCliJob.indexOf("\n      - name: Upload exact ProductE2E CLI input"),
@@ -397,7 +387,7 @@ const acceptedWasmToolchainStep = section(
 const acceptedWasmBuildVerifyStep = section(
   releaseAcceptanceWasmBuildJob,
   "\n      - name: Verify the current-run accepted WASM artifact",
-  "\n      # Keep WASM and native snapshots separate:",
+  "\n      - name: Save verified canonical WASM build cache",
 );
 const acceptedWasmContractsRunStep = releaseAcceptanceWasmContractsJob.slice(
   releaseAcceptanceWasmContractsJob.indexOf("\n      - name: Run WASM source and host contracts"),
@@ -527,8 +517,13 @@ const linuxPcTilingEnforcement = section(
   '\n            if (Object.hasOwn(expected, "kind") && parsed?.kind !== expected.kind) {',
   "\n            for (const [key, value] of Object.entries(expectedSummary)) {",
 );
+// Remove only the managed owner's extra indentation from the otherwise exact
+// Windows payload contract; its try/complete/finally wrapper is checked below.
+const windowsSmokePayload = section(windowsCliJob,
+  "\n          try {", "\n            Complete-ClearraBuildTransaction")
+  .replace(/^  /gmu, "");
 const windowsPcTilingEnforcement = section(
-  windowsCliJob,
+  windowsSmokePayload,
   "\n            if ($ExpectedKind -and $parsed.kind -ne $ExpectedKind) {",
   "\n            foreach ($entry in $ExpectedSummary.GetEnumerator()) {",
 );
@@ -538,7 +533,7 @@ const linuxPcTilingSmoke = section(
   "\nrun_json_smoke failed-queue",
 );
 const windowsPcTilingSmoke = section(
-  windowsCliJob,
+  windowsSmokePayload,
   "\n          Invoke-ClearraJsonSmoke -Name 'pc-tiling'",
   "\n          Invoke-ClearraJsonSmoke -Name 'failed-queue'",
 );
@@ -883,8 +878,8 @@ requireExactNormalizedText(
 );
 const windowsTerminalSmoke = section(
   windowsCliJob,
-  "\n          Invoke-ClearraJsonSmoke -Name 'terminal-supply-p0'",
-  "\n      - name: Upload Windows CLI artifact",
+  "\n            Invoke-ClearraJsonSmoke -Name 'terminal-supply-p0'",
+  "\n            Complete-ClearraBuildTransaction",
 );
 requireTerminalSupplySmoke(windowsTerminalSmoke, "Windows");
 requireText(
@@ -912,7 +907,9 @@ for (const marker of [
   );
 }
 for (const marker of [
-  "$artifactDir = Join-Path $PWD.Path",
+  "$artifactDir = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'release-artifacts'",
+  '"artifact_path=$cli" >> $env:GITHUB_OUTPUT',
+  'path: ${{ steps.windows_cli_build.outputs.artifact_path }}',
   '$cli = Join-Path $artifactDir "Clearra-CLI-v$version-windows-x86_64.exe"',
   "Copy-Item -LiteralPath $builtCli -Destination $cli -Force",
   "$jsonLines = & $cli @CommandArguments",
@@ -973,7 +970,7 @@ requireExactYamlScalar(
 requireExactYamlKeySet(
   workflowEnvironment,
   2,
-  ["CLEARRA_SOURCE_COMMIT", "CLEARRA_ENGINE_BUILD_ID"],
+  ["CLEARRA_SOURCE_COMMIT", "CLEARRA_ENGINE_BUILD_ID", "CLEARRA_BUILD_PURPOSE"],
   "release workflow environment",
 );
 for (const key of ["CLEARRA_SOURCE_COMMIT", "CLEARRA_ENGINE_BUILD_ID"]) {
@@ -984,6 +981,30 @@ for (const key of ["CLEARRA_SOURCE_COMMIT", "CLEARRA_ENGINE_BUILD_ID"]) {
     `release workflow ${key}`,
     2,
   );
+}
+requireExactYamlScalar(workflowEnvironment, "CLEARRA_BUILD_PURPOSE", "product",
+  "release workflow managed build purpose", 2);
+for (const forbidden of [
+  /CARGO_TARGET_DIR[^\n]*GITHUB_ENV/u,
+  /(?:RUNNER_TEMP|runner\.temp)[^\n]*(?:cargo-target|product-e2e-native|product-e2e-cli-target)/u,
+  /(?:~\/AppData\/Local|~\/\.cache)\/Clearra\/build/u,
+]) {
+  if (forbidden.test(workflow)) {
+    throw new Error(`release builds must not bypass the managed owner/root policy: ${forbidden}`);
+  }
+}
+for (const step of workflow.split(/^      - /mu)) {
+  const rawCargo = /^\s+(?:&\s+)?cargo\s+(?:build|test|install|check|run|clippy|rustc)\b/mu.exec(step);
+  const owner = /Ensure-ClearraBuildArtifactCache -RepositoryRoot \$env:GITHUB_WORKSPACE -Purpose product/u.exec(step);
+  if (rawCargo && (!owner || owner.index > rawCargo.index)) {
+    throw new Error("release Cargo must execute after a live product owner in the same step");
+  }
+  if (!owner) continue;
+  if (!/^Ensure-ClearraBuildArtifactCache[^\n]*\n          try \{/u.test(step.slice(owner.index)) ||
+      !/^            Complete-ClearraBuildTransaction\n          \} finally \{\n            Exit-ClearraBuildArtifactCacheUsage\n          \}(?:\n|$)/mu.test(step) ||
+      (step.match(/^\s*Complete-ClearraBuildTransaction\s*$/gmu) ?? []).length !== 1) {
+    throw new Error("direct release owners must complete only after success and release their lease in finally");
+  }
 }
 for (const [name, job, runner] of [
   ["CTK3", ctk3Job, "ubuntu-latest"],
@@ -1015,7 +1036,7 @@ for (const [name, job, runner] of [
   }
 }
 const windowsProductCachePrefix =
-  "product-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}";
+  "product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}";
 const windowsProductCacheKey =
   `key: ${windowsProductCachePrefix}-` + "${{ github.sha }}";
 const windowsProductCacheRestoreKeys = [
@@ -1037,18 +1058,20 @@ requireExactYamlScalar(slimRuntimeStep, "entrypoint", "node", "Cloud-compatible 
 requireExactYamlScalar(slimRuntimeStep, "args",
   "scripts/tools/verify-linux-cli-runtime.mjs --version ${{ needs.metadata.outputs.version }} --source-commit ${{ github.sha }}",
   "Cloud-compatible CLI runtime arguments", 10);
-const linuxProductCachePrefix = "product-linux-bookworm-rust-1.96-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}";
+const linuxProductCachePrefix = "product-linux-bookworm-rust-1.96-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}";
 requireText(linuxJob, `key: ${linuxProductCachePrefix}-` + "${{ github.sha }}",
   "Linux CLI exact-source incremental cache key");
 requireText(linuxJob, ["restore-keys: |", `            ${linuxProductCachePrefix}-`].join("\n"),
   "Linux CLI compatible source cache fallback");
-if (linuxJob.includes("product-v2-")) {
+if (/product-v[23]-/u.test(linuxJob)) {
   throw new Error("Bookworm CLI must not restore an incompatible Ubuntu build snapshot");
 }
 for (const [name, job] of [
   ["Windows CLI", windowsCliJob],
   ["Windows GUI", windowsGuiJob],
 ]) {
+  requireText(job, "path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key:",
+    `${name} dependency-only cache paths`);
   for (const marker of [windowsProductCacheKey, windowsProductCacheRestoreKeys]) {
     requireText(job, marker, `${name} lock-compatible exact-SHA cache ${marker}`);
   }
@@ -1495,44 +1518,41 @@ requireExactYamlScalar(
   6,
 );
 requireExactYamlKeySet(
-  productE2ECliPrepareStep,
+  productE2ECliBuildStep,
   8,
   ["id", "shell", "run"],
-  "exact ProductE2E CLI native identity step",
+  "exact ProductE2E CLI single owner step",
 );
-requireExactYamlScalar(productE2ECliPrepareStep, "id", "native",
+requireExactYamlScalar(productE2ECliBuildStep, "id", "native",
   "exact ProductE2E CLI native identity output owner", 8);
-requireExactYamlScalar(productE2ECliPrepareStep, "shell", "pwsh",
+requireExactYamlScalar(productE2ECliBuildStep, "shell", "pwsh",
   "exact ProductE2E CLI native identity shell", 8);
 for (const marker of [
   "$cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)",
-  '"CARGO_BUILD_JOBS=$cargoJobs" >> $env:GITHUB_ENV',
+  '$env:CARGO_BUILD_JOBS = "$cargoJobs"',
+  'Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product',
+  "Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-native'",
   "scripts/release/prepare-native-build-identity.ps1",
   "-SourceCommit $env:GITHUB_SHA",
   "-Workers $cargoJobs",
   "-GitHubOutputPath $env:GITHUB_OUTPUT",
 ]) {
-  requireText(productE2ECliPrepareStep, marker, `exact ProductE2E CLI identity ${marker}`);
+  requireText(productE2ECliBuildStep, marker, `exact ProductE2E CLI identity ${marker}`);
 }
-requireExactYamlKeySet(
-  productE2ECliBuildStep,
-  8,
-  ["env", "shell", "run"],
-  "exact ProductE2E CLI build and seal step",
-);
-requireExactYamlKeySet(
-  productE2ECliBuildEnvironment,
-  10,
-  ["CLEARRA_NATIVE_LIBRARY_DIR"],
-  "exact ProductE2E CLI build environment",
-);
-requireExactYamlScalar(
-  productE2ECliBuildEnvironment,
-  "CLEARRA_NATIVE_LIBRARY_DIR",
-  "${{ steps.native.outputs.native_library_directory }}",
-  "exact ProductE2E CLI native archive directory",
-  10,
-);
+requireText(productE2ECliBuildStep,
+  '$env:CLEARRA_NATIVE_LIBRARY_DIR = $nativeIdentity.runtime_paths.native_library_directory',
+  "exact ProductE2E CLI same-transaction native archive directory");
+const productE2EOperations = [
+  'Ensure-ClearraBuildArtifactCache',
+  '& ./scripts/release/prepare-native-build-identity.ps1',
+  '$env:CLEARRA_NATIVE_LIBRARY_DIR =',
+  'cargo build --locked',
+  'node scripts/release/product-e2e-cli-artifact.mjs seal',
+].map((marker) => productE2ECliBuildStep.indexOf(marker));
+if (productE2EOperations.some((position, index) => position < 0 ||
+    (index > 0 && position <= productE2EOperations[index - 1]))) {
+  throw new Error("ProductE2E identity, Cargo and seal must follow the same live owner in order");
+}
 requireExactYamlScalar(productE2ECliBuildStep, "shell", "pwsh",
   "exact ProductE2E CLI build shell", 8);
 for (const marker of [
@@ -1541,6 +1561,9 @@ for (const marker of [
   "--source-commit $env:GITHUB_SHA `",
   "--run-id $env:GITHUB_RUN_ID `",
   "--run-attempt $env:GITHUB_RUN_ATTEMPT `",
+  '--native-identity $identity `',
+  "--output (Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-cli-input')",
+  '"artifact_path=$(Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT',
 ]) {
   requireText(productE2ECliBuildStep, marker, `exact ProductE2E CLI build ${marker}`);
 }
@@ -1560,7 +1583,8 @@ for (const [name, step, action] of [
   requireExactYamlScalar(
     step,
     "path",
-    "${{ runner.temp }}/clearra-product-e2e-cli-input",
+    name === "producer upload" ? "${{ steps.native.outputs.artifact_path }}"
+      : "${{ runner.temp }}/clearra-product-e2e-cli-input",
     `ProductE2E CLI ${name} artifact path`,
     10,
   );
@@ -1847,16 +1871,13 @@ for (const [name, job, skeleton] of [
   ["sanitizer", releaseAcceptanceSanitizerJob, [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
-    "- id: release_toolchain_cache",
     "- name: Run canonical release acceptance sanitizer shard",
     "- name: Seal canonical release acceptance sanitizer shard",
-    "- name: Save verified sanitizer C build cache",
     "- name: Upload canonical release acceptance sanitizer shard",
   ]],
   ["ProductE2E CLI producer", releaseAcceptanceProductCliJob, [
     "- uses: actions/checkout@v4",
     "- uses: actions/setup-node@v4",
-    "- name: Prepare exact native ProductE2E identity",
     "- name: Build and seal exact ProductE2E CLI input",
     "- name: Upload exact ProductE2E CLI input",
   ]],
@@ -1954,12 +1975,14 @@ for (const { name, job, family, ownsWriter = false } of releaseToolchainCacheRea
   const manifestHash = windowsNative
     ? "${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}"
     : "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}";
-  const version = windowsNative ? 3 : 4;
+  const version = windowsNative ? 4 : 5;
   const prefix = `release-acceptance-${family}-v${version}-` +
     `\${{ runner.os }}-bindgen-0.2.126-${manifestHash}`;
   const paths = windowsNative
-    ? ["~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git", "~/AppData/Local/Clearra/build"]
-    : ["~/.cargo/bin/wasm-bindgen", "~/.cargo/registry", "~/.cargo/git", "~/.cache/Clearra/build/cargo-target"];
+    ? ["~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git"]
+    : ["~/.cargo/bin/wasm-bindgen", "~/.cargo/registry", "~/.cargo/git"];
+  requireText(job, `path: |\n${paths.map((entry) => `            ${entry}`).join("\n")}\n          key:`,
+    `${name} dependency/tool-only cache paths`);
   for (const marker of [
     ...paths,
     `key: ${prefix}-` + "${{ github.sha }}",
@@ -1968,11 +1991,8 @@ for (const { name, job, family, ownsWriter = false } of releaseToolchainCacheRea
     requireText(job, marker, `${name} release build cache ${marker}`);
   }
 }
-if ((releaseAcceptanceSanitizerJob.match(/actions\/cache\/restore@v4/gu) ?? []).length !== 1) {
-  throw new Error("sanitizer acceptance must have exactly one restore-only C build cache reader");
-}
-if (releaseAcceptanceSanitizerJob.includes("actions/cache@v4")) {
-  throw new Error("sanitizer acceptance must use the bounded, verified explicit cache writer");
+if (releaseAcceptanceSanitizerJob.includes("actions/cache")) {
+  throw new Error("sanitizer generations must remain owned by the managed product transaction, not Actions cache");
 }
 for (const forbidden of [
   "~/.cargo/",
@@ -1983,14 +2003,6 @@ for (const forbidden of [
     throw new Error(`sanitizer acceptance must not restore unrelated toolchain payload: ${forbidden}`);
   }
 }
-for (const marker of [
-  "name: Restore sanitizer C build cache",
-  "path: ~/AppData/Local/Clearra/build",
-  "key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}",
-  "release-acceptance-sanitizer-${{ runner.os }}-",
-]) {
-  requireText(releaseAcceptanceSanitizerJob, marker, `sanitizer C build cache ${marker}`);
-}
 if (
   releaseAcceptancePagesJob.includes("actions/cache/restore@v4") ||
   releaseAcceptancePagesJob.includes("actions/cache@v4") ||
@@ -1998,23 +2010,18 @@ if (
 ) {
   throw new Error("Pages acceptance must consume the accepted WASM build without a build cache");
 }
-if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 3) {
-  throw new Error("canonical caches require exactly one native, WASM and sanitizer writer");
+if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 2) {
+  throw new Error("canonical dependency/tool caches require exactly one native and WASM writer");
 }
 for (const [job, name, upload, paths, saveCondition] of [
   [releaseAcceptanceRustJob, "Save verified canonical native build cache",
     "Upload canonical release acceptance RustExact shard", [
       "~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git",
-      "~/AppData/Local/Clearra/build",
     ], "${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
   [releaseAcceptanceWasmBuildJob, "Save verified canonical WASM build cache",
     "Upload accepted WASM build", [
       "~/.cargo/bin/wasm-bindgen", "~/.cargo/registry", "~/.cargo/git",
-      "~/.cache/Clearra/build/cargo-target",
     ], "${{ success() && steps.rebound_wasm.outputs.reused != 'true' && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
-  [releaseAcceptanceSanitizerJob, "Save verified sanitizer C build cache",
-    "Upload canonical release acceptance sanitizer shard", ["~/AppData/Local/Clearra/build"],
-    "${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
 ]) {
   const step = section(job, `\n      - name: ${name}`, `\n      - name: ${upload}`);
   requireExactYamlKeySet(step, 8,

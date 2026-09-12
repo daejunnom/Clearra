@@ -18,19 +18,9 @@ $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "lib/clearra-path-helpers.ps1")
 . (Join-Path $PSScriptRoot "lib/clearra-execution-surface.ps1")
 . (Join-Path $PSScriptRoot "lib/clearra-application-control.ps1")
+$Root = Resolve-ClearraBuildSourceRoot
+Assert-ClearraBuildEnvironmentBeforeMutation $Root
 Assert-ClearraTrustedExecutionSurface $ExecutionSurface "WASM command runtime"
-
-$previousCargoTargetDir = $env:CARGO_TARGET_DIR
-$cargoTargetDir = if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
-    Get-ClearraCargoTargetDir
-} else {
-    Assert-ClearraCanonicalCargoTargetDir $previousCargoTargetDir
-}
-$env:CARGO_TARGET_DIR = $cargoTargetDir
-$wasmArtifact = Join-Path $cargoTargetDir "wasm32-unknown-unknown/release/clearra_wasm.wasm"
-$webWasmDir = Join-Path $Root "apps/clearra-web/static/wasm"
-$wasmBindings = Join-Path $webWasmDir "clearra_wasm.js"
-$boundWasmArtifact = Join-Path $webWasmDir "clearra_wasm_bg.wasm"
 
 function Invoke-CheckedCommand {
     param(
@@ -74,8 +64,18 @@ $script:Scope = New-ClearraProgressScope `
     -Workers ([Math]::Max(1, $Workers)) `
     -VerboseLog:$VerboseLog.IsPresent
 
-Push-Location $Root
+$wasmCommandLocationPushed = $false
 try {
+    Ensure-ClearraBuildArtifactCache -RepositoryRoot $Root
+    $cargoTargetDir = Get-ClearraCargoTargetDir
+    $wasmArtifact = Join-Path $cargoTargetDir 'wasm32-unknown-unknown/release/clearra_wasm.wasm'
+    # This check consumes an explicit temporary runtime; it must not replace
+    # the currently published browser WASM while proving cancellation.
+    $webWasmDir = Resolve-ClearraArtifactPath 'wasm-command-runtime' $Root
+    $wasmBindings = Join-Path $webWasmDir 'clearra_wasm.js'
+    $boundWasmArtifact = Join-Path $webWasmDir 'clearra_wasm_bg.wasm'
+    Push-Location $Root
+    $wasmCommandLocationPushed = $true
     Invoke-CheckedCommand `
         -Label "cargo check -p clearra-cli-command" `
         -FileName $CargoPath `
@@ -187,7 +187,7 @@ console.log('wasm_exact_execution=launched cancellation=cooperative scope_releas
     Invoke-CheckedCommand `
         -Label "npm build @clearra/web" `
         -FileName $NpmPath `
-        -Arguments @("exec", "--workspace", "@clearra/web", "--", "vite", "build")
+        -Arguments @("exec", "--workspace", "@clearra/web", "--", "vite", "build", "--configLoader", "runner")
 
     Invoke-CheckedCommand `
         -Label "architecture U7 WASM Command Runtime" `
@@ -200,12 +200,9 @@ console.log('wasm_exact_execution=launched cancellation=cooperative scope_releas
 
     Complete-ClearraProgressLine $script:Scope
     Write-Output "[wasm-command] passed | wasm_target=compiled | host_contract_tests=$hostContractMode | wasm_exact_execution=launched | browser_bundle=built | architecture_validation=passed | wsl_used=false"
+    if (Test-ClearraBuildTransactionOwner) { Complete-ClearraBuildTransaction }
 }
 finally {
-    Pop-Location
-    if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
-        Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
-    } else {
-        $env:CARGO_TARGET_DIR = $previousCargoTargetDir
-    }
+    if ($wasmCommandLocationPushed) { Pop-Location }
+    Exit-ClearraBuildArtifactCacheUsage
 }

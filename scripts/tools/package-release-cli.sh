@@ -14,6 +14,8 @@ if [[ "$TARGET_TRIPLE" != "x86_64-unknown-linux-gnu" ]]; then
     printf 'unsupported CLI release target: %s\n' "$TARGET_TRIPLE" >&2
     exit 2
 fi
+# The owner changes cwd to the source root; preserve caller-relative export intent.
+OUTPUT_DIR="$(realpath -m -- "$OUTPUT_DIR")"
 if [[ ! "${CLEARRA_SOURCE_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] ||
    [[ ! "${CLEARRA_ENGINE_BUILD_ID:-}" =~ ^[0-9a-f]{40}$ ]] ||
    [[ "$CLEARRA_ENGINE_BUILD_ID" != "$CLEARRA_SOURCE_COMMIT" ]]; then
@@ -21,13 +23,31 @@ if [[ ! "${CLEARRA_SOURCE_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] ||
     exit 2
 fi
 
-BUILD_ROOT="${CLEARRA_RELEASE_BUILD_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/clearra-release}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$BUILD_ROOT/cargo-target}"
-
 if ! command -v node >/dev/null 2>&1; then
     printf 'node is required to validate release CLI JSON smoke output\n' >&2
     exit 2
 fi
+if [[ -z "${CLEARRA_BUILD_SESSION_ID:-}" ]]; then
+    for override in CLEARRA_WSL_NATIVE_BUILD_ROOT CLEARRA_CORE_C_BUILD_DIR CLEARRA_RELEASE_BUILD_ROOT; do
+        [[ -z "${!override:-}" ]] || { printf 'Unmanaged build override is forbidden: %s\n' "$override" >&2; exit 2; }
+    done
+    exec node "$ROOT/scripts/tools/invoke-clearra-build.mjs" \
+        --source-root "$ROOT" --purpose "${CLEARRA_BUILD_PURPOSE:-product}" \
+        -- bash "$ROOT/scripts/tools/package-release-cli.sh" "$OUTPUT_DIR" "$VERSION" "$TARGET_TRIPLE"
+fi
+BUILD_ROOT="$(node "$ROOT/scripts/tools/clearra-build-paths.mjs" --source-root "$ROOT" --field transaction)"
+MANAGED_CARGO_TARGET="$(node "$ROOT/scripts/tools/clearra-build-paths.mjs" --source-root "$ROOT" --field cargo-target)"
+[[ -z "${CLEARRA_RELEASE_BUILD_ROOT:-}" || "$CLEARRA_RELEASE_BUILD_ROOT" == "$BUILD_ROOT" ]] || {
+    printf 'Release build root must equal the managed transaction root\n' >&2; exit 2;
+}
+[[ -z "${CLEARRA_WSL_CARGO_TARGET_DIR:-}" || "$CLEARRA_WSL_CARGO_TARGET_DIR" == "$MANAGED_CARGO_TARGET" ]] || {
+    printf 'WSL Cargo target must equal the managed transaction target\n' >&2; exit 2;
+}
+for override in CLEARRA_WSL_NATIVE_BUILD_ROOT CLEARRA_CORE_C_BUILD_DIR; do
+    [[ -z "${!override:-}" ]] || { printf 'Release CLI does not accept an independent Core C build output: %s\n' "$override" >&2; exit 2; }
+done
+export CARGO_TARGET_DIR="$MANAGED_CARGO_TARGET"
+# OUTPUT_DIR is a requested publication export, not a compiler/cache root.
 # Resolve the real REN renderer before the expensive native compilation. CI
 # supplies the already accepted CTK3 artifact; this preflight never rebuilds it.
 node --input-type=module -e 'await import(process.argv[1]);' \

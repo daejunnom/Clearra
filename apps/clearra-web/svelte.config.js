@@ -1,5 +1,8 @@
 import adapter from '@sveltejs/adapter-static';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+import { frontendConfigPaths } from '../../scripts/tools/clearra-frontend-paths.mjs';
+
+const frontend = frontendConfigPaths('web');
 
 const deploymentBase = process.env.CLEARRA_WEB_BASE_PATH || '';
 if (
@@ -13,7 +16,8 @@ if (
 const config = {
   preprocess: vitePreprocess(),
   kit: {
-    adapter: adapter({ fallback: 'index.html' }),
+    outDir: frontend.kitOutDir,
+    adapter: adapter({ pages: frontend.exportDir, assets: frontend.exportDir, fallback: 'index.html' }),
     files: {
       assets: process.env.CLEARRA_WEB_PUBLIC_DIR || 'static'
     },

@@ -17,10 +17,23 @@ WORKERS="$5"
 GPU_INVENTORY_MODE="$6"
 PROFILE_MODE="$7"
 
-case "$BINARY" in
-    /home/*/.cache/Clearra/build/cargo-target/*/clearra-pc-artifact) ;;
-    *) printf 'unsafe WSL runtime artifact: %s\n' "$BINARY" >&2; exit 2 ;;
-esac
+AUTHORITY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SOURCE_ROOT="${CLEARRA_WSL_WORKSPACE:-${CLEARRA_BUILD_SOURCE_ROOT:-$AUTHORITY_ROOT}}"
+[[ -n "${CLEARRA_BUILD_SESSION_ID:-}" ]] || {
+    printf 'WSL runtime batch requires an active managed owner. Standalone/NoPrepare execution cannot borrow a cached binary; use a managed build-and-batch session. No build was started.\n' >&2
+    exit 2
+}
+command -v node >/dev/null 2>&1 || { printf 'node is required to validate the managed WSL runtime artifact\n' >&2; exit 2; }
+BUILD_TRANSACTION="$(node "$AUTHORITY_ROOT/scripts/tools/clearra-build-paths.mjs" --source-root "$SOURCE_ROOT" --field transaction)"
+MANAGED_CARGO_TARGET="$(node "$AUTHORITY_ROOT/scripts/tools/clearra-build-paths.mjs" --source-root "$SOURCE_ROOT" --field cargo-target)"
+EXPECTED_BINARY="$MANAGED_CARGO_TARGET/release/clearra-pc-artifact"
+[[ "$BINARY" == "$EXPECTED_BINARY" ]] || {
+    printf 'WSL runtime artifact must equal the active owner release artifact: %s\n' "$EXPECTED_BINARY" >&2
+    exit 2
+}
+node --input-type=module -e \
+    'import { pathToFileURL } from "node:url"; const p = await import(pathToFileURL(process.argv[1])); p.assertBuildPathWithin(process.argv[2], process.argv[3]); p.assertNoBuildLinks(process.argv[2]);' \
+    "$AUTHORITY_ROOT/scripts/tools/clearra-build-policy.mjs" "$BINARY" "$BUILD_TRANSACTION"
 EXPECTED_REPORT_ROOT="$HOME/.local/state/Clearra/reports/runtime-environments/latest"
 [[ "$REPORT_ROOT" == "$EXPECTED_REPORT_ROOT" ]] || {
     printf 'unsafe WSL runtime report root: %s\n' "$REPORT_ROOT" >&2

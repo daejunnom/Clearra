@@ -33,6 +33,10 @@ test("local-services watcher is one hidden 60-second owner for ports 4194 and 87
   assert.match(watcher, /node_modules\\vite\\bin\\vite\.js/u);
   assert.match(watcher, /"--strictPort"/u);
   assert.match(watcher, /"--mode", "local-recovery"/u);
+  assert.match(watcher, /scripts\\tools\\build-clearra-frontend\.mjs/u);
+  assert.match(watcher, /"--app", "web", "--task", "dev", "--recovery"/u);
+  assert.match(watcher, /\$escapedFrontendPath/u);
+  assert.doesNotMatch(watcher, /-ArgumentList[^\r\n]*-f \$vitePath/u);
   assert.doesNotMatch(watcher, /-ArgumentList @\(\$NpmCliPath, "run", "dev"/u);
 
   assert.match(launcher, /exitCode = shell\.Run\(command, 0, True\)/u);

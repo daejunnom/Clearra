@@ -22,9 +22,9 @@
   "sideEffects": false,
   "scripts": {
     "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
-    "build:js": "node ./scripts/build.mjs",
-    "build:types": "tsc -p ./tsconfig.json",
-    "build": "npm run clean && npm run build:js && npm run build:types",
+    "build:js": "node ./scripts/build.mjs --kind js",
+    "build:types": "node ./scripts/build.mjs --kind types",
+    "build": "node ./scripts/build.mjs",
     "test": "npm run build && node --test ./test/*.test.mjs",
     "benchmark": "npm run build && node ./test/benchmark.mjs",
     "prepack": "npm run build"

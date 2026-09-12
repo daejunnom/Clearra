@@ -5,7 +5,8 @@ export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/u
 hash -r
 case "$PATH" in *"/mnt/"*) printf 'Windows PATH entry leaked into WSL native execution\n' >&2; exit 2 ;; esac
 
-ROOT="${CLEARRA_WSL_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+AUTHORITY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="${CLEARRA_WSL_WORKSPACE:-$AUTHORITY_ROOT}"
 ROOT="$(cd "$ROOT" && pwd)"
 case "$ROOT" in /mnt/*) printf 'Clearra WSL tests require an ext4 workspace: %s\n' "$ROOT" >&2; exit 2 ;; esac
 case "$(stat -f -c %T "$ROOT")" in
@@ -14,6 +15,25 @@ case "$(stat -f -c %T "$ROOT")" in
         exit 2
         ;;
 esac
+
+command -v node >/dev/null 2>&1 || { printf 'node is required for the managed Clearra build owner\n' >&2; exit 2; }
+if [[ -z "${CLEARRA_BUILD_SESSION_ID:-}" ]]; then
+    for override in CLEARRA_WSL_NATIVE_BUILD_ROOT CLEARRA_CORE_C_BUILD_DIR CLEARRA_RELEASE_BUILD_ROOT; do
+        [[ -z "${!override:-}" ]] || { printf 'Unmanaged build override is forbidden: %s\n' "$override" >&2; exit 2; }
+    done
+    exec node "$AUTHORITY_ROOT/scripts/tools/invoke-clearra-build.mjs" \
+        --source-root "$ROOT" --purpose "${CLEARRA_BUILD_PURPOSE:-experiment}" \
+        -- bash "$AUTHORITY_ROOT/scripts/tools/wsl-core-c-tests.sh" "$@"
+fi
+BUILD_TRANSACTION="$(node "$AUTHORITY_ROOT/scripts/tools/clearra-build-paths.mjs" --source-root "$ROOT" --field transaction)"
+MANAGED_CARGO_TARGET="$(node "$AUTHORITY_ROOT/scripts/tools/clearra-build-paths.mjs" --source-root "$ROOT" --field cargo-target)"
+[[ -z "${CLEARRA_WSL_CARGO_TARGET_DIR:-}" || "$CLEARRA_WSL_CARGO_TARGET_DIR" == "$MANAGED_CARGO_TARGET" ]] || {
+    printf 'WSL Cargo target must equal the managed transaction target\n' >&2; exit 2;
+}
+[[ -z "${CLEARRA_RELEASE_BUILD_ROOT:-}" || "$CLEARRA_RELEASE_BUILD_ROOT" == "$BUILD_TRANSACTION" ]] || {
+    printf 'Release build root must equal the managed transaction root\n' >&2; exit 2;
+}
+export CARGO_TARGET_DIR="$MANAGED_CARGO_TARGET"
 
 WORKERS=1
 SANITIZER=none
@@ -102,9 +122,13 @@ case "$SANITIZER" in
     undefined) CFLAGS+=(-fsanitize=undefined -fno-omit-frame-pointer); LDFLAGS+=(-fsanitize=undefined) ;;
 esac
 
-CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build"
 VARIANT="aggregate-$SANITIZER-profile$PROFILE"
-BUILD_ROOT="$CACHE_ROOT/core-c-tests/$VARIANT"
+BUILD_ROOT="$BUILD_TRANSACTION/core-c-tests-$VARIANT"
+for override in CLEARRA_WSL_NATIVE_BUILD_ROOT CLEARRA_CORE_C_BUILD_DIR; do
+    [[ -z "${!override:-}" || "${!override:-}" == "$BUILD_ROOT" ]] || {
+        printf 'Core C output must equal the managed transaction output: %s\n' "$override" >&2; exit 2;
+    }
+done
 mkdir -p "$BUILD_ROOT/core" "$BUILD_ROOT/oracle" "$BUILD_ROOT/tests"
 
 INPUT_DIGEST="$({
@@ -113,7 +137,7 @@ INPUT_DIGEST="$({
         "$CORE_ROOT/tools" \
         -type f \( -name '*.c' -o -name '*.h' \) -print0 \
         | sort -z | xargs -0 sha256sum
-    sha256sum "$SOURCE_MANIFEST" "$TEST_MANIFEST" "$ROOT/scripts/tools/wsl-core-c-tests.sh"
+    sha256sum "$SOURCE_MANIFEST" "$TEST_MANIFEST" "$AUTHORITY_ROOT/scripts/tools/wsl-core-c-tests.sh"
 } | sha256sum | cut -d' ' -f1)"
 STAMP="$BUILD_ROOT/source-tree.sha256"
 EXECUTABLE="$BUILD_ROOT/clearra_core_all_tests"
@@ -126,8 +150,6 @@ compile_core_source() {
 }
 
 if [[ ! -x "$EXECUTABLE" || ! -f "$STAMP" || "$(<"$STAMP")" != "$INPUT_DIGEST" ]]; then
-    rm -f -- "$BUILD_ROOT/core/"*.o "$BUILD_ROOT/oracle/"*.o \
-        "$BUILD_ROOT/tests/"*.o "$EXECUTABLE"
     declare -a compile_pids=()
     declare -a core_objects=()
     wait_for_compile_slot() {

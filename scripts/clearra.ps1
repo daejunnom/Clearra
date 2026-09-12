@@ -118,7 +118,8 @@ Assert-ClearraRequestedTaskSurfaces `
     $ExecutionSurface `
     $resolvedRequestedRuntime
 
-$Root = Resolve-ClearraRoot
+$Root = Resolve-ClearraBuildSourceRoot
+Assert-ClearraRequestedBuildPath -Path $CoreCBuildDir -RepositoryRoot $Root | Out-Null
 if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
     $ReportPath = Resolve-ClearraReportPath $ReportPath $Root
 }
@@ -134,8 +135,7 @@ try {
     $script:ClearraRuntimeEnvironment = $resolvedRequestedRuntime
     $script:ClearraWslDistribution = $WslDistribution
     $env:CLEARRA_RUNTIME_ENVIRONMENT = $script:ClearraRuntimeEnvironment
-    # The execution surface is part of the reusable cache generation.
-    Ensure-ClearraBuildArtifactCache
+    Ensure-ClearraBuildArtifactCache -RepositoryRoot $Root
     if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
         $env:CARGO_TARGET_DIR = Get-ClearraCargoTargetDir
     } else {
@@ -221,6 +221,7 @@ try {
     }
 
     Complete-ClearraProgressLine $topLevelProgressScope
+    if (Test-ClearraBuildTransactionOwner) { Complete-ClearraBuildTransaction }
     if ($VerboseLog.IsPresent) {
         Write-Output "==> Clearra task completed | task=$($tasks -join ',')"
     }

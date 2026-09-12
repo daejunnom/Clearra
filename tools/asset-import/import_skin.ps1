@@ -42,6 +42,7 @@ try {
         --tile-width $TileWidth `
         --tile-height $TileHeight
     if ($LASTEXITCODE -ne 0) { throw "skin import failed" }
+    if (Test-ClearraBuildTransactionOwner) { Complete-ClearraBuildTransaction }
 } finally {
     Pop-Location
     Exit-ClearraBuildArtifactCacheUsage

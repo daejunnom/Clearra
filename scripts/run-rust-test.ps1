@@ -22,6 +22,8 @@ $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
 . (Join-Path $PSScriptRoot "lib/progress.ps1")
 . (Join-Path $PSScriptRoot "lib/clearra-path-helpers.ps1")
 . (Join-Path $PSScriptRoot "lib/clearra-execution-surface.ps1")
+$Root = Resolve-ClearraBuildSourceRoot
+Assert-ClearraBuildEnvironmentBeforeMutation $Root
 Assert-ClearraTrustedExecutionSurface $ExecutionSurface "targeted Rust test"
 function Get-ClearraRustTestTargetDir {
     param([string]$RequestedTargetDir)
@@ -65,6 +67,12 @@ if (-not $Lib.IsPresent -and [string]::IsNullOrWhiteSpace($Test)) {
 if ($OutputExcerptLines -lt 1) {
     throw "-OutputExcerptLines must be at least 1."
 }
+if (-not [string]::IsNullOrWhiteSpace($CargoTargetDir)) {
+    Assert-ClearraCanonicalCargoTargetDir $CargoTargetDir | Out-Null
+}
+if (-not [string]::IsNullOrWhiteSpace($Filter) -and $Filter.StartsWith('-')) {
+    throw 'A Rust test filter must not be a Cargo option.'
+}
 
 $cargoArguments = @("test", "-p", $Package)
 if ($Lib.IsPresent) {
@@ -86,20 +94,19 @@ if (-not $NoRun.IsPresent) {
     $cargoArguments += @("--", "--test-threads=1")
 }
 
-$resolvedCargoTargetDir = Get-ClearraRustTestTargetDir $CargoTargetDir
-Assert-ClearraRustTestTargetDir $resolvedCargoTargetDir
-New-Item -ItemType Directory -Force -Path $resolvedCargoTargetDir | Out-Null
-
-$previousCargoTargetDir = $env:CARGO_TARGET_DIR
 $scope = New-ClearraProgressScope `
     -Name "rust-test" `
     -Total 1 `
     -Workers 1 `
     -VerboseLog:$VerboseLog.IsPresent
 
-Push-Location $Root
+$rustTestLocationPushed = $false
 try {
-    $env:CARGO_TARGET_DIR = $resolvedCargoTargetDir
+    Ensure-ClearraBuildArtifactCache -RepositoryRoot $Root
+    $resolvedCargoTargetDir = Get-ClearraRustTestTargetDir $CargoTargetDir
+    Assert-ClearraRustTestTargetDir $resolvedCargoTargetDir
+    Push-Location $Root
+    $rustTestLocationPushed = $true
     Invoke-ClearraProgressCase `
         -Scope $scope `
         -Name "cargo $($cargoArguments -join ' ')" `
@@ -122,12 +129,9 @@ try {
 
     Complete-ClearraProgressLine $scope
     Write-Output "[rust-test] passed | package=$Package | package-process-parallelism=1 | test-threads=1 | target-dir=$resolvedCargoTargetDir"
+    if (Test-ClearraBuildTransactionOwner) { Complete-ClearraBuildTransaction }
 }
 finally {
-    if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
-        Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
-    } else {
-        $env:CARGO_TARGET_DIR = $previousCargoTargetDir
-    }
-    Pop-Location
+    if ($rustTestLocationPushed) { Pop-Location }
+    Exit-ClearraBuildArtifactCacheUsage
 }

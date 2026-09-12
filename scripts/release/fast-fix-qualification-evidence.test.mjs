@@ -98,6 +98,16 @@ function componentReport(component) {
   );
 }
 
+test("CLI qualification requires the managed product owner, not an unowned Cargo claim", () => {
+  const command = COMPONENT_QUALIFICATION_COMMANDS.get("cli");
+  assert.match(command, /invoke-clearra-build\.ps1 -SourceRoot \. -Purpose product -Command cargo/u);
+  assert.doesNotThrow(() => createComponentQualification(candidateAuthority, "cli", command));
+  assert.throws(() => createComponentQualification(candidateAuthority, "cli",
+    "cargo test -p clearra-cli --test product_cli_surface_contract -- --test-threads=1"));
+  assert.throws(() => createComponentQualification(candidateAuthority, "cli",
+    command.replace("-Purpose product", "-Purpose experiment")));
+});
+
 test("focused qualification replaces only the changed component and carries every deployed receipt", () => {
   const baseline = acceptedLedger();
   const ledger = createFastFixQualificationLedger({

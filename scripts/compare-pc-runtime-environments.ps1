@@ -31,6 +31,9 @@ $Root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $PSScriptRoot 'lib/clearra-artifact-cache.ps1')
 . (Join-Path $PSScriptRoot 'lib/clearra-runtime-environment.ps1')
 . (Join-Path $PSScriptRoot 'lib/clearra-application-control.ps1')
+. (Join-Path $PSScriptRoot 'lib/clearra-build-wsl-dispatch.ps1')
+$Root = Resolve-ClearraBuildSourceRoot
+Assert-ClearraBuildEnvironmentBeforeMutation $Root
 
 $runId = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')
 $usesDefaultOutput = [string]::IsNullOrWhiteSpace($OutputDirectory)
@@ -39,16 +42,17 @@ $outputRoot = if ($usesDefaultOutput) {
 } else {
     Resolve-ClearraReportPath $OutputDirectory $Root
 }
-if ($usesDefaultOutput -and (Test-Path -LiteralPath $outputRoot)) {
-    Remove-Item -LiteralPath $outputRoot -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $selectedEnvironments = if ($Environment -eq 'all') {
     @('windows', 'wsl', 'wasm')
 } elseif ($Environment -eq 'auto') {
     @(Resolve-ClearraRuntimeEnvironment 'auto')
 } else {
     @($Environment)
+}
+$needsWindowsBuildOwner = $Prepare.IsPresent -and 'wasm' -in $selectedEnvironments
+$needsWslSourceOwner = $Prepare.IsPresent -and 'wsl' -in $selectedEnvironments
+if ($needsWindowsBuildOwner) {
+    Assert-ClearraRequestedBuildPath -Path $WasmModuleDirectory -RepositoryRoot $Root | Out-Null
 }
 $cases = @(
     [pscustomobject]@{ id = 'pco-6p'; expected = 63; max_patterns = 840; count = 'all' },
@@ -181,7 +185,7 @@ function Invoke-WindowsEnvironment {
         $prepareMs = $prepareResult.elapsed_ms
     }
     $binary = if ([string]::IsNullOrWhiteSpace($WindowsBinaryPath)) {
-        Join-Path (Get-ClearraCargoTargetDir) 'release/clearra-pc-artifact.exe'
+        Join-Path (Get-ClearraBuildTransactionRoot -RepositoryRoot $Root) 'cargo-target/release/clearra-pc-artifact.exe'
     } else {
         [System.IO.Path]::GetFullPath($WindowsBinaryPath)
     }
@@ -249,53 +253,62 @@ function Invoke-WindowsEnvironment {
 }
 
 function Invoke-WslEnvironment {
-    $sync = Sync-ClearraWslExt4Workspace $Root $Distribution
     $linuxHome = (& wsl.exe -d $Distribution -- sh -c 'printf %s "$HOME"' | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $linuxHome -notmatch '^/home/[^/]+$') { throw 'Could not resolve the WSL home.' }
+    $workspaceId = (Get-ClearraStableDigest @($Root.ToLowerInvariant())).Substring(0, 16)
+    $linuxSource = "$linuxHome/.local/share/Clearra/workspaces/$workspaceId/source"
+    $wslTransaction = Get-ClearraIndependentWslTransactionRoot $linuxSource $Distribution
+    $binary = if ([string]::IsNullOrWhiteSpace($WslBinaryPath)) {
+        "$wslTransaction/cargo-target/release/clearra-pc-artifact"
+    } else { $WslBinaryPath }
+    if ($binary -notmatch '^/') { throw 'The WSL runtime artifact must be an absolute Linux path.' }
+    if ($Prepare.IsPresent -and $binary -cne "$wslTransaction/cargo-target/release/clearra-pc-artifact") {
+        throw 'WSL preparation can execute only the exact binary produced by its selected transaction.'
+    }
+    $sync = if ($Prepare.IsPresent) {
+        Ensure-ClearraBuildArtifactCache -RepositoryRoot $Root
+        Sync-ClearraWslExt4Workspace $Root $Distribution
+    } else {
+        # Consuming a prebuilt binary must not synchronize source or initialize
+        # a transient owner that replaces prior Windows experiment artifacts.
+        [pscustomobject]@{ workspace=$linuxSource; sync_performed=$false }
+    }
     $linuxCores = [int]((& wsl.exe -d $Distribution -- nproc | Out-String).Trim())
     $workerCount = if ($workersExplicitlyRequested) {
         [Math]::Min([Math]::Max(1, $Workers), $linuxCores)
     } else {
         [Math]::Max(1, $linuxCores - 1)
     }
-    $cargoScript = "$($sync.workspace)/scripts/tools/wsl-native-cargo.sh"
+    $linuxReportRoot = "$linuxHome/.local/state/Clearra/reports/runtime-environments/latest"
+    $inventoryMode = if (Get-GpuInventoryRequested) { 'query' } else { 'skip' }
+    $profileMode = if ($ProfileStages.IsPresent) { 'profile' } else { 'no-profile' }
     $prepareMs = 0.0
     if ($Prepare.IsPresent) {
-        $profilingEnvironment = if ($ProfileStages.IsPresent) {
-            'CLEARRA_WSL_ENABLE_STAGE_PROFILING=1'
-        } else {
-            'CLEARRA_WSL_ENABLE_STAGE_PROFILING=0'
-        }
         $cargoFeatures = if ($ProfileStages.IsPresent) {
             'gpu-backend,stage-profiling'
         } else {
             'gpu-backend'
         }
-        $prepareResult = Invoke-CapturedCommand 'wsl.exe' @(
-            '-d', $Distribution, '--', 'env', "CLEARRA_WSL_WORKSPACE=$($sync.workspace)",
-            $profilingEnvironment,
-            'bash', $cargoScript, 'build', '--release', '-p', 'clearra-pc-artifact',
-            '--features', $cargoFeatures
-        )
-        $prepareMs = $prepareResult.elapsed_ms
-    }
-    $binary = if ([string]::IsNullOrWhiteSpace($WslBinaryPath)) {
-        "$linuxHome/.cache/Clearra/build/cargo-target/release/clearra-pc-artifact"
+        $prepareArguments = New-ClearraIndependentWslBuildArguments `
+            -LinuxSourceRoot $sync.workspace -Distribution $Distribution `
+            -ScriptName 'wsl-pc-runtime-build-and-batch.sh' `
+            -CommandArguments @($cargoFeatures, $linuxReportRoot, $Backend, $GpuDevice, $workerCount.ToString(), $inventoryMode, $profileMode) `
+            -AdditionalEnvironment @{ CLEARRA_WSL_ENABLE_STAGE_PROFILING = $(if ($ProfileStages.IsPresent) { '1' } else { '0' }) }
+        $batch = Invoke-CapturedCommand 'wsl.exe' $prepareArguments
+        $prepareTime = [regex]::Match($batch.output, '(?m)^wsl_preparation_elapsed_ns=(\d+)\s*$')
+        $batchTime = [regex]::Match($batch.output, '(?m)^wsl_host_batch_elapsed_ns=(\d+)\s*$')
+        if (-not $prepareTime.Success -or -not $batchTime.Success) { throw 'WSL build/runtime timing records are missing.' }
+        $prepareMs = [double]$prepareTime.Groups[1].Value / 1000000.0
+        $batch.elapsed_ms = [double]$batchTime.Groups[1].Value / 1000000.0
     } else {
-        $WslBinaryPath
+        & wsl.exe -d $Distribution -- test -x $binary
+        if ($LASTEXITCODE -ne 0) { throw "Prepared WSL artifact executable is missing: $binary" }
+        $authority = ConvertTo-ClearraWslBuildPath $script:ClearraPathPolicyRepositoryRoot $Distribution
+        $batch = Invoke-CapturedCommand 'wsl.exe' @(
+            '-d', $Distribution, '--', 'bash', "$authority/scripts/tools/wsl-pc-runtime-batch.sh",
+            $binary, $linuxReportRoot, $Backend, $GpuDevice, $workerCount.ToString(), $inventoryMode, $profileMode
+        )
     }
-    if ($binary -notmatch '^/') {
-        throw "The WSL runtime artifact must be an absolute Linux path: $binary"
-    }
-    & wsl.exe -d $Distribution -- test -x $binary
-    if ($LASTEXITCODE -ne 0) { throw "Prepared WSL artifact executable is missing: $binary" }
-    $linuxReportRoot = "$linuxHome/.local/state/Clearra/reports/runtime-environments/latest"
-    $batchScript = "$($sync.workspace)/scripts/tools/wsl-pc-runtime-batch.sh"
-    $batch = Invoke-CapturedCommand 'wsl.exe' @(
-        '-d', $Distribution, '--', 'bash', $batchScript,
-        $binary, $linuxReportRoot, $Backend, $GpuDevice, $workerCount.ToString(),
-        $(if (Get-GpuInventoryRequested) { 'query' } else { 'skip' }),
-        $(if ($ProfileStages.IsPresent) { 'profile' } else { 'no-profile' })
-    )
     $inventoryStatus = (& wsl.exe -d $Distribution -- cat "$linuxReportRoot/gpu-inventory.status" | Out-String).Trim()
     $inventoryElapsedMs = [double]((& wsl.exe -d $Distribution -- cat "$linuxReportRoot/gpu-inventory-time-ns" | Out-String).Trim()) / 1000000.0
     if ($inventoryStatus -eq 'not-requested') {
@@ -379,7 +392,7 @@ function Invoke-WslEnvironment {
         runtime_artifact = $binary
         prepared_this_run = $Prepare.IsPresent
         runtime_filesystem = (& wsl.exe -d $Distribution -- stat -f -c %T $sync.workspace | Out-String).Trim()
-        windows_mount_used_by_runtime = $false
+        windows_mount_used_by_runtime = $binary.StartsWith('/mnt/')
         windows_path_entries_used_by_runtime = $false
         source_sync_performed = $sync.sync_performed
         preparation_excluded_from_case_timings = $true
@@ -394,11 +407,11 @@ function Invoke-WslEnvironment {
 
 function Invoke-WasmEnvironment {
     Assert-ClearraRuntimeEnvironmentAvailable 'wasm' | Out-Null
-    $cargoTarget = Get-ClearraCargoTargetDir
+    if ($Prepare.IsPresent) { Ensure-ClearraBuildArtifactCache -RepositoryRoot $Root }
     $wasmArtifactRoot = if ([string]::IsNullOrWhiteSpace($WasmModuleDirectory)) {
-        Resolve-ClearraArtifactPath `
-            (Join-Path (Get-ClearraArtifactRoot) 'wasm-runtime-environment') `
-            $Root
+        Resolve-ClearraArtifactPath 'wasm-runtime-environment' $Root
+    } elseif ($Prepare.IsPresent) {
+        Resolve-ClearraArtifactPath $WasmModuleDirectory $Root
     } else {
         Assert-ClearraPathOutsideRepository `
             ([System.IO.Path]::GetFullPath($WasmModuleDirectory)) `
@@ -407,8 +420,10 @@ function Invoke-WasmEnvironment {
     $prepareMs = 0.0
     $prepareEnvironmentUsed = $null
     if ($Prepare.IsPresent) {
+        $cargoTarget = Get-ClearraCargoTargetDir
         $prepareEnvironmentUsed = 'windows'
         if (Test-Path -LiteralPath $wasmArtifactRoot) {
+            Assert-ClearraBuildTreeNoReparse $wasmArtifactRoot
             Remove-Item -LiteralPath $wasmArtifactRoot -Recurse -Force
         }
         New-Item -ItemType Directory -Force -Path $wasmArtifactRoot | Out-Null
@@ -481,6 +496,16 @@ function Invoke-WasmEnvironment {
     }
 }
 
+try {
+# Prebuilt Windows/native consumers do not initialize or replace build output.
+# Only Windows WASM preparation owns this PowerShell transaction; WSL owns its
+# independent ext4-source transaction through the dispatch helper.
+Assert-ClearraNoReparseBuildPath $outputRoot | Out-Null
+if ($usesDefaultOutput -and (Test-Path -LiteralPath $outputRoot)) {
+    Assert-ClearraBuildTreeNoReparse $outputRoot
+    Remove-Item -LiteralPath $outputRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $environmentReports = [System.Collections.Generic.List[object]]::new()
 $environmentFailures = [System.Collections.Generic.List[object]]::new()
 foreach ($selected in $selectedEnvironments) {
@@ -534,4 +559,8 @@ Write-Output "runtime environment comparison complete: $comparisonPath"
 if ($environmentFailures.Count -gt 0) {
     $failedNames = @($environmentFailures | ForEach-Object { $_.environment }) -join ', '
     throw "Runtime environment comparison is incomplete for: $failedNames. Report: $comparisonPath"
+}
+if (($needsWindowsBuildOwner -or $needsWslSourceOwner) -and (Test-ClearraBuildTransactionOwner)) { Complete-ClearraBuildTransaction }
+} finally {
+    if ($needsWindowsBuildOwner -or $needsWslSourceOwner) { Exit-ClearraBuildArtifactCacheUsage }
 }

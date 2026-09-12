@@ -97,11 +97,12 @@ function Test-ExistingGuiStartup {
     try {
         $escapedNodePath = [regex]::Escape($NodePath)
         $escapedVitePath = [regex]::Escape((Join-Path $RepoRoot "node_modules\vite\bin\vite.js"))
+        $escapedFrontendPath = [regex]::Escape((Join-Path $RepoRoot "scripts\tools\build-clearra-frontend.mjs"))
         $process = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" `
             -ErrorAction SilentlyContinue |
             Where-Object {
                 $_.ExecutablePath -match "^${escapedNodePath}$" -and
-                $_.CommandLine -match $escapedVitePath -and
+                ($_.CommandLine -match $escapedVitePath -or $_.CommandLine -match $escapedFrontendPath) -and
                 $_.CommandLine -match "(?:^|\s)--port\s+${GuiPort}(?:\s|$)"
             } |
             Select-Object -First 1
@@ -170,19 +171,22 @@ function Ensure-DeveloperGui {
         return
     }
     $vitePath = Join-Path $RepoRoot "node_modules\vite\bin\vite.js"
+    $frontendPath = Join-Path $RepoRoot "scripts\tools\build-clearra-frontend.mjs"
     $webRoot = Join-Path $RepoRoot "apps\clearra-web"
     if (-not (Test-Path -LiteralPath $webRoot -PathType Container) -or
         -not (Test-Path -LiteralPath $NodePath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $vitePath -PathType Leaf)) {
+        -not (Test-Path -LiteralPath $vitePath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $frontendPath -PathType Leaf)) {
         Write-WatchdogEvent "gui start skipped: workspace, node, or vite missing"
         return
     }
 
     try {
-        # Login/recovery serves the existing WASM; never invoke npm predev builds.
+        # Future recovery holds the source experiment owner, but preserves the
+        # existing WASM and never invokes its build or restarts an occupied port.
         $script:ownedGuiProcess = Start-HiddenProcess `
             -FilePath $NodePath `
-            -ArgumentList @(('"{0}"' -f $vitePath), "--host", "127.0.0.1", "--port", [string]$GuiPort, "--strictPort", "--mode", "local-recovery") `
+            -ArgumentList @(('"{0}"' -f $frontendPath), "--app", "web", "--task", "dev", "--recovery", "--host", "127.0.0.1", "--port", [string]$GuiPort, "--strictPort", "--mode", "local-recovery") `
             -WorkingDirectory $webRoot
         Write-WatchdogEvent "gui start requested: pid=$($script:ownedGuiProcess.Id)"
     } catch {

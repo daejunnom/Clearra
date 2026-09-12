@@ -4,6 +4,7 @@ import test from "node:test";
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { collectQualificationJobTopology, QUALIFICATION_JOB_FLAGS } from './fast-fix-job-topology.mjs';
+import { COMPONENT_QUALIFICATION_COMMANDS } from './fast-fix-qualification-evidence.mjs';
 
 const workflow = await readFile(
   new URL("../../.github/workflows/fast-fix-qualification.yml", import.meta.url),
@@ -66,7 +67,7 @@ test("full scope promotes to canonical while focused scope uses explicit closed 
   for (const command of [
     "apps/clearra-web/test/ClearraWasmRuntime.contract.ts",
     "packages/clearra-ui/test/desktopProductPageCancellation.test.mjs",
-    "cargo test -p clearra-cli --test product_cli_surface_contract -- --test-threads=1",
+    COMPONENT_QUALIFICATION_COMMANDS.get('cli'),
     "apps/clearra-discord-bot/test/capability-registry.test.mjs",
     "apps/clearra-discord-bot/test/cloud-candidate-smoke-job.test.mjs",
   ]) {

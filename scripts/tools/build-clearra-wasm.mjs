@@ -16,6 +16,7 @@ import {
 } from './clearra-wasm-generation-retention.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { finesseSourceSnapshot } from '../benchmark/finesse-source-snapshot.mjs';
+import { enterManagedBuildOrRelaunch } from './clearra-build-policy.mjs';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const scriptRoot = resolve(scriptDir, '..', '..');
@@ -38,6 +39,12 @@ const PERFORMANCE_RUST_ENV_KEYS = [
 ];
 const options = parseArguments(process.argv.slice(2));
 const root = options.sourceRoot ? resolve(options.sourceRoot) : scriptRoot;
+// Reject outside targets before creating either a build or publication directory.
+const buildOwner = enterManagedBuildOrRelaunch(root, process.argv.slice(1),
+  process.env.CLEARRA_BUILD_PURPOSE || (options.benchmarkProvenance ? 'experiment' : 'product'));
+if (process.env.CLEARRA_WSL_CARGO_TARGET_DIR) {
+  throw new Error('CLEARRA_WSL_CARGO_TARGET_DIR is no longer configurable; WSL shares the managed build target');
+}
 const destinationDir = options.destination
   ? resolve(options.destination)
   : resolve(root, 'apps', 'clearra-web', 'static', 'wasm');
@@ -45,7 +52,7 @@ const destinationDir = options.destination
 await mkdir(dirname(destinationDir), { recursive: true });
 await mkdir(destinationDir, { recursive: true });
 const stagingLease = await acquireManagedTransientDirectory(
-  resolve(dirname(destinationDir), '.clearra-wasm-stage')
+  resolve(buildOwner.transaction, 'wasm-stage')
 );
 const stagingDir = stagingLease.path;
 const wasmBuildContract = await createClearraWasmBuildContract(root);
@@ -119,7 +126,20 @@ async function buildWithWsl() {
   const script = `set -euo pipefail
 ROOT=$(wslpath -a ${shellQuote(root)})
 DESTINATION=$(wslpath -a ${shellQuote(stagingDir)})
-TARGET_ROOT="\${CLEARRA_WSL_CARGO_TARGET_DIR:-\${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build/cargo-target-wasm}"
+TARGET_ROOT=$(wslpath -a ${shellQuote(buildOwner.cargoTarget)})
+export LOCALAPPDATA=${shellQuote(process.env.LOCALAPPDATA)}
+export CLEARRA_BUILD_ROOT=${shellQuote(process.env.CLEARRA_BUILD_ROOT)}
+export CLEARRA_BUILD_PURPOSE=${shellQuote(process.env.CLEARRA_BUILD_PURPOSE)}
+export CLEARRA_BUILD_SOURCE_ROOT=${shellQuote(process.env.CLEARRA_BUILD_SOURCE_ROOT)}
+export CLEARRA_BUILD_SOURCE_ID=${shellQuote(process.env.CLEARRA_BUILD_SOURCE_ID)}
+export CLEARRA_BUILD_SESSION_ID=${shellQuote(process.env.CLEARRA_BUILD_SESSION_ID)}
+export CLEARRA_BUILD_CACHE_SESSION_KEY=${shellQuote(process.env.CLEARRA_BUILD_CACHE_SESSION_KEY)}
+export CLEARRA_BUILD_TRANSACTION_ROOT=${shellQuote(process.env.CLEARRA_BUILD_TRANSACTION_ROOT)}
+export CLEARRA_BUILD_CACHE_OWNER_PID=${shellQuote(process.env.CLEARRA_BUILD_CACHE_OWNER_PID)}
+export CARGO_TARGET_DIR="$TARGET_ROOT" CARGO_INCREMENTAL=0
+export RUSTC_WRAPPER="$(wslpath -a ${shellQuote(resolve(scriptRoot, 'scripts/tools/clearra-rustc-guard.sh'))})"
+chmod +x "$RUSTC_WRAPPER"
+node "$(wslpath -a ${shellQuote(resolve(scriptRoot, 'scripts/tools/clearra-build-paths.mjs'))})" --field cargo-target >/dev/null
 mkdir -p "$TARGET_ROOT" "$DESTINATION"
 ${options.verify ? `${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --locked --manifest-path "$ROOT/Cargo.toml" --package clearra-cli-command --lib --tests
 ${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --locked --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --lib --tests
@@ -139,11 +159,7 @@ wasm-bindgen "$TARGET_ROOT/wasm32-unknown-unknown/release/clearra_wasm.wasm" --t
 }
 
 async function buildNative() {
-  const cacheBase = process.platform === 'win32'
-    ? process.env.LOCALAPPDATA || process.env.TEMP || resolve(process.env.USERPROFILE || '.', 'AppData', 'Local')
-    : process.env.XDG_CACHE_HOME || resolve(process.env.HOME || '.', '.cache');
-  const targetRoot = process.env.CARGO_TARGET_DIR ||
-    resolve(cacheBase, 'Clearra', 'build', 'cargo-target-wasm');
+  const targetRoot = buildOwner.cargoTarget;
   await mkdir(targetRoot, { recursive: true });
   if (options.verify) {
     await run('cargo', [

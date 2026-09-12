@@ -2,11 +2,30 @@ $script:ClearraCoreCBuildLibRoot = Split-Path -Parent $PSCommandPath
 $script:ClearraScriptsRoot = Split-Path -Parent $script:ClearraCoreCBuildLibRoot
 $script:ClearraRoot = Resolve-Path -LiteralPath (Join-Path $script:ClearraScriptsRoot "..")
 . (Join-Path $script:ClearraCoreCBuildLibRoot "clearra-path-helpers.ps1")
+function Assert-CoreCActiveBuildTransaction {
+    $source = Get-ClearraCanonicalSourceRoot (Resolve-ClearraBuildSourceRoot)
+    Assert-ClearraBuildEnvironmentBeforeMutation $source
+    $record = Get-ClearraInheritedBuildTransaction $source (Get-ClearraBuildPurpose)
+    if ($null -eq $record) {
+        throw 'C builds require an active official build owner; use build-core-c.ps1 or invoke-clearra-build.ps1.'
+    }
+    return $record
+}
+function Assert-CoreCManagedConfigureArgs([string[]]$ConfigureArgs) {
+    foreach ($argument in @($ConfigureArgs)) {
+        if ($argument -notmatch '^-D(BUILD_TESTING|CLEARRA_CORE_SPLIT_TESTS|CLEARRA_CORE_ADVERSARIAL_TESTS|CLEARRA_CORE_ENABLE_ASAN|CLEARRA_CORE_ENABLE_UBSAN|CLEARRA_ENABLE_STAGE_PROFILING)=(ON|OFF)$' -and
+            $argument -notmatch '^-DCMAKE_BUILD_TYPE=[A-Za-z0-9_-]+$') {
+            throw "CMake configure argument '$argument' is not a managed build option; output, source and toolchain overrides are forbidden."
+        }
+    }
+}
 function Resolve-CoreCBuildDir([string]$BuildDir) {
+    $record = Assert-CoreCActiveBuildTransaction
     if ([string]::IsNullOrWhiteSpace($BuildDir)) {
         $BuildDir = "core-c-cache"
     }
-    $path = Resolve-ClearraArtifactPath $BuildDir $script:ClearraRoot
+    Assert-ClearraRequestedBuildPath -Path $BuildDir -RepositoryRoot $record.source_root | Out-Null
+    $path = Resolve-ClearraArtifactPath $BuildDir $record.source_root
     New-Item -ItemType Directory -Force -Path $path | Out-Null
     return $path
 }function Test-CoreCVerboseLog() {
@@ -174,6 +193,8 @@ function Resolve-CoreCBuildDir([string]$BuildDir) {
     [bool]$AllowMissingCompiler,
     $ProgressScope = $null
 ) {
+    $record = Assert-CoreCActiveBuildTransaction
+    Assert-ClearraPathInBuildTransaction $BuildDir $record.transaction_root $record.source_root | Out-Null
     Start-CoreCProgressStep $ProgressScope "cmake $StepName"
     $stepResult = Invoke-CoreCNativeCapture "cmake" $Arguments "cmake $StepName"
     if ($stepResult.ExitCode -eq 0) {
@@ -199,7 +220,10 @@ function Resolve-CoreCBuildDir([string]$BuildDir) {
     [switch]$AllowMissingCompiler,
     $ProgressScope = $null
 ) {
-    $sourceDir = $script:ClearraRoot
+    $record = Assert-CoreCActiveBuildTransaction
+    Assert-CoreCManagedConfigureArgs $ConfigureArgs
+    if ($Configuration -notmatch '^[A-Za-z0-9_-]+$') { throw 'Unsafe CMake build configuration.' }
+    $sourceDir = $record.source_root
     $resolvedBuildDir = Resolve-CoreCBuildDir $BuildDir
 
     if ($null -eq (Get-Command cmake -ErrorAction SilentlyContinue)) {

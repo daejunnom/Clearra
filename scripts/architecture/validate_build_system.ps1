@@ -22,13 +22,17 @@ $rootCargoToml = Read-Text "Cargo.toml"
 if ($rootCargoToml -match '(?m)^\s*build\s*=') {
         Add-ArchitectureError "workspace root Cargo.toml must not declare a build script"
     }
-foreach ($cargoToml in Get-ChildItem -Path (Join-Path $Root "crates") -Recurse -File -Filter Cargo.toml) {
-        $contents = Get-Content -LiteralPath $cargoToml.FullName -Raw
+$trackedCargoManifests = @(& git -C $Root ls-files -- 'crates/**/Cargo.toml')
+if ($LASTEXITCODE -ne 0) {
+    Add-ArchitectureError "build-system policy could not enumerate tracked Cargo manifests"
+}
+foreach ($cargoToml in $trackedCargoManifests) {
+        $contents = Read-Text $cargoToml
         if ($contents -match '(?m)^\s*build\s*=\s*"build\.rs"\s*$') {
-            Add-ArchitectureError "$($cargoToml.FullName) must not declare build = `"build.rs`""
+            Add-ArchitectureError "$cargoToml must not declare build = `"build.rs`""
         }
     }
-$buildSystemDoc = Read-Text "docs/build-system.md"
+$buildSystemDoc = (Read-Text "docs/build-system.md") -replace '\s+', ' '
 foreach ($requiredMarker in @(
         'virtual workspace',
         'does not own a Cargo build.rs',
@@ -64,13 +68,15 @@ foreach ($requiredMarker in @(
         'debug and release artifacts for `clearra-core-ffi`',
         'unchanged native builds',
         'does not invoke WSL',
-        'external artifact root is an incremental cache',
-        'source or script change',
-        'preserves the CMake and Cargo trees',
-        'size budget is exceeded',
-        'workspace/schema identity'
+        'CLEARRA_BUILD_ROOT',
+        'CLEARRA_BUILD_PURPOSE',
+        'CLEARRA_BUILD_SOURCE_ROOT',
+        'CLEARRA_BUILD_TRANSACTION_ROOT',
+        'RUSTC_WRAPPER',
+        'scripts/tools/invoke-clearra-build.ps1',
+        'scripts/tools/invoke-clearra-build.mjs'
     )) {
-        if ($buildSystemDoc -notlike "*$requiredMarker*") {
+        if (-not $buildSystemDoc.Contains($requiredMarker)) {
             Add-ArchitectureError "docs/build-system.md must document no-build.rs build policy marker '$requiredMarker'"
         }
     }
@@ -90,7 +96,7 @@ foreach ($requiredMarker in @(
 if ($nativeLinkHelpers -match '(?i)-C\s+metadata\s*=\s*clearra_core') {
     Add-ArchitectureError "native C library identity must not enter global Rust -C metadata"
 }
-$architectureDoc = Read-Text "docs/architecture.md"
+$architectureDoc = (Read-Text "docs/architecture.md") -replace '\s+', ' '
 foreach ($requiredMarker in @(
         "## Build Script Policy",
         "The handoff lists build.rs as an optional top-level build integration point",
@@ -105,7 +111,7 @@ foreach ($requiredMarker in @(
         "actual Windows error 4551",
         "Default product gates never invoke WSL"
     )) {
-        if ($architectureDoc -notlike "*$requiredMarker*") {
+        if (-not $architectureDoc.Contains($requiredMarker)) {
             Add-ArchitectureError "docs/architecture.md must document 14.3 build script policy override marker '$requiredMarker'"
         }
     }
@@ -186,7 +192,7 @@ foreach ($requiredMarker in @('$SourceDir = $Root', "cmake", "-S", "-B", "--buil
         }
     }
 $buildCoreSh = Read-Text "scripts/build-core-c.sh"
-foreach ($requiredMarker in @('cmake -S "$ROOT_DIR"', "cmake --build", "Clearra/build/core-c-library-cache", "BUILD_TESTING=OFF")) {
+foreach ($requiredMarker in @('cmake -S "$ROOT_DIR"', "cmake --build", 'BUILD_TRANSACTION/core-c-library-cache', "BUILD_TESTING=OFF")) {
         if ($buildCoreSh -notlike "*$requiredMarker*") {
             Add-ArchitectureError "scripts/build-core-c.sh must own M0 CMake build marker '$requiredMarker'"
         }

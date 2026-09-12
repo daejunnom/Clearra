@@ -1,9 +1,9 @@
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { build } from 'esbuild';
+import { enterManagedBuildOrRelaunch, assertNoBuildLinks } from './clearra-build-policy.mjs';
 
 const invocationDirectory = process.cwd();
 const repositoryRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -12,6 +12,9 @@ const inputs = process.argv.slice(2);
 if (inputs.length === 0) {
   throw new Error('at least one TypeScript contract file or directory is required');
 }
+// Preserve caller-relative paths when the owner launches its child at the source root.
+const owner = enterManagedBuildOrRelaunch(repositoryRoot,
+  [fileURLToPath(import.meta.url), ...inputs.map(input => resolve(invocationDirectory, input))]);
 
 const contractFiles = [];
 for (const input of inputs) {
@@ -33,7 +36,8 @@ if (contractFiles.length === 0) {
 }
 
 process.chdir(repositoryRoot);
-const bundleDirectory = await mkdtemp(join(tmpdir(), 'clearra-typescript-contracts-'));
+assertNoBuildLinks(owner.transaction);
+const bundleDirectory = await mkdtemp(join(owner.transaction, 'typescript-contracts-'));
 try {
   for (const [index, contractFile] of contractFiles.entries()) {
     const bundle = await build({

@@ -24,8 +24,14 @@ test('an occupied port never starts, adopts or stops another process', async () 
 
 test('owned server is hidden, IPC-connected, shell-free and cannot fall back to another port', async () => {
   const child = {};
+  const environment = { CLEARRA_BUILD_SESSION_ID: 'test-session' };
+  const completions = [];
   await startExperiment(experimentOptions([]), {
     checkPort: async () => {},
+    acquireOwner: async options => {
+      assert.equal(options.purpose, 'experiment');
+      return { environment, finish: async success => completions.push(success) };
+    },
     forkProcess: (file, args, options) => {
       assert(file.endsWith('run-gui-experiment.mjs'));
       assert.equal(args[0], '--owned-server');
@@ -33,10 +39,25 @@ test('owned server is hidden, IPC-connected, shell-free and cannot fall back to 
       assert.equal(options.detached, false);
       assert.equal(options.stdio[3], 'ipc');
       assert.equal(options.shell, undefined);
+      assert.equal(options.env, environment);
       return child;
     },
     watch: async value => { assert.equal(value, child); },
   });
+  assert.deepEqual(completions, [true]);
+});
+
+test('experiment startup and child failures release only their own failed build transaction', async () => {
+  for (const failure of ['fork', 'watch']) {
+    const completions = [];
+    await assert.rejects(startExperiment(experimentOptions([]), {
+      checkPort: async () => {},
+      acquireOwner: async () => ({ environment: {}, finish: async success => completions.push(success) }),
+      forkProcess: () => { if (failure === 'fork') throw new Error(failure); return {}; },
+      watch: async () => { throw new Error(failure); },
+    }), new RegExp(failure));
+    assert.deepEqual(completions, [false]);
+  }
 });
 
 test('parent signals and lease expiration clean only the owned child and never restart it', async () => {
@@ -83,10 +104,12 @@ test('server uses strict 4195 and shuts down when its parent disappears', async 
   const exits = [];
   let closed = 0;
   const handle = await serveOwnedExperiment(experimentOptions([]), {
+    publishTypes: async () => {},
     events, setTimer: fn => { timers.push(fn); return fn; }, clearTimer: () => {},
     exit: code => exits.push(code),
     loadVite: async () => ({ createServer: async options => {
       assert.equal(options.mode, 'local-audit');
+      assert.equal(options.configLoader, 'runner');
       assert.deepEqual(options.server, { host:'127.0.0.1', port:4195, strictPort:true, hmr:false });
       return { listen:async () => {}, close:async () => { closed++; } };
     } }),
@@ -109,6 +132,7 @@ test('startup race or Vite failure closes its server and cannot report success',
   const exits = [];
   let closed = 0;
   await assert.rejects(serveOwnedExperiment(experimentOptions([]), {
+    publishTypes: async () => {},
     events, setTimer: fn => fn, clearTimer: () => {}, exit: code => exits.push(code),
     loadVite: async () => ({ createServer: async () => ({
       listen: async () => { throw new Error('4195 was occupied after preflight'); },

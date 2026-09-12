@@ -13,16 +13,15 @@ import {
   retainPublishedClearraWasmGenerations,
 } from './clearra-wasm-generation-retention.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
+import { assertManagedBuildTransaction } from './clearra-build-policy.mjs';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const root = resolve(scriptDir, '..', '..');
 const GENERATION_HEX_LENGTH = 24;
-const cacheBase = process.platform === 'win32'
-  ? process.env.LOCALAPPDATA || process.env.TEMP || resolve(process.env.USERPROFILE || '.', 'AppData', 'Local')
-  : process.env.XDG_CACHE_HOME || resolve(process.env.HOME || '.', '.cache');
-const targetRoot = process.env.CARGO_TARGET_DIR
-  ? resolve(process.env.CARGO_TARGET_DIR)
-  : resolve(cacheBase, 'Clearra', 'build', 'cargo-target-wasm');
+// This consumes the owner's already-built module; never acquire a fresh owner
+// here, since doing so would retire the experimental input it needs to stage.
+const owner = assertManagedBuildTransaction({ sourceRoot: root });
+const targetRoot = owner.cargoTarget;
 const source = resolve(targetRoot, 'wasm32-unknown-unknown', 'release', 'clearra_wasm.wasm');
 const destinationDir = process.argv[2]
   ? resolve(process.argv[2])
@@ -36,7 +35,7 @@ await mkdir(dirname(destinationDir), { recursive: true });
 await mkdir(destinationDir, { recursive: true });
 await rm(resolve(destinationDir, 'clearra_wasm.wasm'), { force: true });
 const stagingLease = await acquireManagedTransientDirectory(
-  resolve(dirname(destinationDir), '.clearra-wasm-stage')
+  resolve(owner.transaction, 'wasm-stage')
 );
 const stagingDir = stagingLease.path;
 const bindings = resolve(stagingDir, 'clearra_wasm.js');
