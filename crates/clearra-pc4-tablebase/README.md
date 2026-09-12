@@ -82,3 +82,13 @@ profile and advances the epoch with checked arithmetic. This primitive does
 not decide preview visibility, parse a pattern, apply hold, query a graph, or
 register a product capability. The future `graph x hold x bag x preview` DP
 may consume it only after those observation semantics are separately fixed.
+
+The bounded reveal family composes that one-draw primitive for an explicitly
+requested hidden-draw count. It memoizes exact suffix counts, then un-ranks a
+bounded page in canonical piece order instead of allocating every concrete
+sequence. Each emitted sequence retains its terminal remainder/epoch and a
+reduced checked-u128 rational probability. Count, memo, rank, page-allocation,
+absolute-depth, and cancellation failures are typed and transactional; cursors
+are bound to one prepared family. This remains only an input family for the
+future `graph x hold x bag x preview` DP. It does not infer preview observation
+policy or implement that DP.

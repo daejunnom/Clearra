@@ -5,6 +5,7 @@
 //! requests. No dataset revision or digest is compiled into the product.
 
 mod bag_draw;
+mod bag_reveal;
 mod fixed_queue_hold;
 mod fixed_queue_traversal;
 mod graph;
@@ -17,6 +18,12 @@ mod protocol;
 pub use bag_draw::{
     draw_pc4_bag, Pc4BagDrawBatch, Pc4BagDrawError, Pc4BagDrawTransition, Pc4BagDrawWeight,
     Pc4BagProfile, Pc4BagProfileError, Pc4BagState, Pc4BagStateError, PC4_BAG_PIECES,
+};
+pub use bag_reveal::{
+    prepare_pc4_bag_reveal_family, Pc4BagRevealBudgets, Pc4BagRevealCursor, Pc4BagRevealFamily,
+    Pc4BagRevealGuard, Pc4BagRevealPageBudgetKind, Pc4BagRevealPageError,
+    Pc4BagRevealPrepareBudgetKind, Pc4BagRevealPrepareError, Pc4BagRevealSequence,
+    Pc4ExactProbability, PC4_BAG_REVEAL_ABSOLUTE_DRAW_LIMIT,
 };
 pub use fixed_queue_hold::{
     expand_fixed_queue_hold, FixedQueueHoldBudgetExceeded, FixedQueueHoldBudgetKind,
