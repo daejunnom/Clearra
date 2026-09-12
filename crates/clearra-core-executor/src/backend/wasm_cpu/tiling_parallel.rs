@@ -1,3 +1,6 @@
+// SRP rationale: this module has one behavior-level change reason: coordinating bounded,
+// deterministic Geometry-root and Build-probability work over the shared WASM tiling-worker
+// protocol while preserving its canonical merge and progress evidence.
 use std::collections::VecDeque;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
