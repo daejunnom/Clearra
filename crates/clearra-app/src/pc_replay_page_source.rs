@@ -1,10 +1,10 @@
 //! Query-bound exact replay manifests. Only one cell's language memo is live.
 use crate::pc_path_result::{
-    PcPathProjectionContext, PcPathWitnessV2, checked_execution_projection_peak_bytes,
-    pc_path_witness_payload,
+    checked_execution_projection_peak_bytes, pc_path_witness_payload,
     project_canonical_execution_with_context as project_execution_with_context,
+    PcPathProjectionContext, PcPathWitnessV2,
 };
-use crate::pc_replay_page_error::{PcReplayPageError, replay_engine_error};
+use crate::pc_replay_page_error::{replay_engine_error, PcReplayPageError};
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_executor::performance::CooperativeWorkQuantum;
 use clearra_core_executor::{CoreExecutionResult, CorePostProcessExecution};
