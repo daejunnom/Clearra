@@ -46,6 +46,8 @@ mod pc4_input_disclosure_policy;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_lookup_graph_runtime_adapter;
 #[cfg(feature = "online-pc4-tablebase")]
+mod pc4_observation_candidate_adapter;
+#[cfg(feature = "online-pc4-tablebase")]
 mod pc4_profile_capability_projection;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_search_problem_compatibility;
@@ -246,6 +248,19 @@ pub use pc4_lookup_graph_runtime_adapter::{
     Pc4LookupGraphCacheAdmission, Pc4LookupGraphCacheBudgetKind, Pc4LookupGraphCacheError,
     Pc4LookupGraphCacheLimits, Pc4LookupGraphCacheStartError, Pc4LookupGraphCacheUsage,
     Pc4LookupMaterializationError, Pc4LookupMaterializationField, Pc4LookupPlacementMaterializer,
+};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc4_observation_candidate_adapter::{
+    prepare_pc4_observation_candidate_session, ManifestQualifiedPc4ObservationTerminal,
+    Pc4CompleteObservationCandidateFamily, Pc4ObservationCandidateAdapterRequest,
+    Pc4ObservationCandidateAdvance, Pc4ObservationCandidateAdvanceStatus,
+    Pc4ObservationCandidateBindingError, Pc4ObservationCandidateBudgetExceeded,
+    Pc4ObservationCandidateBudgetKind, Pc4ObservationCandidateBudgets,
+    Pc4ObservationCandidateError, Pc4ObservationCandidateGuard, Pc4ObservationCandidateOutcome,
+    Pc4ObservationCandidateProvenance, Pc4ObservationCandidateSemanticError,
+    Pc4ObservationCandidateSession, Pc4ObservationCandidateSessionError,
+    Pc4ObservationCanonicalCandidate, Pc4ObservationRevealEvidence,
+    QualifiedPc4ObservationCandidateTerminalPredicate, PC4_OBSERVATION_CANDIDATE_FAMILY_CONTRACT,
 };
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc4_profile_capability_projection::{
