@@ -36,8 +36,7 @@ impl FixedQueueTraversalGuard for Guard {
 }
 
 struct Provider {
-    snapshot: QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: QualifiedPc4TargetIdentity,
     graph: BTreeMap<(u32, Pc4GraphPiece), Vec<u32>>,
     calls: Vec<(u32, Pc4GraphPiece, usize)>,
     fail: bool,
@@ -48,12 +47,8 @@ struct Provider {
 impl QualifiedCompleteAdjacencyProvider for Provider {
     type Error = ProviderError;
 
-    fn snapshot(&self) -> &QualifiedSnapshotIdentity {
-        &self.snapshot
-    }
-
-    fn profile(&self) -> Pc4RuleProfile {
-        self.profile
+    fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
     }
 
     fn complete_outgoing_edges(
@@ -79,8 +74,7 @@ impl QualifiedCompleteAdjacencyProvider for Provider {
             .into_iter()
             .map(|target_field_id| {
                 QualifiedPc4GraphEdge::from_qualified_record(
-                    query.snapshot().clone(),
-                    query.profile(),
+                    query.target(),
                     query.source_field_id(),
                     query.piece(),
                     target_field_id,
@@ -88,8 +82,7 @@ impl QualifiedCompleteAdjacencyProvider for Provider {
             })
             .collect();
         Ok(QualifiedCompleteAdjacency::from_qualified_provider(
-            query.snapshot().clone(),
-            query.profile(),
+            query.target(),
             query.source_field_id(),
             query.piece(),
             query.queue_index(),
@@ -206,8 +199,7 @@ fn family() -> Pc4ObservationGraphFamily {
 
 fn provider(family: &Pc4ObservationGraphFamily) -> Provider {
     Provider {
-        snapshot: family.target().snapshot().clone(),
-        profile: family.target().profile(),
+        target: family.target().clone(),
         graph: BTreeMap::from([
             ((7, Pc4GraphPiece::I), vec![11, 10, 10]),
             ((7, Pc4GraphPiece::T), vec![20]),
@@ -266,11 +258,9 @@ fn exact_probability_target_source_and_replay_evidence_survive_graph_paging() {
 
     assert_eq!(paths.len(), 6);
     assert!(paths.iter().all(|path| path.source_field_id() == 7));
-    assert!(
-        paths
-            .iter()
-            .all(|path| path.graph_path().start_field_id() == 7)
-    );
+    assert!(paths
+        .iter()
+        .all(|path| path.graph_path().start_field_id() == 7));
     assert!(paths.iter().all(|path| path.target() == family.target()));
     assert!(paths.iter().all(|path| {
         path.probability().numerator() == 1 && path.probability().denominator() == 2
@@ -373,7 +363,13 @@ fn provider_binding_mismatch_is_typed_and_transactional() {
     let mut cursor = family.cursor();
     let before = cursor_state(&cursor);
     let mut provider = provider(&family);
-    provider.profile = Pc4RuleProfile::Jstris180;
+    provider.target = qualified_target_identity(
+        "observation-graph-generation",
+        "observation-graph-manifest",
+        Pc4RuleProfile::Jstris180,
+        Pc4TerminalUseCase::PcSearch,
+        4,
+    );
 
     assert!(matches!(
         family.next_page(

@@ -523,8 +523,9 @@ where
     G: FixedQueueTraversalGuard,
 {
     let snapshot = request.target.snapshot();
+    let profile = request.target.profile();
     check_guard(snapshot, guard)?;
-    validate_provider_binding(request.target, provider)?;
+    validate_provider_binding(request.target, profile, provider)?;
 
     let mut frontier = vec![FixedQueueGraphPath {
         start_field_id: request.start_field_id,
@@ -597,7 +598,7 @@ where
             consume_unbounded_counter(&mut adjacency_queries);
             let adjacency_result = provider.complete_outgoing_edges(&adjacency_query);
             check_guard(snapshot, guard)?;
-            validate_provider_binding(request.target, provider)?;
+            validate_provider_binding(request.target, profile, provider)?;
             let mut adjacency = adjacency_result.map_err(FixedQueueTraversalError::Provider)?;
             validate_adjacency(&adjacency_query, &adjacency)?;
 
@@ -691,6 +692,7 @@ where
 
 fn validate_provider_binding<ProviderError, TerminalError, P>(
     target: &QualifiedPc4TargetIdentity,
+    expected_profile: Pc4RuleProfile,
     provider: &P,
 ) -> Result<(), FixedQueueTraversalError<ProviderError, TerminalError>>
 where
@@ -701,10 +703,10 @@ where
             FixedQueueTraversalSemanticError::ProviderSnapshotMismatch,
         ));
     }
-    if provider.profile() != target.profile() {
+    if provider.profile() != expected_profile {
         return Err(FixedQueueTraversalError::Semantic(
             FixedQueueTraversalSemanticError::ProviderProfileMismatch {
-                expected: target.profile(),
+                expected: expected_profile,
                 actual: provider.profile(),
             },
         ));
