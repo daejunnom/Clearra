@@ -67,6 +67,7 @@ pub enum FormatMismatch {
         offset: u32,
         graph_bytes: u64,
     },
+    GraphRecordEmpty,
     GraphRecordTooLarge {
         bytes: u64,
         maximum: u32,
@@ -82,6 +83,7 @@ impl FormatMismatch {
             Self::FieldIdOutsideDomain { .. } => "pc4_online_field_id_outside_domain",
             Self::GraphOffsetsDescending { .. } => "pc4_online_graph_offsets_descending",
             Self::GraphOffsetOutsideArtifact { .. } => "pc4_online_graph_offset_outside_artifact",
+            Self::GraphRecordEmpty => "pc4_online_graph_record_empty",
             Self::GraphRecordTooLarge { .. } => "pc4_online_graph_record_too_large",
         }
     }
@@ -351,21 +353,15 @@ impl LookupMachine {
             return;
         }
         let record_bytes = u64::from(end - start);
+        if record_bytes == 0 {
+            self.fail_format(FormatMismatch::GraphRecordEmpty);
+            return;
+        }
         if record_bytes > u64::from(self.profile.maximum_graph_record_bytes()) {
             self.fail_format(FormatMismatch::GraphRecordTooLarge {
                 bytes: record_bytes,
                 maximum: self.profile.maximum_graph_record_bytes(),
             });
-            return;
-        }
-        if record_bytes == 0 {
-            self.terminal = Some(Terminal::Hit(LookupHit {
-                snapshot: self.snapshot.clone(),
-                profile: self.profile.profile(),
-                field_id,
-                graph_target_encoding: self.profile.graph_target_encoding(),
-                graph_record: Vec::new(),
-            }));
             return;
         }
         self.phase = Phase::GraphRecord { field_id };
@@ -698,6 +694,21 @@ mod tests {
             LookupStep::Failed(LookupFailure::FormatMismatch(FormatMismatch::HeaderMagic {
                 artifact: Pc4ArtifactRole::FieldHashIndex,
             }))
+        );
+    }
+
+    #[test]
+    fn empty_graph_record_is_a_format_failure_not_a_hit() {
+        let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
+        let mut machine =
+            LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15).expect("lookup");
+        machine.pending = None;
+        machine.consume_offset_pair(&[0; 8], 0);
+        assert_eq!(
+            machine.step(),
+            LookupStep::Failed(LookupFailure::FormatMismatch(
+                FormatMismatch::GraphRecordEmpty
+            ))
         );
     }
 
