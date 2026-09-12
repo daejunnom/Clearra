@@ -17,6 +17,8 @@ mod extended_reachability;
 mod finesse_score;
 mod geometry;
 mod geometry_apdp;
+#[cfg(test)]
+mod geometry_column_mod_four_ab_tests;
 mod geometry_component;
 mod geometry_domain;
 mod geometry_family;
