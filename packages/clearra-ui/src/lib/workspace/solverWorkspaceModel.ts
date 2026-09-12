@@ -358,7 +358,6 @@ export function trimBoardMask(mask: bigint, height: number): bigint {
 export type CompletedRowClear = {
   boardMask: bigint;
   clearedRows: number;
-  remainingLines: number;
 };
 
 export function clearCompletedRows(mask: bigint, height: number): CompletedRowClear {
@@ -381,8 +380,21 @@ export function clearCompletedRows(mask: bigint, height: number): CompletedRowCl
 
   return {
     boardMask,
-    clearedRows,
-    remainingLines: boundedHeight - clearedRows
+    clearedRows
+  };
+}
+
+export function normalizeWorkspaceInitialField(
+  request: SolverWorkspaceRequest
+): { request: SolverWorkspaceRequest; clearedRows: number } {
+  // Initial line clears compact the occupied field, not the user's target
+  // frame. Keeping `lines` stable matches the CLI scenario compiler.
+  const normalized = clearCompletedRows(request.boardMask, request.lines);
+  return {
+    request: normalized.clearedRows > 0
+      ? { ...request, boardMask: normalized.boardMask }
+      : request,
+    clearedRows: normalized.clearedRows
   };
 }
 
@@ -414,7 +426,7 @@ export function occupiedCellCount(mask: bigint): number {
 
 export function scenarioPieceWindow(request: SolverWorkspaceRequest): number | null {
   const normalized = clearCompletedRows(request.boardMask, request.lines);
-  const emptyCells = normalized.remainingLines * 10 - occupiedCellCount(normalized.boardMask);
+  const emptyCells = request.lines * 10 - occupiedCellCount(normalized.boardMask);
   if (emptyCells <= 0 || emptyCells % 4 !== 0) return null;
   return emptyCells / 4;
 }
@@ -468,7 +480,7 @@ export function workspaceValidationCodes(
     errors.push('pc-score-finder-fixed-queue-required');
   }
   const normalized = clearCompletedRows(request.boardMask, request.lines);
-  const emptyCells = normalized.remainingLines * 10 - occupiedCellCount(normalized.boardMask);
+  const emptyCells = request.lines * 10 - occupiedCellCount(normalized.boardMask);
   if (emptyCells === 0) errors.push('scenario_full');
   else if (emptyCells % 4 !== 0) errors.push('scenario_not_tileable');
   if (!Number.isInteger(request.workers) || request.workers < 1) {
