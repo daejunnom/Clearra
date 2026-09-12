@@ -242,6 +242,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn observed_hf_root_edges_equal_independent_empty_board_placements() {
+        use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
+        use std::collections::BTreeSet;
+
+        // This immutable observation is compiled only into tests, never used
+        // as a production dataset/profile identity or completeness receipt.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/pc4-hf-root-20260913.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["source_hash"], 0);
+        let registry = standard_tetromino_registry();
+        let mut total = 0;
+        for (name, piece) in [
+            ("I", PieceKind::I),
+            ("J", PieceKind::J),
+            ("L", PieceKind::L),
+            ("O", PieceKind::O),
+            ("S", PieceKind::S),
+            ("T", PieceKind::T),
+            ("Z", PieceKind::Z),
+        ] {
+            let mut observed = BTreeSet::new();
+            let rows = fixture["pieces"][name].as_array().unwrap();
+            for entry in rows {
+                let hash = entry["hash"].as_u64().unwrap();
+                let mut board = 0;
+                for y in 0..4 {
+                    for x in 0..10 {
+                        if hash & (1 << (y * 10 + 9 - x)) != 0 {
+                            board |= 1 << (y * 10 + x);
+                        }
+                    }
+                }
+                assert!(observed.insert(board), "duplicate root transition {name}");
+                let placements =
+                    materialize_pc4_ilc_transition(0, board, piece, KickTableProfileId::Jstris180)
+                        .unwrap();
+                assert!(!placements.is_empty(), "unrealized HF {name} hash={hash}");
+                assert!(placements.iter().all(|p| p.occupied_cells() == board
+                    && p.source_cleared_prefix() == 0
+                    && p.physical_cleared_rows() == 0));
+            }
+            // On an empty board, each distinct rotation can be translated
+            // horizontally and dropped to y=0. This does not call Geometry
+            // or the graph materializer to generate the expected set.
+            let mut expected = BTreeSet::new();
+            let definition = registry.get(piece).unwrap();
+            for rotation in RotationState::ALL {
+                let shape = definition.shape(rotation);
+                for x in 0..=(10 - shape.width()) {
+                    let mut board = 0_u64;
+                    for cell in shape.cells() {
+                        board |= 1_u64
+                            << (u32::from(cell.y() as u8) * 10
+                                + u32::from(cell.x() as u8)
+                                + u32::from(x));
+                    }
+                    expected.insert(board);
+                }
+            }
+            assert_eq!(observed, expected, "HF vs local root set for {name}");
+            total += rows.len();
+        }
+        assert_eq!(total, 162);
+    }
+
+    #[test]
     fn materializes_an_uncleared_root_edge_without_selecting_one_move() {
         let placements =
             materialize_pc4_ilc_transition(0, 0b1111, PieceKind::I, KickTableProfileId::SrsPlus)
