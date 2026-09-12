@@ -222,8 +222,9 @@ pub use gui_bridge::{
 #[cfg(feature = "online-pc4-tablebase")]
 pub use online_pc4_fixed_queue_candidate_session::{
     AppOnlinePc4FixedQueueCandidateFailure, AppOnlinePc4FixedQueueCandidateGuard,
-    AppOnlinePc4FixedQueueCandidateRequest, AppOnlinePc4FixedQueueCandidateSession,
-    AppOnlinePc4FixedQueueCandidateStartError, AppOnlinePc4FixedQueueCandidateStep,
+    AppOnlinePc4FixedQueueCandidateRequest, AppOnlinePc4FixedQueueCandidateRequestError,
+    AppOnlinePc4FixedQueueCandidateSession, AppOnlinePc4FixedQueueCandidateStartError,
+    AppOnlinePc4FixedQueueCandidateStep,
 };
 #[cfg(feature = "online-pc4-tablebase")]
 pub use online_pc4_lookup_session::{

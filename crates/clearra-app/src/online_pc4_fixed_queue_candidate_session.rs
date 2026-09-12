@@ -8,12 +8,13 @@
 
 use core::{fmt, num::NonZeroUsize};
 
+use clearra_core_domain::board::standard_pc_board::StandardPcBoard;
 use clearra_pc4_tablebase::{
-    ConcretePathMaterializationBudgets, FixedQueueTraversalBudgets, FixedQueueTraversalGuard,
-    FixedQueueTraversalPageBudgets, LookupFailure, LookupSessionId, MaterializationGuard,
-    Pc4GraphPiece, PinnedPc4Generation, QualifiedPc4TargetIdentity, RangeAdmissionAttempt,
-    RangeAdmissionGuard, RangeAdmissionInput, RangeAdmissionLimits, RangeAdmissionUsage,
-    RangeRequest, TerminalDepthContract, UnsupportedProfileReason,
+    ConcretePathMaterializationBudgets, FixedQueueHoldState, FixedQueueTraversalBudgets,
+    FixedQueueTraversalGuard, FixedQueueTraversalPageBudgets, LookupFailure, LookupSessionId,
+    MaterializationGuard, Pc4GraphPiece, PinnedPc4Generation, QualifiedPc4TargetIdentity,
+    RangeAdmissionAttempt, RangeAdmissionGuard, RangeAdmissionInput, RangeAdmissionLimits,
+    RangeAdmissionUsage, RangeRequest, TerminalDepthContract, UnsupportedProfileReason,
 };
 
 use super::{
@@ -27,10 +28,12 @@ use super::{
         Pc4FixedQueueCandidateRuntimeAdvanceError, Pc4FixedQueueCandidateRuntimeRequest,
         Pc4FixedQueueCandidateRuntimeStartError, Pc4FixedQueueCandidateRuntimeStep,
     },
+    pc4_input_disclosure_policy::{Pc4PreparedOnlineInput, Pc4PreparedQueueInput},
     pc4_lookup_graph_runtime_adapter::{Pc4LookupGraphCacheLimits, Pc4LookupGraphCacheStartError},
     pc_candidate_page_boundary::{
         graph_candidate_adapter::{Pc4GraphCandidateAdapterBudgets, Pc4GraphCandidatePrepareError},
-        PcCandidatePageGuard, PcCandidateReducerInput, PcCandidateSourceBinding,
+        PcCandidatePageGuard, PcCandidateProviderKind, PcCandidateReducerInput,
+        PcCandidateRequestIdentity, PcCandidateRequestIdentityError, PcCandidateSourceBinding,
     },
 };
 
@@ -66,7 +69,7 @@ pub struct AppOnlinePc4FixedQueueCandidateRequest<'a> {
 
 impl<'a> AppOnlinePc4FixedQueueCandidateRequest<'a> {
     #[allow(clippy::too_many_arguments)]
-    pub const fn new(
+    pub(crate) const fn new(
         target: &'a QualifiedPc4TargetIdentity,
         source: &'a PcCandidateSourceBinding,
         first_lookup_session: LookupSessionId,
@@ -97,7 +100,109 @@ impl<'a> AppOnlinePc4FixedQueueCandidateRequest<'a> {
             range_limits,
         }
     }
+
+    /// Creates the public single-queue session request from one canonical,
+    /// disclosure-ready input. A hold-enabled request must first pass through
+    /// the complete hold-family composer; executing its raw queue here would
+    /// silently omit legal swap/store-current branches.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_prepared_input(
+        source: &'a PcCandidateSourceBinding,
+        prepared_input: &'a Pc4PreparedOnlineInput,
+        initial_board: StandardPcBoard,
+        initial_hold: FixedQueueHoldState,
+        first_lookup_session: LookupSessionId,
+        start_field_id: u32,
+        terminal_depth_contract: TerminalDepthContract,
+        traversal_budgets: FixedQueueTraversalBudgets,
+        traversal_page_budgets: FixedQueueTraversalPageBudgets,
+        materialization_budgets: ConcretePathMaterializationBudgets,
+        candidate_budgets: Pc4GraphCandidateAdapterBudgets,
+        cache_limits: Pc4LookupGraphCacheLimits,
+        observation_page_size: NonZeroUsize,
+        range_limits: RangeAdmissionLimits,
+    ) -> Result<Self, AppOnlinePc4FixedQueueCandidateRequestError> {
+        if source.provider_kind() != PcCandidateProviderKind::OnlinePc4 {
+            return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceIsNotOnlinePc4);
+        }
+        if source.profile() != prepared_input.profile() {
+            return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceProfileMismatch);
+        }
+        if source.qualified_snapshot() != Some(prepared_input.target().snapshot()) {
+            return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceSnapshotMismatch);
+        }
+        if initial_board.lines() != prepared_input.target_lines().get()
+            || initial_board.occupied().compact_board64() != Some(source.initial_board_mask())
+        {
+            return Err(AppOnlinePc4FixedQueueCandidateRequestError::InitialBoardMismatch);
+        }
+        let expected_request_identity = PcCandidateRequestIdentity::derive_pc4_candidate_universe(
+            prepared_input,
+            initial_board,
+            initial_hold,
+        )
+        .map_err(AppOnlinePc4FixedQueueCandidateRequestError::RequestIdentity)?;
+        if source.request_identity() != expected_request_identity {
+            return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceRequestMismatch);
+        }
+        if initial_hold != FixedQueueHoldState::Disabled {
+            return Err(AppOnlinePc4FixedQueueCandidateRequestError::HoldCompositionRequired);
+        }
+        let Pc4PreparedQueueInput::FixedExplicit(queue) = prepared_input.queue() else {
+            return Err(AppOnlinePc4FixedQueueCandidateRequestError::FixedQueueRequired);
+        };
+        Ok(Self::new(
+            prepared_input.target(),
+            source,
+            first_lookup_session,
+            start_field_id,
+            queue,
+            terminal_depth_contract,
+            traversal_budgets,
+            traversal_page_budgets,
+            materialization_budgets,
+            candidate_budgets,
+            cache_limits,
+            observation_page_size,
+            range_limits,
+        ))
+    }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppOnlinePc4FixedQueueCandidateRequestError {
+    SourceIsNotOnlinePc4,
+    SourceProfileMismatch,
+    SourceSnapshotMismatch,
+    InitialBoardMismatch,
+    SourceRequestMismatch,
+    FixedQueueRequired,
+    HoldCompositionRequired,
+    RequestIdentity(PcCandidateRequestIdentityError),
+}
+
+impl AppOnlinePc4FixedQueueCandidateRequestError {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::SourceIsNotOnlinePc4 => "pc4_online_candidate_source_is_not_online_pc4",
+            Self::SourceProfileMismatch => "pc4_online_candidate_source_profile_mismatch",
+            Self::SourceSnapshotMismatch => "pc4_online_candidate_source_snapshot_mismatch",
+            Self::InitialBoardMismatch => "pc4_online_candidate_initial_board_mismatch",
+            Self::SourceRequestMismatch => "pc4_online_candidate_source_request_mismatch",
+            Self::FixedQueueRequired => "pc4_online_candidate_fixed_queue_required",
+            Self::HoldCompositionRequired => "pc4_online_candidate_hold_composition_required",
+            Self::RequestIdentity(error) => error.reason(),
+        }
+    }
+}
+
+impl fmt::Display for AppOnlinePc4FixedQueueCandidateRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for AppOnlinePc4FixedQueueCandidateRequestError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppOnlinePc4FixedQueueCandidateStartError {
@@ -520,7 +625,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::{PcCandidateRequestIdentity, PcCandidateSessionId, PcCandidateSourceIdentity};
+    use crate::{
+        prepare_pc4_input_disclosure, Pc4InputDisclosureDecision, Pc4InputDisclosureRequest,
+        Pc4InputSurface, Pc4QueueDisclosure, PcCandidateRequestIdentity, PcCandidateSessionId,
+        PcCandidateSourceIdentity,
+    };
 
     const INITIAL_BOARD: u64 = 0b00_0011_1111;
     const TERMINAL_BOARD: u64 = 0b11_1111_1111;
@@ -742,6 +851,73 @@ mod tests {
             .expect("qualified target")
     }
 
+    fn prepared_fixed(target: QualifiedPc4TargetIdentity) -> Pc4PreparedOnlineInput {
+        match prepare_pc4_input_disclosure(Pc4InputDisclosureRequest::new(
+            target,
+            Pc4InputSurface::Gui,
+            Pc4QueueDisclosure::FixedExplicit(vec![Pc4GraphPiece::I]),
+        ))
+        .expect("fixed queue never requires bag disclosure")
+        {
+            Pc4InputDisclosureDecision::Ready(prepared) => prepared,
+            other => panic!("fixed queue must be ready, got {other:?}"),
+        }
+    }
+
+    fn canonical_source(
+        prepared: &Pc4PreparedOnlineInput,
+        board: StandardPcBoard,
+        hold: FixedQueueHoldState,
+    ) -> PcCandidateSourceBinding {
+        PcCandidateSourceBinding::online_pc4_for_prepared_input(
+            PcCandidateSessionId::new(NonZeroU64::new(71).expect("candidate session")),
+            PcCandidateSourceIdentity::from_sha256([2; 32]),
+            prepared,
+            board,
+            hold,
+        )
+        .expect("canonical online source")
+    }
+
+    fn checked_request<'a>(
+        source: &'a PcCandidateSourceBinding,
+        prepared: &'a Pc4PreparedOnlineInput,
+        board: StandardPcBoard,
+        hold: FixedQueueHoldState,
+    ) -> Result<
+        AppOnlinePc4FixedQueueCandidateRequest<'a>,
+        AppOnlinePc4FixedQueueCandidateRequestError,
+    > {
+        AppOnlinePc4FixedQueueCandidateRequest::for_prepared_input(
+            source,
+            prepared,
+            board,
+            hold,
+            LookupSessionId::new(81).expect("lookup session"),
+            0,
+            TerminalDepthContract::QueueExhaustedOnly,
+            FixedQueueTraversalBudgets::new(nonzero(16), nonzero(16), nonzero(1), nonzero(16)),
+            FixedQueueTraversalPageBudgets::new(nonzero(16), nonzero(16)),
+            ConcretePathMaterializationBudgets::new(
+                nonzero(1),
+                nonzero(16),
+                nonzero(16),
+                nonzero(16),
+            ),
+            Pc4GraphCandidateAdapterBudgets::new(
+                nonzero(16),
+                nonzero(1),
+                nonzero(16),
+                nonzero(16),
+                nonzero(16),
+                nonzero(1),
+            ),
+            Pc4LookupGraphCacheLimits::new(nonzero(2), nonzero(1_024), nonzero(1_024)),
+            nonzero(1),
+            range_limits(),
+        )
+    }
+
     fn source(target: &QualifiedPc4TargetIdentity) -> PcCandidateSourceBinding {
         PcCandidateSourceBinding::online_pc4(
             PcCandidateSessionId::new(NonZeroU64::new(7).expect("candidate session")),
@@ -751,6 +927,55 @@ mod tests {
             INITIAL_BOARD,
             target.snapshot().clone(),
         )
+    }
+
+    #[test]
+    fn public_request_factory_binds_prepared_queue_board_and_source_identity() {
+        let snapshot = activated_snapshot("generation-request", None);
+        let target = target(&snapshot, Pc4RuleProfile::SrsPlus);
+        let prepared = prepared_fixed(target);
+        let board = StandardPcBoard::from_words(1, [INITIAL_BOARD, 0, 0, 0])
+            .expect("normalized initial board");
+        let source = canonical_source(&prepared, board, FixedQueueHoldState::Disabled);
+
+        let request = checked_request(&source, &prepared, board, FixedQueueHoldState::Disabled)
+            .expect("exact prepared request");
+        assert_eq!(request.target, prepared.target());
+        assert_eq!(request.source, &source);
+        assert_eq!(request.queue, &[Pc4GraphPiece::I]);
+
+        let other_board =
+            StandardPcBoard::from_words(1, [0, 0, 0, 0]).expect("normalized other board");
+        match checked_request(
+            &source,
+            &prepared,
+            other_board,
+            FixedQueueHoldState::Disabled,
+        ) {
+            Err(error) => assert_eq!(
+                error,
+                AppOnlinePc4FixedQueueCandidateRequestError::InitialBoardMismatch
+            ),
+            Ok(_) => panic!("another board cannot borrow the source"),
+        }
+    }
+
+    #[test]
+    fn public_single_queue_request_requires_the_hold_family_composer() {
+        let snapshot = activated_snapshot("generation-hold", None);
+        let target = target(&snapshot, Pc4RuleProfile::Srs);
+        let prepared = prepared_fixed(target);
+        let board = StandardPcBoard::from_words(1, [INITIAL_BOARD, 0, 0, 0])
+            .expect("normalized initial board");
+        let source = canonical_source(&prepared, board, FixedQueueHoldState::Empty);
+
+        match checked_request(&source, &prepared, board, FixedQueueHoldState::Empty) {
+            Err(error) => assert_eq!(
+                error,
+                AppOnlinePc4FixedQueueCandidateRequestError::HoldCompositionRequired
+            ),
+            Ok(_) => panic!("a raw single queue would omit legal hold branches"),
+        }
     }
 
     fn start(
