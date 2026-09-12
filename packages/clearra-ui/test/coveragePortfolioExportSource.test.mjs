@@ -16,6 +16,9 @@ const bundle = await build({
         tryCreateCoveragePortfolioExportKeySource
       }
         from './src/lib/workspace/coveragePortfolioExportSource.ts';
+      export { decodeCtk3 } from './src/lib/workspace/ctk3Codec.ts';
+      export { encodeSolutionKeySourceForClipboard }
+        from './src/lib/workspace/solutionExportAsync.ts';
     `,
     loader: 'ts',
     resolveDir: fileURLToPath(new URL('..', import.meta.url))
@@ -24,6 +27,8 @@ const bundle = await build({
 });
 const {
   createCoveragePortfolioExportKeySource,
+  decodeCtk3,
+  encodeSolutionKeySourceForClipboard,
   tryCreateCoveragePortfolioExportKeySource
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
@@ -112,6 +117,28 @@ test('whole-set copy resumes an evicted selected page after 1 -> 2 -> 3 -> 4 -> 
     ],
     'a work-budget stop retries the same exact coordinate before later member pages'
   );
+});
+
+test('CTK3 copy encodes every member of the selected outer alternative, not its visible 100', async () => {
+  const selectedPage = exportableSelectedAlternativePage(1, 100, 301);
+  const requestedCoordinates = [];
+  const source = createCoveragePortfolioExportKeySource({
+    initialPage: selectedPage,
+    isCurrent: () => true,
+    async loadMemberPage(alternativeIndex, memberPageNumber) {
+      requestedCoordinates.push([alternativeIndex, memberPageNumber]);
+      return response(
+        memberPageNumber === '2'
+          ? exportableSelectedAlternativePage(2, 100, 401)
+          : exportableSelectedAlternativePage(3, 5, 501)
+      );
+    }
+  });
+
+  assert.ok(source);
+  const document = await encodeSolutionKeySourceForClipboard(source, 'ctk');
+  assert.equal(decodeCtk3(document).pages.length, 205);
+  assert.deepEqual(requestedCoordinates, [['2', '2'], ['2', '3']]);
 });
 
 test('portfolio export rejects identity mismatches, missing members, and cross-page duplicates', async (t) => {
@@ -274,4 +301,17 @@ function selectedAlternativePage(memberPageNumber, memberCount, firstCandidateId
     total_alternative_count: '4',
     enumeration_complete: true
   };
+}
+
+function exportableSelectedAlternativePage(memberPageNumber, memberCount, firstCandidateId) {
+  const value = selectedAlternativePage(memberPageNumber, memberCount, firstCandidateId);
+  value.optimal_cardinality = '205';
+  value.total_member_pages = '3';
+  value.members = value.members.map((member) => ({
+    ...member,
+    normalized_solution_key: `ctk1|initial=${BigInt(member.candidate_id)
+      .toString(16)
+      .padStart(16, '0')}|placements=`
+  }));
+  return value;
 }
