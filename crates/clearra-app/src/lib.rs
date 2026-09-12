@@ -34,6 +34,8 @@ mod native_forward_execution;
 mod native_spin_structure_execution;
 mod objective_contract;
 #[cfg(feature = "online-pc4-tablebase")]
+mod online_pc4_fixed_queue_candidate_session;
+#[cfg(feature = "online-pc4-tablebase")]
 mod online_pc4_lookup_session;
 mod parity_page_store;
 #[cfg(feature = "online-pc4-tablebase")]
@@ -214,6 +216,12 @@ pub use gui_bridge::{
     GuiStatePersistenceContract, GuiValidatedForm,
 };
 #[cfg(feature = "online-pc4-tablebase")]
+pub use online_pc4_fixed_queue_candidate_session::{
+    AppOnlinePc4FixedQueueCandidateFailure, AppOnlinePc4FixedQueueCandidateGuard,
+    AppOnlinePc4FixedQueueCandidateRequest, AppOnlinePc4FixedQueueCandidateSession,
+    AppOnlinePc4FixedQueueCandidateStartError, AppOnlinePc4FixedQueueCandidateStep,
+};
+#[cfg(feature = "online-pc4-tablebase")]
 pub use online_pc4_lookup_session::{
     AppOnlinePc4LookupSession, AppOnlinePc4LookupStartError, AppOnlinePc4LookupStep,
     AppOnlinePc4RangeDisposition, AppOnlinePc4RangeError, AppQualifiedPc4LookupHit,
@@ -243,6 +251,8 @@ pub use pc4_profile_capability_projection::{
     Pc4ProfileCapabilityStatus, Pc4TargetCapabilitySlot, Pc4TargetCapabilityStatus,
 };
 pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc_candidate_page_boundary::graph_candidate_adapter::Pc4GraphCandidateAdapterBudgets;
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc_candidate_page_boundary::{
     PcCandidateBoundaryError, PcCandidateCollection, PcCandidateCollectionCompleteness,
