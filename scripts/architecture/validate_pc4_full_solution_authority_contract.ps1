@@ -191,6 +191,33 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         Add-ArchitectureError 'PC4 completeness evidence constructor must remain unavailable to product/provider adapters until target-specific completeness is qualified'
     }
 
+    $rangeAdmission = Read-Text 'crates/clearra-pc4-tablebase/src/range_admission/mod.rs'
+    foreach ($required in @(
+        '206 => self.admit_partial(request, http)',
+        '200 => Err(RangeAdmissionError::WholeContentRejected)',
+        'ensure_guard(guard, &self.snapshot)?;',
+        'self.usage = RangeAdmissionUsage {'
+    )) {
+        if (-not $rangeAdmission.Contains($required)) {
+            Add-ArchitectureError "PC4 bounded Range admission contract is missing '$required'"
+        }
+    }
+
+    $onlineLookupSession = Read-Text 'crates/clearra-app/src/online_pc4_lookup_session.rs'
+    foreach ($required in @(
+        'range_admission: RangeAdmissionSession,',
+        'pub fn admit_range<G>(',
+        '.range_admission',
+        '.admit(&request, attempt, input, guard)?'
+    )) {
+        if (-not $onlineLookupSession.Contains($required)) {
+            Add-ArchitectureError "App PC4 lookup must pass host responses through bounded Range admission '$required'"
+        }
+    }
+    if ($onlineLookupSession -match '(?m)^\s*pub\s+fn\s+(?:supply|reject_range)\s*\(') {
+        Add-ArchitectureError 'App PC4 lookup must not expose a raw response or transport-failure supply bypass'
+    }
+
     $setupAcceleration = Read-Text 'crates/clearra-app/src/setup_pc_candidate_acceleration.rs'
     foreach ($required in @(
         'target: Pc4TargetLines,',
@@ -211,6 +238,10 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
     foreach ($required in @(
         'pub struct Pc4TargetLines',
         'pub enum Pc4TerminalUseCase',
+        'pub enum Pc4ArtifactRole',
+        'FieldHashIndex',
+        'GraphOffsets',
+        'Graph',
         'pub struct ProfileTargetCompletenessQualification',
         'outgoing_edge_completeness_identity',
         'offline_exact_parity_identity',
@@ -220,6 +251,19 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         if (-not $manifest.Contains($required)) {
             Add-ArchitectureError "PC4 profile-target completeness qualification is missing '$required'"
         }
+    }
+    if ($manifest -match '(?s)pub enum Pc4ArtifactRole\s*\{(?<Body>[^}]*)\}') {
+        $artifactRoleBody = $Matches['Body']
+        $artifactRoles = @(
+            [regex]::Matches($artifactRoleBody, '(?m)^\s*([A-Za-z][A-Za-z0-9_]*)\s*,?\s*$') |
+                ForEach-Object { $_.Groups[1].Value }
+        )
+        $expectedArtifactRoles = @('FieldHashIndex', 'GraphOffsets', 'Graph')
+        if (($artifactRoles -join ',') -ne ($expectedArtifactRoles -join ',')) {
+            Add-ArchitectureError "PC4 product artifact roles must remain graph/index-only; found '$($artifactRoles -join ',')'"
+        }
+    } else {
+        Add-ArchitectureError 'PC4 product artifact-role enum could not be audited'
     }
 
     foreach ($required in @(

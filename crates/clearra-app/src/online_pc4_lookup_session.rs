@@ -8,7 +8,9 @@
 use clearra_pc4_tablebase::{
     LookupFailure, LookupHit, LookupMachine, LookupSessionId, LookupStartError, LookupStep,
     Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, PinnedPc4Generation,
-    QualifiedPc4TargetIdentity, RangeRequest, RangeResponse, RangeTransportFailure, SupplyError,
+    QualifiedPc4TargetIdentity, RangeAdmissionAttempt, RangeAdmissionError, RangeAdmissionGuard,
+    RangeAdmissionInput, RangeAdmissionLimits, RangeAdmissionOutcome, RangeAdmissionSession,
+    RangeRequest, RangeTransportFailure, SupplyError,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +24,7 @@ pub struct Pc4OnlineLookupRequest {
     lookup_session: LookupSessionId,
     target: QualifiedPc4TargetIdentity,
     field_hash: u64,
+    range_limits: RangeAdmissionLimits,
     offline_fallback: Pc4OfflineFallbackAuthorization,
 }
 
@@ -30,12 +33,14 @@ impl Pc4OnlineLookupRequest {
         lookup_session: LookupSessionId,
         target: QualifiedPc4TargetIdentity,
         field_hash: u64,
+        range_limits: RangeAdmissionLimits,
         offline_fallback: Pc4OfflineFallbackAuthorization,
     ) -> Self {
         Self {
             lookup_session,
             target,
             field_hash,
+            range_limits,
             offline_fallback,
         }
     }
@@ -62,6 +67,10 @@ impl Pc4OnlineLookupRequest {
 
     pub const fn field_hash(&self) -> u64 {
         self.field_hash
+    }
+
+    pub const fn range_limits(&self) -> RangeAdmissionLimits {
+        self.range_limits
     }
 
     pub const fn offline_fallback(&self) -> Pc4OfflineFallbackAuthorization {
@@ -184,10 +193,52 @@ impl From<LookupStartError> for AppOnlinePc4LookupStartError {
     }
 }
 
+/// One admitted host response after the HTTP boundary has been checked.
+///
+/// A non-partial outcome also terminates the pending lookup request. It does
+/// not start an offline search; the original request owner must separately
+/// inspect `offline_fallback_disposition` and obtain explicit authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppOnlinePc4RangeDisposition {
+    PartialContentSupplied,
+    RangeNotSatisfiable { complete_length: u64 },
+    TransportFailure(RangeTransportFailure),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppOnlinePc4RangeError {
+    LookupNotAwaitingRange,
+    Admission(RangeAdmissionError),
+    Supply(SupplyError),
+}
+
+impl AppOnlinePc4RangeError {
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::LookupNotAwaitingRange => "pc4_online_lookup_not_awaiting_range",
+            Self::Admission(error) => error.reason(),
+            Self::Supply(error) => error.reason(),
+        }
+    }
+}
+
+impl From<RangeAdmissionError> for AppOnlinePc4RangeError {
+    fn from(value: RangeAdmissionError) -> Self {
+        Self::Admission(value)
+    }
+}
+
+impl From<SupplyError> for AppOnlinePc4RangeError {
+    fn from(value: SupplyError) -> Self {
+        Self::Supply(value)
+    }
+}
+
 pub struct AppOnlinePc4LookupSession {
     generation: PinnedPc4Generation,
     request: Pc4OnlineLookupRequest,
     machine: LookupMachine,
+    range_admission: RangeAdmissionSession,
 }
 
 impl AppOnlinePc4LookupSession {
@@ -206,10 +257,16 @@ impl AppOnlinePc4LookupSession {
             request.lookup_session(),
         )
         .map_err(AppOnlinePc4LookupStartError::Lookup)?;
+        let range_admission = RangeAdmissionSession::new(
+            request.lookup_session(),
+            request.target().snapshot().clone(),
+            request.range_limits(),
+        );
         Ok(Self {
             generation,
             request,
             machine,
+            range_admission,
         })
     }
 
@@ -234,16 +291,45 @@ impl AppOnlinePc4LookupSession {
         }
     }
 
-    pub fn supply(&mut self, response: RangeResponse) -> Result<(), SupplyError> {
-        self.machine.supply(response)
+    pub const fn range_usage(&self) -> clearra_pc4_tablebase::RangeAdmissionUsage {
+        self.range_admission.usage()
     }
 
-    pub fn reject_range(
+    /// Validates and consumes one host-observed Range result transactionally.
+    ///
+    /// There is intentionally no public raw `RangeResponse` supply path. The
+    /// current pending request is selected inside this owner, so a caller also
+    /// cannot substitute an older request from another lookup session.
+    pub fn admit_range<G>(
         &mut self,
-        request: &RangeRequest,
-        failure: RangeTransportFailure,
-    ) -> Result<(), SupplyError> {
-        self.machine.reject_range(request, failure)
+        attempt: RangeAdmissionAttempt,
+        input: RangeAdmissionInput,
+        guard: &G,
+    ) -> Result<AppOnlinePc4RangeDisposition, AppOnlinePc4RangeError>
+    where
+        G: RangeAdmissionGuard + ?Sized,
+    {
+        let LookupStep::NeedRange(request) = self.machine.step() else {
+            return Err(AppOnlinePc4RangeError::LookupNotAwaitingRange);
+        };
+        match self
+            .range_admission
+            .admit(&request, attempt, input, guard)?
+        {
+            RangeAdmissionOutcome::PartialContent(response) => {
+                self.machine.supply(response)?;
+                Ok(AppOnlinePc4RangeDisposition::PartialContentSupplied)
+            }
+            RangeAdmissionOutcome::RangeNotSatisfiable { complete_length } => {
+                self.machine
+                    .reject_range(&request, RangeTransportFailure::Unavailable)?;
+                Ok(AppOnlinePc4RangeDisposition::RangeNotSatisfiable { complete_length })
+            }
+            RangeAdmissionOutcome::TransportFailure(failure) => {
+                self.machine.reject_range(&request, failure)?;
+                Ok(AppOnlinePc4RangeDisposition::TransportFailure(failure))
+            }
+        }
     }
 
     pub fn cancel(&mut self) {
@@ -278,7 +364,10 @@ impl AppOnlinePc4LookupSession {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        num::{NonZeroU16, NonZeroU32, NonZeroU64},
+        sync::Arc,
+    };
 
     use super::*;
     use clearra_pc4_tablebase::{
@@ -286,7 +375,8 @@ mod tests {
         GraphTargetEncoding, ManifestContentIdentity, Pc4ArtifactRole, Pc4CurrentGeneration,
         Pc4GenerationRegistry, Pc4GenerationRetentionLimit, Pc4GenerationStageOutcome,
         Pc4ProfileManifest, ProfileAvailability, ProfileQualification,
-        ProfileTargetCompletenessQualification, SnapshotIdentity, SnapshotVerificationAttestation,
+        ProfileTargetCompletenessQualification, RangeAdmissionBinding, RangeHttpResponse,
+        RangeResponse, RangeResponseKind, SnapshotIdentity, SnapshotVerificationAttestation,
         SnapshotVerificationFailure, SnapshotVerificationRequest,
     };
 
@@ -308,6 +398,67 @@ mod tests {
 
     fn lookup_session(value: u64) -> LookupSessionId {
         LookupSessionId::new(value).expect("non-zero lookup session")
+    }
+
+    fn range_limits() -> RangeAdmissionLimits {
+        RangeAdmissionLimits::new(
+            NonZeroU64::new(64).expect("response bytes"),
+            NonZeroU64::new(512).expect("session bytes"),
+            NonZeroU32::new(32).expect("request count"),
+            NonZeroU16::new(1).expect("active requests"),
+            60,
+        )
+    }
+
+    fn attempt(ordinal: u32) -> RangeAdmissionAttempt {
+        RangeAdmissionAttempt::new(
+            NonZeroU32::new(ordinal).expect("request ordinal"),
+            NonZeroU16::new(1).expect("one active request"),
+        )
+    }
+
+    struct LiveRangeGuard;
+
+    impl RangeAdmissionGuard for LiveRangeGuard {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_current_snapshot(
+            &self,
+            _expected: &clearra_pc4_tablebase::QualifiedSnapshotIdentity,
+        ) -> bool {
+            true
+        }
+    }
+
+    fn response_for(request: &RangeRequest) -> RangeResponse {
+        RangeResponse {
+            lookup_session: request.lookup_session(),
+            request_id: request.request_id(),
+            snapshot: request.snapshot().clone(),
+            profile: request.profile(),
+            artifact: request.artifact(),
+            artifact_content_identity: request.artifact_descriptor().content_identity().to_owned(),
+            kind: RangeResponseKind::PartialContent,
+            offset: request.offset(),
+            complete_length: request.artifact_descriptor().byte_len(),
+            bytes: vec![0; request.length() as usize],
+        }
+    }
+
+    fn partial_http(request: &RangeRequest, response: RangeResponse) -> RangeAdmissionInput {
+        let end = request.end_exclusive() - 1;
+        RangeAdmissionInput::http(RangeHttpResponse::new(
+            206,
+            Some(format!(
+                "bytes {}-{end}/{}",
+                request.offset(),
+                request.artifact_descriptor().byte_len()
+            )),
+            None,
+            Some(response),
+        ))
     }
 
     fn snapshot(generation: &str) -> ActivatedSnapshot {
@@ -411,7 +562,13 @@ mod tests {
             .expect("qualified PC target");
         AppOnlinePc4LookupSession::start(
             generation,
-            Pc4OnlineLookupRequest::new(lookup_session(id), target, 15, authorization),
+            Pc4OnlineLookupRequest::new(
+                lookup_session(id),
+                target,
+                15,
+                range_limits(),
+                authorization,
+            ),
         )
         .expect("lookup session")
     }
@@ -434,6 +591,7 @@ mod tests {
                 lookup_session(99),
                 old_target,
                 15,
+                range_limits(),
                 Pc4OfflineFallbackAuthorization::NotAuthorized,
             ),
         ) {
@@ -465,12 +623,19 @@ mod tests {
     #[test]
     fn fallback_requires_explicit_authorization_and_never_starts_inside_session_owner() {
         let mut session = new_session(1, Pc4OfflineFallbackAuthorization::NotAuthorized);
-        let AppOnlinePc4LookupStep::NeedRange(request) = session.step() else {
+        let AppOnlinePc4LookupStep::NeedRange(_) = session.step() else {
             panic!("Range request")
         };
-        session
-            .reject_range(&request, RangeTransportFailure::Offline)
-            .expect("transport failure");
+        assert_eq!(
+            session
+                .admit_range(
+                    attempt(1),
+                    RangeAdmissionInput::TransportFailure(RangeTransportFailure::Offline),
+                    &LiveRangeGuard,
+                )
+                .expect("transport failure"),
+            AppOnlinePc4RangeDisposition::TransportFailure(RangeTransportFailure::Offline)
+        );
         assert_eq!(
             session.offline_fallback_disposition(),
             Pc4OfflineFallbackDisposition::RequiresExplicitAuthorization {
@@ -479,17 +644,22 @@ mod tests {
         );
 
         let mut authorized = new_session(2, Pc4OfflineFallbackAuthorization::ExplicitlyAuthorized);
-        let AppOnlinePc4LookupStep::NeedRange(request) = authorized.step() else {
+        let AppOnlinePc4LookupStep::NeedRange(_) = authorized.step() else {
             panic!("Range request")
         };
-        authorized
-            .reject_range(
-                &request,
-                RangeTransportFailure::RateLimited {
-                    retry_after_seconds: Some(30),
-                },
-            )
-            .expect("rate-limit failure");
+        let rate_limited = RangeTransportFailure::RateLimited {
+            retry_after_seconds: Some(30),
+        };
+        assert_eq!(
+            authorized
+                .admit_range(
+                    attempt(1),
+                    RangeAdmissionInput::TransportFailure(rate_limited),
+                    &LiveRangeGuard,
+                )
+                .expect("rate-limit failure"),
+            AppOnlinePc4RangeDisposition::TransportFailure(rate_limited)
+        );
         let Pc4OfflineFallbackDisposition::Authorized(signal) =
             authorized.offline_fallback_disposition()
         else {
@@ -510,14 +680,85 @@ mod tests {
             panic!("old Range request")
         };
         let mut current = new_session(2, Pc4OfflineFallbackAuthorization::NotAuthorized);
+        let AppOnlinePc4LookupStep::NeedRange(current_request) = current.step() else {
+            panic!("current Range request")
+        };
+        let stale_response = response_for(&old_request);
         assert_eq!(
-            current.reject_range(&old_request, RangeTransportFailure::Timeout),
-            Err(SupplyError::LookupSessionMismatch)
+            current.admit_range(
+                attempt(1),
+                partial_http(&current_request, stale_response),
+                &LiveRangeGuard,
+            ),
+            Err(AppOnlinePc4RangeError::Admission(
+                RangeAdmissionError::ResponseBindingDrift {
+                    binding: RangeAdmissionBinding::LookupSession,
+                }
+            ))
         );
+        assert_eq!(current.range_usage(), Default::default());
         assert!(matches!(
             current.step(),
             AppOnlinePc4LookupStep::NeedRange(_)
         ));
+    }
+
+    #[test]
+    fn whole_content_has_no_raw_supply_bypass_and_does_not_consume_budget() {
+        let mut session = new_session(1, Pc4OfflineFallbackAuthorization::NotAuthorized);
+        let AppOnlinePc4LookupStep::NeedRange(request) = session.step() else {
+            panic!("Range request")
+        };
+        let input = RangeAdmissionInput::http(RangeHttpResponse::new(
+            200,
+            None,
+            None,
+            Some(response_for(&request)),
+        ));
+        assert_eq!(
+            session.admit_range(attempt(1), input, &LiveRangeGuard),
+            Err(AppOnlinePc4RangeError::Admission(
+                RangeAdmissionError::WholeContentRejected
+            ))
+        );
+        assert_eq!(session.range_usage(), Default::default());
+        assert!(matches!(
+            session.step(),
+            AppOnlinePc4LookupStep::NeedRange(_)
+        ));
+    }
+
+    #[test]
+    fn unsatisfied_range_is_typed_and_ends_the_lookup_without_starting_fallback() {
+        let mut session = new_session(1, Pc4OfflineFallbackAuthorization::NotAuthorized);
+        let AppOnlinePc4LookupStep::NeedRange(request) = session.step() else {
+            panic!("Range request")
+        };
+        let complete_length = request.artifact_descriptor().byte_len();
+        let input = RangeAdmissionInput::http(RangeHttpResponse::new(
+            416,
+            Some(format!("bytes */{complete_length}")),
+            None,
+            None,
+        ));
+        assert_eq!(
+            session
+                .admit_range(attempt(1), input, &LiveRangeGuard)
+                .expect("typed unsatisfied range"),
+            AppOnlinePc4RangeDisposition::RangeNotSatisfiable { complete_length }
+        );
+        assert_eq!(session.range_usage().request_count(), 1);
+        assert_eq!(session.range_usage().admitted_bytes(), 0);
+        assert!(matches!(
+            session.step(),
+            AppOnlinePc4LookupStep::Failed(LookupFailure::DatasetUnavailable)
+        ));
+        assert_eq!(
+            session.offline_fallback_disposition(),
+            Pc4OfflineFallbackDisposition::RequiresExplicitAuthorization {
+                cause: Pc4FallbackCause::LookupFailure(LookupFailure::DatasetUnavailable),
+            }
+        );
     }
 
     #[test]
