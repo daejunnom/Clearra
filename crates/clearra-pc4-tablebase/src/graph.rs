@@ -3,6 +3,50 @@ use crate::{GraphTargetEncoding, Pc4GraphPiece};
 const HYDRA_GRAPH_FIELD_HASH_BYTES: usize = 5;
 const HYDRA_GRAPH_PIECE_COUNT: usize = 7;
 const HYDRA_GRAPH_MAX_CUMULATIVE_DEGREE: usize = u8::MAX as usize;
+const HYDRA_GRAPH_WIDTH: u32 = 10;
+const HYDRA_GRAPH_HEIGHT: u32 = 4;
+const HYDRA_GRAPH_ROW_MASK: u64 = (1_u64 << HYDRA_GRAPH_WIDTH) - 1;
+const HYDRA_GRAPH_FIELD_MASK: u64 = (1_u64 << (HYDRA_GRAPH_WIDTH * HYDRA_GRAPH_HEIGHT)) - 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HydraFieldHashOutsideDomain {
+    pub field_hash: u64,
+}
+
+impl HydraFieldHashOutsideDomain {
+    pub const fn reason(self) -> &'static str {
+        "pc4_hydra_field_hash_outside_40_bit_domain"
+    }
+}
+
+/// Converts Hydra's documented top-to-bottom, left-to-right 40-bit field
+/// number into Clearra's Board64 mask (`bit = y * 10 + x`).
+///
+/// The ten-bit row positions already agree vertically: the low ten bits are
+/// the bottom row in both representations. Only the bit order inside each row
+/// is reversed. This conversion is an involution and neither clears rows nor
+/// assigns graph/profile completeness authority.
+pub fn hydra_field_hash_v1_to_clearra_board64_mask(
+    field_hash: u64,
+) -> Result<u64, HydraFieldHashOutsideDomain> {
+    if field_hash & !HYDRA_GRAPH_FIELD_MASK != 0 {
+        return Err(HydraFieldHashOutsideDomain { field_hash });
+    }
+    let mut clearra_mask = 0_u64;
+    for row in 0..HYDRA_GRAPH_HEIGHT {
+        let hydra_row = (field_hash >> (row * HYDRA_GRAPH_WIDTH)) & HYDRA_GRAPH_ROW_MASK;
+        let clearra_row = hydra_row.reverse_bits() >> (u64::BITS - HYDRA_GRAPH_WIDTH);
+        clearra_mask |= clearra_row << (row * HYDRA_GRAPH_WIDTH);
+    }
+    Ok(clearra_mask)
+}
+
+/// Inverse of [`hydra_field_hash_v1_to_clearra_board64_mask`].
+pub fn clearra_board64_mask_to_hydra_field_hash_v1(
+    clearra_mask: u64,
+) -> Result<u64, HydraFieldHashOutsideDomain> {
+    hydra_field_hash_v1_to_clearra_board64_mask(clearra_mask)
+}
 
 /// One complete record from the qualified Hydra-compatible graph layout.
 ///
@@ -294,6 +338,43 @@ mod tests {
                 256,
             ),
             Ok(vec![1, 255])
+        );
+    }
+
+    #[test]
+    fn documented_hydra_field_rows_map_exactly_to_clearra_coordinates() {
+        let hydra = 0b1111110000_1111100000_1111110001_1111111111_u64;
+        let clearra = (0b00_0011_1111_u64 << 30)
+            | (0b00_0001_1111_u64 << 20)
+            | (0b10_0011_1111_u64 << 10)
+            | 0b11_1111_1111_u64;
+        assert_eq!(
+            hydra_field_hash_v1_to_clearra_board64_mask(hydra),
+            Ok(clearra)
+        );
+        assert_eq!(
+            clearra_board64_mask_to_hydra_field_hash_v1(clearra),
+            Ok(hydra)
+        );
+    }
+
+    #[test]
+    fn field_conversion_reverses_each_row_without_reordering_rows() {
+        for (hydra, clearra) in [
+            (1_u64 << 39, 1_u64 << 30),
+            (1_u64 << 9, 1_u64),
+            (1_u64, 1_u64 << 9),
+        ] {
+            assert_eq!(
+                hydra_field_hash_v1_to_clearra_board64_mask(hydra),
+                Ok(clearra)
+            );
+        }
+        assert_eq!(
+            hydra_field_hash_v1_to_clearra_board64_mask(1_u64 << 40),
+            Err(HydraFieldHashOutsideDomain {
+                field_hash: 1_u64 << 40,
+            })
         );
     }
 

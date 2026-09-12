@@ -53,8 +53,10 @@ pub use generation_registry::{
     MAX_RETAINED_PC4_GENERATIONS,
 };
 pub use graph::{
-    decode_graph_target_sequence, decode_hydra_graph_record_v1, DecodedHydraGraphRecordV1,
-    GraphTargetDecodeError, HydraGraphRecordDecodeError,
+    clearra_board64_mask_to_hydra_field_hash_v1, decode_graph_target_sequence,
+    decode_hydra_graph_record_v1, hydra_field_hash_v1_to_clearra_board64_mask,
+    DecodedHydraGraphRecordV1, GraphTargetDecodeError, HydraFieldHashOutsideDomain,
+    HydraGraphRecordDecodeError,
 };
 pub use lazy_fixed_queue_traversal::{
     prepare_fixed_queue_traversal_family, FixedQueueTraversalCursor, FixedQueueTraversalFamily,
