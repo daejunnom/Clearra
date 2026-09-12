@@ -8,6 +8,7 @@ mod bag_draw;
 mod bag_reveal;
 mod fixed_queue_hold;
 mod fixed_queue_traversal;
+mod generation_registry;
 mod graph;
 mod lazy_fixed_queue_traversal;
 mod lazy_materialized_path;
@@ -40,6 +41,15 @@ pub use fixed_queue_traversal::{
     FixedQueueTraversalBudgets, FixedQueueTraversalError, FixedQueueTraversalGuard,
     FixedQueueTraversalRequest, FixedQueueTraversalResult, FixedQueueTraversalSemanticError,
     QualifiedCompleteAdjacency, QualifiedCompleteAdjacencyProvider, TerminalDepthContract,
+};
+pub use generation_registry::{
+    Pc4ClosedStageDisposition, Pc4CurrentGeneration, Pc4GenerationCancellationOutcome,
+    Pc4GenerationFailureOutcome, Pc4GenerationIdentityDrift, Pc4GenerationPreparationFailure,
+    Pc4GenerationPromotionOutcome, Pc4GenerationRegistry, Pc4GenerationRegistryError,
+    Pc4GenerationRegistrySlot, Pc4GenerationRegistryVersion, Pc4GenerationRetentionChange,
+    Pc4GenerationRetentionLimit, Pc4GenerationRetentionLimitError, Pc4GenerationRollbackOutcome,
+    Pc4GenerationStageOutcome, Pc4GenerationStageToken, PinnedPc4Generation,
+    MAX_RETAINED_PC4_GENERATIONS,
 };
 pub use graph::{decode_graph_target_sequence, GraphTargetDecodeError};
 pub use lazy_fixed_queue_traversal::{
