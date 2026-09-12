@@ -1394,7 +1394,9 @@ impl CompleteReplayBudget {
             .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
         if self.report_progress
             && (self.visited_nodes == 1
-                || self.visited_nodes % COMPLETE_REPLAY_PROGRESS_CADENCE == 0)
+                || self
+                    .visited_nodes
+                    .is_multiple_of(COMPLETE_REPLAY_PROGRESS_CADENCE))
         {
             control.report_progress("complete-replay-traversal", self.visited_nodes, None);
         }
