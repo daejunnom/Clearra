@@ -63,6 +63,7 @@ export type WorkspaceValidationCode =
   | 'visible-seven-minimum-cover-unsupported'
   | 'pc-score-finder-fixed-queue-required'
   | 'target_lines_invalid'
+  | 'scenario_outside_target'
   | 'scenario_not_tileable'
   | 'scenario_supply_mismatch'
   | 'scenario_full'
@@ -463,7 +464,8 @@ export function workspaceValidationCodes(
 ): WorkspaceValidationCode[] {
   assertGuiScoreMode(request.scoreMode);
   const errors: WorkspaceValidationCode[] = [];
-  if (!Number.isInteger(request.lines) || request.lines < 1 || request.lines > 6) {
+  const targetLinesValid = Number.isInteger(request.lines) && request.lines >= 1 && request.lines <= 6;
+  if (!targetLinesValid) {
     errors.push('target_lines_invalid');
   }
   if (request.queue.trim() !== '' && !parseBrowserQueueInput(request.queue)) {
@@ -479,10 +481,17 @@ export function workspaceValidationCodes(
   if (request.scoreMode === 'score-finder' && parsedQueue?.kind !== 'fixed') {
     errors.push('pc-score-finder-fixed-queue-required');
   }
-  const normalized = clearCompletedRows(request.boardMask, request.lines);
-  const emptyCells = request.lines * 10 - occupiedCellCount(normalized.boardMask);
-  if (emptyCells === 0) errors.push('scenario_full');
-  else if (emptyCells % 4 !== 0) errors.push('scenario_not_tileable');
+  if (targetLinesValid) {
+    const boundedBoard = trimBoardMask(request.boardMask, request.lines);
+    if (request.boardMask !== boundedBoard) {
+      errors.push('scenario_outside_target');
+    } else {
+      const normalized = clearCompletedRows(request.boardMask, request.lines);
+      const emptyCells = request.lines * 10 - occupiedCellCount(normalized.boardMask);
+      if (emptyCells === 0) errors.push('scenario_full');
+      else if (emptyCells % 4 !== 0) errors.push('scenario_not_tileable');
+    }
+  }
   if (!Number.isInteger(request.workers) || request.workers < 1) {
     errors.push('worker_count_invalid');
   }
@@ -531,7 +540,7 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
   if (!openingPreset) {
     tokens.push(
       '--board-mask',
-      boardMaskHex(trimBoardMask(request.boardMask, request.lines)),
+      boardMaskHex(request.boardMask),
       '--height',
       String(request.lines),
       '--pieces',
@@ -617,7 +626,7 @@ export function workspaceRequestForDesktop(
  */
 export function workspaceUsesOpeningPcPreset(request: SolverWorkspaceRequest): boolean {
   return request.scoreMode !== 'score-finder' &&
-    trimBoardMask(request.boardMask, request.lines) === 0n &&
+    request.boardMask === 0n &&
     request.holdEnabled &&
     (request.holdPiece ?? 'empty') === 'empty';
 }

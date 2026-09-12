@@ -27,7 +27,7 @@ pub use pc_hold_policy::PcHoldPolicy;
 pub use pc_queue_input::PcQueueInput;
 pub use pc_scenario_query::{
     ExtendedPcScenarioQuery, PcCompletionGoal, PcCountPolicy, PcScenarioBoard, PcScenarioQuery,
-    PieceWindow, SupplyWindowSize,
+    PcScenarioTargetFrame, PcScenarioTargetFrameError, PieceWindow, SupplyWindowSize,
 };
 pub use pc_search_contract::{
     validate_pc_observation_objective, PcSearchContractError,

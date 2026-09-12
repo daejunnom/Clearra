@@ -24,6 +24,50 @@ pub struct PcScenarioBoard {
     occupied_mask: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PcScenarioTargetFrame {
+    normalized_board: PcScenarioBoard,
+    initial_cleared_rows: u8,
+    required_pieces: usize,
+}
+
+impl PcScenarioTargetFrame {
+    pub fn normalized_board(&self) -> &PcScenarioBoard {
+        &self.normalized_board
+    }
+
+    pub const fn initial_cleared_rows(&self) -> u8 {
+        self.initial_cleared_rows
+    }
+
+    pub const fn required_pieces(&self) -> usize {
+        self.required_pieces
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PcScenarioTargetFrameError {
+    TargetLinesOutsideProductDomain {
+        target_lines: u8,
+    },
+    UnsupportedBoardWidth {
+        width: u16,
+    },
+    InitialFieldHeightOutsideProductDomain {
+        visible_height: u16,
+    },
+    OccupancyOutsideDeclaredInitialField {
+        occupied_mask: u64,
+    },
+    OccupancyAboveTarget {
+        target_lines: u8,
+        occupied_mask: u64,
+    },
+    EmptyAreaNotTetrominoAligned {
+        empty_cells: u32,
+    },
+}
+
 impl PcScenarioBoard {
     pub fn new(width: u16, visible_height: u16, occupied_mask: u64) -> Self {
         Self {
@@ -51,6 +95,76 @@ impl PcScenarioBoard {
 impl PcScenarioBoard {
     pub fn occupied_mask(&self) -> u64 {
         self.occupied_mask
+    }
+
+    /// Interprets this initial field inside one explicit 10-wide PC target.
+    ///
+    /// Initial completed rows are removed before the target boundary is
+    /// checked. The returned board therefore owns the user's unchanged target
+    /// height rather than the shorter occupied-field height. This is a
+    /// product-input classifier only: it proves area consistency, not that a
+    /// legal placement sequence exists.
+    pub fn to_standard_target_frame(
+        &self,
+        target_lines: u8,
+    ) -> Result<PcScenarioTargetFrame, PcScenarioTargetFrameError> {
+        const STANDARD_WIDTH: u16 = 10;
+        const MAX_PRODUCT_LINES: u16 = 6;
+
+        if !(1..=MAX_PRODUCT_LINES as u8).contains(&target_lines) {
+            return Err(
+                PcScenarioTargetFrameError::TargetLinesOutsideProductDomain { target_lines },
+            );
+        }
+        if self.width != STANDARD_WIDTH {
+            return Err(PcScenarioTargetFrameError::UnsupportedBoardWidth { width: self.width });
+        }
+        if self.visible_height > MAX_PRODUCT_LINES {
+            return Err(
+                PcScenarioTargetFrameError::InitialFieldHeightOutsideProductDomain {
+                    visible_height: self.visible_height,
+                },
+            );
+        }
+
+        let initial_visible_bits = u32::from(self.width) * u32::from(self.visible_height);
+        let initial_visible_mask = if initial_visible_bits == 0 {
+            0
+        } else {
+            (1_u64 << initial_visible_bits) - 1
+        };
+        if self.occupied_mask & !initial_visible_mask != 0 {
+            return Err(
+                PcScenarioTargetFrameError::OccupancyOutsideDeclaredInitialField {
+                    occupied_mask: self.occupied_mask,
+                },
+            );
+        }
+
+        let row_mask = (1_u64 << STANDARD_WIDTH) - 1;
+        let initial_cleared_rows = (0..self.visible_height)
+            .filter(|row| (self.occupied_mask >> (row * STANDARD_WIDTH)) & row_mask == row_mask)
+            .count() as u8;
+        let normalized = self.after_initial_line_clear();
+        let target_bits = u32::from(target_lines) * u32::from(STANDARD_WIDTH);
+        let target_mask = (1_u64 << target_bits) - 1;
+        if normalized.occupied_mask & !target_mask != 0 {
+            return Err(PcScenarioTargetFrameError::OccupancyAboveTarget {
+                target_lines,
+                occupied_mask: normalized.occupied_mask,
+            });
+        }
+
+        let empty_cells = target_bits - normalized.occupied_mask.count_ones();
+        if empty_cells == 0 || !empty_cells.is_multiple_of(4) {
+            return Err(PcScenarioTargetFrameError::EmptyAreaNotTetrominoAligned { empty_cells });
+        }
+
+        Ok(PcScenarioTargetFrame {
+            normalized_board: Self::standard_10(u16::from(target_lines), normalized.occupied_mask),
+            initial_cleared_rows,
+            required_pieces: empty_cells as usize / 4,
+        })
     }
 
     /// Applies the standard line clear that occurs before a 10-column PC search.

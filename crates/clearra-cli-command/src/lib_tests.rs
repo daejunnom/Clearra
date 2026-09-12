@@ -20,7 +20,7 @@ use clearra_pc_graph::request::{
 };
 use clearra_problem::{
     BuildProbabilityAggregation, BuildSolutionProbabilityPolicy, FinessePlacement,
-    FinesseScoreRequest, PcQuery,
+    FinesseScoreRequest, PcQuery, ProblemCompiler,
 };
 use clearra_scoring::profile::SpinProfileId;
 use clearra_spin_structure_search::{MinimalityPolicy, SpinLineRequirement, SpinStructureMode};
@@ -28,6 +28,74 @@ use clearra_supply::QueueObservationPolicy;
 
 use super::*;
 use crate::web_command_parser::{PC_SCORE_MAX_ARGUMENT_BYTES, PC_SCORE_MAX_ARGUMENT_TOKENS};
+
+#[test]
+fn canonical_cli_uses_the_shared_one_through_six_line_target_frame_corpus() {
+    const FIXTURE: &str =
+        include_str!("../../../tests/fixtures/contracts/pc_target_frame_parity.v1.tsv");
+
+    for line in FIXTURE
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let columns = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 7, "fixture column count: {line}");
+        let id = columns[0];
+        let target_lines = columns[1];
+        let raw_mask = columns[2];
+        let normalized_mask = columns[3];
+        let required_pieces = if columns[5] == "-" { "1" } else { columns[5] };
+        let queue = "I".repeat(required_pieces.parse().expect("fixture piece count"));
+        let source = format!(
+            "clearra pc path --lines {target_lines} --board-mask 0x{raw_mask} \
+             --height {target_lines} --pieces {required_pieces} --queue {queue} \
+             --no-hold --backend cpu --workers 1"
+        );
+        let result = CliCommandParser::parse(&source).and_then(|request| request.to_app_request());
+
+        if columns[6] != "valid" {
+            let error = result.expect_err(id);
+            assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{id}");
+            continue;
+        }
+
+        let request = result.unwrap_or_else(|error| panic!("{id}: {error:?}"));
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("{id}: expected a scenario PC command");
+        };
+        let query = command.query();
+        assert_eq!(
+            query.initial_board().visible_height(),
+            target_lines.parse::<u16>().expect("fixture target lines"),
+            "{id}: CLI must preserve the user's target lines"
+        );
+        assert_eq!(
+            query.initial_board().occupied_mask(),
+            u64::from_str_radix(raw_mask, 16).expect("fixture raw mask"),
+            "{id}: CLI must retain initial-clear evidence until core compilation"
+        );
+        assert_eq!(
+            query.piece_window().max_pieces(),
+            required_pieces
+                .parse::<usize>()
+                .expect("fixture piece count"),
+            "{id}: exact target-frame piece count"
+        );
+
+        let problem = ProblemCompiler::compile_scenario_pc(query)
+            .unwrap_or_else(|error| panic!("{id}: core compilation failed: {error:?}"));
+        assert_eq!(
+            problem.initial_board().visible_height(),
+            target_lines.parse::<u16>().expect("fixture target lines"),
+            "{id}: core normalization must not shrink the target frame"
+        );
+        assert_eq!(
+            problem.initial_board().occupied_mask(),
+            u64::from_str_radix(normalized_mask, 16).expect("fixture normalized mask"),
+            "{id}: core normalized field"
+        );
+    }
+}
 
 #[test]
 fn request_structural_profiles_are_request_local_and_canonical() {

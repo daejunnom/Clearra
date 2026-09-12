@@ -4,6 +4,115 @@ use clearra_supply::queue::fixed_sequence::FixedSequence;
 use super::*;
 use crate::request::RequestedSearchBackend;
 
+const TARGET_FRAME_PARITY_FIXTURE: &str =
+    include_str!("../../../../tests/fixtures/contracts/pc_target_frame_parity.v1.tsv");
+
+#[derive(Clone, Copy, Debug)]
+struct TargetFrameParityCase<'a> {
+    id: &'a str,
+    target_lines: u8,
+    raw_mask: u64,
+    normalized_mask: Option<u64>,
+    initial_cleared_rows: u8,
+    required_pieces: Option<usize>,
+    outcome: &'a str,
+}
+
+fn target_frame_parity_cases() -> impl Iterator<Item = TargetFrameParityCase<'static>> {
+    TARGET_FRAME_PARITY_FIXTURE
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let columns = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(columns.len(), 7, "fixture column count: {line}");
+            let parse_hex = |value: &str| {
+                u64::from_str_radix(value, 16)
+                    .unwrap_or_else(|error| panic!("invalid fixture mask {value}: {error}"))
+            };
+            TargetFrameParityCase {
+                id: columns[0],
+                target_lines: columns[1].parse().expect("fixture target lines"),
+                raw_mask: parse_hex(columns[2]),
+                normalized_mask: (columns[3] != "-").then(|| parse_hex(columns[3])),
+                initial_cleared_rows: columns[4].parse().expect("fixture cleared rows"),
+                required_pieces: (columns[5] != "-")
+                    .then(|| columns[5].parse().expect("fixture required pieces")),
+                outcome: columns[6],
+            }
+        })
+}
+
+#[test]
+fn explicit_one_through_six_line_target_frames_share_initial_clear_and_error_semantics() {
+    for case in target_frame_parity_cases() {
+        assert_ne!(
+            case.raw_mask, 0,
+            "{}: fixture must retain an input field",
+            case.id
+        );
+        let board = PcScenarioBoard::standard_10(u16::from(case.target_lines), case.raw_mask);
+        match case.outcome {
+            "valid" => {
+                let frame = board
+                    .to_standard_target_frame(case.target_lines)
+                    .unwrap_or_else(|error| {
+                        panic!("{}: unexpected target-frame error: {error:?}", case.id)
+                    });
+                assert_eq!(
+                    frame.normalized_board().visible_height(),
+                    u16::from(case.target_lines),
+                    "{}: normalization must preserve the user's target lines",
+                    case.id
+                );
+                assert_eq!(
+                    frame.normalized_board().occupied_mask(),
+                    case.normalized_mask.expect("valid fixture normalized mask"),
+                    "{}: normalized mask",
+                    case.id
+                );
+                assert_eq!(
+                    frame.initial_cleared_rows(),
+                    case.initial_cleared_rows,
+                    "{}: initial cleared rows",
+                    case.id
+                );
+                assert_eq!(
+                    frame.required_pieces(),
+                    case.required_pieces.expect("valid fixture piece count"),
+                    "{}: target-frame piece count",
+                    case.id
+                );
+            }
+            "target-lines-invalid" => assert!(
+                matches!(
+                    board.to_standard_target_frame(case.target_lines),
+                    Err(PcScenarioTargetFrameError::TargetLinesOutsideProductDomain { .. })
+                ),
+                "{}",
+                case.id
+            ),
+            "area-impossible" => assert!(
+                matches!(
+                    board.to_standard_target_frame(case.target_lines),
+                    Err(PcScenarioTargetFrameError::EmptyAreaNotTetrominoAligned { .. })
+                ),
+                "{}",
+                case.id
+            ),
+            "outside-target" => assert!(
+                matches!(
+                    board.to_standard_target_frame(case.target_lines),
+                    Err(PcScenarioTargetFrameError::OccupancyOutsideDeclaredInitialField { .. })
+                        | Err(PcScenarioTargetFrameError::OccupancyAboveTarget { .. })
+                ),
+                "{}",
+                case.id
+            ),
+            outcome => panic!("{}: unknown fixture outcome {outcome}", case.id),
+        }
+    }
+}
+
 #[test]
 fn scenario_query_owns_setup_completion_contract_without_pc_target() {
     let query = PcScenarioQuery::new(
