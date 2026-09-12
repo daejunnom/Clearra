@@ -473,6 +473,7 @@ function projectPcMinimals(structured) {
   const summary = assertEnvelope(structured, "pc-minimum-cover.v2", "pc.minimals");
   const members = canonicalPortfolioMembers(summary, "pc.minimals");
   if (members.length === 0) throw invalid("pc.minimals", "empty canonical portfolio");
+  assertCanonicalMinimumMembers(members);
   if (
     summary.canonical_selection !== CANONICAL_SELECTION ||
     !plainObject(summary.canonical_witness) ||
@@ -491,6 +492,22 @@ function projectPcMinimals(structured) {
     canonical_candidate: clonePlain(summary.canonical_witness),
   };
   return deepFreeze(projected);
+}
+
+function assertCanonicalMinimumMembers(members) {
+  let previousCandidateId = 0n;
+  const normalizedKeys = new Set();
+  for (const member of members) {
+    const candidateId = BigInt(member.candidate_id);
+    if (
+      candidateId <= previousCandidateId ||
+      normalizedKeys.has(member.normalized_solution_key)
+    ) {
+      throw invalid("pc.minimals", "ordered canonical minimum members");
+    }
+    previousCandidateId = candidateId;
+    normalizedKeys.add(member.normalized_solution_key);
+  }
 }
 
 function projectSetupFamily(structured) {

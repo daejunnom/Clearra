@@ -721,6 +721,119 @@ mod tests {
     }
 
     #[test]
+    fn actual_cli_pc_minimals_returns_first_canonical_then_lazily_continues_every_tie() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "clearra-cli-lazy-minimum-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).expect("lazy minimum test directory");
+        let snapshot = directory.join("iiooo-minimum-portfolios.jsonl");
+        let snapshot_text = snapshot.to_string_lossy().into_owned();
+
+        let initial = CliParser::parse([
+            "clearra".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+            "pc".to_owned(),
+            "minimals".to_owned(),
+            "--lines".to_owned(),
+            "2".to_owned(),
+            "--queue".to_owned(),
+            "IIOOO".to_owned(),
+            "--backend".to_owned(),
+            "cpu".to_owned(),
+            "--workers".to_owned(),
+            "1".to_owned(),
+            "--ties".to_owned(),
+            "--tie-snapshot".to_owned(),
+            snapshot_text.clone(),
+        ])
+        .expect("parse tied IIOOO minimum request");
+        let initial = route_invocation(initial);
+        assert_eq!(
+            initial.exit_code(),
+            ExitCode::Success,
+            "{}",
+            initial.stderr()
+        );
+        let initial: serde_json::Value =
+            serde_json::from_str(initial.stdout()).expect("initial tied minimum JSON");
+        let initial_surface = initial.get("summary").unwrap_or(&initial);
+        let initial_page = &initial_surface["portfolio_alternative_page"];
+        assert_eq!(initial_page["alternative_index"], "1");
+        assert_eq!(initial_page["known_alternative_count"], "1");
+        assert_eq!(
+            initial_page["total_alternative_count"],
+            serde_json::Value::Null
+        );
+        assert_eq!(initial_page["enumeration_complete"], false);
+        assert_eq!(candidate_ids(initial_page), vec!["1"]);
+        let mut cursor = initial_page["tie_cursor"]
+            .as_str()
+            .expect("lazy continuation cursor")
+            .to_owned();
+
+        let mut pages = vec![vec!["1".to_owned()]];
+        loop {
+            let continuation = CliParser::parse([
+                "clearra".to_owned(),
+                "--format".to_owned(),
+                "json".to_owned(),
+                "continue".to_owned(),
+                "--tie-snapshot".to_owned(),
+                snapshot_text.clone(),
+                "--tie-cursor".to_owned(),
+                cursor,
+            ])
+            .expect("parse minimum continuation");
+            let continuation = route_invocation(continuation);
+            assert_eq!(
+                continuation.exit_code(),
+                ExitCode::Success,
+                "{}",
+                continuation.stderr()
+            );
+            let continuation: serde_json::Value =
+                serde_json::from_str(continuation.stdout()).expect("continued minimum JSON");
+            let surface = continuation.get("summary").unwrap_or(&continuation);
+            let page = &surface["portfolio_alternative_page"];
+            pages.push(candidate_ids(page));
+            match page["tie_cursor"].as_str() {
+                Some(next) => cursor = next.to_owned(),
+                None => {
+                    assert_eq!(page["enumeration_complete"], true);
+                    assert_eq!(page["total_alternative_count"], "4");
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(pages, vec![vec!["1"], vec!["2"], vec!["3"], vec!["4"]]);
+        fs::remove_file(&snapshot).expect("remove lazy minimum snapshot");
+        fs::remove_dir(&directory).expect("remove lazy minimum directory");
+    }
+
+    fn candidate_ids(page: &serde_json::Value) -> Vec<String> {
+        page["members"]
+            .as_array()
+            .expect("portfolio members")
+            .iter()
+            .map(|member| {
+                member["candidate_id"]
+                    .as_str()
+                    .expect("canonical candidate ID")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
     fn actual_pc_save_cli_pipeline_separates_probabilities_and_uses_plain_winner_lists() {
         let _resource_guard =
             crate::execution_resource_test_support::execution_resource_test_guard();
