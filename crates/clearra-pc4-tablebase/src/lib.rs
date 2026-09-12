@@ -16,6 +16,7 @@ mod lookup;
 mod manifest;
 mod materializer;
 mod observation_frontier;
+mod observation_graph_traversal;
 mod protocol;
 mod range_admission;
 mod range_fragment_cache;
@@ -96,6 +97,12 @@ pub use observation_frontier::{
     Pc4ObservationFrontierPage, Pc4ObservationFrontierPageBudgetKind,
     Pc4ObservationFrontierPageError, Pc4ObservationFrontierPrepareBudgetKind,
     Pc4ObservationFrontierPrepareError, Pc4ObservationFrontierRequest,
+};
+pub use observation_graph_traversal::{
+    prepare_pc4_observation_graph_family, Pc4ObservationGraphBudgetExceeded,
+    Pc4ObservationGraphBudgetKind, Pc4ObservationGraphBudgets, Pc4ObservationGraphCursor,
+    Pc4ObservationGraphFamily, Pc4ObservationGraphPage, Pc4ObservationGraphPageError,
+    Pc4ObservationGraphPath, Pc4ObservationGraphPrepareError, Pc4ObservationGraphRequest,
 };
 pub use protocol::{
     LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,

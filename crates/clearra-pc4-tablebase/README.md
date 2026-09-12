@@ -165,6 +165,19 @@ are retained only for later path reconstruction and may not influence an
 observation policy. This layer still performs no graph lookup, pattern parsing,
 network/filesystem I/O, product registration, or production qualification.
 
+The target-qualified observation graph family is the feature-off composition
+boundary immediately above that frontier. It starts at one explicit source
+field and consumes one reveal/hold branch at a time, then pages complete
+outgoing adjacency through the existing fixed-queue traversal. Every emitted
+path retains the exact reveal probability, bag/hold/replay evidence, qualified
+profile/use-case/target/snapshot identity, and source field. Aggregate lifetime
+limits and per-call work slices bound frontier branches, graph calls, visited
+states, adjacency queries, and output without pre-expanding all concrete
+queues. Cancellation, snapshot drift, provider failure, or terminal-callback
+failure leaves both nested cursors and aggregate counters unchanged. This pure
+module performs no network/filesystem I/O, claims nothing from a graph dead
+end or partial page, and does not activate a product capability.
+
 The Range-fragment cache is a pure, bounded optimization seam for future
 native and browser transports. It stores only an exact qualified
 snapshot/profile/artifact/content/range binding, never slices a containing or
