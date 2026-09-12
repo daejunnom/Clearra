@@ -37,6 +37,8 @@ mod objective_contract;
 mod online_pc4_lookup_session;
 mod parity_page_store;
 mod pc_allspin_result;
+#[cfg(feature = "online-pc4-tablebase")]
+mod pc_candidate_page_boundary;
 mod pc_chance_probability_result;
 mod pc_failed_queue_result;
 mod pc_minimum_cover_result;
@@ -208,6 +210,15 @@ pub use online_pc4_lookup_session::{
 };
 pub use parity_page_store::{ParityReportPageSource, ParityReportPageStore};
 pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc_candidate_page_boundary::{
+    PcCandidateBoundaryError, PcCandidateCollection, PcCandidateCollectionCompleteness,
+    PcCandidateCompletenessEvidence, PcCandidatePageCollector, PcCandidatePageCursor,
+    PcCandidatePageGuard, PcCandidateProviderKind, PcCandidateReducerInput,
+    PcCandidateRequestIdentity, PcCandidateSessionId, PcCandidateSetDigest,
+    PcCandidateSourceBinding, PcCandidateSourceIdentity, PcConcreteCandidatePage,
+    PC_CANDIDATE_PAGE_CONTRACT, PC_CANDIDATE_SET_DIGEST_ALGORITHM,
+};
 pub use pc_chance_probability_result::{
     PcChanceIngressOrigin, PcChanceProblemPreset, PcChanceQuerySnapshot,
     PcProbabilityCompletenessEvidence, PcProbabilityV2Result,
