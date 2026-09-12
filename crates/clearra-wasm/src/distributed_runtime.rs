@@ -1554,7 +1554,10 @@ impl WasmDistributedCoordinator {
                     "wasm_pc_root_set_empty",
                 ));
             }
-            let worker_count = worker_count.min(root_count.saturating_add(1));
+            // The PC-root producer is a control-only source. Unlike the
+            // legacy candidate producer, it does not consume one of the
+            // admitted compute slots, so all requested slots may own roots.
+            let worker_count = worker_count.min(root_count);
             (
                 DistributedCandidateProducer::PcRoots(producer),
                 WasmDistributedMode::CpuMulti,
@@ -1585,7 +1588,7 @@ impl WasmDistributedCoordinator {
                     "wasm_tiling_root_set_empty",
                 ));
             }
-            let worker_count = worker_count.min(root_count.saturating_add(1));
+            let worker_count = worker_count.min(root_count);
             (
                 DistributedCandidateProducer::Tiling(producer),
                 WasmDistributedMode::CpuMulti,
@@ -2906,15 +2909,16 @@ impl From<RequestedSearchBackend> for WasmDistributedRequestedBackend {
 
 impl DistributedCandidateProducer {
     fn known_parallel_session_capacity(&self) -> Option<usize> {
-        let candidate_family_count = match self {
-            Self::Cpu(producer) => producer.progress().candidate_family_count,
-            Self::PcRoots(producer) => Some(producer.root_count() as u128),
-            Self::Tiling(producer) => Some(producer.root_count() as u128),
-            Self::BuildProbability(producer) => producer.progress().candidate_family_count,
-            Self::Forward(_) | Self::Setup(_) => None,
+        let (candidate_family_count, coordinator_computes) = match self {
+            Self::Cpu(producer) => (producer.progress().candidate_family_count, true),
+            Self::PcRoots(producer) => (Some(producer.root_count() as u128), false),
+            Self::Tiling(producer) => (Some(producer.root_count() as u128), false),
+            Self::BuildProbability(producer) => (producer.progress().candidate_family_count, true),
+            Self::Forward(_) | Self::Setup(_) => (None, true),
             #[cfg(feature = "webgpu-search")]
-            Self::WebGpu(producer) => producer.progress().candidate_family_count,
-        }?;
+            Self::WebGpu(producer) => (producer.progress().candidate_family_count, true),
+        };
+        let candidate_family_count = candidate_family_count?;
         // Before the streaming Geometry producer has completed compilation,
         // zero is a progress value rather than proof that the exact family is
         // empty. Do not collapse a requested pool to serial on that provisional
@@ -2924,7 +2928,7 @@ impl DistributedCandidateProducer {
             return None;
         }
         let verifier_capacity = usize::try_from(candidate_family_count).unwrap_or(usize::MAX);
-        Some(verifier_capacity.saturating_add(1))
+        Some(verifier_capacity.saturating_add(usize::from(coordinator_computes)))
     }
 
     fn verification_required(&self) -> bool {
@@ -3293,6 +3297,7 @@ impl WasmDistributedVerifierRuntime {
                 "distributed verifier candidate batch is still pending",
             ));
         }
+        let pc_root_tasks = matches!(&self.verifier, DistributedVerifier::PcRoots(_));
         if let DistributedVerifier::PcRoots(verifier) | DistributedVerifier::Tiling(verifier) =
             &mut self.verifier
         {
@@ -3327,9 +3332,14 @@ impl WasmDistributedVerifierRuntime {
             verifier.enqueue(&roots).map_err(|reason| {
                 distributed_error("E_WASM_DISTRIBUTED_TILING_TASK_INVALID", reason)
             })?;
-            let (partial, has_pending_work) = advance_tiling_worker(verifier, &self.control)?;
+            let (partial, has_pending_work, verified_candidates) =
+                advance_tiling_worker(verifier, &self.control)?;
             return Ok(WasmDistributedVerifierConsume {
-                candidate_count: candidates.len(),
+                candidate_count: if pc_root_tasks {
+                    verified_candidates
+                } else {
+                    candidates.len()
+                },
                 partial,
                 has_pending_work,
             });
@@ -3496,15 +3506,17 @@ impl WasmDistributedVerifierRuntime {
                 advance_setup_worker(verifier, &self.control)
             }
             DistributedVerifier::PcRoots(verifier) => {
-                let (partial, has_pending_work) = advance_tiling_worker(verifier, &self.control)?;
+                let (partial, has_pending_work, candidate_count) =
+                    advance_tiling_worker(verifier, &self.control)?;
                 Ok(WasmDistributedVerifierConsume {
-                    candidate_count: 0,
+                    candidate_count,
                     partial,
                     has_pending_work,
                 })
             }
             DistributedVerifier::Tiling(verifier) => {
-                let (partial, has_pending_work) = advance_tiling_worker(verifier, &self.control)?;
+                let (partial, has_pending_work, _) =
+                    advance_tiling_worker(verifier, &self.control)?;
                 Ok(WasmDistributedVerifierConsume {
                     candidate_count: 0,
                     partial,
@@ -3742,7 +3754,8 @@ fn advance_setup_worker(
 fn advance_tiling_worker(
     verifier: &mut WasmTilingRootWorker,
     control: &ExecutionControl,
-) -> Result<(Option<Vec<u8>>, bool), WasmCommandRuntimeError> {
+) -> Result<(Option<Vec<u8>>, bool, usize), WasmCommandRuntimeError> {
+    let candidates_before = verifier.progress().candidates;
     let chunk = match verifier
         .advance(16_384, control)
         .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_TILING_GEOMETRY", reason))?
@@ -3756,7 +3769,11 @@ fn advance_tiling_worker(
         }
     };
     let partial = (!chunk.is_empty()).then(|| encode_tiling_root_chunk(&chunk));
-    Ok((partial, verifier.has_pending_work()))
+    let candidate_count = verifier
+        .progress()
+        .candidates
+        .saturating_sub(candidates_before);
+    Ok((partial, verifier.has_pending_work(), candidate_count))
 }
 
 pub fn serialize_distributed_final_events(
@@ -4787,7 +4804,7 @@ mod build_probability_partial_ingress_tests {
     fn pc_verifier_returns_to_the_host_between_candidate_transactions() {
         let runtime = WasmCommandRuntime::default()
             .with_host_capabilities(crate::WasmHostCapabilities::new(4, false, false));
-        let command = "clearra pc --lines 4 --count unique \
+        let command = "clearra pc --lines 2 --count unique \
             --backend cpu --workers 2";
         let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
             .expect("distributed PC preparation");
@@ -4795,6 +4812,7 @@ mod build_probability_partial_ingress_tests {
             WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
             _ => panic!("two-worker PC must use the distributed coordinator"),
         };
+        assert!(coordinator.root_task_parallel());
         let mut verifier = coordinator
             .prepare_in_process_verifier(&runtime, command)
             .expect("distributed PC verifier");
@@ -4821,25 +4839,38 @@ mod build_probability_partial_ingress_tests {
             .len();
         assert!(expected_candidates > 1, "fixture must exercise the cursor");
 
+        let mut previous_candidates = verifier.progress().candidates;
         let mut consumed = verifier
             .consume(&batch)
             .expect("first candidate transaction");
-        assert_eq!(consumed.candidate_count, 1);
-        assert!(consumed.has_pending_work);
-        let finish_error = verifier
-            .finish()
-            .expect_err("pending candidate batches must reject early finish");
-        assert_eq!(finish_error.code(), "E_WASM_DISTRIBUTED_STATE");
+        assert_eq!(
+            consumed.candidate_count,
+            verifier
+                .progress()
+                .candidates
+                .saturating_sub(previous_candidates),
+            "PC-root telemetry counts verified geometry candidates, not root tasks"
+        );
+        assert!(consumed.candidate_count <= 64);
 
         let mut consumed_candidates = consumed.candidate_count;
         while consumed.has_pending_work {
+            previous_candidates = verifier.progress().candidates;
             consumed = verifier
                 .continue_work()
                 .expect("continued candidate transaction");
-            assert!(consumed.candidate_count <= 1);
+            assert_eq!(
+                consumed.candidate_count,
+                verifier
+                    .progress()
+                    .candidates
+                    .saturating_sub(previous_candidates)
+            );
+            assert!(consumed.candidate_count <= 64);
             consumed_candidates += consumed.candidate_count;
         }
-        assert_eq!(consumed_candidates, expected_candidates);
+        assert_eq!(consumed_candidates, verifier.progress().candidates);
+        assert!(consumed_candidates > 0, "fixture must verify PC candidates");
         assert!(!verifier.has_pending_candidates());
     }
 }

@@ -165,6 +165,71 @@ assert.deepEqual(
   'the browser coordinator must return to the host between bounded geometry slices'
 );
 
+// PC-root distribution has a control-only source coordinator. An explicitly
+// admitted N-worker topology therefore starts and reports N compute workers;
+// it must not silently reserve one of those slots for the source loop.
+{
+  const initializedWorkerCounts: number[] = [];
+  const rootBatchSizes: number[] = [];
+  const rootEvents: ClearraWasmWorkerEvent[] = [];
+  let rootWorkersUsed = 0;
+  const rootProgress: ClearraVerifierPoolProgress = {
+    ...completedProgress,
+    readyWorkers: 2,
+    activeWorkers: 2,
+    workerCount: 2
+  };
+  await new DistributedWasmJobRunner({
+    ...wasm,
+    distributed_progress: () => ({
+      ...wasm.distributed_progress(),
+      candidateFamilyCount: '140'
+    }),
+    distributed_produce: (_workBudget: number, batchSize: number) => {
+      rootBatchSizes.push(batchSize);
+      return { status: 'completed' as const };
+    },
+    distributed_finish: (jobId: number, count: number) => {
+      rootWorkersUsed = count;
+      return JSON.stringify([{
+        schema_version: 1,
+        runtime: 'clearra-wasm',
+        event: 'failed',
+        job_id: jobId,
+        diagnostics: { diagnostics: [] }
+      }]);
+    }
+  } as ClearraWasmModule, 415, 'pc-root-control-only-source', {
+    logicalProcessorCount: 2,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  }, {
+    ...pool,
+    async initialize(_initialization: unknown, workerCount: number) {
+      initializedWorkerCounts.push(workerCount);
+    },
+    async finish() { return 2; },
+    progressSnapshot: () => rootProgress
+  } as never).run(
+    'clearra pc --lines 4 --count unique --workers 2',
+    { ...plan, rootTaskParallel: true },
+    (event) => rootEvents.push(event)
+  );
+  assert.deepEqual(initializedWorkerCounts, [2]);
+  assert.deepEqual(rootBatchSizes, [18], '140 roots use four dispatch waves per compute worker');
+  assert.equal(rootWorkersUsed, 2);
+  const rootSearching = rootEvents.find((event) => event.event === 'progress' &&
+    event.progress.telemetry?.phase === 'searching' &&
+    event.progress.telemetry.active_workers === 2);
+  assert.ok(rootSearching, 'root-task telemetry reports both compute workers');
+  const rootMerging = rootEvents.find((event) => event.event === 'progress' &&
+    event.progress.telemetry?.phase === 'merging');
+  assert.ok(rootMerging && rootMerging.event === 'progress');
+  assert.equal(rootMerging.progress.telemetry?.active_workers, 0,
+    'the control-only source is never counted as active compute');
+}
+
 // Draining and finalizing are distinct worker tasks: a finalizer wave can
 // legitimately become busy after all candidate-consume leases have drained.
 // Preserve that transition, and never count stale verifiers in coordinator merge.

@@ -650,6 +650,7 @@ pub struct WasmPcRootProducer {
     root_order: Vec<u32>,
     next_root: usize,
     digest: PcRootDigestAccumulator,
+    check_worker_digest: bool,
     finished: bool,
 }
 
@@ -660,6 +661,9 @@ pub struct WasmPcRootProducer {
 pub struct WasmPcRootResultMerger {
     merger: WasmDistributedResultMerger,
     digest: PcRootDigestAccumulator,
+    worker_candidate_count: usize,
+    worker_candidate_digest: u64,
+    check_worker_digest: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -845,7 +849,16 @@ impl PcRootDigestAccumulator {
 
 impl WasmPcRootProducer {
     pub fn supports(problem: &SearchProblem) -> bool {
+        // A root worker owns only one natural multiset search, so it cannot
+        // enforce a request-wide limit without a coordinator round trip for
+        // every search step. Keep explicitly bounded requests on the existing
+        // global producer path instead of silently turning a global cap into
+        // one cap per root (or ignoring it altogether).
         uses_order_independent_pc_candidate_digest(problem)
+            && problem.budget().max_nodes() == 0
+            && problem.backend_request().max_candidates() == 0
+            && problem.backend_request().max_frontier_states() == 0
+            && problem.backend_request().max_memory_mib().is_none()
     }
 
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
@@ -861,6 +874,7 @@ impl WasmPcRootProducer {
             return Err("wasm_pc_root_set_empty");
         }
         let digest = PcRootDigestAccumulator::new(root_order.len())?;
+        let check_worker_digest = problem.output_policy().retains_candidate_digest();
         let merger = WasmDistributedResultMerger::from_session(
             session
                 .into_distributed_finalizer()
@@ -871,6 +885,7 @@ impl WasmPcRootProducer {
             root_order,
             next_root: 0,
             digest,
+            check_worker_digest,
             finished: false,
         })
     }
@@ -921,6 +936,9 @@ impl WasmPcRootProducer {
         Ok(WasmPcRootResultMerger {
             merger: self.merger,
             digest: self.digest,
+            worker_candidate_count: 0,
+            worker_candidate_digest: 0,
+            check_worker_digest: self.check_worker_digest,
         })
     }
 
@@ -941,7 +959,42 @@ impl WasmPcRootResultMerger {
     }
 
     pub fn absorb(&mut self, result: &crate::CoreExecutionResult) -> Result<(), &'static str> {
-        self.merger.absorb(result)
+        let count_value = result
+            .unique_field("packing_candidate_count")
+            .ok_or("wasm_pc_root_worker_candidate_count_invalid")?;
+        let count = count_value
+            .parse::<usize>()
+            .ok()
+            .filter(|count| count.to_string() == count_value)
+            .ok_or("wasm_pc_root_worker_candidate_count_invalid")?;
+        let digest = if self.check_worker_digest {
+            if result.unique_field("packing_candidate_set_digest_calculated") != Some("true") {
+                return Err("wasm_pc_root_worker_candidate_digest_missing");
+            }
+            let value = result
+                .unique_field("packing_candidate_set_digest")
+                .filter(|value| value.len() == 16)
+                .ok_or("wasm_pc_root_worker_candidate_digest_invalid")?;
+            let parsed = u64::from_str_radix(value, 16)
+                .ok()
+                .filter(|parsed| format!("{parsed:016x}") == value)
+                .ok_or("wasm_pc_root_worker_candidate_digest_invalid")?;
+            Some(parsed)
+        } else {
+            None
+        };
+        // The underlying merger validates the complete worker scalar and
+        // identity evidence before this compact cross-transcript total is
+        // committed.
+        self.merger.absorb(result)?;
+        self.worker_candidate_count = self
+            .worker_candidate_count
+            .checked_add(count)
+            .ok_or("wasm_pc_root_worker_candidate_count_overflow")?;
+        if let Some(digest) = digest {
+            self.worker_candidate_digest = self.worker_candidate_digest.wrapping_add(digest);
+        }
+        Ok(())
     }
 
     pub fn validate_external_result_memory(
@@ -973,6 +1026,12 @@ impl WasmPcRootResultMerger {
     ) -> Result<crate::CoreExecutionResult, &'static str> {
         let root_candidate_counts = self.digest.root_candidate_counts()?;
         let summary = self.digest.summary(base)?;
+        if self.worker_candidate_count != summary.candidate_count
+            || (self.check_worker_digest
+                && self.worker_candidate_digest != summary.candidate_digest)
+        {
+            return Err("wasm_pc_root_worker_candidate_summary_mismatch");
+        }
         self.merger
             .normalize_pc_root_representative_rank(&root_candidate_counts)?;
         self.merger.finish(&summary, workers_used)
@@ -1237,40 +1296,52 @@ impl WasmTilingRootWorker {
                 match active.search.advance(&pass.catalog) {
                     GeometryAdvance::Pending => RootGeometryStep::Pending,
                     GeometryAdvance::Candidate(candidate) => {
-                        let local_ordinal = if pc_root {
-                            let ordinal = u32::try_from(active.pc_candidate_count)
-                                .map_err(|_| "wasm_pc_root_local_ordinal_overflow")?;
-                            active.pc_candidate_count = active
-                                .pc_candidate_count
-                                .checked_add(1)
-                                .ok_or("wasm_pc_root_candidate_count_overflow")?;
-                            active.pc_candidate_digest = mix_order_independent_candidate_digest(
-                                active.pc_candidate_digest,
-                                candidate.identity.bucket_hash(),
-                            );
-                            ordinal
+                        // The serial session filters before candidate rank,
+                        // count, and digest are committed. Preserve that exact
+                        // boundary here: otherwise a colored-solution allow-list
+                        // changes the root transcript and shifts every later
+                        // representative rank even though the verifier rejects
+                        // the same candidate.
+                        if pc_root && !self.problem.allows_solution_identity(&candidate.identity) {
+                            RootGeometryStep::Pending
                         } else {
-                            let packed_rows = pack_canonical_tiling_row_ids(
-                                candidate.row_ids(),
-                                &pass.canonical_rank_by_source,
-                            )
-                            .ok_or("wasm_tiling_root_identity_invalid")?;
-                            if active.identities.len() == active.identities.capacity() {
-                                active
-                                    .identities
-                                    .try_reserve(identity_capacity.max(1))
-                                    .map_err(|_| "wasm_tiling_root_identity_storage_unavailable")?;
+                            let local_ordinal = if pc_root {
+                                let ordinal = u32::try_from(active.pc_candidate_count)
+                                    .map_err(|_| "wasm_pc_root_local_ordinal_overflow")?;
+                                active.pc_candidate_count = active
+                                    .pc_candidate_count
+                                    .checked_add(1)
+                                    .ok_or("wasm_pc_root_candidate_count_overflow")?;
+                                active.pc_candidate_digest = mix_order_independent_candidate_digest(
+                                    active.pc_candidate_digest,
+                                    candidate.identity.bucket_hash(),
+                                );
+                                ordinal
+                            } else {
+                                let packed_rows = pack_canonical_tiling_row_ids(
+                                    candidate.row_ids(),
+                                    &pass.canonical_rank_by_source,
+                                )
+                                .ok_or("wasm_tiling_root_identity_invalid")?;
+                                if active.identities.len() == active.identities.capacity() {
+                                    active
+                                        .identities
+                                        .try_reserve(identity_capacity.max(1))
+                                        .map_err(|_| {
+                                            "wasm_tiling_root_identity_storage_unavailable"
+                                        })?;
+                                }
+                                active.identities.push(WasmPackedTilingIdentity::new(
+                                    candidate.identity.bucket_hash(),
+                                    packed_rows,
+                                ));
+                                0
+                            };
+                            RootGeometryStep::Candidate {
+                                task: active.task,
+                                local_ordinal,
+                                row_ids: pc_root.then(|| candidate.row_ids().to_vec()),
                             }
-                            active.identities.push(WasmPackedTilingIdentity::new(
-                                candidate.identity.bucket_hash(),
-                                packed_rows,
-                            ));
-                            0
-                        };
-                        RootGeometryStep::Candidate {
-                            task: active.task,
-                            local_ordinal,
-                            row_ids: pc_root.then(|| candidate.row_ids().to_vec()),
                         }
                     }
                     GeometryAdvance::Complete => RootGeometryStep::Complete,
@@ -1463,5 +1534,106 @@ impl WasmTilingRootWorker {
             .as_mut()
             .ok_or("wasm_pc_root_verifier_missing")?
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WasmPcRootProducer, WasmTilingRootAdvance, WasmTilingRootWorker};
+    use crate::WasmCpuSearchBackend;
+    use clearra_core_domain::execution_cancellation::ExecutionControl;
+    use clearra_pc_graph::request::{
+        PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+        PieceWindow,
+    };
+    use clearra_problem::{ProblemCompiler, SearchProblem};
+
+    fn pc_root_problem(policy: PcExecutionPolicy, filtered_empty: bool) -> SearchProblem {
+        let mut query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_execution_policy(policy);
+        if filtered_empty {
+            query = query.with_allowed_colored_solution_identities(std::iter::empty());
+        }
+        ProblemCompiler::compile_scenario_pc(&query).expect("two-line root PC problem")
+    }
+
+    #[test]
+    fn pc_root_distribution_refuses_request_wide_resource_caps() {
+        assert!(WasmPcRootProducer::supports(&pc_root_problem(
+            PcExecutionPolicy::mvp_default(),
+            false,
+        )));
+        for policy in [
+            PcExecutionPolicy::mvp_default().with_max_nodes(1),
+            PcExecutionPolicy::mvp_default().with_max_candidates(1),
+            PcExecutionPolicy::mvp_default().with_max_frontier_states(1),
+            PcExecutionPolicy::mvp_default().with_max_memory_mib(Some(1)),
+        ] {
+            assert!(!WasmPcRootProducer::supports(&pc_root_problem(
+                policy, false,
+            )));
+        }
+    }
+
+    #[test]
+    fn pc_root_distribution_filters_before_count_digest_and_rank() {
+        let problem = pc_root_problem(PcExecutionPolicy::mvp_default(), true);
+        let control = ExecutionControl::default();
+        let serial = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+            .expect("serial filtered PC result");
+        let mut producer = WasmPcRootProducer::new(&problem).expect("PC root producer");
+        let mut roots = Vec::new();
+        let base = loop {
+            match producer.advance(&control).expect("root production") {
+                super::super::distributed::WasmCandidateProducerAdvance::Candidate(packet) => {
+                    roots.push((
+                        packet.pass_index(),
+                        u32::try_from(packet.ordinal()).expect("root ordinal"),
+                        packet.target_index(),
+                    ));
+                }
+                super::super::distributed::WasmCandidateProducerAdvance::Completed(summary) => {
+                    break summary;
+                }
+                super::super::distributed::WasmCandidateProducerAdvance::Pending => {}
+                super::super::distributed::WasmCandidateProducerAdvance::Cancelled => {
+                    panic!("root production cancelled")
+                }
+            }
+        };
+        let mut worker =
+            WasmTilingRootWorker::new_for_pc_unique(&problem).expect("filtered PC root worker");
+        worker.enqueue(&roots).expect("root task batch");
+        while worker.has_pending_work() {
+            let chunk = match worker.advance(64, &control).expect("root worker advance") {
+                WasmTilingRootAdvance::Pending(chunk) | WasmTilingRootAdvance::Completed(chunk) => {
+                    chunk
+                }
+                WasmTilingRootAdvance::Cancelled => panic!("root worker cancelled"),
+            };
+            if !chunk.is_empty() {
+                producer.absorb(&chunk).expect("root transcript");
+            }
+        }
+        let worker_result = worker.finish_pc().expect("root worker result");
+        let mut merger = producer.into_merger().expect("PC root merger");
+        merger.absorb(&worker_result).expect("worker result merge");
+        let distributed = merger.finish(&base, 1).expect("root result finish");
+
+        for key in [
+            "packing_candidate_count",
+            "packing_candidate_set_digest",
+            "unique_solution_count",
+            "normalized_solution_set_hash",
+        ] {
+            assert_eq!(distributed.field(key), serial.field(key), "field {key}");
+        }
+        assert_eq!(distributed.field("packing_candidate_count"), Some("0"));
     }
 }

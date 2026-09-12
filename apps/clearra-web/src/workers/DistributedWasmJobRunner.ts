@@ -296,8 +296,13 @@ export class DistributedWasmJobRunner {
       }
     };
     if (transportProfiling) this.pool.beginTransportProfile();
+    // A natural-root coordinator only hands out immutable roots and merges
+    // their summaries; it is not one of the admitted compute workers. Legacy
+    // streaming producers still perform Geometry locally and therefore keep
+    // one requested slot on the coordinator.
+    const sourceCoordinatorComputes = plan.rootTaskParallel !== true;
     const verifierCount = plan.verificationRequired
-      ? Math.max(1, plan.workerCount - 1)
+      ? Math.max(1, plan.workerCount - Number(sourceCoordinatorComputes))
       : 0;
     let effectiveVerifierCount = verifierCount;
     let dispatchedBatches = 0;
@@ -366,10 +371,12 @@ export class DistributedWasmJobRunner {
             producer_coverage_checks: producer.coverageChecks,
             build_nodes: verifier.buildNodes,
             coverage_checks: verifier.coverageChecks,
-            ready_workers: proof ? proof.readyWorkers + Number(parallelCoordinatorComputes) : verifier.readyWorkers + 1,
+            ready_workers: proof
+              ? proof.readyWorkers + Number(parallelCoordinatorComputes)
+              : verifier.readyWorkers + Number(sourceCoordinatorComputes),
             active_workers: proof
               ? proof.activeWorkers + Number(parallelCoordinatorActive)
-              : verifier.activeWorkers + coordinatorActive,
+              : verifier.activeWorkers + coordinatorActive * Number(sourceCoordinatorComputes),
             // This is admitted capacity, not the temporarily ready/finalizing
             // subset. Keep the denominator stable through every phase.
             worker_count: plan.workerCount,
@@ -533,7 +540,9 @@ export class DistributedWasmJobRunner {
       // producer ABI slot. Preserve its exact final counters for this phase.
       finalizingProducer = this.wasm.distributed_progress();
       emitProgress();
-      const workersUsed = plan.verificationRequired ? finishedVerifierCount + 1 : 1;
+      const workersUsed = plan.verificationRequired
+        ? finishedVerifierCount + Number(sourceCoordinatorComputes)
+        : 1;
       let finalEvents: string | null;
       if (this.wasm.distributed_finish_start && this.wasm.distributed_finish_advance) {
         let lastCompletionYield = performance.now();

@@ -538,7 +538,11 @@ fn decode_pc_root_summary(input: &[u8]) -> Result<WasmTilingRootChunk, Distribut
     let candidate_digest = reader.u64()?;
     let candidate_family_count = match reader.u8()? {
         0 => {
-            reader.u128()?;
+            if reader.u128()? != 0 {
+                return Err(DistributedWireError(
+                    "pc_root_candidate_family_absent_payload_nonzero",
+                ));
+            }
             None
         }
         1 => Some(reader.u128()?),
@@ -3949,5 +3953,28 @@ mod tests {
             decode_tiling_root_chunk(&encoded).expect("PC root summary"),
             chunk
         );
+
+        let absent_family =
+            WasmTilingRootChunk::from_pc_root_summary_parts(0, 9, 4, 7, None, 3, 2, 1, 1, 0, 0);
+        let absent_encoded = encode_tiling_root_chunk(&absent_family);
+        assert_eq!(
+            decode_tiling_root_chunk(&absent_encoded).expect("absent PC root family"),
+            absent_family
+        );
+        let mut noncanonical_absent = absent_encoded.clone();
+        // magic + version + pass + root + candidate count + digest + flag
+        noncanonical_absent[30] = 1;
+        assert!(matches!(
+            decode_tiling_root_chunk(&noncanonical_absent),
+            Err(DistributedWireError(
+                "pc_root_candidate_family_absent_payload_nonzero"
+            ))
+        ));
+        let mut trailing = absent_encoded;
+        trailing.push(0);
+        assert!(matches!(
+            decode_tiling_root_chunk(&trailing),
+            Err(DistributedWireError("distributed_wire_trailing_bytes"))
+        ));
     }
 }

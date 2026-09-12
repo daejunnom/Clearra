@@ -1,6 +1,7 @@
 # PC all-solutions worker scheduling audit — 2026-09-12
 
-Status: implementation and local A/B complete. This branch is research and
+Status: historical local A/B retained; post-port semantic audit fixes complete,
+but the audited source has not been re-benchmarked. This branch is research and
 performance work; it does not authorize a production deployment or release.
 
 ## Conclusion
@@ -19,17 +20,20 @@ the coordinator merges a compact, replay-safe summary per root. Work is assigned
 to the next ready worker, so an idle worker steals the next unclaimed batch rather
 than waiting for a fixed shard owner.
 
-Natural roots are never split into synthetic sub-roots. One requested compute
-slot remains the coordinator and the rest are verifier workers. The browser
-chooses a root batch size dynamically as
+Natural roots are never split into synthetic sub-roots. The source coordinator
+only issues immutable root IDs and merges summaries; it is control-only and is
+not counted as one of the requested compute workers. Consequently an explicit
+N-worker/all-logical topology starts N root workers plus that lightweight source
+coordinator. Automatic reserved-main policy still chooses its admitted N before
+this layer. The browser chooses a root batch size dynamically as
 
 ```text
 ceil(root_count / (active_verifiers * 4)), capped at 64 roots
 ```
 
-This gives P7 with 140 roots and 8 requested compute slots seven verifiers and a
-five-root batch. Seven requested slots use six verifiers and a six-root batch.
-Both leave about four dispatch waves per verifier for load balancing while
+This gives P7 with 140 roots a five-root batch at both eight compute workers
+(`ceil(140 / 32)`) and seven compute workers (`ceil(140 / 28)`). Both leave
+about four dispatch waves per verifier for load balancing while
 preserving enough work inside each durable worker transaction to amortize
 transport and verification overhead.
 
@@ -42,14 +46,22 @@ transport and verification overhead.
   explicit `--no-sandbox true` opt-in because its sandbox imposed an 8 GiB
   renderer data limit and terminated this workload. This opt-in is confined to
   the local benchmark runner.
-- Command: `clearra pc --lines 4 --count unique --source-pieces 11` with P7,
+- Historical command: `clearra pc --lines 4 --count unique --source-pieces 11` with P7,
   `--max-patterns 5040`, `--max-candidates 100000000`, CPU warmup, and the worker
   count shown below.
 - Each row is one complete run. Other local computation was active, as requested,
   so absolute time varies between later repeats. Exactness fields are checked
   separately from elapsed time.
 
-## Measurements
+## Historical measurements
+
+These rows describe the pre-audit implementation which reserved one requested
+slot for the source coordinator. They are useful for identifying the scheduling
+bottleneck, but they are not performance evidence for the audited source. In
+particular, the explicit `--max-candidates` command now correctly stays on the
+global producer: independent root workers cannot preserve a request-wide node,
+candidate, frontier, or memory cap without a different shared budget protocol.
+A future root-worker benchmark must omit explicit caps or add such a protocol.
 
 | Source / policy | Requested slots | Time | GUI active slots while searching | Worker batches | Result |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -62,10 +74,10 @@ transport and verification overhead.
 | final-policy repeat, dynamic six-root batches | 7 | 176.44 s | 7.00 mean, 7–7 | 24 | exact |
 | final-policy repeat, dynamic five-root batches | 8 | 168.28 s | 8.00 mean, 8–8 | 28 | exact |
 
-For the current root-worker path, the GUI active count includes the coordinator
-until production completes. The 7-slot runs therefore use six verifier workers;
-the 8-slot runs use seven. After the 140 roots have been dispatched, only the
-remaining verifier work appears in the drain count.
+For these historical rows, the GUI active count included the coordinator until
+production completed. The 7-slot runs therefore used six verifier workers and
+the 8-slot runs used seven. The audited source instead reports only compute
+workers and gives all admitted slots to root workers.
 
 The best comparable optimized sample is 142.17 seconds: 39.2% faster than the
 233.81-second current-baseline 8-worker run. Seven to eight workers improved the
@@ -83,18 +95,19 @@ the WSL VM restarted after about 83 seconds and left zero-byte stdout/stderr. It
 did not produce a Clearra failure event or search result. The restarted VM again
 reported 8 logical processors and sufficient free memory.
 
-The accepted final-policy benchmark WASM is
+The historical accepted final-policy benchmark WASM is
 `6e3f6b20368144b41d27368f102467097a39a583c2f06b8fae2970ac69cefaa2`.
 After those runs, `rustfmt` changed only the source layout of the
 `root_task_parallel` match expression. The final provenance build has identical
 size and bindings but WASM hash
 `5606d0fb0d695401d632903bbb29b73ea2779597d64f7f712a506a6b2b812fa0`.
-No scheduling or search expression changed, so the long-running performance
-measurements were not repeated for that formatting-only binary difference.
+No scheduling or search expression changed between those two historical
+binaries. The later semantic-audit fixes do change topology and eligibility, so
+none of the long-running values above may be attributed to the current source.
 
 ## Exactness checks
 
-Every accepted current-baseline and optimized run produced:
+Every accepted historical current-baseline and optimized run produced:
 
 - 456,923 unique solutions;
 - normalized solution-set hash `cts1:98ebe8726537b29f`;
@@ -116,16 +129,23 @@ branch fixes the independent scheduling bottleneck instead.
 
 ## Implementation boundary
 
-- The root-worker route is limited to the plain CPU PC `Unique + CountUnique`
+- The root-worker route is limited to the uncapped plain CPU PC
+  `Unique + CountUnique`
   path whose result semantics permit the order-independent digest. Score,
   probability, observation, constraint, tablebase, and other specialized paths
-  retain their existing producers.
+  retain their existing producers. Requests with explicit global node,
+  candidate, frontier, or memory caps also retain the global producer so those
+  limits cannot silently become per-root limits.
+- Colored-solution allow-lists are applied before root-local candidate ordinal,
+  count, and digest commitment, matching the serial session boundary.
 - Candidate rank remains deterministic by combining the canonical root ordinal
   with the worker-local ordinal. The final normalized family is independent of
   completion order.
 - Each root returns a compact summary containing its exact candidate count,
   digest, geometry metrics, and completion evidence. Candidate identities are
-  not copied back through the coordinator.
+  not copied back through the coordinator. The terminal merger cross-checks the
+  sum of worker candidate counts and order-independent digests against those
+  root summaries before accepting the result.
 - The coordinator accepts only one matching terminal commit per root. Duplicate
   replay is idempotent; mismatched replay, a missing root, an invalid ordinal, or
   an incomplete transcript fails closed.
