@@ -103,3 +103,13 @@ empty page, while errors leave the cursor unchanged. Concrete hidden suffixes
 are retained only for later path reconstruction and may not influence an
 observation policy. This layer still performs no graph lookup, pattern parsing,
 network/filesystem I/O, product registration, or production qualification.
+
+The Range-fragment cache is a pure, bounded optimization seam for future
+native and browser transports. It stores only an exact qualified
+snapshot/profile/artifact/content/range binding, never slices a containing or
+overlapping entry, and rejects a conflicting body under the same identity.
+Lookup session and request IDs are reconstructed from the current request so a
+cached fragment can cross sessions without making a response valid for the
+wrong session. Finite FIFO entry/byte limits, checked range arithmetic,
+fallible byte allocation, and transactional cancellation keep caching outside
+the dataset-authority and product-activation boundaries.
