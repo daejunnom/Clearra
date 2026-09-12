@@ -281,9 +281,10 @@ pub use pc_candidate_page_boundary::{
     PcCandidateCompletenessEvidence, PcCandidatePageCollector, PcCandidatePageCursor,
     PcCandidatePageGuard, PcCandidateProviderKind, PcCandidateReducerInput,
     PcCandidateRequestIdentity, PcCandidateRequestIdentityError, PcCandidateSessionId,
-    PcCandidateSetDigest, PcCandidateSourceBinding, PcCandidateSourceIdentity,
-    PcCandidateUniverseIdentity, PcConcreteCandidatePage, PC_CANDIDATE_PAGE_CONTRACT,
-    PC_CANDIDATE_REQUEST_IDENTITY_ALGORITHM, PC_CANDIDATE_SET_DIGEST_ALGORITHM,
+    PcCandidateSetDigest, PcCandidateSourceBinding, PcCandidateSourceBindingError,
+    PcCandidateSourceIdentity, PcCandidateUniverseIdentity, PcConcreteCandidatePage,
+    PC_CANDIDATE_PAGE_CONTRACT, PC_CANDIDATE_REQUEST_IDENTITY_ALGORITHM,
+    PC_CANDIDATE_SET_DIGEST_ALGORITHM,
 };
 pub use pc_chance_probability_result::{
     PcChanceIngressOrigin, PcChanceProblemPreset, PcChanceQuerySnapshot,

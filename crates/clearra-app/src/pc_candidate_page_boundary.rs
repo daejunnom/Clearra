@@ -135,6 +135,33 @@ impl core::fmt::Display for PcCandidateRequestIdentityError {
 
 impl std::error::Error for PcCandidateRequestIdentityError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PcCandidateSourceBindingError {
+    InitialBoardTargetLinesMismatch { board_lines: u8, target_lines: u8 },
+    InitialBoardNotCompact,
+    RequestIdentity(PcCandidateRequestIdentityError),
+}
+
+impl PcCandidateSourceBindingError {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::InitialBoardTargetLinesMismatch { .. } => {
+                "pc_candidate_source_initial_board_target_lines_mismatch"
+            }
+            Self::InitialBoardNotCompact => "pc_candidate_source_initial_board_not_compact",
+            Self::RequestIdentity(error) => error.reason(),
+        }
+    }
+}
+
+impl core::fmt::Display for PcCandidateSourceBindingError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for PcCandidateSourceBindingError {}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PcCandidateSourceIdentity([u8; 32]);
 
@@ -193,7 +220,7 @@ impl PcCandidateSourceBinding {
         }
     }
 
-    pub fn online_pc4(
+    pub(crate) fn online_pc4(
         session_id: PcCandidateSessionId,
         request_identity: PcCandidateRequestIdentity,
         source_identity: PcCandidateSourceIdentity,
@@ -209,6 +236,47 @@ impl PcCandidateSourceBinding {
             initial_board_mask,
             provider: PcCandidateProviderProvenance::OnlinePc4(snapshot),
         }
+    }
+
+    /// Creates the only public online-PC4 source binding from a fully prepared
+    /// input. The request identity is derived here so product adapters cannot
+    /// attach an arbitrary queue identity to a qualified target or board.
+    pub fn online_pc4_for_prepared_input(
+        session_id: PcCandidateSessionId,
+        source_identity: PcCandidateSourceIdentity,
+        prepared_input: &Pc4PreparedOnlineInput,
+        initial_board: StandardPcBoard,
+        initial_hold: FixedQueueHoldState,
+    ) -> Result<Self, PcCandidateSourceBindingError> {
+        let target_lines = prepared_input.target_lines().get();
+        if initial_board.lines() != target_lines {
+            return Err(
+                PcCandidateSourceBindingError::InitialBoardTargetLinesMismatch {
+                    board_lines: initial_board.lines(),
+                    target_lines,
+                },
+            );
+        }
+        let initial_board_mask = initial_board
+            .occupied()
+            .compact_board64()
+            .ok_or(PcCandidateSourceBindingError::InitialBoardNotCompact)?;
+        let request_identity = PcCandidateRequestIdentity::derive_pc4_candidate_universe(
+            prepared_input,
+            initial_board,
+            initial_hold,
+        )
+        .map_err(PcCandidateSourceBindingError::RequestIdentity)?;
+        Ok(Self {
+            session_id,
+            request_identity,
+            source_identity,
+            profile: prepared_input.profile(),
+            initial_board_mask,
+            provider: PcCandidateProviderProvenance::OnlinePc4(
+                prepared_input.target().snapshot().clone(),
+            ),
+        })
     }
 
     pub const fn session_id(&self) -> PcCandidateSessionId {

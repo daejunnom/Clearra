@@ -684,6 +684,74 @@ fn input_surface_and_product_objective_do_not_change_universe_identity() {
 }
 
 #[test]
+fn public_online_source_binding_derives_the_exact_prepared_request_identity() {
+    let target = qualified_target(
+        "request-generation-a",
+        Pc4RuleProfile::SrsPlus,
+        Pc4TerminalUseCase::PcSearch,
+        4,
+    );
+    let prepared = prepared_fixed(
+        target.clone(),
+        Pc4InputSurface::Gui,
+        vec![Pc4GraphPiece::I, Pc4GraphPiece::O, Pc4GraphPiece::T],
+    );
+    let board = initial_board(4, 0b11);
+    let hold = FixedQueueHoldState::Disabled;
+    let source_identity = PcCandidateSourceIdentity::from_sha256([7; 32]);
+
+    let source = PcCandidateSourceBinding::online_pc4_for_prepared_input(
+        session(17),
+        source_identity,
+        &prepared,
+        board,
+        hold,
+    )
+    .expect("prepared input owns the public source binding");
+
+    assert_eq!(source.session_id(), session(17));
+    assert_eq!(
+        source.request_identity(),
+        request_identity(&prepared, board, hold)
+    );
+    assert_eq!(source.source_identity(), source_identity);
+    assert_eq!(source.profile(), Pc4RuleProfile::SrsPlus);
+    assert_eq!(source.initial_board_mask(), 0b11);
+    assert_eq!(source.qualified_snapshot(), Some(target.snapshot()));
+}
+
+#[test]
+fn public_online_source_binding_rejects_a_board_from_another_target_height() {
+    let target = qualified_target(
+        "request-generation-a",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::PcSearch,
+        4,
+    );
+    let prepared = prepared_fixed(
+        target,
+        Pc4InputSurface::Gui,
+        vec![Pc4GraphPiece::I, Pc4GraphPiece::O],
+    );
+
+    assert_eq!(
+        PcCandidateSourceBinding::online_pc4_for_prepared_input(
+            session(18),
+            PcCandidateSourceIdentity::from_sha256([8; 32]),
+            &prepared,
+            initial_board(3, 0),
+            FixedQueueHoldState::Empty,
+        ),
+        Err(
+            PcCandidateSourceBindingError::InitialBoardTargetLinesMismatch {
+                board_lines: 3,
+                target_lines: 4,
+            }
+        )
+    );
+}
+
+#[test]
 fn exact_offline_pages_seal_one_canonical_reducer_input() {
     let source = offline_source(1);
     let guard = Guard::new(source.clone());

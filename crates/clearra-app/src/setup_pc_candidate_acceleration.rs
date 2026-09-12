@@ -211,6 +211,7 @@ pub enum SetupPcNoAccelerationReason {
     TargetUseCaseNotQualified,
     ObjectiveNotQualified,
     CandidateSourceNotQualified,
+    CandidateTargetMismatch,
     SnapshotGenerationNotQualified,
     QualificationEvidenceIdentityMissing,
 }
@@ -244,6 +245,7 @@ impl SetupPcNoAccelerationReason {
             Self::CandidateSourceNotQualified => {
                 "setup_pc_acceleration_candidate_source_not_qualified"
             }
+            Self::CandidateTargetMismatch => "setup_pc_acceleration_candidate_target_mismatch",
             Self::SnapshotGenerationNotQualified => {
                 "setup_pc_acceleration_snapshot_generation_not_qualified"
             }
@@ -340,6 +342,9 @@ pub fn admit_setup_pc_candidate_input(
         ),
     ) {
         return refer_offline(rejection_reason(rejection));
+    }
+    if candidates.universe_identity().qualified_target() != Some(&qualification.target) {
+        return refer_offline(SetupPcNoAccelerationReason::CandidateTargetMismatch);
     }
 
     SetupPcAccelerationDisposition::Admitted(PreparedSetupPcCandidateInput {
@@ -567,6 +572,14 @@ mod tests {
     }
 
     fn reducer(source: PcCandidateSourceBinding) -> PcCandidateReducerInput {
+        reducer_for_target(source, Pc4TerminalUseCase::SetupSearch, Pc4TargetLines::MAX)
+    }
+
+    fn reducer_for_target(
+        source: PcCandidateSourceBinding,
+        use_case: Pc4TerminalUseCase,
+        target_lines: u8,
+    ) -> PcCandidateReducerInput {
         let candidate = StandardBoard64TilingIdentity::from_placements(
             source.initial_board_mask(),
             [PiecePlacementMask::new(PieceKind::I, 0b1111 << 10)],
@@ -576,8 +589,8 @@ mod tests {
             qualified_target(
                 snapshot.snapshot_identity().generation(),
                 source.profile(),
-                Pc4TerminalUseCase::SetupSearch,
-                Pc4TargetLines::MAX,
+                use_case,
+                target_lines,
             )
         });
         PcCandidateReducerInput::from_test_parts(source, qualified_target, vec![candidate])
@@ -826,6 +839,40 @@ mod tests {
                 reason: SetupPcNoAccelerationReason::TargetNotQualified,
             }
         );
+    }
+
+    #[test]
+    fn candidate_universe_target_cannot_borrow_a_pc_or_other_line_qualification() {
+        let source = source("generation-a", 1, 2, Pc4RuleProfile::Srs, 0);
+        let request = request(
+            1,
+            Pc4RuleProfile::Srs,
+            0,
+            4,
+            SetupPcAccelerationObjective::RankedJoint,
+        );
+        let proof = proof(
+            request.clone(),
+            &source,
+            Pc4TerminalUseCase::SetupSearch,
+            "synthetic-exact-setup-proof",
+        );
+
+        for candidates in [
+            reducer_for_target(source.clone(), Pc4TerminalUseCase::PcSearch, 4),
+            reducer_for_target(source.clone(), Pc4TerminalUseCase::SetupSearch, 3),
+        ] {
+            assert_eq!(
+                admit_setup_pc_candidate_input(
+                    request.clone(),
+                    SetupPcCandidateAvailability::Complete(candidates),
+                    Some(&proof),
+                ),
+                SetupPcAccelerationDisposition::ReferToOfflineFallbackOwner {
+                    reason: SetupPcNoAccelerationReason::CandidateTargetMismatch,
+                }
+            );
+        }
     }
 
     #[test]
