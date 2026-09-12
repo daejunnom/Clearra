@@ -10,6 +10,13 @@ const checks = [
   ['render-default', [...common, 'commands::render_app_command']],
   ['render-no-bitmap', [...common, '--no-default-features', 'commands::render_app_command']],
 ];
+if (process.argv.includes('--row-normalization')) {
+  checks.splice(0, checks.length,
+    ['pc4-row-core', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-core-executor', '--lib', 'pc4_graph_materializer']],
+    ['pc4-row-tablebase', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-pc4-tablebase', '--lib']],
+    ['pc4-row-app', [...common, 'pc4_']],
+  );
+}
 for (const [name, args] of checks) {
   console.log(`app_contract_check=${name} status=started`);
   const result = spawnSync('cargo', [...args, '--', '--test-threads=2'], {

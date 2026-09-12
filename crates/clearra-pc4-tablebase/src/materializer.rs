@@ -34,6 +34,8 @@ pub struct ClearraPlacementIdentity {
     x: u16,
     y: u16,
     occupied_cells: u64,
+    // Edge-local normalized frame until the concrete path lifts it once.
+    graph_row_transition: Option<(u8, u8)>,
 }
 
 impl ClearraPlacementIdentity {
@@ -56,6 +58,7 @@ impl ClearraPlacementIdentity {
             x,
             y,
             occupied_cells,
+            graph_row_transition: None,
         })
     }
 
@@ -78,16 +81,123 @@ impl ClearraPlacementIdentity {
     pub const fn occupied_cells(self) -> u64 {
         self.occupied_cells
     }
+
+    /// Marks an edge-local normalized placement with its physical clear mask.
+    /// Concrete path paging must lift it before a reducer can use the cells.
+    pub fn with_graph_row_transition(
+        mut self,
+        source_cleared_prefix: u8,
+        physical_cleared_rows: u8,
+    ) -> Result<Self, PlacementIdentityError> {
+        let frame = crate::Pc4RowFrame::new(source_cleared_prefix)
+            .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
+        let shift = u32::from(source_cleared_prefix) * 10;
+        if self.occupied_cells & ((1_u64 << shift) - 1) != 0 {
+            return Err(PlacementIdentityError::InvalidGraphRowTransition);
+        }
+        frame
+            .lift_physical_cells(self.occupied_cells >> shift)
+            .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
+        frame
+            .after_clear(physical_cleared_rows)
+            .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
+        self.graph_row_transition = Some((source_cleared_prefix, physical_cleared_rows));
+        Ok(self)
+    }
+}
+
+/// Rebase each selected edge alternative independently for this concrete path.
+/// Never cache a frame by graph node: different clear histories can converge.
+pub(crate) fn rebase_concrete_placements(
+    placements: &mut [ClearraPlacementIdentity],
+) -> Result<(), PlacementIdentityError> {
+    let Some(first) = placements.first() else {
+        return Ok(());
+    };
+    let Some((prefix, _)) = first.graph_row_transition else {
+        return if placements.iter().all(|p| p.graph_row_transition.is_none()) {
+            Ok(())
+        } else {
+            Err(PlacementIdentityError::InvalidGraphRowTransition)
+        };
+    };
+    let mut frame = crate::Pc4RowFrame::new(prefix)
+        .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
+    for placement in placements {
+        let Some((prefix, clear_rows)) = placement.graph_row_transition else {
+            return Err(PlacementIdentityError::InvalidGraphRowTransition);
+        };
+        if prefix != 4 - frame.remaining_rows() {
+            return Err(PlacementIdentityError::InvalidGraphRowTransition);
+        }
+        placement.occupied_cells = frame
+            .lift_physical_cells(placement.occupied_cells >> (u32::from(prefix) * 10))
+            .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
+        frame = frame
+            .after_clear(clear_rows)
+            .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
+        placement.graph_row_transition = None;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod row_transition_tests {
+    use super::*;
+
+    fn lock(cells: u64, prefix: u8, clears: u8) -> ClearraPlacementIdentity {
+        ClearraPlacementIdentity::new(Pc4GraphPiece::I, PlacementRotation::Zero, 0, 0, cells)
+            .unwrap()
+            .with_graph_row_transition(prefix, clears)
+            .unwrap()
+    }
+
+    #[test]
+    fn converging_normalized_paths_keep_distinct_original_frames() {
+        let later = lock(15 << 10, 1, 0);
+        let mut bottom_clear = [lock(15, 0, 1), later];
+        let mut upper_clear = [lock(15 << 10, 0, 2), later];
+        rebase_concrete_placements(&mut bottom_clear).unwrap();
+        rebase_concrete_placements(&mut upper_clear).unwrap();
+        assert_eq!(bottom_clear[1].occupied_cells(), 15 << 10);
+        assert_eq!(upper_clear[1].occupied_cells(), 15);
+        assert_eq!(bottom_clear[1].x(), later.x());
+        assert_eq!(bottom_clear[1].y(), later.y());
+        assert!(bottom_clear
+            .iter()
+            .all(|p| p.graph_row_transition.is_none()));
+    }
+
+    #[test]
+    fn rejects_mixed_frames_and_inconsistent_clear_history() {
+        let fixed =
+            ClearraPlacementIdentity::new(Pc4GraphPiece::I, PlacementRotation::Zero, 0, 0, 15)
+                .unwrap();
+        for mut path in [
+            vec![fixed, lock(15, 0, 0)],
+            vec![lock(15, 0, 0), fixed],
+            vec![lock(15, 0, 1), lock(15, 0, 0)],
+        ] {
+            assert_eq!(
+                rebase_concrete_placements(&mut path),
+                Err(PlacementIdentityError::InvalidGraphRowTransition)
+            );
+        }
+        assert!(fixed.with_graph_row_transition(1, 0).is_err());
+        assert!(fixed.with_graph_row_transition(0, 16).is_err());
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlacementIdentityError {
     TetrominoAreaMismatch { occupied_cell_count: u32 },
+    InvalidGraphRowTransition,
 }
 
 impl PlacementIdentityError {
     pub const fn reason(self) -> &'static str {
         match self {
+            Self::InvalidGraphRowTransition => "pc4_placement_invalid_graph_row_transition",
             Self::TetrominoAreaMismatch { .. } => "pc4_placement_identity_tetromino_area_mismatch",
         }
     }

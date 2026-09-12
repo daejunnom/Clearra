@@ -1,8 +1,8 @@
 # PC4 normalized graph rows are not a fixed ILC frame
 
-## Confirmed implementation gap
+## Confirmed implementation gap before the follow-up
 
-`pc4_graph_materializer.rs` assumes source cells are a subset of target cells
+The pre-fix `pc4_graph_materializer.rs` assumes source cells are a subset of target cells
 and uses `target & !source` as the four placement cells. This is false when a
 non-bottom row is cleared and the graph moves complete rows to the bottom.
 The existing `merge_deleted_rows == target_deleted` comparison also assumes
@@ -24,7 +24,7 @@ Row 1 becomes full. After clearing, the surviving physical row is the old
 row 0. The graph's normalized target is full row 0 plus 0b11000000 in row 1.
 
 Source has 8 cells and target 12. But six source cells are absent from the
-normalized target. Current materializer rejects this before geometry with
+normalized target. The pre-fix materializer rejects this before geometry with
 `TransitionRemovesLogicalCells`. This proves a coordinate-contract defect;
 it does not claim these particular nodes were fetched from the upstream graph.
 
@@ -41,17 +41,48 @@ every valid initial cleared prefix and two successive physical clear masks with
 every surviving cell mapped independently, and invalid/terminal boundaries.
 These tests do not claim the existing materializer is fixed.
 
-## Required integration before activation
+## Implemented edge and path integration follow-up
 
-1. Enumerate possible physical clear-row masks for an edge, reverse the target
-   normalization, and verify all reachable physical locks using the exact core.
-   Do not infer locks by raw normalized graph-mask subtraction.
-2. Carry each actual clear history through concrete path materialization and
-   lift placements into one request-wide ILC identity before candidate reduction.
-   A converging graph node must not merge distinct row correspondences.
-3. Apply the same framing to fixed-queue and observation/pattern paths, replay,
-   initial fields, and 1-4L target terminals. No-clear-only coverage is inadequate.
-4. Run exact differential cases with upper-row clears and multiple histories,
+The core now enumerates every physical clear-row mask with the required number
+of newly cleared lines (at most 16 masks). For each mask it inserts full rows
+into the compact target, preserves all surviving rows in order, and subtracts
+the physical source only in this reconstructed pre-clear frame. Four-cell
+candidates go through the existing geometry and reachability engine. A final
+forward place-and-clear must exactly match both the physical clear mask and
+the compact target. A count decrease or malformed normalized field remains an
+error; non-monotone bit positions alone are no longer rejected.
+
+Completeness of the row reconstruction: any actual lock has some physical
+clear mask among these masks. Given that mask and the compact target, its
+pre-clear occupied board is uniquely reconstructed by inserting full rows.
+Subtracting the unchanged physical source then yields that lock's cells.
+This argument is about coordinate reconstruction, not upstream graph coverage
+or an independent proof of the existing reachability engine.
+
+The App adapter attaches source-prefix and physical-clear metadata to each
+edge placement. Common concrete-path paging lifts selected alternatives through
+their own `Pc4RowFrame` before returning occupied cells to either fixed-queue or
+observation reducers. Lock x/y remain physical for replay. Metadata is consumed
+once, and mixed frames or inconsistent prefix histories are typed errors.
+Paging performs this on temporary data before committing cursor progress.
+
+Managed follow-up batch completed: core **4 passed**, tablebase **154 passed**,
+including two different clear histories converging on the same normalized frame
+but requiring different original-cell identities. App PC4 **60 passed** (0.02s),
+and the batch exited zero. A subsequent tablebase-only run adding two paging
+regressions passed **156 tests** (0.04s). Those verify different histories across
+page boundaries, physical replay coordinates, one-page/two-page equality, and
+no cursor progress when a late row-frame error discards a temporary page.
+The later source edits outside these tests were comments/documentation only.
+No build/test jobs remain running. These results do not claim release acceptance.
+
+## Remaining verification before activation
+
+1. Add end-to-end reducer cases for
+   upper-row clear histories rather than only independent core/path unit cases.
+2. Verify replay, initial fields, and every enabled 1-4L target terminal with
+   the path framing. No-clear-only coverage is inadequate.
+3. Run exact differential cases with upper-row clears and multiple histories,
    then upstream sampled edges and the relevant product reducers.
 
 This is a v0.9.0 correctness blocker, not a v0.8.1 performance regression or a

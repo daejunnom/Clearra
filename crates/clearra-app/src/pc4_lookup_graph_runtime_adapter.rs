@@ -731,6 +731,12 @@ fn map_core_placement(
         y,
         placement.occupied_cells(),
     )
+    .and_then(|identity| {
+        identity.with_graph_row_transition(
+            placement.source_cleared_prefix(),
+            placement.physical_cleared_rows(),
+        )
+    })
     .map_err(Pc4LookupMaterializationError::PlacementIdentity)
 }
 

@@ -76,6 +76,17 @@ compiled-rerun requirement below; the earlier failures above remain historical
 evidence, not current failures. These are local contract checks, not upstream
 qualification or release acceptance. No build/test job remains running.
 
+### Graph row-normalization follow-up
+
+The online materializer's normalized-graph/fixed-ILC frame confusion has been
+corrected in the edge reconstruction and common concrete-path paging code.
+Managed `check-pc4-app-contracts.mjs --row-normalization` completed: core 4,
+tablebase 154, App PC4 60 tests passed. Two additional tablebase paging tests
+then brought the tablebase suite to 156 passing tests. No production profile
+was activated. The active plan's materializer checkbox remains open for actual
+upstream edge differential and full reducer/replay evidence. See
+`pc4-row-normalization-regression-2026-09-13.md` for the counterexample and scope.
+
 - The unpublished aliases `successful_reveals`, `observed_successful_reveals`,
   and `observed_successful_reveal_count` were removed in the follow-up working
   changes; callers now use explicitly named all-outcome accessors.

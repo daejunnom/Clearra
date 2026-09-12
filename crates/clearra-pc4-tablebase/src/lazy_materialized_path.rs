@@ -219,12 +219,14 @@ impl FixedQueueConcretePathFamily {
         let mut exhausted = cursor.exhausted;
         while page.len() < limit.get() && !exhausted {
             self.check_page_guard(guard)?;
-            let placements = self
+            let mut placements: Vec<_> = self
                 .alternatives
                 .iter()
                 .zip(&next_indices)
                 .map(|(alternatives, &index)| alternatives[index])
                 .collect();
+            crate::materializer::rebase_concrete_placements(&mut placements)
+                .map_err(|_| ConcretePathPageError::RowFrameMismatch)?;
             page.push(FixedQueueConcretePath {
                 start_field_id: self.start_field_id,
                 terminal_field_id: self.terminal_field_id,
@@ -296,6 +298,7 @@ impl FixedQueueConcretePath {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConcretePathPageError {
+    RowFrameMismatch,
     Cancelled,
     StaleSnapshot,
     CursorMismatch,
@@ -305,6 +308,7 @@ pub enum ConcretePathPageError {
 impl ConcretePathPageError {
     pub const fn reason(self) -> &'static str {
         match self {
+            Self::RowFrameMismatch => "pc4_concrete_path_row_frame_mismatch",
             Self::Cancelled => "pc4_concrete_path_page_cancelled",
             Self::StaleSnapshot => "pc4_concrete_path_page_stale_snapshot",
             Self::CursorMismatch => "pc4_concrete_path_page_cursor_mismatch",
@@ -643,6 +647,92 @@ mod tests {
         assert!(page[0].placements().is_empty());
         assert!(page[0].target_field_ids().is_empty());
         assert!(cursor.is_exhausted());
+    }
+
+    fn row_frame_family(invalid_second_alternative: bool) -> FixedQueueConcretePathFamily {
+        let lock = |cells, y, prefix, clears| {
+            ClearraPlacementIdentity::new(Pc4GraphPiece::I, PlacementRotation::Zero, 0, y, cells)
+                .unwrap()
+                .with_graph_row_transition(prefix, clears)
+                .unwrap()
+        };
+        let alternatives = if invalid_second_alternative {
+            vec![
+                vec![lock(15, 0, 0, 1)],
+                vec![lock(15 << 10, 0, 1, 0), lock(15, 0, 0, 0)],
+            ]
+        } else {
+            vec![
+                vec![lock(15, 0, 0, 1), lock(15 << 10, 1, 0, 2)],
+                vec![lock(15 << 10, 0, 1, 0)],
+            ]
+        };
+        FixedQueueConcretePathFamily {
+            target: target_identity("row-frame-pages"),
+            start_field_id: 10,
+            terminal_field_id: 12,
+            target_field_ids: vec![11, 12],
+            alternatives,
+            maximum_page_solutions: 2,
+            cursor_token: Arc::new(()),
+        }
+    }
+
+    #[test]
+    fn row_histories_are_rebased_independently_across_page_boundaries() {
+        let family = row_frame_family(false);
+        let guard = Guard {
+            current: family.snapshot().clone(),
+            cancelled: false,
+        };
+        let mut cursor = family.cursor();
+        let first = family
+            .next_page(&mut cursor, NonZeroUsize::new(1).unwrap(), &guard)
+            .unwrap();
+        assert_eq!(first[0].placements()[1].occupied_cells(), 15 << 10);
+        assert!(!cursor.is_exhausted());
+        let second = family
+            .next_page(&mut cursor, NonZeroUsize::new(1).unwrap(), &guard)
+            .unwrap();
+        assert_eq!(second[0].placements()[1].occupied_cells(), 15);
+        assert_eq!(
+            second[0].placements()[0].y(),
+            1,
+            "replay lock stays physical"
+        );
+        assert_eq!(second[0].placements()[1].y(), 0);
+        assert!(cursor.is_exhausted());
+        let mut all_cursor = family.cursor();
+        let all = family
+            .next_page(&mut all_cursor, NonZeroUsize::new(2).unwrap(), &guard)
+            .unwrap();
+        assert_eq!(all, [first, second].concat());
+    }
+
+    #[test]
+    fn late_row_frame_error_discards_the_whole_page_and_preserves_cursor() {
+        let family = row_frame_family(true);
+        let guard = Guard {
+            current: family.snapshot().clone(),
+            cancelled: false,
+        };
+        let mut cursor = family.cursor();
+        assert_eq!(
+            family.next_page(&mut cursor, NonZeroUsize::new(2).unwrap(), &guard),
+            Err(ConcretePathPageError::RowFrameMismatch)
+        );
+        assert_eq!(cursor.next_indices, [0, 0]);
+        assert!(!cursor.is_exhausted());
+        let valid = family
+            .next_page(&mut cursor, NonZeroUsize::new(1).unwrap(), &guard)
+            .unwrap();
+        assert_eq!(valid[0].placements()[1].occupied_cells(), 15 << 10);
+        assert_eq!(cursor.next_indices, [0, 1]);
+        assert_eq!(
+            family.next_page(&mut cursor, NonZeroUsize::new(1).unwrap(), &guard),
+            Err(ConcretePathPageError::RowFrameMismatch)
+        );
+        assert_eq!(cursor.next_indices, [0, 1]);
     }
 
     #[test]
