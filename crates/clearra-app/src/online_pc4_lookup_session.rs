@@ -7,7 +7,8 @@
 
 use clearra_pc4_tablebase::{
     ActivatedSnapshot, LookupFailure, LookupHit, LookupMachine, LookupSessionId, LookupStartError,
-    LookupStep, Pc4RuleProfile, RangeRequest, RangeResponse, RangeTransportFailure, SupplyError,
+    LookupStep, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, QualifiedPc4TargetIdentity,
+    RangeRequest, RangeResponse, RangeTransportFailure, SupplyError,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,7 +20,7 @@ pub enum Pc4OfflineFallbackAuthorization {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pc4OnlineLookupRequest {
     lookup_session: LookupSessionId,
-    profile: Pc4RuleProfile,
+    target: QualifiedPc4TargetIdentity,
     field_hash: u64,
     offline_fallback: Pc4OfflineFallbackAuthorization,
 }
@@ -27,13 +28,13 @@ pub struct Pc4OnlineLookupRequest {
 impl Pc4OnlineLookupRequest {
     pub const fn new(
         lookup_session: LookupSessionId,
-        profile: Pc4RuleProfile,
+        target: QualifiedPc4TargetIdentity,
         field_hash: u64,
         offline_fallback: Pc4OfflineFallbackAuthorization,
     ) -> Self {
         Self {
             lookup_session,
-            profile,
+            target,
             field_hash,
             offline_fallback,
         }
@@ -44,7 +45,19 @@ impl Pc4OnlineLookupRequest {
     }
 
     pub const fn profile(&self) -> Pc4RuleProfile {
-        self.profile
+        self.target.profile()
+    }
+
+    pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
+    }
+
+    pub const fn use_case(&self) -> Pc4TerminalUseCase {
+        self.target.use_case()
+    }
+
+    pub const fn target_lines(&self) -> Pc4TargetLines {
+        self.target.target_lines()
     }
 
     pub const fn field_hash(&self) -> u64 {
@@ -76,7 +89,7 @@ impl Pc4FallbackCause {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pc4OfflineFallbackSignal {
     lookup_session: LookupSessionId,
-    profile: Pc4RuleProfile,
+    target: QualifiedPc4TargetIdentity,
     field_hash: u64,
     cause: Pc4FallbackCause,
 }
@@ -87,7 +100,19 @@ impl Pc4OfflineFallbackSignal {
     }
 
     pub const fn profile(&self) -> Pc4RuleProfile {
-        self.profile
+        self.target.profile()
+    }
+
+    pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
+    }
+
+    pub const fn use_case(&self) -> Pc4TerminalUseCase {
+        self.target.use_case()
+    }
+
+    pub const fn target_lines(&self) -> Pc4TargetLines {
+        self.target.target_lines()
     }
 
     pub const fn field_hash(&self) -> u64 {
@@ -115,6 +140,27 @@ pub enum AppOnlinePc4LookupStep {
     Cancelled,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppOnlinePc4LookupStartError {
+    TargetSnapshotMismatch,
+    Lookup(LookupStartError),
+}
+
+impl AppOnlinePc4LookupStartError {
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::TargetSnapshotMismatch => "pc4_online_target_snapshot_mismatch",
+            Self::Lookup(error) => error.reason(),
+        }
+    }
+}
+
+impl From<LookupStartError> for AppOnlinePc4LookupStartError {
+    fn from(value: LookupStartError) -> Self {
+        Self::Lookup(value)
+    }
+}
+
 pub struct AppOnlinePc4LookupSession {
     request: Pc4OnlineLookupRequest,
     machine: LookupMachine,
@@ -124,13 +170,17 @@ impl AppOnlinePc4LookupSession {
     pub fn start(
         snapshot: &ActivatedSnapshot,
         request: Pc4OnlineLookupRequest,
-    ) -> Result<Self, LookupStartError> {
+    ) -> Result<Self, AppOnlinePc4LookupStartError> {
+        if request.target().snapshot() != snapshot.qualified_identity() {
+            return Err(AppOnlinePc4LookupStartError::TargetSnapshotMismatch);
+        }
         let machine = LookupMachine::start(
             snapshot,
             request.profile(),
             request.field_hash(),
             request.lookup_session(),
-        )?;
+        )
+        .map_err(AppOnlinePc4LookupStartError::Lookup)?;
         Ok(Self { request, machine })
     }
 
@@ -181,7 +231,7 @@ impl AppOnlinePc4LookupSession {
             Pc4OfflineFallbackAuthorization::ExplicitlyAuthorized => {
                 Pc4OfflineFallbackDisposition::Authorized(Pc4OfflineFallbackSignal {
                     lookup_session: self.request.lookup_session(),
-                    profile: self.request.profile(),
+                    target: self.request.target().clone(),
                     field_hash: self.request.field_hash(),
                     cause,
                 })
@@ -196,8 +246,8 @@ mod tests {
     use clearra_pc4_tablebase::{
         ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, GraphTargetEncoding,
         ManifestContentIdentity, Pc4ArtifactRole, Pc4ProfileManifest, ProfileAvailability,
-        ProfileQualification, SnapshotIdentity, SnapshotVerificationAttestation,
-        SnapshotVerificationFailure, SnapshotVerificationRequest,
+        ProfileQualification, ProfileTargetCompletenessQualification, SnapshotIdentity,
+        SnapshotVerificationAttestation, SnapshotVerificationFailure, SnapshotVerificationRequest,
     };
 
     struct SyntheticVerifier;
@@ -220,11 +270,11 @@ mod tests {
         LookupSessionId::new(value).expect("non-zero lookup session")
     }
 
-    fn snapshot() -> ActivatedSnapshot {
+    fn snapshot(generation: &str) -> ActivatedSnapshot {
         let identity = SnapshotIdentity::new(
             "synthetic/repository",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "generation-a",
+            generation,
         )
         .expect("snapshot identity");
         let profiles = Pc4RuleProfile::ALL
@@ -240,30 +290,46 @@ mod tests {
                     )
                     .expect("artifact")
                 };
-                ProfileAvailability::qualified(
-                    Pc4ProfileManifest::new(
-                        profile,
-                        1,
-                        GraphTargetEncoding::U24LittleEndian,
-                        64,
-                        descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 24),
-                        descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 24),
-                        descriptor(Pc4ArtifactRole::Graph, "graph.bin", 64),
-                        ProfileQualification::new(
-                            format!("{prefix}-index-spec"),
-                            format!("{prefix}-graph-spec"),
-                            format!("{prefix}-provenance"),
-                            format!("{prefix}-kat"),
-                        )
-                        .expect("qualification"),
+                let manifest = Pc4ProfileManifest::new(
+                    profile,
+                    1,
+                    GraphTargetEncoding::U24LittleEndian,
+                    64,
+                    descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 24),
+                    descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 24),
+                    descriptor(Pc4ArtifactRole::Graph, "graph.bin", 64),
+                    ProfileQualification::new(
+                        format!("{prefix}-index-spec"),
+                        format!("{prefix}-graph-spec"),
+                        format!("{prefix}-provenance"),
+                        format!("{prefix}-kat"),
                     )
-                    .expect("profile manifest"),
+                    .expect("qualification"),
                 )
+                .expect("profile manifest");
+                let manifest = if profile == Pc4RuleProfile::Srs {
+                    manifest
+                        .with_target_qualifications(vec![
+                            ProfileTargetCompletenessQualification::new(
+                                Pc4TerminalUseCase::PcSearch,
+                                Pc4TargetLines::new(4).expect("4L target"),
+                                "synthetic-pc-terminal",
+                                "synthetic-all-outgoing-edges",
+                                "synthetic-pc-known-answer",
+                                "synthetic-offline-exact-parity",
+                            )
+                            .expect("synthetic target qualification"),
+                        ])
+                        .expect("unique target qualification")
+                } else {
+                    manifest
+                };
+                ProfileAvailability::qualified(manifest)
             })
             .collect();
         DatasetSnapshotManifest::new(
             identity,
-            ManifestContentIdentity::new("synthetic-app-lookup-manifest")
+            ManifestContentIdentity::new(format!("synthetic-app-lookup-manifest:{generation}"))
                 .expect("manifest content identity"),
             profiles,
         )
@@ -276,11 +342,47 @@ mod tests {
         id: u64,
         authorization: Pc4OfflineFallbackAuthorization,
     ) -> AppOnlinePc4LookupSession {
+        let snapshot = snapshot("generation-a");
+        let target = snapshot
+            .qualified_target(
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(4).expect("4L target"),
+            )
+            .expect("qualified PC target");
         AppOnlinePc4LookupSession::start(
-            &snapshot(),
-            Pc4OnlineLookupRequest::new(lookup_session(id), Pc4RuleProfile::Srs, 15, authorization),
+            &snapshot,
+            Pc4OnlineLookupRequest::new(lookup_session(id), target, 15, authorization),
         )
         .expect("lookup session")
+    }
+
+    #[test]
+    fn target_from_another_generation_cannot_start_a_lookup() {
+        let old_snapshot = snapshot("generation-a");
+        let old_target = old_snapshot
+            .qualified_target(
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(4).expect("4L target"),
+            )
+            .expect("old qualified target");
+        let current_snapshot = snapshot("generation-b");
+        let error = match AppOnlinePc4LookupSession::start(
+            &current_snapshot,
+            Pc4OnlineLookupRequest::new(
+                lookup_session(99),
+                old_target,
+                15,
+                Pc4OfflineFallbackAuthorization::NotAuthorized,
+            ),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("target generation mismatch must fail before Range I/O"),
+        };
+
+        assert_eq!(error, AppOnlinePc4LookupStartError::TargetSnapshotMismatch);
+        assert_eq!(error.reason(), "pc4_online_target_snapshot_mismatch");
     }
 
     #[test]
@@ -331,6 +433,8 @@ mod tests {
         };
         assert_eq!(signal.lookup_session(), lookup_session(2));
         assert_eq!(signal.profile(), Pc4RuleProfile::Srs);
+        assert_eq!(signal.use_case(), Pc4TerminalUseCase::PcSearch);
+        assert_eq!(signal.target_lines().get(), 4);
         assert_eq!(signal.field_hash(), 15);
         assert_eq!(signal.cause().reason(), "pc4_online_rate_limited");
     }
