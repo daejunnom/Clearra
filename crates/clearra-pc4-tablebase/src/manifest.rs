@@ -97,11 +97,12 @@ impl SnapshotIdentity {
         generation: impl Into<String>,
     ) -> Result<Self, ManifestError> {
         let repository = required_identity(repository.into(), "snapshot_repository_missing")?;
-        let revision = required_identity(revision.into(), "snapshot_revision_missing")?;
+        let mut revision = required_identity(revision.into(), "snapshot_revision_missing")?;
         let generation = required_identity(generation.into(), "snapshot_generation_missing")?;
         if !is_resolved_git_object_id(&revision) {
             return Err(ManifestError::UnresolvedSnapshotRevision);
         }
+        revision.make_ascii_lowercase();
         Ok(Self {
             repository,
             revision,
@@ -772,6 +773,7 @@ pub(crate) mod tests {
         Reject,
         ProviderError,
         DriftSnapshot,
+        DriftSnapshotRevision,
         DriftManifestContent,
     }
 
@@ -797,6 +799,7 @@ pub(crate) mod tests {
                 VerificationMode::ProviderError => Err(SnapshotVerificationFailure::ProviderError),
                 VerificationMode::Accept
                 | VerificationMode::DriftSnapshot
+                | VerificationMode::DriftSnapshotRevision
                 | VerificationMode::DriftManifestContent => {
                     for profile in Pc4RuleProfile::ALL {
                         assert!(matches!(
@@ -804,16 +807,25 @@ pub(crate) mod tests {
                             ProfileAvailability::Qualified(_)
                         ));
                     }
-                    let snapshot_identity = if matches!(self.mode, VerificationMode::DriftSnapshot)
-                    {
-                        SnapshotIdentity::new(
+                    let snapshot_identity = match self.mode {
+                        VerificationMode::DriftSnapshot => SnapshotIdentity::new(
                             "synthetic/other-repository",
                             SYNTHETIC_REVISION_B,
                             "other-generation",
                         )
-                        .expect("drift identity")
-                    } else {
-                        request.snapshot_identity().clone()
+                        .expect("drift identity"),
+                        VerificationMode::DriftSnapshotRevision => SnapshotIdentity::new(
+                            request.snapshot_identity().repository(),
+                            SYNTHETIC_REVISION_B,
+                            request.snapshot_identity().generation(),
+                        )
+                        .expect("revision drift identity"),
+                        VerificationMode::Accept
+                        | VerificationMode::Reject
+                        | VerificationMode::ProviderError
+                        | VerificationMode::DriftManifestContent => {
+                            request.snapshot_identity().clone()
+                        }
                     };
                     let manifest_content_identity =
                         if matches!(self.mode, VerificationMode::DriftManifestContent) {
@@ -987,6 +999,20 @@ pub(crate) mod tests {
                 .revision(),
             SYNTHETIC_REVISION_SHA256
         );
+    }
+
+    #[test]
+    fn snapshot_revision_has_one_lowercase_canonical_form() {
+        for lowercase in [SYNTHETIC_REVISION_A, SYNTHETIC_REVISION_SHA256] {
+            let uppercase = lowercase.to_ascii_uppercase();
+            let canonical =
+                SnapshotIdentity::new("repository", lowercase, "generation").expect("lowercase");
+            let normalized = SnapshotIdentity::new("repository", uppercase, "generation")
+                .expect("uppercase resolved object identity");
+
+            assert_eq!(normalized, canonical);
+            assert_eq!(normalized.revision(), lowercase);
+        }
     }
 
     #[test]
@@ -1168,6 +1194,10 @@ pub(crate) mod tests {
         for (mode, binding) in [
             (
                 VerificationMode::DriftSnapshot,
+                SnapshotVerificationBinding::SnapshotIdentity,
+            ),
+            (
+                VerificationMode::DriftSnapshotRevision,
                 SnapshotVerificationBinding::SnapshotIdentity,
             ),
             (
