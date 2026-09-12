@@ -1,7 +1,28 @@
 use crate::manifest::{ArtifactDescriptor, Pc4ArtifactRole, Pc4RuleProfile, SnapshotIdentity};
+use core::num::NonZeroU64;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LookupSessionId(NonZeroU64);
+
+impl LookupSessionId {
+    /// Creates a host-owned identity that remains unique for the lifetime of a
+    /// lookup adapter. Zero is reserved so an uninitialized transport value
+    /// cannot accidentally match a live lookup.
+    pub const fn new(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RangeRequest {
+    lookup_session: LookupSessionId,
     request_id: u64,
     snapshot: SnapshotIdentity,
     profile: Pc4RuleProfile,
@@ -12,6 +33,7 @@ pub struct RangeRequest {
 
 impl RangeRequest {
     pub(crate) fn new(
+        lookup_session: LookupSessionId,
         request_id: u64,
         snapshot: SnapshotIdentity,
         profile: Pc4RuleProfile,
@@ -21,6 +43,7 @@ impl RangeRequest {
     ) -> Self {
         debug_assert!(length > 0);
         Self {
+            lookup_session,
             request_id,
             snapshot,
             profile,
@@ -28,6 +51,10 @@ impl RangeRequest {
             offset,
             length,
         }
+    }
+
+    pub const fn lookup_session(&self) -> LookupSessionId {
+        self.lookup_session
     }
 
     pub const fn request_id(&self) -> u64 {
@@ -71,6 +98,7 @@ pub enum RangeResponseKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RangeResponse {
+    pub lookup_session: LookupSessionId,
     pub request_id: u64,
     pub snapshot: SnapshotIdentity,
     pub profile: Pc4RuleProfile,

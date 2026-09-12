@@ -19,4 +19,6 @@ pub use manifest::{
     GraphTargetEncoding, ManifestError, Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile,
     ProfileAvailability, ProfileQualification, SnapshotIdentity, UnsupportedProfileReason,
 };
-pub use protocol::{RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure};
+pub use protocol::{
+    LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
+};

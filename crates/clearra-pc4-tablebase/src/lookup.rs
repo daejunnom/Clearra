@@ -6,7 +6,9 @@ use crate::{
         FIELD_HASH_INDEX_MAGIC, FIELD_HASH_RECORD_BYTES, GRAPH_OFFSETS_MAGIC, GRAPH_OFFSET_BYTES,
         INDEX_HEADER_BYTES, RANGE_INDEX_VERSION,
     },
-    protocol::{RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure},
+    protocol::{
+        LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
+    },
     GraphTargetEncoding,
 };
 
@@ -14,6 +16,7 @@ const MAX_FIELD_HASH: u64 = (1_u64 << 40) - 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LookupHit {
+    pub lookup_session: LookupSessionId,
     pub snapshot: SnapshotIdentity,
     pub profile: Pc4RuleProfile,
     pub field_id: u32,
@@ -105,6 +108,7 @@ impl LookupStartError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SupplyError {
     Terminal,
+    LookupSessionMismatch,
     StaleRequest { expected: u64, actual: u64 },
     SnapshotMismatch,
     ProfileMismatch,
@@ -119,6 +123,7 @@ impl SupplyError {
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::Terminal => "pc4_online_lookup_terminal",
+            Self::LookupSessionMismatch => "pc4_online_stale_lookup_session",
             Self::StaleRequest { .. } => "pc4_online_stale_range_response",
             Self::SnapshotMismatch => "pc4_online_snapshot_mismatch",
             Self::ProfileMismatch => "pc4_online_profile_mismatch",
@@ -142,6 +147,7 @@ pub enum LookupStep {
 
 #[derive(Clone, Debug)]
 pub struct LookupMachine {
+    lookup_session: LookupSessionId,
     snapshot: SnapshotIdentity,
     profile: Pc4ProfileManifest,
     field_hash: u64,
@@ -173,11 +179,13 @@ impl LookupMachine {
         snapshot: &ActivatedSnapshot,
         profile: Pc4RuleProfile,
         field_hash: u64,
+        lookup_session: LookupSessionId,
     ) -> Result<Self, LookupStartError> {
         if field_hash > MAX_FIELD_HASH {
             return Err(LookupStartError::FieldHashOutsidePc4Domain { field_hash });
         }
         let mut machine = Self {
+            lookup_session,
             snapshot: snapshot.identity().clone(),
             profile: snapshot.profile(profile).clone(),
             field_hash,
@@ -227,6 +235,7 @@ impl LookupMachine {
             Phase::OffsetPair { field_id } => self.consume_offset_pair(&bytes, field_id),
             Phase::GraphRecord { field_id } => {
                 self.terminal = Some(Terminal::Hit(LookupHit {
+                    lookup_session: self.lookup_session,
                     snapshot: self.snapshot.clone(),
                     profile: self.profile.profile(),
                     field_id,
@@ -240,16 +249,11 @@ impl LookupMachine {
 
     pub fn reject_range(
         &mut self,
-        request_id: u64,
+        rejected_request: &RangeRequest,
         failure: RangeTransportFailure,
     ) -> Result<(), SupplyError> {
         let request = self.pending.as_ref().ok_or(SupplyError::Terminal)?;
-        if request.request_id() != request_id {
-            return Err(SupplyError::StaleRequest {
-                expected: request.request_id(),
-                actual: request_id,
-            });
-        }
+        validate_request_identity(request, rejected_request)?;
         self.pending = None;
         self.terminal = Some(Terminal::Failed(match failure {
             RangeTransportFailure::Offline => LookupFailure::Offline,
@@ -376,6 +380,7 @@ impl LookupMachine {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.pending = Some(RangeRequest::new(
+            self.lookup_session,
             request_id,
             self.snapshot.clone(),
             self.profile.profile(),
@@ -392,6 +397,9 @@ impl LookupMachine {
 }
 
 fn validate_response(request: &RangeRequest, response: &RangeResponse) -> Result<(), SupplyError> {
+    if response.lookup_session != request.lookup_session() {
+        return Err(SupplyError::LookupSessionMismatch);
+    }
     if response.request_id != request.request_id() {
         return Err(SupplyError::StaleRequest {
             expected: request.request_id(),
@@ -429,6 +437,34 @@ fn validate_response(request: &RangeRequest, response: &RangeResponse) -> Result
         });
     }
     if request.end_exclusive() > response.complete_length {
+        return Err(SupplyError::ContentRangeMismatch);
+    }
+    Ok(())
+}
+
+fn validate_request_identity(
+    expected: &RangeRequest,
+    actual: &RangeRequest,
+) -> Result<(), SupplyError> {
+    if actual.lookup_session() != expected.lookup_session() {
+        return Err(SupplyError::LookupSessionMismatch);
+    }
+    if actual.request_id() != expected.request_id() {
+        return Err(SupplyError::StaleRequest {
+            expected: expected.request_id(),
+            actual: actual.request_id(),
+        });
+    }
+    if actual.snapshot() != expected.snapshot() {
+        return Err(SupplyError::SnapshotMismatch);
+    }
+    if actual.profile() != expected.profile() {
+        return Err(SupplyError::ProfileMismatch);
+    }
+    if actual.artifact_descriptor() != expected.artifact_descriptor() {
+        return Err(SupplyError::ArtifactMismatch);
+    }
+    if actual.offset() != expected.offset() || actual.length() != expected.length() {
         return Err(SupplyError::ContentRangeMismatch);
     }
     Ok(())
@@ -492,6 +528,10 @@ mod tests {
     const FIELD_IDS: [u32; 3] = [2, 0, 1];
     const GRAPH: [u8; 9] = [10, 11, 12, 20, 21, 30, 31, 32, 33];
 
+    fn session(value: u64) -> LookupSessionId {
+        LookupSessionId::new(value).expect("non-zero lookup session")
+    }
+
     fn field_index() -> Vec<u8> {
         let mut bytes = index_header(FIELD_HASH_INDEX_MAGIC, HASHES.len() as u32);
         for (hash, field_id) in HASHES.into_iter().zip(FIELD_IDS) {
@@ -521,6 +561,7 @@ mod tests {
         let end = request.end_exclusive() as usize;
         machine
             .supply(RangeResponse {
+                lookup_session: request.lookup_session(),
                 request_id: request.request_id(),
                 snapshot: request.snapshot().clone(),
                 profile: request.profile(),
@@ -539,7 +580,8 @@ mod tests {
 
     fn drive(field_hash: u64, profile: Pc4RuleProfile) -> LookupStep {
         let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
-        let mut machine = LookupMachine::start(&snapshot, profile, field_hash).expect("lookup");
+        let mut machine =
+            LookupMachine::start(&snapshot, profile, field_hash, session(1)).expect("lookup");
         let field_index = field_index();
         let graph_offsets = graph_offsets();
         loop {
@@ -562,6 +604,7 @@ mod tests {
         assert_eq!(
             drive(15, Pc4RuleProfile::Srs),
             LookupStep::Hit(LookupHit {
+                lookup_session: session(1),
                 snapshot: SnapshotIdentity::new(
                     "synthetic/repository",
                     "immutable-revision-a",
@@ -577,6 +620,7 @@ mod tests {
         assert_eq!(
             drive(30, Pc4RuleProfile::SrsX),
             LookupStep::Hit(LookupHit {
+                lookup_session: session(1),
                 snapshot: SnapshotIdentity::new(
                     "synthetic/repository",
                     "immutable-revision-a",
@@ -599,12 +643,14 @@ mod tests {
     #[test]
     fn stale_snapshot_short_body_and_whole_body_do_not_advance_machine() {
         let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
-        let mut machine = LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15).expect("lookup");
+        let mut machine =
+            LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15, session(1)).expect("lookup");
         let LookupStep::NeedRange(request) = machine.step() else {
             panic!("initial Range request")
         };
         let source = field_index();
         let base = RangeResponse {
+            lookup_session: request.lookup_session(),
             request_id: request.request_id(),
             snapshot: request.snapshot().clone(),
             profile: request.profile(),
@@ -615,6 +661,13 @@ mod tests {
             complete_length: source.len() as u64,
             bytes: source[..request.length() as usize].to_vec(),
         };
+
+        let mut stale_lookup = base.clone();
+        stale_lookup.lookup_session = session(2);
+        assert_eq!(
+            machine.supply(stale_lookup),
+            Err(SupplyError::LookupSessionMismatch)
+        );
 
         let mut stale = base.clone();
         stale.snapshot = SnapshotIdentity::new("repository", "other-revision", "other-generation")
@@ -650,22 +703,24 @@ mod tests {
     #[test]
     fn transport_failures_remain_distinct_and_terminal() {
         let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
-        let mut offline = LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15).expect("lookup");
+        let mut offline =
+            LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15, session(1)).expect("lookup");
         let LookupStep::NeedRange(request) = offline.step() else {
             panic!("request")
         };
         offline
-            .reject_range(request.request_id(), RangeTransportFailure::Offline)
+            .reject_range(&request, RangeTransportFailure::Offline)
             .expect("offline rejection");
         assert_eq!(offline.step(), LookupStep::Failed(LookupFailure::Offline));
 
-        let mut limited = LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15).expect("lookup");
+        let mut limited =
+            LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15, session(2)).expect("lookup");
         let LookupStep::NeedRange(request) = limited.step() else {
             panic!("request")
         };
         limited
             .reject_range(
-                request.request_id(),
+                &request,
                 RangeTransportFailure::RateLimited {
                     retry_after_seconds: Some(30),
                 },
@@ -680,9 +735,31 @@ mod tests {
     }
 
     #[test]
+    fn stale_failure_from_another_lookup_session_does_not_terminate_current_lookup() {
+        let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
+        let old = LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15, session(1))
+            .expect("old lookup");
+        let LookupStep::NeedRange(old_request) = old.step() else {
+            panic!("old request")
+        };
+        let mut current = LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 30, session(2))
+            .expect("current lookup");
+        let LookupStep::NeedRange(current_request) = current.step() else {
+            panic!("current request")
+        };
+
+        assert_eq!(
+            current.reject_range(&old_request, RangeTransportFailure::Timeout),
+            Err(SupplyError::LookupSessionMismatch)
+        );
+        assert_eq!(current.step(), LookupStep::NeedRange(current_request));
+    }
+
+    #[test]
     fn malformed_index_header_fails_closed() {
         let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
-        let mut machine = LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15).expect("lookup");
+        let mut machine =
+            LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15, session(1)).expect("lookup");
         let LookupStep::NeedRange(request) = machine.step() else {
             panic!("request")
         };
@@ -701,7 +778,7 @@ mod tests {
     fn empty_graph_record_is_a_format_failure_not_a_hit() {
         let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
         let mut machine =
-            LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15).expect("lookup");
+            LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15, session(1)).expect("lookup");
         machine.pending = None;
         machine.consume_offset_pair(&[0; 8], 0);
         assert_eq!(
@@ -715,7 +792,8 @@ mod tests {
     #[test]
     fn cancellation_is_terminal_and_rejects_late_bytes() {
         let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
-        let mut machine = LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15).expect("lookup");
+        let mut machine =
+            LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15, session(1)).expect("lookup");
         let LookupStep::NeedRange(request) = machine.step() else {
             panic!("request")
         };
@@ -724,6 +802,7 @@ mod tests {
         let bytes = field_index();
         assert_eq!(
             machine.supply(RangeResponse {
+                lookup_session: request.lookup_session(),
                 request_id: request.request_id(),
                 snapshot: request.snapshot().clone(),
                 profile: request.profile(),
