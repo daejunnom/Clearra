@@ -83,8 +83,8 @@ pub(crate) use setup_parallel::{
     WasmSetupParallelWorkerAdvance,
 };
 pub use tiling_parallel::{
-    WasmPackedTilingIdentity, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
-    WasmTilingRootResultMerger, WasmTilingRootWorker,
+    WasmPackedTilingIdentity, WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance,
+    WasmTilingRootChunk, WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
 #[cfg(feature = "webgpu-search")]
 pub use webgpu_distributed::WasmWebGpuCandidateProducer;
@@ -186,4 +186,32 @@ fn mix_digest(mut hash: u64, value: u64) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+/// Combines one member into a stable multiset digest. Unlike `mix_digest`,
+/// this operation is associative and commutative, so independently scheduled
+/// geometry roots produce the same candidate-set evidence as serial search.
+fn mix_order_independent_candidate_digest(digest: u64, value: u64) -> u64 {
+    let mut contribution = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    contribution = (contribution ^ (contribution >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    contribution = (contribution ^ (contribution >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    contribution ^= contribution >> 31;
+    digest.wrapping_add(contribution)
+}
+
+fn uses_order_independent_pc_candidate_digest(problem: &clearra_problem::SearchProblem) -> bool {
+    let Some(universe) = problem.piece_source().materialized_universe() else {
+        return false;
+    };
+    problem.objective().kind()
+        == clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
+        && problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
+        && !problem.objective().score().requested()
+        && !problem.objective().execution_constraints().requested()
+        && !problem.solution_probability_policy().requested()
+        && !problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+        && !problem.backend_policy().tablebase_requested()
+        && standard_bag_coverage::StandardBagCoverage::supports(universe, problem.initial_hold())
 }

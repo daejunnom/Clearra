@@ -67,7 +67,7 @@ use super::{
         GeometrySearch,
     },
     kick_profiles::replay_profile_ids,
-    mix_digest,
+    mix_digest, mix_order_independent_candidate_digest,
     pc4_tablebase::{loaded_pc4_compact_tablebase, pc4_tablebase_profile_identity},
     reachability::ReachabilityMetrics,
     standard_bag_coverage::StandardBagCoverage,
@@ -680,6 +680,7 @@ pub(crate) struct WasmExactSearchSession {
     solution_coverage_bytes: usize,
     packing_candidate_count: usize,
     packing_candidate_digest: u64,
+    order_independent_candidate_digest: bool,
     coverage_row_count: usize,
     pattern_verified_execution_count: usize,
     build_variant_count: u128,
@@ -1323,6 +1324,8 @@ impl WasmExactSearchSession {
         let retain_pc_chance_coverage_evidence = problem
             .pc_chance_evidence_policy()
             .retains_pc_coverage_evidence();
+        let order_independent_candidate_digest =
+            super::uses_order_independent_pc_candidate_digest(problem.as_ref());
         let session = Self {
             problem: Arc::clone(&problem),
             problem_retention,
@@ -1350,6 +1353,7 @@ impl WasmExactSearchSession {
             solution_coverage_bytes: 0,
             packing_candidate_count: 0,
             packing_candidate_digest: 0,
+            order_independent_candidate_digest,
             coverage_row_count: 0,
             pattern_verified_execution_count: 0,
             build_variant_count: 0,
@@ -1861,6 +1865,52 @@ impl WasmExactSearchSession {
         Ok(self)
     }
 
+    /// Converts the lexicographic `(root, local-candidate)` rank used by
+    /// independently scheduled browser workers into a continuous canonical
+    /// root-order candidate ordinal for the merged result.
+    pub(super) fn normalize_distributed_root_representative_rank(
+        &mut self,
+        root_candidate_counts: &[usize],
+    ) -> Result<(), WasmExactSearchError> {
+        let Some(rank) = self.representative_rank else {
+            return Ok(());
+        };
+        let root_ordinal = usize::try_from(rank >> 32).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_pc_root_representative_rank_invalid")
+        })?;
+        let local_ordinal = usize::try_from(rank & u64::from(u32::MAX)).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_pc_root_representative_rank_invalid")
+        })?;
+        let root_count = root_candidate_counts.get(root_ordinal).copied().ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_pc_root_representative_rank_invalid"),
+        )?;
+        if local_ordinal >= root_count {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_pc_root_representative_rank_invalid",
+            ));
+        }
+        let prefix = root_candidate_counts[..root_ordinal]
+            .iter()
+            .try_fold(0_u64, |total, count| {
+                total.checked_add(u64::try_from(*count).ok()?)
+            })
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_pc_root_representative_rank_overflow",
+            ))?;
+        self.representative_rank = Some(
+            prefix
+                .checked_add(u64::try_from(local_ordinal).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_pc_root_representative_rank_overflow",
+                    )
+                })?)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_pc_root_representative_rank_overflow",
+                ))?,
+        );
+        Ok(())
+    }
+
     pub(super) fn distributed_tiling_root_order(&self) -> Result<Vec<u32>, WasmExactSearchError> {
         let targets = self
             .geometry
@@ -1885,6 +1935,25 @@ impl WasmExactSearchSession {
             )
         });
         self.validate_canonical_tiling_allocation()?;
+        Ok(roots)
+    }
+
+    pub(super) fn distributed_pc_root_order(&self) -> Result<Vec<u32>, WasmExactSearchError> {
+        let targets = self
+            .geometry
+            .targets()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_pc_root_targets_unavailable",
+            ))?;
+        let mut roots = Vec::new();
+        roots.try_reserve_exact(targets.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_pc_root_order_storage_unavailable")
+        })?;
+        for index in 0..targets.len() {
+            roots.push(u32::try_from(index).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_pc_root_index_overflow")
+            })?);
+        }
         Ok(roots)
     }
 
@@ -2602,10 +2671,17 @@ impl WasmExactSearchSession {
         }
         let candidate_ordinal = external_ordinal.unwrap_or(self.packing_candidate_count as u64);
         self.packing_candidate_count += 1;
-        self.packing_candidate_digest = mix_digest(
-            self.packing_candidate_digest,
-            candidate.identity.bucket_hash(),
-        );
+        self.packing_candidate_digest = if self.order_independent_candidate_digest {
+            mix_order_independent_candidate_digest(
+                self.packing_candidate_digest,
+                candidate.identity.bucket_hash(),
+            )
+        } else {
+            mix_digest(
+                self.packing_candidate_digest,
+                candidate.identity.bucket_hash(),
+            )
+        };
         if self.problem.objective().kind() == ObjectiveKind::Tiling {
             return self.observe_tiling_candidate(candidate, candidate_ordinal);
         }

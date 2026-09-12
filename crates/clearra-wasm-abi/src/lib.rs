@@ -1248,6 +1248,18 @@ pub extern "C" fn clearra_wasm_distributed_tiling_geometry_parallel() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_root_task_parallel() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .is_some_and(WasmDistributedCoordinator::root_task_parallel)
+            .into()
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_requested_backend() -> u32 {
     ABI_STATE.with(|state| {
         state
