@@ -191,6 +191,22 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         Add-ArchitectureError 'PC4 completeness evidence constructor must remain unavailable to product/provider adapters until target-specific completeness is qualified'
     }
 
+    $setupAcceleration = Read-Text 'crates/clearra-app/src/setup_pc_candidate_acceleration.rs'
+    foreach ($required in @(
+        'target: Pc4TargetLines,',
+        'target: QualifiedPc4TargetIdentity,',
+        'Pc4TerminalUseCase::SetupSearch',
+        'qualification.target.snapshot()'
+    )) {
+        if (-not $setupAcceleration.Contains($required)) {
+            Add-ArchitectureError "Setup PC acceleration must consume shared target authority '$required'"
+        }
+    }
+    if ($setupAcceleration.Contains('SetupPcAccelerationTarget') -or
+        $setupAcceleration -match '(?m)^\s+snapshot:\s*QualifiedSnapshotIdentity,') {
+        Add-ArchitectureError 'Setup PC acceleration must not duplicate target or snapshot qualification authority'
+    }
+
     $manifest = Read-Text 'crates/clearra-pc4-tablebase/src/manifest.rs'
     foreach ($required in @(
         'pub struct Pc4TargetLines',
