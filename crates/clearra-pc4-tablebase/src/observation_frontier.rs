@@ -411,18 +411,28 @@ impl Pc4ObservationFrontierCursor {
 /// not infer bag provenance or an ordered hidden sequence.
 #[derive(Clone, Debug)]
 pub struct Pc4ObservationFrontierFamily {
-    initial_visible_queue: Vec<Pc4GraphPiece>,
-    preview_length: usize,
+    queue_scope: Pc4ObservationQueueScope,
     observation_width: usize,
-    hidden_source_state: Pc4BagState,
-    initial_hold: FixedQueueHoldState,
-    placement_count: usize,
     reveal_family: Pc4BagRevealFamily,
     budgets: Pc4ObservationFrontierBudgets,
     cursor_token: Arc<()>,
 }
 
-impl Pc4ObservationFrontierFamily {
+/// Exact queue and hold scope consumed by one observation family. This is
+/// retained beside the reveal enumerator so downstream completeness evidence
+/// cannot silently cross to a different visible prefix, bag generation, or
+/// placement horizon.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Pc4ObservationQueueScope {
+    initial_visible_queue: Vec<Pc4GraphPiece>,
+    preview_length: usize,
+    hidden_source_state: Pc4BagState,
+    hidden_draws: usize,
+    initial_hold: FixedQueueHoldState,
+    placement_count: usize,
+}
+
+impl Pc4ObservationQueueScope {
     pub fn initial_visible_queue(&self) -> &[Pc4GraphPiece] {
         &self.initial_visible_queue
     }
@@ -435,6 +445,10 @@ impl Pc4ObservationFrontierFamily {
         self.hidden_source_state
     }
 
+    pub const fn hidden_draws(&self) -> usize {
+        self.hidden_draws
+    }
+
     pub const fn initial_hold(&self) -> FixedQueueHoldState {
         self.initial_hold
     }
@@ -442,9 +456,35 @@ impl Pc4ObservationFrontierFamily {
     pub const fn placement_count(&self) -> usize {
         self.placement_count
     }
+}
+
+impl Pc4ObservationFrontierFamily {
+    pub const fn queue_scope(&self) -> &Pc4ObservationQueueScope {
+        &self.queue_scope
+    }
+
+    pub fn initial_visible_queue(&self) -> &[Pc4GraphPiece] {
+        self.queue_scope.initial_visible_queue()
+    }
+
+    pub const fn preview_length(&self) -> usize {
+        self.queue_scope.preview_length()
+    }
+
+    pub const fn hidden_source_state(&self) -> Pc4BagState {
+        self.queue_scope.hidden_source_state()
+    }
+
+    pub const fn initial_hold(&self) -> FixedQueueHoldState {
+        self.queue_scope.initial_hold()
+    }
+
+    pub const fn placement_count(&self) -> usize {
+        self.queue_scope.placement_count()
+    }
 
     pub const fn hidden_draws(&self) -> usize {
-        self.reveal_family.hidden_draws()
+        self.queue_scope.hidden_draws()
     }
 
     pub const fn total_reveal_sequences(&self) -> u128 {
@@ -453,6 +493,10 @@ impl Pc4ObservationFrontierFamily {
 
     pub const fn budgets(&self) -> Pc4ObservationFrontierBudgets {
         self.budgets
+    }
+
+    pub(crate) fn reveal_family(&self) -> Pc4BagRevealFamily {
+        self.reveal_family.clone()
     }
 
     pub fn cursor(&self) -> Pc4ObservationFrontierCursor {
@@ -536,6 +580,7 @@ impl Pc4ObservationFrontierFamily {
                 .cloned()
                 .ok_or(Pc4ObservationFrontierPageError::CursorInvariantViolation)?;
             let queue_length = self
+                .queue_scope
                 .initial_visible_queue
                 .len()
                 .checked_add(reveal.pieces().len())
@@ -563,14 +608,14 @@ impl Pc4ObservationFrontierFamily {
             queue
                 .try_reserve_exact(queue_length)
                 .map_err(|_| Pc4ObservationFrontierPageError::AllocationFailed)?;
-            queue.extend_from_slice(&self.initial_visible_queue);
+            queue.extend_from_slice(&self.queue_scope.initial_visible_queue);
             queue.extend_from_slice(reveal.pieces());
             let concrete_supply_queue: Arc<[Pc4GraphPiece]> = Arc::from(queue.into_boxed_slice());
             let expansion = expand_fixed_queue_hold(
                 FixedQueueHoldExpansionRequest::new(
                     &concrete_supply_queue,
-                    self.initial_hold,
-                    self.placement_count,
+                    self.queue_scope.initial_hold,
+                    self.queue_scope.placement_count,
                     self.budgets.hold(),
                 ),
                 &GuardAdapter(guard),
@@ -684,12 +729,15 @@ where
     check_prepare_guard(guard)?;
 
     Ok(Pc4ObservationFrontierFamily {
-        initial_visible_queue,
-        preview_length: request.preview_length,
+        queue_scope: Pc4ObservationQueueScope {
+            initial_visible_queue,
+            preview_length: request.preview_length,
+            hidden_source_state: request.hidden_source_state,
+            hidden_draws: request.hidden_draws,
+            initial_hold: request.initial_hold,
+            placement_count: request.placement_count,
+        },
         observation_width,
-        hidden_source_state: request.hidden_source_state,
-        initial_hold: request.initial_hold,
-        placement_count: request.placement_count,
         reveal_family,
         budgets: request.budgets,
         cursor_token: Arc::new(()),

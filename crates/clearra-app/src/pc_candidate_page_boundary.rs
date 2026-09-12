@@ -678,6 +678,40 @@ pub struct PcCandidateReducerInput {
 }
 
 impl PcCandidateReducerInput {
+    /// Only the observation adapter's sealed, completely exhausted family may
+    /// cross this seam. Raw candidate parts cannot mint completeness evidence.
+    pub(crate) fn from_complete_observation_union(
+        family: &crate::pc4_observation_candidate_adapter::Pc4CompleteObservationCandidateFamily,
+    ) -> Result<Self, PcCandidateBoundaryError> {
+        let source = family.source();
+        let candidates = family.canonical_candidates();
+        validate_candidate_order(candidates)?;
+        if candidates
+            .iter()
+            .any(|candidate| candidate.initial_board_mask() != source.initial_board_mask())
+        {
+            return Err(PcCandidateBoundaryError::InitialBoardMismatch);
+        }
+        let exact_candidate_count = u64::try_from(candidates.len())
+            .map_err(|_| PcCandidateBoundaryError::CandidateOrdinalOverflow)?;
+        let candidate_set_digest = PcCandidateSetDigest::calculate_parts(&[], candidates)?;
+        let evidence = PcCandidateCompletenessEvidence::from_verified_complete_source(
+            source.clone(),
+            Some(family.target().clone()),
+            exact_candidate_count,
+            candidate_set_digest,
+        )?;
+        let mut owned_candidates = Vec::new();
+        owned_candidates
+            .try_reserve_exact(candidates.len())
+            .map_err(|_| PcCandidateBoundaryError::CandidateAllocationFailed)?;
+        owned_candidates.extend_from_slice(candidates);
+        Ok(Self {
+            universe_identity: PcCandidateUniverseIdentity::from_complete_evidence(evidence)?,
+            candidates: owned_candidates,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn from_test_parts(
         source: PcCandidateSourceBinding,

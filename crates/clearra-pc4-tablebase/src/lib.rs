@@ -17,6 +17,7 @@ mod manifest;
 mod materializer;
 mod observation_frontier;
 mod observation_graph_traversal;
+mod observation_reveal_ledger;
 mod protocol;
 mod range_admission;
 mod range_fragment_cache;
@@ -96,13 +97,18 @@ pub use observation_frontier::{
     Pc4ObservationFrontierEntry, Pc4ObservationFrontierFamily, Pc4ObservationFrontierGuard,
     Pc4ObservationFrontierPage, Pc4ObservationFrontierPageBudgetKind,
     Pc4ObservationFrontierPageError, Pc4ObservationFrontierPrepareBudgetKind,
-    Pc4ObservationFrontierPrepareError, Pc4ObservationFrontierRequest,
+    Pc4ObservationFrontierPrepareError, Pc4ObservationFrontierRequest, Pc4ObservationQueueScope,
 };
 pub use observation_graph_traversal::{
     prepare_pc4_observation_graph_family, Pc4ObservationGraphBudgetExceeded,
     Pc4ObservationGraphBudgetKind, Pc4ObservationGraphBudgets, Pc4ObservationGraphCursor,
     Pc4ObservationGraphFamily, Pc4ObservationGraphPage, Pc4ObservationGraphPageError,
     Pc4ObservationGraphPath, Pc4ObservationGraphPrepareError, Pc4ObservationGraphRequest,
+};
+pub use observation_reveal_ledger::{
+    Pc4ObservationRevealLedgerCursor, Pc4ObservationRevealLedgerFamily,
+    Pc4ObservationRevealLedgerPage, Pc4ObservationRevealLedgerPageError,
+    Pc4ObservationRevealOutcome,
 };
 pub use protocol::{
     LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
