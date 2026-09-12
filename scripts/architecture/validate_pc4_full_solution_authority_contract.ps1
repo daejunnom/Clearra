@@ -241,6 +241,30 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         Add-ArchitectureError 'App PC4 lookup must not expose a raw response or transport-failure supply bypass'
     }
 
+    $inputDisclosure = Read-Text 'crates/clearra-app/src/pc4_input_disclosure_policy.rs'
+    foreach ($required in @(
+        'Pc4QueueDisclosure::FixedExplicit(queue)',
+        'Pc4InputSurface::NonInteractiveCli',
+        'Pc4InputDisclosureDecision::RequestBagRemainder',
+        'Pc4InputDisclosureRejection::NonInteractiveBagDisclosureRequired',
+        'target: QualifiedPc4TargetIdentity',
+        'Pc4InputDisclosureStopReason::UserRefused'
+    )) {
+        if (-not $inputDisclosure.Contains($required)) {
+            Add-ArchitectureError "App PC4 input-disclosure boundary is missing '$required'"
+        }
+    }
+    foreach ($forbidden in @(
+        'LookupMachine',
+        'RangeRequest',
+        'AppOnlinePc4LookupSession',
+        'Pc4OfflineFallbackAuthorization'
+    )) {
+        if ($inputDisclosure.Contains($forbidden)) {
+            Add-ArchitectureError "App PC4 input-disclosure boundary must not perform lookup or authorize fallback '$forbidden'"
+        }
+    }
+
     $setupAcceleration = Read-Text 'crates/clearra-app/src/setup_pc_candidate_acceleration.rs'
     foreach ($required in @(
         'target: Pc4TargetLines,',

@@ -36,6 +36,8 @@ mod objective_contract;
 #[cfg(feature = "online-pc4-tablebase")]
 mod online_pc4_lookup_session;
 mod parity_page_store;
+#[cfg(feature = "online-pc4-tablebase")]
+mod pc4_input_disclosure_policy;
 mod pc_allspin_result;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc_candidate_page_boundary;
@@ -212,6 +214,15 @@ pub use online_pc4_lookup_session::{
     Pc4OfflineFallbackSignal, Pc4OnlineLookupField, Pc4OnlineLookupRequest,
 };
 pub use parity_page_store::{ParityReportPageSource, ParityReportPageStore};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc4_input_disclosure_policy::{
+    prepare_pc4_input_disclosure, Pc4BagDisclosure, Pc4BagDisclosureField,
+    Pc4BagDisclosureRequirement, Pc4HiddenQueueDisclosure, Pc4HiddenQueueSource,
+    Pc4HiddenRevealScope, Pc4HiddenRevealScopeError, Pc4InputDisclosureDecision,
+    Pc4InputDisclosureRejection, Pc4InputDisclosureRequest, Pc4InputDisclosureStop,
+    Pc4InputDisclosureStopReason, Pc4InputSurface, Pc4PartialBagRemainder, Pc4PreparedOnlineInput,
+    Pc4PreparedQueueInput, Pc4QueueDisclosure,
+};
 pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc_candidate_page_boundary::{
