@@ -438,6 +438,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "clearra-pc4-tablebase"
+version = "0.8.0"
+
+[[package]]
 name = "clearra-piece-registry"
 version = "0.8.0"
 dependencies = [
