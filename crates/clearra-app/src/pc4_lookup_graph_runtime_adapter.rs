@@ -135,6 +135,12 @@ pub enum Pc4LookupGraphCacheError {
         existing_field_id: u32,
         actual_field_id: u32,
     },
+    TerminalFieldIdentityMismatch {
+        expected_field_id: u32,
+        expected_field_hash: u64,
+        actual_field_id: u32,
+        actual_field_hash: u64,
+    },
     BudgetExceeded {
         kind: Pc4LookupGraphCacheBudgetKind,
         limit: usize,
@@ -159,6 +165,9 @@ impl Pc4LookupGraphCacheError {
             Self::ConflictingRecord { .. } => "pc4_lookup_graph_cache_record_drift",
             Self::FieldHashMappedToDifferentId { .. } => {
                 "pc4_lookup_graph_cache_field_identity_drift"
+            }
+            Self::TerminalFieldIdentityMismatch { .. } => {
+                "pc4_lookup_graph_cache_terminal_field_identity_mismatch"
             }
             Self::BudgetExceeded { .. } => "pc4_lookup_graph_cache_budget_exceeded",
             Self::AccountingOverflow => "pc4_lookup_graph_cache_accounting_overflow",
@@ -395,6 +404,17 @@ impl Pc4LookupGraphCache {
             return Err(Pc4LookupGraphCacheError::FieldIdOutsideDomain {
                 field_id: hit.field_id,
                 field_count: self.field_count,
+            });
+        }
+        let terminal = self.target.terminal_field();
+        let claims_terminal_id = hit.field_id == terminal.field_id();
+        let claims_terminal_hash = hit.field_hash == terminal.field_hash();
+        if claims_terminal_id != claims_terminal_hash {
+            return Err(Pc4LookupGraphCacheError::TerminalFieldIdentityMismatch {
+                expected_field_id: terminal.field_id(),
+                expected_field_hash: terminal.field_hash(),
+                actual_field_id: hit.field_id,
+                actual_field_hash: hit.field_hash,
             });
         }
         if hit.graph_record.len() > self.maximum_graph_record_bytes as usize {
@@ -749,10 +769,10 @@ mod tests {
     use clearra_pc4_tablebase::{
         clearra_board64_mask_to_hydra_field_hash_v1, ArtifactDescriptor, DatasetSnapshotManifest,
         DatasetSnapshotVerifier, FieldIdIndexRelation, LookupSessionId, ManifestContentIdentity,
-        Pc4ArtifactRole, Pc4ProfileManifest, Pc4TargetLines, Pc4TerminalUseCase,
-        ProfileAvailability, ProfileQualification, ProfileTargetCompletenessQualification,
-        SnapshotIdentity, SnapshotVerificationAttestation, SnapshotVerificationFailure,
-        SnapshotVerificationRequest,
+        Pc4ArtifactRole, Pc4ProfileManifest, Pc4TargetLines, Pc4TerminalFieldIdentity,
+        Pc4TerminalUseCase, ProfileAvailability, ProfileQualification,
+        ProfileTargetCompletenessQualification, SnapshotIdentity, SnapshotVerificationAttestation,
+        SnapshotVerificationFailure, SnapshotVerificationRequest,
     };
 
     use super::*;
@@ -833,6 +853,10 @@ mod tests {
                         ProfileTargetCompletenessQualification::new(
                             use_case,
                             Pc4TargetLines::new(4).expect("4L target"),
+                            Pc4TerminalFieldIdentity::full_rows(
+                                Pc4TargetLines::new(4).expect("4L target"),
+                                field_count - 1,
+                            ),
                             format!("{prefix}-{use_case:?}-terminal"),
                             format!("{prefix}-{use_case:?}-outgoing"),
                             format!("{prefix}-{use_case:?}-known-answer"),
@@ -1047,6 +1071,31 @@ mod tests {
             Err(Pc4LookupGraphCacheError::FieldIdOutsideDomain {
                 field_id: 4,
                 field_count: 4,
+            })
+        );
+        let terminal = qualified_target.terminal_field();
+        assert_eq!(
+            cache.admit(
+                &qualified_target,
+                empty_hit(&qualified_target, 6, terminal.field_id(), 0),
+            ),
+            Err(Pc4LookupGraphCacheError::TerminalFieldIdentityMismatch {
+                expected_field_id: terminal.field_id(),
+                expected_field_hash: terminal.field_hash(),
+                actual_field_id: terminal.field_id(),
+                actual_field_hash: 0,
+            })
+        );
+        assert_eq!(
+            cache.admit(
+                &qualified_target,
+                empty_hit(&qualified_target, 7, 0, terminal.field_hash()),
+            ),
+            Err(Pc4LookupGraphCacheError::TerminalFieldIdentityMismatch {
+                expected_field_id: terminal.field_id(),
+                expected_field_hash: terminal.field_hash(),
+                actual_field_id: 0,
+                actual_field_hash: terminal.field_hash(),
             })
         );
         let mut malformed = empty_hit(&qualified_target, 6, 0, 0);
@@ -1339,7 +1388,7 @@ mod tests {
         const WIDTH: usize = 10;
         const ROW_MASK: u64 = (1_u64 << WIDTH) - 1;
 
-        let snapshot = activated_snapshot("generation-post-clear", 4);
+        let snapshot = activated_snapshot("generation-post-clear", 8);
         let qualified_target = target(&snapshot, Pc4RuleProfile::Srs, Pc4TerminalUseCase::PcSearch);
         let mut cache = Pc4LookupGraphCache::new(&snapshot, qualified_target.clone(), limits())
             .expect("bound cache");
