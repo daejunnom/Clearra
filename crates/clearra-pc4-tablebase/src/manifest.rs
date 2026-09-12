@@ -1177,6 +1177,34 @@ pub(crate) mod tests {
         .expect("fully qualified synthetic snapshot")
     }
 
+    pub(crate) fn activated_snapshot_for_generation(
+        generation: impl Into<String>,
+        manifest_content_identity: impl Into<String>,
+    ) -> ActivatedSnapshot {
+        activated_snapshot_for_revision_generation(
+            SYNTHETIC_REVISION_A,
+            generation,
+            manifest_content_identity,
+        )
+    }
+
+    pub(crate) fn activated_snapshot_for_revision_generation(
+        revision: impl Into<String>,
+        generation: impl Into<String>,
+        manifest_content_identity: impl Into<String>,
+    ) -> ActivatedSnapshot {
+        qualified_manifest(
+            SnapshotIdentity::new("synthetic/repository", revision, generation)
+                .expect("synthetic identity"),
+            ManifestContentIdentity::new(manifest_content_identity)
+                .expect("synthetic manifest content identity"),
+            2,
+            8,
+        )
+        .activate(&mut SyntheticVerifier)
+        .expect("fully qualified synthetic snapshot")
+    }
+
     pub(crate) fn qualified_snapshot_identity(
         generation: impl Into<String>,
         manifest_content_identity: impl Into<String>,

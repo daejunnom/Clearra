@@ -36,6 +36,21 @@ named synthetic verifiers and confer no production authority.
 V-star recommendations, policy/value arrays, Krylov data, and n-PC probability
 are outside this crate and are not fetched or decoded by it.
 
+The feature-off generation registry stores only already activated snapshots.
+A request pins one immutable `ActivatedSnapshot` (including its verified
+manifest) before lookup, so later promotion or registry eviction cannot change
+that request's identity. One newly qualified generation may be staged and then
+atomically promoted. The previous current generation enters a configurable,
+strictly bounded N-generation rollback window; an in-flight `Arc` remains valid
+even after registry eviction. Exact duplicate staging is idempotent, while a
+reused repository/generation label with a different revision or qualification
+fails closed. Optimistic registry versions and stage tokens make stale,
+cancelled, and repeated writes transactional. Fetch and qualification failures
+have a typed no-mutation outcome and never imply offline execution. This pure
+registry performs no discovery, network/filesystem I/O, graph parsing, product
+registration, or runtime capability activation, and it compiles no upstream
+revision or dataset digest into the binary.
+
 The graph state domain is bounded to fields no higher than four rows. That
 does not make this an exactly-four-lines-only recommendation table, nor does it
 automatically authorize every shorter target. A PC or Setup accelerator for a
