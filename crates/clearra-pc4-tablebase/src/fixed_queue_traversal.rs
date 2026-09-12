@@ -1,3 +1,4 @@
+// SRP rationale: bounded fixed-queue full outgoing-edge traversal is this module's single change reason.
 use core::{fmt, num::NonZeroUsize};
 
 use crate::{Pc4GraphPiece, Pc4RuleProfile, QualifiedPc4GraphEdge, SnapshotIdentity};
