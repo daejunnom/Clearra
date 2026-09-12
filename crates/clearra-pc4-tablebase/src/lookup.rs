@@ -78,6 +78,13 @@ pub enum FormatMismatch {
         graph_bytes: u64,
     },
     GraphRecordEmpty,
+    GraphFirstOffsetNotZero {
+        offset: u32,
+    },
+    GraphTerminalOffsetMismatch {
+        offset: u32,
+        graph_bytes: u64,
+    },
     GraphRecordTooLarge {
         bytes: u64,
         maximum: u32,
@@ -95,6 +102,8 @@ impl FormatMismatch {
             Self::GraphOffsetsDescending { .. } => "pc4_online_graph_offsets_descending",
             Self::GraphOffsetOutsideArtifact { .. } => "pc4_online_graph_offset_outside_artifact",
             Self::GraphRecordEmpty => "pc4_online_graph_record_empty",
+            Self::GraphFirstOffsetNotZero { .. } => "pc4_online_graph_first_offset_not_zero",
+            Self::GraphTerminalOffsetMismatch { .. } => "pc4_online_graph_terminal_offset_mismatch",
             Self::GraphRecordTooLarge { .. } => "pc4_online_graph_record_too_large",
         }
     }
@@ -492,6 +501,21 @@ impl LookupMachine {
             self.fail_format(FormatMismatch::GraphRecordEmpty);
             return;
         }
+        // Qualified graph records form a headerless, gap-free file. Check the
+        // boundary whenever this pair already contains it; do not add a remote
+        // request to every lookup. Interior pairs still require generation
+        // qualification and the materializer's source-hash verification.
+        if field_id == 0 && start != 0 {
+            self.fail_format(FormatMismatch::GraphFirstOffsetNotZero { offset: start });
+            return;
+        }
+        if field_id == self.profile.field_count() - 1 && u64::from(end) != graph_bytes {
+            self.fail_format(FormatMismatch::GraphTerminalOffsetMismatch {
+                offset: end,
+                graph_bytes,
+            });
+            return;
+        }
         if record_bytes > u64::from(self.profile.maximum_graph_record_bytes()) {
             self.fail_format(FormatMismatch::GraphRecordTooLarge {
                 bytes: record_bytes,
@@ -807,6 +831,56 @@ mod tests {
                 graph_record: vec![20, 21],
             })
         );
+    }
+
+    #[test]
+    fn graph_boundary_offsets_reject_in_bounds_cross_artifact_indices() {
+        let snapshot = activated_snapshot(3, 9);
+        for (field_id, start, end, expected) in [
+            (
+                0,
+                1_u32,
+                3_u32,
+                FormatMismatch::GraphFirstOffsetNotZero { offset: 1 },
+            ),
+            (
+                2,
+                5,
+                8,
+                FormatMismatch::GraphTerminalOffsetMismatch {
+                    offset: 8,
+                    graph_bytes: 9,
+                },
+            ),
+        ] {
+            for profile in [Pc4RuleProfile::Srs, Pc4RuleProfile::SrsX] {
+                let mut machine =
+                    LookupMachine::start_by_field_id(&snapshot, profile, field_id, session(1))
+                        .expect("qualified profile");
+                let bytes = [start.to_le_bytes(), end.to_le_bytes()].concat();
+                machine.consume_offset_pair(&bytes, field_id);
+                assert_eq!(
+                    machine.step(),
+                    LookupStep::Failed(LookupFailure::FormatMismatch(expected.clone()))
+                );
+                assert!(machine.pending.is_none(), "must not request graph bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn graph_boundary_offsets_accept_a_single_record_covering_the_whole_file() {
+        let snapshot = activated_snapshot(1, 9);
+        let mut machine =
+            LookupMachine::start_by_field_id(&snapshot, Pc4RuleProfile::Srs, 0, session(1))
+                .expect("qualified profile");
+        machine.consume_offset_pair(&[0_u32.to_le_bytes(), 9_u32.to_le_bytes()].concat(), 0);
+        let LookupStep::NeedRange(request) = machine.step() else {
+            panic!("valid first and last record must request graph bytes");
+        };
+        assert_eq!(request.artifact(), Pc4ArtifactRole::Graph);
+        assert_eq!(request.offset(), 0);
+        assert_eq!(request.length(), 9);
     }
 
     #[test]

@@ -66,6 +66,16 @@ covered by this binary. There are no running build/test jobs at this checkpoint.
 
 ## Remaining integration boundaries
 
+### Follow-up verification at df2919b
+
+The managed `check-pc4-app-contracts.mjs` batch completed successfully after the
+fixture and feature-boundary fixes: default-feature PC4 **60 passed** (0.02s),
+default-feature render **1 passed**, and no-bitmap render **1 passed**. All three
+commands ran nonzero test counts and the batch exited zero. This closes the
+compiled-rerun requirement below; the earlier failures above remain historical
+evidence, not current failures. These are local contract checks, not upstream
+qualification or release acceptance. No build/test job remains running.
+
 - The unpublished aliases `successful_reveals`, `observed_successful_reveals`,
   and `observed_successful_reveal_count` were removed in the follow-up working
   changes; callers now use explicitly named all-outcome accessors.
