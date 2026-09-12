@@ -74,12 +74,13 @@ pub use lookup::{
 };
 pub use manifest::{
     ActivatedSnapshot, ActivationError, ArtifactDescriptor, DatasetSnapshotManifest,
-    DatasetSnapshotVerifier, GraphTargetEncoding, ManifestContentIdentity, ManifestError,
-    Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase,
-    ProfileAvailability, ProfileQualification, ProfileTargetCompletenessQualification,
-    QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity, SnapshotIdentity,
-    SnapshotVerificationAttestation, SnapshotVerificationBinding, SnapshotVerificationFailure,
-    SnapshotVerificationRequest, TargetQualificationError, UnsupportedProfileReason,
+    DatasetSnapshotVerifier, FieldIdIndexRelation, GraphTargetEncoding, ManifestContentIdentity,
+    ManifestError, Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile, Pc4TargetLines,
+    Pc4TerminalUseCase, ProfileAvailability, ProfileQualification,
+    ProfileTargetCompletenessQualification, QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity,
+    SnapshotIdentity, SnapshotVerificationAttestation, SnapshotVerificationBinding,
+    SnapshotVerificationFailure, SnapshotVerificationRequest, TargetQualificationError,
+    UnsupportedProfileReason,
 };
 pub use materializer::{
     materialize_qualified_graph_edge, ClearraPlacementIdentity, MaterializationGuard,

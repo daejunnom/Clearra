@@ -80,6 +80,18 @@ pub enum GraphTargetEncoding {
     U32LittleEndian,
 }
 
+/// Qualified relationship between a graph field ID and the ordinal of its
+/// `FHIDIDX1` record.
+///
+/// A hash-to-ID index can represent an arbitrary permutation. Reverse lookup
+/// by field ID is safe only when qualification proves that IDs are record
+/// ordinals. Clearra must not infer this property from a few sampled rows.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FieldIdIndexRelation {
+    RecordOrdinal,
+    ExplicitMappingOnly,
+}
+
 impl GraphTargetEncoding {
     pub const fn byte_width(self) -> usize {
         match self {
@@ -329,6 +341,7 @@ pub struct Pc4ProfileManifest {
     profile: Pc4RuleProfile,
     field_count: u32,
     graph_target_encoding: GraphTargetEncoding,
+    field_id_index_relation: FieldIdIndexRelation,
     maximum_graph_record_bytes: u32,
     field_hash_index: ArtifactDescriptor,
     graph_offsets: ArtifactDescriptor,
@@ -343,6 +356,7 @@ impl Pc4ProfileManifest {
         profile: Pc4RuleProfile,
         field_count: u32,
         graph_target_encoding: GraphTargetEncoding,
+        field_id_index_relation: FieldIdIndexRelation,
         maximum_graph_record_bytes: u32,
         field_hash_index: ArtifactDescriptor,
         graph_offsets: ArtifactDescriptor,
@@ -384,6 +398,7 @@ impl Pc4ProfileManifest {
             profile,
             field_count,
             graph_target_encoding,
+            field_id_index_relation,
             maximum_graph_record_bytes,
             field_hash_index,
             graph_offsets,
@@ -428,6 +443,10 @@ impl Pc4ProfileManifest {
 
     pub const fn graph_target_encoding(&self) -> GraphTargetEncoding {
         self.graph_target_encoding
+    }
+
+    pub const fn field_id_index_relation(&self) -> FieldIdIndexRelation {
+        self.field_id_index_relation
     }
 
     pub const fn maximum_graph_record_bytes(&self) -> u32 {
@@ -1106,10 +1125,27 @@ pub(crate) mod tests {
         graph_bytes: u64,
         encoding: GraphTargetEncoding,
     ) -> Pc4ProfileManifest {
+        qualified_profile_with_field_id_relation(
+            profile,
+            field_count,
+            graph_bytes,
+            encoding,
+            FieldIdIndexRelation::RecordOrdinal,
+        )
+    }
+
+    pub(crate) fn qualified_profile_with_field_id_relation(
+        profile: Pc4RuleProfile,
+        field_count: u32,
+        graph_bytes: u64,
+        encoding: GraphTargetEncoding,
+        field_id_index_relation: FieldIdIndexRelation,
+    ) -> Pc4ProfileManifest {
         Pc4ProfileManifest::new(
             profile,
             field_count,
             encoding,
+            field_id_index_relation,
             1024,
             descriptor(
                 profile,
@@ -1131,6 +1167,43 @@ pub(crate) mod tests {
             .expect("synthetic qualification"),
         )
         .expect("synthetic profile manifest")
+    }
+
+    pub(crate) fn activated_snapshot_with_field_id_relation(
+        field_count: u32,
+        graph_bytes: u64,
+        field_id_index_relation: FieldIdIndexRelation,
+    ) -> ActivatedSnapshot {
+        let profiles = Pc4RuleProfile::ALL
+            .into_iter()
+            .map(|profile| {
+                ProfileAvailability::qualified(qualified_profile_with_field_id_relation(
+                    profile,
+                    field_count,
+                    graph_bytes,
+                    if profile == Pc4RuleProfile::SrsX {
+                        GraphTargetEncoding::U32LittleEndian
+                    } else {
+                        GraphTargetEncoding::U24LittleEndian
+                    },
+                    field_id_index_relation,
+                ))
+            })
+            .collect();
+        DatasetSnapshotManifest::new(
+            SnapshotIdentity::new(
+                "synthetic/repository",
+                SYNTHETIC_REVISION_A,
+                "generation-with-field-id-relation",
+            )
+            .expect("synthetic identity"),
+            ManifestContentIdentity::new("synthetic-manifest-with-field-id-relation")
+                .expect("synthetic manifest content identity"),
+            profiles,
+        )
+        .expect("synthetic manifest")
+        .activate(&mut SyntheticVerifier)
+        .expect("fully qualified synthetic snapshot")
     }
 
     fn target_qualification(target_lines: u8) -> ProfileTargetCompletenessQualification {
@@ -1586,6 +1659,7 @@ pub(crate) mod tests {
                 profile,
                 2,
                 GraphTargetEncoding::U24LittleEndian,
+                FieldIdIndexRelation::RecordOrdinal,
                 1024,
                 descriptor(
                     profile,

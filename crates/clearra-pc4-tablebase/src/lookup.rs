@@ -2,8 +2,8 @@ use core::cmp::Ordering;
 
 use crate::{
     manifest::{
-        ActivatedSnapshot, Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile,
-        QualifiedSnapshotIdentity, FIELD_HASH_INDEX_MAGIC, FIELD_HASH_RECORD_BYTES,
+        ActivatedSnapshot, FieldIdIndexRelation, Pc4ArtifactRole, Pc4ProfileManifest,
+        Pc4RuleProfile, QualifiedSnapshotIdentity, FIELD_HASH_INDEX_MAGIC, FIELD_HASH_RECORD_BYTES,
         GRAPH_OFFSETS_MAGIC, GRAPH_OFFSET_BYTES, INDEX_HEADER_BYTES, RANGE_INDEX_VERSION,
     },
     protocol::{
@@ -20,6 +20,7 @@ pub struct LookupHit {
     pub snapshot: QualifiedSnapshotIdentity,
     pub profile: Pc4RuleProfile,
     pub field_id: u32,
+    pub field_hash: u64,
     pub graph_target_encoding: GraphTargetEncoding,
     /// Opaque graph-record bytes. A separately qualified materializer owns the
     /// upstream record layout and placement semantics.
@@ -62,6 +63,10 @@ pub enum FormatMismatch {
         field_id: u32,
         field_count: u32,
     },
+    FieldIndexRecordIdMismatch {
+        expected: u32,
+        actual: u32,
+    },
     GraphOffsetsDescending {
         start: u32,
         end: u32,
@@ -84,6 +89,7 @@ impl FormatMismatch {
             Self::HeaderVersion { .. } => "pc4_online_index_version_mismatch",
             Self::HeaderFieldCount { .. } => "pc4_online_index_field_count_mismatch",
             Self::FieldIdOutsideDomain { .. } => "pc4_online_field_id_outside_domain",
+            Self::FieldIndexRecordIdMismatch { .. } => "pc4_online_field_index_record_id_mismatch",
             Self::GraphOffsetsDescending { .. } => "pc4_online_graph_offsets_descending",
             Self::GraphOffsetOutsideArtifact { .. } => "pc4_online_graph_offset_outside_artifact",
             Self::GraphRecordEmpty => "pc4_online_graph_record_empty",
@@ -95,12 +101,18 @@ impl FormatMismatch {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LookupStartError {
     FieldHashOutsidePc4Domain { field_hash: u64 },
+    FieldIdOutsidePc4Domain { field_id: u32, field_count: u32 },
+    ReverseFieldIdLookupNotQualified { profile: Pc4RuleProfile },
 }
 
 impl LookupStartError {
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::FieldHashOutsidePc4Domain { .. } => "pc4_online_field_hash_outside_pc4_domain",
+            Self::FieldIdOutsidePc4Domain { .. } => "pc4_online_field_id_outside_pc4_domain",
+            Self::ReverseFieldIdLookupNotQualified { .. } => {
+                "pc4_online_reverse_field_id_lookup_not_qualified"
+            }
         }
     }
 }
@@ -150,7 +162,8 @@ pub struct LookupMachine {
     lookup_session: LookupSessionId,
     snapshot: QualifiedSnapshotIdentity,
     profile: Pc4ProfileManifest,
-    field_hash: u64,
+    selector: LookupSelector,
+    field_hash: Option<u64>,
     next_request_id: u64,
     phase: Phase,
     pending: Option<RangeRequest>,
@@ -161,9 +174,16 @@ pub struct LookupMachine {
 enum Phase {
     FieldIndexHeader,
     FieldIndexRecord { low: u32, high: u32, index: u32 },
+    FieldIndexRecordById { field_id: u32 },
     OffsetIndexHeader { field_id: u32 },
     OffsetPair { field_id: u32 },
     GraphRecord { field_id: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LookupSelector {
+    FieldHash(u64),
+    FieldId(u32),
 }
 
 #[derive(Clone, Debug)]
@@ -184,10 +204,59 @@ impl LookupMachine {
         if field_hash > MAX_FIELD_HASH {
             return Err(LookupStartError::FieldHashOutsidePc4Domain { field_hash });
         }
+        Ok(Self::start_with_selector(
+            snapshot,
+            profile,
+            lookup_session,
+            LookupSelector::FieldHash(field_hash),
+            Some(field_hash),
+        ))
+    }
+
+    /// Starts an exact lookup from a graph field ID.
+    ///
+    /// The direct index position is still checked against the record's
+    /// embedded ID before its field hash or graph record can be used. This is
+    /// the reverse-identity path needed to turn graph target IDs back into
+    /// concrete Clearra board states without downloading the field table.
+    pub fn start_by_field_id(
+        snapshot: &ActivatedSnapshot,
+        profile: Pc4RuleProfile,
+        field_id: u32,
+        lookup_session: LookupSessionId,
+    ) -> Result<Self, LookupStartError> {
+        let profile_manifest = snapshot.profile(profile);
+        if profile_manifest.field_id_index_relation() != FieldIdIndexRelation::RecordOrdinal {
+            return Err(LookupStartError::ReverseFieldIdLookupNotQualified { profile });
+        }
+        let field_count = profile_manifest.field_count();
+        if field_id >= field_count {
+            return Err(LookupStartError::FieldIdOutsidePc4Domain {
+                field_id,
+                field_count,
+            });
+        }
+        Ok(Self::start_with_selector(
+            snapshot,
+            profile,
+            lookup_session,
+            LookupSelector::FieldId(field_id),
+            None,
+        ))
+    }
+
+    fn start_with_selector(
+        snapshot: &ActivatedSnapshot,
+        profile: Pc4RuleProfile,
+        lookup_session: LookupSessionId,
+        selector: LookupSelector,
+        field_hash: Option<u64>,
+    ) -> Self {
         let mut machine = Self {
             lookup_session,
             snapshot: snapshot.qualified_identity().clone(),
             profile: snapshot.profile(profile).clone(),
+            selector,
             field_hash,
             next_request_id: 1,
             phase: Phase::FieldIndexHeader,
@@ -199,7 +268,7 @@ impl LookupMachine {
             0,
             INDEX_HEADER_BYTES as u32,
         );
-        Ok(machine)
+        machine
     }
 
     pub fn step(&self) -> LookupStep {
@@ -229,6 +298,9 @@ impl LookupMachine {
             Phase::FieldIndexRecord { low, high, index } => {
                 self.consume_field_index_record(&bytes, low, high, index)
             }
+            Phase::FieldIndexRecordById { field_id } => {
+                self.consume_field_index_record_by_id(&bytes, field_id)
+            }
             Phase::OffsetIndexHeader { field_id } => {
                 self.consume_offset_index_header(&bytes, field_id)
             }
@@ -239,6 +311,9 @@ impl LookupMachine {
                     snapshot: self.snapshot.clone(),
                     profile: self.profile.profile(),
                     field_id,
+                    field_hash: self
+                        .field_hash
+                        .expect("graph-record phase owns a validated field hash"),
                     graph_target_encoding: self.profile.graph_target_encoding(),
                     graph_record: bytes,
                 }));
@@ -286,7 +361,12 @@ impl LookupMachine {
             self.fail_format(error);
             return;
         }
-        self.request_field_record(0, self.profile.field_count());
+        match self.selector {
+            LookupSelector::FieldHash(_) => {
+                self.request_field_record(0, self.profile.field_count());
+            }
+            LookupSelector::FieldId(field_id) => self.request_field_record_by_id(field_id),
+        }
     }
 
     fn request_field_record(&mut self, low: u32, high: u32) {
@@ -313,7 +393,17 @@ impl LookupMachine {
             });
             return;
         }
-        match candidate_hash.cmp(&self.field_hash) {
+        let requested_hash = match self.selector {
+            LookupSelector::FieldHash(field_hash) => field_hash,
+            LookupSelector::FieldId(_) => {
+                self.fail_format(FormatMismatch::FieldIndexRecordIdMismatch {
+                    expected: index,
+                    actual: field_id,
+                });
+                return;
+            }
+        };
+        match candidate_hash.cmp(&requested_hash) {
             Ordering::Equal => {
                 self.phase = Phase::OffsetIndexHeader { field_id };
                 self.request(Pc4ArtifactRole::GraphOffsets, 0, INDEX_HEADER_BYTES as u32);
@@ -321,6 +411,32 @@ impl LookupMachine {
             Ordering::Less => self.request_field_record(index + 1, high),
             Ordering::Greater => self.request_field_record(low, index),
         }
+    }
+
+    fn request_field_record_by_id(&mut self, field_id: u32) {
+        self.phase = Phase::FieldIndexRecordById { field_id };
+        self.request(
+            Pc4ArtifactRole::FieldHashIndex,
+            INDEX_HEADER_BYTES + u64::from(field_id) * FIELD_HASH_RECORD_BYTES,
+            FIELD_HASH_RECORD_BYTES as u32,
+        );
+    }
+
+    fn consume_field_index_record_by_id(&mut self, bytes: &[u8], expected_field_id: u32) {
+        let candidate_hash = read_u40(bytes, 0);
+        let actual_field_id = read_u24(bytes, 5);
+        if actual_field_id != expected_field_id {
+            self.fail_format(FormatMismatch::FieldIndexRecordIdMismatch {
+                expected: expected_field_id,
+                actual: actual_field_id,
+            });
+            return;
+        }
+        self.field_hash = Some(candidate_hash);
+        self.phase = Phase::OffsetIndexHeader {
+            field_id: expected_field_id,
+        };
+        self.request(Pc4ArtifactRole::GraphOffsets, 0, INDEX_HEADER_BYTES as u32);
     }
 
     fn consume_offset_index_header(&mut self, bytes: &[u8], field_id: u32) {
@@ -522,7 +638,10 @@ fn read_u40(bytes: &[u8], offset: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::tests::{activated_snapshot, activated_snapshot_with_manifest_content};
+    use crate::manifest::tests::{
+        activated_snapshot, activated_snapshot_with_field_id_relation,
+        activated_snapshot_with_manifest_content,
+    };
 
     const HASHES: [u64; 3] = [0, 15, 30];
     const FIELD_IDS: [u32; 3] = [2, 0, 1];
@@ -543,6 +662,15 @@ mod tests {
         for (hash, field_id) in HASHES.into_iter().zip(FIELD_IDS) {
             bytes.extend_from_slice(&hash.to_le_bytes()[..5]);
             bytes.extend_from_slice(&field_id.to_le_bytes()[..3]);
+        }
+        bytes
+    }
+
+    fn ordinal_field_index() -> Vec<u8> {
+        let mut bytes = index_header(FIELD_HASH_INDEX_MAGIC, HASHES.len() as u32);
+        for (field_id, hash) in HASHES.into_iter().enumerate() {
+            bytes.extend_from_slice(&hash.to_le_bytes()[..5]);
+            bytes.extend_from_slice(&(field_id as u32).to_le_bytes()[..3]);
         }
         bytes
     }
@@ -605,6 +733,28 @@ mod tests {
         }
     }
 
+    fn drive_by_field_id(field_id: u32, profile: Pc4RuleProfile) -> LookupStep {
+        let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
+        let mut machine =
+            LookupMachine::start_by_field_id(&snapshot, profile, field_id, session(1))
+                .expect("direct field lookup");
+        let field_index = ordinal_field_index();
+        let graph_offsets = graph_offsets();
+        loop {
+            match machine.step() {
+                LookupStep::NeedRange(request) => {
+                    let source: &[u8] = match request.artifact() {
+                        Pc4ArtifactRole::FieldHashIndex => &field_index,
+                        Pc4ArtifactRole::GraphOffsets => &graph_offsets,
+                        Pc4ArtifactRole::Graph => &GRAPH,
+                    };
+                    respond(&mut machine, request, source);
+                }
+                terminal => return terminal,
+            }
+        }
+    }
+
     #[test]
     fn known_answer_lookup_uses_raw_byte_offsets_for_u24_and_u32_profiles() {
         assert_eq!(
@@ -614,6 +764,7 @@ mod tests {
                 snapshot: qualified_snapshot(),
                 profile: Pc4RuleProfile::Srs,
                 field_id: 0,
+                field_hash: 15,
                 graph_target_encoding: GraphTargetEncoding::U24LittleEndian,
                 graph_record: vec![10, 11, 12],
             })
@@ -625,6 +776,7 @@ mod tests {
                 snapshot: qualified_snapshot(),
                 profile: Pc4RuleProfile::SrsX,
                 field_id: 1,
+                field_hash: 30,
                 graph_target_encoding: GraphTargetEncoding::U32LittleEndian,
                 graph_record: vec![20, 21],
             })
@@ -634,6 +786,81 @@ mod tests {
     #[test]
     fn absent_field_is_a_miss_not_a_dataset_failure() {
         assert_eq!(drive(16, Pc4RuleProfile::NoKick), LookupStep::Miss);
+    }
+
+    #[test]
+    fn qualified_record_ordinal_resolves_target_id_without_scanning_the_index() {
+        assert_eq!(
+            drive_by_field_id(1, Pc4RuleProfile::Srs),
+            LookupStep::Hit(LookupHit {
+                lookup_session: session(1),
+                snapshot: qualified_snapshot(),
+                profile: Pc4RuleProfile::Srs,
+                field_id: 1,
+                field_hash: 15,
+                graph_target_encoding: GraphTargetEncoding::U24LittleEndian,
+                graph_record: vec![20, 21],
+            })
+        );
+    }
+
+    #[test]
+    fn direct_field_lookup_rejects_an_index_record_whose_embedded_id_drifts() {
+        let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
+        let mut machine =
+            LookupMachine::start_by_field_id(&snapshot, Pc4RuleProfile::Srs, 1, session(1))
+                .expect("direct field lookup");
+        let LookupStep::NeedRange(header_request) = machine.step() else {
+            panic!("index header request");
+        };
+        let index = field_index();
+        respond(&mut machine, header_request, &index);
+        let LookupStep::NeedRange(record_request) = machine.step() else {
+            panic!("direct index record request");
+        };
+        respond(&mut machine, record_request, &index);
+        assert_eq!(
+            machine.step(),
+            LookupStep::Failed(LookupFailure::FormatMismatch(
+                FormatMismatch::FieldIndexRecordIdMismatch {
+                    expected: 1,
+                    actual: 0,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn direct_field_lookup_rejects_ids_outside_the_qualified_domain() {
+        let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
+        assert!(matches!(
+            LookupMachine::start_by_field_id(
+                &snapshot,
+                Pc4RuleProfile::Srs,
+                HASHES.len() as u32,
+                session(1),
+            ),
+            Err(LookupStartError::FieldIdOutsidePc4Domain {
+                field_id,
+                field_count,
+            }) if field_id == HASHES.len() as u32 && field_count == HASHES.len() as u32
+        ));
+    }
+
+    #[test]
+    fn direct_field_lookup_fails_closed_without_record_ordinal_qualification() {
+        let snapshot = activated_snapshot_with_field_id_relation(
+            HASHES.len() as u32,
+            GRAPH.len() as u64,
+            FieldIdIndexRelation::ExplicitMappingOnly,
+        );
+        assert_eq!(
+            LookupMachine::start_by_field_id(&snapshot, Pc4RuleProfile::Srs, 1, session(1),)
+                .expect_err("an arbitrary hash-to-ID permutation is not reversible by ordinal"),
+            LookupStartError::ReverseFieldIdLookupNotQualified {
+                profile: Pc4RuleProfile::Srs,
+            }
+        );
     }
 
     #[test]

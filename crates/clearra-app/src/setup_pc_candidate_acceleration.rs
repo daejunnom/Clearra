@@ -460,6 +460,7 @@ mod tests {
                     candidate_profile,
                     1,
                     GraphTargetEncoding::U24LittleEndian,
+                    clearra_pc4_tablebase::FieldIdIndexRelation::RecordOrdinal,
                     64,
                     artifact(Pc4ArtifactRole::FieldHashIndex, "field.idx"),
                     artifact(Pc4ArtifactRole::GraphOffsets, "offsets.idx"),

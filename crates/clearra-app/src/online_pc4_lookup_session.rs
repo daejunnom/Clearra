@@ -23,9 +23,36 @@ pub enum Pc4OfflineFallbackAuthorization {
 pub struct Pc4OnlineLookupRequest {
     lookup_session: LookupSessionId,
     target: QualifiedPc4TargetIdentity,
-    field_hash: u64,
+    field: Pc4OnlineLookupField,
     range_limits: RangeAdmissionLimits,
     offline_fallback: Pc4OfflineFallbackAuthorization,
+}
+
+/// Exact identity used to enter the qualified graph.
+///
+/// Hash lookup is the public board-entry path. ID lookup is reserved for
+/// following an already-decoded graph edge: it is admitted only when the
+/// manifest explicitly qualifies graph IDs as field-index ordinals.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Pc4OnlineLookupField {
+    Hash(u64),
+    Id(u32),
+}
+
+impl Pc4OnlineLookupField {
+    pub const fn field_hash(self) -> Option<u64> {
+        match self {
+            Self::Hash(field_hash) => Some(field_hash),
+            Self::Id(_) => None,
+        }
+    }
+
+    pub const fn field_id(self) -> Option<u32> {
+        match self {
+            Self::Hash(_) => None,
+            Self::Id(field_id) => Some(field_id),
+        }
+    }
 }
 
 impl Pc4OnlineLookupRequest {
@@ -39,7 +66,23 @@ impl Pc4OnlineLookupRequest {
         Self {
             lookup_session,
             target,
-            field_hash,
+            field: Pc4OnlineLookupField::Hash(field_hash),
+            range_limits,
+            offline_fallback,
+        }
+    }
+
+    pub const fn from_field_id(
+        lookup_session: LookupSessionId,
+        target: QualifiedPc4TargetIdentity,
+        field_id: u32,
+        range_limits: RangeAdmissionLimits,
+        offline_fallback: Pc4OfflineFallbackAuthorization,
+    ) -> Self {
+        Self {
+            lookup_session,
+            target,
+            field: Pc4OnlineLookupField::Id(field_id),
             range_limits,
             offline_fallback,
         }
@@ -65,8 +108,16 @@ impl Pc4OnlineLookupRequest {
         self.target.target_lines()
     }
 
-    pub const fn field_hash(&self) -> u64 {
-        self.field_hash
+    pub const fn field(&self) -> Pc4OnlineLookupField {
+        self.field
+    }
+
+    pub const fn field_hash(&self) -> Option<u64> {
+        self.field.field_hash()
+    }
+
+    pub const fn field_id(&self) -> Option<u32> {
+        self.field.field_id()
     }
 
     pub const fn range_limits(&self) -> RangeAdmissionLimits {
@@ -99,7 +150,7 @@ impl Pc4FallbackCause {
 pub struct Pc4OfflineFallbackSignal {
     lookup_session: LookupSessionId,
     target: QualifiedPc4TargetIdentity,
-    field_hash: u64,
+    field: Pc4OnlineLookupField,
     cause: Pc4FallbackCause,
 }
 
@@ -124,8 +175,16 @@ impl Pc4OfflineFallbackSignal {
         self.target.target_lines()
     }
 
-    pub const fn field_hash(&self) -> u64 {
-        self.field_hash
+    pub const fn field(&self) -> Pc4OnlineLookupField {
+        self.field
+    }
+
+    pub const fn field_hash(&self) -> Option<u64> {
+        self.field.field_hash()
+    }
+
+    pub const fn field_id(&self) -> Option<u32> {
+        self.field.field_id()
     }
 
     pub const fn cause(&self) -> &Pc4FallbackCause {
@@ -250,12 +309,20 @@ impl AppOnlinePc4LookupSession {
         if request.target().snapshot() != snapshot.qualified_identity() {
             return Err(AppOnlinePc4LookupStartError::TargetSnapshotMismatch);
         }
-        let machine = LookupMachine::start(
-            snapshot,
-            request.profile(),
-            request.field_hash(),
-            request.lookup_session(),
-        )
+        let machine = match request.field() {
+            Pc4OnlineLookupField::Hash(field_hash) => LookupMachine::start(
+                snapshot,
+                request.profile(),
+                field_hash,
+                request.lookup_session(),
+            ),
+            Pc4OnlineLookupField::Id(field_id) => LookupMachine::start_by_field_id(
+                snapshot,
+                request.profile(),
+                field_id,
+                request.lookup_session(),
+            ),
+        }
         .map_err(AppOnlinePc4LookupStartError::Lookup)?;
         let range_admission = RangeAdmissionSession::new(
             request.lookup_session(),
@@ -354,7 +421,7 @@ impl AppOnlinePc4LookupSession {
                 Pc4OfflineFallbackDisposition::Authorized(Pc4OfflineFallbackSignal {
                     lookup_session: self.request.lookup_session(),
                     target: self.request.target().clone(),
-                    field_hash: self.request.field_hash(),
+                    field: self.request.field(),
                     cause,
                 })
             }
@@ -485,6 +552,7 @@ mod tests {
                     profile,
                     1,
                     GraphTargetEncoding::U24LittleEndian,
+                    clearra_pc4_tablebase::FieldIdIndexRelation::RecordOrdinal,
                     64,
                     descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 24),
                     descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 24),
@@ -571,6 +639,33 @@ mod tests {
             ),
         )
         .expect("lookup session")
+    }
+
+    fn new_session_by_field_id(
+        id: u64,
+        field_id: u32,
+        authorization: Pc4OfflineFallbackAuthorization,
+    ) -> AppOnlinePc4LookupSession {
+        let generation = pinned_generation("generation-a");
+        let target = generation
+            .activated_snapshot()
+            .qualified_target(
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(4).expect("4L target"),
+            )
+            .expect("qualified PC target");
+        AppOnlinePc4LookupSession::start(
+            generation,
+            Pc4OnlineLookupRequest::from_field_id(
+                lookup_session(id),
+                target,
+                field_id,
+                range_limits(),
+                authorization,
+            ),
+        )
+        .expect("direct field-ID lookup session")
     }
 
     #[test]
@@ -669,8 +764,35 @@ mod tests {
         assert_eq!(signal.profile(), Pc4RuleProfile::Srs);
         assert_eq!(signal.use_case(), Pc4TerminalUseCase::PcSearch);
         assert_eq!(signal.target_lines().get(), 4);
-        assert_eq!(signal.field_hash(), 15);
+        assert_eq!(signal.field_hash(), Some(15));
+        assert_eq!(signal.field_id(), None);
         assert_eq!(signal.cause().reason(), "pc4_online_rate_limited");
+    }
+
+    #[test]
+    fn direct_field_id_request_preserves_exact_identity_in_fallback_signal() {
+        let mut session =
+            new_session_by_field_id(3, 0, Pc4OfflineFallbackAuthorization::ExplicitlyAuthorized);
+        assert_eq!(session.request().field_hash(), None);
+        assert_eq!(session.request().field_id(), Some(0));
+        let AppOnlinePc4LookupStep::NeedRange(_) = session.step() else {
+            panic!("field-index header request")
+        };
+        session
+            .admit_range(
+                attempt(1),
+                RangeAdmissionInput::TransportFailure(RangeTransportFailure::Offline),
+                &LiveRangeGuard,
+            )
+            .expect("transport failure");
+        let Pc4OfflineFallbackDisposition::Authorized(signal) =
+            session.offline_fallback_disposition()
+        else {
+            panic!("authorized exact-identity signal")
+        };
+        assert_eq!(signal.field(), Pc4OnlineLookupField::Id(0));
+        assert_eq!(signal.field_hash(), None);
+        assert_eq!(signal.field_id(), Some(0));
     }
 
     #[test]

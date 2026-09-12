@@ -54,6 +54,7 @@ fn qualified_snapshot(generation: &str) -> QualifiedSnapshotIdentity {
                     profile,
                     1,
                     GraphTargetEncoding::U24LittleEndian,
+                    clearra_pc4_tablebase::FieldIdIndexRelation::RecordOrdinal,
                     64,
                     descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 24),
                     descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 24),
