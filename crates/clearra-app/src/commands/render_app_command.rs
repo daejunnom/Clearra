@@ -1,8 +1,10 @@
 use core::fmt;
 
+#[cfg(feature = "bitmap-render")]
 use clearra_host_contract::{
     ProductResultPayload, ProductResultPayloadContent, RenderArtifactPayload,
 };
+#[cfg(feature = "bitmap-render")]
 use clearra_output::{
     ExactBitmapOutputFormat, ExactFieldDocumentFormat, FieldDocumentRenderError,
     RenderExactOutputGate, PUBLIC_BITMAP_ARTIFACT_MAX_BYTES,
@@ -13,10 +15,14 @@ use crate::{
     app_context::AppExecutionContext,
     app_error::{AppError, AppErrorCode},
     app_response::{AppResponse, AppStatus},
+    typed_document_utility::{FieldDocumentFormat, TypedFieldDocument, TypedFieldDocumentError},
+};
+
+#[cfg(feature = "bitmap-render")]
+use crate::{
     commands::{bool_field, number_field, string_field},
     document_utility_encoding::{base64_standard, sha256_hex},
     render::{AppMessage, AppRenderModel, AppResultKind},
-    typed_document_utility::{FieldDocumentFormat, TypedFieldDocument, TypedFieldDocumentError},
 };
 
 pub const RENDER_ARTIFACT_RESULT_CONTRACT: &str = "render-artifact.v1";
@@ -92,6 +98,18 @@ impl RenderAppCommand {
 }
 
 impl RunnableAppCommand for RenderAppCommand {
+    #[cfg(not(feature = "bitmap-render"))]
+    fn run(self, _context: &AppExecutionContext<'_>) -> AppResponse {
+        AppResponse::failed(
+            AppStatus::Unsupported,
+            AppError::new(
+                AppErrorCode::Unsupported,
+                "bitmap rendering is unavailable in this build",
+            ),
+        )
+    }
+
+    #[cfg(feature = "bitmap-render")]
     fn run(self, _context: &AppExecutionContext<'_>) -> AppResponse {
         let page_number = match self.artifact_format {
             RenderArtifactFormat::Png => Some(self.page_number.unwrap_or(1)),
@@ -189,6 +207,7 @@ impl RunnableAppCommand for RenderAppCommand {
     }
 }
 
+#[cfg(feature = "bitmap-render")]
 const fn exact_document_format(format: FieldDocumentFormat) -> ExactFieldDocumentFormat {
     match format {
         FieldDocumentFormat::Ctk3 => ExactFieldDocumentFormat::Ctk3,
@@ -196,6 +215,7 @@ const fn exact_document_format(format: FieldDocumentFormat) -> ExactFieldDocumen
     }
 }
 
+#[cfg(feature = "bitmap-render")]
 const fn exact_artifact_format(format: RenderArtifactFormat) -> ExactBitmapOutputFormat {
     match format {
         RenderArtifactFormat::Png => ExactBitmapOutputFormat::Png,
@@ -203,6 +223,7 @@ const fn exact_artifact_format(format: RenderArtifactFormat) -> ExactBitmapOutpu
     }
 }
 
+#[cfg(feature = "bitmap-render")]
 fn render_error_response(error: FieldDocumentRenderError) -> AppResponse {
     let limit = error.is_limit_exceeded();
     AppResponse::failed(
@@ -245,6 +266,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "bitmap-render")]
     fn app_exposes_exact_png_as_bounded_typed_artifact() {
         let document = encode_ctk3_compact(&Ctk3Document::new(
             2,
@@ -272,5 +294,28 @@ mod tests {
         assert!(artifact.bytes_base64().starts_with("iVBOR"));
         assert!(artifact.render_exact());
         assert!(artifact.byte_length() <= artifact.transport_max_bytes());
+    }
+
+    #[test]
+    #[cfg(not(feature = "bitmap-render"))]
+    fn render_without_bitmap_feature_is_typed_unsupported_without_artifact() {
+        let document = encode_ctk3_compact(&Ctk3Document::new(
+            2,
+            vec![Ctk3Page::new(1, vec![Ctk3Color::Gray, Ctk3Color::Empty])],
+        ))
+        .unwrap();
+        for format in [RenderArtifactFormat::Png, RenderArtifactFormat::Gif] {
+            let command =
+                RenderAppCommand::new(FieldDocumentFormat::Ctk3, document.clone(), format, None)
+                    .unwrap();
+            let response = crate::AppContext::default().run(crate::AppRequest::new(
+                crate::AppCommand::UtilityRender(command),
+            ));
+            assert_eq!(response.status(), AppStatus::Unsupported);
+            assert!(response
+                .to_host_response()
+                .product_result_payload()
+                .is_none());
+        }
     }
 }

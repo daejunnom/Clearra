@@ -473,12 +473,6 @@ impl Pc4CompleteObservationCandidateFamily {
         &self.reveal_outcomes
     }
 
-    /// Compatibility name retained for the feature-gated pre-ledger surface.
-    /// The returned slice now also contains zero-solution outcomes.
-    pub fn successful_reveals(&self) -> &[Pc4ObservationCandidateOutcome] {
-        self.reveal_outcomes()
-    }
-
     pub const fn total_reveal_probability(&self) -> Pc4ExactProbability {
         self.total_reveal_probability
     }
@@ -523,10 +517,6 @@ impl Pc4ObservationCandidateAdvance {
 
     pub const fn observed_concrete_paths(self) -> usize {
         self.observed_concrete_paths
-    }
-
-    pub const fn observed_successful_reveals(self) -> usize {
-        self.observed_reveal_outcomes
     }
 
     pub const fn observed_reveal_outcomes(self) -> usize {
@@ -1000,10 +990,6 @@ impl Pc4ObservationCandidateSession {
 
     pub fn observed_concrete_path_count(&self) -> usize {
         self.accumulator.replay_count
-    }
-
-    pub fn observed_successful_reveal_count(&self) -> usize {
-        self.accumulator.ledger_reveals.len()
     }
 
     pub fn observed_reveal_outcome_count(&self) -> usize {

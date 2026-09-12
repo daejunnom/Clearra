@@ -66,12 +66,18 @@ covered by this binary. There are no running build/test jobs at this checkpoint.
 
 ## Remaining integration boundaries
 
-- Inspect and remove/clarify the unpublished compatibility aliases
-  `successful_reveals`, `observed_successful_reveals`, and
-  `observed_successful_reveal_count`: the ledger implementation now includes
-  unsuccessful outcomes, so those names are unsafe guides for future callers.
-- Repair the App bitmap-render feature boundary with appropriate feature-on/off
-  coverage rather than silently enabling an excluded feature.
+- The unpublished aliases `successful_reveals`, `observed_successful_reveals`,
+  and `observed_successful_reveal_count` were removed in the follow-up working
+  changes; callers now use explicitly named all-outcome accessors.
+- The App bitmap-render imports, render implementation and helper functions are
+  feature-gated in the follow-up. Feature-off requests return typed Unsupported
+  without an artifact, instead of enabling bitmap support implicitly. Both PNG
+  and GIF rejection and feature-on PNG output have test coverage in source.
+- Compile and execute these follow-ups and the corrected Setup fixture using
+  `scripts/tools/check-pc4-app-contracts.mjs` under the managed build owner.
+  It shares one generation across default-feature PC4, default-feature render,
+  and no-bitmap render tests, uses no debug symbols to avoid the observed local
+  LLVM memory exhaustion, and stops on the first failed compilation/test.
 - Complete surface/reducer and fallback integration with actual runtime tests.
 - Qualify each independently activated HF profile and target using upstream
   bytes/KAT/completeness and signed generation evidence. Synthetic fixtures do

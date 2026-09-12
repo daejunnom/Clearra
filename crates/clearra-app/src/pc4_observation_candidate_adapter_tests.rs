@@ -566,7 +566,7 @@ fn exhausted_family_groups_probability_once_per_reveal_and_preserves_hold_proven
         family.contract_id(),
         PC4_OBSERVATION_CANDIDATE_FAMILY_CONTRACT
     );
-    assert_eq!(family.successful_reveals().len(), 2);
+    assert_eq!(family.reveal_outcomes().len(), 2);
     assert_eq!(
         family.total_reveal_probability(),
         Pc4ExactProbability::one()
@@ -575,13 +575,13 @@ fn exhausted_family_groups_probability_once_per_reveal_and_preserves_hold_proven
     assert_eq!(family.replay_provenance_count(), 4);
     assert_eq!(
         family
-            .successful_reveals()
+            .reveal_outcomes()
             .iter()
             .map(|outcome| outcome.reveal().reveal_rank())
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
-    assert!(family.successful_reveals().iter().all(|outcome| {
+    assert!(family.reveal_outcomes().iter().all(|outcome| {
         outcome.reveal().probability().numerator() == 1
             && outcome.reveal().probability().denominator() == 2
             && outcome.candidates().len() == 2
@@ -595,7 +595,7 @@ fn exhausted_family_groups_probability_once_per_reveal_and_preserves_hold_proven
         .expect("exact probability sum");
     assert_eq!(probability_sum, Pc4ExactProbability::one());
 
-    for outcome in family.successful_reveals() {
+    for outcome in family.reveal_outcomes() {
         let mut hold_paths = outcome
             .candidates()
             .iter()
@@ -1436,7 +1436,7 @@ fn materializer_failure_leaves_session_state_uncommitted_for_retry() {
         ))
     ));
     assert_eq!(session.observed_concrete_path_count(), 0);
-    assert_eq!(session.observed_successful_reveal_count(), 0);
+    assert_eq!(session.observed_reveal_outcome_count(), 0);
 
     materializer.fail = false;
     while !session.is_exhausted() {
