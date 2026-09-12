@@ -749,10 +749,10 @@ mod tests {
     use clearra_pc4_tablebase::{
         clearra_board64_mask_to_hydra_field_hash_v1, ArtifactDescriptor, DatasetSnapshotManifest,
         DatasetSnapshotVerifier, FieldIdIndexRelation, LookupSessionId, ManifestContentIdentity,
-        Pc4ArtifactRole, Pc4ProfileManifest, Pc4TargetLines, Pc4TerminalUseCase,
-        ProfileAvailability, ProfileQualification, ProfileTargetCompletenessQualification,
-        SnapshotIdentity, SnapshotVerificationAttestation, SnapshotVerificationFailure,
-        SnapshotVerificationRequest,
+        Pc4ArtifactRole, Pc4ProfileManifest, Pc4TargetLines, Pc4TerminalFieldIdentity,
+        Pc4TerminalUseCase, ProfileAvailability, ProfileQualification,
+        ProfileTargetCompletenessQualification, SnapshotIdentity, SnapshotVerificationAttestation,
+        SnapshotVerificationFailure, SnapshotVerificationRequest,
     };
 
     use super::*;
@@ -833,6 +833,10 @@ mod tests {
                         ProfileTargetCompletenessQualification::new(
                             use_case,
                             Pc4TargetLines::new(4).expect("4L target"),
+                            Pc4TerminalFieldIdentity::full_rows(
+                                Pc4TargetLines::new(4).expect("4L target"),
+                                field_count - 1,
+                            ),
                             format!("{prefix}-{use_case:?}-terminal"),
                             format!("{prefix}-{use_case:?}-outgoing"),
                             format!("{prefix}-{use_case:?}-known-answer"),

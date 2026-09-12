@@ -39,6 +39,9 @@ mod parity_page_store;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_input_disclosure_policy;
 #[cfg(feature = "online-pc4-tablebase")]
+#[cfg_attr(not(test), allow(dead_code))]
+mod pc4_fixed_queue_candidate_runtime;
+#[cfg(feature = "online-pc4-tablebase")]
 mod pc4_lookup_graph_runtime_adapter;
 mod pc_allspin_result;
 #[cfg(feature = "online-pc4-tablebase")]
