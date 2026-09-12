@@ -6,17 +6,30 @@
 
 use core::num::NonZeroU64;
 
-use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
-use clearra_pc4_tablebase::{Pc4RuleProfile, QualifiedSnapshotIdentity};
+use clearra_core_domain::{
+    board::standard_pc_board::StandardPcBoard,
+    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
+};
+use clearra_pc4_tablebase::{
+    FixedQueueHoldState, Pc4GraphPiece, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase,
+    QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity,
+};
 use sha2::{Digest, Sha256};
+
+use crate::pc4_input_disclosure_policy::{
+    Pc4HiddenQueueSource, Pc4PreparedOnlineInput, Pc4PreparedQueueInput,
+};
 
 #[path = "pc4_graph_candidate_adapter.rs"]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod graph_candidate_adapter;
 
 pub const PC_CANDIDATE_PAGE_CONTRACT: &str = "pc-concrete-candidate-page.v1";
+pub const PC_CANDIDATE_REQUEST_IDENTITY_ALGORITHM: &str =
+    "sha256:clearra-pc4-candidate-universe-request-v1";
 pub const PC_CANDIDATE_SET_DIGEST_ALGORITHM: &str = "sha256:clearra-pc-canonical-candidate-set-v1";
 
+const CANDIDATE_REQUEST_IDENTITY_DOMAIN: &[u8] = b"clearra.pc4-candidate-universe-request.v1\0";
 const CANDIDATE_SET_DIGEST_DOMAIN: &[u8] = b"clearra.pc-canonical-candidate-set.v1\0";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -40,10 +53,87 @@ impl PcCandidateRequestIdentity {
         Self(bytes)
     }
 
+    /// Derives the canonical identity of one PC4 candidate-universe query.
+    ///
+    /// This binds the verified target authority, normalized initial board,
+    /// queue/reveal semantics, and initial hold state. The input surface is
+    /// intentionally excluded, and product objectives are not accepted by this
+    /// domain boundary: either may reduce the same complete candidate universe
+    /// later without changing which candidates belong to it.
+    pub fn derive_pc4_candidate_universe(
+        prepared_input: &Pc4PreparedOnlineInput,
+        initial_board: StandardPcBoard,
+        initial_hold: FixedQueueHoldState,
+    ) -> Result<Self, PcCandidateRequestIdentityError> {
+        let mut hasher = Sha256::new();
+        hasher.update(CANDIDATE_REQUEST_IDENTITY_DOMAIN);
+        hash_qualified_target(&mut hasher, prepared_input.target())?;
+        hasher.update([initial_board.lines()]);
+        for word in initial_board.occupied().words() {
+            hasher.update(word.to_be_bytes());
+        }
+        hash_hold_state(&mut hasher, initial_hold);
+        match prepared_input.queue() {
+            Pc4PreparedQueueInput::FixedExplicit(queue) => {
+                hasher.update([0]);
+                hash_pieces(&mut hasher, queue)?;
+            }
+            Pc4PreparedQueueInput::PatternOrHidden {
+                source,
+                visible_queue,
+                scope,
+                bag_state,
+            } => {
+                hasher.update([1]);
+                hasher.update([hidden_source_tag(*source)]);
+                hash_pieces(&mut hasher, visible_queue)?;
+                hash_usize(&mut hasher, scope.visible_piece_count())?;
+                hash_usize(&mut hasher, scope.preview_length())?;
+                hash_usize(&mut hasher, scope.hidden_draws())?;
+                hash_usize(&mut hasher, scope.placement_count())?;
+                match bag_state {
+                    Some(bag_state) => {
+                        hasher.update([1]);
+                        for count in bag_state.profile().counts() {
+                            hasher.update(count.to_be_bytes());
+                        }
+                        for count in bag_state.remainder() {
+                            hasher.update(count.to_be_bytes());
+                        }
+                        hasher.update(bag_state.epoch().to_be_bytes());
+                    }
+                    None => hasher.update([0]),
+                }
+            }
+        }
+        Ok(Self(hasher.finalize().into()))
+    }
+
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PcCandidateRequestIdentityError {
+    CanonicalLengthOverflow,
+}
+
+impl PcCandidateRequestIdentityError {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::CanonicalLengthOverflow => "pc_candidate_request_canonical_length_overflow",
+        }
+    }
+}
+
+impl core::fmt::Display for PcCandidateRequestIdentityError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for PcCandidateRequestIdentityError {}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PcCandidateSourceIdentity([u8; 32]);
@@ -237,22 +327,40 @@ impl PcCandidateSetDigest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcCandidateCompletenessEvidence {
     source: PcCandidateSourceBinding,
+    qualified_target: Option<QualifiedPc4TargetIdentity>,
     exact_candidate_count: u64,
     candidate_set_digest: PcCandidateSetDigest,
 }
 
 impl PcCandidateCompletenessEvidence {
-    #[cfg(test)]
     fn from_verified_complete_source(
         source: PcCandidateSourceBinding,
+        qualified_target: Option<QualifiedPc4TargetIdentity>,
         exact_candidate_count: u64,
         candidate_set_digest: PcCandidateSetDigest,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, PcCandidateBoundaryError> {
+        validate_complete_target_binding(&source, qualified_target.as_ref())?;
+        Ok(Self {
             source,
+            qualified_target,
             exact_candidate_count,
             candidate_set_digest,
-        }
+        })
+    }
+
+    #[cfg(test)]
+    fn from_test_verified_complete_source(
+        source: PcCandidateSourceBinding,
+        qualified_target: Option<QualifiedPc4TargetIdentity>,
+        exact_candidate_count: u64,
+        candidate_set_digest: PcCandidateSetDigest,
+    ) -> Result<Self, PcCandidateBoundaryError> {
+        Self::from_verified_complete_source(
+            source,
+            qualified_target,
+            exact_candidate_count,
+            candidate_set_digest,
+        )
     }
 }
 
@@ -371,6 +479,7 @@ pub struct PcCandidateCollection {
     source: PcCandidateSourceBinding,
     candidates: Vec<StandardBoard64TilingIdentity>,
     completeness: PcCandidateCollectionCompleteness,
+    complete_universe_evidence: Option<PcCandidateCompletenessEvidence>,
 }
 
 impl PcCandidateCollection {
@@ -393,10 +502,92 @@ impl PcCandidateCollection {
         if self.completeness != PcCandidateCollectionCompleteness::CompleteRequestUniverse {
             return Err(PcCandidateBoundaryError::IncompleteCannotReduce);
         }
+        let complete_universe_evidence = self
+            .complete_universe_evidence
+            .ok_or(PcCandidateBoundaryError::IncompleteCannotReduce)?;
         Ok(PcCandidateReducerInput {
-            source: self.source,
+            universe_identity: PcCandidateUniverseIdentity::from_complete_evidence(
+                complete_universe_evidence,
+            )?,
             candidates: self.candidates,
         })
+    }
+}
+
+/// Immutable identity of an exactly complete canonical candidate universe.
+///
+/// The source binding retains the request/source/snapshot and normalized
+/// initial-board identities. Online PC4 universes additionally retain their
+/// exact qualified target, including use case and target line count. Count and
+/// digest are minted only from producer completeness evidence; no public
+/// constructor can promote a naked boolean or candidate vector.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PcCandidateUniverseIdentity {
+    source: PcCandidateSourceBinding,
+    qualified_target: Option<QualifiedPc4TargetIdentity>,
+    exact_candidate_count: u64,
+    candidate_set_digest: PcCandidateSetDigest,
+}
+
+impl PcCandidateUniverseIdentity {
+    fn from_complete_evidence(
+        evidence: PcCandidateCompletenessEvidence,
+    ) -> Result<Self, PcCandidateBoundaryError> {
+        validate_complete_target_binding(&evidence.source, evidence.qualified_target.as_ref())?;
+        Ok(Self {
+            source: evidence.source,
+            qualified_target: evidence.qualified_target,
+            exact_candidate_count: evidence.exact_candidate_count,
+            candidate_set_digest: evidence.candidate_set_digest,
+        })
+    }
+
+    pub const fn source(&self) -> &PcCandidateSourceBinding {
+        &self.source
+    }
+
+    pub const fn request_identity(&self) -> PcCandidateRequestIdentity {
+        self.source.request_identity()
+    }
+
+    pub const fn source_identity(&self) -> PcCandidateSourceIdentity {
+        self.source.source_identity()
+    }
+
+    pub fn qualified_snapshot(&self) -> Option<&QualifiedSnapshotIdentity> {
+        self.source.qualified_snapshot()
+    }
+
+    pub const fn initial_board_mask(&self) -> u64 {
+        self.source.initial_board_mask()
+    }
+
+    pub const fn profile(&self) -> Pc4RuleProfile {
+        self.source.profile()
+    }
+
+    pub const fn qualified_target(&self) -> Option<&QualifiedPc4TargetIdentity> {
+        self.qualified_target.as_ref()
+    }
+
+    pub fn use_case(&self) -> Option<Pc4TerminalUseCase> {
+        self.qualified_target
+            .as_ref()
+            .map(|target| target.use_case())
+    }
+
+    pub fn target_lines(&self) -> Option<Pc4TargetLines> {
+        self.qualified_target
+            .as_ref()
+            .map(|target| target.target_lines())
+    }
+
+    pub const fn exact_candidate_count(&self) -> u64 {
+        self.exact_candidate_count
+    }
+
+    pub const fn candidate_set_digest(&self) -> PcCandidateSetDigest {
+        self.candidate_set_digest
     }
 }
 
@@ -405,7 +596,7 @@ impl PcCandidateCollection {
 /// coverage, probability, score, or replay work has run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcCandidateReducerInput {
-    source: PcCandidateSourceBinding,
+    universe_identity: PcCandidateUniverseIdentity,
     candidates: Vec<StandardBoard64TilingIdentity>,
 }
 
@@ -413,13 +604,33 @@ impl PcCandidateReducerInput {
     #[cfg(test)]
     pub(crate) fn from_test_parts(
         source: PcCandidateSourceBinding,
+        qualified_target: Option<QualifiedPc4TargetIdentity>,
         candidates: Vec<StandardBoard64TilingIdentity>,
     ) -> Self {
-        Self { source, candidates }
+        let exact_candidate_count =
+            u64::try_from(candidates.len()).expect("test candidate count fits u64");
+        let candidate_set_digest =
+            PcCandidateSetDigest::calculate(&candidates).expect("test candidate digest");
+        let evidence = PcCandidateCompletenessEvidence::from_test_verified_complete_source(
+            source,
+            qualified_target,
+            exact_candidate_count,
+            candidate_set_digest,
+        )
+        .expect("test source and target binding are consistent");
+        Self {
+            universe_identity: PcCandidateUniverseIdentity::from_complete_evidence(evidence)
+                .expect("test completeness evidence is internally consistent"),
+            candidates,
+        }
     }
 
     pub const fn source(&self) -> &PcCandidateSourceBinding {
-        &self.source
+        self.universe_identity.source()
+    }
+
+    pub const fn universe_identity(&self) -> &PcCandidateUniverseIdentity {
+        &self.universe_identity
     }
 
     pub fn candidates(&self) -> &[StandardBoard64TilingIdentity] {
@@ -432,6 +643,7 @@ pub struct PcCandidatePageCollector {
     expected_cursor: PcCandidatePageCursor,
     candidates: Vec<StandardBoard64TilingIdentity>,
     terminal_completeness: Option<PcCandidateCollectionCompleteness>,
+    complete_universe_evidence: Option<PcCandidateCompletenessEvidence>,
 }
 
 impl PcCandidatePageCollector {
@@ -441,6 +653,7 @@ impl PcCandidatePageCollector {
             expected_cursor: PcCandidatePageCursor::initial(),
             candidates: Vec::new(),
             terminal_completeness: None,
+            complete_universe_evidence: None,
         }
     }
 
@@ -509,6 +722,7 @@ impl PcCandidatePageCollector {
         self.candidates.extend(page.candidates);
         self.expected_cursor = page.next_cursor;
         self.terminal_completeness = terminal_completeness;
+        self.complete_universe_evidence = page.completeness;
         Ok(())
     }
 
@@ -520,6 +734,7 @@ impl PcCandidatePageCollector {
             source: self.source,
             candidates: self.candidates,
             completeness,
+            complete_universe_evidence: self.complete_universe_evidence,
         })
     }
 
@@ -557,6 +772,7 @@ pub enum PcCandidateBoundaryError {
     CandidateOrdinalOverflow,
     CandidateAllocationFailed,
     CompletenessBindingMismatch,
+    CompletenessTargetBindingMismatch,
     CompletenessCountMismatch,
     CompletenessDigestMismatch,
     AlreadyTerminal,
@@ -580,6 +796,9 @@ impl PcCandidateBoundaryError {
             Self::CandidateOrdinalOverflow => "pc_candidate_page_ordinal_overflow",
             Self::CandidateAllocationFailed => "pc_candidate_page_allocation_failed",
             Self::CompletenessBindingMismatch => "pc_candidate_page_completeness_binding_mismatch",
+            Self::CompletenessTargetBindingMismatch => {
+                "pc_candidate_page_completeness_target_binding_mismatch"
+            }
             Self::CompletenessCountMismatch => "pc_candidate_page_completeness_count_mismatch",
             Self::CompletenessDigestMismatch => "pc_candidate_page_completeness_digest_mismatch",
             Self::AlreadyTerminal => "pc_candidate_page_already_terminal",
@@ -596,6 +815,140 @@ impl core::fmt::Display for PcCandidateBoundaryError {
 }
 
 impl std::error::Error for PcCandidateBoundaryError {}
+
+fn hash_qualified_target(
+    hasher: &mut Sha256,
+    target: &QualifiedPc4TargetIdentity,
+) -> Result<(), PcCandidateRequestIdentityError> {
+    let snapshot = target.snapshot();
+    let snapshot_identity = snapshot.snapshot_identity();
+    hash_bytes(hasher, snapshot_identity.repository().as_bytes())?;
+    hash_bytes(hasher, snapshot_identity.revision().as_bytes())?;
+    hash_bytes(hasher, snapshot_identity.generation().as_bytes())?;
+    hash_bytes(
+        hasher,
+        snapshot.manifest_content_identity().as_str().as_bytes(),
+    )?;
+    hash_bytes(
+        hasher,
+        snapshot
+            .verification_attestation()
+            .evidence_identity()
+            .as_bytes(),
+    )?;
+    hasher.update([profile_tag(target.profile())]);
+    hasher.update([use_case_tag(target.use_case())]);
+    hasher.update([target.target_lines().get()]);
+
+    let qualification = target.qualification();
+    let terminal_field = qualification.terminal_field();
+    hasher.update(terminal_field.field_id().to_be_bytes());
+    hasher.update(terminal_field.field_hash().to_be_bytes());
+    hash_bytes(
+        hasher,
+        qualification.terminal_semantics_identity().as_bytes(),
+    )?;
+    hash_bytes(
+        hasher,
+        qualification
+            .outgoing_edge_completeness_identity()
+            .as_bytes(),
+    )?;
+    hash_bytes(hasher, qualification.known_answer_identity().as_bytes())?;
+    hash_bytes(
+        hasher,
+        qualification.offline_exact_parity_identity().as_bytes(),
+    )?;
+    Ok(())
+}
+
+fn hash_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), PcCandidateRequestIdentityError> {
+    hash_usize(hasher, value.len())?;
+    hasher.update(value);
+    Ok(())
+}
+
+fn hash_usize(hasher: &mut Sha256, value: usize) -> Result<(), PcCandidateRequestIdentityError> {
+    let value = u64::try_from(value)
+        .map_err(|_| PcCandidateRequestIdentityError::CanonicalLengthOverflow)?;
+    hasher.update(value.to_be_bytes());
+    Ok(())
+}
+
+fn hash_pieces(
+    hasher: &mut Sha256,
+    pieces: &[Pc4GraphPiece],
+) -> Result<(), PcCandidateRequestIdentityError> {
+    hash_usize(hasher, pieces.len())?;
+    for &piece in pieces {
+        hasher.update([piece_tag(piece)]);
+    }
+    Ok(())
+}
+
+fn hash_hold_state(hasher: &mut Sha256, hold: FixedQueueHoldState) {
+    match hold {
+        FixedQueueHoldState::Disabled => hasher.update([0]),
+        FixedQueueHoldState::Empty => hasher.update([1]),
+        FixedQueueHoldState::Occupied(piece) => hasher.update([2, piece_tag(piece)]),
+    }
+}
+
+const fn profile_tag(profile: Pc4RuleProfile) -> u8 {
+    match profile {
+        Pc4RuleProfile::Srs => 0,
+        Pc4RuleProfile::SrsPlus => 1,
+        Pc4RuleProfile::SrsX => 2,
+        Pc4RuleProfile::Jstris180 => 3,
+        Pc4RuleProfile::NoKick => 4,
+    }
+}
+
+const fn use_case_tag(use_case: Pc4TerminalUseCase) -> u8 {
+    match use_case {
+        Pc4TerminalUseCase::PcSearch => 0,
+        Pc4TerminalUseCase::SetupSearch => 1,
+    }
+}
+
+const fn piece_tag(piece: Pc4GraphPiece) -> u8 {
+    match piece {
+        Pc4GraphPiece::I => 0,
+        Pc4GraphPiece::O => 1,
+        Pc4GraphPiece::T => 2,
+        Pc4GraphPiece::S => 3,
+        Pc4GraphPiece::Z => 4,
+        Pc4GraphPiece::J => 5,
+        Pc4GraphPiece::L => 6,
+    }
+}
+
+const fn hidden_source_tag(source: Pc4HiddenQueueSource) -> u8 {
+    match source {
+        Pc4HiddenQueueSource::Pattern => 0,
+        Pc4HiddenQueueSource::HiddenQueue => 1,
+    }
+}
+
+fn validate_complete_target_binding(
+    source: &PcCandidateSourceBinding,
+    qualified_target: Option<&QualifiedPc4TargetIdentity>,
+) -> Result<(), PcCandidateBoundaryError> {
+    match (source.provider_kind(), qualified_target) {
+        (PcCandidateProviderKind::OfflineExact, None) => Ok(()),
+        (PcCandidateProviderKind::OnlinePc4, Some(target))
+            if source.profile() == target.profile()
+                && source.qualified_snapshot() == Some(target.snapshot()) =>
+        {
+            Ok(())
+        }
+        (PcCandidateProviderKind::OfflineExact, Some(_))
+        | (PcCandidateProviderKind::OnlinePc4, None)
+        | (PcCandidateProviderKind::OnlinePc4, Some(_)) => {
+            Err(PcCandidateBoundaryError::CompletenessTargetBindingMismatch)
+        }
+    }
+}
 
 fn validate_candidate_order(
     candidates: &[StandardBoard64TilingIdentity],
