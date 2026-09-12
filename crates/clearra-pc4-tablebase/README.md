@@ -64,3 +64,12 @@ semantic branch. Empty hold consumes both current and next. It never invents a
 piece after the supplied queue is exhausted and does not implement pattern or
 bag revelation. Its output is only input for the still feature-off qualified
 fixed-queue graph traversal; it is not tablebase activation or a solution.
+
+The bag-draw primitive is another deliberately smaller boundary. It owns an
+immutable arbitrary multiplicity profile, exact remainder and bag epoch, and
+emits at most seven canonical distinct-piece transitions with exact
+`multiplicity / denominator` weights. An empty remainder refills from the
+profile and advances the epoch with checked arithmetic. This primitive does
+not decide preview visibility, parse a pattern, apply hold, query a graph, or
+register a product capability. The future `graph x hold x bag x preview` DP
+may consume it only after those observation semantics are separately fixed.
