@@ -893,4 +893,57 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn extended_residual_above_compact_storage_uses_the_same_safe_residue_rule() {
+        let rows: Vec<_> = (0_u8..9)
+            .map(|x| projected_row(PieceKind::O, &[(x, 0), (x + 1, 0), (x, 1), (x + 1, 1)]))
+            .collect();
+        let catalog = ProjectionCatalog::compile_projected(10, 8, &rows).expect("catalog");
+        let targets = [counts(PieceKind::O, 2)];
+
+        let board = |cells: &[(u16, u16)]| {
+            let mut board = ExtendedBoard::EMPTY;
+            for &(x, y) in cells {
+                assert!(board.insert(y * 10 + x));
+            }
+            board
+        };
+        let reachable = board(&[
+            (0, 6),
+            (1, 6),
+            (2, 6),
+            (3, 6),
+            (0, 7),
+            (1, 7),
+            (2, 7),
+            (3, 7),
+        ]);
+        let residue_impossible = board(&[
+            (0, 6),
+            (1, 6),
+            (3, 6),
+            (4, 6),
+            (0, 7),
+            (1, 7),
+            (3, 7),
+            (5, 7),
+        ]);
+
+        assert!(
+            !ProjectionReachabilityCache::extended_cheap_residual_impossible(
+                &catalog, &targets, [0; 7], reachable,
+            )
+        );
+        let demand = catalog.project_extended_residual(residue_impossible);
+        assert!(catalog.cheap_bounds_allow(targets[0], demand.signature));
+        assert!(
+            ProjectionReachabilityCache::extended_cheap_residual_impossible(
+                &catalog,
+                &targets,
+                [0; 7],
+                residue_impossible,
+            )
+        );
+    }
 }
