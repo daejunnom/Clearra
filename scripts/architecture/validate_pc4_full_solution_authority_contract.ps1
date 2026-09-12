@@ -615,4 +615,45 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
     if ($traversal -match "(?s)pub const fn new\(\s*snapshot:\s*&'a QualifiedSnapshotIdentity") {
         Add-ArchitectureError 'PC4 public traversal request must not accept a raw snapshot in place of target completeness authority'
     }
+
+    $partialGenerationManifest = Read-Text 'scripts/release/pc4/partial-generation-manifest.mjs'
+    foreach ($required in @(
+        'clearra.pc4.partial-generation-manifest.v1',
+        '"srs",',
+        '"srs-plus",',
+        '"srs-x",',
+        '"jstris-180",',
+        '"no-kick",',
+        'status === "not_qualified"',
+        'qualifiedCount === 0',
+        'cannot be borrowed across profiles',
+        'resolved_revision'
+    )) {
+        if (-not $partialGenerationManifest.Contains($required)) {
+            Add-ArchitectureError "PC4 release generation admission must preserve independent partial-profile qualification; missing '$required'"
+        }
+    }
+    foreach ($forbidden in @(
+        'fetch(',
+        'https://huggingface.co/',
+        'process.env',
+        'child_process',
+        'writeFile'
+    )) {
+        if ($partialGenerationManifest.Contains($forbidden)) {
+            Add-ArchitectureError "PC4 partial-generation validator must remain pure and cannot discover, sign, promote, or mutate '$forbidden'"
+        }
+    }
+
+    $partialGenerationManifestTests = Read-Text 'scripts/release/pc4/partial-generation-manifest.test.mjs'
+    foreach ($requiredTest in @(
+        'one qualified profile activates while four retain exact not-qualified reasons',
+        'qualified targets stay independent by use case and line count',
+        'a generation with no qualified profile is rejected',
+        'graph index and qualification evidence cannot be borrowed across profiles'
+    )) {
+        if (-not $partialGenerationManifestTests.Contains($requiredTest)) {
+            Add-ArchitectureError "PC4 partial-generation release contract test is missing '$requiredTest'"
+        }
+    }
 }

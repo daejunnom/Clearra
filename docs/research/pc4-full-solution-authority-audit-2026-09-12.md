@@ -104,3 +104,32 @@ target-specific terminal/completeness statement, known-answer suite, and
 offline exhaustive parity. Browser/native Range transports and a product
 adapter must preserve that exact identity. None of the synthetic fixtures in
 this branch grants release or dataset authority.
+
+## 2026-09-13 upstream recheck
+
+The moving Hugging Face dataset now exposes the original `graph.bin` together
+with four additional graph candidates named `graph_no180.bin`,
+`graph_nokick.bin`, `graph_srsplus.bin`, and `graph_srsx.bin`. The four variants
+were added in one later dataset commit, while the helper files remain named
+only `field_hash_to_id.v1.bin` and `graph_offsets.u32.bin` rather than carrying
+an explicit profile binding.
+
+This file presence does not close profile qualification. The dataset card still
+says that `graph.bin` is not included and points at
+`muse918/zxcl-pc-jstris-tbp/docs/DATA.md`; that path is absent from the current
+repository tree. A similarly named `docs/DATA.md` exists in `muse918/zxcl-pc`,
+but it documents the original 510,917,451-byte Hydra graph and the policy/value
+alignment, not the four newly uploaded graph variants or their relationship to
+the two helper indexes. No authoritative per-variant record layout, exact kick
+identity, index binding, terminal-completeness statement, or known-answer set
+was found in those sources.
+
+Consequently the five filenames are discovery candidates, not five qualified
+profiles. Generation construction must evaluate the fixed SRS, SRS+, SRS-X,
+Jstris-180, and no-kick slots independently. It may activate a generation when
+one or more exact slots complete every qualification obligation, while every
+other slot remains typed `not_qualified`. A qualified graph, helper index, KAT,
+or completeness receipt from one slot must never be borrowed by another. The
+moving dataset revision and observed LFS digests remain discovery evidence and
+must not become source constants; a promoted generation records its own
+resolved immutable bindings only after qualification.
