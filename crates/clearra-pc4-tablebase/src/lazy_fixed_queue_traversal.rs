@@ -298,9 +298,8 @@ impl FixedQueueTraversalFamily {
             });
         }
         let snapshot = self.target.snapshot();
-        let profile = self.target.profile();
         check_page_guard(snapshot, guard)?;
-        validate_provider_binding(snapshot, profile, provider)?;
+        validate_provider_binding(&self.target, provider)?;
 
         let mut transaction = cursor.clone();
         let mut paths = Vec::new();
@@ -372,8 +371,7 @@ impl FixedQueueTraversalFamily {
 
             let piece = self.queue[consumed_pieces];
             let adjacency_query = FixedQueueAdjacencyQuery::from_parts(
-                snapshot,
-                profile,
+                &self.target,
                 field_id,
                 piece,
                 consumed_pieces,
@@ -382,7 +380,7 @@ impl FixedQueueTraversalFamily {
             page_adjacency_queries = checked_increment(page_adjacency_queries)?;
             let adjacency_result = provider.complete_outgoing_edges(&adjacency_query);
             check_page_guard(snapshot, guard)?;
-            validate_provider_binding(snapshot, profile, provider)?;
+            validate_provider_binding(&self.target, provider)?;
             let adjacency = adjacency_result.map_err(FixedQueueTraversalPageError::Provider)?;
             validate_adjacency(&adjacency_query, &adjacency)?;
 
@@ -497,24 +495,28 @@ where
 }
 
 fn validate_provider_binding<ProviderError, TerminalError, P>(
-    snapshot: &QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: &QualifiedPc4TargetIdentity,
     provider: &P,
 ) -> Result<(), FixedQueueTraversalPageError<ProviderError, TerminalError>>
 where
     P: QualifiedCompleteAdjacencyProvider,
 {
-    if provider.snapshot() != snapshot {
+    if provider.snapshot() != target.snapshot() {
         return Err(FixedQueueTraversalPageError::Semantic(
             FixedQueueTraversalSemanticError::ProviderSnapshotMismatch,
         ));
     }
-    if provider.profile() != profile {
+    if provider.profile() != target.profile() {
         return Err(FixedQueueTraversalPageError::Semantic(
             FixedQueueTraversalSemanticError::ProviderProfileMismatch {
-                expected: profile,
+                expected: target.profile(),
                 actual: provider.profile(),
             },
+        ));
+    }
+    if provider.target() != target {
+        return Err(FixedQueueTraversalPageError::Semantic(
+            FixedQueueTraversalSemanticError::ProviderTargetMismatch,
         ));
     }
     Ok(())
@@ -531,6 +533,8 @@ fn validate_adjacency<ProviderError, TerminalError>(
             expected: query.profile(),
             actual: adjacency.profile(),
         })
+    } else if adjacency.target() != query.target() {
+        Some(FixedQueueTraversalSemanticError::AdjacencyTargetMismatch)
     } else if adjacency.source_field_id() != query.source_field_id() {
         Some(FixedQueueTraversalSemanticError::AdjacencySourceMismatch {
             expected: query.source_field_id(),
@@ -562,6 +566,8 @@ fn validate_adjacency<ProviderError, TerminalError>(
                 expected: query.profile(),
                 actual: edge.profile(),
             })
+        } else if edge.target() != query.target() {
+            Some(FixedQueueTraversalSemanticError::EdgeTargetMismatch)
         } else if edge.source_field_id() != query.source_field_id() {
             Some(FixedQueueTraversalSemanticError::EdgeSourceMismatch {
                 expected: query.source_field_id(),
@@ -624,7 +630,7 @@ mod tests {
     use std::{cell::Cell, collections::BTreeMap, convert::Infallible, rc::Rc};
 
     use super::*;
-    use crate::manifest::tests::{qualified_snapshot_identity, qualified_target_identity};
+    use crate::manifest::tests::qualified_target_identity;
     use crate::{
         prepare_fixed_queue_concrete_family, ClearraPlacementIdentity,
         ConcretePathMaterializationBudgets, FixedQueuePathMaterializationRequest,
@@ -638,7 +644,7 @@ mod tests {
     }
 
     struct Provider {
-        snapshot: QualifiedSnapshotIdentity,
+        target: QualifiedPc4TargetIdentity,
         graph: BTreeMap<(u32, Pc4GraphPiece), Vec<u32>>,
         calls: Vec<(u32, Pc4GraphPiece, usize)>,
         fail: bool,
@@ -648,12 +654,8 @@ mod tests {
     impl QualifiedCompleteAdjacencyProvider for Provider {
         type Error = ProviderError;
 
-        fn snapshot(&self) -> &QualifiedSnapshotIdentity {
-            &self.snapshot
-        }
-
-        fn profile(&self) -> Pc4RuleProfile {
-            Pc4RuleProfile::Srs
+        fn target(&self) -> &QualifiedPc4TargetIdentity {
+            &self.target
         }
 
         fn complete_outgoing_edges(
@@ -676,8 +678,7 @@ mod tests {
                 .into_iter()
                 .map(|target| {
                     QualifiedPc4GraphEdge::from_qualified_record(
-                        query.snapshot().clone(),
-                        query.profile(),
+                        query.target(),
                         query.source_field_id(),
                         query.piece(),
                         target,
@@ -685,8 +686,7 @@ mod tests {
                 })
                 .collect();
             Ok(QualifiedCompleteAdjacency::from_qualified_provider(
-                query.snapshot().clone(),
-                query.profile(),
+                query.target(),
                 query.source_field_id(),
                 query.piece(),
                 query.queue_index(),
@@ -720,10 +720,6 @@ mod tests {
         }
     }
 
-    fn snapshot() -> QualifiedSnapshotIdentity {
-        qualified_snapshot_identity("lazy-traversal-generation", "lazy-traversal-manifest")
-    }
-
     fn target() -> QualifiedPc4TargetIdentity {
         qualified_target_identity(
             "lazy-traversal-generation",
@@ -736,7 +732,7 @@ mod tests {
 
     fn provider(graph: &[((u32, Pc4GraphPiece), &[u32])]) -> Provider {
         Provider {
-            snapshot: snapshot(),
+            target: target(),
             graph: graph
                 .iter()
                 .map(|(key, targets)| (*key, targets.to_vec()))
@@ -961,7 +957,6 @@ mod tests {
 
     #[test]
     fn duplicate_graph_edge_materializes_one_complete_concrete_family() {
-        let snapshot = snapshot();
         let queue = [Pc4GraphPiece::I];
         let graph_family = family(&queue, [8, 4, 1, 4, 8, 4]);
         let mut provider = provider(&[((0, Pc4GraphPiece::I), &[1, 1])]);
@@ -981,8 +976,7 @@ mod tests {
         let mut materializer = Materializer { calls: 0 };
         let concrete_family = prepare_fixed_queue_concrete_family(
             FixedQueuePathMaterializationRequest::new(
-                &snapshot,
-                Pc4RuleProfile::Srs,
+                graph_family.target(),
                 &graph_page.paths()[0],
                 ConcretePathMaterializationBudgets::new(
                     nonzero(1),

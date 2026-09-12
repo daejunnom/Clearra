@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::{
     materialize_qualified_graph_edge, ClearraPlacementIdentity, FixedQueueGraphPath,
     MaterializationGuard, Pc4PlacementMaterializer, Pc4RuleProfile, PlacementMaterializationError,
-    QualifiedSnapshotIdentity,
+    QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,22 +55,19 @@ impl ConcretePathMaterializationBudgets {
 }
 
 pub struct FixedQueuePathMaterializationRequest<'a> {
-    snapshot: &'a QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: &'a QualifiedPc4TargetIdentity,
     graph_path: &'a FixedQueueGraphPath,
     budgets: ConcretePathMaterializationBudgets,
 }
 
 impl<'a> FixedQueuePathMaterializationRequest<'a> {
     pub const fn new(
-        snapshot: &'a QualifiedSnapshotIdentity,
-        profile: Pc4RuleProfile,
+        target: &'a QualifiedPc4TargetIdentity,
         graph_path: &'a FixedQueueGraphPath,
         budgets: ConcretePathMaterializationBudgets,
     ) -> Self {
         Self {
-            snapshot,
-            profile,
+            target,
             graph_path,
             budgets,
         }
@@ -79,6 +76,9 @@ impl<'a> FixedQueuePathMaterializationRequest<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConcretePathMaterializationSemanticError {
+    EdgeTargetMismatch {
+        edge_index: usize,
+    },
     EdgeSnapshotMismatch {
         edge_index: usize,
     },
@@ -97,6 +97,7 @@ pub enum ConcretePathMaterializationSemanticError {
 impl ConcretePathMaterializationSemanticError {
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::EdgeTargetMismatch { .. } => "pc4_concrete_path_edge_target_mismatch",
             Self::EdgeSnapshotMismatch { .. } => "pc4_concrete_path_edge_snapshot_mismatch",
             Self::EdgeProfileMismatch { .. } => "pc4_concrete_path_edge_profile_mismatch",
             Self::EdgeSourceMismatch { .. } => "pc4_concrete_path_edge_source_mismatch",
@@ -145,8 +146,7 @@ impl<E> fmt::Display for ConcretePathMaterializationError<E> {
 /// alternatives is never allocated. Callers page that product through a cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixedQueueConcretePathFamily {
-    snapshot: QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: QualifiedPc4TargetIdentity,
     start_field_id: u32,
     terminal_field_id: u32,
     target_field_ids: Vec<u32>,
@@ -156,12 +156,16 @@ pub struct FixedQueueConcretePathFamily {
 }
 
 impl FixedQueueConcretePathFamily {
+    pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
+    }
+
     pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
-        &self.snapshot
+        self.target.snapshot()
     }
 
     pub const fn profile(&self) -> Pc4RuleProfile {
-        self.profile
+        self.target.profile()
     }
 
     pub const fn start_field_id(&self) -> u32 {
@@ -242,7 +246,7 @@ impl FixedQueueConcretePathFamily {
         if guard.is_cancelled() {
             return Err(ConcretePathPageError::Cancelled);
         }
-        if !guard.is_current_snapshot(&self.snapshot) {
+        if !guard.is_current_snapshot(self.target.snapshot()) {
             return Err(ConcretePathPageError::StaleSnapshot);
         }
         Ok(())
@@ -320,7 +324,7 @@ where
     M: Pc4PlacementMaterializer,
     G: MaterializationGuard,
 {
-    check_materialization_guard(request.snapshot, guard)?;
+    check_materialization_guard(request.target.snapshot(), guard)?;
     let edges = request.graph_path.edges();
     if edges.len() > request.budgets.graph_edges() {
         return Err(ConcretePathMaterializationError::BudgetExceeded {
@@ -336,18 +340,23 @@ where
     let mut target_field_ids = Vec::with_capacity(edges.len());
     let mut alternatives = Vec::with_capacity(edges.len());
     for (edge_index, edge) in edges.iter().enumerate() {
-        if edge.snapshot() != request.snapshot {
+        if edge.snapshot() != request.target.snapshot() {
             return Err(ConcretePathMaterializationError::Semantic(
                 ConcretePathMaterializationSemanticError::EdgeSnapshotMismatch { edge_index },
             ));
         }
-        if edge.profile() != request.profile {
+        if edge.profile() != request.target.profile() {
             return Err(ConcretePathMaterializationError::Semantic(
                 ConcretePathMaterializationSemanticError::EdgeProfileMismatch {
                     edge_index,
-                    expected: request.profile,
+                    expected: request.target.profile(),
                     actual: edge.profile(),
                 },
+            ));
+        }
+        if edge.target() != request.target {
+            return Err(ConcretePathMaterializationError::Semantic(
+                ConcretePathMaterializationSemanticError::EdgeTargetMismatch { edge_index },
             ));
         }
         if edge.source_field_id() != expected_source {
@@ -385,11 +394,10 @@ where
         alternatives.push(edge_alternatives);
     }
 
-    check_materialization_guard(request.snapshot, guard)?;
+    check_materialization_guard(request.target.snapshot(), guard)?;
 
     Ok(FixedQueueConcretePathFamily {
-        snapshot: request.snapshot.clone(),
-        profile: request.profile,
+        target: request.target.clone(),
         start_field_id: request.graph_path.start_field_id(),
         terminal_field_id: request.graph_path.terminal_field_id(),
         target_field_ids,
@@ -438,13 +446,24 @@ fn advance_cursor(
 mod tests {
     use super::*;
     use crate::{
-        manifest::tests::qualified_snapshot_identity, MaterializationOutput, Pc4GraphPiece,
-        PlacementRotation, QualifiedPc4GraphEdge,
+        manifest::tests::{qualified_snapshot_identity, qualified_target_identity},
+        MaterializationOutput, Pc4GraphPiece, Pc4TerminalUseCase, PlacementRotation,
+        QualifiedPc4GraphEdge, QualifiedPc4TargetIdentity,
     };
     use std::cell::Cell;
 
     fn snapshot_identity(generation: &str) -> QualifiedSnapshotIdentity {
         qualified_snapshot_identity(generation, format!("synthetic-lazy-manifest:{generation}"))
+    }
+
+    fn target_identity(generation: &str) -> QualifiedPc4TargetIdentity {
+        qualified_target_identity(
+            generation,
+            format!("synthetic-lazy-manifest:{generation}"),
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::PcSearch,
+            4,
+        )
     }
 
     fn placement(
@@ -536,32 +555,21 @@ mod tests {
         )
     }
 
-    fn two_edge_path(snapshot: &QualifiedSnapshotIdentity) -> FixedQueueGraphPath {
+    fn two_edge_path(target: &QualifiedPc4TargetIdentity) -> FixedQueueGraphPath {
         FixedQueueGraphPath::from_test_edges(
             10,
             vec![
-                QualifiedPc4GraphEdge::from_qualified_record(
-                    snapshot.clone(),
-                    Pc4RuleProfile::Srs,
-                    10,
-                    Pc4GraphPiece::I,
-                    11,
-                ),
-                QualifiedPc4GraphEdge::from_qualified_record(
-                    snapshot.clone(),
-                    Pc4RuleProfile::Srs,
-                    11,
-                    Pc4GraphPiece::O,
-                    12,
-                ),
+                QualifiedPc4GraphEdge::from_qualified_record(target, 10, Pc4GraphPiece::I, 11),
+                QualifiedPc4GraphEdge::from_qualified_record(target, 11, Pc4GraphPiece::O, 12),
             ],
         )
     }
 
     #[test]
     fn concrete_product_is_paged_without_eagerly_allocating_all_paths() {
-        let snapshot = snapshot_identity("generation-a");
-        let graph_path = two_edge_path(&snapshot);
+        let target = target_identity("generation-a");
+        let snapshot = target.snapshot().clone();
+        let graph_path = two_edge_path(&target);
         let guard = Guard {
             current: snapshot.clone(),
             cancelled: false,
@@ -570,12 +578,7 @@ mod tests {
             profile: Pc4RuleProfile::Srs,
         };
         let family = prepare_fixed_queue_concrete_family(
-            FixedQueuePathMaterializationRequest::new(
-                &snapshot,
-                Pc4RuleProfile::Srs,
-                &graph_path,
-                budgets(),
-            ),
+            FixedQueuePathMaterializationRequest::new(&target, &graph_path, budgets()),
             &mut materializer,
             &guard,
         )
@@ -616,7 +619,8 @@ mod tests {
 
     #[test]
     fn zero_edge_terminal_path_has_one_empty_concrete_realization() {
-        let snapshot = snapshot_identity("generation-a");
+        let target = target_identity("generation-a");
+        let snapshot = target.snapshot().clone();
         let graph_path = FixedQueueGraphPath::from_test_edges(10, Vec::new());
         let guard = Guard {
             current: snapshot.clone(),
@@ -626,12 +630,7 @@ mod tests {
             profile: Pc4RuleProfile::Srs,
         };
         let family = prepare_fixed_queue_concrete_family(
-            FixedQueuePathMaterializationRequest::new(
-                &snapshot,
-                Pc4RuleProfile::Srs,
-                &graph_path,
-                budgets(),
-            ),
+            FixedQueuePathMaterializationRequest::new(&target, &graph_path, budgets()),
             &mut materializer,
             &guard,
         )
@@ -648,7 +647,8 @@ mod tests {
 
     #[test]
     fn zero_edge_preparation_still_checks_cancellation_and_snapshot_freshness() {
-        let snapshot = snapshot_identity("generation-a");
+        let target = target_identity("generation-a");
+        let snapshot = target.snapshot().clone();
         let graph_path = FixedQueueGraphPath::from_test_edges(10, Vec::new());
         let mut materializer = SyntheticMaterializer {
             profile: Pc4RuleProfile::Srs,
@@ -659,12 +659,7 @@ mod tests {
         };
         assert_eq!(
             prepare_fixed_queue_concrete_family(
-                FixedQueuePathMaterializationRequest::new(
-                    &snapshot,
-                    Pc4RuleProfile::Srs,
-                    &graph_path,
-                    budgets(),
-                ),
+                FixedQueuePathMaterializationRequest::new(&target, &graph_path, budgets(),),
                 &mut materializer,
                 &cancelled,
             ),
@@ -676,12 +671,7 @@ mod tests {
         };
         assert_eq!(
             prepare_fixed_queue_concrete_family(
-                FixedQueuePathMaterializationRequest::new(
-                    &snapshot,
-                    Pc4RuleProfile::Srs,
-                    &graph_path,
-                    budgets(),
-                ),
+                FixedQueuePathMaterializationRequest::new(&target, &graph_path, budgets(),),
                 &mut materializer,
                 &stale,
             ),
@@ -691,11 +681,16 @@ mod tests {
 
     #[test]
     fn same_snapshot_labels_with_different_manifest_content_fail_closed() {
-        let snapshot = snapshot_identity("generation-a");
-        let differently_qualified = qualified_snapshot_identity(
+        let target = target_identity("generation-a");
+        let snapshot = target.snapshot().clone();
+        let differently_qualified_target = qualified_target_identity(
             "generation-a",
             "synthetic-lazy-manifest:different-content",
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::PcSearch,
+            4,
         );
+        let differently_qualified = differently_qualified_target.snapshot().clone();
         assert_eq!(
             snapshot.snapshot_identity(),
             differently_qualified.snapshot_identity()
@@ -705,7 +700,7 @@ mod tests {
             differently_qualified.manifest_content_identity()
         );
 
-        let graph_path = two_edge_path(&differently_qualified);
+        let graph_path = two_edge_path(&differently_qualified_target);
         let guard = Guard {
             current: snapshot.clone(),
             cancelled: false,
@@ -715,12 +710,7 @@ mod tests {
         };
         assert_eq!(
             prepare_fixed_queue_concrete_family(
-                FixedQueuePathMaterializationRequest::new(
-                    &snapshot,
-                    Pc4RuleProfile::Srs,
-                    &graph_path,
-                    budgets(),
-                ),
+                FixedQueuePathMaterializationRequest::new(&target, &graph_path, budgets(),),
                 &mut materializer,
                 &guard,
             ),
@@ -736,12 +726,7 @@ mod tests {
         };
         assert_eq!(
             prepare_fixed_queue_concrete_family(
-                FixedQueuePathMaterializationRequest::new(
-                    &snapshot,
-                    Pc4RuleProfile::Srs,
-                    &empty_path,
-                    budgets(),
-                ),
+                FixedQueuePathMaterializationRequest::new(&target, &empty_path, budgets(),),
                 &mut materializer,
                 &stale_guard,
             ),
@@ -751,8 +736,9 @@ mod tests {
 
     #[test]
     fn cursor_is_bound_to_one_family_and_pages_fail_closed_on_staleness() {
-        let snapshot = snapshot_identity("generation-a");
-        let graph_path = two_edge_path(&snapshot);
+        let target = target_identity("generation-a");
+        let snapshot = target.snapshot().clone();
+        let graph_path = two_edge_path(&target);
         let guard = Guard {
             current: snapshot.clone(),
             cancelled: false,
@@ -761,29 +747,20 @@ mod tests {
             profile: Pc4RuleProfile::Srs,
         };
         let family = prepare_fixed_queue_concrete_family(
-            FixedQueuePathMaterializationRequest::new(
-                &snapshot,
-                Pc4RuleProfile::Srs,
-                &graph_path,
-                budgets(),
-            ),
+            FixedQueuePathMaterializationRequest::new(&target, &graph_path, budgets()),
             &mut materializer,
             &guard,
         )
         .expect("family");
-        let other_snapshot = snapshot_identity("generation-b");
-        let other_graph_path = two_edge_path(&other_snapshot);
+        let other_target = target_identity("generation-b");
+        let other_snapshot = other_target.snapshot().clone();
+        let other_graph_path = two_edge_path(&other_target);
         let other_guard = Guard {
             current: other_snapshot.clone(),
             cancelled: false,
         };
         let other_family = prepare_fixed_queue_concrete_family(
-            FixedQueuePathMaterializationRequest::new(
-                &other_snapshot,
-                Pc4RuleProfile::Srs,
-                &other_graph_path,
-                budgets(),
-            ),
+            FixedQueuePathMaterializationRequest::new(&other_target, &other_graph_path, budgets()),
             &mut materializer,
             &other_guard,
         )
@@ -814,8 +791,9 @@ mod tests {
 
     #[test]
     fn alternative_memory_budgets_fail_before_product_expansion() {
-        let snapshot = snapshot_identity("generation-a");
-        let graph_path = two_edge_path(&snapshot);
+        let target = target_identity("generation-a");
+        let snapshot = target.snapshot().clone();
+        let graph_path = two_edge_path(&target);
         let guard = Guard {
             current: snapshot.clone(),
             cancelled: false,
@@ -831,12 +809,7 @@ mod tests {
         );
         assert_eq!(
             prepare_fixed_queue_concrete_family(
-                FixedQueuePathMaterializationRequest::new(
-                    &snapshot,
-                    Pc4RuleProfile::Srs,
-                    &graph_path,
-                    tight,
-                ),
+                FixedQueuePathMaterializationRequest::new(&target, &graph_path, tight,),
                 &mut materializer,
                 &guard,
             ),
@@ -851,8 +824,9 @@ mod tests {
 
     #[test]
     fn cancelled_page_does_not_advance_cursor_and_page_size_is_bounded() {
-        let snapshot = snapshot_identity("generation-a");
-        let graph_path = two_edge_path(&snapshot);
+        let target = target_identity("generation-a");
+        let snapshot = target.snapshot().clone();
+        let graph_path = two_edge_path(&target);
         let guard = Guard {
             current: snapshot.clone(),
             cancelled: false,
@@ -862,8 +836,7 @@ mod tests {
         };
         let family = prepare_fixed_queue_concrete_family(
             FixedQueuePathMaterializationRequest::new(
-                &snapshot,
-                Pc4RuleProfile::Srs,
+                &target,
                 &graph_path,
                 ConcretePathMaterializationBudgets::new(
                     NonZeroUsize::new(16).expect("non-zero"),
