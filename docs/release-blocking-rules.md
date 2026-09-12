@@ -134,6 +134,12 @@ The following conditions block release:
 - `custom piece silent fallback detected`
 - `GUI subprocess detected`
 - `raw SVG runtime rendering detected`
+- `PC4 product dependency reaches V-star, policy, Krylov, or n-PC probability`
+- `PC4 qualified adjacency selects a single preferred transition`
+- `PC4 active profile lacks exact graph/index/provenance/target qualification`
+- `PC4 profile consumes another profile's graph, index, or qualification`
+- `PC4 generation activates with zero qualified profiles`
+- `v0.9 online PC4 migration retains a live CLR4TB12 static-beta authority`
 
 ## Required Gates
 
@@ -152,6 +158,12 @@ The blocking rules are pinned by architecture validation:
   generic cache identity regressions.
 - U1/U4/U5/U3 architecture contracts block silent GPU fallback, renderer
   exactness shortcuts, asset import shortcuts, and GUI host boundary shortcuts.
+- PC4 Full Solution Authority blocks V-star/policy/Krylov decision sources,
+  dormant n-PC dependency reachability, single-best transition or placement
+  reduction, cross-profile qualification reuse, and—after the explicit v0.9
+  migration marker—any live CLR4TB12 static-beta product path. A qualified
+  profile may activate independently; profiles that did not qualify remain
+  typed `not_qualified` and cannot borrow another profile's authority.
 - U Test / Acceptance / Release Gate pins architecture, data-structure,
   algorithm, pruning, probability, spin/score, PostProcess GPU, field/Fumen,
   replay, and security tests that prevent solution loss, false probability,
