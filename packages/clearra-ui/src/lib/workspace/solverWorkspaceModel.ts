@@ -516,10 +516,12 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
             ? 'score-finder'
           : request.scoreMode === 'score-minimals'
             ? 'score-minimals'
-            : null;
+            : request.scoreMode === 'failed-queue'
+              ? 'failed-queue'
+              : null;
   const tokens = [
     'clearra',
-    request.scoreMode === 'failed-queue' ? 'failed-queue' : 'pc',
+    'pc',
     ...(productSubcommand ? [productSubcommand] : []),
     '--lines',
     String(request.lines)
