@@ -19,8 +19,8 @@ use clearra_objectives::policy::{
 };
 use clearra_pc_graph::request::{
     GpuDeviceSelection, OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy,
-    PcQueueInput, PcScenarioQuery, PcSolutionProbabilityPolicy, RequestedSearchBackend,
-    SupplyWindowSize, WorkerPolicy,
+    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy,
+    RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
 };
 use clearra_problem::{
     BuildSolutionProbabilityPolicy, SetupCandidatePriority, SetupCycleResetBorrowPolicy,
@@ -1243,6 +1243,32 @@ impl WebCommandRequest {
         Ok(())
     }
 
+    fn validate_pc_scenario_target_frame(&self) -> Result<(), WebCommandError> {
+        if !matches!(self.command_kind.as_str(), "pc" | "failed-queue") {
+            return Ok(());
+        }
+        let Some(scenario) = &self.scenario else {
+            return Ok(());
+        };
+        let invalid =
+            |message: String| WebCommandError::new(WebCommandErrorCode::InvalidValue, message);
+        if u16::from(self.lines) != scenario.visible_height() {
+            return Err(invalid(
+                "PC scenario target lines must equal the declared initial-field height".to_owned(),
+            ));
+        }
+        let frame = PcScenarioBoard::standard_10(scenario.visible_height(), scenario.board_mask())
+            .to_standard_target_frame(self.lines)
+            .map_err(|error| invalid(format!("invalid PC scenario target frame: {error:?}")))?;
+        if scenario.piece_window() != frame.required_pieces() {
+            return Err(invalid(format!(
+                "PC scenario requires exactly {} pieces after its initial line clear",
+                frame.required_pieces()
+            )));
+        }
+        Ok(())
+    }
+
     fn attach_product_capability_contract(
         &self,
         request: AppRequest,
@@ -1337,6 +1363,7 @@ impl WebCommandRequest {
             };
             return Ok(AppRequest::new(app_command));
         }
+        self.validate_pc_scenario_target_frame()?;
         self.validate_typed_pc_state()?;
         self.validate_build_v2_state()?;
         self.validate_setup_score_state()?;

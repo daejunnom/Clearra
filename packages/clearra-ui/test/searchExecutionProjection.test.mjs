@@ -23,7 +23,9 @@ const bundle = await build({
       export {
         buildWorkspaceCommand,
         buildWorkspaceCommandArguments,
+        clearCompletedRows,
         createDefaultWorkspaceRequest,
+        normalizeWorkspaceInitialField,
         normalizeWorkspaceRequest,
         workspaceRequestForDesktop,
         workspaceUsesOpeningPcPreset,
@@ -78,6 +80,26 @@ const contractRows = readFileSync(
       lowering: columns[10],
       reason: columns[11],
       dependencies: columns[12]
+    };
+  });
+
+const pcTargetFrameRows = readFileSync(
+  new URL('../../../tests/fixtures/contracts/pc_target_frame_parity.v1.tsv', import.meta.url),
+  'utf8'
+)
+  .split(/\r?\n/u)
+  .filter((line) => line && !line.startsWith('#'))
+  .map((line) => {
+    const columns = line.split('\t');
+    assert.equal(columns.length, 7, `target-frame fixture column count: ${line}`);
+    return {
+      id: columns[0],
+      lines: Number(columns[1]),
+      rawMask: BigInt(`0x${columns[2]}`),
+      normalizedMask: columns[3] === '-' ? null : BigInt(`0x${columns[3]}`),
+      initialClearedRows: Number(columns[4]),
+      requiredPieces: columns[5] === '-' ? null : Number(columns[5]),
+      outcome: columns[6]
     };
   });
 
@@ -484,6 +506,52 @@ test('PC scenario validation preserves odd-height fields and enforces the docume
     production.workspaceValidationCodes(overflow, 'web').includes('initial_b2b_invalid'),
     true
   );
+});
+
+test('PC GUI shares the 1..6L target-frame and initial-clear corpus without dropping high cells', () => {
+  const expectedError = {
+    'target-lines-invalid': 'target_lines_invalid',
+    'area-impossible': 'scenario_not_tileable',
+    'outside-target': 'scenario_outside_target'
+  };
+
+  for (const row of pcTargetFrameRows) {
+    const request = {
+      ...production.createDefaultWorkspaceRequest(),
+      lines: row.lines,
+      boardMask: row.rawMask,
+      queue: 'I'.repeat(row.requiredPieces ?? 1),
+      holdEnabled: false,
+      scoreMode: 'path'
+    };
+    const errors = production.workspaceValidationCodes(request, 'web');
+    assert.equal(
+      production.workspaceUsesOpeningPcPreset(request),
+      false,
+      `${row.id}: a submitted nonempty field must never be erased into the opening preset`
+    );
+
+    if (row.outcome !== 'valid') {
+      assert.deepEqual(errors, [expectedError[row.outcome]], `${row.id}: GUI rejection family`);
+      continue;
+    }
+
+    assert.deepEqual(errors, [], `${row.id}: GUI validation`);
+    const normalized = production.normalizeWorkspaceInitialField(request);
+    assert.equal(normalized.request.lines, row.lines, `${row.id}: target lines survive normalization`);
+    assert.equal(normalized.request.boardMask, row.normalizedMask, `${row.id}: normalized field`);
+    assert.equal(normalized.clearedRows, row.initialClearedRows, `${row.id}: initial clear count`);
+
+    const arguments_ = production.buildWorkspaceCommandArguments(request);
+    assert.equal(arguments_[arguments_.indexOf('--lines') + 1], String(row.lines), row.id);
+    assert.equal(arguments_[arguments_.indexOf('--height') + 1], String(row.lines), row.id);
+    assert.equal(arguments_[arguments_.indexOf('--pieces') + 1], String(row.requiredPieces), row.id);
+    assert.equal(
+      arguments_[arguments_.indexOf('--board-mask') + 1],
+      `0x${row.rawMask.toString(16).padStart(16, '0')}`,
+      `${row.id}: initial-clear evidence reaches the CLI boundary`
+    );
+  }
 });
 
 test('Desktop forward projection preserves the canonical command-discriminated CLI argv', () => {
