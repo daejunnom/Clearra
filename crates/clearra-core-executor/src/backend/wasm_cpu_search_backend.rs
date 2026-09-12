@@ -621,6 +621,16 @@ fn map_error(error: WasmExactSearchError) -> WasmCpuSearchError {
 }
 
 #[cfg(test)]
+static SCORE_RESOURCE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+fn score_resource_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    SCORE_RESOURCE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
 mod coverage_summary_tests {
     use std::sync::Arc;
 
@@ -1261,13 +1271,4 @@ mod tests {
             1
         ));
     }
-}
-#[cfg(test)]
-static SCORE_RESOURCE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-fn score_resource_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    SCORE_RESOURCE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

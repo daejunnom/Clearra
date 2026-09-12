@@ -414,7 +414,7 @@ impl ExactReplayLanguageSession {
                 .ok_or(Error::ProjectionOverflow)?,
             guard,
         )?;
-        let trace = replay_path(batch, graph, self.pattern_id, &path, &holds)
+        let trace = replay_path(batch, graph, self.pattern_id, path, holds)
             .ok_or(Error::InvalidEvidence)?;
         let trace_bytes = (size_of::<clearra_replay::ReplayTrace>() as u128)
             .checked_add(

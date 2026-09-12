@@ -827,6 +827,8 @@ impl NativeGeometryCatalog {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    // Partition coordinates mirror the linked native execution contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn generate_partition(
         &self,
         _problem: &CPackingProblem,
