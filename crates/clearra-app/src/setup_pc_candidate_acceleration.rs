@@ -20,6 +20,8 @@ use qualification_binding::{
 
 #[cfg(test)]
 use crate::PcCandidateSourceBinding;
+#[cfg(test)]
+use clearra_pc4_tablebase::Pc4TerminalFieldIdentity;
 
 pub const SETUP_PC_CANDIDATE_ACCELERATION_CONTRACT: &str = "setup-complete-pc-candidate-input.v2";
 
@@ -485,6 +487,10 @@ mod tests {
                             ProfileTargetCompletenessQualification::new(
                                 qualified_use_case,
                                 Pc4TargetLines::new(qualified_lines).expect("target lines"),
+                                Pc4TerminalFieldIdentity::full_rows(
+                                    Pc4TargetLines::new(qualified_lines).expect("target lines"),
+                                    0,
+                                ),
                                 format!("terminal:{qualified_use_case:?}:{qualified_lines}"),
                                 format!("outgoing:{qualified_use_case:?}:{qualified_lines}"),
                                 format!("answers:{qualified_use_case:?}:{qualified_lines}"),

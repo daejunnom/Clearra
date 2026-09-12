@@ -79,7 +79,7 @@ pub use manifest::{
     ActivatedSnapshot, ActivationError, ArtifactDescriptor, DatasetSnapshotManifest,
     DatasetSnapshotVerifier, FieldIdIndexRelation, GraphTargetEncoding, ManifestContentIdentity,
     ManifestError, Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile, Pc4TargetLines,
-    Pc4TerminalUseCase, ProfileAvailability, ProfileQualification,
+    Pc4TerminalFieldIdentity, Pc4TerminalUseCase, ProfileAvailability, ProfileQualification,
     ProfileTargetCompletenessQualification, QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity,
     SnapshotIdentity, SnapshotVerificationAttestation, SnapshotVerificationBinding,
     SnapshotVerificationFailure, SnapshotVerificationRequest, TargetQualificationError,

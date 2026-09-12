@@ -12,6 +12,9 @@ use clearra_pc4_tablebase::{
     Pc4TerminalUseCase, QualifiedPc4TargetIdentity, PC4_BAG_PIECES,
 };
 
+#[cfg(test)]
+use clearra_pc4_tablebase::Pc4TerminalFieldIdentity;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Pc4InputSurface {
     NonInteractiveCli,
@@ -741,6 +744,10 @@ mod tests {
         ProfileTargetCompletenessQualification::new(
             use_case,
             Pc4TargetLines::new(lines).expect("target lines"),
+            Pc4TerminalFieldIdentity::full_rows(
+                Pc4TargetLines::new(lines).expect("target lines"),
+                0,
+            ),
             format!("synthetic-{use_case:?}-{lines}-terminal"),
             format!("synthetic-{use_case:?}-{lines}-all-edges"),
             format!("synthetic-{use_case:?}-{lines}-kat"),

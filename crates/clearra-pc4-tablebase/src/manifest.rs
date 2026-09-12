@@ -14,6 +14,7 @@ pub(crate) const FIELD_HASH_INDEX_MAGIC: [u8; 8] = *b"FHIDIDX1";
 pub(crate) const GRAPH_OFFSETS_MAGIC: [u8; 8] = *b"GOFFIDX1";
 pub(crate) const RANGE_INDEX_VERSION: u32 = 1;
 const MAX_U24: u64 = 0x00ff_ffff;
+const HYDRA_FIELD_HASH_MASK: u64 = 0x00ff_ffff_ffff;
 const MAX_GRAPH_RECORD_BYTES: u32 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -72,6 +73,63 @@ impl Pc4TargetLines {
 pub enum Pc4TerminalUseCase {
     PcSearch,
     SetupSearch,
+}
+
+/// Exact graph node which represents a completed target in one qualified
+/// profile generation.
+///
+/// Hydra retains already-cleared rows as full logical bottom rows. Therefore
+/// the PC terminal hash is determined by the target height, while the field ID
+/// remains profile/generation specific and must come from the qualified index.
+/// Keeping both values in the manifest prevents a host from inventing terminal
+/// semantics from a convenient graph node.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Pc4TerminalFieldIdentity {
+    field_id: u32,
+    field_hash: u64,
+}
+
+impl Pc4TerminalFieldIdentity {
+    pub fn new(
+        target_lines: Pc4TargetLines,
+        field_id: u32,
+        field_hash: u64,
+    ) -> Result<Self, ManifestError> {
+        if field_hash & !HYDRA_FIELD_HASH_MASK != 0 {
+            return Err(ManifestError::TerminalFieldHashOutsideDomain { field_hash });
+        }
+        let expected = Self::full_rows_hash(target_lines);
+        if field_hash != expected {
+            return Err(ManifestError::TerminalFieldHashMismatch {
+                target_lines,
+                expected,
+                actual: field_hash,
+            });
+        }
+        Ok(Self {
+            field_id,
+            field_hash,
+        })
+    }
+
+    pub const fn full_rows(target_lines: Pc4TargetLines, field_id: u32) -> Self {
+        Self {
+            field_id,
+            field_hash: Self::full_rows_hash(target_lines),
+        }
+    }
+
+    pub const fn field_id(self) -> u32 {
+        self.field_id
+    }
+
+    pub const fn field_hash(self) -> u64 {
+        self.field_hash
+    }
+
+    const fn full_rows_hash(target_lines: Pc4TargetLines) -> u64 {
+        (1_u64 << ((target_lines.get() as u32) * 10)) - 1
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -274,6 +332,7 @@ impl ProfileQualification {
 pub struct ProfileTargetCompletenessQualification {
     use_case: Pc4TerminalUseCase,
     target_lines: Pc4TargetLines,
+    terminal_field: Pc4TerminalFieldIdentity,
     terminal_semantics_identity: String,
     outgoing_edge_completeness_identity: String,
     known_answer_identity: String,
@@ -284,6 +343,7 @@ impl ProfileTargetCompletenessQualification {
     pub fn new(
         use_case: Pc4TerminalUseCase,
         target_lines: Pc4TargetLines,
+        terminal_field: Pc4TerminalFieldIdentity,
         terminal_semantics_identity: impl Into<String>,
         outgoing_edge_completeness_identity: impl Into<String>,
         known_answer_identity: impl Into<String>,
@@ -292,6 +352,7 @@ impl ProfileTargetCompletenessQualification {
         Ok(Self {
             use_case,
             target_lines,
+            terminal_field,
             terminal_semantics_identity: required_identity(
                 terminal_semantics_identity.into(),
                 "profile_target_terminal_semantics_identity_missing",
@@ -317,6 +378,10 @@ impl ProfileTargetCompletenessQualification {
 
     pub const fn target_lines(&self) -> Pc4TargetLines {
         self.target_lines
+    }
+
+    pub const fn terminal_field(&self) -> Pc4TerminalFieldIdentity {
+        self.terminal_field
     }
 
     pub fn terminal_semantics_identity(&self) -> &str {
@@ -427,6 +492,16 @@ impl Pc4ProfileManifest {
                 profile: self.profile,
                 use_case: duplicate[0].use_case(),
                 target_lines: duplicate[0].target_lines(),
+            });
+        }
+        if let Some(qualification) = target_qualifications
+            .iter()
+            .find(|qualification| qualification.terminal_field().field_id() >= self.field_count)
+        {
+            return Err(ManifestError::TerminalFieldIdOutsideProfile {
+                profile: self.profile,
+                field_id: qualification.terminal_field().field_id(),
+                field_count: self.field_count,
             });
         }
         self.target_qualifications = target_qualifications;
@@ -811,6 +886,10 @@ impl QualifiedPc4TargetIdentity {
     pub const fn qualification(&self) -> &ProfileTargetCompletenessQualification {
         &self.qualification
     }
+
+    pub const fn terminal_field(&self) -> Pc4TerminalFieldIdentity {
+        self.qualification.terminal_field()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -915,6 +994,19 @@ pub enum ManifestError {
         use_case: Pc4TerminalUseCase,
         target_lines: Pc4TargetLines,
     },
+    TerminalFieldHashOutsideDomain {
+        field_hash: u64,
+    },
+    TerminalFieldHashMismatch {
+        target_lines: Pc4TargetLines,
+        expected: u64,
+        actual: u64,
+    },
+    TerminalFieldIdOutsideProfile {
+        profile: Pc4RuleProfile,
+        field_id: u32,
+        field_count: u32,
+    },
     ProfileSetIncomplete,
 }
 
@@ -940,6 +1032,13 @@ impl ManifestError {
             }
             Self::DuplicateTargetQualification { .. } => {
                 "pc4_online_duplicate_target_qualification"
+            }
+            Self::TerminalFieldHashOutsideDomain { .. } => {
+                "pc4_online_terminal_field_hash_outside_domain"
+            }
+            Self::TerminalFieldHashMismatch { .. } => "pc4_online_terminal_field_hash_mismatch",
+            Self::TerminalFieldIdOutsideProfile { .. } => {
+                "pc4_online_terminal_field_id_outside_profile"
             }
             Self::ProfileSetIncomplete => "pc4_online_profile_set_incomplete",
         }
@@ -1217,6 +1316,10 @@ pub(crate) mod tests {
         ProfileTargetCompletenessQualification::new(
             use_case,
             Pc4TargetLines::new(target_lines).expect("target inside graph domain"),
+            Pc4TerminalFieldIdentity::full_rows(
+                Pc4TargetLines::new(target_lines).expect("target inside graph domain"),
+                0,
+            ),
             format!("terminal:{use_case:?}:{target_lines}"),
             format!("outgoing-complete:{use_case:?}:{target_lines}"),
             format!("target-kat:{use_case:?}:{target_lines}"),
@@ -1484,6 +1587,70 @@ pub(crate) mod tests {
                 Err(ManifestError::TargetLinesOutsideGraphDomain { actual })
             );
         }
+    }
+
+    #[test]
+    fn terminal_field_identity_is_exactly_the_full_logical_target() {
+        let one = Pc4TargetLines::new(1).expect("one row");
+        let two = Pc4TargetLines::new(2).expect("two rows");
+        let four = Pc4TargetLines::new(4).expect("four rows");
+
+        assert_eq!(
+            Pc4TerminalFieldIdentity::full_rows(one, 7).field_hash(),
+            0x03ff
+        );
+        assert_eq!(
+            Pc4TerminalFieldIdentity::full_rows(two, 8).field_hash(),
+            0x000f_ffff
+        );
+        assert_eq!(
+            Pc4TerminalFieldIdentity::full_rows(four, 9).field_hash(),
+            0x00ff_ffff_ffff
+        );
+        assert_eq!(
+            Pc4TerminalFieldIdentity::new(two, 8, 0x03ff),
+            Err(ManifestError::TerminalFieldHashMismatch {
+                target_lines: two,
+                expected: 0x000f_ffff,
+                actual: 0x03ff,
+            })
+        );
+        assert_eq!(
+            Pc4TerminalFieldIdentity::new(four, 9, 1_u64 << 40),
+            Err(ManifestError::TerminalFieldHashOutsideDomain {
+                field_hash: 1_u64 << 40,
+            })
+        );
+    }
+
+    #[test]
+    fn target_qualification_rejects_a_terminal_id_outside_its_profile() {
+        let lines = Pc4TargetLines::new(4).expect("four rows");
+        let qualification = ProfileTargetCompletenessQualification::new(
+            Pc4TerminalUseCase::PcSearch,
+            lines,
+            Pc4TerminalFieldIdentity::full_rows(lines, 2),
+            "terminal",
+            "all-outgoing",
+            "kat",
+            "offline-parity",
+        )
+        .expect("well-formed qualification");
+
+        assert_eq!(
+            qualified_profile(
+                Pc4RuleProfile::Srs,
+                2,
+                8,
+                GraphTargetEncoding::U24LittleEndian,
+            )
+            .with_target_qualifications(vec![qualification]),
+            Err(ManifestError::TerminalFieldIdOutsideProfile {
+                profile: Pc4RuleProfile::Srs,
+                field_id: 2,
+                field_count: 2,
+            })
+        );
     }
 
     #[test]

@@ -13,6 +13,9 @@ use clearra_pc4_tablebase::{
     RangeRequest, RangeTransportFailure, SupplyError,
 };
 
+#[cfg(test)]
+use clearra_pc4_tablebase::Pc4TerminalFieldIdentity;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Pc4OfflineFallbackAuthorization {
     NotAuthorized,
@@ -572,6 +575,10 @@ mod tests {
                             ProfileTargetCompletenessQualification::new(
                                 Pc4TerminalUseCase::PcSearch,
                                 Pc4TargetLines::new(4).expect("4L target"),
+                                Pc4TerminalFieldIdentity::full_rows(
+                                    Pc4TargetLines::new(4).expect("4L target"),
+                                    0,
+                                ),
                                 "synthetic-pc-terminal",
                                 "synthetic-all-outgoing-edges",
                                 "synthetic-pc-known-answer",

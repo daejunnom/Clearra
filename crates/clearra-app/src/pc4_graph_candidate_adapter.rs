@@ -18,9 +18,10 @@ use clearra_pc4_tablebase::{
     ConcretePathMaterializationError, ConcretePathPageError, FixedQueueBudgetKind,
     FixedQueueConcretePath, FixedQueueConcretePathCursor, FixedQueueConcretePathFamily,
     FixedQueueGraphPath, FixedQueuePathMaterializationRequest, FixedQueueTerminalPredicate,
-    FixedQueueTraversalCursor, FixedQueueTraversalError, FixedQueueTraversalFamily,
-    FixedQueueTraversalGuard, FixedQueueTraversalPageError, MaterializationGuard, Pc4GraphPiece,
-    Pc4PlacementMaterializer, QualifiedCompleteAdjacencyProvider, QualifiedPc4TargetIdentity,
+    FixedQueueTerminalQuery, FixedQueueTraversalCursor, FixedQueueTraversalError,
+    FixedQueueTraversalFamily, FixedQueueTraversalGuard, FixedQueueTraversalPageError,
+    MaterializationGuard, Pc4GraphPiece, Pc4PlacementMaterializer,
+    QualifiedCompleteAdjacencyProvider, QualifiedPc4TargetIdentity,
 };
 
 #[cfg(test)]
@@ -44,6 +45,39 @@ pub trait QualifiedPc4CandidateTerminalPredicate: FixedQueueTerminalPredicate {
     fn target(&self) -> &QualifiedPc4TargetIdentity;
 
     fn terminal_semantics_identity(&self) -> &str;
+}
+
+/// Host-independent terminal predicate minted from the qualified generation
+/// manifest. Product adapters use this owner instead of supplying a closure or
+/// deriving completion from queue exhaustion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManifestQualifiedPc4Terminal {
+    target: QualifiedPc4TargetIdentity,
+}
+
+impl ManifestQualifiedPc4Terminal {
+    pub const fn new(target: QualifiedPc4TargetIdentity) -> Self {
+        Self { target }
+    }
+}
+
+impl FixedQueueTerminalPredicate for ManifestQualifiedPc4Terminal {
+    type Error = Infallible;
+
+    fn is_terminal(&mut self, query: &FixedQueueTerminalQuery<'_>) -> Result<bool, Self::Error> {
+        Ok(query.target() == &self.target
+            && query.field_id() == self.target.terminal_field().field_id())
+    }
+}
+
+impl QualifiedPc4CandidateTerminalPredicate for ManifestQualifiedPc4Terminal {
+    fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
+    }
+
+    fn terminal_semantics_identity(&self) -> &str {
+        self.target.qualification().terminal_semantics_identity()
+    }
 }
 
 pub trait Pc4GraphCandidateGuard:

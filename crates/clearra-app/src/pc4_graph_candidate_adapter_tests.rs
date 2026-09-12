@@ -6,11 +6,11 @@ use clearra_pc4_tablebase::{
     DatasetSnapshotVerifier, FieldIdIndexRelation, FixedQueueAdjacencyQuery,
     FixedQueueTraversalBudgets, FixedQueueTraversalFamilyRequest, FixedQueueTraversalPageBudgets,
     GraphTargetEncoding, ManifestContentIdentity, MaterializationOutput, Pc4ArtifactRole,
-    Pc4ProfileManifest, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, PlacementRotation,
-    ProfileAvailability, ProfileQualification, ProfileTargetCompletenessQualification,
-    QualifiedCompleteAdjacency, QualifiedPc4GraphEdge, QualifiedSnapshotIdentity, SnapshotIdentity,
-    SnapshotVerificationAttestation, SnapshotVerificationFailure, SnapshotVerificationRequest,
-    TerminalDepthContract,
+    Pc4ProfileManifest, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalFieldIdentity,
+    Pc4TerminalUseCase, PlacementRotation, ProfileAvailability, ProfileQualification,
+    ProfileTargetCompletenessQualification, QualifiedCompleteAdjacency, QualifiedPc4GraphEdge,
+    QualifiedSnapshotIdentity, SnapshotIdentity, SnapshotVerificationAttestation,
+    SnapshotVerificationFailure, SnapshotVerificationRequest, TerminalDepthContract,
 };
 
 use super::*;
@@ -51,12 +51,12 @@ fn target(use_case: Pc4TerminalUseCase) -> QualifiedPc4TargetIdentity {
             };
             let manifest = Pc4ProfileManifest::new(
                 profile,
-                1,
+                4,
                 GraphTargetEncoding::U24LittleEndian,
                 FieldIdIndexRelation::RecordOrdinal,
                 64,
-                descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 24),
-                descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 24),
+                descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 48),
+                descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 36),
                 descriptor(Pc4ArtifactRole::Graph, "graph.bin", 64),
                 ProfileQualification::new(
                     format!("{prefix}-index-spec"),
@@ -79,6 +79,10 @@ fn target(use_case: Pc4TerminalUseCase) -> QualifiedPc4TargetIdentity {
                             ProfileTargetCompletenessQualification::new(
                                 qualified_use_case,
                                 Pc4TargetLines::new(4).expect("target"),
+                                Pc4TerminalFieldIdentity::full_rows(
+                                    Pc4TargetLines::new(4).expect("target"),
+                                    3,
+                                ),
                                 format!("terminal:{qualified_use_case:?}:4"),
                                 format!("outgoing:{qualified_use_case:?}:4"),
                                 format!("kat:{qualified_use_case:?}:4"),
@@ -735,6 +739,51 @@ fn duplicate_transition_is_suppressed_while_all_concrete_and_converging_replays_
         .replay_provenances()
         .iter()
         .any(|replay| replay.target_field_ids() == [2, 3]));
+}
+
+#[test]
+fn manifest_terminal_identity_drives_the_complete_candidate_family() {
+    let target = target(Pc4TerminalUseCase::PcSearch);
+    assert_eq!(target.terminal_field().field_id(), 3);
+    assert_eq!(target.terminal_field().field_hash(), 0x00ff_ffff_ffff);
+    let source = source(&target);
+    let guard = Guard::new(source.clone());
+    let graph_family = lazy_family(&target, &guard);
+    let mut provider = provider(&target);
+    let mut terminal = ManifestQualifiedPc4Terminal::new(target.clone());
+    let mut materializer = Materializer { calls: 0 };
+    let mut stream = prepare_pc4_graph_candidate_stream(
+        Pc4GraphCandidateAdapterRequest::new(
+            &target,
+            &source,
+            0,
+            materialization_budgets(),
+            adapter_budgets(2),
+        ),
+        &graph_family,
+        &guard,
+    )
+    .expect("manifest-bound candidate stream");
+
+    while !stream.is_exhausted() {
+        stream
+            .next_observation_page(
+                nonzero(2),
+                &mut provider,
+                &mut terminal,
+                &mut materializer,
+                &guard,
+            )
+            .expect("manifest-bound observation page");
+    }
+    let family = stream.finish(&guard).expect("complete candidate family");
+    assert_eq!(family.candidate_count(), 2);
+    assert_eq!(family.replay_provenance_count(), 4);
+    assert!(family
+        .candidates()
+        .iter()
+        .flat_map(|candidate| candidate.replay_provenances())
+        .all(|replay| replay.terminal_field_id() == 3));
 }
 
 #[test]
