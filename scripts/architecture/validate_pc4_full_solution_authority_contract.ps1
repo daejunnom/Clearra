@@ -535,6 +535,49 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
     }
 
     foreach ($required in @(
+        'profiles: [ProfileAvailability; PC4_RULE_PROFILE_COUNT]',
+        'ActivationError::NoQualifiedProfiles',
+        '.any(|profile| matches!(profile, ProfileAvailability::Qualified(_)))',
+        'pub fn profile_availability(',
+        'ActivatedProfileError::NotQualified'
+    )) {
+        if (-not $manifest.Contains($required)) {
+            Add-ArchitectureError "PC4 snapshot activation must preserve five independent qualified/not-qualified profile slots; missing '$required'"
+        }
+    }
+
+    $profileCapability = Read-Text 'crates/clearra-app/src/pc4_profile_capability_projection.rs'
+    foreach ($required in @(
+        'profiles: [Pc4ProfileCapabilitySlot; 5]',
+        'ProfileNotQualified { reason: UnsupportedProfileReason }',
+        'pc_search_targets: [Pc4TargetCapabilitySlot; 4]',
+        'setup_search_targets: [Pc4TargetCapabilitySlot; 4]',
+        'Pc4RuleProfile::ALL.map(|profile| project_profile(snapshot, profile))'
+    )) {
+        if (-not $profileCapability.Contains($required)) {
+            Add-ArchitectureError "App PC4 capability projection must expose every profile and PC/Setup target independently; missing '$required'"
+        }
+    }
+
+    $fixedQueueRuntime = Get-RustProductionContents (
+        Read-PhysicalText 'crates/clearra-app/src/pc4_fixed_queue_candidate_runtime.rs'
+    )
+    foreach ($required in @(
+        'prepare_pc4_graph_candidate_stream(',
+        'AppQualifiedPc4LookupHit',
+        'NeedLookup(u32)',
+        'pub const fn completed_reducer_input(',
+        'Pc4FixedQueueCandidateRuntimeState::Complete'
+    )) {
+        if (-not $fixedQueueRuntime.Contains($required)) {
+            Add-ArchitectureError "App PC4 fixed-queue runtime must resume qualified lookups and expose reducer input only after complete traversal; missing '$required'"
+        }
+    }
+    if ($fixedQueueRuntime -match '(?m)^\s*pub(?:\([^)]*\))?\s+fn\s+(?:fetch|http|fallback)') {
+        Add-ArchitectureError 'App PC4 fixed-queue runtime must not own HTTP or execute an offline fallback'
+    }
+
+    foreach ($required in @(
         "target: &'a QualifiedPc4TargetIdentity",
         'let snapshot = request.target.snapshot();',
         'let profile = request.target.profile();'
