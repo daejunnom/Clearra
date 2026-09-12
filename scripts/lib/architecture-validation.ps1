@@ -25,6 +25,7 @@ $ValidationStarted = Get-Date
 
 . (Join-Path $ArchitectureLibraryRoot "architecture-validation-repository.ps1")
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_dependencies.ps1")
+. (Join-Path $ArchitectureScriptsRoot "architecture\validate_pc4_full_solution_authority_contract.ps1")
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_product_boundary.ps1")
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_forbidden_algorithms.ps1")
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_proof_carrying_pruning_contract.ps1")

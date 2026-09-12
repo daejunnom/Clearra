@@ -1,7 +1,10 @@
 // SRP rationale: bounded fixed-queue full outgoing-edge traversal is this module's single change reason.
 use core::{fmt, num::NonZeroUsize};
 
-use crate::{Pc4GraphPiece, Pc4RuleProfile, QualifiedPc4GraphEdge, QualifiedSnapshotIdentity};
+use crate::{
+    Pc4GraphPiece, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, QualifiedPc4GraphEdge,
+    QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity,
+};
 
 /// One separately qualified, complete adjacency response.
 ///
@@ -96,9 +99,12 @@ impl<'a> FixedQueueAdjacencyQuery<'a> {
 
 /// Pure port for graph-record parsing/lookup owned outside this traversal.
 ///
-/// Implementations must return all outgoing edges for the exact bound query.
-/// This crate validates bindings but does not parse, fetch, qualify, or infer
-/// the provider's graph format.
+/// Implementations must return all outgoing raw target occurrences for the
+/// exact bound query. The qualified graph may repeat one target for multiple
+/// placements. Traversal validates every occurrence, canonicalizes equal
+/// source + piece + target transitions once, and leaves concrete placement
+/// enumeration to the exact materializer. This crate does not parse, fetch,
+/// qualify, or infer the provider's graph format.
 pub trait QualifiedCompleteAdjacencyProvider {
     type Error;
 
@@ -125,8 +131,7 @@ pub trait FixedQueueTraversalGuard {
 /// Context for the caller-owned terminal predicate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedQueueTerminalQuery<'a> {
-    snapshot: &'a QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: &'a QualifiedPc4TargetIdentity,
     field_id: u32,
     queue: &'a [Pc4GraphPiece],
     consumed_pieces: usize,
@@ -134,11 +139,23 @@ pub struct FixedQueueTerminalQuery<'a> {
 
 impl<'a> FixedQueueTerminalQuery<'a> {
     pub const fn snapshot(&self) -> &'a QualifiedSnapshotIdentity {
-        self.snapshot
+        self.target.snapshot()
     }
 
     pub const fn profile(&self) -> Pc4RuleProfile {
-        self.profile
+        self.target.profile()
+    }
+
+    pub const fn target(&self) -> &'a QualifiedPc4TargetIdentity {
+        self.target
+    }
+
+    pub const fn use_case(&self) -> Pc4TerminalUseCase {
+        self.target.use_case()
+    }
+
+    pub const fn target_lines(&self) -> Pc4TargetLines {
+        self.target.target_lines()
     }
 
     pub const fn field_id(&self) -> u32 {
@@ -383,8 +400,7 @@ impl FixedQueueTraversalResult {
 }
 
 pub struct FixedQueueTraversalRequest<'a> {
-    snapshot: &'a QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: &'a QualifiedPc4TargetIdentity,
     start_field_id: u32,
     queue: &'a [Pc4GraphPiece],
     terminal_depth_contract: TerminalDepthContract,
@@ -393,31 +409,35 @@ pub struct FixedQueueTraversalRequest<'a> {
 
 impl<'a> FixedQueueTraversalRequest<'a> {
     pub const fn new(
-        snapshot: &'a QualifiedSnapshotIdentity,
-        profile: Pc4RuleProfile,
+        target: &'a QualifiedPc4TargetIdentity,
         start_field_id: u32,
         queue: &'a [Pc4GraphPiece],
         terminal_depth_contract: TerminalDepthContract,
         budgets: FixedQueueTraversalBudgets,
     ) -> Self {
         Self {
-            snapshot,
-            profile,
+            target,
             start_field_id,
             queue,
             terminal_depth_contract,
             budgets,
         }
     }
+
+    pub const fn target(&self) -> &'a QualifiedPc4TargetIdentity {
+        self.target
+    }
 }
 
-/// Traverses every outgoing edge for one fixed queue without global state
-/// deduplication.
+/// Traverses every distinct outgoing target transition for one fixed queue
+/// without global state deduplication.
 ///
-/// Reaching the same state through different edge paths therefore preserves
-/// both paths. Canonical ordering is derived solely from qualified edge values.
-/// Any callback, binding, cancellation, freshness, or budget failure returns an
-/// error and discards the in-progress result.
+/// Repeated raw target occurrences in one adjacency are one field transition:
+/// the exact materializer later recovers all concrete placements for that
+/// source + piece + target. Reaching the same state through different prior
+/// paths still preserves every path. Canonical ordering is derived solely from
+/// qualified edge values. Any callback, binding, cancellation, freshness, or
+/// budget failure returns an error and discards the in-progress result.
 pub fn traverse_fixed_queue<P, T, G>(
     request: FixedQueueTraversalRequest<'_>,
     provider: &mut P,
@@ -429,8 +449,10 @@ where
     T: FixedQueueTerminalPredicate,
     G: FixedQueueTraversalGuard,
 {
-    check_guard(request.snapshot, guard)?;
-    validate_provider_binding(request.snapshot, request.profile, provider)?;
+    let snapshot = request.target.snapshot();
+    let profile = request.target.profile();
+    check_guard(snapshot, guard)?;
+    validate_provider_binding(snapshot, profile, provider)?;
 
     let mut frontier = vec![FixedQueueGraphPath {
         start_field_id: request.start_field_id,
@@ -443,7 +465,7 @@ where
     while !frontier.is_empty() {
         let mut next_frontier = Vec::new();
         for path in frontier {
-            check_guard(request.snapshot, guard)?;
+            check_guard(snapshot, guard)?;
             consume_budget(
                 &mut visited_state_occurrences,
                 request.budgets.visited_state_occurrences(),
@@ -453,14 +475,13 @@ where
             let consumed_pieces = path.consumed_pieces();
             let field_id = path.terminal_field_id();
             let terminal_query = FixedQueueTerminalQuery {
-                snapshot: request.snapshot,
-                profile: request.profile,
+                target: request.target,
                 field_id,
                 queue: request.queue,
                 consumed_pieces,
             };
             let terminal_result = terminal_predicate.is_terminal(&terminal_query);
-            check_guard(request.snapshot, guard)?;
+            check_guard(snapshot, guard)?;
             let predicate_matches =
                 terminal_result.map_err(FixedQueueTraversalError::TerminalPredicate)?;
             let depth_permits_terminal = consumed_pieces == request.queue.len()
@@ -496,24 +517,25 @@ where
 
             let piece = request.queue[consumed_pieces];
             let adjacency_query = FixedQueueAdjacencyQuery {
-                snapshot: request.snapshot,
-                profile: request.profile,
+                snapshot,
+                profile,
                 source_field_id: field_id,
                 piece,
                 queue_index: consumed_pieces,
             };
             consume_unbounded_counter(&mut adjacency_queries);
             let adjacency_result = provider.complete_outgoing_edges(&adjacency_query);
-            check_guard(request.snapshot, guard)?;
-            validate_provider_binding(request.snapshot, request.profile, provider)?;
+            check_guard(snapshot, guard)?;
+            validate_provider_binding(snapshot, profile, provider)?;
             let mut adjacency = adjacency_result.map_err(FixedQueueTraversalError::Provider)?;
             validate_adjacency(&adjacency_query, &adjacency)?;
 
             adjacency
                 .edges
                 .sort_unstable_by_key(QualifiedPc4GraphEdge::target_field_id);
+            adjacency.edges.dedup_by_key(|edge| edge.target_field_id());
             for edge in adjacency.edges {
-                check_guard(request.snapshot, guard)?;
+                check_guard(snapshot, guard)?;
                 let attempted = next_frontier.len().saturating_add(1);
                 if attempted > request.budgets.frontier_paths() {
                     return Err(FixedQueueTraversalError::BudgetExceeded(
@@ -532,7 +554,7 @@ where
         frontier = next_frontier;
     }
 
-    check_guard(request.snapshot, guard)?;
+    check_guard(snapshot, guard)?;
     outputs.sort_by(|left, right| {
         left.start_field_id
             .cmp(&right.start_field_id)
@@ -686,7 +708,7 @@ mod tests {
     use std::{cell::Cell, collections::BTreeMap, convert::Infallible, rc::Rc};
 
     use super::*;
-    use crate::manifest::tests::qualified_snapshot_identity;
+    use crate::manifest::tests::{qualified_snapshot_identity, qualified_target_identity};
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum SyntheticProviderError {
@@ -816,8 +838,14 @@ mod tests {
         }
     }
 
-    fn snapshot() -> QualifiedSnapshotIdentity {
-        qualified_snapshot_identity("traversal-generation-a", "synthetic-traversal-manifest-a")
+    fn snapshot() -> QualifiedPc4TargetIdentity {
+        qualified_target_identity(
+            "traversal-generation-a",
+            "synthetic-traversal-manifest-a",
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::PcSearch,
+            4,
+        )
     }
 
     fn other_snapshot() -> QualifiedSnapshotIdentity {
@@ -826,7 +854,7 @@ mod tests {
 
     fn provider(graph: &[((u32, Pc4GraphPiece), &[u32])]) -> SyntheticProvider {
         SyntheticProvider {
-            snapshot: snapshot(),
+            snapshot: snapshot().snapshot().clone(),
             profile: Pc4RuleProfile::Srs,
             graph: graph
                 .iter()
@@ -862,12 +890,12 @@ mod tests {
     }
 
     fn request<'a>(
-        snapshot: &'a QualifiedSnapshotIdentity,
+        target: &'a QualifiedPc4TargetIdentity,
         queue: &'a [Pc4GraphPiece],
         depth: TerminalDepthContract,
         budgets: FixedQueueTraversalBudgets,
     ) -> FixedQueueTraversalRequest<'a> {
-        FixedQueueTraversalRequest::new(snapshot, Pc4RuleProfile::Srs, 0, queue, depth, budgets)
+        FixedQueueTraversalRequest::new(target, 0, queue, depth, budgets)
     }
 
     fn exhausted_terminal(query: &FixedQueueTerminalQuery<'_>) -> Result<bool, Infallible> {
@@ -951,6 +979,29 @@ mod tests {
     }
 
     #[test]
+    fn repeated_raw_targets_are_one_transition_before_exact_materialization() {
+        let snapshot = snapshot();
+        let queue = [Pc4GraphPiece::I];
+        let mut provider = provider(&[((0, Pc4GraphPiece::I), &[2, 1, 2, 1])]);
+        let result = traverse_fixed_queue(
+            request(
+                &snapshot,
+                &queue,
+                TerminalDepthContract::QueueExhaustedOnly,
+                budgets(8, 4, 1, 4),
+            ),
+            &mut provider,
+            &mut exhausted_terminal,
+            &guard(),
+        )
+        .expect("duplicate raw targets are canonical transitions");
+
+        assert_eq!(target_paths(&result), vec![vec![1], vec![2]]);
+        assert_eq!(result.adjacency_queries(), 1);
+        assert_eq!(result.visited_state_occurrences(), 3);
+    }
+
+    #[test]
     fn repeated_states_are_bounded_by_fixed_queue_without_losing_the_path() {
         let snapshot = snapshot();
         let queue = [Pc4GraphPiece::I, Pc4GraphPiece::I, Pc4GraphPiece::I];
@@ -1002,8 +1053,11 @@ mod tests {
             ((0, Pc4GraphPiece::I), &[1][..]),
             ((1, Pc4GraphPiece::O), &[2][..]),
         ];
-        let terminal_at_one =
-            |query: &FixedQueueTerminalQuery<'_>| Ok::<bool, Infallible>(query.field_id() == 1);
+        let terminal_at_one = |query: &FixedQueueTerminalQuery<'_>| {
+            assert_eq!(query.use_case(), Pc4TerminalUseCase::PcSearch);
+            assert_eq!(query.target_lines().get(), 4);
+            Ok::<bool, Infallible>(query.field_id() == 1)
+        };
 
         let mut strict_provider = provider(&graph);
         let strict = traverse_fixed_queue(
@@ -1128,11 +1182,11 @@ mod tests {
         let snapshot = snapshot();
         let differently_qualified = other_snapshot();
         assert_eq!(
-            snapshot.snapshot_identity(),
+            snapshot.snapshot().snapshot_identity(),
             differently_qualified.snapshot_identity()
         );
         assert_ne!(
-            snapshot.manifest_content_identity(),
+            snapshot.snapshot().manifest_content_identity(),
             differently_qualified.manifest_content_identity()
         );
         let queue = [Pc4GraphPiece::I];

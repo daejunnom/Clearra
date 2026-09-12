@@ -36,6 +36,15 @@ named synthetic verifiers and confer no production authority.
 V-star recommendations, policy/value arrays, Krylov data, and n-PC probability
 are outside this crate and are not fetched or decoded by it.
 
+The graph state domain is bounded to fields no higher than four rows. That
+does not make this an exactly-four-lines-only recommendation table, nor does it
+automatically authorize every shorter target. A PC or Setup accelerator for a
+target in `1..=4` must separately qualify that profile, PC-or-Setup use case,
+and target's terminal predicate and full outgoing-edge completeness. Targets
+above four rows remain outside this tablebase. Until those target-specific
+proofs and their concrete candidate bridge exist, the reader stays feature-off
+and the exact offline solver remains authoritative.
+
 The placement-materializer boundary accepts one snapshot- and profile-bound
 source-field + piece -> target-field edge from a separately qualified graph
 record parser. A profile-specific Clearra adapter must return every concrete
@@ -46,16 +55,25 @@ canonicalizes only by that placement identity. It does not parse opaque graph
 records, qualify profiles, prove reachability itself, or make a placement
 identity into replay evidence.
 
+Neither lookup nor materialization may use graph order as a score, tie-break,
+or preferred move. Selection objectives run only after a complete concrete
+candidate universe has crossed the application reducer boundary. Setup may
+reuse the same complete graph traversal only with separately qualified Setup
+terminal semantics; this crate does not infer a Setup reverse index.
+
 The fixed-queue traversal foundation consumes an immutable snapshot/profile,
 one start field, an exact queue, a caller-owned terminal predicate and guard,
 and finite visited/frontier/path/output budgets. It asks a separately qualified
-provider for complete adjacency, validates every redundant binding, preserves
-converging edge paths without global state deduplication, and emits paths in a
-canonical order. Empty adjacency is a valid dead end. Cancellation, snapshot
-drift, callback failures, binding violations, and budget exhaustion discard the
-in-progress result through typed errors. This pure layer does not implement
-hold, pattern/bag semantics, graph parsing/fetching, runtime registration, or
-dataset activation.
+provider for complete adjacency and validates every redundant binding. Hydra
+degree can contain the same target once per concrete placement, so equal raw
+`source + piece + target` occurrences become one canonical field transition;
+the exact materializer then recovers all concrete placements once. Traversal
+still preserves paths that converge from different prior paths without global
+state deduplication, and emits paths in canonical order. Empty adjacency is a
+valid dead end. Cancellation, snapshot drift, callback failures, binding
+violations, and budget exhaustion discard the in-progress result through typed
+errors. This pure layer does not implement hold, pattern/bag semantics, graph
+parsing/fetching, runtime registration, or dataset activation.
 
 The concrete-path bridge materializes each qualified graph edge exactly once,
 stores only that edge's bounded concrete placement alternatives, and pages the
