@@ -1,0 +1,107 @@
+name: Integration Contracts (Non-publishing)
+
+on:
+  push:
+    branches: ["codex/v0.9.0-stacked-on-v0.8.1-20260912"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-contracts-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+# Test results only: no release receipts, accepted artifacts or deployment.
+jobs:
+  source:
+    if: github.ref == 'refs/heads/codex/v0.9.0-stacked-on-v0.8.1-20260912' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check exact source and isolated authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == 'refs/heads/codex/v0.9.0-stacked-on-v0.8.1-20260912' && "$GITHUB_REF_TYPE" == 'branch' ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          node --test scripts/release/integration-contracts-workflow.test.mjs
+
+  native-cli:
+    needs: source
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch locked Rust dependencies
+        run: cargo fetch --locked
+      - name: Build native archive and execute real CLI process tests
+        shell: pwsh
+        run: |
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command pwsh -ArgumentsJson '["-NoProfile","-File","scripts/tools/check-native-cli-contracts.ps1","-ExecutionSurface","Trusted"]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  pc4-contracts:
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch locked Rust dependencies
+        run: cargo fetch --locked
+      - name: Verify materializer, graph paths and App contracts
+        shell: pwsh
+        run: |
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command node -ArgumentsJson '["scripts/tools/check-pc4-app-contracts.mjs","--row-normalization"]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  surface-contracts:
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install exact selected workspace dependencies without lifecycle builds
+        run: npm ci --ignore-scripts --no-audit --no-fund --workspace ctk3 --workspace @clearra/ui --workspace @clearra/discord-bot --workspace @clearra/web --include-workspace-root
+      - name: Build this source's CTK exports
+        shell: pwsh
+        run: |
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command node -ArgumentsJson '["packages/ctk3/scripts/build.mjs"]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify PC and Build result surfaces
+        run: >-
+          node scripts/tools/run-focused-js-tests.mjs
+          apps/clearra-discord-bot/test/typed-product-result.test.mjs
+          apps/clearra-discord-bot/test/capability-registry.test.mjs
+          packages/clearra-ui/test/coveragePortfolioExportSource.test.mjs
+          packages/clearra-ui/test/buildProbabilityAggregation.test.mjs
+          packages/clearra-ui/test/buildV2Model.contract.ts
+          packages/clearra-ui/test/pcPathReplayRenderParity.test.mjs
+          packages/clearra-ui/test/pcReplayPagerSurface.test.mjs
+          packages/clearra-ui/test/pcPathReplayGif.contract.ts
+          packages/clearra-ui/test/pcReplayPager.contract.ts
+          packages/clearra-ui/test/runtimeShellI18n.test.mjs
