@@ -1,3 +1,5 @@
+// SRP rationale: this module has one behavior-level change reason: compiling and evaluating
+// conservative additive projections of the exact ILC Geometry row catalog.
 use std::collections::{HashMap, HashSet};
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
@@ -23,6 +25,7 @@ pub(super) struct ProjectionCatalog {
     piece_maximum: [Vec<u8>; 7],
     piece_checker_options: [u8; 7],
     piece_column_mod_four_options: [u8; 7],
+    piece_column_checker_options: [u32; 7],
     // Serialized into the GPU constraint catalog only when that backend is built.
     #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
     standard_checker_rule_certified: bool,
@@ -138,6 +141,7 @@ impl ProjectionCatalog {
         let mut piece_maximum: [Vec<u8>; 7] = core::array::from_fn(|_| vec![0; width as usize]);
         let mut piece_checker_options = [0_u8; 7];
         let mut piece_column_mod_four_options = [0_u8; 7];
+        let mut piece_column_checker_options = [0_u32; 7];
 
         for row in rows {
             let signature = row.signature;
@@ -151,6 +155,9 @@ impl ProjectionCatalog {
             let checker_index = row.checker_delta.div_euclid(2) + 2;
             if (0..5).contains(&checker_index) {
                 piece_checker_options[piece] |= 1_u8 << checker_index;
+                let joint_index = u32::from(row.column_mod_four_residue) * 5
+                    + u32::try_from(checker_index).ok()?;
+                piece_column_checker_options[piece] |= 1_u32 << joint_index;
             }
             piece_column_mod_four_options[piece] |= 1_u8 << row.column_mod_four_residue;
         }
@@ -203,6 +210,7 @@ impl ProjectionCatalog {
             piece_maximum,
             piece_checker_options,
             piece_column_mod_four_options,
+            piece_column_checker_options,
             standard_checker_rule_certified,
             identity_digest,
         })
@@ -331,8 +339,77 @@ impl ProjectionCatalog {
         domain
     }
 
+    /// Computes the exact additive `(sum(x) mod 4, checker delta / 2)`
+    /// domain of the remaining piece multiset over this catalog's rows.
+    ///
+    /// This is an over-approximation of tilings because row choices are
+    /// convolved without requiring them to be spatially disjoint. It is still
+    /// a necessary condition: every valid completion chooses one catalog row
+    /// for every remaining piece, so its pair must occur in this domain. The
+    /// joint state is strictly at least as strong as intersecting the two
+    /// marginal domains because it preserves correlations between residues.
+    /// Six-line, ten-wide PC targets need at most fifteen tetrominoes. The
+    /// sixteenth slot is retained for the compact-board boundary; larger
+    /// extended searches fail open to the independent modulo-four filter.
+    fn column_checker_domain(&self, counts: [u8; 7]) -> Option<[u128; 4]> {
+        let piece_count = counts
+            .iter()
+            .try_fold(0_u16, |sum, count| sum.checked_add(u16::from(*count)))?;
+        if piece_count > MAX_EXACT_CHECKER_PIECES || !self.standard_checker_rule_certified {
+            return None;
+        }
+
+        // In a certified standard catalog only T (piece index 2) can change
+        // checker imbalance. Fold all non-T M4 options with the four-bit fast
+        // path, then retain the T residue/sign correlation in the joint state.
+        // This avoids paying a 20-state convolution for the common non-T rows.
+        let mut neutral_mod_four_domain = 1_u8;
+        for (piece, count) in counts.into_iter().enumerate() {
+            if piece == 2 {
+                continue;
+            }
+            for _ in 0..count {
+                neutral_mod_four_domain = convolve_mod_four(
+                    neutral_mod_four_domain,
+                    self.piece_column_mod_four_options[piece],
+                );
+            }
+        }
+
+        let mut t_domain = [0_u128; 4];
+        t_domain[0] = 1_u128 << CHECKER_OFFSET;
+        for _ in 0..counts[2] {
+            t_domain = convolve_column_checker(t_domain, self.piece_column_checker_options[2]);
+        }
+        let mut domain = [0_u128; 4];
+        for neutral_residue in 0..4_u8 {
+            if neutral_mod_four_domain & (1_u8 << neutral_residue) == 0 {
+                continue;
+            }
+            for t_residue in 0..4_u8 {
+                domain[usize::from((neutral_residue + t_residue) & 3)] |=
+                    t_domain[usize::from(t_residue)];
+            }
+        }
+        Some(domain)
+    }
+
     fn cheap_counts_may_match(&self, counts: [u8; 7], demand: ResidualProjection) -> bool {
-        if self.column_mod_four_domain(counts) & (1_u8 << demand.column_mod_four_residue) == 0 {
+        if demand.checker_delta % 2 != 0 {
+            return false;
+        }
+        if let Some(domain) = self.column_checker_domain(counts) {
+            let checker_bit = i16::from(demand.checker_delta.div_euclid(2) + CHECKER_OFFSET);
+            if !(0..128).contains(&checker_bit)
+                || domain[usize::from(demand.column_mod_four_residue)]
+                    & (1_u128 << checker_bit as u32)
+                    == 0
+            {
+                return false;
+            }
+        } else if self.column_mod_four_domain(counts) & (1_u8 << demand.column_mod_four_residue)
+            == 0
+        {
             return false;
         }
         self.cheap_bounds_allow(counts, demand.signature)
@@ -601,6 +678,30 @@ fn convolve_mod_four(domain: u8, options: u8) -> u8 {
         })
 }
 
+fn convolve_column_checker(domain: [u128; 4], options: u32) -> [u128; 4] {
+    let mut next = [0_u128; 4];
+    let mut options = options;
+    while options != 0 {
+        let option_index = options.trailing_zeros();
+        options &= options - 1;
+        let option_residue = option_index / 5;
+        let checker_delta = (option_index % 5) as i8 - 2;
+        for source_residue in 0..4_u32 {
+            let shifted = if checker_delta >= 0 {
+                domain[source_residue as usize]
+                    .checked_shl(checker_delta as u32)
+                    .unwrap_or(0)
+            } else {
+                domain[source_residue as usize]
+                    .checked_shr((-checker_delta) as u32)
+                    .unwrap_or(0)
+            };
+            next[((source_residue + option_residue) & 3) as usize] |= shifted;
+        }
+    }
+    next
+}
+
 fn compile_reachable_projections(
     catalog: &ProjectionCatalog,
     counts: [u8; 7],
@@ -770,6 +871,74 @@ mod tests {
         digest
     }
 
+    fn brute_force_column_checker_domain(rows: &[ProjectedRow], counts: [u8; 7]) -> [u128; 4] {
+        fn visit(
+            rows: &[ProjectedRow],
+            copies: &[usize],
+            cursor: usize,
+            residue: u8,
+            checker_units: i8,
+            domain: &mut [u128; 4],
+        ) {
+            if cursor == copies.len() {
+                let checker_bit = i16::from(checker_units) + i16::from(CHECKER_OFFSET);
+                if (0..128).contains(&checker_bit) {
+                    domain[usize::from(residue)] |= 1_u128 << checker_bit as u32;
+                }
+                return;
+            }
+            for row in rows
+                .iter()
+                .filter(|row| piece_index(row.piece) == copies[cursor])
+            {
+                visit(
+                    rows,
+                    copies,
+                    cursor + 1,
+                    (residue + row.column_mod_four_residue) & 3,
+                    checker_units + row.checker_delta.div_euclid(2),
+                    domain,
+                );
+            }
+        }
+
+        let mut copies = Vec::new();
+        for (piece, count) in counts.into_iter().enumerate() {
+            copies.extend(core::iter::repeat_n(piece, usize::from(count)));
+        }
+        let mut domain = [0_u128; 4];
+        visit(rows, &copies, 0, 0, 0, &mut domain);
+        domain
+    }
+
+    fn assert_all_count_vectors_match_brute_force(
+        catalog: &ProjectionCatalog,
+        rows: &[ProjectedRow],
+        counts: &mut [u8; 7],
+        piece: usize,
+        remaining_budget: u8,
+    ) {
+        if piece == counts.len() {
+            assert_eq!(
+                catalog.column_checker_domain(*counts),
+                Some(brute_force_column_checker_domain(rows, *counts)),
+                "joint domain diverged for {counts:?}"
+            );
+            return;
+        }
+        for count in 0..=remaining_budget {
+            counts[piece] = count;
+            assert_all_count_vectors_match_brute_force(
+                catalog,
+                rows,
+                counts,
+                piece + 1,
+                remaining_budget - count,
+            );
+        }
+        counts[piece] = 0;
+    }
+
     #[test]
     fn column_mod_four_rejects_a_residual_that_column_bounds_cannot_distinguish() {
         let rows = [
@@ -821,6 +990,91 @@ mod tests {
     }
 
     #[test]
+    fn joint_column_checker_convolution_matches_bounded_brute_force() {
+        let rows = [
+            projected_row(PieceKind::I, &[(0, 0), (1, 0), (2, 0), (3, 0)]),
+            projected_row(PieceKind::I, &[(0, 0), (0, 1), (0, 2), (0, 3)]),
+            projected_row(PieceKind::O, &[(0, 0), (1, 0), (0, 1), (1, 1)]),
+            projected_row(PieceKind::T, &[(0, 0), (1, 0), (2, 0), (1, 1)]),
+            projected_row(PieceKind::T, &[(0, 1), (0, 2), (0, 3), (1, 2)]),
+            projected_row(PieceKind::S, &[(1, 0), (2, 0), (0, 1), (1, 1)]),
+            projected_row(PieceKind::S, &[(0, 0), (0, 1), (1, 1), (1, 2)]),
+            projected_row(PieceKind::Z, &[(0, 0), (1, 0), (1, 1), (2, 1)]),
+            projected_row(PieceKind::Z, &[(1, 0), (0, 1), (1, 1), (0, 2)]),
+            projected_row(PieceKind::J, &[(0, 0), (0, 1), (1, 1), (2, 1)]),
+            projected_row(PieceKind::J, &[(0, 0), (1, 0), (0, 1), (0, 2)]),
+            projected_row(PieceKind::L, &[(2, 0), (0, 1), (1, 1), (2, 1)]),
+            projected_row(PieceKind::L, &[(0, 0), (1, 0), (1, 1), (1, 2)]),
+        ];
+        let catalog = ProjectionCatalog::compile_projected(10, 6, &rows).expect("catalog");
+
+        assert_all_count_vectors_match_brute_force(&catalog, &rows, &mut [0; 7], 0, 4);
+    }
+
+    #[test]
+    fn joint_domain_fails_open_outside_its_certified_window() {
+        let standard_rows = [projected_row(
+            PieceKind::I,
+            &[(0, 0), (1, 0), (2, 0), (3, 0)],
+        )];
+        let standard_catalog =
+            ProjectionCatalog::compile_projected(10, 6, &standard_rows).expect("catalog");
+        assert!(
+            standard_catalog
+                .column_checker_domain(counts(PieceKind::I, 17))
+                .is_none(),
+            "larger extended domains must fall back instead of truncating checker states"
+        );
+
+        let uncertified_rows = [projected_row(
+            PieceKind::I,
+            &[(0, 0), (1, 0), (2, 0), (1, 1)],
+        )];
+        let uncertified_catalog =
+            ProjectionCatalog::compile_projected(10, 6, &uncertified_rows).expect("catalog");
+        assert!(!uncertified_catalog.standard_checker_rule_certified());
+        assert!(
+            uncertified_catalog
+                .column_checker_domain(counts(PieceKind::I, 1))
+                .is_none(),
+            "a non-standard checker catalog must keep the independent safe fallback"
+        );
+    }
+
+    #[test]
+    fn joint_domain_rejects_a_correlation_lost_by_independent_filters() {
+        let rows = [
+            // (M4 0, checker +2)
+            projected_row(PieceKind::T, &[(0, 0), (1, 0), (2, 0), (1, 1)]),
+            // (M4 1, checker -2)
+            projected_row(PieceKind::T, &[(0, 1), (0, 2), (0, 3), (1, 2)]),
+        ];
+        let catalog = ProjectionCatalog::compile_projected(10, 6, &rows).expect("catalog");
+        let remaining = (1_u64 << 10) | (1_u64 << 1) | (1_u64 << 21) | (1_u64 << 2);
+        let demand = catalog.project_residual(remaining);
+        let piece_counts = counts(PieceKind::T, 1);
+        let checker_bit = u32::try_from(demand.checker_delta.div_euclid(2) + CHECKER_OFFSET)
+            .expect("checker bit");
+
+        assert_eq!(demand.column_mod_four_residue, 0);
+        assert_eq!(demand.checker_delta, -2);
+        assert!(
+            catalog.column_mod_four_domain(piece_counts) & (1_u8 << demand.column_mod_four_residue)
+                != 0,
+            "the independent M4 projection admits the demand"
+        );
+        assert!(
+            catalog.checker_domain(piece_counts) & (1_u128 << checker_bit) != 0,
+            "the independent checker projection admits the demand"
+        );
+        assert!(catalog.cheap_bounds_allow(piece_counts, demand.signature));
+        assert!(
+            !catalog.cheap_counts_may_match(piece_counts, demand),
+            "the joint projection must retain the row-level correlation"
+        );
+    }
+
+    #[test]
     fn mod_four_domain_also_enforces_vertical_parity_without_a_second_rule() {
         let rows = [
             projected_row(PieceKind::I, &[(0, 0), (0, 1), (0, 2), (0, 3)]),
@@ -854,7 +1108,13 @@ mod tests {
                 let demand = catalog
                     .add_projection(i_row.signature, t_row.signature)
                     .expect("rows fit height");
-                let demand = projection_from_signature(&catalog, demand);
+                let demand = ResidualProjection {
+                    signature: demand,
+                    checker_delta: i_row.checker_delta + t_row.checker_delta,
+                    column_mod_four_residue: (i_row.column_mod_four_residue
+                        + t_row.column_mod_four_residue)
+                        & 3,
+                };
                 assert!(
                     catalog.cheap_counts_may_match(residual_counts, demand),
                     "an exact catalog-row sum must never be rejected"
@@ -890,6 +1150,70 @@ mod tests {
             assert!(
                 catalog.cheap_counts_may_match(counts(PieceKind::O, piece_count), demand),
                 "{lines}L normalized residual was rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn joint_domain_preserves_normalized_nonempty_fields_for_one_through_six_lines() {
+        for lines in 1..=6_u8 {
+            let target = if lines == 6 {
+                (1_u64 << 60) - 1
+            } else {
+                (1_u64 << (10 * lines)) - 1
+            };
+            let initial = if lines.is_multiple_of(2) {
+                (1_u64 << 8) | (1_u64 << 9) | (1_u64 << 18) | (1_u64 << 19)
+            } else {
+                (1_u64 << (10 * (lines - 1) + 8)) | (1_u64 << (10 * (lines - 1) + 9))
+            };
+            assert_ne!(initial, 0);
+            for y in 0..lines {
+                assert_ne!((initial >> (10 * y)) & 0x3ff, 0x3ff);
+            }
+            let remaining = target & !initial;
+
+            let mut rows = Vec::new();
+            let paired_line_count = if lines.is_multiple_of(2) {
+                lines
+            } else {
+                lines - 1
+            };
+            for y in (0..paired_line_count).step_by(2) {
+                for x in (0..10_u8).step_by(2) {
+                    if lines.is_multiple_of(2) && x == 8 && y == 0 {
+                        continue;
+                    }
+                    rows.push(projected_row(
+                        PieceKind::O,
+                        &[(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)],
+                    ));
+                }
+            }
+            if !lines.is_multiple_of(2) {
+                let y = lines - 1;
+                rows.push(projected_row(
+                    PieceKind::I,
+                    &[(0, y), (1, y), (2, y), (3, y)],
+                ));
+                rows.push(projected_row(
+                    PieceKind::I,
+                    &[(4, y), (5, y), (6, y), (7, y)],
+                ));
+            }
+
+            let catalog = ProjectionCatalog::compile_projected(10, 6, &rows).expect("catalog");
+            let mut piece_counts = [0_u8; 7];
+            for row in &rows {
+                piece_counts[piece_index(row.piece)] += 1;
+            }
+            assert_eq!(
+                remaining.count_ones(),
+                u32::from(4 * piece_counts.iter().sum::<u8>())
+            );
+            assert!(
+                catalog.cheap_counts_may_match(piece_counts, catalog.project_residual(remaining)),
+                "{lines}L normalized nonempty initial field was rejected"
             );
         }
     }
