@@ -4,6 +4,7 @@
 //! upstream snapshot, qualify it, and satisfy the emitted bounded Range
 //! requests. No dataset revision or digest is compiled into the product.
 
+mod fixed_queue_hold;
 mod fixed_queue_traversal;
 mod graph;
 mod lazy_materialized_path;
@@ -12,6 +13,12 @@ mod manifest;
 mod materializer;
 mod protocol;
 
+pub use fixed_queue_hold::{
+    expand_fixed_queue_hold, FixedQueueHoldBudgetExceeded, FixedQueueHoldBudgetKind,
+    FixedQueueHoldBudgets, FixedQueueHoldDecision, FixedQueueHoldExpansionError,
+    FixedQueueHoldExpansionGuard, FixedQueueHoldExpansionRequest, FixedQueueHoldExpansionResult,
+    FixedQueueHoldPath, FixedQueueHoldState, FixedQueueHoldStep,
+};
 pub use fixed_queue_traversal::{
     traverse_fixed_queue, FixedQueueAdjacencyQuery, FixedQueueBudgetExceeded, FixedQueueBudgetKind,
     FixedQueueGraphPath, FixedQueueTerminalPredicate, FixedQueueTerminalQuery,

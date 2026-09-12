@@ -55,3 +55,12 @@ the full product, treats a zero-edge terminal graph path as one empty concrete
 realization, and discards page output on cancellation, snapshot drift, or a
 cursor/family mismatch. This is still a feature-off synthetic boundary: it does
 not make an unqualified graph parser or placement adapter authoritative.
+
+The fixed-queue hold expander is a separate bounded supply state machine. It
+turns a concrete current/preview queue plus disabled, empty, or occupied hold
+state into every semantic placement-piece sequence while retaining canonical
+hold-decision evidence for later replay. Equal current/held pieces are one
+semantic branch. Empty hold consumes both current and next. It never invents a
+piece after the supplied queue is exhausted and does not implement pattern or
+bag revelation. Its output is only input for the still feature-off qualified
+fixed-queue graph traversal; it is not tablebase activation or a solution.
