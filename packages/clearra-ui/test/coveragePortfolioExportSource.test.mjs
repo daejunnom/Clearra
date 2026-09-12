@@ -127,7 +127,8 @@ test('portfolio export rejects identity mismatches, missing members, and cross-p
     const source = sourceWithPage2({
       ...page(2, 100, 101),
       known_alternative_count: '2',
-      total_alternative_count: '2'
+      total_alternative_count: '2',
+      enumeration_complete: true
     });
     await assert.rejects(source.readKeys(0, 101), /active portfolio/u);
   });
