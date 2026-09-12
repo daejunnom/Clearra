@@ -269,6 +269,25 @@ test("pc.minimals canonical projection survives runner, HTTP client and bot vali
   ].sort());
 });
 
+test("pc.minimals rejects duplicate or noncanonical source membership before narrowing", () => {
+  for (const mutate of [
+    (value) => { value.summary.members[1].candidate_id = "2"; },
+    (value) => { value.summary.members[1].candidate_id = "1"; },
+    (value) => {
+      value.summary.members[1].normalized_solution_key =
+        value.summary.members[0].normalized_solution_key;
+    },
+  ]) {
+    const malformed = coverage("pc-minimum-cover.v2", "pc.minimals");
+    mutate(malformed);
+    assert.equal(validDiscordTypedProductResult(malformed), false);
+    assert.throws(
+      () => projectDiscordTypedProductResult(malformed),
+      /ordered canonical minimum members/u,
+    );
+  }
+});
+
 test("already-canonical pc.minimals rejects mixed families, forged fields and invalid identities", () => {
   const canonical = projectDiscordTypedProductResult(coverage("pc-minimum-cover.v2", "pc.minimals"));
   for (const mutate of [
