@@ -43,6 +43,8 @@ mod pc4_input_disclosure_policy;
 mod pc4_fixed_queue_candidate_runtime;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_lookup_graph_runtime_adapter;
+#[cfg(feature = "online-pc4-tablebase")]
+mod pc4_profile_capability_projection;
 mod pc_allspin_result;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc_candidate_page_boundary;
@@ -234,6 +236,11 @@ pub use pc4_lookup_graph_runtime_adapter::{
     Pc4LookupGraphCacheAdmission, Pc4LookupGraphCacheBudgetKind, Pc4LookupGraphCacheError,
     Pc4LookupGraphCacheLimits, Pc4LookupGraphCacheStartError, Pc4LookupGraphCacheUsage,
     Pc4LookupMaterializationError, Pc4LookupMaterializationField, Pc4LookupPlacementMaterializer,
+};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc4_profile_capability_projection::{
+    project_pc4_profile_capabilities, Pc4ProfileCapabilityProjection, Pc4ProfileCapabilitySlot,
+    Pc4ProfileCapabilityStatus, Pc4TargetCapabilitySlot, Pc4TargetCapabilityStatus,
 };
 pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
 #[cfg(feature = "online-pc4-tablebase")]
