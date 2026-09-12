@@ -1056,6 +1056,15 @@ impl FamilyCompiler {
                 self.tablebase_pruned_states = self.tablebase_pruned_states.saturating_add(1);
                 return self.finish_top(catalog, FAMILY_INVALID, true);
             }
+            if ProjectionReachabilityCache::cheap_residual_impossible(
+                catalog.projection_catalog(),
+                &self.targets,
+                self.used_counts,
+                remaining,
+            ) {
+                self.column_pruned_states = self.column_pruned_states.saturating_add(1);
+                return self.finish_top(catalog, FAMILY_INVALID, true);
+            }
             let advanced_analysis_enabled = !self.resource_authoritative && self.target_depth >= 7;
             let component_composition_enabled =
                 advanced_analysis_enabled && self.compile_domain.allows_component_composition();
@@ -1092,13 +1101,12 @@ impl FamilyCompiler {
             let exact_projection_enabled = advanced_domain
                 && remaining.count_ones() >= 24
                 && (depth <= 2 || domain.pivot_support_count >= 5);
-            if advanced_domain
-                && self.projection_cache.residual_impossible(
+            if exact_projection_enabled
+                && self.projection_cache.exact_residual_impossible(
                     catalog.projection_catalog(),
                     &self.targets,
                     self.used_counts,
                     remaining,
-                    exact_projection_enabled,
                 )
             {
                 self.column_pruned_states = self.column_pruned_states.saturating_add(1);
