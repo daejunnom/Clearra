@@ -4,12 +4,20 @@
 //! upstream snapshot, qualify it, and satisfy the emitted bounded Range
 //! requests. No dataset revision or digest is compiled into the product.
 
+mod fixed_queue_traversal;
 mod graph;
 mod lookup;
 mod manifest;
 mod materializer;
 mod protocol;
 
+pub use fixed_queue_traversal::{
+    traverse_fixed_queue, FixedQueueAdjacencyQuery, FixedQueueBudgetExceeded, FixedQueueBudgetKind,
+    FixedQueueGraphPath, FixedQueueTerminalPredicate, FixedQueueTerminalQuery,
+    FixedQueueTraversalBudgets, FixedQueueTraversalError, FixedQueueTraversalGuard,
+    FixedQueueTraversalRequest, FixedQueueTraversalResult, FixedQueueTraversalSemanticError,
+    QualifiedCompleteAdjacency, QualifiedCompleteAdjacencyProvider, TerminalDepthContract,
+};
 pub use graph::{decode_graph_target_sequence, GraphTargetDecodeError};
 pub use lookup::{
     FormatMismatch, LookupFailure, LookupHit, LookupMachine, LookupStartError, LookupStep,
