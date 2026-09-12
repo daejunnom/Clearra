@@ -9,6 +9,7 @@ mod bag_reveal;
 mod fixed_queue_hold;
 mod fixed_queue_traversal;
 mod graph;
+mod lazy_fixed_queue_traversal;
 mod lazy_materialized_path;
 mod lookup;
 mod manifest;
@@ -41,6 +42,11 @@ pub use fixed_queue_traversal::{
     QualifiedCompleteAdjacency, QualifiedCompleteAdjacencyProvider, TerminalDepthContract,
 };
 pub use graph::{decode_graph_target_sequence, GraphTargetDecodeError};
+pub use lazy_fixed_queue_traversal::{
+    prepare_fixed_queue_traversal_family, FixedQueueTraversalCursor, FixedQueueTraversalFamily,
+    FixedQueueTraversalFamilyRequest, FixedQueueTraversalPage, FixedQueueTraversalPageBudgets,
+    FixedQueueTraversalPageError, FixedQueueTraversalPrepareError,
+};
 pub use lazy_materialized_path::{
     prepare_fixed_queue_concrete_family, ConcretePathMaterializationBudgetKind,
     ConcretePathMaterializationBudgets, ConcretePathMaterializationError,
