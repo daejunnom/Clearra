@@ -13,6 +13,7 @@ mod lazy_materialized_path;
 mod lookup;
 mod manifest;
 mod materializer;
+mod observation_frontier;
 mod protocol;
 
 pub use bag_draw::{
@@ -63,6 +64,13 @@ pub use materializer::{
     MaterializationOutput, Pc4GraphPiece, Pc4PlacementMaterializer, PlacementIdentityError,
     PlacementMaterializationError, PlacementMaterializationSemanticError, PlacementRotation,
     QualifiedPc4GraphEdge,
+};
+pub use observation_frontier::{
+    prepare_pc4_observation_frontier, Pc4ObservationFrontierBudgets, Pc4ObservationFrontierCursor,
+    Pc4ObservationFrontierEntry, Pc4ObservationFrontierFamily, Pc4ObservationFrontierGuard,
+    Pc4ObservationFrontierPage, Pc4ObservationFrontierPageBudgetKind,
+    Pc4ObservationFrontierPageError, Pc4ObservationFrontierPrepareBudgetKind,
+    Pc4ObservationFrontierPrepareError, Pc4ObservationFrontierRequest,
 };
 pub use protocol::{
     LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
