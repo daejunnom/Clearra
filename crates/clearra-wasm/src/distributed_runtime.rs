@@ -4804,8 +4804,8 @@ mod build_probability_partial_ingress_tests {
     fn pc_verifier_returns_to_the_host_between_candidate_transactions() {
         let runtime = WasmCommandRuntime::default()
             .with_host_capabilities(crate::WasmHostCapabilities::new(4, false, false));
-        let command = "clearra pc --lines 2 --count unique \
-            --backend cpu --workers 2";
+        let command = "clearra pc --board-mask 0xf3fcf --height 2 --pieces 1 \
+            --lines 2 --count unique --backend cpu --workers 2";
         let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
             .expect("distributed PC preparation");
         let mut coordinator = match preparation {
