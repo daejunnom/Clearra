@@ -60,6 +60,16 @@ above four rows remain outside this tablebase. Until those target-specific
 proofs and their concrete candidate bridge exist, the reader stays feature-off
 and the exact offline solver remains authoritative.
 
+The pure Hydra-compatible record decoder recognizes only the explicitly
+declared v1 layout: a five-byte big-endian source-field hash followed by all
+seven `I, J, L, O, S, T, Z` degree groups and their little-endian target IDs.
+It verifies the requested source hash, every target domain bound, the
+canonical cumulative-degree bound, truncation, and trailing bytes. It retains
+every raw outgoing target, including duplicates. Decoding a well-formed record
+does not qualify a profile, target, generation, graph completeness statement,
+or concrete placement; those remain independent activation and materializer
+obligations.
+
 The placement-materializer boundary accepts one snapshot- and profile-bound
 source-field + piece -> target-field edge from a separately qualified graph
 record parser. A profile-specific Clearra adapter must return every concrete

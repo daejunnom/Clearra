@@ -52,7 +52,10 @@ pub use generation_registry::{
     Pc4GenerationStageOutcome, Pc4GenerationStageToken, PinnedPc4Generation,
     MAX_RETAINED_PC4_GENERATIONS,
 };
-pub use graph::{decode_graph_target_sequence, GraphTargetDecodeError};
+pub use graph::{
+    decode_graph_target_sequence, decode_hydra_graph_record_v1, DecodedHydraGraphRecordV1,
+    GraphTargetDecodeError, HydraGraphRecordDecodeError,
+};
 pub use lazy_fixed_queue_traversal::{
     prepare_fixed_queue_traversal_family, FixedQueueTraversalCursor, FixedQueueTraversalFamily,
     FixedQueueTraversalFamilyRequest, FixedQueueTraversalPage, FixedQueueTraversalPageBudgets,

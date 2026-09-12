@@ -156,6 +156,29 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         }
     }
 
+    $graphRecordDecoder = Read-Text 'crates/clearra-pc4-tablebase/src/graph.rs'
+    foreach ($required in @(
+        'pub fn decode_hydra_graph_record_v1(',
+        'const HYDRA_GRAPH_PIECES:',
+        'for piece in HYDRA_GRAPH_PIECES',
+        'SourceFieldHashMismatch',
+        'TargetOutsideFieldDomain',
+        'TrailingBytes',
+        'hydra_record_decodes_every_piece_group_without_selecting_an_edge'
+    )) {
+        if (-not $graphRecordDecoder.Contains($required)) {
+            Add-ArchitectureError "PC4 Hydra graph-record decoder is missing all-edge or fail-closed marker '$required'"
+        }
+    }
+    foreach ($pattern in @(
+        '(?is)targets\s*\.\s*(?:first|last|pop|truncate)\s*\(',
+        '(?is)targets\s*\.\s*(?:iter|into_iter)\s*\(\s*\)\s*\.\s*(?:next|take)\s*\(\s*1?\s*\)'
+    )) {
+        if ($graphRecordDecoder -match $pattern) {
+            Add-ArchitectureError 'PC4 graph-record decoding must retain all outgoing targets rather than selecting one edge'
+        }
+    }
+
     $materializer = Read-Text 'crates/clearra-pc4-tablebase/src/materializer.rs'
     foreach ($required in @(
         'let mut placements = output.placements;',
