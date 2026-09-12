@@ -2,7 +2,7 @@
 // whether one already sealed, complete PC candidate universe may cross the
 // feature-off Setup acceleration seam. It performs no lookup, graph parsing,
 // placement materialization, Setup evaluation, fallback execution, capability
-// activation, policy/V* ranking, or Krylov-state computation.
+// activation, score-guided ranking, or future probability-state computation.
 
 mod qualification_binding;
 
@@ -111,7 +111,7 @@ pub enum SetupPcAccelerationRequestError {
 /// Differential-qualification authority for one exact Setup substitution.
 ///
 /// There is intentionally no public constructor. A public caller cannot turn
-/// a graph hit, a mutable generation label, benchmark success, V* policy
+/// a graph hit, a mutable generation label, benchmark success, a ranked-action
 /// output, or a synthetic KAT into production qualification. A future trusted
 /// verifier may mint this inside `clearra-app` only after comparing the complete
 /// graph-derived PC family against the existing offline Setup path for this
