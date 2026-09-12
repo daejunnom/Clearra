@@ -38,6 +38,8 @@ mod online_pc4_lookup_session;
 mod parity_page_store;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_input_disclosure_policy;
+#[cfg(feature = "online-pc4-tablebase")]
+mod pc4_lookup_graph_runtime_adapter;
 mod pc_allspin_result;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc_candidate_page_boundary;
@@ -222,6 +224,13 @@ pub use pc4_input_disclosure_policy::{
     Pc4InputDisclosureRejection, Pc4InputDisclosureRequest, Pc4InputDisclosureStop,
     Pc4InputDisclosureStopReason, Pc4InputSurface, Pc4PartialBagRemainder, Pc4PreparedOnlineInput,
     Pc4PreparedQueueInput, Pc4QueueDisclosure,
+};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc4_lookup_graph_runtime_adapter::{
+    Pc4LookupAdjacencyError, Pc4LookupCompleteAdjacencyProvider, Pc4LookupGraphCache,
+    Pc4LookupGraphCacheAdmission, Pc4LookupGraphCacheBudgetKind, Pc4LookupGraphCacheError,
+    Pc4LookupGraphCacheLimits, Pc4LookupGraphCacheStartError, Pc4LookupGraphCacheUsage,
+    Pc4LookupMaterializationError, Pc4LookupMaterializationField, Pc4LookupPlacementMaterializer,
 };
 pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
 #[cfg(feature = "online-pc4-tablebase")]
