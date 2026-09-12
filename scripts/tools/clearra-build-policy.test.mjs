@@ -29,6 +29,20 @@ test('one physical path identity matches Windows and its WSL mount', () => {
   assert.throws(() => assertBuildPathWithin('/tmp/clearra-build/../escape', '/tmp/clearra-build'));
 });
 
+test('Windows native compiler guard preserves argv beyond the cmd limit', { skip: process.platform !== 'win32' }, async t => {
+  const options = await fixture(t);
+  const owner = await acquireBuildOwner(options);
+  try {
+    assert.ok(owner.environment.RUSTC_WRAPPER.endsWith('.exe'));
+    const payload = 'quoted"한글\\path '.repeat(750);
+    const code = `if (process.argv[1] !== ${JSON.stringify(payload)}) process.exit(9)`;
+    const result = spawnSync(owner.environment.RUSTC_WRAPPER, [process.execPath, '-e', code, payload], {
+      env: { ...process.env, ...owner.environment }, encoding: 'utf8', windowsHide: true,
+    });
+    assert.equal(result.status, 0, result.stderr || result.error?.message);
+  } finally { await owner.finish(true); }
+});
+
 test('outside target and compiler overrides fail before directory creation', async t => {
   const options = await fixture(t);
   for (const key of ['CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR', 'CLEARRA_WSL_CARGO_TARGET_DIR', 'CLEARRA_CORE_C_BUILD_DIR', 'RUSTC_WRAPPER']) {

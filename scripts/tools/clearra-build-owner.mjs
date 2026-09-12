@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { prepareRustcLauncher } from './prepare-clearra-rustc-launcher.mjs';
 import { BUILD_TRANSACTION_MARKER, FORBIDDEN_BUILD_ALIASES, assertBuildRecord, assertBuildPathWithin, assertNoBuildLinks, assertManagedBuildTransaction,
   buildPathIdentity, buildSourceId, canonicalBuildRoot } from './clearra-build-policy.mjs';
 
@@ -99,7 +100,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
   const created = new Date().toISOString();
   const transactionRoot = purpose === 'experiment' ? resolve(root, 'experiments', sourceId, 'current') : resolve(root, 'products', `${created.replace(/[-:.]/gu, '')}-${sessionId}`);
   const cargoTarget = resolve(transactionRoot, 'cargo-target');
-  const guard = resolve(authorityRoot, 'scripts/tools', process.platform === 'win32' ? 'clearra-rustc-guard.cmd' : 'clearra-rustc-guard.sh');
+  const guard = process.platform === 'win32' ? resolve(transactionRoot, 'build-tools/clearra-rustc-guard.exe') : resolve(authorityRoot, 'scripts/tools/clearra-rustc-guard.sh');
   for (const key of ['CARGO_TARGET_DIR']) {
     if (environment[key] && (purpose !== 'experiment' || buildPathIdentity(environment[key]) !== buildPathIdentity(cargoTarget))) throw new Error(`External build target override is forbidden: ${key}`);
   }
@@ -160,7 +161,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
     CLEARRA_BUILD_CACHE_SESSION_KEY: sessionId, CARGO_TARGET_DIR: cargoTarget, CARGO_INCREMENTAL: '0', RUSTC_WRAPPER: guard };
   if (process.platform !== 'win32' && /^[A-Za-z]:\//u.test(buildPathIdentity(root))) childEnvironment.LOCALAPPDATA = buildPathIdentity(root).replace(/\/Clearra\/build$/iu, '').replaceAll('/', '\\');
   let finished = false;
-  return { environment: childEnvironment, transaction: marker, finish: async success => {
+  const owner = { environment: childEnvironment, transaction: marker, finish: async success => {
     if (finished) return;
     assertManagedBuildTransaction({ environment: childEnvironment, sourceRoot });
     finished = true;
@@ -174,4 +175,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
       if (purpose === 'product' && success) await retainProductBuildGenerations(root);
     } finally { if (catalogOwned) await releaseLease(catalogPath, identity); }
   } };
+  try { if (process.platform === 'win32') prepareRustcLauncher(childEnvironment); }
+  catch (error) { await owner.finish(false); throw error; }
+  return owner;
 }

@@ -25,6 +25,17 @@ Assert-ArtifactPathCondition ((Assert-ClearraRequestedBuildPath 'core-c-cache' $
 Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-ClearraRequestedBuildPath (Join-Path $canonicalFixtureRoot 'experiments/other/current/core') $fixtureSource }) 'preflight_other_experiment_path_rejected'
 Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $canonicalFixtureRoot)) 'all_path_validation_preceded_mkdir'
 
+$launcherPreparation = (Get-Command Initialize-ClearraNativeRustcLauncher).ScriptBlock
+try {
+    Set-Item Function:\Initialize-ClearraNativeRustcLauncher { throw 'injected launcher bootstrap failure' }
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Ensure-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource -Purpose product }) 'launcher_failure_rejects_build'
+    Assert-ArtifactPathCondition (-not (Test-ClearraBuildTransactionOwner)) 'launcher_failure_releases_owner'
+    Assert-ArtifactPathCondition (@(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot '.leases') -Force).Count -eq 0) 'launcher_failure_releases_product_leases'
+    Assert-ArtifactPathCondition (@(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Force).Count -eq 0) 'launcher_failure_removes_failed_product'
+} finally {
+    Set-Item Function:\Initialize-ClearraNativeRustcLauncher $launcherPreparation
+}
+
 $first = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
 $firstSession = $first.session_id
 $experimentRoot = $first.transaction_root

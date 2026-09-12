@@ -20,6 +20,9 @@ function Get-ClearraBuildPurpose {
 }
 
 function Get-ClearraExpectedRustcWrapper {
+    if ((Test-StartTestsWindows) -and -not [string]::IsNullOrWhiteSpace($env:CLEARRA_BUILD_TRANSACTION_ROOT)) {
+        return Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'build-tools/clearra-rustc-guard.exe'
+    }
     $name = if (Test-StartTestsWindows) { 'clearra-rustc-guard.cmd' } else { 'clearra-rustc-guard.sh' }
     return [IO.Path]::GetFullPath((Join-Path $script:ClearraPathPolicyRepositoryRoot "scripts/tools/$name"))
 }

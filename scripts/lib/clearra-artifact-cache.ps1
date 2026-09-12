@@ -53,6 +53,16 @@ function Set-ClearraBuildTransactionEnvironment($Record) {
         RUSTC_WRAPPER = (Get-ClearraExpectedRustcWrapper)
     }
     foreach ($name in $values.Keys) { [Environment]::SetEnvironmentVariable($name, [string]$values[$name], 'Process') }
+    # Resolve the guard after installing the new transaction root, including
+    # bootstrap failure cleanup before the native executable exists.
+    $env:RUSTC_WRAPPER = Get-ClearraExpectedRustcWrapper
+}
+
+function Initialize-ClearraNativeRustcLauncher {
+    if (Test-StartTestsWindows) {
+        & node (Join-Path $PSScriptRoot '../tools/prepare-clearra-rustc-launcher.mjs')
+        if ($LASTEXITCODE -ne 0) { throw 'Native Windows compiler guard preparation failed.' }
+    }
 }
 
 function Initialize-ClearraBuildArtifactCache(
@@ -78,6 +88,7 @@ function Initialize-ClearraBuildArtifactCache(
         $script:ClearraBuildCacheSessionKey = $inherited.session_id
         $script:ClearraBuildTransactionOwned = $false
         Set-ClearraBuildTransactionEnvironment $inherited
+        Initialize-ClearraNativeRustcLauncher
         return $inherited
     }
     $sourceId = Get-ClearraBuildSourceIdentity $source
@@ -130,10 +141,18 @@ function Initialize-ClearraBuildArtifactCache(
         $script:ClearraBuildTransactionOwned = $true
         $script:ClearraProductCatalogLease = $catalogLease
         Set-ClearraBuildTransactionEnvironment $record
+        Initialize-ClearraNativeRustcLauncher
         return $record
     } catch {
-        if ($null -ne $lease) { Exit-ClearraBuildLease $lease }
-        if ($null -ne $catalogLease) { Exit-ClearraBuildLease $catalogLease }
+        if ($script:ClearraBuildTransactionOwned -and $null -ne $script:ClearraBuildTransaction -and
+            $script:ClearraBuildTransaction.session_id -eq $session) {
+            # Bootstrap failures occur after ownership is installed. Mark the
+            # generation failed before releasing its lease, using normal exit.
+            Exit-ClearraBuildArtifactCacheUsage
+        } else {
+            if ($null -ne $lease) { Exit-ClearraBuildLease $lease }
+            if ($null -ne $catalogLease) { Exit-ClearraBuildLease $catalogLease }
+        }
         throw
     }
 }

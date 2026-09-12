@@ -100,6 +100,11 @@ The shared schema binds `CLEARRA_BUILD_ROOT`, `CLEARRA_BUILD_PURPOSE`,
 Cargo configuration rejects unmanaged Cargo before compilation. Use
 `scripts/tools/invoke-clearra-build.ps1` or the Node counterpart
 `scripts/tools/invoke-clearra-build.mjs` (also used by Bookworm).
+On Windows the owner prepares a tiny native argv launcher inside the same
+transaction's `build-tools` directory. It forwards directly to the shared Node
+compiler guard without `cmd.exe`, whose shorter command-line ceiling rejects
+large dependency feature lists. The launcher has no independent cache or policy;
+nested commands reuse it and generation retirement removes it.
 This prevents accidental path bypass; it is not an operating-system sandbox
 against deliberately replacing configuration or using an unmodified old branch.
 
