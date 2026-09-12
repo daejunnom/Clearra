@@ -2,7 +2,7 @@ use clearra_app::{
     encode_ctk3_compact, AppCommand, BuildObjective, BuildV2AppRequest, Ctk3Color, Ctk3Document,
     Ctk3Page, Ctk3Piece, QueryEnvelope,
 };
-use clearra_pc_graph::request::RequestedSearchBackend;
+use clearra_pc_graph::request::{RequestedSearchBackend, SupplyWindowSize};
 
 use crate::{
     CliCommandErrorCode, CliCommandParser, CliCommandRequest, WebBuildV2Capability, WebBuildV2Input,
@@ -145,6 +145,35 @@ fn every_canonical_build_v2_path_lowers_to_its_exact_app_request_variant() {
             "{command_text}"
         );
     }
+}
+
+#[test]
+fn gui_minimum_solutions_finite_bag_is_the_only_supply_window_authority() {
+    let request = CliCommandParser::parse(
+        "clearra build cover --base-mask 0x0000000000000000 \
+         --target-mask 0x000000000000000f --height 4 --hold empty \
+         --patterns P2 --queue-knowledge oracle --objective min-cover \
+         --rule srs-plus --backend cpu --no-backend-fallback --workers 1",
+    )
+    .expect("queue-less GUI minimum-solutions command")
+    .to_app_request()
+    .expect("typed Build cover AppRequest");
+
+    let AppCommand::BuildV2(command) = request.command() else {
+        panic!("GUI minimum-solutions did not lower to AppCommand::BuildV2");
+    };
+    let BuildV2AppRequest::BuildCover(cover) = command.request() else {
+        panic!("GUI minimum-solutions did not lower to BuildCover");
+    };
+    assert_eq!(cover.objective(), BuildObjective::MinCover);
+    assert_eq!(cover.query().aggregation().as_str(), "buildability");
+    assert_eq!(cover.query().core_query().piece_window().max_pieces(), 1);
+    assert_eq!(cover.query().core_query().exact_pieces(), Some(1));
+    assert_eq!(
+        cover.query().core_query().supply_window_size(),
+        Some(SupplyWindowSize::new(2))
+    );
+    assert!(cover.query().solution_probability_policy().requested());
 }
 
 #[test]

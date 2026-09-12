@@ -248,7 +248,9 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
   ];
   if (request.holdEnabled) tokens.push('--hold', 'empty');
   else tokens.push('--no-hold');
-  if (request.sourcePieces != null) {
+  const minimumUsesImplicitStandardBag =
+    request.resultMode === 'minimum-solutions' && parsedQueue === null;
+  if (request.sourcePieces != null && !minimumUsesImplicitStandardBag) {
     tokens.push('--source-pieces', String(request.sourcePieces));
   }
   if (parsedQueue) {

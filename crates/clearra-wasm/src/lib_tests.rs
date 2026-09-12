@@ -776,7 +776,7 @@ fn canonical_minimals_complete_empty_payload_is_not_a_validation_failure() {
 }
 
 #[test]
-fn wasm_pc_path_returns_the_complete_normal_replay_family_without_a_page_owner() {
+fn wasm_pc_path_returns_the_complete_normal_replay_family_with_a_live_page_owner() {
     let result = WasmCommandRuntime::default()
         .run_command_text(
             "clearra pc path --lines 1 --board-mask 0x3f0 --height 1 \
@@ -790,7 +790,11 @@ fn wasm_pc_path_returns_the_complete_normal_replay_family_without_a_page_owner()
         "{:#?}",
         result.app_response()
     );
-    assert!(result.product_page_source_owner().is_none());
+    let Some(clearra_app::ProductPageSourceOwner::PcReplay(source)) =
+        result.product_page_source_owner()
+    else {
+        panic!("pc.path must retain its live replay page owner");
+    };
     let payload = result
         .app_response()
         .product_result_payload()
@@ -807,6 +811,8 @@ fn wasm_pc_path_returns_the_complete_normal_replay_family_without_a_page_owner()
     );
     assert!(family.complete());
     assert_eq!(family.witness_count(), family.witnesses().len().to_string());
+    assert_eq!(source.witness_count().to_string(), family.witness_count());
+    assert!(source.geometry_count() > 0);
     assert!(!family.witnesses().is_empty());
     assert_eq!(
         family.canonical_selection(),
