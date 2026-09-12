@@ -1,4 +1,5 @@
-// SRP rationale: this module owns only the generation-bound in-memory bridge
+// SRP rationale: this module's single change reason is the generation-bound in-memory bridge from qualified graph records to exact Clearra transitions.
+// This module owns only the generation-bound in-memory bridge
 // from qualified lookup records to complete adjacency and exact one-edge
 // placement materialization. Range transport, lookup paging, traversal,
 // terminal decisions, reducers, fallback, and product activation stay outside.

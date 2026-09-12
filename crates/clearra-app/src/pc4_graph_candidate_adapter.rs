@@ -1,4 +1,5 @@
-// SRP rationale: this module owns the target-qualified streaming seam between a PC4 graph
+// SRP rationale: this module's single change reason is the target-qualified streaming seam between a PC4 graph and canonical candidate pages.
+// This module owns the target-qualified streaming seam between a PC4 graph
 // family and canonical candidate pages while retaining every concrete replay provenance.
 // Discovery-order observations are deliberately non-authoritative; only an exhausted stream
 // can be sealed into canonical pages or reducer input.

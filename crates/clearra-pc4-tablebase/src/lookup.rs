@@ -1,3 +1,4 @@
+// SRP rationale: this module's single change reason is the bounded lookup state machine for one qualified PC4 graph record.
 use core::cmp::Ordering;
 
 use crate::{

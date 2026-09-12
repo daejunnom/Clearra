@@ -577,6 +577,32 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         Add-ArchitectureError 'App PC4 fixed-queue runtime must not own HTTP or execute an offline fallback'
     }
 
+    $onlineCandidateSession = Get-RustProductionContents (
+        Read-PhysicalText 'crates/clearra-app/src/online_pc4_fixed_queue_candidate_session.rs'
+    )
+    foreach ($required in @(
+        'AppOnlinePc4FixedQueueCandidateSession',
+        'AppOnlinePc4LookupSession',
+        'Pc4FixedQueueCandidateRuntime',
+        'NeedRange(RangeRequest)',
+        'pub fn completed_reducer_input(',
+        'TerminalState::Complete'
+    )) {
+        if (-not $onlineCandidateSession.Contains($required)) {
+            Add-ArchitectureError "App PC4 online candidate session must bind Range lookup to complete fixed-queue reduction; missing '$required'"
+        }
+    }
+    foreach ($forbidden in @(
+        'Pc4OfflineFallbackAuthorization::ExplicitlyAuthorized',
+        'reqwest',
+        'fetch(',
+        'Command::new'
+    )) {
+        if ($onlineCandidateSession.Contains($forbidden)) {
+            Add-ArchitectureError "App PC4 online candidate session must remain no-I/O and cannot authorize or execute fallback '$forbidden'"
+        }
+    }
+
     foreach ($required in @(
         "target: &'a QualifiedPc4TargetIdentity",
         'let snapshot = request.target.snapshot();',

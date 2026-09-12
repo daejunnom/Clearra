@@ -1,3 +1,4 @@
+// SRP rationale: this module's single change reason is compiling one immutable WASM Geometry catalog from a normalized search problem.
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_problem::SearchProblem;

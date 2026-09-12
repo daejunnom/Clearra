@@ -1,3 +1,4 @@
+// SRP rationale: this test module's single change reason is executable coverage of the PC4 graph-to-candidate adapter contract.
 use core::{convert::Infallible, num::NonZeroUsize};
 use std::{cell::Cell, collections::BTreeMap};
 

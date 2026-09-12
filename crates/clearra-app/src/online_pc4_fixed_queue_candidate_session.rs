@@ -1,4 +1,5 @@
 //! No-I/O application owner for one resumable online PC4 fixed-queue candidate session.
+// SRP rationale: this module's single change reason is the lifecycle of one range-admitted online fixed-queue candidate session.
 //!
 //! This module composes the range-admitted online lookup owner with the exact
 //! fixed-queue candidate runtime. It owns neither transport nor fallback, and
