@@ -556,6 +556,15 @@ impl WasmDistributedResultMerger {
             .map_err(map_error)
     }
 
+    pub(super) fn normalize_pc_root_representative_rank(
+        &mut self,
+        root_candidate_counts: &[usize],
+    ) -> Result<(), &'static str> {
+        self.session
+            .normalize_distributed_root_representative_rank(root_candidate_counts)
+            .map_err(map_error)
+    }
+
     /// Validates borrowed wire/result owners against the merger's live search
     /// session. The caller supplies every external owner that coexists with
     /// decode or absorb plus any not-yet-allocated checked future bytes.

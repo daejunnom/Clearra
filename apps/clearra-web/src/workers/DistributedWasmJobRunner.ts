@@ -37,6 +37,8 @@ const MAX_CANDIDATE_BATCH_SIZE = 2_048;
 const STREAMING_CANDIDATE_BATCH_SIZE = 1_024;
 const STREAMING_STARTUP_BATCH_SIZE = 64;
 const TARGET_BATCHES_PER_VERIFIER = 4;
+const TARGET_ROOT_BATCHES_PER_VERIFIER = 4;
+const MAX_ROOT_TASK_BATCH_SIZE = 64;
 const HOST_YIELD_BUDGET_MS = 8;
 const PROGRESS_REFRESH_MS = 50;
 const SHARED_RESOURCE_WAIT_TIMEOUT_MS = 5_000;
@@ -416,7 +418,8 @@ export class DistributedWasmJobRunner {
         const candidateBatchSize = distributedCandidateBatchSize(
           this.wasm.distributed_progress().candidateFamilyCount,
           effectiveVerifierCount,
-          dispatchedBatches
+          dispatchedBatches,
+          plan.rootTaskParallel === true
         );
         const produceStarted = captureSchedulingProfile ? performance.now() : 0;
         const produced = this.wasm.distributed_produce(
@@ -913,8 +916,12 @@ function distributedCoordinatorIsActive(
 function distributedCandidateBatchSize(
   candidateFamilyCount: string | null,
   verifierCount: number,
-  dispatchedBatches: number
+  dispatchedBatches: number,
+  rootTaskParallel: boolean
 ): number {
+  if (rootTaskParallel) {
+    return distributedRootTaskBatchSize(candidateFamilyCount, verifierCount);
+  }
   if (verifierCount <= 1) return MAX_CANDIDATE_BATCH_SIZE;
   // Each batch carries a durable publish/start/result protocol. A streaming
   // unknown family must not turn every single candidate into a disk-backed
@@ -944,6 +951,32 @@ function distributedCandidateBatchSize(
     );
   } catch {
     return streamingBatchSize;
+  }
+}
+
+function distributedRootTaskBatchSize(
+  rootCount: string | null,
+  verifierCount: number
+): number {
+  if (rootCount === null || verifierCount <= 0) return 1;
+  try {
+    const roots = BigInt(rootCount);
+    if (roots <= 0n) return 1;
+    // A root is an independently compiled geometry and verification search.
+    // Four dispatch waves per verifier leave work available to late workers
+    // without paying one durable transaction per root. The count scales with
+    // both the natural root family and the active verifier pool; very large
+    // families are capped to bound each transaction. Small searches retain
+    // their natural roots and never create synthetic sub-roots.
+    const targetBatches = BigInt(verifierCount * TARGET_ROOT_BATCHES_PER_VERIFIER);
+    const balanced = (roots + targetBatches - 1n) / targetBatches;
+    return Number(
+      balanced > BigInt(MAX_ROOT_TASK_BATCH_SIZE)
+        ? BigInt(MAX_ROOT_TASK_BATCH_SIZE)
+        : balanced
+    );
+  } catch {
+    return 1;
   }
 }
 

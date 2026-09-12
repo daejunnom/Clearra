@@ -13,12 +13,17 @@ use super::{
     distributed::{
         WasmCandidatePacket, WasmCandidateProducerAdvance, WasmDistributedBackendExecution,
         WasmDistributedGeometrySummary, WasmDistributedProgress, WasmDistributedResultMerger,
+        WasmDistributedVerifier,
     },
     geometry::{GeometryAdvance, GeometrySearch},
+    mix_order_independent_candidate_digest,
     result::{canonical_tiling_rank_by_source, WasmExactSearchSession},
+    uses_order_independent_pc_candidate_digest,
 };
 
 const ROOT_ADVANCE_WORK_BUDGET: usize = 32 * 1024;
+const PC_ROOT_VERIFY_CANDIDATE_BUDGET: usize = 64;
+const PC_ROOT_LOCAL_ORDINAL_BITS: u32 = 32;
 const NO_TILING_ROOT: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +56,7 @@ pub struct WasmTilingRootChunk {
     chunk_sequence: u32,
     root_complete: bool,
     identities: Vec<WasmPackedTilingIdentity>,
+    pc_candidate_summary: Option<(usize, u64)>,
     completed_roots: usize,
     candidate_family_count: Option<u128>,
     expanded_nodes: usize,
@@ -69,6 +75,7 @@ impl Default for WasmTilingRootChunk {
             chunk_sequence: 0,
             root_complete: false,
             identities: Vec::new(),
+            pc_candidate_summary: None,
             completed_roots: 0,
             candidate_family_count: None,
             expanded_nodes: 0,
@@ -104,7 +111,40 @@ impl WasmTilingRootChunk {
             chunk_sequence,
             root_complete,
             identities,
+            pc_candidate_summary: None,
             completed_roots,
+            candidate_family_count,
+            expanded_nodes,
+            peak_frontier,
+            domain_pruned_states,
+            hall_pruned_states,
+            column_pruned_states,
+            component_compositions,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pc_root_summary_parts(
+        pass_index: u8,
+        root_ordinal: u32,
+        candidate_count: usize,
+        candidate_digest: u64,
+        candidate_family_count: Option<u128>,
+        expanded_nodes: usize,
+        peak_frontier: usize,
+        domain_pruned_states: usize,
+        hall_pruned_states: usize,
+        column_pruned_states: usize,
+        component_compositions: usize,
+    ) -> Self {
+        Self {
+            pass_index,
+            root_ordinal,
+            chunk_sequence: 0,
+            root_complete: true,
+            identities: Vec::new(),
+            pc_candidate_summary: Some((candidate_count, candidate_digest)),
+            completed_roots: 1,
             candidate_family_count,
             expanded_nodes,
             peak_frontier,
@@ -143,6 +183,10 @@ impl WasmTilingRootChunk {
         self.identities
     }
 
+    pub const fn pc_candidate_summary(&self) -> Option<(usize, u64)> {
+        self.pc_candidate_summary
+    }
+
     pub const fn completed_roots(&self) -> usize {
         self.completed_roots
     }
@@ -176,7 +220,10 @@ impl WasmTilingRootChunk {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.identities.is_empty() && !self.root_complete && self.completed_roots == 0
+        self.identities.is_empty()
+            && self.pc_candidate_summary.is_none()
+            && !self.root_complete
+            && self.completed_roots == 0
     }
 }
 
@@ -594,6 +641,344 @@ impl WasmTilingRootResultMerger {
     }
 }
 
+/// Root-task producer for the common all-solutions PC path. Unlike the legacy
+/// candidate producer, this coordinator sends one canonical multiset root to a
+/// browser worker. The worker owns both geometry enumeration and verification,
+/// so coordinator-side candidate serialization cannot starve the worker pool.
+pub struct WasmPcRootProducer {
+    merger: WasmDistributedResultMerger,
+    root_order: Vec<u32>,
+    next_root: usize,
+    digest: PcRootDigestAccumulator,
+    finished: bool,
+}
+
+/// PC result merger paired with compact per-root geometry summaries. Worker
+/// result packets carry buildability evidence; each root summary carries the
+/// exact candidate count, multiset digest, and geometry metrics without moving
+/// the complete candidate stream through the coordinator.
+pub struct WasmPcRootResultMerger {
+    merger: WasmDistributedResultMerger,
+    digest: PcRootDigestAccumulator,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PcRootChunkCommit {
+    candidate_count: usize,
+    candidate_digest: u64,
+    candidate_family_count: Option<u128>,
+    expanded_nodes: usize,
+    peak_frontier: usize,
+    domain_pruned_states: usize,
+    hall_pruned_states: usize,
+    column_pruned_states: usize,
+    component_compositions: usize,
+}
+
+impl PcRootChunkCommit {
+    fn from_chunk(chunk: &WasmTilingRootChunk) -> Result<Self, &'static str> {
+        if chunk.chunk_sequence() != 0
+            || !chunk.root_complete()
+            || chunk.completed_roots() != 1
+            || !chunk.identities().is_empty()
+        {
+            return Err("wasm_pc_root_summary_shape_invalid");
+        }
+        let (candidate_count, candidate_digest) = chunk
+            .pc_candidate_summary()
+            .ok_or("wasm_pc_root_candidate_summary_missing")?;
+        Ok(Self {
+            candidate_count,
+            candidate_digest,
+            candidate_family_count: chunk.candidate_family_count(),
+            expanded_nodes: chunk.expanded_nodes(),
+            peak_frontier: chunk.peak_frontier(),
+            domain_pruned_states: chunk.domain_pruned_states(),
+            hall_pruned_states: chunk.hall_pruned_states(),
+            column_pruned_states: chunk.column_pruned_states(),
+            component_compositions: chunk.component_compositions(),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct PcRootDigestRun {
+    commit: Option<PcRootChunkCommit>,
+}
+
+impl PcRootDigestRun {
+    fn absorb(
+        &mut self,
+        chunk: &WasmTilingRootChunk,
+    ) -> Result<Option<PcRootChunkCommit>, &'static str> {
+        let candidate = PcRootChunkCommit::from_chunk(chunk)?;
+        if let Some(committed) = self.commit {
+            return (committed == candidate)
+                .then_some(None)
+                .ok_or("wasm_pc_root_summary_replay_mismatch");
+        }
+        self.commit = Some(candidate);
+        Ok(Some(candidate))
+    }
+
+    fn terminal_commit(&self) -> Result<PcRootChunkCommit, &'static str> {
+        self.commit.ok_or("wasm_pc_root_terminal_chunk_missing")
+    }
+}
+
+struct PcRootDigestAccumulator {
+    roots: Vec<PcRootDigestRun>,
+    committed_candidate_count: usize,
+    completed_roots: usize,
+}
+
+impl PcRootDigestAccumulator {
+    fn new(root_count: usize) -> Result<Self, &'static str> {
+        let mut roots = Vec::new();
+        roots
+            .try_reserve_exact(root_count)
+            .map_err(|_| "wasm_pc_root_run_storage_unavailable")?;
+        roots.resize_with(root_count, PcRootDigestRun::default);
+        Ok(Self {
+            roots,
+            committed_candidate_count: 0,
+            completed_roots: 0,
+        })
+    }
+
+    fn absorb(&mut self, chunk: &WasmTilingRootChunk) -> Result<(), &'static str> {
+        if chunk.pass_index() != 0 {
+            return Err("wasm_pc_root_pass_invalid");
+        }
+        let root = chunk
+            .root_ordinal()
+            .and_then(|ordinal| self.roots.get_mut(ordinal as usize))
+            .ok_or("wasm_pc_root_ordinal_invalid")?;
+        if let Some(commit) = root.absorb(chunk)? {
+            self.committed_candidate_count = self
+                .committed_candidate_count
+                .checked_add(commit.candidate_count)
+                .ok_or("wasm_pc_root_candidate_count_overflow")?;
+            self.completed_roots = self
+                .completed_roots
+                .checked_add(1)
+                .ok_or("wasm_pc_root_completed_count_overflow")?;
+        }
+        Ok(())
+    }
+
+    fn progress(&self) -> WasmDistributedProgress {
+        WasmDistributedProgress {
+            candidates: self.committed_candidate_count,
+            candidate_family_count: Some(self.roots.len() as u128),
+            coverage_checks: self.completed_roots,
+            pass_count: 1,
+            ..WasmDistributedProgress::default()
+        }
+    }
+
+    fn root_candidate_counts(&self) -> Result<Vec<usize>, &'static str> {
+        let mut counts = Vec::new();
+        counts
+            .try_reserve_exact(self.roots.len())
+            .map_err(|_| "wasm_pc_root_count_storage_unavailable")?;
+        for root in &self.roots {
+            counts.push(root.terminal_commit()?.candidate_count);
+        }
+        Ok(counts)
+    }
+
+    fn summary(
+        &self,
+        base: &WasmDistributedGeometrySummary,
+    ) -> Result<WasmDistributedGeometrySummary, &'static str> {
+        let mut candidate_count = 0_usize;
+        let mut candidate_digest = 0_u64;
+        let mut candidate_family_count = Some(0_u128);
+        let mut expanded_nodes = 0_usize;
+        let mut peak_frontier = 0_usize;
+        let mut domain_pruned_states = 0_usize;
+        let mut hall_pruned_states = 0_usize;
+        let mut column_pruned_states = 0_usize;
+        let mut component_compositions = 0_usize;
+        for root in &self.roots {
+            let terminal = root.terminal_commit()?;
+            candidate_count = candidate_count
+                .checked_add(terminal.candidate_count)
+                .ok_or("wasm_pc_root_candidate_count_overflow")?;
+            candidate_digest = candidate_digest.wrapping_add(terminal.candidate_digest);
+            candidate_family_count = match (candidate_family_count, terminal.candidate_family_count)
+            {
+                (Some(total), Some(value)) => total.checked_add(value),
+                _ => None,
+            };
+            expanded_nodes = expanded_nodes.saturating_add(terminal.expanded_nodes);
+            peak_frontier = peak_frontier.max(terminal.peak_frontier);
+            domain_pruned_states =
+                domain_pruned_states.saturating_add(terminal.domain_pruned_states);
+            hall_pruned_states = hall_pruned_states.saturating_add(terminal.hall_pruned_states);
+            column_pruned_states =
+                column_pruned_states.saturating_add(terminal.column_pruned_states);
+            component_compositions =
+                component_compositions.saturating_add(terminal.component_compositions);
+        }
+        if candidate_count != self.committed_candidate_count
+            || self.completed_roots != self.roots.len()
+        {
+            return Err("wasm_pc_root_transcript_incomplete");
+        }
+        Ok(WasmDistributedGeometrySummary {
+            candidate_count,
+            candidate_digest,
+            candidate_family_count,
+            expanded_nodes,
+            peak_frontier,
+            domain_pruned_states,
+            hall_pruned_states,
+            column_pruned_states,
+            component_compositions,
+            truncated_reason: base.truncated_reason,
+            backend_execution: base.backend_execution.clone(),
+        })
+    }
+}
+
+impl WasmPcRootProducer {
+    pub fn supports(problem: &SearchProblem) -> bool {
+        uses_order_independent_pc_candidate_digest(problem)
+    }
+
+    pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
+        if !Self::supports(problem) {
+            return Err("wasm_pc_root_problem_unsupported");
+        }
+        let session = WasmExactSearchSession::new_external_geometry(problem)
+            .map_err(super::distributed::map_error)?;
+        let root_order = session
+            .distributed_pc_root_order()
+            .map_err(super::distributed::map_error)?;
+        if root_order.is_empty() {
+            return Err("wasm_pc_root_set_empty");
+        }
+        let digest = PcRootDigestAccumulator::new(root_order.len())?;
+        let merger = WasmDistributedResultMerger::from_session(
+            session
+                .into_distributed_finalizer()
+                .map_err(super::distributed::map_error)?,
+        );
+        Ok(Self {
+            merger,
+            root_order,
+            next_root: 0,
+            digest,
+            finished: false,
+        })
+    }
+
+    pub fn advance(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<WasmCandidateProducerAdvance, &'static str> {
+        if self.finished {
+            return Err("wasm_pc_root_producer_already_finished");
+        }
+        if control.is_cancelled() {
+            return Ok(WasmCandidateProducerAdvance::Cancelled);
+        }
+        if let Some(family_index) = self.root_order.get(self.next_root).copied() {
+            let ordinal = self.next_root;
+            self.next_root += 1;
+            return Ok(WasmCandidateProducerAdvance::Candidate(
+                WasmCandidatePacket::new(ordinal as u64, family_index, Vec::new()),
+            ));
+        }
+        self.finished = true;
+        Ok(WasmCandidateProducerAdvance::Completed(
+            WasmDistributedGeometrySummary {
+                candidate_count: 0,
+                candidate_digest: 0,
+                candidate_family_count: Some(0),
+                expanded_nodes: 0,
+                peak_frontier: 0,
+                domain_pruned_states: 0,
+                hall_pruned_states: 0,
+                column_pruned_states: 0,
+                component_compositions: 0,
+                truncated_reason: None,
+                backend_execution: WasmDistributedBackendExecution::Cpu,
+            },
+        ))
+    }
+
+    pub fn absorb(&mut self, chunk: &WasmTilingRootChunk) -> Result<(), &'static str> {
+        self.digest.absorb(chunk)
+    }
+
+    pub fn into_merger(self) -> Result<WasmPcRootResultMerger, &'static str> {
+        if !self.finished {
+            return Err("wasm_pc_root_producer_not_finished");
+        }
+        Ok(WasmPcRootResultMerger {
+            merger: self.merger,
+            digest: self.digest,
+        })
+    }
+
+    pub fn progress(&self) -> WasmDistributedProgress {
+        let mut progress = self.digest.progress();
+        progress.geometry_nodes = self.next_root;
+        progress
+    }
+
+    pub fn root_count(&self) -> usize {
+        self.root_order.len()
+    }
+}
+
+impl WasmPcRootResultMerger {
+    pub fn absorb_root_chunk(&mut self, chunk: &WasmTilingRootChunk) -> Result<(), &'static str> {
+        self.digest.absorb(chunk)
+    }
+
+    pub fn absorb(&mut self, result: &crate::CoreExecutionResult) -> Result<(), &'static str> {
+        self.merger.absorb(result)
+    }
+
+    pub fn validate_external_result_memory(
+        &self,
+        external_retained_bytes: u128,
+        checked_future_bytes: u128,
+    ) -> Result<(), &'static str> {
+        self.merger
+            .validate_external_result_memory(external_retained_bytes, checked_future_bytes)
+    }
+
+    pub fn validate_public_result_memory_with_future(
+        &self,
+        result: &crate::CoreExecutionResult,
+        checked_future_bytes: u128,
+    ) -> Result<(), &'static str> {
+        self.merger
+            .validate_public_result_memory_with_future(result, checked_future_bytes)
+    }
+
+    pub fn progress(&self) -> Option<WasmDistributedProgress> {
+        Some(self.digest.progress())
+    }
+
+    pub fn finish(
+        &mut self,
+        base: &WasmDistributedGeometrySummary,
+        workers_used: usize,
+    ) -> Result<crate::CoreExecutionResult, &'static str> {
+        let root_candidate_counts = self.digest.root_candidate_counts()?;
+        let summary = self.digest.summary(base)?;
+        self.merger
+            .normalize_pc_root_representative_rank(&root_candidate_counts)?;
+        self.merger.finish(&summary, workers_used)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TilingRootTask {
     pass_index: u8,
@@ -605,11 +990,14 @@ struct ActiveTilingRoot {
     task: TilingRootTask,
     search: GeometrySearch,
     identities: Vec<WasmPackedTilingIdentity>,
+    pc_candidate_count: usize,
+    pc_candidate_digest: u64,
 }
 
 struct CompletedTilingRoot {
     task: TilingRootTask,
     identities: Vec<WasmPackedTilingIdentity>,
+    pc_candidate_summary: Option<(usize, u64)>,
     next_offset: usize,
     chunk_sequence: u32,
     candidate_family_count: Option<u128>,
@@ -624,6 +1012,7 @@ struct CompletedTilingRoot {
 pub struct WasmTilingRootWorker {
     problem: SearchProblem,
     passes: Vec<TilingRootWorkerPass>,
+    pc_verifier: Option<WasmDistributedVerifier>,
     pending_roots: VecDeque<TilingRootTask>,
     active_root: Option<ActiveTilingRoot>,
     completed_root: Option<CompletedTilingRoot>,
@@ -648,7 +1037,17 @@ impl WasmTilingRootWorker {
         }
         super::ensure_connected_kick_profile(problem).map_err(super::distributed::map_error)?;
         let catalog = GeometryCatalog::compile(problem).map_err(super::distributed::map_error)?;
-        Self::with_catalogs(problem, vec![catalog])
+        Self::with_catalogs(problem, vec![catalog], None)
+    }
+
+    pub fn new_for_pc_unique(problem: &SearchProblem) -> Result<Self, &'static str> {
+        if !WasmPcRootProducer::supports(problem) {
+            return Err("wasm_pc_root_worker_problem_unsupported");
+        }
+        super::ensure_connected_kick_profile(problem).map_err(super::distributed::map_error)?;
+        let catalog = GeometryCatalog::compile(problem).map_err(super::distributed::map_error)?;
+        let verifier = WasmDistributedVerifier::new(problem)?;
+        Self::with_catalogs(problem, vec![catalog], Some(verifier))
     }
 
     pub fn new_for_build_probability(
@@ -690,12 +1089,13 @@ impl WasmTilingRootWorker {
                 .map_err(super::distributed::map_error)?,
             );
         }
-        Self::with_catalogs(problem, catalogs)
+        Self::with_catalogs(problem, catalogs, None)
     }
 
     fn with_catalogs(
         problem: &SearchProblem,
         catalogs: Vec<GeometryCatalog>,
+        pc_verifier: Option<WasmDistributedVerifier>,
     ) -> Result<Self, &'static str> {
         let universe = problem
             .piece_source()
@@ -727,6 +1127,7 @@ impl WasmTilingRootWorker {
         Ok(Self {
             problem: problem.clone(),
             passes,
+            pc_verifier,
             pending_roots: VecDeque::new(),
             active_root: None,
             completed_root: None,
@@ -769,7 +1170,16 @@ impl WasmTilingRootWorker {
         if self.completed_root.is_some() {
             return self.emit_completed_root(identity_capacity);
         }
+        if let Some(verifier) = self.pc_verifier.as_mut() {
+            if verifier.preparation_pending() {
+                verifier.advance_preparation(control)?;
+                return Ok(WasmTilingRootAdvance::Pending(
+                    WasmTilingRootChunk::default(),
+                ));
+            }
+        }
 
+        let mut verified_candidates = 0_usize;
         for work in 0..ROOT_ADVANCE_WORK_BUDGET {
             if work & 1023 == 0 && control.is_cancelled() {
                 return Ok(WasmTilingRootAdvance::Cancelled);
@@ -800,48 +1210,113 @@ impl WasmTilingRootWorker {
                     task,
                     search,
                     identities: Vec::new(),
+                    pc_candidate_count: 0,
+                    pc_candidate_digest: 0,
                 });
             }
 
-            let active = self
-                .active_root
-                .as_mut()
-                .ok_or("wasm_tiling_root_search_missing")?;
-            let pass = self
-                .passes
-                .get(usize::from(active.task.pass_index))
-                .ok_or("wasm_tiling_root_pass_invalid")?;
-            match active.search.advance(&pass.catalog) {
-                GeometryAdvance::Pending => {}
-                GeometryAdvance::Candidate(candidate) => {
-                    let packed_rows = pack_canonical_tiling_row_ids(
-                        candidate.row_ids(),
-                        &pass.canonical_rank_by_source,
-                    )
-                    .ok_or("wasm_tiling_root_identity_invalid")?;
-                    if active.identities.len() == active.identities.capacity() {
-                        active
-                            .identities
-                            .try_reserve(identity_capacity.max(1))
-                            .map_err(|_| "wasm_tiling_root_identity_storage_unavailable")?;
+            enum RootGeometryStep {
+                Pending,
+                Candidate {
+                    task: TilingRootTask,
+                    local_ordinal: u32,
+                    row_ids: Option<Vec<u32>>,
+                },
+                Complete,
+            }
+            let pc_root = self.pc_verifier.is_some();
+            let step = {
+                let active = self
+                    .active_root
+                    .as_mut()
+                    .ok_or("wasm_tiling_root_search_missing")?;
+                let pass = self
+                    .passes
+                    .get(usize::from(active.task.pass_index))
+                    .ok_or("wasm_tiling_root_pass_invalid")?;
+                match active.search.advance(&pass.catalog) {
+                    GeometryAdvance::Pending => RootGeometryStep::Pending,
+                    GeometryAdvance::Candidate(candidate) => {
+                        let local_ordinal = if pc_root {
+                            let ordinal = u32::try_from(active.pc_candidate_count)
+                                .map_err(|_| "wasm_pc_root_local_ordinal_overflow")?;
+                            active.pc_candidate_count = active
+                                .pc_candidate_count
+                                .checked_add(1)
+                                .ok_or("wasm_pc_root_candidate_count_overflow")?;
+                            active.pc_candidate_digest = mix_order_independent_candidate_digest(
+                                active.pc_candidate_digest,
+                                candidate.identity.bucket_hash(),
+                            );
+                            ordinal
+                        } else {
+                            let packed_rows = pack_canonical_tiling_row_ids(
+                                candidate.row_ids(),
+                                &pass.canonical_rank_by_source,
+                            )
+                            .ok_or("wasm_tiling_root_identity_invalid")?;
+                            if active.identities.len() == active.identities.capacity() {
+                                active
+                                    .identities
+                                    .try_reserve(identity_capacity.max(1))
+                                    .map_err(|_| "wasm_tiling_root_identity_storage_unavailable")?;
+                            }
+                            active.identities.push(WasmPackedTilingIdentity::new(
+                                candidate.identity.bucket_hash(),
+                                packed_rows,
+                            ));
+                            0
+                        };
+                        RootGeometryStep::Candidate {
+                            task: active.task,
+                            local_ordinal,
+                            row_ids: pc_root.then(|| candidate.row_ids().to_vec()),
+                        }
                     }
-                    active.identities.push(WasmPackedTilingIdentity::new(
-                        candidate.identity.bucket_hash(),
-                        packed_rows,
-                    ));
-                    self.candidate_count = self.candidate_count.saturating_add(1);
+                    GeometryAdvance::Complete => RootGeometryStep::Complete,
+                    GeometryAdvance::ResourceIncomplete(reason) => return Err(reason),
                 }
-                GeometryAdvance::Complete => {
+            };
+            match step {
+                RootGeometryStep::Pending => {}
+                RootGeometryStep::Candidate {
+                    task,
+                    local_ordinal,
+                    row_ids,
+                } => {
+                    if let Some(verifier) = self.pc_verifier.as_mut() {
+                        let ordinal = (u64::from(task.ordinal) << PC_ROOT_LOCAL_ORDINAL_BITS)
+                            | u64::from(local_ordinal);
+                        verifier.consume(
+                            &WasmCandidatePacket::new(
+                                ordinal,
+                                task.family_index,
+                                row_ids.ok_or("wasm_pc_root_candidate_rows_missing")?,
+                            ),
+                            control,
+                        )?;
+                        verified_candidates = verified_candidates.saturating_add(1);
+                    }
+                    self.candidate_count = self.candidate_count.saturating_add(1);
+                    if pc_root && verified_candidates >= PC_ROOT_VERIFY_CANDIDATE_BUDGET {
+                        return Ok(WasmTilingRootAdvance::Pending(
+                            WasmTilingRootChunk::default(),
+                        ));
+                    }
+                }
+                RootGeometryStep::Complete => {
                     let mut active = self
                         .active_root
                         .take()
                         .ok_or("wasm_tiling_root_search_missing")?;
-                    active
-                        .identities
-                        .sort_unstable_by_key(|identity| identity.packed_rows());
-                    active
-                        .identities
-                        .dedup_by_key(|identity| identity.packed_rows());
+                    if !pc_root {
+                        active
+                            .identities
+                            .sort_unstable_by_key(|identity| identity.packed_rows());
+                        active
+                            .identities
+                            .dedup_by_key(|identity| identity.packed_rows());
+                    }
                     let completed = active.search;
                     self.completed_roots = self.completed_roots.saturating_add(1);
                     self.expanded_nodes = self
@@ -851,6 +1326,8 @@ impl WasmTilingRootWorker {
                     self.completed_root = Some(CompletedTilingRoot {
                         task: active.task,
                         identities: active.identities,
+                        pc_candidate_summary: pc_root
+                            .then_some((active.pc_candidate_count, active.pc_candidate_digest)),
                         next_offset: 0,
                         chunk_sequence: 0,
                         candidate_family_count: completed.candidate_family_count(),
@@ -863,7 +1340,6 @@ impl WasmTilingRootWorker {
                     });
                     return self.emit_completed_root(identity_capacity);
                 }
-                GeometryAdvance::ResourceIncomplete(reason) => return Err(reason),
             }
         }
         Ok(WasmTilingRootAdvance::Pending(
@@ -879,6 +1355,33 @@ impl WasmTilingRootWorker {
             .completed_root
             .as_mut()
             .ok_or("wasm_tiling_completed_root_missing")?;
+        if let Some((candidate_count, candidate_digest)) = completed.pc_candidate_summary {
+            if !completed.identities.is_empty()
+                || completed.next_offset != 0
+                || completed.chunk_sequence != 0
+            {
+                return Err("wasm_pc_root_summary_state_invalid");
+            }
+            let chunk = WasmTilingRootChunk::from_pc_root_summary_parts(
+                completed.task.pass_index,
+                completed.task.ordinal,
+                candidate_count,
+                candidate_digest,
+                completed.candidate_family_count,
+                completed.expanded_nodes,
+                completed.peak_frontier,
+                completed.domain_pruned_states,
+                completed.hall_pruned_states,
+                completed.column_pruned_states,
+                completed.component_compositions,
+            );
+            self.completed_root = None;
+            return if self.has_pending_work() {
+                Ok(WasmTilingRootAdvance::Pending(chunk))
+            } else {
+                Ok(WasmTilingRootAdvance::Completed(chunk))
+            };
+        }
         let begin = completed.next_offset;
         let end = begin
             .saturating_add(identity_capacity.max(1))
@@ -895,6 +1398,7 @@ impl WasmTilingRootWorker {
             chunk_sequence: completed.chunk_sequence,
             root_complete,
             identities,
+            pc_candidate_summary: None,
             completed_roots: usize::from(root_complete),
             candidate_family_count: if root_complete {
                 completed.candidate_family_count
@@ -930,6 +1434,10 @@ impl WasmTilingRootWorker {
     }
 
     pub fn progress(&self) -> WasmDistributedProgress {
+        let verifier_progress = self.pc_verifier.as_ref().map_or_else(
+            WasmDistributedProgress::default,
+            WasmDistributedVerifier::progress,
+        );
         WasmDistributedProgress {
             geometry_nodes: self.expanded_nodes.saturating_add(
                 self.active_root
@@ -940,9 +1448,20 @@ impl WasmTilingRootWorker {
             candidate_family_count: self.passes.iter().try_fold(0_u128, |total, pass| {
                 total.checked_add(pass.family.len() as u128)
             }),
+            build_nodes: verifier_progress.build_nodes,
             coverage_checks: self.completed_roots,
             pass_count: self.passes.len(),
             ..WasmDistributedProgress::default()
         }
+    }
+
+    pub fn finish_pc(&mut self) -> Result<crate::CoreExecutionResult, &'static str> {
+        if self.has_pending_work() {
+            return Err("wasm_pc_root_worker_finish_pending");
+        }
+        self.pc_verifier
+            .as_mut()
+            .ok_or("wasm_pc_root_verifier_missing")?
+            .finish()
     }
 }
