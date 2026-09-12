@@ -2,9 +2,12 @@ use std::{cell::Cell, num::NonZeroU64};
 
 use clearra_core_domain::{
     board::standard_pc_board::StandardPcBoard,
+    execution_cancellation::{ExecutionControl, ExecutionPartition},
     piece::piece_kind::PieceKind,
     solution::normalized_tiling_solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
 };
+use clearra_core_executor::WasmCpuSearchBackend;
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc4_tablebase::{
     ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, FixedQueueHoldState,
     GraphTargetEncoding, ManifestContentIdentity, Pc4ArtifactRole, Pc4BagProfile, Pc4GraphPiece,
@@ -13,12 +16,27 @@ use clearra_pc4_tablebase::{
     QualifiedPc4TargetIdentity, SnapshotIdentity, SnapshotVerificationAttestation,
     SnapshotVerificationFailure, SnapshotVerificationRequest,
 };
+use clearra_pc_graph::request::{
+    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    RequestedSearchBackend,
+};
+use clearra_problem::{ProblemCompiler, SearchProblem};
+use clearra_rules::profile::builtin_rules::{jstris_180, srs};
+use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 use super::*;
 use crate::pc4_input_disclosure_policy::{
     prepare_pc4_input_disclosure, Pc4BagDisclosure, Pc4HiddenQueueDisclosure, Pc4HiddenQueueSource,
     Pc4InputDisclosureDecision, Pc4InputDisclosureRequest, Pc4InputSurface, Pc4PartialBagRemainder,
     Pc4PreparedOnlineInput, Pc4QueueDisclosure,
+};
+use crate::{
+    pc4_search_problem_compatibility::{
+        validate_pc4_search_problem_compatibility, Pc4SearchProblemCompatibilityError,
+    },
+    pc_candidate_execution_bridge::{
+        execute_validated_pc_candidate_input, PcCandidateExecutionError,
+    },
 };
 
 struct SyntheticVerifier;
@@ -1090,5 +1108,270 @@ fn pages_require_one_initial_board_and_nonterminal_progress() {
             true,
         ),
         Err(PcCandidateBoundaryError::InitialBoardMismatch)
+    );
+}
+
+fn pc_candidate_execution_bridge_problem(
+    rule: clearra_rules::profile::rule_profile::RuleProfile,
+) -> SearchProblem {
+    pc_candidate_execution_bridge_problem_for_piece(rule, PieceKind::I)
+}
+
+fn pc_candidate_execution_bridge_problem_for_piece(
+    rule: clearra_rules::profile::rule_profile::RuleProfile,
+    queue_piece: PieceKind,
+) -> SearchProblem {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(1, 0x3f0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![queue_piece])),
+        PieceWindow::new(1),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(1))
+    .with_count_policy(PcCountPolicy::CountAll)
+    .with_retained_trace_limit(1)
+    .with_objective(ObjectivePolicy::all().with_score_summary())
+    .with_rule(rule)
+    .with_execution_policy(
+        PcExecutionPolicy::mvp_default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_workers(1)
+            .with_max_memory_mib(Some(64)),
+    );
+    ProblemCompiler::compile_scenario_pc(&query).expect("one-piece bridge problem")
+}
+
+fn pc_candidate_execution_bridge_input(
+    target: QualifiedPc4TargetIdentity,
+    initial_board_mask: u64,
+    candidates: Vec<StandardBoard64TilingIdentity>,
+) -> PcCandidateReducerInput {
+    let prepared = prepared_fixed(target.clone(), Pc4InputSurface::Gui, vec![Pc4GraphPiece::I]);
+    let source = PcCandidateSourceBinding::online_pc4_for_prepared_input(
+        session(71),
+        PcCandidateSourceIdentity::from_sha256([72; 32]),
+        &prepared,
+        initial_board(target.target_lines().get(), initial_board_mask),
+        FixedQueueHoldState::Disabled,
+    )
+    .expect("request-bound bridge source");
+    PcCandidateReducerInput::from_test_parts(source, Some(target), candidates)
+}
+
+#[test]
+fn pc_candidate_execution_bridge_preserves_ordinary_exact_product_payloads() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let problem = pc_candidate_execution_bridge_problem(srs());
+    let control = ExecutionControl::default();
+    let ordinary = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+        .expect("ordinary exact execution");
+    assert_eq!(ordinary.normalized_solution_identities().len(), 1);
+    assert!(!ordinary.path_steps().is_empty());
+    assert!(ordinary.exact_scoring_execution_batch().is_some());
+    let target = qualified_target(
+        "execution-bridge-generation",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::PcSearch,
+        1,
+    );
+    let input = pc_candidate_execution_bridge_input(
+        target,
+        problem.initial_board().occupied_mask(),
+        ordinary.normalized_solution_identities().to_vec(),
+    );
+    let compatibility = validate_pc4_search_problem_compatibility(Pc4RuleProfile::Srs, &problem)
+        .expect("SRS compatibility");
+
+    let (injected, evidence) =
+        execute_validated_pc_candidate_input(&input, compatibility, &problem, &control)
+            .expect("validated candidate execution");
+
+    assert_eq!(evidence.universe_identity(), input.universe_identity());
+    assert_eq!(evidence.compatibility(), compatibility);
+    assert_eq!(evidence.problem_id(), problem.problem_id());
+    assert_eq!(
+        injected.normalized_solution_identities(),
+        ordinary.normalized_solution_identities()
+    );
+    assert_eq!(
+        injected.normalized_solution_keys(),
+        ordinary.normalized_solution_keys()
+    );
+    assert_eq!(injected.path_steps(), ordinary.path_steps());
+    assert_eq!(
+        injected.coverage_pattern_words(),
+        ordinary.coverage_pattern_words()
+    );
+    assert_eq!(injected.solution_coverages(), ordinary.solution_coverages());
+    assert_eq!(
+        injected.exact_scoring_execution_batches(),
+        ordinary.exact_scoring_execution_batches()
+    );
+    for field in [
+        "unique_solution_count",
+        "normalized_solution_set_hash",
+        "build_variant_count",
+        "count_complete",
+        "coverage_complete",
+        "score_requested",
+    ] {
+        assert_eq!(injected.field(field), ordinary.field(field), "{field}");
+    }
+}
+
+#[test]
+fn pc_candidate_execution_bridge_rejects_other_profile_target_and_board() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let srs_problem = pc_candidate_execution_bridge_problem(srs());
+    let control = ExecutionControl::default();
+    let ordinary = WasmCpuSearchBackend::execute_with_control(&srs_problem, &control)
+        .expect("ordinary exact execution");
+    let candidates = ordinary.normalized_solution_identities().to_vec();
+    let pc_target = qualified_target(
+        "execution-bridge-rejections",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::PcSearch,
+        1,
+    );
+    let valid_input = pc_candidate_execution_bridge_input(
+        pc_target.clone(),
+        srs_problem.initial_board().occupied_mask(),
+        candidates.clone(),
+    );
+
+    let jstris_problem = pc_candidate_execution_bridge_problem(jstris_180());
+    let jstris_compatibility =
+        validate_pc4_search_problem_compatibility(Pc4RuleProfile::Jstris180, &jstris_problem)
+            .expect("Jstris compatibility");
+    assert_eq!(
+        execute_validated_pc_candidate_input(
+            &valid_input,
+            jstris_compatibility,
+            &jstris_problem,
+            &control,
+        ),
+        Err(PcCandidateExecutionError::ProfileMismatch)
+    );
+
+    let srs_compatibility =
+        validate_pc4_search_problem_compatibility(Pc4RuleProfile::Srs, &srs_problem)
+            .expect("SRS compatibility");
+    let other_target = qualified_target(
+        "execution-bridge-rejections",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::PcSearch,
+        2,
+    );
+    let other_target_input = pc_candidate_execution_bridge_input(
+        other_target,
+        srs_problem.initial_board().occupied_mask(),
+        candidates.clone(),
+    );
+    assert_eq!(
+        execute_validated_pc_candidate_input(
+            &other_target_input,
+            srs_compatibility,
+            &srs_problem,
+            &control,
+        ),
+        Err(PcCandidateExecutionError::TargetLinesMismatch)
+    );
+
+    let setup_target = qualified_target(
+        "execution-bridge-rejections",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::SetupSearch,
+        1,
+    );
+    let setup_input = pc_candidate_execution_bridge_input(
+        setup_target,
+        srs_problem.initial_board().occupied_mask(),
+        candidates.clone(),
+    );
+    assert_eq!(
+        execute_validated_pc_candidate_input(
+            &setup_input,
+            srs_compatibility,
+            &srs_problem,
+            &control,
+        ),
+        Err(PcCandidateExecutionError::TargetUseCaseMismatch)
+    );
+
+    let other_board_input = pc_candidate_execution_bridge_input(pc_target, 0, candidates);
+    assert_eq!(
+        execute_validated_pc_candidate_input(
+            &other_board_input,
+            srs_compatibility,
+            &srs_problem,
+            &control,
+        ),
+        Err(PcCandidateExecutionError::InitialBoardMismatch)
+    );
+
+    assert!(matches!(
+        execute_validated_pc_candidate_input(
+            &valid_input,
+            srs_compatibility,
+            &jstris_problem,
+            &control,
+        ),
+        Err(PcCandidateExecutionError::SearchProblemCompatibility(
+            Pc4SearchProblemCompatibilityError::RuleProfileMismatch { .. }
+        ))
+    ));
+}
+
+#[test]
+fn pc_candidate_execution_bridge_rejects_tampered_count_digest_and_request_control() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let problem = pc_candidate_execution_bridge_problem(srs());
+    let control = ExecutionControl::default();
+    let ordinary = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+        .expect("ordinary exact execution");
+    let target = qualified_target(
+        "execution-bridge-integrity",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::PcSearch,
+        1,
+    );
+    let input = pc_candidate_execution_bridge_input(
+        target,
+        problem.initial_board().occupied_mask(),
+        ordinary.normalized_solution_identities().to_vec(),
+    );
+    let compatibility = validate_pc4_search_problem_compatibility(Pc4RuleProfile::Srs, &problem)
+        .expect("SRS compatibility");
+
+    assert_eq!(
+        execute_validated_pc_candidate_input(
+            &input.clone().with_test_exact_candidate_count(99),
+            compatibility,
+            &problem,
+            &control,
+        ),
+        Err(PcCandidateExecutionError::CandidateCountMismatch)
+    );
+    assert_eq!(
+        execute_validated_pc_candidate_input(
+            &input.clone().with_test_candidate_set_digest([99; 32]),
+            compatibility,
+            &problem,
+            &control,
+        ),
+        Err(PcCandidateExecutionError::CandidateDigestMismatch)
+    );
+
+    let wrong_queue_problem = pc_candidate_execution_bridge_problem_for_piece(srs(), PieceKind::O);
+    assert_eq!(
+        execute_validated_pc_candidate_input(&input, compatibility, &wrong_queue_problem, &control,),
+        Err(PcCandidateExecutionError::RequestIdentityMismatch)
+    );
+
+    let partitioned = ExecutionControl::default()
+        .with_partition(ExecutionPartition::new(0, 2).expect("valid test partition"));
+    assert_eq!(
+        execute_validated_pc_candidate_input(&input, compatibility, &problem, &partitioned,),
+        Err(PcCandidateExecutionError::PartitionedExecutionControl)
     );
 }

@@ -53,6 +53,8 @@ mod pc4_profile_capability_projection;
 mod pc4_search_problem_compatibility;
 mod pc_allspin_result;
 #[cfg(feature = "online-pc4-tablebase")]
+mod pc_candidate_execution_bridge;
+#[cfg(feature = "online-pc4-tablebase")]
 mod pc_candidate_page_boundary;
 mod pc_chance_probability_result;
 mod pc_failed_queue_result;
@@ -274,6 +276,11 @@ pub use pc4_search_problem_compatibility::{
     Pc4SearchProblemCompatibilityError,
 };
 pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc_candidate_execution_bridge::{
+    execute_validated_pc_candidate_input, PcCandidateExecutionError,
+    ValidatedPcCandidateExecutionEvidence,
+};
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc_candidate_page_boundary::graph_candidate_adapter::Pc4GraphCandidateAdapterBudgets;
 #[cfg(feature = "online-pc4-tablebase")]

@@ -65,14 +65,8 @@ impl PcCandidateRequestIdentity {
         initial_board: StandardPcBoard,
         initial_hold: FixedQueueHoldState,
     ) -> Result<Self, PcCandidateRequestIdentityError> {
-        let mut hasher = Sha256::new();
-        hasher.update(CANDIDATE_REQUEST_IDENTITY_DOMAIN);
-        hash_qualified_target(&mut hasher, prepared_input.target())?;
-        hasher.update([initial_board.lines()]);
-        for word in initial_board.occupied().words() {
-            hasher.update(word.to_be_bytes());
-        }
-        hash_hold_state(&mut hasher, initial_hold);
+        let mut hasher =
+            candidate_universe_hasher(prepared_input.target(), initial_board, initial_hold)?;
         match prepared_input.queue() {
             Pc4PreparedQueueInput::FixedExplicit(queue) => {
                 hasher.update([0]);
@@ -106,6 +100,21 @@ impl PcCandidateRequestIdentity {
                 }
             }
         }
+        Ok(Self(hasher.finalize().into()))
+    }
+
+    /// Recomputes the same request identity for the fixed-queue representation
+    /// retained by a compiled `SearchProblem`. This remains crate-private so a
+    /// caller cannot mint candidate-completeness authority from request data.
+    pub(crate) fn derive_pc4_fixed_queue_candidate_universe(
+        target: &QualifiedPc4TargetIdentity,
+        initial_board: StandardPcBoard,
+        initial_hold: FixedQueueHoldState,
+        queue: &[Pc4GraphPiece],
+    ) -> Result<Self, PcCandidateRequestIdentityError> {
+        let mut hasher = candidate_universe_hasher(target, initial_board, initial_hold)?;
+        hasher.update([0]);
+        hash_pieces(&mut hasher, queue)?;
         Ok(Self(hasher.finalize().into()))
     }
 
@@ -220,6 +229,7 @@ impl PcCandidateSourceBinding {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn online_pc4(
         session_id: PcCandidateSessionId,
         request_identity: PcCandidateRequestIdentity,
@@ -353,8 +363,7 @@ impl PcCandidateSetDigest {
         &self.0
     }
 
-    #[cfg(test)]
-    fn calculate(
+    pub(crate) fn calculate(
         candidates: &[StandardBoard64TilingIdentity],
     ) -> Result<Self, PcCandidateBoundaryError> {
         Self::calculate_parts(candidates, &[])
@@ -704,6 +713,18 @@ impl PcCandidateReducerInput {
     pub fn candidates(&self) -> &[StandardBoard64TilingIdentity] {
         &self.candidates
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_exact_candidate_count(mut self, exact_candidate_count: u64) -> Self {
+        self.universe_identity.exact_candidate_count = exact_candidate_count;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_candidate_set_digest(mut self, digest: [u8; 32]) -> Self {
+        self.universe_identity.candidate_set_digest = PcCandidateSetDigest(digest);
+        self
+    }
 }
 
 pub struct PcCandidatePageCollector {
@@ -928,6 +949,22 @@ fn hash_qualified_target(
         qualification.offline_exact_parity_identity().as_bytes(),
     )?;
     Ok(())
+}
+
+fn candidate_universe_hasher(
+    target: &QualifiedPc4TargetIdentity,
+    initial_board: StandardPcBoard,
+    initial_hold: FixedQueueHoldState,
+) -> Result<Sha256, PcCandidateRequestIdentityError> {
+    let mut hasher = Sha256::new();
+    hasher.update(CANDIDATE_REQUEST_IDENTITY_DOMAIN);
+    hash_qualified_target(&mut hasher, target)?;
+    hasher.update([initial_board.lines()]);
+    for word in initial_board.occupied().words() {
+        hasher.update(word.to_be_bytes());
+    }
+    hash_hold_state(&mut hasher, initial_hold);
+    Ok(hasher)
 }
 
 fn hash_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), PcCandidateRequestIdentityError> {
