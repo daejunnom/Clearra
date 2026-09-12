@@ -49,12 +49,52 @@ network, embedded asset, subprocess, or URL access. Its synthetic opaque Krylov
 adapter is therefore dormant research structure, not product authority.
 
 The release-blocking `PC4 Full Solution Authority` architecture task now checks
-that dependency closure, no-I/O property, forbidden V-star/policy/Krylov or
-single-best product symbols, complete-edge traversal, all-realization
-materialization, and the non-forgeable complete-universe reducer seam. The
-existing executed Rust cases remain the behavioral proof; the static task is a
-fail-closed architecture regression and does not substitute for upstream
-format qualification or exact offline parity.
+that dependency closure from `clearra-core-executor` and `clearra-wasm-abi` as
+well as the prior product roots. Its product-source scan covers the Rust hosts,
+Web/Desktop/Discord applications, `packages/clearra-ui`, Svelte and application
+configuration, release and future discovery scripts, workflow configuration,
+and container recipes. The scan includes Rust, TypeScript/JavaScript, Svelte,
+JSON/TOML/YAML, PowerShell, shell, Python, and extensionless Dockerfile surfaces.
+
+Forbidden V-star/policy/Krylov or single-best semantics are checked only on
+production-bearing content. Documentation and separately named test/fixture
+paths are excluded, and `#[cfg(test)]` Rust blocks are removed before scanning.
+The dormant probability crate is not silently allowlisted as a product source:
+it is audited separately for dependency-free `no_std` and no-I/O behavior, and
+any product import or configuration reference to that crate still fails. This
+keeps research vocabulary and synthetic negative tests legal without allowing
+them to become CLI, GUI, release, discovery, or runtime authority.
+
+The same task pins the qualified lookup to `FieldHashIndex`, `GraphOffsets`, and
+`Graph`, checks the complete-edge traversal, checks the
+`clearra-core-executor` ILC materializer's all-realization loop, and requires the
+application adapter to exhaust graph and concrete-materialization pages before
+minting reducer completeness. The existing executed Rust cases remain the
+behavioral proof; the static task is a fail-closed architecture regression and
+does not substitute for upstream format qualification or exact offline parity.
+
+## v0.9 static-beta migration switch
+
+This branch still carries the v0.8.1 compatibility path: the tracked
+`pc4-compact-exact-v12.bin`, `CLR4TB12` loader, embedded CLI copy, Web/WASM
+installer, and container copy remain live. Removing them before the qualified
+online replacement is ready would break v0.8.1, so their mere presence does not
+fail the shared architecture task yet.
+
+The v0.9 migration commit must add
+`scripts/architecture/pc4-v090-online-authority.mode` with exactly:
+
+```text
+pc4-product-authority=v0.9-online-graph-v1
+```
+
+Once that explicit marker exists, the architecture task treats the static
+binary and every production `CLR4TB12`, compact-tablebase, embedded-asset, or
+WASM install/release reference as a migration blocker. A malformed marker also
+fails closed. Test fixtures and documentation may retain legacy names for
+rollback and negative coverage, but they cannot satisfy or defeat the product
+scan. Absence of the marker means only “v0.8.1 compatibility mode”; it is not
+evidence that v0.9 migration, qualification, or release is complete.
 
 ## Remaining activation evidence
 

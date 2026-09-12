@@ -39,28 +39,48 @@ function Assert-Pc4ProductDependencyClosure(
 }
 
 function Test-Pc4ProductSourceExcluded([System.IO.FileInfo]$File) {
-    return $File.FullName -match '[\\/](node_modules|dist|dist-server|build|coverage|target|fixtures|tests?|__tests__)[\\/]' -or
-        $File.Name -match '(?i)(^test[._-]|[._-]test\.|[._-]tests\.)'
+    return $File.FullName -match '[\\/](node_modules|dist|dist-server|build|coverage|target|fixtures|tests?|__tests__|test_support|snapshots|docs?|documentation)[\\/]' -or
+        $File.Name -match '(?i)(^test[._-]|[._-](?:test|tests|spec)\.)' -or
+        $File.Name -match '(?i)(?:^|[-_.])lock(?:\.|$)' -or
+        $File.FullName -match '[\\/](?:credentials?|secrets?)[\\/]' -or
+        $File.Name -match '(?i)(?:service[-_]?account|credentials?|secrets?|api[-_]?keys?|id_(?:rsa|dsa|ecdsa|ed25519)).*'
 }
 
 function Get-Pc4ProductAuthoritySourceFiles() {
     $roots = @(
-        'crates/clearra-pc4-tablebase/src',
-        'crates/clearra-app/src',
-        'crates/clearra-host-contract/src',
-        'crates/clearra-ui-schema/src',
-        'crates/clearra-gui-host/src',
-        'crates/clearra-cli-command/src',
-        'crates/clearra-wasm/src',
-        'crates/clearra-cli/src',
-        'apps/clearra-web/src',
-        'apps/clearra-desktop/src',
-        'apps/clearra-discord-bot'
+        'crates/clearra-pc4-tablebase',
+        'crates/clearra-core-executor',
+        'crates/clearra-app',
+        'crates/clearra-host-contract',
+        'crates/clearra-ui-schema',
+        'crates/clearra-gui-host',
+        'crates/clearra-cli-command',
+        'crates/clearra-pc-graph',
+        'crates/clearra-problem',
+        'crates/clearra-wasm',
+        'crates/clearra-wasm-abi',
+        'crates/clearra-cli',
+        'apps/clearra-web',
+        'apps/clearra-desktop',
+        'apps/clearra-discord-bot',
+        'packages/clearra-ui',
+        'scripts/release',
+        'scripts/pc4-discovery',
+        'scripts/discovery',
+        'tools/pc4-discovery',
+        'tools/discovery',
+        'config',
+        'configs',
+        '.github/workflows',
+        '.github/actions'
     )
     $extensions = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
     )
-    foreach ($extension in @('.rs', '.ts', '.tsx', '.js', '.mjs', '.cjs')) {
+    foreach ($extension in @(
+        '.rs', '.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs', '.svelte',
+        '.json', '.toml', '.yaml', '.yml', '.ps1', '.sh', '.py', '.config', '.conf'
+    )) {
         [void]$extensions.Add($extension)
     }
 
@@ -68,9 +88,131 @@ function Get-Pc4ProductAuthoritySourceFiles() {
         $absoluteRoot = Join-Path $Root $relativeRoot
         if (-not (Test-Path -LiteralPath $absoluteRoot)) { continue }
         foreach ($file in Get-ChildItem -LiteralPath $absoluteRoot -Recurse -File) {
-            if ($extensions.Contains($file.Extension) -and
+            $isSourceOrConfiguration = $extensions.Contains($file.Extension) -or
+                $file.Name -match '^(?i)(?:Dockerfile|Containerfile)(?:\..+)?$'
+            if ($isSourceOrConfiguration -and
                 -not (Test-Pc4ProductSourceExcluded $file)) {
                 $file
+            }
+        }
+    }
+}
+
+function Get-Pc4ProductAuthorityProductionText([System.IO.FileInfo]$File) {
+    $contents = Get-Content -LiteralPath $File.FullName -Raw
+    if ($File.Extension.Equals('.rs', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return Get-RustProductionContents $contents
+    }
+    return $contents
+}
+
+function Get-Pc4ProductAuthorityRelativePath([System.IO.FileInfo]$File) {
+    $rootValue = if ($Root -is [System.Management.Automation.PathInfo]) {
+        $Root.Path
+    } else {
+        [string]$Root
+    }
+    $rootPath = [System.IO.Path]::GetFullPath($rootValue).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $fullPath = [System.IO.Path]::GetFullPath($File.FullName)
+    if (-not $fullPath.StartsWith(
+        "$rootPath$([System.IO.Path]::DirectorySeparatorChar)",
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "PC4 authority source escaped the workspace: $fullPath"
+    }
+    return $fullPath.Substring($rootPath.Length + 1).Replace('\', '/')
+}
+
+function Test-Pc4DecisionAuthorityContext(
+    [System.IO.FileInfo]$File,
+    [string]$Contents
+) {
+    $relative = Get-Pc4ProductAuthorityRelativePath $File
+    return $relative -match '(?i)(?:pc[_-]?4|tablebase|full[-_]?solution)' -or
+        $Contents -match '(?i)(?:pc[_-]?4|tablebase|full[-_]?solution)'
+}
+
+function Assert-Pc4ProductDecisionSourceAbsence() {
+    $globallyForbiddenPatterns = @(
+        '(?i)\bclearra[_-]pc[_-]next[_-]probability\b',
+        '(?i)\bpc[_-]?next[_-]?probability(?:port|provider|adapter|result)?\b',
+        '(?i)\bpc[_-]?survival(?:model)?(?:port|provider|adapter)?\b',
+        '(?i)\bpc[_-]?krylov\b',
+        '(?i)\bkrylov\b',
+        '(?i)\bv[_-]?star\b',
+        '(?-i:\bV\*)',
+        '(?i)\bpolicy[_-]?advisor\b',
+        '(?i)\bpolicy\.bin\b',
+        '(?i)\bvalue\.bin\b'
+    )
+    $pc4DecisionPatterns = @(
+        '(?i)\bpolicy[_-]?value\b',
+        '(?i)\bpolicy(?:[_-]?(?:action|array|asset))\b',
+        '(?i)\bvalue(?:[_-]?(?:array|asset))\b',
+        '(?i)\b(?:optimal|best|recommended)[_-]?(?:action|edge|transition)\b',
+        '(?i)\b(?:single|one)[_-]?best\b'
+    )
+
+    foreach ($file in Get-Pc4ProductAuthoritySourceFiles) {
+        $contents = Get-Pc4ProductAuthorityProductionText $file
+        $patterns = @($globallyForbiddenPatterns)
+        if (Test-Pc4DecisionAuthorityContext -File $file -Contents $contents) {
+            $patterns += $pc4DecisionPatterns
+        }
+        foreach ($pattern in $patterns) {
+            if ($contents -match $pattern) {
+                $relative = Get-Pc4ProductAuthorityRelativePath $file
+                Add-ArchitectureError "$relative contains forbidden PC4 decision-source semantics '$($Matches[0])'; v0.9 product authority is qualified graph/index data plus complete Clearra materialization"
+            }
+        }
+    }
+}
+
+function Test-Pc4V090MigrationMode() {
+    $markerRelativePath = 'scripts/architecture/pc4-v090-online-authority.mode'
+    $markerPath = Join-Path $Root $markerRelativePath
+    if (-not (Test-Path -LiteralPath $markerPath)) {
+        return $false
+    }
+
+    $expected = 'pc4-product-authority=v0.9-online-graph-v1'
+    $actual = (Get-Content -LiteralPath $markerPath -Raw).Trim()
+    if ($actual -ne $expected) {
+        Add-ArchitectureError "$markerRelativePath must contain exactly '$expected' before v0.9 migration checks can run"
+        return $false
+    }
+    return $true
+}
+
+function Assert-Pc4V090LegacyStaticBetaMigration() {
+    if (-not (Test-Pc4V090MigrationMode)) {
+        return
+    }
+
+    $legacyAsset = 'apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin'
+    if (Test-Path -LiteralPath (Join-Path $Root $legacyAsset)) {
+        Add-ArchitectureError "v0.9 PC4 migration mode forbids legacy static-beta asset '$legacyAsset'"
+    }
+
+    $legacyPatterns = @(
+        '(?i)\bCLR4TB12\b',
+        '(?i)\bpc4-compact-exact-v12(?:\.bin)?\b',
+        '(?i)\bPC4_COMPACT_TABLEBASE\b',
+        '(?i)\b(?:compile|install|release)_pc4_compact_tablebase\b',
+        '(?i)\bPc4CompactTablebase(?:Artifact)?\b',
+        '(?i)\bAppTablebaseSession\b',
+        '(?i)apps/clearra-web/static/tablebase/',
+        '(?i)\bclearra_wasm_tablebase_(?:install|release)\b'
+    )
+    foreach ($file in Get-Pc4ProductAuthoritySourceFiles) {
+        $contents = Get-Pc4ProductAuthorityProductionText $file
+        foreach ($pattern in $legacyPatterns) {
+            if ($contents -match $pattern) {
+                $relative = Get-Pc4ProductAuthorityRelativePath $file
+                Add-ArchitectureError "v0.9 PC4 migration mode still reaches the CLR4TB12 static-beta product path in '$relative' via '$($Matches[0])'"
             }
         }
     }
@@ -79,12 +221,14 @@ function Get-Pc4ProductAuthoritySourceFiles() {
 function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyGraph) {
     $productRoots = @(
         'clearra-pc4-tablebase',
+        'clearra-core-executor',
         'clearra-app',
         'clearra-host-contract',
         'clearra-ui-schema',
         'clearra-gui-host',
         'clearra-cli-command',
         'clearra-wasm',
+        'clearra-wasm-abi',
         'clearra-cli'
     )
     foreach ($productRoot in $productRoots) {
@@ -95,6 +239,25 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
     if ($probabilityManifest.Count -ne 0) {
         Add-ArchitectureError 'Dormant n-PC probability seam must remain dependency-free and unable to acquire an I/O implementation'
     }
+    $probabilityManifestText = Read-PhysicalText 'crates/clearra-pc-next-probability/Cargo.toml'
+    foreach ($forbiddenManifestPattern in @(
+        '(?m)^\s*\[features\]\s*$',
+        '(?m)^\s*build\s*='
+    )) {
+        if ($probabilityManifestText -match $forbiddenManifestPattern) {
+            Add-ArchitectureError 'Dormant n-PC probability seam must not declare activation features or a build script'
+        }
+    }
+    foreach ($forbiddenSeamPath in @(
+        'crates/clearra-pc-next-probability/build.rs',
+        'crates/clearra-pc-next-probability/src/bin',
+        'crates/clearra-pc-next-probability/examples',
+        'crates/clearra-pc-next-probability/benches'
+    )) {
+        if (Test-Path -LiteralPath (Join-Path $Root $forbiddenSeamPath)) {
+            Add-ArchitectureError "Dormant n-PC probability seam must not own executable, build, example, or benchmark surface '$forbiddenSeamPath'"
+        }
+    }
     $probabilityLib = Read-Text 'crates/clearra-pc-next-probability/src/lib.rs'
     if (-not $probabilityLib.Contains('#![no_std]')) {
         Add-ArchitectureError 'Dormant n-PC probability seam must remain no_std'
@@ -103,48 +266,100 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         'std::fs',
         'std::net',
         'extern crate std',
+        'std::io',
+        'std::path',
+        'std::process',
+        'std::env',
         'include_bytes!',
         'include_str!',
+        'include!(',
+        'env!(',
+        'option_env!(',
         'File::open',
         'OpenOptions',
         'Command::new',
+        'extern "C"',
+        '#[link(',
         'http://',
         'https://'
     ) 'dormant n-PC probability seam performs no I/O and owns no asset'
 
-    $forbiddenDecisionPatterns = @(
-        '(?i)\bclearra[_-]pc[_-]next[_-]probability\b',
-        '(?i)\bpc[_-]?krylov\b',
-        '(?i)\bkrylov\b',
-        '(?i)\bv[_-]?star\b',
-        '(?i)\bv\*',
-        '(?i)\bpolicy[_-]?value\b',
-        '(?i)\bpolicy(?:[_-]?(?:action|array|asset)|\.bin)\b',
-        '(?i)\bvalue(?:[_-]?(?:array|asset)|\.bin)\b',
-        '(?i)\b(?:optimal|best|recommended)[_-]?(?:action|edge|transition)\b',
-        '(?i)\b(?:single|one)[_-]?best\b'
+    Assert-Pc4ProductDecisionSourceAbsence
+    Assert-Pc4V090LegacyStaticBetaMigration
+
+    $lookup = Get-RustProductionContents (
+        Read-PhysicalText 'crates/clearra-pc4-tablebase/src/lookup.rs'
     )
-    foreach ($file in Get-Pc4ProductAuthoritySourceFiles) {
-        $contents = Get-Content -LiteralPath $file.FullName -Raw
-        foreach ($pattern in $forbiddenDecisionPatterns) {
-            if ($contents -match $pattern) {
-                $relative = Get-RepositoryRelativePath $file.FullName
-                Add-ArchitectureError "$relative contains forbidden PC4 decision-source semantics '$($Matches[0])'; product authority is the complete outgoing graph plus exact Clearra materialization"
-            }
+    foreach ($required in @(
+        'self.request(',
+        'Pc4ArtifactRole::FieldHashIndex',
+        'Pc4ArtifactRole::GraphOffsets',
+        'Pc4ArtifactRole::Graph',
+        'self.profile.artifact(artifact).clone()'
+    )) {
+        if (-not $lookup.Contains($required)) {
+            Add-ArchitectureError "PC4 lookup must source qualified graph/index artifacts; missing '$required'"
         }
     }
 
-    $traversal = Read-Text 'crates/clearra-pc4-tablebase/src/fixed_queue_traversal.rs'
+    $coreMaterializer = Get-RustProductionContents (
+        Read-PhysicalText 'crates/clearra-core-executor/src/backend/wasm_cpu/pc4_graph_materializer.rs'
+    )
+    foreach ($required in @(
+        'pub fn materialize_pc4_ilc_transition(',
+        'for realization in catalog.instantiations(',
+        'placements.push(Pc4IlcPlacement {',
+        'placements.sort_unstable();',
+        'placements.dedup();'
+    )) {
+        if (-not $coreMaterializer.Contains($required)) {
+            Add-ArchitectureError "Clearra core PC4 edge materializer must retain every exact reachable realization; missing '$required'"
+        }
+    }
+    foreach ($pattern in @(
+        '(?is)placements\s*\.\s*(?:first|last|pop|truncate)\s*\(',
+        '(?is)catalog\s*\.\s*instantiations\s*\([^)]*\)\s*\.\s*(?:next|take)\s*\(\s*1?\s*\)'
+    )) {
+        if ($coreMaterializer -match $pattern) {
+            Add-ArchitectureError 'Clearra core PC4 edge materializer must not select one preferred realization'
+        }
+    }
+
+    $candidateAdapter = Get-RustProductionContents (
+        Read-PhysicalText 'crates/clearra-app/src/pc4_graph_candidate_adapter.rs'
+    )
+    foreach ($required in @(
+        'P: QualifiedCompleteAdjacencyProvider',
+        'M: Pc4PlacementMaterializer',
+        'prepare_fixed_queue_concrete_family(',
+        'while observations.len() < limit.get()',
+        'if !self.is_exhausted() {',
+        'Pc4GraphCandidatePrepareError::IncompleteCannotFinalize',
+        'PcCandidateCompletenessEvidence {'
+    )) {
+        if (-not $candidateAdapter.Contains($required)) {
+            Add-ArchitectureError "App PC4 candidate adapter must exhaust graph paths and all concrete materializations before reducer authority; missing '$required'"
+        }
+    }
+
+    $traversalFile = Read-PhysicalText 'crates/clearra-pc4-tablebase/src/fixed_queue_traversal.rs'
+    $traversal = Get-RustProductionContents $traversalFile
     foreach ($required in @(
         'fn complete_outgoing_edges(',
         '.dedup_by_key(|edge| edge.target_field_id());',
-        'for edge in adjacency.edges',
+        'for edge in adjacency.edges'
+    )) {
+        if (-not $traversal.Contains($required)) {
+            Add-ArchitectureError "PC4 complete-graph traversal contract is missing '$required'"
+        }
+    }
+    foreach ($requiredTest in @(
         'kat_traverses_every_outgoing_edge_in_canonical_order',
         'converging_paths_are_not_collapsed_by_visited_state',
         'repeated_raw_targets_are_one_transition_before_exact_materialization'
     )) {
-        if (-not $traversal.Contains($required)) {
-            Add-ArchitectureError "PC4 complete-graph traversal contract is missing '$required'"
+        if (-not $traversalFile.Contains($requiredTest)) {
+            Add-ArchitectureError "PC4 complete-graph traversal test contract is missing '$requiredTest'"
         }
     }
     foreach ($pattern in @(
@@ -156,19 +371,22 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         }
     }
 
-    $graphRecordDecoder = Read-Text 'crates/clearra-pc4-tablebase/src/graph.rs'
+    $graphRecordDecoderFile = Read-PhysicalText 'crates/clearra-pc4-tablebase/src/graph.rs'
+    $graphRecordDecoder = Get-RustProductionContents $graphRecordDecoderFile
     foreach ($required in @(
         'pub fn decode_hydra_graph_record_v1(',
         'const HYDRA_GRAPH_PIECES:',
         'for piece in HYDRA_GRAPH_PIECES',
         'SourceFieldHashMismatch',
         'TargetOutsideFieldDomain',
-        'TrailingBytes',
-        'hydra_record_decodes_every_piece_group_without_selecting_an_edge'
+        'TrailingBytes'
     )) {
         if (-not $graphRecordDecoder.Contains($required)) {
             Add-ArchitectureError "PC4 Hydra graph-record decoder is missing all-edge or fail-closed marker '$required'"
         }
+    }
+    if (-not $graphRecordDecoderFile.Contains('hydra_record_decodes_every_piece_group_without_selecting_an_edge')) {
+        Add-ArchitectureError "PC4 Hydra graph-record decoder test contract is missing 'hydra_record_decodes_every_piece_group_without_selecting_an_edge'"
     }
     foreach ($pattern in @(
         '(?is)targets\s*\.\s*(?:first|last|pop|truncate)\s*\(',
@@ -179,16 +397,19 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         }
     }
 
-    $materializer = Read-Text 'crates/clearra-pc4-tablebase/src/materializer.rs'
+    $materializerFile = Read-PhysicalText 'crates/clearra-pc4-tablebase/src/materializer.rs'
+    $materializer = Get-RustProductionContents $materializerFile
     foreach ($required in @(
         'let mut placements = output.placements;',
         'placements.sort_unstable();',
-        'placements.dedup();',
-        'multiple_realizations_are_sorted_and_deduped_only_by_stable_identity'
+        'placements.dedup();'
     )) {
         if (-not $materializer.Contains($required)) {
             Add-ArchitectureError "PC4 all-realization materializer contract is missing '$required'"
         }
+    }
+    if (-not $materializerFile.Contains('multiple_realizations_are_sorted_and_deduped_only_by_stable_identity')) {
+        Add-ArchitectureError "PC4 all-realization materializer test contract is missing 'multiple_realizations_are_sorted_and_deduped_only_by_stable_identity'"
     }
     foreach ($pattern in @(
         '(?is)placements\s*\.\s*(?:first|last|pop|truncate)\s*\(',
@@ -199,7 +420,7 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         }
     }
 
-    $candidateBoundary = Read-Text 'crates/clearra-app/src/pc_candidate_page_boundary.rs'
+    $candidateBoundary = Read-PhysicalText 'crates/clearra-app/src/pc_candidate_page_boundary.rs'
     foreach ($required in @(
         '#[cfg(test)]',
         'fn from_verified_complete_source(',
