@@ -6,6 +6,7 @@
 
 mod fixed_queue_traversal;
 mod graph;
+mod lazy_materialized_path;
 mod lookup;
 mod manifest;
 mod materializer;
@@ -19,6 +20,13 @@ pub use fixed_queue_traversal::{
     QualifiedCompleteAdjacency, QualifiedCompleteAdjacencyProvider, TerminalDepthContract,
 };
 pub use graph::{decode_graph_target_sequence, GraphTargetDecodeError};
+pub use lazy_materialized_path::{
+    prepare_fixed_queue_concrete_family, ConcretePathMaterializationBudgetKind,
+    ConcretePathMaterializationBudgets, ConcretePathMaterializationError,
+    ConcretePathMaterializationSemanticError, ConcretePathPageError, FixedQueueConcretePath,
+    FixedQueueConcretePathCursor, FixedQueueConcretePathFamily,
+    FixedQueuePathMaterializationRequest,
+};
 pub use lookup::{
     FormatMismatch, LookupFailure, LookupHit, LookupMachine, LookupStartError, LookupStep,
     SupplyError,

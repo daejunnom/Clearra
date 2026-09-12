@@ -47,3 +47,11 @@ drift, callback failures, binding violations, and budget exhaustion discard the
 in-progress result through typed errors. This pure layer does not implement
 hold, pattern/bag semantics, graph parsing/fetching, runtime registration, or
 dataset activation.
+
+The concrete-path bridge materializes each qualified graph edge exactly once,
+stores only that edge's bounded concrete placement alternatives, and pages the
+Cartesian product with a snapshot-bound mixed-radix cursor. It never allocates
+the full product, treats a zero-edge terminal graph path as one empty concrete
+realization, and discards page output on cancellation, snapshot drift, or a
+cursor/family mismatch. This is still a feature-off synthetic boundary: it does
+not make an unqualified graph parser or placement adapter authoritative.

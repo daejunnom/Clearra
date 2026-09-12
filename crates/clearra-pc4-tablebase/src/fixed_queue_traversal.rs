@@ -333,6 +333,14 @@ pub struct FixedQueueGraphPath {
 }
 
 impl FixedQueueGraphPath {
+    #[cfg(test)]
+    pub(crate) fn from_test_edges(start_field_id: u32, edges: Vec<QualifiedPc4GraphEdge>) -> Self {
+        Self {
+            start_field_id,
+            edges,
+        }
+    }
+
     pub const fn start_field_id(&self) -> u32 {
         self.start_field_id
     }
