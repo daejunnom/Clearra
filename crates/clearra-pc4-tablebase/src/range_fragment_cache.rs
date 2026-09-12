@@ -489,6 +489,7 @@ mod tests {
             Pc4RuleProfile::Srs,
             activated
                 .profile(Pc4RuleProfile::Srs)
+                .expect("qualified SRS profile")
                 .field_hash_index()
                 .clone(),
             1,
