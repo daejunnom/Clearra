@@ -31,7 +31,7 @@ completeness 계약으로 다시 검증한다. hash는 비교용 색인일 뿐 e
 | inverse lock-clear와 geometry family | [`algorithms.md`](algorithms.md), [`buildup.md`](buildup.md), [`memory-lifecycle.md`](memory-lifecycle.md) | `crates/clearra-core-executor/src/backend/wasm_cpu`, `core-c/src/packing`, `core-c/src/buildup` |
 | 공급, queue, hold, coverage | [`buildup.md`](buildup.md), [`build-coverage.md`](build-coverage.md), [`output-formats.md`](output-formats.md) | `crates/clearra-supply`, `crates/clearra-coverage`, `crates/clearra-build-coverage` |
 | PC 셋업과 QB/미래 정보 | [`setup-search.md`](setup-search.md) | `crates/clearra-setup-search`, `crates/clearra-core-executor/src/backend/wasm_cpu/setup_*` |
-| 선택적 PC4 tablebase | [`v0.8.1-v0.9.x-implementation-release-plan.md`](v0.8.1-v0.9.x-implementation-release-plan.md), 핸드오프의 tablebase 계약 | v0.8.1 호환 경로: `crates/clearra-core-executor/src/backend/wasm_cpu/pc4_tablebase.rs`, `crates/clearra-app/src/tablebase_runtime.rs`, `apps/clearra-web/src/workers/pc4TablebaseAssets.ts`; v0.9 준비 경로: `crates/clearra-pc4-tablebase`, `crates/clearra-app/src/online_pc4_lookup_session.rs`, `crates/clearra-app/src/pc4_lookup_graph_runtime_adapter.rs`, `crates/clearra-app/src/pc4_graph_candidate_adapter.rs`, `crates/clearra-app/src/setup_pc_candidate_acceleration.rs` |
+| 선택적 PC4 tablebase | [`v0.8.1-v0.9.x-implementation-release-plan.md`](v0.8.1-v0.9.x-implementation-release-plan.md), [`pc4-full-solution-authority-audit-2026-09-12.md`](research/pc4-full-solution-authority-audit-2026-09-12.md), 핸드오프의 tablebase 계약 | v0.8.1 호환 경로: `crates/clearra-core-executor/src/backend/wasm_cpu/pc4_tablebase.rs`, `crates/clearra-app/src/tablebase_runtime.rs`, `apps/clearra-web/src/workers/pc4TablebaseAssets.ts`; v0.9 준비 경로: `crates/clearra-pc4-tablebase`, `crates/clearra-app/src/online_pc4_lookup_session.rs`, `crates/clearra-app/src/pc4_lookup_graph_runtime_adapter.rs`, `crates/clearra-app/src/pc4_fixed_queue_candidate_runtime.rs`, `crates/clearra-app/src/pc4_graph_candidate_adapter.rs`, `crates/clearra-app/src/setup_pc_candidate_acceleration.rs` |
 | CPU/WebGPU 실행과 자원 | [`gpu-pipeline.md`](gpu-pipeline.md), [`runtime-budgets.md`](runtime-budgets.md), [`memory-lifecycle.md`](memory-lifecycle.md) | `crates/clearra-core-executor/src/cpu_worker_pool.rs`, `crates/clearra-webgpu`, `apps/clearra-web/src/workers` |
 | rule, kick, spin, score | [`rules-and-kicks.md`](rules-and-kicks.md), [`scoring.md`](scoring.md), [`scoring-profiles.md`](scoring-profiles.md) | `crates/clearra-rules`, `crates/clearra-spin`, `crates/clearra-scoring`, `crates/clearra-forward-search` |
 | CTK3/Fumen과 렌더링 | [`ctk3.md`](ctk3.md), [`output-formats.md`](output-formats.md) | `packages/ctk3`, `crates/clearra-fumen`, `crates/clearra-render`, `packages/clearra-ui/src/lib/workspace/ctk3*` |
@@ -101,6 +101,33 @@ parity, bumper, separator/MITM, setup family-quotient 계약은 루트 핸드오
 - Clearra 경계: tablebase는 선택적 exact accelerator다. artifact가 없거나
   identity가 맞지 않으면 일반 exact search를 실행하며, partial/unknown
   entry는 prune 권한이 없다.
+
+### muse918/tetris-4lpc-mdp-vstar-policy 및 hydra-optimal
+
+- Dataset: <https://huggingface.co/datasets/muse918/tetris-4lpc-mdp-vstar-policy>
+- Graph 형식·생성기: <https://github.com/muse918/hydra-optimal>
+- 관련 소비 구현: <https://github.com/muse918/zxcl-pc>,
+  <https://github.com/muse918/zxcl-pc-jstris-tbp>
+- License: dataset card의 MIT 표기와 사용자에게 별도로 확인된 사용 허가를
+  provenance 입력으로 보존한다. 이는 graph/profile/index 의미의 자격 증명을
+  대신하지 않는다.
+- v0.9.0에서 사용하는 범위는 profile별로 완결성이 증명된 `graph.bin` 계열의
+  모든 outgoing transition, 같은 generation에 결박된 field-hash/index,
+  target terminal 및 exact offline differential뿐이다. `V*`, policy action,
+  Krylov 상태와 최선의 수는 PC/Setup 후보 생성, pruning, 정렬, 확률 또는
+  tie-break 입력으로 사용하지 않는다.
+- HF dataset은 갱신될 수 있으므로 revision이나 SHA-256을 제품 코드에 고정하지
+  않는다. discovery가 실행 시점의 resolved revision과 content identity를
+  immutable signed generation manifest에 기록하고, 조회 세션은 그 manifest에
+  pin한다. 새 revision은 자동 승격되지 않는다.
+- 공개 파일명이 profile 의미를 증명하지 않는다. 다섯 profile은 각각 독립된
+  artifact/index/format/provenance/KAT/target-completeness slot을 가지며, 자격을
+  끝낸 profile만 활성화한다. 미자격 profile은 정확한 `not_qualified` 사유를
+  유지하고 다른 profile의 graph나 index를 빌리지 않는다.
+- 공유 `field_hash_to_id.v1.bin`과 `graph_offsets.u32.bin`의 길이가 canonical
+  graph의 field count와 맞는다는 관찰은 container 형식의 보조 증거일 뿐이다.
+  크기나 field ordering이 다른 graph variant에 같은 index를 재사용할 권위는
+  아니다.
 
 ### muse918/pcanalyzer-web
 
