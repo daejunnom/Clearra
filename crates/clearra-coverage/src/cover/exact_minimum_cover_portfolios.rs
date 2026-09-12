@@ -495,6 +495,10 @@ impl core::fmt::Debug for ExactMinimumCoverPortfolioEnumerator {
 /// incomplete inputs preserve the exact solver's partial coverage evidence
 /// without manufacturing an all-portfolio authority.
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing the hot resumable enumerator would add an allocation to preparation"
+)]
 pub enum ExactMinimumCoverPortfolioPreparation {
     Coverable {
         proof: ExactMinimumCoverResult,
@@ -507,6 +511,10 @@ pub enum ExactMinimumCoverPortfolioPreparation {
 
 /// One bounded advance of the proof-bound portfolio preparation authority.
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing the hot resumable enumerator would add an allocation to bounded advances"
+)]
 pub enum ExactMinimumCoverPortfolioPreparationAdvance {
     Pending {
         visited_nodes: u64,
@@ -535,6 +543,10 @@ pub struct ExactMinimumCoverPortfolioPreparationSession {
     parallel_proof: Option<ParallelMinimumProof>,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the session deliberately owns its proof state without another allocation"
+)]
 enum ExactMinimumCoverPortfolioPreparationSessionState {
     Proving {
         required: PatternBitSet,
@@ -2780,13 +2792,8 @@ impl ExactMinimumCoverPortfolioEnumerator {
             } else {
                 remaining_work
             };
-            let decision = pending_search.advance(
-                self,
-                slice_work,
-                pending_live,
-                memory_guard,
-                cancelled,
-            )?;
+            let decision =
+                pending_search.advance(self, slice_work, pending_live, memory_guard, cancelled)?;
             match decision {
                 LexSearchAdvance::Cancelled { visited_nodes } => {
                     let _discarded_transactional_work = visited_nodes;
@@ -3049,6 +3056,10 @@ enum LexSearchAdvance {
     },
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the ready oracle remains inline to avoid allocating every canonical suffix probe"
+)]
 enum PendingOracleStart {
     Ready(PendingAtMostOracle),
     ProvedNone,
