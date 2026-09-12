@@ -1,4 +1,4 @@
-use crate::{Pc4RuleProfile, SnapshotIdentity};
+use crate::{Pc4RuleProfile, QualifiedSnapshotIdentity};
 
 /// Standard tetromino carried by a qualified PC4 graph edge.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -102,7 +102,7 @@ impl PlacementIdentityError {
 /// without a separately qualified record-layout parser.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QualifiedPc4GraphEdge {
-    snapshot: SnapshotIdentity,
+    snapshot: QualifiedSnapshotIdentity,
     profile: Pc4RuleProfile,
     source_field_id: u32,
     piece: Pc4GraphPiece,
@@ -111,7 +111,7 @@ pub struct QualifiedPc4GraphEdge {
 
 impl QualifiedPc4GraphEdge {
     pub fn from_qualified_record(
-        snapshot: SnapshotIdentity,
+        snapshot: QualifiedSnapshotIdentity,
         profile: Pc4RuleProfile,
         source_field_id: u32,
         piece: Pc4GraphPiece,
@@ -126,7 +126,7 @@ impl QualifiedPc4GraphEdge {
         }
     }
 
-    pub const fn snapshot(&self) -> &SnapshotIdentity {
+    pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
         &self.snapshot
     }
 
@@ -153,7 +153,7 @@ impl QualifiedPc4GraphEdge {
 /// rather than trusting an adapter to have answered the requested edge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterializationOutput {
-    pub snapshot: SnapshotIdentity,
+    pub snapshot: QualifiedSnapshotIdentity,
     pub profile: Pc4RuleProfile,
     pub source_field_id: u32,
     pub piece: Pc4GraphPiece,
@@ -185,7 +185,7 @@ pub trait Pc4PlacementMaterializer {
 pub trait MaterializationGuard {
     fn is_cancelled(&self) -> bool;
 
-    fn is_current_snapshot(&self, expected: &SnapshotIdentity) -> bool;
+    fn is_current_snapshot(&self, expected: &QualifiedSnapshotIdentity) -> bool;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -374,6 +374,7 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use super::*;
+    use crate::manifest::tests::qualified_snapshot_identity;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum SyntheticError {
@@ -420,18 +421,16 @@ mod tests {
             self.cancelled.get()
         }
 
-        fn is_current_snapshot(&self, _expected: &SnapshotIdentity) -> bool {
+        fn is_current_snapshot(&self, _expected: &QualifiedSnapshotIdentity) -> bool {
             !self.stale.get()
         }
     }
 
-    fn snapshot() -> SnapshotIdentity {
-        SnapshotIdentity::new(
-            "synthetic/repository",
-            "immutable-revision-materializer-a",
+    fn snapshot() -> QualifiedSnapshotIdentity {
+        qualified_snapshot_identity(
             "generation-materializer-a",
+            "synthetic-materializer-manifest-a",
         )
-        .expect("synthetic immutable snapshot")
     }
 
     fn edge(profile: Pc4RuleProfile) -> QualifiedPc4GraphEdge {
@@ -529,6 +528,27 @@ mod tests {
     fn wrong_source_piece_target_and_profile_bindings_are_rejected() {
         let edge = edge(Pc4RuleProfile::Jstris180);
         let valid = placement(PlacementRotation::Two, 4, 0xf000);
+
+        let mut wrong_snapshot = output(&edge, vec![valid]);
+        wrong_snapshot.snapshot = qualified_snapshot_identity(
+            "generation-materializer-a",
+            "synthetic-materializer-manifest-b",
+        );
+        assert_eq!(
+            wrong_snapshot.snapshot.snapshot_identity(),
+            edge.snapshot().snapshot_identity()
+        );
+        assert_ne!(
+            wrong_snapshot.snapshot.manifest_content_identity(),
+            edge.snapshot().manifest_content_identity()
+        );
+        let mut materializer = synthetic_materializer(&edge, Ok(wrong_snapshot));
+        assert_eq!(
+            materialize_qualified_graph_edge(&edge, &mut materializer, &guard()),
+            Err(PlacementMaterializationError::Semantic(
+                PlacementMaterializationSemanticError::OutputSnapshotMismatch
+            ))
+        );
 
         let mut wrong_source = output(&edge, vec![valid]);
         wrong_source.source_field_id += 1;

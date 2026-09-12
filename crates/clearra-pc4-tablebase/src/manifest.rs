@@ -99,8 +99,8 @@ impl SnapshotIdentity {
         let repository = required_identity(repository.into(), "snapshot_repository_missing")?;
         let revision = required_identity(revision.into(), "snapshot_revision_missing")?;
         let generation = required_identity(generation.into(), "snapshot_generation_missing")?;
-        if is_moving_revision(&revision) {
-            return Err(ManifestError::MovingSnapshotRevision);
+        if !is_resolved_git_object_id(&revision) {
+            return Err(ManifestError::UnresolvedSnapshotRevision);
         }
         Ok(Self {
             repository,
@@ -455,7 +455,7 @@ impl DatasetSnapshotManifest {
         }
 
         Ok(ActivatedSnapshot {
-            attestation,
+            qualified_identity: QualifiedSnapshotIdentity::from_verified_attestation(attestation),
             profiles,
         })
     }
@@ -480,7 +480,7 @@ impl<'a> SnapshotVerificationRequest<'a> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SnapshotVerificationAttestation {
     snapshot_identity: SnapshotIdentity,
     manifest_content_identity: ManifestContentIdentity,
@@ -516,6 +516,37 @@ impl SnapshotVerificationAttestation {
     }
 }
 
+/// Nominal identity minted only after the host verifier accepts an exact
+/// snapshot and manifest-content binding.
+///
+/// There is deliberately no public constructor or conversion from the two raw
+/// labels. Runtime lookup, traversal, and materialization boundaries can only
+/// obtain this value from an [`ActivatedSnapshot`] (or clone an already
+/// qualified value), so manifest provenance cannot be discarded after
+/// activation.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct QualifiedSnapshotIdentity {
+    attestation: SnapshotVerificationAttestation,
+}
+
+impl QualifiedSnapshotIdentity {
+    fn from_verified_attestation(attestation: SnapshotVerificationAttestation) -> Self {
+        Self { attestation }
+    }
+
+    pub const fn snapshot_identity(&self) -> &SnapshotIdentity {
+        self.attestation.snapshot_identity()
+    }
+
+    pub const fn manifest_content_identity(&self) -> &ManifestContentIdentity {
+        self.attestation.manifest_content_identity()
+    }
+
+    pub const fn verification_attestation(&self) -> &SnapshotVerificationAttestation {
+        &self.attestation
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotVerificationFailure {
     Rejected,
@@ -531,21 +562,25 @@ pub trait DatasetSnapshotVerifier {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActivatedSnapshot {
-    attestation: SnapshotVerificationAttestation,
+    qualified_identity: QualifiedSnapshotIdentity,
     profiles: Vec<Pc4ProfileManifest>,
 }
 
 impl ActivatedSnapshot {
     pub const fn identity(&self) -> &SnapshotIdentity {
-        self.attestation.snapshot_identity()
+        self.qualified_identity.snapshot_identity()
     }
 
     pub const fn manifest_content_identity(&self) -> &ManifestContentIdentity {
-        self.attestation.manifest_content_identity()
+        self.qualified_identity.manifest_content_identity()
     }
 
     pub const fn verification_attestation(&self) -> &SnapshotVerificationAttestation {
-        &self.attestation
+        self.qualified_identity.verification_attestation()
+    }
+
+    pub const fn qualified_identity(&self) -> &QualifiedSnapshotIdentity {
+        &self.qualified_identity
     }
 
     pub fn profile(&self, profile: Pc4RuleProfile) -> &Pc4ProfileManifest {
@@ -599,7 +634,7 @@ impl std::error::Error for ActivationError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManifestError {
     EmptyIdentity(&'static str),
-    MovingSnapshotRevision,
+    UnresolvedSnapshotRevision,
     InvalidArtifactPath,
     EmptyArtifact {
         role: Pc4ArtifactRole,
@@ -632,7 +667,9 @@ impl ManifestError {
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::EmptyIdentity(reason) => reason,
-            Self::MovingSnapshotRevision => "pc4_online_snapshot_revision_is_moving",
+            Self::UnresolvedSnapshotRevision => {
+                "pc4_online_snapshot_revision_is_not_resolved_object_id"
+            }
             Self::InvalidArtifactPath => "pc4_online_artifact_path_invalid",
             Self::EmptyArtifact { .. } => "pc4_online_artifact_empty",
             Self::ArtifactRoleMismatch { .. } => "pc4_online_artifact_role_mismatch",
@@ -664,10 +701,8 @@ fn required_identity(value: String, reason: &'static str) -> Result<String, Mani
     }
 }
 
-fn is_moving_revision(revision: &str) -> bool {
-    let revision = revision.trim().to_ascii_lowercase();
-    matches!(revision.as_str(), "main" | "master" | "latest" | "head")
-        || revision.starts_with("refs/heads/")
+fn is_resolved_git_object_id(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64) && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn valid_relative_artifact_path(path: &str) -> bool {
@@ -706,6 +741,14 @@ fn require_role(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    pub(crate) const SYNTHETIC_REVISION_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    pub(crate) const SYNTHETIC_REVISION_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SYNTHETIC_REVISION_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
+    const SYNTHETIC_REVISION_D: &str = "dddddddddddddddddddddddddddddddddddddddd";
+    const SYNTHETIC_REVISION_E: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const SYNTHETIC_REVISION_SHA256: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     pub(crate) struct SyntheticVerifier;
 
@@ -765,7 +808,7 @@ pub(crate) mod tests {
                     {
                         SnapshotIdentity::new(
                             "synthetic/other-repository",
-                            "immutable-other-revision",
+                            SYNTHETIC_REVISION_B,
                             "other-generation",
                         )
                         .expect("drift identity")
@@ -838,20 +881,46 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn activated_snapshot(field_count: u32, graph_bytes: u64) -> ActivatedSnapshot {
+        activated_snapshot_with_manifest_content(
+            field_count,
+            graph_bytes,
+            format!("synthetic-manifest:{field_count}:{graph_bytes}"),
+        )
+    }
+
+    pub(crate) fn activated_snapshot_with_manifest_content(
+        field_count: u32,
+        graph_bytes: u64,
+        manifest_content_identity: impl Into<String>,
+    ) -> ActivatedSnapshot {
         qualified_manifest(
-            SnapshotIdentity::new(
-                "synthetic/repository",
-                "immutable-revision-a",
-                "generation-a",
-            )
-            .expect("synthetic identity"),
-            ManifestContentIdentity::new(format!("synthetic-manifest:{field_count}:{graph_bytes}"))
+            SnapshotIdentity::new("synthetic/repository", SYNTHETIC_REVISION_A, "generation-a")
+                .expect("synthetic identity"),
+            ManifestContentIdentity::new(manifest_content_identity)
                 .expect("synthetic manifest content identity"),
             field_count,
             graph_bytes,
         )
         .activate(&mut SyntheticVerifier)
         .expect("fully qualified synthetic snapshot")
+    }
+
+    pub(crate) fn qualified_snapshot_identity(
+        generation: impl Into<String>,
+        manifest_content_identity: impl Into<String>,
+    ) -> QualifiedSnapshotIdentity {
+        qualified_manifest(
+            SnapshotIdentity::new("synthetic/repository", SYNTHETIC_REVISION_A, generation)
+                .expect("synthetic snapshot identity"),
+            ManifestContentIdentity::new(manifest_content_identity)
+                .expect("synthetic manifest content identity"),
+            2,
+            8,
+        )
+        .activate(&mut SyntheticVerifier)
+        .expect("synthetic snapshot activation")
+        .qualified_identity()
+        .clone()
     }
 
     fn qualified_manifest(
@@ -888,11 +957,40 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn moving_revisions_and_arbitrary_paths_are_rejected() {
+    fn snapshot_revision_requires_an_exact_resolved_git_object_id() {
+        for mutable_or_unresolved in [
+            "main",
+            "master",
+            "latest",
+            "HEAD",
+            "refs/heads/main",
+            "refs/tags/v0.9.0",
+            "v0.9.0",
+            "abc123",
+            "gggggggggggggggggggggggggggggggggggggggg",
+        ] {
+            assert_eq!(
+                SnapshotIdentity::new("repository", mutable_or_unresolved, "generation"),
+                Err(ManifestError::UnresolvedSnapshotRevision),
+                "{mutable_or_unresolved}"
+            );
+        }
         assert_eq!(
-            SnapshotIdentity::new("repository", "main", "generation"),
-            Err(ManifestError::MovingSnapshotRevision)
+            SnapshotIdentity::new("repository", SYNTHETIC_REVISION_A, "generation")
+                .expect("SHA-1 object identity")
+                .revision(),
+            SYNTHETIC_REVISION_A
         );
+        assert_eq!(
+            SnapshotIdentity::new("repository", SYNTHETIC_REVISION_SHA256, "generation")
+                .expect("SHA-256 object identity")
+                .revision(),
+            SYNTHETIC_REVISION_SHA256
+        );
+    }
+
+    #[test]
+    fn arbitrary_artifact_paths_are_rejected() {
         assert_eq!(
             ArtifactDescriptor::new(Pc4ArtifactRole::Graph, "../graph.bin", 1, "oid"),
             Err(ManifestError::InvalidArtifactPath)
@@ -926,7 +1024,8 @@ pub(crate) mod tests {
             reason: UnsupportedProfileReason::MissingProfileSpecificIndex,
         };
         let manifest = DatasetSnapshotManifest::new(
-            SnapshotIdentity::new("repository", "immutable", "generation").expect("identity"),
+            SnapshotIdentity::new("repository", SYNTHETIC_REVISION_A, "generation")
+                .expect("identity"),
             ManifestContentIdentity::new("synthetic-incomplete-manifest")
                 .expect("manifest content identity"),
             profiles,
@@ -978,12 +1077,8 @@ pub(crate) mod tests {
     fn snapshot_identity_is_dynamic_but_immutable_after_activation() {
         let first = activated_snapshot(2, 8);
         let second = DatasetSnapshotManifest::new(
-            SnapshotIdentity::new(
-                "synthetic/repository",
-                "immutable-revision-b",
-                "generation-b",
-            )
-            .expect("second identity"),
+            SnapshotIdentity::new("synthetic/repository", SYNTHETIC_REVISION_B, "generation-b")
+                .expect("second identity"),
             ManifestContentIdentity::new("synthetic-second-manifest")
                 .expect("second manifest content identity"),
             Pc4RuleProfile::ALL
@@ -1002,7 +1097,7 @@ pub(crate) mod tests {
         .activate(&mut SyntheticVerifier)
         .expect("second activation");
         assert_ne!(first.identity(), second.identity());
-        assert_eq!(first.identity().revision(), "immutable-revision-a");
+        assert_eq!(first.identity().revision(), SYNTHETIC_REVISION_A);
     }
 
     #[test]
@@ -1010,7 +1105,7 @@ pub(crate) mod tests {
         let manifest = qualified_manifest(
             SnapshotIdentity::new(
                 "synthetic/repository",
-                "immutable-revision-verified",
+                SYNTHETIC_REVISION_C,
                 "generation-verified",
             )
             .expect("snapshot identity"),
@@ -1052,7 +1147,7 @@ pub(crate) mod tests {
             let manifest = qualified_manifest(
                 SnapshotIdentity::new(
                     "synthetic/repository",
-                    "immutable-revision-failure",
+                    SYNTHETIC_REVISION_D,
                     "generation-failure",
                 )
                 .expect("snapshot identity"),
@@ -1083,7 +1178,7 @@ pub(crate) mod tests {
             let manifest = qualified_manifest(
                 SnapshotIdentity::new(
                     "synthetic/repository",
-                    "immutable-revision-binding",
+                    SYNTHETIC_REVISION_E,
                     "generation-binding",
                 )
                 .expect("snapshot identity"),
