@@ -63,6 +63,10 @@ impl QualifiedCompleteAdjacency {
     pub fn edges(&self) -> &[QualifiedPc4GraphEdge] {
         &self.edges
     }
+
+    pub(crate) fn into_edges(self) -> Vec<QualifiedPc4GraphEdge> {
+        self.edges
+    }
 }
 
 /// Fully bound query passed to a separately qualified adjacency provider.
@@ -76,6 +80,22 @@ pub struct FixedQueueAdjacencyQuery<'a> {
 }
 
 impl<'a> FixedQueueAdjacencyQuery<'a> {
+    pub(crate) const fn from_parts(
+        snapshot: &'a QualifiedSnapshotIdentity,
+        profile: Pc4RuleProfile,
+        source_field_id: u32,
+        piece: Pc4GraphPiece,
+        queue_index: usize,
+    ) -> Self {
+        Self {
+            snapshot,
+            profile,
+            source_field_id,
+            piece,
+            queue_index,
+        }
+    }
+
     pub const fn snapshot(&self) -> &'a QualifiedSnapshotIdentity {
         self.snapshot
     }
@@ -138,6 +158,22 @@ pub struct FixedQueueTerminalQuery<'a> {
 }
 
 impl<'a> FixedQueueTerminalQuery<'a> {
+    pub(crate) const fn from_parts(
+        snapshot: &'a QualifiedSnapshotIdentity,
+        profile: Pc4RuleProfile,
+        field_id: u32,
+        queue: &'a [Pc4GraphPiece],
+        consumed_pieces: usize,
+    ) -> Self {
+        Self {
+            snapshot,
+            profile,
+            field_id,
+            queue,
+            consumed_pieces,
+        }
+    }
+
     pub const fn snapshot(&self) -> &'a QualifiedSnapshotIdentity {
         self.target.snapshot()
     }
@@ -351,6 +387,17 @@ pub struct FixedQueueGraphPath {
 }
 
 impl FixedQueueGraphPath {
+    pub(crate) fn from_parts(start_field_id: u32, edges: Vec<QualifiedPc4GraphEdge>) -> Self {
+        Self {
+            start_field_id,
+            edges,
+        }
+    }
+
+    pub(crate) fn push_edge(&mut self, edge: QualifiedPc4GraphEdge) {
+        self.edges.push(edge);
+    }
+
     #[cfg(test)]
     pub(crate) fn from_test_edges(start_field_id: u32, edges: Vec<QualifiedPc4GraphEdge>) -> Self {
         Self {
