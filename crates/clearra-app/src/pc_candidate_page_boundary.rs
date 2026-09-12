@@ -10,6 +10,10 @@ use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64Ti
 use clearra_pc4_tablebase::{Pc4RuleProfile, QualifiedSnapshotIdentity};
 use sha2::{Digest, Sha256};
 
+#[path = "pc4_graph_candidate_adapter.rs"]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod graph_candidate_adapter;
+
 pub const PC_CANDIDATE_PAGE_CONTRACT: &str = "pc-concrete-candidate-page.v1";
 pub const PC_CANDIDATE_SET_DIGEST_ALGORITHM: &str = "sha256:clearra-pc-canonical-candidate-set-v1";
 

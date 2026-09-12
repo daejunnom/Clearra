@@ -13,8 +13,7 @@ use crate::{
 /// graph dead end; it is not a dataset lookup miss.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QualifiedCompleteAdjacency {
-    snapshot: QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: QualifiedPc4TargetIdentity,
     source_field_id: u32,
     piece: Pc4GraphPiece,
     queue_index: usize,
@@ -23,16 +22,14 @@ pub struct QualifiedCompleteAdjacency {
 
 impl QualifiedCompleteAdjacency {
     pub fn from_qualified_provider(
-        snapshot: QualifiedSnapshotIdentity,
-        profile: Pc4RuleProfile,
+        target: &QualifiedPc4TargetIdentity,
         source_field_id: u32,
         piece: Pc4GraphPiece,
         queue_index: usize,
         edges: Vec<QualifiedPc4GraphEdge>,
     ) -> Self {
         Self {
-            snapshot,
-            profile,
+            target: target.clone(),
             source_field_id,
             piece,
             queue_index,
@@ -40,12 +37,16 @@ impl QualifiedCompleteAdjacency {
         }
     }
 
+    pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
+    }
+
     pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
-        &self.snapshot
+        self.target.snapshot()
     }
 
     pub const fn profile(&self) -> Pc4RuleProfile {
-        self.profile
+        self.target.profile()
     }
 
     pub const fn source_field_id(&self) -> u32 {
@@ -72,8 +73,7 @@ impl QualifiedCompleteAdjacency {
 /// Fully bound query passed to a separately qualified adjacency provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedQueueAdjacencyQuery<'a> {
-    snapshot: &'a QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: &'a QualifiedPc4TargetIdentity,
     source_field_id: u32,
     piece: Pc4GraphPiece,
     queue_index: usize,
@@ -81,27 +81,29 @@ pub struct FixedQueueAdjacencyQuery<'a> {
 
 impl<'a> FixedQueueAdjacencyQuery<'a> {
     pub(crate) const fn from_parts(
-        snapshot: &'a QualifiedSnapshotIdentity,
-        profile: Pc4RuleProfile,
+        target: &'a QualifiedPc4TargetIdentity,
         source_field_id: u32,
         piece: Pc4GraphPiece,
         queue_index: usize,
     ) -> Self {
         Self {
-            snapshot,
-            profile,
+            target,
             source_field_id,
             piece,
             queue_index,
         }
     }
 
+    pub const fn target(&self) -> &'a QualifiedPc4TargetIdentity {
+        self.target
+    }
+
     pub const fn snapshot(&self) -> &'a QualifiedSnapshotIdentity {
-        self.snapshot
+        self.target.snapshot()
     }
 
     pub const fn profile(&self) -> Pc4RuleProfile {
-        self.profile
+        self.target.profile()
     }
 
     pub const fn source_field_id(&self) -> u32 {
@@ -128,9 +130,15 @@ impl<'a> FixedQueueAdjacencyQuery<'a> {
 pub trait QualifiedCompleteAdjacencyProvider {
     type Error;
 
-    fn snapshot(&self) -> &QualifiedSnapshotIdentity;
+    fn target(&self) -> &QualifiedPc4TargetIdentity;
 
-    fn profile(&self) -> Pc4RuleProfile;
+    fn snapshot(&self) -> &QualifiedSnapshotIdentity {
+        self.target().snapshot()
+    }
+
+    fn profile(&self) -> Pc4RuleProfile {
+        self.target().profile()
+    }
 
     fn complete_outgoing_edges(
         &mut self,
@@ -290,11 +298,13 @@ pub struct FixedQueueBudgetExceeded {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FixedQueueTraversalSemanticError {
+    ProviderTargetMismatch,
     ProviderSnapshotMismatch,
     ProviderProfileMismatch {
         expected: Pc4RuleProfile,
         actual: Pc4RuleProfile,
     },
+    AdjacencyTargetMismatch,
     AdjacencySnapshotMismatch,
     AdjacencyProfileMismatch {
         expected: Pc4RuleProfile,
@@ -312,6 +322,7 @@ pub enum FixedQueueTraversalSemanticError {
         expected: usize,
         actual: usize,
     },
+    EdgeTargetMismatch,
     EdgeSnapshotMismatch,
     EdgeProfileMismatch {
         expected: Pc4RuleProfile,
@@ -330,8 +341,10 @@ pub enum FixedQueueTraversalSemanticError {
 impl FixedQueueTraversalSemanticError {
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::ProviderTargetMismatch => "pc4_fixed_queue_provider_target_mismatch",
             Self::ProviderSnapshotMismatch => "pc4_fixed_queue_provider_snapshot_mismatch",
             Self::ProviderProfileMismatch { .. } => "pc4_fixed_queue_provider_profile_mismatch",
+            Self::AdjacencyTargetMismatch => "pc4_fixed_queue_adjacency_target_mismatch",
             Self::AdjacencySnapshotMismatch => "pc4_fixed_queue_adjacency_snapshot_mismatch",
             Self::AdjacencyProfileMismatch { .. } => "pc4_fixed_queue_adjacency_profile_mismatch",
             Self::AdjacencySourceMismatch { .. } => "pc4_fixed_queue_adjacency_source_mismatch",
@@ -339,6 +352,7 @@ impl FixedQueueTraversalSemanticError {
             Self::AdjacencyQueueIndexMismatch { .. } => {
                 "pc4_fixed_queue_adjacency_queue_index_mismatch"
             }
+            Self::EdgeTargetMismatch => "pc4_fixed_queue_edge_target_mismatch",
             Self::EdgeSnapshotMismatch => "pc4_fixed_queue_edge_snapshot_mismatch",
             Self::EdgeProfileMismatch { .. } => "pc4_fixed_queue_edge_profile_mismatch",
             Self::EdgeSourceMismatch { .. } => "pc4_fixed_queue_edge_source_mismatch",
@@ -425,12 +439,22 @@ impl FixedQueueGraphPath {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixedQueueTraversalResult {
+    target: QualifiedPc4TargetIdentity,
+    start_field_id: u32,
     paths: Vec<FixedQueueGraphPath>,
     visited_state_occurrences: usize,
     adjacency_queries: usize,
 }
 
 impl FixedQueueTraversalResult {
+    pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
+    }
+
+    pub const fn start_field_id(&self) -> u32 {
+        self.start_field_id
+    }
+
     pub fn paths(&self) -> &[FixedQueueGraphPath] {
         &self.paths
     }
@@ -472,6 +496,10 @@ impl<'a> FixedQueueTraversalRequest<'a> {
     pub const fn target(&self) -> &'a QualifiedPc4TargetIdentity {
         self.target
     }
+
+    pub const fn start_field_id(&self) -> u32 {
+        self.start_field_id
+    }
 }
 
 /// Traverses every distinct outgoing target transition for one fixed queue
@@ -495,9 +523,8 @@ where
     G: FixedQueueTraversalGuard,
 {
     let snapshot = request.target.snapshot();
-    let profile = request.target.profile();
     check_guard(snapshot, guard)?;
-    validate_provider_binding(snapshot, profile, provider)?;
+    validate_provider_binding(request.target, provider)?;
 
     let mut frontier = vec![FixedQueueGraphPath {
         start_field_id: request.start_field_id,
@@ -562,8 +589,7 @@ where
 
             let piece = request.queue[consumed_pieces];
             let adjacency_query = FixedQueueAdjacencyQuery {
-                snapshot,
-                profile,
+                target: request.target,
                 source_field_id: field_id,
                 piece,
                 queue_index: consumed_pieces,
@@ -571,7 +597,7 @@ where
             consume_unbounded_counter(&mut adjacency_queries);
             let adjacency_result = provider.complete_outgoing_edges(&adjacency_query);
             check_guard(snapshot, guard)?;
-            validate_provider_binding(snapshot, profile, provider)?;
+            validate_provider_binding(request.target, provider)?;
             let mut adjacency = adjacency_result.map_err(FixedQueueTraversalError::Provider)?;
             validate_adjacency(&adjacency_query, &adjacency)?;
 
@@ -616,6 +642,8 @@ where
             })
     });
     Ok(FixedQueueTraversalResult {
+        target: request.target.clone(),
+        start_field_id: request.start_field_id,
         paths: outputs,
         visited_state_occurrences,
         adjacency_queries,
@@ -662,24 +690,28 @@ where
 }
 
 fn validate_provider_binding<ProviderError, TerminalError, P>(
-    snapshot: &QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: &QualifiedPc4TargetIdentity,
     provider: &P,
 ) -> Result<(), FixedQueueTraversalError<ProviderError, TerminalError>>
 where
     P: QualifiedCompleteAdjacencyProvider,
 {
-    if provider.snapshot() != snapshot {
+    if provider.snapshot() != target.snapshot() {
         return Err(FixedQueueTraversalError::Semantic(
             FixedQueueTraversalSemanticError::ProviderSnapshotMismatch,
         ));
     }
-    if provider.profile() != profile {
+    if provider.profile() != target.profile() {
         return Err(FixedQueueTraversalError::Semantic(
             FixedQueueTraversalSemanticError::ProviderProfileMismatch {
-                expected: profile,
+                expected: target.profile(),
                 actual: provider.profile(),
             },
+        ));
+    }
+    if provider.target() != target {
+        return Err(FixedQueueTraversalError::Semantic(
+            FixedQueueTraversalSemanticError::ProviderTargetMismatch,
         ));
     }
     Ok(())
@@ -696,6 +728,8 @@ fn validate_adjacency<ProviderError, TerminalError>(
             expected: query.profile(),
             actual: adjacency.profile(),
         })
+    } else if adjacency.target() != query.target() {
+        Some(FixedQueueTraversalSemanticError::AdjacencyTargetMismatch)
     } else if adjacency.source_field_id() != query.source_field_id() {
         Some(FixedQueueTraversalSemanticError::AdjacencySourceMismatch {
             expected: query.source_field_id(),
@@ -728,6 +762,8 @@ fn validate_adjacency<ProviderError, TerminalError>(
                 expected: query.profile(),
                 actual: edge.profile(),
             })
+        } else if edge.target() != query.target() {
+            Some(FixedQueueTraversalSemanticError::EdgeTargetMismatch)
         } else if edge.source_field_id() != query.source_field_id() {
             Some(FixedQueueTraversalSemanticError::EdgeSourceMismatch {
                 expected: query.source_field_id(),
@@ -753,7 +789,7 @@ mod tests {
     use std::{cell::Cell, collections::BTreeMap, convert::Infallible, rc::Rc};
 
     use super::*;
-    use crate::manifest::tests::{qualified_snapshot_identity, qualified_target_identity};
+    use crate::manifest::tests::qualified_target_identity;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum SyntheticProviderError {
@@ -765,18 +801,19 @@ mod tests {
         None,
         WrongSnapshot,
         WrongProfile,
+        WrongTarget,
         WrongSource,
         WrongPiece,
         WrongQueueIndex,
         WrongEdgeSnapshot,
         WrongEdgeProfile,
+        WrongEdgeTarget,
         WrongEdgeSource,
         WrongEdgePiece,
     }
 
     struct SyntheticProvider {
-        snapshot: QualifiedSnapshotIdentity,
-        profile: Pc4RuleProfile,
+        target: QualifiedPc4TargetIdentity,
         graph: BTreeMap<(u32, Pc4GraphPiece), Vec<u32>>,
         calls: Vec<(u32, Pc4GraphPiece, usize)>,
         response_fault: ResponseFault,
@@ -788,12 +825,8 @@ mod tests {
     impl QualifiedCompleteAdjacencyProvider for SyntheticProvider {
         type Error = SyntheticProviderError;
 
-        fn snapshot(&self) -> &QualifiedSnapshotIdentity {
-            &self.snapshot
-        }
-
-        fn profile(&self) -> Pc4RuleProfile {
-            self.profile
+        fn target(&self) -> &QualifiedPc4TargetIdentity {
+            &self.target
         }
 
         fn complete_outgoing_edges(
@@ -812,14 +845,14 @@ mod tests {
                 return Err(SyntheticProviderError::Rejected);
             }
 
-            let mut snapshot = query.snapshot().clone();
-            let mut profile = query.profile();
+            let mut response_target = query.target().clone();
             let mut source = query.source_field_id();
             let mut piece = query.piece();
             let mut queue_index = query.queue_index();
             match self.response_fault {
-                ResponseFault::WrongSnapshot => snapshot = other_snapshot(),
-                ResponseFault::WrongProfile => profile = Pc4RuleProfile::NoKick,
+                ResponseFault::WrongSnapshot => response_target = other_snapshot_target(),
+                ResponseFault::WrongProfile => response_target = other_profile_target(),
+                ResponseFault::WrongTarget => response_target = other_terminal_target(),
                 ResponseFault::WrongSource => source = source.saturating_add(1),
                 ResponseFault::WrongPiece => piece = Pc4GraphPiece::L,
                 ResponseFault::WrongQueueIndex => queue_index = queue_index.saturating_add(1),
@@ -833,15 +866,13 @@ mod tests {
             let edges = targets
                 .into_iter()
                 .map(|target| {
-                    let mut edge_snapshot = query.snapshot().clone();
-                    let mut edge_profile = query.profile();
+                    let mut edge_target = query.target().clone();
                     let mut edge_source = query.source_field_id();
                     let mut edge_piece = query.piece();
                     match self.response_fault {
-                        ResponseFault::WrongEdgeSnapshot => edge_snapshot = other_snapshot(),
-                        ResponseFault::WrongEdgeProfile => {
-                            edge_profile = Pc4RuleProfile::NoKick;
-                        }
+                        ResponseFault::WrongEdgeSnapshot => edge_target = other_snapshot_target(),
+                        ResponseFault::WrongEdgeProfile => edge_target = other_profile_target(),
+                        ResponseFault::WrongEdgeTarget => edge_target = other_terminal_target(),
                         ResponseFault::WrongEdgeSource => {
                             edge_source = edge_source.saturating_add(1);
                         }
@@ -849,8 +880,7 @@ mod tests {
                         _ => {}
                     }
                     QualifiedPc4GraphEdge::from_qualified_record(
-                        edge_snapshot,
-                        edge_profile,
+                        &edge_target,
                         edge_source,
                         edge_piece,
                         target,
@@ -858,8 +888,7 @@ mod tests {
                 })
                 .collect();
             Ok(QualifiedCompleteAdjacency::from_qualified_provider(
-                snapshot,
-                profile,
+                &response_target,
                 source,
                 piece,
                 queue_index,
@@ -893,14 +922,39 @@ mod tests {
         )
     }
 
-    fn other_snapshot() -> QualifiedSnapshotIdentity {
-        qualified_snapshot_identity("traversal-generation-a", "synthetic-traversal-manifest-b")
+    fn other_snapshot_target() -> QualifiedPc4TargetIdentity {
+        qualified_target_identity(
+            "traversal-generation-a",
+            "synthetic-traversal-manifest-b",
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::PcSearch,
+            4,
+        )
+    }
+
+    fn other_profile_target() -> QualifiedPc4TargetIdentity {
+        qualified_target_identity(
+            "traversal-generation-a",
+            "synthetic-traversal-manifest-a",
+            Pc4RuleProfile::NoKick,
+            Pc4TerminalUseCase::PcSearch,
+            4,
+        )
+    }
+
+    fn other_terminal_target() -> QualifiedPc4TargetIdentity {
+        qualified_target_identity(
+            "traversal-generation-a",
+            "synthetic-traversal-manifest-a",
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::SetupSearch,
+            4,
+        )
     }
 
     fn provider(graph: &[((u32, Pc4GraphPiece), &[u32])]) -> SyntheticProvider {
         SyntheticProvider {
-            snapshot: snapshot().snapshot().clone(),
-            profile: Pc4RuleProfile::Srs,
+            target: snapshot(),
             graph: graph
                 .iter()
                 .map(|(key, targets)| (*key, targets.to_vec()))
@@ -1225,14 +1279,14 @@ mod tests {
     #[test]
     fn provider_profile_and_every_response_binding_fail_closed() {
         let snapshot = snapshot();
-        let differently_qualified = other_snapshot();
+        let differently_qualified = other_snapshot_target();
         assert_eq!(
             snapshot.snapshot().snapshot_identity(),
-            differently_qualified.snapshot_identity()
+            differently_qualified.snapshot().snapshot_identity()
         );
         assert_ne!(
             snapshot.snapshot().manifest_content_identity(),
-            differently_qualified.manifest_content_identity()
+            differently_qualified.snapshot().manifest_content_identity()
         );
         let queue = [Pc4GraphPiece::I];
         let traversal_request = || {
@@ -1245,7 +1299,7 @@ mod tests {
         };
 
         let mut wrong_profile_provider = provider(&[]);
-        wrong_profile_provider.profile = Pc4RuleProfile::NoKick;
+        wrong_profile_provider.target = other_profile_target();
         assert!(matches!(
             traverse_fixed_queue(
                 traversal_request(),
@@ -1258,14 +1312,60 @@ mod tests {
             ))
         ));
 
+        let same_snapshot_other_target = other_terminal_target();
+        assert_eq!(snapshot.snapshot(), same_snapshot_other_target.snapshot());
+        let mut wrong_target_provider = provider(&[]);
+        wrong_target_provider.target = same_snapshot_other_target;
+        assert!(matches!(
+            traverse_fixed_queue(
+                traversal_request(),
+                &mut wrong_target_provider,
+                &mut exhausted_terminal,
+                &guard(),
+            ),
+            Err(FixedQueueTraversalError::Semantic(
+                FixedQueueTraversalSemanticError::ProviderTargetMismatch
+            ))
+        ));
+
+        let mut wrong_target_response = provider(&[((0, Pc4GraphPiece::I), &[1])]);
+        wrong_target_response.response_fault = ResponseFault::WrongTarget;
+        assert!(matches!(
+            traverse_fixed_queue(
+                traversal_request(),
+                &mut wrong_target_response,
+                &mut exhausted_terminal,
+                &guard(),
+            ),
+            Err(FixedQueueTraversalError::Semantic(
+                FixedQueueTraversalSemanticError::AdjacencyTargetMismatch
+            ))
+        ));
+
+        let mut wrong_edge_target = provider(&[((0, Pc4GraphPiece::I), &[1])]);
+        wrong_edge_target.response_fault = ResponseFault::WrongEdgeTarget;
+        assert!(matches!(
+            traverse_fixed_queue(
+                traversal_request(),
+                &mut wrong_edge_target,
+                &mut exhausted_terminal,
+                &guard(),
+            ),
+            Err(FixedQueueTraversalError::Semantic(
+                FixedQueueTraversalSemanticError::EdgeTargetMismatch
+            ))
+        ));
+
         let faults = [
             ResponseFault::WrongSnapshot,
             ResponseFault::WrongProfile,
+            ResponseFault::WrongTarget,
             ResponseFault::WrongSource,
             ResponseFault::WrongPiece,
             ResponseFault::WrongQueueIndex,
             ResponseFault::WrongEdgeSnapshot,
             ResponseFault::WrongEdgeProfile,
+            ResponseFault::WrongEdgeTarget,
             ResponseFault::WrongEdgeSource,
             ResponseFault::WrongEdgePiece,
         ];

@@ -1,4 +1,4 @@
-use crate::{Pc4RuleProfile, QualifiedSnapshotIdentity};
+use crate::{Pc4RuleProfile, QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity};
 
 /// Standard tetromino carried by a qualified PC4 graph edge.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -102,8 +102,7 @@ impl PlacementIdentityError {
 /// without a separately qualified record-layout parser.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QualifiedPc4GraphEdge {
-    snapshot: QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: QualifiedPc4TargetIdentity,
     source_field_id: u32,
     piece: Pc4GraphPiece,
     target_field_id: u32,
@@ -111,27 +110,29 @@ pub struct QualifiedPc4GraphEdge {
 
 impl QualifiedPc4GraphEdge {
     pub fn from_qualified_record(
-        snapshot: QualifiedSnapshotIdentity,
-        profile: Pc4RuleProfile,
+        target: &QualifiedPc4TargetIdentity,
         source_field_id: u32,
         piece: Pc4GraphPiece,
         target_field_id: u32,
     ) -> Self {
         Self {
-            snapshot,
-            profile,
+            target: target.clone(),
             source_field_id,
             piece,
             target_field_id,
         }
     }
 
+    pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
+    }
+
     pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
-        &self.snapshot
+        self.target.snapshot()
     }
 
     pub const fn profile(&self) -> Pc4RuleProfile {
-        self.profile
+        self.target.profile()
     }
 
     pub const fn source_field_id(&self) -> u32 {
@@ -374,7 +375,8 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use super::*;
-    use crate::manifest::tests::qualified_snapshot_identity;
+    use crate::manifest::tests::{qualified_snapshot_identity, qualified_target_identity};
+    use crate::Pc4TerminalUseCase;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum SyntheticError {
@@ -426,15 +428,15 @@ mod tests {
         }
     }
 
-    fn snapshot() -> QualifiedSnapshotIdentity {
-        qualified_snapshot_identity(
+    fn edge(profile: Pc4RuleProfile) -> QualifiedPc4GraphEdge {
+        let target = qualified_target_identity(
             "generation-materializer-a",
             "synthetic-materializer-manifest-a",
-        )
-    }
-
-    fn edge(profile: Pc4RuleProfile) -> QualifiedPc4GraphEdge {
-        QualifiedPc4GraphEdge::from_qualified_record(snapshot(), profile, 11, Pc4GraphPiece::T, 17)
+            profile,
+            Pc4TerminalUseCase::PcSearch,
+            4,
+        );
+        QualifiedPc4GraphEdge::from_qualified_record(&target, 11, Pc4GraphPiece::T, 17)
     }
 
     fn placement(
