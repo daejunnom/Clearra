@@ -218,6 +218,22 @@ function Assert-Pc4V090LegacyStaticBetaMigration() {
     }
 }
 
+function Assert-Pc4GraphCandidateAdapterCompleteness([string]$ProductionText) {
+    foreach ($required in @(
+        'P: QualifiedCompleteAdjacencyProvider',
+        'M: Pc4PlacementMaterializer',
+        'prepare_fixed_queue_concrete_family(',
+        'while observations.len() < limit.get()',
+        'if !self.is_exhausted() {',
+        'Pc4GraphCandidatePrepareError::IncompleteCannotFinalize',
+        'PcCandidateCompletenessEvidence::from_verified_complete_source('
+    )) {
+        if (-not $ProductionText.Contains($required)) {
+            Add-ArchitectureError "App PC4 candidate adapter must exhaust graph paths and all concrete materializations before reducer authority; missing '$required'"
+        }
+    }
+}
+
 function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyGraph) {
     $productRoots = @(
         'clearra-pc4-tablebase',
@@ -328,19 +344,7 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
     $candidateAdapter = Get-RustProductionContents (
         Read-PhysicalText 'crates/clearra-app/src/pc4_graph_candidate_adapter.rs'
     )
-    foreach ($required in @(
-        'P: QualifiedCompleteAdjacencyProvider',
-        'M: Pc4PlacementMaterializer',
-        'prepare_fixed_queue_concrete_family(',
-        'while observations.len() < limit.get()',
-        'if !self.is_exhausted() {',
-        'Pc4GraphCandidatePrepareError::IncompleteCannotFinalize',
-        'PcCandidateCompletenessEvidence {'
-    )) {
-        if (-not $candidateAdapter.Contains($required)) {
-            Add-ArchitectureError "App PC4 candidate adapter must exhaust graph paths and all concrete materializations before reducer authority; missing '$required'"
-        }
-    }
+    Assert-Pc4GraphCandidateAdapterCompleteness $candidateAdapter
 
     $traversalFile = Read-PhysicalText 'crates/clearra-pc4-tablebase/src/fixed_queue_traversal.rs'
     $traversal = Get-RustProductionContents $traversalFile

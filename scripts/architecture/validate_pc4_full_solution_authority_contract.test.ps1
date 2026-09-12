@@ -32,6 +32,33 @@ $temporaryRoot = Join-Path (
 [void][System.IO.Directory]::CreateDirectory($temporaryRoot)
 
 try {
+    # Exercise the real production adapter, not only the synthetic authority
+    # fixtures below. Its evidence constructor is private; a raw struct-literal
+    # requirement would reject the stronger source-binding boundary.
+    $candidateAdapter = Get-RustProductionContents (
+        Get-Content -LiteralPath (Join-Path $repositoryRoot `
+            'crates/clearra-app/src/pc4_graph_candidate_adapter.rs') -Raw
+    )
+    $Errors.Clear()
+    Assert-Pc4GraphCandidateAdapterCompleteness $candidateAdapter
+    Assert-Contract ($Errors.Count -eq 0) 'real complete adapter no longer matches its authority contract'
+
+    foreach ($removedGuard in @(
+        'PcCandidateCompletenessEvidence::from_verified_complete_source(',
+        'if !self.is_exhausted() {'
+    )) {
+        $Errors.Clear()
+        Assert-Pc4GraphCandidateAdapterCompleteness ($candidateAdapter.Replace($removedGuard, ''))
+        Assert-Contract (($Errors -join "`n").Contains($removedGuard)) `
+            "candidate adapter mutation did not reject missing $removedGuard"
+    }
+    $Errors.Clear()
+    Assert-Pc4GraphCandidateAdapterCompleteness ($candidateAdapter.Replace(
+        'PcCandidateCompletenessEvidence::from_verified_complete_source(',
+        'PcCandidateCompletenessEvidence {'
+    ))
+    Assert-Contract ($Errors.Count -ne 0) 'raw evidence construction was accepted as the verified constructor'
+
     $Root = $temporaryRoot
 
     $scannedFixtures = [ordered]@{
