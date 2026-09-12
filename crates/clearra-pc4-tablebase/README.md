@@ -92,3 +92,14 @@ absolute-depth, and cancellation failures are typed and transactional; cursors
 are bound to one prepared family. This remains only an input family for the
 future `graph x hold x bag x preview` DP. It does not infer preview observation
 policy or implement that DP.
+
+The graph-free observation frontier is the next feature-off composition seam.
+Its input separates an exact current-plus-preview prefix from the exact bag
+state after that prefix was drawn, then lazily combines canonical hidden-reveal
+ranks with the fixed-queue hold branches. Each bounded page retains exact reveal
+probability, hold-decision evidence, terminal bag state, and the terminal
+current/preview window; work-slice limits can return a resumable partial or
+empty page, while errors leave the cursor unchanged. Concrete hidden suffixes
+are retained only for later path reconstruction and may not influence an
+observation policy. This layer still performs no graph lookup, pattern parsing,
+network/filesystem I/O, product registration, or production qualification.
