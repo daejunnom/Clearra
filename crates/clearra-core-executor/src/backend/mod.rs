@@ -111,8 +111,9 @@ pub use wasm_cpu::{
     WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
     WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
     WasmDistributedResultMerger, WasmDistributedVerifier, WasmPackedTilingIdentity,
-    WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer, WasmTilingRootResultMerger,
-    WasmTilingRootWorker, PC4_COMPACT_TABLEBASE_MAX_BYTES,
+    WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance, WasmTilingRootChunk,
+    WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
+    PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
 pub(crate) use wasm_cpu::{DocumentLockReachability, DocumentReachabilityEngine};
 pub use wasm_cpu_search_backend::{

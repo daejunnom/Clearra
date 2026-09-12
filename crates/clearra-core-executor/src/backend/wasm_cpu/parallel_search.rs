@@ -307,8 +307,10 @@ fn merge_results(
         ));
     }
 
-    let (packing_candidate_count, packing_candidate_digest) =
-        candidate_identity_summary(&branch_outcomes);
+    let (packing_candidate_count, packing_candidate_digest) = candidate_identity_summary(
+        &branch_outcomes,
+        super::uses_order_independent_pc_candidate_digest(problem),
+    );
     let truncated_reason = branch_outcomes
         .iter()
         .find_map(|branch| branch.truncated_reason);
@@ -383,13 +385,20 @@ fn merge_results(
     })
 }
 
-fn candidate_identity_summary(branches: &[BranchSearchOutcome]) -> (usize, u64) {
+fn candidate_identity_summary(
+    branches: &[BranchSearchOutcome],
+    order_independent: bool,
+) -> (usize, u64) {
     let mut count = 0usize;
     let mut digest = 0u64;
     for branch in branches {
         count = count.saturating_add(branch.candidate_count);
         for candidate_hash in &branch.candidate_hashes {
-            digest = mix_digest(digest, *candidate_hash);
+            digest = if order_independent {
+                super::mix_order_independent_candidate_digest(digest, *candidate_hash)
+            } else {
+                mix_digest(digest, *candidate_hash)
+            };
         }
     }
     (count, digest)

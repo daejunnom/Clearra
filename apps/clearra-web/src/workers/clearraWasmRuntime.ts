@@ -95,6 +95,7 @@ export type ClearraDistributedPlan = {
   deferredInitialization: boolean;
   verificationRequired: boolean;
   tilingGeometryParallel: boolean;
+  rootTaskParallel?: boolean;
 };
 
 export type ClearraDistributedVerifierConsume = {
@@ -197,6 +198,7 @@ type ClearraRawWasmExports = {
   clearra_wasm_distributed_worker_count_exact: () => number;
   clearra_wasm_distributed_verification_required: () => number;
   clearra_wasm_distributed_tiling_geometry_parallel: () => number;
+  clearra_wasm_distributed_root_task_parallel: () => number;
   clearra_wasm_distributed_requested_backend: () => number;
   clearra_wasm_distributed_preparation_fallback_reason: () => number;
   clearra_wasm_distributed_produce: (
@@ -1104,7 +1106,9 @@ function wrapRawModule(
           selectedMode !== 'ready' &&
           raw.clearra_wasm_distributed_verification_required() !== 0,
         tilingGeometryParallel:
-          raw.clearra_wasm_distributed_tiling_geometry_parallel() !== 0
+          raw.clearra_wasm_distributed_tiling_geometry_parallel() !== 0,
+        rootTaskParallel:
+          raw.clearra_wasm_distributed_root_task_parallel() !== 0
       };
     },
     distributed_produce(workBudget, batchCapacity) {

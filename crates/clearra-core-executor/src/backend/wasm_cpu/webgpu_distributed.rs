@@ -11,7 +11,7 @@ use super::{
         WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
         WasmDistributedResultMerger,
     },
-    mix_digest,
+    mix_digest, mix_order_independent_candidate_digest,
     result::WasmExactSearchSession,
     webgpu_search::{
         adapter_selection, compile_batches, poll_once, run_gpu, GpuReduction, GpuRunFailure,
@@ -30,6 +30,7 @@ pub struct WasmWebGpuCandidateProducer {
     verification_required: bool,
     candidate_count: usize,
     candidate_digest: u64,
+    order_independent_candidate_digest: bool,
     summary: Option<WasmDistributedGeometrySummary>,
 }
 
@@ -69,6 +70,9 @@ impl WasmWebGpuCandidateProducer {
             verification_required,
             candidate_count: 0,
             candidate_digest: 0,
+            order_independent_candidate_digest: super::uses_order_independent_pc_candidate_digest(
+                problem,
+            ),
             summary: None,
         })
     }
@@ -189,8 +193,14 @@ impl WasmWebGpuCandidateProducer {
                                 .map_err(map_error)?;
                             let ordinal = self.candidate_count as u64;
                             self.candidate_count = self.candidate_count.saturating_add(1);
-                            self.candidate_digest =
-                                mix_digest(self.candidate_digest, identity_hash);
+                            self.candidate_digest = if self.order_independent_candidate_digest {
+                                mix_order_independent_candidate_digest(
+                                    self.candidate_digest,
+                                    identity_hash,
+                                )
+                            } else {
+                                mix_digest(self.candidate_digest, identity_hash)
+                            };
                             let candidate = WasmCandidatePacket::new(
                                 ordinal,
                                 target_index,
