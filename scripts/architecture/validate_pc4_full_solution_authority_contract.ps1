@@ -656,4 +656,45 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
             Add-ArchitectureError "PC4 partial-generation release contract test is missing '$requiredTest'"
         }
     }
+
+    $upstreamDiscovery = Read-Text 'scripts/release/pc4/discover-upstream-generation.mjs'
+    foreach ($required in @(
+        'clearra.pc4.upstream-discovery.v1',
+        '/revision/${encodeURIComponent(channel)}',
+        '/tree/${resolvedRevision}?recursive=false&expand=false',
+        'qualification_status: "unqualified"',
+        'field_hash_to_id\.v1\.bin',
+        'graph_offsets\.u32\.bin',
+        'graph(?:_[A-Za-z0-9]+)?\.bin',
+        'MAX_RESPONSE_BYTES',
+        'entry.lfs.size !== entry.size'
+    )) {
+        if (-not $upstreamDiscovery.Contains($required)) {
+            Add-ArchitectureError "PC4 upstream discovery must resolve one immutable graph/index inventory without qualifying it; missing '$required'"
+        }
+    }
+    foreach ($forbidden in @(
+        'qualification_status: "qualified"',
+        'profile:',
+        'writeFile',
+        'child_process',
+        'policy.u16',
+        'values.f32'
+    )) {
+        if ($upstreamDiscovery.Contains($forbidden)) {
+            Add-ArchitectureError "PC4 upstream discovery must remain profile-neutral, graph/index-only, read-only, and non-authoritative; found '$forbidden'"
+        }
+    }
+
+    $upstreamDiscoveryTests = Read-Text 'scripts/release/pc4/discover-upstream-generation.test.mjs'
+    foreach ($requiredTest in @(
+        'moving discovery resolves once then inventories the immutable revision without profile inference',
+        'value-like files are not candidates and cannot supply missing graph helpers',
+        'candidate artifact content and size must be self-consistent',
+        'metadata cannot redirect discovery to another repository or non-immutable identity'
+    )) {
+        if (-not $upstreamDiscoveryTests.Contains($requiredTest)) {
+            Add-ArchitectureError "PC4 upstream discovery release contract test is missing '$requiredTest'"
+        }
+    }
 }
