@@ -576,6 +576,7 @@ export const japaneseWorkspaceMessages = Object.freeze({
   'visible-seven-minimum-cover-unsupported': '見えているミノを7個に制限した場合、最小カバー集合の選択には対応していません。すべての供給ミノ、または別の集計方法を選択してください。',
   'pc-score-finder-fixed-queue-required': '固定ミノ順の最高スコアには、明示的な1つの厳密なミノ順が必要です。パターンや空の供給は使用できません。',
   target_lines_invalid: '目標ライン数は1〜6の整数にしてください。',
+  scenario_outside_target: '選択した目標ラインより上にブロックがあります。',
   scenario_not_tileable: 'フィールドの空きセル数は4の倍数である必要があります。',
   scenario_supply_mismatch: 'このフィールドとミノ順では、4ライン以内にパーフェクトクリアを達成できません。',
   scenario_full: 'このフィールドには解くための空きセルがありません。',

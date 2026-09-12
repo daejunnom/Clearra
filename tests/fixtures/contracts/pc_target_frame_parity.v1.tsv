@@ -1,0 +1,12 @@
+# id	target_lines	raw_mask_hex	normalized_mask_hex	initial_cleared_rows	required_pieces	outcome
+# A completed row cannot leave a valid 1L target: ten empty cells are not tetromino-aligned.
+line-1-nonempty	1	000000000000003f	000000000000003f	0	1	valid
+line-1-initial-clear-area-impossible	1	00000000000003ff	-	1	-	area-impossible
+line-2-initial-clear	2	0000000000003fff	000000000000000f	1	4	valid
+line-3-initial-clear	3	00000000003003ff	0000000000000c00	1	7	valid
+line-4-initial-clear	4	00000003c00003ff	0000000000f00000	1	9	valid
+line-5-initial-clear	5	00000300000003ff	00000000c0000000	1	12	valid
+line-6-initial-clear	6	003c0000000003ff	00000f0000000000	1	14	valid
+target-lines-zero	0	0000000000000001	-	0	-	target-lines-invalid
+target-lines-seven	7	0000000000000001	-	0	-	target-lines-invalid
+occupied-above-target	2	0000000000100000	-	0	-	outside-target

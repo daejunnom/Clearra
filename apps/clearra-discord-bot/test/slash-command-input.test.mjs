@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { encodeCtk3 } from "ctk3";
@@ -17,6 +18,79 @@ import {
   normalizeSearchField,
   queuePatternPieceCount,
 } from "../src/discord/slash-command-input.mjs";
+
+const pcTargetFrameRows = readFileSync(
+  new URL("../../../tests/fixtures/contracts/pc_target_frame_parity.v1.tsv", import.meta.url),
+  "utf8",
+)
+  .split(/\r?\n/u)
+  .filter((line) => line && !line.startsWith("#"))
+  .map((line) => {
+    const columns = line.split("\t");
+    assert.equal(columns.length, 7, `target-frame fixture column count: ${line}`);
+    return Object.freeze({
+      id: columns[0],
+      lines: Number(columns[1]),
+      rawMask: BigInt(`0x${columns[2]}`),
+      normalizedMask: columns[3] === "-" ? null : BigInt(`0x${columns[3]}`),
+      requiredPieces: columns[5] === "-" ? null : Number(columns[5]),
+      outcome: columns[6],
+    });
+  });
+
+function compactGridFromMask(mask) {
+  const highestBit = mask === 0n ? 0 : mask.toString(2).length - 1;
+  const height = Math.max(1, Math.floor(highestBit / 10) + 1);
+  const rows = [];
+  for (let y = height - 1; y >= 0; y -= 1) {
+    let row = "";
+    for (let x = 0; x < 10; x += 1) {
+      row += (mask & (1n << BigInt(y * 10 + x))) === 0n ? "_" : "#";
+    }
+    rows.push(row);
+  }
+  return `grid:${rows.join("/")}`;
+}
+
+test("Discord PC input shares the 1..6L target-frame and initial-clear corpus", () => {
+  const command = findSlashCommand("pc").subcommands.path;
+  const expectedError = Object.freeze({
+    "target-lines-invalid": /lines must be an integer from 1 through 6/u,
+    "area-impossible": /target does not contain a whole number of tetrominoes/u,
+    "outside-target": /field has occupied cells above the requested PC target/u,
+  });
+
+  for (const row of pcTargetFrameRows) {
+    const options = [
+      { name: "field", value: compactGridFromMask(row.rawMask) },
+      { name: "next", value: "I".repeat(row.requiredPieces ?? 1) },
+      { name: "lines", value: row.lines },
+      { name: "hold", value: "disabled" },
+    ];
+    if (row.outcome !== "valid") {
+      assert.throws(
+        () => buildSlashCommandArguments(command, options),
+        expectedError[row.outcome],
+        row.id,
+      );
+      continue;
+    }
+
+    const arguments_ = buildSlashCommandArguments(command, options);
+    assert.equal(arguments_[arguments_.indexOf("--lines") + 1], String(row.lines), row.id);
+    assert.equal(arguments_[arguments_.indexOf("--height") + 1], String(row.lines), row.id);
+    assert.equal(
+      arguments_[arguments_.indexOf("--pieces") + 1],
+      String(row.requiredPieces),
+      row.id,
+    );
+    assert.equal(
+      arguments_[arguments_.indexOf("--board-mask") + 1],
+      `0x${row.normalizedMask.toString(16)}`,
+      `${row.id}: Discord forwards the normalized initial field`,
+    );
+  }
+});
 
 test("advanced objective selection is absent from slash input contracts", () => {
   const pc = findSlashCommand("pc");
