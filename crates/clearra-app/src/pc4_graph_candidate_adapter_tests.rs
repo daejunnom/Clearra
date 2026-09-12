@@ -830,15 +830,48 @@ fn bounded_pages_seal_completeness_only_on_the_terminal_page() {
         collection.completeness(),
         PcCandidateCollectionCompleteness::CompleteRequestUniverse
     );
+    let collected = collection
+        .into_reducer_input()
+        .expect("complete reducer input");
+    let direct = family
+        .try_reducer_input(&guard)
+        .expect("direct reducer input");
+    assert_eq!(collected.candidates(), direct.candidates());
+    assert_eq!(collected.universe_identity(), direct.universe_identity());
+    let identity = direct.universe_identity();
+    assert_eq!(identity.qualified_target(), Some(family.target()));
+    assert_eq!(identity.profile(), Pc4RuleProfile::Srs);
+    assert_eq!(identity.use_case(), Some(Pc4TerminalUseCase::PcSearch));
     assert_eq!(
-        collection
-            .into_reducer_input()
-            .expect("complete reducer input")
-            .candidates(),
-        family
-            .try_reducer_input(&guard)
-            .expect("direct reducer input")
-            .candidates()
+        identity.target_lines(),
+        Some(Pc4TargetLines::new(4).expect("target lines"))
+    );
+    assert_eq!(
+        identity.request_identity(),
+        family.source().request_identity()
+    );
+    assert_eq!(
+        identity.source_identity(),
+        family.source().source_identity()
+    );
+    assert_eq!(
+        identity.qualified_snapshot(),
+        family.source().qualified_snapshot()
+    );
+    assert_eq!(
+        identity.initial_board_mask(),
+        family.source().initial_board_mask()
+    );
+    assert_eq!(identity.exact_candidate_count(), 2);
+    let candidate_identities = family
+        .candidates()
+        .iter()
+        .map(Pc4CanonicalCandidate::identity)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        identity.candidate_set_digest(),
+        PcCandidateSetDigest::calculate_parts(&candidate_identities, &[])
+            .expect("candidate set digest")
     );
 }
 
@@ -884,12 +917,17 @@ fn setup_target_remains_distinct_and_uses_the_same_complete_candidate_contract()
 
     assert_eq!(family.target().use_case(), Pc4TerminalUseCase::SetupSearch);
     assert_eq!(family.candidate_count(), 2);
+    let reducer = family
+        .try_reducer_input(&guard)
+        .expect("setup reducer input");
+    assert_eq!(reducer.source(), family.source());
     assert_eq!(
-        family
-            .try_reducer_input(&guard)
-            .expect("setup reducer input")
-            .source(),
-        family.source()
+        reducer.universe_identity().qualified_target(),
+        Some(family.target())
+    );
+    assert_eq!(
+        reducer.universe_identity().use_case(),
+        Some(Pc4TerminalUseCase::SetupSearch)
     );
 }
 

@@ -31,7 +31,7 @@ use clearra_pc4_tablebase::{traverse_fixed_queue, FixedQueueTraversalRequest};
 use super::{
     PcCandidateBoundaryError, PcCandidateCompletenessEvidence, PcCandidatePageCursor,
     PcCandidatePageGuard, PcCandidateProviderKind, PcCandidateReducerInput, PcCandidateSetDigest,
-    PcCandidateSourceBinding, PcConcreteCandidatePage,
+    PcCandidateSourceBinding, PcCandidateUniverseIdentity, PcConcreteCandidatePage,
 };
 
 pub const PC4_GRAPH_CANDIDATE_ADAPTER_CONTRACT: &str =
@@ -610,7 +610,10 @@ impl Pc4GraphCandidateFamily {
         candidates.extend(self.candidates.iter().map(Pc4CanonicalCandidate::identity));
         check_page_guard(&self.source, guard)?;
         Ok(PcCandidateReducerInput {
-            source: self.source.clone(),
+            universe_identity: PcCandidateUniverseIdentity::from_complete_evidence(
+                self.completeness.clone(),
+            )
+            .map_err(Pc4GraphCandidatePageError::CandidateBoundary)?,
             candidates,
         })
     }
@@ -840,11 +843,13 @@ impl CandidateAccumulator {
             .map_err(Pc4GraphCandidatePrepareError::CandidateBoundary)?;
         let exact_candidate_count = u64::try_from(candidates.len())
             .map_err(|_| Pc4GraphCandidatePrepareError::CounterOverflow)?;
-        let completeness = PcCandidateCompletenessEvidence {
-            source: binding.source.clone(),
+        let completeness = PcCandidateCompletenessEvidence::from_verified_complete_source(
+            binding.source.clone(),
+            Some(binding.target.clone()),
             exact_candidate_count,
             candidate_set_digest,
-        };
+        )
+        .map_err(Pc4GraphCandidatePrepareError::CandidateBoundary)?;
         check_prepare_guard(&binding.source, guard)?;
         Ok(Pc4GraphCandidateFamily {
             contract_id: PC4_GRAPH_CANDIDATE_ADAPTER_CONTRACT,

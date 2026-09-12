@@ -1,17 +1,25 @@
 use std::{cell::Cell, num::NonZeroU64};
 
 use clearra_core_domain::{
+    board::standard_pc_board::StandardPcBoard,
     piece::piece_kind::PieceKind,
     solution::normalized_tiling_solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
 };
 use clearra_pc4_tablebase::{
-    ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, GraphTargetEncoding,
-    ManifestContentIdentity, Pc4ArtifactRole, Pc4ProfileManifest, ProfileAvailability,
-    ProfileQualification, SnapshotIdentity, SnapshotVerificationAttestation,
+    ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, FixedQueueHoldState,
+    GraphTargetEncoding, ManifestContentIdentity, Pc4ArtifactRole, Pc4BagProfile, Pc4GraphPiece,
+    Pc4ProfileManifest, Pc4TargetLines, Pc4TerminalFieldIdentity, Pc4TerminalUseCase,
+    ProfileAvailability, ProfileQualification, ProfileTargetCompletenessQualification,
+    QualifiedPc4TargetIdentity, SnapshotIdentity, SnapshotVerificationAttestation,
     SnapshotVerificationFailure, SnapshotVerificationRequest,
 };
 
 use super::*;
+use crate::pc4_input_disclosure_policy::{
+    prepare_pc4_input_disclosure, Pc4BagDisclosure, Pc4HiddenQueueDisclosure, Pc4HiddenQueueSource,
+    Pc4InputDisclosureDecision, Pc4InputDisclosureRequest, Pc4InputSurface, Pc4PartialBagRemainder,
+    Pc4PreparedOnlineInput, Pc4QueueDisclosure,
+};
 
 struct SyntheticVerifier;
 
@@ -82,6 +90,158 @@ fn qualified_snapshot(generation: &str) -> QualifiedSnapshotIdentity {
     .expect("qualified snapshot")
     .qualified_identity()
     .clone()
+}
+
+fn qualified_target(
+    generation: &str,
+    profile: Pc4RuleProfile,
+    use_case: Pc4TerminalUseCase,
+    target_lines: u8,
+) -> QualifiedPc4TargetIdentity {
+    let profiles = Pc4RuleProfile::ALL
+        .into_iter()
+        .map(|manifest_profile| {
+            let prefix = manifest_profile.as_str();
+            let descriptor = |role, suffix: &str, byte_len| {
+                ArtifactDescriptor::new(
+                    role,
+                    format!("{prefix}/{suffix}"),
+                    byte_len,
+                    format!("{prefix}-{suffix}-identity"),
+                )
+                .expect("artifact")
+            };
+            let qualifications = [
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TerminalUseCase::SetupSearch,
+            ]
+            .into_iter()
+            .flat_map(|qualified_use_case| {
+                (Pc4TargetLines::MIN..=Pc4TargetLines::MAX).map(move |lines| {
+                    let target = Pc4TargetLines::new(lines).expect("target lines");
+                    ProfileTargetCompletenessQualification::new(
+                        qualified_use_case,
+                        target,
+                        Pc4TerminalFieldIdentity::full_rows(target, u32::from(lines - 1)),
+                        format!("{prefix}:terminal:{qualified_use_case:?}:{lines}"),
+                        format!("{prefix}:outgoing:{qualified_use_case:?}:{lines}"),
+                        format!("{prefix}:kat:{qualified_use_case:?}:{lines}"),
+                        format!("{prefix}:offline:{qualified_use_case:?}:{lines}"),
+                    )
+                    .expect("target qualification")
+                })
+            })
+            .collect();
+            ProfileAvailability::qualified(
+                Pc4ProfileManifest::new(
+                    manifest_profile,
+                    4,
+                    GraphTargetEncoding::U24LittleEndian,
+                    clearra_pc4_tablebase::FieldIdIndexRelation::RecordOrdinal,
+                    64,
+                    descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 48),
+                    descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 36),
+                    descriptor(Pc4ArtifactRole::Graph, "graph.bin", 64),
+                    ProfileQualification::new(
+                        format!("{prefix}-index-spec"),
+                        format!("{prefix}-graph-spec"),
+                        format!("{prefix}-provenance"),
+                        format!("{prefix}-kat"),
+                    )
+                    .expect("qualification"),
+                )
+                .expect("profile manifest")
+                .with_target_qualifications(qualifications)
+                .expect("target qualifications"),
+            )
+        })
+        .collect();
+    DatasetSnapshotManifest::new(
+        SnapshotIdentity::new(
+            "synthetic/repository",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            generation,
+        )
+        .expect("snapshot identity"),
+        ManifestContentIdentity::new(format!("manifest-{generation}"))
+            .expect("manifest content identity"),
+        profiles,
+    )
+    .expect("manifest")
+    .activate(&mut SyntheticVerifier)
+    .expect("activated snapshot")
+    .qualified_target(
+        profile,
+        use_case,
+        Pc4TargetLines::new(target_lines).expect("target lines"),
+    )
+    .expect("qualified target")
+}
+
+fn prepared_fixed(
+    target: QualifiedPc4TargetIdentity,
+    surface: Pc4InputSurface,
+    queue: Vec<Pc4GraphPiece>,
+) -> Pc4PreparedOnlineInput {
+    match prepare_pc4_input_disclosure(Pc4InputDisclosureRequest::new(
+        target,
+        surface,
+        Pc4QueueDisclosure::FixedExplicit(queue),
+    ))
+    .expect("fixed input is ready")
+    {
+        Pc4InputDisclosureDecision::Ready(prepared) => prepared,
+        _ => panic!("fixed input must be ready"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepared_hidden(
+    target: QualifiedPc4TargetIdentity,
+    surface: Pc4InputSurface,
+    source: Pc4HiddenQueueSource,
+    visible_queue: Vec<Pc4GraphPiece>,
+    preview_length: usize,
+    hidden_draws: usize,
+    placement_count: usize,
+    bag_profile: Pc4BagProfile,
+    remainder: [u32; 7],
+    bag_epoch: u64,
+) -> Pc4PreparedOnlineInput {
+    let hidden = Pc4HiddenQueueDisclosure::new(
+        source,
+        visible_queue,
+        preview_length,
+        hidden_draws,
+        placement_count,
+        bag_profile,
+        bag_epoch,
+        Pc4BagDisclosure::Remaining(Pc4PartialBagRemainder::complete(remainder)),
+    )
+    .expect("normalized hidden input");
+    match prepare_pc4_input_disclosure(Pc4InputDisclosureRequest::new(
+        target,
+        surface,
+        Pc4QueueDisclosure::PatternOrHidden(hidden),
+    ))
+    .expect("complete hidden input is ready")
+    {
+        Pc4InputDisclosureDecision::Ready(prepared) => prepared,
+        _ => panic!("complete hidden input must be ready"),
+    }
+}
+
+fn initial_board(lines: u8, mask: u64) -> StandardPcBoard {
+    StandardPcBoard::from_words(lines, [mask, 0, 0, 0]).expect("normalized initial board")
+}
+
+fn request_identity(
+    prepared: &Pc4PreparedOnlineInput,
+    board: StandardPcBoard,
+    hold: FixedQueueHoldState,
+) -> PcCandidateRequestIdentity {
+    PcCandidateRequestIdentity::derive_pc4_candidate_universe(prepared, board, hold)
+        .expect("canonical request identity")
 }
 
 fn session(value: u64) -> PcCandidateSessionId {
@@ -162,11 +322,365 @@ fn evidence(
     source: &PcCandidateSourceBinding,
     values: &[StandardBoard64TilingIdentity],
 ) -> PcCandidateCompletenessEvidence {
-    PcCandidateCompletenessEvidence::from_verified_complete_source(
+    PcCandidateCompletenessEvidence::from_test_verified_complete_source(
         source.clone(),
+        None,
         values.len() as u64,
         PcCandidateSetDigest::calculate(values).expect("candidate digest"),
     )
+    .expect("offline exact completeness evidence")
+}
+
+#[test]
+fn complete_universe_evidence_requires_a_provider_consistent_qualified_target() {
+    let values = candidates();
+    let digest = PcCandidateSetDigest::calculate(&values).expect("candidate digest");
+    let online = online_source(1, "generation-a");
+    assert_eq!(
+        PcCandidateCompletenessEvidence::from_test_verified_complete_source(
+            online.clone(),
+            None,
+            values.len() as u64,
+            digest,
+        ),
+        Err(PcCandidateBoundaryError::CompletenessTargetBindingMismatch)
+    );
+    assert_eq!(
+        PcCandidateCompletenessEvidence::from_test_verified_complete_source(
+            online,
+            Some(qualified_target(
+                "generation-b",
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                4,
+            )),
+            values.len() as u64,
+            digest,
+        ),
+        Err(PcCandidateBoundaryError::CompletenessTargetBindingMismatch)
+    );
+    assert_eq!(
+        PcCandidateCompletenessEvidence::from_test_verified_complete_source(
+            offline_source(1),
+            Some(qualified_target(
+                "generation-a",
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                4,
+            )),
+            values.len() as u64,
+            digest,
+        ),
+        Err(PcCandidateBoundaryError::CompletenessTargetBindingMismatch)
+    );
+}
+
+#[test]
+fn canonical_fixed_queue_request_identity_binds_each_universe_field() {
+    let target = qualified_target(
+        "request-generation-a",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::PcSearch,
+        4,
+    );
+    let prepared = prepared_fixed(
+        target,
+        Pc4InputSurface::Gui,
+        vec![Pc4GraphPiece::I, Pc4GraphPiece::O, Pc4GraphPiece::T],
+    );
+    let board = initial_board(4, 0b11);
+    let baseline = request_identity(&prepared, board, FixedQueueHoldState::Disabled);
+
+    let target_mutations = [
+        (
+            "snapshot",
+            qualified_target(
+                "request-generation-b",
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                4,
+            ),
+        ),
+        (
+            "profile",
+            qualified_target(
+                "request-generation-a",
+                Pc4RuleProfile::SrsPlus,
+                Pc4TerminalUseCase::PcSearch,
+                4,
+            ),
+        ),
+        (
+            "use case",
+            qualified_target(
+                "request-generation-a",
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::SetupSearch,
+                4,
+            ),
+        ),
+        (
+            "target lines",
+            qualified_target(
+                "request-generation-a",
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::PcSearch,
+                3,
+            ),
+        ),
+    ];
+    for (field, target) in target_mutations {
+        let mutated = prepared_fixed(
+            target,
+            Pc4InputSurface::Gui,
+            vec![Pc4GraphPiece::I, Pc4GraphPiece::O, Pc4GraphPiece::T],
+        );
+        assert_ne!(
+            request_identity(&mutated, board, FixedQueueHoldState::Disabled),
+            baseline,
+            "{field} must bind the request identity"
+        );
+    }
+
+    for (field, mutated_board) in [
+        ("initial board mask", initial_board(4, 0b1011)),
+        ("initial board dimensions", initial_board(3, 0b11)),
+    ] {
+        assert_ne!(
+            request_identity(&prepared, mutated_board, FixedQueueHoldState::Disabled),
+            baseline,
+            "{field} must bind the request identity"
+        );
+    }
+
+    for (field, queue) in [
+        (
+            "fixed queue piece",
+            vec![Pc4GraphPiece::I, Pc4GraphPiece::O, Pc4GraphPiece::L],
+        ),
+        (
+            "fixed queue order",
+            vec![Pc4GraphPiece::O, Pc4GraphPiece::I, Pc4GraphPiece::T],
+        ),
+        (
+            "fixed queue length",
+            vec![Pc4GraphPiece::I, Pc4GraphPiece::O],
+        ),
+    ] {
+        let mutated = prepared_fixed(prepared.target().clone(), Pc4InputSurface::Gui, queue);
+        assert_ne!(
+            request_identity(&mutated, board, FixedQueueHoldState::Disabled),
+            baseline,
+            "{field} must bind the request identity"
+        );
+    }
+
+    for hold in [
+        FixedQueueHoldState::Empty,
+        FixedQueueHoldState::Occupied(Pc4GraphPiece::T),
+    ] {
+        assert_ne!(
+            request_identity(&prepared, board, hold),
+            baseline,
+            "initial hold must bind the request identity"
+        );
+    }
+}
+
+#[test]
+fn canonical_hidden_request_identity_binds_reveal_and_exact_bag_fields() {
+    let target = qualified_target(
+        "request-generation-a",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::PcSearch,
+        4,
+    );
+    let board = initial_board(4, 0b11);
+    let baseline_input = prepared_hidden(
+        target.clone(),
+        Pc4InputSurface::Gui,
+        Pc4HiddenQueueSource::Pattern,
+        vec![Pc4GraphPiece::T, Pc4GraphPiece::I],
+        1,
+        2,
+        5,
+        Pc4BagProfile::standard_seven_bag(),
+        [1, 0, 1, 1, 1, 1, 1],
+        3,
+    );
+    let baseline = request_identity(&baseline_input, board, FixedQueueHoldState::Empty);
+    let cases = [
+        (
+            "hidden source",
+            prepared_hidden(
+                target.clone(),
+                Pc4InputSurface::Gui,
+                Pc4HiddenQueueSource::HiddenQueue,
+                vec![Pc4GraphPiece::T, Pc4GraphPiece::I],
+                1,
+                2,
+                5,
+                Pc4BagProfile::standard_seven_bag(),
+                [1, 0, 1, 1, 1, 1, 1],
+                3,
+            ),
+        ),
+        (
+            "visible queue",
+            prepared_hidden(
+                target.clone(),
+                Pc4InputSurface::Gui,
+                Pc4HiddenQueueSource::Pattern,
+                vec![Pc4GraphPiece::I, Pc4GraphPiece::T],
+                1,
+                2,
+                5,
+                Pc4BagProfile::standard_seven_bag(),
+                [1, 0, 1, 1, 1, 1, 1],
+                3,
+            ),
+        ),
+        (
+            "preview and visible scope",
+            prepared_hidden(
+                target.clone(),
+                Pc4InputSurface::Gui,
+                Pc4HiddenQueueSource::Pattern,
+                vec![Pc4GraphPiece::T, Pc4GraphPiece::I, Pc4GraphPiece::O],
+                2,
+                2,
+                5,
+                Pc4BagProfile::standard_seven_bag(),
+                [1, 0, 1, 1, 1, 1, 1],
+                3,
+            ),
+        ),
+        (
+            "hidden draws",
+            prepared_hidden(
+                target.clone(),
+                Pc4InputSurface::Gui,
+                Pc4HiddenQueueSource::Pattern,
+                vec![Pc4GraphPiece::T, Pc4GraphPiece::I],
+                1,
+                3,
+                5,
+                Pc4BagProfile::standard_seven_bag(),
+                [1, 0, 1, 1, 1, 1, 1],
+                3,
+            ),
+        ),
+        (
+            "placement count",
+            prepared_hidden(
+                target.clone(),
+                Pc4InputSurface::Gui,
+                Pc4HiddenQueueSource::Pattern,
+                vec![Pc4GraphPiece::T, Pc4GraphPiece::I],
+                1,
+                2,
+                4,
+                Pc4BagProfile::standard_seven_bag(),
+                [1, 0, 1, 1, 1, 1, 1],
+                3,
+            ),
+        ),
+        (
+            "bag profile",
+            prepared_hidden(
+                target.clone(),
+                Pc4InputSurface::Gui,
+                Pc4HiddenQueueSource::Pattern,
+                vec![Pc4GraphPiece::T, Pc4GraphPiece::I],
+                1,
+                2,
+                5,
+                Pc4BagProfile::new([2, 1, 1, 1, 1, 1, 1]).expect("bag profile"),
+                [1, 0, 1, 1, 1, 1, 1],
+                3,
+            ),
+        ),
+        (
+            "bag remainder",
+            prepared_hidden(
+                target.clone(),
+                Pc4InputSurface::Gui,
+                Pc4HiddenQueueSource::Pattern,
+                vec![Pc4GraphPiece::T, Pc4GraphPiece::I],
+                1,
+                2,
+                5,
+                Pc4BagProfile::standard_seven_bag(),
+                [0, 0, 1, 1, 1, 1, 1],
+                3,
+            ),
+        ),
+        (
+            "bag epoch",
+            prepared_hidden(
+                target,
+                Pc4InputSurface::Gui,
+                Pc4HiddenQueueSource::Pattern,
+                vec![Pc4GraphPiece::T, Pc4GraphPiece::I],
+                1,
+                2,
+                5,
+                Pc4BagProfile::standard_seven_bag(),
+                [1, 0, 1, 1, 1, 1, 1],
+                4,
+            ),
+        ),
+    ];
+    for (field, mutated) in cases {
+        assert_ne!(
+            request_identity(&mutated, board, FixedQueueHoldState::Empty),
+            baseline,
+            "{field} must bind the request identity"
+        );
+    }
+
+    let fixed = prepared_fixed(
+        baseline_input.target().clone(),
+        Pc4InputSurface::Gui,
+        vec![Pc4GraphPiece::T, Pc4GraphPiece::I],
+    );
+    assert_ne!(
+        request_identity(&fixed, board, FixedQueueHoldState::Empty),
+        baseline,
+        "fixed and hidden queue domains must remain distinct"
+    );
+}
+
+#[test]
+fn input_surface_and_product_objective_do_not_change_universe_identity() {
+    let target = qualified_target(
+        "request-generation-a",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::PcSearch,
+        4,
+    );
+    let queue = vec![Pc4GraphPiece::I, Pc4GraphPiece::O, Pc4GraphPiece::T];
+    let board = initial_board(4, 0b11);
+    let baseline = prepared_fixed(target.clone(), Pc4InputSurface::Gui, queue.clone());
+
+    for surface in [
+        Pc4InputSurface::NonInteractiveCli,
+        Pc4InputSurface::InteractiveCli,
+        Pc4InputSurface::Discord,
+    ] {
+        let other_surface = prepared_fixed(target.clone(), surface, queue.clone());
+        assert_eq!(
+            request_identity(&other_surface, board, FixedQueueHoldState::Disabled),
+            request_identity(&baseline, board, FixedQueueHoldState::Disabled)
+        );
+    }
+
+    // Product objectives have no representation in this constructor. They are
+    // downstream reductions over the already identified candidate universe.
+    assert_eq!(
+        PC_CANDIDATE_REQUEST_IDENTITY_ALGORITHM,
+        "sha256:clearra-pc4-candidate-universe-request-v1"
+    );
 }
 
 #[test]
@@ -204,6 +718,21 @@ fn exact_offline_pages_seal_one_canonical_reducer_input() {
         .expect("complete reducer input");
     assert_eq!(reducer.source(), &source);
     assert_eq!(reducer.candidates(), all);
+    assert_eq!(reducer.universe_identity().qualified_target(), None);
+    assert_eq!(
+        reducer.universe_identity().request_identity(),
+        source.request_identity()
+    );
+    assert_eq!(
+        reducer.universe_identity().source_identity(),
+        source.source_identity()
+    );
+    assert_eq!(reducer.universe_identity().initial_board_mask(), 0);
+    assert_eq!(reducer.universe_identity().exact_candidate_count(), 3);
+    assert_eq!(
+        reducer.universe_identity().candidate_set_digest(),
+        PcCandidateSetDigest::calculate(reducer.candidates()).expect("candidate digest")
+    );
 }
 
 #[test]
@@ -378,11 +907,13 @@ fn false_complete_count_or_digest_is_rejected_without_mutating_cursor() {
     let source = offline_source(1);
     let guard = Guard::new(source.clone());
     let all = candidates();
-    let wrong_count = PcCandidateCompletenessEvidence::from_verified_complete_source(
+    let wrong_count = PcCandidateCompletenessEvidence::from_test_verified_complete_source(
         source.clone(),
+        None,
         99,
         PcCandidateSetDigest::calculate(&all).expect("candidate digest"),
-    );
+    )
+    .expect("offline exact completeness evidence");
     let page = PcConcreteCandidatePage::complete(
         source.clone(),
         PcCandidatePageCursor::initial(),
@@ -400,11 +931,13 @@ fn false_complete_count_or_digest_is_rejected_without_mutating_cursor() {
         PcCandidatePageCursor::initial()
     );
 
-    let wrong_digest = PcCandidateCompletenessEvidence::from_verified_complete_source(
+    let wrong_digest = PcCandidateCompletenessEvidence::from_test_verified_complete_source(
         source.clone(),
+        None,
         all.len() as u64,
         PcCandidateSetDigest([7; 32]),
-    );
+    )
+    .expect("offline exact completeness evidence");
     let page = PcConcreteCandidatePage::complete(
         source,
         PcCandidatePageCursor::initial(),

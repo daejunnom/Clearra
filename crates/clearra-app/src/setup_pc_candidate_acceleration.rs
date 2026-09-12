@@ -572,7 +572,15 @@ mod tests {
             [PiecePlacementMask::new(PieceKind::I, 0b1111 << 10)],
         )
         .expect("canonical candidate");
-        PcCandidateReducerInput::from_test_parts(source, vec![candidate])
+        let qualified_target = source.qualified_snapshot().map(|snapshot| {
+            qualified_target(
+                snapshot.snapshot_identity().generation(),
+                source.profile(),
+                Pc4TerminalUseCase::SetupSearch,
+                Pc4TargetLines::MAX,
+            )
+        });
+        PcCandidateReducerInput::from_test_parts(source, qualified_target, vec![candidate])
     }
 
     fn proof(
