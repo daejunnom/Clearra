@@ -28,6 +28,7 @@ import {
   DISCORD_HIDDEN_TEXT_SEARCH_CONTRACT,
   DISCORD_PUBLIC_SEARCH_CONTRACT,
 } from "../src/discord/public-search-contract.mjs";
+import { SUPPORTED_DISCORD_LOCALES } from "../src/discord/locale-rollout.mjs";
 import {
   classifyClearraTextCommand,
   parseClearraTextMessage,
@@ -38,6 +39,20 @@ const legacyAliasFixture = JSON.parse(readFileSync(new URL(
   "../../../tests/fixtures/contracts/legacy_alias_equivalence.v1.json",
   import.meta.url,
 ), "utf8"));
+
+test("public registry i18n policy matches every released Discord locale", () => {
+  const releasedPolicy = SUPPORTED_DISCORD_LOCALES.join("-");
+  const publicCapabilities = productCapabilityRegistry.filter(
+    ({ helpPolicy }) => helpPolicy === "public",
+  );
+  assert.ok(publicCapabilities.length > 0);
+  for (const capability of publicCapabilities) {
+    assert.equal(capability.i18nPolicy, releasedPolicy, capability.id);
+  }
+  for (const route of discordGenericCompatibilityRouteProjection()) {
+    assert.equal(route.i18nPolicy, releasedPolicy, route.id);
+  }
+});
 
 test("v0.8 capability registry separates problem, algorithm, timeout, form, and result authority", () => {
   assert.equal(assertProductCapabilityRegistry(), true);
