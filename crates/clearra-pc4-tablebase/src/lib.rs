@@ -15,6 +15,7 @@ mod manifest;
 mod materializer;
 mod observation_frontier;
 mod protocol;
+mod range_fragment_cache;
 
 pub use bag_draw::{
     draw_pc4_bag, Pc4BagDrawBatch, Pc4BagDrawError, Pc4BagDrawTransition, Pc4BagDrawWeight,
@@ -74,4 +75,9 @@ pub use observation_frontier::{
 };
 pub use protocol::{
     LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
+};
+pub use range_fragment_cache::{
+    RangeFragmentCache, RangeFragmentCacheBudgetKind, RangeFragmentCacheError,
+    RangeFragmentCacheGuard, RangeFragmentCacheInsert, RangeFragmentCacheLimits,
+    RangeFragmentResponseBinding,
 };
