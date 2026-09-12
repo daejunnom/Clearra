@@ -20,6 +20,7 @@ use crate::WasmCpuSearchBackend;
 use super::{
     catalog::GeometryCatalog,
     geometry::{GeometryAdvance, GeometrySearch},
+    geometry_projection::with_column_mod_four_ab_mode,
 };
 
 const REPEATS: usize = 15;
@@ -49,17 +50,24 @@ struct Measurement {
 #[ignore = "local-only bounded column-mod-four A/B; never run in CI"]
 fn benchmark_column_mod_four_residual_filter() {
     let fixtures = fixtures();
-    // Warm the exact same code path before recording either timing stream.
-    for fixture in &fixtures {
+    for (arm, enabled) in [
+        ("A1-baseline", false),
+        ("B1-candidate", true),
+        ("B2-candidate", true),
+        ("A2-baseline", false),
+    ] {
+        with_column_mod_four_ab_mode(enabled, || measure_arm(arm, &fixtures));
+    }
+}
+
+fn measure_arm(arm: &str, fixtures: &[Fixture]) {
+    // Warm the exact same binary and code path before recording every arm.
+    for fixture in fixtures {
         let _ = measure(fixture);
     }
 
-    println!(
-        "AB_ENV\tarm={}\trepeats={}\tworkers=1",
-        option_env!("AB_ARM").unwrap_or("unspecified"),
-        REPEATS
-    );
-    for fixture in &fixtures {
+    println!("AB_ENV\tarm={arm}\trepeats={REPEATS}\tworkers=1");
+    for fixture in fixtures {
         let mut measurements = Vec::with_capacity(REPEATS);
         for _ in 0..REPEATS {
             measurements.push(measure(fixture));
@@ -81,7 +89,8 @@ fn benchmark_column_mod_four_residual_filter() {
         );
         let total = summarize(measurements.iter().map(|sample| sample.total_us).collect());
         println!(
-            "AB_RESULT\t{}\t{}\t{}L\tnodes={}\tprojection_prunes={}\tgeometry_count={}\tgeometry_hash={}\tsolution_count={}\tsolution_hash={}\tgeometry_median_us={}\tgeometry_p95_us={}\ttotal_median_us={}\ttotal_p95_us={}",
+            "AB_RESULT\t{}\t{}\t{}\t{}L\tnodes={}\tprojection_prunes={}\tgeometry_count={}\tgeometry_hash={}\tsolution_count={}\tsolution_hash={}\tgeometry_median_us={}\tgeometry_p95_us={}\ttotal_median_us={}\ttotal_p95_us={}",
+            arm,
             fixture.id,
             fixture.expected,
             fixture.lines,

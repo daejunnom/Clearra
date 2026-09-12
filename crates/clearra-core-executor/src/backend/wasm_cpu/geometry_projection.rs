@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
 
@@ -11,6 +13,33 @@ const MAX_REACHABLE_PROJECTIONS: usize = 262_144;
 const MAX_ADAPTIVE_PROJECTION_COMBINATIONS: usize = 16_384;
 const CHECKER_OFFSET: i8 = 32;
 const MAX_EXACT_CHECKER_PIECES: u16 = 16;
+
+#[cfg(test)]
+static COLUMN_MOD_FOUR_AB_MODE: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(test)]
+pub(super) fn with_column_mod_four_ab_mode<T>(enabled: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(u8);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            COLUMN_MOD_FOUR_AB_MODE.store(self.0, Ordering::SeqCst);
+        }
+    }
+
+    let previous = COLUMN_MOD_FOUR_AB_MODE.swap(if enabled { 2 } else { 1 }, Ordering::SeqCst);
+    let _reset = Reset(previous);
+    run()
+}
+
+#[cfg(test)]
+fn column_mod_four_enabled_for_ab() -> bool {
+    COLUMN_MOD_FOUR_AB_MODE.load(Ordering::SeqCst) != 1
+}
+
+#[cfg(not(test))]
+const fn column_mod_four_enabled_for_ab() -> bool {
+    true
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct ProjectionCatalog {
@@ -332,7 +361,9 @@ impl ProjectionCatalog {
     }
 
     fn cheap_counts_may_match(&self, counts: [u8; 7], demand: ResidualProjection) -> bool {
-        if self.column_mod_four_domain(counts) & (1_u8 << demand.column_mod_four_residue) == 0 {
+        if column_mod_four_enabled_for_ab()
+            && self.column_mod_four_domain(counts) & (1_u8 << demand.column_mod_four_residue) == 0
+        {
             return false;
         }
         self.cheap_bounds_allow(counts, demand.signature)
