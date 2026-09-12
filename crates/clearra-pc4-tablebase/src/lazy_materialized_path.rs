@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::{
     materialize_qualified_graph_edge, ClearraPlacementIdentity, FixedQueueGraphPath,
     MaterializationGuard, Pc4PlacementMaterializer, Pc4RuleProfile, PlacementMaterializationError,
-    SnapshotIdentity,
+    QualifiedSnapshotIdentity,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,7 +55,7 @@ impl ConcretePathMaterializationBudgets {
 }
 
 pub struct FixedQueuePathMaterializationRequest<'a> {
-    snapshot: &'a SnapshotIdentity,
+    snapshot: &'a QualifiedSnapshotIdentity,
     profile: Pc4RuleProfile,
     graph_path: &'a FixedQueueGraphPath,
     budgets: ConcretePathMaterializationBudgets,
@@ -63,7 +63,7 @@ pub struct FixedQueuePathMaterializationRequest<'a> {
 
 impl<'a> FixedQueuePathMaterializationRequest<'a> {
     pub const fn new(
-        snapshot: &'a SnapshotIdentity,
+        snapshot: &'a QualifiedSnapshotIdentity,
         profile: Pc4RuleProfile,
         graph_path: &'a FixedQueueGraphPath,
         budgets: ConcretePathMaterializationBudgets,
@@ -145,7 +145,7 @@ impl<E> fmt::Display for ConcretePathMaterializationError<E> {
 /// alternatives is never allocated. Callers page that product through a cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixedQueueConcretePathFamily {
-    snapshot: SnapshotIdentity,
+    snapshot: QualifiedSnapshotIdentity,
     profile: Pc4RuleProfile,
     start_field_id: u32,
     terminal_field_id: u32,
@@ -156,7 +156,7 @@ pub struct FixedQueueConcretePathFamily {
 }
 
 impl FixedQueueConcretePathFamily {
-    pub const fn snapshot(&self) -> &SnapshotIdentity {
+    pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
         &self.snapshot
     }
 
@@ -400,7 +400,7 @@ where
 }
 
 fn check_materialization_guard<E, G>(
-    snapshot: &SnapshotIdentity,
+    snapshot: &QualifiedSnapshotIdentity,
     guard: &G,
 ) -> Result<(), ConcretePathMaterializationError<E>>
 where
@@ -437,12 +437,14 @@ fn advance_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MaterializationOutput, Pc4GraphPiece, PlacementRotation, QualifiedPc4GraphEdge};
+    use crate::{
+        manifest::tests::qualified_snapshot_identity, MaterializationOutput, Pc4GraphPiece,
+        PlacementRotation, QualifiedPc4GraphEdge,
+    };
     use std::cell::Cell;
 
-    fn snapshot_identity(generation: &str) -> SnapshotIdentity {
-        SnapshotIdentity::new("synthetic/repository", "immutable-revision", generation)
-            .expect("snapshot")
+    fn snapshot_identity(generation: &str) -> QualifiedSnapshotIdentity {
+        qualified_snapshot_identity(generation, format!("synthetic-lazy-manifest:{generation}"))
     }
 
     fn placement(
@@ -493,7 +495,7 @@ mod tests {
     }
 
     struct Guard {
-        current: SnapshotIdentity,
+        current: QualifiedSnapshotIdentity,
         cancelled: bool,
     }
 
@@ -502,13 +504,13 @@ mod tests {
             self.cancelled
         }
 
-        fn is_current_snapshot(&self, expected: &SnapshotIdentity) -> bool {
+        fn is_current_snapshot(&self, expected: &QualifiedSnapshotIdentity) -> bool {
             self.current == *expected
         }
     }
 
     struct CancelAfterChecks {
-        current: SnapshotIdentity,
+        current: QualifiedSnapshotIdentity,
         checks: Cell<usize>,
         allowed_checks: usize,
     }
@@ -520,7 +522,7 @@ mod tests {
             checks >= self.allowed_checks
         }
 
-        fn is_current_snapshot(&self, expected: &SnapshotIdentity) -> bool {
+        fn is_current_snapshot(&self, expected: &QualifiedSnapshotIdentity) -> bool {
             self.current == *expected
         }
     }
@@ -534,7 +536,7 @@ mod tests {
         )
     }
 
-    fn two_edge_path(snapshot: &SnapshotIdentity) -> FixedQueueGraphPath {
+    fn two_edge_path(snapshot: &QualifiedSnapshotIdentity) -> FixedQueueGraphPath {
         FixedQueueGraphPath::from_test_edges(
             10,
             vec![
@@ -682,6 +684,66 @@ mod tests {
                 ),
                 &mut materializer,
                 &stale,
+            ),
+            Err(ConcretePathMaterializationError::StaleSnapshot)
+        );
+    }
+
+    #[test]
+    fn same_snapshot_labels_with_different_manifest_content_fail_closed() {
+        let snapshot = snapshot_identity("generation-a");
+        let differently_qualified = qualified_snapshot_identity(
+            "generation-a",
+            "synthetic-lazy-manifest:different-content",
+        );
+        assert_eq!(
+            snapshot.snapshot_identity(),
+            differently_qualified.snapshot_identity()
+        );
+        assert_ne!(
+            snapshot.manifest_content_identity(),
+            differently_qualified.manifest_content_identity()
+        );
+
+        let graph_path = two_edge_path(&differently_qualified);
+        let guard = Guard {
+            current: snapshot.clone(),
+            cancelled: false,
+        };
+        let mut materializer = SyntheticMaterializer {
+            profile: Pc4RuleProfile::Srs,
+        };
+        assert_eq!(
+            prepare_fixed_queue_concrete_family(
+                FixedQueuePathMaterializationRequest::new(
+                    &snapshot,
+                    Pc4RuleProfile::Srs,
+                    &graph_path,
+                    budgets(),
+                ),
+                &mut materializer,
+                &guard,
+            ),
+            Err(ConcretePathMaterializationError::Semantic(
+                ConcretePathMaterializationSemanticError::EdgeSnapshotMismatch { edge_index: 0 }
+            ))
+        );
+
+        let empty_path = FixedQueueGraphPath::from_test_edges(10, Vec::new());
+        let stale_guard = Guard {
+            current: differently_qualified,
+            cancelled: false,
+        };
+        assert_eq!(
+            prepare_fixed_queue_concrete_family(
+                FixedQueuePathMaterializationRequest::new(
+                    &snapshot,
+                    Pc4RuleProfile::Srs,
+                    &empty_path,
+                    budgets(),
+                ),
+                &mut materializer,
+                &stale_guard,
             ),
             Err(ConcretePathMaterializationError::StaleSnapshot)
         );

@@ -223,7 +223,7 @@ mod tests {
     fn snapshot() -> ActivatedSnapshot {
         let identity = SnapshotIdentity::new(
             "synthetic/repository",
-            "immutable-revision-a",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "generation-a",
         )
         .expect("snapshot identity");

@@ -1,7 +1,7 @@
 // SRP rationale: bounded fixed-queue full outgoing-edge traversal is this module's single change reason.
 use core::{fmt, num::NonZeroUsize};
 
-use crate::{Pc4GraphPiece, Pc4RuleProfile, QualifiedPc4GraphEdge, SnapshotIdentity};
+use crate::{Pc4GraphPiece, Pc4RuleProfile, QualifiedPc4GraphEdge, QualifiedSnapshotIdentity};
 
 /// One separately qualified, complete adjacency response.
 ///
@@ -10,7 +10,7 @@ use crate::{Pc4GraphPiece, Pc4RuleProfile, QualifiedPc4GraphEdge, SnapshotIdenti
 /// graph dead end; it is not a dataset lookup miss.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QualifiedCompleteAdjacency {
-    snapshot: SnapshotIdentity,
+    snapshot: QualifiedSnapshotIdentity,
     profile: Pc4RuleProfile,
     source_field_id: u32,
     piece: Pc4GraphPiece,
@@ -20,7 +20,7 @@ pub struct QualifiedCompleteAdjacency {
 
 impl QualifiedCompleteAdjacency {
     pub fn from_qualified_provider(
-        snapshot: SnapshotIdentity,
+        snapshot: QualifiedSnapshotIdentity,
         profile: Pc4RuleProfile,
         source_field_id: u32,
         piece: Pc4GraphPiece,
@@ -37,7 +37,7 @@ impl QualifiedCompleteAdjacency {
         }
     }
 
-    pub const fn snapshot(&self) -> &SnapshotIdentity {
+    pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
         &self.snapshot
     }
 
@@ -65,7 +65,7 @@ impl QualifiedCompleteAdjacency {
 /// Fully bound query passed to a separately qualified adjacency provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedQueueAdjacencyQuery<'a> {
-    snapshot: &'a SnapshotIdentity,
+    snapshot: &'a QualifiedSnapshotIdentity,
     profile: Pc4RuleProfile,
     source_field_id: u32,
     piece: Pc4GraphPiece,
@@ -73,7 +73,7 @@ pub struct FixedQueueAdjacencyQuery<'a> {
 }
 
 impl<'a> FixedQueueAdjacencyQuery<'a> {
-    pub const fn snapshot(&self) -> &'a SnapshotIdentity {
+    pub const fn snapshot(&self) -> &'a QualifiedSnapshotIdentity {
         self.snapshot
     }
 
@@ -102,7 +102,7 @@ impl<'a> FixedQueueAdjacencyQuery<'a> {
 pub trait QualifiedCompleteAdjacencyProvider {
     type Error;
 
-    fn snapshot(&self) -> &SnapshotIdentity;
+    fn snapshot(&self) -> &QualifiedSnapshotIdentity;
 
     fn profile(&self) -> Pc4RuleProfile;
 
@@ -119,13 +119,13 @@ pub trait QualifiedCompleteAdjacencyProvider {
 pub trait FixedQueueTraversalGuard {
     fn is_cancelled(&self) -> bool;
 
-    fn is_current_snapshot(&self, expected: &SnapshotIdentity) -> bool;
+    fn is_current_snapshot(&self, expected: &QualifiedSnapshotIdentity) -> bool;
 }
 
 /// Context for the caller-owned terminal predicate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedQueueTerminalQuery<'a> {
-    snapshot: &'a SnapshotIdentity,
+    snapshot: &'a QualifiedSnapshotIdentity,
     profile: Pc4RuleProfile,
     field_id: u32,
     queue: &'a [Pc4GraphPiece],
@@ -133,7 +133,7 @@ pub struct FixedQueueTerminalQuery<'a> {
 }
 
 impl<'a> FixedQueueTerminalQuery<'a> {
-    pub const fn snapshot(&self) -> &'a SnapshotIdentity {
+    pub const fn snapshot(&self) -> &'a QualifiedSnapshotIdentity {
         self.snapshot
     }
 
@@ -383,7 +383,7 @@ impl FixedQueueTraversalResult {
 }
 
 pub struct FixedQueueTraversalRequest<'a> {
-    snapshot: &'a SnapshotIdentity,
+    snapshot: &'a QualifiedSnapshotIdentity,
     profile: Pc4RuleProfile,
     start_field_id: u32,
     queue: &'a [Pc4GraphPiece],
@@ -393,7 +393,7 @@ pub struct FixedQueueTraversalRequest<'a> {
 
 impl<'a> FixedQueueTraversalRequest<'a> {
     pub const fn new(
-        snapshot: &'a SnapshotIdentity,
+        snapshot: &'a QualifiedSnapshotIdentity,
         profile: Pc4RuleProfile,
         start_field_id: u32,
         queue: &'a [Pc4GraphPiece],
@@ -579,7 +579,7 @@ fn consume_unbounded_counter(value: &mut usize) {
 }
 
 fn check_guard<ProviderError, TerminalError, G>(
-    snapshot: &SnapshotIdentity,
+    snapshot: &QualifiedSnapshotIdentity,
     guard: &G,
 ) -> Result<(), FixedQueueTraversalError<ProviderError, TerminalError>>
 where
@@ -595,7 +595,7 @@ where
 }
 
 fn validate_provider_binding<ProviderError, TerminalError, P>(
-    snapshot: &SnapshotIdentity,
+    snapshot: &QualifiedSnapshotIdentity,
     profile: Pc4RuleProfile,
     provider: &P,
 ) -> Result<(), FixedQueueTraversalError<ProviderError, TerminalError>>
@@ -686,6 +686,7 @@ mod tests {
     use std::{cell::Cell, collections::BTreeMap, convert::Infallible, rc::Rc};
 
     use super::*;
+    use crate::manifest::tests::qualified_snapshot_identity;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum SyntheticProviderError {
@@ -707,7 +708,7 @@ mod tests {
     }
 
     struct SyntheticProvider {
-        snapshot: SnapshotIdentity,
+        snapshot: QualifiedSnapshotIdentity,
         profile: Pc4RuleProfile,
         graph: BTreeMap<(u32, Pc4GraphPiece), Vec<u32>>,
         calls: Vec<(u32, Pc4GraphPiece, usize)>,
@@ -720,7 +721,7 @@ mod tests {
     impl QualifiedCompleteAdjacencyProvider for SyntheticProvider {
         type Error = SyntheticProviderError;
 
-        fn snapshot(&self) -> &SnapshotIdentity {
+        fn snapshot(&self) -> &QualifiedSnapshotIdentity {
             &self.snapshot
         }
 
@@ -810,27 +811,17 @@ mod tests {
             self.cancelled.get()
         }
 
-        fn is_current_snapshot(&self, _expected: &SnapshotIdentity) -> bool {
+        fn is_current_snapshot(&self, _expected: &QualifiedSnapshotIdentity) -> bool {
             !self.stale.get()
         }
     }
 
-    fn snapshot() -> SnapshotIdentity {
-        SnapshotIdentity::new(
-            "synthetic/repository",
-            "immutable-traversal-revision-a",
-            "traversal-generation-a",
-        )
-        .expect("synthetic immutable snapshot")
+    fn snapshot() -> QualifiedSnapshotIdentity {
+        qualified_snapshot_identity("traversal-generation-a", "synthetic-traversal-manifest-a")
     }
 
-    fn other_snapshot() -> SnapshotIdentity {
-        SnapshotIdentity::new(
-            "synthetic/repository",
-            "immutable-traversal-revision-b",
-            "traversal-generation-b",
-        )
-        .expect("different synthetic immutable snapshot")
+    fn other_snapshot() -> QualifiedSnapshotIdentity {
+        qualified_snapshot_identity("traversal-generation-a", "synthetic-traversal-manifest-b")
     }
 
     fn provider(graph: &[((u32, Pc4GraphPiece), &[u32])]) -> SyntheticProvider {
@@ -871,7 +862,7 @@ mod tests {
     }
 
     fn request<'a>(
-        snapshot: &'a SnapshotIdentity,
+        snapshot: &'a QualifiedSnapshotIdentity,
         queue: &'a [Pc4GraphPiece],
         depth: TerminalDepthContract,
         budgets: FixedQueueTraversalBudgets,
@@ -1135,6 +1126,15 @@ mod tests {
     #[test]
     fn provider_profile_and_every_response_binding_fail_closed() {
         let snapshot = snapshot();
+        let differently_qualified = other_snapshot();
+        assert_eq!(
+            snapshot.snapshot_identity(),
+            differently_qualified.snapshot_identity()
+        );
+        assert_ne!(
+            snapshot.manifest_content_identity(),
+            differently_qualified.manifest_content_identity()
+        );
         let queue = [Pc4GraphPiece::I];
         let traversal_request = || {
             request(

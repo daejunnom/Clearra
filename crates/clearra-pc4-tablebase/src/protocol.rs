@@ -1,4 +1,6 @@
-use crate::manifest::{ArtifactDescriptor, Pc4ArtifactRole, Pc4RuleProfile, SnapshotIdentity};
+use crate::manifest::{
+    ArtifactDescriptor, Pc4ArtifactRole, Pc4RuleProfile, QualifiedSnapshotIdentity,
+};
 use core::num::NonZeroU64;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -24,7 +26,7 @@ impl LookupSessionId {
 pub struct RangeRequest {
     lookup_session: LookupSessionId,
     request_id: u64,
-    snapshot: SnapshotIdentity,
+    snapshot: QualifiedSnapshotIdentity,
     profile: Pc4RuleProfile,
     artifact: ArtifactDescriptor,
     offset: u64,
@@ -35,7 +37,7 @@ impl RangeRequest {
     pub(crate) fn new(
         lookup_session: LookupSessionId,
         request_id: u64,
-        snapshot: SnapshotIdentity,
+        snapshot: QualifiedSnapshotIdentity,
         profile: Pc4RuleProfile,
         artifact: ArtifactDescriptor,
         offset: u64,
@@ -61,7 +63,7 @@ impl RangeRequest {
         self.request_id
     }
 
-    pub const fn snapshot(&self) -> &SnapshotIdentity {
+    pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
         &self.snapshot
     }
 
@@ -100,7 +102,7 @@ pub enum RangeResponseKind {
 pub struct RangeResponse {
     pub lookup_session: LookupSessionId,
     pub request_id: u64,
-    pub snapshot: SnapshotIdentity,
+    pub snapshot: QualifiedSnapshotIdentity,
     pub profile: Pc4RuleProfile,
     pub artifact: Pc4ArtifactRole,
     pub artifact_content_identity: String,

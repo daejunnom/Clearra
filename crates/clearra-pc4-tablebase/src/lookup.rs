@@ -2,9 +2,9 @@ use core::cmp::Ordering;
 
 use crate::{
     manifest::{
-        ActivatedSnapshot, Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile, SnapshotIdentity,
-        FIELD_HASH_INDEX_MAGIC, FIELD_HASH_RECORD_BYTES, GRAPH_OFFSETS_MAGIC, GRAPH_OFFSET_BYTES,
-        INDEX_HEADER_BYTES, RANGE_INDEX_VERSION,
+        ActivatedSnapshot, Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile,
+        QualifiedSnapshotIdentity, FIELD_HASH_INDEX_MAGIC, FIELD_HASH_RECORD_BYTES,
+        GRAPH_OFFSETS_MAGIC, GRAPH_OFFSET_BYTES, INDEX_HEADER_BYTES, RANGE_INDEX_VERSION,
     },
     protocol::{
         LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
@@ -17,7 +17,7 @@ const MAX_FIELD_HASH: u64 = (1_u64 << 40) - 1;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LookupHit {
     pub lookup_session: LookupSessionId,
-    pub snapshot: SnapshotIdentity,
+    pub snapshot: QualifiedSnapshotIdentity,
     pub profile: Pc4RuleProfile,
     pub field_id: u32,
     pub graph_target_encoding: GraphTargetEncoding,
@@ -148,7 +148,7 @@ pub enum LookupStep {
 #[derive(Clone, Debug)]
 pub struct LookupMachine {
     lookup_session: LookupSessionId,
-    snapshot: SnapshotIdentity,
+    snapshot: QualifiedSnapshotIdentity,
     profile: Pc4ProfileManifest,
     field_hash: u64,
     next_request_id: u64,
@@ -186,7 +186,7 @@ impl LookupMachine {
         }
         let mut machine = Self {
             lookup_session,
-            snapshot: snapshot.identity().clone(),
+            snapshot: snapshot.qualified_identity().clone(),
             profile: snapshot.profile(profile).clone(),
             field_hash,
             next_request_id: 1,
@@ -522,7 +522,7 @@ fn read_u40(bytes: &[u8], offset: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::tests::activated_snapshot;
+    use crate::manifest::tests::{activated_snapshot, activated_snapshot_with_manifest_content};
 
     const HASHES: [u64; 3] = [0, 15, 30];
     const FIELD_IDS: [u32; 3] = [2, 0, 1];
@@ -530,6 +530,12 @@ mod tests {
 
     fn session(value: u64) -> LookupSessionId {
         LookupSessionId::new(value).expect("non-zero lookup session")
+    }
+
+    fn qualified_snapshot() -> QualifiedSnapshotIdentity {
+        activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64)
+            .qualified_identity()
+            .clone()
     }
 
     fn field_index() -> Vec<u8> {
@@ -605,12 +611,7 @@ mod tests {
             drive(15, Pc4RuleProfile::Srs),
             LookupStep::Hit(LookupHit {
                 lookup_session: session(1),
-                snapshot: SnapshotIdentity::new(
-                    "synthetic/repository",
-                    "immutable-revision-a",
-                    "generation-a"
-                )
-                .expect("identity"),
+                snapshot: qualified_snapshot(),
                 profile: Pc4RuleProfile::Srs,
                 field_id: 0,
                 graph_target_encoding: GraphTargetEncoding::U24LittleEndian,
@@ -621,12 +622,7 @@ mod tests {
             drive(30, Pc4RuleProfile::SrsX),
             LookupStep::Hit(LookupHit {
                 lookup_session: session(1),
-                snapshot: SnapshotIdentity::new(
-                    "synthetic/repository",
-                    "immutable-revision-a",
-                    "generation-a"
-                )
-                .expect("identity"),
+                snapshot: qualified_snapshot(),
                 profile: Pc4RuleProfile::SrsX,
                 field_id: 1,
                 graph_target_encoding: GraphTargetEncoding::U32LittleEndian,
@@ -641,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_snapshot_short_body_and_whole_body_do_not_advance_machine() {
+    fn differently_qualified_snapshot_short_body_and_whole_body_do_not_advance_machine() {
         let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
         let mut machine =
             LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, 15, session(1)).expect("lookup");
@@ -670,8 +666,17 @@ mod tests {
         );
 
         let mut stale = base.clone();
-        stale.snapshot = SnapshotIdentity::new("repository", "other-revision", "other-generation")
-            .expect("stale identity");
+        let differently_qualified = activated_snapshot_with_manifest_content(
+            HASHES.len() as u32,
+            GRAPH.len() as u64,
+            "synthetic-other-manifest-content",
+        );
+        assert_eq!(differently_qualified.identity(), snapshot.identity());
+        assert_ne!(
+            differently_qualified.manifest_content_identity(),
+            snapshot.manifest_content_identity()
+        );
+        stale.snapshot = differently_qualified.qualified_identity().clone();
         assert_eq!(machine.supply(stale), Err(SupplyError::SnapshotMismatch));
 
         let mut whole = base.clone();
