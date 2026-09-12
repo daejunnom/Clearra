@@ -758,11 +758,11 @@ function nativePcArguments(command, values, mode = {}) {
   if (lines === null) {
     throw new Error("Native PC search requires one exact lines value after automatic target planning.");
   }
+  const initialBoard = clearCompletedPcRows(field.occupied, field.height);
   const target = (1n << BigInt(lines * 10)) - 1n;
-  if ((field.occupied & ~target) !== 0n) {
+  if ((initialBoard & ~target) !== 0n) {
     throw new Error("field has occupied cells above the requested PC target.");
   }
-  const initialBoard = clearCompletedPcRows(field.occupied, lines);
   const emptyCount = popcount(target & ~initialBoard);
   if (emptyCount % 4 !== 0) {
     throw new Error("the PC target does not contain a whole number of tetrominoes.");
@@ -873,11 +873,11 @@ function nativePcScoreFinderArguments(command, values) {
   if (lines === null) {
     throw new Error("PC score-finder requires one exact lines value after automatic target planning.");
   }
+  const initialBoard = clearCompletedPcRows(field.occupied, field.height);
   const target = (1n << BigInt(lines * 10)) - 1n;
-  if ((field.occupied & ~target) !== 0n) {
+  if ((initialBoard & ~target) !== 0n) {
     throw new Error("field has occupied cells above the requested PC target.");
   }
-  const initialBoard = clearCompletedPcRows(field.occupied, lines);
   const emptyCount = popcount(target & ~initialBoard);
   if (emptyCount % 4 !== 0) {
     throw new Error("the PC target does not contain a whole number of tetrominoes.");
@@ -913,11 +913,11 @@ function nativePcAllspinArguments(command, values, exactQueue) {
     throw new Error("All-Spin PC search requires one exact lines value after automatic target planning.");
   }
 
+  const initialBoard = clearCompletedPcRows(field.occupied, field.height);
   const target = (1n << BigInt(lines * 10)) - 1n;
-  if ((field.occupied & ~target) !== 0n) {
+  if ((initialBoard & ~target) !== 0n) {
     throw new Error("field has occupied cells above the requested PC target.");
   }
-  const initialBoard = clearCompletedPcRows(field.occupied, lines);
   const emptyCount = popcount(target & ~initialBoard);
   if (emptyCount < 4 || emptyCount % 4 !== 0) {
     throw new Error("the PC target must contain a positive whole number of tetrominoes.");
@@ -2330,25 +2330,26 @@ export function automaticPcLines({ occupied, pieceCount }) {
   if (typeof occupied !== "bigint" || occupied < 0n) {
     throw new Error("Clearra received an invalid PC field mask.");
   }
-  const height = occupiedHeight(occupied);
+  const inputHeight = occupiedHeight(occupied);
   if (
-    !Number.isSafeInteger(height) ||
-    height < 0 ||
-    height > DISCORD_PC_FIELD_MAX_ROWS
+    !Number.isSafeInteger(inputHeight) ||
+    inputHeight < 0 ||
+    inputHeight > DISCORD_PC_FIELD_MAX_ROWS
   ) {
     throw new Error("Automatic PC search supports fields up to six rows high.");
   }
   if (!Number.isSafeInteger(pieceCount) || pieceCount < 1) {
     throw new Error("Automatic PC search requires a finite next-pattern length.");
   }
+  const initialBoard = clearCompletedPcRows(occupied, inputHeight);
+  const height = occupiedHeight(initialBoard);
   const lines = Array.from(
     { length: DISCORD_PC_FIELD_MAX_ROWS },
     (_, index) => index + 1,
   ).filter((lineCount) => {
     if (lineCount < height) return false;
     const target = (1n << BigInt(lineCount * 10)) - 1n;
-    if ((occupied & ~target) !== 0n) return false;
-    const initialBoard = clearCompletedPcRows(occupied, lineCount);
+    if ((initialBoard & ~target) !== 0n) return false;
     const missingCellCount = popcount(target & ~initialBoard);
     return missingCellCount > 0 &&
       missingCellCount % 4 === 0 &&
