@@ -620,6 +620,7 @@ mod tests {
         source: PcCandidateSourceBinding,
         request: SetupPcAccelerationRequestBinding,
     ) -> SetupPcAccelerationDisposition {
+        let target_lines = request.target().get();
         let proof = proof(
             request.clone(),
             &source,
@@ -628,7 +629,11 @@ mod tests {
         );
         admit_setup_pc_candidate_input(
             request,
-            SetupPcCandidateAvailability::Complete(reducer(source)),
+            SetupPcCandidateAvailability::Complete(reducer_for_target(
+                source,
+                Pc4TerminalUseCase::SetupSearch,
+                target_lines,
+            )),
             Some(&proof),
         )
     }
