@@ -26,3 +26,13 @@ an immutable identity before constructing a manifest.
 
 V-star recommendations, policy/value arrays, Krylov data, and n-PC probability
 are outside this crate and are not fetched or decoded by it.
+
+The placement-materializer boundary accepts one snapshot- and profile-bound
+source-field + piece -> target-field edge from a separately qualified graph
+record parser. A profile-specific Clearra adapter must return every concrete
+legal placement as the declared `(piece, rotation, x, y, occupied-cells)`
+identity. The boundary rejects empty or incorrectly bound results, checks
+cancellation and snapshot freshness before and after enumeration, and
+canonicalizes only by that placement identity. It does not parse opaque graph
+records, qualify profiles, prove reachability itself, or make a placement
+identity into replay evidence.
