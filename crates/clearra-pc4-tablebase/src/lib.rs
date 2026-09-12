@@ -21,6 +21,9 @@ mod observation_reveal_ledger;
 mod protocol;
 mod range_admission;
 mod range_fragment_cache;
+mod row_frame;
+
+pub use row_frame::{Pc4RowFrame, Pc4RowFrameError};
 
 pub use bag_draw::{
     draw_pc4_bag, Pc4BagDrawBatch, Pc4BagDrawError, Pc4BagDrawTransition, Pc4BagDrawWeight,
