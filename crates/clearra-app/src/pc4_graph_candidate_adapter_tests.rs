@@ -3,12 +3,12 @@ use std::{cell::Cell, collections::BTreeMap};
 
 use clearra_pc4_tablebase::{
     prepare_fixed_queue_traversal_family, ArtifactDescriptor, DatasetSnapshotManifest,
-    DatasetSnapshotVerifier, FixedQueueAdjacencyQuery, FixedQueueTraversalBudgets,
-    FixedQueueTraversalFamilyRequest, FixedQueueTraversalPageBudgets, GraphTargetEncoding,
-    ManifestContentIdentity, MaterializationOutput, Pc4ArtifactRole, Pc4ProfileManifest,
-    Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, PlacementRotation, ProfileAvailability,
-    ProfileQualification, ProfileTargetCompletenessQualification, QualifiedCompleteAdjacency,
-    QualifiedPc4GraphEdge, QualifiedSnapshotIdentity, SnapshotIdentity,
+    DatasetSnapshotVerifier, FieldIdIndexRelation, FixedQueueAdjacencyQuery,
+    FixedQueueTraversalBudgets, FixedQueueTraversalFamilyRequest, FixedQueueTraversalPageBudgets,
+    GraphTargetEncoding, ManifestContentIdentity, MaterializationOutput, Pc4ArtifactRole,
+    Pc4ProfileManifest, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, PlacementRotation,
+    ProfileAvailability, ProfileQualification, ProfileTargetCompletenessQualification,
+    QualifiedCompleteAdjacency, QualifiedPc4GraphEdge, QualifiedSnapshotIdentity, SnapshotIdentity,
     SnapshotVerificationAttestation, SnapshotVerificationFailure, SnapshotVerificationRequest,
     TerminalDepthContract,
 };
@@ -53,6 +53,7 @@ fn target(use_case: Pc4TerminalUseCase) -> QualifiedPc4TargetIdentity {
                 profile,
                 1,
                 GraphTargetEncoding::U24LittleEndian,
+                FieldIdIndexRelation::RecordOrdinal,
                 64,
                 descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 24),
                 descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 24),

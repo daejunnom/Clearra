@@ -644,10 +644,11 @@ fn piece_index(piece: Pc4GraphPiece) -> usize {
 mod tests {
     use super::*;
     use clearra_pc4_tablebase::{
-        ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, GraphTargetEncoding,
-        ManifestContentIdentity, Pc4ArtifactRole, Pc4ProfileManifest, ProfileAvailability,
-        ProfileQualification, ProfileTargetCompletenessQualification, SnapshotIdentity,
-        SnapshotVerificationAttestation, SnapshotVerificationFailure, SnapshotVerificationRequest,
+        ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, FieldIdIndexRelation,
+        GraphTargetEncoding, ManifestContentIdentity, Pc4ArtifactRole, Pc4ProfileManifest,
+        ProfileAvailability, ProfileQualification, ProfileTargetCompletenessQualification,
+        SnapshotIdentity, SnapshotVerificationAttestation, SnapshotVerificationFailure,
+        SnapshotVerificationRequest,
     };
 
     struct SyntheticVerifier;
@@ -683,6 +684,7 @@ mod tests {
                     profile,
                     1,
                     GraphTargetEncoding::U24LittleEndian,
+                    FieldIdIndexRelation::RecordOrdinal,
                     64,
                     descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 24),
                     descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 24),
