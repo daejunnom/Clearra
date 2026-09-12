@@ -164,3 +164,16 @@ cached fragment can cross sessions without making a response valid for the
 wrong session. Finite FIFO entry/byte limits, checked range arithmetic,
 fallible byte allocation, and transactional cancellation keep caching outside
 the dataset-authority and product-activation boundaries.
+
+The HTTP Range admission core is a separate pure boundary in front of lookup
+and caching. It accepts only an exact `206 Partial Content` response whose raw
+`Content-Range` and existing protocol response agree with the current request,
+qualified snapshot, profile, artifact content identity, offset, length, and
+complete artifact length. A `200` whole-body response is rejected instead of
+turning a Range request into an unbounded download. `416`, bounded `429`
+metadata, and host-reported offline, timeout, or unavailable outcomes remain
+typed observations; admission itself neither retries nor starts fallback.
+Per-response bytes, cumulative session bytes, request count, and host-declared
+active-request count are checked with overflow-safe accounting. Cancellation
+or snapshot drift at either guard check leaves all counters unchanged. The
+module performs no HTTP request and embeds no dataset revision or digest.
