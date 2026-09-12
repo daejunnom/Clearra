@@ -36,3 +36,14 @@ cancellation and snapshot freshness before and after enumeration, and
 canonicalizes only by that placement identity. It does not parse opaque graph
 records, qualify profiles, prove reachability itself, or make a placement
 identity into replay evidence.
+
+The fixed-queue traversal foundation consumes an immutable snapshot/profile,
+one start field, an exact queue, a caller-owned terminal predicate and guard,
+and finite visited/frontier/path/output budgets. It asks a separately qualified
+provider for complete adjacency, validates every redundant binding, preserves
+converging edge paths without global state deduplication, and emits paths in a
+canonical order. Empty adjacency is a valid dead end. Cancellation, snapshot
+drift, callback failures, binding violations, and budget exhaustion discard the
+in-progress result through typed errors. This pure layer does not implement
+hold, pattern/bag semantics, graph parsing/fetching, runtime registration, or
+dataset activation.
