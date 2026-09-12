@@ -635,7 +635,8 @@ mod tests {
         assert_eq!(core.tasks[1].forced_rows, [1]);
         assert_eq!(core.tasks[2].forced_rows, [2]);
         assert_eq!(core.tasks[2].excluded_rows, [1]);
-        for child in core.tasks[1..].to_vec() {
+        let assist_children = core.tasks[1..].to_vec();
+        for child in assist_children {
             let receipt = run(&query, &child);
             assert!(matches!(
                 receipt.outcome(),

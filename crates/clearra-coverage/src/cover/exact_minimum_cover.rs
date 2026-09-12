@@ -1634,7 +1634,7 @@ impl FixedCardinalityCoverSearchSession {
         self.iteration += 1;
         self.attempted_swaps += 1;
         self.pivot_candidates.clear();
-        let arbitrary_pivot = (self.iteration - 1) % 20 == 0;
+        let arbitrary_pivot = (self.iteration - 1).is_multiple_of(20);
         let mut minimum_support = usize::MAX;
         let word_mask_scoring = self.uses_word_mask_scoring();
         if word_mask_scoring {
@@ -2506,6 +2506,10 @@ fn prepare_lazy_initial_reduction(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the search constructor keeps each authority and resource boundary explicit"
+)]
 fn prepare_exact_cover_search_session(
     required: &PatternBitSet,
     rows: &[PatternBitSet],
@@ -3144,6 +3148,10 @@ impl ExactCoverSearchSession {
         Ok(cloned)
     }
 
+    #[allow(
+        clippy::never_loop,
+        reason = "the single-dispatch loop preserves the resumable state-machine boundary"
+    )]
     pub(super) fn advance(
         &mut self,
         max_nodes: u64,
@@ -3161,7 +3169,7 @@ impl ExactCoverSearchSession {
                     rows,
                     goal,
                     incumbent_policy,
-                    witness_hint,
+                    mut witness_hint,
                 } => {
                     if cancelled() {
                         drop(witness_hint);
@@ -3182,18 +3190,14 @@ impl ExactCoverSearchSession {
                     }
                     if incumbent_policy == ExactCoverIncumbentPolicy::WitnessAssisted
                         && matches!(goal, ExactCoverSearchGoal::AtMost(_))
-                        && witness_hint.is_some()
                     {
-                        self.state = ExactCoverSearchSessionState::WitnessShortcut(
-                            WitnessShortcutSession::new(
-                                required,
-                                rows,
-                                goal,
-                                witness_hint.expect("witness existence was checked"),
-                            ),
-                        );
-                        visited_nodes += 1;
-                        return Ok(ExactMinimumCoverSessionAdvance::Pending { visited_nodes });
+                        if let Some(witness_hint) = witness_hint.take() {
+                            self.state = ExactCoverSearchSessionState::WitnessShortcut(
+                                WitnessShortcutSession::new(required, rows, goal, witness_hint),
+                            );
+                            visited_nodes += 1;
+                            return Ok(ExactMinimumCoverSessionAdvance::Pending { visited_nodes });
+                        }
                     }
                     self.state = prepare_lazy_initial_reduction(
                         required,
@@ -4987,7 +4991,7 @@ fn build_support_by_pattern_with_memory_guard(
     // of target slots even though the support matrix itself is linear in its
     // incidences.
     let mut support_live = checked_vec_retained_bytes(&support_by_pattern)?;
-    for pattern in 0..pattern_count {
+    for (pattern, support_slot) in support_by_pattern.iter_mut().enumerate() {
         let word_index = pattern / u64::BITS as usize;
         let bit = pattern % u64::BITS as usize;
         let support_count = rows
@@ -5013,7 +5017,7 @@ fn build_support_by_pattern_with_memory_guard(
         support_live = support_live
             .checked_add(checked_vec_retained_bytes(&support)?)
             .ok_or(ExactMinimumCoverError::ProjectionOverflow)?;
-        support_by_pattern[pattern] = support;
+        *support_slot = support;
         memory_guard(
             base_live_bytes
                 .checked_add(support_live)
@@ -5685,7 +5689,7 @@ fn quotient_redundant_target_constraints_with_memory_guard(
     // matrix around every replacement turns lossless quotient preparation
     // into quadratic bookkeeping, repeated by canonical suffix proofs.
     let mut current_rows_live = rows_live;
-    for row_index in 0..rows.len() {
+    for (row_index, row) in rows.iter_mut().enumerate() {
         let mut compact_row = try_vec_with_capacity(
             compact_word_count,
             current_rows_live
@@ -5706,10 +5710,10 @@ fn quotient_redundant_target_constraints_with_memory_guard(
             }
         }
         current_rows_live = current_rows_live
-            .checked_sub(checked_vec_retained_bytes(&rows[row_index].words)?)
+            .checked_sub(checked_vec_retained_bytes(&row.words)?)
             .and_then(|bytes| bytes.checked_add(checked_vec_retained_bytes(&compact_row).ok()?))
             .ok_or(ExactMinimumCoverError::ProjectionOverflow)?;
-        rows[row_index].words = compact_row;
+        row.words = compact_row;
         memory_guard(
             current_rows_live
                 .checked_add(target_live)
@@ -7597,7 +7601,7 @@ impl MinimumCoverSearch {
                     row_limit,
                 )
             {
-                let residual_outcome = self.dual_workspace.as_mut().and_then(|workspace| {
+                let residual_outcome = self.dual_workspace.as_mut().map(|workspace| {
                     let iterations_before = workspace.remaining_proposal_iterations();
                     #[cfg(feature = "diagnostic-probes")]
                     let bound = workspace
@@ -7621,7 +7625,7 @@ impl MinimumCoverSearch {
                         row_limit,
                     );
                     let iterations_after = workspace.remaining_proposal_iterations();
-                    Some((bound, iterations_before.saturating_sub(iterations_after)))
+                    (bound, iterations_before.saturating_sub(iterations_after))
                 });
                 if let Some((bound, _consumed_iterations)) = residual_outcome {
                     let pruned = bound.is_some_and(|dual_lower_bound| dual_lower_bound > row_limit);
@@ -10407,10 +10411,10 @@ mod tests {
         };
         search.root_dual = None;
         search.support_pattern_order.clear();
-        for row_index in 78..ROW_COUNT {
+        for (row_index, row) in rows.iter().enumerate().take(ROW_COUNT).skip(78) {
             search.selected[row_index] = true;
             search.current.push(row_index);
-            union_words(&mut search.covered, &rows[row_index].words);
+            union_words(&mut search.covered, &row.words);
         }
         assert_eq!(search.current.len(), 6);
         assert!(search.best.capacity() >= 12);
