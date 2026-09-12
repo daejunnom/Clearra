@@ -245,6 +245,9 @@ test("spin cover preserves canonical portfolio membership without alternative pa
 
 test("pc.minimals exposes only its supplied numeric-smallest canonical member", () => {
   const result = coverage("pc-minimum-cover.v2", "pc.minimals");
+  assert.equal(result.summary.known_alternative_count, "1");
+  assert.equal(result.summary.total_alternative_count, null);
+  assert.equal(result.summary.enumeration_complete, false);
   const projected = projectDiscordTypedProductResult(result);
   assert.equal(projected.summary.canonical_candidate.candidate_id, "2");
   assert.equal(Object.hasOwn(projected.summary, "members"), false);
@@ -648,6 +651,9 @@ function coverage(kind, capabilityId) {
     page_handle_available: true,
   };
   if (capabilityId === "pc.minimals") {
+    summary.known_alternative_count = "1";
+    summary.total_alternative_count = null;
+    summary.enumeration_complete = false;
     summary.canonical_selection = "smallest-canonical-candidate-id";
     summary.canonical_witness = structuredClone(members[0]);
   }

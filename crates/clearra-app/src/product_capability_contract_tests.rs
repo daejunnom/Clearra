@@ -1016,6 +1016,41 @@ fn direct_wasm_pc_minimals_enumerates_every_iiooo_single_member_tie() {
     assert!(report.selected_solution_probabilities().is_empty());
     assert!(result.public_page_source_owner().is_some());
 
+    let alternatives = report.portfolio_alternatives();
+    let canonical_page = alternatives.canonical_page();
+    assert_eq!(canonical_page.portfolio().candidate_ids(), &[1]);
+    assert_eq!(canonical_page.known_alternative_count_decimal(), "1");
+    assert_eq!(canonical_page.total_alternative_count_decimal(), None);
+    assert!(!canonical_page.enumeration_complete());
+    let (canonical_candidate_id, canonical_solution_key) = report
+        .canonical_candidate()
+        .expect("first original-ID canonical minimum candidate");
+    assert_eq!(canonical_candidate_id, 1);
+    assert_eq!(
+        canonical_solution_key,
+        report.selected_solution_keys()[0],
+        "the selected solution identity must be derived from the exact canonical page"
+    );
+
+    let payload = result
+        .public_result_payload()
+        .expect("public tied pc.minimals payload");
+    let ProductResultPayloadContent::CoveragePortfolio(payload) = payload.content() else {
+        panic!("expected tied pc.minimals coverage portfolio payload")
+    };
+    assert_eq!(payload.known_alternative_count(), "1");
+    assert_eq!(payload.total_alternative_count(), None);
+    assert!(!payload.enumeration_complete());
+    assert_eq!(payload.members().len(), 1);
+    assert_eq!(payload.members()[0].candidate_id(), "1");
+    assert_eq!(
+        payload
+            .canonical_witness()
+            .expect("public first canonical witness")
+            .candidate_id(),
+        "1"
+    );
+
     let core = response
         .render_model()
         .and_then(crate::AppRenderModel::core_result)
@@ -1037,16 +1072,13 @@ fn direct_wasm_pc_minimals_enumerates_every_iiooo_single_member_tie() {
         "the deferred Core hash describes all four rows, while the typed report describes the canonical singleton"
     );
 
-    let mut store = report
-        .portfolio_alternatives()
+    let mut store = alternatives
         .open_store()
         .expect("IIOOO exact alternative store");
-    let mut portfolios = vec![report
-        .portfolio_alternatives()
-        .canonical_page()
-        .portfolio()
-        .candidate_ids()
-        .to_vec()];
+    let initial_checkpoint = store.checkpoint();
+    assert_eq!(initial_checkpoint.known_alternative_count_decimal(), "1");
+    assert!(!initial_checkpoint.enumeration_complete());
+    let mut portfolios = vec![canonical_page.portfolio().candidate_ids().to_vec()];
     for _ in 0..4 {
         let advance = store
             .next_page(u64::MAX, &mut || false)
