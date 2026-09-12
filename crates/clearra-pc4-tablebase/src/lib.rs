@@ -7,6 +7,7 @@
 mod graph;
 mod lookup;
 mod manifest;
+mod materializer;
 mod protocol;
 
 pub use graph::{decode_graph_target_sequence, GraphTargetDecodeError};
@@ -18,6 +19,12 @@ pub use manifest::{
     ActivatedSnapshot, ActivationError, ArtifactDescriptor, DatasetSnapshotManifest,
     GraphTargetEncoding, ManifestError, Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile,
     ProfileAvailability, ProfileQualification, SnapshotIdentity, UnsupportedProfileReason,
+};
+pub use materializer::{
+    materialize_qualified_graph_edge, ClearraPlacementIdentity, MaterializationGuard,
+    MaterializationOutput, Pc4GraphPiece, Pc4PlacementMaterializer, PlacementIdentityError,
+    PlacementMaterializationError, PlacementMaterializationSemanticError, PlacementRotation,
+    QualifiedPc4GraphEdge,
 };
 pub use protocol::{
     LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
