@@ -159,15 +159,13 @@ pub struct FixedQueueTerminalQuery<'a> {
 
 impl<'a> FixedQueueTerminalQuery<'a> {
     pub(crate) const fn from_parts(
-        snapshot: &'a QualifiedSnapshotIdentity,
-        profile: Pc4RuleProfile,
+        target: &'a QualifiedPc4TargetIdentity,
         field_id: u32,
         queue: &'a [Pc4GraphPiece],
         consumed_pieces: usize,
     ) -> Self {
         Self {
-            snapshot,
-            profile,
+            target,
             field_id,
             queue,
             consumed_pieces,

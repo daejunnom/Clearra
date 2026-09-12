@@ -7,7 +7,7 @@ use crate::{
     FixedQueueTerminalPredicate, FixedQueueTerminalQuery, FixedQueueTraversalBudgets,
     FixedQueueTraversalGuard, FixedQueueTraversalSemanticError, Pc4GraphPiece, Pc4RuleProfile,
     QualifiedCompleteAdjacency, QualifiedCompleteAdjacencyProvider, QualifiedPc4GraphEdge,
-    QualifiedSnapshotIdentity, TerminalDepthContract,
+    QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity, TerminalDepthContract,
 };
 
 /// Per-call limits for resumable traversal work and emitted graph paths.
@@ -39,13 +39,10 @@ impl FixedQueueTraversalPageBudgets {
 }
 
 /// Immutable request used to prepare a feature-off lazy traversal family.
-///
-/// The public constructor intentionally keeps request binding in one place.
-/// Product integration must replace its raw snapshot/profile pair with the
-/// target-specific completeness authority before registering this feature.
+/// A verified profile/use-case/target identity is mandatory even before a
+/// product adapter exists, so paging cannot bypass target completeness.
 pub struct FixedQueueTraversalFamilyRequest<'a> {
-    snapshot: &'a QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: &'a QualifiedPc4TargetIdentity,
     start_field_id: u32,
     queue: &'a [Pc4GraphPiece],
     terminal_depth_contract: TerminalDepthContract,
@@ -54,10 +51,8 @@ pub struct FixedQueueTraversalFamilyRequest<'a> {
 }
 
 impl<'a> FixedQueueTraversalFamilyRequest<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
-        snapshot: &'a QualifiedSnapshotIdentity,
-        profile: Pc4RuleProfile,
+        target: &'a QualifiedPc4TargetIdentity,
         start_field_id: u32,
         queue: &'a [Pc4GraphPiece],
         terminal_depth_contract: TerminalDepthContract,
@@ -65,8 +60,7 @@ impl<'a> FixedQueueTraversalFamilyRequest<'a> {
         page_budgets: FixedQueueTraversalPageBudgets,
     ) -> Self {
         Self {
-            snapshot,
-            profile,
+            target,
             start_field_id,
             queue,
             terminal_depth_contract,
@@ -222,8 +216,7 @@ impl FixedQueueTraversalCursor {
 /// target-completeness evidence.
 #[derive(Clone, Debug)]
 pub struct FixedQueueTraversalFamily {
-    snapshot: QualifiedSnapshotIdentity,
-    profile: Pc4RuleProfile,
+    target: QualifiedPc4TargetIdentity,
     start_field_id: u32,
     queue: Vec<Pc4GraphPiece>,
     terminal_depth_contract: TerminalDepthContract,
@@ -234,11 +227,15 @@ pub struct FixedQueueTraversalFamily {
 
 impl FixedQueueTraversalFamily {
     pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
-        &self.snapshot
+        self.target.snapshot()
     }
 
     pub const fn profile(&self) -> Pc4RuleProfile {
-        self.profile
+        self.target.profile()
+    }
+
+    pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
+        &self.target
     }
 
     pub const fn start_field_id(&self) -> u32 {
@@ -300,8 +297,10 @@ impl FixedQueueTraversalFamily {
                 attempted: limit.get(),
             });
         }
-        check_page_guard(&self.snapshot, guard)?;
-        validate_provider_binding(&self.snapshot, self.profile, provider)?;
+        let snapshot = self.target.snapshot();
+        let profile = self.target.profile();
+        check_page_guard(snapshot, guard)?;
+        validate_provider_binding(snapshot, profile, provider)?;
 
         let mut transaction = cursor.clone();
         let mut paths = Vec::new();
@@ -313,7 +312,7 @@ impl FixedQueueTraversalFamily {
         let mut page_duplicate_edges = 0usize;
 
         while paths.len() < limit.get() && !transaction.exhausted {
-            check_page_guard(&self.snapshot, guard)?;
+            check_page_guard(snapshot, guard)?;
             if page_visited == self.page_budgets.state_occurrences() {
                 break;
             }
@@ -331,14 +330,13 @@ impl FixedQueueTraversalFamily {
             let consumed_pieces = path.consumed_pieces();
             let field_id = path.terminal_field_id();
             let terminal_query = FixedQueueTerminalQuery::from_parts(
-                &self.snapshot,
-                self.profile,
+                &self.target,
                 field_id,
                 &self.queue,
                 consumed_pieces,
             );
             let terminal_result = terminal_predicate.is_terminal(&terminal_query);
-            check_page_guard(&self.snapshot, guard)?;
+            check_page_guard(snapshot, guard)?;
             let predicate_matches =
                 terminal_result.map_err(FixedQueueTraversalPageError::TerminalPredicate)?;
             let depth_permits_terminal = consumed_pieces == self.queue.len()
@@ -374,8 +372,8 @@ impl FixedQueueTraversalFamily {
 
             let piece = self.queue[consumed_pieces];
             let adjacency_query = FixedQueueAdjacencyQuery::from_parts(
-                &self.snapshot,
-                self.profile,
+                snapshot,
+                profile,
                 field_id,
                 piece,
                 consumed_pieces,
@@ -383,8 +381,8 @@ impl FixedQueueTraversalFamily {
             transaction.adjacency_queries = checked_increment(transaction.adjacency_queries)?;
             page_adjacency_queries = checked_increment(page_adjacency_queries)?;
             let adjacency_result = provider.complete_outgoing_edges(&adjacency_query);
-            check_page_guard(&self.snapshot, guard)?;
-            validate_provider_binding(&self.snapshot, self.profile, provider)?;
+            check_page_guard(snapshot, guard)?;
+            validate_provider_binding(snapshot, profile, provider)?;
             let adjacency = adjacency_result.map_err(FixedQueueTraversalPageError::Provider)?;
             validate_adjacency(&adjacency_query, &adjacency)?;
 
@@ -423,7 +421,7 @@ impl FixedQueueTraversalFamily {
             transaction.exhausted = transaction.pending_paths.is_empty();
         }
 
-        check_page_guard(&self.snapshot, guard)?;
+        check_page_guard(snapshot, guard)?;
         let stopped_by_work_budget = !transaction.exhausted
             && page_visited == self.page_budgets.state_occurrences()
             && paths.len() < limit.get();
@@ -448,16 +446,15 @@ pub fn prepare_fixed_queue_traversal_family<G>(
 where
     G: FixedQueueTraversalGuard,
 {
-    check_prepare_guard(request.snapshot, guard)?;
+    check_prepare_guard(request.target.snapshot(), guard)?;
     let mut queue = Vec::new();
     queue
         .try_reserve_exact(request.queue.len())
         .map_err(|_| FixedQueueTraversalPrepareError::AllocationFailed)?;
     queue.extend_from_slice(request.queue);
-    check_prepare_guard(request.snapshot, guard)?;
+    check_prepare_guard(request.target.snapshot(), guard)?;
     Ok(FixedQueueTraversalFamily {
-        snapshot: request.snapshot.clone(),
-        profile: request.profile,
+        target: request.target.clone(),
         start_field_id: request.start_field_id,
         queue,
         terminal_depth_contract: request.terminal_depth_contract,
@@ -627,11 +624,12 @@ mod tests {
     use std::{cell::Cell, collections::BTreeMap, convert::Infallible, rc::Rc};
 
     use super::*;
-    use crate::manifest::tests::qualified_snapshot_identity;
+    use crate::manifest::tests::{qualified_snapshot_identity, qualified_target_identity};
     use crate::{
         prepare_fixed_queue_concrete_family, ClearraPlacementIdentity,
         ConcretePathMaterializationBudgets, FixedQueuePathMaterializationRequest,
-        MaterializationGuard, MaterializationOutput, Pc4PlacementMaterializer, PlacementRotation,
+        MaterializationGuard, MaterializationOutput, Pc4PlacementMaterializer, Pc4TerminalUseCase,
+        PlacementRotation,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -726,6 +724,16 @@ mod tests {
         qualified_snapshot_identity("lazy-traversal-generation", "lazy-traversal-manifest")
     }
 
+    fn target() -> QualifiedPc4TargetIdentity {
+        qualified_target_identity(
+            "lazy-traversal-generation",
+            "lazy-traversal-manifest",
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::PcSearch,
+            4,
+        )
+    }
+
     fn provider(graph: &[((u32, Pc4GraphPiece), &[u32])]) -> Provider {
         Provider {
             snapshot: snapshot(),
@@ -750,16 +758,12 @@ mod tests {
         NonZeroUsize::new(value).expect("positive synthetic budget")
     }
 
-    fn family<'a>(
-        snapshot: &'a QualifiedSnapshotIdentity,
-        queue: &'a [Pc4GraphPiece],
-        limits: [usize; 6],
-    ) -> FixedQueueTraversalFamily {
+    fn family(queue: &[Pc4GraphPiece], limits: [usize; 6]) -> FixedQueueTraversalFamily {
         let [visited, frontier, path, output, page_work, page_output] = limits;
+        let target = target();
         prepare_fixed_queue_traversal_family(
             FixedQueueTraversalFamilyRequest::new(
-                snapshot,
-                Pc4RuleProfile::Srs,
+                &target,
                 0,
                 queue,
                 TerminalDepthContract::QueueExhaustedOnly,
@@ -798,9 +802,8 @@ mod tests {
 
     #[test]
     fn first_page_does_not_enumerate_or_store_the_whole_family() {
-        let snapshot = snapshot();
         let queue = [Pc4GraphPiece::I, Pc4GraphPiece::O];
-        let family = family(&snapshot, &queue, [32, 8, 2, 8, 8, 1]);
+        let family = family(&queue, [32, 8, 2, 8, 8, 1]);
         let mut provider = provider(&[
             ((0, Pc4GraphPiece::I), &[3, 1, 2]),
             ((1, Pc4GraphPiece::O), &[11]),
@@ -829,9 +832,8 @@ mod tests {
 
     #[test]
     fn duplicate_transition_is_suppressed_but_converging_prefixes_survive() {
-        let snapshot = snapshot();
         let queue = [Pc4GraphPiece::I, Pc4GraphPiece::O];
-        let family = family(&snapshot, &queue, [32, 8, 2, 8, 32, 8]);
+        let family = family(&queue, [32, 8, 2, 8, 32, 8]);
         let mut provider = provider(&[
             ((0, Pc4GraphPiece::I), &[2, 1, 1]),
             ((1, Pc4GraphPiece::O), &[3, 3]),
@@ -856,12 +858,11 @@ mod tests {
 
     #[test]
     fn canonical_dfs_matches_lexicographic_batch_order_with_early_terminals() {
-        let snapshot = snapshot();
+        let target = target();
         let queue = [Pc4GraphPiece::I, Pc4GraphPiece::O, Pc4GraphPiece::T];
         let family = prepare_fixed_queue_traversal_family(
             FixedQueueTraversalFamilyRequest::new(
-                &snapshot,
-                Pc4RuleProfile::Srs,
+                &target,
                 0,
                 &queue,
                 TerminalDepthContract::PredicateMayTerminateEarly,
@@ -962,7 +963,7 @@ mod tests {
     fn duplicate_graph_edge_materializes_one_complete_concrete_family() {
         let snapshot = snapshot();
         let queue = [Pc4GraphPiece::I];
-        let graph_family = family(&snapshot, &queue, [8, 4, 1, 4, 8, 4]);
+        let graph_family = family(&queue, [8, 4, 1, 4, 8, 4]);
         let mut provider = provider(&[((0, Pc4GraphPiece::I), &[1, 1])]);
         let guard = guard();
         let mut cursor = graph_family.cursor();
@@ -1004,9 +1005,8 @@ mod tests {
 
     #[test]
     fn work_slice_can_commit_empty_progress_and_resume_canonically() {
-        let snapshot = snapshot();
         let queue = [Pc4GraphPiece::I];
-        let family = family(&snapshot, &queue, [8, 4, 1, 4, 1, 2]);
+        let family = family(&queue, [8, 4, 1, 4, 1, 2]);
         let mut provider = provider(&[((0, Pc4GraphPiece::I), &[2, 1])]);
         let mut cursor = family.cursor();
 
@@ -1050,11 +1050,10 @@ mod tests {
 
     #[test]
     fn cursor_is_bound_to_exact_family_request() {
-        let snapshot = snapshot();
         let first_queue = [Pc4GraphPiece::I];
         let second_queue = [Pc4GraphPiece::O];
-        let first = family(&snapshot, &first_queue, [4, 2, 1, 2, 4, 2]);
-        let second = family(&snapshot, &second_queue, [4, 2, 1, 2, 4, 2]);
+        let first = family(&first_queue, [4, 2, 1, 2, 4, 2]);
+        let second = family(&second_queue, [4, 2, 1, 2, 4, 2]);
         let mut cursor = first.cursor();
         let mut provider = provider(&[]);
         let error = second
@@ -1074,9 +1073,8 @@ mod tests {
 
     #[test]
     fn cancellation_is_transactional_and_retry_starts_at_same_cursor() {
-        let snapshot = snapshot();
         let queue = [Pc4GraphPiece::I];
-        let family = family(&snapshot, &queue, [4, 2, 1, 2, 4, 2]);
+        let family = family(&queue, [4, 2, 1, 2, 4, 2]);
         let guard = guard();
         let mut provider = provider(&[((0, Pc4GraphPiece::I), &[1])]);
         provider.cancel_during_call = Some(Rc::clone(&guard.cancelled));
@@ -1111,9 +1109,8 @@ mod tests {
 
     #[test]
     fn page_and_lifetime_budgets_fail_closed() {
-        let snapshot = snapshot();
         let queue = [Pc4GraphPiece::I];
-        let family = family(&snapshot, &queue, [1, 1, 1, 1, 1, 1]);
+        let family = family(&queue, [1, 1, 1, 1, 1, 1]);
         let mut cursor = family.cursor();
         let mut provider = provider(&[((0, Pc4GraphPiece::I), &[1, 2])]);
         assert_eq!(
@@ -1154,9 +1151,8 @@ mod tests {
 
     #[test]
     fn stale_snapshot_and_provider_failure_return_no_partial_page() {
-        let snapshot = snapshot();
         let queue = [Pc4GraphPiece::I];
-        let family = family(&snapshot, &queue, [4, 2, 1, 2, 4, 2]);
+        let family = family(&queue, [4, 2, 1, 2, 4, 2]);
         let stale_guard = guard();
         stale_guard.stale.set(true);
         let mut never_called = provider(&[]);

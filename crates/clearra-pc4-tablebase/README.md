@@ -76,14 +76,14 @@ errors. This pure layer does not implement hold, pattern/bag semantics, graph
 parsing/fetching, runtime registration, or dataset activation.
 
 Its feature-off resumable family supplements the compatible eager API with
-bounded pages. Before product registration, its raw snapshot/profile request
-binding must be replaced by target-specific completeness authority; this seam
-cannot itself qualify a 1L--4L target or infer that PC4 graph coverage applies.
+bounded pages. Preparation requires a target-specific completeness identity
+already minted by manifest activation; this seam cannot itself qualify a
+1L--4L target or infer that PC4 graph coverage applies.
 Preparation owns only the immutable request; the first graph callback happens
 when a page is requested. A depth-first canonical cursor retains only pending
 prefix paths, applies both lifetime and per-page work limits, and commits state
 only after a successful page. The cursor is bound to the exact prepared
-snapshot/profile/request family, so cancellation, snapshot drift, callback
+target/snapshot/profile/request family, so cancellation, snapshot drift, callback
 failure, or foreign-cursor use cannot publish a partial page. Repeated target
 IDs within one complete adjacency are one identical graph transition and are
 suppressed before traversal: the separately qualified ILC materializer remains
