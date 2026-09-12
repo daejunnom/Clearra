@@ -16,6 +16,7 @@ members = [
     "crates/clearra-supply",
     "crates/clearra-pc-graph",
     "crates/clearra-pc4-tablebase",
+    "crates/clearra-pc-next-probability",
     "crates/clearra-two-line",
     "crates/clearra-exact-cover",
     "crates/clearra-objectives",

@@ -439,6 +439,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "clearra-pc-next-probability"
+version = "0.8.0"
+
+[[package]]
 name = "clearra-pc4-tablebase"
 version = "0.8.0"
 
