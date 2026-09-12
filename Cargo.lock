@@ -149,6 +149,7 @@ dependencies = [
  "clearra-objectives",
  "clearra-output",
  "clearra-pc-graph",
+ "clearra-pc4-tablebase",
  "clearra-postprocess",
  "clearra-problem",
  "clearra-profiles",

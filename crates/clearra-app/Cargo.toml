@@ -18,6 +18,7 @@ wasm-stage-profiling = [
     "clearra-core-executor/wasm-stage-profiling",
     "clearra-postprocess/stage-profiling",
 ]
+online-pc4-tablebase = ["dep:clearra-pc4-tablebase"]
 
 [dependencies]
 clearra-build-coverage = { path = "../clearra-build-coverage" }
@@ -32,6 +33,7 @@ clearra-i18n = { path = "../clearra-i18n" }
 clearra-output = { path = "../clearra-output", default-features = false }
 clearra-objectives = { path = "../clearra-objectives" }
 clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-pc4-tablebase = { path = "../clearra-pc4-tablebase", optional = true }
 clearra-postprocess = { path = "../clearra-postprocess" }
 clearra-profiles = { path = "../clearra-profiles" }
 clearra-problem = { path = "../clearra-problem" }

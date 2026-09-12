@@ -33,6 +33,8 @@ mod native_forward_execution;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_spin_structure_execution;
 mod objective_contract;
+#[cfg(feature = "online-pc4-tablebase")]
+mod online_pc4_lookup_session;
 mod parity_page_store;
 mod pc_allspin_result;
 mod pc_chance_probability_result;
@@ -197,6 +199,12 @@ pub use gui_bridge::{
     GuiAppRequestPreview, GuiBackendCapabilityView, GuiBridgeError, GuiBridgeErrorCode,
     GuiCommandPreview, GuiDisabledReason, GuiFormState, GuiFormValidation, GuiGpuBackendOptionView,
     GuiStatePersistenceContract, GuiValidatedForm,
+};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use online_pc4_lookup_session::{
+    AppOnlinePc4LookupSession, AppOnlinePc4LookupStep, Pc4FallbackCause,
+    Pc4OfflineFallbackAuthorization, Pc4OfflineFallbackDisposition, Pc4OfflineFallbackSignal,
+    Pc4OnlineLookupRequest,
 };
 pub use parity_page_store::{ParityReportPageSource, ParityReportPageStore};
 pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
