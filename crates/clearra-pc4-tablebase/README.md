@@ -17,12 +17,16 @@ It is deliberately not imported by this crate, and the online reader is not
 registered with the current runtime. This prevents either implementation from
 silently becoming an alternative source of product truth.
 
-Production activation is fail-closed: one immutable snapshot generation must
-contain independently qualified index, graph-format, provenance, and
-known-answer evidence for SRS, SRS+, SRS-X, Jstris-180, and no-kick. The
-repository does not embed a Hugging Face revision or dataset digest. Discovery
-may follow a moving upstream reference, but it must resolve that reference to
-an immutable identity before constructing a manifest.
+Production activation is fail-closed: one immutable snapshot generation keeps
+an explicit availability slot for each of SRS, SRS+, SRS-X, Jstris-180, and
+no-kick. A profile becomes usable only when its own index, graph format,
+provenance, known-answer, and target-completeness evidence is qualified. At
+least one profile must qualify before the generation can activate; the other
+slots remain typed `not_qualified` with their exact reason. They never borrow a
+qualified profile's graph, index, or evidence. The repository does not embed a
+Hugging Face revision or dataset digest. Discovery may follow a moving upstream
+reference, but it must resolve that reference to an immutable identity before
+constructing a manifest.
 
 An otherwise complete manifest still cannot construct an `ActivatedSnapshot`
 without passing the host-owned `DatasetSnapshotVerifier` port. The request
