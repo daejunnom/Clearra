@@ -6,9 +6,9 @@
 //! starts a separate exact-search request.
 
 use clearra_pc4_tablebase::{
-    ActivatedSnapshot, LookupFailure, LookupHit, LookupMachine, LookupSessionId, LookupStartError,
-    LookupStep, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, QualifiedPc4TargetIdentity,
-    RangeRequest, RangeResponse, RangeTransportFailure, SupplyError,
+    LookupFailure, LookupHit, LookupMachine, LookupSessionId, LookupStartError, LookupStep,
+    Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, PinnedPc4Generation,
+    QualifiedPc4TargetIdentity, RangeRequest, RangeResponse, RangeTransportFailure, SupplyError,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,15 +185,17 @@ impl From<LookupStartError> for AppOnlinePc4LookupStartError {
 }
 
 pub struct AppOnlinePc4LookupSession {
+    generation: PinnedPc4Generation,
     request: Pc4OnlineLookupRequest,
     machine: LookupMachine,
 }
 
 impl AppOnlinePc4LookupSession {
     pub fn start(
-        snapshot: &ActivatedSnapshot,
+        generation: PinnedPc4Generation,
         request: Pc4OnlineLookupRequest,
     ) -> Result<Self, AppOnlinePc4LookupStartError> {
+        let snapshot = generation.activated_snapshot();
         if request.target().snapshot() != snapshot.qualified_identity() {
             return Err(AppOnlinePc4LookupStartError::TargetSnapshotMismatch);
         }
@@ -204,7 +206,15 @@ impl AppOnlinePc4LookupSession {
             request.lookup_session(),
         )
         .map_err(AppOnlinePc4LookupStartError::Lookup)?;
-        Ok(Self { request, machine })
+        Ok(Self {
+            generation,
+            request,
+            machine,
+        })
+    }
+
+    pub const fn generation(&self) -> &PinnedPc4Generation {
+        &self.generation
     }
 
     pub const fn request(&self) -> &Pc4OnlineLookupRequest {
@@ -268,12 +278,16 @@ impl AppOnlinePc4LookupSession {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use clearra_pc4_tablebase::{
-        ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, GraphTargetEncoding,
-        ManifestContentIdentity, Pc4ArtifactRole, Pc4ProfileManifest, ProfileAvailability,
-        ProfileQualification, ProfileTargetCompletenessQualification, SnapshotIdentity,
-        SnapshotVerificationAttestation, SnapshotVerificationFailure, SnapshotVerificationRequest,
+        ActivatedSnapshot, ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier,
+        GraphTargetEncoding, ManifestContentIdentity, Pc4ArtifactRole, Pc4CurrentGeneration,
+        Pc4GenerationRegistry, Pc4GenerationRetentionLimit, Pc4GenerationStageOutcome,
+        Pc4ProfileManifest, ProfileAvailability, ProfileQualification,
+        ProfileTargetCompletenessQualification, SnapshotIdentity, SnapshotVerificationAttestation,
+        SnapshotVerificationFailure, SnapshotVerificationRequest,
     };
 
     struct SyntheticVerifier;
@@ -364,12 +378,31 @@ mod tests {
         .expect("all profiles qualified")
     }
 
+    fn pinned_generation(generation: &str) -> PinnedPc4Generation {
+        let mut registry = Pc4GenerationRegistry::new(
+            Pc4GenerationRetentionLimit::new(1).expect("one retained generation"),
+        );
+        let token = match registry
+            .stage(registry.version(), Arc::new(snapshot(generation)))
+            .expect("stage synthetic generation")
+        {
+            Pc4GenerationStageOutcome::Staged { token, .. } => token,
+            unexpected => panic!("expected staged generation, got {unexpected:?}"),
+        };
+        registry.promote(&token).expect("promote generation");
+        match registry.pin_current() {
+            Pc4CurrentGeneration::Current(current) => current,
+            Pc4CurrentGeneration::NoCurrent => panic!("promoted generation must be current"),
+        }
+    }
+
     fn new_session(
         id: u64,
         authorization: Pc4OfflineFallbackAuthorization,
     ) -> AppOnlinePc4LookupSession {
-        let snapshot = snapshot("generation-a");
-        let target = snapshot
+        let generation = pinned_generation("generation-a");
+        let target = generation
+            .activated_snapshot()
             .qualified_target(
                 Pc4RuleProfile::Srs,
                 Pc4TerminalUseCase::PcSearch,
@@ -377,7 +410,7 @@ mod tests {
             )
             .expect("qualified PC target");
         AppOnlinePc4LookupSession::start(
-            &snapshot,
+            generation,
             Pc4OnlineLookupRequest::new(lookup_session(id), target, 15, authorization),
         )
         .expect("lookup session")
@@ -385,17 +418,18 @@ mod tests {
 
     #[test]
     fn target_from_another_generation_cannot_start_a_lookup() {
-        let old_snapshot = snapshot("generation-a");
-        let old_target = old_snapshot
+        let old_generation = pinned_generation("generation-a");
+        let old_target = old_generation
+            .activated_snapshot()
             .qualified_target(
                 Pc4RuleProfile::Srs,
                 Pc4TerminalUseCase::PcSearch,
                 Pc4TargetLines::new(4).expect("4L target"),
             )
             .expect("old qualified target");
-        let current_snapshot = snapshot("generation-b");
+        let current_generation = pinned_generation("generation-b");
         let error = match AppOnlinePc4LookupSession::start(
-            &current_snapshot,
+            current_generation,
             Pc4OnlineLookupRequest::new(
                 lookup_session(99),
                 old_target,
@@ -418,6 +452,10 @@ mod tests {
             panic!("host-driven Range request")
         };
         assert_eq!(request.lookup_session(), lookup_session(1));
+        assert_eq!(
+            session.generation().qualified_identity(),
+            session.request().target().snapshot()
+        );
         assert_eq!(
             session.offline_fallback_disposition(),
             Pc4OfflineFallbackDisposition::NotAvailable
