@@ -637,10 +637,10 @@ fn wasm_pc_score_minimals_returns_the_score_only_portfolio_and_live_page_owner()
 fn wasm_pc_minimals_returns_the_exact_portfolio_and_live_page_owner() {
     let result = WasmCommandRuntime::default()
         .run_command_text(
-            "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 \
-             --pieces 1 --queue I --hold empty",
+            "clearra pc minimals --lines 2 --queue IIOOO \
+             --backend cpu --workers 1",
         )
-        .expect("canonical WASM pc minimals search");
+        .expect("tied canonical WASM pc minimals search");
 
     assert_eq!(result.app_response().status(), AppStatus::Success);
     assert!(
@@ -659,12 +659,18 @@ fn wasm_pc_minimals_returns_the_exact_portfolio_and_live_page_owner() {
     };
     assert!(page.page_handle_available());
     assert_eq!(page.alternative_index(), "1");
+    assert_eq!(page.known_alternative_count(), "1");
+    assert_eq!(page.total_alternative_count(), None);
+    assert!(!page.enumeration_complete());
     assert_eq!(page.member_page_number(), "1");
-    assert!(!page.members().is_empty());
-    assert!(page
-        .members()
-        .iter()
-        .all(|member| !member.candidate_id().starts_with('0')));
+    assert_eq!(page.members().len(), 1);
+    assert_eq!(page.members()[0].candidate_id(), "1");
+    assert_eq!(
+        page.canonical_witness()
+            .expect("WASM first canonical candidate")
+            .candidate_id(),
+        "1"
+    );
 }
 
 #[test]

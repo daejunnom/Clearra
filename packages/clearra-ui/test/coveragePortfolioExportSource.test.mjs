@@ -34,6 +34,9 @@ const CANDIDATE_MAP_IDENTITY = 'b'.repeat(64);
 
 test('portfolio export materializes the complete selected outer alternative in canonical order', async () => {
   const initialPage = page(1, 100, 1);
+  assert.equal(initialPage.known_alternative_count, '1');
+  assert.equal(initialPage.total_alternative_count, null);
+  assert.equal(initialPage.enumeration_complete, false);
   const requests = [];
   const source = createCoveragePortfolioExportKeySource({
     initialPage,
@@ -248,8 +251,8 @@ function page(memberPageNumber, memberCount, firstCandidateId) {
     alternative_index: '1',
     optimal_cardinality: '205',
     known_alternative_count: '1',
-    total_alternative_count: '1',
-    enumeration_complete: true,
+    total_alternative_count: null,
+    enumeration_complete: false,
     member_page_number: memberPageNumber.toString(),
     total_member_pages: '3',
     members: Array.from({ length: memberCount }, (_, index) => {
@@ -267,6 +270,7 @@ function selectedAlternativePage(memberPageNumber, memberCount, firstCandidateId
     ...page(memberPageNumber, memberCount, firstCandidateId),
     alternative_index: '2',
     known_alternative_count: '4',
-    total_alternative_count: '4'
+    total_alternative_count: '4',
+    enumeration_complete: true
   };
 }

@@ -1273,9 +1273,23 @@ mod tests {
             .expect("initialize snapshot");
         assert_eq!(initial.alternative_index_decimal(), Some("1"));
         assert_eq!(initial.known_alternative_count_decimal(), "1");
+        assert_eq!(initial.total_alternative_count_decimal(), None);
         assert!(!initial.enumeration_complete());
         let first_cursor = initial.cursor().expect("restart cursor").to_owned();
         let (secret, _) = parse_cursor(&first_cursor).expect("initial cursor");
+
+        let mut initial_file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("open initial snapshot");
+        let initial_records = read_and_authenticate_records(&mut initial_file, &secret)
+            .expect("initial snapshot records are authenticated");
+        assert_eq!(
+            initial_records.len(),
+            3,
+            "initialization writes only header, canonical page, and restart checkpoint"
+        );
+        drop(initial_file);
 
         assert_eq!(
             initialize_snapshot_from_set(&tied_test_set(), &path_text),
