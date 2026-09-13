@@ -385,7 +385,7 @@ pub(super) fn assert_product_parity_with_supply<G: PcCandidatePageGuard>(
         assert_eq!(
             expected.status(),
             AppStatus::Success,
-            "{lines}L {profile:?} {product:?}: {expected:?}"
+            "{lines}L {profile:?} {product:?} {hold:?} {queue:?}: {expected:?}"
         );
         let mut actual = context
             .start_pc4_candidate_product(request, input, guard, &ExecutionControl::default())

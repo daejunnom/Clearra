@@ -186,6 +186,69 @@ fn raw_caps_are_not_redefined_as_distinct_caps() {
 }
 
 #[test]
+fn pc4_hold_and_nonzero_cursor_languages_select_actual_supply_bound_witnesses() {
+    use PieceKind::{I, O, S};
+    for (queue, cursor, held, enabled, terminal_cursor, terminal_hold) in [
+        (vec![O, O], 0, None, false, 2, None),
+        (vec![I, O, O], 0, None, true, 3, Some(I)),
+        (vec![I, O], 0, Some(O), true, 2, Some(I)),
+        (vec![O, O], 0, Some(I), true, 2, Some(I)),
+        (vec![O, O], 0, Some(O), true, 2, Some(O)),
+        (vec![S, I, O, O], 1, None, true, 4, Some(I)),
+        (vec![S, I, O], 1, Some(O), true, 3, Some(I)),
+    ] {
+        let source: Arc<[ExactScoringExecutionBatch]> = vec![ExactScoringExecutionBatch::new(
+            Board64Layout::new(BoardSize::new(4, 2).unwrap()).unwrap(),
+            0,
+            vec![queue],
+            cursor,
+            held,
+            enabled,
+            false,
+            false,
+            1,
+            1,
+            // Exercise both suffix union and canonical deduplication.
+            vec![graph(&[&[0, 2], &[2, 0], &[0, 2]], 2)],
+            true,
+        )]
+        .into();
+        let expected = oracle(&source);
+        assert!(!expected.is_empty());
+        let mut counted = session(Arc::clone(&source), 100_000);
+        complete(&mut counted).unwrap();
+        assert_eq!(all(&counted), expected);
+        assert_eq!(counted.count(), Some(expected.len()));
+        for rank in 0..expected.len() {
+            let selected = counted
+                .select(rank, &ExecutionControl::default(), &mut |_| Ok(()))
+                .unwrap();
+            let (_, identity, replay) = selected.into_parts();
+            assert_eq!(identity, replay.canonical_key());
+            let mut supply = (usize::from(cursor), held);
+            for step in replay.solution_trace().steps() {
+                let decision = step.piece_decision();
+                assert_eq!(
+                    (decision.input_cursor(), decision.input_hold_piece()),
+                    supply
+                );
+                assert_eq!(
+                    Some(decision),
+                    PieceDecision::from_selected_hold(
+                        step.placement().piece_kind(),
+                        supply.0,
+                        supply.1,
+                        decision.hold_decision(),
+                    )
+                );
+                supply = (decision.output_cursor(), decision.output_hold_piece());
+            }
+            assert_eq!(supply, (terminal_cursor, terminal_hold));
+        }
+    }
+}
+
+#[test]
 fn malformed_unselected_transition_and_empty_pc_fail_closed() {
     for paths in [
         vec![&[0, 2][..], &[0, 0][..]],

@@ -13,6 +13,47 @@ pub struct PieceDecision {
 }
 
 impl PieceDecision {
+    /// Projects an already selected supply transition; this does not decide
+    /// whether a queue makes the transition available. The supply automaton
+    /// remains that authority. In particular, terminal release is its existing
+    /// projected-lookahead marker, not permission to draw from an empty queue.
+    pub fn from_selected_hold(
+        active_piece: PieceKind,
+        input_cursor: usize,
+        input_hold_piece: Option<PieceKind>,
+        hold_decision: HoldDecision,
+    ) -> Option<Self> {
+        let (consumed, output_hold_piece) = match hold_decision {
+            HoldDecision::None => (1, input_hold_piece),
+            HoldDecision::SwapWithHold {
+                incoming_piece,
+                held_piece,
+            } if input_hold_piece == Some(held_piece) && active_piece == held_piece => {
+                (1, Some(incoming_piece))
+            }
+            HoldDecision::StoreIncoming {
+                stored_piece,
+                drawn_piece,
+            } if input_hold_piece.is_none() && active_piece == drawn_piece => {
+                (2, Some(stored_piece))
+            }
+            HoldDecision::ReleaseHeldAtTerminal { held_piece }
+                if input_hold_piece == Some(held_piece) && active_piece == held_piece =>
+            {
+                (1, input_hold_piece)
+            }
+            _ => return None,
+        };
+        Some(Self::new(
+            active_piece,
+            input_cursor,
+            input_cursor.checked_add(consumed)?,
+            input_hold_piece,
+            output_hold_piece,
+            hold_decision,
+        ))
+    }
+
     pub fn new(
         active_piece: PieceKind,
         input_cursor: usize,

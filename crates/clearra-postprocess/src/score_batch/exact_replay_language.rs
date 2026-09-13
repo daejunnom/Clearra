@@ -16,7 +16,7 @@ use super::{
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_replay::{
     trace::solution_trace_builder::SolutionTraceBuilder, ExactScoringExecutionBatch, HoldDecision,
-    ScoringExecutionEdge, TraceCanonicalKey,
+    PieceDecision, ScoringExecutionEdge, TraceCanonicalKey,
 };
 use std::{
     cmp::Ordering,
@@ -41,17 +41,12 @@ struct Label {
     len: usize,
 }
 impl Label {
-    fn new(
-        depth: usize,
-        edge: ScoringExecutionEdge,
-        hold: HoldDecision,
-        mask: u64,
-    ) -> Result<Self, Error> {
+    fn new(edge: ScoringExecutionEdge, decision: PieceDecision, mask: u64) -> Result<Self, Error> {
         let mut label = Self {
             bytes: [0; 192],
             len: 0,
         };
-        TraceCanonicalKey::write_scoring_step_key(&mut label, depth, edge, hold, mask)
+        TraceCanonicalKey::write_scoring_step_key_with_decision(&mut label, edge, decision, mask)
             .map_err(|_| Error::ProjectionOverflow)?;
         Ok(label)
     }
@@ -440,6 +435,8 @@ impl ExactReplayLanguageSession {
             .strip_prefix("trk1:")
             .ok_or(Error::InvalidEvidence)?;
         let mut board = batch.initial_occupied();
+        let mut cursor = usize::from(batch.initial_cursor());
+        let mut held = batch.initial_hold();
         for (index, (&edge, &hold)) in path.iter().zip(holds).enumerate() {
             if control.is_cancelled() {
                 return Err(Error::Cancelled);
@@ -451,7 +448,11 @@ impl ExactReplayLanguageSession {
                 SolutionTraceBuilder::project_scoring_step(batch.layout(), board, edge)
                     .ok_or(Error::InvalidEvidence)?;
             board = next_board;
-            let canonical = Label::new(index, edge, hold, mask)?;
+            let decision = PieceDecision::from_selected_hold(edge.piece(), cursor, held, hold)
+                .ok_or(Error::InvalidEvidence)?;
+            cursor = decision.output_cursor();
+            held = decision.output_hold_piece();
+            let canonical = Label::new(edge, decision, mask)?;
             let label = std::str::from_utf8(&canonical.bytes[..canonical.len])
                 .map_err(|_| Error::InvalidEvidence)?;
             remaining = remaining
@@ -1025,15 +1026,9 @@ impl ExactReplayLanguageSession {
         let sequence = &batch.patterns()[self.pattern_id];
         if node.accepting() {
             let accepted = terminal_supply_state_is_accepted(batch, sequence, key.supply);
-            // The existing public projection starts at synthetic cursor zero
-            // and hold None. Do not count an unshown trace that the unchanged
-            // PC chain validator would reject against a nondefault query start.
-            if accepted
-                && (key.depth == 0
-                    || key.board != 0
-                    || batch.initial_cursor() != 0
-                    || batch.initial_hold().is_some())
-            {
+            // Every counted witness is board- and supply-bound. Nondefault
+            // starts now use the same real decisions as the public projection.
+            if accepted && (key.depth == 0 || key.board != 0) {
                 return Err(Error::InvalidEvidence);
             }
             self.nfa[self.index].accepting = accepted;
@@ -1104,7 +1099,21 @@ impl ExactReplayLanguageSession {
                     .ok_or(Error::InvalidEvidence)?;
             for branch in branches.into_iter().take(length) {
                 let (hold, supply) = branch.ok_or(Error::InvalidEvidence)?;
-                let label = Label::new(key.depth, edge, hold, mask)?;
+                let decision = PieceDecision::from_selected_hold(
+                    edge.piece(),
+                    usize::from(key.supply.cursor),
+                    key.supply.hold,
+                    hold,
+                )
+                .ok_or(Error::InvalidEvidence)?;
+                // The projection does not invent supply transitions: even an
+                // unselected counted edge must agree with the shared automaton.
+                if decision.output_cursor() != usize::from(supply.cursor)
+                    || decision.output_hold_piece() != supply.hold
+                {
+                    return Err(Error::InvalidEvidence);
+                }
+                let label = Label::new(edge, decision, mask)?;
                 let destination = self.intern_nfa(
                     NfaKey {
                         location: key.location,

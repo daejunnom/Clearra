@@ -19,6 +19,7 @@ pub struct SolutionTraceBuilder {
     operations: Vec<BuildVariantOperation>,
     representative_order: Vec<usize>,
     hold_decisions: Vec<HoldDecision>,
+    initial_supply_state: Option<(usize, Option<PieceKind>)>,
 }
 
 impl SolutionTraceBuilder {
@@ -72,6 +73,7 @@ impl SolutionTraceBuilder {
             operations,
             representative_order,
             hold_decisions,
+            initial_supply_state: None,
         })
     }
 }
@@ -82,6 +84,13 @@ impl SolutionTraceBuilder {
     }
 }
 impl SolutionTraceBuilder {
+    /// Opt in to request-bound supply evidence. Legacy geometry-only traces
+    /// retain their synthetic placement-index projection.
+    pub fn with_initial_supply_state(mut self, cursor: usize, hold: Option<PieceKind>) -> Self {
+        self.initial_supply_state = Some((cursor, hold));
+        self
+    }
+
     pub fn build(&self) -> Result<SolutionTrace, SolutionTraceBuilderError> {
         if self.hold_decisions.len() != self.operations.len() {
             return Err(SolutionTraceBuilderError::HoldDecisionLengthMismatch {
@@ -92,6 +101,7 @@ impl SolutionTraceBuilder {
         let registry = standard_tetromino_registry();
         let mut board = self.initial_board;
         let mut steps = Vec::with_capacity(self.operations.len());
+        let mut supply_state = self.initial_supply_state;
 
         for (step_index, operation_index) in self.representative_order.iter().copied().enumerate() {
             let operation = self.operations.get(operation_index).ok_or(
@@ -145,14 +155,26 @@ impl SolutionTraceBuilder {
             }
             let after_line_clear = Board64State::new(self.layout, clear_result.occupied)
                 .map_err(SolutionTraceBuilderError::InvalidIntermediateBoard)?;
-            let piece_decision = PieceDecision::new(
-                operation.piece(),
-                step_index,
-                step_index + 1,
-                None,
-                None,
-                self.hold_decisions[step_index],
-            );
+            let piece_decision = if let Some((cursor, hold)) = supply_state {
+                let decision = PieceDecision::from_selected_hold(
+                    operation.piece(),
+                    cursor,
+                    hold,
+                    self.hold_decisions[step_index],
+                )
+                .ok_or(SolutionTraceBuilderError::InvalidSupplyTransition { step_index })?;
+                supply_state = Some((decision.output_cursor(), decision.output_hold_piece()));
+                decision
+            } else {
+                PieceDecision::new(
+                    operation.piece(),
+                    step_index,
+                    step_index + 1,
+                    None,
+                    None,
+                    self.hold_decisions[step_index],
+                )
+            };
             let mut placement_step = PlacementStep::new(
                 step_index,
                 piece_decision,
@@ -174,6 +196,9 @@ impl SolutionTraceBuilder {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SolutionTraceBuilderError {
+    InvalidSupplyTransition {
+        step_index: usize,
+    },
     InvalidInitialBoard(Board64StateError),
     InvalidIntermediateBoard(Board64StateError),
     RepresentativeOrderLengthMismatch {

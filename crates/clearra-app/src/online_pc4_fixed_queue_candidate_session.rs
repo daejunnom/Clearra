@@ -1779,11 +1779,14 @@ mod tests {
             let AppOnlinePc4FixedQueueCandidateStep::Failed(failure) = session.step(&guard) else {
                 panic!("stale guard must fail closed")
             };
-            assert!(matches!(
-                failure.reason(),
-                "pc4_graph_candidate_prepare_stale_source"
-                    | "pc4_graph_candidate_prepare_stale_snapshot"
-            ));
+            assert_eq!(
+                failure,
+                if stale_source {
+                    AppOnlinePc4FixedQueueCandidateFailure::StaleSource
+                } else {
+                    AppOnlinePc4FixedQueueCandidateFailure::StaleSnapshot
+                }
+            );
             assert_eq!(session.active_lookup_field_id(), None);
             assert_eq!(session.completed_reducer_input(), None);
         }

@@ -232,9 +232,38 @@ node must not turn the original request into a supposedly complete empty set.
 New source tests drive actual Range admission and Core materialization for
 1..4L, five typed profiles and five hold/queue cases, then compare all/chance/
 minimum/replay through the existing product path (400 paired cases). Separate
-tests cover hidden I/O bag outcomes, zero-hit probability mass, immediate
+tests cover hidden I-or-O bag outcomes, zero-hit probability mass, immediate
 pending-response cancellation/revocation, common cache exhaustion and initial
 node substitution. These are synthetic-qualified graphs; they do not prove
 real HF completeness or authorize a profile. Execution of this extension
 requires the next exact-source CI run. No public CLI/GUI/Discord route or
 network transport has been activated by these changes.
+
+### Hold parity exposed a pre-existing replay projection defect
+
+Run [34743209645](https://github.com/daejunnom/Clearra/actions/runs/34743209645)
+on `4195f3f300e81aec97a144f9269570e1f69d5d00` passed source, surfaces and native
+CLI. Core **7 + 5** and Tablebase **163** passed; App completed **72 of 74**
+tests successfully. One failure was an obsolete stale-source diagnostic
+assertion after the shared controller's earlier rejection. The other was
+ordinary offline `pc.path` (before the TB result was consumed): the replay
+language rejected nonempty initial hold because the trace builder projected
+every step as cursor `i -> i+1`, hold `None -> None`. Empty-hold store was also
+projected with the wrong consumed-piece count, even when both sides agreed.
+
+The correction binds exact replay/scoring traces and language labels to the
+batch's initial cursor/hold and selected supply transitions. Store consumes
+two queue entries, swap consumes one and updates hold, and playing current
+preserves hold. The existing projected terminal-release marker retains its
+own supply semantics; it does not authorize a phantom queue draw. Every
+counted edge checks its projected output against the existing supply
+automaton, including unselected witnesses. Legacy geometry-only callers keep
+their explicit synthetic projection. No supply enumeration algorithm is
+replaced and no invalid-evidence guard is disabled.
+
+Additional source tests cover occupied/unused/identical hold, empty store,
+nonzero initial cursor, canonical count/rank/select versus exhaustive replay,
+and invalid transitions/overflow. The non-publishing PC4 job now also runs
+Replay library and Postprocess score-batch tests. These changes still require
+their own exact-source CI evidence before marking the hold product parity
+complete.

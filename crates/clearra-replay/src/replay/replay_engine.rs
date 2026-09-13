@@ -100,6 +100,7 @@ pub struct BuildVariantReplayInput {
     operations: Vec<BuildVariantOperation>,
     representative_order: Vec<usize>,
     hold_decisions: Vec<HoldDecision>,
+    initial_supply_state: Option<(usize, Option<PieceKind>)>,
     representative: bool,
     sample: bool,
     kick_evidence: Vec<KickEvidenceEvent>,
@@ -123,6 +124,7 @@ impl BuildVariantReplayInput {
             operations,
             representative_order,
             hold_decisions,
+            initial_supply_state: None,
             representative: true,
             sample: true,
             kick_evidence: Vec::new(),
@@ -134,6 +136,12 @@ impl BuildVariantReplayInput {
 impl BuildVariantReplayInput {
     pub fn with_representative_order(mut self, representative_order: Vec<usize>) -> Self {
         self.representative_order = representative_order;
+        self
+    }
+}
+impl BuildVariantReplayInput {
+    pub fn with_initial_supply_state(mut self, cursor: usize, hold: Option<PieceKind>) -> Self {
+        self.initial_supply_state = Some((cursor, hold));
         self
     }
 }
@@ -403,16 +411,18 @@ impl ReplayEngine {
         input: &BuildVariantReplayInput,
         budget: Option<ReplayTraceBufferBudget>,
     ) -> Result<ReplayTrace, ReplayEngineError> {
-        let solution_trace = SolutionTraceBuilder::new(
+        let mut builder = SolutionTraceBuilder::new(
             input.layout(),
             input.initial_occupied(),
             input.operations().to_vec(),
             input.representative_order().to_vec(),
         )
         .map_err(ReplayEngineError::TraceBuilder)?
-        .with_hold_decisions(input.hold_decisions().to_vec())
-        .build()
-        .map_err(ReplayEngineError::TraceBuilder)?;
+        .with_hold_decisions(input.hold_decisions().to_vec());
+        if let Some((cursor, hold)) = input.initial_supply_state {
+            builder = builder.with_initial_supply_state(cursor, hold);
+        }
+        let solution_trace = builder.build().map_err(ReplayEngineError::TraceBuilder)?;
         let colored_cell_ownership = ColoredCellOwnership::from_trace(&solution_trace)
             .map_err(ReplayEngineError::ColoredCellOwnership)?;
         let events = replay_events_from_trace(

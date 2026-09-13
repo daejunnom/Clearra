@@ -6,7 +6,7 @@ use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_reg
 
 use crate::{
     trace::{hold_decision::HoldDecision, solution_trace::SolutionTrace},
-    ScoringExecutionEdge,
+    PieceDecision, ScoringExecutionEdge,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -15,8 +15,7 @@ pub struct TraceCanonicalKey {
 }
 
 impl TraceCanonicalKey {
-    /// Canonical visible label of one scoring edge. Counting uses this same
-    /// writer as trk1; actual supply state is deliberately not its projection.
+    /// Legacy geometry-only label with a synthetic placement-index cursor.
     pub fn write_scoring_step_key(
         writer: &mut impl Write,
         step_index: usize,
@@ -24,13 +23,38 @@ impl TraceCanonicalKey {
         hold_decision: HoldDecision,
         placement_mask: u64,
     ) -> fmt::Result {
+        Self::write_scoring_step_key_with_decision(
+            writer,
+            edge,
+            PieceDecision::new(
+                edge.piece(),
+                step_index,
+                step_index.checked_add(1).ok_or(fmt::Error)?,
+                None,
+                None,
+                hold_decision,
+            ),
+            placement_mask,
+        )
+    }
+
+    /// Exact supply-bound label, shared by language counting and trk1 replay.
+    pub fn write_scoring_step_key_with_decision(
+        writer: &mut impl Write,
+        edge: ScoringExecutionEdge,
+        decision: PieceDecision,
+        placement_mask: u64,
+    ) -> fmt::Result {
+        if decision.active_piece() != edge.piece() {
+            return Err(fmt::Error);
+        }
         TraceStepCanonicalKey {
-            active_piece: edge.piece(),
-            input_cursor: step_index,
-            output_cursor: step_index.checked_add(1).ok_or(fmt::Error)?,
-            input_hold_piece: None,
-            output_hold_piece: None,
-            hold_decision,
+            active_piece: decision.active_piece(),
+            input_cursor: decision.input_cursor(),
+            output_cursor: decision.output_cursor(),
+            input_hold_piece: decision.input_hold_piece(),
+            output_hold_piece: decision.output_hold_piece(),
+            hold_decision: decision.hold_decision(),
             placed_piece: edge.piece(),
             rotation: edge.rotation(),
             x: u16::try_from(edge.x()).map_err(|_| fmt::Error)?,
@@ -54,6 +78,25 @@ impl TraceCanonicalKey {
         edges: &[ScoringExecutionEdge],
         hold_decisions: &[HoldDecision],
     ) -> Option<Self> {
+        Self::from_scoring_path_inner(layout, edges, hold_decisions, None)
+    }
+
+    pub fn from_scoring_path_with_initial_supply(
+        layout: Board64Layout,
+        edges: &[ScoringExecutionEdge],
+        hold_decisions: &[HoldDecision],
+        cursor: usize,
+        hold: Option<PieceKind>,
+    ) -> Option<Self> {
+        Self::from_scoring_path_inner(layout, edges, hold_decisions, Some((cursor, hold)))
+    }
+
+    fn from_scoring_path_inner(
+        layout: Board64Layout,
+        edges: &[ScoringExecutionEdge],
+        hold_decisions: &[HoldDecision],
+        mut supply_state: Option<(usize, Option<PieceKind>)>,
+    ) -> Option<Self> {
         if edges.len() != hold_decisions.len() {
             return None;
         }
@@ -69,12 +112,27 @@ impl TraceCanonicalKey {
             let x = u16::try_from(edge.x()).ok()?;
             let y = u16::try_from(edge.y()).ok()?;
             let placement = PlacementMask::new(layout, definition, edge.rotation(), x, y).ok()?;
+            let decision = if let Some((cursor, hold)) = supply_state {
+                let decision =
+                    PieceDecision::from_selected_hold(edge.piece(), cursor, hold, hold_decision)?;
+                supply_state = Some((decision.output_cursor(), decision.output_hold_piece()));
+                decision
+            } else {
+                PieceDecision::new(
+                    edge.piece(),
+                    step_index,
+                    step_index.checked_add(1)?,
+                    None,
+                    None,
+                    hold_decision,
+                )
+            };
             steps.push(TraceStepCanonicalKey {
                 active_piece: edge.piece(),
-                input_cursor: step_index,
-                output_cursor: step_index + 1,
-                input_hold_piece: None,
-                output_hold_piece: None,
+                input_cursor: decision.input_cursor(),
+                output_cursor: decision.output_cursor(),
+                input_hold_piece: decision.input_hold_piece(),
+                output_hold_piece: decision.output_hold_piece(),
                 hold_decision,
                 placed_piece: edge.piece(),
                 rotation: edge.rotation(),

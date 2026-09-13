@@ -1256,12 +1256,16 @@ fn materialize_terminal_replays_for_cell(
                 ) {
                     continue;
                 }
-                let Some(trace_identity) = TraceCanonicalKey::from_scoring_path(
-                    batch.layout(),
-                    &retained.edges,
-                    &retained.holds,
-                )
-                .map(|key| key.stable_key()) else {
+                let Some(trace_identity) =
+                    TraceCanonicalKey::from_scoring_path_with_initial_supply(
+                        batch.layout(),
+                        &retained.edges,
+                        &retained.holds,
+                        usize::from(batch.initial_cursor()),
+                        batch.initial_hold(),
+                    )
+                    .map(|key| key.stable_key())
+                else {
                     complete = false;
                     continue;
                 };
@@ -1905,8 +1909,14 @@ fn visit_execution_paths(
             }
             let Some(trace_identity) =
                 profiler.measure(ProfiledExecutionStage::TraceIdentity, || {
-                    TraceCanonicalKey::from_scoring_path(batch.layout(), path, holds)
-                        .map(|key| key.stable_key())
+                    TraceCanonicalKey::from_scoring_path_with_initial_supply(
+                        batch.layout(),
+                        path,
+                        holds,
+                        usize::from(batch.initial_cursor()),
+                        batch.initial_hold(),
+                    )
+                    .map(|key| key.stable_key())
                 })
             else {
                 return Ok(false);
@@ -2075,6 +2085,7 @@ pub(super) fn replay_path(
         operations,
     )
     .with_hold_decisions(holds.to_vec())
+    .with_initial_supply_state(usize::from(batch.initial_cursor()), batch.initial_hold())
     .with_trace_marker(false, false)
     .with_movement_evidence(movement)
     .with_kick_evidence(kicks)
