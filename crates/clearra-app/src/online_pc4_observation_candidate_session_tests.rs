@@ -173,7 +173,7 @@ fn drive(
 }
 
 #[test]
-fn pc4_range_hold_union_matches_four_existing_products_for_all_profiles_and_target_lines() {
+fn pc4_range_hold_union_matches_seven_existing_products_for_all_profiles_and_target_lines() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     for lines in 1..=4 {
         let fixture = clear_path(lines);
@@ -241,6 +241,15 @@ fn pc4_range_hold_union_matches_four_existing_products_for_all_profiles_and_targ
                 let address = input.candidates().as_ptr();
                 let owned = session.into_completed_reducer_input(&guard).unwrap();
                 assert_eq!(owned.candidates().as_ptr(), address);
+                product_contracts::assert_owned_score_product_parity_with_supply(
+                    lines,
+                    profile,
+                    fixture.initial_board,
+                    &queue,
+                    hold,
+                    owned,
+                    &guard,
+                );
             }
         }
     }

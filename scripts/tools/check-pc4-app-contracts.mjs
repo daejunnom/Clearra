@@ -18,6 +18,7 @@ if (process.argv.includes('--row-normalization')) {
     ['pc4-replay-core', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-replay', '--lib']],
     ['pc4-replay-products', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-postprocess', '--lib', 'score_batch::']],
     ['pc4-row-app', [...common, 'pc4_']],
+    ['pc4-replay-app', [...common, 'pc_replay_']],
   );
 }
 // Even fetch probes rustc, so it must inherit this live managed owner.

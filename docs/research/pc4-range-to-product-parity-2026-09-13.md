@@ -276,3 +276,18 @@ fixture calls still using the old synthetic-label signature (E0061). Those
 fixtures now supply actual `PieceDecision` values; lexical ordering and the
 maximum cursor label size remain asserted. App hold parity did not execute
 on that failed source.
+
+On `584ff49`, run [34743906554](https://github.com/daejunnom/Clearra/actions/runs/34743906554)
+passed the same Core/Tablebase/Replay groups and **40 of 41** Postprocess
+tests. The remaining historical fixture explicitly expected synthetic empty
+hold in every key. It now asserts real store/swap/terminal-release cursor and
+hold transitions; exhaustive and rank/select agreement was already passing.
+The replay source digest's projection schema is also advanced, preventing
+old cached page authority from being reused with the corrected witness keys.
+
+The follow-up Range product matrix adds all three owned score products to the
+five supply cases across 1..4L and all profiles: **700 paired cases** rather
+than 400. Replay assertions now include the fixture's independently known
+consumed queue length and terminal hold, so matching two equally synthetic
+results cannot pass. App replay paging/digest tests are included in the same
+managed, non-publishing CI transaction. This expansion is pending execution.

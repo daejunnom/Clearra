@@ -181,6 +181,26 @@ pub(super) fn assert_owned_score_product_parity<G: PcCandidatePageGuard>(
     input: PcCandidateReducerInput,
     guard: &G,
 ) {
+    assert_owned_score_product_parity_with_supply(
+        lines,
+        profile,
+        initial,
+        &vec![Pc4GraphPiece::I; usize::from(lines)],
+        FixedQueueHoldState::Disabled,
+        input,
+        guard,
+    );
+}
+
+pub(super) fn assert_owned_score_product_parity_with_supply<G: PcCandidatePageGuard>(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    queue: &[Pc4GraphPiece],
+    hold: FixedQueueHoldState,
+    input: PcCandidateReducerInput,
+    guard: &G,
+) {
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     );
@@ -189,12 +209,12 @@ pub(super) fn assert_owned_score_product_parity<G: PcCandidatePageGuard>(
             > (input.candidates().len() * core::mem::size_of_val(&input.candidates()[0])) as u128
     );
     for product in [Product::Score, Product::ScoreMinimum, Product::FixedScore] {
-        let request = request(lines, profile, initial, product);
+        let request = request_with_supply(lines, profile, initial, product, queue, hold);
         let expected = ordinary(&context, request.clone());
         assert_eq!(
             expected.status(),
             AppStatus::Success,
-            "ordinary {lines}L {profile:?} {product:?}: {expected:?}"
+            "ordinary {lines}L {profile:?} {product:?} {hold:?} {queue:?}: {expected:?}"
         );
         // Borrowed compatibility input cannot take the score authority. An
         // explicit App override is rejected instead of silently substituting
@@ -252,12 +272,17 @@ pub(super) fn assert_owned_score_product_parity<G: PcCandidatePageGuard>(
             Err(Pc4CandidateProductError::AlreadyFinished)
         ));
     }
-    if lines == 1 && profile == Pc4RuleProfile::Srs {
+    if lines == 1
+        && profile == Pc4RuleProfile::Srs
+        && hold == FixedQueueHoldState::Disabled
+        && queue == [Pc4GraphPiece::I]
+    {
         assert_owned_score_revocation(&context, initial, &input, guard);
     }
     for limit in [0, 64] {
-        let finite_override = request(lines, profile, initial, Product::Score)
-            .with_resource_budget(ResourceBudget::new(1, None, Some(limit)));
+        let finite_override =
+            request_with_supply(lines, profile, initial, Product::Score, queue, hold)
+                .with_resource_budget(ResourceBudget::new(1, None, Some(limit)));
         assert!(matches!(
             context.start_pc4_owned_candidate_product(
                 finite_override,
@@ -493,7 +518,37 @@ pub(super) fn assert_product_parity_with_supply<G: PcCandidatePageGuard>(
                 );
             }
             if matches!(product, Product::Replay) {
-                assert!(actual_product.pc_path_family_v2().is_some());
+                let replay = actual_product.pc_path_family_v2().unwrap();
+                let initial_hold = match hold {
+                    FixedQueueHoldState::Occupied(piece) => Some(piece_kind(piece)),
+                    _ => None,
+                };
+                let terminal_hold = match hold {
+                    FixedQueueHoldState::Disabled => None,
+                    FixedQueueHoldState::Empty => Some(piece_kind(queue[0])),
+                    FixedQueueHoldState::Occupied(_) if queue[0] != Pc4GraphPiece::I => {
+                        Some(piece_kind(queue[0]))
+                    }
+                    FixedQueueHoldState::Occupied(piece) => Some(piece_kind(piece)),
+                };
+                assert!(!replay.witnesses().is_empty());
+                for witness in replay.witnesses() {
+                    // Both reducers agreeing is insufficient if both silently
+                    // project synthetic supply. Assert the real fixture chain.
+                    assert_eq!(witness.consumed_piece_count(), queue.len());
+                    assert_eq!(witness.terminal_hold_piece(), terminal_hold);
+                    let first = &witness.steps()[0];
+                    assert_eq!(first.input_cursor(), 0);
+                    assert_eq!(first.input_hold_piece(), initial_hold);
+                    assert_eq!(
+                        first.output_cursor(),
+                        if hold == FixedQueueHoldState::Empty {
+                            2
+                        } else {
+                            1
+                        }
+                    );
+                }
                 // Public replay paging retains the ordinary source, not the
                 // limited graph-observation page used by the input fixture.
                 assert_eq!(core.path_steps(), expected_core.path_steps());

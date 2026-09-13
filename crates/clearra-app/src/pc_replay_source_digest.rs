@@ -20,10 +20,12 @@ pub(crate) fn pc_replay_source_hasher(
     batches: &[ExactScoringExecutionBatch],
 ) -> Result<Sha256, &'static str> {
     let mut hash = Sha256::new();
-    hash.update(b"clearra.pc-replay-source.v2\0");
+    // Real supply changes canonical rank and witness bytes. Do not reuse a
+    // source/page identity minted for the old synthetic cursor/hold projection.
+    hash.update(b"clearra.pc-replay-source.v3\0");
     bytes(
         &mut hash,
-        b"canonical-projection:trk1/synthetic-cursor-hold/v1",
+        b"canonical-projection:trk1/request-bound-cursor-hold/v2",
     )?;
     bytes(
         &mut hash,

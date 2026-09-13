@@ -491,7 +491,7 @@ fn separate_pattern_ids_are_not_deduplicated_together() {
 }
 
 #[test]
-fn actual_supply_and_synthetic_visible_hold_projection_match_all_hold_variants() {
+fn actual_supply_and_visible_hold_projection_match_all_hold_variants() {
     let original = batch(vec![graph(&[&[0, 2], &[2, 0]], 2)], 2, true);
     for (queue_len, lookahead, bag) in [(3, false, false), (2, true, false), (2, true, true)] {
         let source: Arc<[ExactScoringExecutionBatch]> = vec![ExactScoringExecutionBatch::new(
@@ -514,7 +514,46 @@ fn actual_supply_and_synthetic_visible_hold_projection_match_all_hold_variants()
         complete(&mut counted).unwrap();
         let actual = all(&counted);
         assert_eq!(actual, expected);
-        assert!(actual.iter().all(|key| key.contains("ihnoneohnone")));
+        assert!(actual.iter().any(|key| key.contains("ihnoneohO")));
+        for rank in 0..actual.len() {
+            let (_, _, replay) = counted
+                .select(rank, &ExecutionControl::default(), &mut |_| Ok(()))
+                .unwrap()
+                .into_parts();
+            let mut supply = (0, None);
+            for step in replay.solution_trace().steps() {
+                let decision = step.piece_decision();
+                assert_eq!(
+                    (decision.input_cursor(), decision.input_hold_piece()),
+                    supply
+                );
+                match decision.hold_decision() {
+                    HoldDecision::StoreIncoming { .. } => {
+                        assert_eq!(decision.output_cursor(), supply.0 + 2);
+                        assert_eq!(decision.input_hold_piece(), None);
+                        assert_eq!(decision.output_hold_piece(), Some(PieceKind::O));
+                    }
+                    HoldDecision::SwapWithHold { .. }
+                    | HoldDecision::ReleaseHeldAtTerminal { .. } => {
+                        assert_eq!(decision.output_cursor(), supply.0 + 1);
+                        assert_eq!(decision.input_hold_piece(), Some(PieceKind::O));
+                        assert_eq!(decision.output_hold_piece(), Some(PieceKind::O));
+                    }
+                    HoldDecision::None => {
+                        assert_eq!(decision.output_cursor(), supply.0 + 1);
+                        assert_eq!(decision.output_hold_piece(), supply.1);
+                    }
+                }
+                supply = (decision.output_cursor(), decision.output_hold_piece());
+            }
+            if lookahead {
+                assert!(
+                    supply == (queue_len, None) || supply == (queue_len + 1, Some(PieceKind::O))
+                );
+            } else {
+                assert!(supply == (2, None) || supply == (3, Some(PieceKind::O)));
+            }
+        }
         if lookahead {
             assert!(actual.iter().any(|key| key.contains("terminalO")));
         } else {
