@@ -74,7 +74,7 @@ pub(super) fn execute_local_at(
     let mut execution = context.start_pc4_execution_for_surface(
         request,
         snapshot,
-        clearra_app::Pc4InputSurface::Cli,
+        clearra_app::Pc4InputSurface::NonInteractiveCli,
     )?;
     loop {
         match execution.advance(2_048, &control)? {

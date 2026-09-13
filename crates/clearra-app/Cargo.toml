@@ -18,7 +18,7 @@ wasm-stage-profiling = [
     "clearra-core-executor/wasm-stage-profiling",
     "clearra-postprocess/stage-profiling",
 ]
-online-pc4-tablebase = ["dep:clearra-pc4-tablebase"]
+online-pc4-tablebase = ["dep:clearra-pc4-tablebase", "dep:serde_json"]
 
 [dependencies]
 clearra-build-coverage = { path = "../clearra-build-coverage" }
@@ -44,6 +44,7 @@ clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-supply = { path = "../clearra-supply" }
 clearra-validation = { path = "../clearra-validation" }
 sha2 = "0.10.9"
+serde_json = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 getrandom = "0.4.3"

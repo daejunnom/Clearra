@@ -146,6 +146,21 @@ policy is not bypassed. Preview WASM is not a release-authoritative artifact.
 The currently loaded 4194 WASM must not be described as updated until exact
 artifact replacement is recorded separately.
 
+The actual 4194 download-panel audit used a separate tab, preserving the user's
+original tab and inputs. All five profile selections were visible. Jstris size
+preparation displayed **661.0MiB**; switching through all four other profiles
+cleared the old size and the download action. The temporary audit tab was closed.
+No full-download button was pressed and no search was run.
+
+First non-publishing CI `34760309467` compiled and passed the pure tablebase
+tests (185 passed, two separate opt-in A/B tests also passed) but failed at the
+App JSON dependency moved from WASM. The surface job exposed an idle Node
+MessageChannel lifetime bug: an outstanding unreferenced yield could exit
+before its promise resolved. Follow-up adds the App-only optional dependency,
+references the port only while yields are pending, and adds a deterministic
+isolated-process test with no timing sleeps. These are corrected-source checks,
+not a claim that the failed CI passed. The new local host tests passed (8/8).
+
 Remaining measured outcomes: real complete download on user-selected storage,
 native/browser full-file query parity, all 456,459 reference solutions, P7P4
 whole-family performance, native HTTP/desktop/Discord adapters, Oracle

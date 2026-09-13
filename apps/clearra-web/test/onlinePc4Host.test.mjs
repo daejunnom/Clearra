@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
 // In-memory contract only: no build file or alternate cache root is created.
 const bundle = await build({ entryPoints: [fileURLToPath(new URL('../src/workers/WasmJobRunner.ts', import.meta.url))],
   bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
-const { WasmJobRunner } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+const moduleUrl = `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text + '\n//# sourceURL=pc4OnlineHost.contract.mjs').toString('base64')}`;
+const { WasmJobRunner } = await import(moduleUrl);
 const generation = { schema: 'clearra.pc4.host-generation.v1', repository: 'muse918/tetris-4lpc-mdp-vstar-policy',
   revision: 'a'.repeat(40), profiles: [], transferred_bytes: 0 };
 const range = { lookup_session: 9, request_id: 1, offset: 16, length: 8,
@@ -83,4 +85,26 @@ test('cancelling an in-flight Range drains cancellation instead of reporting a n
     assert.equal((await run).event, 'cancelled');
     assert.equal(f.observed.at(-1).event, 'cancelled');
   } finally { globalThis.fetch = original; }
+});
+
+test('an outstanding host yield keeps Node alive but an idle runner does not', () => {
+  // Isolated child: no unrelated test/network timer can mask an unref race.
+  // A synthetic monotonic clock forces the yield without a timing threshold.
+  const script = `
+    import { WasmJobRunner } from ${JSON.stringify(moduleUrl)};
+    let ticks = 0, advances = 0;
+    Object.defineProperty(globalThis, 'performance', { value: { now: () => ticks += 100 } });
+    const events = [];
+    const runner = new WasmJobRunner({ start_job: () => 1,
+      advance_job: () => { if (++advances < 3) return 'pending';
+        events.push({ event: 'final_response', job_id: 1 }); return 'completed'; },
+      drain_job_events_json: () => JSON.stringify(events.splice(0)), cancel_job: () => {} });
+    const result = await runner.run('fixture', () => {});
+    if (result.event !== 'final_response' || advances !== 3) throw Error('yield did not drain');
+    console.log('host_yield_drained=1');
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module'], { input: script, encoding: 'utf8', timeout: 10_000, windowsHide: true });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /host_yield_drained=1/);
 });

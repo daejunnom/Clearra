@@ -210,14 +210,21 @@ function withSearchProfile(
 
 function createWorkerHostYield(): () => Promise<void> {
   const channel = new MessageChannel();
-  const nodePort1 = channel.port1 as MessagePort & { unref?: () => void };
+  const nodePort1 = channel.port1 as MessagePort & { ref?: () => void; unref?: () => void };
   const nodePort2 = channel.port2 as MessagePort & { unref?: () => void };
   const pending: Array<() => void> = [];
-  channel.port1.onmessage = () => pending.shift()?.();
+  channel.port1.onmessage = () => {
+    const resolve = pending.shift();
+    if (pending.length === 0) nodePort1.unref?.();
+    resolve?.();
+  };
   nodePort1.unref?.();
   nodePort2.unref?.();
   return () =>
     new Promise<void>((resolve) => {
+      // Node contract runners have no browser host to keep the event loop
+      // alive. Only an outstanding yield owns a ref; idle modules still exit.
+      if (pending.length === 0) nodePort1.ref?.();
       pending.push(resolve);
       channel.port2.postMessage(undefined);
     });
