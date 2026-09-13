@@ -80,6 +80,13 @@ test('login recovery preserves published WASM and only starts the requested loop
   ]) assert.throws(() => frontendOptions(args));
 });
 
+test('the first audit page optimizes its linked-workspace runtime imports together', async () => {
+  const vite = await readFile(resolve(root, 'apps/clearra-web/vite.config.ts'), 'utf8');
+  assert.match(vite, /optimizeDeps: \{ include: \['@lucide\/svelte', 'tetris-fumen', '@tauri-apps\/api\/core'\] \}/u);
+  assert.match(vite, /cacheDir: frontend\.viteCacheDir/u);
+  assert.match(vite, /hmr: mode === 'local-recovery' \|\| mode === 'local-audit' \? false : undefined/u);
+});
+
 test('type forwarding follows successful sync and every failed payload stops later work', async () => {
   const commands = frontendPlan(frontendOptions(['--app', 'web']), paths);
   const order = [];

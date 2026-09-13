@@ -8,6 +8,10 @@ export default defineConfig(({ mode }) => {
   const frontend = frontendPaths('web', { requireOwner: true });
   return {
     cacheDir: frontend.viteCacheDir,
+    // Linked workspace imports are otherwise discovered after the first page
+    // has loaded. With audit HMR disabled, that re-optimization can mix two
+    // Svelte runtime generations until a manual reload (blank first page).
+    optimizeDeps: { include: ['@lucide/svelte', 'tetris-fumen', '@tauri-apps/api/core'] },
     plugins: [wasmArtifactGuard(), sveltekit()],
     server: {
       strictPort: false,

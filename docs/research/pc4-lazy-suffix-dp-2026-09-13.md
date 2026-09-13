@@ -92,16 +92,62 @@ test-profile sample. Do not claim a general 36.8x PC speedup: positive path
 prefix copying, transaction work, concrete materialization and final reduction
 remain independent costs, and production network/WASM performance was not run.
 
+## Shared-prefix and exact-cap follow-up
+
+Code `26ca011167e24b54b7b04ddea231eac096ebde9b` replaces pending flat paths
+with shared immutable linked prefixes. Branch extension and transactional
+cursor cloning no longer clone every prior edge. Only emitted paths allocate
+the flat edge list required by the existing API. Branch/canonical order,
+reveal/hold provenance and suffix memo semantics are unchanged. Iterative
+parent release avoids a recursive destructor for long explicit queues.
+
+The pre-change flat implementation exists only under `cfg(test)` for isolated
+A/B; both prefix variants use the same suffix memo. Exact path equality, not
+only counts, is checked across depth 1/4/8 and work budgets 1/3/64.
+
+The observation output-cap fix probes at most one additional path under the
+ordinary work slice after reaching the exact output budget. Empty trailing
+frontiers may establish exhaustion. An actual additional path still produces
+`OutputPaths { limit: 2, attempted: 3 }` before publication, without advancing
+the caller cursor. Page sizes 1/8 cover exact success and real overflow.
+
+Non-publishing run [34750309184](https://github.com/daejunnom/Clearra/actions/runs/34750309184)
+passed all four contract jobs: Tablebase 182 (two explicit A/B tests ignored in
+the ordinary selection, both subsequently run/passed), Core 7+5, Replay 20,
+Postprocess 41, App PC4 87, App replay 16 and native CLI 17. Its newly added
+preview-only WASM job failed before compilation because a platform helper was
+not loaded. `f1a77a8` fixes that workflow dependency; this first run must not be
+reported as an entirely successful workflow.
+
+The follow-up [34750402366](https://github.com/daejunnom/Clearra/actions/runs/34750402366)
+at `f1a77a8230207be03fb89335fb7a913d165211b3` passed all five jobs, including
+the unqualified preview WASM build. Its contract selections again passed; the
+depth-10 positive prefix ABBA totals were `[122986071,74061488]` ns across
+eight runs each (15.373259ms versus 9.257686ms). This repeats the same synthetic
+checkpoint, not an additional real-field sample. The verified preview was
+imported and served on 4194; see `pc4-empty-p7p4-4194-2026-09-13.md` for why
+actual HF empty/P7P4 timing is still not available.
+
+| Shared-prefix ABBA fixture | Flat mean | Shared mean | Queries A/B (8 runs) | Visits A/B | Paths A/B |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Depth 8, negative | 0.298430ms | 0.220328ms | 120 / 120 | 248 / 248 | 0 / 0 |
+| Depth 8, positive | 3.246225ms | 2.077046ms | 120 / 120 | 3,064 / 3,064 | 1,024 / 1,024 |
+| Depth 10, negative | 0.418920ms | 0.264279ms | 152 / 152 | 312 / 312 | 0 / 0 |
+| Depth 10, positive | 15.759473ms | 9.113920ms | 152 / 152 | 12,280 / 12,280 | 4,096 / 4,096 |
+
+Raw elapsed ns totals, in table order: `[2387438,1762624]`,
+`[25969798,16616371]`, `[3351356,2114231]`, `[126075780,72911357]`.
+Each side ran eight times in four ABBA cycles. Positive depth-10 time fell
+about 42% in this test-profile fixture, with identical outputs and visits.
+This is neither an empty/P7P4 measurement nor a production HF/WASM speedup.
+
 ## Next boundaries to close
 
-1. Reuse/share positive path prefixes and materialization without eagerly
+1. Share concrete materialization beyond the now-shared graph prefixes without eagerly
    collecting/counting every replay before the first requested result.
-2. Add a regression and fix for the observation output-cap completion boundary:
-   the current owner fails immediately when `lifetime_output_remaining == 0`,
-   before checking whether trailing frontier entries are all empty. This was
-   identified in source during this change; it was not an executed reproduction
-   or a fixed case in the green run above. Exact-budget success must still prove
-   exhaustion, while one extra real path must remain a typed budget failure.
+2. The preview build/import and GUI display check are complete; the exact-cap
+   execution regression above is also no longer an open bug. Actual online
+   empty/P7P4 timing remains coupled to the public adapter and qualification.
 3. Continue actual profile/terminal/materializer qualification and public
    CLI/Web/Desktop/Discord transport/fallback integration. The active goal and
    the plan's full-DP/release checkboxes remain open.
