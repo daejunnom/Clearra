@@ -35,8 +35,13 @@ if (process.argv.includes('--row-normalization')) {
 // Even fetch probes rustc, so it must inherit this live managed owner.
 // Keep fetch and offline tests in one generation rather than replacing it.
 if (process.argv.includes('--fetch')) checks.unshift(['fetch-locked', ['fetch', '--locked']]);
+// Existing A/B measurements are retained evidence, not ordinary regression
+// tests. Do not repeat them on every source change; request them explicitly
+// only when a new algorithm comparison requires fresh measurements.
+const benchmarkChecks = new Set(['pc4-suffix-dag-ab', 'pc4-shared-prefix-ab', 'pc4-compact-input-ab']);
+const selectedChecks = checks.filter(([name]) => process.argv.includes('--benchmarks') || !benchmarkChecks.has(name));
 const failures = [];
-for (const [name, args] of checks) {
+for (const [name, args] of selectedChecks) {
   console.log(`app_contract_check=${name} status=started`);
   const command = args[0] === 'test'
     ? [...args, ...(args.includes('--') ? [] : ['--']), '--test-threads=2'] : args;

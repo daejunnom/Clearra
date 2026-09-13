@@ -570,6 +570,56 @@ current product host still has one pending request; this internal producer
 alone does not change HTTP concurrency, GUI speed or 4194 WASM. Existing
 historical A/B results are not rerun or attributed to this candidate.
 
+### CI correction and cooperative candidate finalization
+
+Non-publishing run [34778237881](https://github.com/daejunnom/Clearra/actions/runs/34778237881)
+for `19d1ff06621d946945c6188bceb187b945bc4149` finished with source, native-cli
+and surface-contracts successful; preview-WASM was intentionally skipped.
+The PC4 group compiled successfully but failed one of the five new tests:
+the helper appended `P5` immediately after a bare `[IO]` group, which the
+existing input grammar intentionally rejects. The corrected helper spells
+the completed group as `[IO]1P5` and then projects its visible prefix. The
+product parser is not changed. The 60-pair test remains unverified until the
+corrected run succeeds; its failure is not silently converted into a skip.
+
+The other four new tests passed, including the six-product comparison for the
+5,040-ordinal projected input and the converging O fixture. That fixture kept
+one canonical layout in both response orders, merged 41 repeated state
+arrivals and exposed two independent missing fields. Traversal work was
+155/153 units, not elapsed-time performance evidence. Existing graph/Core,
+App, host-WASM, local-CLI, replay and compact supply groups also passed.
+
+The follow-up implementation removes the compact producer's all-at-once
+final collection/sort/digest. A provider-neutral internal canonicalizer now
+copies one candidate, visits one in-place heap level, or hashes one bounded
+Board64 candidate per work unit. It reuses the unchanged v1 digest byte
+contract, owns no profile/source completeness authority, and cannot expose
+its parts until ordering and hashing are finished. Traversal and finalization
+share the same lifetime work limit. Source/snapshot revocation and cancellation
+are rechecked before the producer can mint its private completeness evidence.
+
+The finalizer admits the old HashSet element capacity and new Vec element
+capacity **simultaneously** before allocating the latter, then checks the
+actual Vec capacity. Empty traversal queues release their backing stores first.
+This bounds those candidate buffers only; hash/allocator metadata, graph cache,
+language and other live owners are not promoted into whole-search/RSS authority.
+The remaining whole-producer byte-credit work is still necessary before
+product activation.
+
+Four new helper contracts compare bulk order/digest at 20 sizes and five work
+quanta, check simultaneous buffer limits, cancel during collection/heap/sort/hash
+and late completion, and preserve independently computed v1 digest golden bytes.
+An integrated producer test checks finalization work exhaustion, memory denial
+and late source/snapshot revocation. These new Rust checks are queued for the
+next exact-source non-publishing run; local rustfmt is not execution evidence.
+
+The previous runner repeated already-recorded ignored A/B tests as part of every
+row regression run. This is corrected: `--benchmarks` is now required for those
+three timing experiments. Ordinary regression tests, all new correctness
+comparisons and nonzero executed-test checks remain automatic. Historical A/B
+values are retained without requesting another measurement. 4194, product
+selection, main and deployment remain unchanged.
+
 ## Remaining evidence
 
 Still required: complete 456,459-family validation/timing, input/hold-family

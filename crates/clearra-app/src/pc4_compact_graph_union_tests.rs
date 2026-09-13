@@ -22,7 +22,10 @@ fn compact_queue(pattern: &str) -> PcQueueInput {
         2 => "P5",
         _ => panic!("bounded compact fixture expects one or two visible variants"),
     };
-    let compact = QueuePatternExpression::parse(&format!("{pattern}{suffix}"), 5040)
+    // A bare group immediately followed by P is ambiguous in the product
+    // grammar. Explicitly finish its one-draw suffix before the next atom.
+    let delimiter = if pattern.ends_with(']') { "1" } else { "" };
+    let compact = QueuePatternExpression::parse(&format!("{pattern}{delimiter}{suffix}"), 5040)
         .unwrap()
         .prefix(visible.sequence_len());
     assert!(compact.is_factorized());
@@ -39,6 +42,7 @@ fn limits() -> CompactGraphUnionLimits {
         candidates: nonzero(512),
         waiting_fields: nonzero(128),
         edge_placements: nonzero(256),
+        canonicalization_bytes: nonzero(1024 * 1024),
         language: CompactPatternUnionLimits::new(nonzero(16), nonzero(4096), nonzero(65_536)),
     }
 }
@@ -332,6 +336,87 @@ fn pc4_compact_graph_union_cancellation_and_stale_sources_fail_closed() {
         assert!(union.advance(&cache, nonzero(1), &guard).is_err());
         assert!(union.pending_fields(128).is_empty());
         assert!(union.into_reducer_input(&guard).is_err());
+    }
+}
+
+#[test]
+fn pc4_compact_graph_union_finalization_budget_and_late_revocation_cannot_publish() {
+    let fixture = clear_path(2);
+    let make = |limits| {
+        prepare(
+            &fixture,
+            2,
+            Pc4RuleProfile::Srs,
+            "II",
+            FixedQueueHoldState::Disabled,
+            limits,
+        )
+    };
+    let (mut reference, mut cache, guard) = make(limits());
+    drive(&mut reference, &mut cache, &fixture, &guard, false);
+    let usage = reference.usage();
+    assert!(usage.canonicalization_work > 1);
+    assert!(usage.peak_canonicalization_buffer_bytes > 0);
+    let full_work = usage.work + usage.canonicalization_work;
+    for memory_limit in [false, true] {
+        let mut budget = limits();
+        if memory_limit {
+            budget.canonicalization_bytes = nonzero(1);
+        } else {
+            budget.work = nonzero(full_work - 1);
+        }
+        let (mut owner, mut cache, guard) = make(budget);
+        let mut failed = None;
+        for _ in 0..1000 {
+            match owner.advance(&cache, nonzero(1), &guard) {
+                Err(error) => {
+                    failed = Some(error);
+                    break;
+                }
+                Ok(CompactGraphUnionStep::Complete) => {
+                    panic!("an exhausted envelope cannot complete")
+                }
+                _ => {}
+            }
+            if let Some(id) = owner.pending_fields(1).first() {
+                admit(&mut cache, &fixture, *id);
+            }
+        }
+        assert_eq!(
+            failed.expect("bounded finalization must reject").reason(),
+            if memory_limit {
+                "pc_candidate_canonicalization_buffer_limit"
+            } else {
+                "pc4_compact_union_work_limit"
+            }
+        );
+        assert!(owner.into_reducer_input(&guard).is_err());
+    }
+    for revoke in 0..3 {
+        let (mut owner, mut cache, guard) = make(limits());
+        for _ in 0..1000 {
+            assert_ne!(
+                owner.advance(&cache, nonzero(1), &guard).unwrap(),
+                CompactGraphUnionStep::Complete
+            );
+            if owner.usage().canonicalization_work > 0 {
+                break;
+            }
+            if let Some(id) = owner.pending_fields(1).first() {
+                admit(&mut cache, &fixture, *id);
+            }
+        }
+        assert!(
+            owner.usage().canonicalization_work > 0,
+            "test reached finalization"
+        );
+        match revoke {
+            0 => guard.cancelled.set(true),
+            1 => guard.source_current.set(false),
+            _ => guard.snapshot_current.set(false),
+        }
+        assert!(owner.advance(&cache, nonzero(16), &guard).is_err());
+        assert!(owner.into_reducer_input(&guard).is_err());
     }
 }
 

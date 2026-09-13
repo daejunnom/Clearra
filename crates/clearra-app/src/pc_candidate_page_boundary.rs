@@ -28,6 +28,10 @@ pub(crate) mod graph_candidate_adapter;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod compact_graph_union;
 
+#[path = "pc_candidate_cooperative_canonicalizer.rs"]
+#[cfg_attr(not(test), allow(dead_code))]
+mod cooperative_canonicalizer;
+
 pub const PC_CANDIDATE_PAGE_CONTRACT: &str = "pc-concrete-candidate-page.v1";
 pub const PC_CANDIDATE_REQUEST_IDENTITY_ALGORITHM: &str =
     "sha256:clearra-pc4-candidate-universe-request-v1";
@@ -398,22 +402,33 @@ impl PcCandidateSetDigest {
             .checked_add(page.len())
             .and_then(|count| u64::try_from(count).ok())
             .ok_or(PcCandidateBoundaryError::CandidateOrdinalOverflow)?;
+        let mut hasher = Self::begin_hash(candidate_count);
+        for candidate in accepted.iter().chain(page) {
+            Self::hash_candidate(&mut hasher, candidate);
+        }
+        Ok(Self(hasher.finalize().into()))
+    }
+
+    // Shared byte contract for bulk and cooperative hashing. Neither method
+    // grants candidate completeness or validates a source binding.
+    fn begin_hash(candidate_count: u64) -> Sha256 {
         let mut hasher = Sha256::new();
         hasher.update(CANDIDATE_SET_DIGEST_DOMAIN);
         hasher.update(candidate_count.to_be_bytes());
-        for candidate in accepted.iter().chain(page) {
-            hasher.update(candidate.initial_board_mask().to_be_bytes());
-            hasher.update(
-                u64::try_from(candidate.placement_count())
-                    .expect("standard Board64 candidate placement count fits u64")
-                    .to_be_bytes(),
-            );
-            hasher.update(candidate.packed_piece_codes().to_be_bytes());
-            for placement_mask in candidate.placement_masks() {
-                hasher.update(placement_mask.to_be_bytes());
-            }
+        hasher
+    }
+
+    fn hash_candidate(hasher: &mut Sha256, candidate: &StandardBoard64TilingIdentity) {
+        hasher.update(candidate.initial_board_mask().to_be_bytes());
+        hasher.update(
+            u64::try_from(candidate.placement_count())
+                .expect("standard Board64 candidate placement count fits u64")
+                .to_be_bytes(),
+        );
+        hasher.update(candidate.packed_piece_codes().to_be_bytes());
+        for placement_mask in candidate.placement_masks() {
+            hasher.update(placement_mask.to_be_bytes());
         }
-        Ok(Self(hasher.finalize().into()))
     }
 }
 

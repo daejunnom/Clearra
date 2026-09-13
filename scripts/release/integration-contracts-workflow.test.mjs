@@ -64,6 +64,12 @@ test('compact graph union parity runs once in its own nonzero-evidence group', (
   assert.match(pc4Contracts, /'pc4-compact-graph-union', \[\.\.\.common, 'pc4_compact_graph_union_', '--', '--nocapture'\]/u);
   assert.match(pc4Contracts, /!evidence\.hasExecutedTests\(\)/u);
 });
+test('ordinary regression checks do not repeat retained A/B measurements', () => {
+  assert.match(pc4Contracts, /new Set\(\['pc4-suffix-dag-ab', 'pc4-shared-prefix-ab', 'pc4-compact-input-ab'\]\)/u);
+  assert.match(pc4Contracts, /const selectedChecks = checks\.filter\(\(\[name\]\) => process\.argv\.includes\('--benchmarks'\) \|\| !benchmarkChecks\.has\(name\)\);/u);
+  assert.match(pc4Contracts, /for \(const \[name, args\] of selectedChecks\)/u);
+  assert.doesNotMatch(workflow, /--benchmarks/u);
+});
 for (const [name, mutation] of [
   ['main trigger', s => s.replace('branches: ["codex/v0.9.0-stacked-on-v0.8.1-20260912"]', 'branches: ["main"]')],
   ['broad job admission', s => s.replace("if: github.ref == 'refs/heads/codex/v0.9.0-stacked-on-v0.8.1-20260912' && github.ref_type == 'branch'", 'if: true')],

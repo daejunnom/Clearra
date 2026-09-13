@@ -21,9 +21,12 @@ use clearra_supply::pattern_universe::{
 };
 
 use super::{
-    graph_candidate_adapter::Pc4GraphCandidateGuard, PcCandidateBoundaryError,
-    PcCandidateCompletenessEvidence, PcCandidatePageGuard, PcCandidateReducerInput,
-    PcCandidateSetDigest, PcCandidateSourceBinding, PcCandidateUniverseIdentity,
+    cooperative_canonicalizer::{
+        CandidateCanonicalizationError, CooperativeCandidateCanonicalizer,
+    },
+    graph_candidate_adapter::Pc4GraphCandidateGuard,
+    PcCandidateBoundaryError, PcCandidateCompletenessEvidence, PcCandidatePageGuard,
+    PcCandidateReducerInput, PcCandidateSourceBinding, PcCandidateUniverseIdentity,
 };
 use crate::{
     pc4_input_disclosure_policy::{Pc4PreparedOnlineInput, Pc4PreparedQueueInput},
@@ -42,6 +45,8 @@ pub(crate) struct CompactGraphUnionLimits {
     pub candidates: NonZeroUsize,
     pub waiting_fields: NonZeroUsize,
     pub edge_placements: NonZeroUsize,
+    /// Candidate buffers during collection/sorting only, not whole-search RSS.
+    pub canonicalization_bytes: NonZeroUsize,
     pub language: CompactPatternUnionLimits,
 }
 
@@ -52,6 +57,7 @@ pub(crate) enum CompactGraphUnionError {
     Adjacency(FixedQueueTraversalPageError<Pc4LookupAdjacencyError, Infallible>),
     Placement(PlacementMaterializationError<Pc4LookupMaterializationError>),
     Boundary(PcCandidateBoundaryError),
+    Canonicalization(CandidateCanonicalizationError),
     Limit {
         kind: &'static str,
         limit: usize,
@@ -67,6 +73,7 @@ impl CompactGraphUnionError {
             Self::Adjacency(error) => error.reason(),
             Self::Placement(error) => error.reason(),
             Self::Boundary(error) => error.reason(),
+            Self::Canonicalization(error) => error.reason(),
             Self::Limit { kind, .. } => kind,
         }
     }
@@ -86,6 +93,8 @@ pub(crate) struct CompactGraphUnionUsage {
     pub merged_states: usize,
     pub materialized_edges: usize,
     pub peak_waiting_fields: usize,
+    pub canonicalization_work: usize,
+    pub peak_canonicalization_buffer_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -161,6 +170,7 @@ pub(crate) struct Pc4CompactGraphUnion {
     waiting_count: usize,
     next_layer: HashMap<StateKey, CompactPatternUnionFrontier>,
     candidates: HashSet<StandardBoard64TilingIdentity>,
+    canonicalizer: Option<CooperativeCandidateCanonicalizer>,
     retained_supply_states: usize,
     cache_records_seen: usize,
     completed: bool,
@@ -262,6 +272,7 @@ impl Pc4CompactGraphUnion {
             waiting_count: 0,
             next_layer: HashMap::new(),
             candidates: HashSet::new(),
+            canonicalizer: None,
             retained_supply_states,
             cache_records_seen: 0,
             completed: false,
@@ -306,6 +317,7 @@ impl Pc4CompactGraphUnion {
             self.waiting.clear();
             self.next_layer.clear();
             self.candidates.clear();
+            self.canonicalizer = None;
             self.waiting_count = 0;
             self.retained_supply_states = 0;
         }
@@ -324,6 +336,35 @@ impl Pc4CompactGraphUnion {
         }
         if self.completed {
             return Ok(CompactGraphUnionStep::Complete);
+        }
+        if let Some(canonicalizer) = &mut self.canonicalizer {
+            let consumed = self
+                .usage
+                .work
+                .checked_add(self.usage.canonicalization_work)
+                .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+            let remaining = self.limits.work.get().saturating_sub(consumed);
+            let Some(remaining) = NonZeroUsize::new(remaining) else {
+                return Err(CompactGraphUnionError::Limit {
+                    kind: "pc4_compact_union_work_limit",
+                    limit: self.limits.work.get(),
+                    attempted: consumed.saturating_add(1),
+                });
+            };
+            let complete = canonicalizer
+                .advance(work.min(remaining), &|| {
+                    PcCandidatePageGuard::is_cancelled(guard)
+                })
+                .map_err(CompactGraphUnionError::Canonicalization)?;
+            self.usage.canonicalization_work = canonicalizer.work_done();
+            self.usage.peak_canonicalization_buffer_bytes = canonicalizer.peak_buffer_bytes();
+            check_guard(&self.source, &self.target, guard)?;
+            self.completed = complete;
+            return Ok(if complete {
+                CompactGraphUnionStep::Complete
+            } else {
+                CompactGraphUnionStep::Progress
+            });
         }
         if !self.start_verified {
             let Some(hash) = cache.field_hash(self.start_field) else {
@@ -358,8 +399,19 @@ impl Pc4CompactGraphUnion {
                     return Ok(CompactGraphUnionStep::Waiting);
                 }
                 if self.next_layer.is_empty() {
-                    self.completed = true;
-                    return Ok(CompactGraphUnionStep::Complete);
+                    // No histories remain. Release queue backing stores before
+                    // retaining both candidate buffers during canonicalization.
+                    self.ready = VecDeque::new();
+                    self.waiting = HashMap::new();
+                    self.next_layer = HashMap::new();
+                    self.canonicalizer = Some(
+                        CooperativeCandidateCanonicalizer::begin(
+                            core::mem::take(&mut self.candidates),
+                            self.limits.canonicalization_bytes,
+                        )
+                        .map_err(CompactGraphUnionError::Canonicalization)?,
+                    );
+                    return Ok(CompactGraphUnionStep::Progress);
                 }
                 self.ready
                     .try_reserve(self.next_layer.len())
@@ -608,10 +660,11 @@ impl Pc4CompactGraphUnion {
         {
             return Err(contract("pc4_compact_union_incomplete"));
         }
-        let mut candidates: Vec<_> = self.candidates.into_iter().collect();
-        candidates.sort_unstable();
-        let digest = PcCandidateSetDigest::calculate_parts(&[], &candidates)
-            .map_err(CompactGraphUnionError::Boundary)?;
+        let (candidates, digest) = self
+            .canonicalizer
+            .ok_or_else(|| contract("pc4_compact_union_incomplete"))?
+            .into_parts()
+            .map_err(CompactGraphUnionError::Canonicalization)?;
         check_guard(&self.source, &self.target, guard)?;
         let evidence = PcCandidateCompletenessEvidence::from_verified_complete_source(
             self.source,
