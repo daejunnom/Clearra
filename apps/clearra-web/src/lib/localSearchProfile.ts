@@ -33,10 +33,18 @@ function numbers(value: unknown, keys: string[]): Record<string, number | null> 
 
 export function localSearchProfileText(event: unknown): string | null {
   const envelope = record(event);
-  if (!envelope || !['final_response', 'failed'].includes(String(envelope.event))) return null;
-  const profile = record(envelope.search_profile);
-  if (!profile) return null;
+  if (!envelope || !['final_response', 'failed', 'cancelled'].includes(String(envelope.event))) return null;
+  const profile = record(envelope.search_profile) ?? {};
   const result: Record<string, unknown> = {};
+  const online = record(envelope.pc4_online);
+  if (online?.provider === 'hf-graph') {
+    result.pc4_online = {
+      provider: 'hf-graph',
+      ...numbers(online, ['requests', 'transferred_bytes', 'elapsed_ms']),
+      ...(typeof online.revision === 'string' && /^[a-f0-9]{40}$/.test(online.revision)
+        ? { revision: online.revision } : {})
+    };
+  }
   const host = numbers(profile.host_execution, [
     'product_prepare_ms', 'module_prepare_ms', 'worker_elapsed_to_terminal_ms',
     'run_to_emit_ms', 'source_ms', 'drain_ms', 'verifier_finish_ms', 'finalize_ms',

@@ -32,7 +32,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug)]
-enum Product {
+pub(super) enum Product {
     All,
     Chance,
     Minimum,
@@ -42,7 +42,12 @@ enum Product {
     FixedScore,
 }
 
-fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -> AppRequest {
+pub(super) fn request(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    product: Product,
+) -> AppRequest {
     request_with_supply(
         lines,
         profile,
@@ -194,7 +199,7 @@ fn request_with_queue_input(
     }
 }
 
-fn pattern_request(
+pub(super) fn pattern_request(
     lines: u8,
     profile: Pc4RuleProfile,
     initial: u64,

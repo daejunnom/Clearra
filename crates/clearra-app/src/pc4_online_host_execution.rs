@@ -67,28 +67,54 @@ impl AppContext {
             problem.core_query().allow_hold(),
             problem.core_query().hold_state(),
         );
-        let mut preparation = Pc4CompiledPatternPreparation::begin(
-            problem,
-            Pc4CompiledPatternLimits::new(nz(5_000_000), nz(11), nz(256)),
-        )
-        .map_err(|e| e.reason())?;
-        // Compact patterns are structurally certified without unranking. The
-        // host entry supports that compact representation; explicit large
-        // sources must use cooperative preparation rather than block a worker.
-        preparation
-            .advance(nz(256), &|| false)
+        let (prepared, input_identity) = if let Some(queue) =
+            problem.core_query().remaining_queue().as_fixed_sequence()
+        {
+            let pieces = queue
+                .pieces()
+                .iter()
+                .copied()
+                .map(crate::pc_candidate_execution_bridge::core_piece_to_graph)
+                .collect::<Vec<_>>();
+            let identity = PcCandidateRequestIdentity::derive_pc4_fixed_queue_candidate_universe(
+                &target, board, hold, &pieces,
+            )
+            .map_err(|_| "pc4_online_source_binding_failed")?;
+            let decision = prepare_pc4_input_disclosure(Pc4InputDisclosureRequest::new(
+                target.clone(),
+                Pc4InputSurface::Gui,
+                Pc4QueueDisclosure::FixedExplicit(pieces),
+            ))
+            .map_err(|_| "pc4_online_fixed_input_rejected")?;
+            let Pc4InputDisclosureDecision::Ready(prepared) = decision else {
+                return Err("pc4_online_disclosure_required");
+            };
+            (prepared, *identity.as_bytes())
+        } else {
+            let mut preparation = Pc4CompiledPatternPreparation::begin(
+                problem,
+                Pc4CompiledPatternLimits::new(nz(5_000_000), nz(11), nz(256)),
+            )
             .map_err(|e| e.reason())?;
-        if !preparation.is_complete() {
-            return Err("pc4_online_explicit_pattern_preparation_required");
-        }
-        let pattern = preparation.finish().map_err(|e| e.reason())?;
-        let input_identity = *pattern.identity().as_bytes();
-        let prepared = Pc4PreparedOnlineInput::for_compiled_pattern(
-            target.clone(),
-            Pc4InputSurface::Gui,
-            pattern,
-        )
-        .map_err(|e| e.reason())?;
+            // Compact patterns are structurally certified without unranking. The
+            // host entry supports that compact representation; explicit large
+            // sources must use cooperative preparation rather than block a worker.
+            preparation
+                .advance(nz(256), &|| false)
+                .map_err(|e| e.reason())?;
+            if !preparation.is_complete() {
+                return Err("pc4_online_explicit_pattern_preparation_required");
+            }
+            let pattern = preparation.finish().map_err(|e| e.reason())?;
+            let input_identity = *pattern.identity().as_bytes();
+            let prepared = Pc4PreparedOnlineInput::for_compiled_pattern(
+                target.clone(),
+                Pc4InputSurface::Gui,
+                pattern,
+            )
+            .map_err(|e| e.reason())?;
+            (prepared, input_identity)
+        };
         let source = PcCandidateSourceBinding::online_pc4_for_prepared_input(
             PcCandidateSessionId::new(NonZeroU64::new(1).unwrap()),
             PcCandidateSourceIdentity::from_sha256(input_identity),
@@ -330,6 +356,9 @@ impl PcCandidatePageGuard for HostGuard<'_> {
     }
     fn is_current_source(&self, source: &PcCandidateSourceBinding) -> bool {
         source == self.source
+    }
+    fn is_current_snapshot(&self, snapshot: &QualifiedSnapshotIdentity) -> bool {
+        self.source.qualified_snapshot() == Some(snapshot)
     }
 }
 impl FixedQueueTraversalGuard for HostGuard<'_> {

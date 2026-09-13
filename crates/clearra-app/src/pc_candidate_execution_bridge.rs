@@ -317,7 +317,7 @@ pub(crate) fn fixed_queue_hold_state(allow_hold: bool, hold: HoldSlot) -> FixedQ
     }
 }
 
-const fn core_piece_to_graph(piece: PieceKind) -> Pc4GraphPiece {
+pub(crate) const fn core_piece_to_graph(piece: PieceKind) -> Pc4GraphPiece {
     match piece {
         PieceKind::I => Pc4GraphPiece::I,
         PieceKind::O => Pc4GraphPiece::O,

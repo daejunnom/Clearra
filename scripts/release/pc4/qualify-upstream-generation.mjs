@@ -19,7 +19,7 @@ export class Pc4OnlineError extends Error {
 // No disk persistence. A job pins the returned immutable revision; a subsequent
 // refresh can discover new upstream content without changing an active job.
 export async function qualifyPc4UpstreamGeneration({ signal, onProgress } = {}, dependencies = {}) {
-  const discovery = await (dependencies.discover ?? discoverPc4UpstreamGeneration)();
+  const discovery = await (dependencies.discover ?? discoverPc4UpstreamGeneration)({ signal });
   if (signal?.aborted) throw new Pc4OnlineError('pc4_online_cancelled');
   const reader = dependencies.reader ?? createPc4RangeReader(discovery, { signal, onProgress });
   const entries = new Map(discovery.candidates.map(entry => [entry.path, entry]));

@@ -491,7 +491,6 @@ function wasmHostCapabilities(
 function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
   if (!tablebaseRequested) return Promise.resolve();
   if (tablebaseWarmup) return tablebaseWarmup;
-  if (tablebaseWarmupAttempted) return Promise.resolve();
   tablebaseWarmupAttempted = true;
   const generation = ++tablebaseWarmupGeneration;
   postTablebaseWarmupPhase('loading', 0);

@@ -12,7 +12,7 @@ const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const MOVING_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u;
-const CANDIDATE_PATH = /^(?:field_hash_to_id\.v1\.bin|graph_offsets\.u32\.bin|graph(?:_[A-Za-z0-9]+)?\.bin)$/u;
+const CANDIDATE_PATH = /^(?:field_hash_to_id(?:_(?:no180|srsplus|srsx|nokick))?\.v1\.bin|graph_offsets(?:_(?:no180|srsplus|srsx|nokick))?\.u32\.bin|graph(?:_[A-Za-z0-9]+)?\.bin)$/u;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 512;
 
@@ -26,7 +26,7 @@ export async function discoverPc4UpstreamGeneration(options = {}, dependencies =
   if (channel.includes("..") || channel.includes("//")) {
     throw new Error("PC4 dataset channel is not canonical");
   }
-  const requestJson = dependencies.requestJson ?? boundedJsonRequest;
+  const requestJson = dependencies.requestJson ?? ((url, label) => boundedJsonRequest(url, label, options.signal));
   const metadataUrl = `${API_ORIGIN}/api/datasets/${repository}/revision/${encodeURIComponent(channel)}`;
   const metadata = await requestJson(metadataUrl, "PC4 dataset revision metadata");
   const resolvedRevision = requirePattern(
@@ -64,7 +64,17 @@ export async function discoverPc4UpstreamGeneration(options = {}, dependencies =
   });
 }
 
-async function boundedJsonRequest(url, label) {
+async function boundedJsonRequest(url, label, signal) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(abort, 30_000);
+  try { return await readBoundedJson(url, label, controller.signal); }
+  finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+}
+
+async function readBoundedJson(url, label, signal) {
   const response = await fetch(url, {
     method: "GET",
     headers: Object.freeze({
@@ -72,6 +82,8 @@ async function boundedJsonRequest(url, label) {
       "user-agent": "Clearra-PC4-generation-discovery/1",
     }),
     redirect: "error",
+    credentials: "omit",
+    signal,
   });
   if (!response.ok || response.status !== 200) {
     throw new Error(`${label} returned HTTP ${response.status}`);
@@ -117,9 +129,9 @@ function validateCandidate(entry) {
   if (entry.lfs.size !== entry.size) {
     throw new Error(`PC4 ${path} LFS and tree lengths differ`);
   }
-  const role = path === "field_hash_to_id.v1.bin"
+  const role = path.startsWith("field_hash_to_id")
     ? "field-hash-index"
-    : path === "graph_offsets.u32.bin"
+    : path.startsWith("graph_offsets")
       ? "graph-offsets"
       : "graph-candidate";
   return {

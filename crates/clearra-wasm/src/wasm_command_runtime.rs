@@ -3961,6 +3961,14 @@ impl WasmCommandRuntime {
     ) -> Result<WasmExecutionResult, WasmCommandRuntimeError> {
         let control = ExecutionControl::default();
         let mut execution = self.start_prepared_execution(prepared);
+        // The synchronous convenience API has no asynchronous Range host.
+        // Never spin forever waiting for bytes it cannot supply.
+        if matches!(execution.online_pc4, Some(Ok(_))) {
+            return Err(WasmCommandRuntimeError::new(
+                "pc4_online_host_transport_required",
+                "online PC4 requires the cooperative worker transport",
+            ));
+        }
         loop {
             match execution.advance(4096, &control) {
                 PreparedWasmAdvance::Pending | PreparedWasmAdvance::Progress => {}

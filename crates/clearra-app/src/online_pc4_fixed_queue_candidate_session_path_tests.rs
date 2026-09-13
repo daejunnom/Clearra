@@ -321,3 +321,84 @@ fn pc4_three_line_upper_clear_range_to_candidate_and_replay() {
 fn pc4_four_line_upper_clear_range_to_candidate_and_replay() {
     assert_clear_path(4);
 }
+
+#[test]
+fn pc4_host_transport_runs_fixed_and_pattern_requests_through_the_shared_product() {
+    use crate::{AppContext, AppStatus, CooperativeAppAdvance};
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let fixture = clear_path(4);
+    let snapshot = activated_snapshot_for_dataset(
+        "host-transport-fixture",
+        Some(Pc4RuleProfile::Jstris180),
+        Pc4TargetLines::new(4).unwrap(),
+        5,
+        *fixture.ids_by_step.last().unwrap(),
+        &fixture.dataset,
+    );
+    let fixed = product_contracts::request(
+        4,
+        Pc4RuleProfile::Jstris180,
+        fixture.initial_board,
+        product_contracts::Product::All,
+    );
+    let pattern = product_contracts::pattern_request(
+        4,
+        Pc4RuleProfile::Jstris180,
+        fixture.initial_board,
+        product_contracts::Product::All,
+        "IIII",
+        FixedQueueHoldState::Disabled,
+    );
+    for request in [fixed, pattern] {
+        let context = AppContext::default();
+        let control = clearra_core_domain::execution_cancellation::ExecutionControl::default();
+        let mut execution = context
+            .start_online_pc4_execution(request, snapshot.clone())
+            .unwrap();
+        let mut completed = false;
+        let mut transfers = 0;
+        for _ in 0..10_000 {
+            match execution.advance(64, &control).unwrap() {
+                CooperativeAppAdvance::Completed(response) => {
+                    assert_eq!(response.status(), AppStatus::Success);
+                    completed = true;
+                    break;
+                }
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                _ => panic!("unexpected host execution termination"),
+            }
+            if let Some(range) = execution.pending_range() {
+                let data = match range.artifact() {
+                    Pc4ArtifactRole::FieldHashIndex => &fixture.dataset.field_index,
+                    Pc4ArtifactRole::GraphOffsets => &fixture.dataset.graph_offsets,
+                    Pc4ArtifactRole::Graph => &fixture.dataset.graph,
+                };
+                let offset = range.offset() as usize;
+                let length = range.length() as usize;
+                let bytes = data[offset..offset + length].to_vec();
+                let session = range.lookup_session().get();
+                let id = range.request_id();
+                let header = format!("bytes {}-{}/{}", offset, offset + length - 1, data.len());
+                assert!(execution
+                    .admit_range(
+                        session,
+                        id + 1,
+                        206,
+                        Some(header.clone()),
+                        bytes.clone(),
+                        &control
+                    )
+                    .is_err());
+                execution
+                    .admit_range(session, id, 206, Some(header), bytes, &control)
+                    .unwrap();
+                transfers += 1;
+            }
+        }
+        assert!(completed, "host transport must not wait indefinitely");
+        assert!(
+            transfers > 0,
+            "success must have consumed online graph bytes"
+        );
+    }
+}
