@@ -71,6 +71,10 @@ impl WasmWorkerAdvanceStatus {
 pub type JobId = WasmWorkerJobId;
 pub type JobStatus = WasmWorkerJobStatus;
 
+#[cfg(test)]
+#[path = "online_pc4_worker_tests.rs"]
+mod online_pc4_tests;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BudgetStatus {
     pub state: String,

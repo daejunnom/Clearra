@@ -1,7 +1,8 @@
 // Run related App contracts in one managed generation, preserving compiler
 // reuse without retaining another independent experimental build.
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { assertManagedBuildTransaction } from './clearra-build-policy.mjs';
+import { createRustTestEvidence } from './rust-test-evidence.mjs';
 
 const transaction = assertManagedBuildTransaction();
 const common = ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-app', '--features', 'online-pc4-tablebase', '--lib'];
@@ -36,14 +37,24 @@ for (const [name, args] of checks) {
   console.log(`app_contract_check=${name} status=started`);
   const command = args[0] === 'test'
     ? [...args, ...(args.includes('--') ? [] : ['--']), '--test-threads=2'] : args;
-  const result = spawnSync('cargo', command, {
-    cwd: transaction.source_root,
-    env: { ...process.env, CARGO_PROFILE_TEST_DEBUG: '0' },
-    stdio: 'inherit', windowsHide: true,
+  const evidence = createRustTestEvidence();
+  const result = await new Promise(resolve => {
+    const child = spawn('cargo', command, {
+      cwd: transaction.source_root,
+      env: { ...process.env, CARGO_PROFILE_TEST_DEBUG: '0' },
+      stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true,
+    });
+    child.stdout.on('data', chunk => { evidence.observe(chunk); process.stdout.write(chunk); });
+    child.once('error', error => resolve({ error, status: 1 }));
+    child.once('close', status => resolve({ status }));
   });
   if (result.error || result.status !== 0) {
     console.error(`app_contract_check=${name} status=failed ${result.error?.message ?? ''}`);
     process.exit(result.status || 1);
+  }
+  if (args[0] === 'test' && !evidence.hasExecutedTests()) {
+    console.error(`app_contract_check=${name} status=failed reason=no-tests-executed`);
+    process.exit(1);
   }
   console.log(`app_contract_check=${name} status=passed`);
 }

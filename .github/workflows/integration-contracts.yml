@@ -37,6 +37,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           node --test scripts/release/integration-contracts-workflow.test.mjs
           node --test scripts/tools/cargo-jobserver-stdio.test.mjs
+          node --test scripts/tools/rust-test-evidence.test.mjs
           node --test scripts/release/pc4/discover-upstream-generation.test.mjs scripts/release/pc4/qualify-upstream-generation.test.mjs scripts/release/pc4/pc4-range-reader.test.mjs
           node --test scripts/release/pc4/pc4-download.test.mjs
 

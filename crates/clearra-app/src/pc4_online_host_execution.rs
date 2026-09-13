@@ -99,6 +99,16 @@ impl AppContext {
                 return Err("pc4_online_disclosure_required");
             };
             (prepared, *identity.as_bytes())
+        } else if problem
+            .core_query()
+            .remaining_queue()
+            .observed_queue()
+            .is_some()
+        {
+            // An observed prefix is not an exhaustive fixed queue or a full
+            // pattern universe. Its bag/reveal scope must be supplied through
+            // the disclosure boundary; never silently give it oracle knowledge.
+            return Err("pc4_online_disclosure_required");
         } else {
             let mut preparation = Pc4CompiledPatternPreparation::begin(
                 problem,

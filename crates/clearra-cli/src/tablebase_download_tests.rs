@@ -183,6 +183,7 @@ fn tablebase_download_native_search_uses_shared_app_and_rejects_cross_profile_re
             "4",
             "--queue",
             "I",
+            "--fixed",
             "--no-hold",
             "--rule",
             profile,
@@ -203,4 +204,37 @@ fn tablebase_download_native_search_uses_shared_app_and_rejects_cross_profile_re
             assert!(result.is_err(), "SRS cannot reuse Jstris graph data");
         }
     }
+}
+
+#[cfg(all(feature = "online-pc4-tablebase", feature = "wasm-cpu-runtime"))]
+#[test]
+fn tablebase_download_observed_queue_is_not_silently_relabelled_as_fixed() {
+    use crate::{args::CliParser, assemble::CliAppRequestAssembler, output::RenderFormat};
+    use clearra_app::{AppContext, AppCoreExecutorService, AppServices};
+    let f = Fixture::new();
+    f.install(&"a".repeat(40), false).unwrap();
+    File::create_new(f.root.join("store.lock")).unwrap();
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "4",
+        "--queue",
+        "I",
+        "--no-hold",
+        "--rule",
+        "jstris-180",
+        "--tablebase",
+    ])
+    .unwrap();
+    let request = CliAppRequestAssembler::assemble(invocation.into_command(), RenderFormat::Json)
+        .unwrap()
+        .request();
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    assert_eq!(
+        execute_local_at(&f.root, context, request).unwrap_err(),
+        "pc4_online_disclosure_required"
+    );
 }

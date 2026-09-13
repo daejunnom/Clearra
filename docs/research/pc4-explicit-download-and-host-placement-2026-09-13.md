@@ -161,6 +161,18 @@ references the port only while yields are pending, and adds a deterministic
 isolated-process test with no timing sleeps. These are corrected-source checks,
 not a claim that the failed CI passed. The new local host tests passed (8/8).
 
+Follow-up CI `34760594684` at `5fbcc1d` passed source, native CLI, surface
+contracts and preview WASM. Its PC4 job still failed: the native fixture used
+legacy `--queue` (observed prefix) while expecting fixed-queue semantics.
+Corrected fixtures explicitly use `--fixed`; observed input retains its
+disclosure-required result and cannot be reinterpreted as an exhaustive queue.
+That run also revealed that the WASM `online_pc4` filter executed zero tests
+after configuration ownership moved to App. New synthetic public-worker tests
+exercise local/HTTP admission, the same one-I completion, source separation,
+stale requests and cancellation. The contract runner now rejects zero-test
+success without invoking Cargo a second time. These follow-up changes require
+their own CI result; the earlier preview is not their runtime evidence.
+
 Remaining measured outcomes: real complete download on user-selected storage,
 native/browser full-file query parity, all 456,459 reference solutions, P7P4
 whole-family performance, native HTTP/desktop/Discord adapters, Oracle
