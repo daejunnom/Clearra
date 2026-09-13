@@ -41,6 +41,8 @@ mod online_pc4_lookup_session;
 mod online_pc4_observation_candidate_request;
 mod parity_page_store;
 #[cfg(feature = "online-pc4-tablebase")]
+mod pc4_compiled_pattern_source;
+#[cfg(feature = "online-pc4-tablebase")]
 #[cfg_attr(not(test), allow(dead_code))]
 mod pc4_fixed_queue_candidate_runtime;
 #[cfg(feature = "online-pc4-tablebase")]
@@ -251,6 +253,12 @@ pub use online_pc4_observation_candidate_request::{
     AppOnlinePc4ObservationCandidateRequest, AppOnlinePc4ObservationCandidateRequestError,
 };
 pub use parity_page_store::{ParityReportPageSource, ParityReportPageStore};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc4_compiled_pattern_source::{
+    Pc4CompiledPatternError, Pc4CompiledPatternIdentity, Pc4CompiledPatternLimits,
+    Pc4CompiledPatternPreparation, Pc4CompiledPatternQueue, Pc4CompiledPatternSource,
+    PC4_COMPILED_PATTERN_SOURCE_CONTRACT,
+};
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc4_input_disclosure_policy::{
     prepare_pc4_input_disclosure, Pc4BagDisclosure, Pc4BagDisclosureField,
