@@ -89,6 +89,16 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
     pub fn read(&mut self, role: usize, offset: u64, length: u64) -> Result<Vec<u8>> {
         self.validate_span(role, offset, length)?;
         if let Some(bytes) = self.cached(role, offset, length) {
+            // The real graph demand is about to enter App's decoded cache.
+            // Release only an exact one-record prefetch; keep unread siblings
+            // of a larger coalesced span until normal bounded eviction.
+            if role == 2
+                && self.windows.back().is_some_and(|w| {
+                    w.role == role && w.offset == offset && w.bytes.len() as u64 == length
+                })
+            {
+                self.retained -= self.windows.pop_back().unwrap().bytes.len();
+            }
             return Ok(bytes);
         }
         let artifact = &self.files[role];
@@ -117,6 +127,16 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
         let bytes = self.exact_span(role, start, stop - start, role != 2)?;
         let within = (offset - start) as usize;
         Ok(bytes[within..within + length as usize].to_vec())
+    }
+
+    pub fn read_cached(
+        &mut self,
+        role: usize,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        self.validate_span(role, offset, length)?;
+        Ok(self.cached(role, offset, length))
     }
 
     /// Only explicit, already known byte intervals may be merged. Cached

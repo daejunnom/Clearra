@@ -115,6 +115,22 @@ fn tablebase_download_explicit_batch_validates_before_io_and_excludes_cached_sub
 }
 
 #[test]
+fn tablebase_download_consumed_graph_prefetches_release_index_cache_capacity() {
+    let mut reader = OnlineRangeReader::new(files(), |a, o, n| Ok(reply(a, o, n)));
+    reader.read(1, 0, 8).unwrap();
+    let demands: Vec<_> = (0..32).map(|i| (i * 4096, 12)).collect();
+    reader.read_many(2, &demands).unwrap();
+    for &(offset, length) in &demands {
+        reader.read(2, offset, length).unwrap();
+    }
+    assert_eq!(reader.retained, 4096);
+    assert_eq!(reader.windows.len(), 1);
+    assert_eq!(reader.requests, 33);
+    reader.read(1, 16, 8).unwrap();
+    assert_eq!(reader.requests, 33);
+}
+
+#[test]
 fn tablebase_download_http_requires_real_partial_content_before_cache_admission() {
     for (status, expected) in [
         (200, "pc4_online_whole_content_rejected"),

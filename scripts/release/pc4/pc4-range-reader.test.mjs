@@ -172,6 +172,21 @@ test('a partly cached frontier only transfers its unknown demands', async () => 
   } finally { f.reader.dispose(); }
 });
 
+test('consumed one-record graph prefetches do not evict reusable index pages', async () => {
+  const f = fixture({ directPaths: [artifact.path] });
+  const index = { ...artifact, path: 'offsets.bin' };
+  try {
+    await f.reader.read(index, 0, 8);
+    const demands = Array.from({ length: 32 }, (_, i) => ({ artifact, offset: i * 4096, length: 12 }));
+    await f.reader.readMany(demands);
+    for (const d of demands) assert.deepEqual(await f.reader.read(d.artifact, d.offset, d.length), values(d.offset, d.length));
+    assert.equal(f.reader.retainedBytes, 16384, 'only the reusable index page remains');
+    assert.equal(f.reader.requests, 33);
+    await f.reader.read(index, 16, 8);
+    assert.equal(f.reader.requests, 33);
+  } finally { f.reader.dispose(); }
+});
+
 test('batch validates every demand before any I/O and preserves the maximum transfer span', async () => {
   const f = fixture();
   const d = { artifact, offset: 0, length: 8 };

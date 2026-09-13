@@ -34,16 +34,43 @@ pub(super) fn prefetch<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>>(
     {
         return Err("pc4_online_frontier_invalid");
     }
-    let mut ids = Vec::new();
-    for &id in frontier {
-        if !ids.contains(&id) {
-            ids.push(id);
-        }
+    let current = current as u32;
+    // Minimum qualified record size is 12 bytes. An ID gap above 86 cannot
+    // bridge a 1,024-byte transfer gap. Skip unrelated optional hints before
+    // copying cached bytes; the required graph lookup remains unchanged.
+    if !frontier
+        .iter()
+        .any(|&id| id != current && id.abs_diff(current) <= 86)
+    {
+        return Ok(());
     }
-    let offsets: Vec<_> = ids.iter().map(|&id| (16 + u64::from(id) * 4, 8)).collect();
-    let pairs = reader.read_many(1, &offsets)?;
+    let mut ids = frontier.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let at = ids.binary_search(&current).unwrap();
+    let (mut lo, mut hi) = (at, at + 1);
+    while lo > 0 && ids[lo] - ids[lo - 1] <= 86 {
+        lo -= 1;
+    }
+    while hi < ids.len() && ids[hi] - ids[hi - 1] <= 86 {
+        hi += 1;
+    }
+    let ids: Vec<_> = std::iter::once(current)
+        .chain(ids[lo..hi].iter().copied().filter(|&id| id != current))
+        .collect();
+    let required_pair = reader.read(1, offset, length)?;
     let mut records = Vec::new();
-    for (&id, pair) in ids.iter().zip(pairs) {
+    for id in ids {
+        // Only the required offset pair may cause I/O. Reading all queued
+        // siblings early lost index locality in the real P7P4 A/B.
+        let pair = if id == current {
+            Some(required_pair.clone())
+        } else {
+            reader.read_cached(1, 16 + u64::from(id) * 4, 8)?
+        };
+        let Some(pair) = pair else {
+            continue;
+        };
         let pair: [u8; 8] = pair.try_into().map_err(|_| "pc4_online_truncated_range")?;
         let start = u64::from(u32::from_le_bytes(pair[..4].try_into().unwrap()));
         let end = u64::from(u32::from_le_bytes(pair[4..].try_into().unwrap()));
@@ -55,8 +82,40 @@ pub(super) fn prefetch<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>>(
         {
             return Err("pc4_online_record_bounds");
         }
+        if reader.read_cached(2, start, end - start)?.is_some() {
+            if id == current {
+                return Ok(());
+            }
+            continue;
+        }
         records.push((start, end - start));
     }
-    reader.read_many(2, &records)?;
+    let required = records[0]; // the current record is uncached and always first
+    records.sort_unstable();
+    records.dedup();
+    let mut begin = 0;
+    while begin < records.len() {
+        let start = records[begin].0;
+        let mut end = start + records[begin].1;
+        let mut stop = begin + 1;
+        while let Some(&(offset, length)) = records.get(stop) {
+            let merged_end = end.max(offset + length);
+            if offset > end + 1_024 || merged_end - start > 65_536 {
+                break;
+            }
+            end = merged_end;
+            stop += 1;
+        }
+        let group = &records[begin..stop];
+        if group.contains(&required) {
+            // Never add a graph HTTP call just for a distant sibling. Only
+            // enlarge the required transfer if it covers another known record.
+            if group.len() > 1 {
+                reader.read_many(2, group)?;
+            }
+            break;
+        }
+        begin = stop;
+    }
     Ok(())
 }

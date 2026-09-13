@@ -16,24 +16,42 @@ const { values } = parseArgs({ options: {
   command: { type: 'string' }, seconds: { type: 'string', default: '60' },
   'read-limit': { type: 'string', default: '100000' }, cached: { type: 'boolean' },
   'page-bytes': { type: 'string', default: '4096' }, trace: { type: 'boolean' }, 'compare-trace': { type: 'boolean' },
-  transport: { type: 'string', default: 'local' }, frontier: { type: 'boolean' }
+  transport: { type: 'string', default: 'local' }, frontier: { type: 'boolean' },
+  'wasm-stdin': { type: 'boolean' }, 'expected-source': { type: 'string' }
 } });
 const seconds = Number(values.seconds), readLimit = Number(values['read-limit']);
 if (!values.command || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > 600 ||
     !Number.isSafeInteger(readLimit) || readLimit < 1 || readLimit > 1000000) throw new Error('Explicit bounded probe arguments required');
 if (!['local', 'http-model'].includes(values.transport) || values.transport === 'http-model' && values.cached ||
     values.frontier && values.transport !== 'http-model') throw new Error('Choose local storage OR modeled HTTP; frontier is HTTP-only');
+if (!!values['wasm-directory'] === !!values['wasm-stdin'] ||
+    values['wasm-stdin'] && !/^[a-f0-9]{40}$/.test(values['expected-source'] ?? '')) throw new Error('Choose a WASM directory or bounded stdin with an exact expected source');
+let streamed = null;
+if (values['wasm-stdin']) {
+  // CI ZIP entries can be passed in memory. This avoids creating a second
+  // experimental build directory just to measure an already built artifact.
+  const chunks = []; let total = 0;
+  for await (const chunk of process.stdin) {
+    total += chunk.length;
+    if (total > 64 * 1024 * 1024) throw new Error('WASM input exceeds benchmark bound');
+    chunks.push(chunk);
+  }
+  streamed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
 const dataset = await openBenchmarkDataset(values.directory, values.profile);
-const wasmDirectory = resolve(values['wasm-directory']);
-const manifest = JSON.parse(await readFile(join(wasmDirectory, 'clearra_wasm.manifest.json'), 'utf8'));
+const wasmDirectory = values['wasm-directory'] ? resolve(values['wasm-directory']) : null;
+const manifest = streamed?.manifest ?? JSON.parse(await readFile(join(wasmDirectory, 'clearra_wasm.manifest.json'), 'utf8'));
+if (values['expected-source'] && (manifest.build?.runtime_identity?.source_commit !== values['expected-source'] ||
+    manifest.build?.runtime_identity?.engine_build_id !== values['expected-source'])) throw new Error('Unexpected benchmark artifact source');
 async function verified(artifact) {
   if (basename(artifact.path) !== artifact.path || !/^[a-zA-Z0-9_.-]+$/.test(artifact.path)) throw new Error('Invalid WASM artifact path');
-  const bytes = await readFile(join(wasmDirectory, artifact.path));
+  const bytes = streamed ? Buffer.from(streamed.files[artifact.path], 'base64') : await readFile(join(wasmDirectory, artifact.path));
   if (bytes.length !== artifact.bytes || createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) throw new Error('WASM artifact integrity mismatch');
   return bytes;
 }
 const prepare = performance.now();
 const bindingBytes = await verified(manifest.bindings), wasmBytes = await verified(manifest.wasm);
+streamed = null;
 const bindings = await import(`data:text/javascript;base64,${bindingBytes.toString('base64')}`);
 const raw = await bindings.default({ module_or_path: await WebAssembly.compile(wasmBytes) });
 const decoder = new TextDecoder(), encoder = new TextEncoder();

@@ -4,8 +4,7 @@ import { createPc4RangeReader } from './pc4-range-reader.mjs';
 import { prefetchPc4LookupFrontier } from './pc4-frontier-reader.mjs';
 import { PC4_READER_CONTRACT } from './qualify-upstream-generation.mjs';
 
-function fixture({ mutate, ...options } = {}) {
-  const count = 128;
+function fixture({ mutate, count = 128, ...options } = {}) {
   const a = (path, byte_length, hash) => ({ path, byte_length, content_identity: 'sha256:' + hash.repeat(64) });
   const offsets = a('graph_offsets.u32.bin', 16 + 4 * (count + 1), 'b');
   const graph = a('graph.bin', count * 12, 'c');
@@ -34,8 +33,8 @@ function fixture({ mutate, ...options } = {}) {
   return { reader, generation, calls, range, graphBytes, indexBytes };
 }
 
-test('a known 32-record frontier uses two dependency-stage HTTP requests and later exact reads reuse their bytes', async t => {
-  const serial = fixture(), batch = fixture();
+test('a known 32-record frontier reuses cached offsets and needs only the current graph transfer', async t => {
+  const serial = fixture({ count: 4096 }), batch = fixture({ count: 4096 });
   try {
     await prefetchPc4LookupFrontier(batch.reader, batch.generation, batch.range);
     for (const id of batch.range.lookup_frontier) {
@@ -47,14 +46,28 @@ test('a known 32-record frontier uses two dependency-stage HTTP requests and lat
         bytes.fill(255); // Caller mutation must not contaminate a batched span.
       }
     }
-    assert.equal(serial.reader.requests, 64);
+    assert.equal(serial.reader.requests, 33);
     assert.equal(batch.reader.requests, 2);
-    assert.equal(batch.reader.bytes, 132 + 384);
+    assert.equal(batch.reader.bytes, 4096 + 384);
     await prefetchPc4LookupFrontier(batch.reader, batch.generation, batch.range);
     assert.equal(batch.reader.requests, 2, 'repeated hints cannot refetch known byte spans');
     assert.ok(batch.reader.retainedBytes <= 8 * 1024 * 1024);
-    t.diagnostic('synthetic known-frontier transport A/B: 64 -> 2 requests; not a complete PC timing');
+    t.diagnostic('synthetic cached-index frontier transport A/B: 33 -> 2 requests; not a complete PC timing');
   } finally { serial.reader.dispose(); batch.reader.dispose(); }
+});
+
+test('large-index frontiers preserve containing-page reuse including an offset-pair seam', async () => {
+  const f = fixture({ count: 4096 });
+  const ids = [1019, 1020]; // 4092..4100 crosses the 4 KiB index seam.
+  const range = { ...f.range, offset: 16 + ids[0] * 4, lookup_frontier: ids };
+  try {
+    await prefetchPc4LookupFrontier(f.reader, f.generation, range);
+    assert.equal(f.calls.length, 3, 'the normal seam read needs two index pages, followed by one graph span');
+    assert.deepEqual(f.calls[0], { path: range.artifact.path, start: 0, end: 4096 });
+    assert.deepEqual(f.calls[1], { path: range.artifact.path, start: 4096, end: 8192 });
+    assert.deepEqual(await f.reader.read(range.artifact, 100 * 4 + 16, 8), f.indexBytes.slice(416, 424));
+    assert.equal(f.calls.length, 3, 'a later sibling reuses the containing index pages');
+  } finally { f.reader.dispose(); }
 });
 
 test('frontier validation is bounded, profile-specific and never triggers on header or single-record requests', async () => {
@@ -73,7 +86,7 @@ test('frontier validation is bounded, profile-specific and never triggers on hea
 
 test('malformed offset pairs, exhausted transfer budget and cancellation never start the graph stage', async () => {
   const bad = fixture({ mutate: ({ bytes }) => new DataView(bytes.buffer).setUint32(4, 0, true) });
-  const budget = fixture({ maxBytes: 100 });
+  const budget = fixture({ maxBytes: 7 });
   const controller = new AbortController();
   const cancelled = fixture({ signal: controller.signal, mutate: () => controller.abort() });
   for (const [f, code] of [[bad, 'pc4_online_record_bounds'], [budget, 'pc4_online_transfer_limit'], [cancelled, 'pc4_online_cancelled']]) {
@@ -86,7 +99,7 @@ test('malformed offset pairs, exhausted transfer budget and cancellation never s
 
 test('a frontier snapshots graph identity before the index await', async () => {
   let original;
-  const f = fixture({ mutate: ({ generation, file }) => {
+  const f = fixture({ count: 4096, mutate: ({ generation, file }) => {
     if (file.path !== 'graph_offsets.u32.bin') return;
     original = generation.profiles[0].artifacts.graph;
     generation.profiles[0].artifacts.graph = { ...original, path: 'other-profile.bin' };
@@ -96,4 +109,26 @@ test('a frontier snapshots graph identity before the index await', async () => {
     assert.equal(f.calls.length, 2);
     assert.equal(f.calls[1].path, 'graph.bin');
   } finally { f.reader.dispose(); }
+});
+
+test('uncached or distant sibling offsets never cause speculative HTTP requests', async () => {
+  const f = fixture({ count: 4096 });
+  const range = { ...f.range, lookup_frontier: [10, 2048, 3000] };
+  try {
+    await prefetchPc4LookupFrontier(f.reader, f.generation, range);
+    assert.equal(f.calls.length, 0, 'distant IDs are rejected before any prefetch preparation');
+    assert.equal(f.reader.readCached(range.artifact, 16 + 2048 * 4, 8), null);
+    assert.equal(f.calls.length, 0, 'cache inspection itself must not start I/O');
+  } finally { f.reader.dispose(); }
+});
+
+test('the 12-byte record lower bound keeps the 86-ID seam and its connected chains', async () => {
+  for (const [ids, calls] of [[[10, 96], 2], [[10, 97], 0], [[10, 96, 182], 2]]) {
+    const f = fixture({ count: 4096 });
+    try {
+      await prefetchPc4LookupFrontier(f.reader, f.generation, { ...f.range, lookup_frontier: ids });
+      assert.equal(f.calls.length, calls, JSON.stringify(ids));
+      if (calls) assert.equal(f.calls[1].end, (ids.at(-1) + 1) * 12);
+    } finally { f.reader.dispose(); }
+  }
 });

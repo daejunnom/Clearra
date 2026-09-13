@@ -121,6 +121,13 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
     get joinedRequests() { return joined; },
     get retainedBytes() { return cache.bytes; },
     dispose() { cancel(); signal?.removeEventListener('abort', cancel); },
+    readCached(input, offset, length) {
+      if (closed || signal?.aborted) fail('pc4_online_cancelled');
+      let artifact;
+      try { ({ artifact } = checkedPc4Read(input, offset, length)); }
+      catch (error) { fail(error.message); }
+      return cache.get(artifact, offset, length)?.slice() ?? null;
+    },
     async readMany(demands, options) {
       if (closed || signal?.aborted) fail('pc4_online_cancelled');
       let plan;
@@ -163,7 +170,17 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
       // A previous explicit frontier batch may cover this exact record without
       // matching the fixed window key. Reuse it before expanding the demand.
       const known = cache.get(artifact, offset, length);
-      if (known) { cacheHits++; return known.slice(); }
+      if (known) {
+        cacheHits++;
+        const result = known.slice();
+        // App retains the decoded graph once this real demand is admitted.
+        // Drop a consumed one-record prefetch; otherwise thousands of dead
+        // graph entries evict the index pages that batching must preserve.
+        // A containing multi-record span stays until LRU eviction so unread
+        // siblings in that same transfer are never discarded prematurely.
+        if (direct.has(artifact.path)) cache.releaseExact(artifact, offset, length);
+        return result;
+      }
       // No speculative/background scan: only windows intersecting this demand.
       // Small files and byte-budget-constrained reads keep exact access, never
       // expand a small request into a whole-artifact download.

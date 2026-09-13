@@ -201,7 +201,7 @@ contained index fetches, and the original complete local/online solution parity
 assertion. It does not simply change the expected count to 22. Fresh Rust CI
 is required for this fix and the frontier implementation below.
 
-## Bounded known-frontier transport implementation
+## First bounded-frontier implementation (superseded transport policy)
 
 On a missing adjacency record, the cooperative traversal now exposes at most
 32 unique IDs from its already queued work, inspecting at most 128 pending
@@ -227,7 +227,7 @@ transfer budget, cancellation, 206/Content-Range validation and no implicit
 retry remain intact. All-file expansion and speculative full-graph scans remain
 forbidden.
 
-Focused JS transport/OPFS/host validation: **27 tests passed**. A synthetic
+Initial focused JS transport/OPFS/host validation: **27 tests passed**. A synthetic
 32-adjacent-record A/B used 64 serial HTTP requests versus **2 batch requests**
 (132 offset bytes + 384 graph bytes), with every exact returned byte equal.
 The host integration test separately consumed all 64 genuine pending requests
@@ -241,9 +241,101 @@ without `--frontier` measures the same artifact/input. Old traces contain no
 frontier hints and cannot establish this implementation's large-case savings;
 future trace reads must not be treated as already known work.
 
+`7601eeda915c926e980651147767d32467c899f1` passed all five non-publishing jobs:
+https://github.com/daejunnom/Clearra/actions/runs/34771370952 . Nonzero Rust
+evidence includes TB 186, App 94, native TB 22, public WASM host 2, native
+process E2E 17 and native contract selection 19. This proves the contracts,
+not a speed benefit for the eager transport policy above. Only a tooling
+`punycode` deprecation warning was observed in the selected logs; no new Rust
+warning or failed selected test was found.
+
+## Real-frontier A/B and final request-conservative policy
+
+The exact 7601 WASM was read from CI artifact 10321957728, run 34771370952,
+attempt 1. ZIP digest `61ca9c58a47e8c5bc25187781f66410cb0b4ecf22d11cd26cf178a670fbcceb4`;
+WASM digest `bef0f56d12aed2cb0dca349a401cf04d3f99f4195a83dffb118e622cb7b49930`,
+21,496,038 B. The benchmark received the checked ZIP entries **in memory**,
+without an extra experimental build directory or a 4194 publication. The
+read-only helper accepts only the exact integration-preview source/artifact,
+bounds the archive, verifies its ZIP and entry SHA256 values, and never reads
+credential files. A producer retention-history receipt is allowed but not used
+as executable or release authority.
+
+Same empty-board / 4L / Jstris180 / P7P4 command, same WASM, first 30,000 real
+logical demands; only host transport policy changed:
+
+| Host policy | Modeled HTTP requests | Modeled HTTP bytes | Decision |
+|---|---:|---:|---|
+| Index 4 KiB / exact graph, no frontier | 15,026 | 20,959,851 | Baseline |
+| Eager exact-pair frontier (7601) | 19,857 | 555,140 | Reject: 32.2% more requests |
+| Eager frontier with index pages restored | 16,165 | 25,810,796 | Reject: still more requests |
+| Also release consumed exact graph spans | 15,040 | 21,075,795 | Reject: still no request benefit |
+| Enlarge only the currently required graph transfer | 14,998 | 21,016,558 | Small benefit, not a broad speed claim |
+
+All rows completed the identical 30k prefix, with the exact same raw ordered
+returned-byte digest `c0bcc67bd28c5ba64f5a3200c808fde68f0cb01b44c2ac871a1545e8e78fc65b`.
+The older saved trace still differs only by the already documented independent
+record swap; its normalized returned-byte digest remains `76d9a53a...76f` above.
+
+Two causes were corrected before accepting a transport policy: eager exact
+offset pairs lost the existing index-page reuse, and consumed one-record graph
+prefetches occupied entries that reusable index pages needed. More importantly,
+most DFS hints are distant queued ancestors/siblings, not a new ready batch at
+every missing descendant. Fetching all of them early gives little reduction
+in sequential dependency round trips.
+
+The final Web/native policy therefore:
+
+1. Only the current offset-pair request may start index I/O, using ordinary
+   index paging. Other hinted offsets must already be cached; otherwise skip.
+2. Only a merged graph span containing the **currently required** record and
+   at least one other distinct uncached known record may be fetched. Distant
+   siblings cause no extra speculative index or graph requests.
+3. Keep 64 KiB span / 1,024 B gap / 64 MiB total limits and exact Rust admission.
+   Consumed exact one-record graph entries are released; containing multi-record
+   spans retain their unread siblings under the existing LRU bound.
+4. Reject disconnected optional hints before cache copying/planning. Each
+   qualified record has at least 12 bytes, so a gap over 86 field IDs cannot
+   bridge the 1,024 B byte-gap limit. Preserve the connected component containing
+   the required ID, including chains at the 86-ID boundary. This is only an
+   I/O-hint filter, never a PC pruning or completeness claim.
+
+The final larger comparison used **100,000** identical logical demands and
+101,696 App advances:
+
+| Host policy | Modeled HTTP requests | Modeled HTTP bytes |
+|---|---:|---:|
+| No frontier | 45,551 | 51,329,915 |
+| Required-transfer-only, before cheap ID filter | 45,219 | 51,832,903 |
+| Final connected-ID filter | **45,220** | **51,832,638** |
+
+The final policy saves **331 requests (0.73%)** for about **0.50 MB extra bytes**.
+The one-request difference from the unfiltered variant reflects cache access/
+retention order, not different logical graph requests. Full ordered returned-byte
+digest matches across all three 100k runs:
+`8074680fc8fcb67df3044e97156d44edcf3a6839943d123545c123eeb478b6e7`.
+Normalizing only the recorded 30k swap reproduces the old 100k digest
+`8ec35bc3...82cb`; the unrecorded suffix remains order-sensitive.
+
+Model wall times were 61.383 / 75.633 / 41.121 seconds, with host I/O/planning
+25.496 / 40.011 / 10.742 seconds. These use local responses, include OS/runtime
+variation, and **are not internet latency or completed PC timings**. The ID
+filter removes unnecessary cache-copy/planning work; a universal speed ratio
+is not established. The large request-count benefit is modest. Explicit
+matching-profile installation remains the path that eliminates all lookup HTTP.
+
+Final local transport/host/OPFS tests: **31 passed**, including cached-only
+lookahead, sparse frontiers, index seams, consumed spans, and 86/87-ID bounds.
+The native mirror and new tests require the follow-up exact-source CI. No new
+App traversal or WASM hint protocol was introduced after the successful 7601
+build. The original 3ceca8 temporary extraction remains because its cleanup
+command was denied; no workaround deletion or additional extracted build was
+performed. All probes are finished, no benchmark port was started, and 4194
+still has the earlier a22 artifact.
+
 ## Remaining evidence
 
 Still required: complete 456,459-family validation/timing, input/hold-family
 scale tests, native/browser parity after these edits, real HTTP latency and
-real-WASM frontier-batch A/B, independent profile qualification, remaining product contracts and release
+completed-search frontier-batch A/B, independent profile qualification, remaining product contracts and release
 acceptance. Do not mark v0.9.0 or the overall goal complete from these prefix tests.

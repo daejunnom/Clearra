@@ -18,6 +18,7 @@ export function createPc4SpanCache(maxBytes, maxEntries) {
   return {
     get bytes() { return retained; },
     clear() { entries.clear(); files.clear(); retained = 0; },
+    releaseExact(artifact, offset, length) { remove(key(identity(artifact), offset, length)); },
     get(artifact, offset, length) {
       const file = identity(artifact), exact = key(file, offset, length);
       let k = entries.has(exact) ? exact : null;

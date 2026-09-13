@@ -61,7 +61,7 @@ test('online host forwards only verified partial bytes and records actual I/O', 
 
 test('online host consumes bounded WASM frontier hints but admits only each real pending range', async () => {
   const original = fetch;
-  const count = 128;
+  const count = 4096;
   const a = (path, byte_length, hash) => ({ path, byte_length, content_identity: 'sha256:' + hash.repeat(64) });
   const offsets = a('graph_offsets.u32.bin', 16 + 4 * (count + 1), 'b');
   const graph = a('graph.bin', count * 12, 'c');
@@ -108,7 +108,7 @@ test('online host consumes bounded WASM frontier hints but admits only each real
     assert.equal(cursor, 64, 'no pending request may be skipped or replaced with prefetched admission');
     assert.equal(calls, 2);
     assert.equal(observed.at(-1).pc4_online.requests, 2);
-    assert.equal(observed.at(-1).pc4_online.transferred_bytes, 516);
+    assert.equal(observed.at(-1).pc4_online.transferred_bytes, 4480);
   } finally { globalThis.fetch = original; }
 });
 
