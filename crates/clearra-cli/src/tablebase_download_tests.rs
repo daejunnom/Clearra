@@ -211,6 +211,7 @@ fn tablebase_download_requires_explicit_profile_and_lists_all_five_without_io() 
 fn tablebase_download_native_search_uses_shared_app_and_rejects_cross_profile_reuse() {
     use crate::{args::CliParser, assemble::CliAppRequestAssembler, output::RenderFormat};
     use clearra_app::{AppContext, AppCoreExecutorService, AppServices, AppStatus};
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let f = Fixture::new();
     f.install(&"a".repeat(40), false).unwrap();
     File::create_new(f.root.join("store.lock")).unwrap();
@@ -311,6 +312,9 @@ fn one_piece_request(profile: &str) -> clearra_app::AppRequest {
 #[test]
 fn tablebase_download_native_range_and_installed_files_return_the_same_complete_solution() {
     use clearra_app::{AppContext, AppCoreExecutorService, AppServices, AppStatus};
+    // These are complete App executions using the process-wide authority, not
+    // independent transport-only tests. Share the existing CLI resource guard.
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let f = Fixture::one_piece();
     let context = || {
         AppContext::new(
@@ -356,6 +360,8 @@ fn tablebase_download_native_range_and_installed_files_return_the_same_complete_
     );
     f.install(&"a".repeat(40), false).unwrap();
     File::create_new(f.root.join("store.lock")).unwrap();
+    // Retain the completed online response while starting local execution:
+    // only the search session, not its public response, may own compute slots.
     let local = online_execution::execute_with_online(
         &f.root,
         context(),

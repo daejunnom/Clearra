@@ -244,6 +244,22 @@ the lossless `u64::from(range.length())` conversion, not a relaxed transport bou
 The run remains failed; the next exact-source CI must execute the native tests
 before this path is considered verified. Its preview has not replaced 4194.
 
+Run `34763603661` compiled and executed the native PC4 group: 12 of 13 tests
+passed. The two complete-App tests had omitted the CLI's existing process-wide
+execution-resource test guard and raced under `--test-threads=2`; local admission
+in the parity test reported `shared_execution_resource_deferred`. Both now use
+that guard, while the transport/store-only tests remain parallel. Production
+admission limits and failure reporting are unchanged. The online response is
+deliberately kept alive while the next local search runs, so the test still
+checks release of execution resources between completed requests. The next CI
+must confirm this fix; no passing result is inferred from the code change.
+
+The same run passed both public WASM boundary tests, all 90 selected App tests,
+185 pure tablebase tests and the independent materializer/replay groups. In the
+4194 browser, all five download choices were inspected: four displayed their own
+unavailable state, while only Jstris enabled preparation. No full download or
+search was started, and the temporary audit tab was closed.
+
 ## Primary references
 
 - [HF dataset](https://huggingface.co/datasets/muse918/tetris-4lpc-mdp-vstar-policy): public metadata, current per-generation file identities; MIT dataset declared by user/upstream.
