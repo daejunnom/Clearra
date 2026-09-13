@@ -52,7 +52,7 @@ function fixture() {
       ? { profile, status: 'ready', upstream_complete: true, reader_contract: PC4_READER_CONTRACT,
         artifacts: { fields: desc[0], offsets: desc[1], graph: desc[2] } } : { profile, status: 'unavailable' }) };
   const install = async (value = generation) => downloadPc4Profile(value, api.pc4LocalDownloadStore, {
-    intent: 'explicit-download', fetcher: async url => new Response(files.get(url.split('/').at(-1))) });
+    intent: 'explicit-download', profile: 'jstris-180', fetcher: async url => new Response(files.get(url.split('/').at(-1))) });
   return { root, navigator, files, generation, desc, install };
 }
 async function withStorage(run) {

@@ -33,6 +33,7 @@ if (process.argv.includes('--row-normalization')) {
 // Even fetch probes rustc, so it must inherit this live managed owner.
 // Keep fetch and offline tests in one generation rather than replacing it.
 if (process.argv.includes('--fetch')) checks.unshift(['fetch-locked', ['fetch', '--locked']]);
+const failures = [];
 for (const [name, args] of checks) {
   console.log(`app_contract_check=${name} status=started`);
   const command = args[0] === 'test'
@@ -50,11 +51,20 @@ for (const [name, args] of checks) {
   });
   if (result.error || result.status !== 0) {
     console.error(`app_contract_check=${name} status=failed ${result.error?.message ?? ''}`);
-    process.exit(result.status || 1);
+    // Fetch is a prerequisite; test groups are independent and should still
+    // report their failures in this same managed compiler generation.
+    if (args[0] !== 'test') process.exit(result.status || 1);
+    failures.push(name);
+    continue;
   }
   if (args[0] === 'test' && !evidence.hasExecutedTests()) {
     console.error(`app_contract_check=${name} status=failed reason=no-tests-executed`);
-    process.exit(1);
+    failures.push(name);
+    continue;
   }
   console.log(`app_contract_check=${name} status=passed`);
+}
+if (failures.length) {
+  console.error(`app_contracts=failed checks=${failures.join(',')}`);
+  process.exitCode = 1;
 }

@@ -52,11 +52,23 @@ test('only an explicit action streams exactly the three qualified files and comm
   const f = fixture();
   await assert.rejects(downloadPc4Profile(f.generation, f.store), { code: 'pc4_download_explicit_action_required' });
   assert.equal(f.state.begun, 0);
-  const result = await downloadPc4Profile(f.generation, f.store, { intent: 'explicit-download', fetcher: f.fetcher });
+  const result = await downloadPc4Profile(f.generation, f.store, { intent: 'explicit-download', profile: 'jstris-180', fetcher: f.fetcher });
   assert.equal(result.storedBytes, [...f.files.values()].reduce((n, bytes) => n + bytes.length, 0));
   assert.equal(f.state.requests, 3); assert.equal(f.state.committed, 1); assert.equal(f.state.aborted, 0);
   for (const [path, bytes] of f.files) assert.deepEqual(Uint8Array.from(f.chunks.get(path)), bytes);
   assert.throws(() => pc4DownloadPlan(f.generation, 'srs'), { code: 'pc4_download_profile_unavailable' });
+});
+
+test('an explicit action without an explicit profile never defaults to Jstris or starts I/O', async () => {
+  const f = fixture();
+  for (const profile of [undefined, null, '', 'no180', 'unknown']) {
+    assert.throws(() => pc4DownloadPlan(f.generation, profile), { code: 'pc4_download_profile_required' });
+    await assert.rejects(downloadPc4Profile(f.generation, f.store, {
+      intent: 'explicit-download', profile, fetcher: f.fetcher,
+    }), { code: 'pc4_download_profile_required' });
+  }
+  assert.equal(f.state.requests, 0);
+  assert.equal(f.state.begun, 0);
 });
 
 test('each kick table requires its own qualification and cannot alias the Jstris artifacts', () => {
@@ -68,7 +80,7 @@ test('each kick table requires its own qualification and cannot alias the Jstris
     assert.throws(() => pc4DownloadPlan(claimed, profile), { code: 'pc4_download_profile_unavailable' });
   }
   const duplicate = { ...f.generation, profiles: Array(5).fill(f.generation.profiles[3]) };
-  assert.throws(() => pc4DownloadPlan(duplicate), { code: 'pc4_download_generation_invalid' });
+  assert.throws(() => pc4DownloadPlan(duplicate, 'jstris-180'), { code: 'pc4_download_generation_invalid' });
 });
 
 for (const failure of ['digest','truncated','oversized','partial','rate-limit','cancel','quota']) {
@@ -82,7 +94,7 @@ for (const failure of ['digest','truncated','oversized','partial','rate-limit','
       return new Response(failure === 'truncated' ? bytes.subarray(1) : failure === 'oversized' ? new Uint8Array(bytes.length + 1) : bytes,
         { status: failure === 'partial' ? 206 : failure === 'rate-limit' ? 429 : 200 });
     };
-    await assert.rejects(downloadPc4Profile(f.generation, f.store, { intent: 'explicit-download', fetcher, signal: controller.signal }));
+    await assert.rejects(downloadPc4Profile(f.generation, f.store, { intent: 'explicit-download', profile: 'jstris-180', fetcher, signal: controller.signal }));
     assert.equal(f.state.committed, 0); assert.equal(f.state.aborted, 1); assert.equal(f.chunks.size, 0);
   });
 }

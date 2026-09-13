@@ -19,7 +19,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let hashes = [0_u64, 0xff_ffff_fff0, 0xff_ffff_ffff];
+        // Hydra reverses bits within each ten-cell row; it is not column-major.
+        let initial_hash =
+            clearra_pc4_tablebase::clearra_board64_mask_to_hydra_field_hash_v1(0xff_bfef_fbfe)
+                .unwrap();
+        assert_eq!(initial_hash, 0x7f_dff7_fdff);
+        let hashes = [0_u64, initial_hash, 0xff_ffff_ffff];
         let header = |magic: &[u8; 8]| {
             let mut bytes = magic.to_vec();
             bytes.extend_from_slice(&1_u32.to_le_bytes());
@@ -134,14 +139,21 @@ fn online_pc4_worker_local_and_http_adapters_complete_the_same_one_piece_search(
             if state.is_terminal() {
                 let events = runtime.drain_events(id);
                 assert_eq!(state, WasmWorkerAdvanceStatus::Completed, "{events:?}");
-                let response = events
+                let (response, report) = events
                     .into_iter()
                     .find_map(|event| match event {
-                        WasmWorkerJobEvent::FinalResponse { response, .. } => Some(response),
+                        WasmWorkerJobEvent::FinalResponse {
+                            response,
+                            search_report,
+                            ..
+                        } => Some((response, search_report)),
                         _ => None,
                     })
                     .expect("terminal product response");
                 assert_eq!(response.status(), AppStatus::Success);
+                let report = report.expect("GUI-visible solution report");
+                assert!(report.solution_count_calculated);
+                assert_eq!(report.unique_solution_count, 1);
                 responses.push(response);
                 completed = true;
                 break;

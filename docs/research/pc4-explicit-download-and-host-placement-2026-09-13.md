@@ -173,6 +173,16 @@ stale requests and cancellation. The contract runner now rejects zero-test
 success without invoking Cargo a second time. These follow-up changes require
 their own CI result; the earlier preview is not their runtime evidence.
 
+The worker test's first run (`34761460337`) caught an incorrect synthetic field
+hash: Hydra reverses bits within each ten-cell row, not a column-major packing.
+The fixture now uses the existing checked conversion and an independent
+constant (`0xffbfeffbfe` Clearra -> `0x7fdff7fdff` Hydra); production conversion
+was unchanged. The cancellation/source-separation test already passed. The
+contract runner keeps independent test groups running after a failure (fetch
+remains prerequisite) and preserves a failing final status. Both the shared
+JavaScript download API and its type contract now require a profile explicitly;
+even `intent=explicit-download` alone cannot default to Jstris or start I/O.
+
 Remaining measured outcomes: real complete download on user-selected storage,
 native/browser full-file query parity, all 456,459 reference solutions, P7P4
 whole-family performance, native HTTP/desktop/Discord adapters, Oracle

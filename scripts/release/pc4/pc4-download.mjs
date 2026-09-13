@@ -3,7 +3,8 @@
 import { PC4_READER_CONTRACT } from './qualify-upstream-generation.mjs';
 import { Pc4StreamSha256 } from './pc4-stream-sha256.mjs';
 
-export function pc4DownloadPlan(generation, profile = 'jstris-180') {
+export function pc4DownloadPlan(generation, profile) {
+  if (!['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'].includes(profile)) fail('pc4_download_profile_required');
   if (generation?.schema !== 'clearra.pc4.host-generation.v1' ||
       generation.repository !== 'muse918/tetris-4lpc-mdp-vstar-policy' ||
       !/^[0-9a-f]{40}$/.test(generation.revision) || generation.profiles?.length !== 5 ||
@@ -24,7 +25,7 @@ export function pc4DownloadPlan(generation, profile = 'jstris-180') {
     files, totalBytes: files.reduce((n, file) => n + file.byte_length, 0) };
 }
 
-export async function downloadPc4Profile(generation, store, { intent, profile = 'jstris-180', signal,
+export async function downloadPc4Profile(generation, store, { intent, profile, signal,
   fetcher = fetch, onProgress = () => {}, hasherFactory = () => new Pc4StreamSha256() } = {}) {
   if (intent !== 'explicit-download') fail('pc4_download_explicit_action_required');
   // Immutable copy: a caller cannot change size/digest/revision during I/O.
