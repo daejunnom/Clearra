@@ -1022,6 +1022,15 @@ type ClearraWasmWorkerEventBase = {
   schema_version: 1;
   runtime: 'clearra-wasm';
   job_id: number;
+  /** Host I/O observations only; never completeness or scheduling authority. */
+  pc4_online?: {
+    provider: 'hf-graph';
+    profile: string;
+    revision: string;
+    requests: number;
+    transferred_bytes: number;
+    elapsed_ms: number;
+  };
 };
 
 export type ClearraSearchProgressTelemetry = {

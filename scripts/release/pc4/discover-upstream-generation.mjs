@@ -79,7 +79,6 @@ async function readBoundedJson(url, label, signal) {
     method: "GET",
     headers: Object.freeze({
       accept: "application/json",
-      "user-agent": "Clearra-PC4-generation-discovery/1",
     }),
     redirect: "error",
     credentials: "omit",

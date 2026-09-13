@@ -37,6 +37,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           node --test scripts/release/integration-contracts-workflow.test.mjs
           node --test scripts/tools/cargo-jobserver-stdio.test.mjs
+          node --test scripts/release/pc4/discover-upstream-generation.test.mjs scripts/release/pc4/qualify-upstream-generation.test.mjs
 
   native-cli:
     needs: source
@@ -107,6 +108,7 @@ jobs:
           packages/clearra-ui/test/pcPathReplayGif.contract.ts
           packages/clearra-ui/test/pcReplayPager.contract.ts
           packages/clearra-ui/test/runtimeShellI18n.test.mjs
+          apps/clearra-web/test/onlinePc4Host.test.mjs
 
   preview-wasm:
     needs: source

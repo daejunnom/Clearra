@@ -41,6 +41,13 @@ function isolated(source) {
   assert.equal((preview.match(/node scripts\/tools\/build-clearra-wasm\.mjs/gu) ?? []).length, 1);
 }
 test('integration checks have only exact-branch read-only test authority', () => isolated(workflow));
+test('online PC4 discovery and real host transport contracts stay in non-publishing checks', () => {
+  const source = workflow.split('  source:')[1].split('  native-cli:')[0];
+  assert.ok(source.includes('scripts/release/pc4/discover-upstream-generation.test.mjs'));
+  assert.ok(source.includes('scripts/release/pc4/qualify-upstream-generation.test.mjs'));
+  const surfaces = workflow.split('  surface-contracts:')[1].split('  preview-wasm:')[0];
+  assert.ok(surfaces.includes('apps/clearra-web/test/onlinePc4Host.test.mjs'));
+});
 for (const [name, mutation] of [
   ['main trigger', s => s.replace('branches: ["codex/v0.9.0-stacked-on-v0.8.1-20260912"]', 'branches: ["main"]')],
   ['broad job admission', s => s.replace("if: github.ref == 'refs/heads/codex/v0.9.0-stacked-on-v0.8.1-20260912' && github.ref_type == 'branch'", 'if: true')],
