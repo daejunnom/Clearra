@@ -1159,6 +1159,67 @@ fn pc_candidate_execution_bridge_input(
 }
 
 #[test]
+fn pc4_owned_candidate_accounting_includes_spare_vector_and_both_metadata_owners() {
+    let target = qualified_target(
+        "capacity-test",
+        Pc4RuleProfile::Srs,
+        Pc4TerminalUseCase::PcSearch,
+        1,
+    );
+    let candidate = StandardBoard64TilingIdentity::from_placements(
+        0x3f0,
+        [PiecePlacementMask::new(PieceKind::I, 0xf)],
+    )
+    .expect("one-row candidate");
+    let mut input = pc_candidate_execution_bridge_input(target, 0x3f0, vec![candidate]);
+    input.candidates.reserve_exact(512);
+    assert!(input.candidates.capacity() > input.candidates.len());
+    let source_metadata = input
+        .source()
+        .qualified_snapshot()
+        .unwrap()
+        .checked_retained_heap_bytes()
+        .unwrap();
+    let target_metadata = input
+        .universe_identity()
+        .qualified_target()
+        .unwrap()
+        .checked_retained_heap_bytes()
+        .unwrap();
+    let expected = core::mem::size_of::<PcCandidateReducerInput>() as u128
+        + input.candidates.capacity() as u128
+            * core::mem::size_of::<StandardBoard64TilingIdentity>() as u128
+        + source_metadata
+        + target_metadata;
+    assert_eq!(input.checked_retained_capacity_bytes(), Some(expected));
+    assert!(source_metadata > 0 && target_metadata > source_metadata);
+
+    let problem = pc_candidate_execution_bridge_problem(srs());
+    let compatibility = validate_pc4_search_problem_compatibility(Pc4RuleProfile::Srs, &problem)
+        .expect("same rule profile");
+    let evidence = crate::pc_candidate_execution_bridge::validate_pc_candidate_input(
+        &input,
+        compatibility,
+        &problem,
+        &ExecutionControl::default(),
+    )
+    .expect("candidate provenance validated without starting another search");
+    let evidence_bytes = core::mem::size_of_val(&evidence) as u128
+        + evidence
+            .universe_identity()
+            .checked_retained_heap_bytes()
+            .unwrap()
+        + evidence
+            .problem_id()
+            .checked_retained_capacity_bytes()
+            .unwrap();
+    assert_eq!(
+        evidence.checked_retained_capacity_bytes(),
+        Some(evidence_bytes)
+    );
+}
+
+#[test]
 fn pc_candidate_execution_bridge_preserves_ordinary_exact_product_payloads() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let problem = pc_candidate_execution_bridge_problem(srs());

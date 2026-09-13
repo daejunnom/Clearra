@@ -448,6 +448,42 @@ impl AppOnlinePc4FixedQueueCandidateSession {
         }
     }
 
+    /// Transfers the sealed candidate vector without cloning it. Consuming
+    /// this session releases Range cache, graph observations and replay
+    /// provenance before a product acquires its own retained-memory surface.
+    pub fn into_completed_reducer_input<G: PcCandidatePageGuard>(
+        self,
+        guard: &G,
+    ) -> Result<PcCandidateReducerInput, crate::PcCandidateBoundaryError> {
+        use crate::PcCandidateBoundaryError;
+        let input = self
+            .completed_reducer_input()
+            .ok_or(PcCandidateBoundaryError::IncompleteCannotReduce)?;
+        let check = |input: &PcCandidateReducerInput| {
+            if guard.is_cancelled() {
+                return Err(PcCandidateBoundaryError::Cancelled);
+            }
+            if !guard.is_current_source(input.universe_identity().source()) {
+                return Err(PcCandidateBoundaryError::StaleSession);
+            }
+            let snapshot = input
+                .universe_identity()
+                .qualified_snapshot()
+                .ok_or(PcCandidateBoundaryError::CompletenessBindingMismatch)?;
+            if !guard.is_current_snapshot(snapshot) {
+                return Err(PcCandidateBoundaryError::StaleSnapshot);
+            }
+            Ok(())
+        };
+        check(input)?;
+        let input = self
+            .runtime
+            .into_completed_reducer_input()
+            .ok_or(PcCandidateBoundaryError::IncompleteCannotReduce)?;
+        check(&input)?;
+        Ok(input)
+    }
+
     /// Advances through internal hit admission until externally observable I/O,
     /// one bounded candidate page, or a terminal state is reached.
     pub fn step<G>(&mut self, guard: &G) -> AppOnlinePc4FixedQueueCandidateStep
@@ -1332,6 +1368,106 @@ mod tests {
         assert_eq!(reducer.candidates().len(), 1);
         assert_eq!(reducer.candidates()[0].initial_board_mask(), INITIAL_BOARD);
         assert_eq!(session.step(&guard), complete);
+    }
+
+    #[test]
+    fn consuming_candidate_handoff_rejects_incomplete_cancelled_and_stale_sources() {
+        use crate::PcCandidateBoundaryError;
+
+        let prepare = |complete: bool| {
+            let generation = pin(activated_snapshot("generation-owned-handoff", None));
+            let qualified_target = target(generation.activated_snapshot(), Pc4RuleProfile::Srs);
+            let candidate_source = source(&qualified_target);
+            let guard = Guard::new(candidate_source.clone());
+            let mut session = start(generation, &qualified_target, &candidate_source, &guard)
+                .expect("owned handoff session");
+            if complete {
+                let dataset = range_dataset();
+                let mut lookup = None;
+                let mut ordinal = 0;
+                for _ in 0..256 {
+                    match session.step(&guard) {
+                        AppOnlinePc4FixedQueueCandidateStep::NeedRange(request) => {
+                            if lookup != Some(request.lookup_session()) {
+                                lookup = Some(request.lookup_session());
+                                ordinal = 0;
+                            }
+                            ordinal += 1;
+                            session
+                                .admit_range(
+                                    attempt(ordinal),
+                                    partial_input(&request, &dataset),
+                                    &guard,
+                                )
+                                .expect("exact synthetic range");
+                        }
+                        AppOnlinePc4FixedQueueCandidateStep::Progress { .. } => {}
+                        AppOnlinePc4FixedQueueCandidateStep::Complete { .. } => break,
+                        terminal => panic!("unexpected handoff state: {terminal:?}"),
+                    }
+                }
+                assert!(
+                    session.completed_reducer_input().is_some(),
+                    "bounded fixture completes"
+                );
+            }
+            (session, guard)
+        };
+        let (incomplete, guard) = prepare(false);
+        assert_eq!(
+            incomplete.into_completed_reducer_input(&guard),
+            Err(PcCandidateBoundaryError::IncompleteCannotReduce)
+        );
+        for failure in 0..3 {
+            let (session, guard) = prepare(true);
+            let expected = match failure {
+                0 => {
+                    guard.cancelled.set(true);
+                    PcCandidateBoundaryError::Cancelled
+                }
+                1 => {
+                    guard.source_current.set(false);
+                    PcCandidateBoundaryError::StaleSession
+                }
+                _ => {
+                    guard.snapshot_current.set(false);
+                    PcCandidateBoundaryError::StaleSnapshot
+                }
+            };
+            assert_eq!(session.into_completed_reducer_input(&guard), Err(expected));
+        }
+
+        struct StaleAfterHandoff<'a> {
+            guard: &'a Guard,
+            observations: Cell<usize>,
+        }
+        impl PcCandidatePageGuard for StaleAfterHandoff<'_> {
+            fn is_cancelled(&self) -> bool {
+                false
+            }
+            fn is_current_source(&self, source: &PcCandidateSourceBinding) -> bool {
+                let observations = self.observations.get() + 1;
+                self.observations.set(observations);
+                observations == 1 && PcCandidatePageGuard::is_current_source(self.guard, source)
+            }
+            fn is_current_snapshot(&self, snapshot: &QualifiedSnapshotIdentity) -> bool {
+                PcCandidatePageGuard::is_current_snapshot(self.guard, snapshot)
+            }
+        }
+        let (session, guard) = prepare(true);
+        let stale = StaleAfterHandoff {
+            guard: &guard,
+            observations: Cell::new(0),
+        };
+        assert_eq!(
+            session.into_completed_reducer_input(&stale),
+            Err(PcCandidateBoundaryError::StaleSession)
+        );
+        assert_eq!(
+            stale.observations.get(),
+            2,
+            "freshness is sampled on both sides of cache release"
+        );
     }
 
     #[test]

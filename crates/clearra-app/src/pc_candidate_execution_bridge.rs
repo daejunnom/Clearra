@@ -38,6 +38,17 @@ pub struct ValidatedPcCandidateExecutionEvidence {
 }
 
 impl ValidatedPcCandidateExecutionEvidence {
+    pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let Self {
+            universe_identity,
+            compatibility: _,
+            problem_id,
+        } = self;
+        (core::mem::size_of::<Self>() as u128)
+            .checked_add(universe_identity.checked_retained_heap_bytes()?)?
+            .checked_add(problem_id.checked_retained_capacity_bytes()?)
+    }
+
     pub const fn universe_identity(&self) -> &PcCandidateUniverseIdentity {
         &self.universe_identity
     }
@@ -144,6 +155,26 @@ pub fn execute_validated_pc_candidate_input(
     control: &ExecutionControl,
 ) -> Result<(CoreExecutionResult, ValidatedPcCandidateExecutionEvidence), PcCandidateExecutionError>
 {
+    let evidence = validate_pc_candidate_input(input, compatibility, problem, control)?;
+    let core_result =
+        WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+            problem,
+            input.candidates(),
+            control,
+        )
+        .map_err(PcCandidateExecutionError::Core)?;
+    Ok((core_result, evidence))
+}
+
+/// Same admission as the compatibility executor, without starting a session.
+/// A typed-score caller must keep this result and the exact problem together
+/// while its parent-authorized Core verifier owns postprocessing.
+pub(crate) fn validate_pc_candidate_input(
+    input: &PcCandidateReducerInput,
+    compatibility: Pc4SearchProblemCompatibility,
+    problem: &SearchProblem,
+    control: &ExecutionControl,
+) -> Result<ValidatedPcCandidateExecutionEvidence, PcCandidateExecutionError> {
     if control.is_cancelled() {
         return Err(PcCandidateExecutionError::Cancelled);
     }
@@ -251,21 +282,11 @@ pub fn execute_validated_pc_candidate_input(
         return Err(PcCandidateExecutionError::RequestIdentityMismatch);
     }
 
-    let core_result =
-        WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
-            problem,
-            input.candidates(),
-            control,
-        )
-        .map_err(PcCandidateExecutionError::Core)?;
-    Ok((
-        core_result,
-        ValidatedPcCandidateExecutionEvidence {
-            universe_identity: universe.clone(),
-            compatibility,
-            problem_id: problem.problem_id().clone(),
-        },
-    ))
+    Ok(ValidatedPcCandidateExecutionEvidence {
+        universe_identity: universe.clone(),
+        compatibility,
+        problem_id: problem.problem_id().clone(),
+    })
 }
 
 fn fixed_queue_hold_state(allow_hold: bool, hold: HoldSlot) -> FixedQueueHoldState {

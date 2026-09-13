@@ -607,6 +607,33 @@ pub struct PcCandidateUniverseIdentity {
 }
 
 impl PcCandidateUniverseIdentity {
+    pub(crate) fn checked_retained_heap_bytes(&self) -> Option<u128> {
+        let Self {
+            source,
+            qualified_target,
+            exact_candidate_count: _,
+            candidate_set_digest: _,
+        } = self;
+        let PcCandidateSourceBinding {
+            session_id: _,
+            request_identity: _,
+            source_identity: _,
+            profile: _,
+            initial_board_mask: _,
+            provider,
+        } = source;
+        let source_bytes = match provider {
+            PcCandidateProviderProvenance::OfflineExact => 0,
+            PcCandidateProviderProvenance::OnlinePc4(snapshot) => {
+                snapshot.checked_retained_heap_bytes()?
+            }
+        };
+        source_bytes.checked_add(match qualified_target {
+            Some(target) => target.checked_retained_heap_bytes()?,
+            None => 0,
+        })
+    }
+
     fn from_complete_evidence(
         evidence: PcCandidateCompletenessEvidence,
     ) -> Result<Self, PcCandidateBoundaryError> {
@@ -678,6 +705,25 @@ pub struct PcCandidateReducerInput {
 }
 
 impl PcCandidateReducerInput {
+    /// Includes the inline carrier, all vector capacity and owned source/
+    /// target metadata. It does not account for a still-live producer cache;
+    /// use the consuming session handoff before admitting an owned product.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let Self {
+            universe_identity,
+            candidates,
+        } = self;
+        if core::mem::needs_drop::<StandardBoard64TilingIdentity>() {
+            return None;
+        }
+        (core::mem::size_of::<Self>() as u128)
+            .checked_add(
+                (candidates.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)?,
+            )?
+            .checked_add(universe_identity.checked_retained_heap_bytes()?)
+    }
+
     /// Only the observation adapter's sealed, completely exhausted family may
     /// cross this seam. Raw candidate parts cannot mint completeness evidence.
     pub(crate) fn from_complete_observation_union(

@@ -13,6 +13,7 @@ const checks = [
 if (process.argv.includes('--row-normalization')) {
   checks.splice(0, checks.length,
     ['pc4-row-core', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-core-executor', '--lib', 'pc4_graph_materializer']],
+    ['pc4-candidate-core', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-core-executor', '--lib', 'precomputed_geometry_tests']],
     ['pc4-row-tablebase', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-pc4-tablebase', '--lib']],
     ['pc4-row-app', [...common, 'pc4_']],
   );

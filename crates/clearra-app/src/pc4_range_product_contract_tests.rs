@@ -22,8 +22,8 @@ use crate::{
     AppCommand, AppContext, AppCoreExecutorService, AppRequest, AppResponse, AppServices,
     AppStatus, CooperativeAppAdvance, Pc4CandidateProductError, PcCandidateBoundaryError,
     PcCandidatePageGuard, PcCandidateReducerInput, PcCandidateSourceBinding, PcChanceIngressOrigin,
-    PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection, ProductCapabilityContract,
-    ScenarioAppCommand,
+    PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection, PcScoreIngressOrigin,
+    ProductCapabilityContract, ScenarioAppCommand,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -32,6 +32,9 @@ enum Product {
     Chance,
     Minimum,
     Replay,
+    Score,
+    ScoreMinimum,
+    FixedScore,
 }
 
 fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -> AppRequest {
@@ -67,8 +70,30 @@ fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -
             PcResultProjection::PathFamilyV2(PcPathIngressOrigin::CanonicalPcPath),
             Some(ProductCapabilityContract::PcPath),
         ),
+        Product::Score => (
+            PcCountPolicy::CountAll,
+            ObjectivePolicy::all().with_score_summary(),
+            PcResultProjection::ScoreSummaryV2(PcScoreIngressOrigin::CanonicalPcScore),
+            Some(ProductCapabilityContract::PcScore),
+        ),
+        Product::ScoreMinimum => (
+            PcCountPolicy::CountAll,
+            ObjectivePolicy::minimum_cover().with_score_summary(),
+            PcResultProjection::pc_score_minimals(),
+            Some(ProductCapabilityContract::PcScoreMinimals),
+        ),
+        Product::FixedScore => (
+            PcCountPolicy::CountAll,
+            ObjectivePolicy::all().with_score_summary(),
+            PcResultProjection::ScoreSummaryV2(PcScoreIngressOrigin::CanonicalPcScoreFinder),
+            Some(ProductCapabilityContract::PcScoreFinder),
+        ),
     };
-    let query = PcScenarioQuery::new(
+    let score = matches!(
+        product,
+        Product::Score | Product::ScoreMinimum | Product::FixedScore
+    );
+    let mut query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(u16::from(lines), initial),
         PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; usize::from(lines)])),
         PieceWindow::new(usize::from(lines)),
@@ -81,8 +106,12 @@ fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -
     .with_execution_policy(
         PcExecutionPolicy::mvp_default()
             .with_requested_backend(RequestedSearchBackend::Cpu)
-            .with_workers(1),
+            .with_workers(1)
+            .with_max_memory_mib(score.then_some(64)),
     );
+    if score {
+        query = query.with_retained_trace_limit(1);
+    }
     let request = AppRequest::new(AppCommand::Scenario(
         ScenarioAppCommand::new(query).with_result_projection(projection),
     ));
@@ -90,6 +119,97 @@ fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -
         Some(contract) => request.with_product_capability_contract(contract).unwrap(),
         None => request,
     }
+}
+
+pub(super) fn assert_owned_score_product_parity<G: PcCandidatePageGuard>(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    input: PcCandidateReducerInput,
+    guard: &G,
+) {
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    assert!(
+        input.checked_retained_capacity_bytes().unwrap()
+            > (input.candidates().len() * core::mem::size_of_val(&input.candidates()[0])) as u128
+    );
+    for product in [Product::Score, Product::ScoreMinimum, Product::FixedScore] {
+        let request = request(lines, profile, initial, product);
+        let expected = ordinary(&context, request.clone());
+        assert_eq!(
+            expected.status(),
+            AppStatus::Success,
+            "ordinary {lines}L {profile:?} {product:?}: {expected:?}"
+        );
+        // Explicit finite App and compiled limits agree. Borrowed compatibility
+        // input must still reject this path; owned input retains its authority.
+        let request = request.with_resource_budget(ResourceBudget::new(1, None, Some(64)));
+        assert!(matches!(
+            context.start_pc4_candidate_product(
+                request.clone(),
+                &input,
+                guard,
+                &ExecutionControl::default()
+            ),
+            Err(Pc4CandidateProductError::FiniteMemoryAuthorityRequired)
+        ));
+        let mut execution = context
+            .start_pc4_owned_candidate_product(
+                request,
+                input.clone(),
+                guard,
+                &ExecutionControl::default(),
+            )
+            .unwrap_or_else(|error| panic!("online {lines}L {profile:?} {product:?}: {error:?}"));
+        let mut response = None;
+        for _ in 0..4096 {
+            match execution
+                .advance(256, guard, &ExecutionControl::default())
+                .unwrap()
+            {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                CooperativeAppAdvance::Completed(value) => {
+                    response = Some(value);
+                    break;
+                }
+                other => panic!("unexpected score state: {other:?}"),
+            }
+        }
+        let response = response.expect("owned score product must finish");
+        assert_eq!(
+            response.status(),
+            AppStatus::Success,
+            "online {lines}L {profile:?} {product:?}: {response:?}"
+        );
+        let actual_product = response
+            .product_capability_result()
+            .expect("typed online score");
+        let expected_product = expected
+            .product_capability_result()
+            .expect("typed ordinary score");
+        assert_eq!(actual_product.contract(), expected_product.contract());
+        assert_eq!(actual_product.public_result_payload(), expected_product.public_result_payload(),
+            "{lines}L {profile:?} {product:?}: all field scores, winners and canonical portfolio stay identical");
+        assert!(matches!(
+            execution.advance(256, guard, &ExecutionControl::default()),
+            Err(Pc4CandidateProductError::AlreadyFinished)
+        ));
+    }
+    let too_small = request(lines, profile, initial, Product::Score)
+        .with_resource_budget(ResourceBudget::new(1, None, Some(0)));
+    assert!(matches!(
+        context.start_pc4_owned_candidate_product(
+            too_small,
+            input,
+            guard,
+            &ExecutionControl::default()
+        ),
+        Err(Pc4CandidateProductError::Terminal(
+            "pc4_score_request_memory_limit_binding_mismatch"
+        ))
+    ));
 }
 
 fn ordinary(context: &AppContext, request: AppRequest) -> AppResponse {

@@ -235,6 +235,20 @@ impl Pc4FixedQueueCandidateRuntime {
         }
     }
 
+    pub fn into_completed_reducer_input(self) -> Option<PcCandidateReducerInput> {
+        match self.state {
+            Pc4FixedQueueCandidateRuntimeState::Complete(completion) => {
+                let Pc4FixedQueueCandidateCompletion {
+                    family: _,
+                    reducer_input,
+                } = *completion;
+                Some(reducer_input)
+            }
+            Pc4FixedQueueCandidateRuntimeState::Running(_)
+            | Pc4FixedQueueCandidateRuntimeState::Poisoned => None,
+        }
+    }
+
     pub const fn completed_candidate_family(&self) -> Option<&Pc4GraphCandidateFamily> {
         match &self.state {
             Pc4FixedQueueCandidateRuntimeState::Complete(completion) => Some(&completion.family),

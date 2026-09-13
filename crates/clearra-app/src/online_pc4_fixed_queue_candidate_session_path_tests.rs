@@ -282,6 +282,20 @@ fn assert_clear_path(lines: u8) {
             reducer,
             &guard,
         );
+        let candidate_allocation = reducer.candidates().as_ptr();
+        let owned_input = session.into_completed_reducer_input(&guard).unwrap();
+        assert_eq!(
+            owned_input.candidates().as_ptr(),
+            candidate_allocation,
+            "completion moves, rather than clones, the candidate allocation"
+        );
+        product_contracts::assert_owned_score_product_parity(
+            lines,
+            profile,
+            fixture.initial_board,
+            owned_input,
+            &guard,
+        );
     }
 }
 

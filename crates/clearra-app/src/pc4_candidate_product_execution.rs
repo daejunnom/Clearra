@@ -5,10 +5,15 @@
 //! does not start distributed workers or enumerate Geometry. Core verifies the
 //! supplied candidates and App retains its existing cooperative minimum/replay
 //! finalization. Transport, consent, fallback and dataset qualification remain
-//! outside this module. Finite-memory and typed score/tiling terminals require
-//! their own guarded handoff and are explicitly not admitted by this path.
+//! outside this module. The borrowed compatibility entrypoint rejects finite
+//! memory and typed score/tiling terminals. Typed scores use the owned child
+//! handoff and retain the existing request-level terminal memory authority;
+//! other finite-memory product handoffs remain explicitly unsupported.
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+
+#[path = "pc4_score_candidate_product_execution.rs"]
+mod score;
 
 use super::{
     AppContext, AppRequest, AppResponse, CooperativeSearchResponseKind,
@@ -37,6 +42,7 @@ pub enum Pc4CandidateProductError {
     Source(PcCandidateBoundaryError),
     Compatibility(Pc4SearchProblemCompatibilityError),
     Candidate(PcCandidateExecutionError),
+    Terminal(&'static str),
     AlreadyFinished,
 }
 
@@ -51,6 +57,7 @@ impl Pc4CandidateProductError {
             Self::Source(error) => error.reason(),
             Self::Compatibility(error) => error.reason(),
             Self::Candidate(error) => error.reason(),
+            Self::Terminal(reason) => reason,
             Self::AlreadyFinished => "pc4_candidate_product_already_finished",
         }
     }
@@ -68,8 +75,16 @@ impl std::error::Error for Pc4CandidateProductError {}
 /// Freshness is sampled before and after every advance, including completion;
 /// a stale source cannot be laundered by a long minimum-cover proof.
 pub struct Pc4CandidateProductExecution {
-    execution: Option<CooperativeAppExecution>,
+    execution: Option<Pc4CandidateProductState>,
     evidence: ValidatedPcCandidateExecutionEvidence,
+}
+
+// One result owner exists at a time; score summaries are already finalized,
+// while minimum/replay products retain the ordinary resumable cursor.
+#[allow(clippy::large_enum_variant)]
+enum Pc4CandidateProductState {
+    Cooperative(CooperativeAppExecution),
+    Ready(AppResponse),
 }
 
 impl AppContext {
@@ -97,20 +112,7 @@ impl AppContext {
         {
             return Err(Pc4CandidateProductError::FiniteMemoryAuthorityRequired);
         }
-        let mut context = self
-            .clone()
-            .with_language(request.language().unwrap_or(self.language()));
-        if let Some(policy) = request.file_policy() {
-            context = context.with_file_policy(policy.clone());
-        }
-        let prepared = match context.prepare_distributed_search(request) {
-            DistributedSearchPreparation::Ready(response) => {
-                return Err(Pc4CandidateProductError::RequestRejected(Box::new(
-                    response,
-                )));
-            }
-            DistributedSearchPreparation::Search(prepared) => prepared,
-        };
+        let prepared = prepare_request(self, request)?;
         prepared.start_pc4_candidate_product(input, guard, control)
     }
 }
@@ -167,15 +169,17 @@ impl PreparedDistributedSearch {
         } = self;
         drop(problem);
         Ok(Pc4CandidateProductExecution {
-            execution: Some(CooperativeAppExecution::from_precomputed_product_result(
-                context,
-                result,
-                response_kind,
-                command_kind,
-                output_policy,
-                validation_report,
-                resource_budget,
-                product_capability_contract,
+            execution: Some(Pc4CandidateProductState::Cooperative(
+                CooperativeAppExecution::from_precomputed_product_result(
+                    context,
+                    result,
+                    response_kind,
+                    command_kind,
+                    output_policy,
+                    validation_report,
+                    resource_budget,
+                    product_capability_contract,
+                ),
             )),
             evidence,
         })
@@ -193,29 +197,46 @@ impl Pc4CandidateProductExecution {
         guard: &G,
         control: &ExecutionControl,
     ) -> Result<CooperativeAppAdvance, Pc4CandidateProductError> {
-        if self.execution.is_none() {
-            return Err(Pc4CandidateProductError::AlreadyFinished);
-        }
-        if let Err(error) = check_source(self.evidence.universe_identity(), guard, control) {
-            self.execution = None;
-            return Err(error);
-        }
-        let advance = self
+        let state = self
             .execution
-            .as_mut()
-            .expect("checked execution")
-            .advance(work_budget, control);
-        if let Err(error) = check_source(self.evidence.universe_identity(), guard, control) {
-            self.execution = None;
-            return Err(error);
-        }
-        if !matches!(
-            &advance,
-            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress
-        ) {
-            self.execution = None;
-        }
+            .take()
+            .ok_or(Pc4CandidateProductError::AlreadyFinished)?;
+        check_source(self.evidence.universe_identity(), guard, control)?;
+        let (advance, next_state) = match state {
+            Pc4CandidateProductState::Cooperative(mut execution) => {
+                let advance = execution.advance(work_budget, control);
+                let next = matches!(
+                    &advance,
+                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress
+                )
+                .then_some(Pc4CandidateProductState::Cooperative(execution));
+                (advance, next)
+            }
+            Pc4CandidateProductState::Ready(response) => {
+                (CooperativeAppAdvance::Completed(response), None)
+            }
+        };
+        check_source(self.evidence.universe_identity(), guard, control)?;
+        self.execution = next_state;
         Ok(advance)
+    }
+}
+
+fn prepare_request(
+    context: &AppContext,
+    request: AppRequest,
+) -> Result<PreparedDistributedSearch, Pc4CandidateProductError> {
+    let mut context = context
+        .clone()
+        .with_language(request.language().unwrap_or(context.language()));
+    if let Some(policy) = request.file_policy() {
+        context = context.with_file_policy(policy.clone());
+    }
+    match context.prepare_distributed_search(request) {
+        DistributedSearchPreparation::Ready(response) => Err(
+            Pc4CandidateProductError::RequestRejected(Box::new(response)),
+        ),
+        DistributedSearchPreparation::Search(prepared) => Ok(prepared),
     }
 }
 

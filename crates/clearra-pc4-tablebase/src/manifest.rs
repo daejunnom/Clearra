@@ -793,6 +793,32 @@ pub struct QualifiedSnapshotIdentity {
 }
 
 impl QualifiedSnapshotIdentity {
+    /// Allocation capacities retained by this identity, excluding its inline
+    /// carrier. Qualification metadata is owned, not just borrowed labels.
+    pub fn checked_retained_heap_bytes(&self) -> Option<u128> {
+        let SnapshotVerificationAttestation {
+            snapshot_identity,
+            manifest_content_identity,
+            evidence_identity,
+        } = &self.attestation;
+        let SnapshotIdentity {
+            repository,
+            revision,
+            generation,
+        } = snapshot_identity;
+        [
+            repository.capacity(),
+            revision.capacity(),
+            generation.capacity(),
+            manifest_content_identity.0.capacity(),
+            evidence_identity.capacity(),
+        ]
+        .into_iter()
+        .try_fold(0_u128, |bytes, capacity| {
+            bytes.checked_add(capacity as u128)
+        })
+    }
+
     fn from_verified_attestation(attestation: SnapshotVerificationAttestation) -> Self {
         Self { attestation }
     }
@@ -907,6 +933,37 @@ pub struct QualifiedPc4TargetIdentity {
 }
 
 impl QualifiedPc4TargetIdentity {
+    /// Heap payload only; the owning App carrier accounts for this type's
+    /// inline storage. Capacities, rather than visible string lengths, matter.
+    pub fn checked_retained_heap_bytes(&self) -> Option<u128> {
+        let Self {
+            snapshot,
+            profile: _,
+            use_case: _,
+            qualification,
+        } = self;
+        let ProfileTargetCompletenessQualification {
+            use_case: _,
+            target_lines: _,
+            terminal_field: _,
+            terminal_semantics_identity,
+            outgoing_edge_completeness_identity,
+            known_answer_identity,
+            offline_exact_parity_identity,
+        } = qualification;
+        [
+            terminal_semantics_identity.capacity(),
+            outgoing_edge_completeness_identity.capacity(),
+            known_answer_identity.capacity(),
+            offline_exact_parity_identity.capacity(),
+        ]
+        .into_iter()
+        .try_fold(
+            snapshot.checked_retained_heap_bytes()?,
+            |bytes, capacity| bytes.checked_add(capacity as u128),
+        )
+    }
+
     pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
         &self.snapshot
     }
@@ -1559,6 +1616,47 @@ pub(crate) mod tests {
             Pc4ArtifactRole::GraphOffsets => "graph-offsets",
             Pc4ArtifactRole::Graph => "graph",
         }
+    }
+
+    #[test]
+    fn qualified_identity_memory_counts_every_owned_string_capacity() {
+        let mut target = qualified_target_identity(
+            "capacity-test",
+            "capacity-manifest",
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::PcSearch,
+            1,
+        );
+        let attestation = &mut target.snapshot.attestation;
+        let mut snapshot_capacity = 0_u128;
+        for value in [
+            &mut attestation.snapshot_identity.repository,
+            &mut attestation.snapshot_identity.revision,
+            &mut attestation.snapshot_identity.generation,
+            &mut attestation.manifest_content_identity.0,
+            &mut attestation.evidence_identity,
+        ] {
+            value.reserve_exact(1024);
+            assert!(value.capacity() > value.len());
+            snapshot_capacity += value.capacity() as u128;
+        }
+        assert_eq!(
+            target.snapshot.checked_retained_heap_bytes(),
+            Some(snapshot_capacity)
+        );
+        let qualification = &mut target.qualification;
+        let mut target_capacity = snapshot_capacity;
+        for value in [
+            &mut qualification.terminal_semantics_identity,
+            &mut qualification.outgoing_edge_completeness_identity,
+            &mut qualification.known_answer_identity,
+            &mut qualification.offline_exact_parity_identity,
+        ] {
+            value.reserve_exact(2048);
+            assert!(value.capacity() > value.len());
+            target_capacity += value.capacity() as u128;
+        }
+        assert_eq!(target.checked_retained_heap_bytes(), Some(target_capacity));
     }
 
     #[test]

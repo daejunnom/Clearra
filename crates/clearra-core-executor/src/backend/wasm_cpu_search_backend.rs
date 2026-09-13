@@ -367,6 +367,56 @@ impl WasmCpuSearchBackend {
 
         let mut session =
             WasmExactSearchSession::new_external_geometry(problem).map_err(map_error)?;
+        Self::reduce_complete_precomputed_candidates(&mut session, candidates, control)
+    }
+
+    /// The typed-score counterpart of the complete precomputed candidate
+    /// reducer. The exact problem Arc and request-level parent authority stay
+    /// bound to the returned verifier, whose child lease must remain alive
+    /// through guarded postprocessing. Drop the returned session before
+    /// constructing a rich App response. No Geometry enumeration or second
+    /// global memory lease is introduced. Completeness remains the caller's
+    /// authority; this constructor accepts only CPU typed-score execution.
+    pub fn execute_complete_precomputed_candidates_under_authority(
+        problem: Arc<SearchProblem>,
+        candidates: &[StandardBoard64TilingIdentity],
+        checked_external_retained_upper_bound_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+        control: &ExecutionControl,
+    ) -> Result<(CoreExecutionResult, WasmCpuSearchSession), WasmCpuSearchError> {
+        validate_shared_terminal_problem(&problem, false, true)?;
+        if candidates.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(WasmCpuSearchError::InvalidProblem {
+                reason: "wasm_precomputed_geometry_candidates_not_strictly_canonical",
+            });
+        }
+        if control.is_cancelled() {
+            return Err(WasmCpuSearchError::Cancelled);
+        }
+        let exact = WasmExactSearchSession::new_shared_external_verifier_under_authority(
+            problem,
+            checked_external_retained_upper_bound_bytes,
+            authority,
+        )
+        .map_err(map_error)?;
+        let mut session = WasmCpuSearchSession {
+            inner: WasmSearchSessionInner::Cpu(exact),
+        };
+        let result = match &mut session.inner {
+            WasmSearchSessionInner::Cpu(exact) => {
+                Self::reduce_complete_precomputed_candidates(exact, candidates, control)
+            }
+            #[cfg(feature = "webgpu-search")]
+            WasmSearchSessionInner::WebGpu(_) => unreachable!("explicit CPU candidate verifier"),
+        };
+        Ok((result?, session))
+    }
+
+    fn reduce_complete_precomputed_candidates(
+        session: &mut WasmExactSearchSession,
+        candidates: &[StandardBoard64TilingIdentity],
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
         if !candidates.is_empty() {
             while !session
                 .advance_external_geometry_preparation(control)
@@ -709,6 +759,8 @@ fn score_resource_test_guard() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod precomputed_geometry_tests {
+    use std::sync::Arc;
+
     use clearra_core_domain::{
         execution_cancellation::ExecutionControl,
         piece::piece_kind::PieceKind,
@@ -722,7 +774,10 @@ mod precomputed_geometry_tests {
     use clearra_problem::{ProblemCompiler, SearchProblem};
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
-    use super::{score_resource_test_guard, WasmCpuSearchBackend, WasmCpuSearchError};
+    use super::{
+        score_resource_test_guard, WasmCpuSearchBackend, WasmCpuSearchError,
+        WasmCpuTerminalResourceAuthority,
+    };
 
     fn one_i_problem(retain_replay: bool, reject_all: bool) -> SearchProblem {
         let mut query = PcScenarioQuery::new(
@@ -823,6 +878,107 @@ mod precomputed_geometry_tests {
         ] {
             assert_eq!(injected.field(field), ordinary.field(field), "{field}");
         }
+    }
+
+    #[test]
+    fn parent_authorized_precomputed_score_retains_exact_result_and_memory_authority() {
+        let _resource_guard = score_resource_test_guard();
+        let problem = Arc::new(one_i_problem(true, false));
+        let control = ExecutionControl::default();
+        let ordinary = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+            .expect("ordinary exact reference before parent admission");
+        // Independent geometry input: the four missing cells in a one-row PC.
+        let candidate = StandardBoard64TilingIdentity::from_placements(
+            0x3f0,
+            [PiecePlacementMask::new(PieceKind::I, 0x00f)],
+        )
+        .expect("one-I independent candidate");
+        let parent = WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
+            .expect("one request-level parent");
+        let external_bytes = 16 * 1024 * 1024;
+        let (injected, session) =
+            WasmCpuSearchBackend::execute_complete_precomputed_candidates_under_authority(
+                Arc::clone(&problem),
+                &[candidate],
+                external_bytes,
+                &parent,
+                &control,
+            )
+            .expect("external verifier uses the existing parent");
+        assert!(session.shares_problem_arc(&problem));
+        assert_eq!(injected.normalized_solution_identities(), &[candidate]);
+        assert_eq!(injected.path_steps(), ordinary.path_steps());
+        assert_eq!(injected.solution_coverages(), ordinary.solution_coverages());
+        assert_eq!(
+            injected.exact_scoring_execution_batches(),
+            ordinary.exact_scoring_execution_batches()
+        );
+        let retained = session
+            .checked_terminal_retained_bytes(&injected)
+            .expect("completed external verifier retains checked accounting");
+        assert!(retained >= external_bytes);
+        let future = session
+            .admitted_memory_cap_bytes()
+            .checked_sub(retained)
+            .expect("the result fits the configured cap");
+        session
+            .validate_public_result_memory_with_future(&injected, future)
+            .expect("exact cap boundary is admitted");
+        for excessive_future in [future + 1, u128::MAX] {
+            assert!(matches!(
+                session.validate_public_result_memory_with_future(&injected, excessive_future),
+                Err(WasmCpuSearchError::ResourceAdmission { .. })
+            ));
+        }
+        drop(session);
+        drop(parent);
+        WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
+            .expect("both failed checks and successful completion release their authority");
+    }
+
+    #[test]
+    fn parent_authorized_precomputed_score_rejects_noncanonical_and_foreign_candidates() {
+        let _resource_guard = score_resource_test_guard();
+        let problem = Arc::new(one_i_problem(true, false));
+        let control = ExecutionControl::default();
+        let candidate = StandardBoard64TilingIdentity::from_placements(
+            0x3f0,
+            [PiecePlacementMask::new(PieceKind::I, 0x00f)],
+        )
+        .expect("independent candidate");
+        let foreign = StandardBoard64TilingIdentity::from_placements(
+            0,
+            [PiecePlacementMask::new(PieceKind::I, 0x00f)],
+        )
+        .expect("foreign initial board");
+        let parent =
+            WasmCpuTerminalResourceAuthority::try_acquire_full_capacity().expect("request parent");
+        for (candidates, expected) in [
+            (
+                vec![candidate, candidate],
+                "wasm_precomputed_geometry_candidates_not_strictly_canonical",
+            ),
+            (
+                vec![foreign],
+                "wasm_precomputed_geometry_initial_board_mismatch",
+            ),
+        ] {
+            assert!(matches!(
+                WasmCpuSearchBackend::execute_complete_precomputed_candidates_under_authority(
+                    Arc::clone(&problem), &candidates, 16 * 1024 * 1024, &parent, &control,
+                ),
+                Err(WasmCpuSearchError::InvalidProblem { reason }) if reason == expected
+            ));
+        }
+        // A rejected invocation must not strand the parent's compute child.
+        WasmCpuSearchBackend::execute_complete_precomputed_candidates_under_authority(
+            problem,
+            &[candidate],
+            16 * 1024 * 1024,
+            &parent,
+            &control,
+        )
+        .expect("same parent remains usable after rejected candidates");
     }
 
     #[test]

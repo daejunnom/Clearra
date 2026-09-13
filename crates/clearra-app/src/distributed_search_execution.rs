@@ -394,6 +394,13 @@ impl PreparedDistributedSearch {
     pub fn pc_score_terminal_resource_authority(
         &self,
     ) -> Result<Option<(&WasmCpuTerminalResourceAuthority, u128)>, &'static str> {
+        self.pc_score_terminal_resource_authority_with_external_bytes(0)
+    }
+
+    fn pc_score_terminal_resource_authority_with_external_bytes(
+        &self,
+        additional_retained_bytes: u128,
+    ) -> Result<Option<(&WasmCpuTerminalResourceAuthority, u128)>, &'static str> {
         let (authority, product) = match &self.response_kind {
             CooperativeSearchResponseKind::PcScore {
                 authority, product, ..
@@ -424,7 +431,8 @@ impl PreparedDistributedSearch {
             }
         };
         let concurrent_retained_bytes = (core::mem::size_of::<Self>() as u128)
-            .checked_add(execution_evidence_inline_bytes)
+            .checked_add(additional_retained_bytes)
+            .and_then(|bytes| bytes.checked_add(execution_evidence_inline_bytes))
             .and_then(|bytes| {
                 bytes.checked_add(
                     core::mem::size_of::<crate::pc_score_postprocess::PcScoreDerivation>() as u128,
