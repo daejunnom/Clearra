@@ -24,3 +24,23 @@ Retry [34717896918](https://github.com/daejunnom/Clearra/actions/runs/3471789691
 was observed queued on exact source `7a48b514dfa5518d8d0d5ff7afda66e1535f4f4f`.
 Only creation was checked; no successful hosted test result is claimed here.
 No main merge, production deployment, release receipt, or Secrets change occurred.
+
+## Hosted test outcome and native context correction
+
+The later bounded check of run `34717896918` found source, surface-contracts
+and pc4-contracts successful. Native CLI built and executed its 16 process
+tests, with five passing and eleven failing. The helper had enabled both
+`native-c-core` and `wasm-cpu-runtime`: CLI `product_app_context` deliberately
+chooses its WASM context when the latter is enabled. That is incompatible with
+the native C routing/count contracts asserted by this suite.
+
+Commit `044dc3d` removes only the forced-WASM feature from this native helper.
+The workflow boundary test rejects reintroducing that combination; its nine
+focused tests passed locally. This is a diagnosed context-selection mismatch,
+not a claim that all eleven failures have already disappeared.
+
+Retry [34736690362](https://github.com/daejunnom/Clearra/actions/runs/34736690362)
+was observed in progress on exact source
+`044dc3ddbf5d54095fc91a690dad8c12b068bcd2`. Only its creation was checked here.
+It also includes `382edfb`'s newer nonempty HF observations, which were not in
+the previous hosted PC4 success. This remains isolated, non-publishing CI.

@@ -605,6 +605,10 @@ fn is_cancelled_advance(error: &Pc4FixedQueueCandidateRuntimeAdvanceError) -> bo
 }
 
 #[cfg(test)]
+#[path = "online_pc4_fixed_queue_candidate_session_path_tests.rs"]
+mod path_tests;
+
+#[cfg(test)]
 mod tests {
     use core::{
         cell::Cell,
@@ -651,7 +655,7 @@ mod tests {
         }
     }
 
-    struct Guard {
+    pub(super) struct Guard {
         source: PcCandidateSourceBinding,
         cancelled: Cell<bool>,
         source_current: Cell<bool>,
@@ -659,7 +663,7 @@ mod tests {
     }
 
     impl Guard {
-        fn new(source: PcCandidateSourceBinding) -> Self {
+        pub(super) fn new(source: PcCandidateSourceBinding) -> Self {
             Self {
                 source,
                 cancelled: Cell::new(false),
@@ -729,11 +733,11 @@ mod tests {
         }
     }
 
-    fn nonzero(value: usize) -> NonZeroUsize {
+    pub(super) fn nonzero(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("non-zero test budget")
     }
 
-    fn range_limits() -> RangeAdmissionLimits {
+    pub(super) fn range_limits() -> RangeAdmissionLimits {
         RangeAdmissionLimits::new(
             NonZeroU64::new(64).expect("response bytes"),
             NonZeroU64::new(512).expect("session bytes"),
@@ -743,7 +747,7 @@ mod tests {
         )
     }
 
-    fn attempt(ordinal: u32) -> RangeAdmissionAttempt {
+    pub(super) fn attempt(ordinal: u32) -> RangeAdmissionAttempt {
         RangeAdmissionAttempt::new(
             NonZeroU32::new(ordinal).expect("request ordinal"),
             NonZeroU16::new(1).expect("one active request"),
@@ -754,7 +758,24 @@ mod tests {
         generation: &str,
         qualified_profile: Option<Pc4RuleProfile>,
     ) -> ActivatedSnapshot {
-        let target_lines = Pc4TargetLines::new(1).expect("1L target");
+        activated_snapshot_for_dataset(
+            generation,
+            qualified_profile,
+            Pc4TargetLines::new(1).expect("1L target"),
+            2,
+            1,
+            &range_dataset(),
+        )
+    }
+
+    pub(super) fn activated_snapshot_for_dataset(
+        generation: &str,
+        qualified_profile: Option<Pc4RuleProfile>,
+        target_lines: Pc4TargetLines,
+        field_count: u32,
+        terminal_id: u32,
+        dataset: &RangeDataset,
+    ) -> ActivatedSnapshot {
         let profiles = Pc4RuleProfile::ALL
             .into_iter()
             .map(|profile| {
@@ -770,13 +791,25 @@ mod tests {
                 };
                 let manifest = Pc4ProfileManifest::new(
                     profile,
-                    2,
+                    field_count,
                     GraphTargetEncoding::U24LittleEndian,
                     FieldIdIndexRelation::RecordOrdinal,
                     4_096,
-                    descriptor(Pc4ArtifactRole::FieldHashIndex, "field.idx", 32),
-                    descriptor(Pc4ArtifactRole::GraphOffsets, "offsets.idx", 28),
-                    descriptor(Pc4ArtifactRole::Graph, "graph.bin", 27),
+                    descriptor(
+                        Pc4ArtifactRole::FieldHashIndex,
+                        "field.idx",
+                        dataset.field_index.len() as u64,
+                    ),
+                    descriptor(
+                        Pc4ArtifactRole::GraphOffsets,
+                        "offsets.idx",
+                        dataset.graph_offsets.len() as u64,
+                    ),
+                    descriptor(
+                        Pc4ArtifactRole::Graph,
+                        "graph.bin",
+                        dataset.graph.len() as u64,
+                    ),
                     ProfileQualification::new(
                         format!("{prefix}-index"),
                         format!("{prefix}-graph"),
@@ -789,7 +822,7 @@ mod tests {
                 .with_target_qualifications(vec![ProfileTargetCompletenessQualification::new(
                     Pc4TerminalUseCase::PcSearch,
                     target_lines,
-                    Pc4TerminalFieldIdentity::full_rows(target_lines, 1),
+                    Pc4TerminalFieldIdentity::full_rows(target_lines, terminal_id),
                     format!("{prefix}-pc-terminal"),
                     format!("{prefix}-pc-outgoing"),
                     format!("{prefix}-pc-kat"),
@@ -823,7 +856,7 @@ mod tests {
         .expect("activated snapshot")
     }
 
-    fn pin(snapshot: ActivatedSnapshot) -> PinnedPc4Generation {
+    pub(super) fn pin(snapshot: ActivatedSnapshot) -> PinnedPc4Generation {
         let mut registry = Pc4GenerationRegistry::new(
             Pc4GenerationRetentionLimit::new(1).expect("one retained generation"),
         );
@@ -864,7 +897,7 @@ mod tests {
         }
     }
 
-    fn canonical_source(
+    pub(super) fn canonical_source(
         prepared: &Pc4PreparedOnlineInput,
         board: StandardPcBoard,
         hold: FixedQueueHoldState,
@@ -1019,14 +1052,14 @@ mod tests {
         )
     }
 
-    fn index_header(magic: [u8; 8], count: u32) -> Vec<u8> {
+    pub(super) fn index_header(magic: [u8; 8], count: u32) -> Vec<u8> {
         let mut bytes = magic.to_vec();
         bytes.extend_from_slice(&1_u32.to_le_bytes());
         bytes.extend_from_slice(&count.to_le_bytes());
         bytes
     }
 
-    fn hydra_record(source_hash: u64, per_piece_targets: [&[u32]; 7]) -> Vec<u8> {
+    pub(super) fn hydra_record(source_hash: u64, per_piece_targets: [&[u32]; 7]) -> Vec<u8> {
         let mut bytes = source_hash.to_be_bytes()[3..].to_vec();
         for targets in per_piece_targets {
             bytes.push(u8::try_from(targets.len()).expect("small test degree"));
@@ -1037,10 +1070,10 @@ mod tests {
         bytes
     }
 
-    struct RangeDataset {
-        field_index: Vec<u8>,
-        graph_offsets: Vec<u8>,
-        graph: Vec<u8>,
+    pub(super) struct RangeDataset {
+        pub(super) field_index: Vec<u8>,
+        pub(super) graph_offsets: Vec<u8>,
+        pub(super) graph: Vec<u8>,
     }
 
     fn range_dataset() -> RangeDataset {
@@ -1094,7 +1127,10 @@ mod tests {
         }
     }
 
-    fn partial_input(request: &RangeRequest, dataset: &RangeDataset) -> RangeAdmissionInput {
+    pub(super) fn partial_input(
+        request: &RangeRequest,
+        dataset: &RangeDataset,
+    ) -> RangeAdmissionInput {
         let artifact = match request.artifact() {
             Pc4ArtifactRole::FieldHashIndex => &dataset.field_index,
             Pc4ArtifactRole::GraphOffsets => &dataset.graph_offsets,
