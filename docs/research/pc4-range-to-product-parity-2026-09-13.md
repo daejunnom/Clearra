@@ -291,3 +291,20 @@ than 400. Replay assertions now include the fixture's independently known
 consumed queue length and terminal hold, so matching two equally synthetic
 results cannot pass. App replay paging/digest tests are included in the same
 managed, non-publishing CI transaction. This expansion is pending execution.
+
+On `d5e6265`, run [34744089489](https://github.com/daejunnom/Clearra/actions/runs/34744089489)
+passed Core **7 + 5**, Tablebase **163**, Replay **20** and all **41**
+Postprocess tests. App passed **73 of 74**: the expanded score fixture used
+queue length as its placement window. Canonical score correctly rejected
+the empty-hold case's extra source piece. The fixture now keeps placement
+horizon equal to the empty-cell requirement and lets the existing compiler
+resolve the independently longer disclosed supply window. The product's
+fixed-cap/request validation is unchanged.
+
+A further shared-lifecycle audit closes observed cancellation or snapshot
+revocation during `admit_range` immediately. Such a rejected response cannot
+become a live request again simply because the next guard is fresh; both
+fixed and observation sessions retain their terminal state and discard the
+pending lookup. Malformed/misrouted response rejection remains transactional
+and retryable, as it does not revoke the request itself. A source test covers
+late-response non-resurrection without any intervening `step` polling.

@@ -150,7 +150,9 @@ fn request_with_supply(
         PcQueueInput::fixed_sequence(FixedSequence::new(
             queue.iter().copied().map(piece_kind).collect(),
         )),
-        PieceWindow::new(queue.len()),
+        // Placement horizon is not source queue length: storing current may
+        // consume one additional disclosed piece without placing another one.
+        PieceWindow::new(usize::from(lines)),
     )
     .with_exact_pieces(Some(usize::from(lines)))
     .with_allow_hold(hold != FixedQueueHoldState::Disabled)

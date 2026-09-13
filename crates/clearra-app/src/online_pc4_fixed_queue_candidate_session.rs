@@ -738,7 +738,26 @@ impl AppOnlinePc4CandidateSession {
         let Some(active) = &mut self.active_lookup else {
             return Err(AppOnlinePc4RangeError::LookupNotAwaitingRange);
         };
-        active.session.admit_range(attempt, input, guard)
+        let result = active.session.admit_range(attempt, input, guard);
+        // The byte admission transaction is retryable after a malformed or
+        // misrouted reply. Observed cancellation/revocation is different: the
+        // candidate owner must not revive it when a later guard is fresh again.
+        match &result {
+            Err(AppOnlinePc4RangeError::Admission(
+                clearra_pc4_tablebase::RangeAdmissionError::Cancelled,
+            )) => {
+                self.finish(TerminalState::Cancelled);
+            }
+            Err(AppOnlinePc4RangeError::Admission(
+                clearra_pc4_tablebase::RangeAdmissionError::SnapshotStale,
+            )) => {
+                self.finish(TerminalState::Failed(
+                    AppOnlinePc4FixedQueueCandidateFailure::StaleSnapshot,
+                ));
+            }
+            _ => {}
+        }
+        result
     }
 
     pub fn cancel(&mut self) {
@@ -1813,8 +1832,11 @@ mod tests {
         );
         assert_eq!(
             session.step(&Guard::new(candidate_source)),
-            AppOnlinePc4FixedQueueCandidateStep::NeedRange(request)
+            AppOnlinePc4FixedQueueCandidateStep::Failed(
+                AppOnlinePc4FixedQueueCandidateFailure::StaleSnapshot
+            )
         );
+        assert_eq!(session.active_lookup_field_id(), None);
         assert_eq!(session.completed_reducer_input(), None);
     }
 }

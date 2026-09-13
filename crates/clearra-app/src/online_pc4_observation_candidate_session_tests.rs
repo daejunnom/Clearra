@@ -414,6 +414,63 @@ fn pc4_hold_branches_share_cache_budget_and_cannot_seal_a_partial_union_on_failu
 }
 
 #[test]
+fn pc4_range_admission_revocation_cannot_revive_a_candidate_session() {
+    for cancelled in [false, true] {
+        let fixture = clear_path(1);
+        let (mut session, guard) = start(
+            &fixture,
+            1,
+            Pc4RuleProfile::Srs,
+            Pc4QueueDisclosure::FixedExplicit(vec![Pc4GraphPiece::I]),
+            FixedQueueHoldState::Disabled,
+            5,
+        );
+        let AppOnlinePc4CandidateStep::NeedRange(pending) = session.step(&guard) else {
+            panic!("initial Range required")
+        };
+        if cancelled {
+            guard.cancelled.set(true);
+        } else {
+            guard.snapshot_current.set(false);
+        }
+        let expected_error = if cancelled {
+            clearra_pc4_tablebase::RangeAdmissionError::Cancelled
+        } else {
+            clearra_pc4_tablebase::RangeAdmissionError::SnapshotStale
+        };
+        assert_eq!(
+            session.admit_range(
+                attempt(1),
+                partial_input(&pending, &fixture.dataset),
+                &guard
+            ),
+            Err(AppOnlinePc4RangeError::Admission(expected_error))
+        );
+        // No intermediate step polls the rejected guard. Admission itself must
+        // close the composed owner before a corrected/late response arrives.
+        guard.cancelled.set(false);
+        guard.snapshot_current.set(true);
+        let expected = if cancelled {
+            AppOnlinePc4CandidateStep::Cancelled
+        } else {
+            AppOnlinePc4CandidateStep::Failed(AppOnlinePc4FixedQueueCandidateFailure::StaleSnapshot)
+        };
+        assert_eq!(session.step(&guard), expected);
+        assert_eq!(session.active_lookup_field_id(), None);
+        assert!(session.completed_reducer_input().is_none());
+        assert_eq!(
+            session.admit_range(
+                attempt(1),
+                partial_input(&pending, &fixture.dataset),
+                &guard
+            ),
+            Err(AppOnlinePc4RangeError::LookupNotAwaitingRange)
+        );
+        assert_eq!(session.step(&guard), expected);
+    }
+}
+
+#[test]
 fn pc4_initial_graph_field_must_match_even_when_the_queue_has_no_solution() {
     let fixture = clear_path(1);
     for start_field_id in [None, Some(*fixture.ids_by_step.last().unwrap())] {
