@@ -50,10 +50,16 @@ try {
         hash.update(`${artifact.path}:${offset}:${length}\n`).update(bytes); completed++;
       }
     } catch (error) { if (error.code !== 'pc4_online_transfer_limit') throw error; failure = error.code; }
+    const digest = hash.digest('hex');
+    // A full trace is evidence of equivalent bytes, not merely an I/O counter.
+    // Partial traces retain their own digest but cannot claim full equivalence.
+    const comparable = completed === trace.length && header.measurement?.logical_reads === trace.length;
+    if (comparable && digest !== header.measurement.demand_sha256) throw new Error('Transport policy changed recorded bytes');
     console.log(JSON.stringify({ evidence: 'recorded-real-demand-local-response-transport-counts-not-network-timing',
       policy, trace_records: trace.length, completed_reads: completed, failure,
       requests: reader.requests, bytes: reader.bytes, cache_hits: reader.cacheHits,
-      retained_bytes: reader.retainedBytes, ordered_demand_sha256: hash.digest('hex') }));
+      retained_bytes: reader.retainedBytes, ordered_demand_sha256: digest,
+      complete_trace_bytes_equal: comparable ? true : null }));
     reader.dispose();
   }
 } finally { await dataset.close(); }

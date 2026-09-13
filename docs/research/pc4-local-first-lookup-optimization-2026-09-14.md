@@ -179,7 +179,12 @@ borrow another profile's graph. Transfer/request/memory bounds, immutable
 revision, real 206/Content-Range checks, cancellation and no implicit retry are
 preserved. Local installed readers still perform zero HTTP requests.
 The focused JS transport/OPFS/host/comparison suite passed **28 tests** locally;
-the new native/accumulator changes still need their own exact-source CI.
+40 additional qualification/download/workflow/artifact-guard checks passed.
+Follow-up implementation is `3ceca8b51c9d6e54a837bc14fa5a6f17bbc8bcba`;
+non-publishing CI https://github.com/daejunnom/Clearra/actions/runs/34769318668 .
+At this checkpoint source, surface and native CLI jobs succeeded; PC4 contracts
+and preview WASM are still running. This exact-source checkpoint supersedes no
+release evidence, and the new accumulator timing has not yet been measured.
 
 ## Next online stage / remaining evidence
 
