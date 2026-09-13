@@ -170,6 +170,7 @@ struct Pc4FixedQueueCandidateCompletion {
 /// exhausted.
 pub(crate) struct Pc4FixedQueueCandidateRuntime {
     cache: Pc4LookupGraphCache,
+    lookup_frontier: Vec<u32>,
     terminal: ManifestQualifiedPc4Terminal,
     observation_page_size: NonZeroUsize,
     state: Pc4FixedQueueCandidateRuntimeState,
@@ -215,6 +216,7 @@ impl Pc4FixedQueueCandidateRuntime {
         .map_err(Pc4FixedQueueCandidateRuntimeStartError::Candidate)?;
         Ok(Self {
             cache,
+            lookup_frontier: Vec::new(),
             terminal: ManifestQualifiedPc4Terminal::new(request.target.clone()),
             observation_page_size: request.observation_page_size,
             state: Pc4FixedQueueCandidateRuntimeState::Running(Box::new(stream)),
@@ -311,6 +313,7 @@ impl Pc4FixedQueueCandidateRuntime {
     where
         G: super::pc_candidate_page_boundary::graph_candidate_adapter::Pc4GraphCandidateGuard,
     {
+        self.lookup_frontier.clear();
         if let Pc4FixedQueueCandidateRuntimeState::Complete(completion) = &self.state {
             return Ok(Pc4FixedQueueCandidateRuntimeStep::Complete {
                 replay_provenances: completion.family.replay_provenance_count(),
@@ -327,7 +330,7 @@ impl Pc4FixedQueueCandidateRuntime {
             let Pc4FixedQueueCandidateRuntimeState::Running(stream) = &mut self.state else {
                 return Err(Pc4FixedQueueCandidateRuntimeAdvanceError::CompletionUnavailable);
             };
-            let mut provider = cache.adjacency_provider();
+            let mut provider = cache.adjacency_provider_with_frontier(&mut self.lookup_frontier);
             let mut materializer = cache.placement_materializer();
             stream.next_observation_page(
                 self.observation_page_size,
@@ -365,6 +368,10 @@ impl Pc4FixedQueueCandidateRuntime {
                 }
             }
         }
+    }
+
+    pub(crate) fn lookup_frontier(&self) -> &[u32] {
+        &self.lookup_frontier
     }
 
     fn seal<G>(

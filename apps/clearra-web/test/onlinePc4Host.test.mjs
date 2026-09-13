@@ -59,6 +59,59 @@ test('online host forwards only verified partial bytes and records actual I/O', 
   } finally { globalThis.fetch = original; }
 });
 
+test('online host consumes bounded WASM frontier hints but admits only each real pending range', async () => {
+  const original = fetch;
+  const count = 128;
+  const a = (path, byte_length, hash) => ({ path, byte_length, content_identity: 'sha256:' + hash.repeat(64) });
+  const offsets = a('graph_offsets.u32.bin', 16 + 4 * (count + 1), 'b');
+  const graph = a('graph.bin', count * 12, 'c');
+  const bytes = new Uint8Array(offsets.byte_length), graphBytes = Uint8Array.from({ length: graph.byte_length }, (_, i) => i % 251);
+  for (let id = 0; id <= count; id++) new DataView(bytes.buffer).setUint32(16 + id * 4, id * 12, true);
+  const selected = { ...generation, profiles: [{ profile: 'jstris-180', status: 'ready', field_count: count,
+    reader_contract: 'hydra-jstris-180-complete-graph-v1', artifacts: { offsets, graph } }] };
+  const frontier = Array.from({ length: 32 }, (_, i) => i + 10);
+  const demands = frontier.flatMap(id => [[offsets, 16 + id * 4, 8], [graph, id * 12, 12]])
+    .map(([artifact, offset, length], i) => ({ artifact, offset, length, profile: 'jstris-180',
+      lookup_session: 9, request_id: i + 1, lookup_frontier: frontier }));
+  let cursor = 0, calls = 0;
+  const events = [], observed = [];
+  const wasm = {
+    start_job: () => 7,
+    advance_job: () => {
+      if (cursor < demands.length) return 'pending';
+      events.push({ event: 'final_response', job_id: 7, response: { status: 'success' } });
+      return 'completed';
+    },
+    online_pc4_pending: () => demands[cursor],
+    online_pc4_admit: (job, response) => {
+      const r = demands[cursor++];
+      assert.equal(job, 7);
+      assert.deepEqual(response, { lookup_session: 9, request_id: r.request_id, status: 206,
+        content_range: `bytes ${r.offset}-${r.offset + r.length - 1}/${r.artifact.byte_length}`,
+        bytes: Array.from((r.artifact.path === offsets.path ? bytes : graphBytes).slice(r.offset, r.offset + r.length)) });
+    },
+    drain_job_events_json: () => JSON.stringify(events.splice(0)),
+    cancel_job: () => assert.fail('successful frontier transport must not cancel')
+  };
+  try {
+    globalThis.fetch = async (url, init) => {
+      const file = url.endsWith('/' + offsets.path) ? offsets : graph;
+      assert.ok(url.endsWith('/' + file.path));
+      const [, start, last] = /^bytes=(\d+)-(\d+)$/.exec(init.headers.Range);
+      const o = Number(start), end = Number(last) + 1;
+      calls++;
+      return new Response((file === offsets ? bytes : graphBytes).slice(o, end), {
+        status: 206, headers: { 'content-range': `bytes ${o}-${end - 1}/${file.byte_length}` }
+      });
+    };
+    await new WasmJobRunner(wasm, selected).run('clearra pc --tablebase', event => observed.push(event));
+    assert.equal(cursor, 64, 'no pending request may be skipped or replaced with prefetched admission');
+    assert.equal(calls, 2);
+    assert.equal(observed.at(-1).pc4_online.requests, 2);
+    assert.equal(observed.at(-1).pc4_online.transferred_bytes, 516);
+  } finally { globalThis.fetch = original; }
+});
+
 test('whole-body response fails without entering an offline solver', async () => {
   const original = fetch;
   try {

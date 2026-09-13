@@ -14,7 +14,7 @@ pub(super) enum HostSlice {
 
 pub(super) fn drive(
     mut execution: Pc4OnlineHostExecution,
-    mut reader: impl FnMut(&str, u64, &str, u64, u64) -> Result<HostSlice>,
+    mut reader: impl FnMut(&str, u64, &str, u64, u64, &[u32]) -> Result<HostSlice>,
 ) -> Result<clearra_app::AppResponse> {
     let control = ExecutionControl::default();
     loop {
@@ -32,6 +32,7 @@ pub(super) fn drive(
                 artifact.content_identity(),
                 range.offset(),
                 u64::from(range.length()),
+                execution.pending_lookup_frontier(),
             )?;
             match bytes {
                 HostSlice::Local(bytes) => execution.admit_local_slice(

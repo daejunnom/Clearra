@@ -321,38 +321,51 @@ fn tablebase_download_native_range_and_installed_files_return_the_same_complete_
             AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
         )
     };
-    let mut calls = 0;
-    let online = online_execution::execute_with_online(
-        &f.root,
-        context(),
-        one_piece_request("jstris-180"),
-        |ctx, request| {
-            online_execution::execute_online_with(
-                ctx,
-                request,
-                &"a".repeat(40),
-                &f.files,
-                |artifact, start, length| {
-                    calls += 1;
-                    let i = FILES
-                        .iter()
-                        .position(|path| *path == artifact.path)
-                        .unwrap();
-                    Ok(http_range::HttpReply {
-                        status: 206,
-                        content_range: http_range::content_range(start, length, artifact.size),
-                        bytes: f.bytes[i][start as usize..(start + length) as usize].to_vec(),
-                    })
-                },
-            )
-        },
-    )
-    .unwrap();
+    let mut ranges = Vec::new();
+    let online =
+        online_execution::execute_with_online(
+            &f.root,
+            context(),
+            one_piece_request("jstris-180"),
+            |ctx, request| {
+                online_execution::execute_online_with(
+                    ctx,
+                    request,
+                    &"a".repeat(40),
+                    &f.files,
+                    |artifact, start, length| {
+                        let i = FILES
+                            .iter()
+                            .position(|path| *path == artifact.path)
+                            .unwrap();
+                        // Every physical request is partial and bounded. A repeated
+                        // index slice must be served by the verified cache shared
+                        // across qualification and the subsequent App traversal.
+                        assert!(length > 0 && length <= 65_536 && start + length <= artifact.size);
+                        if i < 2 {
+                            assert!(
+                                length < artifact.size,
+                                "a small read cannot download a whole index"
+                            );
+                            assert!(!ranges.iter().any(|&(role, previous, size)| {
+                            role == i && previous <= start && start + length <= previous + size
+                        }), "an already verified containing index span must not be fetched again");
+                        }
+                        ranges.push((i, start, length));
+                        Ok(http_range::HttpReply {
+                            status: 206,
+                            content_range: http_range::content_range(start, length, artifact.size),
+                            bytes: f.bytes[i][start as usize..(start + length) as usize].to_vec(),
+                        })
+                    },
+                )
+            },
+        )
+        .unwrap();
     assert_eq!(online.status(), AppStatus::Success);
-    assert_eq!(
-        calls, 3,
-        "qualification and graph traversal share the same HTTP windows"
-    );
+    assert!(ranges.iter().any(|&(role, _, _)| role == 0));
+    assert!(ranges.iter().any(|&(role, _, _)| role == 1));
+    assert!(ranges.iter().any(|&(role, _, _)| role == 2));
     assert_eq!(
         fs::read_dir(&f.root).unwrap().count(),
         0,

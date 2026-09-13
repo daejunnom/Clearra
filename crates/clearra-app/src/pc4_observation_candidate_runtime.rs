@@ -119,6 +119,7 @@ struct Completion {
 
 pub(crate) struct Pc4ObservationCandidateRuntime {
     cache: Pc4LookupGraphCache,
+    lookup_frontier: Vec<u32>,
     terminal: ManifestQualifiedPc4ObservationTerminal,
     page_size: NonZeroUsize,
     state: State,
@@ -164,6 +165,7 @@ impl Pc4ObservationCandidateRuntime {
         .map_err(Pc4ObservationCandidateRuntimeStartError::Candidate)?;
         Ok(Self {
             cache,
+            lookup_frontier: Vec::new(),
             terminal: ManifestQualifiedPc4ObservationTerminal::new(target.clone()),
             page_size: request.observation_page_size,
             state: State::Running(Box::new(session)),
@@ -218,6 +220,7 @@ impl Pc4ObservationCandidateRuntime {
         guard: &G,
     ) -> Result<Pc4ObservationCandidateRuntimeStep, Pc4ObservationCandidateRuntimeAdvanceError>
     {
+        self.lookup_frontier.clear();
         let State::Running(session) = &mut self.state else {
             return match &self.state {
                 State::Complete(done) => Ok(Pc4ObservationCandidateRuntimeStep::Complete {
@@ -229,7 +232,9 @@ impl Pc4ObservationCandidateRuntime {
         };
         let result = session.advance(
             self.page_size,
-            &mut self.cache.adjacency_provider(),
+            &mut self
+                .cache
+                .adjacency_provider_with_frontier(&mut self.lookup_frontier),
             &mut self.terminal,
             &mut self.cache.placement_materializer(),
             guard,
@@ -257,6 +262,10 @@ impl Pc4ObservationCandidateRuntime {
                 Err(Pc4ObservationCandidateRuntimeAdvanceError::Candidate(error))
             }
         }
+    }
+
+    pub(crate) fn lookup_frontier(&self) -> &[u32] {
+        &self.lookup_frontier
     }
 
     fn seal<G: Pc4ObservationCandidateGuard>(

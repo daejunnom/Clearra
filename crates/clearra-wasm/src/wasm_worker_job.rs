@@ -1031,18 +1031,20 @@ impl WasmWorkerJobRuntime {
     }
 
     pub fn online_pc4_pending_json(&self, job_id: WasmWorkerJobId) -> String {
-        let range = self
+        let online = self
             .active_jobs
             .get(&job_id)
             .and_then(|job| job.execution.as_ref())
             .and_then(|execution| execution.online_pc4.as_ref())
-            .and_then(|online| online.as_ref().ok())
-            .and_then(|online| online.pending_range());
-        let Some(range) = range else {
+            .and_then(|online| online.as_ref().ok());
+        let Some((online, range)) =
+            online.and_then(|online| online.pending_range().map(|range| (online, range)))
+        else {
             return "null".to_owned();
         };
         serde_json::json!({ "lookup_session": range.lookup_session().get(), "request_id": range.request_id(),
             "profile": range.profile().as_str(), "offset": range.offset(), "length": range.length(),
+            "lookup_frontier": online.pending_lookup_frontier(),
             "artifact": { "path": range.artifact_descriptor().path(), "byte_length": range.artifact_descriptor().byte_len(),
                 "content_identity": range.artifact_descriptor().content_identity() } }).to_string()
     }

@@ -144,6 +144,17 @@ pub trait QualifiedCompleteAdjacencyProvider {
         &mut self,
         query: &FixedQueueAdjacencyQuery<'_>,
     ) -> Result<QualifiedCompleteAdjacency, Self::Error>;
+
+    /// Optional bounded I/O scheduling hint after a provider error. These IDs
+    /// are already queued in this exact traversal, not newly explored edges.
+    /// Observing them grants no adjacency, suffix fact, cursor advancement or
+    /// completeness authority. Implementations must do no I/O in this callback.
+    fn observe_unresolved_frontier(
+        &mut self,
+        _target: &QualifiedPc4TargetIdentity,
+        _source_field_ids: &[u32],
+    ) {
+    }
 }
 
 /// Host-owned cancellation and immutable-snapshot freshness observation.

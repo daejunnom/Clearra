@@ -193,6 +193,9 @@ mod host_execution;
 #[path = "tablebase_http_range.rs"]
 mod http_range;
 #[cfg(feature = "online-pc4-tablebase")]
+#[path = "tablebase_http_frontier.rs"]
+mod http_frontier;
+#[cfg(feature = "online-pc4-tablebase")]
 #[path = "tablebase_local_execution.rs"]
 mod local_execution;
 #[cfg(feature = "online-pc4-tablebase")]

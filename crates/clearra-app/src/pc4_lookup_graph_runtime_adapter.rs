@@ -398,7 +398,20 @@ impl Pc4LookupGraphCache {
     }
 
     pub const fn adjacency_provider(&self) -> Pc4LookupCompleteAdjacencyProvider<'_> {
-        Pc4LookupCompleteAdjacencyProvider { cache: self }
+        Pc4LookupCompleteAdjacencyProvider {
+            cache: self,
+            frontier: None,
+        }
+    }
+
+    pub fn adjacency_provider_with_frontier<'a>(
+        &'a self,
+        frontier: &'a mut Vec<u32>,
+    ) -> Pc4LookupCompleteAdjacencyProvider<'a> {
+        Pc4LookupCompleteAdjacencyProvider {
+            cache: self,
+            frontier: Some(frontier),
+        }
     }
 
     pub const fn placement_materializer(&self) -> Pc4LookupPlacementMaterializer<'_> {
@@ -509,6 +522,7 @@ impl std::error::Error for Pc4LookupAdjacencyError {}
 /// Read-only complete-adjacency view over a shared qualified record cache.
 pub struct Pc4LookupCompleteAdjacencyProvider<'a> {
     cache: &'a Pc4LookupGraphCache,
+    frontier: Option<&'a mut Vec<u32>>,
 }
 
 impl Pc4LookupCompleteAdjacencyProvider<'_> {
@@ -574,6 +588,29 @@ impl QualifiedCompleteAdjacencyProvider for Pc4LookupCompleteAdjacencyProvider<'
             query.piece(),
             query.queue_index(),
         )
+    }
+
+    fn observe_unresolved_frontier(&mut self, target: &QualifiedPc4TargetIdentity, fields: &[u32]) {
+        let Some(frontier) = &mut self.frontier else {
+            return;
+        };
+        if target != self.cache.target() {
+            return;
+        }
+        frontier.clear();
+        // This is an optional hint. Failure to allocate retains the exact
+        // single-record demand; it must not fail an otherwise valid traversal.
+        if frontier.try_reserve(32).is_err() {
+            return;
+        }
+        for &id in fields.iter().take(32) {
+            if id < self.cache.field_count()
+                && !self.cache.contains_field_id(id)
+                && !frontier.contains(&id)
+            {
+                frontier.push(id);
+            }
+        }
     }
 }
 
@@ -1012,6 +1049,41 @@ mod tests {
         field_hash: u64,
     ) -> LookupHit {
         hit(target, session, field_id, field_hash, [EMPTY_TARGETS; 7])
+    }
+
+    #[test]
+    fn pc4_frontier_hints_filter_cached_invalid_and_foreign_generation_ids() {
+        let snapshot = activated_snapshot("frontier-cache", 64);
+        let bound = target(&snapshot, Pc4RuleProfile::Srs, Pc4TerminalUseCase::PcSearch);
+        let mut cache = Pc4LookupGraphCache::new(&snapshot, bound.clone(), limits()).unwrap();
+        cache.admit(&bound, empty_hit(&bound, 1, 1, 1)).unwrap();
+        let mut frontier = Vec::new();
+        cache
+            .adjacency_provider_with_frontier(&mut frontier)
+            .observe_unresolved_frontier(&bound, &[1, 2, 2, 3, 64, u32::MAX]);
+        assert_eq!(frontier, [2, 3]);
+        let other_snapshot = activated_snapshot("other-frontier-cache", 64);
+        let other = target(
+            &other_snapshot,
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::PcSearch,
+        );
+        cache
+            .adjacency_provider_with_frontier(&mut frontier)
+            .observe_unresolved_frontier(&other, &[4, 5]);
+        assert_eq!(
+            frontier,
+            [2, 3],
+            "foreign hints cannot replace the current generation's work"
+        );
+        cache
+            .adjacency_provider_with_frontier(&mut frontier)
+            .observe_unresolved_frontier(&bound, &(0..64).collect::<Vec<_>>());
+        assert!(frontier.len() <= 32);
+        assert_eq!(
+            cache.usage.record_count, 1,
+            "hints grant no graph admission"
+        );
     }
 
     #[test]

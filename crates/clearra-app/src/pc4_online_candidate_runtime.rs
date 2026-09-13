@@ -56,6 +56,13 @@ impl Pc4OnlineCandidateRuntimeAdvanceError {
 }
 
 impl Pc4OnlineCandidateRuntime {
+    pub(crate) fn lookup_frontier(&self) -> &[u32] {
+        match self {
+            Self::Fixed(runtime) => runtime.lookup_frontier(),
+            Self::Observation(runtime) => runtime.lookup_frontier(),
+        }
+    }
+
     pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
         match self {
             Self::Fixed(runtime) => runtime.target(),

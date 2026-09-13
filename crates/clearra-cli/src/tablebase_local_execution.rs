@@ -62,7 +62,7 @@ pub(super) fn execute_local_at(
     )?;
     drive(
         execution,
-        |path, total, expected_identity, offset, requested| {
+        |path, total, expected_identity, offset, requested, _frontier| {
             let (file, length, identity) = handles
                 .get_mut(path)
                 .ok_or("tablebase: unexpected artifact request")?;

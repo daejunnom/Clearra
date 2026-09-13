@@ -178,6 +178,15 @@ impl Pc4OnlineHostExecution {
         self.pending.as_ref()
     }
 
+    pub fn pending_lookup_frontier(&self) -> &[u32] {
+        if self.pending.is_none() {
+            return &[];
+        }
+        self.candidates
+            .as_ref()
+            .map_or(&[], |session| session.lookup_frontier())
+    }
+
     pub fn advance(
         &mut self,
         work: usize,

@@ -87,22 +87,12 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
         }
     }
     pub fn read(&mut self, role: usize, offset: u64, length: u64) -> Result<Vec<u8>> {
-        let artifact = self.files.get(role).ok_or("pc4_online_artifact_invalid")?;
-        let end = offset
-            .checked_add(length)
-            .ok_or("pc4_online_range_request_invalid")?;
-        if length == 0 || length > 65_536 || end > artifact.size {
-            return Err("pc4_online_range_request_invalid");
-        }
-        if let Some(at) = self.windows.iter().position(|w| {
-            w.role == role && w.offset <= offset && w.offset + w.bytes.len() as u64 >= end
-        }) {
-            let window = self.windows.remove(at).unwrap();
-            let start = (offset - window.offset) as usize;
-            let bytes = window.bytes[start..start + length as usize].to_vec();
-            self.windows.push_back(window);
+        self.validate_span(role, offset, length)?;
+        if let Some(bytes) = self.cached(role, offset, length) {
             return Ok(bytes);
         }
+        let artifact = &self.files[role];
+        let end = offset + length;
         // Reuse FHID/GOFF index pages; exact graph records are already retained
         // decoded by App. Uniform 16 KiB graph windows exhaust the 64 MiB
         // transport budget after only a small prefix of the P7P4 reference.
@@ -124,21 +114,107 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
             start = offset;
             stop = end;
         }
-        let amount = stop - start;
+        let bytes = self.exact_span(role, start, stop - start, role != 2)?;
+        let within = (offset - start) as usize;
+        Ok(bytes[within..within + length as usize].to_vec())
+    }
+
+    /// Only explicit, already known byte intervals may be merged. Cached
+    /// demands are removed before planning so overlapping frontiers do not
+    /// repeatedly transfer their already retained records.
+    pub fn read_many(&mut self, role: usize, demands: &[(u64, u64)]) -> Result<Vec<Vec<u8>>> {
+        if demands.len() > 512 {
+            return Err("pc4_online_batch_invalid");
+        }
+        for &(offset, length) in demands {
+            self.validate_span(role, offset, length)?;
+        }
+        let mut result = vec![Vec::new(); demands.len()];
+        let mut missing = Vec::new();
+        for (index, &(offset, length)) in demands.iter().enumerate() {
+            if let Some(bytes) = self.cached(role, offset, length) {
+                result[index] = bytes;
+            } else {
+                missing.push((offset, length, index));
+            }
+        }
+        missing.sort_unstable();
+        let mut cursor = 0;
+        while cursor < missing.len() {
+            let start = missing[cursor].0;
+            let mut end = start + missing[cursor].1;
+            let mut stop = cursor + 1;
+            while let Some(&(offset, length, _)) = missing.get(stop) {
+                let merged_end = end.max(offset + length);
+                if offset > end + 1_024 || merged_end - start > 65_536 {
+                    break;
+                }
+                end = merged_end;
+                stop += 1;
+            }
+            // Explicit graph batches use the same bounded cache as index
+            // pages. They confer no graph/solution admission authority.
+            let bytes = self.exact_span(role, start, end - start, true)?;
+            for &(offset, length, index) in &missing[cursor..stop] {
+                let within = (offset - start) as usize;
+                result[index] = bytes[within..within + length as usize].to_vec();
+            }
+            cursor = stop;
+        }
+        Ok(result)
+    }
+
+    fn validate_span(&self, role: usize, offset: u64, length: u64) -> Result<()> {
+        let artifact = self.files.get(role).ok_or("pc4_online_artifact_invalid")?;
+        if length == 0
+            || length > 65_536
+            || offset
+                .checked_add(length)
+                .is_none_or(|end| end > artifact.size)
+        {
+            return Err("pc4_online_range_request_invalid");
+        }
+        Ok(())
+    }
+
+    fn cached(&mut self, role: usize, offset: u64, length: u64) -> Option<Vec<u8>> {
+        let at = self.windows.iter().position(|w| {
+            w.role == role
+                && w.offset <= offset
+                && w.offset + w.bytes.len() as u64 >= offset + length
+        })?;
+        let window = self.windows.remove(at)?;
+        let start = (offset - window.offset) as usize;
+        let bytes = window.bytes[start..start + length as usize].to_vec();
+        self.windows.push_back(window);
+        Some(bytes)
+    }
+
+    fn exact_span(
+        &mut self,
+        role: usize,
+        start: u64,
+        amount: u64,
+        retain: bool,
+    ) -> Result<Vec<u8>> {
+        self.validate_span(role, start, amount)?;
+        if let Some(bytes) = self.cached(role, start, amount) {
+            return Ok(bytes);
+        }
         if self.requests >= 100_000 || self.reserved + amount > 64 * 1024 * 1024 {
             return Err("pc4_online_transfer_limit");
         }
         self.requests += 1;
         self.reserved += amount;
+        let artifact = &self.files[role];
         let bytes = (self.fetch)(artifact, start, amount)?.validate(artifact, start, amount)?;
-        if direct {
+        if !retain {
             return Ok(bytes);
         }
         while self.retained + bytes.len() > 8 * 1024 * 1024 || self.windows.len() >= 2_048 {
             self.retained -= self.windows.pop_front().unwrap().bytes.len();
         }
-        let within = (offset - start) as usize;
-        let result = bytes[within..within + length as usize].to_vec();
+        let result = bytes.clone();
         self.retained += bytes.len();
         self.windows.push_back(Window {
             role,

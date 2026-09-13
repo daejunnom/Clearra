@@ -1,6 +1,7 @@
 // SRP: bounded immutable HTTP byte transport. Graph meaning, candidate
 // completeness and rule-profile qualification belong to other owners.
 import { checkedPc4Read, planPc4ReadBatch } from './pc4-range-plan.mjs';
+import { createPc4SpanCache } from './pc4-span-cache.mjs';
 export class Pc4OnlineError extends Error {
   constructor(code, detail = code) { super(detail); this.name = 'Pc4OnlineError'; this.code = code; }
 }
@@ -25,25 +26,16 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
   const direct = new Set(directPaths);
 
   const pageSize = cacheBytes >= windowBytes && maxBytes >= windowBytes ? windowBytes : 0;
-  const cache = new Map(), inFlight = new Map(), controllers = new Set(), queue = [];
-  let transferred = 0, requests = 0, retained = 0, reservedTotal = 0;
+  const cache = createPc4SpanCache(cacheBytes, MAX_CACHE_ENTRIES), inFlight = new Map(), controllers = new Set(), queue = [];
+  let transferred = 0, requests = 0, reservedTotal = 0;
   let active = 0, closed = false, reads = 0, cacheHits = 0, joined = 0;
   const cancel = () => {
     closed = true;
     for (const controller of controllers) controller.abort();
     for (const entry of queue.splice(0)) entry.reject(new Pc4OnlineError('pc4_online_cancelled'));
-    cache.clear(); retained = 0;
+    cache.clear();
   };
   signal?.addEventListener('abort', cancel, { once: true });
-
-  function retain(key, bytes) {
-    if (closed || bytes.length > cacheBytes) return;
-    while (cache.size && (retained + bytes.length > cacheBytes || cache.size >= MAX_CACHE_ENTRIES)) {
-      const oldest = cache.keys().next().value;
-      retained -= cache.get(oldest).length; cache.delete(oldest);
-    }
-    cache.set(key, bytes); retained += bytes.length;
-  }
 
   function pump() {
     while (!closed && active < maxConcurrent && queue.length) {
@@ -55,12 +47,12 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
     }
   }
 
-  function span(artifact, offset, length) {
+  function span(artifact, offset, length, explicitBatch = false) {
     if (closed || signal?.aborted) return Promise.reject(new Pc4OnlineError('pc4_online_cancelled'));
     const key = `${artifact.content_identity}:${artifact.path}:${artifact.byte_length}:${offset}:${length}`;
-    const cached = cache.get(key);
+    const cached = cache.get(artifact, offset, length);
     if (cached) {
-      cacheHits++; cache.delete(key); cache.set(key, cached);
+      cacheHits++;
       return Promise.resolve(cached);
     }
     const pending = inFlight.get(key);
@@ -73,7 +65,7 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
       // Decoded graph records already belong to the generation-bound App
       // cache. Retaining their one-shot raw bytes here evicts reusable index
       // pages and increases subsequent HTTP calls for the same known indices.
-      if (!direct.has(artifact.path)) retain(key, bytes);
+      if (!closed && (explicitBatch || !direct.has(artifact.path))) cache.put(artifact, offset, bytes);
       return bytes;
     }, error => { inFlight.delete(key); throw error; });
     inFlight.set(key, request);
@@ -127,7 +119,7 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
     get reads() { return reads; },
     get cacheHits() { return cacheHits; },
     get joinedRequests() { return joined; },
-    get retainedBytes() { return retained; },
+    get retainedBytes() { return cache.bytes; },
     dispose() { cancel(); signal?.removeEventListener('abort', cancel); },
     async readMany(demands, options) {
       if (closed || signal?.aborted) fail('pc4_online_cancelled');
@@ -139,11 +131,23 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
       // cache window. The same transport limits/accounting apply to each span.
       reads += demands.length;
       const result = new Array(demands.length);
+      const missing = [], originalIndices = [];
+      // Remove cached sub-demands BEFORE merging. Otherwise a partly cached
+      // frontier can repeatedly transfer its old prefix in a larger new span.
+      for (const transfer of plan) for (const demand of transfer.demands) {
+        const known = cache.get(transfer.artifact, demand.offset, demand.length);
+        if (known) { result[demand.index] = known.slice(); cacheHits++; }
+        else {
+          originalIndices.push(demand.index);
+          missing.push({ artifact: transfer.artifact, offset: demand.offset, length: demand.length });
+        }
+      }
+      plan = planPc4ReadBatch(missing, options);
       await Promise.all(plan.map(async transfer => {
-        const bytes = await span(transfer.artifact, transfer.offset, transfer.length);
+        const bytes = await span(transfer.artifact, transfer.offset, transfer.length, true);
         for (const demand of transfer.demands) {
           const begin = demand.offset - transfer.offset;
-          result[demand.index] = bytes.slice(begin, begin + demand.length);
+          result[originalIndices[demand.index]] = bytes.slice(begin, begin + demand.length);
         }
       }));
       if (closed || signal?.aborted) fail('pc4_online_cancelled');
@@ -156,6 +160,10 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
       try { ({ artifact } = checkedPc4Read(input, offset, length)); }
       catch (error) { fail(error.message); }
       reads++;
+      // A previous explicit frontier batch may cover this exact record without
+      // matching the fixed window key. Reuse it before expanding the demand.
+      const known = cache.get(artifact, offset, length);
+      if (known) { cacheHits++; return known.slice(); }
       // No speculative/background scan: only windows intersecting this demand.
       // Small files and byte-budget-constrained reads keep exact access, never
       // expand a small request into a whole-artifact download.

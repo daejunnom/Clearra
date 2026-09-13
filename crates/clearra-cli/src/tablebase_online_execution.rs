@@ -78,25 +78,44 @@ pub(super) fn execute_online_with(
     })?;
     let snapshot = clearra_app::activate_pc4_host_generation(&generation.to_string())?
         .ok_or("pc4_online_generation_unavailable")?;
+    let field_count = generation["profiles"]
+        .as_array()
+        .and_then(|profiles| profiles.iter().find(|p| p["profile"] == "jstris-180"))
+        .and_then(|p| p["field_count"].as_u64())
+        .and_then(|count| u32::try_from(count).ok())
+        .ok_or("pc4_online_index_layout_mismatch")?;
     let execution = context.start_pc4_execution_for_surface(
         request,
         snapshot,
         Pc4InputSurface::NonInteractiveCli,
     )?;
-    drive(execution, |path, total, identity, offset, length| {
-        let role = files
-            .iter()
-            .position(|file| file.path == path)
-            .ok_or("pc4_online_artifact_invalid")?;
-        if total != files[role].size || identity != format!("sha256:{}", files[role].digest) {
-            return Err("pc4_online_artifact_identity_mismatch");
-        }
-        // The containing HTTP window's status, Content-Range and exact size
-        // were validated before cache admission. This is its bounded projection.
-        let bytes = reader.read(role, offset, length)?;
-        Ok(HostSlice::Http {
-            bytes,
-            content_range: content_range(offset, length, total),
-        })
-    })
+    drive(
+        execution,
+        |path, total, identity, offset, length, frontier| {
+            let role = files
+                .iter()
+                .position(|file| file.path == path)
+                .ok_or("pc4_online_artifact_invalid")?;
+            if total != files[role].size || identity != format!("sha256:{}", files[role].digest) {
+                return Err("pc4_online_artifact_identity_mismatch");
+            }
+            if role == 1 {
+                super::http_frontier::prefetch(
+                    &mut reader,
+                    field_count,
+                    files[2].size,
+                    offset,
+                    length,
+                    frontier,
+                )?;
+            }
+            // The containing HTTP window's status, Content-Range and exact size
+            // were validated before cache admission. This is its bounded projection.
+            let bytes = reader.read(role, offset, length)?;
+            Ok(HostSlice::Http {
+                bytes,
+                content_range: content_range(offset, length, total),
+            })
+        },
+    )
 }

@@ -147,8 +147,17 @@ cancellation and publication contracts are unchanged.
 
 Tests exercise all three new-conflict intersections and 1,000 ascending pages
 (64,000 ranks): only 1,998 boundary-key evaluations, rather than repeatedly
-scanning accumulated keys. This follow-up requires exact-source Rust CI and a
-new WASM measurement; it is not included in the a22 timing above.
+scanning accumulated keys. This correction passed the 93-test App selection in
+the follow-up CI below. It is not included in the a22 timing above.
+
+A new 120-second probe of the exact `3ceca8b` CI artifact still did not complete:
+153,776 logical reads, 51,258 graph records, 69,429 file calls, 76,279,410 local
+bytes, 105.205 s compute, 10.766 s I/O, 3.130 s bridge and 539,557,888 B WASM
+memory. WASM SHA256 `139ebc8d9286b7ca241271ef216db39a12341b692bea1c3fe598efa8682b26b0`;
+artifact 10321905713 / run 34769318668 / attempt 1. This is only a small amount
+of additional progress versus a22 at the same probe cap, not a demonstrated
+end-to-end performance breakthrough. The artifact was used for measurement,
+not published to 4194. No 456,459-family completion claim is made.
 
 ## Online transport correction, using the saved real trace
 
@@ -182,21 +191,59 @@ The focused JS transport/OPFS/host/comparison suite passed **28 tests** locally;
 40 additional qualification/download/workflow/artifact-guard checks passed.
 Follow-up implementation is `3ceca8b51c9d6e54a837bc14fa5a6f17bbc8bcba`;
 non-publishing CI https://github.com/daejunnom/Clearra/actions/runs/34769318668 .
-At this checkpoint source, surface and native CLI jobs succeeded; PC4 contracts
-and preview WASM are still running. This exact-source checkpoint supersedes no
-release evidence, and the new accumulator timing has not yet been measured.
+Source, surface and native CLI jobs succeeded. PC4 contracts found one native
+unit-test failure: the old tiny fixture expected three whole-file windows,
+where the new partial policy made 22 requests. App 93 and public WASM-host 2
+tests passed. The failure also exposed a real cache omission: exact reads of
+small index files returned before cache admission. The follow-up fixes that
+omission and replaces the obsolete count with partial-range bounds, no repeated
+contained index fetches, and the original complete local/online solution parity
+assertion. It does not simply change the expected count to 22. Fresh Rust CI
+is required for this fix and the frontier implementation below.
 
-## Next online stage / remaining evidence
+## Bounded known-frontier transport implementation
 
-Further reduce **actual HTTP transactions**, not just logical reads: carry a
-bounded known-demand frontier into index/record
-batch planning, keep immutable revision/profile admission, and avoid rereading
-known metadata. Existing 64 MiB request-budget and 206/Content-Range validation
-must not be relaxed to hide a costly query. All-file expansion, background scans
-and implicit full downloads remain forbidden. Installed matching-profile data
-must remain distinguishable from Range transport.
+On a missing adjacency record, the cooperative traversal now exposes at most
+32 unique IDs from its already queued work, inspecting at most 128 pending
+entries. A failed page remains uncommitted; the hint does not change DFS order,
+suffix facts, candidates, or the next-page cursor. App filters cached, foreign,
+and out-of-domain IDs and carries the hint with the existing pending lookup.
+
+Both Web HTTP and native CLI adapters use two dependent byte stages: batched
+GOFF pairs, then the graph spans those pairs specify. Only the actual GOFF-pair
+phase starts read-ahead, after normal lookup header handling. Known spans merge
+only across at most 1,024 gap bytes, up to 64 KiB per transfer. Cached sub-demands
+are removed before merging to prevent overlapping frontiers from refetching
+their old prefix. Web retains the existing four-HTTP-request concurrency bound;
+native curl transfers remain serial but coalesce known spans before launching
+processes. Native parallel curl execution is not claimed.
+
+The same bounded 8 MiB / 2,048-entry transport cache retains explicit graph
+batches until the exact lookup asks for them. A bucketed containing-span index
+avoids scanning every cached Web record. Ordinary one-shot graph reads still
+do not evict index pages. Local installed readers **do not prefetch** and make
+zero HTTP calls. Profile/revision identity, exact Rust admission, 64 MiB total
+transfer budget, cancellation, 206/Content-Range validation and no implicit
+retry remain intact. All-file expansion and speculative full-graph scans remain
+forbidden.
+
+Focused JS transport/OPFS/host validation: **27 tests passed**. A synthetic
+32-adjacent-record A/B used 64 serial HTTP requests versus **2 batch requests**
+(132 offset bytes + 384 graph bytes), with every exact returned byte equal.
+The host integration test separately consumed all 64 genuine pending requests
+through normal admission while making those two fetches. This is not evidence
+of a 32x whole-search or real-network speedup. New native/core tests require CI.
+
+`run-pc4-local-wasm.mjs --transport http-model --frontier` is the next bounded
+measurement path: real WASM-produced frontiers and product HTTP transport with
+exact local dataset responses, no network or alternate port. The comparison
+without `--frontier` measures the same artifact/input. Old traces contain no
+frontier hints and cannot establish this implementation's large-case savings;
+future trace reads must not be treated as already known work.
+
+## Remaining evidence
 
 Still required: complete 456,459-family validation/timing, input/hold-family
 scale tests, native/browser parity after these edits, real HTTP latency and
-frontier-batch A/B, independent profile qualification, remaining product contracts and release
+real-WASM frontier-batch A/B, independent profile qualification, remaining product contracts and release
 acceptance. Do not mark v0.9.0 or the overall goal complete from these prefix tests.

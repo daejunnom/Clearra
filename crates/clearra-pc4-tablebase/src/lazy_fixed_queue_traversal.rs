@@ -530,7 +530,34 @@ impl FixedQueueTraversalFamily {
                 let adjacency_result = provider.complete_outgoing_edges(&adjacency_query);
                 check_page_guard(snapshot, guard)?;
                 validate_provider_binding(&self.target, provider)?;
-                let adjacency = adjacency_result.map_err(FixedQueueTraversalPageError::Provider)?;
+                let adjacency = match adjacency_result {
+                    Ok(adjacency) => adjacency,
+                    Err(error) => {
+                        // Keep the failed transaction uncommitted. Expose only
+                        // a bounded prefix of its already queued siblings, so a
+                        // host can group future byte reads without changing DFS
+                        // order or pretending missing adjacency is an empty set.
+                        let mut fields = [0_u32; 32];
+                        fields[0] = field_id;
+                        let mut count = 1;
+                        for pending in transaction.pending_paths.iter().rev().take(128) {
+                            if count == fields.len() {
+                                break;
+                            }
+                            let pending_id = pending.terminal_field_id();
+                            if pending.consumed_pieces() < self.queue.len()
+                                && !fields[..count].contains(&pending_id)
+                            {
+                                fields[count] = pending_id;
+                                count += 1;
+                            }
+                        }
+                        provider.observe_unresolved_frontier(&self.target, &fields[..count]);
+                        check_page_guard(snapshot, guard)?;
+                        validate_provider_binding(&self.target, provider)?;
+                        return Err(FixedQueueTraversalPageError::Provider(error));
+                    }
+                };
                 validate_adjacency(&adjacency_query, &adjacency)?;
 
                 let mut edges = adjacency.into_edges();
@@ -967,6 +994,102 @@ mod tests {
 
     fn append_target_paths(output: &mut Vec<Vec<u32>>, page: &FixedQueueTraversalPage) {
         output.extend(target_paths(page));
+    }
+
+    #[test]
+    fn unresolved_frontier_is_bounded_and_cannot_commit_a_failed_page() {
+        struct Waiting {
+            base: Provider,
+            blocked: bool,
+            hints: Vec<u32>,
+        }
+        impl QualifiedCompleteAdjacencyProvider for Waiting {
+            type Error = ProviderError;
+            fn target(&self) -> &QualifiedPc4TargetIdentity {
+                self.base.target()
+            }
+            fn complete_outgoing_edges(
+                &mut self,
+                query: &FixedQueueAdjacencyQuery<'_>,
+            ) -> Result<QualifiedCompleteAdjacency, Self::Error> {
+                if self.blocked && query.source_field_id() != 0 {
+                    return Err(ProviderError::Rejected);
+                }
+                self.base.complete_outgoing_edges(query)
+            }
+            fn observe_unresolved_frontier(
+                &mut self,
+                target: &QualifiedPc4TargetIdentity,
+                fields: &[u32],
+            ) {
+                assert_eq!(target, self.base.target());
+                self.hints = fields.to_vec();
+            }
+        }
+        let family = family(
+            &[Pc4GraphPiece::I, Pc4GraphPiece::O],
+            [128, 64, 2, 64, 128, 64],
+        );
+        let mut waiting = Waiting {
+            base: provider(&[
+                ((0, Pc4GraphPiece::I), &[3, 1, 2]),
+                ((1, Pc4GraphPiece::O), &[11]),
+                ((2, Pc4GraphPiece::O), &[12]),
+                ((3, Pc4GraphPiece::O), &[13]),
+            ]),
+            blocked: true,
+            hints: Vec::new(),
+        };
+        let mut cursor = family.cursor();
+        assert!(matches!(
+            family.next_page(
+                &mut cursor,
+                nonzero(64),
+                &mut waiting,
+                &mut exhausted,
+                &guard()
+            ),
+            Err(FixedQueueTraversalPageError::Provider(
+                ProviderError::Rejected
+            ))
+        ));
+        assert_eq!(waiting.hints, [1, 2, 3]);
+        assert_eq!(cursor.visited_state_occurrences(), 0);
+        assert_eq!(cursor.emitted_paths(), 0);
+        assert_eq!(cursor.pending_path_count(), 1);
+        waiting.blocked = false;
+        let page = family
+            .next_page(
+                &mut cursor,
+                nonzero(64),
+                &mut waiting,
+                &mut exhausted,
+                &guard(),
+            )
+            .unwrap();
+        assert_eq!(
+            target_paths(&page),
+            vec![vec![1, 11], vec![2, 12], vec![3, 13]]
+        );
+        assert!(page.is_exhausted());
+
+        waiting.blocked = true;
+        waiting
+            .base
+            .graph
+            .insert((0, Pc4GraphPiece::I), (1..=60).collect());
+        let mut cursor = family.cursor();
+        assert!(family
+            .next_page(
+                &mut cursor,
+                nonzero(64),
+                &mut waiting,
+                &mut exhausted,
+                &guard()
+            )
+            .is_err());
+        assert_eq!(waiting.hints, (1..=32).collect::<Vec<_>>());
+        assert_eq!(cursor.visited_state_occurrences(), 0);
     }
 
     #[test]

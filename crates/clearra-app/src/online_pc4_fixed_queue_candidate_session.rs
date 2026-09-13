@@ -529,6 +529,15 @@ impl AppOnlinePc4CandidateSession {
         self.active_lookup.as_ref().map(|active| active.field_id)
     }
 
+    /// Non-authoritative scheduling hints, valid only while that missing record
+    /// is being fetched. Every later exact lookup still passes normal admission.
+    pub fn lookup_frontier(&self) -> &[u32] {
+        if self.terminal.is_some() || self.active_lookup.is_none() {
+            return &[];
+        }
+        self.runtime.lookup_frontier()
+    }
+
     pub fn active_range_usage(&self) -> Option<RangeAdmissionUsage> {
         self.active_lookup
             .as_ref()

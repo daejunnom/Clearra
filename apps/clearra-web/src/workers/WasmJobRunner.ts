@@ -4,6 +4,7 @@ import type { ClearraWasmModule } from './clearraWasmRuntime';
 import { onlinePc4Progress } from './OnlinePc4Progress';
 import { openLocalPc4Reader } from './pc4LocalStore';
 import { pc4SearchRangePolicy } from '../../../../scripts/release/pc4/pc4-search-range-policy.mjs';
+import { prefetchPc4LookupFrontier } from '../../../../scripts/release/pc4/pc4-frontier-reader.mjs';
 import { createPc4RangeReader, type Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 
 // Keep one synchronous WASM entry comfortably below the browser host turn.
@@ -73,7 +74,12 @@ export class WasmJobRunner {
             const range = this.wasm.online_pc4_pending?.(this.jobId);
             if (range) {
               let bytes: Uint8Array;
-              try { bytes = await reader.read(range.artifact, range.offset, range.length); }
+              try {
+                // Local storage keeps its measured index-page/exact-record
+                // policy. Read-ahead groups known demands only for HTTP RTTs.
+                if (!('provider' in reader)) await prefetchPc4LookupFrontier(reader, this.onlineGeneration!, range);
+                bytes = await reader.read(range.artifact, range.offset, range.length);
+              }
               catch (error) {
                 // Cancellation already has a terminal event waiting in Rust.
                 // Do not turn an aborted HTTP request into a generic failure.

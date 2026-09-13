@@ -72,6 +72,49 @@ fn tablebase_download_graph_records_do_not_evict_reused_index_pages_or_overread(
 }
 
 #[test]
+fn tablebase_download_small_indexes_cache_exact_ranges_without_whole_file_expansion() {
+    let mut small = files();
+    small[0].size = 32;
+    let mut reader = OnlineRangeReader::new(small, |a, offset, length| {
+        assert_eq!((offset, length), (0, 16));
+        Ok(reply(a, offset, length))
+    });
+    reader.read(0, 0, 16).unwrap();
+    assert_eq!(reader.read(0, 8, 8).unwrap(), (8..16).collect::<Vec<u8>>());
+    reader.read(0, 0, 16).unwrap();
+    assert_eq!(reader.requests, 1);
+    assert_eq!(reader.retained, 16);
+    assert_eq!(reader.reserved, 16);
+}
+
+#[test]
+fn tablebase_download_explicit_batch_validates_before_io_and_excludes_cached_subranges() {
+    let calls = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = Rc::clone(&calls);
+    let mut reader = OnlineRangeReader::new(files(), move |a, o, n| {
+        log.borrow_mut().push((o, n));
+        Ok(reply(a, o, n))
+    });
+    reader.read_many(2, &[(100, 12)]).unwrap();
+    let demands = [(108, 4), (120, 12), (100, 12)];
+    let bytes = reader.read_many(2, &demands).unwrap();
+    for ((offset, length), value) in demands.into_iter().zip(bytes) {
+        assert_eq!(
+            value,
+            (offset..offset + length)
+                .map(|v| v as u8)
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(*calls.borrow(), [(100, 12), (120, 12)]);
+    assert!(reader.read_many(2, &[(200, 12), (u64::MAX, 12)]).is_err());
+    assert!(reader.read_many(2, &[(200, 12); 513]).is_err());
+    assert_eq!(calls.borrow().len(), 2);
+    reader.read_many(2, &[(0, 65_536), (65_536, 12)]).unwrap();
+    assert_eq!(&calls.borrow()[2..], [(0, 65_536), (65_536, 12)]);
+}
+
+#[test]
 fn tablebase_download_http_requires_real_partial_content_before_cache_admission() {
     for (status, expected) in [
         (200, "pc4_online_whole_content_rejected"),

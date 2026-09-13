@@ -3,6 +3,7 @@ import test from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 import { createPc4RangeReader } from './pc4-range-reader.mjs';
 import { pc4SearchRangePolicy } from './pc4-search-range-policy.mjs';
+import './pc4-frontier-reader.test.mjs';
 
 const generation = { repository: 'example/pc4', revision: 'a'.repeat(40) };
 const artifact = { path: 'graph.bin', byte_length: 1_048_581, content_identity: 'sha256:' + 'b'.repeat(64) };
@@ -156,6 +157,21 @@ test('explicit batch merges known nearby intervals, retains order, identity and 
   } finally { f.reader.dispose(); }
 });
 
+test('a partly cached frontier only transfers its unknown demands', async () => {
+  const f = fixture({ windowBytes: 0 });
+  try {
+    await f.reader.read(artifact, 100, 12);
+    const demands = [
+      { artifact, offset: 108, length: 4 }, { artifact, offset: 120, length: 12 },
+      { artifact, offset: 100, length: 12 }
+    ];
+    const result = await f.reader.readMany(demands);
+    demands.forEach((d, i) => assert.deepEqual(result[i], values(d.offset, d.length)));
+    assert.deepEqual(f.ranges.map(r => [r.start, r.end]), [[100, 111], [120, 131]]);
+    assert.equal(f.reader.bytes, 24);
+  } finally { f.reader.dispose(); }
+});
+
 test('batch validates every demand before any I/O and preserves the maximum transfer span', async () => {
   const f = fixture();
   const d = { artifact, offset: 0, length: 8 };
@@ -199,5 +215,23 @@ test('search policy selects only the qualified profile and keeps graph reads exa
     assert.equal(f.reader.bytes, 4096 + 2100 * 12);
     assert.equal(f.reader.retainedBytes, 4096);
     assert.ok(f.ranges.slice(1).every(r => r.end - r.start + 1 === 12));
+  } finally { f.reader.dispose(); }
+});
+
+test('explicit batch spans are reused by exact subranges across bucket boundaries and forgotten on LRU eviction', async () => {
+  const f = fixture({ windowBytes: 0, cacheBytes: 16 });
+  try {
+    const demands = [65532, 65540].map(offset => ({ artifact, offset, length: 8 }));
+    await f.reader.readMany(demands);
+    assert.equal(f.reader.requests, 1);
+    assert.deepEqual(await f.reader.read(artifact, 65538, 4), values(65538, 4));
+    assert.equal(f.reader.requests, 1, 'bucket-crossing containing span is reused');
+    await f.reader.read(artifact, 0, 16);
+    assert.equal(f.reader.retainedBytes, 16);
+    await f.reader.read(artifact, 65538, 4);
+    assert.equal(f.reader.requests, 3, 'the old span must be absent from every bucket after eviction');
+    const other = { ...artifact, content_identity: 'sha256:' + 'd'.repeat(64) };
+    await f.reader.read(other, 65538, 4);
+    assert.equal(f.reader.requests, 4, 'a different identity cannot borrow a containing span');
   } finally { f.reader.dispose(); }
 });

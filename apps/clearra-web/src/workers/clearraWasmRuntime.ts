@@ -7,6 +7,7 @@ import type {
 // SRP rationale: this module has one behavior-level change reason: adapting the validated
 // WASM ABI exports into the browser runtime contract.
 export type Pc4PendingRange = {
+  lookup_frontier?: number[];
   lookup_session: number; request_id: number; profile: string; offset: number; length: number;
   artifact: { path: string; byte_length: number; content_identity: string };
 };

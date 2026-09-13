@@ -7,16 +7,22 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { checkedDatasetRoot, openBenchmarkDataset } from './pc4-local-dataset.mjs';
 import { createPc4TraceComparison } from './pc4-trace-comparison.mjs';
+import { createPc4RangeReader } from '../release/pc4/pc4-range-reader.mjs';
+import { pc4SearchRangePolicy } from '../release/pc4/pc4-search-range-policy.mjs';
+import { prefetchPc4LookupFrontier } from '../release/pc4/pc4-frontier-reader.mjs';
 
 const { values } = parseArgs({ options: {
   directory: { type: 'string' }, profile: { type: 'string' }, 'wasm-directory': { type: 'string' },
   command: { type: 'string' }, seconds: { type: 'string', default: '60' },
   'read-limit': { type: 'string', default: '100000' }, cached: { type: 'boolean' },
-  'page-bytes': { type: 'string', default: '4096' }, trace: { type: 'boolean' }, 'compare-trace': { type: 'boolean' }
+  'page-bytes': { type: 'string', default: '4096' }, trace: { type: 'boolean' }, 'compare-trace': { type: 'boolean' },
+  transport: { type: 'string', default: 'local' }, frontier: { type: 'boolean' }
 } });
 const seconds = Number(values.seconds), readLimit = Number(values['read-limit']);
 if (!values.command || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > 600 ||
     !Number.isSafeInteger(readLimit) || readLimit < 1 || readLimit > 1000000) throw new Error('Explicit bounded probe arguments required');
+if (!['local', 'http-model'].includes(values.transport) || values.transport === 'http-model' && values.cached ||
+    values.frontier && values.transport !== 'http-model') throw new Error('Choose local storage OR modeled HTTP; frontier is HTTP-only');
 const dataset = await openBenchmarkDataset(values.directory, values.profile);
 const wasmDirectory = resolve(values['wasm-directory']);
 const manifest = JSON.parse(await readFile(join(wasmDirectory, 'clearra_wasm.manifest.json'), 'utf8'));
@@ -46,6 +52,21 @@ if (values.cached) {
   reader = createPc4LocalReader(dataset.plan.files, (artifact, offset, length) => dataset.read(artifact, offset, length),
     { pageBytes: Number(values['page-bytes']), directPaths: [dataset.plan.files[2].path] });
 }
+if (values.transport === 'http-model') {
+  // Real product transport and real WASM-produced hints, but exact local
+  // responses. This measures causal request/byte counts, NOT internet latency.
+  reader = createPc4RangeReader(dataset.generation, { ...pc4SearchRangePolicy(dataset.generation, values.profile),
+    fetcher: async (url, init) => {
+      const artifact = dataset.plan.files.find(file => url ===
+        `https://huggingface.co/datasets/${dataset.generation.repository}/resolve/${dataset.plan.revision}/${file.path}`);
+      const match = /^bytes=(\d+)-(\d+)$/.exec(init.headers.Range);
+      if (!artifact || !match || init.credentials !== 'omit') throw new Error('Modeled transport identity mismatch');
+      const offset = Number(match[1]), length = Number(match[2]) - offset + 1;
+      return new Response(await dataset.read(artifact, offset, length), {
+        status: 206, headers: { 'content-range': `bytes ${offset}-${offset + length - 1}/${artifact.byte_length}` }
+      });
+    } });
+}
 const demandDigest = createHash('sha256'), artifactCounts = {}, started = performance.now();
 let job, steps = 0, reads = 0, computeMs = 0, ioMs = 0, bridgeMs = 0, terminal = null, lastReport = started, cancelled = false;
 // One bounded local-only trace for the next HTTP planner experiment. Persist
@@ -53,9 +74,12 @@ let job, steps = 0, reads = 0, computeMs = 0, ioMs = 0, bridgeMs = 0, terminal =
 const trace = values.trace ? Buffer.alloc(Math.min(readLimit, 200000) * 12) : null;
 let traceHandle, tracePath, traceCommitted = false, traceCount = 0;
 let comparison = null;
+let frontiers = 0, hintedIds = 0, maximumFrontier = 0;
 const progress = () => ({ elapsed_ms: performance.now() - started, steps, logical_reads: reads, file_reads: dataset.calls,
   file_bytes: dataset.bytes, compute_ms: computeMs, io_ms: ioMs, bridge_ms: bridgeMs, artifact_reads: artifactCounts,
-  wasm_memory_bytes: raw.memory.buffer.byteLength, cache_hits: reader.cacheHits ?? 0 });
+  wasm_memory_bytes: raw.memory.buffer.byteLength, cache_hits: reader.cacheHits ?? 0,
+  ...(values.transport === 'http-model' ? { modeled_http_requests: reader.requests, modeled_http_bytes: reader.bytes,
+    frontier_hints: frontiers, hinted_ids: hintedIds, maximum_frontier: maximumFrontier } : {}) });
 try {
   if (values['compare-trace']) {
     const root = await checkedDatasetRoot(values.directory, values.profile);
@@ -91,7 +115,16 @@ try {
     if (status === 0 || status === 4) {
       at = performance.now(); ok(raw.clearra_wasm_online_pc4_pending(job)); const range = JSON.parse(output()); bridgeMs += performance.now() - at;
       if (range) {
-        at = performance.now(); const bytes = await reader.read(range.artifact, range.offset, range.length); ioMs += performance.now() - at;
+        at = performance.now();
+        if (values.frontier) {
+          if (!Array.isArray(range.lookup_frontier)) throw new Error('This WASM does not expose frontier hints; rebuild in trusted CI');
+          if (range.lookup_frontier.length >= 2 && range.artifact.path === dataset.plan.files[1].path && range.length === 8 && range.offset >= 16) {
+            frontiers++; hintedIds += range.lookup_frontier.length;
+            maximumFrontier = Math.max(maximumFrontier, range.lookup_frontier.length);
+          }
+          await prefetchPc4LookupFrontier(reader, dataset.generation, range);
+        }
+        const bytes = await reader.read(range.artifact, range.offset, range.length); ioMs += performance.now() - at;
         reads++; artifactCounts[range.artifact.path] = (artifactCounts[range.artifact.path] ?? 0) + 1;
         demandDigest.update(`${range.artifact.path}:${range.offset}:${range.length}\n`).update(bytes);
         comparison?.observe(range.artifact, range.offset, range.length, bytes);
@@ -102,7 +135,9 @@ try {
           trace.writeUInt32LE(range.offset, traceCount * 12 + 4);
           trace.writeUInt32LE(range.length, traceCount * 12 + 8); traceCount++;
         }
-        at = performance.now(); input(JSON.stringify({ lookup_session: range.lookup_session, request_id: range.request_id, source: 'verified-local-file', bytes: Array.from(bytes) }));
+        at = performance.now(); input(JSON.stringify({ lookup_session: range.lookup_session, request_id: range.request_id,
+          ...(values.transport === 'local' ? { source: 'verified-local-file' } : { status: 206,
+            content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}` }), bytes: Array.from(bytes) }));
         ok(raw.clearra_wasm_online_pc4_admit(job)); bridgeMs += performance.now() - at;
       }
     }
@@ -114,7 +149,9 @@ try {
     if (performance.now() - lastReport >= 10000) { console.log(JSON.stringify({ event: 'progress', ...progress() })); lastReport = performance.now(); }
     if (terminal || ![0, 4].includes(status)) break;
   }
-  const report = { event: 'result', cached: !!values.cached, page_bytes: values.cached ? Number(values['page-bytes']) : 0, source_commit: manifest.build?.runtime_identity?.source_commit,
+  const report = { event: 'result', transport: values.transport, frontier: !!values.frontier,
+    evidence: values.transport === 'http-model' ? 'real-wasm-frontier-local-responses-not-internet-timing' : 'real-wasm-local-files',
+    cached: !!values.cached, page_bytes: values.cached ? Number(values['page-bytes']) : 0, source_commit: manifest.build?.runtime_identity?.source_commit,
     wasm_sha256: manifest.wasm.sha256, dataset_revision: dataset.plan.revision, module_prepare_ms: preparationMs,
     ...progress(), cancelled_by_probe: cancelled, demand_sha256: demandDigest.digest('hex'),
     ...(comparison ? comparison.finish() : {}),
