@@ -1,11 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import { assertManagedBuildTransaction, assertCargoOutputArguments } from './clearra-build-policy.mjs';
+import { cargoJobserverStdio } from './cargo-jobserver-stdio.mjs';
 try {
   const transaction = assertManagedBuildTransaction();
   const [compiler, ...arguments_] = process.argv.slice(2);
   if (!compiler) throw new Error('Missing Rust compiler argument');
   assertCargoOutputArguments(arguments_, transaction.transaction);
-  const result = spawnSync(compiler, arguments_, { stdio: 'inherit', windowsHide: true });
+  const result = spawnSync(compiler, arguments_, { stdio: cargoJobserverStdio(), windowsHide: true });
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;
 } catch (error) {

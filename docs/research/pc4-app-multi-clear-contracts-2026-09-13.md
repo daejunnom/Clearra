@@ -49,3 +49,17 @@ full-solution authority validator mutation suite also passed. Executable
 validation of the new four App tests is delegated to the existing read-only,
 non-publishing Linux `pc4-contracts` CI job on the exact submitted source.
 Do not mark the materialization/completeness checklist closed from this entry.
+
+## First hosted result and correction
+
+Run `34737351001` executed the new tests: 1L passed, but the 2L through 4L
+cases stopped at the fixture's accidentally one-edge traversal budget. The
+materialization budget also incorrectly allowed only one edge. Both now equal
+the fixture's exact line/path length; one-observation-per-page is unchanged.
+The initial hosted result was 61 App tests passed and three failed, not a
+multi-clear parity pass. Core 7 and TB 156 passed on that source.
+
+This also identified an App diagnostic loss: the session retained only a
+generic budget reason. It now retains the original typed stage, limit and
+attempted count, with a focused mapping regression. This does not raise a
+product budget or turn an incomplete family into reducer input.

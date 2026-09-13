@@ -125,10 +125,15 @@ fn assert_clear_path(lines: u8) {
             LookupSessionId::new(1).unwrap(),
             fixture.ids_by_step[0],
             TerminalDepthContract::QueueExhaustedOnly,
-            FixedQueueTraversalBudgets::new(nonzero(64), nonzero(64), nonzero(1), nonzero(16)),
+            FixedQueueTraversalBudgets::new(
+                nonzero(64),
+                nonzero(64),
+                nonzero(usize::from(lines)),
+                nonzero(16),
+            ),
             FixedQueueTraversalPageBudgets::new(nonzero(64), nonzero(64)),
             ConcretePathMaterializationBudgets::new(
-                nonzero(1),
+                nonzero(usize::from(lines)),
                 nonzero(16),
                 nonzero(64),
                 nonzero(64),

@@ -31,6 +31,7 @@ jobs:
           [[ "$GITHUB_REF" == 'refs/heads/codex/v0.9.0-stacked-on-v0.8.1-20260912' && "$GITHUB_REF_TYPE" == 'branch' ]]
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           node --test scripts/release/integration-contracts-workflow.test.mjs
+          node --test scripts/tools/cargo-jobserver-stdio.test.mjs
 
   native-cli:
     needs: source

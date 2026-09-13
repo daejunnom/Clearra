@@ -38,7 +38,10 @@ fn expected_percent_probability() -> &'static str {
 
 fn expected_path_solution_count() -> usize {
     if native_core_enabled() {
-        1536
+        // IIOOO on 2L has four field tilings: the aligned horizontal Is
+        // start at x=0,2,4,6 and the three Os fill the remaining columns.
+        // Build-order/rotation witnesses are not extra solution fields.
+        4
     } else {
         1
     }
@@ -46,18 +49,16 @@ fn expected_path_solution_count() -> usize {
 
 fn expected_path_retained_trace_count() -> usize {
     if native_core_enabled() {
-        64
+        4
     } else {
         1
     }
 }
 
 fn expected_scenario_solution_count() -> usize {
-    if native_core_enabled() {
-        2
-    } else {
-        1
-    }
+    // The only empty cells form one horizontal I. Storing the final current
+    // in an empty hold cannot produce a second execution without a next piece.
+    1
 }
 
 fn expected_scenario_coverage_probability_json() -> &'static str {

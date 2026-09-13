@@ -42,7 +42,25 @@ fn process_e2e_inspect_reports_reserved_unsupported_command() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
     assert!(stderr.contains("E_CLI_COMMAND_UNSUPPORTED"));
-    assert!(stderr.contains("inspect is unsupported"));
+    assert!(
+        stderr.contains("the requested operation is not supported"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("MVP"));
+
+    let detailed = clearra()
+        .args(["--verbose", "inspect"])
+        .output()
+        .expect("verbose inspect process");
+    assert_eq!(detailed.status.code(), Some(3));
+    assert!(detailed.stdout.is_empty());
+    let details = String::from_utf8(detailed.stderr).unwrap();
+    assert!(details.contains("E_CLI_COMMAND_UNSUPPORTED"), "{details}");
+    assert!(details.contains("inspect is unsupported"), "{details}");
+    assert!(
+        details.contains("rules inspect or scoring inspect"),
+        "{details}"
+    );
 }
 
 #[test]

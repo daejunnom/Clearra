@@ -47,13 +47,27 @@ fn process_e2e_m26_percent_and_path_report_product_contract() {
     let path_stdout = String::from_utf8(path.stdout).expect("path stdout utf8");
     assert!(path_stdout.contains("kind: path"));
     assert!(path_stdout.contains("retained_representative_trace: true"));
-    assert!(path_stdout.contains(&format!(
-        "total_solution_count: {}",
-        expected_path_solution_count()
-    )));
-    assert!(path_stdout.contains(&format!(
-        "retained_trace_count: {}",
-        expected_path_retained_trace_count()
-    )));
+    assert!(
+        path_stdout.contains(&format!(
+            "total_solution_count: {}",
+            expected_path_solution_count()
+        )),
+        "field count contract: {path_stdout}"
+    );
+    assert!(
+        path_stdout.contains(&format!(
+            "retained_trace_count: {}",
+            expected_path_retained_trace_count()
+        )),
+        "retention contract: {path_stdout}"
+    );
+    assert!(
+        path_stdout.contains("unique_solution_count: 4"),
+        "{path_stdout}"
+    );
+    assert!(
+        path_stdout.contains("count_complete: true"),
+        "{path_stdout}"
+    );
     assert!(path_stdout.contains("path_distinguishes_retained_trace_from_total_count: true"));
 }

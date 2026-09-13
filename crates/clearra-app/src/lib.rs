@@ -282,7 +282,9 @@ pub use pc_candidate_execution_bridge::{
     ValidatedPcCandidateExecutionEvidence,
 };
 #[cfg(feature = "online-pc4-tablebase")]
-pub use pc_candidate_page_boundary::graph_candidate_adapter::Pc4GraphCandidateAdapterBudgets;
+pub use pc_candidate_page_boundary::graph_candidate_adapter::{
+    Pc4GraphCandidateAdapterBudgets, Pc4GraphCandidateBudgetExceeded, Pc4GraphCandidateBudgetKind,
+};
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc_candidate_page_boundary::{
     PcCandidateBoundaryError, PcCandidateCollection, PcCandidateCollectionCompleteness,

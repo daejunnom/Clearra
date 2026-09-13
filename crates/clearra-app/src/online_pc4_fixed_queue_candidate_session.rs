@@ -31,7 +31,10 @@ use super::{
     pc4_input_disclosure_policy::{Pc4PreparedOnlineInput, Pc4PreparedQueueInput},
     pc4_lookup_graph_runtime_adapter::{Pc4LookupGraphCacheLimits, Pc4LookupGraphCacheStartError},
     pc_candidate_page_boundary::{
-        graph_candidate_adapter::{Pc4GraphCandidateAdapterBudgets, Pc4GraphCandidatePrepareError},
+        graph_candidate_adapter::{
+            Pc4GraphCandidateAdapterBudgets, Pc4GraphCandidateBudgetExceeded,
+            Pc4GraphCandidatePrepareError,
+        },
         PcCandidatePageGuard, PcCandidateProviderKind, PcCandidateReducerInput,
         PcCandidateRequestIdentity, PcCandidateRequestIdentityError, PcCandidateSourceBinding,
     },
@@ -271,6 +274,7 @@ pub enum AppOnlinePc4FixedQueueCandidateFailure {
     CandidateAdvance {
         reason: &'static str,
     },
+    CandidateBudgetExceeded(Pc4GraphCandidateBudgetExceeded),
     CompletionUnavailable,
 }
 
@@ -283,6 +287,7 @@ impl AppOnlinePc4FixedQueueCandidateFailure {
             Self::LookupStart { error, .. } => error.reason(),
             Self::Lookup { failure, .. } => failure.reason(),
             Self::LookupAdmission { reason, .. } | Self::CandidateAdvance { reason } => reason,
+            Self::CandidateBudgetExceeded(_) => "pc4_graph_candidate_prepare_budget_exceeded",
             Self::CompletionUnavailable => "pc4_online_candidate_completion_unavailable",
         }
     }
@@ -293,7 +298,9 @@ impl AppOnlinePc4FixedQueueCandidateFailure {
             | Self::LookupStart { field_id, .. }
             | Self::Lookup { field_id, .. }
             | Self::LookupAdmission { field_id, .. } => Some(*field_id),
-            Self::CandidateAdvance { .. } | Self::CompletionUnavailable => None,
+            Self::CandidateAdvance { .. }
+            | Self::CandidateBudgetExceeded(_)
+            | Self::CompletionUnavailable => None,
         }
     }
 }
@@ -512,11 +519,7 @@ impl AppOnlinePc4FixedQueueCandidateSession {
                     if is_cancelled_advance(&error) {
                         return self.finish(TerminalState::Cancelled);
                     }
-                    return self.finish(TerminalState::Failed(
-                        AppOnlinePc4FixedQueueCandidateFailure::CandidateAdvance {
-                            reason: error.reason(),
-                        },
-                    ));
+                    return self.finish(TerminalState::Failed(candidate_advance_failure(error)));
                 }
             }
         }
@@ -604,6 +607,19 @@ fn is_cancelled_advance(error: &Pc4FixedQueueCandidateRuntimeAdvanceError) -> bo
     )
 }
 
+fn candidate_advance_failure(
+    error: Pc4FixedQueueCandidateRuntimeAdvanceError,
+) -> AppOnlinePc4FixedQueueCandidateFailure {
+    match error {
+        Pc4FixedQueueCandidateRuntimeAdvanceError::Candidate(
+            Pc4GraphCandidatePrepareError::BudgetExceeded(budget),
+        ) => AppOnlinePc4FixedQueueCandidateFailure::CandidateBudgetExceeded(budget),
+        other => AppOnlinePc4FixedQueueCandidateFailure::CandidateAdvance {
+            reason: other.reason(),
+        },
+    }
+}
+
 #[cfg(test)]
 #[path = "online_pc4_fixed_queue_candidate_session_path_tests.rs"]
 mod path_tests;
@@ -638,6 +654,39 @@ mod tests {
     const INITIAL_BOARD: u64 = 0b00_0011_1111;
     const TERMINAL_BOARD: u64 = 0b11_1111_1111;
     const EMPTY_TARGETS: &[u32] = &[];
+
+    #[test]
+    fn pc4_resource_failure_preserves_stage_limit_and_attempted_count() {
+        use crate::pc_candidate_page_boundary::graph_candidate_adapter::Pc4GraphCandidateBudgetKind;
+        for kind in [
+            Pc4GraphCandidateBudgetKind::Traversal(
+                clearra_pc4_tablebase::FixedQueueBudgetKind::PathEdges,
+            ),
+            Pc4GraphCandidateBudgetKind::Materialization(
+                clearra_pc4_tablebase::ConcretePathMaterializationBudgetKind::GraphEdges,
+            ),
+            Pc4GraphCandidateBudgetKind::CanonicalCandidates,
+        ] {
+            let budget = Pc4GraphCandidateBudgetExceeded {
+                kind,
+                limit: 1,
+                attempted: 2,
+            };
+            let failure =
+                candidate_advance_failure(Pc4FixedQueueCandidateRuntimeAdvanceError::Candidate(
+                    Pc4GraphCandidatePrepareError::BudgetExceeded(budget),
+                ));
+            assert_eq!(
+                failure,
+                AppOnlinePc4FixedQueueCandidateFailure::CandidateBudgetExceeded(budget)
+            );
+            assert_eq!(
+                failure.reason(),
+                "pc4_graph_candidate_prepare_budget_exceeded"
+            );
+            assert_eq!(failure.field_id(), None);
+        }
+    }
 
     struct Verifier;
 

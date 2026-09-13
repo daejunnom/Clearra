@@ -48,7 +48,7 @@ fn process_e2e_mvp2_cli_commands_are_routed() {
 
 #[test]
 fn process_e2e_m18_cli_commands_use_search_problem_executor_route() {
-    let commands: [(&[&str], &str, &str); 6] = [
+    let commands: [(&[&str], &str, &str); 5] = [
         (
             &[
                 "--verbose",
@@ -93,11 +93,6 @@ fn process_e2e_m18_cli_commands_use_search_problem_executor_route() {
             "route: search-problem-core-executor",
         ),
         (
-            &["--verbose", "setup", "--queue", "IOTSZJL", "--fixed"],
-            "kind: setup",
-            "route: search-problem-core-executor",
-        ),
-        (
             &["--verbose", "cover", "--template", "basic"],
             "kind: build_coverage",
             "route: search-problem-core-executor",
@@ -129,4 +124,52 @@ fn process_e2e_m18_cli_commands_use_search_problem_executor_route() {
             "missing {route_marker}: {stdout}"
         );
     }
+}
+
+#[test]
+fn process_e2e_setup_uses_redesigned_ranked_family_and_preserves_legacy_alias() {
+    for command in ["setup-finder", "setup"] {
+        let output = clearra()
+            .args([
+                "--format",
+                "json",
+                command,
+                "--remaining",
+                "TI",
+                "--mode",
+                "qb",
+                "--qb",
+                "OS",
+                "--max-setup-pieces",
+                "1",
+                "--workers",
+                "1",
+            ])
+            .output()
+            .expect("setup process");
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        for marker in [
+            "\"capability_id\":\"setup.joint\"",
+            "\"result_contract\":\"setup-joint-ranking.v2\"",
+            "\"payload_kind\":\"setup-ranked-family\"",
+        ] {
+            assert!(
+                stdout.contains(marker),
+                "{command}: missing {marker}: {stdout}"
+            );
+        }
+    }
+    let obsolete = clearra()
+        .args(["setup", "--remaining", "TI", "--fixed"])
+        .output()
+        .unwrap();
+    assert_eq!(obsolete.status.code(), Some(2));
+    assert!(obsolete.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&obsolete.stderr).contains("E_CLI_UNKNOWN_OPTION"));
 }

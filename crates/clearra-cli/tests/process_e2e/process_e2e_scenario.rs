@@ -39,10 +39,13 @@ fn process_e2e_pc_scenario_fixture_json_counts_solutions() {
     ] {
         assert!(stdout.contains(marker), "missing marker {marker}");
     }
-    assert!(stdout.contains(&format!(
-        "\"total_solution_count\":{}",
-        expected_scenario_solution_count()
-    )));
+    assert!(
+        stdout.contains(&format!(
+            "\"total_solution_count\":{}",
+            expected_scenario_solution_count()
+        )),
+        "single final-current solution count: {stdout}"
+    );
     assert!(stdout.contains(if native_core_enabled() {
         "\"count_complete\":true"
     } else {
@@ -85,10 +88,13 @@ fn process_e2e_pc_scenario_simple_4l_fixture_counts_solutions() {
     ] {
         assert!(stdout.contains(marker), "missing marker {marker}");
     }
-    assert!(stdout.contains(&format!(
-        "\"total_solution_count\":{}",
-        expected_scenario_solution_count()
-    )));
+    assert!(
+        stdout.contains(&format!(
+            "\"total_solution_count\":{}",
+            expected_scenario_solution_count()
+        )),
+        "single final-current solution count: {stdout}"
+    );
 }
 
 #[test]
