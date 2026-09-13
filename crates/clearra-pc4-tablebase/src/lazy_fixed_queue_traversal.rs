@@ -3,6 +3,7 @@ use core::{fmt, num::NonZeroUsize};
 use std::sync::Arc;
 
 use crate::fixed_queue_suffix_memo::{FixedQueueSuffixMemo, SuffixFact, SuffixKey, SuffixMemoPage};
+use crate::lazy_graph_prefix::PendingGraphPath;
 use crate::{
     FixedQueueAdjacencyQuery, FixedQueueBudgetExceeded, FixedQueueBudgetKind, FixedQueueGraphPath,
     FixedQueueTerminalPredicate, FixedQueueTerminalQuery, FixedQueueTraversalBudgets,
@@ -192,7 +193,7 @@ impl FixedQueueTraversalPage {
 #[derive(Clone, Debug)]
 pub struct FixedQueueTraversalCursor {
     family_token: Arc<()>,
-    pending_paths: Vec<FixedQueueGraphPath>,
+    pending_paths: Vec<PendingGraphPath>,
     suffix_memo: FixedQueueSuffixMemo,
     suffix_completions: Vec<SuffixCompletion>,
     manifest_terminal_mode: Option<bool>,
@@ -291,6 +292,8 @@ pub struct FixedQueueTraversalFamily {
     traversal_budgets: FixedQueueTraversalBudgets,
     page_budgets: FixedQueueTraversalPageBudgets,
     cursor_token: Arc<()>,
+    #[cfg(test)]
+    copied_prefix_for_test: bool,
 }
 
 impl FixedQueueTraversalFamily {
@@ -327,12 +330,16 @@ impl FixedQueueTraversalFamily {
     }
 
     pub fn cursor(&self) -> FixedQueueTraversalCursor {
+        let root = PendingGraphPath::root(self.start_field_id);
+        #[cfg(test)]
+        let root = if self.copied_prefix_for_test {
+            PendingGraphPath::copied_root(self.start_field_id)
+        } else {
+            root
+        };
         FixedQueueTraversalCursor {
             family_token: Arc::clone(&self.cursor_token),
-            pending_paths: vec![FixedQueueGraphPath::from_parts(
-                self.start_field_id,
-                Vec::new(),
-            )],
+            pending_paths: vec![root],
             suffix_memo: FixedQueueSuffixMemo::new(
                 &self.target,
                 self.traversal_budgets.visited_state_occurrences(),
@@ -468,7 +475,10 @@ impl FixedQueueTraversalFamily {
                     self.traversal_budgets.output_paths(),
                     FixedQueueBudgetKind::OutputPaths,
                 )?;
-                paths.push(path);
+                paths.push(
+                    path.into_graph_path()
+                        .map_err(|_| FixedQueueTraversalPageError::AllocationFailed)?,
+                );
                 transaction.exhausted = transaction.pending_paths.is_empty();
                 continue;
             }
@@ -571,9 +581,7 @@ impl FixedQueueTraversalFamily {
                 }
             }
             for edge in edges.into_iter().rev() {
-                let mut next_path = path.clone();
-                next_path.push_edge(edge);
-                transaction.pending_paths.push(next_path);
+                transaction.pending_paths.push(path.extended(edge));
             }
             transaction.exhausted = transaction.pending_paths.is_empty();
         }
@@ -622,6 +630,8 @@ where
         traversal_budgets: request.traversal_budgets,
         page_budgets: request.page_budgets,
         cursor_token: Arc::new(()),
+        #[cfg(test)]
+        copied_prefix_for_test: false,
     })
 }
 

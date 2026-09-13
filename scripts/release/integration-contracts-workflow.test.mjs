@@ -16,7 +16,7 @@ function isolated(source) {
   assert.doesNotMatch(source, /\brun:\s*(?:&\s+)?cargo\b/u, 'even cargo fetch requires its live build owner');
   assert.doesNotMatch(source, /\bgh\s|\bgcloud\s|\bssh\s|\bscp\s|git\s+(?:push|tag)|deploy-pages|\/dispatches|canonical-acceptance-evidence|CLEARRA_ACCEPTED_/u);
   const actions = [...source.matchAll(/^\s*(?:- )?uses: (\S+)/gmu)].map(m => m[1]);
-  for (const action of actions) assert.ok(['actions/checkout@v4', 'actions/setup-node@v4'].includes(action));
+  for (const action of actions) assert.ok(['actions/checkout@v4', 'actions/setup-node@v4', 'actions/upload-artifact@v4'].includes(action));
   assert.equal((source.match(/persist-credentials: false/gu) ?? []).length,
     actions.filter(a => a === 'actions/checkout@v4').length);
   for (const name of ['native-cli', 'pc4-contracts', 'surface-contracts']) {
@@ -26,6 +26,16 @@ function isolated(source) {
     assert.match(job, /timeout-minutes: (?:20|60)/u);
     assert.match(job, /invoke-clearra-build\.ps1 -Purpose experiment/u);
   }
+  const preview = source.split('  preview-wasm:')[1];
+  assert.ok(preview);
+  assert.match(preview, /needs: source/u);
+  assert.match(preview, /if: inputs\.preview_wasm == true \|\| \(github\.event_name == 'push' && contains\(github\.event\.head_commit\.message, '\[preview-wasm\]'\)\)/u);
+  assert.match(preview, /timeout-minutes: 40/u);
+  assert.match(preview, /invoke-clearra-build\.ps1 -Purpose experiment/u);
+  assert.equal((source.match(/actions\/upload-artifact@v4/gu) ?? []).length, 1);
+  assert.match(preview, /name: unqualified-integration-preview-wasm-\$\{\{ github\.sha \}\}-run-\$\{\{ github\.run_id \}\}-attempt-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(preview, /if-no-files-found: error\s+retention-days: 2/u);
+  assert.equal((preview.match(/node scripts\/tools\/build-clearra-wasm\.mjs/gu) ?? []).length, 1);
 }
 test('integration checks have only exact-branch read-only test authority', () => isolated(workflow));
 for (const [name, mutation] of [
@@ -36,6 +46,9 @@ for (const [name, mutation] of [
   ['accepted artifact', s => s + '\n# canonical-acceptance-evidence.mjs'],
   ['cache writer', s => s + '\n      - uses: actions/cache@v4'],
   ['unmanaged fetch', s => s + '\n      - run: cargo fetch --locked'],
+  ['unconditional preview build', s => s.replace("if: inputs.preview_wasm == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[preview-wasm]'))", 'if: true')],
+  ['ambiguous preview artifact', s => s.replace('name: unqualified-integration-preview-wasm-', 'name: runtime-wasm-')],
+  ['extra artifact writer', s => s + '\n      - uses: actions/upload-artifact@v4'],
 ]) test(`rejects ${name}`, () => assert.throws(() => isolated(mutation(workflow))));
 test('native process checks preserve the local execution policy before archive building', () => {
   assert.ok(native.indexOf('Assert-ClearraTrustedExecutionSurface') < native.indexOf('$libraryDirectory = Resolve-ProductE2ENativeLibraryDir'));

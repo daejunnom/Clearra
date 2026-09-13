@@ -4,6 +4,11 @@ on:
   push:
     branches: ["codex/v0.9.0-stacked-on-v0.8.1-20260912"]
   workflow_dispatch:
+    inputs:
+      preview_wasm:
+        description: Build an unqualified WASM for local 4194 review only
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -102,3 +107,51 @@ jobs:
           packages/clearra-ui/test/pcPathReplayGif.contract.ts
           packages/clearra-ui/test/pcReplayPager.contract.ts
           packages/clearra-ui/test/runtimeShellI18n.test.mjs
+
+  preview-wasm:
+    needs: source
+    if: inputs.preview_wasm == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[preview-wasm]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUST_MIN_STACK: "16777216"
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Prepare isolated preview toolchain
+        shell: pwsh
+        run: |
+          . ./scripts/lib/clearra-execution-surface.ps1
+          Assert-ClearraTrustedExecutionSurface -TaskName 'IntegrationPreviewWasm' -ExecutionSurface Trusted -RuntimeEnvironment wasm
+          rustup target add wasm32-unknown-unknown
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command cargo -ArgumentsJson '["install","wasm-bindgen-cli","--version","0.2.126","--locked"]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build exact-source development WASM once
+        id: preview
+        shell: pwsh
+        run: |
+          . ./scripts/lib/clearra-path-helpers.ps1
+          Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose experiment
+          try {
+            $previewOutput = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'unqualified-preview-wasm'
+            & node scripts/tools/build-clearra-wasm.mjs --environment native --destination $previewOutput
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "artifact_path=$previewOutput" >> $env:GITHUB_OUTPUT
+            Complete-ClearraBuildTransaction
+          } finally {
+            Exit-ClearraBuildArtifactCacheUsage
+          }
+      - name: Upload local-review bytes without release authority
+        uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-integration-preview-wasm-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.preview.outputs.artifact_path }}
+          if-no-files-found: error
+          retention-days: 2

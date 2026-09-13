@@ -416,6 +416,7 @@ impl FixedQueueGraphPath {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn push_edge(&mut self, edge: QualifiedPc4GraphEdge) {
         self.edges.push(edge);
     }

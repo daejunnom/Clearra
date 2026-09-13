@@ -13,6 +13,7 @@ mod fixed_queue_traversal;
 mod generation_registry;
 mod graph;
 mod lazy_fixed_queue_traversal;
+mod lazy_graph_prefix;
 mod lazy_materialized_path;
 mod lookup;
 mod manifest;

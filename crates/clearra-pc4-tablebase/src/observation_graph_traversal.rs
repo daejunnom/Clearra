@@ -499,21 +499,13 @@ impl Pc4ObservationGraphFamily {
                 .output_paths()
                 .checked_sub(transaction.emitted_paths)
                 .ok_or(Pc4ObservationGraphPageError::CursorInvariantViolation)?;
-            if lifetime_output_remaining == 0 {
-                return Err(Pc4ObservationGraphPageError::BudgetExceeded(
-                    Pc4ObservationGraphBudgetExceeded {
-                        kind: Pc4ObservationGraphBudgetKind::OutputPaths,
-                        limit: self.budgets.output_paths(),
-                        attempted: transaction
-                            .emitted_paths
-                            .checked_add(1)
-                            .ok_or(Pc4ObservationGraphPageError::CounterOverflow)?,
-                    },
-                ));
-            }
             let requested_output_remaining = limit.get() - paths.len();
+            // At the exact lifetime cap, trailing frontiers may all be empty.
+            // Probe at most one additional path under the ordinary work slice;
+            // the emission budget below rejects it before it can be returned.
+            // Merely reaching the cap is neither overflow nor exhaustion proof.
             let graph_page_limit = requested_output_remaining
-                .min(lifetime_output_remaining)
+                .min(lifetime_output_remaining.max(1))
                 .min(self.graph_page_budgets.output_paths());
             let active = transaction
                 .active

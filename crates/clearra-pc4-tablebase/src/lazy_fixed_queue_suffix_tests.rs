@@ -479,3 +479,80 @@ fn pc4_suffix_dag_abba() {
         println!("pc4_suffix_abba live={live} repetitions_each=8 elapsed_ns={elapsed:?} adjacency_queries={queries:?} state_visits={visits:?} output_paths={outputs:?}");
     }
 }
+
+#[test]
+fn shared_prefixes_preserve_complete_order_across_page_and_work_boundaries() {
+    for depth in [1, 4, 8] {
+        for live in [false, true] {
+            for work in [1, 3, 64] {
+                let mut outcomes = Vec::new();
+                for copied in [true, false] {
+                    let mut family = family(&vec![Pc4GraphPiece::I; depth], work, false);
+                    family.copied_prefix_for_test = copied;
+                    let mut provider = provider(layered(depth, live));
+                    let mut cursor = family.cursor();
+                    let paths = drain(
+                        &family,
+                        &mut cursor,
+                        &mut provider,
+                        &mut Terminal::new(true),
+                    );
+                    outcomes.push((
+                        paths,
+                        provider.calls,
+                        cursor.visited_state_occurrences(),
+                        cursor.suffix_memo_hits(),
+                    ));
+                }
+                assert_eq!(
+                    outcomes[0], outcomes[1],
+                    "depth={depth} live={live} work={work}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "explicit non-publishing shared-prefix ABBA measurement"]
+fn pc4_prefix_abba() {
+    for depth in [8, 10] {
+        for live in [false, true] {
+            let mut elapsed = [0_u128; 2];
+            let mut queries = [0_usize; 2];
+            let mut visits = [0_usize; 2];
+            let mut outputs = [0_usize; 2];
+            let mut reference = None;
+            for _ in 0..4 {
+                for shared in [false, true, true, false] {
+                    let index = usize::from(shared);
+                    let mut family = family(&vec![Pc4GraphPiece::I; depth], 64, false);
+                    family.copied_prefix_for_test = !shared;
+                    let mut provider = provider(layered(depth, live));
+                    let mut cursor = family.cursor();
+                    let started = Instant::now();
+                    // Both sides retain the same suffix memo: only prefix storage changes.
+                    let paths = drain(
+                        &family,
+                        &mut cursor,
+                        &mut provider,
+                        &mut Terminal::new(true),
+                    );
+                    elapsed[index] += started.elapsed().as_nanos();
+                    queries[index] += provider.calls;
+                    visits[index] += cursor.visited_state_occurrences();
+                    outputs[index] += paths.len();
+                    if let Some(reference) = &reference {
+                        assert_eq!(&paths, reference);
+                    } else {
+                        reference = Some(paths);
+                    }
+                }
+            }
+            assert_eq!(queries[0], queries[1]);
+            assert_eq!(visits[0], visits[1]);
+            assert_eq!(outputs[0], outputs[1]);
+            println!("pc4_prefix_abba depth={depth} live={live} repetitions_each=8 elapsed_ns={elapsed:?} adjacency_queries={queries:?} state_visits={visits:?} output_paths={outputs:?}");
+        }
+    }
+}

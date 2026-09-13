@@ -373,6 +373,75 @@ fn suffix_reuse_keeps_every_reveal_ordinal_hold_path_and_probability() {
 }
 
 #[test]
+fn exact_output_cap_finishes_empty_frontiers_and_rejects_only_an_actual_extra_path() {
+    for page_size in [1, 8] {
+        for extra_path in [false, true] {
+            let family = family_with(
+                target(Pc4TerminalUseCase::PcSearch, 4),
+                Pc4ObservationGraphBudgets::new(
+                    nonzero(32),
+                    nonzero(1_000),
+                    nonzero(1_000),
+                    nonzero(2),
+                    nonzero(32),
+                    nonzero(64),
+                    nonzero(64),
+                ),
+                FixedQueueTraversalPageBudgets::new(nonzero(1), nonzero(8)),
+            );
+            let mut provider = provider(&family);
+            provider.graph = BTreeMap::from([
+                ((7, Pc4GraphPiece::I), vec![10]),
+                (
+                    (7, Pc4GraphPiece::T),
+                    if extra_path { vec![20] } else { Vec::new() },
+                ),
+            ]);
+            let mut cursor = family.cursor();
+            let mut paths = Vec::new();
+            let mut overflow = false;
+            let mut pages = 0;
+            while !cursor.is_exhausted() {
+                let before = cursor_state(&cursor);
+                match family.next_page(
+                    &mut cursor,
+                    nonzero(page_size),
+                    &mut provider,
+                    &mut terminal,
+                    &guard(),
+                ) {
+                    Ok(page) => paths.extend_from_slice(page.paths()),
+                    Err(Pc4ObservationGraphPageError::BudgetExceeded(error)) => {
+                        assert!(extra_path);
+                        assert_eq!(error.kind, Pc4ObservationGraphBudgetKind::OutputPaths);
+                        assert_eq!((error.limit, error.attempted), (2, 3));
+                        assert_eq!(cursor_state(&cursor), before);
+                        overflow = true;
+                        break;
+                    }
+                    Err(error) => panic!("unexpected cap failure: {error:?}"),
+                }
+                pages += 1;
+                assert!(pages < 100);
+            }
+            assert_eq!(overflow, extra_path);
+            assert!(paths.len() <= 2);
+            if !extra_path {
+                assert_eq!(paths.len(), 2);
+                assert_eq!(cursor.frontier_entries_started(), 4);
+                assert_eq!(
+                    paths
+                        .iter()
+                        .map(|path| path.frontier_entry().reveal_rank())
+                        .collect::<Vec<_>>(),
+                    vec![0, 1]
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn graph_derived_reveal_ledger_is_scope_bound_ranked_and_exactly_normalized() {
     let graph = family();
     let ledger = graph.reveal_ledger_family();
