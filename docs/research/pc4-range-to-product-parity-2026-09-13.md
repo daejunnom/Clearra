@@ -191,3 +191,10 @@ fixture passed a raw closure where `FixedQueueHoldExpansionGuard` requires
 the existing frontier guard adapter. That test call is corrected without
 changing the hold algorithm or cancellation contract. The new App cases did
 not execute on the failed source.
+
+On `25871f7`, run [34742054330](https://github.com/daejunnom/Clearra/actions/runs/34742054330)
+passed Core **7 + 5** and Tablebase **163** (including the new fixed/no-draw
+contracts). App compilation then exposed a fixture's nonexistent `Cli`
+surface variant; the contract distinguishes interactive and non-interactive
+CLI. The fixture now explicitly uses `NonInteractiveCli`, proving a disclosed
+fixed queue needs no bag prompt in that stricter surface as well.

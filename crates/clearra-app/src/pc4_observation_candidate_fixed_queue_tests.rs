@@ -42,7 +42,7 @@ fn prepared_fixed(
 ) -> Pc4PreparedOnlineInput {
     match prepare_pc4_input_disclosure(Pc4InputDisclosureRequest::new(
         target.clone(),
-        Pc4InputSurface::Cli,
+        Pc4InputSurface::NonInteractiveCli,
         Pc4QueueDisclosure::FixedExplicit(queue.to_vec()),
     ))
     .expect("explicit queue input")
