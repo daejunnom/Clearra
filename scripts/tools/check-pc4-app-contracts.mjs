@@ -20,6 +20,7 @@ if (process.argv.includes('--row-normalization')) {
     ['pc4-replay-core', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-replay', '--lib']],
     ['pc4-replay-products', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-postprocess', '--lib', 'score_batch::']],
     ['pc4-row-app', [...common, 'pc4_']],
+    ['pc4-host-wasm', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-wasm', '--lib', 'online_pc4']],
     ['pc4-compact-storage', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'compact_source_uses_real_storage']],
     ['pc4-compact-shape', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'factorized_shape_preserves_actual_order']],
     ['pc4-compact-large', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'p7_p7_p2_factorized_universe_retains_compact_expression_storage']],

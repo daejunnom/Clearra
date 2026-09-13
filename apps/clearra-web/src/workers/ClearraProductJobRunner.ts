@@ -8,6 +8,7 @@ import { withHostExecutionTiming } from './HostExecutionProfile';
 import { SerialSearchProgress } from './SerialSearchProgress';
 import type { SharedExecutionResourceAuthority } from './SharedExecutionResourceAuthority';
 import { WasmJobRunner } from './WasmJobRunner';
+import type { Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 import type {
   ClearraWasmHostCapabilities,
   ClearraWasmModule
@@ -28,7 +29,7 @@ export class ClearraProductJobRunner {
   async run(
     commandText: string,
     onEvent: (event: ClearraWasmWorkerEvent) => void,
-    options: { transportProfile?: boolean } = {}
+    options: { transportProfile?: boolean; onlinePc4?: Pc4HostGeneration | null; tablebaseRequested?: boolean } = {}
   ): Promise<ClearraWasmWorkerEvent> {
     const preparationStarted = options.transportProfile ? performance.now() : null;
     let preparationMs = 0;
@@ -47,6 +48,14 @@ export class ClearraProductJobRunner {
     try {
       onEvent(preparationProgressEvent(this.jobId));
       await distributed.acquire();
+      if (options.tablebaseRequested) {
+        if (!options.onlinePc4 || !this.wasm.configure_online_pc4) throw new Error('pc4_online_generation_unavailable');
+        this.wasm.configure_online_pc4(options.onlinePc4);
+        const online = new WasmJobRunner(this.wasm, options.onlinePc4);
+        this.activeRunner = online;
+        try { return await online.run(commandText, emit); }
+        finally { distributed.dispose(); this.wasm.configure_online_pc4(null); }
+      }
       const plan = distributed.prepare(commandText);
       if (preparationStarted !== null) preparationMs = performance.now() - preparationStarted;
       if (plan.mode === 'ready') {

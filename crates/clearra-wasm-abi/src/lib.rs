@@ -8,6 +8,7 @@ use std::{
 };
 
 use clearra_pc_graph::request::GpuDeviceSelection;
+mod online_pc4_exports;
 #[cfg(target_arch = "wasm32")]
 use clearra_wasm::prewarm_gpu_search_async;
 #[cfg(feature = "stage-profiling")]

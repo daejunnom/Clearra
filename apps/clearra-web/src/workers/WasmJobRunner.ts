@@ -1,6 +1,7 @@
 import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
 
 import type { ClearraWasmModule } from './clearraWasmRuntime';
+import { createPc4RangeReader, type Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 
 // Keep one synchronous WASM entry comfortably below the browser host turn.
 // Canonical empty-board 4L minimals profiling measured a 2,048-step serial
@@ -14,8 +15,9 @@ export class WasmJobRunner {
   private active = false;
   private jobId: number | null = null;
   private cancellationRequested = false;
+  private onlineAbort: AbortController | null = null;
 
-  constructor(private readonly wasm: ClearraWasmModule) {}
+  constructor(private readonly wasm: ClearraWasmModule, private readonly onlineGeneration?: Pc4HostGeneration) {}
 
   async run(
     commandText: string,
@@ -29,11 +31,17 @@ export class WasmJobRunner {
     let terminal: ClearraWasmWorkerEvent | null = null;
     let advancesSinceDrain = 0;
     let searchProfile: unknown = null;
+    const onlineStarted = performance.now();
+    this.onlineAbort = this.onlineGeneration ? new AbortController() : null;
+    const reader = this.onlineGeneration ? createPc4RangeReader(this.onlineGeneration, { signal: this.onlineAbort!.signal }) : null;
+    const emit = (event: ClearraWasmWorkerEvent) => onEvent(reader ? ({ ...event,
+      pc4_online: { provider: 'hf-graph', profile: 'jstris-180', revision: this.onlineGeneration!.revision,
+        requests: reader.requests, transferred_bytes: reader.bytes, elapsed_ms: performance.now() - onlineStarted } } as ClearraWasmWorkerEvent) : event);
     try {
       this.jobId = this.wasm.start_job(commandText);
       this.active = true;
       this.cancellationRequested = false;
-      this.drain(onEvent, (event) => {
+      this.drain(emit, (event) => {
         terminal = event;
       });
       let lastHostYield = performance.now();
@@ -43,6 +51,16 @@ export class WasmJobRunner {
         if (!this.cancellationRequested) {
           status = this.wasm.advance_job(this.jobId, SEARCH_WORK_BUDGET);
           advancesSinceDrain += 1;
+          if (reader && (status === 'pending' || status === 'progress')) {
+            const range = this.wasm.online_pc4_pending?.(this.jobId);
+            if (range) {
+              const bytes = await reader.read(range.artifact, range.offset, range.length);
+              if (this.cancellationRequested) continue;
+              this.wasm.online_pc4_admit!(this.jobId, { lookup_session: range.lookup_session, request_id: range.request_id,
+                status: 206, content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}`,
+                bytes: Array.from(bytes) });
+            }
+          }
         }
         const terminalStatus = status !== 'pending' && status !== 'progress';
         if (
@@ -55,7 +73,7 @@ export class WasmJobRunner {
             searchProfile = this.wasm.profile_finish();
             profilingActive = false;
           }
-          this.drain(onEvent, (event) => {
+          this.drain(emit, (event) => {
             terminal = event;
           }, searchProfile);
           advancesSinceDrain = 0;
@@ -78,6 +96,7 @@ export class WasmJobRunner {
       }
       return terminal;
     } finally {
+      this.onlineAbort?.abort(); this.onlineAbort = null;
       if (profilingActive && this.wasm.profile_finish) {
         try {
           this.wasm.profile_finish();
@@ -96,6 +115,7 @@ export class WasmJobRunner {
   cancel() {
     if (!this.active || this.jobId === null) return;
     this.cancellationRequested = true;
+    this.onlineAbort?.abort();
     try {
       this.wasm.cancel_job(this.jobId);
     } catch {

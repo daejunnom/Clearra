@@ -1,0 +1,79 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { qualifyPc4UpstreamGeneration, createPc4RangeReader } from './qualify-upstream-generation.mjs';
+
+function le(value, width) { return Uint8Array.from({ length: width }, (_, i) => Math.floor(value / 256 ** i) % 256); }
+function data() {
+  const header = magic => [...new TextEncoder().encode(magic), ...le(1, 4), ...le(2, 4)];
+  const graph = Uint8Array.from([0,0,0,0,0, 1,1,0,0, 0,0,0,0,0,0, 255,255,255,255,255, 0,0,0,0,0,0,0]);
+  const files = new Map([
+    ['graph.bin', graph],
+    ['field_hash_to_id.v1.bin', Uint8Array.from([...header('FHIDIDX1'), ...le(0,5), ...le(0,3), ...le(2**40-1,5), ...le(1,3)])],
+    ['graph_offsets.u32.bin', Uint8Array.from([...header('GOFFIDX1'), ...le(0,4), ...le(15,4), ...le(27,4)])]
+  ]);
+  const discovery = { repository: 'example/pc4', resolved_revision: 'a'.repeat(40), candidates:
+    [...files].map(([path, bytes], i) => ({ path, byte_length: bytes.length, content_identity: 'sha256:' + String(i).repeat(64) })) };
+  return { discovery, files, reader: { bytes: 0, async read(artifact, offset, length) {
+    const bytes = files.get(artifact.path); assert.ok(bytes); return bytes.slice(offset, offset + length);
+  } } };
+}
+test('completion declaration and independent reader qualification enable only Jstris 180', async () => {
+  const f = data();
+  const result = await qualifyPc4UpstreamGeneration({}, { discover: async () => f.discovery, reader: f.reader });
+  assert.equal(result.profiles.length, 5);
+  assert.deepEqual(result.profiles.filter(p => p.status === 'ready').map(p => p.profile), ['jstris-180']);
+  assert.deepEqual(result.profiles[3].target_lines, [4]);
+  assert.equal(result.profiles[0].status, 'unavailable');
+});
+test('changed graph or index never retains stale readiness', async () => {
+  const f = data();
+  f.files.get('graph_offsets.u32.bin')[24] = 26;
+  const result = await qualifyPc4UpstreamGeneration({}, { discover: async () => f.discovery, reader: f.reader });
+  assert.equal(result.profiles[3].upstream_complete, true);
+  assert.equal(result.profiles[3].status, 'unavailable');
+  assert.equal(result.profiles[3].reason, 'pc4_online_index_graph_mismatch');
+});
+test('source bitmap mismatch is not hidden by a completion declaration', async () => {
+  const f = data(); f.files.get('graph.bin')[0] = 1;
+  const result = await qualifyPc4UpstreamGeneration({}, { discover: async () => f.discovery, reader: f.reader });
+  assert.equal(result.profiles[3].reason, 'pc4_online_graph_field_mismatch');
+});
+test('canonical indices are never lent to another graph profile', async () => {
+  const f = data();
+  f.discovery.candidates.push({ path: 'graph_srsplus.bin', byte_length: 27, content_identity: 'sha256:' + 'f'.repeat(64) });
+  const result = await qualifyPc4UpstreamGeneration({}, { discover: async () => f.discovery, reader: f.reader });
+  assert.equal(result.profiles[1].reason, 'missing-profile-specific-index');
+});
+const generation = { repository: 'example/pc4', revision: 'a'.repeat(40) };
+const artifact = { path: 'graph.bin', byte_length: 99, content_identity: 'sha256:' + 'a'.repeat(64) };
+function response(status = 206, range = 'bytes 3-5/99', bytes = [1,2,3]) {
+  return new Response(Uint8Array.from(bytes), { status, headers: { 'content-range': range } });
+}
+test('Range cache reuses exact immutable bytes, never mutable returned arrays', async () => {
+  let calls = 0;
+  const reader = createPc4RangeReader(generation, { fetcher: async (url, options) => {
+    calls++; assert.ok(url.includes('/' + 'a'.repeat(40) + '/graph.bin'));
+    assert.equal(options.credentials, 'omit'); assert.equal(options.headers.Range, 'bytes=3-5'); return response();
+  }});
+  const first = await reader.read(artifact, 3, 3); first[0] = 99;
+  assert.deepEqual(await reader.read(artifact, 3, 3), Uint8Array.from([1,2,3]));
+  assert.equal(calls, 1); assert.equal(reader.bytes, 3);
+});
+for (const [name, result, code] of [
+  ['whole body', () => response(200), 'pc4_online_whole_content_rejected'],
+  ['rate limit', () => response(429), 'pc4_online_rate_limited'],
+  ['wrong range', () => response(206, 'bytes 0-2/99'), 'pc4_online_range_response_invalid'],
+  ['truncation', () => response(206, 'bytes 3-5/99', [1]), 'pc4_online_truncated_range'],
+  ['oversized response', () => response(206, 'bytes 3-5/99', [1,2,3,4]), 'pc4_online_response_too_large']
+]) test(`rejects ${name} without downloading a file or starting fallback`, async () => {
+  const reader = createPc4RangeReader(generation, { fetcher: async () => result() });
+  await assert.rejects(reader.read(artifact, 3, 3), error => error.code === code);
+});
+test('cancellation and transfer budgets apply before new I/O', async () => {
+  const controller = new AbortController(); controller.abort();
+  const never = async () => { assert.fail('must not fetch'); };
+  await assert.rejects(createPc4RangeReader(generation, { signal: controller.signal, fetcher: never }).read(artifact,3,3),
+    error => error.code === 'pc4_online_cancelled');
+  await assert.rejects(createPc4RangeReader(generation, { maxBytes: 2, fetcher: never }).read(artifact,3,3),
+    error => error.code === 'pc4_online_transfer_limit');
+});

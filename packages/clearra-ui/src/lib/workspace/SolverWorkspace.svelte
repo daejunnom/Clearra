@@ -302,6 +302,7 @@
     dependencyDagControlAvailable
     tablebaseStatus={$wasmWorkerState.tablebaseWarmup.status}
     tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
+    tablebaseProfiles={$wasmWorkerState.tablebaseWarmup.profiles ?? []}
     {workerAuthority}
     on:change={(event) => updateRequest(event.detail)}
   />

@@ -656,6 +656,7 @@ dependencies = [
  "clearra-forward-search",
  "clearra-host-contract",
  "clearra-pc-graph",
+ "clearra-pc4-tablebase",
  "clearra-problem",
  "clearra-spin-structure-search",
  "serde_json",

@@ -11,7 +11,9 @@ webgpu-search = ["clearra-app/webgpu-search"]
 stage-profiling = ["clearra-app/wasm-stage-profiling"]
 
 [dependencies]
-clearra-app = { path = "../clearra-app", default-features = false, features = ["bitmap-render"] }
+clearra-app = { path = "../clearra-app", default-features = false, features = ["bitmap-render", "online-pc4-tablebase"] }
+clearra-pc4-tablebase = { path = "../clearra-pc4-tablebase" }
+serde_json.workspace = true
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-core-executor = { path = "../clearra-core-executor", default-features = false }
 clearra-coverage = { path = "../clearra-coverage" }

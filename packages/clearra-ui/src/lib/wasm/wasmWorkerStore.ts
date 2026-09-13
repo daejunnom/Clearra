@@ -52,6 +52,7 @@ export type WasmWorkerState = {
 };
 
 export type WasmTablebaseWarmupState = {
+  profiles?: Array<{ profile: string; status: 'ready' | 'unavailable'; reason?: string }>;
   status: 'disabled' | 'loading' | 'ready' | 'unavailable';
   artifactSha256: string;
   byteLength: number;
@@ -59,6 +60,7 @@ export type WasmTablebaseWarmupState = {
 };
 
 export type TablebaseWarmupWorkerEvent = {
+  profiles?: WasmTablebaseWarmupState['profiles'];
   type: 'tablebase_warmup';
   phase: WasmTablebaseWarmupState['status'];
   artifactSha256: string;
@@ -193,6 +195,7 @@ export function applyTablebaseWarmupEvent(event: TablebaseWarmupWorkerEvent) {
     ...state,
     tablebaseWarmup: {
       status: event.phase,
+      profiles: event.profiles ?? [],
       artifactSha256: event.artifactSha256,
       byteLength: event.byteLength,
       message: event.message ?? null

@@ -1016,6 +1016,79 @@ impl WasmWorkerJobRuntime {
         &self.runtime
     }
 
+    pub fn configure_online_pc4(&mut self, json: &str) -> Result<(), WasmCommandRuntimeError> {
+        if !self.active_jobs.is_empty() {
+            return Err(WasmCommandRuntimeError::new(
+                "pc4_online_job_active",
+                "pc4_online_job_active",
+            ));
+        }
+        self.runtime.configure_online_pc4(json)
+    }
+
+    pub fn online_pc4_pending_json(&self, job_id: WasmWorkerJobId) -> String {
+        let range = self
+            .active_jobs
+            .get(&job_id)
+            .and_then(|job| job.execution.as_ref())
+            .and_then(|execution| execution.online_pc4.as_ref())
+            .and_then(|online| online.as_ref().ok())
+            .and_then(|online| online.pending_range());
+        let Some(range) = range else {
+            return "null".to_owned();
+        };
+        serde_json::json!({ "lookup_session": range.lookup_session().get(), "request_id": range.request_id(),
+            "profile": range.profile().as_str(), "offset": range.offset(), "length": range.length(),
+            "artifact": { "path": range.artifact_descriptor().path(), "byte_length": range.artifact_descriptor().byte_len(),
+                "content_identity": range.artifact_descriptor().content_identity() } }).to_string()
+    }
+
+    pub fn online_pc4_admit_json(
+        &mut self,
+        job_id: WasmWorkerJobId,
+        json: &str,
+    ) -> Result<(), WasmCommandRuntimeError> {
+        let error = |code| WasmCommandRuntimeError::new(code, code);
+        if json.len() > 512 * 1024 {
+            return Err(error("pc4_online_response_too_large"));
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(json).map_err(|_| error("pc4_online_response_invalid"))?;
+        let lookup = v["lookup_session"]
+            .as_u64()
+            .ok_or_else(|| error("pc4_online_response_invalid"))?;
+        let id = v["request_id"]
+            .as_u64()
+            .ok_or_else(|| error("pc4_online_response_invalid"))?;
+        let status = v["status"]
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .ok_or_else(|| error("pc4_online_response_invalid"))?;
+        let content_range = v["content_range"].as_str().map(str::to_owned);
+        let bytes: Vec<u8> = serde_json::from_value(v["bytes"].clone())
+            .map_err(|_| error("pc4_online_response_invalid"))?;
+        let job = self
+            .active_jobs
+            .get_mut(&job_id)
+            .ok_or_else(|| error("pc4_online_job_missing"))?;
+        let online = job
+            .execution
+            .as_mut()
+            .and_then(|execution| execution.online_pc4.as_mut())
+            .and_then(|online| online.as_mut().ok())
+            .ok_or_else(|| error("pc4_online_job_missing"))?;
+        online
+            .admit_range(
+                lookup,
+                id,
+                status,
+                content_range,
+                bytes,
+                job.scope.execution_control(),
+            )
+            .map_err(error)
+    }
+
     pub fn start_job(
         &mut self,
         command_text: &str,

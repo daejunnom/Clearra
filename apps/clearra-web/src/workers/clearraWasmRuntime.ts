@@ -6,7 +6,14 @@ import type {
 
 // SRP rationale: this module has one behavior-level change reason: adapting the validated
 // WASM ABI exports into the browser runtime contract.
+export type Pc4PendingRange = {
+  lookup_session: number; request_id: number; profile: string; offset: number; length: number;
+  artifact: { path: string; byte_length: number; content_identity: string };
+};
 export type ClearraWasmModule = {
+  configure_online_pc4?: (generation: unknown) => void;
+  online_pc4_pending?: (jobId: number) => Pc4PendingRange | null;
+  online_pc4_admit?: (jobId: number, response: unknown) => void;
   compiled_module: () => WebAssembly.Module;
   configure_host: (capabilities: ClearraWasmHostCapabilities) => void;
   install_tablebase: (artifact: ArrayBuffer) => ClearraTablebaseInstallReport;
@@ -176,6 +183,9 @@ const ARTIFACT_MODULE_TIMEOUT_MS = 60_000;
 const ABI_OUTPUT_NOT_RELEASED = -2;
 
 type ClearraRawWasmExports = {
+  clearra_wasm_online_pc4_configure?: () => number;
+  clearra_wasm_online_pc4_pending?: (jobId: number) => number;
+  clearra_wasm_online_pc4_admit?: (jobId: number) => number;
   memory: WebAssembly.Memory;
   clearra_wasm_abi_version: () => number;
   clearra_wasm_configure_host: (
@@ -981,6 +991,20 @@ function wrapRawModule(
   let gpuWarmupGeneration = 0;
 
   const module: ClearraWasmModule = {
+    ...(raw.clearra_wasm_online_pc4_configure && raw.clearra_wasm_online_pc4_pending && raw.clearra_wasm_online_pc4_admit ? {
+      configure_online_pc4(generation: unknown) {
+        setCommand(JSON.stringify(generation));
+        requireOk(raw.clearra_wasm_online_pc4_configure!());
+      },
+      online_pc4_pending(jobId: number): Pc4PendingRange | null {
+        requireOk(raw.clearra_wasm_online_pc4_pending!(jobId));
+        return JSON.parse(outputText());
+      },
+      online_pc4_admit(jobId: number, response: unknown) {
+        setCommand(JSON.stringify(response));
+        requireOk(raw.clearra_wasm_online_pc4_admit!(jobId));
+      }
+    } : {}),
     compiled_module() {
       return compiledModule;
     },

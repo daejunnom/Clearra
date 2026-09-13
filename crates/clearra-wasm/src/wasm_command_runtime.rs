@@ -3743,6 +3743,7 @@ fn wasm_pc_tiling_publication_contract_is_valid(result: &CoreExecutionResult) ->
 pub struct WasmCommandRuntime {
     app_context: AppContext,
     host_capabilities: WasmHostCapabilities,
+    online_pc4_snapshot: Option<clearra_pc4_tablebase::ActivatedSnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -3754,6 +3755,7 @@ pub(crate) struct PreparedWasmCommand {
 pub(crate) struct PreparedWasmExecution {
     execution: Option<CooperativeAppExecution>,
     webgpu_requested: bool,
+    pub(crate) online_pc4: Option<Result<clearra_app::Pc4OnlineHostExecution, &'static str>>,
 }
 
 pub(crate) enum PreparedWasmAdvance {
@@ -3770,6 +3772,7 @@ impl WasmCommandRuntime {
         Self {
             app_context,
             host_capabilities: WasmHostCapabilities::default(),
+            online_pc4_snapshot: None,
         }
     }
 
@@ -3782,6 +3785,15 @@ impl WasmCommandRuntime {
         self.host_capabilities = capabilities;
         self.app_context
             .set_product_retention_budget(capabilities.product_retention_budget());
+    }
+
+    pub(crate) fn configure_online_pc4(
+        &mut self,
+        json: &str,
+    ) -> Result<(), WasmCommandRuntimeError> {
+        self.online_pc4_snapshot = crate::online_pc4_configuration::configure(json)
+            .map_err(|code| WasmCommandRuntimeError::new(code, code))?;
+        Ok(())
     }
 
     pub fn set_product_retention_budget(
@@ -3975,12 +3987,35 @@ impl WasmCommandRuntime {
         &self,
         prepared: PreparedWasmCommand,
     ) -> PreparedWasmExecution {
+        let tablebase_requested = match prepared.request.command() {
+            AppCommand::Pc(command) => command.query().execution_policy().tablebase_requested(),
+            AppCommand::Scenario(command) => {
+                command.query().execution_policy().tablebase_requested()
+            }
+            _ => false,
+        };
+        if tablebase_requested {
+            let online = self
+                .online_pc4_snapshot
+                .clone()
+                .ok_or("pc4_online_generation_unavailable")
+                .and_then(|snapshot| {
+                    self.app_context
+                        .start_online_pc4_execution(prepared.request, snapshot)
+                });
+            return PreparedWasmExecution {
+                execution: None,
+                webgpu_requested: false,
+                online_pc4: Some(online),
+            };
+        }
         PreparedWasmExecution {
             execution: Some(
                 self.app_context
                     .start_cooperative_execution(prepared.request),
             ),
             webgpu_requested: prepared.webgpu_requested,
+            online_pc4: None,
         }
     }
 
@@ -4017,6 +4052,7 @@ impl WasmCommandRuntime {
         Ok(PreparedWasmExecution {
             execution: Some(execution),
             webgpu_requested,
+            online_pc4: None,
         })
     }
 }
@@ -4143,6 +4179,37 @@ impl PreparedWasmExecution {
         work_budget: usize,
         control: &ExecutionControl,
     ) -> PreparedWasmAdvance {
+        if let Some(online) = &mut self.online_pc4 {
+            let advance = match online {
+                Ok(online) => online.advance(work_budget, control),
+                Err(code) => Err(*code),
+            };
+            return match advance {
+                Ok(CooperativeAppAdvance::Completed(response)) => {
+                    self.online_pc4 = None;
+                    PreparedWasmAdvance::Completed(WasmExecutionResult::from_app_response(
+                        response, false,
+                    ))
+                }
+                Ok(CooperativeAppAdvance::Cancelled) => {
+                    self.online_pc4 = None;
+                    PreparedWasmAdvance::Cancelled
+                }
+                Ok(CooperativeAppAdvance::Pending) => PreparedWasmAdvance::Pending,
+                Ok(CooperativeAppAdvance::Progress) => PreparedWasmAdvance::Progress,
+                Ok(_) => {
+                    self.online_pc4 = None;
+                    PreparedWasmAdvance::Failed(WasmCommandRuntimeError::new(
+                        "pc4_online_terminal_unsupported",
+                        "pc4_online_terminal_unsupported",
+                    ))
+                }
+                Err(code) => {
+                    self.online_pc4 = None;
+                    PreparedWasmAdvance::Failed(WasmCommandRuntimeError::new(code, code))
+                }
+            };
+        }
         let execution = self
             .execution
             .as_mut()

@@ -21,6 +21,7 @@
   export let dependencyDagControlAvailable = false;
   export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
   export let tablebaseByteLength = 0;
+  export let tablebaseProfiles: Array<{ profile: string; status: 'ready' | 'unavailable'; reason?: string }> = [];
   export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
@@ -40,7 +41,8 @@
   }
 
   $: tablebaseStatusLabel = tablebaseMessage(
-    tablebaseStatus,
+    tablebaseStatus === 'ready' && tablebaseProfiles.find(slot => slot.profile === request.rule)?.status !== 'ready'
+      ? 'unavailable' : tablebaseStatus,
     tablebaseByteLength,
     language
   );
@@ -231,6 +233,14 @@
         </label>
         <small class="workspace-field-help">{label('tablebaseHelp')}</small>
         <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
+        {#if request.tablebaseEnabled && tablebaseProfiles.length > 0}
+          <ul class="tablebase-profiles">
+            {#each tablebaseProfiles as slot}
+              <li>{({'srs': 'SRS', 'srs-plus': 'SRS+', 'srs-x': 'SRS-X', 'jstris-180': 'Jstris 180', 'no-kick': 'No kick'} as Record<string, string>)[slot.profile] ?? slot.profile}:
+                {label(slot.status === 'ready' ? 'tablebaseAvailable' : 'tablebaseUnavailable')}</li>
+            {/each}
+          </ul>
+        {/if}
       </div>
     {/if}
     {#if dependencyDagControlAvailable}
@@ -278,4 +288,5 @@
     overflow-wrap: anywhere;
   }
   .tablebase-status { color: #3f5c57; font-size: 11px; font-weight: 700; }
+  .tablebase-profiles { margin: 0; padding-left: 18px; font-size: 11px; }
 </style>

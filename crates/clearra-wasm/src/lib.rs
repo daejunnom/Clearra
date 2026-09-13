@@ -4,6 +4,7 @@ pub mod host_contract_bridge;
 mod json_event_envelope;
 mod minimum_parallel_runtime;
 mod minimum_parallel_wire;
+mod online_pc4_configuration;
 pub mod wasm_command_runtime;
 pub mod wasm_host_capabilities;
 pub mod wasm_worker_job;

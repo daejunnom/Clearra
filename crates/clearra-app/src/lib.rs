@@ -56,6 +56,10 @@ mod pc4_observation_candidate_runtime;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_online_candidate_runtime;
 #[cfg(feature = "online-pc4-tablebase")]
+mod pc4_online_host_execution;
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc4_online_host_execution::Pc4OnlineHostExecution;
+#[cfg(feature = "online-pc4-tablebase")]
 mod pc4_profile_capability_projection;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_search_problem_compatibility;

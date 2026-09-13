@@ -27,6 +27,7 @@ import {
 } from './clearraWasmRuntime';
 import {
   pc4TablebaseArtifactSha256,
+  getPc4OnlineGeneration,
   prewarmPc4TablebaseAssets,
   releasePc4TablebaseAssets
 } from './pc4TablebaseAssets';
@@ -278,7 +279,8 @@ async function runCommandText(
       });
       if (isTerminal(emitted)) job.terminalPosted = true;
       postWorkerEvent(emitted);
-    }, { transportProfile: isLocalSearchProfileMode(import.meta.env.MODE) });
+    }, { transportProfile: isLocalSearchProfileMode(import.meta.env.MODE),
+      onlinePc4: tablebaseRequested ? getPc4OnlineGeneration() : null, tablebaseRequested });
     if (requiresFailClosedRelease(terminal)) {
       releaseJobResources(job);
       closeFailClosedWorker();
@@ -502,11 +504,8 @@ function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
     .then((bundle) => {
       if (generation !== tablebaseWarmupGeneration || !tablebaseRequested) return;
       postTablebaseWarmupPhase('loading', bundle.byteLength);
-      const report = wasm.install_tablebase(bundle.artifact);
-      if (report.artifact_bytes !== bundle.byteLength) {
-        throw new Error('WASM tablebase install reported an unexpected artifact size');
-      }
-      postTablebaseWarmupPhase('ready', bundle.byteLength);
+      if (!wasm.configure_online_pc4) throw new Error('pc4_online_wasm_update_required');
+      postTablebaseWarmupPhase(bundle.generation.profiles.some(slot => slot.status === 'ready') ? 'ready' : 'unavailable', bundle.byteLength);
     })
     .catch((error) => {
       if (generation !== tablebaseWarmupGeneration || !tablebaseRequested) return;
@@ -799,6 +798,7 @@ function postTablebaseWarmupPhase(
     phase,
     artifactSha256: pc4TablebaseArtifactSha256(),
     byteLength,
+    profiles: getPc4OnlineGeneration()?.profiles.map(({ profile, status, reason }) => ({ profile, status, reason })) ?? [],
     ...(message ? { message } : {})
   });
 }
