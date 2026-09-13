@@ -35,7 +35,59 @@ struct FactorizedPatternAtom {
     variant_count: usize,
 }
 
+/// Borrowed description of the actual ranked representation, not a claim
+/// inferred from the original expression text. It preserves hidden suffix
+/// multiplicity when the visible queue has been prefix-projected.
+#[derive(Clone, Copy, Debug)]
+pub struct FactorizedQueuePatternShape<'a> {
+    space: &'a FactorizedQueuePatternSpace,
+}
+
+impl<'a> FactorizedQueuePatternShape<'a> {
+    pub fn pattern_count(self) -> usize {
+        self.space.pattern_count
+    }
+    pub fn full_sequence_len(self) -> usize {
+        self.space.full_sequence_len
+    }
+    pub fn visible_sequence_len(self) -> usize {
+        self.space.visible_sequence_len
+    }
+    pub fn atoms(self) -> impl ExactSizeIterator<Item = FactorizedPatternAtomShape<'a>> {
+        self.space
+            .atoms
+            .iter()
+            .map(|atom| FactorizedPatternAtomShape { atom })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FactorizedPatternAtomShape<'a> {
+    atom: &'a FactorizedPatternAtom,
+}
+
+impl<'a> FactorizedPatternAtomShape<'a> {
+    pub fn choices(self) -> &'a [PieceKind] {
+        &self.atom.choices
+    }
+    pub fn draw_count(self) -> usize {
+        self.atom.draw_count
+    }
+    pub fn variant_count(self) -> usize {
+        self.atom.variant_count
+    }
+}
+
 impl QueuePatternExpression {
+    pub fn factorized_shape(&self) -> Option<FactorizedQueuePatternShape<'_>> {
+        match &self.sequences {
+            QueuePatternSequenceStorage::Factorized(space) => {
+                Some(FactorizedQueuePatternShape { space })
+            }
+            QueuePatternSequenceStorage::Explicit(_) => None,
+        }
+    }
+
     pub fn parse(source: &str, max_patterns: usize) -> Result<Self, QueuePatternParseError> {
         let normalized = source
             .chars()
@@ -837,6 +889,40 @@ mod tests {
         FactorizedPatternAtom, FactorizedQueuePatternSpace, QueuePatternExpression,
         QueuePatternParseError, QueuePatternSequenceStorage,
     };
+
+    #[test]
+    fn factorized_shape_preserves_actual_order_and_prefix_multiplicity() {
+        let expression = QueuePatternExpression::parse("P7", 5040).unwrap().prefix(1);
+        let shape = expression.factorized_shape().unwrap();
+        assert_eq!(shape.pattern_count(), 5040);
+        assert_eq!(shape.full_sequence_len(), 7);
+        assert_eq!(shape.visible_sequence_len(), 1);
+        assert_eq!(shape.atoms().len(), 1);
+        let atom = shape.atoms().next().unwrap();
+        assert_eq!(atom.draw_count(), 7);
+        assert_eq!(atom.variant_count(), 5040);
+        let original_choices = atom.choices().to_vec();
+        let mut changed = expression.clone();
+        let QueuePatternSequenceStorage::Factorized(space) = &mut changed.sequences else {
+            unreachable!()
+        };
+        space.atoms[0].choices.swap(0, 1);
+        assert_eq!(expression.source(), changed.source());
+        assert_ne!(
+            original_choices,
+            changed
+                .factorized_shape()
+                .unwrap()
+                .atoms()
+                .next()
+                .unwrap()
+                .choices()
+        );
+        assert!(QueuePatternExpression::parse("[IO]", 2)
+            .unwrap()
+            .factorized_shape()
+            .is_none());
+    }
 
     #[test]
     fn permutation_count_is_not_a_set_suffix() {

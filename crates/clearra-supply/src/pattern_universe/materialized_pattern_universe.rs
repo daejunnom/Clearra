@@ -44,6 +44,41 @@ enum PatternSequenceStorage {
     FactorizedQueueExpression(QueuePatternExpression),
 }
 
+/// Read-only evidence from the actual compact sequence and uniform-weight
+/// storage. Numeric universe IDs and the descriptive `structure` field are
+/// deliberately not used to produce this view.
+#[derive(Clone, Copy, Debug)]
+pub enum UniformCompactPatternSource<'a> {
+    Standard7Bag {
+        sequence_len: usize,
+        pattern_count: usize,
+    },
+    FactorizedExpression(crate::queue::queue_pattern_expression::FactorizedQueuePatternShape<'a>),
+}
+
+impl MaterializedPatternUniverse {
+    pub fn uniform_compact_source(&self) -> Option<UniformCompactPatternSource<'_>> {
+        // Equality of two Uniform variants is O(1). Explicit and terminal-
+        // remainder variants do not compare equal, even if their samples do.
+        if self.weights != WeightedPatternSet::uniform(self.pattern_count()).ok()? {
+            return None;
+        }
+        match &self.sequences {
+            PatternSequenceStorage::Standard7BagLexicographic(space) => {
+                Some(UniformCompactPatternSource::Standard7Bag {
+                    sequence_len: space.sequence_len(),
+                    pattern_count: space.len(),
+                })
+            }
+            PatternSequenceStorage::FactorizedQueueExpression(expression) => expression
+                .factorized_shape()
+                .map(UniformCompactPatternSource::FactorizedExpression),
+            PatternSequenceStorage::Explicit(_)
+            | PatternSequenceStorage::ObservedStandard7BagLexicographic(_) => None,
+        }
+    }
+}
+
 impl PatternSequenceStorage {
     fn len(&self) -> usize {
         match self {
@@ -613,6 +648,49 @@ mod tests {
         assert_eq!(universe.pattern_count(), PATTERN_COUNT);
         assert_eq!(universe.checked_retained_capacity_bytes(), Some(expected));
         assert!(expected < 1024 * 1024);
+        let Some(super::UniformCompactPatternSource::FactorizedExpression(shape)) =
+            universe.uniform_compact_source()
+        else {
+            panic!("actual compact storage and uniform weights must have a structural view");
+        };
+        assert_eq!(shape.pattern_count(), PATTERN_COUNT);
+        assert_eq!(shape.full_sequence_len(), 16);
+        assert_eq!(shape.visible_sequence_len(), 16);
+        assert_eq!(shape.atoms().len(), 3);
+    }
+
+    #[test]
+    fn compact_source_uses_real_storage_not_descriptive_ids_or_sampled_weights() {
+        let expression = QueuePatternExpression::parse("P7", 5040).unwrap();
+        let mut universe = MaterializedPatternUniverse::from_factorized_queue_expression(
+            PatternUniverseId::new(1),
+            PatternWeightModelId::new(2),
+            expression,
+            ProbabilityValue::new(1.0 / 5040f64).unwrap(),
+            5040,
+        )
+        .unwrap();
+        universe.structure = super::MaterializedPatternUniverseStructure::Explicit;
+        assert!(
+            universe.uniform_compact_source().is_some(),
+            "view follows actual storage, not metadata"
+        );
+        universe.weights =
+            clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet::new(
+                vec![ProbabilityValue::new(1.0 / 5040f64).unwrap(); 5040],
+            )
+            .unwrap();
+        assert!(
+            universe.uniform_compact_source().is_none(),
+            "explicit weights require exhaustive evidence"
+        );
+        universe.weights = clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet::uniform_with_weight(
+            5040, ProbabilityValue::new(1.0 / 10080f64).unwrap(),
+        ).unwrap();
+        assert!(
+            universe.uniform_compact_source().is_none(),
+            "sub-unity mass is not silently normalized"
+        );
     }
 
     #[test]

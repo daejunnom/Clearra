@@ -15,8 +15,11 @@ use clearra_problem::{SearchProblem, SearchProblemKind};
 use clearra_supply::pattern_universe::MaterializedPatternUniverse;
 use sha2::{Digest, Sha256};
 
-pub const PC4_COMPILED_PATTERN_SOURCE_CONTRACT: &str = "pc4-compiled-pattern-source.v2";
-const IDENTITY_DOMAIN: &[u8] = b"clearra.pc4-compiled-pattern-source.v2\0";
+#[path = "pc4_compact_pattern_identity.rs"]
+mod compact_identity;
+
+pub const PC4_COMPILED_PATTERN_SOURCE_CONTRACT: &str = "pc4-compiled-pattern-source.v3";
+const IDENTITY_DOMAIN: &[u8] = b"clearra.pc4-compiled-pattern-source.v3\0";
 
 /// Preparation work limits, not Core execution or retained-memory authority.
 /// The caller already owns the immutable problem; only an Arc and at most one
@@ -134,7 +137,7 @@ impl Pc4CompiledPatternQueue {
 }
 
 /// An input-only certificate minted only after every original queue and weight
-/// has been audited. Reading queues stays lazy and uses the same immutable
+/// has been audited directly or by its exact compact storage. Reading queues stays lazy and uses the same immutable
 /// problem, not a reconstructed seven-bag or an unweighted candidate union.
 #[derive(Clone, Debug)]
 pub struct Pc4CompiledPatternSource {
@@ -185,8 +188,9 @@ impl Pc4CompiledPatternSource {
 }
 
 /// No graph lookup, native search, source clone, or bulk queue allocation occurs
-/// in begin. Hashing is O(total source pieces), sliced by advance; source count
-/// is checked before the first lazy unrank. Cancellation poisons preparation,
+/// in begin. Explicit storage is audited in bounded pages; actual compact
+/// uniform storage is bound structurally without unranking. Source count
+/// is checked before any work. Cancellation poisons preparation,
 /// so an observed cancellation cannot be followed by a late successful seal.
 pub struct Pc4CompiledPatternPreparation {
     problem: Arc<SearchProblem>,
@@ -245,12 +249,26 @@ impl Pc4CompiledPatternPreparation {
             });
         }
         let mut staged = hasher.clone();
-        let end = self
+        let mut end = self
             .next_pattern
             .saturating_add(limit.get())
             .min(self.pattern_count);
         let result = (|| {
             let universe = universe(&self.problem)?;
+            if self.next_pattern == 0 {
+                if let Some(source) = universe.uniform_compact_source() {
+                    compact_identity::hash_compact_source(
+                        &mut staged,
+                        source,
+                        self.pattern_count,
+                        self.sequence_pieces,
+                        cancelled,
+                    )?;
+                    end = self.pattern_count;
+                    return Ok(());
+                }
+                staged.update(b"exhaustive-ordinal-storage.v1\0");
+            }
             for index in self.next_pattern..end {
                 if cancelled() {
                     return Err(Pc4CompiledPatternError::Cancelled);
@@ -428,6 +446,11 @@ pub(crate) fn derive_compiled_pattern_identity<G: Fn() -> bool>(
         Pc4CompiledPatternLimits::new(NonZeroUsize::MAX, NonZeroUsize::MAX, NonZeroUsize::MIN);
     let (mut hasher, count, length) = audit_header(problem, limits)?;
     let universe = universe(problem)?;
+    if let Some(source) = universe.uniform_compact_source() {
+        compact_identity::hash_compact_source(&mut hasher, source, count, length, cancelled)?;
+        return Ok(Pc4CompiledPatternIdentity(hasher.finalize().into()));
+    }
+    hasher.update(b"exhaustive-ordinal-storage.v1\0");
     for index in 0..count {
         if cancelled() {
             return Err(Pc4CompiledPatternError::Cancelled);
@@ -481,17 +504,21 @@ fn hash_record(
     // renormalization, or successful-outcome-only denominator is introduced.
     hasher.update(universe.weight_at(index).get().to_bits().to_be_bytes());
     for piece in queue.iter().copied() {
-        hasher.update([match piece {
-            PieceKind::I => b'I',
-            PieceKind::J => b'J',
-            PieceKind::L => b'L',
-            PieceKind::O => b'O',
-            PieceKind::S => b'S',
-            PieceKind::T => b'T',
-            PieceKind::Z => b'Z',
-        }]);
+        hasher.update([piece_identity_byte(piece)]);
     }
     Ok(())
+}
+
+fn piece_identity_byte(piece: PieceKind) -> u8 {
+    match piece {
+        PieceKind::I => b'I',
+        PieceKind::J => b'J',
+        PieceKind::L => b'L',
+        PieceKind::O => b'O',
+        PieceKind::S => b'S',
+        PieceKind::T => b'T',
+        PieceKind::Z => b'Z',
+    }
 }
 
 fn hash_len(hasher: &mut Sha256, value: usize) -> Result<(), Pc4CompiledPatternError> {

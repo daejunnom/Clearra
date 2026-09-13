@@ -124,14 +124,15 @@ fn pc4_compiled_pattern_p7_remains_lazy_and_identical_for_every_ordinal() {
         Pc4CompiledPatternPreparation::begin(Arc::clone(&problem), limits(64)).unwrap();
     assert_eq!(preparation.audited_patterns(), 0);
     assert!(!preparation.is_complete());
-    assert!(!preparation.advance(nz(64), &|| false).unwrap());
-    assert_eq!(preparation.audited_patterns(), 64);
-    let mut advances = 1;
-    while !preparation.advance(nz(64), &|| false).unwrap() {
-        advances += 1;
-    }
-    advances += 1;
-    assert_eq!(advances, 79);
+    let checks = Cell::new(0);
+    assert!(preparation
+        .advance(nz(1), &|| {
+            checks.set(checks.get() + 1);
+            false
+        })
+        .unwrap());
+    assert_eq!(preparation.audited_patterns(), 5040);
+    assert_eq!(checks.get(), 4, "one compact atom, no ordinal unranking");
     let source = preparation.finish().unwrap();
     assert!(
         Arc::ptr_eq(&source.problem, &problem),
@@ -160,6 +161,92 @@ fn pc4_compiled_pattern_p7_remains_lazy_and_identical_for_every_ordinal() {
         source.identity(),
         derive_compiled_pattern_identity(&problem, &|| false).unwrap()
     );
+}
+
+#[test]
+fn pc4_compact_pattern_prefix_keeps_hidden_suffix_multiplicity_and_late_cancel_is_terminal() {
+    let problem = compile("P7", 1);
+    let source = prepare(Arc::clone(&problem), 1);
+    assert_eq!(source.pattern_count(), 5040);
+    assert_eq!(source.sequence_pieces(), 1);
+    let mut counts = std::collections::BTreeMap::new();
+    for index in 0..5040 {
+        let queue = source.read_queue(index).unwrap();
+        *counts.entry(queue.pieces()[0]).or_insert(0) += 1;
+        assert_eq!(queue.weight().get().to_bits(), (1.0 / 5040f64).to_bits());
+    }
+    assert_eq!(counts.len(), 7);
+    assert!(counts.values().all(|count| *count == 720));
+    assert_eq!(
+        source.identity(),
+        derive_compiled_pattern_identity(&problem, &|| false).unwrap()
+    );
+    assert_ne!(source.identity(), prepare(compile("P7", 2), 1).identity());
+    let mut preparation = Pc4CompiledPatternPreparation::begin(problem, limits(1)).unwrap();
+    let checks = Cell::new(0);
+    assert_eq!(
+        preparation.advance(nz(1), &|| {
+            checks.set(checks.get() + 1);
+            checks.get() == 4 // after the compact structure was hashed
+        }),
+        Err(Pc4CompiledPatternError::Cancelled)
+    );
+    assert_eq!(preparation.audited_patterns(), 0);
+    assert!(matches!(
+        preparation.finish(),
+        Err(Pc4CompiledPatternError::PreparationTerminated)
+    ));
+}
+
+#[test]
+#[ignore = "explicit algorithmic input-admission A/B, not a search latency gate"]
+fn pc4_compact_input_admission_ab() {
+    use std::time::Instant;
+    for (label, problem) in [
+        ("factorized-p7", compile("P7", 7)),
+        ("factorized-p7-prefix", compile("P7", 1)),
+        (
+            "standard-7-bag",
+            compile_queue(PcQueueInput::standard_7_bag(), 7, 5040),
+        ),
+    ] {
+        let input = universe(&problem).unwrap();
+        let length = problem.supply().source_sequence_length();
+        let before = input.checked_retained_capacity_bytes();
+        let mut elapsed = [0u128; 2];
+        let mut baseline_reads = 0usize;
+        let compact_checks = Cell::new(0usize);
+        // ABBA, repeated four times. Both arms hash the same actual source;
+        // encoding versions differ, so digests are not claimed byte-identical.
+        for _ in 0..4 {
+            for arm in [0, 1, 1, 0] {
+                let started = Instant::now();
+                if arm == 0 {
+                    let (mut digest, _, _) = audit_header(&problem, limits(1)).unwrap();
+                    for ordinal in 0..input.pattern_count() {
+                        validate_uniform_weight(input, ordinal).unwrap();
+                        hash_record(&mut digest, input, ordinal, length).unwrap();
+                        baseline_reads += 1;
+                    }
+                    std::hint::black_box(digest.finalize());
+                } else {
+                    std::hint::black_box(
+                        derive_compiled_pattern_identity(&problem, &|| {
+                            compact_checks.set(compact_checks.get() + 1);
+                            false
+                        })
+                        .unwrap(),
+                    );
+                }
+                elapsed[arm] += started.elapsed().as_nanos();
+            }
+        }
+        assert_eq!(baseline_reads, 8 * 5040);
+        let compact_checks = compact_checks.get();
+        assert!(compact_checks <= 8 * 4);
+        assert_eq!(before, input.checked_retained_capacity_bytes());
+        eprintln!("pc4_compact_input_ab label={label} repeats=8 baseline_ns={} compact_ns={} baseline_queue_reads={baseline_reads} compact_queue_reads=0 compact_guard_checks={compact_checks}", elapsed[0], elapsed[1]);
+    }
 }
 
 #[test]

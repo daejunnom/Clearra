@@ -18,6 +18,10 @@ if (process.argv.includes('--row-normalization')) {
     ['pc4-replay-core', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-replay', '--lib']],
     ['pc4-replay-products', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-postprocess', '--lib', 'score_batch::']],
     ['pc4-row-app', [...common, 'pc4_']],
+    ['pc4-compact-storage', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'compact_source_uses_real_storage']],
+    ['pc4-compact-shape', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'factorized_shape_preserves_actual_order']],
+    ['pc4-compact-large', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'p7_p7_p2_factorized_universe_retains_compact_expression_storage']],
+    ['pc4-compact-input-ab', [...common, 'pc4_compact_input_admission_ab', '--', '--ignored', '--nocapture']],
     ['pc4-replay-app', [...common, 'pc_replay_']],
   );
 }
@@ -26,7 +30,8 @@ if (process.argv.includes('--row-normalization')) {
 if (process.argv.includes('--fetch')) checks.unshift(['fetch-locked', ['fetch', '--locked']]);
 for (const [name, args] of checks) {
   console.log(`app_contract_check=${name} status=started`);
-  const command = args[0] === 'test' ? [...args, '--', '--test-threads=2'] : args;
+  const command = args[0] === 'test'
+    ? [...args, ...(args.includes('--') ? [] : ['--']), '--test-threads=2'] : args;
   const result = spawnSync('cargo', command, {
     cwd: transaction.source_root,
     env: { ...process.env, CARGO_PROFILE_TEST_DEBUG: '0' },
