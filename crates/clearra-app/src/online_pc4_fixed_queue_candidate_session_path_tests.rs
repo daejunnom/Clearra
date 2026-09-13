@@ -23,6 +23,9 @@ const ROW: u64 = 1023;
 #[path = "pc4_range_product_contract_tests.rs"]
 mod product_contracts;
 
+#[path = "online_pc4_observation_candidate_session_tests.rs"]
+mod observation_contracts;
+
 struct ClearPath {
     dataset: RangeDataset,
     initial_board: u64,

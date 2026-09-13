@@ -37,6 +37,8 @@ mod objective_contract;
 mod online_pc4_fixed_queue_candidate_session;
 #[cfg(feature = "online-pc4-tablebase")]
 mod online_pc4_lookup_session;
+#[cfg(feature = "online-pc4-tablebase")]
+mod online_pc4_observation_candidate_request;
 mod parity_page_store;
 #[cfg(feature = "online-pc4-tablebase")]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -47,6 +49,10 @@ mod pc4_input_disclosure_policy;
 mod pc4_lookup_graph_runtime_adapter;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_observation_candidate_adapter;
+#[cfg(feature = "online-pc4-tablebase")]
+mod pc4_observation_candidate_runtime;
+#[cfg(feature = "online-pc4-tablebase")]
+mod pc4_online_candidate_runtime;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_profile_capability_projection;
 #[cfg(feature = "online-pc4-tablebase")]
@@ -227,6 +233,7 @@ pub use gui_bridge::{
 };
 #[cfg(feature = "online-pc4-tablebase")]
 pub use online_pc4_fixed_queue_candidate_session::{
+    AppOnlinePc4CandidateSession, AppOnlinePc4CandidateStep,
     AppOnlinePc4FixedQueueCandidateFailure, AppOnlinePc4FixedQueueCandidateGuard,
     AppOnlinePc4FixedQueueCandidateRequest, AppOnlinePc4FixedQueueCandidateRequestError,
     AppOnlinePc4FixedQueueCandidateSession, AppOnlinePc4FixedQueueCandidateStartError,
@@ -238,6 +245,10 @@ pub use online_pc4_lookup_session::{
     AppOnlinePc4RangeDisposition, AppOnlinePc4RangeError, AppQualifiedPc4LookupHit,
     Pc4FallbackCause, Pc4OfflineFallbackAuthorization, Pc4OfflineFallbackDisposition,
     Pc4OfflineFallbackSignal, Pc4OnlineLookupField, Pc4OnlineLookupRequest,
+};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use online_pc4_observation_candidate_request::{
+    AppOnlinePc4ObservationCandidateRequest, AppOnlinePc4ObservationCandidateRequestError,
 };
 pub use parity_page_store::{ParityReportPageSource, ParityReportPageStore};
 #[cfg(feature = "online-pc4-tablebase")]

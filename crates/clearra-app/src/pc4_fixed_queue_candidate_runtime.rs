@@ -225,6 +225,14 @@ impl Pc4FixedQueueCandidateRuntime {
         self.cache.target()
     }
 
+    pub const fn source(&self) -> Option<&PcCandidateSourceBinding> {
+        match &self.state {
+            Pc4FixedQueueCandidateRuntimeState::Running(stream) => Some(stream.source()),
+            Pc4FixedQueueCandidateRuntimeState::Complete(done) => Some(done.family.source()),
+            Pc4FixedQueueCandidateRuntimeState::Poisoned => None,
+        }
+    }
+
     pub const fn completed_reducer_input(&self) -> Option<&PcCandidateReducerInput> {
         match &self.state {
             Pc4FixedQueueCandidateRuntimeState::Complete(completion) => {

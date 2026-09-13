@@ -1,8 +1,8 @@
-//! No-I/O application owner for one resumable online PC4 fixed-queue candidate session.
-// SRP rationale: this module's single change reason is the lifecycle of one range-admitted online fixed-queue candidate session.
+//! No-I/O owner for one resumable online PC4 candidate session.
+// SRP rationale: one Range lifecycle is shared by fixed and observation producers.
 //!
 //! This module composes the range-admitted online lookup owner with the exact
-//! fixed-queue candidate runtime. It owns neither transport nor fallback, and
+//! selected candidate runtime. It owns neither transport nor fallback, and
 //! exposes no candidate data until the runtime has sealed complete reducer
 //! input.
 
@@ -23,13 +23,26 @@ use super::{
         AppOnlinePc4RangeDisposition, AppOnlinePc4RangeError, Pc4OfflineFallbackAuthorization,
         Pc4OnlineLookupRequest,
     },
+    online_pc4_observation_candidate_request::AppOnlinePc4ObservationCandidateRequest,
     pc4_fixed_queue_candidate_runtime::{
         Pc4FixedQueueCandidateRuntime, Pc4FixedQueueCandidateRuntimeAdmissionError,
         Pc4FixedQueueCandidateRuntimeAdvanceError, Pc4FixedQueueCandidateRuntimeRequest,
-        Pc4FixedQueueCandidateRuntimeStartError, Pc4FixedQueueCandidateRuntimeStep,
+        Pc4FixedQueueCandidateRuntimeStartError,
     },
     pc4_input_disclosure_policy::{Pc4PreparedOnlineInput, Pc4PreparedQueueInput},
     pc4_lookup_graph_runtime_adapter::{Pc4LookupGraphCacheLimits, Pc4LookupGraphCacheStartError},
+    pc4_observation_candidate_adapter::{
+        Pc4CompleteObservationCandidateFamily, Pc4ObservationCandidateBudgetExceeded,
+        Pc4ObservationCandidateError,
+    },
+    pc4_observation_candidate_runtime::{
+        Pc4ObservationCandidateRuntime, Pc4ObservationCandidateRuntimeAdvanceError,
+        Pc4ObservationCandidateRuntimeRequest, Pc4ObservationCandidateRuntimeStartError,
+    },
+    pc4_online_candidate_runtime::{
+        Pc4OnlineCandidateRuntime, Pc4OnlineCandidateRuntimeAdvanceError,
+        Pc4OnlineCandidateRuntimeStep,
+    },
     pc_candidate_page_boundary::{
         graph_candidate_adapter::{
             Pc4GraphCandidateAdapterBudgets, Pc4GraphCandidateBudgetExceeded,
@@ -125,29 +138,7 @@ impl<'a> AppOnlinePc4FixedQueueCandidateRequest<'a> {
         observation_page_size: NonZeroUsize,
         range_limits: RangeAdmissionLimits,
     ) -> Result<Self, AppOnlinePc4FixedQueueCandidateRequestError> {
-        if source.provider_kind() != PcCandidateProviderKind::OnlinePc4 {
-            return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceIsNotOnlinePc4);
-        }
-        if source.profile() != prepared_input.profile() {
-            return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceProfileMismatch);
-        }
-        if source.qualified_snapshot() != Some(prepared_input.target().snapshot()) {
-            return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceSnapshotMismatch);
-        }
-        if initial_board.lines() != prepared_input.target_lines().get()
-            || initial_board.occupied().compact_board64() != Some(source.initial_board_mask())
-        {
-            return Err(AppOnlinePc4FixedQueueCandidateRequestError::InitialBoardMismatch);
-        }
-        let expected_request_identity = PcCandidateRequestIdentity::derive_pc4_candidate_universe(
-            prepared_input,
-            initial_board,
-            initial_hold,
-        )
-        .map_err(AppOnlinePc4FixedQueueCandidateRequestError::RequestIdentity)?;
-        if source.request_identity() != expected_request_identity {
-            return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceRequestMismatch);
-        }
+        validate_prepared_candidate_source(source, prepared_input, initial_board, initial_hold)?;
         if initial_hold != FixedQueueHoldState::Disabled {
             return Err(AppOnlinePc4FixedQueueCandidateRequestError::HoldCompositionRequired);
         }
@@ -170,6 +161,38 @@ impl<'a> AppOnlinePc4FixedQueueCandidateRequest<'a> {
             range_limits,
         ))
     }
+}
+
+pub(crate) fn validate_prepared_candidate_source(
+    source: &PcCandidateSourceBinding,
+    prepared_input: &Pc4PreparedOnlineInput,
+    initial_board: StandardPcBoard,
+    initial_hold: FixedQueueHoldState,
+) -> Result<(), AppOnlinePc4FixedQueueCandidateRequestError> {
+    if source.provider_kind() != PcCandidateProviderKind::OnlinePc4 {
+        return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceIsNotOnlinePc4);
+    }
+    if source.profile() != prepared_input.profile() {
+        return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceProfileMismatch);
+    }
+    if source.qualified_snapshot() != Some(prepared_input.target().snapshot()) {
+        return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceSnapshotMismatch);
+    }
+    if initial_board.lines() != prepared_input.target_lines().get()
+        || initial_board.occupied().compact_board64() != Some(source.initial_board_mask())
+    {
+        return Err(AppOnlinePc4FixedQueueCandidateRequestError::InitialBoardMismatch);
+    }
+    let expected = PcCandidateRequestIdentity::derive_pc4_candidate_universe(
+        prepared_input,
+        initial_board,
+        initial_hold,
+    )
+    .map_err(AppOnlinePc4FixedQueueCandidateRequestError::RequestIdentity)?;
+    if source.request_identity() != expected {
+        return Err(AppOnlinePc4FixedQueueCandidateRequestError::SourceRequestMismatch);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,6 +279,8 @@ impl std::error::Error for AppOnlinePc4FixedQueueCandidateStartError {}
 /// the lookup transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppOnlinePc4FixedQueueCandidateFailure {
+    StaleSource,
+    StaleSnapshot,
     LookupSessionIdsExhausted {
         field_id: u32,
     },
@@ -275,12 +300,16 @@ pub enum AppOnlinePc4FixedQueueCandidateFailure {
         reason: &'static str,
     },
     CandidateBudgetExceeded(Pc4GraphCandidateBudgetExceeded),
+    ObservationBudgetExceeded(Pc4ObservationCandidateBudgetExceeded),
+    ObservationGraphBudgetExceeded(clearra_pc4_tablebase::Pc4ObservationGraphBudgetExceeded),
     CompletionUnavailable,
 }
 
 impl AppOnlinePc4FixedQueueCandidateFailure {
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::StaleSource => "pc4_online_candidate_stale_source",
+            Self::StaleSnapshot => "pc4_online_candidate_stale_snapshot",
             Self::LookupSessionIdsExhausted { .. } => {
                 "pc4_online_candidate_lookup_session_ids_exhausted"
             }
@@ -288,6 +317,8 @@ impl AppOnlinePc4FixedQueueCandidateFailure {
             Self::Lookup { failure, .. } => failure.reason(),
             Self::LookupAdmission { reason, .. } | Self::CandidateAdvance { reason } => reason,
             Self::CandidateBudgetExceeded(_) => "pc4_graph_candidate_prepare_budget_exceeded",
+            Self::ObservationBudgetExceeded(_) => "pc4_observation_candidate_budget_exceeded",
+            Self::ObservationGraphBudgetExceeded(_) => "pc4_observation_graph_budget_exceeded",
             Self::CompletionUnavailable => "pc4_online_candidate_completion_unavailable",
         }
     }
@@ -298,8 +329,12 @@ impl AppOnlinePc4FixedQueueCandidateFailure {
             | Self::LookupStart { field_id, .. }
             | Self::Lookup { field_id, .. }
             | Self::LookupAdmission { field_id, .. } => Some(*field_id),
-            Self::CandidateAdvance { .. }
+            Self::StaleSource
+            | Self::StaleSnapshot
+            | Self::CandidateAdvance { .. }
             | Self::CandidateBudgetExceeded(_)
+            | Self::ObservationBudgetExceeded(_)
+            | Self::ObservationGraphBudgetExceeded(_)
             | Self::CompletionUnavailable => None,
         }
     }
@@ -321,6 +356,13 @@ pub enum AppOnlinePc4FixedQueueCandidateStep {
     Progress {
         observed_replays: usize,
         observed_candidates: usize,
+    },
+    /// Memberships may repeat across reveal outcomes; they are deliberately
+    /// not labelled as the final number of unique canonical candidates.
+    ObservationProgress {
+        concrete_paths: usize,
+        reveal_outcomes: usize,
+        candidate_memberships: usize,
     },
     Complete {
         replay_provenances: usize,
@@ -374,16 +416,22 @@ impl TerminalState {
 /// one target-field lookup. Successive lookup IDs are allocated from the
 /// caller-owned first ID so delayed Range responses cannot bind to a later
 /// field lookup.
-pub struct AppOnlinePc4FixedQueueCandidateSession {
+pub struct AppOnlinePc4CandidateSession {
     generation: PinnedPc4Generation,
-    runtime: Pc4FixedQueueCandidateRuntime,
+    runtime: Pc4OnlineCandidateRuntime,
+    initial_field_id: u32,
+    initial_field_verified: bool,
     range_limits: RangeAdmissionLimits,
     next_lookup_session: Option<LookupSessionId>,
     active_lookup: Option<ActiveLookup>,
     terminal: Option<TerminalState>,
 }
 
-impl AppOnlinePc4FixedQueueCandidateSession {
+/// Compatibility name for the existing single-queue constructor and tests.
+pub type AppOnlinePc4FixedQueueCandidateSession = AppOnlinePc4CandidateSession;
+pub type AppOnlinePc4CandidateStep = AppOnlinePc4FixedQueueCandidateStep;
+
+impl AppOnlinePc4CandidateSession {
     pub fn start<G>(
         generation: PinnedPc4Generation,
         request: AppOnlinePc4FixedQueueCandidateRequest<'_>,
@@ -412,7 +460,56 @@ impl AppOnlinePc4FixedQueueCandidateSession {
         .map_err(AppOnlinePc4FixedQueueCandidateStartError::from_runtime)?;
         Ok(Self {
             generation,
-            runtime,
+            runtime: Pc4OnlineCandidateRuntime::Fixed(runtime),
+            initial_field_id: request.start_field_id,
+            initial_field_verified: false,
+            range_limits: request.range_limits,
+            next_lookup_session: Some(request.first_lookup_session),
+            active_lookup: None,
+            terminal: None,
+        })
+    }
+
+    /// Uses one pinned generation, graph cache and lookup-ID sequence across
+    /// every hold/reveal branch. No child branch starts another Range owner.
+    pub fn start_observation<G: AppOnlinePc4FixedQueueCandidateGuard>(
+        generation: PinnedPc4Generation,
+        request: AppOnlinePc4ObservationCandidateRequest<'_>,
+        guard: &G,
+    ) -> Result<Self, AppOnlinePc4FixedQueueCandidateStartError> {
+        let runtime = Pc4ObservationCandidateRuntime::prepare(
+            Pc4ObservationCandidateRuntimeRequest {
+                activated_snapshot: generation.activated_snapshot(),
+                prepared_input: request.prepared_input,
+                source: request.source,
+                start_field_id: request.start_field_id,
+                frontier: request.frontier,
+                terminal_depth_contract: request.terminal_depth_contract,
+                traversal_budgets: request.traversal_budgets,
+                traversal_page_budgets: request.traversal_page_budgets,
+                graph_budgets: request.graph_budgets,
+                materialization_budgets: request.materialization_budgets,
+                candidate_budgets: request.candidate_budgets,
+                cache_limits: request.cache_limits,
+                observation_page_size: request.observation_page_size,
+            },
+            guard,
+        )
+        .map_err(|error| match error {
+            Pc4ObservationCandidateRuntimeStartError::Cache(error) => {
+                AppOnlinePc4FixedQueueCandidateStartError::from_runtime(
+                    Pc4FixedQueueCandidateRuntimeStartError::Cache(error),
+                )
+            }
+            error => AppOnlinePc4FixedQueueCandidateStartError::PreparationFailed {
+                reason: error.reason(),
+            },
+        })?;
+        Ok(Self {
+            generation,
+            runtime: Pc4OnlineCandidateRuntime::Observation(runtime),
+            initial_field_id: request.start_field_id,
+            initial_field_verified: false,
             range_limits: request.range_limits,
             next_lookup_session: Some(request.first_lookup_session),
             active_lookup: None,
@@ -443,6 +540,16 @@ impl AppOnlinePc4FixedQueueCandidateSession {
     pub fn completed_reducer_input(&self) -> Option<&PcCandidateReducerInput> {
         if matches!(self.terminal, Some(TerminalState::Complete { .. })) {
             self.runtime.completed_reducer_input()
+        } else {
+            None
+        }
+    }
+
+    /// Exposes the complete reveal ledger as well as the canonical union, so
+    /// probability consumers need not infer weights from the union alone.
+    pub fn completed_observation_family(&self) -> Option<&Pc4CompleteObservationCandidateFamily> {
+        if matches!(self.terminal, Some(TerminalState::Complete { .. })) {
+            self.runtime.completed_observation_family()
         } else {
             None
         }
@@ -495,6 +602,30 @@ impl AppOnlinePc4FixedQueueCandidateSession {
         }
 
         loop {
+            // A waiting Range response must not postpone cancellation or
+            // retain authority after source/snapshot revocation.
+            if PcCandidatePageGuard::is_cancelled(guard) {
+                return self.finish(TerminalState::Cancelled);
+            }
+            if !PcCandidatePageGuard::is_current_snapshot(guard, self.runtime.target().snapshot()) {
+                return self.finish(TerminalState::Failed(
+                    AppOnlinePc4FixedQueueCandidateFailure::StaleSnapshot,
+                ));
+            }
+            if self
+                .runtime
+                .source()
+                .is_some_and(|source| !PcCandidatePageGuard::is_current_source(guard, source))
+            {
+                return self.finish(TerminalState::Failed(
+                    AppOnlinePc4FixedQueueCandidateFailure::StaleSource,
+                ));
+            }
+            if self.active_lookup.is_none() && !self.initial_field_verified {
+                if let Err(error) = self.start_lookup(self.initial_field_id) {
+                    return self.finish(TerminalState::Failed(error));
+                }
+            }
             if let Some(active) = &self.active_lookup {
                 let field_id = active.field_id;
                 match active.session.step() {
@@ -503,9 +634,28 @@ impl AppOnlinePc4FixedQueueCandidateSession {
                     }
                     AppOnlinePc4LookupStep::Hit(hit) => {
                         self.active_lookup = None;
+                        if !self.initial_field_verified {
+                            let expected = self.runtime.source().and_then(|source| {
+                                clearra_pc4_tablebase::clearra_board64_mask_to_hydra_field_hash_v1(
+                                    source.initial_board_mask(),
+                                )
+                                .ok()
+                            });
+                            if field_id != self.initial_field_id
+                                || expected != Some(hit.lookup().field_hash)
+                            {
+                                return self.finish(TerminalState::Failed(
+                                    AppOnlinePc4FixedQueueCandidateFailure::LookupAdmission {
+                                        field_id,
+                                        reason: "pc4_online_candidate_initial_field_mismatch",
+                                    },
+                                ));
+                            }
+                        }
                         if let Err(error) = self.runtime.admit_lookup_hit(hit) {
                             return self.fail_lookup_admission(field_id, error);
                         }
+                        self.initial_field_verified = true;
                     }
                     AppOnlinePc4LookupStep::Miss => {
                         return self.finish(TerminalState::Miss { field_id });
@@ -523,12 +673,12 @@ impl AppOnlinePc4FixedQueueCandidateSession {
             }
 
             match self.runtime.advance(guard) {
-                Ok(Pc4FixedQueueCandidateRuntimeStep::NeedLookup(field_id)) => {
+                Ok(Pc4OnlineCandidateRuntimeStep::NeedLookup(field_id)) => {
                     if let Err(failure) = self.start_lookup(field_id) {
                         return self.finish(TerminalState::Failed(failure));
                     }
                 }
-                Ok(Pc4FixedQueueCandidateRuntimeStep::Advanced {
+                Ok(Pc4OnlineCandidateRuntimeStep::Progress {
                     observed_replays,
                     observed_candidates,
                 }) => {
@@ -537,7 +687,18 @@ impl AppOnlinePc4FixedQueueCandidateSession {
                         observed_candidates,
                     };
                 }
-                Ok(Pc4FixedQueueCandidateRuntimeStep::Complete {
+                Ok(Pc4OnlineCandidateRuntimeStep::ObservationProgress {
+                    concrete_paths,
+                    reveal_outcomes,
+                    candidate_memberships,
+                }) => {
+                    return AppOnlinePc4FixedQueueCandidateStep::ObservationProgress {
+                        concrete_paths,
+                        reveal_outcomes,
+                        candidate_memberships,
+                    }
+                }
+                Ok(Pc4OnlineCandidateRuntimeStep::Complete {
                     replay_provenances,
                     canonical_candidates,
                 }) => {
@@ -552,10 +713,12 @@ impl AppOnlinePc4FixedQueueCandidateSession {
                     });
                 }
                 Err(error) => {
-                    if is_cancelled_advance(&error) {
+                    if is_cancelled_online_advance(&error) {
                         return self.finish(TerminalState::Cancelled);
                     }
-                    return self.finish(TerminalState::Failed(candidate_advance_failure(error)));
+                    return self.finish(TerminalState::Failed(online_candidate_advance_failure(
+                        error,
+                    )));
                 }
             }
         }
@@ -582,10 +745,7 @@ impl AppOnlinePc4FixedQueueCandidateSession {
         if self.terminal.is_some() {
             return;
         }
-        if let Some(active) = &mut self.active_lookup {
-            active.session.cancel();
-        }
-        self.terminal = Some(TerminalState::Cancelled);
+        self.finish(TerminalState::Cancelled);
     }
 
     fn start_lookup(
@@ -628,6 +788,9 @@ impl AppOnlinePc4FixedQueueCandidateSession {
     }
 
     fn finish(&mut self, terminal: TerminalState) -> AppOnlinePc4FixedQueueCandidateStep {
+        if let Some(mut active) = self.active_lookup.take() {
+            active.session.cancel();
+        }
         let step = terminal.step();
         self.terminal = Some(terminal);
         step
@@ -641,6 +804,43 @@ fn is_cancelled_advance(error: &Pc4FixedQueueCandidateRuntimeAdvanceError) -> bo
             Pc4GraphCandidatePrepareError::Cancelled
         )
     )
+}
+
+fn is_cancelled_online_advance(error: &Pc4OnlineCandidateRuntimeAdvanceError) -> bool {
+    match error {
+        Pc4OnlineCandidateRuntimeAdvanceError::Fixed(error) => is_cancelled_advance(error),
+        Pc4OnlineCandidateRuntimeAdvanceError::Observation(error) => matches!(
+            error,
+            Pc4ObservationCandidateRuntimeAdvanceError::Candidate(
+                Pc4ObservationCandidateError::Cancelled
+            ) | Pc4ObservationCandidateRuntimeAdvanceError::Session(
+                Pc4ObservationCandidateError::Cancelled
+            )
+        ),
+    }
+}
+
+fn online_candidate_advance_failure(
+    error: Pc4OnlineCandidateRuntimeAdvanceError,
+) -> AppOnlinePc4FixedQueueCandidateFailure {
+    match error {
+        Pc4OnlineCandidateRuntimeAdvanceError::Fixed(error) => candidate_advance_failure(error),
+        Pc4OnlineCandidateRuntimeAdvanceError::Observation(
+            Pc4ObservationCandidateRuntimeAdvanceError::Candidate(
+                Pc4ObservationCandidateError::BudgetExceeded(budget),
+            ),
+        ) => AppOnlinePc4FixedQueueCandidateFailure::ObservationBudgetExceeded(budget),
+        Pc4OnlineCandidateRuntimeAdvanceError::Observation(
+            Pc4ObservationCandidateRuntimeAdvanceError::Candidate(
+                Pc4ObservationCandidateError::ObservationGraph(
+                    clearra_pc4_tablebase::Pc4ObservationGraphPageError::BudgetExceeded(budget),
+                ),
+            ),
+        ) => AppOnlinePc4FixedQueueCandidateFailure::ObservationGraphBudgetExceeded(budget),
+        other => AppOnlinePc4FixedQueueCandidateFailure::CandidateAdvance {
+            reason: other.reason(),
+        },
+    }
 }
 
 fn candidate_advance_failure(
@@ -742,9 +942,9 @@ mod tests {
 
     pub(super) struct Guard {
         source: PcCandidateSourceBinding,
-        cancelled: Cell<bool>,
-        source_current: Cell<bool>,
-        snapshot_current: Cell<bool>,
+        pub(super) cancelled: Cell<bool>,
+        pub(super) source_current: Cell<bool>,
+        pub(super) snapshot_current: Cell<bool>,
     }
 
     impl Guard {

@@ -13,7 +13,9 @@ use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_objectives::policy::score_objective_policy::{
     ScoreProfileSelection, SpinProfileSelection,
 };
-use clearra_pc4_tablebase::{Pc4RuleProfile, QualifiedSnapshotIdentity};
+use clearra_pc4_tablebase::{
+    FixedQueueHoldState, Pc4GraphPiece, Pc4RuleProfile, QualifiedSnapshotIdentity,
+};
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
     RequestedSearchBackend,
@@ -41,6 +43,36 @@ enum Product {
 }
 
 fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -> AppRequest {
+    request_with_supply(
+        lines,
+        profile,
+        initial,
+        product,
+        &vec![Pc4GraphPiece::I; usize::from(lines)],
+        FixedQueueHoldState::Disabled,
+    )
+}
+
+fn piece_kind(piece: Pc4GraphPiece) -> PieceKind {
+    match piece {
+        Pc4GraphPiece::I => PieceKind::I,
+        Pc4GraphPiece::O => PieceKind::O,
+        Pc4GraphPiece::T => PieceKind::T,
+        Pc4GraphPiece::S => PieceKind::S,
+        Pc4GraphPiece::Z => PieceKind::Z,
+        Pc4GraphPiece::J => PieceKind::J,
+        Pc4GraphPiece::L => PieceKind::L,
+    }
+}
+
+fn request_with_supply(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    product: Product,
+    queue: &[Pc4GraphPiece],
+    hold: FixedQueueHoldState,
+) -> AppRequest {
     let rule = match profile {
         Pc4RuleProfile::Srs => srs(),
         Pc4RuleProfile::SrsPlus => srs_plus(),
@@ -115,11 +147,17 @@ fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -
     }
     let mut query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(u16::from(lines), initial),
-        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; usize::from(lines)])),
-        PieceWindow::new(usize::from(lines)),
+        PcQueueInput::fixed_sequence(FixedSequence::new(
+            queue.iter().copied().map(piece_kind).collect(),
+        )),
+        PieceWindow::new(queue.len()),
     )
     .with_exact_pieces(Some(usize::from(lines)))
-    .with_allow_hold(false)
+    .with_allow_hold(hold != FixedQueueHoldState::Disabled)
+    .with_hold_piece(match hold {
+        FixedQueueHoldState::Occupied(piece) => Some(piece_kind(piece)),
+        _ => None,
+    })
     .with_rule(rule)
     .with_count_policy(count)
     .with_objective(objective)
@@ -313,6 +351,26 @@ pub(super) fn assert_product_parity<G: PcCandidatePageGuard>(
     input: &PcCandidateReducerInput,
     guard: &G,
 ) {
+    assert_product_parity_with_supply(
+        lines,
+        profile,
+        initial,
+        &vec![Pc4GraphPiece::I; usize::from(lines)],
+        FixedQueueHoldState::Disabled,
+        input,
+        guard,
+    );
+}
+
+pub(super) fn assert_product_parity_with_supply<G: PcCandidatePageGuard>(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    queue: &[Pc4GraphPiece],
+    hold: FixedQueueHoldState,
+    input: &PcCandidateReducerInput,
+    guard: &G,
+) {
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     );
@@ -322,7 +380,7 @@ pub(super) fn assert_product_parity<G: PcCandidatePageGuard>(
         Product::Minimum,
         Product::Replay,
     ] {
-        let request = request(lines, profile, initial, product);
+        let request = request_with_supply(lines, profile, initial, product, queue, hold);
         let expected = ordinary(&context, request.clone());
         assert_eq!(
             expected.status(),
@@ -444,7 +502,10 @@ pub(super) fn assert_product_parity<G: PcCandidatePageGuard>(
             assert!(response.product_capability_result().is_none());
         }
     }
-    assert_rejections(&context, lines, profile, initial, input, guard);
+    if hold == FixedQueueHoldState::Disabled && queue == vec![Pc4GraphPiece::I; usize::from(lines)]
+    {
+        assert_rejections(&context, lines, profile, initial, input, guard);
+    }
 }
 
 struct RevokingGuard<'a, G> {

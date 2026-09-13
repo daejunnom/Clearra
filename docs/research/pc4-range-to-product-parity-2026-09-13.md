@@ -198,3 +198,43 @@ contracts). App compilation then exposed a fixture's nonexistent `Cli`
 surface variant; the contract distinguishes interactive and non-interactive
 CLI. The fixture now explicitly uses `NonInteractiveCli`, proving a disclosed
 fixed queue needs no bag prompt in that stricter surface as well.
+
+Run [34742209353](https://github.com/daejunnom/Clearra/actions/runs/34742209353)
+on `004fbe128c55d97a5b311601fb56db9838e187d1` completed all four jobs
+successfully. Core **7 + 5**, Tablebase **163**, App **69** passed; App took
+**2.11 s**. This covers the fixed/no-draw pure union, not the following Range
+composition extension.
+
+## Shared Range lifecycle for observation candidates
+
+The new observation request binds disclosure-ready input to the same source,
+board, hold and full placement horizon. Its runtime uses the existing
+observation graph/candidate session and physical Core ILC materializer over
+one qualified record cache. Missing adjacency or materialization records
+become `NeedLookup`; transactional cursors are retried only after the shared
+owner admits the exact record. A purported missing record already present in
+the cache fails instead of creating a repeated lookup loop.
+
+`AppOnlinePc4CandidateSession` now selects either the existing single-queue
+producer or this observation producer. The old fixed-queue name is a type
+alias and its constructor remains supported. Lookup IDs, Range validation,
+generation pinning and failure/cancellation handling are not copied into a
+second controller. Graph/cache budgets span hold/reveal siblings. Progress
+reports reveal memberships separately from unique canonical candidate count;
+the complete probability ledger is available separately from the union.
+
+The common controller checks cancellation and source/snapshot revocation
+even while awaiting a response, and clears the pending lookup when terminal.
+It also verifies the initial record's bitmap against the source board before
+allowing an empty or nonempty complete result. Selecting an unrelated valid
+node must not turn the original request into a supposedly complete empty set.
+
+New source tests drive actual Range admission and Core materialization for
+1..4L, five typed profiles and five hold/queue cases, then compare all/chance/
+minimum/replay through the existing product path (400 paired cases). Separate
+tests cover hidden I/O bag outcomes, zero-hit probability mass, immediate
+pending-response cancellation/revocation, common cache exhaustion and initial
+node substitution. These are synthetic-qualified graphs; they do not prove
+real HF completeness or authorize a profile. Execution of this extension
+requires the next exact-source CI run. No public CLI/GUI/Discord route or
+network transport has been activated by these changes.
