@@ -321,3 +321,15 @@ with `WorkerPoolUnavailable`, before constructing any replay owner. Those
 memory-only fixtures now explicitly request one worker; production worker
 admission and the test resource lock remain unchanged. The complete latest
 CI still needs a clean result, not an inferred pass from this partial result.
+
+On `2bfa8cedb9357d50c8d4a9c4e303be2589e166e9`, non-publishing run
+[34744560333](https://github.com/daejunnom/Clearra/actions/runs/34744560333)
+passed the complete PC4 job: Core **7 + 5**, Tablebase **163**, Replay **20**,
+Postprocess **41**, PC4 App **75** (**7.91 s**) and App replay **16**
+(**34.25 s**), all zero failures. All four workflow jobs completed successfully;
+native CLI passed **17** real process tests (**107.41 s**), alongside source
+and surface checks.
+The reported durations are CI fixture-group timings, not product-performance
+claims. In particular, this is synthetic-qualified Range/hold/product evidence,
+not proof of actual HF format/completeness, public network adapters or release
+readiness. The pattern-source binding and production-profile gates remain open.
