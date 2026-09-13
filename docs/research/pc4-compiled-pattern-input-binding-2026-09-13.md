@@ -85,6 +85,13 @@ production pattern preparation or PC search benchmarks. The P7 ordinal test
 also confirmed bounded page-size-independent preparation, identity sharing
 with the original owner, and unchanged source capacity after all reads.
 
+Native CLI separately passed **17** real process tests (106.33 s). Its build
+still reported MSVC `LNK4098` (`MSVCRTD` default-library conflict); that warning
+is not resolved by a pattern-input change and needs native archive/runtime
+configuration review before claiming a warning-clean release. Hosted action
+logs also contain the Node `punycode` deprecation warning. Neither a successful
+workflow nor these fixture timings prove production deployment readiness.
+
 ## Remaining integration
 
 Bind the resulting source to the qualified target, original board/hold,
