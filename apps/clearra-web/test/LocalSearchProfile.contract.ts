@@ -5,12 +5,23 @@ assert.equal(isLocalSearchProfileMode('local-recovery'), true);
 assert.equal(isLocalSearchProfileMode('local-audit'), true);
 for (const mode of ['production', 'development', 'test', '']) assert.equal(isLocalSearchProfileMode(mode), false);
 assert.equal(localSearchProfileText({ event: 'progress', search_profile: {} }), null);
+assert.equal(localSearchProfileText({ event: 'started', job_id: 2 }), '');
+// The existing presenter replaces text on a non-null value; a new job clears
+// stale online counters even when subsequent ordinary progress has no profile.
+let display = '{"pc4_online":{"requests":17}}';
+for (const event of [{ event: 'started', job_id: 2 }, { event: 'progress', job_id: 2 }]) {
+  const next = localSearchProfileText(event);
+  if (next !== null) display = next;
+}
+assert.equal(display, '');
 const online = JSON.parse(localSearchProfileText({ event: 'progress', pc4_online: {
   provider: 'hf-graph', requests: 17, transferred_bytes: 1248, elapsed_ms: 2500,
+  logical_reads: 40, cache_hits: 20, joined_requests: 3, cache_bytes: 1024,
   revision: 'a'.repeat(40), input: 'private', arbitrary: 'never include'
 } })!);
 assert.deepEqual(online.pc4_online, { provider: 'hf-graph', requests: 17,
-  transferred_bytes: 1248, elapsed_ms: 2500, revision: 'a'.repeat(40) });
+  transferred_bytes: 1248, logical_reads: 40, cache_hits: 20, joined_requests: 3,
+  cache_bytes: 1024, elapsed_ms: 2500, revision: 'a'.repeat(40) });
 assert.equal(localSearchProfileText({ event: 'final_response', search_profile: { input: 'private' } }), null);
 const text = localSearchProfileText({ event: 'final_response', search_profile: {
   input: 'private', verifier_transport: { timings: {

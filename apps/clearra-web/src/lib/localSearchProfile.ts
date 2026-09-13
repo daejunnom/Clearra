@@ -33,6 +33,9 @@ function numbers(value: unknown, keys: string[]): Record<string, number | null> 
 
 export function localSearchProfileText(event: unknown): string | null {
   const envelope = record(event);
+  // An offline job must never display the previous online job's counters while
+  // awaiting its own terminal profile. Empty text clears the presenter's panel.
+  if (envelope?.event === 'started') return '';
   if (!envelope || !['final_response', 'failed', 'cancelled', 'progress'].includes(String(envelope.event))) return null;
   const profile = record(envelope.search_profile) ?? {};
   const result: Record<string, unknown> = {};
@@ -40,7 +43,8 @@ export function localSearchProfileText(event: unknown): string | null {
   if (online?.provider === 'hf-graph') {
     result.pc4_online = {
       provider: 'hf-graph',
-      ...numbers(online, ['requests', 'transferred_bytes', 'elapsed_ms']),
+      ...numbers(online, ['requests', 'transferred_bytes', 'logical_reads', 'cache_hits',
+        'joined_requests', 'cache_bytes', 'elapsed_ms']),
       ...(typeof online.revision === 'string' && /^[a-f0-9]{40}$/.test(online.revision)
         ? { revision: online.revision } : {})
     };

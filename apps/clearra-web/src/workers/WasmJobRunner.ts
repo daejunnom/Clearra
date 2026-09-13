@@ -38,7 +38,9 @@ export class WasmJobRunner {
     const reader = this.onlineGeneration ? createPc4RangeReader(this.onlineGeneration, { signal: this.onlineAbort!.signal }) : null;
     const emit = (event: ClearraWasmWorkerEvent) => onEvent(reader ? ({ ...event,
       pc4_online: { provider: 'hf-graph', profile: 'jstris-180', revision: this.onlineGeneration!.revision,
-        requests: reader.requests, transferred_bytes: reader.bytes, elapsed_ms: performance.now() - onlineStarted } } as ClearraWasmWorkerEvent) : event);
+        requests: reader.requests, transferred_bytes: reader.bytes, logical_reads: reader.reads,
+        cache_hits: reader.cacheHits, joined_requests: reader.joinedRequests, cache_bytes: reader.retainedBytes,
+        elapsed_ms: performance.now() - onlineStarted } } as ClearraWasmWorkerEvent) : event);
     try {
       this.jobId = this.wasm.start_job(commandText);
       this.active = true;
@@ -109,6 +111,7 @@ export class WasmJobRunner {
       }
       return terminal;
     } finally {
+      reader?.dispose();
       this.onlineAbort?.abort(); this.onlineAbort = null;
       if (profilingActive && this.wasm.profile_finish) {
         try {

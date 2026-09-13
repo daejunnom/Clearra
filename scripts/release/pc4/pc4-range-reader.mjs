@@ -1,0 +1,157 @@
+// SRP: bounded immutable HTTP byte transport. Graph meaning, candidate
+// completeness and rule-profile qualification belong to other owners.
+export class Pc4OnlineError extends Error {
+  constructor(code, detail = code) { super(detail); this.name = 'Pc4OnlineError'; this.code = code; }
+}
+
+const MAX_RANGE = 65_536;
+const MAX_CACHE_ENTRIES = 2_048;
+const MAX_WAITERS = 512;
+
+export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = fetch,
+  maxBytes = 64 * 1024 * 1024, maxRequests = 100_000, cacheBytes = 8 * 1024 * 1024,
+  windowBytes = 16_384, maxConcurrent = 4 } = {}) {
+  const revision = discovery.resolved_revision ?? discovery.revision;
+  const repository = discovery.repository;
+  if (!/^[0-9a-f]{40}$/.test(revision) || !/^[\w.-]+\/[\w.-]+$/.test(repository)) fail('pc4_online_identity_invalid');
+  for (const value of [maxBytes, maxRequests, cacheBytes, windowBytes, maxConcurrent]) {
+    if (!Number.isSafeInteger(value) || value < 0) fail('pc4_online_limits_invalid');
+  }
+  if (!maxConcurrent || maxConcurrent > 16 || windowBytes > MAX_RANGE ||
+      (windowBytes && (windowBytes < 512 || (windowBytes & (windowBytes - 1)) !== 0))) fail('pc4_online_limits_invalid');
+
+  const pageSize = cacheBytes >= windowBytes && maxBytes >= windowBytes ? windowBytes : 0;
+  const cache = new Map(), inFlight = new Map(), controllers = new Set(), queue = [];
+  let transferred = 0, requests = 0, retained = 0, reservedTotal = 0;
+  let active = 0, closed = false, reads = 0, cacheHits = 0, joined = 0;
+  const cancel = () => {
+    closed = true;
+    for (const controller of controllers) controller.abort();
+    for (const entry of queue.splice(0)) entry.reject(new Pc4OnlineError('pc4_online_cancelled'));
+    cache.clear(); retained = 0;
+  };
+  signal?.addEventListener('abort', cancel, { once: true });
+
+  function retain(key, bytes) {
+    if (closed || bytes.length > cacheBytes) return;
+    while (cache.size && (retained + bytes.length > cacheBytes || cache.size >= MAX_CACHE_ENTRIES)) {
+      const oldest = cache.keys().next().value;
+      retained -= cache.get(oldest).length; cache.delete(oldest);
+    }
+    cache.set(key, bytes); retained += bytes.length;
+  }
+
+  function pump() {
+    while (!closed && active < maxConcurrent && queue.length) {
+      const entry = queue.shift();
+      active++;
+      transport(entry.artifact, entry.offset, entry.length).then(entry.resolve, entry.reject).finally(() => {
+        active--; pump();
+      });
+    }
+  }
+
+  function span(artifact, offset, length) {
+    if (closed || signal?.aborted) return Promise.reject(new Pc4OnlineError('pc4_online_cancelled'));
+    const key = `${artifact.content_identity}:${artifact.path}:${artifact.byte_length}:${offset}:${length}`;
+    const cached = cache.get(key);
+    if (cached) {
+      cacheHits++; cache.delete(key); cache.set(key, cached);
+      return Promise.resolve(cached);
+    }
+    const pending = inFlight.get(key);
+    if (pending) { joined++; return pending; }
+    if (queue.length >= MAX_WAITERS) return Promise.reject(new Pc4OnlineError('pc4_online_request_queue_limit'));
+    const request = new Promise((resolve, reject) => {
+      queue.push({ artifact, offset, length, resolve, reject }); pump();
+    }).then(bytes => {
+      inFlight.delete(key); retain(key, bytes); return bytes;
+    }, error => { inFlight.delete(key); throw error; });
+    inFlight.set(key, request);
+    return request;
+  }
+
+  async function transport(artifact, offset, length) {
+    if (closed || signal?.aborted) fail('pc4_online_cancelled');
+    // Reserve before I/O, not after streaming: parallel requests cannot each
+    // spend the same remaining budget. Failed reservations are not refunded.
+    if (requests >= maxRequests || reservedTotal + length > maxBytes) fail('pc4_online_transfer_limit');
+    requests++; reservedTotal += length;
+    const controller = new AbortController(); controllers.add(controller);
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetcher(`https://huggingface.co/datasets/${repository}/resolve/${revision}/${artifact.path}`,
+        { headers: { Range: `bytes=${offset}-${offset + length - 1}` }, credentials: 'omit', signal: controller.signal });
+      const expected = `bytes ${offset}-${offset + length - 1}/${artifact.byte_length}`;
+      if (response.status !== 206 || response.headers.get('content-range') !== expected) {
+        await response.body?.cancel();
+        fail(response.status === 429 ? 'pc4_online_rate_limited' : response.status === 416 ? 'pc4_online_range_unsatisfiable' :
+          response.status === 200 ? 'pc4_online_whole_content_rejected' : 'pc4_online_range_response_invalid');
+      }
+      const stream = response.body?.getReader();
+      if (!stream) fail('pc4_online_empty_body');
+      const bytes = new Uint8Array(length);
+      let cursor = 0;
+      while (true) {
+        const { done, value } = await stream.read();
+        if (done) break;
+        transferred += value.length;
+        if (cursor + value.length > length || transferred > maxBytes) {
+          await stream.cancel(); fail('pc4_online_response_too_large');
+        }
+        bytes.set(value, cursor); cursor += value.length;
+      }
+      if (closed || signal?.aborted) fail('pc4_online_cancelled');
+      if (cursor !== length) fail('pc4_online_truncated_range');
+      onProgress?.({ transferredBytes: transferred, requests });
+      return bytes;
+    } catch (error) {
+      if (error instanceof Pc4OnlineError) throw error;
+      throw new Pc4OnlineError(closed || signal?.aborted ? 'pc4_online_cancelled' :
+        controller.signal.aborted ? 'pc4_online_timeout' : 'pc4_online_offline', String(error));
+    } finally { clearTimeout(timer); controllers.delete(controller); }
+  }
+
+  return {
+    get bytes() { return transferred; },
+    get requests() { return requests; },
+    get reads() { return reads; },
+    get cacheHits() { return cacheHits; },
+    get joinedRequests() { return joined; },
+    get retainedBytes() { return retained; },
+    dispose() { cancel(); signal?.removeEventListener('abort', cancel); },
+    async read(input, offset, length) {
+      if (closed || signal?.aborted) fail('pc4_online_cancelled');
+      if (!Number.isSafeInteger(input?.byte_length) || input.byte_length <= 0 ||
+          !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 ||
+          length > MAX_RANGE || offset > input.byte_length - length ||
+          !/^[A-Za-z0-9_.-]+\.bin$/.test(input.path) ||
+          !/^sha256:[0-9a-f]{64}$/.test(input.content_identity)) fail('pc4_online_range_invalid');
+      // A queued transport must not observe later mutation of its descriptor.
+      const artifact = { path: input.path, byte_length: input.byte_length, content_identity: input.content_identity };
+      reads++;
+      // No speculative/background scan: only windows intersecting this demand.
+      // Small files and byte-budget-constrained reads keep exact access, never
+      // expand a small request into a whole-artifact download.
+      if (!pageSize || artifact.byte_length <= pageSize) {
+        const bytes = await span(artifact, offset, length);
+        if (closed || signal?.aborted) fail('pc4_online_cancelled');
+        return bytes.slice();
+      }
+      const end = offset + length, parts = [];
+      for (let start = Math.floor(offset / pageSize) * pageSize; start < end; start += pageSize) {
+        const size = Math.min(pageSize, artifact.byte_length - start);
+        const begin = Math.max(offset, start), finish = Math.min(end, start + size);
+        parts.push(span(artifact, start, size).then(bytes => ({ bytes, start, begin, finish })));
+      }
+      const result = new Uint8Array(length);
+      for (const part of await Promise.all(parts)) {
+        result.set(part.bytes.subarray(part.begin - part.start, part.finish - part.start), part.begin - offset);
+      }
+      if (closed || signal?.aborted) fail('pc4_online_cancelled');
+      return result;
+    }
+  };
+}
+
+function fail(code) { throw new Pc4OnlineError(code); }

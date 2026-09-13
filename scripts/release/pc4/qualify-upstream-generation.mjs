@@ -2,6 +2,8 @@
 // upstream generation. Upstream completeness declarations and reader evidence
 // are distinct: bounded samples are never described as a whole-graph proof.
 import { discoverPc4UpstreamGeneration } from './discover-upstream-generation.mjs';
+import { createPc4RangeReader, Pc4OnlineError } from './pc4-range-reader.mjs';
+export { createPc4RangeReader, Pc4OnlineError } from './pc4-range-reader.mjs';
 
 export const PC4_READER_CONTRACT = 'hydra-jstris-180-complete-graph-v1';
 export const PC4_PROFILE_ARTIFACTS = Object.freeze([
@@ -12,16 +14,17 @@ export const PC4_PROFILE_ARTIFACTS = Object.freeze([
   { profile: 'no-kick', graph: 'graph_nokick.bin', suffix: '_nokick', width: 3 }
 ]);
 
-export class Pc4OnlineError extends Error {
-  constructor(code, detail = code) { super(detail); this.name = 'Pc4OnlineError'; this.code = code; }
-}
-
 // No disk persistence. A job pins the returned immutable revision; a subsequent
 // refresh can discover new upstream content without changing an active job.
 export async function qualifyPc4UpstreamGeneration({ signal, onProgress } = {}, dependencies = {}) {
   const discovery = await (dependencies.discover ?? discoverPc4UpstreamGeneration)({ signal });
   if (signal?.aborted) throw new Pc4OnlineError('pc4_online_cancelled');
   const reader = dependencies.reader ?? createPc4RangeReader(discovery, { signal, onProgress });
+  try { return await qualifyProfiles(discovery, reader, signal); }
+  finally { if (!dependencies.reader) reader.dispose(); }
+}
+
+async function qualifyProfiles(discovery, reader, signal) {
   const entries = new Map(discovery.candidates.map(entry => [entry.path, entry]));
   const profiles = [];
   for (const model of PC4_PROFILE_ARTIFACTS) {
@@ -74,71 +77,6 @@ export async function qualifyPc4UpstreamGeneration({ signal, onProgress } = {}, 
   }
   return Object.freeze({ schema: 'clearra.pc4.host-generation.v1', repository: discovery.repository,
     revision: discovery.resolved_revision, profiles, transferred_bytes: reader.bytes ?? 0 });
-}
-
-export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = fetch,
-  maxBytes = 64 * 1024 * 1024, maxRequests = 100_000, cacheBytes = 8 * 1024 * 1024 } = {}) {
-  const revision = discovery.resolved_revision ?? discovery.revision;
-  if (!/^[0-9a-f]{40}$/.test(revision) || !/^[\w.-]+\/[\w.-]+$/.test(discovery.repository)) fail('pc4_online_identity_invalid');
-  let transferred = 0, requests = 0, retained = 0;
-  const cache = new Map();
-  return {
-    get bytes() { return transferred; },
-    get requests() { return requests; },
-    async read(artifact, offset, length) {
-      if (signal?.aborted) fail('pc4_online_cancelled');
-      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 ||
-          length > 65_536 || offset + length > artifact.byte_length ||
-          !/^[A-Za-z0-9_.-]+\.bin$/.test(artifact.path)) fail('pc4_online_range_invalid');
-      const key = `${artifact.content_identity}:${artifact.path}:${offset}:${length}`;
-      const cached = cache.get(key);
-      if (cached) return cached.slice();
-      if (requests >= maxRequests || transferred + length > maxBytes) fail('pc4_online_transfer_limit');
-      requests++;
-      const controller = new AbortController();
-      const abort = () => controller.abort();
-      signal?.addEventListener('abort', abort, { once: true });
-      const timer = setTimeout(abort, 30_000);
-      try {
-        const url = `https://huggingface.co/datasets/${discovery.repository}/resolve/${revision}/${artifact.path}`;
-        const response = await fetcher(url, { headers: { Range: `bytes=${offset}-${offset + length - 1}` },
-          credentials: 'omit', signal: controller.signal });
-        const expected = `bytes ${offset}-${offset + length - 1}/${artifact.byte_length}`;
-        if (response.status !== 206 || response.headers.get('content-range') !== expected) {
-          await response.body?.cancel();
-          fail(response.status === 429 ? 'pc4_online_rate_limited' :
-            response.status === 200 ? 'pc4_online_whole_content_rejected' : 'pc4_online_range_response_invalid');
-        }
-        const stream = response.body?.getReader();
-        if (!stream) fail('pc4_online_empty_body');
-        const bytes = new Uint8Array(length);
-        let cursor = 0;
-        while (true) {
-          const { done, value } = await stream.read();
-          if (done) break;
-          transferred += value.length;
-          if (cursor + value.length > length || transferred > maxBytes) {
-            await stream.cancel(); fail('pc4_online_response_too_large');
-          }
-          bytes.set(value, cursor); cursor += value.length;
-        }
-        if (cursor !== length) fail('pc4_online_truncated_range');
-        while (retained + length > cacheBytes && cache.size) {
-          const oldest = cache.keys().next().value;
-          retained -= cache.get(oldest).length; cache.delete(oldest);
-        }
-        if (length <= cacheBytes) { cache.set(key, bytes); retained += length; }
-        onProgress?.({ transferredBytes: transferred, requests });
-        return bytes.slice();
-      } catch (error) {
-        if (error instanceof Pc4OnlineError) throw error;
-        throw new Pc4OnlineError(signal?.aborted ? 'pc4_online_cancelled' :
-          controller.signal.aborted ? 'pc4_online_timeout' : 'pc4_online_offline', String(error));
-      } finally {
-        clearTimeout(timer); signal?.removeEventListener('abort', abort);
-      }
-    }
-  };
 }
 
 function header(bytes, magic) {

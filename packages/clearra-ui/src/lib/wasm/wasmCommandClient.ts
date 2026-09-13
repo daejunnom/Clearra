@@ -1029,6 +1029,10 @@ type ClearraWasmWorkerEventBase = {
     revision: string;
     requests: number;
     transferred_bytes: number;
+    logical_reads?: number;
+    cache_hits?: number;
+    joined_requests?: number;
+    cache_bytes?: number;
     elapsed_ms: number;
   };
 };
