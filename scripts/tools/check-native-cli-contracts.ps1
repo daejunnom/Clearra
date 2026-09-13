@@ -33,7 +33,9 @@ try {
     $env:CARGO_PROFILE_TEST_DEBUG = '0'
     Push-Location $Root
     try {
-        & cargo test --locked --offline -p clearra-cli --features native-c-core,wasm-cpu-runtime `
+        # wasm-cpu-runtime selects a different App context even when C is
+        # linked. These process contracts deliberately verify the native route.
+        & cargo test --locked --offline -p clearra-cli --features native-c-core `
             --test process_e2e -j 2 -- --test-threads=2
         if ($LASTEXITCODE -ne 0) { throw "native CLI process contracts failed: $LASTEXITCODE" }
     } finally { Pop-Location }

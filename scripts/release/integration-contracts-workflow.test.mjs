@@ -40,6 +40,8 @@ test('native process checks preserve the local execution policy before archive b
   assert.ok(native.indexOf('Assert-ClearraTrustedExecutionSurface') < native.indexOf('$libraryDirectory = Resolve-ProductE2ENativeLibraryDir'));
   assert.match(native, /Sync-ClearraNativeCargoLinkState/u);
   assert.match(native, /--test process_e2e/u);
+  assert.match(native, /cargo test --locked --offline -p clearra-cli --features native-c-core\s*`/u);
+  assert.doesNotMatch(native, /--features [^\r\n]*wasm-cpu-runtime/u);
   assert.doesNotMatch(native, /Unblock-File|Set-AuthenticodeSignature|ExecutionPolicy|\bwsl\b/u);
   assert.ok(native.indexOf('Assert-ClearraTrustedExecutionSurface') < native.indexOf('& cargo fetch --locked'));
   assert.match(workflow, /"-FetchDependencies"/u);
