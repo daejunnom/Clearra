@@ -175,9 +175,12 @@ machine; the successful executable evidence above is from Windows CI.
 
 ## Remaining integration and performance gates
 
-Preparation and Core admission currently each audit all original queue pieces.
-Preparation is cooperatively paged; the second admission audit is synchronous
-with per-ordinal cancellation points. This is functional finite-family
+At the v2 integration checkpoint, preparation and Core admission each audited
+all original queue pieces. The subsequent v3 compact-source change is tracked
+separately in [compact pattern admission](pc4-compact-pattern-admission-2026-09-13.md):
+actual compact uniform storage uses structural binding, while explicit lists
+still use exhaustive binding. Its performance and exact-SHA validation are
+not inferred from the earlier green run. This is functional finite-family
 integration, not the planned structural graph x hold x bag x preview DP or a
 large-pattern speed claim. Public use still requires bounded admission and
 performance evidence, restricted-observation/hidden-bag semantics, applicable
