@@ -5,6 +5,7 @@ import test from 'node:test';
 const workflow = await readFile(new URL('../../.github/workflows/integration-contracts.yml', import.meta.url), 'utf8');
 const native = await readFile(new URL('../tools/check-native-cli-contracts.ps1', import.meta.url), 'utf8');
 const nativeCMake = await readFile(new URL('../../core-c/CMakeLists.txt', import.meta.url), 'utf8');
+const pc4Contracts = await readFile(new URL('../tools/check-pc4-app-contracts.mjs', import.meta.url), 'utf8');
 function isolated(source) {
   assert.match(source, /^name: Integration Contracts \(Non-publishing\)$/mu);
   assert.match(source, /^    branches: \["codex\/v0\.9\.0-stacked-on-v0\.8\.1-20260912"\]$/mu);
@@ -52,6 +53,11 @@ test('online PC4 discovery and real host transport contracts stay in non-publish
   assert.ok(surfaces.includes('apps/clearra-web/test/onlinePc4Host.test.mjs'));
   assert.ok(surfaces.includes('apps/clearra-web/test/pc4LocalStore.test.mjs'));
   assert.ok(surfaces.includes('apps/clearra-web/test/LocalSearchProfile.contract.ts'));
+});
+test('compact input union executes its exhaustive parity contracts in the managed test owner', () => {
+  assert.match(pc4Contracts, /'pc4-compact-union',[^\n]*'-p', 'clearra-supply', '--lib', 'compact_pattern_union_', '--', '--nocapture'/u);
+  assert.match(pc4Contracts, /!evidence\.hasExecutedTests\(\)/u);
+  assert.match(pc4Contracts, /assertManagedBuildTransaction\(\)/u);
 });
 for (const [name, mutation] of [
   ['main trigger', s => s.replace('branches: ["codex/v0.9.0-stacked-on-v0.8.1-20260912"]', 'branches: ["main"]')],

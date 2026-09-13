@@ -394,3 +394,83 @@ fn pc4_compiled_pattern_does_not_upgrade_visible_seven_to_full_future_oracle() {
         Err(Pc4CompiledPatternError::UnsupportedObservationPolicy)
     ));
 }
+
+#[test]
+fn pc4_compact_union_adapter_binds_the_original_p7p4_problem_without_reveal_expansion() {
+    let pattern_count = 4_233_600;
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0),
+        PcQueueInput::pattern_expression(
+            QueuePatternExpression::parse("P7P4", pattern_count).unwrap(),
+        ),
+        PieceWindow::new(10),
+    )
+    .with_exact_pieces(Some(10))
+    .with_allow_hold(true)
+    .with_execution_policy(
+        PcExecutionPolicy::mvp_default()
+            .with_workers(1)
+            .with_max_patterns(pattern_count),
+    );
+    let problem = Arc::new(ProblemCompiler::compile_scenario_pc(&query).unwrap());
+    let mut preparation = Pc4CompiledPatternPreparation::begin(
+        Arc::clone(&problem),
+        Pc4CompiledPatternLimits::new(nz(pattern_count), nz(11), nz(1)),
+    )
+    .unwrap();
+    assert!(preparation.advance(nz(1), &|| false).unwrap());
+    let source = preparation.finish().unwrap();
+    let source_identity = source.identity();
+    let union_limits = CompactPatternUnionLimits::new(nz(11), nz(4096), nz(65_536));
+    let (language, mut frontier) = source
+        .compact_union_language(union_limits, &|| false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(source.sequence_pieces(), 11);
+    assert_eq!(language.sequence_pieces(), source.sequence_pieces());
+    assert_eq!(language.source_pattern_count(), source.pattern_count());
+    assert_eq!(language.atom_count(), 2);
+    for piece in PieceKind::STANDARD_TETROMINOES
+        .into_iter()
+        .chain(PieceKind::STANDARD_TETROMINOES.into_iter().take(3))
+    {
+        frontier = language.advance(&frontier, piece, &|| false).unwrap();
+        assert!(!frontier.is_empty());
+    }
+    assert_eq!(frontier.placed_pieces(), 10);
+    assert_eq!(source.identity(), source_identity);
+    assert!(Arc::ptr_eq(&source.problem, &problem));
+    assert_eq!(
+        source.read_queue(0).unwrap().weight(),
+        universe(&problem).unwrap().weight_at(0)
+    );
+    assert!(matches!(
+        source.compact_union_language(union_limits, &|| true),
+        Err(Pc4CompiledPatternError::CompactUnion(
+            CompactPatternUnionError::Cancelled
+        ))
+    ));
+}
+
+#[test]
+fn pc4_compact_union_adapter_preserves_explicit_and_standard_bag_source_boundaries() {
+    let union_limits = CompactPatternUnionLimits::new(nz(11), nz(4096), nz(65_536));
+    let explicit = prepare(compile("[IO][TZ]", 2), 1);
+    assert!(explicit
+        .compact_union_language(union_limits, &|| false)
+        .unwrap()
+        .is_none());
+    let bag = prepare(compile_queue(PcQueueInput::standard_7_bag(), 7, 5040), 64);
+    let (language, mut frontier) = bag
+        .compact_union_language(union_limits, &|| false)
+        .unwrap()
+        .unwrap();
+    for piece in PieceKind::STANDARD_TETROMINOES {
+        frontier = language.advance(&frontier, piece, &|| false).unwrap();
+        assert!(!frontier.is_empty());
+    }
+    assert!(language
+        .advance(&frontier, PieceKind::I, &|| false)
+        .unwrap()
+        .is_empty());
+}

@@ -12,7 +12,10 @@ use clearra_pc4_tablebase::{
 };
 use clearra_pc_graph::request::PcQueueInput;
 use clearra_problem::{SearchProblem, SearchProblemKind};
-use clearra_supply::pattern_universe::MaterializedPatternUniverse;
+use clearra_supply::pattern_universe::{
+    CompactPatternUnionError, CompactPatternUnionFrontier, CompactPatternUnionLanguage,
+    CompactPatternUnionLimits, MaterializedPatternUniverse,
+};
 use sha2::{Digest, Sha256};
 
 #[path = "pc4_compact_pattern_identity.rs"]
@@ -47,6 +50,7 @@ impl Pc4CompiledPatternLimits {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Pc4CompiledPatternError {
+    CompactUnion(CompactPatternUnionError),
     TargetMismatch,
     RuleMismatch(crate::Pc4SearchProblemCompatibilityError),
     UnsupportedObservationPolicy,
@@ -71,6 +75,7 @@ pub enum Pc4CompiledPatternError {
 impl Pc4CompiledPatternError {
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::CompactUnion(error) => error.reason(),
             Self::TargetMismatch => "pc4_compiled_pattern_target_mismatch",
             Self::RuleMismatch(error) => error.reason(),
             Self::UnsupportedObservationPolicy => {
@@ -163,6 +168,27 @@ impl Pc4CompiledPatternSource {
     }
     pub fn problem(&self) -> &SearchProblem {
         &self.problem
+    }
+
+    /// Optional input-only adapter for a graph x supply-state traversal. This
+    /// does not replace the complete observation family or mint reducer input;
+    /// coverage, replay and graph/materializer completeness remain separate.
+    /// The original immutable source still owns ordinal weights/identity.
+    pub fn compact_union_language<G: Fn() -> bool>(
+        &self,
+        limits: CompactPatternUnionLimits,
+        cancelled: &G,
+    ) -> Result<
+        Option<(CompactPatternUnionLanguage, CompactPatternUnionFrontier)>,
+        Pc4CompiledPatternError,
+    > {
+        CompactPatternUnionLanguage::prepare(
+            universe(&self.problem)?,
+            self.problem.initial_hold(),
+            limits,
+            cancelled,
+        )
+        .map_err(Pc4CompiledPatternError::CompactUnion)
     }
 
     pub fn read_queue(

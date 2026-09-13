@@ -1,4 +1,5 @@
 pub mod bag_multiset_reachability;
+mod compact_pattern_union;
 mod flat_pattern_sequences;
 mod hold_multiset_reachability;
 pub mod materialized_pattern_universe;
@@ -12,6 +13,10 @@ mod standard_7_bag_sequence_space;
 pub use bag_multiset_reachability::{
     reachable_bag_multisets, BagHoldBranchKind, BagMultisetProjectionError, BagPlacementAutomaton,
     BagPlacementState, BagSupplyBranch,
+};
+pub use compact_pattern_union::{
+    CompactPatternUnionError, CompactPatternUnionFrontier, CompactPatternUnionLanguage,
+    CompactPatternUnionLimits,
 };
 pub use materialized_pattern_universe::{
     MaterializedPatternUniverse, MaterializedPatternUniverseError,

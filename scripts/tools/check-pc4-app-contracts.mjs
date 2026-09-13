@@ -26,6 +26,7 @@ if (process.argv.includes('--row-normalization')) {
     ['pc4-compact-storage', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'compact_source_uses_real_storage']],
     ['pc4-compact-shape', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'factorized_shape_preserves_actual_order']],
     ['pc4-compact-large', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'p7_p7_p2_factorized_universe_retains_compact_expression_storage']],
+    ['pc4-compact-union', ['test', '--locked', '--offline', '--quiet', '-j', '2', '-p', 'clearra-supply', '--lib', 'compact_pattern_union_', '--', '--nocapture']],
     ['pc4-compact-input-ab', [...common, 'pc4_compact_input_admission_ab', '--', '--ignored', '--nocapture']],
     ['pc4-replay-app', [...common, 'pc_replay_']],
   );

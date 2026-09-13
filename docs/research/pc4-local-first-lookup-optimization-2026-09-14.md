@@ -411,6 +411,90 @@ search code changed, so this follow-up does not request another WASM build.
 4194 still uses its previously published a22 WASM; it was not restarted or
 replaced here. No production action or new benchmark port was started.
 
+The follow-up `acb27cb29aac94ace6a2f8ffb203d2421598c9f5` has now completed
+non-publishing run [34774245129](https://github.com/daejunnom/Clearra/actions/runs/34774245129):
+source, surface-contracts, pc4-contracts and native-cli all succeeded. The
+unrequested preview-WASM build was skipped. In particular, the TS contract
+blocked by the local build-purpose lease was exercised by the surface job.
+This success applies to the local-handle/HTTP-gap changes, not later edits.
+
+## Structural union input for the large-search successor
+
+Source inspection after the local transport changes found a separate scale
+cost. `Pc4ObservationCandidateSession` traverses each reveal/hold execution and
+retains per-reveal ledgers, memberships and replay provenance. Its completed
+family's `reducer_input()` passes only the canonical candidate union to
+`PcCandidateReducerInput`. `pc_candidate_execution_bridge.rs` then asks Core
+to perform authoritative BuildUp/coverage/scoring/replay for the original
+problem. This does not make the observation-family contract wrong, but it
+makes that richer producer a poor prerequisite for the union-only product
+handoff on P7P4. The 4,233,600 reveal ordinals are not 4,233,600 distinct
+placement languages. Counting their histories as independent graph work
+also reduces the benefit of a local copy or coalesced HTTP transfers.
+
+The next input owner is `clearra-supply::pattern_universe::CompactPatternUnionLanguage`.
+It reads only the actual uniform compact storage view; it does not reparse
+pattern text, inspect a few queue samples, trust numeric IDs, or reconstruct
+every pattern as an unrestricted seven-bag. Standard bags and ordered
+without-replacement atoms share a finite draw representation. Each atom keeps
+its real choices and draw count; P4P4 therefore resets after four draws while
+P7P4 does not. The visible horizon is enforced even when the compact source
+retains hidden suffix multiplicity. Fresh-source/hold/observation constraints
+and checked cardinality are validated before preparing any frontier.
+
+For one ordered placement prefix the frontier is the sorted, deduplicated set
+of `(draw position, current atom remainder, held piece)` states. A graph-piece
+label advances that set once. Hold behavior calls the existing
+`SupplyExecutionAutomaton::sequence().transition`; it is not a second hold
+algorithm. Exhausted queues cannot release an extra held piece. An immutable
+owner token scopes equality/memo keys and rejects foreign frontiers even if
+their descriptive IDs match. Bounded transition/state limits and cancellation
+return errors without committing a partial next frontier; limits never mean
+"no solution" or permission to truncate the language.
+
+The correctness argument is an induction on the placement prefix:
+
+1. The atom reader recognizes exactly the prefixes of the compiled visible
+   queue family. Every accepted prefix has a full extension because atom
+   choices are distinct and draw counts are validated. Hidden multiplicity
+   does not change existential membership.
+2. Each Current/Swap/Store transition consumes exactly the same one/two queue
+   pieces as the existing supply transition. The finite visible boundary is
+   tested before a transition, including a Store across atom boundaries.
+3. Two histories with the same draw/hold state at the same placement depth have
+   identical legal futures. Their **existential** union can merge, but their
+   probability mass and replay provenance cannot be inferred from that merge.
+4. This permits a graph x supply-state successor to avoid reveal expansion.
+   It does **not** permit merging distinct geometry/row-lift histories or
+   minting a complete candidate certificate before exhaustive materialization.
+
+`Pc4CompiledPatternSource::compact_union_language` binds this optional input
+adapter to the same immutable `Arc<SearchProblem>` and initial hold. Explicit
+or observed storage remains unsupported by this adapter; it is not silently
+relabelled or sent through an unrestricted bag. Original ordinal weights,
+source identity, qualified profile/generation and the existing complete
+observation-family/reducer boundary remain unchanged.
+
+Added contracts compare all accepted short placement strings with an
+independent explicit queue/hold recurrence for forbidden, allowed and required
+hold, empty/occupied initial hold, projected hidden suffixes and non-bag atom
+boundaries. Other contracts cover owner isolation, atomic cancellation,
+state/work limits, inconsistent cardinality and P7P4 preparation without
+Cartesian unranking. App contracts exercise the actual empty-board ten-piece
+P7P4 compiled problem and preserve the explicit/standard-bag input boundary.
+These Rust contracts are queued for the managed non-publishing CI; local
+native execution policy is not bypassed.
+
+**This is an input adapter, not an activated graph traversal.** The current
+online host still uses the existing producer. Remaining implementation must
+compose qualified graph edges with these frontiers, preserve concrete path
+materialization, seal the exact canonical union with its own typed proof,
+then pass that union to Core. Only after set/hold/row-lift parity may the
+product dispatcher select it. No full-search timing, reduced HTTP count or
+456,459-candidate equality is claimed for this adapter alone. The earlier
+range A/B is not repeated, 4194 is unchanged, and no production publication is
+requested.
+
 ## Remaining evidence
 
 Still required: complete 456,459-family validation/timing, input/hold-family
