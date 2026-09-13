@@ -335,9 +335,19 @@ fn cancellation_and_every_guard_rejection_never_publish_a_count() {
 
 #[test]
 fn canonical_step_labels_keep_decimal_lexical_order() {
-    let a = Label::new(10, edge(1, 0, 0), HoldDecision::None, 3).unwrap();
-    let b = Label::new(2, edge(1, 0, 0), HoldDecision::None, 3).unwrap();
+    let label = |cursor| {
+        Label::new(
+            edge(1, 0, 0),
+            PieceDecision::from_selected_hold(PieceKind::O, cursor, None, HoldDecision::None)
+                .unwrap(),
+            3,
+        )
+        .unwrap()
+    };
+    let a = label(10);
+    let b = label(2);
     assert!(a < b, "text i10 precedes text i2, not numeric tuple order");
+    assert!(label(usize::MAX - 1).len <= 192);
     assert!(replay_projection(usize::MAX, usize::MAX).is_err());
 }
 

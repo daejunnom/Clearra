@@ -267,3 +267,12 @@ and invalid transitions/overflow. The non-publishing PC4 job now also runs
 Replay library and Postprocess score-batch tests. These changes still require
 their own exact-source CI evidence before marking the hold product parity
 complete.
+
+The first supply-bound source `8bd310c` passed Core **7 + 5**, Tablebase
+**163** and Replay **20** in run
+[34743824489](https://github.com/daejunnom/Clearra/actions/runs/34743824489).
+The newly included Postprocess test target then exposed two lexical-order
+fixture calls still using the old synthetic-label signature (E0061). Those
+fixtures now supply actual `PieceDecision` values; lexical ordering and the
+maximum cursor label size remain asserted. App hold parity did not execute
+on that failed source.
