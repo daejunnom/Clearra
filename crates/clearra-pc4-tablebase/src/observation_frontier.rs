@@ -976,7 +976,7 @@ mod tests {
             assert_eq!(family.total_reveal_sequences(), 1);
             let expected = expand_fixed_queue_hold(
                 FixedQueueHoldExpansionRequest::new(&queue, hold, placements, budgets().hold()),
-                &|| false,
+                &GuardAdapter(&|| false),
             )
             .expect("independent hold expansion");
             let one = drain(&family, 1);

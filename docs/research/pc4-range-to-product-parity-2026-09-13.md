@@ -183,3 +183,11 @@ draw substitution rejection. A separate adapter fixture covers all five
 typed profiles, seven finite-queue cases and page sizes 1/8, retaining one
 reveal outcome and the original request identity. These tests require their
 own exact-source CI result; the successful runs above are not substituted.
+
+The first no-draw run, [34741935450](https://github.com/daejunnom/Clearra/actions/runs/34741935450)
+on `f3731a9`, passed both Core groups and the source/surface jobs, but the
+Tablebase test target stopped with E0277. The independent hold-comparison
+fixture passed a raw closure where `FixedQueueHoldExpansionGuard` requires
+the existing frontier guard adapter. That test call is corrected without
+changing the hold algorithm or cancellation contract. The new App cases did
+not execute on the failed source.
