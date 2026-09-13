@@ -105,13 +105,28 @@ fn tablebase_download_uncached_distant_frontier_adds_no_speculative_http_request
 
 #[test]
 fn tablebase_download_minimum_record_size_frontier_bound_preserves_connected_seams() {
-    for (ids, expected) in [(vec![10, 96], 2), (vec![10, 97], 0), (vec![10, 96, 182], 2)] {
+    for (ids, expected) in [
+        (vec![10, 352], 2),
+        (vec![10, 353], 0),
+        (vec![10, 352, 694], 2),
+    ] {
         let (mut reader, calls) = fixture(4096, false);
         prefetch(&mut reader, 4096, 4096 * 12, 56, 8, &ids).unwrap();
         assert_eq!(calls.borrow().len(), expected);
         if expected > 0 {
             let log = calls.borrow();
             assert_eq!(log[1].1 + log[1].2, u64::from(ids.last().unwrap() + 1) * 12);
+            drop(log);
+            for id in ids {
+                let start = u64::from(id) * 12;
+                assert_eq!(
+                    reader.read(2, start, 12).unwrap(),
+                    (start..start + 12)
+                        .map(|n| (n % 251) as u8)
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(calls.borrow().len(), 2);
         }
     }
 }

@@ -5,6 +5,10 @@ use super::{
     Artifact, Result,
 };
 
+// Same measured policy as the Web transport; this is not a graph/search bound.
+const MAX_FRONTIER_GAP_BYTES: u64 = 4096;
+const MAX_CONNECTED_ID_GAP: u32 = (MAX_FRONTIER_GAP_BYTES / 12 + 1) as u32;
+
 #[cfg(test)]
 #[path = "tablebase_http_frontier_tests.rs"]
 mod tests;
@@ -35,12 +39,12 @@ pub(super) fn prefetch<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>>(
         return Err("pc4_online_frontier_invalid");
     }
     let current = current as u32;
-    // Minimum qualified record size is 12 bytes. An ID gap above 86 cannot
-    // bridge a 1,024-byte transfer gap. Skip unrelated optional hints before
+    // Minimum qualified record size is 12 bytes. An ID gap above 342 cannot
+    // bridge a 4,096-byte transfer gap. Skip unrelated optional hints before
     // copying cached bytes; the required graph lookup remains unchanged.
     if !frontier
         .iter()
-        .any(|&id| id != current && id.abs_diff(current) <= 86)
+        .any(|&id| id != current && id.abs_diff(current) <= MAX_CONNECTED_ID_GAP)
     {
         return Ok(());
     }
@@ -49,10 +53,10 @@ pub(super) fn prefetch<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>>(
     ids.dedup();
     let at = ids.binary_search(&current).unwrap();
     let (mut lo, mut hi) = (at, at + 1);
-    while lo > 0 && ids[lo] - ids[lo - 1] <= 86 {
+    while lo > 0 && ids[lo] - ids[lo - 1] <= MAX_CONNECTED_ID_GAP {
         lo -= 1;
     }
-    while hi < ids.len() && ids[hi] - ids[hi - 1] <= 86 {
+    while hi < ids.len() && ids[hi] - ids[hi - 1] <= MAX_CONNECTED_ID_GAP {
         hi += 1;
     }
     let ids: Vec<_> = std::iter::once(current)
@@ -100,7 +104,7 @@ pub(super) fn prefetch<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>>(
         let mut stop = begin + 1;
         while let Some(&(offset, length)) = records.get(stop) {
             let merged_end = end.max(offset + length);
-            if offset > end + 1_024 || merged_end - start > 65_536 {
+            if offset > end + MAX_FRONTIER_GAP_BYTES || merged_end - start > 65_536 {
                 break;
             }
             end = merged_end;
@@ -111,7 +115,7 @@ pub(super) fn prefetch<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>>(
             // Never add a graph HTTP call just for a distant sibling. Only
             // enlarge the required transfer if it covers another known record.
             if group.len() > 1 {
-                reader.read_many(2, group)?;
+                reader.read_many(2, group, MAX_FRONTIER_GAP_BYTES)?;
             }
             break;
         }

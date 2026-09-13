@@ -126,9 +126,33 @@ test('the 12-byte record lower bound keeps the 86-ID seam and its connected chai
   for (const [ids, calls] of [[[10, 96], 2], [[10, 97], 0], [[10, 96, 182], 2]]) {
     const f = fixture({ count: 4096 });
     try {
-      await prefetchPc4LookupFrontier(f.reader, f.generation, { ...f.range, lookup_frontier: ids });
+      await prefetchPc4LookupFrontier(f.reader, f.generation, { ...f.range, lookup_frontier: ids }, { maxGapBytes: 1024 });
       assert.equal(f.calls.length, calls, JSON.stringify(ids));
       if (calls) assert.equal(f.calls[1].end, (ids.at(-1) + 1) * 12);
     } finally { f.reader.dispose(); }
   }
+});
+
+test('the larger measured gap keeps the 342-ID seam, bounded chains and exact bytes', async () => {
+  for (const [ids, calls] of [[[10, 352], 2], [[10, 353], 0], [[10, 352, 694], 2]]) {
+    const f = fixture({ count: 4096 });
+    try {
+      await prefetchPc4LookupFrontier(f.reader, f.generation, { ...f.range, lookup_frontier: ids });
+      assert.equal(f.calls.length, calls, JSON.stringify(ids));
+      if (calls) {
+        assert.equal(f.calls[1].end, (ids.at(-1) + 1) * 12);
+        for (const id of ids) {
+          assert.deepEqual(await f.reader.read(f.generation.profiles[0].artifacts.graph, id * 12, 12), f.graphBytes.slice(id * 12, id * 12 + 12));
+        }
+        assert.equal(f.calls.length, 2, 'known siblings use one contiguous graph transfer');
+      }
+    } finally { f.reader.dispose(); }
+  }
+  const f = fixture();
+  try {
+    for (const maxGapBytes of [-1, 4097, 0.5, Infinity]) {
+      await assert.rejects(prefetchPc4LookupFrontier(f.reader, f.generation, f.range, { maxGapBytes }), { code: 'pc4_online_batch_invalid' });
+    }
+    assert.equal(f.calls.length, 0);
+  } finally { f.reader.dispose(); }
 });

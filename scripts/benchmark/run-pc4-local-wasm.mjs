@@ -9,7 +9,7 @@ import { checkedDatasetRoot, openBenchmarkDataset } from './pc4-local-dataset.mj
 import { createPc4TraceComparison } from './pc4-trace-comparison.mjs';
 import { createPc4RangeReader } from '../release/pc4/pc4-range-reader.mjs';
 import { pc4SearchRangePolicy } from '../release/pc4/pc4-search-range-policy.mjs';
-import { prefetchPc4LookupFrontier } from '../release/pc4/pc4-frontier-reader.mjs';
+import { PC4_FRONTIER_MAX_GAP_BYTES, prefetchPc4LookupFrontier } from '../release/pc4/pc4-frontier-reader.mjs';
 
 const { values } = parseArgs({ options: {
   directory: { type: 'string' }, profile: { type: 'string' }, 'wasm-directory': { type: 'string' },
@@ -17,9 +17,12 @@ const { values } = parseArgs({ options: {
   'read-limit': { type: 'string', default: '100000' }, cached: { type: 'boolean' },
   'page-bytes': { type: 'string', default: '4096' }, trace: { type: 'boolean' }, 'compare-trace': { type: 'boolean' },
   transport: { type: 'string', default: 'local' }, frontier: { type: 'boolean' },
+  'frontier-gap-bytes': { type: 'string', default: String(PC4_FRONTIER_MAX_GAP_BYTES) },
   'wasm-stdin': { type: 'boolean' }, 'expected-source': { type: 'string' }
 } });
 const seconds = Number(values.seconds), readLimit = Number(values['read-limit']);
+const frontierGapBytes = Number(values['frontier-gap-bytes']);
+if (!Number.isSafeInteger(frontierGapBytes) || frontierGapBytes < 0 || frontierGapBytes > 4096) throw new Error('Invalid bounded frontier gap');
 if (!values.command || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > 600 ||
     !Number.isSafeInteger(readLimit) || readLimit < 1 || readLimit > 1000000) throw new Error('Explicit bounded probe arguments required');
 if (!['local', 'http-model'].includes(values.transport) || values.transport === 'http-model' && values.cached ||
@@ -140,7 +143,7 @@ try {
             frontiers++; hintedIds += range.lookup_frontier.length;
             maximumFrontier = Math.max(maximumFrontier, range.lookup_frontier.length);
           }
-          await prefetchPc4LookupFrontier(reader, dataset.generation, range);
+          await prefetchPc4LookupFrontier(reader, dataset.generation, range, { maxGapBytes: frontierGapBytes });
         }
         const bytes = await reader.read(range.artifact, range.offset, range.length); ioMs += performance.now() - at;
         reads++; artifactCounts[range.artifact.path] = (artifactCounts[range.artifact.path] ?? 0) + 1;
@@ -168,6 +171,7 @@ try {
     if (terminal || ![0, 4].includes(status)) break;
   }
   const report = { event: 'result', transport: values.transport, frontier: !!values.frontier,
+    frontier_gap_bytes: values.frontier ? frontierGapBytes : 0,
     evidence: values.transport === 'http-model' ? 'real-wasm-frontier-local-responses-not-internet-timing' : 'real-wasm-local-files',
     cached: !!values.cached, page_bytes: values.cached ? Number(values['page-bytes']) : 0, source_commit: manifest.build?.runtime_identity?.source_commit,
     wasm_sha256: manifest.wasm.sha256, dataset_revision: dataset.plan.revision, module_prepare_ms: preparationMs,

@@ -142,8 +142,13 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
     /// Only explicit, already known byte intervals may be merged. Cached
     /// demands are removed before planning so overlapping frontiers do not
     /// repeatedly transfer their already retained records.
-    pub fn read_many(&mut self, role: usize, demands: &[(u64, u64)]) -> Result<Vec<Vec<u8>>> {
-        if demands.len() > 512 {
+    pub fn read_many(
+        &mut self,
+        role: usize,
+        demands: &[(u64, u64)],
+        max_gap: u64,
+    ) -> Result<Vec<Vec<u8>>> {
+        if demands.len() > 512 || max_gap > 4096 {
             return Err("pc4_online_batch_invalid");
         }
         for &(offset, length) in demands {
@@ -166,7 +171,7 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
             let mut stop = cursor + 1;
             while let Some(&(offset, length, _)) = missing.get(stop) {
                 let merged_end = end.max(offset + length);
-                if offset > end + 1_024 || merged_end - start > 65_536 {
+                if offset > end.saturating_add(max_gap) || merged_end - start > 65_536 {
                     break;
                 }
                 end = merged_end;

@@ -45,6 +45,9 @@ export function localSearchProfileText(event: unknown): string | null {
       provider: online.provider,
       ...numbers(online, ['requests', 'transferred_bytes', 'local_bytes', 'local_file_reads', 'logical_reads', 'cache_hits',
         'joined_requests', 'cache_bytes', 'elapsed_ms']),
+      ...(online.provider === 'local-graph' && typeof online.local_file_access === 'string' && ['sync-access-handle', 'blob-slice',
+        'sync-access-handle+blob-slice', 'blob-slice+sync-access-handle'].includes(online.local_file_access)
+        ? { local_file_access: online.local_file_access } : {}),
       ...(typeof online.revision === 'string' && /^[a-f0-9]{40}$/.test(online.revision)
         ? { revision: online.revision } : {})
     };

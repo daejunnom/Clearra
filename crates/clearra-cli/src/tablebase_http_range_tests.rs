@@ -95,9 +95,9 @@ fn tablebase_download_explicit_batch_validates_before_io_and_excludes_cached_sub
         log.borrow_mut().push((o, n));
         Ok(reply(a, o, n))
     });
-    reader.read_many(2, &[(100, 12)]).unwrap();
+    reader.read_many(2, &[(100, 12)], 1024).unwrap();
     let demands = [(108, 4), (120, 12), (100, 12)];
-    let bytes = reader.read_many(2, &demands).unwrap();
+    let bytes = reader.read_many(2, &demands, 1024).unwrap();
     for ((offset, length), value) in demands.into_iter().zip(bytes) {
         assert_eq!(
             value,
@@ -107,10 +107,15 @@ fn tablebase_download_explicit_batch_validates_before_io_and_excludes_cached_sub
         );
     }
     assert_eq!(*calls.borrow(), [(100, 12), (120, 12)]);
-    assert!(reader.read_many(2, &[(200, 12), (u64::MAX, 12)]).is_err());
-    assert!(reader.read_many(2, &[(200, 12); 513]).is_err());
+    assert!(reader
+        .read_many(2, &[(200, 12), (u64::MAX, 12)], 1024)
+        .is_err());
+    assert!(reader.read_many(2, &[(200, 12); 513], 1024).is_err());
+    assert!(reader.read_many(2, &[(200, 12)], 4097).is_err());
     assert_eq!(calls.borrow().len(), 2);
-    reader.read_many(2, &[(0, 65_536), (65_536, 12)]).unwrap();
+    reader
+        .read_many(2, &[(0, 65_536), (65_536, 12)], 1024)
+        .unwrap();
     assert_eq!(&calls.borrow()[2..], [(0, 65_536), (65_536, 12)]);
 }
 
@@ -119,7 +124,7 @@ fn tablebase_download_consumed_graph_prefetches_release_index_cache_capacity() {
     let mut reader = OnlineRangeReader::new(files(), |a, o, n| Ok(reply(a, o, n)));
     reader.read(1, 0, 8).unwrap();
     let demands: Vec<_> = (0..32).map(|i| (i * 4096, 12)).collect();
-    reader.read_many(2, &demands).unwrap();
+    reader.read_many(2, &demands, 1024).unwrap();
     for &(offset, length) in &demands {
         reader.read(2, offset, length).unwrap();
     }

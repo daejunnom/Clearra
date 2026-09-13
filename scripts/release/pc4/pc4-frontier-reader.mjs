@@ -3,7 +3,12 @@
 import { PC4_READER_CONTRACT, Pc4OnlineError } from './qualify-upstream-generation.mjs';
 import { checkedPc4Read, planPc4ReadBatch } from './pc4-range-plan.mjs';
 
-export async function prefetchPc4LookupFrontier(reader, generation, range) {
+// Real 100k-demand P7P4 A/B: 4 KiB saved 777 further HTTP requests vs 1 KiB
+// for 1.63 MB extra transfer. Still only enlarge a currently required span.
+export const PC4_FRONTIER_MAX_GAP_BYTES = 4096;
+
+export async function prefetchPc4LookupFrontier(reader, generation, range, { maxGapBytes = PC4_FRONTIER_MAX_GAP_BYTES } = {}) {
+  if (!Number.isSafeInteger(maxGapBytes) || maxGapBytes < 0 || maxGapBytes > 4096) throw new Pc4OnlineError('pc4_online_batch_invalid');
   const ids = range.lookup_frontier;
   if (ids === undefined || Array.isArray(ids) && ids.length < 2) return;
   const fail = code => { throw new Pc4OnlineError(code); };
@@ -24,16 +29,17 @@ export async function prefetchPc4LookupFrontier(reader, generation, range) {
       range.offset < 16 || (range.offset - 16) % 4 || range.length !== 8) return;
   const current = (range.offset - 16) / 4;
   if (!ids.includes(current) || ids.some(id => !Number.isSafeInteger(id) || id < 0 || id >= count)) fail('pc4_online_frontier_invalid');
-  // A qualified graph record has at least 5 bitmap + 7 degree bytes. With a
-  // 1,024-byte merge gap, an ID gap above 86 cannot connect two known records.
+  // A qualified graph record has at least 5 bitmap + 7 degree bytes. An ID gap
+  // over floor(maxGapBytes / 12) + 1 cannot connect two known records.
   // Most DFS frontiers are far apart: reject those optional hints arithmetically
   // before copying cached bytes or planning transfers. Required lookup is
   // untouched, so this filter grants no graph validity/completeness authority.
-  if (!ids.some(id => id !== current && Math.abs(id - current) <= 86)) return;
+  const idGap = Math.floor(maxGapBytes / 12) + 1;
+  if (!ids.some(id => id !== current && Math.abs(id - current) <= idGap)) return;
   const sorted = [...new Set(ids)].sort((x, y) => x - y), at = sorted.indexOf(current);
   let lo = at, hi = at + 1;
-  while (lo > 0 && sorted[lo] - sorted[lo - 1] <= 86) lo--;
-  while (hi < sorted.length && sorted[hi] - sorted[hi - 1] <= 86) hi++;
+  while (lo > 0 && sorted[lo] - sorted[lo - 1] <= idGap) lo--;
+  while (hi < sorted.length && sorted[hi] - sorted[hi - 1] <= idGap) hi++;
   // Pay only for the index range the real machine needs NOW. Other queued
   // IDs may participate only when their offset bytes are already cached.
   // Fetching every sibling's index early increased real P7P4 request counts.
@@ -57,8 +63,8 @@ export async function prefetchPc4LookupFrontier(reader, generation, range) {
   // Only enlarge the transfer that is required now, and only if it covers at
   // least two distinct missing records. Distant siblings cause zero extra
   // index or graph HTTP calls; cached bytes remain transport-only evidence.
-  const currentSpan = planPc4ReadBatch(demands).find(span => span.demands.some(d => d.index === 0));
+  const currentSpan = planPc4ReadBatch(demands, { maxGapBytes }).find(span => span.demands.some(d => d.index === 0));
   if (currentSpan && new Set(currentSpan.demands.map(d => `${d.offset}:${d.length}`)).size > 1) {
-    await reader.readMany(currentSpan.demands.map(d => demands[d.index]));
+    await reader.readMany(currentSpan.demands.map(d => demands[d.index]), { maxGapBytes });
   }
 }

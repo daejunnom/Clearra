@@ -2,6 +2,7 @@
 // traversal or fallback. One active generation + one unpublished transaction.
 import { pc4DownloadPlan } from '../../../../scripts/release/pc4/pc4-download.mjs';
 import { createPc4LocalReader } from '../../../../scripts/release/pc4/pc4-local-reader.mjs';
+import { openPc4LocalFileSource } from './pc4LocalFileSource';
 import type { Pc4Artifact, Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 
 const ROOT = 'clearra-pc4-v1';
@@ -136,36 +137,51 @@ export async function openLocalPc4Reader(generation: Pc4HostGeneration, signal?:
   if (!pc4LocalStorageSupported()) return null;
   const release = await lease('shared');
   let transferred = false;
+  const sources = new Map<string, Awaited<ReturnType<typeof openPc4LocalFileSource>>>();
+  const closeSources = async () => {
+    const closed = await Promise.allSettled([...sources.values()].map(source => source.close()));
+    const failure = closed.find(result => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
+  };
   try {
     const directory = await root(), active = await activeFrom(directory);
     if (!active || active.generation.revision !== generation.revision || active.generation.repository !== generation.repository) return null;
     const plan = pc4DownloadPlan(active.generation, PROFILE);
-    const files = await directory.getDirectoryHandle(active.directory);
-    const blobs = new Map<string, { artifact: Pc4Artifact; file: File }>();
-    for (const artifact of plan.files) {
-      const file = await (await files.getFileHandle(artifact.path)).getFile();
-      if (file.size !== artifact.byte_length) fail('pc4_download_local_size_mismatch');
-      blobs.set(artifact.path, { artifact, file });
+    const expected = pc4DownloadPlan(generation, PROFILE);
+    if (plan.files.some((file, i) => file.path !== expected.files[i].path ||
+        file.byte_length !== expected.files[i].byte_length || file.content_identity !== expected.files[i].content_identity)) {
+      fail('pc4_download_local_manifest_invalid');
     }
-    const reader = createPc4LocalReader(plan.files, async (artifact, offset, length) => {
-      const found = blobs.get(artifact.path)!;
-      return new Uint8Array(await found.file.slice(offset, offset + length).arrayBuffer());
-    }, { signal, directPaths: [plan.files[2].path] });
+    const files = await directory.getDirectoryHandle(active.directory);
+    for (const artifact of plan.files) {
+      const handle = await files.getFileHandle(artifact.path);
+      sources.set(artifact.path, await openPc4LocalFileSource(handle, artifact.byte_length, signal));
+    }
+    const reader = createPc4LocalReader(plan.files, (artifact, offset, length) =>
+      sources.get(artifact.path)!.read(offset, length), { signal, directPaths: [plan.files[2].path] });
     // Resolve only after Web Locks has released ownership, not merely after
     // signalling its callback. A following update/delete must not see our own
     // already-finished read as a busy search.
-    const dispose = async () => { reader.dispose(); signal?.removeEventListener('abort', onAbort); await release(); };
-    const onAbort = () => { void dispose(); };
+    let disposing: Promise<void> | undefined;
+    const dispose = () => {
+      if (!disposing) {
+        reader.dispose(); signal?.removeEventListener('abort', onAbort);
+        disposing = (async () => { try { await closeSources(); } finally { await release(); } })();
+      }
+      return disposing;
+    };
+    const onAbort = () => { void dispose().catch(() => {}); };
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) { await dispose(); fail('pc4_online_cancelled'); }
     transferred = true;
     return {
       provider: reader.provider, requests: 0, bytes: 0,
+      fileAccess: [...new Set([...sources.values()].map(source => source.backend))].join('+'),
       get reads() { return reader.reads; }, get localBytes() { return reader.localBytes; },
       get fileReads() { return reader.fileReads; }, get cacheHits() { return reader.cacheHits; },
       get joinedRequests() { return reader.joinedRequests; }, get retainedBytes() { return reader.retainedBytes; },
       read: reader.read, readMany: reader.readMany, dispose
     };
   } catch (error) { if (missing(error)) return null; throw error; }
-  finally { if (!transferred) await release(); }
+  finally { if (!transferred) { try { await closeSources(); } finally { await release(); } } }
 }

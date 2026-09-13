@@ -333,6 +333,84 @@ command was denied; no workaround deletion or additional extracted build was
 performed. All probes are finished, no benchmark port was started, and 4194
 still has the earlier a22 artifact.
 
+## Read-only local file access and wider current-span A/B
+
+The 56c73 candidate completed all five jobs in non-publishing run
+[34772962152](https://github.com/daejunnom/Clearra/actions/runs/34772962152).
+The PC4 job included 25 CLI TB tests, 94 App tests, and the previously listed
+graph/materializer contracts. Native CLI process coverage included 17 E2E
+and 22 selected native contracts. This is not release acceptance.
+
+The GUI's downloaded-file transport previously used
+`File.slice().arrayBuffer()` for every cache miss, including tiny graph records.
+`pc4LocalFileSource.ts` now owns one read-only OPFS access handle per file when
+the dedicated worker exposes the multiple-readers `mode` capability. It requests
+only `read-only`, verifies the returned mode and size, reuses the handle, and
+never invokes write/flush/truncate. Older exclusive-only implementations are
+not probed by opening an exclusive handle; unsupported optional mode keeps the
+existing Blob-slice reader. Permission, lock, truncation or real read errors do
+not silently switch to HTTP or an offline search. This follows the
+[File System synchronous access contract](https://fs.spec.whatwg.org/#api-filesystemsyncaccesshandle)
+and the [multiple-readers design](https://github.com/whatwg/fs/blob/main/proposals/MultipleReadersWriters.md).
+
+The store retains its shared generation lease until all pending Blob reads
+settle and all opened handles are closed, including partial-open failure and
+cancellation. Two read-only searches can coexist; update/delete remains
+exclusive. Same repository/revision with different artifact descriptors is
+rejected before opening any data file. Neither the 693 MB dataset nor an
+additional graph copy is loaded wholesale into JS memory. The explicit local
+directory and per-profile download/retention policy are unchanged.
+
+Mocked OPFS contracts cover 10,000 exact graph reads with three handles per
+search and no per-read Blob operations, concurrent search leases, unsupported
+mode, partial open failure, abort during open, partial/zero reads, identity
+mismatch and an outstanding Blob read at disposal. These validate behavior,
+not actual browser I/O latency. Developer-only diagnostics record the selected
+file access backend through a finite whitelist, not file paths or input data.
+
+For HTTP, the existing 1 KiB gap was compared with a 4 KiB gap using **the same
+7601 WASM artifact in memory**, the same downloaded dataset, the same P7P4
+command, and the first **100,000** logical demands / **101,696** advances.
+The new run used `--transport http-model --frontier --frontier-gap-bytes 4096`;
+prior completed measurements were reused, not repeated.
+
+| Current required graph span policy | Requests | Bytes |
+|---|---:|---:|
+| No frontier, earlier baseline | 45,551 | 51,329,915 |
+| 1 KiB connected-gap policy | 45,220 | 51,832,638 |
+| **4 KiB connected-gap candidate** | **44,443** | **53,457,576** |
+
+The candidate removes **777** more requests (1.72%) for **1,624,938 B** extra;
+against no frontier it removes **1,108** requests (2.43%) for 2,127,661 B extra.
+No claim of large/universal WAN acceleration follows from this modest request
+reduction. On this model run wall time was 26.665 s, compute 17.150 s, host I/O
+6.190 s, bridge 2.723 s; these are local-response times with OS/runtime variation.
+WASM memory was 57,081,856 B. The probe intentionally cancelled at its read
+limit and **did not finish the 456,459-candidate family**.
+
+Raw ordered returned-byte digest still matches the prior 100k runs:
+`8074680fc8fcb67df3044e97156d44edcf3a6839943d123545c123eeb478b6e7`.
+The bounded old-30k comparison has the same four positions / two independent
+records swapped as before; normalization only of that recorded prefix gives
+`8ec35bc3f553df460923dd4b027b2be4ed526a62eaa752134dd42d51948283cb`.
+There is no count cap, traversal-order change, solution omission or changed
+candidate admission. A minimum 12-byte record implies the new safe ID-gap
+precheck `floor(4096/12)+1 = 342`; 342/343 seams and connected chains are tested.
+Only known records with already cached offsets may join the required transfer.
+The 64 KiB single-span, 64 MiB total and cache bounds remain unchanged. The
+native mirror uses the same gap and exact bytes; unrelated explicit batches
+can retain their earlier 1 KiB setting.
+
+After these edits: **46 related JS tests passed**, standalone strict TypeScript
+no-emit checking passed, Rustfmt and JS syntax passed. The separate local
+TypeScript contract runner was rejected by the existing 4194 build-purpose
+owner; that lease was not removed or bypassed. The contract was added to the
+non-publishing CI surface job. Native edits require that follow-up CI; the
+earlier 56c73 success is not evidence for these later changes. No Rust/WASM
+search code changed, so this follow-up does not request another WASM build.
+4194 still uses its previously published a22 WASM; it was not restarted or
+replaced here. No production action or new benchmark port was started.
+
 ## Remaining evidence
 
 Still required: complete 456,459-family validation/timing, input/hold-family

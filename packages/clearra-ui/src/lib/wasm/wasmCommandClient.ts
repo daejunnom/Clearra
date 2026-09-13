@@ -1027,6 +1027,7 @@ type ClearraWasmWorkerEventBase = {
     provider: 'hf-graph' | 'local-graph';
     local_bytes?: number;
     local_file_reads?: number;
+    local_file_access?: string;
     profile: string;
     revision: string;
     requests: number;

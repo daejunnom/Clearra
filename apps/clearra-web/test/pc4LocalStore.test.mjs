@@ -129,6 +129,153 @@ test('WASM host uses typed local admission with zero HTTP and releases files bef
     assert.equal(io.provider, 'local-graph'); assert.equal(io.requests, 0);
     assert.equal(io.transferred_bytes, 0); assert.equal(io.local_bytes, 8);
     assert.equal(io.local_file_reads, 1);
+    assert.equal(io.local_file_access, 'blob-slice');
     await api.removeLocalPc4();
   } finally { globalThis.fetch = original; }
+}));
+
+async function withSyncStorage(run) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'FileSystemSyncAccessHandle');
+  const constructor = { prototype: { mode: 'read-only' } };
+  Object.defineProperty(globalThis, 'FileSystemSyncAccessHandle', { value: constructor, configurable: true });
+  try { await withStorage(async f => {
+    await f.install();
+    const profile = f.root.entries.get('clearra-pc4-v1').entries.get('jstris-180');
+    const directory = [...profile.entries].find(([name]) => name.startsWith('gen-'))[1];
+    const state = { opened: 0, closed: 0, active: 0, reads: 0, bytes: 0, blobCalls: 0 };
+    for (const file of directory.entries.values()) {
+      const getFile = file.getFile.bind(file);
+      file.getFile = async () => { state.blobCalls++; return getFile(); };
+      file.createSyncAccessHandle = async options => {
+        assert.deepEqual(options, { mode: 'read-only' });
+        state.opened++; state.active++;
+        let closed = false;
+        return { mode: 'read-only', getSize: () => file.bytes.length,
+          read: (output, { at }) => {
+            assert.equal(closed, false); state.reads++;
+            const bytes = file.bytes.subarray(at, at + output.length);
+            output.set(bytes); state.bytes += bytes.length; return bytes.length;
+          },
+          close: () => { assert.equal(closed, false, 'each OS handle closes exactly once'); closed = true; state.closed++; state.active--; }
+        };
+      };
+    }
+    await run({ ...f, directory, state, constructor });
+  }); } finally {
+    if (original) Object.defineProperty(globalThis, 'FileSystemSyncAccessHandle', original);
+    else delete globalThis.FileSystemSyncAccessHandle;
+  }
+}
+
+test('read-only OPFS handles are opened once and shared by concurrent search leases without Blob reads', async () => withSyncStorage(async f => {
+  const first = await api.openLocalPc4Reader(f.generation), second = await api.openLocalPc4Reader(f.generation);
+  assert.equal(first.fileAccess, 'sync-access-handle');
+  try {
+    for (let i = 0; i < 10000; i++) {
+      const offset = i * 17 % 40;
+      assert.deepEqual(await first.read(f.desc[2], offset, 12), f.files.get('graph.bin').slice(offset, offset + 12));
+    }
+    assert.deepEqual(await second.read(f.desc[1], 2, 16), f.files.get('graph_offsets.u32.bin').slice(2, 18));
+    assert.equal(f.state.opened, 6); assert.equal(f.state.active, 6); assert.equal(f.state.blobCalls, 0);
+    assert.equal(f.state.reads, 10001); assert.equal(first.requests, 0);
+    await first.dispose(); await first.dispose();
+    assert.equal(f.state.active, 3);
+    await assert.rejects(api.removeLocalPc4(), { code: 'pc4_download_storage_busy' });
+  } finally { await Promise.all([first.dispose(), second.dispose()]); }
+  assert.equal(f.state.active, 0); assert.equal(f.state.closed, 6);
+  await api.removeLocalPc4();
+}));
+
+test('an older exclusive-only API is never opened and unsupported optional mode stays local', async () => withSyncStorage(async f => {
+  delete f.constructor.prototype.mode;
+  const old = await api.openLocalPc4Reader(f.generation);
+  assert.equal(old.fileAccess, 'blob-slice'); assert.equal(f.state.opened, 0);
+  await old.dispose();
+  f.constructor.prototype.mode = 'read-only';
+  for (const file of f.directory.entries.values()) file.createSyncAccessHandle = async () => { throw new TypeError('unsupported mode'); };
+  const reader = await api.openLocalPc4Reader(f.generation);
+  try {
+    assert.equal(reader.fileAccess, 'blob-slice');
+    assert.deepEqual(await reader.read(f.desc[2], 0, 12), f.files.get('graph.bin').slice(0, 12));
+    assert.equal(reader.requests, 0);
+  } finally { await reader.dispose(); }
+}));
+
+test('partial read-only open failure closes earlier files and releases the generation lease', async () => withSyncStorage(async f => {
+  f.directory.entries.get(f.desc[1].path).createSyncAccessHandle = async () => { throw new DOMException('denied', 'NotAllowedError'); };
+  await assert.rejects(api.openLocalPc4Reader(f.generation), { name: 'NotAllowedError' });
+  assert.equal(f.state.opened, 1); assert.equal(f.state.closed, 1); assert.equal(f.state.blobCalls, 0);
+  await api.removeLocalPc4();
+}));
+
+test('cancellation during asynchronous handle opening closes every acquired file before returning', async () => withSyncStorage(async f => {
+  const abort = new AbortController(), file = f.directory.entries.get(f.desc[1].path), create = file.createSyncAccessHandle;
+  file.createSyncAccessHandle = async options => { const result = await create(options); abort.abort(); return result; };
+  await assert.rejects(api.openLocalPc4Reader(f.generation, abort.signal), { code: 'pc4_online_cancelled' });
+  assert.equal(f.state.opened, 2); assert.equal(f.state.closed, 2); assert.equal(f.state.active, 0);
+  await api.removeLocalPc4();
+}));
+
+test('short sync reads are completed exactly, but a zero read never becomes padded data or HTTP', async () => withSyncStorage(async f => {
+  const file = f.directory.entries.get(f.desc[2].path), create = file.createSyncAccessHandle;
+  let stop = false;
+  file.createSyncAccessHandle = async options => {
+    const access = await create(options), read = access.read;
+    access.read = (bytes, at) => stop ? 0 : read(bytes.subarray(0, Math.min(bytes.length, 3)), at);
+    return access;
+  };
+  const reader = await api.openLocalPc4Reader(f.generation);
+  try {
+    assert.deepEqual(await reader.read(f.desc[2], 4, 8), f.files.get('graph.bin').slice(4, 12));
+    stop = true;
+    await assert.rejects(reader.read(f.desc[2], 8, 8), { code: 'pc4_online_truncated_range' });
+    assert.equal(reader.requests, 0); assert.equal(f.state.blobCalls, 0);
+  } finally { await reader.dispose(); }
+  assert.equal(f.state.active, 0);
+}));
+
+test('same revision cannot lease local files with a different pinned artifact identity', async () => withSyncStorage(async f => {
+  const changed = structuredClone(f.generation);
+  changed.profiles.find(p => p.profile === 'jstris-180').artifacts.graph.content_identity = 'sha256:' + 'f'.repeat(64);
+  await assert.rejects(api.openLocalPc4Reader(changed), { code: 'pc4_download_local_manifest_invalid' });
+  assert.equal(f.state.opened, 0);
+  await api.removeLocalPc4();
+}));
+
+test('a close error still closes other files, releases the lease and retires the failed WASM job', async () => withSyncStorage(async f => {
+  const file = f.directory.entries.get(f.desc[0].path), create = file.createSyncAccessHandle;
+  file.createSyncAccessHandle = async options => {
+    const access = await create(options), close = access.close;
+    access.close = () => { close(); throw new Error('close-failed'); };
+    return access;
+  };
+  let cancelled = 0;
+  const wasm = { start_job: () => 7, advance_job: () => { throw new Error('fixture-search-failed'); },
+    drain_job_events_json: () => '[]', cancel_job: () => { cancelled++; } };
+  const runner = new WasmJobRunner(wasm, f.generation);
+  await assert.rejects(runner.run('clearra pc --tablebase', () => {}), /close-failed/);
+  assert.equal(f.state.opened, 3); assert.equal(f.state.closed, 3); assert.equal(f.state.active, 0);
+  assert.equal(cancelled, 1);
+  runner.dispose(); assert.equal(cancelled, 1);
+  await api.removeLocalPc4();
+}));
+
+test('disposing a Blob reader holds the generation lease until pending file reads settle', async () => withStorage(async f => {
+  await f.install();
+  const profile = f.root.entries.get('clearra-pc4-v1').entries.get('jstris-180');
+  const directory = [...profile.entries].find(([name]) => name.startsWith('gen-'))[1];
+  const file = directory.entries.get('graph.bin');
+  let finish;
+  file.getFile = async () => ({ size: file.bytes.length, slice: (offset, end) => ({
+    arrayBuffer: () => new Promise(resolve => { finish = () => resolve(file.bytes.slice(offset, end).buffer); })
+  }) });
+  const reader = await api.openLocalPc4Reader(f.generation);
+  const reading = reader.read(f.desc[2], 0, 8);
+  const rejected = assert.rejects(reading, { code: 'pc4_online_cancelled' });
+  let disposed = false;
+  const disposing = reader.dispose().then(() => { disposed = true; });
+  await assert.rejects(api.removeLocalPc4(), { code: 'pc4_download_storage_busy' });
+  assert.equal(disposed, false);
+  finish(); await rejected; await disposing;
+  await api.removeLocalPc4();
 }));

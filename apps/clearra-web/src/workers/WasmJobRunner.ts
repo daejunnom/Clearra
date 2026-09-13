@@ -44,6 +44,7 @@ export class WasmJobRunner {
         requests: reader.requests, transferred_bytes: reader.bytes, logical_reads: reader.reads,
         local_bytes: 'localBytes' in reader ? reader.localBytes : 0,
         local_file_reads: 'fileReads' in reader ? reader.fileReads : 0,
+        ...('fileAccess' in reader ? { local_file_access: reader.fileAccess } : {}),
         cache_hits: reader.cacheHits, joined_requests: reader.joinedRequests, cache_bytes: reader.retainedBytes,
         elapsed_ms: performance.now() - onlineStarted } } as ClearraWasmWorkerEvent) : event);
     try {
@@ -130,19 +131,21 @@ export class WasmJobRunner {
       }
       return terminal;
     } finally {
-      await reader?.dispose();
-      this.onlineAbort?.abort(); this.onlineAbort = null;
-      if (profilingActive && this.wasm.profile_finish) {
-        try {
-          this.wasm.profile_finish();
-        } catch {
-          // The worker owner will terminate a failed runtime; cleanup must not mask the failure.
+      try { await reader?.dispose(); }
+      finally {
+        this.onlineAbort?.abort(); this.onlineAbort = null;
+        if (profilingActive && this.wasm.profile_finish) {
+          try {
+            this.wasm.profile_finish();
+          } catch {
+            // The worker owner will terminate a failed runtime; cleanup must not mask the failure.
+          }
         }
-      }
-      if (terminal === null) this.releaseActiveJob();
-      else {
-        this.active = false;
-        this.jobId = null;
+        if (terminal === null) this.releaseActiveJob();
+        else {
+          this.active = false;
+          this.jobId = null;
+        }
       }
     }
   }
