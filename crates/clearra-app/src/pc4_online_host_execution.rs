@@ -31,6 +31,15 @@ impl AppContext {
         request: AppRequest,
         snapshot: ActivatedSnapshot,
     ) -> Result<Pc4OnlineHostExecution, &'static str> {
+        self.start_pc4_execution_for_surface(request, snapshot, Pc4InputSurface::Gui)
+    }
+
+    pub fn start_pc4_execution_for_surface(
+        &self,
+        request: AppRequest,
+        snapshot: ActivatedSnapshot,
+        surface: Pc4InputSurface,
+    ) -> Result<Pc4OnlineHostExecution, &'static str> {
         if !matches!(
             request.command(),
             AppCommand::Pc(_) | AppCommand::Scenario(_)
@@ -82,7 +91,7 @@ impl AppContext {
             .map_err(|_| "pc4_online_source_binding_failed")?;
             let decision = prepare_pc4_input_disclosure(Pc4InputDisclosureRequest::new(
                 target.clone(),
-                Pc4InputSurface::Gui,
+                surface,
                 Pc4QueueDisclosure::FixedExplicit(pieces),
             ))
             .map_err(|_| "pc4_online_fixed_input_rejected")?;
@@ -107,12 +116,9 @@ impl AppContext {
             }
             let pattern = preparation.finish().map_err(|e| e.reason())?;
             let input_identity = *pattern.identity().as_bytes();
-            let prepared = Pc4PreparedOnlineInput::for_compiled_pattern(
-                target.clone(),
-                Pc4InputSurface::Gui,
-                pattern,
-            )
-            .map_err(|e| e.reason())?;
+            let prepared =
+                Pc4PreparedOnlineInput::for_compiled_pattern(target.clone(), surface, pattern)
+                    .map_err(|e| e.reason())?;
             (prepared, input_identity)
         };
         let source = PcCandidateSourceBinding::online_pc4_for_prepared_input(
@@ -293,6 +299,35 @@ impl Pc4OnlineHostExecution {
         bytes: Vec<u8>,
         control: &ExecutionControl,
     ) -> Result<(), &'static str> {
+        self.admit_bytes(
+            lookup_session,
+            request_id,
+            Some((status, content_range)),
+            bytes,
+            control,
+        )
+    }
+
+    /// The host verifies the complete file during explicit installation and
+    /// keeps that generation leased while serving these bounded local slices.
+    pub fn admit_local_slice(
+        &mut self,
+        lookup_session: u64,
+        request_id: u64,
+        bytes: Vec<u8>,
+        control: &ExecutionControl,
+    ) -> Result<(), &'static str> {
+        self.admit_bytes(lookup_session, request_id, None, bytes, control)
+    }
+
+    fn admit_bytes(
+        &mut self,
+        lookup_session: u64,
+        request_id: u64,
+        http: Option<(u16, Option<String>)>,
+        bytes: Vec<u8>,
+        control: &ExecutionControl,
+    ) -> Result<(), &'static str> {
         let range = self.pending.as_ref().ok_or("pc4_online_no_pending_range")?;
         if range.request_id() != request_id || range.lookup_session().get() != lookup_session {
             return Err("pc4_online_response_id_mismatch");
@@ -322,12 +357,15 @@ impl Pc4OnlineHostExecution {
             complete_length: range.artifact_descriptor().byte_len(),
             bytes,
         };
-        let input = RangeAdmissionInput::http(RangeHttpResponse::new(
-            status,
-            content_range,
-            None,
-            Some(response),
-        ));
+        let input = match http {
+            Some((status, content_range)) => RangeAdmissionInput::http(RangeHttpResponse::new(
+                status,
+                content_range,
+                None,
+                Some(response),
+            )),
+            None => RangeAdmissionInput::VerifiedLocalSlice(Box::new(response)),
+        };
         let attempt = RangeAdmissionAttempt::new(ordinal, NonZeroU16::new(1).unwrap());
         if let Some(lookup) = &mut self.lookup {
             lookup

@@ -11,7 +11,7 @@ use crate::{
     protocol::{
         LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
     },
-    GraphTargetEncoding,
+    GraphSourceFieldEncoding, GraphTargetEncoding,
 };
 
 const MAX_FIELD_HASH: u64 = (1_u64 << 40) - 1;
@@ -78,6 +78,9 @@ pub enum FormatMismatch {
         graph_bytes: u64,
     },
     GraphRecordEmpty,
+    GraphSourceFieldHashTruncated {
+        bytes: usize,
+    },
     GraphFirstOffsetNotZero {
         offset: u32,
     },
@@ -102,6 +105,7 @@ impl FormatMismatch {
             Self::GraphOffsetsDescending { .. } => "pc4_online_graph_offsets_descending",
             Self::GraphOffsetOutsideArtifact { .. } => "pc4_online_graph_offset_outside_artifact",
             Self::GraphRecordEmpty => "pc4_online_graph_record_empty",
+            Self::GraphSourceFieldHashTruncated { .. } => "pc4_online_graph_source_hash_truncated",
             Self::GraphFirstOffsetNotZero { .. } => "pc4_online_graph_first_offset_not_zero",
             Self::GraphTerminalOffsetMismatch { .. } => "pc4_online_graph_terminal_offset_mismatch",
             Self::GraphRecordTooLarge { .. } => "pc4_online_graph_record_too_large",
@@ -239,10 +243,10 @@ impl LookupMachine {
 
     /// Starts an exact lookup from a graph field ID.
     ///
-    /// The direct index position is still checked against the record's
-    /// embedded ID before its field hash or graph record can be used. This is
-    /// the reverse-identity path needed to turn graph target IDs back into
-    /// concrete Clearra board states without downloading the field table.
+    /// With an explicitly qualified inline source-hash layout, read the two
+    /// offsets together, then the complete graph record: its own prefix is the
+    /// field bitmap. Opaque layouts still check the separate hash-index ID.
+    /// Neither path downloads or searches the field table for a known ID.
     pub fn start_by_field_id(
         snapshot: &ActivatedSnapshot,
         profile: Pc4RuleProfile,
@@ -287,6 +291,15 @@ impl LookupMachine {
             pending: None,
             terminal: None,
         };
+        if let LookupSelector::FieldId(field_id) = machine.selector {
+            if machine.profile.graph_source_field_encoding()
+                == GraphSourceFieldEncoding::HydraU40BigEndianPrefix
+            {
+                machine.phase = Phase::OffsetIndexHeader { field_id };
+                machine.request(Pc4ArtifactRole::GraphOffsets, 0, INDEX_HEADER_BYTES as u32);
+                return machine;
+            }
+        }
         machine.request(
             Pc4ArtifactRole::FieldHashIndex,
             0,
@@ -330,6 +343,22 @@ impl LookupMachine {
             }
             Phase::OffsetPair { field_id } => self.consume_offset_pair(&bytes, field_id),
             Phase::GraphRecord { field_id } => {
+                if self.field_hash.is_none() {
+                    // Only the qualified ID/inline-hash path omits the field
+                    // index. Hydra stores this prefix big-endian; FHIDIDX1's
+                    // five-byte hashes are little-endian and must not be reused.
+                    if bytes.len() < 5 {
+                        self.fail_format(FormatMismatch::GraphSourceFieldHashTruncated {
+                            bytes: bytes.len(),
+                        });
+                        return Ok(());
+                    }
+                    self.field_hash = Some(
+                        bytes[..5]
+                            .iter()
+                            .fold(0_u64, |hash, byte| (hash << 8) | u64::from(*byte)),
+                    );
+                }
                 self.terminal = Some(Terminal::Hit(LookupHit {
                     lookup_session: self.lookup_session,
                     snapshot: self.snapshot.clone(),
@@ -386,6 +415,14 @@ impl LookupMachine {
             return;
         }
         match self.selector {
+            // Sorted nonnegative 40-bit keys make domain endpoints exact
+            // one-record probes, including a checked miss if absent. Empty
+            // field requests must not walk ~24 remote binary-search pivots.
+            LookupSelector::FieldHash(0) => self.request_field_record(0, 1),
+            LookupSelector::FieldHash(MAX_FIELD_HASH) => {
+                let count = self.profile.field_count();
+                self.request_field_record(count - 1, count);
+            }
             LookupSelector::FieldHash(_) => {
                 self.request_field_record(0, self.profile.field_count());
             }
@@ -801,6 +838,143 @@ mod tests {
                     respond(&mut machine, request, source);
                 }
                 terminal => return terminal,
+            }
+        }
+    }
+
+    #[test]
+    fn qualified_inline_hash_lookup_skips_fhid_and_preserves_all_record_bytes() {
+        use crate::manifest::tests::{qualified_profile, SyntheticVerifier, SYNTHETIC_REVISION_A};
+        use crate::{
+            DatasetSnapshotManifest, ManifestContentIdentity, ProfileAvailability, SnapshotIdentity,
+        };
+
+        let hashes = [0_u64, 0x01_0203_0405, MAX_FIELD_HASH];
+        let graph = hashes
+            .iter()
+            .flat_map(|hash| {
+                let mut record = hash.to_be_bytes()[3..].to_vec();
+                record.extend_from_slice(&[0; 7]);
+                record
+            })
+            .collect::<Vec<_>>();
+        let mut offsets = index_header(GRAPH_OFFSETS_MAGIC, 3);
+        for offset in [0_u32, 12, 24, 36] {
+            offsets.extend_from_slice(&offset.to_le_bytes());
+        }
+        for profile in Pc4RuleProfile::ALL {
+            let manifest = DatasetSnapshotManifest::new(
+                SnapshotIdentity::new(
+                    "synthetic/repository",
+                    SYNTHETIC_REVISION_A,
+                    "inline-source-hash",
+                )
+                .unwrap(),
+                ManifestContentIdentity::new("synthetic-inline-source-hash").unwrap(),
+                Pc4RuleProfile::ALL
+                    .into_iter()
+                    .map(|p| {
+                        ProfileAvailability::qualified(
+                            qualified_profile(
+                                p,
+                                3,
+                                graph.len() as u64,
+                                if p == Pc4RuleProfile::SrsX {
+                                    GraphTargetEncoding::U32LittleEndian
+                                } else {
+                                    GraphTargetEncoding::U24LittleEndian
+                                },
+                            )
+                            .with_graph_source_field_encoding(
+                                GraphSourceFieldEncoding::HydraU40BigEndianPrefix,
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap()
+            .activate(&mut SyntheticVerifier)
+            .unwrap();
+            for (id, hash) in hashes.iter().enumerate() {
+                let mut machine =
+                    LookupMachine::start_by_field_id(&manifest, profile, id as u32, session(1))
+                        .unwrap();
+                let mut requests = 0;
+                loop {
+                    match machine.step() {
+                        LookupStep::NeedRange(request) => {
+                            requests += 1;
+                            let bytes = match request.artifact() {
+                                Pc4ArtifactRole::GraphOffsets => &offsets,
+                                Pc4ArtifactRole::Graph => &graph,
+                                Pc4ArtifactRole::FieldHashIndex => {
+                                    panic!("qualified inline source needs no FHID read")
+                                }
+                            };
+                            respond(&mut machine, request, bytes);
+                        }
+                        LookupStep::Hit(hit) => {
+                            assert_eq!(requests, 3);
+                            assert_eq!((hit.field_id, hit.field_hash), (id as u32, *hash));
+                            assert_eq!(hit.graph_record, graph[id * 12..(id + 1) * 12]);
+                            break;
+                        }
+                        other => panic!("unexpected inline lookup outcome: {other:?}"),
+                    }
+                }
+            }
+            // Qualified metadata cannot make a truncated record safe. The
+            // by-ID fast path must fail as a format error, not panic or Hit.
+            let mut truncated_offsets = offsets.clone();
+            truncated_offsets[20..24].copy_from_slice(&3_u32.to_le_bytes());
+            let mut truncated =
+                LookupMachine::start_by_field_id(&manifest, profile, 0, session(2)).unwrap();
+            loop {
+                match truncated.step() {
+                    LookupStep::NeedRange(request) => {
+                        let source = match request.artifact() {
+                            Pc4ArtifactRole::GraphOffsets => &truncated_offsets,
+                            Pc4ArtifactRole::Graph => &graph,
+                            _ => panic!("inline hash must not read FHID"),
+                        };
+                        respond(&mut truncated, request, source);
+                    }
+                    outcome => {
+                        assert_eq!(
+                            outcome,
+                            LookupStep::Failed(LookupFailure::FormatMismatch(
+                                FormatMismatch::GraphSourceFieldHashTruncated { bytes: 3 }
+                            ))
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_hash_probe_checks_the_sorted_endpoint_before_declaring_hit_or_miss() {
+        let snapshot = activated_snapshot(HASHES.len() as u32, GRAPH.len() as u64);
+        for (hash, index) in [(0, 0), (MAX_FIELD_HASH, 2)] {
+            let mut machine =
+                LookupMachine::start(&snapshot, Pc4RuleProfile::Srs, hash, session(1)).unwrap();
+            let LookupStep::NeedRange(header) = machine.step() else {
+                panic!("header expected");
+            };
+            respond(&mut machine, header, &field_index());
+            let LookupStep::NeedRange(record) = machine.step() else {
+                panic!("record expected");
+            };
+            assert_eq!(
+                record.offset(),
+                INDEX_HEADER_BYTES + index * FIELD_HASH_RECORD_BYTES
+            );
+            respond(&mut machine, record, &field_index());
+            if hash == MAX_FIELD_HASH {
+                assert_eq!(machine.step(), LookupStep::Miss);
+            } else {
+                assert!(matches!(machine.step(), LookupStep::NeedRange(_)));
             }
         }
     }

@@ -47,6 +47,13 @@ This establishes a latency/transfer trade-off and byte equivalence, not a
 
 ## Live HF browser A/B
 
+**Later follow-up:** known-demand batch planning reduces the same 320-demand
+synthetic trace to eight transfers with only 2,560 body bytes. Qualified by-ID
+lookup also removes its redundant FHID read using the graph's source hash.
+These Rust/host changes are newer than the unchanged-WASM observation above.
+The following historical GUI timings were not rerun or relabelled as their
+performance. See [explicit downloads and request planning](pc4-explicit-download-and-host-placement-2026-09-13.md).
+
 4194 was idle before reloading the new JavaScript. The same existing WASM was
 retained. HF revision in both observations:
 `ea61380b31fa3dc9ffb4c8505c9a09c1b421ef31`.

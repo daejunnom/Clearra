@@ -1,5 +1,6 @@
 // SRP: bounded immutable HTTP byte transport. Graph meaning, candidate
 // completeness and rule-profile qualification belong to other owners.
+import { checkedPc4Read, planPc4ReadBatch } from './pc4-range-plan.mjs';
 export class Pc4OnlineError extends Error {
   constructor(code, detail = code) { super(detail); this.name = 'Pc4OnlineError'; this.code = code; }
 }
@@ -120,15 +121,32 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
     get joinedRequests() { return joined; },
     get retainedBytes() { return retained; },
     dispose() { cancel(); signal?.removeEventListener('abort', cancel); },
+    async readMany(demands, options) {
+      if (closed || signal?.aborted) fail('pc4_online_cancelled');
+      let plan;
+      try { plan = planPc4ReadBatch(demands, options); }
+      catch (error) { fail(error.message); }
+      // Plan the whole explicit demand before starting any I/O. Batch spans
+      // follow known record boundaries instead of expanding every read to a
+      // cache window. The same transport limits/accounting apply to each span.
+      reads += demands.length;
+      const result = new Array(demands.length);
+      await Promise.all(plan.map(async transfer => {
+        const bytes = await span(transfer.artifact, transfer.offset, transfer.length);
+        for (const demand of transfer.demands) {
+          const begin = demand.offset - transfer.offset;
+          result[demand.index] = bytes.slice(begin, begin + demand.length);
+        }
+      }));
+      if (closed || signal?.aborted) fail('pc4_online_cancelled');
+      return result;
+    },
     async read(input, offset, length) {
       if (closed || signal?.aborted) fail('pc4_online_cancelled');
-      if (!Number.isSafeInteger(input?.byte_length) || input.byte_length <= 0 ||
-          !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 ||
-          length > MAX_RANGE || offset > input.byte_length - length ||
-          !/^[A-Za-z0-9_.-]+\.bin$/.test(input.path) ||
-          !/^sha256:[0-9a-f]{64}$/.test(input.content_identity)) fail('pc4_online_range_invalid');
       // A queued transport must not observe later mutation of its descriptor.
-      const artifact = { path: input.path, byte_length: input.byte_length, content_identity: input.content_identity };
+      let artifact;
+      try { ({ artifact } = checkedPc4Read(input, offset, length)); }
+      catch (error) { fail(error.message); }
       reads++;
       // No speculative/background scan: only windows intersecting this demand.
       // Small files and byte-budget-constrained reads keep exact access, never

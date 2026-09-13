@@ -46,6 +46,8 @@ mod pc4_compiled_pattern_source;
 #[cfg_attr(not(test), allow(dead_code))]
 mod pc4_fixed_queue_candidate_runtime;
 #[cfg(feature = "online-pc4-tablebase")]
+mod pc4_host_configuration;
+#[cfg(feature = "online-pc4-tablebase")]
 mod pc4_input_disclosure_policy;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_lookup_graph_runtime_adapter;
@@ -57,6 +59,8 @@ mod pc4_observation_candidate_runtime;
 mod pc4_online_candidate_runtime;
 #[cfg(feature = "online-pc4-tablebase")]
 mod pc4_online_host_execution;
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc4_host_configuration::configure as activate_pc4_host_generation;
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc4_online_host_execution::Pc4OnlineHostExecution;
 #[cfg(feature = "online-pc4-tablebase")]

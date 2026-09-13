@@ -149,6 +149,9 @@ impl RangeHttpResponse {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RangeAdmissionInput {
     Http(Box<RangeHttpResponse>),
+    /// Bytes sliced from a host-owned file whose full content identity was
+    /// verified at explicit installation. Not an invented HTTP response.
+    VerifiedLocalSlice(Box<RangeResponse>),
     TransportFailure(RangeTransportFailure),
 }
 
@@ -346,6 +349,23 @@ impl RangeAdmissionSession {
 
         let (outcome, admitted_response_bytes) = match input {
             RangeAdmissionInput::Http(response) => self.admit_http(request, *response)?,
+            RangeAdmissionInput::VerifiedLocalSlice(response) => {
+                let response = *response;
+                validate_partial_bindings(
+                    request,
+                    &response,
+                    response.offset,
+                    request.end_exclusive() - 1,
+                    response.complete_length,
+                )?;
+                let bytes = response.bytes.len() as u64;
+                check_budget(
+                    RangeAdmissionBudgetKind::ResponseBytes,
+                    self.limits.max_response_bytes(),
+                    bytes,
+                )?;
+                (RangeAdmissionOutcome::PartialContent(response), bytes)
+            }
             RangeAdmissionInput::TransportFailure(failure) => {
                 validate_retry_after_failure(&failure, self.limits.max_retry_after_seconds())?;
                 (RangeAdmissionOutcome::TransportFailure(failure), 0)

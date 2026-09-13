@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Pc4DownloadControl from './Pc4DownloadControl.svelte';
   import { Database, Layers3 } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
@@ -169,6 +170,7 @@
         </label>
         <small class="workspace-field-help">{label('tablebaseHelp')}</small>
         <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
+        <Pc4DownloadControl {language} />
       </div>
       <div class="worker-policy-control">
         <label class="workspace-switch-label">

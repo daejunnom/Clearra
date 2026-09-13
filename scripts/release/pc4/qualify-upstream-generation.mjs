@@ -25,6 +25,8 @@ export async function qualifyPc4UpstreamGeneration({ signal, onProgress } = {}, 
 }
 
 async function qualifyProfiles(discovery, reader, signal) {
+  const readMany = demands => reader.readMany ? reader.readMany(demands)
+    : Promise.all(demands.map(d => reader.read(d.artifact, d.offset, d.length)));
   const entries = new Map(discovery.candidates.map(entry => [entry.path, entry]));
   const profiles = [];
   for (const model of PC4_PROFILE_ARTIFACTS) {
@@ -44,28 +46,35 @@ async function qualifyProfiles(discovery, reader, signal) {
       continue;
     }
     try {
-      const [fh, oh] = await Promise.all([reader.read(fields, 0, 16), reader.read(offsets, 0, 16)]);
+      const [fh, oh] = await readMany([
+        { artifact: fields, offset: 0, length: 16 }, { artifact: offsets, offset: 0, length: 16 }
+      ]);
       const count = header(fh, 'FHIDIDX1');
       if (count !== header(oh, 'GOFFIDX1') || fields.byte_length !== 16 + 8 * count ||
           offsets.byte_length !== 16 + 4 * (count + 1)) fail('pc4_online_index_layout_mismatch');
-      const [first, sentinel] = await Promise.all([
-        reader.read(offsets, 16, 4), reader.read(offsets, 16 + 4 * count, 4)
-      ]);
-      if (u32(first) !== 0 || u32(sentinel) !== graph.byte_length) fail('pc4_online_index_graph_mismatch');
+      const ids = [...new Set([0, 1, 100, 10_000, Math.floor(count / 2), count - 1])].filter(id => id < count);
+      // All sample addresses are known after the two headers. Fetch their
+      // necessary index intervals as one planned stage, not six serial lookups.
+      const indices = await readMany(ids.flatMap(id => [
+        { artifact: fields, offset: 16 + id * 8, length: 8 },
+        { artifact: offsets, offset: 16 + id * 4, length: 8 }
+      ]));
       const evidence = [];
-      for (const id of [...new Set([0, 1, 100, 10_000, Math.floor(count / 2), count - 1])]) {
-        if (id >= count) continue;
-        const [field, pair] = await Promise.all([
-          reader.read(fields, 16 + id * 8, 8), reader.read(offsets, 16 + id * 4, 8)
-        ]);
+      for (const [index, id] of ids.entries()) {
+        const [field, pair] = indices.slice(index * 2, index * 2 + 2);
         const hash = little(field.subarray(0, 5));
         if (little(field.subarray(5)) !== id) fail('pc4_online_index_order_mismatch');
         const start = u32(pair), end = u32(pair, 4);
+        // These boundary pairs already contain the first offset and sentinel;
+        // requesting those separately would reread the same index cells.
+        if ((id === 0 && start !== 0) || (id === count - 1 && end !== graph.byte_length)) {
+          fail('pc4_online_index_graph_mismatch');
+        }
         if (end <= start || end > graph.byte_length || end - start > 16_384) fail('pc4_online_record_bounds');
-        const record = await reader.read(graph, start, end - start);
-        validateGraphRecord(record, hash, model.width, count);
         evidence.push({ id, hash, start, end });
       }
+      const records = await readMany(evidence.map(e => ({ artifact: graph, offset: e.start, length: e.end - e.start })));
+      for (const [index, e] of evidence.entries()) validateGraphRecord(records[index], e.hash, model.width, count);
       if (evidence[0].hash !== 0 || evidence.at(-1).hash !== 2 ** 40 - 1) fail('pc4_online_terminal_mismatch');
       profiles.push({ ...base, status: 'ready', reader_contract: PC4_READER_CONTRACT,
         field_count: count, target_width: model.width, target_lines: [4],

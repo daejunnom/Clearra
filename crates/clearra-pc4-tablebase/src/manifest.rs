@@ -149,6 +149,15 @@ pub enum GraphTargetEncoding {
     U32LittleEndian,
 }
 
+/// Source identity carried by a qualified graph record. This declaration is
+/// covered by format/provenance qualification, never inferred from samples.
+/// Existing opaque layouts continue to require the separate hash index.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GraphSourceFieldEncoding {
+    Opaque,
+    HydraU40BigEndianPrefix,
+}
+
 /// Qualified relationship between a graph field ID and the ordinal of its
 /// `FHIDIDX1` record.
 ///
@@ -417,6 +426,7 @@ pub struct Pc4ProfileManifest {
     profile: Pc4RuleProfile,
     field_count: u32,
     graph_target_encoding: GraphTargetEncoding,
+    graph_source_field_encoding: GraphSourceFieldEncoding,
     field_id_index_relation: FieldIdIndexRelation,
     maximum_graph_record_bytes: u32,
     field_hash_index: ArtifactDescriptor,
@@ -474,6 +484,7 @@ impl Pc4ProfileManifest {
             profile,
             field_count,
             graph_target_encoding,
+            graph_source_field_encoding: GraphSourceFieldEncoding::Opaque,
             field_id_index_relation,
             maximum_graph_record_bytes,
             field_hash_index,
@@ -519,6 +530,13 @@ impl Pc4ProfileManifest {
         Ok(self)
     }
 
+    /// Declares a source-hash layout bound to the verified generation, just
+    /// like target encoding and the field-ID/record-ordinal relationship.
+    pub fn with_graph_source_field_encoding(mut self, encoding: GraphSourceFieldEncoding) -> Self {
+        self.graph_source_field_encoding = encoding;
+        self
+    }
+
     pub const fn profile(&self) -> Pc4RuleProfile {
         self.profile
     }
@@ -529,6 +547,10 @@ impl Pc4ProfileManifest {
 
     pub const fn graph_target_encoding(&self) -> GraphTargetEncoding {
         self.graph_target_encoding
+    }
+
+    pub const fn graph_source_field_encoding(&self) -> GraphSourceFieldEncoding {
+        self.graph_source_field_encoding
     }
 
     pub const fn field_id_index_relation(&self) -> FieldIdIndexRelation {

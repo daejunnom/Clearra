@@ -11,6 +11,8 @@
   import { resolveCtkViewerQuery } from '../lib/ctkViewerQuery';
   import { installWasmArtifactHotUpdate } from '../lib/wasmArtifactHotUpdate';
   import { isLocalSearchProfileMode, localSearchProfileText } from '../lib/localSearchProfile';
+  import Pc4DownloadPanel from '../lib/Pc4DownloadPanel.svelte';
+  setContext('clearra.pc4-download-control.v1', Pc4DownloadPanel);
 
   const showLocalProfile = isLocalSearchProfileMode(import.meta.env.MODE);
   let localProfile = '';

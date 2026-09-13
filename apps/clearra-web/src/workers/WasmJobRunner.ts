@@ -2,6 +2,7 @@ import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
 
 import type { ClearraWasmModule } from './clearraWasmRuntime';
 import { onlinePc4Progress } from './OnlinePc4Progress';
+import { openLocalPc4Reader } from './pc4LocalStore';
 import { createPc4RangeReader, type Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 
 // Keep one synchronous WASM entry comfortably below the browser host turn.
@@ -35,13 +36,18 @@ export class WasmJobRunner {
     let lastOnlineProgress = 0;
     const onlineStarted = performance.now();
     this.onlineAbort = this.onlineGeneration ? new AbortController() : null;
-    const reader = this.onlineGeneration ? createPc4RangeReader(this.onlineGeneration, { signal: this.onlineAbort!.signal }) : null;
+    let reader: ReturnType<typeof createPc4RangeReader> | Awaited<ReturnType<typeof openLocalPc4Reader>> = null;
     const emit = (event: ClearraWasmWorkerEvent) => onEvent(reader ? ({ ...event,
-      pc4_online: { provider: 'hf-graph', profile: 'jstris-180', revision: this.onlineGeneration!.revision,
+      pc4_online: { provider: 'provider' in reader ? reader.provider : 'hf-graph', profile: 'jstris-180', revision: this.onlineGeneration!.revision,
         requests: reader.requests, transferred_bytes: reader.bytes, logical_reads: reader.reads,
+        local_bytes: 'localBytes' in reader ? reader.localBytes : 0,
         cache_hits: reader.cacheHits, joined_requests: reader.joinedRequests, cache_bytes: reader.retainedBytes,
         elapsed_ms: performance.now() - onlineStarted } } as ClearraWasmWorkerEvent) : event);
     try {
+      if (this.onlineGeneration) {
+        reader = await openLocalPc4Reader(this.onlineGeneration, this.onlineAbort!.signal)
+          ?? createPc4RangeReader(this.onlineGeneration, { signal: this.onlineAbort!.signal });
+      }
       this.jobId = this.wasm.start_job(commandText);
       this.active = true;
       this.cancellationRequested = false;
@@ -71,8 +77,11 @@ export class WasmJobRunner {
                 throw error;
               }
               if (this.cancellationRequested) continue;
+              // Local data has its own admission kind, never a fabricated
+              // HTTP status/header. Both retain exact generation/range checks.
               this.wasm.online_pc4_admit!(this.jobId, { lookup_session: range.lookup_session, request_id: range.request_id,
-                status: 206, content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}`,
+                ...('provider' in reader ? { source: 'verified-local-file' } : {
+                  status: 206, content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}` }),
                 bytes: Array.from(bytes) });
             }
           }
@@ -111,7 +120,7 @@ export class WasmJobRunner {
       }
       return terminal;
     } finally {
-      reader?.dispose();
+      await reader?.dispose();
       this.onlineAbort?.abort(); this.onlineAbort = null;
       if (profilingActive && this.wasm.profile_finish) {
         try {

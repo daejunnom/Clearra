@@ -46,8 +46,10 @@ test('online PC4 discovery and real host transport contracts stay in non-publish
   assert.ok(source.includes('scripts/release/pc4/discover-upstream-generation.test.mjs'));
   assert.ok(source.includes('scripts/release/pc4/qualify-upstream-generation.test.mjs'));
   assert.ok(source.includes('scripts/release/pc4/pc4-range-reader.test.mjs'));
+  assert.ok(source.includes('scripts/release/pc4/pc4-download.test.mjs'));
   const surfaces = workflow.split('  surface-contracts:')[1].split('  preview-wasm:')[0];
   assert.ok(surfaces.includes('apps/clearra-web/test/onlinePc4Host.test.mjs'));
+  assert.ok(surfaces.includes('apps/clearra-web/test/pc4LocalStore.test.mjs'));
 });
 for (const [name, mutation] of [
   ['main trigger', s => s.replace('branches: ["codex/v0.9.0-stacked-on-v0.8.1-20260912"]', 'branches: ["main"]')],

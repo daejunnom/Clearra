@@ -40,10 +40,10 @@ export function localSearchProfileText(event: unknown): string | null {
   const profile = record(envelope.search_profile) ?? {};
   const result: Record<string, unknown> = {};
   const online = record(envelope.pc4_online);
-  if (online?.provider === 'hf-graph') {
+  if (online?.provider === 'hf-graph' || online?.provider === 'local-graph') {
     result.pc4_online = {
-      provider: 'hf-graph',
-      ...numbers(online, ['requests', 'transferred_bytes', 'logical_reads', 'cache_hits',
+      provider: online.provider,
+      ...numbers(online, ['requests', 'transferred_bytes', 'local_bytes', 'logical_reads', 'cache_hits',
         'joined_requests', 'cache_bytes', 'elapsed_ms']),
       ...(typeof online.revision === 'string' && /^[a-f0-9]{40}$/.test(online.revision)
         ? { revision: online.revision } : {})

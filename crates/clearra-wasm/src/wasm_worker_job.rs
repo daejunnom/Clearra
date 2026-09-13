@@ -1060,10 +1060,21 @@ impl WasmWorkerJobRuntime {
         let id = v["request_id"]
             .as_u64()
             .ok_or_else(|| error("pc4_online_response_invalid"))?;
-        let status = v["status"]
-            .as_u64()
-            .and_then(|n| u16::try_from(n).ok())
-            .ok_or_else(|| error("pc4_online_response_invalid"))?;
+        let local = v["source"] == "verified-local-file";
+        let status = if local {
+            if !v["status"].is_null() || !v["content_range"].is_null() {
+                return Err(error("pc4_local_response_not_http"));
+            }
+            0
+        } else {
+            if !v["source"].is_null() {
+                return Err(error("pc4_online_source_invalid"));
+            }
+            v["status"]
+                .as_u64()
+                .and_then(|n| u16::try_from(n).ok())
+                .ok_or_else(|| error("pc4_online_response_invalid"))?
+        };
         let content_range = v["content_range"].as_str().map(str::to_owned);
         let bytes: Vec<u8> = serde_json::from_value(v["bytes"].clone())
             .map_err(|_| error("pc4_online_response_invalid"))?;
@@ -1077,6 +1088,11 @@ impl WasmWorkerJobRuntime {
             .and_then(|execution| execution.online_pc4.as_mut())
             .and_then(|online| online.as_mut().ok())
             .ok_or_else(|| error("pc4_online_job_missing"))?;
+        if local {
+            return online
+                .admit_local_slice(lookup, id, bytes, job.scope.execution_control())
+                .map_err(error);
+        }
         online
             .admit_range(
                 lookup,

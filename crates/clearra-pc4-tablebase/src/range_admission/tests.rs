@@ -96,6 +96,66 @@ fn partial_http(request: &RangeRequest, bytes: Vec<u8>) -> RangeHttpResponse {
 }
 
 #[test]
+fn verified_local_slice_keeps_byte_binding_budgets_without_fabricating_http() {
+    let (request, guard) = fixture();
+    let make_session = || {
+        RangeAdmissionSession::new(
+            request.lookup_session(),
+            request.snapshot().clone(),
+            limits(64, 128, 4, 1),
+        )
+    };
+    let bytes = vec![0; request.length() as usize];
+    let mut local = make_session();
+    let accepted = local
+        .admit(
+            &request,
+            attempt(1, 1),
+            RangeAdmissionInput::VerifiedLocalSlice(Box::new(response(&request, bytes.clone()))),
+            &guard,
+        )
+        .unwrap();
+    assert_eq!(
+        accepted,
+        RangeAdmissionOutcome::PartialContent(response(&request, bytes))
+    );
+    assert_eq!(local.usage().admitted_bytes(), u64::from(request.length()));
+    for binding in [0, 1, 2] {
+        let mut bad = response(&request, vec![0; request.length() as usize]);
+        match binding {
+            0 => bad.offset += 1,
+            1 => bad.artifact_content_identity.push('x'),
+            _ => {
+                bad.bytes.pop();
+            }
+        }
+        let mut session = make_session();
+        assert!(session
+            .admit(
+                &request,
+                attempt(1, 1),
+                RangeAdmissionInput::VerifiedLocalSlice(Box::new(bad)),
+                &guard
+            )
+            .is_err());
+        assert_eq!(session.usage().admitted_bytes(), 0);
+    }
+    let mut cancelled = guard.clone();
+    cancelled.cancelled = true;
+    assert!(make_session()
+        .admit(
+            &request,
+            attempt(1, 1),
+            RangeAdmissionInput::VerifiedLocalSlice(Box::new(response(
+                &request,
+                vec![0; request.length() as usize]
+            ))),
+            &cancelled
+        )
+        .is_err());
+}
+
+#[test]
 fn exact_206_is_admitted_and_accounted_once() {
     let (request, guard) = fixture();
     let mut session = RangeAdmissionSession::new(

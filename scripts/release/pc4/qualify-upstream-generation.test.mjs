@@ -25,6 +25,20 @@ test('completion declaration and independent reader qualification enable only Js
   assert.deepEqual(result.profiles[3].target_lines, [4]);
   assert.equal(result.profiles[0].status, 'unavailable');
 });
+
+test('qualification batches three dependency stages without dropping any sample evidence', async () => {
+  const f = data();
+  const baseline = await qualifyPc4UpstreamGeneration({}, { discover: async () => f.discovery, reader: f.reader });
+  const stages = [];
+  f.reader.readMany = async demands => {
+    stages.push(demands.map(d => [d.artifact.path, d.offset, d.length]));
+    return Promise.all(demands.map(d => f.reader.read(d.artifact, d.offset, d.length)));
+  };
+  const result = await qualifyPc4UpstreamGeneration({}, { discover: async () => f.discovery, reader: f.reader });
+  assert.deepEqual(result, baseline);
+  assert.deepEqual(stages.map(s => s.length), [2, 4, 2]);
+  assert.ok(stages[2].every(d => d[0] === 'graph.bin'));
+});
 test('changed graph or index never retains stale readiness', async () => {
   const f = data();
   f.files.get('graph_offsets.u32.bin')[24] = 26;

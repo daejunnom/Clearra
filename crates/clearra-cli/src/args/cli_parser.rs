@@ -132,6 +132,7 @@ impl ParsedCliInvocation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParsedCliCommand {
+    Tablebase(Vec<String>),
     Pc(PcArgs),
     PcScenario(PcScenarioArgs),
     Path(PathArgs),
@@ -223,9 +224,20 @@ impl CliHelpTopic {
             &TranslationKey::new("cli.help.top_level"),
             "Clearra command line",
         );
+        let download_hint = if matches!(self, Self::TopLevel) {
+            match language {
+                LanguageId::Ko => "\n킥테이블별 TB 다운로드·상태·삭제: clearra tablebase --help",
+                LanguageId::Ja => {
+                    "\nキックテーブル別TBのダウンロード・状態確認・削除: clearra tablebase --help"
+                }
+                _ => "\nPer-kick-table TB downloads, status and removal: clearra tablebase --help",
+            }
+        } else {
+            ""
+        };
         if language == LanguageId::Ja {
             return CliOutput::success(format!(
-                "{title}\n{}",
+                "{title}\n{}{download_hint}",
                 super::japanese_help_draft::help_body(self)
             ));
         }
@@ -233,7 +245,7 @@ impl CliHelpTopic {
             return CliOutput::success(format!("{title}\n{}", topic.help_body()));
         }
         CliOutput::success(format!(
-            "{title}\n{}",
+            "{title}\n{}{download_hint}",
             match self {
                 Self::TopLevel => {
                     "usage: clearra [--format text|json|ctk3|fumen] [--lang en|ko|ja] [--verbose] [--verbose-paths] [--include-solution-data] [--solution-output PATH] [--solution-artifact-format compact|json|ctk3|fumen] <pc|pc-scenario|pc-replay|percent|failed-queue|setup-finder|build|build-probability|finesse|damage|spin-finder|ren|spin-structure|build-coverage|rules|scoring|convert|continue|sfinder> [options]\nglobal options may appear before or after the command\nfinesse search: clearra finesse search --base-mask HEX --target-mask HEX --height N (--queue QUEUE | --patterns PATTERN) [--hold empty|PIECE|--no-hold] [--pattern-knowledge both|oracle|visible-7] [--rule RULE]\nfinesse score: clearra finesse score --initial-mask HEX --height N --placements PIECE:rotation:x:y,... (--queue QUEUE | --patterns PATTERN) [--hold empty|PIECE|--no-hold] [--pattern-knowledge both|oracle|visible-7] [--rule RULE]\nbuild-probability finesse: add --finesse inputs [--pattern-knowledge both|oracle|visible-7]\nspin-structure searches an unordered piece inventory and keeps Regular and Mini structures separate; it does not change spin-finder, damage, or ren\nspin-structure usage: --pieces IOTSZ [--spin-profile t-spins|t-spins-plus|all-mini|all-mini-plus|all-spin|all-spin-plus] [--lines any|0..4|1+..4+] [--height 4..24] [--fill-bottom N --fill-top N] [--minimality subset-minimal|minimum-piece-count] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads]\n--include-solution-data is a JSON-only host integration surface for exact document export data\n--solution-output atomically creates a new typed solution-set artifact; compact is the default and --solution-artifact-format selects compact, JSON, native CTK3, or native Fumen. Existing targets and symlink parents are rejected\nNative CTK3/Fumen encoding has no JavaScript, subprocess, network, or browser runtime dependency\nlegacy Clearra aliases: path=pc-replay, setup=setup-finder, cover=build-coverage\nSfinder-man-style native mappings are isolated under: clearra sfinder <command>; they are not complete solution-finder 1.43 CLI parity\ntry opening preset: clearra pc --lines 2"

@@ -2,6 +2,7 @@
 // The prior bundled pruning data is not loaded by the public HF control.
 import { qualifyPc4UpstreamGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 import type { Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
+import { localPc4Status } from './pc4LocalStore';
 
 export type Pc4TablebaseAssetBundle = { generation: Pc4HostGeneration; byteLength: number };
 let cached: Pc4TablebaseAssetBundle | null = null;
@@ -14,7 +15,9 @@ export function prewarmPc4TablebaseAssets(): Promise<Pc4TablebaseAssetBundle> {
   if (active) return active;
   const token = ++epoch;
   controller = new AbortController();
-  active = qualifyPc4UpstreamGeneration({ signal: controller.signal }).then((generation) => {
+  const signal = controller.signal;
+  active = localPc4Status().then(async local => local
+    ? local.generation : qualifyPc4UpstreamGeneration({ signal })).then((generation) => {
     if (token !== epoch) throw new DOMException('PC4 preparation cancelled', 'AbortError');
     cached = { generation, byteLength: generation.transferred_bytes };
     checkedAt = Date.now();

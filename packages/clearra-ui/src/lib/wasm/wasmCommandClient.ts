@@ -1024,7 +1024,8 @@ type ClearraWasmWorkerEventBase = {
   job_id: number;
   /** Host I/O observations only; never completeness or scheduling authority. */
   pc4_online?: {
-    provider: 'hf-graph';
+    provider: 'hf-graph' | 'local-graph';
+    local_bytes?: number;
     profile: string;
     revision: string;
     requests: number;

@@ -12,6 +12,7 @@ mod input;
 pub mod output;
 mod rules;
 mod scoring;
+mod tablebase_download;
 mod tie_snapshot;
 mod typed_document_utility_cli;
 

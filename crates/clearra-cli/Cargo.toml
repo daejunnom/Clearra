@@ -10,10 +10,11 @@ autotests = false
 workspace = true
 
 [features]
-default = []
+default = ["online-pc4-tablebase"]
 native-c-core = ["clearra-app/native-c-core"]
 wasm-cpu-runtime = ["clearra-app/parallel"]
 webgpu-search = ["clearra-app/webgpu-search"]
+online-pc4-tablebase = ["clearra-app/online-pc4-tablebase"]
 
 [[bin]]
 name = "clearra"

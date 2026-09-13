@@ -117,19 +117,57 @@ test('queued transport snapshots descriptors and keeps the active-request bound'
   } finally { f.reader.dispose(); }
 });
 
-test('exact/window A/B returns identical bytes for a clustered lookup demand trace', async t => {
-  const exact = fixture({ windowBytes: 0 }), windowed = fixture();
+test('exact/window/batch A/B returns identical bytes for a clustered lookup demand trace', async t => {
+  const exact = fixture({ windowBytes: 0 }), windowed = fixture(), batched = fixture();
   try {
     const trace = Array.from({ length: 320 }, (_, i) => [Math.floor(i / 40) * 16_384 + (i % 40) * 8, 8]);
+    const batch = await batched.reader.readMany(trace.map(([offset, length]) => ({ artifact, offset, length })));
+    for (const [index, [offset, length]] of trace.entries()) assert.deepEqual(batch[index], values(offset, length));
     for (const [offset, length] of trace) {
       assert.deepEqual(await windowed.reader.read(artifact, offset, length), await exact.reader.read(artifact, offset, length));
     }
     assert.equal(exact.reader.requests, 320); assert.equal(windowed.reader.requests, 8);
     assert.equal(windowed.reader.cacheHits, 312);
+    assert.equal(batched.reader.requests, 8); assert.equal(batched.reader.bytes, 2_560);
     t.diagnostic(JSON.stringify({ evidence: 'synthetic-byte-trace-not-search-timing', logical_reads: 320,
       exact_requests: exact.reader.requests, window_requests: windowed.reader.requests,
-      exact_bytes: exact.reader.bytes, window_bytes: windowed.reader.bytes }));
-  } finally { exact.reader.dispose(); windowed.reader.dispose(); }
+      exact_bytes: exact.reader.bytes, window_bytes: windowed.reader.bytes,
+      batch_requests: batched.reader.requests, batch_bytes: batched.reader.bytes }));
+  } finally { exact.reader.dispose(); windowed.reader.dispose(); batched.reader.dispose(); }
+});
+
+test('explicit batch merges known nearby intervals, retains order, identity and independent result buffers', async () => {
+  const f = fixture({ maxConcurrent: 2 });
+  const other = { ...artifact, path: 'other.bin' };
+  const demands = [
+    { artifact, offset: 9_000, length: 8 }, { artifact, offset: 16, length: 8 },
+    { artifact, offset: 0, length: 16 }, { artifact, offset: 816, length: 8 },
+    { artifact: other, offset: 0, length: 8 }, { artifact, offset: 16, length: 8 }
+  ];
+  try {
+    const result = await f.reader.readMany(demands);
+    demands.forEach((d, i) => assert.deepEqual(result[i], values(d.offset, d.length)));
+    result[1][0] = 255;
+    assert.deepEqual(result[5], values(16, 8));
+    assert.equal(f.reader.requests, 3); assert.equal(f.reader.bytes, 840); assert.equal(f.reader.reads, 6);
+    assert.equal(f.peak, 2);
+    assert.deepEqual(f.ranges.map(r => [r.start, r.end]), [[0, 823], [9_000, 9_007], [0, 7]]);
+  } finally { f.reader.dispose(); }
+});
+
+test('batch validates every demand before any I/O and preserves the maximum transfer span', async () => {
+  const f = fixture();
+  const d = { artifact, offset: 0, length: 8 };
+  try {
+    await assert.rejects(f.reader.readMany([d, { ...d, offset: -1 }]), { code: 'pc4_online_range_invalid' });
+    await assert.rejects(f.reader.readMany(Array(513).fill(d)), { code: 'pc4_online_batch_invalid' });
+    await assert.rejects(f.reader.readMany([d], { maxGapBytes: 4_097 }), { code: 'pc4_online_batch_invalid' });
+    assert.equal(f.reader.requests, 0);
+    const demands = [{ ...d, length: 65_536 }, { ...d, offset: 65_536 }];
+    const results = await f.reader.readMany(demands);
+    assert.equal(f.reader.requests, 2);
+    demands.forEach((r, i) => assert.deepEqual(results[i], values(r.offset, r.length)));
+  } finally { f.reader.dispose(); }
 });
 
 test('invalid limits and identities fail before opening a connection', async () => {

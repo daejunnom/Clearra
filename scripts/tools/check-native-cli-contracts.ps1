@@ -38,6 +38,9 @@ try {
         & cargo test --locked --offline -p clearra-cli --features native-c-core `
             --test process_e2e -j 2 -- --test-threads=2
         if ($LASTEXITCODE -ne 0) { throw "native CLI process contracts failed: $LASTEXITCODE" }
+        & cargo test --locked --offline -p clearra-cli --features native-c-core `
+            --lib tablebase_download -j 2 -- --test-threads=2
+        if ($LASTEXITCODE -ne 0) { throw "native TB download contracts failed: $LASTEXITCODE" }
     } finally { Pop-Location }
 } finally {
     $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $previousFlags

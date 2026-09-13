@@ -11,6 +11,7 @@
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
   import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
+  import Pc4DownloadControl from './Pc4DownloadControl.svelte';
   import type { WorkerAuthorityReport } from '../wasm';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
@@ -233,6 +234,7 @@
         </label>
         <small class="workspace-field-help">{label('tablebaseHelp')}</small>
         <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
+        <Pc4DownloadControl {language} />
         {#if request.tablebaseEnabled && tablebaseProfiles.length > 0}
           <ul class="tablebase-profiles">
             {#each tablebaseProfiles as slot}

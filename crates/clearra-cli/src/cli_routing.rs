@@ -10,11 +10,16 @@ use crate::{
     },
     typed_document_utility_cli::prepare_native_typed_utility,
 };
+#[cfg(all(
+    feature = "wasm-cpu-runtime",
+    any(test, not(feature = "online-pc4-tablebase"))
+))]
+use clearra_app::AppTablebaseSession;
 use clearra_app::{io::AppFilePolicy, AppContext, AppStatus};
 #[cfg(feature = "wasm-cpu-runtime")]
-use clearra_app::{AppCoreExecutorService, AppServices, AppTablebaseSession};
+use clearra_app::{AppCoreExecutorService, AppServices};
 
-#[cfg(feature = "wasm-cpu-runtime")]
+#[cfg(all(feature = "wasm-cpu-runtime", not(feature = "online-pc4-tablebase")))]
 const PC4_COMPACT_TABLEBASE: &[u8] =
     include_bytes!("../../../apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin");
 
@@ -39,6 +44,23 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
     let explicit_ties = invocation.explicit_ties().clone();
     let output = file_input_guard::with_verbose_paths(verbose_paths, || {
         let command = invocation.into_command();
+        if let ParsedCliCommand::Tablebase(args) = &command {
+            if explicit_ties.active()
+                || solution_artifact_output.is_some()
+                || solution_stdout_format.is_some()
+                || include_solution_data
+            {
+                return CliOutput::error(
+                    CliErrorCode::CliInvalidValue,
+                    "tablebase management does not return a solution set",
+                );
+            }
+            return crate::tablebase_download::run(
+                args,
+                language,
+                matches!(format, crate::output::RenderFormat::Json),
+            );
+        }
         if let ParsedCliCommand::Help(topic) = command {
             if solution_artifact_output.is_some() || solution_stdout_format.is_some() {
                 return CliOutput::error(
@@ -138,7 +160,9 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
                         .windows(2)
                         .any(|pair| pair[0] == "pc" && pair[1] == "tiling")
         );
-        #[cfg(feature = "wasm-cpu-runtime")]
+        #[cfg(feature = "online-pc4-tablebase")]
+        let local_tablebase = command_requests_tablebase(&command);
+        #[cfg(all(feature = "wasm-cpu-runtime", not(feature = "online-pc4-tablebase")))]
         let _tablebase_session = match tablebase_session_for_command(&command) {
             Ok(session) => session,
             Err(output) => return output,
@@ -154,10 +178,22 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             .request()
             .with_language(language)
             .with_file_policy(AppFilePolicy::new(verbose_paths));
-        let response = product_app_context()
+        let context = product_app_context()
             .with_language(language)
-            .with_file_policy(AppFilePolicy::new(verbose_paths))
-            .run(request);
+            .with_file_policy(AppFilePolicy::new(verbose_paths));
+        #[cfg(feature = "online-pc4-tablebase")]
+        let response = if local_tablebase {
+            match crate::tablebase_download::execute_local(context, request) {
+                Ok(response) => response,
+                Err(reason) => {
+                    return CliOutput::error(CliErrorCode::TablebaseInstallFailed, reason)
+                }
+            }
+        } else {
+            context.run(request)
+        };
+        #[cfg(not(feature = "online-pc4-tablebase"))]
+        let response = context.run(request);
         if let Some(plan) = typed_document_plan.as_ref() {
             if response.status() == AppStatus::Success {
                 return render_typed_document_utility_success(&response, plan, render_format);
@@ -257,23 +293,37 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
     }
 }
 
-#[cfg(feature = "wasm-cpu-runtime")]
+#[cfg(all(feature = "wasm-cpu-runtime", not(feature = "online-pc4-tablebase")))]
 fn tablebase_session_for_command(
     command: &ParsedCliCommand,
 ) -> Result<Option<AppTablebaseSession>, CliOutput> {
-    let requested = match command {
+    let requested = command_requests_tablebase(command);
+    install_requested_tablebase(requested, PC4_COMPACT_TABLEBASE)
+}
+
+#[cfg(any(feature = "wasm-cpu-runtime", feature = "online-pc4-tablebase"))]
+fn command_requests_tablebase(command: &ParsedCliCommand) -> bool {
+    match command {
         ParsedCliCommand::Pc(args) => args.tablebase_requested() == Some(true),
         ParsedCliCommand::FailedQueue(args) => args.pc().tablebase_requested() == Some(true),
         ParsedCliCommand::Setup(args) => args.tablebase_requested() == Some(true),
         ParsedCliCommand::Product(tokens) => tokens
             .iter()
-            .any(|token| matches!(token.as_str(), "--tablebase" | "--tb")),
+            .rev()
+            .find_map(|token| match token.as_str() {
+                "--tablebase" | "--tb" => Some(true),
+                "--no-tablebase" | "--no-tb" => Some(false),
+                _ => None,
+            })
+            .unwrap_or(false),
         _ => false,
-    };
-    install_requested_tablebase(requested, PC4_COMPACT_TABLEBASE)
+    }
 }
 
-#[cfg(feature = "wasm-cpu-runtime")]
+#[cfg(all(
+    feature = "wasm-cpu-runtime",
+    any(test, not(feature = "online-pc4-tablebase"))
+))]
 fn install_requested_tablebase(
     requested: bool,
     artifact: &[u8],
