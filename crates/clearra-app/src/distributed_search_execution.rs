@@ -5,6 +5,10 @@
 // bypass when materializing the canonical App response.
 use std::sync::Arc;
 
+#[cfg(feature = "online-pc4-tablebase")]
+#[path = "pc4_candidate_product_execution.rs"]
+pub(crate) mod pc4_candidate_product;
+
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_executor::{
     CoreExecutionError, CoreExecutionResult, WasmCpuTerminalResourceAuthority,
@@ -315,7 +319,7 @@ impl PreparedDistributedSearch {
         } = self;
         drop(problem);
         Ok(
-            crate::CooperativeAppExecution::from_distributed_product_result(
+            crate::CooperativeAppExecution::from_precomputed_product_result(
                 context,
                 result,
                 response_kind,

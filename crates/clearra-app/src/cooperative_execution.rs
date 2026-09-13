@@ -2106,11 +2106,11 @@ impl CooperativeAppExecution {
     }
 
     /// Reuses the ordinary postprocess/finalizer state machine after a
-    /// distributed producer has supplied its complete Core result. No search
-    /// is repeated. Exact minimum proof and paged replay source construction
+    /// validated precomputed producer has supplied its complete Core result.
+    /// No search is repeated. Exact minimum proof and paged replay source construction
     /// remain owned by this cursor instead of invoking blocking finalization.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_distributed_product_result(
+    pub(crate) fn from_precomputed_product_result(
         context: AppContext,
         result: clearra_core_executor::CoreExecutionResult,
         response_kind: CooperativeSearchResponseKind,

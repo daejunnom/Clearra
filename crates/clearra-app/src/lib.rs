@@ -204,6 +204,10 @@ pub use cooperative_execution::{
 pub use distributed_forward_execution::{
     DistributedForwardPreparation, PreparedDistributedForwardSearch,
 };
+#[cfg(feature = "online-pc4-tablebase")]
+pub use distributed_search_execution::pc4_candidate_product::{
+    Pc4CandidateProductError, Pc4CandidateProductExecution,
+};
 pub use distributed_search_execution::{
     DistributedSearchPreparation, PreparedDistributedBuildMinimumCompletion,
     PreparedDistributedPcScoreCompletion, PreparedDistributedSearch,

@@ -20,6 +20,9 @@ use crate::{
 
 const ROW: u64 = 1023;
 
+#[path = "pc4_range_product_contract_tests.rs"]
+mod product_contracts;
+
 struct ClearPath {
     dataset: RangeDataset,
     initial_board: u64,
@@ -87,6 +90,7 @@ fn clear_path(lines: u8) -> ClearPath {
 }
 
 fn assert_clear_path(lines: u8) {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let fixture = clear_path(lines);
     let target_lines = Pc4TargetLines::new(lines).unwrap();
     for profile in Pc4RuleProfile::ALL {
@@ -271,6 +275,13 @@ fn assert_clear_path(lines: u8) {
                 "every retained provenance must replay to PC"
             );
         }
+        product_contracts::assert_product_parity(
+            lines,
+            profile,
+            fixture.initial_board,
+            reducer,
+            &guard,
+        );
     }
 }
 
