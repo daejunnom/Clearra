@@ -81,8 +81,10 @@ The owned score extension adds another three products for each of the same
 typed public score payload, including field scores, fixed-score selection and
 the first canonical score-minimum portfolio. Separate tests cover exact memory
 boundaries/overflow, rejected-candidate lease release, spare vector/string
-capacity, and incomplete/cancelled/stale consuming handoffs. These new cases
-are pending exact-source CI until a terminal passing result is recorded below.
+capacity, and incomplete/cancelled/stale consuming handoffs. These cases passed
+the exact-source PC4 job recorded below. An additional score-summary/portfolio
+revocation check now covers source invalidation after Core and on both sides
+of the first advance, lease reuse after rejection, and non-resurrection.
 
 ## Evidence status
 
@@ -120,7 +122,7 @@ non-publishing PC4 CI run. No policy bypass was attempted.
 
 Actual HF completeness (including the 13 unresolved nonempty edges), exact
 profile provenance, missing variant-specific indices, ordinary finite resource
-authority, hold/pattern composition, owned score CI, transports and
+authority, hold/pattern composition, transports and
 production activation remain open in the implementation plan.
 
 The first submitted product-adapter run, `34739031424` on `e905f9d`, passed
@@ -138,3 +140,12 @@ query override to a typed-score request whose existing contract forbids it.
 The correction uses the canonical CPU/no-fallback/pattern-cap policy and
 the existing Jstris Ultra/T-spins contract for fixed-score. Product validation
 is not relaxed. The new Core unused-must-use test warning is corrected too.
+
+On `3d7da6ed2df15b447c58252a1f00128524ee01ca`, non-publishing run
+[34740735499](https://github.com/daejunnom/Clearra/actions/runs/34740735499)
+passed the PC4 job: Core materializer **7**, parent-authorized verifier **5**,
+Tablebase **157**, App **67**, zero failures. The App phase took **2.01 s** and
+executed all 140 paired product cases, including the 60 owned score cases.
+Source and surface jobs also passed. Native CLI was still running at that
+check; no full-run completion or speedup is claimed yet. Later additions to
+the revocation test require their own exact-source check.

@@ -214,6 +214,9 @@ pub(super) fn assert_owned_score_product_parity<G: PcCandidatePageGuard>(
             Err(Pc4CandidateProductError::AlreadyFinished)
         ));
     }
+    if lines == 1 && profile == Pc4RuleProfile::Srs {
+        assert_owned_score_revocation(&context, initial, &input, guard);
+    }
     for limit in [0, 64] {
         let finite_override = request(lines, profile, initial, Product::Score)
             .with_resource_budget(ResourceBudget::new(1, None, Some(limit)));
@@ -227,6 +230,66 @@ pub(super) fn assert_owned_score_product_parity<G: PcCandidatePageGuard>(
             Err(Pc4CandidateProductError::Terminal(
                 "pc4_score_request_memory_limit_binding_mismatch"
             ))
+        ));
+    }
+}
+
+fn assert_owned_score_revocation<G: PcCandidatePageGuard>(
+    context: &AppContext,
+    initial: u64,
+    input: &PcCandidateReducerInput,
+    guard: &G,
+) {
+    for product in [Product::Score, Product::ScoreMinimum] {
+        let request = request(1, Pc4RuleProfile::Srs, initial, product);
+        assert!(matches!(
+            context.start_pc4_candidate_product(
+                request.clone(),
+                input,
+                guard,
+                &ExecutionControl::default(),
+            ),
+            Err(Pc4CandidateProductError::UnsupportedProduct)
+        ));
+
+        let revoked_after_core = RevokingGuard {
+            inner: guard,
+            snapshots_remaining: Cell::new(3),
+        };
+        assert!(matches!(
+            context.start_pc4_owned_candidate_product(
+                request.clone(),
+                input.clone(),
+                &revoked_after_core,
+                &ExecutionControl::default(),
+            ),
+            Err(Pc4CandidateProductError::Source(
+                PcCandidateBoundaryError::StaleSnapshot
+            ))
+        ));
+        // Fresh admission after rejection proves the prior request and compute
+        // child were dropped, not stranded in the failed score callback.
+        let mut execution = context
+            .start_pc4_owned_candidate_product(
+                request,
+                input.clone(),
+                guard,
+                &ExecutionControl::default(),
+            )
+            .expect("the score authority is reusable after source revocation");
+        let revoke_during_advance = RevokingGuard {
+            inner: guard,
+            snapshots_remaining: Cell::new(1),
+        };
+        assert!(matches!(
+            execution.advance(256, &revoke_during_advance, &ExecutionControl::default()),
+            Err(Pc4CandidateProductError::Source(
+                PcCandidateBoundaryError::StaleSnapshot
+            ))
+        ));
+        assert!(matches!(
+            execution.advance(256, guard, &ExecutionControl::default()),
+            Err(Pc4CandidateProductError::AlreadyFinished)
         ));
     }
 }
