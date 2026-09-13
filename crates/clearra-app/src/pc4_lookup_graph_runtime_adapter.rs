@@ -5,6 +5,7 @@
 // terminal decisions, reducers, fallback, and product activation stay outside.
 
 use core::{fmt, mem::size_of, num::NonZeroUsize};
+use std::collections::HashMap;
 
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_core_executor::{
@@ -223,6 +224,12 @@ pub struct Pc4LookupGraphCache {
     limits: Pc4LookupGraphCacheLimits,
     usage: Pc4LookupGraphCacheUsage,
     entries: Vec<Pc4LookupGraphCacheEntry>,
+    // Lookups are in graph-ID order, not insertion order. Linear scans here
+    // make admitting R distinct records quadratic and repeat that scan for
+    // every traversal/materialization edge. These indexes are never iterated
+    // to produce results, so randomized hash order cannot change canonicality.
+    by_id: HashMap<u32, usize>,
+    by_hash: HashMap<u64, u32>,
 }
 
 impl Pc4LookupGraphCache {
@@ -250,6 +257,8 @@ impl Pc4LookupGraphCache {
             limits,
             usage: Pc4LookupGraphCacheUsage::default(),
             entries: Vec::new(),
+            by_id: HashMap::new(),
+            by_hash: HashMap::new(),
         })
     }
 
@@ -307,14 +316,10 @@ impl Pc4LookupGraphCache {
                 })
             };
         }
-        if let Some(existing) = self
-            .entries
-            .iter()
-            .find(|entry| entry.field_hash == hit.field_hash)
-        {
+        if let Some(&existing_field_id) = self.by_hash.get(&hit.field_hash) {
             return Err(Pc4LookupGraphCacheError::FieldHashMappedToDifferentId {
                 field_hash: hit.field_hash,
-                existing_field_id: existing.field_id,
+                existing_field_id,
                 actual_field_id: hit.field_id,
             });
         }
@@ -372,6 +377,16 @@ impl Pc4LookupGraphCache {
         self.entries
             .try_reserve(1)
             .map_err(|_| Pc4LookupGraphCacheError::AllocationFailed)?;
+        // Reserve all owners before publishing anything: allocation failure
+        // must not admit a half-indexed record or change semantic accounting.
+        self.by_id
+            .try_reserve(1)
+            .map_err(|_| Pc4LookupGraphCacheError::AllocationFailed)?;
+        self.by_hash
+            .try_reserve(1)
+            .map_err(|_| Pc4LookupGraphCacheError::AllocationFailed)?;
+        self.by_id.insert(hit.field_id, self.entries.len());
+        self.by_hash.insert(hit.field_hash, hit.field_id);
         self.entries.push(Pc4LookupGraphCacheEntry {
             field_id: hit.field_id,
             field_hash: hit.field_hash,
@@ -440,7 +455,11 @@ impl Pc4LookupGraphCache {
     }
 
     fn entry(&self, field_id: u32) -> Option<&Pc4LookupGraphCacheEntry> {
-        self.entries.iter().find(|entry| entry.field_id == field_id)
+        self.by_id.get(&field_id).map(|&index| {
+            let entry = &self.entries[index];
+            debug_assert_eq!(entry.field_id, field_id);
+            entry
+        })
     }
 }
 
@@ -993,6 +1012,68 @@ mod tests {
         field_hash: u64,
     ) -> LookupHit {
         hit(target, session, field_id, field_hash, [EMPTY_TARGETS; 7])
+    }
+
+    #[test]
+    fn large_pc4_graph_cache_indexes_preserve_exact_conflicts_and_record_order() {
+        const RECORDS: u32 = 20_000;
+        let snapshot = activated_snapshot("indexed-large-cache", RECORDS + 2);
+        let qualified_target = target(&snapshot, Pc4RuleProfile::Srs, Pc4TerminalUseCase::PcSearch);
+        let mut cache = Pc4LookupGraphCache::new(
+            &snapshot,
+            qualified_target.clone(),
+            Pc4LookupGraphCacheLimits::new(
+                nonzero(RECORDS as usize),
+                nonzero(1_000_000),
+                nonzero(1),
+            ),
+        )
+        .unwrap();
+        // Intentionally not sorted: result identity cannot depend on hash or
+        // insertion ordering. 7919 is coprime with 20000.
+        for ordinal in 0..RECORDS {
+            let id = (ordinal * 7919) % RECORDS;
+            cache
+                .admit(
+                    &qualified_target,
+                    empty_hit(&qualified_target, u64::from(id) + 1, id, u64::from(id) + 1),
+                )
+                .unwrap();
+            assert_eq!(cache.entries[ordinal as usize].field_id, id);
+        }
+        for id in (0..RECORDS).rev() {
+            assert_eq!(cache.entry(id).unwrap().field_hash, u64::from(id) + 1);
+            assert_eq!(
+                cache
+                    .admit(
+                        &qualified_target,
+                        empty_hit(&qualified_target, 1, id, u64::from(id) + 1)
+                    )
+                    .unwrap(),
+                Pc4LookupGraphCacheAdmission::AlreadyPresent
+            );
+        }
+        assert!(matches!(
+            cache.admit(
+                &qualified_target,
+                empty_hit(&qualified_target, 1, RECORDS, 1)
+            ),
+            Err(Pc4LookupGraphCacheError::FieldHashMappedToDifferentId {
+                existing_field_id: 0,
+                ..
+            })
+        ));
+        assert!(cache
+            .admit(
+                &qualified_target,
+                empty_hit(&qualified_target, 1, RECORDS, 100_000)
+            )
+            .is_err());
+        assert!(!cache.contains_field_id(RECORDS));
+        assert!(!cache.by_hash.contains_key(&100_000));
+        assert_eq!(cache.by_id.len(), RECORDS as usize);
+        assert_eq!(cache.by_hash.len(), RECORDS as usize);
+        assert_eq!(cache.usage.record_count, RECORDS as usize);
     }
 
     #[test]

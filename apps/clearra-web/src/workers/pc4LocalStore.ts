@@ -1,6 +1,7 @@
 // SRP: origin-private streamed files and cross-tab lifetime. No HTTP, graph
 // traversal or fallback. One active generation + one unpublished transaction.
 import { pc4DownloadPlan } from '../../../../scripts/release/pc4/pc4-download.mjs';
+import { createPc4LocalReader } from '../../../../scripts/release/pc4/pc4-local-reader.mjs';
 import type { Pc4Artifact, Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 
 const ROOT = 'clearra-pc4-v1';
@@ -146,30 +147,24 @@ export async function openLocalPc4Reader(generation: Pc4HostGeneration, signal?:
       if (file.size !== artifact.byte_length) fail('pc4_download_local_size_mismatch');
       blobs.set(artifact.path, { artifact, file });
     }
-    let closed = false, reads = 0, bytes = 0;
+    const reader = createPc4LocalReader(plan.files, async (artifact, offset, length) => {
+      const found = blobs.get(artifact.path)!;
+      return new Uint8Array(await found.file.slice(offset, offset + length).arrayBuffer());
+    }, { signal, directPaths: [plan.files[2].path] });
     // Resolve only after Web Locks has released ownership, not merely after
     // signalling its callback. A following update/delete must not see our own
     // already-finished read as a busy search.
-    const dispose = async () => { closed = true; signal?.removeEventListener('abort', onAbort); await release(); };
+    const dispose = async () => { reader.dispose(); signal?.removeEventListener('abort', onAbort); await release(); };
     const onAbort = () => { void dispose(); };
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) { await dispose(); fail('pc4_online_cancelled'); }
     transferred = true;
     return {
-      provider: 'local-graph' as const, requests: 0, cacheHits: 0, joinedRequests: 0, retainedBytes: 0,
-      bytes: 0, get reads() { return reads; }, get localBytes() { return bytes; }, dispose,
-      async read(artifact: Pc4Artifact, offset: number, length: number) {
-        if (closed || signal?.aborted) fail('pc4_online_cancelled');
-        const found = blobs.get(artifact.path);
-        if (!found || found.artifact.content_identity !== artifact.content_identity || found.artifact.byte_length !== artifact.byte_length ||
-            !Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || length < 1 || length > 65_536 || offset < 0 ||
-            offset > found.file.size - length) fail('pc4_online_range_invalid');
-        const result = new Uint8Array(await found.file.slice(offset, offset + length).arrayBuffer());
-        if (closed || signal?.aborted) fail('pc4_online_cancelled');
-        if (result.length !== length) fail('pc4_online_truncated_range');
-        reads++; bytes += result.length;
-        return result;
-      }
+      provider: reader.provider, requests: 0, bytes: 0,
+      get reads() { return reader.reads; }, get localBytes() { return reader.localBytes; },
+      get fileReads() { return reader.fileReads; }, get cacheHits() { return reader.cacheHits; },
+      get joinedRequests() { return reader.joinedRequests; }, get retainedBytes() { return reader.retainedBytes; },
+      read: reader.read, readMany: reader.readMany, dispose
     };
   } catch (error) { if (missing(error)) return null; throw error; }
   finally { if (!transferred) await release(); }

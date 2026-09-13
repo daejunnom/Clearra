@@ -41,6 +41,7 @@ export class WasmJobRunner {
       pc4_online: { provider: 'provider' in reader ? reader.provider : 'hf-graph', profile: 'jstris-180', revision: this.onlineGeneration!.revision,
         requests: reader.requests, transferred_bytes: reader.bytes, logical_reads: reader.reads,
         local_bytes: 'localBytes' in reader ? reader.localBytes : 0,
+        local_file_reads: 'fileReads' in reader ? reader.fileReads : 0,
         cache_hits: reader.cacheHits, joined_requests: reader.joinedRequests, cache_bytes: reader.retainedBytes,
         elapsed_ms: performance.now() - onlineStarted } } as ClearraWasmWorkerEvent) : event);
     try {

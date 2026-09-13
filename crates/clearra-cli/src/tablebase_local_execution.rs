@@ -3,9 +3,10 @@
 use super::{active, reject_links, Result, FILES};
 use std::{
     fs::{File, OpenOptions},
-    io::Read,
     path::Path,
 };
+#[path = "tablebase_local_reader.rs"]
+mod local_reader;
 
 /// Lease installed files and supply bounded slices to the shared App driver.
 pub(super) fn execute_local_at(
@@ -14,10 +15,7 @@ pub(super) fn execute_local_at(
     request: clearra_app::AppRequest,
 ) -> Result<clearra_app::AppResponse> {
     use super::host_execution::{drive, HostSlice};
-    use std::{
-        collections::BTreeMap,
-        io::{Seek, SeekFrom},
-    };
+    use std::collections::BTreeMap;
     reject_links(root)?;
     reject_links(&root.join("store.lock"))?;
     let lock = OpenOptions::new()
@@ -48,7 +46,7 @@ pub(super) fn execute_local_at(
         handles.insert(
             name,
             (
-                file,
+                local_reader::LocalPc4File::new(file, length, key != "graph"),
                 length,
                 artifacts[key]["content_identity"]
                     .as_str()
@@ -78,11 +76,7 @@ pub(super) fn execute_local_at(
             {
                 return Err("tablebase: local slice identity or bounds mismatch");
             }
-            file.seek(SeekFrom::Start(offset))
-                .map_err(|_| "tablebase: cannot seek local artifact")?;
-            let mut bytes = vec![0_u8; requested as usize];
-            file.read_exact(&mut bytes)
-                .map_err(|_| "tablebase: local artifact was truncated")?;
+            let bytes = file.read(offset, requested)?;
             Ok(HostSlice::Local(bytes))
         },
     )
