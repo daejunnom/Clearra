@@ -5,12 +5,15 @@
 use core::{fmt, num::NonZeroUsize};
 use std::sync::Arc;
 
+use crate::observation_reveal_source::{
+    ObservationRevealCursor, ObservationRevealFamily, ObservationRevealSequence,
+};
 use crate::{
     expand_fixed_queue_hold, prepare_pc4_bag_reveal_family, FixedQueueHoldBudgets,
     FixedQueueHoldExpansionError, FixedQueueHoldExpansionGuard, FixedQueueHoldExpansionRequest,
-    FixedQueueHoldPath, FixedQueueHoldState, Pc4BagRevealBudgets, Pc4BagRevealCursor,
-    Pc4BagRevealFamily, Pc4BagRevealGuard, Pc4BagRevealPageError, Pc4BagRevealPrepareError,
-    Pc4BagRevealSequence, Pc4BagState, Pc4ExactProbability, Pc4GraphPiece,
+    FixedQueueHoldPath, FixedQueueHoldState, Pc4BagRevealBudgets, Pc4BagRevealGuard,
+    Pc4BagRevealPageError, Pc4BagRevealPrepareError, Pc4BagState, Pc4ExactProbability,
+    Pc4GraphPiece,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,7 +122,7 @@ where
 pub struct Pc4ObservationFrontierRequest<'a> {
     initial_visible_queue: &'a [Pc4GraphPiece],
     preview_length: usize,
-    hidden_source_state: Pc4BagState,
+    hidden_source_state: Option<Pc4BagState>,
     hidden_draws: usize,
     initial_hold: FixedQueueHoldState,
     placement_count: usize,
@@ -140,8 +143,32 @@ impl<'a> Pc4ObservationFrontierRequest<'a> {
         Self {
             initial_visible_queue,
             preview_length,
-            hidden_source_state,
+            hidden_source_state: if hidden_draws == 0 {
+                None
+            } else {
+                Some(hidden_source_state)
+            },
             hidden_draws,
+            initial_hold,
+            placement_count,
+            budgets,
+        }
+    }
+
+    /// A completely disclosed finite queue has one probability-one outcome,
+    /// even when hold permits several controllable placement orders. It needs
+    /// no bag provenance and must not draw another piece after exhaustion.
+    pub const fn fixed_queue(
+        queue: &'a [Pc4GraphPiece],
+        initial_hold: FixedQueueHoldState,
+        placement_count: usize,
+        budgets: Pc4ObservationFrontierBudgets,
+    ) -> Self {
+        Self {
+            initial_visible_queue: queue,
+            preview_length: queue.len().saturating_sub(1),
+            hidden_source_state: None,
+            hidden_draws: 0,
             initial_hold,
             placement_count,
             budgets,
@@ -156,7 +183,7 @@ impl<'a> Pc4ObservationFrontierRequest<'a> {
         self.preview_length
     }
 
-    pub const fn hidden_source_state(&self) -> Pc4BagState {
+    pub const fn hidden_source_state(&self) -> Option<Pc4BagState> {
         self.hidden_source_state
     }
 
@@ -269,7 +296,7 @@ impl std::error::Error for Pc4ObservationFrontierPageError {}
 /// must group by `terminal_observation` rather than inspect that suffix.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pc4ObservationFrontierEntry {
-    reveal: Arc<Pc4BagRevealSequence>,
+    reveal: Arc<ObservationRevealSequence>,
     hold_path_index: usize,
     concrete_supply_queue: Arc<[Pc4GraphPiece]>,
     hold_path: FixedQueueHoldPath,
@@ -298,7 +325,7 @@ impl Pc4ObservationFrontierEntry {
         self.reveal.probability()
     }
 
-    pub fn terminal_bag_state(&self) -> Pc4BagState {
+    pub fn terminal_bag_state(&self) -> Option<Pc4BagState> {
         self.reveal.terminal_state()
     }
 
@@ -375,8 +402,8 @@ impl Pc4ObservationFrontierPage {
 #[derive(Clone, Debug)]
 pub struct Pc4ObservationFrontierCursor {
     family_token: Arc<()>,
-    reveal_cursor: Pc4BagRevealCursor,
-    pending_reveal: Option<Arc<Pc4BagRevealSequence>>,
+    reveal_cursor: ObservationRevealCursor,
+    pending_reveal: Option<Arc<ObservationRevealSequence>>,
     pending_hold_path_index: usize,
     next_entry_index: u128,
     exhausted: bool,
@@ -413,7 +440,7 @@ impl Pc4ObservationFrontierCursor {
 pub struct Pc4ObservationFrontierFamily {
     queue_scope: Pc4ObservationQueueScope,
     observation_width: usize,
-    reveal_family: Pc4BagRevealFamily,
+    reveal_family: ObservationRevealFamily,
     budgets: Pc4ObservationFrontierBudgets,
     cursor_token: Arc<()>,
 }
@@ -426,7 +453,7 @@ pub struct Pc4ObservationFrontierFamily {
 pub struct Pc4ObservationQueueScope {
     initial_visible_queue: Vec<Pc4GraphPiece>,
     preview_length: usize,
-    hidden_source_state: Pc4BagState,
+    hidden_source_state: Option<Pc4BagState>,
     hidden_draws: usize,
     initial_hold: FixedQueueHoldState,
     placement_count: usize,
@@ -441,7 +468,7 @@ impl Pc4ObservationQueueScope {
         self.preview_length
     }
 
-    pub const fn hidden_source_state(&self) -> Pc4BagState {
+    pub const fn hidden_source_state(&self) -> Option<Pc4BagState> {
         self.hidden_source_state
     }
 
@@ -471,7 +498,7 @@ impl Pc4ObservationFrontierFamily {
         self.queue_scope.preview_length()
     }
 
-    pub const fn hidden_source_state(&self) -> Pc4BagState {
+    pub const fn hidden_source_state(&self) -> Option<Pc4BagState> {
         self.queue_scope.hidden_source_state()
     }
 
@@ -495,7 +522,7 @@ impl Pc4ObservationFrontierFamily {
         self.budgets
     }
 
-    pub(crate) fn reveal_family(&self) -> Pc4BagRevealFamily {
+    pub(crate) fn reveal_family(&self) -> ObservationRevealFamily {
         self.reveal_family.clone()
     }
 
@@ -719,13 +746,22 @@ where
         .try_reserve_exact(request.initial_visible_queue.len())
         .map_err(|_| Pc4ObservationFrontierPrepareError::AllocationFailed)?;
     initial_visible_queue.extend_from_slice(request.initial_visible_queue);
-    let reveal_family = prepare_pc4_bag_reveal_family(
-        request.hidden_source_state,
-        request.hidden_draws,
-        request.budgets.reveal(),
-        &GuardAdapter(guard),
-    )
-    .map_err(map_reveal_prepare_error)?;
+    let reveal_family = match request.hidden_source_state {
+        Some(state) => ObservationRevealFamily::Bag(
+            prepare_pc4_bag_reveal_family(
+                state,
+                request.hidden_draws,
+                request.budgets.reveal(),
+                &GuardAdapter(guard),
+            )
+            .map_err(map_reveal_prepare_error)?,
+        ),
+        // Request constructors only omit bag state for zero hidden draws.
+        None => ObservationRevealFamily::fixed(
+            NonZeroUsize::new(request.budgets.reveal().page_sequences())
+                .expect("reveal budgets contain nonzero page limits"),
+        ),
+    };
     check_prepare_guard(guard)?;
 
     Ok(Pc4ObservationFrontierFamily {
@@ -909,6 +945,104 @@ mod tests {
             entries.extend_from_slice(page.entries());
         }
         entries
+    }
+
+    #[test]
+    fn fixed_queue_hold_branches_are_complete_without_hidden_bag_state() {
+        for (queue, hold, placements) in [
+            (
+                vec![Pc4GraphPiece::I, Pc4GraphPiece::O],
+                FixedQueueHoldState::Disabled,
+                2,
+            ),
+            (
+                vec![Pc4GraphPiece::O, Pc4GraphPiece::I],
+                FixedQueueHoldState::Empty,
+                1,
+            ),
+            (
+                vec![Pc4GraphPiece::I],
+                FixedQueueHoldState::Occupied(Pc4GraphPiece::O),
+                1,
+            ),
+        ] {
+            let request =
+                Pc4ObservationFrontierRequest::fixed_queue(&queue, hold, placements, budgets());
+            assert_eq!(request.hidden_source_state(), None);
+            assert_eq!(request.hidden_draws(), 0);
+            let family =
+                prepare_pc4_observation_frontier(request, &|| false).expect("fixed frontier");
+            assert_eq!(family.hidden_source_state(), None);
+            assert_eq!(family.total_reveal_sequences(), 1);
+            let expected = expand_fixed_queue_hold(
+                FixedQueueHoldExpansionRequest::new(&queue, hold, placements, budgets().hold()),
+                &|| false,
+            )
+            .expect("independent hold expansion");
+            let one = drain(&family, 1);
+            assert_eq!(one, drain(&family, 8));
+            assert_eq!(
+                one.iter()
+                    .map(|entry| entry.hold_path())
+                    .collect::<Vec<_>>(),
+                expected.paths().iter().collect::<Vec<_>>()
+            );
+            assert!(one.iter().all(|entry| entry.reveal_rank() == 0
+                && entry.revealed_pieces().is_empty()
+                && entry.terminal_bag_state().is_none()
+                && entry.concrete_supply_queue() == queue
+                && entry.probability() == Pc4ExactProbability::one()));
+        }
+    }
+
+    #[test]
+    fn fixed_queue_exhaustion_never_promotes_hold_to_a_new_current_piece() {
+        let family = prepare_pc4_observation_frontier(
+            Pc4ObservationFrontierRequest::fixed_queue(
+                &[Pc4GraphPiece::O],
+                FixedQueueHoldState::Occupied(Pc4GraphPiece::I),
+                2,
+                budgets(),
+            ),
+            &|| false,
+        )
+        .expect("bounded queue frontier");
+        assert!(drain(&family, 1).is_empty());
+        assert_eq!(family.total_reveal_sequences(), 1);
+        assert!(matches!(
+            prepare_pc4_observation_frontier(
+                Pc4ObservationFrontierRequest::fixed_queue(
+                    &[],
+                    FixedQueueHoldState::Occupied(Pc4GraphPiece::I),
+                    1,
+                    budgets(),
+                ),
+                &|| false,
+            ),
+            Err(
+                Pc4ObservationFrontierPrepareError::InvalidVisibleQueueLength {
+                    expected: 1,
+                    actual: 0
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn zero_hidden_draws_discard_unconsumed_bag_provenance() {
+        let family = family(
+            &[Pc4GraphPiece::I],
+            0,
+            standard_state([1, 0, 0, 0, 0, 0, 0]),
+            0,
+            FixedQueueHoldState::Disabled,
+            1,
+        );
+        assert_eq!(family.queue_scope().hidden_source_state(), None);
+        let entries = drain(&family, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].terminal_bag_state(), None);
+        assert_eq!(entries[0].probability(), Pc4ExactProbability::one());
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod materializer;
 mod observation_frontier;
 mod observation_graph_traversal;
 mod observation_reveal_ledger;
+mod observation_reveal_source;
 mod protocol;
 mod range_admission;
 mod range_fragment_cache;

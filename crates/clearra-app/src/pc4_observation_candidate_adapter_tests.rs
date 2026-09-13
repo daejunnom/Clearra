@@ -27,6 +27,9 @@ use crate::pc_candidate_page_boundary::{
     PcCandidateRequestIdentity, PcCandidateSessionId, PcCandidateSourceIdentity,
 };
 
+#[path = "pc4_observation_candidate_fixed_queue_tests.rs"]
+mod fixed_queue;
+
 struct Verifier;
 
 impl DatasetSnapshotVerifier for Verifier {
@@ -180,6 +183,15 @@ fn source_with_hold(
     initial_hold: FixedQueueHoldState,
 ) -> PcCandidateSourceBinding {
     let initial_board = StandardPcBoard::empty(target.target_lines().get()).expect("empty board");
+    source_with_board_and_hold(target, prepared_input, initial_board, initial_hold)
+}
+
+fn source_with_board_and_hold(
+    target: &QualifiedPc4TargetIdentity,
+    prepared_input: &Pc4PreparedOnlineInput,
+    initial_board: StandardPcBoard,
+    initial_hold: FixedQueueHoldState,
+) -> PcCandidateSourceBinding {
     let request_identity = PcCandidateRequestIdentity::derive_pc4_candidate_universe(
         prepared_input,
         initial_board,
@@ -191,7 +203,10 @@ fn source_with_hold(
         request_identity,
         PcCandidateSourceIdentity::from_sha256([9; 32]),
         target.profile(),
-        0,
+        initial_board
+            .occupied()
+            .compact_board64()
+            .expect("compact source"),
         target.snapshot().clone(),
     )
 }
@@ -422,7 +437,23 @@ fn frontier_with(
 ) -> clearra_pc4_tablebase::Pc4ObservationFrontierFamily {
     let profile = Pc4BagProfile::new([1, 1, 0, 0, 0, 0, 0]).expect("synthetic bag");
     let state = Pc4BagState::new(profile, [1, 1, 0, 0, 0, 0, 0], 5).expect("synthetic state");
-    let budgets = Pc4ObservationFrontierBudgets::new(
+    prepare_pc4_observation_frontier(
+        Pc4ObservationFrontierRequest::new(
+            &[Pc4GraphPiece::I],
+            0,
+            state,
+            hidden_draws,
+            initial_hold,
+            placement_count,
+            frontier_budgets(),
+        ),
+        &|| false,
+    )
+    .expect("frontier")
+}
+
+fn frontier_budgets() -> Pc4ObservationFrontierBudgets {
+    Pc4ObservationFrontierBudgets::new(
         Pc4BagRevealBudgets::new(
             nonzero(8),
             nonzero(128),
@@ -438,20 +469,7 @@ fn frontier_with(
         nonzero(8),
         nonzero(8),
         nonzero(128),
-    );
-    prepare_pc4_observation_frontier(
-        Pc4ObservationFrontierRequest::new(
-            &[Pc4GraphPiece::I],
-            0,
-            state,
-            hidden_draws,
-            initial_hold,
-            placement_count,
-            budgets,
-        ),
-        &|| false,
     )
-    .expect("frontier")
 }
 
 fn graph_family(target: &QualifiedPc4TargetIdentity, guard: &Guard) -> Pc4ObservationGraphFamily {
@@ -1221,7 +1239,7 @@ fn source_board_and_profile_mismatches_are_rejected_before_session_preparation()
 }
 
 #[test]
-fn bag_free_prepared_input_cannot_authorize_arbitrary_ledger_bag_provenance() {
+fn zero_draw_prepared_input_has_one_bag_free_outcome_and_rejects_hidden_draw_substitution() {
     let target = target(Pc4TerminalUseCase::PcSearch);
     let hidden = Pc4HiddenQueueDisclosure::new(
         Pc4HiddenQueueSource::Pattern,
@@ -1249,6 +1267,50 @@ fn bag_free_prepared_input_cannot_authorize_arbitrary_ledger_bag_provenance() {
         &guard,
         frontier_with(0, FixedQueueHoldState::Occupied(Pc4GraphPiece::T), 1),
     );
+    let mut session = prepare_pc4_observation_candidate_session(
+        Pc4ObservationCandidateAdapterRequest::new(
+            &target,
+            &prepared,
+            &source,
+            0,
+            materialization_budgets(),
+            adapter_budgets(16),
+        ),
+        &graph,
+        &guard,
+    )
+    .expect("zero hidden draws need no bag");
+    let mut provider = provider(&target);
+    let mut terminal = ManifestQualifiedPc4ObservationTerminal::new(target.clone());
+    let mut materializer = Materializer {
+        profile: target.profile(),
+        calls: 0,
+    };
+    while !session.is_exhausted() {
+        session
+            .advance(
+                nonzero(1),
+                &mut provider,
+                &mut terminal,
+                &mut materializer,
+                &guard,
+            )
+            .expect("zero-draw hold union");
+    }
+    let family = session.finish(&guard).expect("complete zero-draw family");
+    assert_eq!(family.reveal_outcomes().len(), 1);
+    assert_eq!(
+        family.reveal_outcomes()[0].reveal().terminal_bag_state(),
+        None
+    );
+    assert_eq!(
+        family.total_reveal_probability(),
+        Pc4ExactProbability::one()
+    );
+    assert_eq!(family.canonical_candidates().len(), 2);
+    assert_eq!(family.replay_provenance_count(), 2);
+
+    let substituted = graph_family(&target, &guard);
     assert!(matches!(
         prepare_pc4_observation_candidate_session(
             Pc4ObservationCandidateAdapterRequest::new(
@@ -1259,7 +1321,7 @@ fn bag_free_prepared_input_cannot_authorize_arbitrary_ledger_bag_provenance() {
                 materialization_budgets(),
                 adapter_budgets(16),
             ),
-            &graph,
+            &substituted,
             &guard,
         ),
         Err(Pc4ObservationCandidateError::Binding(

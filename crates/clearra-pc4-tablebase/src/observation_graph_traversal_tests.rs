@@ -351,12 +351,17 @@ fn graph_derived_reveal_ledger_is_scope_bound_ranked_and_exactly_normalized() {
     assert_eq!(first.outcomes()[0].probability().denominator(), 2);
     assert_eq!(
         first.outcomes()[0].terminal_bag_state(),
-        Pc4BagState::new(
-            scope.hidden_source_state().profile(),
-            [0, 1, 0, 0, 0, 0, 0],
-            3,
+        Some(
+            Pc4BagState::new(
+                scope
+                    .hidden_source_state()
+                    .expect("real hidden draw")
+                    .profile(),
+                [0, 1, 0, 0, 0, 0, 0],
+                3,
+            )
+            .expect("terminal I remainder")
         )
-        .expect("terminal I remainder")
     );
     assert_eq!(first.complete_probability(), None);
     assert!(!first.is_exhausted());
@@ -369,12 +374,17 @@ fn graph_derived_reveal_ledger_is_scope_bound_ranked_and_exactly_normalized() {
     assert_eq!(second.outcomes()[0].pieces(), [Pc4GraphPiece::O]);
     assert_eq!(
         second.outcomes()[0].terminal_bag_state(),
-        Pc4BagState::new(
-            scope.hidden_source_state().profile(),
-            [1, 0, 0, 0, 0, 0, 0],
-            3,
+        Some(
+            Pc4BagState::new(
+                scope
+                    .hidden_source_state()
+                    .expect("real hidden draw")
+                    .profile(),
+                [1, 0, 0, 0, 0, 0, 0],
+                3,
+            )
+            .expect("terminal O remainder")
         )
-        .expect("terminal O remainder")
     );
     assert_eq!(
         second.complete_probability(),

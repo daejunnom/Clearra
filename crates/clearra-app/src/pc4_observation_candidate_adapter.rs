@@ -154,7 +154,6 @@ pub enum Pc4ObservationCandidateBindingError {
     SourceSnapshotMismatch,
     SourceProfileMismatch,
     PreparedInputTargetMismatch,
-    PreparedInputNotPatternOrHidden,
     QueueScopeMismatch,
     RequestIdentityMismatch,
     InitialBoardMismatch,
@@ -176,9 +175,6 @@ impl Pc4ObservationCandidateBindingError {
             Self::SourceProfileMismatch => "pc4_observation_candidate_source_profile_mismatch",
             Self::PreparedInputTargetMismatch => {
                 "pc4_observation_candidate_prepared_input_target_mismatch"
-            }
-            Self::PreparedInputNotPatternOrHidden => {
-                "pc4_observation_candidate_prepared_input_not_pattern_or_hidden"
             }
             Self::QueueScopeMismatch => "pc4_observation_candidate_queue_scope_mismatch",
             Self::RequestIdentityMismatch => "pc4_observation_candidate_request_identity_mismatch",
@@ -304,7 +300,7 @@ pub struct Pc4ObservationRevealEvidence {
     reveal_rank: u128,
     revealed_pieces: Vec<Pc4GraphPiece>,
     probability: Pc4ExactProbability,
-    terminal_bag_state: Pc4BagState,
+    terminal_bag_state: Option<Pc4BagState>,
 }
 
 impl Pc4ObservationRevealEvidence {
@@ -322,7 +318,7 @@ impl Pc4ObservationRevealEvidence {
         self.probability
     }
 
-    pub const fn terminal_bag_state(&self) -> Pc4BagState {
+    pub const fn terminal_bag_state(&self) -> Option<Pc4BagState> {
         self.terminal_bag_state
     }
 }
@@ -1308,30 +1304,6 @@ fn validate_queue_scope_binding<ProviderError, TerminalError, MaterializerError>
             Pc4ObservationCandidateBindingError::PreparedInputTargetMismatch,
         ));
     }
-    let Pc4PreparedQueueInput::PatternOrHidden {
-        visible_queue,
-        scope,
-        bag_state,
-        ..
-    } = request.prepared_input.queue()
-    else {
-        return Err(Pc4ObservationCandidateError::Binding(
-            Pc4ObservationCandidateBindingError::PreparedInputNotPatternOrHidden,
-        ));
-    };
-    let graph_scope = graph_family.queue_scope();
-    if visible_queue.as_slice() != graph_scope.initial_visible_queue()
-        || scope.visible_piece_count() != graph_scope.initial_visible_queue().len()
-        || scope.preview_length() != graph_scope.preview_length()
-        || scope.hidden_draws() != graph_scope.hidden_draws()
-        || scope.placement_count() != graph_scope.placement_count()
-        || bag_state.as_ref().copied() != Some(graph_scope.hidden_source_state())
-    {
-        return Err(Pc4ObservationCandidateError::Binding(
-            Pc4ObservationCandidateBindingError::QueueScopeMismatch,
-        ));
-    }
-
     let initial_board = StandardPcBoard::from_words(
         request.target.target_lines().get(),
         [request.source.initial_board_mask(), 0, 0, 0],
@@ -1341,6 +1313,40 @@ fn validate_queue_scope_binding<ProviderError, TerminalError, MaterializerError>
             Pc4ObservationCandidateBindingError::InitialBoardMismatch,
         )
     })?;
+    let graph_scope = graph_family.queue_scope();
+    let queue_matches = match request.prepared_input.queue() {
+        Pc4PreparedQueueInput::FixedExplicit(queue) => {
+            // A finite queue may have controllable hold branches but no hidden
+            // randomness. Bind the complete placement horizon to board area:
+            // a shorter family must not become an authoritative empty union.
+            let cells_to_fill =
+                u32::from(initial_board.cell_count()) - initial_board.occupied().count_ones();
+            queue.as_slice() == graph_scope.initial_visible_queue()
+                && graph_scope.preview_length() == queue.len().saturating_sub(1)
+                && graph_scope.hidden_draws() == 0
+                && graph_scope.hidden_source_state().is_none()
+                && cells_to_fill.is_multiple_of(4)
+                && graph_scope.placement_count() == (cells_to_fill / 4) as usize
+        }
+        Pc4PreparedQueueInput::PatternOrHidden {
+            visible_queue,
+            scope,
+            bag_state,
+            ..
+        } => {
+            visible_queue.as_slice() == graph_scope.initial_visible_queue()
+                && scope.visible_piece_count() == graph_scope.initial_visible_queue().len()
+                && scope.preview_length() == graph_scope.preview_length()
+                && scope.hidden_draws() == graph_scope.hidden_draws()
+                && scope.placement_count() == graph_scope.placement_count()
+                && *bag_state == graph_scope.hidden_source_state()
+        }
+    };
+    if !queue_matches {
+        return Err(Pc4ObservationCandidateError::Binding(
+            Pc4ObservationCandidateBindingError::QueueScopeMismatch,
+        ));
+    }
     let expected_request_identity = PcCandidateRequestIdentity::derive_pc4_candidate_universe(
         request.prepared_input,
         initial_board,

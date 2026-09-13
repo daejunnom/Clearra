@@ -4,10 +4,10 @@
 use core::{fmt, num::NonZeroUsize};
 use std::sync::Arc;
 
+use crate::observation_reveal_source::{ObservationRevealCursor, ObservationRevealFamily};
 use crate::{
-    FixedQueueTraversalGuard, Pc4BagRevealCursor, Pc4BagRevealFamily, Pc4BagRevealGuard,
-    Pc4BagRevealPageError, Pc4BagState, Pc4ExactProbability, Pc4GraphPiece,
-    Pc4ObservationQueueScope, QualifiedPc4TargetIdentity,
+    FixedQueueTraversalGuard, Pc4BagRevealGuard, Pc4BagRevealPageError, Pc4BagState,
+    Pc4ExactProbability, Pc4GraphPiece, Pc4ObservationQueueScope, QualifiedPc4TargetIdentity,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -15,7 +15,7 @@ pub struct Pc4ObservationRevealOutcome {
     rank: u128,
     pieces: Vec<Pc4GraphPiece>,
     probability: Pc4ExactProbability,
-    terminal_bag_state: Pc4BagState,
+    terminal_bag_state: Option<Pc4BagState>,
 }
 
 impl Pc4ObservationRevealOutcome {
@@ -31,7 +31,7 @@ impl Pc4ObservationRevealOutcome {
         self.probability
     }
 
-    pub const fn terminal_bag_state(&self) -> Pc4BagState {
+    pub const fn terminal_bag_state(&self) -> Option<Pc4BagState> {
         self.terminal_bag_state
     }
 }
@@ -82,7 +82,7 @@ impl std::error::Error for Pc4ObservationRevealLedgerPageError {}
 #[derive(Clone, Debug)]
 pub struct Pc4ObservationRevealLedgerCursor {
     family_token: Arc<()>,
-    reveal_cursor: Pc4BagRevealCursor,
+    reveal_cursor: ObservationRevealCursor,
     emitted_outcomes: u128,
     accumulated_probability: Pc4ExactProbability,
     exhausted: bool,
@@ -129,7 +129,7 @@ pub struct Pc4ObservationRevealLedgerFamily {
     target: Arc<QualifiedPc4TargetIdentity>,
     source_field_id: u32,
     queue_scope: Arc<Pc4ObservationQueueScope>,
-    reveal_family: Pc4BagRevealFamily,
+    reveal_family: ObservationRevealFamily,
     page_limit: usize,
     cursor_token: Arc<()>,
 }
@@ -139,7 +139,7 @@ impl Pc4ObservationRevealLedgerFamily {
         target: Arc<QualifiedPc4TargetIdentity>,
         source_field_id: u32,
         queue_scope: Arc<Pc4ObservationQueueScope>,
-        reveal_family: Pc4BagRevealFamily,
+        reveal_family: ObservationRevealFamily,
         page_limit: usize,
     ) -> Self {
         Self {

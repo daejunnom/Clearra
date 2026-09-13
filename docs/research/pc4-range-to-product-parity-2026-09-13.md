@@ -105,7 +105,10 @@ pattern is `[IOT]![SZJL]![^SZJL]!`: `3! * 4! * 3! = 864` queue words and one
 `[IT]![OS]![^OS]!P2`: `2! * 2! * 5! * 7P2 = 20,160` eleven-piece words, including
 different hold-slack completion inventories. A compiler assertion pins the
 new fixture's exact pattern/count. No product search limit or algorithm is
-weakened; its wall time still needs the next exact-source native CI result.
+weakened. On `3d7da6e`, native job `103679903987` passed all 17 process tests in
+**71.35 s**, compared with the previous fixture's **1,519.58 s**. This is a
+smaller routing-test input domain, not a product algorithm speedup. Its native
+test compilation took 2 min 15 s and is separate from those execution times.
 
 On source `7fcf750817614ecb54901711f79abf005470aba1`, non-publishing run
 [34739201596](https://github.com/daejunnom/Clearra/actions/runs/34739201596)
@@ -117,8 +120,8 @@ results do **not** cover the later owned score extension described above.
 For this change, Rustfmt parsing, diff checks, the PC4 authority mutation
 suite and the read-only workflow/jobserver Node tests are local checks. Local
 Rust execution remains unavailable after the recorded Windows application
-control rejection; the new owned score cases require the next exact-source
-non-publishing PC4 CI run. No policy bypass was attempted.
+control rejection; Rust execution evidence comes from the exact-source
+non-publishing PC4 CI runs below. No policy bypass was attempted.
 
 Actual HF completeness (including the 13 unresolved nonempty edges), exact
 profile provenance, missing variant-specific indices, ordinary finite resource
@@ -146,6 +149,37 @@ On `3d7da6ed2df15b447c58252a1f00128524ee01ca`, non-publishing run
 passed the PC4 job: Core materializer **7**, parent-authorized verifier **5**,
 Tablebase **157**, App **67**, zero failures. The App phase took **2.01 s** and
 executed all 140 paired product cases, including the 60 owned score cases.
-Source and surface jobs also passed. Native CLI was still running at that
-check; no full-run completion or speedup is claimed yet. Later additions to
-the revocation test require their own exact-source check.
+Source, surface and native CLI jobs also passed. The native timing is recorded
+above separately from this PC4 test result.
+
+On `dca1172336a8d91f42ae9c7091951fe40a1d6594`, non-publishing run
+[34740907051](https://github.com/daejunnom/Clearra/actions/runs/34740907051)
+completed all four jobs successfully. Core **7 + 5**, Tablebase **157** and
+App **67** tests passed; App took **2.14 s**. This exact source includes the
+additional owned-score revocation/non-resurrection and parent-lease reuse
+assertions. It does not cover the subsequent fixed/no-draw change below.
+
+## Fixed/no-draw observation union follow-up
+
+The input policy correctly omits bag state when hidden draws are zero, but
+the observation adapter previously required a bag even for that scope.
+Observation paging now distinguishes real bag reveals from the single
+probability-one no-draw outcome. `fixed_queue` declares the entire finite
+queue without inventing bag provenance; the existing hold expansion and
+aggregate graph budgets remain the sole owners of supply/graph enumeration.
+The reveal ledger records probability once, not once per controllable hold
+choice, including a zero-solution or queue-exhausted outcome.
+
+The complete candidate adapter admits that fixed scope only when queue,
+hold-bound source identity, zero hidden draws, absent bag state and the full
+board-area-derived placement horizon agree. A shortened horizon cannot seal
+an empty subset as complete. This is a pure composition change, not yet a
+new HTTP observation session or a public product route.
+
+New source tests cover transactional fixed-page cancellation/budgets/cursor
+identity, real-bag delegation, hold-disabled/empty/occupied supply parity,
+no phantom current after exhaustion, zero-draw input acceptance and hidden
+draw substitution rejection. A separate adapter fixture covers all five
+typed profiles, seven finite-queue cases and page sizes 1/8, retaining one
+reveal outcome and the original request identity. These tests require their
+own exact-source CI result; the successful runs above are not substituted.
