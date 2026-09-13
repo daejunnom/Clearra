@@ -305,6 +305,74 @@ fn exact_probability_target_source_and_replay_evidence_survive_graph_paging() {
 }
 
 #[test]
+fn suffix_reuse_keeps_every_reveal_ordinal_hold_path_and_probability() {
+    struct FieldTerminal {
+        target: QualifiedPc4TargetIdentity,
+        memoize: bool,
+    }
+    impl FixedQueueTerminalPredicate for FieldTerminal {
+        type Error = TerminalError;
+        fn is_terminal(
+            &mut self,
+            query: &FixedQueueTerminalQuery<'_>,
+        ) -> Result<bool, Self::Error> {
+            Ok(query.target() == &self.target
+                && query.field_id() == self.target.terminal_field().field_id())
+        }
+        fn qualified_field_terminal(&self) -> Option<&QualifiedPc4TargetIdentity> {
+            self.memoize.then_some(&self.target)
+        }
+    }
+
+    for live in [false, true] {
+        let family = family();
+        let mut results = Vec::new();
+        for memoize in [false, true] {
+            let mut provider = provider(&family);
+            let targets = if live {
+                vec![family.target().terminal_field().field_id()]
+            } else {
+                Vec::new()
+            };
+            provider.graph = BTreeMap::from([
+                ((7, Pc4GraphPiece::I), targets.clone()),
+                ((7, Pc4GraphPiece::T), targets),
+            ]);
+            let mut cursor = family.cursor();
+            let mut terminal = FieldTerminal {
+                target: family.target().clone(),
+                memoize,
+            };
+            let mut paths = Vec::new();
+            while !cursor.is_exhausted() {
+                let page = family
+                    .next_page(
+                        &mut cursor,
+                        nonzero(1),
+                        &mut provider,
+                        &mut terminal,
+                        &guard(),
+                    )
+                    .unwrap();
+                paths.extend_from_slice(page.paths());
+            }
+            assert_eq!(cursor.frontier_entries_started(), 4);
+            assert_eq!(provider.calls.len(), if memoize { 2 } else { 4 });
+            assert_eq!(cursor.suffix_memo_hits(), if memoize { 2 } else { 0 });
+            assert_eq!(paths.len(), if live { 4 } else { 0 });
+            assert!(paths
+                .iter()
+                .all(|path| path.probability().numerator() == 1
+                    && path.probability().denominator() == 2));
+            results.push(paths);
+        }
+        // Includes reveal rank, remaining observation/bag, terminal hold,
+        // canonical hold decisions, all edge prefixes and exact probabilities.
+        assert_eq!(results[0], results[1]);
+    }
+}
+
+#[test]
 fn graph_derived_reveal_ledger_is_scope_bound_ranked_and_exactly_normalized() {
     let graph = family();
     let ledger = graph.reveal_ledger_family();

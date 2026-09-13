@@ -69,6 +69,10 @@ impl FixedQueueTerminalPredicate for ManifestQualifiedPc4Terminal {
         Ok(query.target() == &self.target
             && query.field_id() == self.target.terminal_field().field_id())
     }
+
+    fn qualified_field_terminal(&self) -> Option<&QualifiedPc4TargetIdentity> {
+        Some(&self.target)
+    }
 }
 
 impl QualifiedPc4CandidateTerminalPredicate for ManifestQualifiedPc4Terminal {

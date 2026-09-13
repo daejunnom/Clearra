@@ -3,6 +3,7 @@
 use core::{fmt, num::NonZeroUsize};
 use std::sync::Arc;
 
+use crate::fixed_queue_suffix_memo::FixedQueueSuffixMemo;
 use crate::{
     prepare_fixed_queue_traversal_family, FixedQueueGraphPath, FixedQueueTerminalPredicate,
     FixedQueueTraversalBudgets, FixedQueueTraversalCursor, FixedQueueTraversalFamily,
@@ -294,9 +295,12 @@ pub struct Pc4ObservationGraphCursor {
     family_token: Arc<()>,
     frontier_cursor: Pc4ObservationFrontierCursor,
     active: Option<ActiveObservationTraversal>,
+    suffix_memo: FixedQueueSuffixMemo,
     frontier_entries_started: usize,
     visited_state_occurrences: usize,
     adjacency_queries: usize,
+    suffix_memo_hits: usize,
+    empty_suffixes_skipped: usize,
     emitted_paths: usize,
     exhausted: bool,
 }
@@ -312,6 +316,14 @@ impl Pc4ObservationGraphCursor {
 
     pub const fn adjacency_queries(&self) -> usize {
         self.adjacency_queries
+    }
+
+    pub const fn suffix_memo_hits(&self) -> usize {
+        self.suffix_memo_hits
+    }
+
+    pub const fn empty_suffixes_skipped(&self) -> usize {
+        self.empty_suffixes_skipped
     }
 
     pub const fn emitted_paths(&self) -> usize {
@@ -379,9 +391,15 @@ impl Pc4ObservationGraphFamily {
             family_token: Arc::clone(&self.cursor_token),
             frontier_cursor: self.frontier.cursor(),
             active: None,
+            suffix_memo: FixedQueueSuffixMemo::new(
+                &self.target,
+                self.budgets.visited_state_occurrences(),
+            ),
             frontier_entries_started: 0,
             visited_state_occurrences: 0,
             adjacency_queries: 0,
+            suffix_memo_hits: 0,
+            empty_suffixes_skipped: 0,
             emitted_paths: 0,
             exhausted: false,
         }
@@ -463,7 +481,8 @@ impl Pc4ObservationGraphFamily {
                     guard,
                 )
                 .map_err(map_traversal_prepare_error)?;
-                let graph_cursor = family.cursor();
+                let mut graph_cursor = family.cursor();
+                graph_cursor.share_suffix_memo(&transaction.suffix_memo);
                 transaction.active = Some(ActiveObservationTraversal {
                     frontier_entry: Arc::new(frontier_entry),
                     family,
@@ -515,6 +534,12 @@ impl Pc4ObservationGraphFamily {
             page_visited = checked_add(page_visited, graph_page.visited_state_occurrences())?;
             page_adjacency_queries =
                 checked_add(page_adjacency_queries, graph_page.adjacency_queries())?;
+            transaction.suffix_memo_hits =
+                checked_add(transaction.suffix_memo_hits, graph_page.suffix_memo_hits())?;
+            transaction.empty_suffixes_skipped = checked_add(
+                transaction.empty_suffixes_skipped,
+                graph_page.empty_suffixes_skipped(),
+            )?;
             transaction.visited_state_occurrences = consume_batch_budget(
                 transaction.visited_state_occurrences,
                 graph_page.visited_state_occurrences(),

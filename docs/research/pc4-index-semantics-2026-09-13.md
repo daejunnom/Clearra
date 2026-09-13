@@ -132,3 +132,29 @@ upstream evidence above; it is not another whole-file download or a claim
 that all five actual uploaded graph/index pairs are qualified. The 13
 unresolved physical-completion differences remain recorded in
 [the nonempty differential](pc4-hf-nonempty-differential-2026-09-13.md).
+
+## Operator clarification and local revalidation
+
+The user's `no180 = SRS` mapping is accepted as the requested profile, not held
+pending another reply. Clearra's `srs_profile_entries` uses the eight 90-degree
+transitions; the separate SRS+, SRS-X and Jstris profiles retain their own
+transition tables. A graph reader describes adjacency encoding, not the exact
+kick arrays that generated a particular uploaded artifact. Sampled byte or
+transition matches must therefore not silently qualify a profile.
+
+On integration source `16e4ea25c270177f876c14526321718c0c2e4cf5`, local checks
+revalidated the saved Range observations: equal index counts, both helper
+length formulas, canonical first/EOF offsets, and sampled canonical record
+lengths `5 + 7 + 3 * sum(degrees)`. Field ID 1 still resolves to bitmap 15 and
+graph bytes `[498, 912)`. The PC4 full-solution authority validator's contract
+tests also passed. These were local arithmetic/source-contract checks; no new
+native build, full dataset download, production activation or deployment was
+performed. Existing compiled CI evidence above is not relabelled as a fresh
+local Rust test run.
+
+For field reconstruction, the bitmap restores occupancy only, not tetromino
+colours, placement history, hold or queue state. Already-cleared rows remain
+full at the bottom of the upstream logical frame; the four-line terminal is
+the all-ones 40-bit field, not the all-zero starting field. This distinction is
+handled by the separate coordinate and materialization owners, not by the
+hash-to-ID index.

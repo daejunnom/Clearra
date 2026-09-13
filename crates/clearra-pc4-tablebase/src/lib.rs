@@ -8,6 +8,7 @@ mod bag_draw;
 mod bag_reveal;
 mod finite_queue_family;
 mod fixed_queue_hold;
+mod fixed_queue_suffix_memo;
 mod fixed_queue_traversal;
 mod generation_registry;
 mod graph;

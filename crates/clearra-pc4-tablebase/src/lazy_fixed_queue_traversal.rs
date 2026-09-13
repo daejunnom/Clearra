@@ -2,6 +2,7 @@
 use core::{fmt, num::NonZeroUsize};
 use std::sync::Arc;
 
+use crate::fixed_queue_suffix_memo::{FixedQueueSuffixMemo, SuffixFact, SuffixKey, SuffixMemoPage};
 use crate::{
     FixedQueueAdjacencyQuery, FixedQueueBudgetExceeded, FixedQueueBudgetKind, FixedQueueGraphPath,
     FixedQueueTerminalPredicate, FixedQueueTerminalQuery, FixedQueueTraversalBudgets,
@@ -9,6 +10,10 @@ use crate::{
     QualifiedCompleteAdjacency, QualifiedCompleteAdjacencyProvider, QualifiedPc4GraphEdge,
     QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity, TerminalDepthContract,
 };
+
+#[cfg(test)]
+#[path = "lazy_fixed_queue_suffix_tests.rs"]
+mod suffix_tests;
 
 /// Per-call limits for resumable traversal work and emitted graph paths.
 ///
@@ -144,6 +149,8 @@ pub struct FixedQueueTraversalPage {
     visited_state_occurrences: usize,
     adjacency_queries: usize,
     duplicate_edges_suppressed: usize,
+    suffix_memo_hits: usize,
+    empty_suffixes_skipped: usize,
     stopped_by_work_budget: bool,
     exhausted: bool,
 }
@@ -165,6 +172,14 @@ impl FixedQueueTraversalPage {
         self.duplicate_edges_suppressed
     }
 
+    pub const fn suffix_memo_hits(&self) -> usize {
+        self.suffix_memo_hits
+    }
+
+    pub const fn empty_suffixes_skipped(&self) -> usize {
+        self.empty_suffixes_skipped
+    }
+
     pub const fn stopped_by_work_budget(&self) -> bool {
         self.stopped_by_work_budget
     }
@@ -178,11 +193,23 @@ impl FixedQueueTraversalPage {
 pub struct FixedQueueTraversalCursor {
     family_token: Arc<()>,
     pending_paths: Vec<FixedQueueGraphPath>,
+    suffix_memo: FixedQueueSuffixMemo,
+    suffix_completions: Vec<SuffixCompletion>,
+    manifest_terminal_mode: Option<bool>,
     visited_state_occurrences: usize,
     adjacency_queries: usize,
     emitted_paths: usize,
     duplicate_edges_suppressed: usize,
+    suffix_memo_hits: usize,
+    empty_suffixes_skipped: usize,
     exhausted: bool,
+}
+
+#[derive(Clone, Debug)]
+struct SuffixCompletion {
+    key: SuffixKey,
+    pending_outside_subtree: usize,
+    emitted_before_subtree: usize,
 }
 
 impl FixedQueueTraversalCursor {
@@ -200,6 +227,47 @@ impl FixedQueueTraversalCursor {
 
     pub const fn duplicate_edges_suppressed(&self) -> usize {
         self.duplicate_edges_suppressed
+    }
+
+    pub const fn suffix_memo_hits(&self) -> usize {
+        self.suffix_memo_hits
+    }
+
+    pub const fn empty_suffixes_skipped(&self) -> usize {
+        self.empty_suffixes_skipped
+    }
+
+    // Only the observation-family owner can share facts across its own reveal
+    // and hold entries. Source provenance and cursor positions stay separate.
+    pub(crate) fn share_suffix_memo(&mut self, memo: &FixedQueueSuffixMemo) {
+        self.suffix_memo = memo.clone();
+    }
+
+    fn finish_suffixes<PE, TE>(
+        &mut self,
+        memo_page: &mut SuffixMemoPage,
+    ) -> Result<(), FixedQueueTraversalPageError<PE, TE>> {
+        while let Some(completion) = self.suffix_completions.last() {
+            match self
+                .pending_paths
+                .len()
+                .cmp(&completion.pending_outside_subtree)
+            {
+                core::cmp::Ordering::Greater => break,
+                core::cmp::Ordering::Less => {
+                    return Err(FixedQueueTraversalPageError::CursorInvariantViolation);
+                }
+                core::cmp::Ordering::Equal => {}
+            }
+            let completion = self
+                .suffix_completions
+                .pop()
+                .ok_or(FixedQueueTraversalPageError::CursorInvariantViolation)?;
+            if self.emitted_paths == completion.emitted_before_subtree {
+                memo_page.stage_empty(completion.key);
+            }
+        }
+        Ok(())
     }
 
     pub fn pending_path_count(&self) -> usize {
@@ -265,10 +333,18 @@ impl FixedQueueTraversalFamily {
                 self.start_field_id,
                 Vec::new(),
             )],
+            suffix_memo: FixedQueueSuffixMemo::new(
+                &self.target,
+                self.traversal_budgets.visited_state_occurrences(),
+            ),
+            suffix_completions: Vec::new(),
+            manifest_terminal_mode: None,
             visited_state_occurrences: 0,
             adjacency_queries: 0,
             emitted_paths: 0,
             duplicate_edges_suppressed: 0,
+            suffix_memo_hits: 0,
+            empty_suffixes_skipped: 0,
             exhausted: false,
         }
     }
@@ -301,7 +377,22 @@ impl FixedQueueTraversalFamily {
         check_page_guard(snapshot, guard)?;
         validate_provider_binding(&self.target, provider)?;
 
+        let manifest_terminal_mode = match terminal_predicate.qualified_field_terminal() {
+            Some(target) if target == &self.target => true,
+            Some(_) => return Err(FixedQueueTraversalPageError::CursorInvariantViolation),
+            None => false,
+        };
+        if cursor
+            .manifest_terminal_mode
+            .is_some_and(|mode| mode != manifest_terminal_mode)
+            || !cursor.suffix_memo.matches_target(&self.target)
+        {
+            return Err(FixedQueueTraversalPageError::CursorInvariantViolation);
+        }
+
         let mut transaction = cursor.clone();
+        transaction.manifest_terminal_mode = Some(manifest_terminal_mode);
+        let mut memo_page = transaction.suffix_memo.page();
         let mut paths = Vec::new();
         paths
             .try_reserve_exact(limit.get())
@@ -309,9 +400,12 @@ impl FixedQueueTraversalFamily {
         let mut page_visited = 0usize;
         let mut page_adjacency_queries = 0usize;
         let mut page_duplicate_edges = 0usize;
+        let mut page_memo_hits = 0usize;
+        let mut page_empty_suffixes = 0usize;
 
         while paths.len() < limit.get() && !transaction.exhausted {
             check_page_guard(snapshot, guard)?;
+            transaction.finish_suffixes(&mut memo_page)?;
             if page_visited == self.page_budgets.state_occurrences() {
                 break;
             }
@@ -328,13 +422,40 @@ impl FixedQueueTraversalFamily {
 
             let consumed_pieces = path.consumed_pieces();
             let field_id = path.terminal_field_id();
+            let suffix_key = if manifest_terminal_mode {
+                memo_page.key(
+                    field_id,
+                    consumed_pieces,
+                    &self.queue[consumed_pieces..],
+                    self.terminal_depth_contract,
+                )
+            } else {
+                None
+            };
+            let memo_fact = suffix_key.as_ref().and_then(|key| memo_page.get(key));
+            if memo_fact.is_some() {
+                validate_provider_binding(&self.target, provider)?;
+                page_memo_hits = checked_increment(page_memo_hits)?;
+                transaction.suffix_memo_hits = checked_increment(transaction.suffix_memo_hits)?;
+            }
+            if matches!(memo_fact, Some(SuffixFact::Empty)) {
+                page_empty_suffixes = checked_increment(page_empty_suffixes)?;
+                transaction.empty_suffixes_skipped =
+                    checked_increment(transaction.empty_suffixes_skipped)?;
+                transaction.exhausted = transaction.pending_paths.is_empty();
+                continue;
+            }
             let terminal_query = FixedQueueTerminalQuery::from_parts(
                 &self.target,
                 field_id,
                 &self.queue,
                 consumed_pieces,
             );
-            let terminal_result = terminal_predicate.is_terminal(&terminal_query);
+            let terminal_result = if manifest_terminal_mode {
+                Ok(field_id == self.target.terminal_field().field_id())
+            } else {
+                terminal_predicate.is_terminal(&terminal_query)
+            };
             check_page_guard(snapshot, guard)?;
             let predicate_matches =
                 terminal_result.map_err(FixedQueueTraversalPageError::TerminalPredicate)?;
@@ -352,6 +473,9 @@ impl FixedQueueTraversalFamily {
                 continue;
             }
             if consumed_pieces == self.queue.len() {
+                if let Some(key) = suffix_key {
+                    memo_page.stage_empty(key);
+                }
                 transaction.exhausted = transaction.pending_paths.is_empty();
                 continue;
             }
@@ -376,22 +500,46 @@ impl FixedQueueTraversalFamily {
                 piece,
                 consumed_pieces,
             );
-            transaction.adjacency_queries = checked_increment(transaction.adjacency_queries)?;
-            page_adjacency_queries = checked_increment(page_adjacency_queries)?;
-            let adjacency_result = provider.complete_outgoing_edges(&adjacency_query);
-            check_page_guard(snapshot, guard)?;
-            validate_provider_binding(&self.target, provider)?;
-            let adjacency = adjacency_result.map_err(FixedQueueTraversalPageError::Provider)?;
-            validate_adjacency(&adjacency_query, &adjacency)?;
+            let edges = if let Some(SuffixFact::Adjacency(targets)) = memo_fact {
+                let mut edges = Vec::new();
+                edges
+                    .try_reserve_exact(targets.len())
+                    .map_err(|_| FixedQueueTraversalPageError::AllocationFailed)?;
+                edges.extend(targets.iter().map(|&target_field_id| {
+                    QualifiedPc4GraphEdge::from_qualified_record(
+                        &self.target,
+                        field_id,
+                        piece,
+                        target_field_id,
+                    )
+                }));
+                edges
+            } else {
+                transaction.adjacency_queries = checked_increment(transaction.adjacency_queries)?;
+                page_adjacency_queries = checked_increment(page_adjacency_queries)?;
+                let adjacency_result = provider.complete_outgoing_edges(&adjacency_query);
+                check_page_guard(snapshot, guard)?;
+                validate_provider_binding(&self.target, provider)?;
+                let adjacency = adjacency_result.map_err(FixedQueueTraversalPageError::Provider)?;
+                validate_adjacency(&adjacency_query, &adjacency)?;
 
-            let mut edges = adjacency.into_edges();
-            edges.sort_unstable_by_key(QualifiedPc4GraphEdge::target_field_id);
-            let original_edge_count = edges.len();
-            edges.dedup_by_key(|edge| edge.target_field_id());
-            let duplicate_count = original_edge_count - edges.len();
-            page_duplicate_edges = checked_add(page_duplicate_edges, duplicate_count)?;
-            transaction.duplicate_edges_suppressed =
-                checked_add(transaction.duplicate_edges_suppressed, duplicate_count)?;
+                let mut edges = adjacency.into_edges();
+                edges.sort_unstable_by_key(QualifiedPc4GraphEdge::target_field_id);
+                let original_edge_count = edges.len();
+                edges.dedup_by_key(|edge| edge.target_field_id());
+                let duplicate_count = original_edge_count - edges.len();
+                page_duplicate_edges = checked_add(page_duplicate_edges, duplicate_count)?;
+                transaction.duplicate_edges_suppressed =
+                    checked_add(transaction.duplicate_edges_suppressed, duplicate_count)?;
+                if let Some(key) = &suffix_key {
+                    let mut targets = Vec::new();
+                    if targets.try_reserve_exact(edges.len()).is_ok() {
+                        targets.extend(edges.iter().map(QualifiedPc4GraphEdge::target_field_id));
+                        memo_page.stage_adjacency(key.clone(), targets);
+                    }
+                }
+                edges
+            };
 
             let attempted_frontier = transaction
                 .pending_paths
@@ -411,6 +559,17 @@ impl FixedQueueTraversalFamily {
                 .pending_paths
                 .try_reserve_exact(edges.len())
                 .map_err(|_| FixedQueueTraversalPageError::AllocationFailed)?;
+            if let Some(key) = suffix_key {
+                if edges.is_empty() {
+                    memo_page.stage_empty(key);
+                } else if transaction.suffix_completions.try_reserve(1).is_ok() {
+                    transaction.suffix_completions.push(SuffixCompletion {
+                        key,
+                        pending_outside_subtree: transaction.pending_paths.len(),
+                        emitted_before_subtree: transaction.emitted_paths,
+                    });
+                }
+            }
             for edge in edges.into_iter().rev() {
                 let mut next_path = path.clone();
                 next_path.push_edge(edge);
@@ -419,17 +578,21 @@ impl FixedQueueTraversalFamily {
             transaction.exhausted = transaction.pending_paths.is_empty();
         }
 
+        transaction.finish_suffixes(&mut memo_page)?;
         check_page_guard(snapshot, guard)?;
         let stopped_by_work_budget = !transaction.exhausted
             && page_visited == self.page_budgets.state_occurrences()
             && paths.len() < limit.get();
         let exhausted = transaction.exhausted;
+        memo_page.commit();
         *cursor = transaction;
         Ok(FixedQueueTraversalPage {
             paths,
             visited_state_occurrences: page_visited,
             adjacency_queries: page_adjacency_queries,
             duplicate_edges_suppressed: page_duplicate_edges,
+            suffix_memo_hits: page_memo_hits,
+            empty_suffixes_skipped: page_empty_suffixes,
             stopped_by_work_budget,
             exhausted,
         })

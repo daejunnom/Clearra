@@ -221,6 +221,16 @@ pub trait FixedQueueTerminalPredicate {
     type Error;
 
     fn is_terminal(&mut self, query: &FixedQueueTerminalQuery<'_>) -> Result<bool, Self::Error>;
+
+    /// Selects the manifest's pure field-ID terminal semantics for lazy suffix
+    /// reuse. `Some(target)` means exactly `query.target() == target &&
+    /// query.field_id() == target.terminal_field().field_id()`, without errors
+    /// or observable callback side effects. The pager may evaluate that rule
+    /// directly. Stateful closures and other predicates must keep `None`.
+    /// This is not new graph/profile completeness authority.
+    fn qualified_field_terminal(&self) -> Option<&QualifiedPc4TargetIdentity> {
+        None
+    }
 }
 
 impl<F, E> FixedQueueTerminalPredicate for F
