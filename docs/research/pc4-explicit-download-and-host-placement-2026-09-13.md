@@ -235,6 +235,15 @@ This validates the curl final-header receipt on this host, not native App
 execution, full-solution timing or a complete download. No Rust executable was
 run through or around the local execution-policy restriction.
 
+## CI follow-up
+
+Run `34762937614` passed source, surface contracts and preview WASM, but both
+native-related jobs failed to compile the shared host driver: the range length
+is `u32`, whereas the transport boundary deliberately accepts `u64`. The fix is
+the lossless `u64::from(range.length())` conversion, not a relaxed transport bound.
+The run remains failed; the next exact-source CI must execute the native tests
+before this path is considered verified. Its preview has not replaced 4194.
+
 ## Primary references
 
 - [HF dataset](https://huggingface.co/datasets/muse918/tetris-4lpc-mdp-vstar-policy): public metadata, current per-generation file identities; MIT dataset declared by user/upstream.

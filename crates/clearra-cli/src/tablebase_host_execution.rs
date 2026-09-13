@@ -31,7 +31,7 @@ pub(super) fn drive(
                 artifact.byte_len(),
                 artifact.content_identity(),
                 range.offset(),
-                range.length(),
+                u64::from(range.length()),
             )?;
             match bytes {
                 HostSlice::Local(bytes) => execution.admit_local_slice(
