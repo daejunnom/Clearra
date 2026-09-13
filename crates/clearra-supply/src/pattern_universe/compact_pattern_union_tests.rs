@@ -53,6 +53,39 @@ fn prepare(
         .unwrap()
 }
 
+#[test]
+fn compact_pattern_union_merge_preserves_exact_future_union_and_input_ownership() {
+    let source = expression_source("P7", 7);
+    let (language, root) = prepare(&source, initial(HoldPolicy::Allowed, None));
+    let left = language.advance(&root, PieceKind::I, &|| false).unwrap();
+    let right = language.advance(&root, PieceKind::O, &|| false).unwrap();
+    let merged = language.merge(&left, &right, &|| false).unwrap();
+    let expected = symbolic_outputs(&language, &left, 2)
+        .union(&symbolic_outputs(&language, &right, 2))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(symbolic_outputs(&language, &merged, 2), expected);
+    assert_eq!(language.merge(&right, &left, &|| false).unwrap(), merged);
+    assert_eq!(language.merge(&merged, &merged, &|| false).unwrap(), merged);
+    assert_eq!(
+        language.merge(&root, &left, &|| false).unwrap_err(),
+        CompactPatternUnionError::PlacementDepthMismatch
+    );
+    let (_, foreign) = prepare(&source, initial(HoldPolicy::Allowed, None));
+    assert_eq!(
+        language.merge(&root, &foreign, &|| false).unwrap_err(),
+        CompactPatternUnionError::ForeignFrontier
+    );
+    let before = (left.clone(), right.clone());
+    let checks = Cell::new(0);
+    let result = language.merge(&left, &right, &|| {
+        checks.set(checks.get() + 1);
+        checks.get() >= 3
+    });
+    assert_eq!(result.unwrap_err(), CompactPatternUnionError::Cancelled);
+    assert_eq!((left, right), before);
+}
+
 fn symbolic_outputs(
     language: &CompactPatternUnionLanguage,
     frontier: &CompactPatternUnionFrontier,

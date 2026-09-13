@@ -90,7 +90,7 @@ fn request_with_supply(
     )
 }
 
-fn request_with_queue_input(
+pub(super) fn request_with_queue_input(
     lines: u8,
     profile: Pc4RuleProfile,
     initial: u64,
@@ -242,6 +242,36 @@ pub(super) fn assert_pattern_product_parity<G: PcCandidatePageGuard>(
     input: PcCandidateReducerInput,
     guard: &G,
 ) {
+    let queue = PcQueueInput::pattern_expression(
+        clearra_supply::queue::queue_pattern_expression::QueuePatternExpression::parse(
+            pattern, 5040,
+        )
+        .unwrap(),
+    );
+    assert_pattern_product_parity_with_queue(
+        lines,
+        profile,
+        initial,
+        pattern,
+        queue,
+        hold,
+        zero_hit_ordinals,
+        input,
+        guard,
+    );
+}
+
+pub(super) fn assert_pattern_product_parity_with_queue<G: PcCandidatePageGuard>(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    pattern: &str,
+    queue: PcQueueInput,
+    hold: FixedQueueHoldState,
+    zero_hit_ordinals: usize,
+    input: PcCandidateReducerInput,
+    guard: &G,
+) {
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     );
@@ -253,7 +283,8 @@ pub(super) fn assert_pattern_product_parity<G: PcCandidatePageGuard>(
         Product::Score,
         Product::ScoreMinimum,
     ] {
-        let request = pattern_request(lines, profile, initial, product, pattern, hold);
+        let request =
+            request_with_queue_input(lines, profile, initial, product, queue.clone(), hold);
         let expected = ordinary(&context, request.clone());
         // Score-minimals deliberately requires a winner for every original
         // ordinal. A complete search proving an impossible ordinal must keep

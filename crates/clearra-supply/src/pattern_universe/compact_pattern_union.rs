@@ -56,6 +56,7 @@ pub enum CompactPatternUnionError {
     FrontierStateLimit { limit: usize, attempted: usize },
     TransitionLimit { limit: usize, attempted: usize },
     ForeignFrontier,
+    PlacementDepthMismatch,
     CounterOverflow,
     AllocationFailed,
     Supply(SupplyExecutionError),
@@ -73,6 +74,7 @@ impl CompactPatternUnionError {
             Self::FrontierStateLimit { .. } => "compact_pattern_union_frontier_state_limit",
             Self::TransitionLimit { .. } => "compact_pattern_union_transition_limit",
             Self::ForeignFrontier => "compact_pattern_union_foreign_frontier",
+            Self::PlacementDepthMismatch => "compact_pattern_union_placement_depth_mismatch",
             Self::CounterOverflow => "compact_pattern_union_counter_overflow",
             Self::AllocationFailed => "compact_pattern_union_allocation_failed",
             Self::Supply(_) => "compact_pattern_union_supply_failed",
@@ -107,10 +109,11 @@ struct PlacementState {
     held: Option<PieceKind>,
 }
 
-/// A determinized set of supply states for ONE ordered placement prefix.
-/// Equal states merge only within that prefix; different geometry paths must
-/// remain distinct in the graph/materialization owner. Clones are immutable
-/// inputs to independent transitions, so cancellation cannot partially commit.
+/// A determinized set of supply states for one placement prefix, or an explicit
+/// union of equal-depth prefixes whose future geometry the caller proved
+/// equivalent. Distinct partial layouts/row frames remain distinct in that
+/// caller. Clones are immutable inputs to independent transitions, so
+/// cancellation cannot partially commit.
 #[derive(Clone, Debug)]
 pub struct CompactPatternUnionFrontier {
     owner: Arc<()>,
@@ -127,6 +130,9 @@ impl CompactPatternUnionFrontier {
     }
     pub const fn placed_pieces(&self) -> usize {
         self.placed_pieces
+    }
+    pub fn retained_state_capacity_bytes(&self) -> usize {
+        self.states.capacity() * core::mem::size_of::<PlacementState>()
     }
 }
 
@@ -254,6 +260,71 @@ impl CompactPatternUnionLanguage {
     }
     pub fn atom_count(&self) -> usize {
         self.atoms.len()
+    }
+
+    /// Existential union at one placement depth. Geometry owners may use this
+    /// only after independently proving equality of their partial layout AND
+    /// row frame. It does not combine probabilities or replay histories.
+    pub fn merge<G: Fn() -> bool>(
+        &self,
+        left: &CompactPatternUnionFrontier,
+        right: &CompactPatternUnionFrontier,
+        cancelled: &G,
+    ) -> Result<CompactPatternUnionFrontier, CompactPatternUnionError> {
+        check_cancelled(cancelled)?;
+        if !Arc::ptr_eq(&self.owner, &left.owner) || !Arc::ptr_eq(&self.owner, &right.owner) {
+            return Err(CompactPatternUnionError::ForeignFrontier);
+        }
+        if left.placed_pieces != right.placed_pieces {
+            return Err(CompactPatternUnionError::PlacementDepthMismatch);
+        }
+        let mut states = Vec::new();
+        let limit = self.limits.frontier_states.get();
+        states
+            .try_reserve_exact(
+                left.states
+                    .len()
+                    .saturating_add(right.states.len())
+                    .min(limit),
+            )
+            .map_err(|_| CompactPatternUnionError::AllocationFailed)?;
+        let (mut l, mut r) = (0, 0);
+        while l < left.states.len() || r < right.states.len() {
+            check_cancelled(cancelled)?;
+            let item = match (left.states.get(l), right.states.get(r)) {
+                (Some(a), Some(b)) if a == b => {
+                    l += 1;
+                    r += 1;
+                    *a
+                }
+                (Some(a), Some(b)) if a < b => {
+                    l += 1;
+                    *a
+                }
+                (Some(_), Some(b)) | (None, Some(b)) => {
+                    r += 1;
+                    *b
+                }
+                (Some(a), None) => {
+                    l += 1;
+                    *a
+                }
+                (None, None) => unreachable!("loop has a remaining state"),
+            };
+            if states.len() == limit {
+                return Err(CompactPatternUnionError::FrontierStateLimit {
+                    limit,
+                    attempted: limit.saturating_add(1),
+                });
+            }
+            states.push(item);
+        }
+        check_cancelled(cancelled)?;
+        Ok(CompactPatternUnionFrontier {
+            owner: Arc::clone(&self.owner),
+            states,
+            placed_pieces: left.placed_pieces,
+        })
     }
 
     /// At most one next frontier is produced per desired graph-piece label.

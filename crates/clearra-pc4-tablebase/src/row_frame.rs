@@ -16,7 +16,7 @@ pub enum Pc4RowFrameError {
 /// Original row IDs are never reassigned when a graph field normalizes its
 /// cleared rows to the bottom. Keep one frame per concrete path, not per node:
 /// converging graph paths can have different original-row correspondences.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Pc4RowFrame {
     surviving_original_rows: [u8; 4],
     remaining: u8,

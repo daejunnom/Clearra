@@ -24,6 +24,10 @@ use crate::pc4_input_disclosure_policy::{
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod graph_candidate_adapter;
 
+#[path = "pc4_compact_graph_union.rs"]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod compact_graph_union;
+
 pub const PC_CANDIDATE_PAGE_CONTRACT: &str = "pc-concrete-candidate-page.v1";
 pub const PC_CANDIDATE_REQUEST_IDENTITY_ALGORITHM: &str =
     "sha256:clearra-pc4-candidate-universe-request-v1";

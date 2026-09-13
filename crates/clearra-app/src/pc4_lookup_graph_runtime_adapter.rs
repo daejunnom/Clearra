@@ -294,6 +294,10 @@ impl Pc4LookupGraphCache {
         self.entry(field_id).is_some()
     }
 
+    pub(crate) fn field_hash(&self, field_id: u32) -> Option<u64> {
+        self.entry(field_id).map(|entry| entry.field_hash)
+    }
+
     /// Admits one lookup hit under the exact target that authorized its
     /// lookup session. The session identity is intentionally not cached, so
     /// an identical immutable record fetched by a later session remains an

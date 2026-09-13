@@ -26,6 +26,9 @@ mod product_contracts;
 #[path = "online_pc4_observation_candidate_session_tests.rs"]
 mod observation_contracts;
 
+#[path = "pc4_compact_graph_union_tests.rs"]
+mod compact_union_contracts;
+
 struct ClearPath {
     dataset: RangeDataset,
     initial_board: u64,

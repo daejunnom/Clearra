@@ -485,6 +485,12 @@ P7P4 compiled problem and preserve the explicit/standard-bag input boundary.
 These Rust contracts are queued for the managed non-publishing CI; local
 native execution policy is not bypassed.
 
+Follow-up verification: `6172f58eaa6c8e0e7cbde902e88a1077ec242d9f` completed
+non-publishing run [34775579021](https://github.com/daejunnom/Clearra/actions/runs/34775579021):
+source, native-cli, pc4-contracts and surface-contracts succeeded; preview-WASM
+was intentionally skipped. This covers the committed input adapter, not the
+later uncommitted graph helpers or the proposed asynchronous scheduler.
+
 **This is an input adapter, not an activated graph traversal.** The current
 online host still uses the existing producer. Remaining implementation must
 compose qualified graph edges with these frontiers, preserve concrete path
@@ -494,6 +500,75 @@ product dispatcher select it. No full-search timing, reduced HTTP count or
 456,459-candidate equality is claimed for this adapter alone. The earlier
 range A/B is not repeated, 4194 is unchanged, and no production publication is
 requested.
+
+The next user-requested comparison pauses graph integration and records the
+single-pending lookup boundary, live HTTP/2 multiplexing evidence, bounded
+continuation scheduling and optional sparse block directory in
+[the async transport/layout review](pc4-async-transport-and-layout-review-2026-09-14.md).
+That review is not an activated traversal or a completed-search timing claim.
+
+## Compact graph union implementation checkpoint (2026-09-14)
+
+After the requested transport/layout comparison, implementation resumed in
+`pc_candidate_page_boundary::compact_graph_union`. The new producer composes
+qualified graph adjacency, the real compact supply language and Core ILC edge
+materialization. It does not perform HTTP or produce an observation ledger.
+
+The state key retains **canonical partial placement set + current graph field
+ID + original-row frame**. Only equal keys at the same placement depth may
+merge their supply frontiers. This is an existential union of equal legal
+futures, not a probability merge. Each selected edge alternative lifts its
+cells into that path's original row frame before extending the layout. A
+graph ID, hash or equal occupied cells alone never authorizes this merge.
+
+The owner now has a round-robin CPU-ready queue, waiting lists indexed by the
+missing field and a separate next layer. `pending_fields` can expose independent
+data demands while other CPU tasks remain ready. An admitted cache record wakes
+all its dependants; one missing record suspends only those work items. The
+layer barrier is retained so all incoming supply states are merged before a
+successor expands. Removing it requires delta/fixpoint processing, not a
+visited-node shortcut. This is not yet the final cross-layer tail policy.
+
+Only a fully drained traversal can consume the private completeness constructor
+and hand the sorted, deduplicated canonical union to the existing Core reducer.
+Work/state/candidate/waiting/supply limits and cancellation poison an incomplete
+owner instead of publishing a partial set. No replay or observation probability
+certificate is invented. The original compiled input still supplies weights,
+coverage and product semantics when Core consumes this candidate union.
+
+Five focused App tests are prepared:
+
+- 60 candidate-set comparisons with the existing observation producer across
+  1..4L, five synthetic profile slots and three hold/input cases, including
+  top-row-first clears. Real small inputs use explicit storage, so the compact
+  side appends a hidden suffix **before projecting to the original visible
+  queue length**. It retains 5,040 source ordinals without exposing more pieces.
+- The existing six-product differential reducer checks on that same projected
+  compact request, including 2,520 zero-hit ordinals in the denominator.
+- Empty unions, incomplete handoff and work exhaustion remain distinct.
+- Cancellation, stale source and stale generation reject late completion.
+- Three disjoint O holes exercise converging layouts, multiple pending field
+  demands and opposite response orders; six valid orders must produce one
+  canonical placement set, with equal intermediate histories merged.
+
+The Supply merge contract separately checks future-language equality,
+commutativity/idempotence, owner/depth isolation and atomic cancellation.
+These are synthetic qualification/composition tests, not upstream profile
+completeness or the 456,459-family proof. The managed non-publishing runner
+executes the new group once and rejects zero executed tests.
+
+Local validation: rustfmt parsing/check, JS syntax and 19 workflow/test-evidence
+contracts passed. Native Rust execution was not attempted or policy-bypassed;
+the new Rust tests require the exact-source non-publishing CI. The earlier
+6172f58 CI success does not cover this producer.
+
+Product activation is deliberately still absent. Remaining work includes
+retained-byte authority (logical limits are not full peak-byte accounting),
+cooperative final sorting/sealing, large-family memory/time measurements,
+Setup target composition and the host's bounded multi-request broker. The
+current product host still has one pending request; this internal producer
+alone does not change HTTP concurrency, GUI speed or 4194 WASM. Existing
+historical A/B results are not rerun or attributed to this candidate.
 
 ## Remaining evidence
 

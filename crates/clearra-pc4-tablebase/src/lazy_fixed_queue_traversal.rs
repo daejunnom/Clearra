@@ -722,6 +722,39 @@ where
     Ok(())
 }
 
+/// Read one complete piece adjacency with the same qualification checks as
+/// fixed-queue traversal. This is an I/O-free orchestration port: the provider
+/// owns lookup/cache misses and must never label a missing record as empty.
+pub fn read_qualified_pc4_adjacency<P, G>(
+    target: &QualifiedPc4TargetIdentity,
+    source_field_id: u32,
+    piece: Pc4GraphPiece,
+    placed_pieces: usize,
+    provider: &mut P,
+    guard: &G,
+) -> Result<
+    Vec<QualifiedPc4GraphEdge>,
+    FixedQueueTraversalPageError<P::Error, core::convert::Infallible>,
+>
+where
+    P: QualifiedCompleteAdjacencyProvider,
+    G: FixedQueueTraversalGuard,
+{
+    check_page_guard(target.snapshot(), guard)?;
+    validate_provider_binding(target, provider)?;
+    let query = FixedQueueAdjacencyQuery::from_parts(target, source_field_id, piece, placed_pieces);
+    let response = provider.complete_outgoing_edges(&query);
+    check_page_guard(target.snapshot(), guard)?;
+    validate_provider_binding(target, provider)?;
+    let adjacency = response.map_err(FixedQueueTraversalPageError::Provider)?;
+    validate_adjacency(&query, &adjacency)?;
+    let mut edges = adjacency.into_edges();
+    edges.sort_unstable_by_key(QualifiedPc4GraphEdge::target_field_id);
+    edges.dedup_by_key(|edge| edge.target_field_id());
+    check_page_guard(target.snapshot(), guard)?;
+    Ok(edges)
+}
+
 fn validate_adjacency<ProviderError, TerminalError>(
     query: &FixedQueueAdjacencyQuery<'_>,
     adjacency: &QualifiedCompleteAdjacency,

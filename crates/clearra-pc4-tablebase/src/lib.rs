@@ -71,7 +71,7 @@ pub use graph::{
     HydraGraphRecordDecodeError,
 };
 pub use lazy_fixed_queue_traversal::{
-    prepare_fixed_queue_traversal_family, FixedQueueTraversalCursor, FixedQueueTraversalFamily,
+    prepare_fixed_queue_traversal_family, read_qualified_pc4_adjacency, FixedQueueTraversalCursor, FixedQueueTraversalFamily,
     FixedQueueTraversalFamilyRequest, FixedQueueTraversalPage, FixedQueueTraversalPageBudgets,
     FixedQueueTraversalPageError, FixedQueueTraversalPrepareError,
 };

@@ -152,7 +152,7 @@ fn start_prepared(
     (session, guard)
 }
 
-fn drive(
+pub(super) fn drive(
     session: &mut AppOnlinePc4CandidateSession,
     guard: &Guard,
     fixture: &ClearPath,
@@ -277,7 +277,7 @@ fn pc4_range_hold_union_matches_seven_existing_products_for_all_profiles_and_tar
     }
 }
 
-fn start_pattern(
+pub(super) fn start_pattern(
     fixture: &ClearPath,
     lines: u8,
     profile: Pc4RuleProfile,

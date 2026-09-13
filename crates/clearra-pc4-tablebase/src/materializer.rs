@@ -104,6 +104,30 @@ impl ClearraPlacementIdentity {
         self.graph_row_transition = Some((source_cleared_prefix, physical_cleared_rows));
         Ok(self)
     }
+
+    /// Lift one graph-normalized edge alternative in its path-local frame.
+    /// The returned placement is in the original input frame. Callers must
+    /// retain the returned frame alongside partial layout identity when paths
+    /// converge; a graph field ID alone cannot stand in for row correspondence.
+    pub fn rebase_in_frame(
+        mut self,
+        frame: crate::Pc4RowFrame,
+    ) -> Result<(Self, crate::Pc4RowFrame), PlacementIdentityError> {
+        let Some((prefix, clear_rows)) = self.graph_row_transition else {
+            return Err(PlacementIdentityError::InvalidGraphRowTransition);
+        };
+        if prefix != 4 - frame.remaining_rows() {
+            return Err(PlacementIdentityError::InvalidGraphRowTransition);
+        }
+        self.occupied_cells = frame
+            .lift_physical_cells(self.occupied_cells >> (u32::from(prefix) * 10))
+            .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
+        let next = frame
+            .after_clear(clear_rows)
+            .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
+        self.graph_row_transition = None;
+        Ok((self, next))
+    }
 }
 
 /// Rebase each selected edge alternative independently for this concrete path.
@@ -124,19 +148,9 @@ pub(crate) fn rebase_concrete_placements(
     let mut frame = crate::Pc4RowFrame::new(prefix)
         .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
     for placement in placements {
-        let Some((prefix, clear_rows)) = placement.graph_row_transition else {
-            return Err(PlacementIdentityError::InvalidGraphRowTransition);
-        };
-        if prefix != 4 - frame.remaining_rows() {
-            return Err(PlacementIdentityError::InvalidGraphRowTransition);
-        }
-        placement.occupied_cells = frame
-            .lift_physical_cells(placement.occupied_cells >> (u32::from(prefix) * 10))
-            .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
-        frame = frame
-            .after_clear(clear_rows)
-            .map_err(|_| PlacementIdentityError::InvalidGraphRowTransition)?;
-        placement.graph_row_transition = None;
+        let (lifted, next) = placement.rebase_in_frame(frame)?;
+        *placement = lifted;
+        frame = next;
     }
     Ok(())
 }

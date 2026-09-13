@@ -59,6 +59,11 @@ test('compact input union executes its exhaustive parity contracts in the manage
   assert.match(pc4Contracts, /!evidence\.hasExecutedTests\(\)/u);
   assert.match(pc4Contracts, /assertManagedBuildTransaction\(\)/u);
 });
+test('compact graph union parity runs once in its own nonzero-evidence group', () => {
+  assert.match(pc4Contracts, /'pc4-row-app', \[\.\.\.common, 'pc4_', '--', '--skip', 'pc4_compact_graph_union_'\]/u);
+  assert.match(pc4Contracts, /'pc4-compact-graph-union', \[\.\.\.common, 'pc4_compact_graph_union_', '--', '--nocapture'\]/u);
+  assert.match(pc4Contracts, /!evidence\.hasExecutedTests\(\)/u);
+});
 for (const [name, mutation] of [
   ['main trigger', s => s.replace('branches: ["codex/v0.9.0-stacked-on-v0.8.1-20260912"]', 'branches: ["main"]')],
   ['broad job admission', s => s.replace("if: github.ref == 'refs/heads/codex/v0.9.0-stacked-on-v0.8.1-20260912' && github.ref_type == 'branch'", 'if: true')],
