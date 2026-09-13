@@ -64,6 +64,44 @@ timing assertion or production-minimum performance claim.
 
 Local checks: Rust formatting, JS workflow/jobserver contracts (13 passed,
 one POSIX-only skip), PC4 authority validator contracts, and `git diff --check`
-passed. Compiled Rust differential/A/B and App regressions are pending the
-exact candidate's non-publishing CI; local Windows execution policy is not
-bypassed to run Cargo/native binaries.
+passed. Local Windows execution policy was not bypassed to run Cargo/native
+binaries.
+
+## Exact compiled evidence
+
+Code `6d03ccbbd2037842de9facc37f4194506b9a80db` passed all four jobs of
+non-publishing [34749465353](https://github.com/daejunnom/Clearra/actions/runs/34749465353).
+PC4 job `103703235287` reports Core 7+5, Tablebase 178 (one A/B ignored in
+ordinary selection, then explicitly run and passed), Replay 20, Postprocess
+41, App PC4 87, three selected Supply tests, the compact-input A/B, and App
+replay 16 passing. The pre-existing App matrix retains its 1,090 paired product
+cases; the new suffix differential adds live/empty topology and paging cases.
+Native job `103703235336` passed all 17 real CLI process tests (115.78s test
+runtime), with no LNK4098/LNK2038 in its log. Node-host punycode deprecation
+warnings remain; they are not relabelled as Rust warnings or suppressed.
+
+| Depth-10 fixture | Baseline mean | Suffix memo mean | Adjacency calls A/B (8 runs) | State visits A/B (8 runs) | Paths A/B (8 runs) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| All negative | 11.748814ms | 0.319642ms | 8,184 / 152 | 16,376 / 312 | 0 / 0 |
+| All positive | 12.864806ms | 12.659364ms | 8,184 / 152 | 12,280 / 12,280 | 4,096 / 4,096 |
+
+Raw elapsed nanosecond totals were `[93990514, 2557134]` and
+`[102918444, 101274912]`. This confirms a large gain for reconvergent failed
+suffixes, while positive enumeration time is effectively unchanged in this
+test-profile sample. Do not claim a general 36.8x PC speedup: positive path
+prefix copying, transaction work, concrete materialization and final reduction
+remain independent costs, and production network/WASM performance was not run.
+
+## Next boundaries to close
+
+1. Reuse/share positive path prefixes and materialization without eagerly
+   collecting/counting every replay before the first requested result.
+2. Add a regression and fix for the observation output-cap completion boundary:
+   the current owner fails immediately when `lifetime_output_remaining == 0`,
+   before checking whether trailing frontier entries are all empty. This was
+   identified in source during this change; it was not an executed reproduction
+   or a fixed case in the green run above. Exact-budget success must still prove
+   exhaustion, while one extra real path must remain a typed budget failure.
+3. Continue actual profile/terminal/materializer qualification and public
+   CLI/Web/Desktop/Discord transport/fallback integration. The active goal and
+   the plan's full-DP/release checkboxes remain open.
