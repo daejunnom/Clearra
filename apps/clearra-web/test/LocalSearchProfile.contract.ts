@@ -22,6 +22,12 @@ const online = JSON.parse(localSearchProfileText({ event: 'progress', pc4_online
 assert.deepEqual(online.pc4_online, { provider: 'hf-graph', requests: 17,
   transferred_bytes: 1248, logical_reads: 40, cache_hits: 20, joined_requests: 3,
   cache_bytes: 1024, elapsed_ms: 2500, revision: 'a'.repeat(40) });
+const local = JSON.parse(localSearchProfileText({ event: 'progress', pc4_online: {
+  provider: 'local-graph', requests: 0, transferred_bytes: 0, local_file_reads: 5,
+  local_bytes: 4096, logical_reads: 30, elapsed_ms: 100, input: 'private'
+} })!);
+assert.deepEqual(local.pc4_online, { provider: 'local-graph', requests: 0,
+  transferred_bytes: 0, local_file_reads: 5, local_bytes: 4096, logical_reads: 30, elapsed_ms: 100 });
 assert.equal(localSearchProfileText({ event: 'final_response', search_profile: { input: 'private' } }), null);
 const text = localSearchProfileText({ event: 'final_response', search_profile: {
   input: 'private', verifier_transport: { timings: {

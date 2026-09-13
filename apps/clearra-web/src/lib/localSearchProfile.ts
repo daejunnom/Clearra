@@ -43,7 +43,7 @@ export function localSearchProfileText(event: unknown): string | null {
   if (online?.provider === 'hf-graph' || online?.provider === 'local-graph') {
     result.pc4_online = {
       provider: online.provider,
-      ...numbers(online, ['requests', 'transferred_bytes', 'local_bytes', 'logical_reads', 'cache_hits',
+      ...numbers(online, ['requests', 'transferred_bytes', 'local_bytes', 'local_file_reads', 'logical_reads', 'cache_hits',
         'joined_requests', 'cache_bytes', 'elapsed_ms']),
       ...(typeof online.revision === 'string' && /^[a-f0-9]{40}$/.test(online.revision)
         ? { revision: online.revision } : {})

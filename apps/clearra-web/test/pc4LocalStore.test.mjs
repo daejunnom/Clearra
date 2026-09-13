@@ -128,6 +128,7 @@ test('WASM host uses typed local admission with zero HTTP and releases files bef
     const io = observed.at(-1).pc4_online;
     assert.equal(io.provider, 'local-graph'); assert.equal(io.requests, 0);
     assert.equal(io.transferred_bytes, 0); assert.equal(io.local_bytes, 8);
+    assert.equal(io.local_file_reads, 1);
     await api.removeLocalPc4();
   } finally { globalThis.fetch = original; }
 }));

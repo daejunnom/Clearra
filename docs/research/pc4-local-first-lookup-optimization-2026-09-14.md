@@ -54,6 +54,15 @@ so comparing only that sample with a warm page-cache run would exaggerate gains.
 Its probe initially tried to advance after cancelling a retired job; that
 benchmark-owner bug was corrected. It was not a product failure.
 
+A larger prefix, with the same **old** WASM and the index-only local reader,
+reached **100,000 logical reads** in **108.219 s**: 45,551 file reads,
+51,329,915 local bytes, 99.384 s App compute, 5.367 s I/O, 2.901 s ABI bridge,
+47,579,136 B WASM memory. Transcript digest:
+`8ec35bc3f553df460923dd4b027b2be4ed526a62eaa752134dd42d51948283cb`.
+Thus removing HTTP exposes a substantial local scaling problem too. This is
+the baseline for the new graph-cache indexes, not a timing of those indexes.
+Both prefix runs stop intentionally and remain non-completion evidence.
+
 The prefix contains 2 field-index reads, 19,999 offset reads and 9,999 graph
 reads. Large graph pages create substantial over-read; they are not enabled in
 the local product reader. Remote transport policy is not widened by these tests.
@@ -81,6 +90,13 @@ the local product reader. Remote transport policy is not widened by these tests.
 Related JS download, reader, OPFS lease and workflow tests passed locally.
 Rust/CLI correctness and the graph-cache algorithm's actual speedup require the
 new exact-source CI/WASM. The 4194 WASM has **not** been replaced for these edits.
+
+Implementation commit: `a22dbfffa8bfc65aee6c482a2f989a8023a8c306`.
+Non-publishing CI: https://github.com/daejunnom/Clearra/actions/runs/34766442189 .
+Source and surface contracts passed at the last observation; Rust, native CLI
+and preview WASM were still running. A later host-only follow-up carries the
+physical file-read counter through the development receipt and bounds direct
+reads as well as cached reads. It does not require another Rust/WASM build.
 
 ## Next online stage / remaining evidence
 

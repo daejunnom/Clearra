@@ -64,3 +64,15 @@ test('random graph records stay exact while index reads share pages', async () =
   assert.equal(reader.retainedBytes, 4096);
   assert.equal(reader.cacheHits, 1);
 });
+test('concurrent direct reads and pages share the same allocation bound', async () => {
+  const finish = [];
+  const reader = createPc4LocalReader(artifacts, (_a, _o, n) => new Promise(resolve => finish.push(() => resolve(new Uint8Array(n)))),
+    { directPaths: [artifacts[2].path] });
+  const pending = Array.from({ length: 128 }, () => reader.read(artifacts[2], 0, 1));
+  await assert.rejects(reader.read(artifacts[2], 0, 1), /pending_limit/);
+  await assert.rejects(reader.read(artifacts[0], 0, 1), /pending_limit/);
+  assert.equal(reader.fileReads, 128);
+  for (const resolve of finish) resolve();
+  await Promise.all(pending);
+  assert.equal(reader.retainedBytes, 0);
+});
