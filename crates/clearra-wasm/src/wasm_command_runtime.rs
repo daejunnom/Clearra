@@ -4002,7 +4002,9 @@ impl WasmCommandRuntime {
             }
             _ => false,
         };
-        if tablebase_requested {
+        // A configured online host must not silently execute a different
+        // product through the ordinary/offline path (for example setup).
+        if tablebase_requested || self.online_pc4_snapshot.is_some() {
             let online = self
                 .online_pc4_snapshot
                 .clone()
