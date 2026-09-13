@@ -106,3 +106,29 @@ Managed `cargo test --locked --offline -p clearra-pc4-tablebase --lib` passed
 tests cover in-bounds wrong first/last offsets for u24/u32 profiles and the
 valid single-record file satisfying both boundaries. This is synthetic reader
 regression evidence, not whole-dataset or release acceptance.
+
+## Current source cross-check
+
+The subsequent graph reader explicitly converts the reversible occupancy:
+`hydra_field_hash_v1_to_clearra_board64_mask` in `graph.rs` reverses the bit
+order inside each ten-cell row; both representations already use the low ten
+bits for the bottom row. Its inverse is the same operation. This neither
+clears rows nor grants profile authority. The Core materializer separately
+handles upstream's full cleared-row prefix and reconstructs physical
+lock/clear placements with the existing Geometry/reachability engine.
+
+The Range lookup still binary-searches eight-byte hash/ID records and reads
+two four-byte offsets for a known ID. `consume_offset_pair` checks ordering,
+EOF, record size, the first offset and the last sentinel before graph I/O.
+No decoded-array element offset from the upstream in-memory reader is used
+as an HTTP byte address.
+
+The exact integration code `f28e8926d49f1a5e45d7571f50fe1130ea6fd4d6` passed
+Tablebase 167, Core row/materializer 7 and candidate ingress 5 tests in
+non-publishing [34747762465](https://github.com/daejunnom/Clearra/actions/runs/34747762465).
+The larger App matrix also checks synthetic-qualified 1..4L targets across
+all five typed profiles. This current code verification reuses the bounded
+upstream evidence above; it is not another whole-file download or a claim
+that all five actual uploaded graph/index pairs are qualified. The 13
+unresolved physical-completion differences remain recorded in
+[the nonempty differential](pc4-hf-nonempty-differential-2026-09-13.md).
