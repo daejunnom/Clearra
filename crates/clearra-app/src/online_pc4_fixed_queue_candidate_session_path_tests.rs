@@ -2,7 +2,7 @@
 //! SRP rationale: multi-clear App composition is separate from session lifecycle tests.
 
 use clearra_pc4_tablebase::{
-    clearra_board64_mask_to_hydra_field_hash_v1, Pc4RuleProfile, Pc4TargetLines,
+    clearra_board64_mask_to_hydra_field_hash_v1, Pc4ArtifactRole, Pc4RuleProfile, Pc4TargetLines,
     Pc4TerminalUseCase, PlacementRotation,
 };
 

@@ -1,6 +1,7 @@
 import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
 
 import type { ClearraWasmModule } from './clearraWasmRuntime';
+import { onlinePc4Progress } from './OnlinePc4Progress';
 import { createPc4RangeReader, type Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 
 // Keep one synchronous WASM entry comfortably below the browser host turn.
@@ -31,6 +32,7 @@ export class WasmJobRunner {
     let terminal: ClearraWasmWorkerEvent | null = null;
     let advancesSinceDrain = 0;
     let searchProfile: unknown = null;
+    let lastOnlineProgress = 0;
     const onlineStarted = performance.now();
     this.onlineAbort = this.onlineGeneration ? new AbortController() : null;
     const reader = this.onlineGeneration ? createPc4RangeReader(this.onlineGeneration, { signal: this.onlineAbort!.signal }) : null;
@@ -48,13 +50,24 @@ export class WasmJobRunner {
       while (this.active && terminal === null) {
         if (!this.active || this.jobId === null) break;
         let status: ReturnType<ClearraWasmModule['advance_job']> = 'pending';
+        if (reader && performance.now() - lastOnlineProgress >= 200) {
+          emit(onlinePc4Progress(this.jobId, reader.requests));
+          lastOnlineProgress = performance.now();
+        }
         if (!this.cancellationRequested) {
           status = this.wasm.advance_job(this.jobId, SEARCH_WORK_BUDGET);
           advancesSinceDrain += 1;
           if (reader && (status === 'pending' || status === 'progress')) {
             const range = this.wasm.online_pc4_pending?.(this.jobId);
             if (range) {
-              const bytes = await reader.read(range.artifact, range.offset, range.length);
+              let bytes: Uint8Array;
+              try { bytes = await reader.read(range.artifact, range.offset, range.length); }
+              catch (error) {
+                // Cancellation already has a terminal event waiting in Rust.
+                // Do not turn an aborted HTTP request into a generic failure.
+                if (this.cancellationRequested) continue;
+                throw error;
+              }
               if (this.cancellationRequested) continue;
               this.wasm.online_pc4_admit!(this.jobId, { lookup_session: range.lookup_session, request_id: range.request_id,
                 status: 206, content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}`,

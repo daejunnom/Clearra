@@ -353,6 +353,7 @@ export const japaneseWorkspaceMessages = Object.freeze({
   tablebaseDisabled: '未読み込み',
   tablebaseLoading: 'ダウンロード・検証中',
   tablebaseReady: '準備完了 · {size}',
+  progressStageTablebase: 'オンラインテーブルベースの部分取得',
   tablebaseUnavailable: '使用不可',
   precomputeBuildDependencies: 'ミノの依存関係を事前計算（ベータ）',
   precomputeBuildDependenciesHelp: 'ベータ機能です。無効にした場合より遅くなることがあります。',

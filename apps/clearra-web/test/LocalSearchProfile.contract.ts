@@ -5,6 +5,12 @@ assert.equal(isLocalSearchProfileMode('local-recovery'), true);
 assert.equal(isLocalSearchProfileMode('local-audit'), true);
 for (const mode of ['production', 'development', 'test', '']) assert.equal(isLocalSearchProfileMode(mode), false);
 assert.equal(localSearchProfileText({ event: 'progress', search_profile: {} }), null);
+const online = JSON.parse(localSearchProfileText({ event: 'progress', pc4_online: {
+  provider: 'hf-graph', requests: 17, transferred_bytes: 1248, elapsed_ms: 2500,
+  revision: 'a'.repeat(40), input: 'private', arbitrary: 'never include'
+} })!);
+assert.deepEqual(online.pc4_online, { provider: 'hf-graph', requests: 17,
+  transferred_bytes: 1248, elapsed_ms: 2500, revision: 'a'.repeat(40) });
 assert.equal(localSearchProfileText({ event: 'final_response', search_profile: { input: 'private' } }), null);
 const text = localSearchProfileText({ event: 'final_response', search_profile: {
   input: 'private', verifier_transport: { timings: {

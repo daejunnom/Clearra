@@ -7,6 +7,13 @@ import {
   type WorkspaceProgressInput
 } from '../src/lib/workspace/workspaceProgressModel.ts';
 
+const onlineProgress = buildWorkspaceProgressModel({ profile: 'pc', status: 'running',
+  progressLabel: 'pc4-online', progressDone: 23, progressTotal: 0, telemetry: null });
+assert.deepEqual(onlineProgress.stages.map(stage => stage.id), ['prepare', 'online', 'finalize']);
+assert.equal(onlineProgress.stages[1].done, '23');
+assert.equal(onlineProgress.stages[1].total, null);
+assert.equal(onlineProgress.stages[1].status, 'running');
+
 function input(
   profile: WorkspaceProgressInput['profile'],
   telemetry: NonNullable<WorkspaceProgressInput['telemetry']>,

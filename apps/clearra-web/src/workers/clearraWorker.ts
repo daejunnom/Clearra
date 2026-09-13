@@ -95,7 +95,6 @@ let tablebaseRequested = false;
 let deferredTablebaseRequested = false;
 let tablebaseWarmup: Promise<void> | null = null;
 let tablebaseWarmupGeneration = 0;
-let tablebaseWarmupAttempted = false;
 let failClosed = false;
 let lifecycleOwnerId = '';
 let hostCapabilitySnapshot = createHostCapabilitySnapshot({
@@ -425,7 +424,6 @@ function setTablebaseRequested(requested: boolean) {
   tablebaseRequested = requested;
   tablebaseWarmupGeneration += 1;
   tablebaseWarmup = null;
-  tablebaseWarmupAttempted = false;
   if (requested) return;
   try {
     loadedWasm?.release_tablebase();
@@ -491,7 +489,6 @@ function wasmHostCapabilities(
 function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
   if (!tablebaseRequested) return Promise.resolve();
   if (tablebaseWarmup) return tablebaseWarmup;
-  tablebaseWarmupAttempted = true;
   const generation = ++tablebaseWarmupGeneration;
   postTablebaseWarmupPhase('loading', 0);
   tablebaseWarmup = withTimeout(
@@ -569,7 +566,6 @@ function disposeRuntime() {
   deferredTablebaseRequested = false;
   tablebaseWarmupGeneration += 1;
   tablebaseWarmup = null;
-  tablebaseWarmupAttempted = false;
   try {
     loadedWasm?.release_tablebase();
   } catch {

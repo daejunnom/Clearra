@@ -142,6 +142,16 @@ function profileStages(
 export function buildWorkspaceProgressModel(
   input: WorkspaceProgressInput
 ): WorkspaceProgressModel {
+  if (input.progressLabel === 'pc4-online') {
+    const complete = input.status === 'completed';
+    const stopped = ['failed', 'cancelled', 'terminated'].includes(input.status);
+    return summarize([
+      { ...COMMON_PREPARE, status: 'complete', done: null, total: null, percent: null, metrics: [] },
+      { id: 'online', labelKey: 'progressStageTablebase', status: complete ? 'complete' : stopped ? 'stopped' : 'running',
+        done: String(input.progressDone), total: null, percent: null, metrics: [] },
+      { ...COMMON_AGGREGATE, status: complete ? 'complete' : 'pending', done: null, total: null, percent: null, metrics: [] }
+    ]);
+  }
   const stages = profileStages(input.profile, input.mode ?? 'default').map<WorkspaceProgressStage>((definition) => ({
     ...definition,
     status: 'pending',

@@ -41,7 +41,7 @@
   }
 
   $: tablebaseStatusLabel = tablebaseMessage(
-    tablebaseStatus === 'ready' && tablebaseProfiles.find(slot => slot.profile === request.rule)?.status !== 'ready'
+    tablebaseStatus === 'ready' && (request.lines !== 4 || tablebaseProfiles.find(slot => slot.profile === request.rule)?.status !== 'ready')
       ? 'unavailable' : tablebaseStatus,
     tablebaseByteLength,
     language

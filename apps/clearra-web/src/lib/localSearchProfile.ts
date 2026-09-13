@@ -33,7 +33,7 @@ function numbers(value: unknown, keys: string[]): Record<string, number | null> 
 
 export function localSearchProfileText(event: unknown): string | null {
   const envelope = record(event);
-  if (!envelope || !['final_response', 'failed', 'cancelled'].includes(String(envelope.event))) return null;
+  if (!envelope || !['final_response', 'failed', 'cancelled', 'progress'].includes(String(envelope.event))) return null;
   const profile = record(envelope.search_profile) ?? {};
   const result: Record<string, unknown> = {};
   const online = record(envelope.pc4_online);
