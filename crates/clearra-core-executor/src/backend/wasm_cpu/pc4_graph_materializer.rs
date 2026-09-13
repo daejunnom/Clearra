@@ -238,6 +238,10 @@ fn bottom_full_row_prefix(cells: u64) -> Option<u16> {
 }
 
 #[cfg(test)]
+#[path = "pc4_graph_materializer_hf_tests.rs"]
+mod hf_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
