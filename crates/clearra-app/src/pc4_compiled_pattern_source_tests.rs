@@ -115,7 +115,11 @@ fn pc4_compiled_pattern_p7_remains_lazy_and_identical_for_every_ordinal() {
     let problem = compile("P7", 7);
     let original = universe(&problem).unwrap();
     assert_eq!(original.pattern_count(), 5040);
-    assert!(original.lazy_sequence_storage_retained_bytes().is_some());
+    assert!(matches!(
+        original.structure(),
+        clearra_supply::pattern_universe::MaterializedPatternUniverseStructure::FactorizedQueueExpression { sequence_len: 7 }
+    ));
+    let retained_before = original.checked_retained_capacity_bytes().unwrap();
     let mut preparation =
         Pc4CompiledPatternPreparation::begin(Arc::clone(&problem), limits(64)).unwrap();
     assert_eq!(preparation.audited_patterns(), 0);
@@ -144,6 +148,10 @@ fn pc4_compiled_pattern_p7_remains_lazy_and_identical_for_every_ordinal() {
         assert_eq!(queue.pieces(), expected);
         assert_eq!(queue.weight(), original.weight_at(index));
     }
+    assert_eq!(
+        original.checked_retained_capacity_bytes(),
+        Some(retained_before)
+    );
     assert_eq!(
         source.identity(),
         prepare(Arc::clone(&problem), 7).identity()
