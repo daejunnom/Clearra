@@ -770,7 +770,8 @@ mod memory_tests {
         use clearra_core_domain::piece::piece_kind::PieceKind;
         use clearra_objectives::policy::objective_policy::ObjectivePolicy;
         use clearra_pc_graph::request::{
-            PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+            PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+            PieceWindow,
         };
         use clearra_supply::queue::fixed_sequence::FixedSequence;
         let query = PcScenarioQuery::new(
@@ -780,6 +781,10 @@ mod memory_tests {
         )
         .with_exact_pieces(Some(2))
         .with_allow_hold(false)
+        // These tests own replay memory, not a worker pool. The serial-only
+        // Core feature must not inherit the host's Auto worker count and then
+        // request unavailable parallel execution on larger CI machines.
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1))
         .with_count_policy(PcCountPolicy::CountAll)
         .with_objective(ObjectivePolicy::all());
         let problem = clearra_problem::ProblemCompiler::compile_scenario_pc(&query).unwrap();

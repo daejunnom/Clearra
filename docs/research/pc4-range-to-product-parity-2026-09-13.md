@@ -308,3 +308,16 @@ fixed and observation sessions retain their terminal state and discard the
 pending lookup. Malformed/misrouted response rejection remains transactional
 and retryable, as it does not revoke the request itself. A source test covers
 late-response non-resurrection without any intervening `step` polling.
+
+On `24c124d5d5195432b105ffa8780d00ba4ed6f42a`, run
+[34744298236](https://github.com/daejunnom/Clearra/actions/runs/34744298236)
+passed Core **7 + 5**, Tablebase **163**, Replay **20**, Postprocess **41**,
+and all **75** PC4 App tests (**11.89 s**). This executes all 700 paired
+fixed/hold product cases and the admission-time non-resurrection test.
+The separate App replay group passed **12 of 16**, including the P7/lazy-page
+contracts, but four tiny memory fixtures inherited Auto workers while directly
+calling Core built without the `parallel` feature. They failed immediately
+with `WorkerPoolUnavailable`, before constructing any replay owner. Those
+memory-only fixtures now explicitly request one worker; production worker
+admission and the test resource lock remain unchanged. The complete latest
+CI still needs a clean result, not an inferred pass from this partial result.
