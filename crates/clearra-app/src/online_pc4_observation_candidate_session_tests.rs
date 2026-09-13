@@ -375,6 +375,7 @@ fn pc4_compiled_pattern_range_union_matches_six_products_and_preserves_zero_hit_
                     fixture.initial_board,
                     &pattern,
                     hold,
+                    zero_hits,
                     input,
                     &guard,
                 );
@@ -425,6 +426,7 @@ fn pc4_compiled_pattern_range_keeps_projected_duplicate_ordinals_in_probability_
             fixture.initial_board,
             "[IO][TZ]",
             FixedQueueHoldState::Disabled,
+            2,
             input,
             &guard,
         );

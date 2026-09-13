@@ -233,6 +233,7 @@ pub(super) fn assert_pattern_product_parity<G: PcCandidatePageGuard>(
     initial: u64,
     pattern: &str,
     hold: FixedQueueHoldState,
+    zero_hit_ordinals: usize,
     input: PcCandidateReducerInput,
     guard: &G,
 ) {
@@ -249,9 +250,18 @@ pub(super) fn assert_pattern_product_parity<G: PcCandidatePageGuard>(
     ] {
         let request = pattern_request(lines, profile, initial, product, pattern, hold);
         let expected = ordinary(&context, request.clone());
+        // Score-minimals deliberately requires a winner for every original
+        // ordinal. A complete search proving an impossible ordinal must keep
+        // that public rejection, not drop its probability mass to mint a set.
+        let coverage_rejection = matches!(product, Product::ScoreMinimum) && zero_hit_ordinals != 0;
+        let expected_status = if coverage_rejection {
+            AppStatus::Unsupported
+        } else {
+            AppStatus::Success
+        };
         assert_eq!(
             expected.status(),
-            AppStatus::Success,
+            expected_status,
             "ordinary {lines}L {profile:?} {pattern} {hold:?} {product:?}: {expected:?}"
         );
         let mut execution = if matches!(product, Product::Score | Product::ScoreMinimum) {
@@ -289,9 +299,21 @@ pub(super) fn assert_pattern_product_parity<G: PcCandidatePageGuard>(
         let actual = actual.expect("bounded pattern product must complete");
         assert_eq!(
             actual.status(),
-            AppStatus::Success,
+            expected_status,
             "{lines}L {profile:?} {pattern} {product:?}: {actual:?}"
         );
+        assert_eq!(actual.error(), expected.error());
+        if coverage_rejection {
+            let error = crate::AppError::new(
+                crate::AppErrorCode::Unsupported,
+                "requested execution runtime is unsupported: pc-score-portfolio-coverage-incomplete",
+            );
+            assert_eq!(actual.error(), Some(&error));
+            for response in [&expected, &actual] {
+                assert!(response.product_capability_result().is_none());
+                assert!(response.render_model().is_none());
+            }
+        }
         if let Some(expected_core) = expected
             .render_model()
             .and_then(crate::AppRenderModel::core_result)
