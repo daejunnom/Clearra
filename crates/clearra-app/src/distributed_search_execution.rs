@@ -1145,6 +1145,17 @@ impl PreparedDistributedPcScoreCompletion {
     pub fn into_cooperative_product_completion(
         self,
     ) -> Result<crate::CooperativeAppExecution, &'static str> {
+        if self.result.is_err() {
+            // Preserve the ordinary typed failure (including unsolvable
+            // ordinals) instead of replacing it with a generic source error.
+            // The caller has dropped the compute child; complete() releases
+            // terminal authority before constructing the public rejection.
+            let context = self.context.clone();
+            return Ok(crate::CooperativeAppExecution::from_finalized_response(
+                context,
+                self.complete(),
+            ));
+        }
         let Self {
             context,
             response_kind,

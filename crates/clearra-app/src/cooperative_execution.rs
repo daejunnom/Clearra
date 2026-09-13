@@ -1840,6 +1840,18 @@ impl CooperativePcTilingEnvelopeError {
 }
 
 impl CooperativeAppExecution {
+    /// Retain an already-finalized rejection after its compute/terminal lease
+    /// has been released. Advancing returns it once without starting a solver
+    /// or applying product finalization a second time.
+    pub(crate) fn from_finalized_response(context: AppContext, response: AppResponse) -> Self {
+        Self {
+            context: Some(context),
+            state: CooperativeExecutionState::Ready(Some(response)),
+            finite_caller_memory: None,
+            finite_caller_generation: None,
+        }
+    }
+
     // Each argument transfers one independently admitted owner; an options
     // clone would obscure the producer-to-continuation ownership boundary.
     #[allow(clippy::too_many_arguments)]
