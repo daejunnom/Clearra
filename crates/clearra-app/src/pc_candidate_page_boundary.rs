@@ -68,6 +68,10 @@ impl PcCandidateRequestIdentity {
         let mut hasher =
             candidate_universe_hasher(prepared_input.target(), initial_board, initial_hold)?;
         match prepared_input.queue() {
+            Pc4PreparedQueueInput::CompiledPattern(pattern) => {
+                hasher.update([2]);
+                hasher.update(pattern.identity().as_bytes());
+            }
             Pc4PreparedQueueInput::FixedExplicit(queue) => {
                 hasher.update([0]);
                 hash_pieces(&mut hasher, queue)?;
@@ -115,6 +119,18 @@ impl PcCandidateRequestIdentity {
         let mut hasher = candidate_universe_hasher(target, initial_board, initial_hold)?;
         hasher.update([0]);
         hash_pieces(&mut hasher, queue)?;
+        Ok(Self(hasher.finalize().into()))
+    }
+
+    pub(crate) fn derive_pc4_compiled_pattern_candidate_universe(
+        target: &QualifiedPc4TargetIdentity,
+        initial_board: StandardPcBoard,
+        initial_hold: FixedQueueHoldState,
+        pattern: crate::Pc4CompiledPatternIdentity,
+    ) -> Result<Self, PcCandidateRequestIdentityError> {
+        let mut hasher = candidate_universe_hasher(target, initial_board, initial_hold)?;
+        hasher.update([2]);
+        hasher.update(pattern.as_bytes());
         Ok(Self(hasher.finalize().into()))
     }
 

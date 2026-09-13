@@ -41,6 +41,37 @@ fn start_with_field(
     cache_records: usize,
     start_field_id: Option<u32>,
 ) -> (AppOnlinePc4CandidateSession, Guard) {
+    start_prepared(
+        fixture,
+        lines,
+        profile,
+        hold,
+        cache_records,
+        start_field_id,
+        |target| match prepare_pc4_input_disclosure(Pc4InputDisclosureRequest::new(
+            target,
+            Pc4InputSurface::NonInteractiveCli,
+            disclosure,
+        ))
+        .unwrap()
+        {
+            Pc4InputDisclosureDecision::Ready(prepared) => prepared,
+            other => panic!("fixture is fully disclosed: {other:?}"),
+        },
+    )
+}
+
+fn start_prepared(
+    fixture: &ClearPath,
+    lines: u8,
+    profile: Pc4RuleProfile,
+    hold: FixedQueueHoldState,
+    cache_records: usize,
+    start_field_id: Option<u32>,
+    prepare: impl FnOnce(
+        clearra_pc4_tablebase::QualifiedPc4TargetIdentity,
+    ) -> crate::Pc4PreparedOnlineInput,
+) -> (AppOnlinePc4CandidateSession, Guard) {
     let target_lines = Pc4TargetLines::new(lines).unwrap();
     let generation = pin(activated_snapshot_for_dataset(
         "observation-range-fixture",
@@ -54,16 +85,7 @@ fn start_with_field(
         .activated_snapshot()
         .qualified_target(profile, Pc4TerminalUseCase::PcSearch, target_lines)
         .unwrap();
-    let prepared = match prepare_pc4_input_disclosure(Pc4InputDisclosureRequest::new(
-        target,
-        Pc4InputSurface::NonInteractiveCli,
-        disclosure,
-    ))
-    .unwrap()
-    {
-        Pc4InputDisclosureDecision::Ready(prepared) => prepared,
-        other => panic!("fixture is fully disclosed: {other:?}"),
-    };
+    let prepared = prepare(target);
     let board = StandardPcBoard::from_words(lines, [fixture.initial_board, 0, 0, 0]).unwrap();
     let source = canonical_source(&prepared, board, hold);
     let guard = Guard::new(source.clone());
@@ -252,6 +274,160 @@ fn pc4_range_hold_union_matches_seven_existing_products_for_all_profiles_and_tar
                 );
             }
         }
+    }
+}
+
+fn start_pattern(
+    fixture: &ClearPath,
+    lines: u8,
+    profile: Pc4RuleProfile,
+    pattern: &str,
+    hold: FixedQueueHoldState,
+) -> (AppOnlinePc4CandidateSession, Guard) {
+    let problem = product_contracts::compile_pattern_problem(
+        lines,
+        profile,
+        fixture.initial_board,
+        pattern,
+        hold,
+    );
+    let mut preparation = crate::Pc4CompiledPatternPreparation::begin(
+        problem,
+        crate::Pc4CompiledPatternLimits::new(nonzero(5040), nonzero(8), nonzero(1)),
+    )
+    .unwrap();
+    while !preparation.advance(nonzero(1), &|| false).unwrap() {}
+    let pattern_source = preparation.finish().unwrap();
+    start_prepared(fixture, lines, profile, hold, 5, None, |target| {
+        crate::Pc4PreparedOnlineInput::for_compiled_pattern(
+            target,
+            Pc4InputSurface::NonInteractiveCli,
+            pattern_source,
+        )
+        .unwrap()
+    })
+}
+
+#[test]
+fn pc4_compiled_pattern_range_union_matches_six_products_and_preserves_zero_hit_mass() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    for lines in 1..=4 {
+        let fixture = clear_path(lines);
+        for profile in Pc4RuleProfile::ALL {
+            for (pattern, hold, zero_hits) in [
+                (
+                    format!("[IO]{}", "I".repeat(usize::from(lines) - 1)),
+                    FixedQueueHoldState::Disabled,
+                    1,
+                ),
+                (
+                    format!("[OT]{}", "I".repeat(usize::from(lines))),
+                    FixedQueueHoldState::Empty,
+                    0,
+                ),
+                (
+                    format!("[IO]{}", "I".repeat(usize::from(lines) - 1)),
+                    FixedQueueHoldState::Occupied(Pc4GraphPiece::I),
+                    0,
+                ),
+            ] {
+                let (mut session, guard) = start_pattern(&fixture, lines, profile, &pattern, hold);
+                let (terminal, lookups) = drive(&mut session, &guard, &fixture);
+                assert!(
+                    matches!(
+                        terminal,
+                        AppOnlinePc4CandidateStep::Complete {
+                            canonical_candidates: 1,
+                            ..
+                        }
+                    ),
+                    "{lines}L {profile:?} {pattern} {hold:?}: {terminal:?}"
+                );
+                assert_eq!(
+                    lookups.len(),
+                    usize::from(lines) + 1,
+                    "all pattern and hold branches share one cache"
+                );
+                let family = session.completed_observation_family().unwrap();
+                assert_eq!(family.reveal_outcomes().len(), 2);
+                assert_eq!(
+                    family.total_reveal_probability(),
+                    Pc4ExactProbability::one()
+                );
+                assert_eq!(
+                    family
+                        .reveal_outcomes()
+                        .iter()
+                        .filter(|outcome| outcome.candidates().is_empty())
+                        .count(),
+                    zero_hits
+                );
+                for (ordinal, outcome) in family.reveal_outcomes().iter().enumerate() {
+                    assert_eq!(outcome.reveal().reveal_rank(), ordinal as u128);
+                    assert_eq!(outcome.reveal().probability().numerator(), 1);
+                    assert_eq!(outcome.reveal().probability().denominator(), 2);
+                    assert_eq!(outcome.reveal().terminal_bag_state(), None);
+                }
+                let input = session.into_completed_reducer_input(&guard).unwrap();
+                product_contracts::assert_pattern_product_parity(
+                    lines,
+                    profile,
+                    fixture.initial_board,
+                    &pattern,
+                    hold,
+                    input,
+                    &guard,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pc4_compiled_pattern_range_keeps_projected_duplicate_ordinals_in_probability_denominator() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let fixture = clear_path(1);
+    for profile in Pc4RuleProfile::ALL {
+        let (mut session, guard) = start_pattern(
+            &fixture,
+            1,
+            profile,
+            "[IO][TZ]",
+            FixedQueueHoldState::Disabled,
+        );
+        let (terminal, lookups) = drive(&mut session, &guard, &fixture);
+        assert!(matches!(
+            terminal,
+            AppOnlinePc4CandidateStep::Complete {
+                canonical_candidates: 1,
+                ..
+            }
+        ));
+        assert_eq!(lookups.len(), 2);
+        let family = session.completed_observation_family().unwrap();
+        assert_eq!(family.reveal_outcomes().len(), 4);
+        assert_eq!(
+            family
+                .reveal_outcomes()
+                .iter()
+                .filter(|outcome| outcome.candidates().is_empty())
+                .count(),
+            2
+        );
+        for outcome in family.reveal_outcomes() {
+            assert_eq!(outcome.reveal().probability().denominator(), 4);
+            assert_eq!(outcome.reveal().revealed_pieces().len(), 1);
+        }
+        let input = session.into_completed_reducer_input(&guard).unwrap();
+        product_contracts::assert_pattern_product_parity(
+            1,
+            profile,
+            fixture.initial_board,
+            "[IO][TZ]",
+            FixedQueueHoldState::Disabled,
+            input,
+            &guard,
+        );
     }
 }
 

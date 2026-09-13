@@ -7,14 +7,16 @@ use std::{borrow::Cow, sync::Arc};
 use clearra_core_domain::{
     piece::piece_kind::PieceKind, probability::probability_value::ProbabilityValue,
 };
-use clearra_pc4_tablebase::Pc4GraphPiece;
+use clearra_pc4_tablebase::{
+    Pc4FiniteQueueFamily, Pc4FiniteQueueReadError, Pc4FiniteQueueReader, Pc4GraphPiece,
+};
 use clearra_pc_graph::request::PcQueueInput;
 use clearra_problem::{SearchProblem, SearchProblemKind};
 use clearra_supply::pattern_universe::MaterializedPatternUniverse;
 use sha2::{Digest, Sha256};
 
-pub const PC4_COMPILED_PATTERN_SOURCE_CONTRACT: &str = "pc4-compiled-pattern-source.v1";
-const IDENTITY_DOMAIN: &[u8] = b"clearra.pc4-compiled-pattern-source.v1\0";
+pub const PC4_COMPILED_PATTERN_SOURCE_CONTRACT: &str = "pc4-compiled-pattern-source.v2";
+const IDENTITY_DOMAIN: &[u8] = b"clearra.pc4-compiled-pattern-source.v2\0";
 
 /// Preparation work limits, not Core execution or retained-memory authority.
 /// The caller already owns the immutable problem; only an Arc and at most one
@@ -42,6 +44,10 @@ impl Pc4CompiledPatternLimits {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Pc4CompiledPatternError {
+    TargetMismatch,
+    RuleMismatch(crate::Pc4SearchProblemCompatibilityError),
+    UnsupportedObservationPolicy,
+    UnsupportedWeights,
     Cancelled,
     PreparationTerminated,
     PreparationIncomplete,
@@ -62,6 +68,12 @@ pub enum Pc4CompiledPatternError {
 impl Pc4CompiledPatternError {
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::TargetMismatch => "pc4_compiled_pattern_target_mismatch",
+            Self::RuleMismatch(error) => error.reason(),
+            Self::UnsupportedObservationPolicy => {
+                "pc4_compiled_pattern_observation_policy_unsupported"
+            }
+            Self::UnsupportedWeights => "pc4_compiled_pattern_weights_unsupported",
             Self::Cancelled => "pc4_compiled_pattern_cancelled",
             Self::PreparationTerminated => "pc4_compiled_pattern_preparation_terminated",
             Self::PreparationIncomplete => "pc4_compiled_pattern_preparation_incomplete",
@@ -126,6 +138,7 @@ impl Pc4CompiledPatternQueue {
 /// problem, not a reconstructed seven-bag or an unweighted candidate union.
 #[derive(Clone, Debug)]
 pub struct Pc4CompiledPatternSource {
+    family: Pc4FiniteQueueFamily,
     problem: Arc<SearchProblem>,
     identity: Pc4CompiledPatternIdentity,
     pattern_count: usize,
@@ -133,6 +146,9 @@ pub struct Pc4CompiledPatternSource {
 }
 
 impl Pc4CompiledPatternSource {
+    pub(crate) const fn finite_family(&self) -> &Pc4FiniteQueueFamily {
+        &self.family
+    }
     pub const fn identity(&self) -> Pc4CompiledPatternIdentity {
         self.identity
     }
@@ -186,61 +202,7 @@ impl Pc4CompiledPatternPreparation {
         problem: Arc<SearchProblem>,
         limits: Pc4CompiledPatternLimits,
     ) -> Result<Self, Pc4CompiledPatternError> {
-        if !matches!(
-            problem.problem_kind(),
-            SearchProblemKind::OpeningPc | SearchProblemKind::ScenarioPc
-        ) {
-            return Err(Pc4CompiledPatternError::UnsupportedProblem);
-        }
-        let board = problem.initial_board();
-        if board.width() != 10 || !(1..=4).contains(&board.visible_height()) {
-            return Err(Pc4CompiledPatternError::UnsupportedBoard);
-        }
-        let mut hasher = Sha256::new();
-        hasher.update(IDENTITY_DOMAIN);
-        match problem.core_query().remaining_queue() {
-            PcQueueInput::PatternExpression(expression) => {
-                hasher.update([0]);
-                hash_len(&mut hasher, expression.source().len())?;
-                hasher.update(expression.source().as_bytes());
-            }
-            PcQueueInput::Standard7Bag => hasher.update([1]),
-            // Fixed queues and hidden observations have separate disclosure
-            // contracts; they must not acquire pattern authority by relabeling.
-            _ => return Err(Pc4CompiledPatternError::UnsupportedQueueSource),
-        }
-        let universe = universe(&problem)?;
-        if !problem.piece_source().complete()
-            || !universe.complete()
-            || problem.piece_source().truncation_reason().is_some()
-            || universe.truncation_reason().is_some()
-        {
-            return Err(Pc4CompiledPatternError::IncompleteUniverse);
-        }
-        let pattern_count = universe.pattern_count();
-        if pattern_count == 0 || universe.total_possible_pattern_count() != pattern_count as u128 {
-            return Err(Pc4CompiledPatternError::InconsistentUniverse);
-        }
-        if pattern_count > limits.patterns.get() {
-            return Err(Pc4CompiledPatternError::PatternLimit {
-                limit: limits.patterns.get(),
-                attempted: pattern_count,
-            });
-        }
-        let sequence_pieces = problem.supply().source_sequence_length();
-        if sequence_pieces > limits.sequence_pieces.get() {
-            return Err(Pc4CompiledPatternError::SequencePieceLimit {
-                limit: limits.sequence_pieces.get(),
-                attempted: sequence_pieces,
-            });
-        }
-        if sequence_pieces == 0 {
-            return Err(Pc4CompiledPatternError::InconsistentUniverse);
-        }
-        hash_len(&mut hasher, pattern_count)?;
-        hasher.update(universe.total_possible_pattern_count().to_be_bytes());
-        hash_len(&mut hasher, sequence_pieces)?;
-        hasher.update([u8::from(problem.supply().projects_unplaced_lookahead())]);
+        let (hasher, pattern_count, sequence_pieces) = audit_header(&problem, limits)?;
         Ok(Self {
             problem,
             limits,
@@ -293,6 +255,7 @@ impl Pc4CompiledPatternPreparation {
                 if cancelled() {
                     return Err(Pc4CompiledPatternError::Cancelled);
                 }
+                validate_uniform_weight(universe, index)?;
                 hash_record(&mut staged, universe, index, self.sequence_pieces)?;
             }
             if cancelled() {
@@ -316,13 +279,166 @@ impl Pc4CompiledPatternPreparation {
         if self.next_pattern != self.pattern_count {
             return Err(Pc4CompiledPatternError::PreparationIncomplete);
         }
+        let family = Pc4FiniteQueueFamily::uniform(
+            Arc::new(CompiledQueueReader {
+                problem: Arc::clone(&self.problem),
+                length: self.sequence_pieces,
+            }),
+            NonZeroUsize::new(self.pattern_count).expect("audited nonempty source"),
+            NonZeroUsize::new(self.sequence_pieces).expect("audited nonempty queue"),
+        );
         Ok(Pc4CompiledPatternSource {
+            family,
             problem: self.problem,
             identity: Pc4CompiledPatternIdentity(hasher.finalize().into()),
             pattern_count: self.pattern_count,
             sequence_pieces: self.sequence_pieces,
         })
     }
+}
+
+fn audit_header(
+    problem: &SearchProblem,
+    limits: Pc4CompiledPatternLimits,
+) -> Result<(Sha256, usize, usize), Pc4CompiledPatternError> {
+    if !matches!(
+        problem.problem_kind(),
+        SearchProblemKind::OpeningPc | SearchProblemKind::ScenarioPc
+    ) {
+        return Err(Pc4CompiledPatternError::UnsupportedProblem);
+    }
+    let board = problem.initial_board();
+    if board.width() != 10 || !(1..=4).contains(&board.visible_height()) {
+        return Err(Pc4CompiledPatternError::UnsupportedBoard);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(IDENTITY_DOMAIN);
+    if problem
+        .core_query()
+        .queue_observation_policy()
+        .requires_observation_policy()
+    {
+        return Err(Pc4CompiledPatternError::UnsupportedObservationPolicy);
+    }
+    hasher.update(
+        problem
+            .core_query()
+            .queue_observation_policy()
+            .keyword()
+            .as_bytes(),
+    );
+    match problem.core_query().remaining_queue() {
+        PcQueueInput::PatternExpression(expression) => {
+            hasher.update([0]);
+            hash_len(&mut hasher, expression.source().len())?;
+            hasher.update(expression.source().as_bytes());
+        }
+        PcQueueInput::Standard7Bag => hasher.update([1]),
+        // Fixed queues and hidden observations have separate disclosure
+        // contracts; they must not acquire pattern authority by relabeling.
+        _ => return Err(Pc4CompiledPatternError::UnsupportedQueueSource),
+    }
+    let universe = universe(problem)?;
+    if !problem.piece_source().complete()
+        || !universe.complete()
+        || problem.piece_source().truncation_reason().is_some()
+        || universe.truncation_reason().is_some()
+    {
+        return Err(Pc4CompiledPatternError::IncompleteUniverse);
+    }
+    let pattern_count = universe.pattern_count();
+    if pattern_count == 0 || universe.total_possible_pattern_count() != pattern_count as u128 {
+        return Err(Pc4CompiledPatternError::InconsistentUniverse);
+    }
+    if pattern_count > limits.patterns.get() {
+        return Err(Pc4CompiledPatternError::PatternLimit {
+            limit: limits.patterns.get(),
+            attempted: pattern_count,
+        });
+    }
+    let sequence_pieces = problem.supply().source_sequence_length();
+    if sequence_pieces > limits.sequence_pieces.get() {
+        return Err(Pc4CompiledPatternError::SequencePieceLimit {
+            limit: limits.sequence_pieces.get(),
+            attempted: sequence_pieces,
+        });
+    }
+    if sequence_pieces == 0 {
+        return Err(Pc4CompiledPatternError::InconsistentUniverse);
+    }
+    hash_len(&mut hasher, pattern_count)?;
+    hasher.update(universe.total_possible_pattern_count().to_be_bytes());
+    hash_len(&mut hasher, sequence_pieces)?;
+    hasher.update([u8::from(problem.supply().projects_unplaced_lookahead())]);
+    Ok((hasher, pattern_count, sequence_pieces))
+}
+
+impl PartialEq for Pc4CompiledPatternSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.family == other.family && self.identity == other.identity
+    }
+}
+impl Eq for Pc4CompiledPatternSource {}
+
+#[derive(Debug)]
+struct CompiledQueueReader {
+    problem: Arc<SearchProblem>,
+    length: usize,
+}
+impl Pc4FiniteQueueReader for CompiledQueueReader {
+    fn read_queue(&self, ordinal: usize) -> Result<Vec<Pc4GraphPiece>, Pc4FiniteQueueReadError> {
+        let universe =
+            universe(&self.problem).map_err(|_| Pc4FiniteQueueReadError::QueueUnavailable)?;
+        if ordinal >= universe.pattern_count() {
+            return Err(Pc4FiniteQueueReadError::QueueUnavailable);
+        }
+        let queue = checked_queue(universe, ordinal, self.length)
+            .map_err(|_| Pc4FiniteQueueReadError::QueueLengthMismatch)?;
+        let mut pieces = Vec::new();
+        pieces
+            .try_reserve_exact(queue.len())
+            .map_err(|_| Pc4FiniteQueueReadError::AllocationFailed)?;
+        pieces.extend(queue.iter().copied().map(graph_piece));
+        Ok(pieces)
+    }
+}
+
+fn validate_uniform_weight(
+    universe: &MaterializedPatternUniverse,
+    index: usize,
+) -> Result<(), Pc4CompiledPatternError> {
+    if universe.weight_at(index).get().to_bits()
+        != (1.0 / universe.pattern_count() as f64).to_bits()
+    {
+        return Err(Pc4CompiledPatternError::UnsupportedWeights);
+    }
+    Ok(())
+}
+
+/// Revalidates a borrowed product problem without cloning its source owners.
+/// Core's existing synchronous admission has cancellation points per ordinal.
+pub(crate) fn derive_compiled_pattern_identity<G: Fn() -> bool>(
+    problem: &SearchProblem,
+    cancelled: &G,
+) -> Result<Pc4CompiledPatternIdentity, Pc4CompiledPatternError> {
+    if cancelled() {
+        return Err(Pc4CompiledPatternError::Cancelled);
+    }
+    let limits =
+        Pc4CompiledPatternLimits::new(NonZeroUsize::MAX, NonZeroUsize::MAX, NonZeroUsize::MIN);
+    let (mut hasher, count, length) = audit_header(problem, limits)?;
+    let universe = universe(problem)?;
+    for index in 0..count {
+        if cancelled() {
+            return Err(Pc4CompiledPatternError::Cancelled);
+        }
+        validate_uniform_weight(universe, index)?;
+        hash_record(&mut hasher, universe, index, length)?;
+    }
+    if cancelled() {
+        return Err(Pc4CompiledPatternError::Cancelled);
+    }
+    Ok(Pc4CompiledPatternIdentity(hasher.finalize().into()))
 }
 
 fn universe(

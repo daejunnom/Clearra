@@ -73,6 +73,26 @@ fn request_with_supply(
     queue: &[Pc4GraphPiece],
     hold: FixedQueueHoldState,
 ) -> AppRequest {
+    request_with_queue_input(
+        lines,
+        profile,
+        initial,
+        product,
+        PcQueueInput::fixed_sequence(FixedSequence::new(
+            queue.iter().copied().map(piece_kind).collect(),
+        )),
+        hold,
+    )
+}
+
+fn request_with_queue_input(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    product: Product,
+    queue: PcQueueInput,
+    hold: FixedQueueHoldState,
+) -> AppRequest {
     let rule = match profile {
         Pc4RuleProfile::Srs => srs(),
         Pc4RuleProfile::SrsPlus => srs_plus(),
@@ -147,9 +167,7 @@ fn request_with_supply(
     }
     let mut query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(u16::from(lines), initial),
-        PcQueueInput::fixed_sequence(FixedSequence::new(
-            queue.iter().copied().map(piece_kind).collect(),
-        )),
+        queue,
         // Placement horizon is not source queue length: storing current may
         // consume one additional disclosed piece without placing another one.
         PieceWindow::new(usize::from(lines)),
@@ -173,6 +191,159 @@ fn request_with_supply(
     match contract {
         Some(contract) => request.with_product_capability_contract(contract).unwrap(),
         None => request,
+    }
+}
+
+fn pattern_request(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    product: Product,
+    pattern: &str,
+    hold: FixedQueueHoldState,
+) -> AppRequest {
+    let queue = PcQueueInput::pattern_expression(
+        clearra_supply::queue::queue_pattern_expression::QueuePatternExpression::parse(
+            pattern, 5040,
+        )
+        .unwrap(),
+    );
+    request_with_queue_input(lines, profile, initial, product, queue, hold)
+}
+
+pub(super) fn compile_pattern_problem(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    pattern: &str,
+    hold: FixedQueueHoldState,
+) -> std::sync::Arc<clearra_problem::SearchProblem> {
+    let request = pattern_request(lines, profile, initial, Product::All, pattern, hold);
+    let AppCommand::Scenario(command) = request.command() else {
+        panic!("scenario fixture")
+    };
+    std::sync::Arc::new(
+        clearra_problem::ProblemCompiler::compile_scenario_pc(command.query()).unwrap(),
+    )
+}
+
+pub(super) fn assert_pattern_product_parity<G: PcCandidatePageGuard>(
+    lines: u8,
+    profile: Pc4RuleProfile,
+    initial: u64,
+    pattern: &str,
+    hold: FixedQueueHoldState,
+    input: PcCandidateReducerInput,
+    guard: &G,
+) {
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for product in [
+        Product::All,
+        Product::Chance,
+        Product::Minimum,
+        Product::Replay,
+        Product::Score,
+        Product::ScoreMinimum,
+    ] {
+        let request = pattern_request(lines, profile, initial, product, pattern, hold);
+        let expected = ordinary(&context, request.clone());
+        assert_eq!(
+            expected.status(),
+            AppStatus::Success,
+            "ordinary {lines}L {profile:?} {pattern} {hold:?} {product:?}: {expected:?}"
+        );
+        let mut execution = if matches!(product, Product::Score | Product::ScoreMinimum) {
+            context.start_pc4_owned_candidate_product(
+                request,
+                input.clone(),
+                guard,
+                &ExecutionControl::default(),
+            )
+        } else {
+            context.start_pc4_candidate_product(
+                request,
+                &input,
+                guard,
+                &ExecutionControl::default(),
+            )
+        }
+        .unwrap_or_else(|error| {
+            panic!("online {lines}L {profile:?} {pattern} {hold:?} {product:?}: {error:?}")
+        });
+        let mut actual = None;
+        for _ in 0..4096 {
+            match execution
+                .advance(256, guard, &ExecutionControl::default())
+                .unwrap()
+            {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                CooperativeAppAdvance::Completed(response) => {
+                    actual = Some(response);
+                    break;
+                }
+                other => panic!("pattern product state {other:?}"),
+            }
+        }
+        let actual = actual.expect("bounded pattern product must complete");
+        assert_eq!(
+            actual.status(),
+            AppStatus::Success,
+            "{lines}L {profile:?} {pattern} {product:?}: {actual:?}"
+        );
+        if let Some(expected_core) = expected
+            .render_model()
+            .and_then(crate::AppRenderModel::core_result)
+        {
+            let core = actual
+                .render_model()
+                .and_then(crate::AppRenderModel::core_result)
+                .unwrap();
+            assert_eq!(
+                core.normalized_solution_identities(),
+                expected_core.normalized_solution_identities()
+            );
+            assert_eq!(
+                core.normalized_solution_keys(),
+                expected_core.normalized_solution_keys()
+            );
+            assert_eq!(
+                core.solution_coverages(),
+                expected_core.solution_coverages()
+            );
+            assert_eq!(
+                core.coverage_pattern_words(),
+                expected_core.coverage_pattern_words()
+            );
+            assert_eq!(core.path_steps(), expected_core.path_steps());
+        }
+        if let Some(expected_product) = expected.product_capability_result() {
+            let actual_product = actual.product_capability_result().unwrap();
+            assert_eq!(actual_product.contract(), expected_product.contract());
+            assert_eq!(actual_product.public_result_payload(), expected_product.public_result_payload(),
+                "{lines}L {profile:?} {pattern} {hold:?} {product:?}: probability, minimum sets, field scores and replay witnesses");
+        }
+        assert!(matches!(
+            execution.advance(256, guard, &ExecutionControl::default()),
+            Err(Pc4CandidateProductError::AlreadyFinished)
+        ));
+    }
+    // An equal-size pattern whose only successful field may even be identical
+    // still cannot consume this source's completeness certificate.
+    if lines == 1 && profile == Pc4RuleProfile::Srs && hold == FixedQueueHoldState::Disabled {
+        let wrong_request = pattern_request(lines, profile, initial, Product::All, "[IT]", hold);
+        assert!(matches!(
+            context.start_pc4_candidate_product(
+                wrong_request,
+                &input,
+                guard,
+                &ExecutionControl::default()
+            ),
+            Err(Pc4CandidateProductError::Candidate(
+                crate::PcCandidateExecutionError::RequestIdentityMismatch
+            ))
+        ));
     }
 }
 

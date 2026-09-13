@@ -1,6 +1,8 @@
 // SRP rationale: observation consumers page either a real hidden bag family
 // or the single deterministic no-draw outcome. A fixed queue never invents
 // bag state, performs a draw, or duplicates probability across hold choices.
+use crate::finite_queue_family::{FiniteQueueCursor, FiniteQueueOutcome};
+use crate::Pc4FiniteQueueFamily;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -11,18 +13,28 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub(crate) enum ObservationRevealFamily {
-    Fixed { token: Arc<()>, page_limit: usize },
+    Finite {
+        family: Pc4FiniteQueueFamily,
+        page_limit: usize,
+        allocated_pieces_limit: usize,
+    },
+    Fixed {
+        token: Arc<()>,
+        page_limit: usize,
+    },
     Bag(Pc4BagRevealFamily),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum ObservationRevealCursor {
+    Finite(FiniteQueueCursor),
     Fixed { token: Arc<()>, consumed: bool },
     Bag(Pc4BagRevealCursor),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ObservationRevealSequence {
+    Finite(FiniteQueueOutcome),
     Fixed,
     Bag(Pc4BagRevealSequence),
 }
@@ -35,8 +47,9 @@ impl ObservationRevealFamily {
         }
     }
 
-    pub(crate) const fn total_sequences(&self) -> u128 {
+    pub(crate) fn total_sequences(&self) -> u128 {
         match self {
+            Self::Finite { family, .. } => family.count() as u128,
             Self::Fixed { .. } => 1,
             Self::Bag(family) => family.total_sequences(),
         }
@@ -44,6 +57,7 @@ impl ObservationRevealFamily {
 
     pub(crate) fn cursor(&self) -> ObservationRevealCursor {
         match self {
+            Self::Finite { family, .. } => ObservationRevealCursor::Finite(family.cursor()),
             Self::Fixed { token, .. } => ObservationRevealCursor::Fixed {
                 token: Arc::clone(token),
                 consumed: false,
@@ -64,6 +78,21 @@ impl ObservationRevealFamily {
         let mut transaction = cursor.clone();
         let mut result = Vec::new();
         match (self, &mut transaction) {
+            (
+                Self::Finite {
+                    family,
+                    page_limit,
+                    allocated_pieces_limit,
+                },
+                ObservationRevealCursor::Finite(cursor),
+            ) => {
+                let page =
+                    family.next_page(cursor, limit, *page_limit, *allocated_pieces_limit, guard)?;
+                result
+                    .try_reserve_exact(page.len())
+                    .map_err(|_| Pc4BagRevealPageError::AllocationFailed)?;
+                result.extend(page.into_iter().map(ObservationRevealSequence::Finite));
+            }
             (
                 Self::Fixed { token, page_limit },
                 ObservationRevealCursor::Fixed {
@@ -109,13 +138,15 @@ impl ObservationRevealFamily {
 impl ObservationRevealCursor {
     pub(crate) const fn next_rank(&self) -> u128 {
         match self {
+            Self::Finite(cursor) => cursor.next_rank(),
             Self::Fixed { consumed, .. } => *consumed as u128,
             Self::Bag(cursor) => cursor.next_rank(),
         }
     }
 
-    pub(crate) const fn is_exhausted(&self) -> bool {
+    pub(crate) fn is_exhausted(&self) -> bool {
         match self {
+            Self::Finite(cursor) => cursor.is_exhausted(),
             Self::Fixed { consumed, .. } => *consumed,
             Self::Bag(cursor) => cursor.is_exhausted(),
         }
@@ -125,6 +156,7 @@ impl ObservationRevealCursor {
 impl ObservationRevealSequence {
     pub(crate) const fn rank(&self) -> u128 {
         match self {
+            Self::Finite(sequence) => sequence.rank,
             Self::Fixed => 0,
             Self::Bag(sequence) => sequence.rank(),
         }
@@ -132,6 +164,7 @@ impl ObservationRevealSequence {
 
     pub(crate) fn pieces(&self) -> &[Pc4GraphPiece] {
         match self {
+            Self::Finite(sequence) => &sequence.pieces,
             Self::Fixed => &[],
             Self::Bag(sequence) => sequence.pieces(),
         }
@@ -139,6 +172,7 @@ impl ObservationRevealSequence {
 
     pub(crate) const fn probability(&self) -> Pc4ExactProbability {
         match self {
+            Self::Finite(sequence) => sequence.probability,
             Self::Fixed => Pc4ExactProbability::one(),
             Self::Bag(sequence) => sequence.probability(),
         }
@@ -146,6 +180,7 @@ impl ObservationRevealSequence {
 
     pub(crate) const fn terminal_state(&self) -> Option<Pc4BagState> {
         match self {
+            Self::Finite(_) => None,
             Self::Fixed => None,
             Self::Bag(sequence) => Some(sequence.terminal_state()),
         }
@@ -160,6 +195,7 @@ impl ObservationRevealSequence {
         Option<Pc4BagState>,
     ) {
         match self {
+            Self::Finite(sequence) => (sequence.rank, sequence.pieces, sequence.probability, None),
             Self::Fixed => (0, Vec::new(), Pc4ExactProbability::one(), None),
             Self::Bag(sequence) => {
                 let (rank, pieces, probability, state) = sequence.into_parts();

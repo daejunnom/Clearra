@@ -1315,6 +1315,24 @@ fn validate_queue_scope_binding<ProviderError, TerminalError, MaterializerError>
     })?;
     let graph_scope = graph_family.queue_scope();
     let queue_matches = match request.prepared_input.queue() {
+        Pc4PreparedQueueInput::CompiledPattern(pattern) => {
+            let cells_to_fill =
+                u32::from(initial_board.cell_count()) - initial_board.occupied().count_ones();
+            let problem = pattern.problem();
+            graph_scope.finite_queues() == Some(pattern.finite_family())
+                && graph_scope.initial_visible_queue().is_empty()
+                && graph_scope.preview_length() == pattern.sequence_pieces() - 1
+                && graph_scope.hidden_draws() == 0
+                && graph_scope.hidden_source_state().is_none()
+                && cells_to_fill.is_multiple_of(4)
+                && graph_scope.placement_count() == (cells_to_fill / 4) as usize
+                && problem.initial_board().occupied_mask() == request.source.initial_board_mask()
+                && graph_scope.initial_hold()
+                    == crate::pc_candidate_execution_bridge::fixed_queue_hold_state(
+                        problem.core_query().allow_hold(),
+                        problem.core_query().hold_state(),
+                    )
+        }
         Pc4PreparedQueueInput::FixedExplicit(queue) => {
             // A finite queue may have controllable hold branches but no hidden
             // randomness. Bind the complete placement horizon to board area:
@@ -1322,6 +1340,7 @@ fn validate_queue_scope_binding<ProviderError, TerminalError, MaterializerError>
             let cells_to_fill =
                 u32::from(initial_board.cell_count()) - initial_board.occupied().count_ones();
             queue.as_slice() == graph_scope.initial_visible_queue()
+                && graph_scope.finite_queues().is_none()
                 && graph_scope.preview_length() == queue.len().saturating_sub(1)
                 && graph_scope.hidden_draws() == 0
                 && graph_scope.hidden_source_state().is_none()
@@ -1335,6 +1354,7 @@ fn validate_queue_scope_binding<ProviderError, TerminalError, MaterializerError>
             ..
         } => {
             visible_queue.as_slice() == graph_scope.initial_visible_queue()
+                && graph_scope.finite_queues().is_none()
                 && scope.visible_piece_count() == graph_scope.initial_visible_queue().len()
                 && scope.preview_length() == graph_scope.preview_length()
                 && scope.hidden_draws() == graph_scope.hidden_draws()

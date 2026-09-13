@@ -164,7 +164,7 @@ impl Pc4ObservationRevealLedgerFamily {
         &self.queue_scope
     }
 
-    pub const fn total_outcomes(&self) -> u128 {
+    pub fn total_outcomes(&self) -> u128 {
         self.reveal_family.total_sequences()
     }
 

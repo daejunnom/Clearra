@@ -41,6 +41,7 @@ pub struct AppOnlinePc4ObservationCandidateRequest<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppOnlinePc4ObservationCandidateRequestError {
+    CompiledInputMismatch,
     Source(AppOnlinePc4FixedQueueCandidateRequestError),
     InvalidPlacementArea,
     PlacementHorizonMismatch { expected: usize, declared: usize },
@@ -51,6 +52,7 @@ pub enum AppOnlinePc4ObservationCandidateRequestError {
 impl AppOnlinePc4ObservationCandidateRequestError {
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::CompiledInputMismatch => "pc4_online_compiled_pattern_input_mismatch",
             Self::Source(error) => error.reason(),
             Self::InvalidPlacementArea => "pc4_online_observation_invalid_placement_area",
             Self::PlacementHorizonMismatch { .. } => {
@@ -100,6 +102,30 @@ impl<'a> AppOnlinePc4ObservationCandidateRequest<'a> {
         }
         let placement_count = (cells / 4) as usize;
         let frontier_request = match prepared_input.queue() {
+            Pc4PreparedQueueInput::CompiledPattern(pattern) => {
+                let problem = pattern.problem();
+                if problem.initial_board().occupied_mask()
+                    != initial_board
+                        .occupied()
+                        .compact_board64()
+                        .unwrap_or(u64::MAX)
+                    || initial_hold
+                        != crate::pc_candidate_execution_bridge::fixed_queue_hold_state(
+                            problem.core_query().allow_hold(),
+                            problem.core_query().hold_state(),
+                        )
+                {
+                    return Err(
+                        AppOnlinePc4ObservationCandidateRequestError::CompiledInputMismatch,
+                    );
+                }
+                Pc4ObservationFrontierRequest::finite_queues(
+                    pattern.finite_family().clone(),
+                    initial_hold,
+                    placement_count,
+                    frontier_budgets,
+                )
+            }
             Pc4PreparedQueueInput::FixedExplicit(queue) => {
                 Pc4ObservationFrontierRequest::fixed_queue(
                     queue,

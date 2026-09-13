@@ -2,6 +2,7 @@
 // already-bounded concrete hold expansion and lazy multiset reveal families
 // into a graph-free observation frontier. Graph lookup, pattern syntax,
 // product activation, and I/O remain outside this feature-off state machine.
+use crate::Pc4FiniteQueueFamily;
 use core::{fmt, num::NonZeroUsize};
 use std::sync::Arc;
 
@@ -120,6 +121,7 @@ where
 }
 
 pub struct Pc4ObservationFrontierRequest<'a> {
+    finite_queues: Option<Pc4FiniteQueueFamily>,
     initial_visible_queue: &'a [Pc4GraphPiece],
     preview_length: usize,
     hidden_source_state: Option<Pc4BagState>,
@@ -141,6 +143,7 @@ impl<'a> Pc4ObservationFrontierRequest<'a> {
         budgets: Pc4ObservationFrontierBudgets,
     ) -> Self {
         Self {
+            finite_queues: None,
             initial_visible_queue,
             preview_length,
             hidden_source_state: if hidden_draws == 0 {
@@ -165,8 +168,29 @@ impl<'a> Pc4ObservationFrontierRequest<'a> {
         budgets: Pc4ObservationFrontierBudgets,
     ) -> Self {
         Self {
+            finite_queues: None,
             initial_visible_queue: queue,
             preview_length: queue.len().saturating_sub(1),
+            hidden_source_state: None,
+            hidden_draws: 0,
+            initial_hold,
+            placement_count,
+            budgets,
+        }
+    }
+
+    /// Each member is fully specified by the compiled pattern. This is not a
+    /// hidden observation source and does not infer a bag or future revelation.
+    pub fn finite_queues(
+        family: Pc4FiniteQueueFamily,
+        initial_hold: FixedQueueHoldState,
+        placement_count: usize,
+        budgets: Pc4ObservationFrontierBudgets,
+    ) -> Self {
+        Self {
+            preview_length: family.sequence_pieces() - 1,
+            finite_queues: Some(family),
+            initial_visible_queue: &[],
             hidden_source_state: None,
             hidden_draws: 0,
             initial_hold,
@@ -451,6 +475,7 @@ pub struct Pc4ObservationFrontierFamily {
 /// placement horizon.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pc4ObservationQueueScope {
+    finite_queues: Option<Pc4FiniteQueueFamily>,
     initial_visible_queue: Vec<Pc4GraphPiece>,
     preview_length: usize,
     hidden_source_state: Option<Pc4BagState>,
@@ -460,6 +485,9 @@ pub struct Pc4ObservationQueueScope {
 }
 
 impl Pc4ObservationQueueScope {
+    pub const fn finite_queues(&self) -> Option<&Pc4FiniteQueueFamily> {
+        self.finite_queues.as_ref()
+    }
     pub fn initial_visible_queue(&self) -> &[Pc4GraphPiece] {
         &self.initial_visible_queue
     }
@@ -514,7 +542,7 @@ impl Pc4ObservationFrontierFamily {
         self.queue_scope.hidden_draws()
     }
 
-    pub const fn total_reveal_sequences(&self) -> u128 {
+    pub fn total_reveal_sequences(&self) -> u128 {
         self.reveal_family.total_sequences()
     }
 
@@ -722,7 +750,7 @@ where
         .preview_length
         .checked_add(1)
         .ok_or(Pc4ObservationFrontierPrepareError::LengthOverflow)?;
-    if request.initial_visible_queue.len() != observation_width {
+    if request.finite_queues.is_none() && request.initial_visible_queue.len() != observation_width {
         return Err(
             Pc4ObservationFrontierPrepareError::InvalidVisibleQueueLength {
                 expected: observation_width,
@@ -731,7 +759,7 @@ where
         );
     }
     require_prepare_budget(
-        request.initial_visible_queue.len(),
+        observation_width,
         request.budgets.initial_visible_pieces(),
         Pc4ObservationFrontierPrepareBudgetKind::InitialVisiblePieces,
     )?;
@@ -746,26 +774,35 @@ where
         .try_reserve_exact(request.initial_visible_queue.len())
         .map_err(|_| Pc4ObservationFrontierPrepareError::AllocationFailed)?;
     initial_visible_queue.extend_from_slice(request.initial_visible_queue);
-    let reveal_family = match request.hidden_source_state {
-        Some(state) => ObservationRevealFamily::Bag(
-            prepare_pc4_bag_reveal_family(
-                state,
-                request.hidden_draws,
-                request.budgets.reveal(),
-                &GuardAdapter(guard),
-            )
-            .map_err(map_reveal_prepare_error)?,
-        ),
-        // Request constructors only omit bag state for zero hidden draws.
-        None => ObservationRevealFamily::fixed(
-            NonZeroUsize::new(request.budgets.reveal().page_sequences())
-                .expect("reveal budgets contain nonzero page limits"),
-        ),
+    let reveal_family = if let Some(family) = &request.finite_queues {
+        ObservationRevealFamily::Finite {
+            family: family.clone(),
+            page_limit: request.budgets.reveal().page_sequences(),
+            allocated_pieces_limit: request.budgets.reveal().allocated_pieces(),
+        }
+    } else {
+        match request.hidden_source_state {
+            Some(state) => ObservationRevealFamily::Bag(
+                prepare_pc4_bag_reveal_family(
+                    state,
+                    request.hidden_draws,
+                    request.budgets.reveal(),
+                    &GuardAdapter(guard),
+                )
+                .map_err(map_reveal_prepare_error)?,
+            ),
+            // Request constructors only omit bag state for zero hidden draws.
+            None => ObservationRevealFamily::fixed(
+                NonZeroUsize::new(request.budgets.reveal().page_sequences())
+                    .expect("reveal budgets contain nonzero page limits"),
+            ),
+        }
     };
     check_prepare_guard(guard)?;
 
     Ok(Pc4ObservationFrontierFamily {
         queue_scope: Pc4ObservationQueueScope {
+            finite_queues: request.finite_queues,
             initial_visible_queue,
             preview_length: request.preview_length,
             hidden_source_state: request.hidden_source_state,

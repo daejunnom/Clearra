@@ -64,6 +64,7 @@ impl ValidatedPcCandidateExecutionEvidence {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcCandidateExecutionError {
+    CompiledPattern(crate::Pc4CompiledPatternError),
     Cancelled,
     PartitionedExecutionControl,
     QualifiedOnlineSourceRequired,
@@ -93,6 +94,7 @@ pub enum PcCandidateExecutionError {
 impl PcCandidateExecutionError {
     pub fn reason(&self) -> &'static str {
         match self {
+            Self::CompiledPattern(error) => error.reason(),
             Self::Cancelled => "pc_candidate_execution_cancelled",
             Self::PartitionedExecutionControl => {
                 "pc_candidate_execution_partitioned_control_not_allowed"
@@ -253,17 +255,6 @@ pub(crate) fn validate_pc_candidate_input(
         return Err(PcCandidateExecutionError::CandidateDigestMismatch);
     }
 
-    let queue = problem
-        .core_query()
-        .remaining_queue()
-        .as_fixed_sequence()
-        .ok_or(PcCandidateExecutionError::UnsupportedRequestSource)?;
-    let queue = queue
-        .pieces()
-        .iter()
-        .copied()
-        .map(core_piece_to_graph)
-        .collect::<Vec<_>>();
     let initial_board =
         StandardPcBoard::from_words(target_lines, [initial.occupied_mask(), 0, 0, 0])
             .map_err(|_| PcCandidateExecutionError::ProblemBoardDomainMismatch)?;
@@ -271,13 +262,40 @@ pub(crate) fn validate_pc_candidate_input(
         problem.core_query().allow_hold(),
         problem.core_query().hold_state(),
     );
-    let request_identity = PcCandidateRequestIdentity::derive_pc4_fixed_queue_candidate_universe(
-        target,
-        initial_board,
-        initial_hold,
-        &queue,
-    )
-    .map_err(PcCandidateExecutionError::RequestIdentity)?;
+    let request_identity =
+        if let Some(queue) = problem.core_query().remaining_queue().as_fixed_sequence() {
+            let queue = queue
+                .pieces()
+                .iter()
+                .copied()
+                .map(core_piece_to_graph)
+                .collect::<Vec<_>>();
+            PcCandidateRequestIdentity::derive_pc4_fixed_queue_candidate_universe(
+                target,
+                initial_board,
+                initial_hold,
+                &queue,
+            )
+        } else if matches!(
+            problem.core_query().remaining_queue(),
+            clearra_pc_graph::request::PcQueueInput::PatternExpression(_)
+                | clearra_pc_graph::request::PcQueueInput::Standard7Bag
+        ) {
+            let identity = crate::pc4_compiled_pattern_source::derive_compiled_pattern_identity(
+                problem,
+                &|| control.is_cancelled(),
+            )
+            .map_err(PcCandidateExecutionError::CompiledPattern)?;
+            PcCandidateRequestIdentity::derive_pc4_compiled_pattern_candidate_universe(
+                target,
+                initial_board,
+                initial_hold,
+                identity,
+            )
+        } else {
+            return Err(PcCandidateExecutionError::UnsupportedRequestSource);
+        }
+        .map_err(PcCandidateExecutionError::RequestIdentity)?;
     if request_identity != universe.request_identity() {
         return Err(PcCandidateExecutionError::RequestIdentityMismatch);
     }
@@ -289,7 +307,7 @@ pub(crate) fn validate_pc_candidate_input(
     })
 }
 
-fn fixed_queue_hold_state(allow_hold: bool, hold: HoldSlot) -> FixedQueueHoldState {
+pub(crate) fn fixed_queue_hold_state(allow_hold: bool, hold: HoldSlot) -> FixedQueueHoldState {
     if !allow_hold {
         return FixedQueueHoldState::Disabled;
     }

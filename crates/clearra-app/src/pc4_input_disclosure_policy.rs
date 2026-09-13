@@ -287,6 +287,7 @@ impl Pc4InputDisclosureRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Pc4PreparedQueueInput {
+    CompiledPattern(crate::Pc4CompiledPatternSource),
     FixedExplicit(Vec<Pc4GraphPiece>),
     PatternOrHidden {
         source: Pc4HiddenQueueSource,
@@ -308,6 +309,28 @@ pub struct Pc4PreparedOnlineInput {
 }
 
 impl Pc4PreparedOnlineInput {
+    /// A fully specified finite pattern does not require invented bag state.
+    /// Its private source capability was minted from the actual Core compiler.
+    pub fn for_compiled_pattern(
+        target: QualifiedPc4TargetIdentity,
+        surface: Pc4InputSurface,
+        source: crate::Pc4CompiledPatternSource,
+    ) -> Result<Self, crate::Pc4CompiledPatternError> {
+        if target.use_case() != Pc4TerminalUseCase::PcSearch
+            || u16::from(target.target_lines().get())
+                != source.problem().initial_board().visible_height()
+        {
+            return Err(crate::Pc4CompiledPatternError::TargetMismatch);
+        }
+        crate::validate_pc4_search_problem_compatibility(target.profile(), source.problem())
+            .map_err(crate::Pc4CompiledPatternError::RuleMismatch)?;
+        Ok(Self {
+            target,
+            surface,
+            queue: Pc4PreparedQueueInput::CompiledPattern(source),
+        })
+    }
+
     pub const fn target(&self) -> &QualifiedPc4TargetIdentity {
         &self.target
     }

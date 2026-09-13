@@ -156,6 +156,10 @@ fn pc4_compiled_pattern_p7_remains_lazy_and_identical_for_every_ordinal() {
         source.identity(),
         prepare(Arc::clone(&problem), 7).identity()
     );
+    assert_eq!(
+        source.identity(),
+        derive_compiled_pattern_identity(&problem, &|| false).unwrap()
+    );
 }
 
 #[test]
@@ -284,4 +288,22 @@ fn pc4_compiled_pattern_digest_preserves_weight_bits_even_with_reused_numeric_id
     }
     assert_ne!(digest([0.25, 0.75]), digest([0.75, 0.25]));
     assert_ne!(digest([0.5, 0.5]), digest([0.0, 1.0]));
+}
+
+#[test]
+fn pc4_compiled_pattern_does_not_upgrade_visible_seven_to_full_future_oracle() {
+    let problem = compile("P7", 7);
+    let query = problem
+        .core_query()
+        .clone()
+        .with_queue_observation_policy(clearra_supply::QueueObservationPolicy::VisibleSeven);
+    let observed = Arc::new(ProblemCompiler::compile_scenario_pc(&query).unwrap());
+    assert!(matches!(
+        Pc4CompiledPatternPreparation::begin(Arc::clone(&observed), limits(1)),
+        Err(Pc4CompiledPatternError::UnsupportedObservationPolicy)
+    ));
+    assert!(matches!(
+        derive_compiled_pattern_identity(&observed, &|| false),
+        Err(Pc4CompiledPatternError::UnsupportedObservationPolicy)
+    ));
 }

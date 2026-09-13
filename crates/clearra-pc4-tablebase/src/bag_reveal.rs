@@ -102,6 +102,12 @@ pub struct Pc4ExactProbability {
 }
 
 impl Pc4ExactProbability {
+    pub(crate) const fn uniform(count: NonZeroUsize) -> Self {
+        Self {
+            numerator: 1,
+            denominator: count.get() as u128,
+        }
+    }
     const ONE: Self = Self {
         numerator: 1,
         denominator: 1,
@@ -207,6 +213,7 @@ impl std::error::Error for Pc4BagRevealPrepareError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Pc4BagRevealPageError {
+    FiniteQueue(crate::Pc4FiniteQueueReadError),
     Cancelled,
     CursorMismatch,
     BudgetExceeded {
@@ -223,6 +230,7 @@ pub enum Pc4BagRevealPageError {
 impl Pc4BagRevealPageError {
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::FiniteQueue(error) => error.reason(),
             Self::Cancelled => "pc4_bag_reveal_page_cancelled",
             Self::CursorMismatch => "pc4_bag_reveal_cursor_mismatch",
             Self::BudgetExceeded { .. } => "pc4_bag_reveal_page_budget_exceeded",
