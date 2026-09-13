@@ -68,3 +68,10 @@ Actual HF completeness (including the 13 unresolved nonempty edges), exact
 profile provenance, missing variant-specific indices, finite resource
 authority, hold/pattern composition, typed score reduction, transports and
 production activation remain open in the implementation plan.
+
+The first submitted product-adapter run, `34739031424` on `e905f9d`, passed
+Core 7 and Tablebase 156 but stopped while compiling App. The new adapter
+mistakenly called host-memory accessors on `SearchProblemBudget`, which owns
+node/time/result/pattern limits. The compiled memory limit actually belongs
+to `SearchProblem::backend_policy()`. That access is corrected; the product
+matrix was not executed on the failed source.

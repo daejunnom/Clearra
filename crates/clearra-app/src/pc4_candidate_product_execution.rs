@@ -142,9 +142,7 @@ impl PreparedDistributedSearch {
         if !supported {
             return Err(Pc4CandidateProductError::UnsupportedProduct);
         }
-        if self.problem.resource_budget().max_memory_mib().is_some()
-            || self.problem.resource_budget().memory_mib().is_some()
-        {
+        if self.problem.backend_policy().max_memory_mib().is_some() {
             return Err(Pc4CandidateProductError::FiniteMemoryAuthorityRequired);
         }
         check_source(input.universe_identity(), guard, control)?;
