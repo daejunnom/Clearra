@@ -32,6 +32,9 @@ function isolated(source) {
   assert.match(preview, /if: inputs\.preview_wasm == true \|\| \(github\.event_name == 'push' && contains\(github\.event\.head_commit\.message, '\[preview-wasm\]'\)\)/u);
   assert.match(preview, /timeout-minutes: 40/u);
   assert.match(preview, /invoke-clearra-build\.ps1 -Purpose experiment/u);
+  const preparePreview = preview.split('      - name: Prepare isolated preview toolchain')[1]?.split('      - name: Build exact-source')[0];
+  assert.ok(preparePreview?.includes('. ./scripts/lib/clearra-path-helpers.ps1'));
+  assert.ok(preparePreview.indexOf('. ./scripts/lib/clearra-path-helpers.ps1') < preparePreview.indexOf('Assert-ClearraTrustedExecutionSurface'));
   assert.equal((source.match(/actions\/upload-artifact@v4/gu) ?? []).length, 1);
   assert.match(preview, /name: unqualified-integration-preview-wasm-\$\{\{ github\.sha \}\}-run-\$\{\{ github\.run_id \}\}-attempt-\$\{\{ github\.run_attempt \}\}/u);
   assert.match(preview, /if-no-files-found: error\s+retention-days: 2/u);
@@ -49,6 +52,7 @@ for (const [name, mutation] of [
   ['unconditional preview build', s => s.replace("if: inputs.preview_wasm == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[preview-wasm]'))", 'if: true')],
   ['ambiguous preview artifact', s => s.replace('name: unqualified-integration-preview-wasm-', 'name: runtime-wasm-')],
   ['extra artifact writer', s => s + '\n      - uses: actions/upload-artifact@v4'],
+  ['missing preview platform helpers', s => s.replace('          . ./scripts/lib/clearra-path-helpers.ps1', '')],
 ]) test(`rejects ${name}`, () => assert.throws(() => isolated(mutation(workflow))));
 test('native process checks preserve the local execution policy before archive building', () => {
   assert.ok(native.indexOf('Assert-ClearraTrustedExecutionSurface') < native.indexOf('$libraryDirectory = Resolve-ProductE2ENativeLibraryDir'));

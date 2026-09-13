@@ -127,6 +127,7 @@ jobs:
       - name: Prepare isolated preview toolchain
         shell: pwsh
         run: |
+          . ./scripts/lib/clearra-path-helpers.ps1
           . ./scripts/lib/clearra-execution-surface.ps1
           Assert-ClearraTrustedExecutionSurface -TaskName 'IntegrationPreviewWasm' -ExecutionSurface Trusted -RuntimeEnvironment wasm
           rustup target add wasm32-unknown-unknown
