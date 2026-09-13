@@ -65,42 +65,8 @@ pub(super) fn curl_stream(
     limit: u64,
     sink: &mut dyn FnMut(&[u8]) -> Result<()>,
 ) -> Result<()> {
-    if !url.starts_with("https://huggingface.co/") {
-        return Err("tablebase: transport origin rejected");
-    }
-    let mut command = Command::new("curl");
-    // -q MUST be first: never load .curlrc or credentials/config from it.
-    command
-        .args([
-            "-q",
-            "--fail",
-            "--location",
-            "--silent",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--connect-timeout",
-            "30",
-            "--max-time",
-            "1800",
-            "--speed-limit",
-            "1",
-            "--speed-time",
-            "60",
-            "--max-filesize",
-        ])
-        .arg(limit.to_string())
-        .arg("--url")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
+    let mut command = public_https_command(url, limit, 1800)?;
+    command.arg("--fail");
     let mut child = command
         .spawn()
         .map_err(|_| "tablebase: curl is required for explicit downloads")?;
@@ -137,4 +103,108 @@ pub(super) fn curl_stream(
         );
     }
     Ok(())
+}
+
+fn public_https_command(url: &str, limit: u64, timeout: u32) -> Result<Command> {
+    if !url.starts_with("https://huggingface.co/") {
+        return Err("tablebase: transport origin rejected");
+    }
+    let mut command = Command::new("curl");
+    // -q MUST be first: never load .curlrc or credentials/config from it.
+    command
+        .args([
+            "-q",
+            "--location",
+            "--silent",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+        ])
+        .arg(timeout.to_string())
+        .args([
+            "--max-redirs",
+            "5",
+            "--speed-limit",
+            "1",
+            "--speed-time",
+            "60",
+            "--max-filesize",
+        ])
+        .arg(limit.to_string())
+        .arg("--url")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    Ok(command)
+}
+
+#[cfg(feature = "online-pc4-tablebase")]
+pub(super) fn curl_range(
+    revision: &str,
+    artifact: &Artifact,
+    offset: u64,
+    length: u64,
+) -> Result<super::http_range::HttpReply> {
+    use super::http_range::HttpReply;
+    if !hex(revision, 40)
+        || !FILES.contains(&artifact.path)
+        || length == 0
+        || length > 65_536
+        || offset
+            .checked_add(length)
+            .is_none_or(|end| end > artifact.size)
+    {
+        return Err("pc4_online_range_request_invalid");
+    }
+    let url = format!(
+        "https://huggingface.co/datasets/{REPOSITORY}/resolve/{revision}/{}",
+        artifact.path
+    );
+    let mut command = public_https_command(&url, length, 30)?;
+    command.args([
+        "--range",
+        &format!("{}-{}", offset, offset + length - 1),
+        "--write-out",
+        "\nCLEARRA-PC4-HTTP\n%{http_code}\n%header{content-range}\n",
+    ]);
+    let mut child = command
+        .spawn()
+        .map_err(|_| "pc4_online_transport_unavailable")?;
+    // Only body plus a tiny status/header receipt enters memory. Curl's own
+    // --max-filesize also rejects a server ignoring Range before a full body.
+    let cap = length + 256;
+    let mut output = Vec::new();
+    let result = child
+        .stdout
+        .take()
+        .ok_or("pc4_online_transport_unavailable")
+        .and_then(|stdout| {
+            stdout
+                .take(cap + 1)
+                .read_to_end(&mut output)
+                .map_err(|_| "pc4_online_transport_interrupted")
+        });
+    if result.is_err() || output.len() as u64 > cap {
+        let _ = child.kill();
+    }
+    let successful = child.wait().map(|s| s.success()).unwrap_or(false);
+    result?;
+    if output.len() as u64 > cap {
+        return Err("pc4_online_response_too_large");
+    }
+    let reply = HttpReply::from_curl_output(output)?;
+    if !successful && reply.status == 206 {
+        return Err("pc4_online_transport_interrupted");
+    }
+    Ok(reply)
 }

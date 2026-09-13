@@ -39,13 +39,13 @@ pub(crate) fn run(args: &[String], language: LanguageId, json_output: bool) -> C
         let (note, unavailable, location) = match language {
             LanguageId::Ko => ("선택한 킥테이블의 그래프와 두 인덱스를 명시적으로 다운로드합니다. curl이 필요합니다. check는 용량만 확인하며 파일을 받지 않습니다. download는 최신 데이터로 갱신하고 이전 데이터는 성공 후 정리합니다. Ctrl+C로 중단할 수 있습니다.",
                 "현재 Jstris 180만 사용 가능합니다. SRS / SRS+ / SRS-X / No kick은 각 프로필의 그래프와 인덱스가 검증되면 별도로 제공됩니다.",
-                "CLEARRA_PC4_DIRECTORY로 다운로드와 로컬 탐색에서 사용할 저장 위치를 함께 지정할 수 있습니다."),
+                "CLEARRA_PC4_DIRECTORY로 다운로드와 로컬 탐색의 공통 저장 위치를 지정합니다. 다운로드는 선택 사항입니다. --tablebase 탐색은 저장된 데이터가 없으면 필요한 구간만 온라인으로 조회합니다(curl 7.84 이상). 조회 실패 시 오프라인 탐색은 자동 시작하지 않습니다."),
             LanguageId::Ja => ("選択したキックテーブルのグラフと2つのインデックスを明示的にダウンロードします。curlが必要です。checkは容量のみ確認します。downloadは最新データへ更新し、成功後に旧データを削除します。Ctrl+Cで中止できます。",
                 "現在はJstris 180のみ利用できます。SRS / SRS+ / SRS-X / No kickはそれぞれのグラフとインデックスが確認され次第、個別に提供します。",
-                "CLEARRA_PC4_DIRECTORYでダウンロードとローカル検索の共通保存先を指定できます。"),
+                "CLEARRA_PC4_DIRECTORYで共通の保存先を指定します。ダウンロードは任意です。--tablebase検索は保存済みデータがなければ必要な範囲だけオンラインで取得します(curl 7.84以降)。失敗してもオフライン検索は自動開始しません。"),
             _ => ("Explicitly download the selected kick table's graph and two indexes. Requires curl. check retrieves sizes only. download updates to the latest data and removes the old copy only after success. Ctrl+C cancels.",
                 "Jstris 180 is currently available. SRS / SRS+ / SRS-X / No kick require their own independently qualified graph and indexes.",
-                "CLEARRA_PC4_DIRECTORY selects the same storage base for downloads and local searches.")
+                "CLEARRA_PC4_DIRECTORY selects the shared storage base. Downloads are optional: --tablebase searches read online ranges when no data is installed (curl 7.84 or later). A lookup failure never starts offline search automatically.")
         };
         return CliOutput::success(format!("clearra tablebase <check|download|status|remove> --profile srs|srs-plus|srs-x|jstris-180|no-kick [--directory DIRECTORY]\n{note}\n{unavailable}\n{location}"));
     }
@@ -187,12 +187,21 @@ fn default_directory() -> Result<PathBuf> {
 }
 
 #[cfg(feature = "online-pc4-tablebase")]
+#[path = "tablebase_host_execution.rs"]
+mod host_execution;
+#[cfg(feature = "online-pc4-tablebase")]
+#[path = "tablebase_http_range.rs"]
+mod http_range;
+#[cfg(feature = "online-pc4-tablebase")]
 #[path = "tablebase_local_execution.rs"]
 mod local_execution;
 #[cfg(feature = "online-pc4-tablebase")]
-pub(crate) use local_execution::execute_local;
+#[path = "tablebase_online_execution.rs"]
+mod online_execution;
 #[cfg(all(test, feature = "online-pc4-tablebase", feature = "wasm-cpu-runtime"))]
 use local_execution::execute_local_at;
+#[cfg(feature = "online-pc4-tablebase")]
+pub(crate) use online_execution::execute;
 fn hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value

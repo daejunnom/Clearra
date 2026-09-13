@@ -18,10 +18,45 @@ pub(super) fn qualify(directory: &Path, revision: &str, artifacts: &[Artifact]) 
         .map_err(|_| "tablebase: cannot open offset index")?;
     let mut graph = File::open(directory.join(artifacts[2].path))
         .map_err(|_| "tablebase: cannot open graph")?;
-    let count = header(&read(&mut fields, 0, 16)?, b"FHIDIDX1")?;
+    qualify_with_reader(revision, artifacts, |role, offset, length| {
+        let file = match role {
+            0 => &mut fields,
+            1 => &mut offsets,
+            _ => &mut graph,
+        };
+        read(file, offset, length)
+    })
+}
+
+/// The same byte/format qualification is used for full files and bounded HTTP
+/// slices. A transport callback grants no completeness or profile authority.
+pub(super) fn qualify_with_reader(
+    revision: &str,
+    artifacts: &[Artifact],
+    mut reader: impl FnMut(usize, u64, usize) -> Result<Vec<u8>>,
+) -> Result<Value> {
+    if artifacts.len() != 3 || !super::hex(revision, 40) {
+        return Err("tablebase: invalid generation for qualification");
+    }
+    let mut read = |role: usize, offset: u64, length: usize| -> Result<Vec<u8>> {
+        if length == 0
+            || length > 65_536
+            || offset
+                .checked_add(length as u64)
+                .is_none_or(|end| end > artifacts[role].size)
+        {
+            return Err("tablebase: qualification slice is outside artifact bounds");
+        }
+        let bytes = reader(role, offset, length)?;
+        if bytes.len() != length {
+            return Err("tablebase: truncated qualification slice");
+        }
+        Ok(bytes)
+    };
+    let count = header(&read(0, 0, 16)?, b"FHIDIDX1")?;
     if count < 2
         || count > 1 << 24
-        || count != header(&read(&mut offsets, 0, 16)?, b"GOFFIDX1")?
+        || count != header(&read(1, 0, 16)?, b"GOFFIDX1")?
         || artifacts[0].size != 16 + u64::from(count) * 8
         || artifacts[1].size != 16 + (u64::from(count) + 1) * 4
     {
@@ -35,12 +70,12 @@ pub(super) fn qualify(directory: &Path, revision: &str, artifacts: &[Artifact]) 
     }
     let mut evidence = Vec::new();
     for id in ids {
-        let field = read(&mut fields, 16 + u64::from(id) * 8, 8)?;
+        let field = read(0, 16 + u64::from(id) * 8, 8)?;
         let hash = little(&field[..5]);
         if little(&field[5..]) != u64::from(id) {
             return Err("tablebase: field ID is not its index ordinal");
         }
-        let pair = read(&mut offsets, 16 + u64::from(id) * 4, 8)?;
+        let pair = read(1, 16 + u64::from(id) * 4, 8)?;
         let start = little(&pair[..4]);
         let end = little(&pair[4..]);
         if end <= start
@@ -51,7 +86,7 @@ pub(super) fn qualify(directory: &Path, revision: &str, artifacts: &[Artifact]) 
         {
             return Err("tablebase: graph bounds or terminal identity mismatch");
         }
-        let record = read(&mut graph, start, (end - start) as usize)?;
+        let record = read(2, start, (end - start) as usize)?;
         if record.len() < 12
             || record[..5]
                 .iter()
@@ -61,6 +96,7 @@ pub(super) fn qualify(directory: &Path, revision: &str, artifacts: &[Artifact]) 
             return Err("tablebase: graph source bitmap mismatch");
         }
         let mut cursor = 5;
+        let mut cumulative_degree = 0;
         for _ in 0..7 {
             let degree = usize::from(
                 *record
@@ -68,6 +104,10 @@ pub(super) fn qualify(directory: &Path, revision: &str, artifacts: &[Artifact]) 
                     .ok_or("tablebase: truncated graph record")?,
             );
             cursor += 1;
+            cumulative_degree += degree;
+            if cumulative_degree > 255 {
+                return Err("tablebase: cumulative graph degree exceeds format bound");
+            }
             for _ in 0..degree {
                 let edge = record
                     .get(cursor..cursor + 3)

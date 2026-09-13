@@ -1,32 +1,19 @@
 //! SRP: native host adapter supplying verified local slices to the shared App.
 //! No downloads, graph algorithms, new product reducers or implicit fallback.
-use super::{active, default_directory, reject_links, Result, FILES};
+use super::{active, reject_links, Result, FILES};
 use std::{
     fs::{File, OpenOptions},
     io::Read,
     path::Path,
 };
 
-/// Native hosts use the same App execution and reducers as WASM. This adapter
-/// only leases the installed files and supplies bounded, identity-bound slices.
-pub(crate) fn execute_local(
-    context: clearra_app::AppContext,
-    request: clearra_app::AppRequest,
-) -> Result<clearra_app::AppResponse> {
-    execute_local_at(
-        &default_directory()?.join("pc4-v1/jstris-180"),
-        context,
-        request,
-    )
-}
-
+/// Lease installed files and supply bounded slices to the shared App driver.
 pub(super) fn execute_local_at(
     root: &Path,
     context: clearra_app::AppContext,
     request: clearra_app::AppRequest,
 ) -> Result<clearra_app::AppResponse> {
-    use clearra_app::CooperativeAppAdvance;
-    use clearra_core_domain::execution_cancellation::ExecutionControl;
+    use super::host_execution::{drive, HostSlice};
     use std::{
         collections::BTreeMap,
         io::{Seek, SeekFrom},
@@ -70,42 +57,33 @@ pub(super) fn execute_local_at(
             ),
         );
     }
-    let control = ExecutionControl::default();
-    let mut execution = context.start_pc4_execution_for_surface(
+    let execution = context.start_pc4_execution_for_surface(
         request,
         snapshot,
         clearra_app::Pc4InputSurface::NonInteractiveCli,
     )?;
-    loop {
-        match execution.advance(2_048, &control)? {
-            CooperativeAppAdvance::Completed(response) => return Ok(response),
-            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
-            CooperativeAppAdvance::Cancelled => return Err("tablebase: search cancelled"),
-            _ => return Err("tablebase: search did not complete; no offline fallback was started"),
-        }
-        if let Some(range) = execution.pending_range().cloned() {
+    drive(
+        execution,
+        |path, total, expected_identity, offset, requested| {
             let (file, length, identity) = handles
-                .get_mut(range.artifact_descriptor().path())
+                .get_mut(path)
                 .ok_or("tablebase: unexpected artifact request")?;
-            if *length != range.artifact_descriptor().byte_len()
-                || identity.as_str() != range.artifact_descriptor().content_identity()
-                || range.end_exclusive() > *length
-                || range.length() == 0
-                || range.length() > 65_536
+            if *length != total
+                || identity.as_str() != expected_identity
+                || offset
+                    .checked_add(requested)
+                    .is_none_or(|end| end > *length)
+                || requested == 0
+                || requested > 65_536
             {
                 return Err("tablebase: local slice identity or bounds mismatch");
             }
-            file.seek(SeekFrom::Start(range.offset()))
+            file.seek(SeekFrom::Start(offset))
                 .map_err(|_| "tablebase: cannot seek local artifact")?;
-            let mut bytes = vec![0_u8; range.length() as usize];
+            let mut bytes = vec![0_u8; requested as usize];
             file.read_exact(&mut bytes)
                 .map_err(|_| "tablebase: local artifact was truncated")?;
-            execution.admit_local_slice(
-                range.lookup_session().get(),
-                range.request_id(),
-                bytes,
-                &control,
-            )?;
-        }
-    }
+            Ok(HostSlice::Local(bytes))
+        },
+    )
 }

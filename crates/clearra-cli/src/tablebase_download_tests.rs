@@ -43,6 +43,45 @@ impl Fixture {
             .collect();
         Self { root, files, bytes }
     }
+
+    #[cfg(all(feature = "online-pc4-tablebase", feature = "wasm-cpu-runtime"))]
+    fn one_piece() -> Self {
+        let mut f = Self::new();
+        let hashes = [0_u64, 0x7f_dff7_fdff, 0xff_ffff_ffff];
+        let header = |magic: &[u8; 8]| {
+            let mut bytes = magic.to_vec();
+            bytes.extend_from_slice(&1_u32.to_le_bytes());
+            bytes.extend_from_slice(&3_u32.to_le_bytes());
+            bytes
+        };
+        let mut fields = header(b"FHIDIDX1");
+        let mut offsets = header(b"GOFFIDX1");
+        let mut graph = Vec::new();
+        for (id, hash) in hashes.into_iter().enumerate() {
+            fields.extend_from_slice(&hash.to_le_bytes()[..5]);
+            fields.extend_from_slice(&(id as u32).to_le_bytes()[..3]);
+            offsets.extend_from_slice(&(graph.len() as u32).to_le_bytes());
+            graph.extend_from_slice(&hash.to_be_bytes()[3..]);
+            if id == 1 {
+                graph.extend_from_slice(&[1, 2, 0, 0]);
+            } else {
+                graph.push(0);
+            }
+            graph.extend_from_slice(&[0; 6]);
+        }
+        offsets.extend_from_slice(&(graph.len() as u32).to_le_bytes());
+        f.bytes = vec![fields, offsets, graph];
+        f.files = FILES
+            .into_iter()
+            .zip(&f.bytes)
+            .map(|(path, bytes)| Artifact {
+                path,
+                size: bytes.len() as u64,
+                digest: format!("{:x}", Sha256::digest(bytes)),
+            })
+            .collect();
+        f
+    }
     fn install(&self, revision: &str, corrupt: bool) -> Result<Value> {
         install(&self.root, revision, &self.files, |url, limit, sink| {
             let i = FILES.iter().position(|name| url.ends_with(name)).unwrap();
@@ -182,7 +221,7 @@ fn tablebase_download_native_search_uses_shared_app_and_rejects_cross_profile_re
             "--lines",
             "4",
             "--queue",
-            "I",
+            "IJLOSTZIJL",
             "--fixed",
             "--no-hold",
             "--rule",
@@ -237,4 +276,131 @@ fn tablebase_download_observed_queue_is_not_silently_relabelled_as_fixed() {
         execute_local_at(&f.root, context, request).unwrap_err(),
         "pc4_online_disclosure_required"
     );
+}
+
+#[cfg(all(feature = "online-pc4-tablebase", feature = "wasm-cpu-runtime"))]
+fn one_piece_request(profile: &str) -> clearra_app::AppRequest {
+    use crate::{args::CliParser, assemble::CliAppRequestAssembler, output::RenderFormat};
+    let invocation = CliParser::parse([
+        "clearra",
+        "pc",
+        "--board-mask",
+        "0xffbfeffbfe",
+        "--height",
+        "4",
+        "--pieces",
+        "1",
+        "--lines",
+        "4",
+        "--count",
+        "unique",
+        "--queue",
+        "I",
+        "--no-hold",
+        "--rule",
+        profile,
+        "--tablebase",
+    ])
+    .unwrap();
+    CliAppRequestAssembler::assemble(invocation.into_command(), RenderFormat::Json)
+        .unwrap()
+        .request()
+}
+
+#[cfg(all(feature = "online-pc4-tablebase", feature = "wasm-cpu-runtime"))]
+#[test]
+fn tablebase_download_native_range_and_installed_files_return_the_same_complete_solution() {
+    use clearra_app::{AppContext, AppCoreExecutorService, AppServices, AppStatus};
+    let f = Fixture::one_piece();
+    let context = || {
+        AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        )
+    };
+    let mut calls = 0;
+    let online = online_execution::execute_with_online(
+        &f.root,
+        context(),
+        one_piece_request("jstris-180"),
+        |ctx, request| {
+            online_execution::execute_online_with(
+                ctx,
+                request,
+                &"a".repeat(40),
+                &f.files,
+                |artifact, start, length| {
+                    calls += 1;
+                    let i = FILES
+                        .iter()
+                        .position(|path| *path == artifact.path)
+                        .unwrap();
+                    Ok(http_range::HttpReply {
+                        status: 206,
+                        content_range: http_range::content_range(start, length, artifact.size),
+                        bytes: f.bytes[i][start as usize..(start + length) as usize].to_vec(),
+                    })
+                },
+            )
+        },
+    )
+    .unwrap();
+    assert_eq!(online.status(), AppStatus::Success);
+    assert_eq!(
+        calls, 3,
+        "qualification and graph traversal share the same HTTP windows"
+    );
+    assert_eq!(
+        fs::read_dir(&f.root).unwrap().count(),
+        0,
+        "Range is not a disk download"
+    );
+    f.install(&"a".repeat(40), false).unwrap();
+    File::create_new(f.root.join("store.lock")).unwrap();
+    let local = online_execution::execute_with_online(
+        &f.root,
+        context(),
+        one_piece_request("jstris-180"),
+        |_, _| panic!("installed data must not request network discovery"),
+    )
+    .unwrap();
+    let keys = |response: &clearra_app::AppResponse| {
+        response
+            .render_model()
+            .unwrap()
+            .core_result()
+            .unwrap()
+            .normalized_solution_keys()
+            .to_vec()
+    };
+    assert_eq!(keys(&local).len(), 1);
+    assert_eq!(keys(&online), keys(&local));
+    assert!(online_execution::execute_with_online(
+        &f.root,
+        context(),
+        one_piece_request("srs"),
+        |_, _| { panic!("an unavailable profile cannot spend Jstris network reads") }
+    )
+    .is_err());
+    let pointer = active(&f.root).unwrap().unwrap();
+    fs::write(
+        f.root
+            .join(pointer["directory"].as_str().unwrap())
+            .join("graph.bin"),
+        [0],
+    )
+    .unwrap();
+    assert!(online_execution::execute_with_online(
+        &f.root,
+        context(),
+        one_piece_request("jstris-180"),
+        |_, _| { panic!("broken local data cannot silently change generation or provider") }
+    )
+    .is_err());
+}
+
+#[cfg(feature = "online-pc4-tablebase")]
+#[test]
+fn tablebase_download_shared_qualification_rejects_truncated_transport_slices() {
+    let f = Fixture::new();
+    assert!(format::qualify_with_reader(&"a".repeat(40), &f.files, |_, _, _| Ok(vec![0])).is_err());
 }

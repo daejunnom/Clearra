@@ -18,6 +18,7 @@ pub enum CliErrorCode {
     NativeCoreUnavailable,
     BackendGpuUnavailable,
     TablebaseInstallFailed,
+    TablebaseLookupFailed,
     PcTargetInvalid,
     PcTargetUnsupportedMvp,
     PcQueryInvalid,
@@ -90,6 +91,7 @@ impl CliErrorCode {
             Self::NativeCoreUnavailable => "E_NATIVE_CORE_UNAVAILABLE",
             Self::BackendGpuUnavailable => "E_BACKEND_GPU_UNAVAILABLE",
             Self::TablebaseInstallFailed => "E_TABLEBASE_INSTALL_FAILED",
+            Self::TablebaseLookupFailed => "E_TABLEBASE_LOOKUP_FAILED",
             Self::PcTargetInvalid => "E_PC_TARGET_INVALID",
             Self::PcTargetUnsupportedMvp => "E_PC_TARGET_UNSUPPORTED_MVP",
             Self::PcQueryInvalid => "E_PC_QUERY_INVALID",
@@ -156,6 +158,7 @@ impl CliErrorCode {
             | Self::PcScenarioSearchInternal
             | Self::ContinueSearchInternal
             | Self::TablebaseInstallFailed
+            | Self::TablebaseLookupFailed
             | Self::CliArtifactPublishFailed
             | Self::CliArtifactDurabilityUncertain
             | Self::CliArtifactCommittedButOutputFailed

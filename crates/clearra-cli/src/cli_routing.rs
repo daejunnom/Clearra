@@ -161,7 +161,7 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
                         .any(|pair| pair[0] == "pc" && pair[1] == "tiling")
         );
         #[cfg(feature = "online-pc4-tablebase")]
-        let local_tablebase = command_requests_tablebase(&command);
+        let online_tablebase = command_requests_tablebase(&command);
         #[cfg(all(feature = "wasm-cpu-runtime", not(feature = "online-pc4-tablebase")))]
         let _tablebase_session = match tablebase_session_for_command(&command) {
             Ok(session) => session,
@@ -182,11 +182,11 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             .with_language(language)
             .with_file_policy(AppFilePolicy::new(verbose_paths));
         #[cfg(feature = "online-pc4-tablebase")]
-        let response = if local_tablebase {
-            match crate::tablebase_download::execute_local(context, request) {
+        let response = if online_tablebase {
+            match crate::tablebase_download::execute(context, request) {
                 Ok(response) => response,
                 Err(reason) => {
-                    return CliOutput::error(CliErrorCode::TablebaseInstallFailed, reason)
+                    return CliOutput::error(CliErrorCode::TablebaseLookupFailed, reason)
                 }
             }
         } else {

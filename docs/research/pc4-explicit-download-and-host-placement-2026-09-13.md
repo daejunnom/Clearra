@@ -188,6 +188,53 @@ native/browser full-file query parity, all 456,459 reference solutions, P7P4
 whole-family performance, native HTTP/desktop/Discord adapters, Oracle
 non-interference and deployment gates. This change does not close them.
 
+## Native online continuation (implementation checkpoint)
+
+CI `34761889108` passed both real WASM worker boundary tests: local and HTTP
+responses returned the same one-I solution and cancellation/stale/header fences
+held. Its only PC4 failure was the legacy native fixture's empty 4L field with
+one fixed piece: the request compiler correctly rejected the wrong area. That
+fixture now supplies ten fixed pieces. Source, native process, surface and
+preview-WASM jobs passed; the overall run remains failed, not accepted.
+
+The next implementation connects the native CLI without requiring a complete
+download. An explicit Jstris `--tablebase` request prefers its installed files;
+only absence selects immutable HF Range. Corrupt local metadata/files, busy
+leases and another profile cannot silently select network or offline search.
+Unsupported profiles and observed-prefix disclosure requirements are checked
+before network discovery. Full qualification and exact request/kick validation
+still belong to their existing owners.
+
+`tablebase_host_execution.rs` drives the same App for local and online hosts.
+`tablebase_download_format.rs` now qualifies through one bounded reader callback
+for both transports. `tablebase_http_range.rs` accepts only checked 206 replies
+with exact Content-Range/body size, then caches at most 8 MiB in bounded windows;
+individual reads are <=64 KiB and per-request transfer allowance is 64 MiB.
+These are transfer limits, never partial-family completeness proofs. The cache
+is in memory for one immutable generation and writes no dataset files.
+
+The existing curl dependency supplies transport (7.84+ for final header receipt).
+It is invoked with configuration disabled, HTTPS-only redirects, hidden windows,
+bounded stdout and timeouts. It does not build a shell command or read credentials.
+The [curl manual](https://curl.se/docs/manpage.html) explicitly notes that servers
+may ignore Range and return whole content; that response is rejected here.
+This subprocess transport is not yet a latency parity claim against a persistent
+HTTP client. Window reuse avoids repeating a process for adjacent tiny reads;
+large native search timing and actual cancellation readback remain to measure.
+
+New synthetic tests cover the one-I complete set via native Range and installed
+files, absence versus corruption, zero disk writes for Range, same-window reuse,
+cross-artifact isolation, bad headers, whole responses, 429 and byte limits.
+They require the next non-publishing Rust CI; formatting alone is not execution.
+
+A separate transport-only check on this Windows host resolved the current
+revision to `ea61380b31fa3dc9ffb4c8505c9a09c1b421ef31` and used system curl for
+exactly bytes 0-15 of FHID. It returned exit 0, HTTP 206,
+`Content-Range: bytes 0-15/121485664` and `FHIDIDX1` (16 payload bytes).
+This validates the curl final-header receipt on this host, not native App
+execution, full-solution timing or a complete download. No Rust executable was
+run through or around the local execution-policy restriction.
+
 ## Primary references
 
 - [HF dataset](https://huggingface.co/datasets/muse918/tetris-4lpc-mdp-vstar-policy): public metadata, current per-generation file identities; MIT dataset declared by user/upstream.
