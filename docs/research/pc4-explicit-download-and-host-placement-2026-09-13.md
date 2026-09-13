@@ -63,14 +63,16 @@ metadata and pins its own immutable file identities for the transaction.
 - Browser download/hash work runs in a dedicated Worker. Native HTTPS transport
   uses system curl without a shell or curl configuration (`-q` first), no
   credential reads, HTTPS-only redirects, bounded bytes/time and hidden Windows
-  process windows. The executable requires curl only for check/download.
+  process windows. The original lifecycle path requires curl for check/download;
+  the native online continuation below also requires it for uncached Range reads.
 - Search adapter: bounded local file reads/Blob slices feed the same pure
   reader and App/Core reducers through `verified-local-file` admission. It does
   not fabricate HTTP 206 provenance. Native/GUI input surfaces remain distinct.
   Local byte counters and HTTP request/body counters are separate.
 - The v0.9 integration branch enables the new CLI local host by default. The
-  released main/v0.8.1 artifacts are unchanged. Native online Range transport,
-  Desktop local-storage UI and Discord routing remain independent work.
+  released main/v0.8.1 artifacts are unchanged. Native online Range transport is
+  connected in the continuation below; Desktop local-storage UI and Discord
+  routing remain independent work.
 
 Downloaded TB use is not `offline-exact` fallback. Missing/corrupt/unqualified
 data must not silently choose another kick table or another solver. Existing
@@ -259,6 +261,64 @@ The same run passed both public WASM boundary tests, all 90 selected App tests,
 4194 browser, all five download choices were inspected: four displayed their own
 unavailable state, while only Jstris enabled preparation. No full download or
 search was started, and the temporary audit tab was closed.
+
+## Exact-source CI and 4194 readback (2026-09-14 KST)
+
+Non-publishing run `34764005219` for
+`0932df948e00fcaecd309b06d7ef45fd8ee8badb` passed all five jobs: source,
+surface-contracts, native-cli, pc4-contracts and preview-wasm. The native PC4
+group executed **13 tests, all passed**. The two public WASM boundary tests
+passed too. This confirms the resource-guard correction without changing the
+production resource authority or discarding the preceding completed response.
+The independent exact-source import checks passed 15 tests; live-generation
+guard tests passed 2 tests.
+
+Preview artifact `10319594515` (run 34764005219, attempt 1) was downloaded into
+one transient directory inside this source's fixed experimental build slot.
+GitHub metadata bound the artifact to that source/run/attempt; the importer
+checked the current compile-input fingerprint and the original five artifact
+files. It did not restamp the manifest,
+run Cargo or confer accepted-release authority. Temporary import files were
+removed after publication; three known published WASM generations remain, below
+the maximum of five, so no previous published generation was deleted.
+
+The running 4194 Vite listener is this worktree's local-recovery process. It
+serves `apps/clearra-web/static/wasm`, not the normal frontend public staging
+directory. Both the HTTP manifest and accepted-generation endpoint now report:
+
+- Source commit: `0932df948e00fcaecd309b06d7ef45fd8ee8badb`
+- Compile inputs: `480a16beac9e59bb0fddb173245fd0a3195cf49cfb1d75871febc26f155ec258`
+- WASM: `9f416207804aa10660853f8562ebaa5a9967eae3ab37c4a2a6d9d1b292700430`, 21,484,910 bytes
+- Bindings: `e45cf6b1682171c43b65fa4b86c226dfd359753dd4b55ef0b5d053b918c093e0`, 42,216 bytes
+
+An audit tab was prepared before import with 36 occupied cells, one empty left
+column, fixed queue `I`, no hold, Jstris 180, 4L and All solutions. The form and
+checked TB option survived publication without reload. After import, two actual
+HF Range searches returned **one solution and 100% coverage**, completed all
+four stages and displayed the normal solution image/copy controls. No stored
+TB or offline fallback was used. UI preparation reported 2.6 KiB and only the
+Jstris slot available. Other profiles retained independent unavailable states.
+
+| GUI observation | First search | Same-input repeat |
+| --- | ---: | ---: |
+| Displayed elapsed | 22.2 s | 16.9 s |
+| WASM module preparation | 5,645.8 ms | 0.2 ms |
+| PC4 online elapsed | 16,423.5 ms | 16,914.9 ms |
+| Worker elapsed to terminal | 22,077.7 ms | 16,915.3 ms |
+| Actual Range requests | 19 | 19 |
+| Range payload bytes | 301,063 | 301,063 |
+| Logical reads / cache hits | 34 / 15 | 34 / 15 |
+| Local-file bytes | 0 | 0 |
+
+These are two GUI observations, not a statistical benchmark or full-file/large
+family performance claim. The repeat is **module-warm, not dataset-cache-warm**:
+it still makes 19 requests. It separates first-module setup from the remaining
+online latency, but the counters alone do not attribute each request to a
+particular index or graph record. The one-I fixture does not prove the 456,459
+empty-field P7P4 family, all kick profiles, Desktop/Discord parity or release
+acceptance. Full Jstris download (~661 MiB), installed real-file timing and
+Oracle non-interference remain unmeasured; no full download or server deployment
+was performed. The temporary audit tab was closed after the two searches.
 
 ## Primary references
 
