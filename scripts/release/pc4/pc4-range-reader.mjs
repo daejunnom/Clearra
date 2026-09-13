@@ -11,7 +11,7 @@ const MAX_WAITERS = 512;
 
 export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = fetch,
   maxBytes = 64 * 1024 * 1024, maxRequests = 100_000, cacheBytes = 8 * 1024 * 1024,
-  windowBytes = 16_384, maxConcurrent = 4 } = {}) {
+  windowBytes = 16_384, maxConcurrent = 4, directPaths = [] } = {}) {
   const revision = discovery.resolved_revision ?? discovery.revision;
   const repository = discovery.repository;
   if (!/^[0-9a-f]{40}$/.test(revision) || !/^[\w.-]+\/[\w.-]+$/.test(repository)) fail('pc4_online_identity_invalid');
@@ -20,6 +20,9 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
   }
   if (!maxConcurrent || maxConcurrent > 16 || windowBytes > MAX_RANGE ||
       (windowBytes && (windowBytes < 512 || (windowBytes & (windowBytes - 1)) !== 0))) fail('pc4_online_limits_invalid');
+  if (!Array.isArray(directPaths) || directPaths.length > 16 ||
+      directPaths.some(path => typeof path !== 'string' || !/^[A-Za-z0-9_.-]+\.bin$/.test(path))) fail('pc4_online_limits_invalid');
+  const direct = new Set(directPaths);
 
   const pageSize = cacheBytes >= windowBytes && maxBytes >= windowBytes ? windowBytes : 0;
   const cache = new Map(), inFlight = new Map(), controllers = new Set(), queue = [];
@@ -66,7 +69,12 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
     const request = new Promise((resolve, reject) => {
       queue.push({ artifact, offset, length, resolve, reject }); pump();
     }).then(bytes => {
-      inFlight.delete(key); retain(key, bytes); return bytes;
+      inFlight.delete(key);
+      // Decoded graph records already belong to the generation-bound App
+      // cache. Retaining their one-shot raw bytes here evicts reusable index
+      // pages and increases subsequent HTTP calls for the same known indices.
+      if (!direct.has(artifact.path)) retain(key, bytes);
+      return bytes;
     }, error => { inFlight.delete(key); throw error; });
     inFlight.set(key, request);
     return request;
@@ -151,7 +159,7 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
       // No speculative/background scan: only windows intersecting this demand.
       // Small files and byte-budget-constrained reads keep exact access, never
       // expand a small request into a whole-artifact download.
-      if (!pageSize || artifact.byte_length <= pageSize) {
+      if (direct.has(artifact.path) || !pageSize || artifact.byte_length <= pageSize) {
         const bytes = await span(artifact, offset, length);
         if (closed || signal?.aborted) fail('pc4_online_cancelled');
         return bytes.slice();

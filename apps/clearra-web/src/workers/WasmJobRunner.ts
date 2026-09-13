@@ -3,6 +3,7 @@ import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
 import type { ClearraWasmModule } from './clearraWasmRuntime';
 import { onlinePc4Progress } from './OnlinePc4Progress';
 import { openLocalPc4Reader } from './pc4LocalStore';
+import { pc4SearchRangePolicy } from '../../../../scripts/release/pc4/pc4-search-range-policy.mjs';
 import { createPc4RangeReader, type Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 
 // Keep one synchronous WASM entry comfortably below the browser host turn.
@@ -47,7 +48,9 @@ export class WasmJobRunner {
     try {
       if (this.onlineGeneration) {
         reader = await openLocalPc4Reader(this.onlineGeneration, this.onlineAbort!.signal)
-          ?? createPc4RangeReader(this.onlineGeneration, { signal: this.onlineAbort!.signal });
+          ?? createPc4RangeReader(this.onlineGeneration, {
+            signal: this.onlineAbort!.signal, ...pc4SearchRangePolicy(this.onlineGeneration, 'jstris-180')
+          });
       }
       this.jobId = this.wasm.start_job(commandText);
       this.active = true;

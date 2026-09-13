@@ -226,7 +226,10 @@ function artifactGeneration(
   };
 }
 
-export async function expectedBuildForManifest(context: ArtifactContext, manifest: WasmArtifactManifest, readHead: (root: string) => Promise<string> = currentGitHead): Promise<ClearraWasmBuildContract> {
+export async function expectedBuildForManifest(context: ArtifactContext, manifest: WasmArtifactManifest,
+  readHead: (root: string) => Promise<string> = currentGitHead,
+  readAncestor: (root: string, source: string, head: string) => Promise<boolean> = isGitAncestor
+): Promise<ClearraWasmBuildContract> {
   // Production preserves strict pinned environment semantics. A long-running
   // local server may outlive the commit whose pins were in its startup env.
   if (!context.localServe) return createClearraWasmBuildContract(context.repositoryRoot);
@@ -235,16 +238,32 @@ export async function expectedBuildForManifest(context: ArtifactContext, manifes
     return createClearraWasmBuildContract(context.repositoryRoot, {});
   }
   const head = await readHead(context.repositoryRoot);
-  if (identity.source_commit !== head || identity.engine_build_id !== head) {
-    throw staleArtifactError(context.manifestPath, 'the artifact source/engine pins do not equal the current Git HEAD');
+  if (identity.source_commit !== identity.engine_build_id ||
+      (identity.source_commit !== head && !await readAncestor(context.repositoryRoot, identity.source_commit, head))) {
+    throw staleArtifactError(context.manifestPath, 'the artifact source/engine pins do not belong to the current Git HEAD history');
   }
+  // A host-only/docs commit must not force an identical Rust build. Preserve
+  // the immutable artifact's original pins, require ancestry, and still hash
+  // every current compiler input below. loadVerifiedManifest compares the
+  // entire contract and both artifact digests; matching history alone is not
+  // freshness. This relaxation is exclusively for a local development server.
   const expected = await createClearraWasmBuildContract(context.repositoryRoot, {
-    CLEARRA_SOURCE_COMMIT: head, CLEARRA_ENGINE_BUILD_ID: head
+    CLEARRA_SOURCE_COMMIT: identity.source_commit, CLEARRA_ENGINE_BUILD_ID: identity.engine_build_id
   });
   if (await readHead(context.repositoryRoot) !== head) {
     throw staleArtifactError(context.manifestPath, 'Git HEAD changed during artifact verification');
   }
   return expected;
+}
+
+async function isGitAncestor(repositoryRoot: string, source: string, head: string): Promise<boolean> {
+  if (!/^[0-9a-f]{40}$/u.test(source) || !/^[0-9a-f]{40}$/u.test(head)) return false;
+  try {
+    await execFileAsync('git', ['-C', repositoryRoot, 'merge-base', '--is-ancestor', source, head], {
+      windowsHide: true, timeout: 5000, encoding: 'utf8', maxBuffer: 1024
+    });
+    return true;
+  } catch { return false; }
 }
 
 async function currentGitHead(repositoryRoot: string): Promise<string> {

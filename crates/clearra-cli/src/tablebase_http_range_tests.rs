@@ -28,7 +28,7 @@ fn tablebase_download_http_windows_reuse_verified_slices_without_cross_artifact_
         assert!(length <= 65_536);
         Ok(reply(a, offset, length))
     });
-    for offset in [0, 8, 16, 1_024, 3_333, 16_376] {
+    for offset in [0, 8, 16, 1_024, 3_333, 4_088] {
         assert_eq!(
             reader.read(0, offset, 8).unwrap(),
             (offset..offset + 8).map(|i| i as u8).collect::<Vec<_>>()
@@ -47,6 +47,28 @@ fn tablebase_download_http_windows_reuse_verified_slices_without_cross_artifact_
         assert!(reader.read(role, offset, length).is_err());
     }
     assert_eq!(calls.get(), 3, "bad input cannot touch transport");
+}
+
+#[test]
+fn tablebase_download_graph_records_do_not_evict_reused_index_pages_or_overread() {
+    let mut reader = OnlineRangeReader::new(files(), |a, offset, length| {
+        if a.path == super::super::FILES[2] {
+            assert_eq!(length, 12);
+        }
+        Ok(reply(a, offset, length))
+    });
+    reader.read(1, 0, 8).unwrap();
+    for id in 0..3_000 {
+        reader.read(2, id * 12, 12).unwrap();
+    }
+    assert_eq!(reader.windows.len(), 1);
+    assert_eq!(reader.retained, 4_096);
+    reader.read(1, 8, 8).unwrap();
+    assert_eq!(
+        reader.requests, 3_001,
+        "graph bytes must not evict a reusable offset page"
+    );
+    assert_eq!(reader.reserved, 4_096 + 3_000 * 12);
 }
 
 #[test]

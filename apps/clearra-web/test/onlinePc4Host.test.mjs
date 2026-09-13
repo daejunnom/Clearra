@@ -10,7 +10,9 @@ const bundle = await build({ entryPoints: [fileURLToPath(new URL('../src/workers
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text + '\n//# sourceURL=pc4OnlineHost.contract.mjs').toString('base64')}`;
 const { WasmJobRunner } = await import(moduleUrl);
 const generation = { schema: 'clearra.pc4.host-generation.v1', repository: 'muse918/tetris-4lpc-mdp-vstar-policy',
-  revision: 'a'.repeat(40), profiles: [], transferred_bytes: 0 };
+  revision: 'a'.repeat(40), profiles: [{ profile: 'jstris-180', status: 'ready', artifacts: {
+    graph: { path: 'graph.bin', byte_length: 64000, content_identity: 'sha256:' + 'c'.repeat(64) }
+  } }], transferred_bytes: 0 };
 const range = { lookup_session: 9, request_id: 1, offset: 16, length: 8,
   artifact: { path: 'field_hash_to_id.v1.bin', byte_length: 32, content_identity: 'sha256:' + 'b'.repeat(64) } };
 

@@ -722,30 +722,19 @@ impl CandidateAccumulator {
             }
         }
 
-        for reveal in new_path_reveals.iter().chain(self.seen_path_reveals.iter()) {
-            if let Ok(index) = self
-                .ledger_reveals
-                .binary_search_by_key(&reveal.reveal_rank, |seen| seen.reveal_rank)
-            {
-                if self.ledger_reveals[index] != *reveal {
-                    return Err(Pc4ObservationCandidateError::Semantic(
-                        Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
-                            reveal_rank: reveal.reveal_rank,
-                        },
-                    ));
-                }
-            }
-            if let Ok(index) = new_ledger_reveals
-                .binary_search_by_key(&reveal.reveal_rank, |seen| seen.reveal_rank)
-            {
-                if new_ledger_reveals[index] != *reveal {
-                    return Err(Pc4ObservationCandidateError::Semantic(
-                        Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence {
-                            reveal_rank: reveal.reveal_rank,
-                        },
-                    ));
-                }
-            }
+        // Old/old evidence was checked before its atomic publication. Only
+        // new/old, old/new and new/new intersections can introduce a conflict.
+        // Rechecking every historical path on each small page is quadratic in
+        // the number of reveal outcomes (millions for P7P4).
+        if let Some(reveal_rank) = inconsistent_reveal_delta(
+            &self.seen_path_reveals,
+            &self.ledger_reveals,
+            &new_path_reveals,
+            &new_ledger_reveals,
+        ) {
+            return Err(Pc4ObservationCandidateError::Semantic(
+                Pc4ObservationCandidateSemanticError::InconsistentRevealEvidence { reveal_rank },
+            ));
         }
         let next_reveal_count = self
             .ledger_reveals
@@ -821,14 +810,19 @@ impl CandidateAccumulator {
 
     fn commit_batch(&mut self, batch: PreparedBatch) {
         self.pending.extend(batch.pending);
-        self.seen_path_reveals.extend(batch.new_path_reveals);
-        self.seen_path_reveals
-            .sort_unstable_by_key(Pc4ObservationRevealEvidence::reveal_rank);
-        self.ledger_reveals.extend(batch.new_ledger_reveals);
-        self.ledger_reveals
-            .sort_unstable_by_key(Pc4ObservationRevealEvidence::reveal_rank);
-        self.seen_memberships.extend(batch.new_memberships);
-        self.seen_memberships.sort_unstable();
+        extend_sorted_delta(
+            &mut self.seen_path_reveals,
+            batch.new_path_reveals,
+            Pc4ObservationRevealEvidence::reveal_rank,
+        );
+        extend_sorted_delta(
+            &mut self.ledger_reveals,
+            batch.new_ledger_reveals,
+            Pc4ObservationRevealEvidence::reveal_rank,
+        );
+        extend_sorted_delta(&mut self.seen_memberships, batch.new_memberships, |value| {
+            *value
+        });
         self.replay_count = batch.next_replay_count;
         self.retained_element_count = batch.next_retained_element_count;
     }
@@ -958,6 +952,42 @@ impl CandidateAccumulator {
             replay_provenance_count: self.replay_count,
             retained_element_count: self.retained_element_count,
         })
+    }
+}
+
+// Both old sets and both deltas are sorted and internally unique. The caller
+// has validated duplicate evidence within each side before reaching here.
+fn inconsistent_reveal_delta(
+    old_paths: &[Pc4ObservationRevealEvidence],
+    old_ledger: &[Pc4ObservationRevealEvidence],
+    new_paths: &[Pc4ObservationRevealEvidence],
+    new_ledger: &[Pc4ObservationRevealEvidence],
+) -> Option<u128> {
+    let differs = |reveal: &Pc4ObservationRevealEvidence,
+                   other: &[Pc4ObservationRevealEvidence]| {
+        other
+            .binary_search_by_key(&reveal.reveal_rank, |seen| seen.reveal_rank)
+            .is_ok_and(|index| other[index] != *reveal)
+    };
+    new_paths
+        .iter()
+        .find(|reveal| differs(reveal, old_ledger) || differs(reveal, new_ledger))
+        .or_else(|| new_ledger.iter().find(|reveal| differs(reveal, old_paths)))
+        .map(Pc4ObservationRevealEvidence::reveal_rank)
+}
+
+// The ledger normally arrives in increasing rank order. Empty/monotone deltas
+// need no scan or sort of the retained prefix. Preserve the generic unordered
+// arrival contract for graph-derived memberships with an exact fallback sort.
+// Capacity is already reserved transactionally by reserve_batch.
+fn extend_sorted_delta<T, K: Ord>(base: &mut Vec<T>, delta: Vec<T>, key: impl Fn(&T) -> K) {
+    if delta.is_empty() {
+        return;
+    }
+    let ordered = base.last().is_none_or(|last| key(last) <= key(&delta[0]));
+    base.extend(delta);
+    if !ordered {
+        base.sort_unstable_by_key(key);
     }
 }
 

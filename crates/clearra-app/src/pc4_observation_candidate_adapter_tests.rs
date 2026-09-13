@@ -30,6 +30,88 @@ use crate::pc_candidate_page_boundary::{
 #[path = "pc4_observation_candidate_fixed_queue_tests.rs"]
 mod fixed_queue;
 
+fn delta_reveal(rank: u128, piece: Pc4GraphPiece) -> Pc4ObservationRevealEvidence {
+    Pc4ObservationRevealEvidence {
+        reveal_rank: rank,
+        revealed_pieces: vec![piece],
+        probability: Pc4ExactProbability::one(),
+        terminal_bag_state: None,
+    }
+}
+
+#[test]
+fn reveal_delta_checks_all_new_intersections_without_revalidating_old_pairs() {
+    let old_paths = vec![
+        delta_reveal(1, Pc4GraphPiece::I),
+        delta_reveal(3, Pc4GraphPiece::O),
+    ];
+    let old_ledger = vec![
+        delta_reveal(1, Pc4GraphPiece::I),
+        delta_reveal(2, Pc4GraphPiece::T),
+    ];
+    let new_paths = vec![
+        delta_reveal(2, Pc4GraphPiece::T),
+        delta_reveal(4, Pc4GraphPiece::L),
+    ];
+    let new_ledger = vec![
+        delta_reveal(3, Pc4GraphPiece::O),
+        delta_reveal(4, Pc4GraphPiece::L),
+    ];
+    assert_eq!(
+        inconsistent_reveal_delta(&old_paths, &old_ledger, &new_paths, &new_ledger),
+        None
+    );
+    for (path_side, index, rank) in [(true, 0, 2), (true, 1, 4), (false, 0, 3)] {
+        let mut paths = new_paths.clone();
+        let mut ledger = new_ledger.clone();
+        if path_side {
+            paths[index].revealed_pieces = vec![Pc4GraphPiece::Z];
+        } else {
+            ledger[index].revealed_pieces = vec![Pc4GraphPiece::Z];
+        }
+        assert_eq!(
+            inconsistent_reveal_delta(&old_paths, &old_ledger, &paths, &ledger),
+            Some(rank)
+        );
+    }
+    assert_eq!(
+        inconsistent_reveal_delta(&old_paths, &old_ledger, &[], &[]),
+        None
+    );
+}
+
+#[test]
+fn sorted_delta_monotone_pages_do_not_rescan_the_accumulated_prefix() {
+    let key_calls = Cell::new(0usize);
+    let mut values = Vec::new();
+    for page in 0..1000 {
+        extend_sorted_delta(
+            &mut values,
+            (page * 64..(page + 1) * 64).collect(),
+            |value| {
+                key_calls.set(key_calls.get() + 1);
+                *value
+            },
+        );
+    }
+    assert_eq!(values, (0..64000).collect::<Vec<_>>());
+    assert_eq!(
+        key_calls.get(),
+        1998,
+        "two boundary keys per noninitial page, not 64 million historical keys"
+    );
+    extend_sorted_delta(&mut values, Vec::<i32>::new(), |_| {
+        panic!("empty page must not scan")
+    });
+    let mut interleaved = vec![1, 4, 8];
+    extend_sorted_delta(&mut interleaved, vec![2, 3, 9], |value| *value);
+    assert_eq!(
+        interleaved,
+        vec![1, 2, 3, 4, 8, 9],
+        "out-of-order pages preserve canonical order"
+    );
+}
+
 struct Verifier;
 
 impl DatasetSnapshotVerifier for Verifier {

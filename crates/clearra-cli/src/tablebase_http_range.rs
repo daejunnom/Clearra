@@ -103,10 +103,23 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
             self.windows.push_back(window);
             return Ok(bytes);
         }
+        // Reuse FHID/GOFF index pages; exact graph records are already retained
+        // decoded by App. Uniform 16 KiB graph windows exhaust the 64 MiB
+        // transport budget after only a small prefix of the P7P4 reference.
+        // FILES pins the role order (fields, offsets, graph) for this reader.
+        let direct = role == 2 || artifact.size <= 4_096;
         // A single bounded window replaces repeated tiny FHID/GOFF processes.
         // A crossing large demand stays one request; no read exceeds 64 KiB.
-        let mut start = offset / 16_384 * 16_384;
-        let mut stop = (start + 16_384).min(artifact.size).max(end);
+        let mut start = if direct {
+            offset
+        } else {
+            offset / 4_096 * 4_096
+        };
+        let mut stop = if direct {
+            end
+        } else {
+            (start + 4_096).min(artifact.size).max(end)
+        };
         if stop - start > 65_536 {
             start = offset;
             stop = end;
@@ -118,6 +131,9 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
         self.requests += 1;
         self.reserved += amount;
         let bytes = (self.fetch)(artifact, start, amount)?.validate(artifact, start, amount)?;
+        if direct {
+            return Ok(bytes);
+        }
         while self.retained + bytes.len() > 8 * 1024 * 1024 || self.windows.len() >= 2_048 {
             self.retained -= self.windows.pop_front().unwrap().bytes.len();
         }

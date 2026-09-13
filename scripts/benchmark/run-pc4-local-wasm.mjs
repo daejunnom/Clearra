@@ -1,17 +1,18 @@
 // Local-only measurement of the real App/WASM + downloaded graph. Does not
 // start a server, change 4194, rebuild Rust, publish, or assert release success.
-import { readFile } from 'node:fs/promises';
+import { lstat, open, readFile, unlink } from 'node:fs/promises';
 import { resolve, join, basename } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { openBenchmarkDataset } from './pc4-local-dataset.mjs';
+import { checkedDatasetRoot, openBenchmarkDataset } from './pc4-local-dataset.mjs';
+import { createPc4TraceComparison } from './pc4-trace-comparison.mjs';
 
 const { values } = parseArgs({ options: {
   directory: { type: 'string' }, profile: { type: 'string' }, 'wasm-directory': { type: 'string' },
   command: { type: 'string' }, seconds: { type: 'string', default: '60' },
   'read-limit': { type: 'string', default: '100000' }, cached: { type: 'boolean' },
-  'page-bytes': { type: 'string', default: '4096' }
+  'page-bytes': { type: 'string', default: '4096' }, trace: { type: 'boolean' }, 'compare-trace': { type: 'boolean' }
 } });
 const seconds = Number(values.seconds), readLimit = Number(values['read-limit']);
 if (!values.command || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > 600 ||
@@ -47,10 +48,34 @@ if (values.cached) {
 }
 const demandDigest = createHash('sha256'), artifactCounts = {}, started = performance.now();
 let job, steps = 0, reads = 0, computeMs = 0, ioMs = 0, bridgeMs = 0, terminal = null, lastReport = started, cancelled = false;
+// One bounded local-only trace for the next HTTP planner experiment. Persist
+// after timing, not during reads; never record user input text or payloads.
+const trace = values.trace ? Buffer.alloc(Math.min(readLimit, 200000) * 12) : null;
+let traceHandle, tracePath, traceCommitted = false, traceCount = 0;
+let comparison = null;
 const progress = () => ({ elapsed_ms: performance.now() - started, steps, logical_reads: reads, file_reads: dataset.calls,
   file_bytes: dataset.bytes, compute_ms: computeMs, io_ms: ioMs, bridge_ms: bridgeMs, artifact_reads: artifactCounts,
   wasm_memory_bytes: raw.memory.buffer.byteLength, cache_hits: reader.cacheHits ?? 0 });
 try {
+  if (values['compare-trace']) {
+    const root = await checkedDatasetRoot(values.directory, values.profile);
+    const path = join(root, 'lookup-trace.bin'), stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 4 || stat.size > 2531076) throw new Error('Invalid trace file');
+    const input = await readFile(path);
+    const size = input.readUInt32LE(0);
+    if (size > 131072) throw new Error('Invalid trace header');
+    const header = JSON.parse(input.subarray(4, 4 + size));
+    const reference = input.subarray(4 + size);
+    if (header.schema !== 'clearra.pc4.lookup-trace.v1' || header.record_count > 200000 ||
+        reference.length !== header.record_count * 12 || header.body_sha256 !== createHash('sha256').update(reference).digest('hex') ||
+        header.command_sha256 !== createHash('sha256').update(values.command).digest('hex') ||
+        JSON.stringify(header.generation) !== JSON.stringify(dataset.generation)) throw new Error('Trace identity or bytes mismatch');
+    comparison = createPc4TraceComparison(reference, dataset.plan.files);
+  }
+  if (trace) {
+    tracePath = join(await checkedDatasetRoot(values.directory, values.profile), 'lookup-trace.bin');
+    traceHandle = await open(tracePath, 'wx'); // existing evidence is reused, never overwritten
+  }
   input(values.command); job = raw.clearra_wasm_start_job(); if (!job) throw new Error(output());
   for (;;) {
     if (performance.now() - started > seconds * 1000 || reads >= readLimit) {
@@ -69,6 +94,14 @@ try {
         at = performance.now(); const bytes = await reader.read(range.artifact, range.offset, range.length); ioMs += performance.now() - at;
         reads++; artifactCounts[range.artifact.path] = (artifactCounts[range.artifact.path] ?? 0) + 1;
         demandDigest.update(`${range.artifact.path}:${range.offset}:${range.length}\n`).update(bytes);
+        comparison?.observe(range.artifact, range.offset, range.length, bytes);
+        if (trace && traceCount < trace.length / 12) {
+          const role = dataset.plan.files.findIndex(file => file.path === range.artifact.path);
+          if (role < 0 || !Number.isSafeInteger(range.offset) || range.offset > 0xffffffff) throw new Error('Trace address outside v1 format');
+          trace.writeUInt32LE(role, traceCount * 12);
+          trace.writeUInt32LE(range.offset, traceCount * 12 + 4);
+          trace.writeUInt32LE(range.length, traceCount * 12 + 8); traceCount++;
+        }
         at = performance.now(); input(JSON.stringify({ lookup_session: range.lookup_session, request_id: range.request_id, source: 'verified-local-file', bytes: Array.from(bytes) }));
         ok(raw.clearra_wasm_online_pc4_admit(job)); bridgeMs += performance.now() - at;
       }
@@ -81,12 +114,26 @@ try {
     if (performance.now() - lastReport >= 10000) { console.log(JSON.stringify({ event: 'progress', ...progress() })); lastReport = performance.now(); }
     if (terminal || ![0, 4].includes(status)) break;
   }
-  console.log(JSON.stringify({ event: 'result', cached: !!values.cached, page_bytes: values.cached ? Number(values['page-bytes']) : 0, source_commit: manifest.build?.runtime_identity?.source_commit,
+  const report = { event: 'result', cached: !!values.cached, page_bytes: values.cached ? Number(values['page-bytes']) : 0, source_commit: manifest.build?.runtime_identity?.source_commit,
     wasm_sha256: manifest.wasm.sha256, dataset_revision: dataset.plan.revision, module_prepare_ms: preparationMs,
     ...progress(), cancelled_by_probe: cancelled, demand_sha256: demandDigest.digest('hex'),
+    ...(comparison ? comparison.finish() : {}),
     terminal: terminal ? { event: terminal.event, status: terminal.response?.status,
-      diagnostics: terminal.response?.diagnostics, error: terminal.error } : null }));
+      diagnostics: terminal.response?.diagnostics, error: terminal.error } : null };
+  console.log(JSON.stringify(report));
+  if (traceHandle) {
+    const body = trace.subarray(0, traceCount * 12);
+    const header = Buffer.from(JSON.stringify({ schema: 'clearra.pc4.lookup-trace.v1', record_count: traceCount,
+      command_sha256: createHash('sha256').update(values.command).digest('hex'),
+      generation: dataset.generation, measurement: report,
+      body_sha256: createHash('sha256').update(body).digest('hex') }));
+    const size = Buffer.alloc(4); size.writeUInt32LE(header.length);
+    await traceHandle.writeFile(Buffer.concat([size, header, body])); await traceHandle.sync(); traceCommitted = true;
+    console.log(JSON.stringify({ event: 'trace-saved', records: traceCount, bytes: 4 + header.length + body.length, path: tracePath }));
+  }
+  if (terminal?.event === 'failed') process.exitCode = 1;
 } finally {
+  if (traceHandle) { await traceHandle.close(); if (!traceCommitted) await unlink(tracePath); }
   reader.dispose?.();
   await dataset.close();
 }

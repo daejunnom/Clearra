@@ -325,9 +325,19 @@ test('local hot-update pins bind to current HEAD while production environment re
     assert.notDeepEqual(production, manifest.build, 'the ordinary strict contract comparison must reject stale production pins');
     const unverified = { build: await createClearraWasmBuildContract(root, {}) };
     assert.deepEqual(await guard.expectedBuildForManifest(context, unverified, async () => { assert.fail('unverified local mode does not mint a commit identity'); }), unverified.build);
+    const ancestorBuild = await createClearraWasmBuildContract(root, { CLEARRA_SOURCE_COMMIT: previous, CLEARRA_ENGINE_BUILD_ID: previous });
+    const ancestorManifest = { build: ancestorBuild };
+    const confirmedAncestor = async (repository, source, head) => {
+      assert.equal(repository, root); assert.equal(source, previous); assert.equal(head, current); return true;
+    };
+    assert.deepEqual(await guard.expectedBuildForManifest(context, ancestorManifest, async () => current, confirmedAncestor), ancestorBuild,
+      'host-only descendant commits reuse exact compiler bytes without restamping original pins');
+    await assert.rejects(guard.expectedBuildForManifest(context, ancestorManifest, async () => current, async () => false), /current Git HEAD/);
     await writeFile(join(root, 'Cargo.toml'), '[workspace]\nmembers = []\n# changed source\n');
     const changed = await guard.expectedBuildForManifest(context, manifest, async () => current);
     assert.notEqual(changed.source_sha256, manifest.build.source_sha256, 'matching pins never bypass actual source fingerprint comparison');
+    const changedAncestor = await guard.expectedBuildForManifest(context, ancestorManifest, async () => current, confirmedAncestor);
+    assert.notEqual(changedAncestor.source_sha256, ancestorBuild.source_sha256, 'ancestry never bypasses current compiler-input verification');
   } finally {
     if (savedSource === undefined) delete process.env.CLEARRA_SOURCE_COMMIT; else process.env.CLEARRA_SOURCE_COMMIT = savedSource;
     if (savedEngine === undefined) delete process.env.CLEARRA_ENGINE_BUILD_ID; else process.env.CLEARRA_ENGINE_BUILD_ID = savedEngine;

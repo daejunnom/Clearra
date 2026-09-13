@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 import { createPc4RangeReader } from './pc4-range-reader.mjs';
+import { pc4SearchRangePolicy } from './pc4-search-range-policy.mjs';
 
 const generation = { repository: 'example/pc4', revision: 'a'.repeat(40) };
 const artifact = { path: 'graph.bin', byte_length: 1_048_581, content_identity: 'sha256:' + 'b'.repeat(64) };
@@ -171,11 +172,32 @@ test('batch validates every demand before any I/O and preserves the maximum tran
 });
 
 test('invalid limits and identities fail before opening a connection', async () => {
-  for (const options of [{ windowBytes: 3 }, { maxConcurrent: 0 }, { maxConcurrent: 17 }, { cacheBytes: -1 }]) {
+  for (const options of [{ windowBytes: 3 }, { maxConcurrent: 0 }, { maxConcurrent: 17 }, { cacheBytes: -1 },
+    { directPaths: ['../graph.bin'] }, { directPaths: 'graph.bin' }, { directPaths: [null] }]) {
     assert.throws(() => createPc4RangeReader(generation, options), { code: 'pc4_online_limits_invalid' });
   }
   const reader = createPc4RangeReader(generation, { fetcher: () => assert.fail('must not fetch') });
   try {
     await assert.rejects(reader.read({ ...artifact, content_identity: 'mutable' }, 0, 8), { code: 'pc4_online_range_invalid' });
   } finally { reader.dispose(); }
+});
+
+test('search policy selects only the qualified profile and keeps graph reads exact without evicting indexes', async () => {
+  const ready = { profile: 'jstris-180', status: 'ready', artifacts: { graph: artifact } };
+  const configured = { ...generation, profiles: [{ ...ready, profile: 'srs', status: 'unavailable' }, ready] };
+  for (const selected of ['srs', 'srs-x', 'no-kick']) {
+    assert.throws(() => pc4SearchRangePolicy(configured, selected), /pc4_online_profile_not_qualified/);
+  }
+  assert.throws(() => pc4SearchRangePolicy({ ...configured, profiles: [ready, ready] }, 'jstris-180'), /not_qualified/);
+  const f = fixture(pc4SearchRangePolicy(configured, 'jstris-180'));
+  const index = { ...artifact, path: 'graph_offsets.u32.bin' };
+  try {
+    await f.reader.read(index, 0, 8);
+    for (let i = 0; i < 2100; i++) assert.deepEqual(await f.reader.read(artifact, i * 12, 12), values(i * 12, 12));
+    assert.deepEqual(await f.reader.read(index, 8, 8), values(8, 8));
+    assert.equal(f.reader.requests, 2101);
+    assert.equal(f.reader.bytes, 4096 + 2100 * 12);
+    assert.equal(f.reader.retainedBytes, 4096);
+    assert.ok(f.ranges.slice(1).every(r => r.end - r.start + 1 === 12));
+  } finally { f.reader.dispose(); }
 });

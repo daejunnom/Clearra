@@ -18,6 +18,7 @@ export default defineConfig(({ mode }) => {
       fs: { allow: [searchForWorkspaceRoot(frontend.appRoot), frontend.frontendRoot] },
       // A long-running local audit must survive edits and server reconnects.
       // WASM generations use their own verified, non-reloading update channel.
+      // Reloading server-side artifact validation must not reload an active page.
       hmr: mode === 'local-recovery' || mode === 'local-audit' ? false : undefined
     }
   };

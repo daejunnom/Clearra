@@ -67,7 +67,7 @@ The prefix contains 2 field-index reads, 19,999 offset reads and 9,999 graph
 reads. Large graph pages create substantial over-read; they are not enabled in
 the local product reader. Remote transport policy is not widened by these tests.
 
-## Implemented changes awaiting exact-source Rust CI
+## Implemented local reader and graph-index changes
 
 1. App decoded graph cache: indexed field-ID and reverse-hash lookups, replacing
    full-vector scans. Admitting R records previously needed quadratic duplicate
@@ -87,21 +87,104 @@ the local product reader. Remote transport policy is not widened by these tests.
    or port is created. Rust compilation/execution remains in non-publishing CI;
    local UMCI restrictions are not bypassed.
 
-Related JS download, reader, OPFS lease and workflow tests passed locally.
-Rust/CLI correctness and the graph-cache algorithm's actual speedup require the
-new exact-source CI/WASM. The 4194 WASM has **not** been replaced for these edits.
-
 Implementation commit: `a22dbfffa8bfc65aee6c482a2f989a8023a8c306`.
-Non-publishing CI: https://github.com/daejunnom/Clearra/actions/runs/34766442189 .
-Source and surface contracts passed at the last observation; Rust, native CLI
-and preview WASM were still running. A later host-only follow-up carries the
-physical file-read counter through the development receipt and bounds direct
-reads as well as cached reads. It does not require another Rust/WASM build.
+Non-publishing CI https://github.com/daejunnom/Clearra/actions/runs/34766442189
+finished with all five jobs successful: source, native CLI, PC4 contracts,
+surface contracts, preview WASM. Nonzero evidence includes 91 App tests,
+17 native PC4 tests and 2 public WASM-host tests. This is not release acceptance.
+The host-only `ec4ab5c` follow-up exposes physical local file reads and bounds
+direct pending reads without changing compiler inputs.
+
+Verified a22 WASM: `f0f09bc8d33d530925d44a98cdc81d19866b6c60cf0d5440f850495b4ccf78e2`,
+21,488,190 B; source fingerprint
+`9c014be368958e894e20767fd6d98a0a832a166b41f5a7594a76d1e6aee6e2cc`.
+CI artifact 10321017440, run 34766442189, attempt 1. Exact bytes were published
+to 4194 after validation, with no local Rust build or restamping. Four product
+generations were retained; the temporary artifact extraction was removed.
+
+A live-development guard previously rejected this artifact after a host/docs-only
+descendant commit. It now permits an exact Git ancestor only when the **entire
+current compiler fingerprint** still matches, preserving original pins. Changed
+Rust inputs and unrelated commits remain rejected; production pin rules are
+unchanged. The idle owned 4194 server was restarted without a visible console;
+its accepted-generation endpoint and manifest both reported the new hash.
+Subsequent Rust edits below need their own CI artifact before publication.
+
+## Large-prefix A/B after graph indexing
+
+The same 100,000 logical reads / 101,696 App advances now take **19.738 s**
+(12.379 s compute, 5.251 s I/O, 1.744 s bridge), versus 108.219 s before.
+Physical reads and bytes remain exactly **45,551 / 51,329,915**. WASM memory
+was 47,906,816 B. A diagnostic repeat took 20.240 s; these remain single local
+observations with OS-I/O variation, not a universal speedup or completed search.
+
+Raw ordered demand hashes initially differed. Publication was held until an
+exact trace comparison showed four differing positions: two independent
+offset/graph record queries exchanged order at ordinals 10009/10010 and
+10012/10013. No demand was lost or added. After normalizing only this bounded
+recorded prefix, **all 100,000 requests and returned bytes** reproduce the old
+digest `8ec35bc3f553df460923dd4b027b2be4ed526a62eaa752134dd42d51948283cb`.
+The following unrecorded suffix remains order-sensitive. The comparison retains
+the raw hash and reports the trace-coverage boundary; it never sorts away an
+arbitrary mismatch. One 362,750 B local trace is retained and reused, not replaced.
+
+The unrestricted-read 120-second probe still did **not** complete. At cancellation:
+150,656 logical reads, 50,218 graph records, 67,984 local file reads,
+74,601,189 local bytes, 104.855 s compute, 11.051 s I/O, and 425,721,856 B WASM
+memory. Progress sometimes consumed many seconds with no new byte demand.
+No 456,459-family or full-run speed claim is justified by this evidence.
+
+## Subsequent local accumulator correction
+
+Source inspection found repeated old/old reveal-evidence comparisons on each
+small transaction, and full-prefix sorts even for empty or monotonically growing
+ledger pages. The old/old invariant has already been checked at atomic commit.
+The new check covers only new/old, old/new and new/new intersections; within-side
+duplicate/conflict validation and the complete finalization check remain intact.
+Sorted delta append skips sorting only for empty or already ordered boundaries;
+out-of-order graph memberships still use the exact sort. Allocation/budget,
+cancellation and publication contracts are unchanged.
+
+Tests exercise all three new-conflict intersections and 1,000 ascending pages
+(64,000 ranks): only 1,998 boundary-key evaluations, rather than repeatedly
+scanning accumulated keys. This follow-up requires exact-source Rust CI and a
+new WASM measurement; it is not included in the a22 timing above.
+
+## Online transport correction, using the saved real trace
+
+`run-pc4-range-trace.mjs` replays the saved 30,000 real demands through the product
+HTTP reader with exact bytes from the verified local dataset as the response
+source. It performs **zero network calls, search reruns or builds**. These are
+HTTP transaction-policy counts, not internet latency or full-search timings.
+
+| Policy | Completed logical reads | HTTP transactions modeled | Transferred bytes modeled |
+|---|---:|---:|---:|
+| Exact spans, existing bounded cache | 30,000 | 19,999 | 449,621 |
+| Uniform 512 B windows | 30,000 | 19,275 | 9,868,295 |
+| Uniform 2 KiB windows | 30,000 | 16,576 | 33,944,771 |
+| Uniform 4 KiB windows | 30,000 | 14,993 | 61,407,246 |
+| Previous uniform 16 KiB windows | **8,325; transfer limit** | 4,096 | 67,098,631 |
+| **4 KiB index pages + exact graph records** | **30,000** | **15,026** | **20,959,851** |
+
+Every completed row matches the original 30k returned-byte digest. The selected
+policy reduces requests by 24.9% versus exact spans; compared with uniform 4 KiB
+it saves 65.9% of bytes for 33 extra transactions. The former default cannot be
+compared as a completed result: it fails at less than a third of the prefix.
+
+The GUI and native CLI now select index-only paging. One-shot raw graph records
+do not evict reusable index pages because the App already owns their decoded
+records. Qualification's separate bounded explicit-batch reader is unchanged.
+The GUI policy selects the exact ready profile; unsupported profiles cannot
+borrow another profile's graph. Transfer/request/memory bounds, immutable
+revision, real 206/Content-Range checks, cancellation and no implicit retry are
+preserved. Local installed readers still perform zero HTTP requests.
+The focused JS transport/OPFS/host/comparison suite passed **28 tests** locally;
+the new native/accumulator changes still need their own exact-source CI.
 
 ## Next online stage / remaining evidence
 
-After the local baseline is established, reduce **actual HTTP transactions**,
-not just logical reads: carry a bounded known-demand frontier into index/record
+Further reduce **actual HTTP transactions**, not just logical reads: carry a
+bounded known-demand frontier into index/record
 batch planning, keep immutable revision/profile admission, and avoid rereading
 known metadata. Existing 64 MiB request-budget and 206/Content-Range validation
 must not be relaxed to hide a costly query. All-file expansion, background scans
@@ -109,6 +192,6 @@ and implicit full downloads remain forbidden. Installed matching-profile data
 must remain distinguishable from Range transport.
 
 Still required: complete 456,459-family validation/timing, input/hold-family
-scale tests, native/browser parity after these edits, online transaction-count
-A/B, independent profile qualification, remaining product contracts and release
+scale tests, native/browser parity after these edits, real HTTP latency and
+frontier-batch A/B, independent profile qualification, remaining product contracts and release
 acceptance. Do not mark v0.9.0 or the overall goal complete from these prefix tests.

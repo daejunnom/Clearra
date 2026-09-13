@@ -11,7 +11,7 @@ export class Pc4OnlineError extends Error { code: string; constructor(code: stri
 export function qualifyPc4UpstreamGeneration(options?: { signal?: AbortSignal; onProgress?: (progress: { transferredBytes: number; requests: number }) => void }): Promise<Pc4HostGeneration>;
 export function createPc4RangeReader(generation: Pc4HostGeneration, options?: {
   signal?: AbortSignal; onProgress?: (progress: { transferredBytes: number; requests: number }) => void;
-  maxBytes?: number; maxRequests?: number; cacheBytes?: number; windowBytes?: number; maxConcurrent?: number;
+  maxBytes?: number; maxRequests?: number; cacheBytes?: number; windowBytes?: number; maxConcurrent?: number; directPaths?: string[];
 }): { readonly bytes: number; readonly requests: number; readonly reads: number; readonly cacheHits: number;
   readonly joinedRequests: number; readonly retainedBytes: number; dispose(): void;
   readMany(demands: Array<{ artifact: Pc4Artifact; offset: number; length: number }>,
