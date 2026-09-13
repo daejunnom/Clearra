@@ -38,7 +38,11 @@ bracket the handoff, and incomplete or poisoned sessions cannot produce input.
 field-average score, score-minimum and fixed-queue highest-score products.
 It measures vector capacity and every owned source/qualification string
 capacity, including the separate provenance evidence. App and compiled memory
-limits must agree conservatively; a lower explicit App cap cannot be ignored.
+limits must agree conservatively; an explicit App override cannot be ignored.
+The current typed-score contract forbids query-level memory overrides and
+chooses its cap through the parent authority. Thus this entrypoint uses that
+same fixed-cap policy and rejects an independently supplied finite App cap;
+it does not claim arbitrary caller-selected finite-memory support.
 These owners must fit the existing closed typed-score retained-owner proof.
 
 Core validates all canonical identities, performs ordinary reachability and
@@ -92,6 +96,15 @@ the 80 paired cases added here. Native CLI passed all **17** process tests in
 time, because its one-piece prefix limit does not bound the 4L completion
 geometry. This is not evidence of a hung process or a benchmark speedup.
 
+The next fixture keeps both real CLI family completions and their typed payload
+assertions, but uses `IOT / SZJL` (cycle seven, no post-cycle borrow). The compiled
+pattern is `[IOT]![SZJL]![^SZJL]!`: `3! * 4! * 3! = 864` queue words and one
+10-piece inventory. The old `TI / OS` fixture compiled to
+`[IT]![OS]![^OS]!P2`: `2! * 2! * 5! * 7P2 = 20,160` eleven-piece words, including
+different hold-slack completion inventories. A compiler assertion pins the
+new fixture's exact pattern/count. No product search limit or algorithm is
+weakened; its wall time still needs the next exact-source native CI result.
+
 On source `7fcf750817614ecb54901711f79abf005470aba1`, non-publishing run
 [34739201596](https://github.com/daejunnom/Clearra/actions/runs/34739201596)
 completed source, surface and PC4 jobs successfully. Core **7**, Tablebase
@@ -116,3 +129,12 @@ mistakenly called host-memory accessors on `SearchProblemBudget`, which owns
 node/time/result/pattern limits. The compiled memory limit actually belongs
 to `SearchProblem::backend_policy()`. That access is corrected; the product
 matrix was not executed on the failed source.
+
+Owned-handoff run [34740492306](https://github.com/daejunnom/Clearra/actions/runs/34740492306)
+on `9cb6d05` passed Core materializer **7**, retained verifier **5**, and
+Tablebase **157** tests. App passed **63** but failed the four product-matrix
+tests before executing scores: the new fixture incorrectly added a 64-MiB
+query override to a typed-score request whose existing contract forbids it.
+The correction uses the canonical CPU/no-fallback/pattern-cap policy and
+the existing Jstris Ultra/T-spins contract for fixed-score. Product validation
+is not relaxed. The new Core unused-must-use test warning is corrected too.

@@ -128,6 +128,38 @@ fn process_e2e_m18_cli_commands_use_search_problem_executor_route() {
 
 #[test]
 fn process_e2e_setup_uses_redesigned_ranked_family_and_preserves_legacy_alias() {
+    // Cycle-seven QB fixture: [IOT]![SZJL]![^SZJL]! has 864 queue words
+    // and one ten-piece multiset. TI / OS generated 20,160 eleven-piece
+    // words plus hold-slack alternatives: --max-setup-pieces bounds only the
+    // displayed prefix, not the complete 4L geometry behind its ranking.
+    // Keep real completed family/alias checks without that unrelated search.
+    const REMAINING: &str = "IOT";
+    const OBSERVED: &str = "SZJL";
+    let pieces = |text: &str| {
+        text.chars()
+            .map(|piece| {
+                clearra_core_domain::piece::piece_kind::PieceKind::from_ascii(piece)
+                    .expect("fixture tetromino")
+            })
+            .collect()
+    };
+    let fixture = clearra_problem::SetupSearchQuery::default()
+        .with_remaining_pieces(pieces(REMAINING))
+        .with_queue_based_pieces(pieces(OBSERVED))
+        .with_max_setup_pieces(1);
+    let conditions = clearra_problem::compile_setup_search_conditions(&fixture)
+        .expect("the small fixture is a valid complete Setup request");
+    assert_eq!(conditions.len(), 1);
+    assert_eq!(conditions[0].pattern_expression(), "[IOT]![SZJL]![^SZJL]!");
+    assert_eq!(
+        conditions[0]
+            .problem()
+            .piece_source()
+            .materialized_universe()
+            .expect("compiled Setup universe")
+            .pattern_count(),
+        864
+    );
     for command in ["setup-finder", "setup"] {
         let output = clearra()
             .args([
@@ -135,11 +167,11 @@ fn process_e2e_setup_uses_redesigned_ranked_family_and_preserves_legacy_alias() 
                 "json",
                 command,
                 "--remaining",
-                "TI",
+                REMAINING,
                 "--mode",
                 "qb",
                 "--qb",
-                "OS",
+                OBSERVED,
                 "--max-setup-pieces",
                 "1",
                 "--workers",

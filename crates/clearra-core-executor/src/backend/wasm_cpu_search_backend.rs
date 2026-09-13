@@ -932,8 +932,10 @@ mod precomputed_geometry_tests {
         }
         drop(session);
         drop(parent);
-        WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
-            .expect("both failed checks and successful completion release their authority");
+        drop(
+            WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
+                .expect("both failed checks and successful completion release their authority"),
+        );
     }
 
     #[test]

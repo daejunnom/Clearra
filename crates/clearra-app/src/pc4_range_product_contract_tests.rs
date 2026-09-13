@@ -10,6 +10,9 @@ use clearra_core_domain::{
 };
 use clearra_host_contract::ResourceBudget;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+use clearra_objectives::policy::score_objective_policy::{
+    ScoreProfileSelection, SpinProfileSelection,
+};
 use clearra_pc4_tablebase::{Pc4RuleProfile, QualifiedSnapshotIdentity};
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
@@ -84,7 +87,13 @@ fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -
         ),
         Product::FixedScore => (
             PcCountPolicy::CountAll,
-            ObjectivePolicy::all().with_score_summary(),
+            ObjectivePolicy::all().with_score_policy(
+                ObjectivePolicy::all()
+                    .with_score_summary()
+                    .score()
+                    .with_profile(ScoreProfileSelection::JstrisUltra)
+                    .with_spin_profile(SpinProfileSelection::TSpins),
+            ),
             PcResultProjection::ScoreSummaryV2(PcScoreIngressOrigin::CanonicalPcScoreFinder),
             Some(ProductCapabilityContract::PcScoreFinder),
         ),
@@ -93,6 +102,17 @@ fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -
         product,
         Product::Score | Product::ScoreMinimum | Product::FixedScore
     );
+    let mut execution_policy = PcExecutionPolicy::mvp_default()
+        .with_requested_backend(RequestedSearchBackend::Cpu)
+        .with_workers(1);
+    if score {
+        // The canonical score request has a closed resource policy. Its
+        // parent authority chooses the admitted cap; query-level memory
+        // overrides and backend fallback are deliberately not allowed.
+        execution_policy = execution_policy
+            .with_allow_backend_fallback(false)
+            .with_max_patterns(crate::PC_SCORE_MAX_PATTERNS);
+    }
     let mut query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(u16::from(lines), initial),
         PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; usize::from(lines)])),
@@ -103,12 +123,7 @@ fn request(lines: u8, profile: Pc4RuleProfile, initial: u64, product: Product) -
     .with_rule(rule)
     .with_count_policy(count)
     .with_objective(objective)
-    .with_execution_policy(
-        PcExecutionPolicy::mvp_default()
-            .with_requested_backend(RequestedSearchBackend::Cpu)
-            .with_workers(1)
-            .with_max_memory_mib(score.then_some(64)),
-    );
+    .with_execution_policy(execution_policy);
     if score {
         query = query.with_retained_trace_limit(1);
     }
@@ -143,12 +158,14 @@ pub(super) fn assert_owned_score_product_parity<G: PcCandidatePageGuard>(
             AppStatus::Success,
             "ordinary {lines}L {profile:?} {product:?}: {expected:?}"
         );
-        // Explicit finite App and compiled limits agree. Borrowed compatibility
-        // input must still reject this path; owned input retains its authority.
-        let request = request.with_resource_budget(ResourceBudget::new(1, None, Some(64)));
+        // Borrowed compatibility input cannot take the score authority. An
+        // explicit App override is rejected instead of silently substituting
+        // the canonical score cap. The owned positive case uses that cap.
         assert!(matches!(
             context.start_pc4_candidate_product(
-                request.clone(),
+                request
+                    .clone()
+                    .with_resource_budget(ResourceBudget::new(1, None, Some(64))),
                 &input,
                 guard,
                 &ExecutionControl::default()
@@ -197,19 +214,21 @@ pub(super) fn assert_owned_score_product_parity<G: PcCandidatePageGuard>(
             Err(Pc4CandidateProductError::AlreadyFinished)
         ));
     }
-    let too_small = request(lines, profile, initial, Product::Score)
-        .with_resource_budget(ResourceBudget::new(1, None, Some(0)));
-    assert!(matches!(
-        context.start_pc4_owned_candidate_product(
-            too_small,
-            input,
-            guard,
-            &ExecutionControl::default()
-        ),
-        Err(Pc4CandidateProductError::Terminal(
-            "pc4_score_request_memory_limit_binding_mismatch"
-        ))
-    ));
+    for limit in [0, 64] {
+        let finite_override = request(lines, profile, initial, Product::Score)
+            .with_resource_budget(ResourceBudget::new(1, None, Some(limit)));
+        assert!(matches!(
+            context.start_pc4_owned_candidate_product(
+                finite_override,
+                input.clone(),
+                guard,
+                &ExecutionControl::default(),
+            ),
+            Err(Pc4CandidateProductError::Terminal(
+                "pc4_score_request_memory_limit_binding_mismatch"
+            ))
+        ));
+    }
 }
 
 fn ordinary(context: &AppContext, request: AppRequest) -> AppResponse {
