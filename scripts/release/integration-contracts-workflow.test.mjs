@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const workflow = await readFile(new URL('../../.github/workflows/integration-contracts.yml', import.meta.url), 'utf8');
 const native = await readFile(new URL('../tools/check-native-cli-contracts.ps1', import.meta.url), 'utf8');
+const nativeCMake = await readFile(new URL('../../core-c/CMakeLists.txt', import.meta.url), 'utf8');
 function isolated(source) {
   assert.match(source, /^name: Integration Contracts \(Non-publishing\)$/mu);
   assert.match(source, /^    branches: \["codex\/v0\.9\.0-stacked-on-v0\.8\.1-20260912"\]$/mu);
@@ -46,4 +47,13 @@ test('native process checks preserve the local execution policy before archive b
   assert.ok(native.indexOf('Assert-ClearraTrustedExecutionSurface') < native.indexOf('& cargo fetch --locked'));
   assert.match(workflow, /"-FetchDependencies"/u);
   assert.match(workflow, /"--row-normalization","--fetch"/u);
+});
+
+test('MSVC archive and C tests share the Rust-compatible CRT without changing build profiles', () => {
+  const policy = /if\(MSVC AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY\)\s+set\(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL"\)\s+endif\(\)/u;
+  const policyIndex = nativeCMake.search(policy);
+  assert.ok(policyIndex > nativeCMake.indexOf('project('));
+  assert.ok(policyIndex < nativeCMake.indexOf('include(cmake/library_target.cmake)'));
+  assert.ok(policyIndex < nativeCMake.indexOf('include(cmake/test_targets.cmake)'));
+  assert.doesNotMatch(nativeCMake, /NODEFAULTLIB|CMAKE_C_FLAGS_DEBUG|CMAKE_BUILD_TYPE|FORCE/u);
 });
