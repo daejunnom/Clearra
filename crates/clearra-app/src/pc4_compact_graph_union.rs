@@ -269,6 +269,12 @@ impl Pc4CompactGraphUnion {
         self.waiting.len() + root >= fields || self.waiting_count + root >= continuations
     }
 
+    #[cfg(test)]
+    pub(crate) fn resident_capacity_blocks_cold_front(&self) -> bool {
+        self.residents == self.limits.resident_work.get()
+            && self.ready.front().is_some_and(|task| !task.resident)
+    }
+
     pub(crate) fn prepare<G: Pc4GraphCandidateGuard>(
         source: &PcCandidateSourceBinding,
         prepared: &Pc4PreparedOnlineInput,

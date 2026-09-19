@@ -737,10 +737,7 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
             if status == CompactGraphUnionStep::Complete {
                 break;
             }
-            if bounded_cache
-                && union.residents == union.limits.resident_work.get()
-                && union.ready.front().is_some_and(|task| !task.resident)
-            {
+            if bounded_cache && union.resident_capacity_blocks_cold_front() {
                 let charged = union.usage().work;
                 assert_eq!(
                     union.advance(&cache, nonzero(8), &guard).unwrap(),
