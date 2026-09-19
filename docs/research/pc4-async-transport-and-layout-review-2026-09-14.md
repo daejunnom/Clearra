@@ -809,11 +809,14 @@ RSS와 전체 wall time을 기존 positional read와 A/B한 뒤에만 채택한�
   지원하면 TLS에서 HTTP/2를 우선하고, 그렇지 않으면 같은 네 slot의 bounded HTTP/1.1
   fallback 의미를 유지한다. HTTP/3는 이 feature에 포함하지 않는다.
 
-첫 후보는 graph transport tail만 격리한다. FHID/GOFF index page와 frontier read-ahead는
-측정된 기존 scalar cache를 계속 사용하므로 mixed graph/index dependency tail과 Web의
-3:1 bounded fairness를 아직 닫지 않는다. Ubuntu/Windows 비게시 matrix는 feature의
-compile/link와 callback 계약만 검사하며, 이어지는 실제 full-search A/B가 다음을 동시에
-만족하기 전에는 기본 승격하지 않는다.
+첫 후보의 후속 수정은 generation qualification, FHID/GOFF scalar cache miss와 graph
+transfer를 **한 multi owner**로 합쳤다. qualification의 첫 bounded Range가
+DNS/TCP/TLS/ALPN을 먼저 지불하고, 같은 owner의 connection cache를 실제 graph와 index가
+재사용한다. graph가 진행 중이거나 CPU ready work가 있을 때 scalar 동기 read를 시작하지
+않아 기존 graph-first 순서를 유지한다. 이는 owner 경계를 닫은 것이지 mixed graph/index
+3:1 fairness와 full-search tail을 측정 완료했다는 뜻은 아니다. Ubuntu/Windows 비게시
+matrix는 feature의 compile/link와 callback 계약만 검사하며, 이어지는 실제 full-search
+A/B가 다음을 동시에 만족하기 전에는 기본 승격하지 않는다.
 
 1. exact solution/count/digest와 오류 분류가 기본 유한 batch와 같다.
 2. 서로 다른 실제 demand trace에서 first result, total wall, 마지막 10% tail이 악화되지
@@ -837,3 +840,70 @@ candidate build는 Ubuntu 1분 35초, Windows 4분 49초였다. 이는 compile/l
 계약 증거이지 live HF 협상, finite batch 대비 전체 검색 성능, 다섯 프로필 자격 또는
 Jstris 빈 필드 P7P4 456,459개 완료 증거가 아니다. Windows 비용과 아직 남은 mixed-index
 tail 때문에 feature는 opt-in 상태를 유지한다.
+
+### 9.11 HTTPS prewarm 수명, Keep-Alive/TFO와 Setup 후보 주입 경계
+
+#### 연결 준비와 수명
+
+HTTPS 병목은 (1) revision discovery, (2) DNS/TCP/TLS/ALPN, (3) FHID/GOFF 의존
+왕복, (4) graph transfer와 마지막 tail로 나눈다. 이번 수정은 2번의 중복을 줄이지만
+1·3·4가 사라졌다는 증거는 아니다.
+
+- native opt-in 경로는 자격 확인용 Range부터 검색 중 index/graph Range까지 한
+  [`curl::multi::Multi`](https://curl.se/libcurl/c/libcurl-multi.html)를 유지한다. logical queue 16/active 4 제한과 exact receipt 검증은
+  그대로다. [`MAXAGE_CONN=300s`](https://curl.se/libcurl/c/CURLOPT_MAXAGE_CONN.html)는 너무 오래 idle한 연결을 재사용하지 않는 상한이고,
+  [TCP keepalive](https://curl.se/libcurl/c/CURLOPT_TCP_KEEPALIVE.html) 60s/30s는 죽은 peer를 발견하기 위한 probe다. 둘 다 요청 heartbeat나
+  무기한 연결 보장이 아니다.
+- Web은 사용자가 TB를 켜는 순간 generation discovery·header qualification을 worker
+  warmup과 함께 시작한다. TB를 다시 꺼도 immutable generation asset과 진행 중 warmup은
+  worker disposal/fail-close 전까지 유지한다. 따라서 재활성화는 같은 worker cache를
+  재사용하지만, 브라우저의 HTTP connection pool/socket 만료는 애플리케이션이 소유하지
+  않는다. 꺼진 동안 dummy Range를 주기적으로 보내는 heartbeat는 데이터 사용량·rate
+  limit·백그라운드 throttling 때문에 만들지 않는다.
+- live A/B에서는 각 transfer의
+  [`CURLINFO_NUM_CONNECTS`](https://curl.se/libcurl/c/CURLINFO_NUM_CONNECTS.html), redirect count, negotiated HTTP
+  version, name lookup/connect/TLS/start-transfer time을 기록한다. 첫 qualification 뒤 실제
+  graph wave에서 새 connection 수가 0인지가 handshake 재사용 판정이며, warm cache의 총
+  시간만으로 판정하지 않는다.
+
+[`TCP Fast Open`](https://curl.se/libcurl/c/CURLOPT_TCP_FASTOPEN.html)은 기본으로 켜지 않는다. 최초 TCP handshake에서 최대 한 RTT를 줄일 수
+있지만 libcurl 계약상 TFO를 켜면 TLS session cache가 작동하지 않고 일부 네트워크에서
+문제가 알려져 있다. 이번 workload는 한 번의 cold connect보다 같은 TLS/HTTP/2 connection
+재사용이 더 중요하고 Rust `curl` wrapper에도 안정적인 portable option이 노출되어 있지
+않다. 필요하면 Linux 전용 local-only A/B로 분리하되 결과가 connection reuse보다 우월한
+경우에만 다시 제안한다. HTTP/3 역시 Bookworm/브라우저가 실제 QUIC를 협상했다는 receipt와
+packet-loss tail 이득이 생기기 전에는 후보 우선순위를 올리지 않는다.
+
+따라서 이 시점의 판정은 **HTTPS owner/handshake 중복 결함은 코드상 제거했지만 전체 검색
+병목 해결은 미증명**이다. 제품 기본 native 경로는 여전히 유한 외부 curl batch이고,
+`native-pc4-libcurl`은 full-search A/B 전까지 opt-in이다.
+
+#### Setup 탐색 적용
+
+새 실행 경계는 App에서 exact `SetupSearch` differential proof를 통과한 complete PC4
+candidate family만 받는다. Core는 모든 후보를 active ILC catalog, 초기 필드, 4L 깊이,
+piece multiset과 다시 대조한 뒤 기존 Setup graph의 shape·spin·score·BuildUp·probability
+평가를 그대로 실행한다. partial/miss/rate limit/profile 또는 generation 불일치는 Setup
+불가능 증명이 아니며 기존 명시 fallback owner로 돌려보낸다. 주입 경로 결과는 일반 Setup
+graph cache에 섞지 않는다.
+
+현재 구현은 root completion family를 미리 공급해 최초 exact geometry compile을 생략하고,
+후속 residual은 기존 exact compiler가 책임지는 보수적 기반이다. 즉 완결 후보를 받았다는
+이유만으로 임의의 row 조합을 허용하지 않으며, 대규모 residual index나 후보 전체 스캔을
+추가하지 않는다. 실 profile별 SetupSearch 자격과 differential proof가 아직 없으므로 제품
+capability는 계속 꺼져 있다.
+
+과거 기록에는 다음 Setup 수치가 있지만 어느 것도 동일 입력의 HF TB on/off A/B가 아니다.
+
+- IOTS, setup piece 최대 1: 29.1초, 77 setups
+- IOTS, 최대 2 locks: 약 35.68초, 330MiB, 1,701 setups/610,196 families
+- 과거 broad fixture: 1,519.58초; 후속 routing fixture 71.35초
+
+따라서 기존 기록을 TB 가속률로 재사용하지 않는다. 새 A/B는 동일 query/profile/kick/
+generation/worker/memory/time budget에서 offline과 TB가 모두 완료될 때만 wall time,
+first-result, geometry nodes, peak RSS와 exact result digest를 수치 비교한다. offline이 고정된
+CPU·메모리·시간 예산 안에 완료되지 않아 같은 입력의 숫자 비교가 불가능하되, 자격된 TB가
+complete candidate family를 공급하고 기존 Setup evaluator가 exact digest와 함께 완료하면
+이를 **feasibility dominance(연산 가능성 우위)**로 기록한다. 이를 무한 배속이나 일반적
+성능 수치로 표현하지 않는다. 이번 bounded synthetic 검사는 주입 family와 offline exact
+geometry의 root row 집합 동등성만 확인하며 실제 HF/대형 Setup A/B를 대체하지 않는다.

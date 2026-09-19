@@ -1,4 +1,9 @@
+#[cfg(not(target_family = "wasm"))]
+use std::sync::Arc;
+
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+#[cfg(not(target_family = "wasm"))]
+use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
 use clearra_problem::SetupSearchQuery;
 
 use crate::CoreExecutionResult;
@@ -113,6 +118,22 @@ impl WasmSetupParallelCoordinator {
     ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
         super::wasm_cpu::execute_setup_parallel_native(query, worker_count, control)
             .map_err(map_error)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn execute_native_with_complete_precomputed_pc_candidates(
+        query: &SetupSearchQuery,
+        worker_count: usize,
+        candidates: Arc<[StandardBoard64TilingIdentity]>,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
+        super::wasm_cpu::execute_setup_parallel_native_with_complete_candidates(
+            query,
+            worker_count,
+            candidates,
+            control,
+        )
+        .map_err(map_error)
     }
 }
 

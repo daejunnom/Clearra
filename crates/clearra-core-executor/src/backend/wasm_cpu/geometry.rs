@@ -1404,8 +1404,24 @@ pub(super) enum GeometryFamilyCompileAdvance {
 }
 
 pub(super) struct GeometryFamilyCompileSession {
-    compiler: Option<FamilyCompiler>,
+    compiler: Option<GeometryFamilyCompiler>,
     execution_prefixes: Vec<u32>,
+}
+
+enum GeometryFamilyCompiler {
+    Exact(FamilyCompiler),
+    CompleteCandidates(CompleteCandidateFamilyCompiler),
+}
+
+struct CompleteCandidateFamilyCompiler {
+    required_cells: u64,
+    candidates: Arc<[StandardBoard64TilingIdentity]>,
+    next_candidate: usize,
+    targets: Arc<[TargetGroup]>,
+    geometry_prefixes: Vec<u32>,
+    target_depth: u8,
+    family: GeometrySolutionFamily,
+    root_family: u32,
 }
 
 pub(super) struct CompiledGeometryFamily {
@@ -1422,54 +1438,51 @@ impl GeometryFamilyCompileSession {
         mut execution_prefixes: Vec<u32>,
         tablebase: Option<Arc<Pc4CompactTablebase>>,
     ) -> Result<Self, WasmExactSearchError> {
-        target_keys.sort_unstable();
-        target_keys.dedup();
-        if target_keys.is_empty() {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "setup_geometry_has_no_admissible_piece_multiset",
-            ));
-        }
-        let target_depth = target_keys[0].total_count();
-        if target_keys
-            .iter()
-            .any(|target| target.total_count() != target_depth)
-        {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "setup_geometry_target_depth_mismatch",
-            ));
-        }
-        execution_prefixes.sort_unstable();
-        execution_prefixes.dedup();
-        if execution_prefixes.binary_search(&0).is_err()
-            || target_keys.iter().any(|target| {
-                execution_prefixes
-                    .binary_search(&pack_piece_counts(target.counts()))
-                    .is_err()
-            })
-        {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "setup_geometry_admissible_prefix_domain_incomplete",
-            ));
-        }
-
-        let possible_patterns = Arc::new(PatternBitSet::all(1));
-        let targets = target_keys
-            .into_iter()
-            .enumerate()
-            .map(|(index, key)| TargetGroup {
-                key,
-                pattern_index_id: index as u32,
-                possible_patterns: Arc::clone(&possible_patterns),
-                pattern_index: None,
-            })
-            .collect::<Vec<_>>();
-        let compiler_prefixes = compile_admissible_prefixes(&targets);
+        let (targets, compiler_prefixes, target_depth) =
+            prepare_setup_geometry_targets(&mut target_keys, &mut execution_prefixes)?;
         Ok(Self {
-            compiler: Some(FamilyCompiler::new_with_admissible_prefixes(
-                required_cells,
-                targets.into(),
-                compiler_prefixes,
-                tablebase,
+            compiler: Some(GeometryFamilyCompiler::Exact(
+                FamilyCompiler::new_with_admissible_prefixes(
+                    required_cells,
+                    targets,
+                    compiler_prefixes,
+                    tablebase,
+                ),
+            )),
+            execution_prefixes,
+        })
+    }
+
+    /// Seeds Setup's ordinary completion oracle from a sealed, complete PC
+    /// candidate universe. This does not grant completeness authority: the App
+    /// boundary must already have bound that authority to the exact Setup
+    /// request, profile, target and snapshot. Core validates every placement
+    /// against the active ILC catalog before it publishes the root family.
+    pub fn new_with_complete_candidates(
+        required_cells: u64,
+        mut target_keys: Vec<PieceMultisetKey>,
+        mut execution_prefixes: Vec<u32>,
+        candidates: Arc<[StandardBoard64TilingIdentity]>,
+    ) -> Result<Self, WasmExactSearchError> {
+        if candidates.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_precomputed_candidates_not_strictly_canonical",
+            ));
+        }
+        let (targets, geometry_prefixes, target_depth) =
+            prepare_setup_geometry_targets(&mut target_keys, &mut execution_prefixes)?;
+        Ok(Self {
+            compiler: Some(GeometryFamilyCompiler::CompleteCandidates(
+                CompleteCandidateFamilyCompiler {
+                    required_cells,
+                    candidates,
+                    next_candidate: 0,
+                    targets,
+                    geometry_prefixes,
+                    target_depth,
+                    family: GeometrySolutionFamily::new(),
+                    root_family: FAMILY_INVALID,
+                },
             )),
             execution_prefixes,
         })
@@ -1486,6 +1499,44 @@ impl GeometryFamilyCompileSession {
                 "setup_geometry_compile_session_already_finished",
             );
         };
+        if let GeometryFamilyCompiler::CompleteCandidates(compiler) = compiler {
+            for work in 0..work_budget.max(1) {
+                if work & 1023 == 0 && control.is_cancelled() {
+                    return GeometryFamilyCompileAdvance::Cancelled;
+                }
+                if let Err(reason) = compiler.advance_one(catalog) {
+                    return GeometryFamilyCompileAdvance::ResourceIncomplete(reason);
+                }
+                if compiler.next_candidate == compiler.candidates.len() {
+                    let GeometryFamilyCompiler::CompleteCandidates(compiler) = self
+                        .compiler
+                        .take()
+                        .expect("complete candidate compiler exists")
+                    else {
+                        unreachable!("complete candidate compiler kind is stable")
+                    };
+                    let candidate_family_count = Some(compiler.candidates.len() as u128);
+                    let expanded_nodes = compiler.next_candidate;
+                    let target_depth = compiler.target_depth;
+                    let targets = Arc::clone(&compiler.targets);
+                    let state = compiler.into_completion_state();
+                    return finish_setup_geometry_family(
+                        state,
+                        targets,
+                        std::mem::take(&mut self.execution_prefixes),
+                        target_depth,
+                        catalog.skeleton_count(),
+                        candidate_family_count,
+                        expanded_nodes,
+                        0,
+                    );
+                }
+            }
+            return GeometryFamilyCompileAdvance::Pending;
+        }
+        let GeometryFamilyCompiler::Exact(compiler) = compiler else {
+            unreachable!("candidate compiler returned above")
+        };
         for work in 0..work_budget.max(1) {
             if work & 1023 == 0 && control.is_cancelled() {
                 return GeometryFamilyCompileAdvance::Cancelled;
@@ -1498,44 +1549,27 @@ impl GeometryFamilyCompileSession {
                     );
                 }
                 CompileAdvance::Complete => {
-                    let compiler = self.compiler.take().expect("geometry compiler exists");
+                    let GeometryFamilyCompiler::Exact(compiler) =
+                        self.compiler.take().expect("geometry compiler exists")
+                    else {
+                        unreachable!("exact compiler kind is stable")
+                    };
                     let candidate_family_count = compiler.candidate_family_count();
                     let targets = Arc::clone(&compiler.targets);
                     let target_depth = compiler.target_depth;
                     let expanded_nodes = compiler.expanded_nodes;
                     let tablebase_pruned_states = compiler.tablebase_pruned_states;
                     let state = compiler.into_completion_state();
-                    let execution_prefixes = std::mem::take(&mut self.execution_prefixes);
-                    let completion_oracle = match GeometryCompletionOracle::new(
+                    return finish_setup_geometry_family(
                         state,
                         targets,
-                        execution_prefixes,
+                        std::mem::take(&mut self.execution_prefixes),
                         target_depth,
                         catalog.skeleton_count(),
-                    ) {
-                        Ok(oracle) => oracle,
-                        Err(WasmExactSearchError::InvalidProblem(reason)) => {
-                            return GeometryFamilyCompileAdvance::ResourceIncomplete(reason);
-                        }
-                        // Admission is owned by the enclosing session and cannot
-                        // originate in this pure completion-oracle constructor.
-                        // Keep the compatibility result fail-closed if that
-                        // invariant is ever violated.
-                        Err(error @ WasmExactSearchError::ResourceAdmission(_)) => {
-                            return GeometryFamilyCompileAdvance::ResourceIncomplete(
-                                error.reason(),
-                            );
-                        }
-                        Err(WasmExactSearchError::Cancelled) => {
-                            return GeometryFamilyCompileAdvance::Cancelled;
-                        }
-                    };
-                    return GeometryFamilyCompileAdvance::Complete(CompiledGeometryFamily {
-                        completion_oracle,
                         candidate_family_count,
                         expanded_nodes,
                         tablebase_pruned_states,
-                    });
+                    );
                 }
             }
         }
@@ -1543,12 +1577,318 @@ impl GeometryFamilyCompileSession {
     }
 
     pub(super) fn progress_nodes(&self) -> usize {
-        self.compiler.as_ref().map_or(0, |compiler| {
-            compiler
+        self.compiler.as_ref().map_or(0, |compiler| match compiler {
+            GeometryFamilyCompiler::Exact(compiler) => compiler
                 .expanded_nodes
-                .saturating_add(compiler.family.node_count() as usize)
+                .saturating_add(compiler.family.node_count() as usize),
+            GeometryFamilyCompiler::CompleteCandidates(compiler) => compiler
+                .next_candidate
+                .saturating_add(compiler.family.node_count() as usize),
         })
     }
+}
+
+#[cfg(test)]
+mod precomputed_geometry_tests {
+    use std::{collections::BTreeSet, sync::Arc};
+
+    use clearra_core_domain::{
+        execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+        pc::pc_target::PcTarget,
+    };
+    use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+    use clearra_pc_graph::request::{OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput};
+    use clearra_problem::ProblemCompiler;
+
+    use super::*;
+
+    #[test]
+    fn sealed_candidates_seed_the_same_root_rows_as_exact_geometry() {
+        let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_queue(PcQueueInput::default())
+            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_objective(ObjectivePolicy::unique());
+        let problem = ProblemCompiler::compile_opening_pc(&query).expect("two-line problem");
+        let catalog = GeometryCatalog::compile(&problem).expect("geometry catalog");
+        let universe = problem
+            .piece_source()
+            .materialized_universe()
+            .expect("materialized universe");
+        let family = universe.packing_multiset_family_for_execution(
+            5,
+            problem.initial_hold(),
+            false,
+            super::super::packing_hold_projection(&problem),
+        );
+        let target_keys = family
+            .groups()
+            .iter()
+            .map(|group| group.key())
+            .collect::<Vec<_>>();
+        let mut execution_prefixes = Vec::new();
+        let mut prefix_counts = [0_u8; 7];
+        for key in &target_keys {
+            enumerate_count_prefixes(key.counts(), 0, &mut prefix_counts, &mut execution_prefixes);
+        }
+        execution_prefixes.sort_unstable();
+        execution_prefixes.dedup();
+
+        let mut search = GeometrySearch::new(universe, &family, catalog.required_cells(), false)
+            .expect("geometry search");
+        let mut candidates = BTreeSet::new();
+        loop {
+            match search.advance(&catalog) {
+                GeometryAdvance::Pending => {}
+                GeometryAdvance::Candidate(candidate) => {
+                    candidates.insert(candidate.identity);
+                }
+                GeometryAdvance::Complete => break,
+                GeometryAdvance::ResourceIncomplete(reason) => {
+                    panic!("geometry fixture incomplete: {reason}")
+                }
+            }
+        }
+        let candidates = candidates.into_iter().collect::<Vec<_>>();
+        assert!(!candidates.is_empty());
+
+        let control = ExecutionControl::new(ExecutionCancellationToken::new());
+        let exact = compile_session(
+            GeometryFamilyCompileSession::new_with_tablebase(
+                catalog.required_cells(),
+                target_keys.clone(),
+                execution_prefixes.clone(),
+                None,
+            )
+            .expect("exact session"),
+            &catalog,
+            &control,
+        );
+        let injected = compile_session(
+            GeometryFamilyCompileSession::new_with_complete_candidates(
+                catalog.required_cells(),
+                target_keys,
+                execution_prefixes,
+                Arc::from(candidates.clone()),
+            )
+            .expect("candidate session"),
+            &catalog,
+            &control,
+        );
+        assert_eq!(
+            injected.candidate_family_count,
+            Some(candidates.len() as u128)
+        );
+
+        let mut exact_rows = root_rows(exact, &catalog, &control);
+        let mut injected_rows = root_rows(injected, &catalog, &control);
+        exact_rows.sort_unstable();
+        injected_rows.sort_unstable();
+        assert_eq!(injected_rows, exact_rows);
+    }
+
+    fn compile_session(
+        mut session: GeometryFamilyCompileSession,
+        catalog: &GeometryCatalog,
+        control: &ExecutionControl,
+    ) -> CompiledGeometryFamily {
+        loop {
+            match session.advance(catalog, 256, control) {
+                GeometryFamilyCompileAdvance::Pending => {}
+                GeometryFamilyCompileAdvance::Complete(compiled) => return compiled,
+                GeometryFamilyCompileAdvance::ResourceIncomplete(reason) => {
+                    panic!("family compile incomplete: {reason}")
+                }
+                GeometryFamilyCompileAdvance::Cancelled => panic!("fixture cancelled"),
+            }
+        }
+    }
+
+    fn root_rows(
+        mut compiled: CompiledGeometryFamily,
+        catalog: &GeometryCatalog,
+        control: &ExecutionControl,
+    ) -> Vec<u32> {
+        let mut rows = Vec::new();
+        compiled
+            .completion_oracle
+            .collect_available_rows(
+                catalog.required_cells(),
+                0,
+                false,
+                catalog,
+                &mut rows,
+                control,
+            )
+            .expect("root rows");
+        rows
+    }
+}
+
+fn prepare_setup_geometry_targets(
+    target_keys: &mut Vec<PieceMultisetKey>,
+    execution_prefixes: &mut Vec<u32>,
+) -> Result<(Arc<[TargetGroup]>, Vec<u32>, u8), WasmExactSearchError> {
+    target_keys.sort_unstable();
+    target_keys.dedup();
+    if target_keys.is_empty() {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_geometry_has_no_admissible_piece_multiset",
+        ));
+    }
+    let target_depth = target_keys[0].total_count();
+    if target_keys
+        .iter()
+        .any(|target| target.total_count() != target_depth)
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_geometry_target_depth_mismatch",
+        ));
+    }
+    execution_prefixes.sort_unstable();
+    execution_prefixes.dedup();
+    if execution_prefixes.binary_search(&0).is_err()
+        || target_keys.iter().any(|target| {
+            execution_prefixes
+                .binary_search(&pack_piece_counts(target.counts()))
+                .is_err()
+        })
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_geometry_admissible_prefix_domain_incomplete",
+        ));
+    }
+
+    let possible_patterns = Arc::new(PatternBitSet::all(1));
+    let targets = target_keys
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, key)| TargetGroup {
+            key,
+            pattern_index_id: index as u32,
+            possible_patterns: Arc::clone(&possible_patterns),
+            pattern_index: None,
+        })
+        .collect::<Vec<_>>();
+    let geometry_prefixes = compile_admissible_prefixes(&targets);
+    Ok((targets.into(), geometry_prefixes, target_depth))
+}
+
+impl CompleteCandidateFamilyCompiler {
+    fn advance_one(&mut self, catalog: &GeometryCatalog) -> Result<(), &'static str> {
+        let Some(identity) = self.candidates.get(self.next_candidate).copied() else {
+            return Ok(());
+        };
+        if identity.initial_board_mask() != catalog.initial_board() {
+            return Err("setup_precomputed_candidate_initial_board_mismatch");
+        }
+        if identity.placement_count() != usize::from(self.target_depth) {
+            return Err("setup_precomputed_candidate_depth_mismatch");
+        }
+
+        let mut occupied = catalog.initial_board();
+        let mut counts = [0_u8; 7];
+        let mut candidate_family = FAMILY_EMPTY;
+        for index in 0..identity.placement_count() {
+            let placement = identity
+                .placement(index)
+                .ok_or("setup_precomputed_candidate_placement_missing")?;
+            let cells = placement.cells_mask();
+            if cells & self.required_cells != cells || occupied & cells != 0 {
+                return Err("setup_precomputed_candidate_target_domain_mismatch");
+            }
+            let row_id = catalog
+                .skeleton_id(placement.piece(), cells)
+                .ok_or("setup_precomputed_candidate_not_in_ilc_catalog")?;
+            let piece = piece_index(placement.piece());
+            counts[piece] = counts[piece]
+                .checked_add(1)
+                .ok_or("setup_precomputed_candidate_supply_overflow")?;
+            occupied |= cells;
+            let singleton = self
+                .family
+                .append(row_id, FAMILY_EMPTY)
+                .ok_or("geometry_solution_family_storage_unavailable")?;
+            candidate_family = self
+                .family
+                .product(candidate_family, singleton)
+                .ok_or("geometry_solution_family_storage_unavailable")?;
+        }
+        if occupied != catalog.initial_board() | self.required_cells {
+            return Err("setup_precomputed_candidate_target_domain_mismatch");
+        }
+        let key = PieceMultisetKey::from_counts(counts);
+        if self
+            .targets
+            .binary_search_by_key(&key, |target| target.key)
+            .is_err()
+        {
+            return Err("setup_precomputed_candidate_supply_mismatch");
+        }
+        self.root_family = self
+            .family
+            .union(self.root_family, candidate_family)
+            .ok_or("geometry_solution_family_storage_unavailable")?;
+        self.next_candidate += 1;
+        Ok(())
+    }
+
+    fn into_completion_state(self) -> GeometryCompilerState {
+        let mut residual_memo = ResidualMemo::new(self.target_depth);
+        residual_memo.insert_after_miss(
+            ResidualKey {
+                remaining: self.required_cells,
+                packed_counts: 0,
+            },
+            self.root_family,
+        );
+        GeometryCompilerState {
+            family: self.family,
+            residual_memo,
+            geometry_prefixes: self.geometry_prefixes,
+            projection_cache: ProjectionReachabilityCache::default(),
+            tablebase: None,
+            compile_domain: FamilyCompileDomain::PermutationClosedGeometry,
+        }
+    }
+}
+
+fn finish_setup_geometry_family(
+    state: GeometryCompilerState,
+    targets: Arc<[TargetGroup]>,
+    execution_prefixes: Vec<u32>,
+    target_depth: u8,
+    skeleton_count: usize,
+    candidate_family_count: Option<u128>,
+    expanded_nodes: usize,
+    tablebase_pruned_states: usize,
+) -> GeometryFamilyCompileAdvance {
+    let completion_oracle = match GeometryCompletionOracle::new(
+        state,
+        targets,
+        execution_prefixes,
+        target_depth,
+        skeleton_count,
+    ) {
+        Ok(oracle) => oracle,
+        Err(WasmExactSearchError::InvalidProblem(reason)) => {
+            return GeometryFamilyCompileAdvance::ResourceIncomplete(reason);
+        }
+        // Admission is owned by the enclosing session and cannot originate in
+        // this pure completion-oracle constructor.
+        Err(error @ WasmExactSearchError::ResourceAdmission(_)) => {
+            return GeometryFamilyCompileAdvance::ResourceIncomplete(error.reason());
+        }
+        Err(WasmExactSearchError::Cancelled) => {
+            return GeometryFamilyCompileAdvance::Cancelled;
+        }
+    };
+    GeometryFamilyCompileAdvance::Complete(CompiledGeometryFamily {
+        completion_oracle,
+        candidate_family_count,
+        expanded_nodes,
+        tablebase_pruned_states,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]

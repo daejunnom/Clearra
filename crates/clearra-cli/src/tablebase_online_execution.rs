@@ -21,6 +21,8 @@ use clearra_app::{
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_rules::profile::rule_profile::RuleProfileId;
 use std::path::Path;
+#[cfg(feature = "native-pc4-libcurl")]
+use std::{cell::RefCell, rc::Rc};
 
 pub(crate) fn execute(context: AppContext, request: AppRequest) -> Result<AppResponse> {
     let root = default_directory()?.join("pc4-v1/jstris-180");
@@ -148,36 +150,40 @@ fn execute_online_native(
     files: &[Artifact],
 ) -> Result<AppResponse> {
     let owned_revision = revision.to_owned();
-    let fetch_revision = owned_revision.clone();
-    let (reader, execution, field_count) = prepare_online(
-        context,
-        request,
-        &owned_revision,
-        files,
-        move |artifact, offset, length| {
-            transport::curl_range(&fetch_revision, artifact, offset, length)
-        },
-    )?;
-    drive_native(execution, reader, &owned_revision, files, field_count)
-}
-
-fn drive_native<F>(
-    execution: Pc4OnlineHostExecution,
-    reader: OnlineRangeReader<F>,
-    revision: &str,
-    files: &[Artifact],
-    field_count: u32,
-) -> Result<AppResponse>
-where
-    F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>,
-{
     #[cfg(feature = "native-pc4-libcurl")]
     {
-        return drive_native_pool(execution, reader, revision, files, field_count);
+        let shared_pool = Rc::new(RefCell::new(NativeCurlPool::new(&owned_revision)?));
+        let fetch_pool = Rc::clone(&shared_pool);
+        let (reader, execution, field_count) = prepare_online(
+            context,
+            request,
+            &owned_revision,
+            files,
+            move |artifact, offset, length| {
+                let role = files
+                    .iter()
+                    .position(|file| file.path == artifact.path)
+                    .ok_or("pc4_online_artifact_invalid")?;
+                fetch_pool
+                    .borrow_mut()
+                    .fetch_exact(role, artifact, offset, length)
+            },
+        )?;
+        return drive_native_pool(execution, reader, files, field_count, shared_pool);
     }
     #[cfg(not(feature = "native-pc4-libcurl"))]
     {
-        drive_native_batch(execution, reader, revision, files, field_count)
+        let fetch_revision = owned_revision.clone();
+        let (reader, execution, field_count) = prepare_online(
+            context,
+            request,
+            &owned_revision,
+            files,
+            move |artifact, offset, length| {
+                transport::curl_range(&fetch_revision, artifact, offset, length)
+            },
+        )?;
+        drive_native_batch(execution, reader, &owned_revision, files, field_count)
     }
 }
 
@@ -304,17 +310,16 @@ where
 fn drive_native_pool<F>(
     mut execution: Pc4OnlineHostExecution,
     mut reader: OnlineRangeReader<F>,
-    revision: &str,
     files: &[Artifact],
     field_count: u32,
+    pool: Rc<RefCell<NativeCurlPool>>,
 ) -> Result<AppResponse>
 where
     F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>,
 {
     let control = ExecutionControl::default();
-    let mut pool = NativeCurlPool::new(revision)?;
     loop {
-        drain_pool(&mut pool, &mut execution, &control, false)?;
+        drain_shared_pool(&pool, &mut execution, &control, false)?;
         match execution.advance(2_048, &control)? {
             CooperativeAppAdvance::Completed(response) => return Ok(response),
             CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
@@ -344,8 +349,8 @@ where
             });
         }
         if demands.is_empty() {
-            if pool.is_active() && !execution.has_ready_work() {
-                drain_pool(&mut pool, &mut execution, &control, true)?;
+            if pool.borrow().is_active() && !execution.has_ready_work() {
+                drain_shared_pool(&pool, &mut execution, &control, true)?;
             }
             continue;
         }
@@ -381,22 +386,25 @@ where
             .cloned()
             .collect::<Vec<_>>();
         if !graph_demands.is_empty() {
-            if let Some(plan) = pool.plan_fresh(graph_demands)? {
+            let plan = pool.borrow().plan_fresh(graph_demands)?;
+            if let Some(plan) = plan {
                 reader.reserve_external(&plan.reservations())?;
-                pool.submit(plan)?;
+                pool.borrow_mut().submit(plan)?;
             }
         }
         if execution.has_ready_work() {
             continue;
         }
-        if pool.is_active() {
-            drain_pool(&mut pool, &mut execution, &control, true)?;
+        if pool.borrow().is_active() {
+            drain_shared_pool(&pool, &mut execution, &control, true)?;
             continue;
         }
 
-        // Index requests preserve the existing measured page/frontier cache.
-        // A future mixed-owner A/B may move them into the same pool, but must
-        // retain its bounded 3:1 graph/index fairness and cache semantics.
+        // Index requests preserve the measured page/frontier cache. A cache
+        // miss now uses the same multi owner that qualified the generation and
+        // carries graph streams, so DNS/TCP/TLS/ALPN state is not discarded.
+        // We reach this scalar dependency only after ready CPU work and graph
+        // transfers are drained, preserving the existing graph-first policy.
         let demand = demands
             .iter()
             .find(|demand| demand.role != 2)
@@ -472,6 +480,17 @@ fn drain_pool(
             }
         }
     }
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+fn drain_shared_pool(
+    pool: &Rc<RefCell<NativeCurlPool>>,
+    execution: &mut Pc4OnlineHostExecution,
+    control: &ExecutionControl,
+    wait: bool,
+) -> Result<()> {
+    let mut pool = pool.borrow_mut();
+    drain_pool(&mut pool, execution, control, wait)
 }
 
 fn admit_native_ranges(

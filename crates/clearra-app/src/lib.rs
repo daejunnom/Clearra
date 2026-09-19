@@ -104,6 +104,8 @@ pub mod search_backend_warmup;
 mod search_output_surface_postprocess;
 #[cfg(feature = "online-pc4-tablebase")]
 mod setup_pc_candidate_acceleration;
+#[cfg(feature = "online-pc4-tablebase")]
+mod setup_pc_candidate_execution;
 mod setup_ranked_family_result;
 #[cfg(test)]
 mod setup_ranked_fixture;
@@ -414,6 +416,11 @@ pub use setup_pc_candidate_acceleration::{
     SetupPcAccelerationObjective, SetupPcAccelerationRequestBinding, SetupPcCandidateAvailability,
     SetupPcCandidateProviderFailure, SetupPcNoAccelerationReason,
     SETUP_PC_CANDIDATE_ACCELERATION_CONTRACT,
+};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use setup_pc_candidate_execution::{
+    execute_prepared_setup_pc_candidate_input, SetupPcCandidateExecutionError,
+    ValidatedSetupPcCandidateExecutionEvidence,
 };
 pub use setup_ranked_family_result::{
     setup_ranked_candidate_id, SetupRankedCandidateIdentity, SetupRankedFamilyResult,

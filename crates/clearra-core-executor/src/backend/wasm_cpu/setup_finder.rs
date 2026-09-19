@@ -11,7 +11,10 @@ use std::sync::{atomic::AtomicUsize, Barrier};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
-use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind,
+    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
+};
 use clearra_coverage::pattern::{
     pattern_bitset::PatternBitSet, weighted_pattern_set::WeightedPatternSet,
 };
@@ -165,6 +168,19 @@ impl WasmSetupSearchSession {
     ) -> Result<Self, WasmExactSearchError> {
         Ok(Self {
             stage: SetupSearchStage::Building(SetupGraphBuildSession::new(query)?),
+            observation_worker_count: observation_worker_count.max(1),
+        })
+    }
+
+    pub fn new_with_complete_precomputed_pc_candidates(
+        query: &SetupSearchQuery,
+        candidates: Arc<[StandardBoard64TilingIdentity]>,
+        observation_worker_count: usize,
+    ) -> Result<Self, WasmExactSearchError> {
+        Ok(Self {
+            stage: SetupSearchStage::Building(
+                SetupGraphBuildSession::new_with_complete_candidates(query, candidates)?,
+            ),
             observation_worker_count: observation_worker_count.max(1),
         })
     }

@@ -14,7 +14,10 @@ use std::{
     },
 };
 
-use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl,
+    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
+};
 use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
 use clearra_problem::{
     compile_setup_search_condition, setup_search_condition_count, SetupSearchCondition,
@@ -91,6 +94,23 @@ impl WasmSetupParallelCoordinator {
         worker_count: usize,
     ) -> Result<Self, WasmExactSearchError> {
         let builder = SetupGraphBuildSession::new_parallel(query)?;
+        Self::from_builder(builder, worker_count)
+    }
+
+    pub(crate) fn new_with_complete_candidates(
+        query: &SetupSearchQuery,
+        worker_count: usize,
+        candidates: Arc<[StandardBoard64TilingIdentity]>,
+    ) -> Result<Self, WasmExactSearchError> {
+        let builder =
+            SetupGraphBuildSession::new_parallel_with_complete_candidates(query, candidates)?;
+        Self::from_builder(builder, worker_count)
+    }
+
+    fn from_builder(
+        builder: SetupGraphBuildSession,
+        worker_count: usize,
+    ) -> Result<Self, WasmExactSearchError> {
         let task_count_hint = if builder.parallel_task_count_hint() < 2 {
             1
         } else {
@@ -656,7 +676,31 @@ pub(crate) fn execute_setup_parallel_native(
     worker_count: usize,
     control: &ExecutionControl,
 ) -> Result<CoreExecutionResult, WasmExactSearchError> {
-    let mut coordinator = WasmSetupParallelCoordinator::new(query, worker_count)?;
+    let coordinator = WasmSetupParallelCoordinator::new(query, worker_count)?;
+    execute_setup_parallel_native_coordinator(coordinator, worker_count, control)
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn execute_setup_parallel_native_with_complete_candidates(
+    query: &SetupSearchQuery,
+    worker_count: usize,
+    candidates: Arc<[StandardBoard64TilingIdentity]>,
+    control: &ExecutionControl,
+) -> Result<CoreExecutionResult, WasmExactSearchError> {
+    let coordinator = WasmSetupParallelCoordinator::new_with_complete_candidates(
+        query,
+        worker_count,
+        candidates,
+    )?;
+    execute_setup_parallel_native_coordinator(coordinator, worker_count, control)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn execute_setup_parallel_native_coordinator(
+    mut coordinator: WasmSetupParallelCoordinator,
+    worker_count: usize,
+    control: &ExecutionControl,
+) -> Result<CoreExecutionResult, WasmExactSearchError> {
     prepare_native_setup_graph(&mut coordinator, control)?;
     if coordinator.tasks.is_empty() {
         control.report_progress("setup-finalize", 4, Some(4));

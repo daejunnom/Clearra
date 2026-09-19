@@ -144,6 +144,7 @@ jobs:
           apps/clearra-web/test/onlinePc4Host.test.mjs
           apps/clearra-web/test/pc4HostTypes.test.mjs
           apps/clearra-web/test/pc4LocalStore.test.mjs
+          apps/clearra-web/test/tablebaseWarmupLifetime.test.mjs
           apps/clearra-web/test/LocalSearchProfile.contract.ts
 
   preview-wasm:

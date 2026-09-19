@@ -401,6 +401,7 @@ pub(super) struct NativeCurlPool {
     active: BTreeMap<usize, LibcurlActive>,
     identities: BTreeMap<(u64, u64), DemandIdentity>,
     next_token: usize,
+    next_scalar_request_id: u64,
 }
 
 #[cfg(feature = "native-pc4-libcurl")]
@@ -459,7 +460,68 @@ impl NativeCurlPool {
             active: BTreeMap::new(),
             identities: BTreeMap::new(),
             next_token: 1,
+            next_scalar_request_id: 1,
         })
+    }
+
+    /// Performs a bounded qualification read through this pool before the
+    /// cooperative search starts. Keeping the same multi owner alive lets the
+    /// first graph demand and later scalar index misses reuse the
+    /// DNS/TCP/TLS/ALPN state established here. Graph work is still drained
+    /// before a scalar miss is admitted so this synchronous helper cannot
+    /// starve already-ready graph transfers.
+    pub fn fetch_exact(
+        &mut self,
+        role: usize,
+        artifact: &Artifact,
+        offset: u64,
+        length: u64,
+    ) -> Result<HttpReply> {
+        if self.is_active() {
+            return Err("pc4_online_transport_busy");
+        }
+        let request_id = self.next_scalar_request_id;
+        self.next_scalar_request_id = self
+            .next_scalar_request_id
+            .checked_add(1)
+            .filter(|next| *next != 0)
+            .ok_or("pc4_online_transport_unavailable")?;
+        let demand = NativeRangeDemand {
+            role,
+            lookup_session: u64::MAX,
+            request_id,
+            artifact: artifact.clone(),
+            offset,
+            length,
+        };
+        let plan = self
+            .plan_fresh(vec![demand])?
+            .ok_or("pc4_online_pending_missing")?;
+        self.submit(plan)?;
+        loop {
+            match self.poll(true)? {
+                NativeCurlPoll::Admissions(admissions) => {
+                    let mut matching = admissions.into_iter().filter(|admission| {
+                        admission.lookup_session == u64::MAX && admission.request_id == request_id
+                    });
+                    let admission = matching
+                        .next()
+                        .ok_or("pc4_online_response_receipt_invalid")?;
+                    if matching.next().is_some() {
+                        return Err("pc4_online_response_receipt_invalid");
+                    }
+                    return Ok(HttpReply {
+                        status: 206,
+                        content_range: content_range(offset, length, artifact.size),
+                        bytes: admission.bytes,
+                    });
+                }
+                NativeCurlPoll::Pending => {}
+                NativeCurlPoll::Finished => {
+                    return Err("pc4_online_response_receipt_invalid");
+                }
+            }
+        }
     }
 
     pub fn plan_fresh(&self, demands: Vec<NativeRangeDemand>) -> Result<Option<NativeCurlPlan>> {
@@ -737,6 +799,13 @@ fn configure_easy(
         .and_then(|_| easy.low_speed_limit(1))
         .and_then(|_| easy.low_speed_time(Duration::from_secs(60)))
         .and_then(|_| easy.max_filesize(transfer.length))
+        // Connection reuse is the latency policy. TCP keepalive is only a
+        // dead-peer detector for an already-idle socket; it is not an
+        // application heartbeat and never creates speculative Range traffic.
+        .and_then(|_| easy.tcp_keepalive(true))
+        .and_then(|_| easy.tcp_keepidle(Duration::from_secs(60)))
+        .and_then(|_| easy.tcp_keepintvl(Duration::from_secs(30)))
+        .and_then(|_| easy.maxage_conn(Duration::from_secs(300)))
         .and_then(|_| {
             easy.range(&format!(
                 "{}-{}",

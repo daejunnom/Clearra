@@ -422,15 +422,19 @@ function interruptIncompleteRuntimePrewarm() {
 function setTablebaseRequested(requested: boolean) {
   if (tablebaseRequested === requested) return;
   tablebaseRequested = requested;
-  tablebaseWarmupGeneration += 1;
-  tablebaseWarmup = null;
   if (requested) return;
+  // The online generation preparation is owned by this worker lifetime, not
+  // by the visible feature toggle. Let an
+  // already-started qualification finish and retain its immutable revision so
+  // re-enabling TB does not repeat discovery/TLS setup. The generation guard
+  // below prevents the completed promise from publishing a ready UI state
+  // while the feature is disabled. Runtime disposal and fail-closed shutdown
+  // remain the only owners that abort and clear this cache.
   try {
     loadedWasm?.release_tablebase();
   } catch (error) {
     console.warn('Clearra tablebase release was incomplete', error);
   }
-  releasePc4TablebaseAssets();
   postTablebaseWarmupPhase('disabled', 0);
 }
 

@@ -1,6 +1,9 @@
 use std::{cell::RefCell, sync::Arc};
 
-use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl,
+    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
+};
 use clearra_problem::{compile_setup_search_conditions, SetupSearchCondition, SetupSearchQuery};
 use clearra_supply::pattern_universe::{PatternPiecePositionIndex, PieceMultisetKey};
 
@@ -119,6 +122,7 @@ pub(super) struct SetupGraphBuildSession {
     condition_pattern_indices: Option<Vec<Arc<PatternPiecePositionIndex>>>,
     catalog: Option<Arc<GeometryCatalog>>,
     tablebase: Option<Arc<Pc4CompactTablebase>>,
+    complete_candidates: Option<Arc<[StandardBoard64TilingIdentity]>>,
     cached_detail_coverage: Option<Arc<[CompletedSetupCoverage]>>,
     tablebase_status: &'static str,
     parallel_task_count_hint: usize,
@@ -157,18 +161,36 @@ thread_local! {
 
 impl SetupGraphBuildSession {
     pub(super) fn new(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
-        Self::new_internal(query, false)
+        Self::new_internal(query, false, None)
     }
 
     pub(super) fn new_parallel(query: &SetupSearchQuery) -> Result<Self, WasmExactSearchError> {
-        Self::new_internal(query, true)
+        Self::new_internal(query, true, None)
+    }
+
+    pub(super) fn new_with_complete_candidates(
+        query: &SetupSearchQuery,
+        candidates: Arc<[StandardBoard64TilingIdentity]>,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_internal(query, false, Some(candidates))
+    }
+
+    pub(super) fn new_parallel_with_complete_candidates(
+        query: &SetupSearchQuery,
+        candidates: Arc<[StandardBoard64TilingIdentity]>,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_internal(query, true, Some(candidates))
     }
 
     fn new_internal(
         query: &SetupSearchQuery,
         parallel: bool,
+        complete_candidates: Option<Arc<[StandardBoard64TilingIdentity]>>,
     ) -> Result<Self, WasmExactSearchError> {
-        let cached = cached_setup_graph(query);
+        let cached = complete_candidates
+            .is_none()
+            .then(|| cached_setup_graph(query))
+            .flatten();
         let parallel_task_count_hint = if cached.as_ref().is_some_and(|cached| {
             !cached.compact_continuation
                 && cached_detail_candidate_exists(query, cached.coverage.as_deref())
@@ -184,6 +206,7 @@ impl SetupGraphBuildSession {
             condition_pattern_indices: None,
             catalog: None,
             tablebase: None,
+            complete_candidates,
             cached_detail_coverage: None,
             tablebase_status: "disabled",
             parallel_task_count_hint,
@@ -383,21 +406,26 @@ impl SetupGraphBuildSession {
                         "setup_finder_requires_empty_10x4_target",
                     ));
                 }
-                let loaded_tablebase = self
-                    .query
-                    .tablebase_requested()
-                    .then(loaded_pc4_compact_tablebase)
-                    .flatten();
-                let expected_tablebase_profile =
-                    pc4_tablebase_profile_identity(first.problem(), catalog.identity_digest());
-                let (tablebase, tablebase_status) = select_setup_tablebase(
-                    self.query.tablebase_requested(),
-                    loaded_tablebase,
-                    catalog.identity_digest(),
-                    expected_tablebase_profile,
-                );
-                self.tablebase = tablebase;
-                self.tablebase_status = tablebase_status;
+                if self.complete_candidates.is_some() {
+                    self.tablebase = None;
+                    self.tablebase_status = "online-complete-candidates";
+                } else {
+                    let loaded_tablebase = self
+                        .query
+                        .tablebase_requested()
+                        .then(loaded_pc4_compact_tablebase)
+                        .flatten();
+                    let expected_tablebase_profile =
+                        pc4_tablebase_profile_identity(first.problem(), catalog.identity_digest());
+                    let (tablebase, tablebase_status) = select_setup_tablebase(
+                        self.query.tablebase_requested(),
+                        loaded_tablebase,
+                        catalog.identity_digest(),
+                        expected_tablebase_profile,
+                    );
+                    self.tablebase = tablebase;
+                    self.tablebase_status = tablebase_status;
+                }
                 self.catalog = Some(catalog);
                 self.stage = SetupGraphBuildStage::Prefixes(
                     SetupAdmissiblePrefixCompileSession::new_with_retained_indices(
@@ -484,12 +512,21 @@ impl SetupGraphBuildSession {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "setup_geometry_catalog_missing",
                     ))?;
-                let geometry = GeometryFamilyCompileSession::new_with_tablebase(
-                    catalog.required_cells(),
-                    target_keys,
-                    admissible_prefixes,
-                    self.tablebase.take(),
-                )?;
+                let geometry = if let Some(candidates) = self.complete_candidates.take() {
+                    GeometryFamilyCompileSession::new_with_complete_candidates(
+                        catalog.required_cells(),
+                        target_keys,
+                        admissible_prefixes,
+                        candidates,
+                    )?
+                } else {
+                    GeometryFamilyCompileSession::new_with_tablebase(
+                        catalog.required_cells(),
+                        target_keys,
+                        admissible_prefixes,
+                        self.tablebase.take(),
+                    )?
+                };
                 self.stage = SetupGraphBuildStage::Geometry(geometry);
                 Ok(SetupGraphBuildAdvance::Pending)
             }
@@ -750,7 +787,10 @@ fn cached_setup_graph(query: &SetupSearchQuery) -> Option<CachedSetupGraph> {
 }
 
 fn cache_setup_graph(shared: &SetupSharedGraph) {
-    if shared.query.path_detail().is_some() || shared.graph.resource_truncated {
+    if shared.query.path_detail().is_some()
+        || shared.graph.resource_truncated
+        || shared.tablebase_status == "online-complete-candidates"
+    {
         return;
     }
     SETUP_GRAPH_CACHE.with(|cache| {
