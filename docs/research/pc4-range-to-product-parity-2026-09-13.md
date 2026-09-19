@@ -99,10 +99,14 @@ time, because its one-piece prefix limit does not bound the 4L completion
 geometry. This is not evidence of a hung process or a benchmark speedup.
 
 The next fixture keeps both real CLI family completions and their typed payload
-assertions, but uses `IOT / SZJL` (cycle seven, no post-cycle borrow). The compiled
-pattern is `[IOT]![SZJL]![^SZJL]!`: `3! * 4! * 3! = 864` queue words and one
-10-piece inventory. The old `TI / OS` fixture compiled to
-`[IT]![OS]![^OS]!P2`: `2! * 2! * 5! * 7P2 = 20,160` eleven-piece words, including
+assertions, but uses `IOT / [SZJL]!` (cycle seven, no post-cycle borrow). After
+the ordered-QB contract was introduced, plain `SZJL` means exactly that order;
+the explicit group keeps the fixture's historical unordered meaning. The
+canonical compiled universe is `[IOT]!P7` (30,240 words), and intersection with
+the QB expression leaves `3! * 4! * 3! = 864` conditioned queue words and one
+10-piece inventory. The old `TI / [OS]!` fixture is now represented by the
+canonical `[IT]!P7P2` universe plus the explicit QB intersection; its conditioned
+count remains `2! * 2! * 5! * 7P2 = 20,160` eleven-piece words, including
 different hold-slack completion inventories. A compiler assertion pins the
 new fixture's exact pattern/count. No product search limit or algorithm is
 weakened. On `3d7da6e`, native job `103679903987` passed all 17 process tests in
