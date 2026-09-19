@@ -2348,6 +2348,79 @@ fn distributed_build_probability_b2b_constraint_matches_serial_exact_result() {
 }
 
 #[test]
+fn gui_build_probability_b2b_argv_runs_through_serial_and_distributed_wasm() {
+    let commands =
+        include_str!("../../../tests/fixtures/contracts/gui_build_probability_b2b_argv.tsv")
+            .lines()
+            .map(|line| line.split('\t').collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>();
+    assert_eq!(commands.len(), 2, "serial and distributed GUI fixtures");
+
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let serial = runtime
+        .run_command_text(&commands[0])
+        .expect("GUI serial B2B Build command");
+    let distributed = run_distributed_cpu(&runtime, &commands[1]);
+    let serial_report = serial.search_report().expect("serial GUI B2B report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed GUI B2B report");
+
+    assert_eq!(serial.app_response().status(), AppStatus::Success);
+    assert_eq!(distributed.app_response().status(), AppStatus::Success);
+    assert_eq!(serial_report.unique_solution_count, 8);
+    assert_eq!(
+        distributed_report.unique_solution_count,
+        serial_report.unique_solution_count
+    );
+    assert_eq!(
+        distributed_report.normalized_solution_set_hash,
+        serial_report.normalized_solution_set_hash
+    );
+    assert_eq!(
+        distributed_report.covered_pattern_count,
+        serial_report.covered_pattern_count
+    );
+    for report in [serial_report, distributed_report] {
+        assert!(report
+            .summary_fields
+            .iter()
+            .any(|(key, value)| { key == "execution_constraint_preserve_b2b" && value == "true" }));
+        assert!(report
+            .summary_fields
+            .iter()
+            .any(|(key, value)| { key == "execution_constraint_materialized" && value == "true" }));
+    }
+}
+
+#[test]
+fn gui_queue_less_build_minimum_runs_through_the_distributed_wasm_terminal() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(12, false, false));
+    let command = "clearra build cover --base-mask 0x0000000000000000 \
+        --target-mask 0x000000000000000f --height 4 --hold empty --patterns P2 \
+        --queue-knowledge oracle --objective min-cover --rule srs-plus --backend cpu \
+        --no-backend-fallback --workers 11";
+
+    let result =
+        finish_distributed_cpu_source(completed_distributed_cpu_source(&runtime, command), 11);
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    let payload = result
+        .app_response()
+        .product_result_payload()
+        .expect("GUI Build minimum payload");
+    let ProductResultPayloadContent::BuildCoveragePortfolioV2(minimum) = payload.content() else {
+        panic!("GUI Build minimum must publish its typed coverage portfolio");
+    };
+    assert_eq!(minimum.source_candidate_count(), "2");
+    assert_eq!(minimum.selected_candidate_count(), "1");
+    assert_eq!(minimum.union_probability(), "0.2857142857142857");
+    assert!(minimum.completeness().complete());
+}
+
+#[test]
 fn distributed_build_solution_probabilities_match_serial_complete_canonical_reports() {
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
