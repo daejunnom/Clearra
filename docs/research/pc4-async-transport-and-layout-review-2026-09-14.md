@@ -624,3 +624,41 @@ CLI/Discord의 다음 구현 경계는 별도다. App은 이미 `pending_ranges(
 (4) 첫 완료부터 exact lookup ID로 admission하는 구조다. HTTP/2를 지원하지 않는 환경은
 같은 broker가 bounded HTTP/1.1 연결을 사용하되 의미와 예산은 같아야 한다. 이 native
 owner는 아직 구현하지 않았으며, 요청별 curl thread 증대는 그 대체물이 아니다.
+
+### 9.7 실제 로컬 블록 A/B와 활성화 판정
+
+모델의 요청 수만 보고 로컬 제품을 전환하지 않기 위해, 같은 검증 WASM
+`3ceca8b51c9d6e54a837bc14fa5a6f17bbc8bcba`와 같은 immutable Jstris generation,
+빈 필드/4L/P7P4/unique 입력에서 실제 local reader A/B를 추가했다. 모든 비교는 같은
+read limit에서 demand SHA-256이 일치했고 완료 전에 취소됐으므로 전체 456,459개 완료
+증거가 아니다. sidecar 생성 시간은 명시 다운로드/준비 비용으로 따로 기록해 검색
+벽시계에서 제외했다.
+
+먼저 sidecar 없이 GOFF에서 K=16 경계를 즉석으로 읽는 후보는 30,000 lookup에서
+5.122초/20.96MB보다 느린 5.440초/31.64MB였다. graph block이 GOFF page를 공유 LRU에서
+축출하므로 이 경로는 폐기했다. 실제 `GBLKIDX1` sidecar를 메모리에 만들어 읽은 경로는
+다음 결과를 냈다.
+
+| 경로 | lookup | 검색 벽시계 | 물리 읽기 | 파일 bytes | 준비 시간 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 기존 exact graph | 30,000 | 5.122초 | 15,026 | 20,959,851 | 0 |
+| sidecar K=16 | 30,000 | 5.125초 | 9,683 | 5,906,618 | 0.152초 |
+| sidecar K=4 | 30,000 | 5.018초 | 9,940 | 1,528,487 | 0.397초 |
+| sidecar K=8 | 30,000 | 4.914초 | 9,840 | 3,019,568 | 0.234초 |
+| 기존 exact graph | 100,000 | 16.440초 | 45,551 | 51,329,915 | 0 |
+| sidecar K=8 | 100,000 | 16.667초 | 32,142 | 10,145,153 | 0.237초 |
+| sidecar K=16 | 100,000 | 16.828초 | 31,005 | 19,551,146 | 0.159초 |
+
+K=8의 30k 이득은 100k에서 재현되지 않았다. target ID 의미 검증을 기존 Rust
+materializer에 남기고 JS는 record 경계만 구분하도록 줄인 뒤에도 100k sidecar는 인접한
+exact baseline보다 느렸다. 따라서 **CLI/GUI의 명시 다운로드 제품 경로는 현재 exact
+graph 읽기를 유지**한다. 실험 adapter와 `--graph-block-records` 계측은 남기되 caller가
+명시하지 않으면 동작하지 않는다. 로컬에서 bytes 감소만으로 mmap/sidecar를 활성화하지
+않으며, native mmap은 별도 positional-read A/B 전까지 계속 보류한다.
+
+반대로 WAN에서는 10~30k건의 RTT와 Range header 비용이 로컬 파일 호출보다 훨씬 크므로
+이 결과가 K=16 online 후보를 기각하지는 않는다. 온라인 채택 조건은 실제 upstream
+sidecar와 동일한 중앙 broker에서 exact 대비 전체 벽시계·tail·429를 비교하는 것이다.
+정확한 요청 형식은
+[upstream graph-block sidecar 요청안](pc4-upstream-graph-block-sidecar-request-2026-09-19.md)에
+분리했다. `.safetensors` 변환이나 graph 재정렬은 요구하지 않는다.

@@ -11,21 +11,29 @@ import { pc4SearchSummary } from './pc4-search-summary.mjs';
 import { createPc4RangeReader } from '../release/pc4/pc4-range-reader.mjs';
 import { pc4SearchRangePolicy } from '../release/pc4/pc4-search-range-policy.mjs';
 import { PC4_FRONTIER_MAX_GAP_BYTES, prefetchPc4LookupFrontier } from '../release/pc4/pc4-frontier-reader.mjs';
+import { buildPc4GraphBlockDirectory } from '../release/pc4/pc4-graph-block.mjs';
 
 const { values } = parseArgs({ options: {
   directory: { type: 'string' }, profile: { type: 'string' }, 'wasm-directory': { type: 'string' },
   command: { type: 'string' }, seconds: { type: 'string', default: '60' },
   'read-limit': { type: 'string', default: '100000' }, cached: { type: 'boolean' },
-  'page-bytes': { type: 'string', default: '4096' }, trace: { type: 'boolean' }, 'compare-trace': { type: 'boolean' },
+  'page-bytes': { type: 'string', default: '4096' }, 'graph-block-records': { type: 'string', default: '0' },
+  trace: { type: 'boolean' }, 'compare-trace': { type: 'boolean' },
   transport: { type: 'string', default: 'local' }, frontier: { type: 'boolean' },
   'frontier-gap-bytes': { type: 'string', default: String(PC4_FRONTIER_MAX_GAP_BYTES) },
   'wasm-stdin': { type: 'boolean' }, 'expected-source': { type: 'string' }
 } });
 const seconds = Number(values.seconds), readLimit = Number(values['read-limit']);
 const frontierGapBytes = Number(values['frontier-gap-bytes']);
+const graphBlockRecords = Number(values['graph-block-records']);
 if (!Number.isSafeInteger(frontierGapBytes) || frontierGapBytes < 0 || frontierGapBytes > 4096) throw new Error('Invalid bounded frontier gap');
 if (!values.command || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > 600 ||
     !Number.isSafeInteger(readLimit) || readLimit < 1 || readLimit > 1000000) throw new Error('Explicit bounded probe arguments required');
+if (!Number.isSafeInteger(graphBlockRecords) || graphBlockRecords < 0 || graphBlockRecords > 1024 ||
+    graphBlockRecords && (graphBlockRecords & (graphBlockRecords - 1)) ||
+    graphBlockRecords && (!values.cached || values.transport !== 'local')) {
+  throw new Error('Graph blocks require a bounded cached local probe');
+}
 if (!['local', 'http-model'].includes(values.transport) || values.transport === 'http-model' && values.cached ||
     values.frontier && values.transport !== 'http-model') throw new Error('Choose local storage OR modeled HTTP; frontier is HTTP-only');
 if (!!values['wasm-directory'] === !!values['wasm-stdin'] ||
@@ -69,10 +77,31 @@ ok(raw.clearra_wasm_configure_host(1, 0));
 input(JSON.stringify(dataset.generation)); ok(raw.clearra_wasm_online_pc4_configure());
 const preparationMs = performance.now() - prepare;
 let reader = dataset;
+let graphBlockPrepareMs = 0;
 if (values.cached) {
   const { createPc4LocalReader } = await import('../release/pc4/pc4-local-reader.mjs');
-  reader = createPc4LocalReader(dataset.plan.files, (artifact, offset, length) => dataset.read(artifact, offset, length),
-    { pageBytes: Number(values['page-bytes']), directPaths: [dataset.plan.files[2].path] });
+  const slot = dataset.generation.profiles.find(candidate =>
+    candidate.profile === values.profile && candidate.status === 'ready');
+  if (!slot) throw new Error('Qualified benchmark profile missing');
+  let directory, localFiles = dataset.plan.files;
+  if (graphBlockRecords) {
+    const at = performance.now();
+    directory = await buildPc4GraphBlockDirectory((offset, length) =>
+      dataset.read(dataset.plan.files[1], offset, length), {
+        fieldCount: slot.field_count, graphBytes: dataset.plan.files[2].byte_length,
+        blockRecords: graphBlockRecords, readBytes: 65_536
+      });
+    graphBlockPrepareMs = performance.now() - at;
+    localFiles = [...localFiles, { path: `benchmark_graph_blocks.k${graphBlockRecords}.v1.bin`,
+      byte_length: directory.bytes.length, content_identity: directory.contentIdentity }];
+  }
+  reader = createPc4LocalReader(localFiles, (artifact, offset, length) => directory &&
+    artifact.path === localFiles[3]?.path ? Promise.resolve(directory.bytes.slice(offset, offset + length))
+      : dataset.read(artifact, offset, length),
+  { pageBytes: Number(values['page-bytes']), directPaths: [dataset.plan.files[2].path],
+    ...(graphBlockRecords ? { graphBlock: { directoryPath: localFiles[3].path,
+      offsetsPath: dataset.plan.files[1].path, graphPath: dataset.plan.files[2].path,
+      fieldCount: slot.field_count, targetWidth: slot.target_width, blockRecords: graphBlockRecords } } : {}) });
 }
 if (values.transport === 'http-model') {
   // Real product transport and real WASM-produced hints, but exact local
@@ -89,6 +118,7 @@ if (values.transport === 'http-model') {
       });
     } });
 }
+const datasetCallsAtStart = dataset.calls, datasetBytesAtStart = dataset.bytes;
 const demandDigest = createHash('sha256'), artifactCounts = {}, started = performance.now();
 let job, steps = 0, reads = 0, computeMs = 0, maximumAdvanceMs = 0, ioMs = 0, bridgeMs = 0, terminal = null, lastReport = started, cancelled = false;
 // One bounded local-only trace for the next HTTP planner experiment. Persist
@@ -97,8 +127,9 @@ const trace = values.trace ? Buffer.alloc(Math.min(readLimit, 200000) * 12) : nu
 let traceHandle, tracePath, traceCommitted = false, traceCount = 0;
 let comparison = null;
 let frontiers = 0, hintedIds = 0, maximumFrontier = 0;
-const progress = () => ({ elapsed_ms: performance.now() - started, steps, logical_reads: reads, file_reads: dataset.calls,
-  file_bytes: dataset.bytes, compute_ms: computeMs, maximum_advance_ms: maximumAdvanceMs,
+const progress = () => ({ elapsed_ms: performance.now() - started, steps, logical_reads: reads,
+  file_reads: dataset.calls - datasetCallsAtStart, file_bytes: dataset.bytes - datasetBytesAtStart,
+  compute_ms: computeMs, maximum_advance_ms: maximumAdvanceMs,
   io_ms: ioMs, bridge_ms: bridgeMs, artifact_reads: artifactCounts,
   wasm_memory_bytes: raw.memory.buffer.byteLength, cache_hits: reader.cacheHits ?? 0,
   ...(values.transport === 'http-model' ? { modeled_http_requests: reader.requests, modeled_http_bytes: reader.bytes,
@@ -177,7 +208,9 @@ try {
   const report = { event: 'result', transport: values.transport, frontier: !!values.frontier,
     frontier_gap_bytes: values.frontier ? frontierGapBytes : 0,
     evidence: values.transport === 'http-model' ? 'real-wasm-frontier-local-responses-not-internet-timing' : 'real-wasm-local-files',
-    cached: !!values.cached, page_bytes: values.cached ? Number(values['page-bytes']) : 0, source_commit: manifest.build?.runtime_identity?.source_commit,
+    cached: !!values.cached, page_bytes: values.cached ? Number(values['page-bytes']) : 0,
+    graph_block_records: graphBlockRecords, graph_block_prepare_ms: graphBlockPrepareMs,
+    source_commit: manifest.build?.runtime_identity?.source_commit,
     wasm_sha256: manifest.wasm.sha256, dataset_revision: dataset.plan.revision, module_prepare_ms: preparationMs,
     ...progress(), cancelled_by_probe: cancelled, demand_sha256: demandDigest.digest('hex'),
     ...(comparison ? comparison.finish() : {}),
