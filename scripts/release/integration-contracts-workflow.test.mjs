@@ -14,6 +14,8 @@ function isolated(source) {
   assert.match(source, /\[\[ "\$GITHUB_REF" == 'refs\/heads\/codex\/v0\.9\.0-stacked-on-v0\.8\.1-20260912' && "\$GITHUB_REF_TYPE" == 'branch' \]\]/u);
   assert.match(source, /\[\[ "\$\(git rev-parse HEAD\)" == "\$GITHUB_SHA" \]\]/u);
   assert.match(source, /^permissions:\r?\n  contents: read$/mu);
+  assert.match(source, /^concurrency:\r?\n  group: integration-contracts-\$\{\{ github\.ref \}\}\r?\n  cancel-in-progress: true$/mu);
+  assert.doesNotMatch(source, /^  group: .*github\.sha/mu);
   assert.doesNotMatch(source, /workflow_run:|workflow_call:|pull_request:|\bsecrets\.|\benvironment:|id-token:|:\s*write\b|continue-on-error/u);
   assert.doesNotMatch(source, /\brun:\s*(?:&\s+)?cargo\b/u, 'even cargo fetch requires its live build owner');
   assert.doesNotMatch(source, /\bgh\s|\bgcloud\s|\bssh\s|\bscp\s|git\s+(?:push|tag)|deploy-pages|\/dispatches|canonical-acceptance-evidence|CLEARRA_ACCEPTED_/u);

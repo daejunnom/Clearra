@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: integration-contracts-${{ github.ref }}-${{ github.sha }}
+  group: integration-contracts-${{ github.ref }}
   cancel-in-progress: true
 
 # Test results only: no release receipts, accepted artifacts or deployment.
