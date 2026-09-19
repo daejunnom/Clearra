@@ -245,13 +245,32 @@ test('batch validates every demand before any I/O and preserves the maximum tran
 
 test('invalid limits and identities fail before opening a connection', async () => {
   for (const options of [{ windowBytes: 3 }, { maxConcurrent: 0 }, { maxConcurrent: 17 }, { cacheBytes: -1 },
-    { directPaths: ['../graph.bin'] }, { directPaths: 'graph.bin' }, { directPaths: [null] }]) {
+    { directPaths: ['../graph.bin'] }, { directPaths: 'graph.bin' }, { directPaths: [null] },
+    { requestCache: 'reload' }]) {
     assert.throws(() => createPc4RangeReader(generation, options), { code: 'pc4_online_limits_invalid' });
   }
   const reader = createPc4RangeReader(generation, { fetcher: () => assert.fail('must not fetch') });
   try {
     await assert.rejects(reader.read({ ...artifact, content_identity: 'mutable' }, 0, 8), { code: 'pc4_online_range_invalid' });
   } finally { reader.dispose(); }
+});
+
+test('an explicit transport touch bypasses the HTTP cache without changing ordinary reads', async () => {
+  for (const [requestCache, expected] of [[undefined, undefined], ['no-store', 'no-store']]) {
+    const reader = createPc4RangeReader(generation, {
+      windowBytes: 0,
+      requestCache,
+      fetcher: async (_url, init) => {
+        assert.equal(init.cache, expected);
+        return new Response(values(0, 1), {
+          status: 206,
+          headers: { 'content-range': `bytes 0-0/${artifact.byte_length}` }
+        });
+      }
+    });
+    try { assert.deepEqual(await reader.read(artifact, 0, 1), values(0, 1)); }
+    finally { reader.dispose(); }
+  }
 });
 
 test('temporary upstream HTTP failures remain distinct from invalid immutable data', async () => {

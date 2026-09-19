@@ -65,7 +65,12 @@ export function releasePc4TablebaseAssets() {
 
 async function touchPc4OnlineTransport(generation: Pc4HostGeneration, signal: AbortSignal) {
   const profile = generation.profiles.find(slot => slot.status === 'ready' && slot.artifacts);
-  const artifact = profile?.artifacts?.fields;
+  // Touch the large graph itself. A small index can be served from a different
+  // cache/CDN route and therefore cannot prove that the graph data path has
+  // completed DNS/TCP/TLS/ALPN preparation. `no-store` prevents an HTTP-cache
+  // hit from being mistaken for a live transport touch; this remains one
+  // exact byte and never retains or scans graph content.
+  const artifact = profile?.artifacts?.graph;
   if (!artifact || artifact.byte_length < 1) throw new Error('pc4_online_generation_unavailable');
   const reader = createPc4RangeReader(generation, {
     signal,
@@ -74,6 +79,7 @@ async function touchPc4OnlineTransport(generation: Pc4HostGeneration, signal: Ab
     cacheBytes: 0,
     windowBytes: 0,
     maxConcurrent: 1,
+    requestCache: 'no-store',
     directPaths: [artifact.path]
   });
   try {

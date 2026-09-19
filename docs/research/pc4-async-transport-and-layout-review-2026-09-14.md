@@ -900,6 +900,14 @@ packet-loss tail 이득이 생기기 전에는 후보 우선순위를 올리지 
 경로는 여전히 유한 외부 curl batch이고, `native-pc4-libcurl`은 full-search A/B 전까지
 opt-in이다.
 
+Web 재-prewarm은 이후 작은 `field_hash_to_id`가 아니라 선택 가능한 ready profile의 실제
+`graph*.bin` 첫 1바이트를 읽도록 좁혔다. 작은 index와 대형 LFS graph가 서로 다른 HTTP
+cache/CDN 경로를 사용할 수 있기 때문이다. 이 touch만 `Request.cache=no-store`를 사용해
+브라우저 cache hit를 live handshake로 세지 않으며, 일반 탐색 Range의 immutable cache
+정책은 바꾸지 않는다. 호출/전송 상한은 여전히 1회/1바이트이고 timer heartbeat는 없다.
+전송 및 worker 수명 계약 63개와 contract TypeScript 검사가 통과했다. 이는 graph data-path
+prewarm의 소스·계약 증거이며 브라우저 socket 영속성이나 full-search 완료 시간 증거는 아니다.
+
 #### Setup 탐색 적용
 
 새 실행 경계는 App에서 exact `SetupSearch` differential proof를 통과한 complete PC4

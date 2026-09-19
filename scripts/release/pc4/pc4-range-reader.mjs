@@ -22,7 +22,7 @@ const MAX_DIRECT_BURST = 3;
 
 export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = fetch,
   maxBytes = 64 * 1024 * 1024, maxRequests = 100_000, cacheBytes = 8 * 1024 * 1024,
-  windowBytes = 16_384, maxConcurrent = 4, directPaths = [] } = {}) {
+  windowBytes = 16_384, maxConcurrent = 4, directPaths = [], requestCache } = {}) {
   const revision = discovery.resolved_revision ?? discovery.revision;
   const repository = discovery.repository;
   if (!/^[0-9a-f]{40}$/.test(revision) || !/^[\w.-]+\/[\w.-]+$/.test(repository)) fail('pc4_online_identity_invalid');
@@ -33,6 +33,7 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
       (windowBytes && (windowBytes < 512 || (windowBytes & (windowBytes - 1)) !== 0))) fail('pc4_online_limits_invalid');
   if (!Array.isArray(directPaths) || directPaths.length > 16 ||
       directPaths.some(path => typeof path !== 'string' || !/^[A-Za-z0-9_.-]+\.bin$/.test(path))) fail('pc4_online_limits_invalid');
+  if (requestCache !== undefined && requestCache !== 'no-store') fail('pc4_online_limits_invalid');
   const direct = new Set(directPaths);
 
   const pageSize = cacheBytes >= windowBytes && maxBytes >= windowBytes ? windowBytes : 0;
@@ -110,7 +111,8 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
     const timer = setTimeout(() => controller.abort(), 30_000);
     try {
       const response = await fetcher(`https://huggingface.co/datasets/${repository}/resolve/${revision}/${artifact.path}`,
-        { headers: { Range: `bytes=${offset}-${offset + length - 1}` }, credentials: 'omit', signal: controller.signal });
+        { headers: { Range: `bytes=${offset}-${offset + length - 1}` }, credentials: 'omit', signal: controller.signal,
+          ...(requestCache === undefined ? {} : { cache: requestCache }) });
       const expected = `bytes ${offset}-${offset + length - 1}/${artifact.byte_length}`;
       if (response.status !== 206 || response.headers.get('content-range') !== expected) {
         await response.body?.cancel();

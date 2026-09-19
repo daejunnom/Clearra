@@ -106,8 +106,11 @@ test('a cached online generation performs one bounded transport touch on re-enab
   assert.match(assets, /cachedProvider !== 'online'/u);
   assert.match(assets, /TRANSPORT_TOUCH_FLOOR_MS/u);
   assert.match(assets, /touchPc4OnlineTransport\(bundle\.generation/u);
+  assert.match(assets, /artifacts\?\.graph/u);
+  assert.doesNotMatch(assets, /artifacts\?\.fields/u);
   assert.match(assets, /maxBytes:\s*1/u);
   assert.match(assets, /maxRequests:\s*1/u);
+  assert.match(assets, /requestCache:\s*'no-store'/u);
   assert.match(assets, /reader\.read\(artifact, 0, 1\)/u);
   assert.doesNotMatch(assets, /setInterval|setTimeout/u);
 });
