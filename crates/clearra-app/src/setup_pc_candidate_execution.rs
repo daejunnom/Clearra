@@ -222,7 +222,7 @@ const fn query_profile(profile: RuleProfileId) -> Option<Pc4RuleProfile> {
         RuleProfileId::SrsX => Some(Pc4RuleProfile::SrsX),
         RuleProfileId::Jstris180 => Some(Pc4RuleProfile::Jstris180),
         RuleProfileId::NoKick => Some(Pc4RuleProfile::NoKick),
-        RuleProfileId::Custom => None,
+        RuleProfileId::Asc | RuleProfileId::Ars | RuleProfileId::Custom => None,
     }
 }
 

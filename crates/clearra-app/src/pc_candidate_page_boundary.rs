@@ -575,13 +575,6 @@ impl PcConcreteCandidatePage {
         &self.candidates
     }
 
-    /// Transfers the already validated complete family to another App owner.
-    /// The caller must preserve the universe identity before consuming this
-    /// value; this seam does not mint or weaken completeness evidence.
-    pub(crate) fn into_candidates(self) -> Vec<StandardBoard64TilingIdentity> {
-        self.candidates
-    }
-
     pub const fn terminal(&self) -> bool {
         self.terminal
     }
@@ -834,6 +827,13 @@ impl PcCandidateReducerInput {
 
     pub fn candidates(&self) -> &[StandardBoard64TilingIdentity] {
         &self.candidates
+    }
+
+    /// Transfers the already validated complete family to another App owner.
+    /// The caller must preserve the universe identity before consuming this
+    /// value; this seam does not mint or weaken completeness evidence.
+    pub(crate) fn into_candidates(self) -> Vec<StandardBoard64TilingIdentity> {
+        self.candidates
     }
 
     #[cfg(test)]
