@@ -90,9 +90,18 @@ test("setup packed options cover every legal pair and stable dependency errors",
     "options.setup_qb_oracle_conflict",
   );
   assertErrorCode(
-    () => setupArguments([["mode", "qb"], settings[1]], "IOTSZJ"),
+    () => setupArguments([["mode", "qb"], ["qb", "IOTSZ"]], "IOTSZJL"),
     "options.setup_qb_bag_capacity",
   );
+  assert.doesNotThrow(
+    () => setupArguments([["mode", "qb"], ["qb", "IOTS"]], "IOTSZJL"),
+  );
+  for (const qb of ["OS", "[OS]!"]) {
+    const arguments_ = setupArguments([["mode", "qb"], ["qb", qb]], "TI");
+    const qbIndex = arguments_.indexOf("--qb");
+    assert.notEqual(qbIndex, -1);
+    assert.equal(arguments_[qbIndex + 1], qb);
+  }
   assert.deepEqual(
     setupArguments([["post-cycle-borrow", "on"]]).slice(-1),
     ["--allow-post-cycle-borrow"],

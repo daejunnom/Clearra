@@ -17,23 +17,32 @@ empty 10x4 PC geometry family
 `--mode oracle` is the default shape/residue mode described below. Its input is
 an unordered cycle residue.
 
-`qb` conditions the next bag on the piece group currently visible to the
-player. For example, cycle-five residue `TI` with observed next pieces `OS`
-uses:
+`qb` conditions the supply beginning at the next bag boundary. It accepts one
+exact queue prefix or one queue-pattern expression. For example, cycle-five
+residue `TI` with the exact next-bag prefix `OS` uses:
 
 ```text
 clearra setup-finder --remaining TI --mode qb --qb OS
 ```
 
-Observed QB pieces are distinct and must fit in the same seven-piece bag as the
-current residue. Their input order does not fix their draw order. They are
-available to partial BuildUp, but a setup does not have to lock every observed
-piece. Clearra represents the example as an exact conditioned pattern language
-equivalent to:
+`--qb OS` means exactly that O is first and S is second in the next bag. It does
+not include `SO`, `OLJIS`, or any other prefix whose second piece is not S. The
+other five pieces of that bag remain randomly ordered. Clearra intersects this
+condition with the canonical standard 7-bag universe, equivalently:
 
 ```text
-[IT]![OS]![^OS]!P2
+[IT]!OS[^OS]!P2
 ```
+
+Use queue-pattern syntax only when several orders are intended. For example,
+`--qb '[OS]!'` permits the two prefixes `OS` and `SO`. A longer QB expression
+may cross a bag boundary; every compatible concrete sequence must still obey
+consecutive standard 7-bags. The residue count plus QB sequence length may be
+at most 11.
+
+QB conditions which supply sequences are possible and renormalizes probability
+over that compatible subset. It does not require a setup to lock every piece in
+the QB input.
 
 Both `oracle` and `qb` may independently constrain the exact supply left when
 the current PC finishes:
@@ -71,8 +80,10 @@ their original universe IDs and weights, so the result is not renormalized into
 a false conditional 100%.
 
 QB uses the same inverse lock-clear family quotient and partial BuildUp search
-as residue mode. Observed QB conditioning and the optional terminal inventory
-filter are separate axes and may be combined.
+as residue mode. QB prefix conditioning and the optional terminal inventory
+filter are separate axes and may be combined. The PC4 tablebase changes only
+candidate geometry generation; tablebase candidates pass through the same QB
+conditioned coverage universe as ordinary candidates.
 
 ## Queue Knowledge
 

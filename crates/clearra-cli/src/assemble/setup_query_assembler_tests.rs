@@ -117,6 +117,20 @@ fn assembles_residue_and_observed_qb_separately() {
 }
 
 #[test]
+fn preserves_qb_pattern_syntax_instead_of_flattening_it_to_exact_pieces() {
+    let args = SetupArgs::new("TI", false).with_queue_based_pieces("[OS]!");
+    let query = SetupQueryAssembler::assemble(&args).expect("QB pattern setup query");
+    let expression = query
+        .queue()
+        .as_pattern_expression()
+        .expect("QB pattern expression");
+
+    assert_eq!(expression.source(), "[OS]!");
+    assert_eq!(expression.pattern_count(), 2);
+    assert!(query.queue().as_fixed_sequence().is_none());
+}
+
+#[test]
 fn assembles_next_cycle_inventory_without_changing_search_mode() {
     let args = SetupArgs::new("TI", false).with_next_cycle_remaining_pieces("OOSITZ");
     let query = SetupQueryAssembler::assemble(&args).expect("oracle setup query");

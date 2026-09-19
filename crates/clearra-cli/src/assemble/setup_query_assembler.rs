@@ -1,8 +1,11 @@
 use clearra_core_domain::piece::piece_kind::{PieceKind, UnknownPieceKind};
 use clearra_rules::profile::builtin_rules::srs_plus;
 use clearra_setup_search::query::{
-    SetupCycleResetBorrowPolicy, SetupHoldPolicy, SetupPathDetail, SetupSearchMode,
+    SetupCycleResetBorrowPolicy, SetupHoldPolicy, SetupLimits, SetupPathDetail, SetupSearchMode,
     SetupSearchQuery,
+};
+use clearra_supply::queue::queue_pattern_expression::{
+    QueuePatternExpression, QueuePatternParseError,
 };
 
 use crate::{
@@ -15,6 +18,7 @@ pub enum SetupQueryAssemblyError {
     UnknownPiece { value: char },
     QueueBasedPiecesMissing,
     QueueBasedPiecesUnexpected,
+    QueueBasedPattern(QueuePatternParseError),
     InitialHoldInvalid,
     PathDetailInvalid,
     RuleProfile(RuleProfileAssemblyError),
@@ -51,7 +55,7 @@ impl SetupQueryAssembler {
                 return Err(SetupQueryAssemblyError::QueueBasedPiecesMissing);
             }
             (SetupSearchMode::QueueBased, Some(value)) => {
-                query = query.with_queue_based_pieces(parse_remaining(value)?);
+                query = with_queue_based_source(query, value)?;
             }
         }
         if let Some(value) = args.next_cycle_remaining_pieces() {
@@ -74,6 +78,27 @@ impl SetupQueryAssembler {
         }
         Ok(query)
     }
+}
+
+fn with_queue_based_source(
+    query: SetupSearchQuery,
+    value: &str,
+) -> Result<SetupSearchQuery, SetupQueryAssemblyError> {
+    let normalized = value
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != ',')
+        .collect::<String>();
+    if !normalized.is_empty()
+        && normalized
+            .chars()
+            .all(|character| PieceKind::from_ascii(character.to_ascii_uppercase()).is_ok())
+    {
+        return Ok(query.with_queue_based_pieces(parse_remaining(&normalized)?));
+    }
+    let expression =
+        QueuePatternExpression::parse(&normalized, SetupLimits::default().max_patterns())
+            .map_err(SetupQueryAssemblyError::QueueBasedPattern)?;
+    Ok(query.with_queue_based_pattern_expression(expression))
 }
 
 fn parse_remaining(remaining: &str) -> Result<Vec<PieceKind>, SetupQueryAssemblyError> {

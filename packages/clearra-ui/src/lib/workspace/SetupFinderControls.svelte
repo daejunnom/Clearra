@@ -14,7 +14,7 @@
     type SetupLengthPreference,
     type SetupSearchMode
   } from './setupFinderModel';
-  import type { RuleProfile } from './solverWorkspaceModel';
+  import { parseBrowserQueueInput, type RuleProfile } from './solverWorkspaceModel';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
   import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
   import type { WorkerAuthorityReport } from '../wasm';
@@ -39,6 +39,7 @@
   ) => workspaceMessage(language, key, values);
   $: cycle = setupCycle(request.remaining);
   $: nextRemainingCount = nextSetupCycleRemainingCount(request.remaining);
+  $: qbSequenceLength = parseBrowserQueueInput(request.qbQueue)?.sequenceLength ?? 0;
   $: setupTablebaseAvailable = setupTablebaseAvailableFor(request.rule);
   $: tablebaseStatusLabel = tablebaseMessage(
     setupTablebaseAvailable ? tablebaseStatus : 'unavailable',
@@ -124,7 +125,7 @@
           <QueueTextInput
             class="workspace-queue-input"
             value={request.qbQueue}
-            maxlength="7"
+            maxlength="64"
             placeholder="OS"
             spellcheck="false"
             aria-invalid={validationCodes.length > 0}
@@ -164,7 +165,7 @@
         <span>{label('pcCycle')}</span><strong>{cycle ? label('cycleNumber', { cycle }) : '—'}</strong>
         {#if request.searchMode === 'qb'}
           <span>{label('setupObservedPieces')}</span>
-          <strong>{request.qbQueue.replace(/[\s,]/g, '').length}</strong>
+          <strong>{qbSequenceLength}</strong>
         {/if}
         <span>{label('setupNextCycleRemainingCount')}</span>
         <strong>

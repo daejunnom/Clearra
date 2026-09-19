@@ -1146,6 +1146,36 @@ fn setup_command_separates_residue_and_observed_qb_pieces() {
 }
 
 #[test]
+fn setup_command_preserves_qb_pattern_syntax_and_exact_queue_distinction() {
+    let request = CliCommandParser::parse("clearra setup --remaining TI --mode qb --qb [OS]!")
+        .expect("QB pattern setup command")
+        .to_app_request()
+        .expect("AppRequest");
+    let AppCommand::Setup(command) = request.command() else {
+        panic!("expected AppCommand::Setup");
+    };
+    let expression = command
+        .query()
+        .queue()
+        .as_pattern_expression()
+        .expect("QB pattern expression");
+
+    assert_eq!(expression.source(), "[OS]!");
+    assert_eq!(expression.pattern_count(), 2);
+    assert!(command.query().queue().as_fixed_sequence().is_none());
+}
+
+#[test]
+fn setup_command_accepts_eleven_combined_supply_pieces_and_rejects_twelve() {
+    CliCommandParser::parse("clearra setup --remaining I --mode qb --qb IOTSZJLIOT")
+        .expect("eleven combined setup pieces");
+
+    let error = CliCommandParser::parse("clearra setup --remaining TI --mode qb --qb IOTSZJLIOT")
+        .expect_err("twelve combined setup pieces must fail");
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
+}
+
+#[test]
 fn setup_command_accepts_next_cycle_inventory_in_oracle_mode() {
     let request =
         CliCommandParser::parse("clearra setup --remaining TI --next-cycle-remaining OOSITZ")

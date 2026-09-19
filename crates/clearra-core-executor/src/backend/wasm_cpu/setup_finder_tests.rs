@@ -12,6 +12,7 @@ use clearra_problem::{
 };
 use clearra_supply::{
     pattern_universe::{MaterializedPatternUniverse, PatternPiecePositionIndex},
+    queue::queue_pattern_expression::QueuePatternExpression,
     QueueObservationPolicy,
 };
 
@@ -140,6 +141,66 @@ fn resumable_terminal_filtered_pattern_index_matches_the_legacy_index() {
     };
 
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn exact_os_qb_index_contains_only_the_ordered_next_bag_prefix() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S]);
+    let conditions = compile_setup_search_conditions(&query).expect("exact OS QB condition");
+    let condition = &conditions[0];
+    let universe = condition
+        .problem()
+        .piece_source()
+        .materialized_universe()
+        .expect("canonical setup universe");
+    let index = compile_setup_pattern_index(condition).expect("exact OS QB pattern index");
+
+    assert_eq!(index.local_pattern_count(), 10_080);
+    let mut sequence = Vec::new();
+    for local_pattern_id in 0..index.local_pattern_count() {
+        let global_pattern_id = index
+            .global_pattern_index(local_pattern_id)
+            .expect("global pattern id");
+        universe.write_sequence_at(global_pattern_id, &mut sequence);
+        assert_eq!(
+            &sequence[condition.queue_based_start()..condition.queue_based_start() + 2],
+            &[PieceKind::O, PieceKind::S],
+            "OS must exclude SO and longer queues such as OLJIS whose second piece is not S"
+        );
+    }
+}
+
+#[test]
+fn unordered_os_qb_pattern_requires_the_explicit_group_expression() {
+    let qb = QueuePatternExpression::parse("[OS]!", 2).expect("two OS orders");
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_queue_based_pattern_expression(qb);
+    let conditions = compile_setup_search_conditions(&query).expect("OS group QB condition");
+    let condition = &conditions[0];
+    let universe = condition
+        .problem()
+        .piece_source()
+        .materialized_universe()
+        .expect("canonical setup universe");
+    let index = compile_setup_pattern_index(condition).expect("OS group QB pattern index");
+
+    assert_eq!(index.local_pattern_count(), 20_160);
+    let start = condition.queue_based_start();
+    let mut saw_os = false;
+    let mut saw_so = false;
+    let mut sequence = Vec::new();
+    for local_pattern_id in 0..index.local_pattern_count() {
+        let global_pattern_id = index
+            .global_pattern_index(local_pattern_id)
+            .expect("global pattern id");
+        universe.write_sequence_at(global_pattern_id, &mut sequence);
+        saw_os |= sequence[start..start + 2] == [PieceKind::O, PieceKind::S];
+        saw_so |= sequence[start..start + 2] == [PieceKind::S, PieceKind::O];
+    }
+    assert!(saw_os && saw_so);
 }
 
 #[test]

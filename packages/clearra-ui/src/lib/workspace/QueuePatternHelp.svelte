@@ -16,7 +16,8 @@
   </summary>
   <dl>
     {#if mode === 'setup-qb'}
-      <div><dt>TI → OS</dt><dd>{label('setupQbQueueLetters')}</dd></div>
+      <div><dt>OS</dt><dd>{label('setupQbQueueLetters')}</dd></div>
+      <div><dt>[OS]!</dt><dd>{label('setupQbQueuePattern')}</dd></div>
       <div class="wide"><dt>{label('setupQbObservedQueue')}</dt><dd>{label('setupQbAllPieces')}</dd></div>
       <div class="wide"><dt>{label('setupQbBagLimit')}</dt><dd>{label('setupQbSevenLimit')}</dd></div>
     {:else if mode === 'setup'}

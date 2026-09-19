@@ -64,7 +64,7 @@ pub struct WebCommandRequest {
     percent_query: Option<PcScenarioQuery>,
     percent_failed_pattern_limit: usize,
     setup_remaining: Option<Vec<PieceKind>>,
-    setup_queue_based_pieces: Option<Vec<PieceKind>>,
+    setup_queue_based_source: Option<String>,
     setup_next_cycle_remaining_pieces: Option<Vec<PieceKind>>,
     setup_allow_post_cycle_borrow: bool,
     setup_candidate_priority: SetupCandidatePriority,
@@ -127,7 +127,7 @@ impl WebCommandRequest {
             percent_query: None,
             percent_failed_pattern_limit: 100,
             setup_remaining: None,
-            setup_queue_based_pieces: None,
+            setup_queue_based_source: None,
             setup_next_cycle_remaining_pieces: None,
             setup_allow_post_cycle_borrow: false,
             setup_candidate_priority: SetupCandidatePriority::default(),
@@ -191,7 +191,7 @@ impl WebCommandRequest {
             percent_query: None,
             percent_failed_pattern_limit: 100,
             setup_remaining: None,
-            setup_queue_based_pieces: None,
+            setup_queue_based_source: None,
             setup_next_cycle_remaining_pieces: None,
             setup_allow_post_cycle_borrow: false,
             setup_candidate_priority: SetupCandidatePriority::default(),
@@ -324,7 +324,13 @@ impl WebCommandRequest {
     }
 
     pub fn with_setup_queue_based_pieces(mut self, pieces: Vec<PieceKind>) -> Self {
-        self.setup_queue_based_pieces = Some(pieces);
+        self.setup_queue_based_source = Some(pieces.iter().map(|piece| piece.as_ascii()).collect());
+        self.setup_search_mode = SetupSearchMode::QueueBased;
+        self
+    }
+
+    pub fn with_setup_queue_based_source(mut self, source: impl Into<String>) -> Self {
+        self.setup_queue_based_source = Some(source.into());
         self.setup_search_mode = SetupSearchMode::QueueBased;
         self
     }
@@ -1463,7 +1469,7 @@ impl WebCommandRequest {
                 .with_tablebase_requested(self.tablebase_requested);
             match self.setup_search_mode {
                 SetupSearchMode::ShapeOracle => {
-                    if self.setup_queue_based_pieces.is_some() {
+                    if self.setup_queue_based_source.is_some() {
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
                             "shape-oracle setup search does not accept observed QB pieces",
@@ -1471,13 +1477,43 @@ impl WebCommandRequest {
                     }
                 }
                 SetupSearchMode::QueueBased => {
-                    let pieces = self.setup_queue_based_pieces.clone().ok_or_else(|| {
+                    let source = self.setup_queue_based_source.as_deref().ok_or_else(|| {
                         WebCommandError::new(
                             WebCommandErrorCode::MissingValue,
-                            "queue-based setup search requires observed next-bag pieces",
+                            "queue-based setup search requires a next-bag queue or pattern",
                         )
                     })?;
-                    query = query.with_queue_based_pieces(pieces);
+                    let normalized = source
+                        .chars()
+                        .filter(|character| !character.is_whitespace() && *character != ',')
+                        .flat_map(char::to_uppercase)
+                        .collect::<String>();
+                    if !normalized.is_empty()
+                        && normalized
+                            .chars()
+                            .all(|piece| PieceKind::from_ascii(piece).is_ok())
+                    {
+                        let pieces =
+                            queue_parser::parse_piece_sequence(&normalized).map_err(|error| {
+                                WebCommandError::new(
+                                    WebCommandErrorCode::InvalidValue,
+                                    format!("invalid QB queue: {error:?}"),
+                                )
+                            })?;
+                        query = query.with_queue_based_pieces(pieces);
+                    } else {
+                        let expression = QueuePatternExpression::parse(
+                            &normalized,
+                            query.limits().max_patterns(),
+                        )
+                        .map_err(|error| {
+                            WebCommandError::new(
+                                WebCommandErrorCode::InvalidValue,
+                                format!("invalid QB queue pattern: {error:?}"),
+                            )
+                        })?;
+                        query = query.with_queue_based_pattern_expression(expression);
+                    }
                 }
             }
             if let Some(pieces) = self.setup_next_cycle_remaining_pieces.clone() {

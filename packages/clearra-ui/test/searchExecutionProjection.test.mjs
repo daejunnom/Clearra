@@ -45,7 +45,8 @@ const bundle = await build({
         buildSetupFinderCommandArguments,
         buildSetupPathDetailCommandArguments,
         createDefaultSetupFinderRequest,
-        setupFinderRequestForDesktop
+        setupFinderRequestForDesktop,
+        setupFinderValidationCodes
       } from './src/lib/workspace/setupFinderModel.ts';
     `,
     loader: 'ts',
@@ -646,6 +647,39 @@ test('Desktop setup search and path detail preserve their canonical CLI argv', (
   );
   assert.equal(optionValue(detail.arguments, '--auto-workers'), '12');
   assert.equal(hasOption(detail.arguments, '--use-all-cpu-threads'), false);
+});
+
+test('setup QB input keeps exact prefixes distinct from explicit pattern languages', () => {
+  const base = {
+    ...production.createDefaultSetupFinderRequest(),
+    searchMode: 'qb',
+    remaining: 'TI',
+    queueKnowledge: 'visible-7'
+  };
+  for (const qbQueue of ['OS', '[OS]!', 'OLJIS']) {
+    const request = { ...base, qbQueue };
+    assert.deepEqual(production.setupFinderValidationCodes(request), [], qbQueue);
+    const arguments_ = production.buildSetupFinderCommandArguments(request, 8);
+    assert.equal(optionValue(arguments_, '--qb'), qbQueue, qbQueue);
+    assert.equal(optionValue(arguments_, '--queue-knowledge'), 'visible-7', qbQueue);
+  }
+
+  const eleven = {
+    ...base,
+    remaining: 'I',
+    qbQueue: 'IOTSZJLIOT'
+  };
+  assert.deepEqual(production.setupFinderValidationCodes(eleven), []);
+
+  const twelve = {
+    ...base,
+    remaining: 'TI',
+    qbQueue: 'IOTSZJLIOT'
+  };
+  assert.deepEqual(
+    production.setupFinderValidationCodes(twelve),
+    ['setup_qb_combined_count_invalid']
+  );
 });
 
 test('PC score mode transitions canonicalize inactive Desktop profiles', () => {

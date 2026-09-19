@@ -4,6 +4,7 @@ use clearra_core_domain::{
 use clearra_setup_search::query::{
     SetupHoldPolicy, SetupLimits, SetupProbabilityFilter, SetupSearchQuery,
 };
+use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 
 use crate::diagnostic::diagnostic_code::{DiagnosticCode, DiagnosticSeverity};
 
@@ -174,7 +175,7 @@ fn setup_rejects_two_duplicated_next_cycle_piece_kinds() {
 }
 
 #[test]
-fn queue_based_setup_accepts_distinct_observed_next_bag_group() {
+fn queue_based_setup_accepts_exact_ordered_next_bag_prefix() {
     let query = SetupSearchQuery::default()
         .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
         .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S]);
@@ -185,24 +186,56 @@ fn queue_based_setup_accepts_distinct_observed_next_bag_group() {
 }
 
 #[test]
-fn queue_based_setup_rejects_duplicate_or_overlong_observations() {
-    for observed in [
-        vec![PieceKind::O, PieceKind::O],
-        vec![
+fn queue_based_setup_accepts_explicit_unordered_pattern() {
+    let expression = QueuePatternExpression::parse("[OS]!", 2).expect("OS group pattern");
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_queue_based_pattern_expression(expression);
+
+    assert!(!SetupQueryValidator::validate(&query).has_errors());
+}
+
+#[test]
+fn queue_based_setup_accepts_eleven_combined_pieces() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::I])
+        .with_queue_based_pieces(vec![
+            PieceKind::I,
             PieceKind::O,
+            PieceKind::T,
             PieceKind::S,
             PieceKind::Z,
             PieceKind::J,
             PieceKind::L,
+            PieceKind::I,
+            PieceKind::O,
             PieceKind::T,
-        ],
-    ] {
-        let query = SetupSearchQuery::default()
-            .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
-            .with_queue_based_pieces(observed);
+        ]);
 
-        assert!(SetupQueryValidator::validate(&query).has_errors());
-    }
+    assert!(!SetupQueryValidator::validate(&query).has_errors());
+}
+
+#[test]
+fn queue_based_setup_rejects_more_than_eleven_combined_pieces() {
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_queue_based_pieces(vec![
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
+            PieceKind::J,
+            PieceKind::L,
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+        ]);
+
+    let report = SetupQueryValidator::validate(&query);
+
+    assert!(report.has_errors());
+    assert!(report.contains_code(DiagnosticCode::ESetupQueryInvalid));
 }
 
 #[test]

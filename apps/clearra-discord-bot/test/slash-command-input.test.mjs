@@ -1418,6 +1418,36 @@ test("setup ranking commands preserve their defaults and expose every canonical 
   );
 });
 
+test("canonical setup QB options preserve exact and pattern supply semantics", () => {
+  const command = findSlashCommand("setup").subcommands.joint;
+  for (const qb of ["OS", "[OS]!"]) {
+    const arguments_ = buildSlashCommandArguments(command, [
+      { name: "remaining", value: "TI" },
+      { name: "mode", value: "qb" },
+      { name: "qb", value: qb },
+      { name: "queue-knowledge", value: "visible-7" },
+    ]);
+    const qbIndex = arguments_.indexOf("--qb");
+    assert.notEqual(qbIndex, -1);
+    assert.equal(arguments_[qbIndex + 1], qb);
+    assert.ok(arguments_.includes("visible-7"));
+  }
+
+  assert.doesNotThrow(() => buildSlashCommandArguments(command, [
+    { name: "remaining", value: "I" },
+    { name: "mode", value: "qb" },
+    { name: "qb", value: "IOTSZJLIOT" },
+  ]));
+  assert.throws(
+    () => buildSlashCommandArguments(command, [
+      { name: "remaining", value: "TI" },
+      { name: "mode", value: "qb" },
+      { name: "qb", value: "IOTSZJLIOT" },
+    ]),
+    (error) => error?.code === "options.setup_qb_bag_capacity",
+  );
+});
+
 test("setup ranking inventories and enums fail closed before execution", () => {
   const build = (options) =>
     buildSlashCommandArguments(findSlashCommand("pc-setup"), options);
