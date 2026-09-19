@@ -106,16 +106,57 @@ pub(super) fn curl_stream(
 }
 
 fn public_https_command(url: &str, limit: u64, timeout: u32) -> Result<Command> {
-    if !url.starts_with("https://huggingface.co/") {
-        return Err("tablebase: transport origin rejected");
+    let mut command = Command::new("curl");
+    // -q MUST be first: never load .curlrc or credentials/config from it.
+    command.arg("-q");
+    append_public_https_transfer(&mut command, url, limit, timeout)?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
     }
+    Ok(command)
+}
+
+/// One curl process owns a finite parallel batch. Repeating the local transfer
+/// options after each `--next` preserves the same public-origin, redirect and
+/// body limits as scalar reads. Curl may multiplex these transfers on HTTP/2;
+/// an HTTP/1.1 build remains a bounded four-connection fallback.
+#[cfg(feature = "online-pc4-tablebase")]
+pub(super) fn public_https_parallel_command() -> Command {
     let mut command = Command::new("curl");
     // -q MUST be first: never load .curlrc or credentials/config from it.
     command
+        .args(["-q", "--parallel", "--parallel-max", "4"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+}
+
+pub(super) fn append_public_https_transfer(
+    command: &mut Command,
+    url: &str,
+    limit: u64,
+    timeout: u32,
+) -> Result<()> {
+    if !url.starts_with("https://huggingface.co/") {
+        return Err("tablebase: transport origin rejected");
+    }
+    command
         .args([
-            "-q",
             "--location",
             "--silent",
+            "--no-buffer",
             "--proto",
             "=https",
             "--proto-redir",
@@ -136,16 +177,8 @@ fn public_https_command(url: &str, limit: u64, timeout: u32) -> Result<Command> 
         ])
         .arg(limit.to_string())
         .arg("--url")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    Ok(command)
+        .arg(url);
+    Ok(())
 }
 
 #[cfg(feature = "online-pc4-tablebase")]

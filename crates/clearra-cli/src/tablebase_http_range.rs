@@ -40,7 +40,7 @@ impl HttpReply {
             bytes,
         })
     }
-    fn validate(self, artifact: &Artifact, offset: u64, length: u64) -> Result<Vec<u8>> {
+    pub(super) fn validate(self, artifact: &Artifact, offset: u64, length: u64) -> Result<Vec<u8>> {
         match self.status {
             206 => {}
             200 => return Err("pc4_online_whole_content_rejected"),
@@ -137,6 +137,38 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
     ) -> Result<Option<Vec<u8>>> {
         self.validate_span(role, offset, length)?;
         Ok(self.cached(role, offset, length))
+    }
+
+    /// Reserve a finite native transport batch before starting any of its
+    /// physical requests. The external owner is allowed to overlap I/O, but it
+    /// must spend the same request/byte budget as scalar `exact_span` reads.
+    /// Validation is all-or-nothing so one malformed sibling starts no I/O.
+    pub fn reserve_external(&mut self, spans: &[(usize, u64, u64)]) -> Result<()> {
+        if spans.is_empty() || spans.len() > 16 {
+            return Err("pc4_online_batch_invalid");
+        }
+        let mut bytes = 0_u64;
+        for &(role, offset, length) in spans {
+            self.validate_span(role, offset, length)?;
+            bytes = bytes
+                .checked_add(length)
+                .ok_or("pc4_online_transfer_limit")?;
+        }
+        let requests = u64::try_from(spans.len()).map_err(|_| "pc4_online_batch_invalid")?;
+        if self
+            .requests
+            .checked_add(requests)
+            .is_none_or(|v| v > 100_000)
+            || self
+                .reserved
+                .checked_add(bytes)
+                .is_none_or(|v| v > 64 * 1024 * 1024)
+        {
+            return Err("pc4_online_transfer_limit");
+        }
+        self.requests += requests;
+        self.reserved += bytes;
+        Ok(())
     }
 
     /// Only explicit, already known byte intervals may be merged. Cached

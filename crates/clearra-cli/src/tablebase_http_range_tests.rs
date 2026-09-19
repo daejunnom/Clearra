@@ -120,6 +120,44 @@ fn tablebase_download_explicit_batch_validates_before_io_and_excludes_cached_sub
 }
 
 #[test]
+fn tablebase_download_external_batch_reserves_every_span_before_parallel_io() {
+    let calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&calls);
+    let mut reader = OnlineRangeReader::new(files(), move |a, o, n| {
+        count.set(count.get() + 1);
+        Ok(reply(a, o, n))
+    });
+    reader
+        .reserve_external(&[(2, 100, 12), (2, 120, 24)])
+        .unwrap();
+    assert_eq!(reader.requests, 2);
+    assert_eq!(reader.reserved, 36);
+    assert_eq!(calls.get(), 0, "reservation never performs transport");
+
+    let requests = reader.requests;
+    let reserved = reader.reserved;
+    assert_eq!(
+        reader
+            .reserve_external(&[(2, 200, 12), (3, 0, 1)])
+            .unwrap_err(),
+        "pc4_online_artifact_invalid"
+    );
+    assert_eq!((reader.requests, reader.reserved), (requests, reserved));
+    assert_eq!(
+        reader.reserve_external(&[(2, 0, 12); 17]).unwrap_err(),
+        "pc4_online_batch_invalid"
+    );
+    assert_eq!((reader.requests, reader.reserved), (requests, reserved));
+
+    reader.reserved = 64 * 1024 * 1024 - 8;
+    assert_eq!(
+        reader.reserve_external(&[(2, 0, 12)]).unwrap_err(),
+        "pc4_online_transfer_limit"
+    );
+    assert_eq!(reader.requests, requests);
+}
+
+#[test]
 fn tablebase_download_consumed_graph_prefetches_release_index_cache_capacity() {
     let mut reader = OnlineRangeReader::new(files(), |a, o, n| Ok(reply(a, o, n)));
     reader.read(1, 0, 8).unwrap();
