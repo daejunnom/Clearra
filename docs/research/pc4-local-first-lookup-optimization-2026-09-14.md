@@ -800,3 +800,79 @@ legacy/compact pairs and diamond admission-order checks remain. Local rustfmt
 and source checks alone are not execution evidence; these contracts and a new
 large-input probe await this candidate's exact-source CI/preview. 4194, main and
 deployment are unchanged by this candidate.
+
+The candidate is committed as `1e4f9f4ad8c2cea9e225dbe0b0065c57d1b7984a`.
+[Its non-publishing CI](https://github.com/daejunnom/Clearra/actions/runs/35435718284)
+passed all five jobs, including the separate preview-WASM. Actual logs show
+17 compact graph tests, the 60 exact legacy/compact pairs, 11 compact supply
+tests, and all selected Core/TB/App/replay/WASM/CLI/surface groups passing.
+Native CLI's separate real-process job passed 17 process and 22 library tests.
+This is selected integration evidence, not the final release acceptance gate.
+
+The diamond fixture kept the exact same final candidate for both response
+orders. Each order collected 12 terminal arrivals without terminal frontier
+copies; merged-state operations decreased from 41 to 30. Peak retained frontier
+payload was 4,840B. Work-unit counts became 165/163 (previous 155/153) because
+layer movement is now explicitly charged cooperative work. Those counters are
+not elapsed-time measurements or a throughput comparison on the large input.
+
+Preview artifact `10582249721` is 11,709,544B; its GitHub ZIP digest is
+`b6901c39f598996cb1bbc590a58530656527e238177907d937c4bbc9b7f711ff`.
+The exact-source/hash-checked artifact is consumed in memory by the next local
+probe, without extracting another build directory or replacing 4194.
+
+### 2026-09-19: new large-input probe reaches the cumulative lookup limit
+
+One new real-input probe used the same local dataset, empty field / 4L /
+Jstris180 / P7P4 / unique command and the same scalar 4KiB-index/exact-graph
+driver, with a 180s / 350,000-logical-read measurement envelope. The WASM SHA256
+was `c475358a3765f3b261dea2e217e9934ddc38cc66374c81a3f9347c548163a7b9`.
+It did **not** hit the removed state-count ceiling or the new frontier-byte
+ceiling. It failed with **`pc4_compact_session_lookup_limit`**, the existing
+cumulative 100,000-started-lookup guard, before those probe limits. Several
+independent lookup sessions were still incomplete when that guard rejected new
+work; completed graph reads are therefore not exactly the started-session count.
+
+| Metric | Exact final failure observation |
+| --- | ---: |
+| Wall time | 63.878623s |
+| Logical reads / advance calls | 299,984 / 300,415 |
+| Physical local file reads / bytes | 103,884 / 29,425,649 |
+| Completed graph reads | 99,994 |
+| FHID / GOFF logical reads | 2 / 199,988 |
+| App/WASM advance time | 42.458731s |
+| Local reader wait time | 8.835579s |
+| Request/admission bridge | 11.785763s |
+| Maximum synchronous advance, including failure cleanup | 36.5777ms |
+| WASM linear-memory high water at failure | 114,688,000B |
+| Host cache hits | 196,205 |
+
+There is **no complete search report** and no 456,459 count/hash claim. The
+reader and WASM job were released by the probe's normal failure cleanup and
+the process exited. No fallback/reexecution, deployment or 4194 update followed.
+
+This is progress beyond the earlier observed prefix, not a valid completed-run
+speedup claim: the earlier failure had only a 70.003s last periodic sample and
+different work/admission order. No extra baseline is rerun to invent equivalent
+work. Even removing this probe's entire local-reader wait while holding other
+costs unchanged would give only about 1.16x speedup; that conditional arithmetic
+is neither a general mmap bound nor an HTTP latency measurement.
+
+The next obstacle is now source-local and explicit. The cumulative lookup count
+guard and append-only graph cache (100,000-record guard, encoded/decoded byte
+limits) are independent of the bounded concurrent I/O window. They must be
+redesigned together for large complete searches, not relabeled as concurrent
+queue pressure or merely increased until one fixture passes. A bounded cache
+replacement design must pin records needed by an active source/target
+materialization, preserve immutable profile/generation identity, and wake
+continuations by an admission revision rather than `record_count` changes alone
+(eviction can leave that count unchanged). Cumulative transport/work budgets
+must remain explicit and finite; local verified files and remote transfer
+allowances must not be conflated. Full set/digest and cancellation parity are
+required before activating that replacement.
+
+Also confirmed in source: known-field lookups re-request and validate the same
+16-byte GOFF header before offset pair and graph record. Host page cache avoids
+the repeated physical read but not the extra ABI roundtrip. A private same-
+generation validated-header witness is a separate candidate; see the async
+transport review. It is not implemented or counted as a speedup here.

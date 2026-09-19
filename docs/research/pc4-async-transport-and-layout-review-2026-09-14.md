@@ -320,3 +320,28 @@ whole-owner 바이트 credit, CLI 지속 연결/비동기 client, sparse sidecar
 count watermark와 개별 버퍼 한도가 전체 RSS/사용자 memory budget을 대체하지 않는다.
 새 Rust host/다중 세션 계약은 exact-source 비게시 CI에서 확인한다. 4194/배포는 변경하지
 않으며 HTTP 프로토콜 진단도 다시 실행하지 않았다. 4절의 네트워크 관측일은 그대로다.
+
+### 8.1 2026-09-19 추가 소스 점검: 헤더 캐시의 계층
+
+현재 `LookupMachine::start_with_selector`의 qualified field-ID 경로는 lookup마다
+`GOFFIDX1` 헤더 16바이트를 먼저 요청한 다음 offset pair와 graph record로 진행한다.
+`consume_offset_index_header`가 각 세션에서 동일 version/count를 재검증한다.
+따라서 기존 4KiB host 캐시는 물리 HTTP/파일 읽기를 피할 수 있어도, 새 lookup의
+헤더 수요·JSON 전달·admission 비용까지 없애지는 않는다. 알려진 ID에 대한 보통
+3회 논리 요청 중 1회가 이 헤더다. 이는 실제 prefix의 graph record 약 3배 논리
+조회와도 일치하지만, 아직 헤더 공유 전후 실행시간 A/B를 수행한 것은 아니다.
+
+다음 후보는 같은 immutable snapshot/profile/artifact/layout에서 한 번 검증한
+**index-header witness**를 lookup owner 사이에 공유하는 것이다. 단순 boolean,
+파일명만의 global cache, Web에서 가짜 응답 생성, 형식 검증 삭제로 대체하지 않는다.
+source/snapshot 취소와 프로필/세대 변경 시 이전 witness를 사용할 수 없어야 한다.
+이 후보는 초기 generation discovery 캐시와 별개이며, 캐시 적중 상태의 논리 왕복을
+줄이는 것이다. `offset -> graph`의 실제 원격 의존을 줄이는 block directory와도
+구분해 A/B해야 한다. 이번 frontier 수정에는 아직 이 witness를 넣지 않았다.
+
+이 PC의 CLI curl 기능 목록도 2026-09-19 다시 확인했으며 HTTP2/HTTP3가 없다.
+CLI 소스의 요청별 process 생성/동기 대기도 그대로다. HF h2 병렬 Range 및 h3 광고는
+4절의 2026-09-14 관측을 재사용하며 새 네트워크/GUI 계측으로 표현하지 않는다.
+HTTP/2·3의 stream multiplexing, libcurl multi의 공유 연결, safetensors의 offset
+header 및 memmap2의 file-mutation 안전성 계약은 해당 공식 문서와 다시 대조했다.
+이 검토로 `.safetensors` 변환이나 실제 QUIC/native mmap 구현이 완료되는 것은 아니다.
