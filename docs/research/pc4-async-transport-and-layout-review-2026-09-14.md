@@ -719,6 +719,12 @@ transport-only 수치이며 전체 검색 가속률이 아니다. 같은 host에
 `--parallel-immediate`는 multiplex를 기다리는 대신 연결을 더 열 수 있으므로 Cloud
 exact-image A/B 전에는 제품 기본값으로 넣지 않는다.
 
+별도 단일 HTTP/2 client/한 서버 연결 실험에서 네 4KiB stream의 첫 wave는 1.990초,
+같은 client를 재사용한 후속 네 wave는 0.832~0.852초였다. 같은 object/Range를 반복해
+CDN cache와 연결 재사용을 분리할 수 없는 제한된 결과지만, 유한 curl process를 매
+wave 종료하는 구조를 최종안으로 삼지 않을 근거에는 부합한다. 최종 A/B는 서로 다른
+실제 demand trace와 connection/TLS counter를 기록해야 한다.
+
 최종 native owner는 OS 계산 thread마다 HTTP client를 두지 않는다. 한 host-lifetime
 libcurl multi/pool owner가 logical queue를 소유하고, physical slot 기본 4개 중 하나가
 비는 즉시 새 easy handle을 추가해야 한다. libcurl multi는 진행 중에도 handle 추가가
@@ -743,10 +749,16 @@ HTTP/2를 기본 협상한다. 그러나 protocol은 소스 옵션이 아니라 
 
 - 현재 Windows `curl 8.21.0 (Schannel)`의 feature 목록에는 HTTP2와 HTTP3가 모두 없다.
   따라서 이 환경의 유한 batch는 HTTP/1.1 최대 네 연결로만 검증한다.
-- production의 `node:22-bookworm-slim` 경로는 현재 accepted runtime Dockerfile에 curl을
-  설치하지 않는다. Debian Bookworm `libcurl4`는 `libnghttp2-14`에 의존하므로 명시 설치한
-  curl은 HTTP/2 사용 후보지만, exact image에서 `curl --version`과 실제 `%{http_version}`
-  receipt를 확인하기 전에는 협상 성공을 주장하지 않는다.
+- endpoint 능력은 별도로 확인했다. 같은 exact revision/네 4KiB Range를 .NET 단일
+  `HttpClient`, `MaxConnectionsPerServer=1`, HTTP/2 우선으로 동시에 전송했을 때 네
+  응답이 모두 HTTP 206, version 2.0, exact Content-Range/4096B였고 전체 벽시계는
+  1.299초였다. 이는 HF/CDN이 이 요청에서 HTTP/2 다중 Range stream을 처리한다는
+  bounded transport 증거이며 product curl·전체 검색의 협상 증거는 아니다.
+- production의 `node:22-bookworm-slim` 경로는 accepted runtime Dockerfile에 curl을
+  설치하지 않았으므로 후보 branch에서 curl/CA를 명시 설치하고 build 중 HTTPS protocol과
+  HTTP2 feature를 검사하도록 수정했다. Debian Bookworm `libcurl4`는 `libnghttp2-14`에
+  의존하지만, exact image build와 실제 `%{http_version}` receipt를 확인하기 전에는
+  Cloud 협상 성공을 주장하지 않는다.
 - Bookworm 기본 패키지에서 HTTP/3를 가정하지 않는다. curl의 HTTP/3는 QUIC backend가
   들어간 별도 build가 필요하고 proxy에서는 제약이 있다. 이 workload는 작은 immutable
   Range의 연결 재사용이 핵심이므로 우선순위는 persistent HTTP/2 multi이며, HTTP/3는
