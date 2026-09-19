@@ -39,10 +39,13 @@ try {
     try {
         if ($archive.Entries.Count -lt 5 -or $archive.Entries.Count -gt 6) { throw 'Unexpected preview entry count' }
         $manifestEntry = $archive.GetEntry('clearra_wasm.manifest.json')
-        if ($null -eq $manifestEntry -or $manifestEntry.Length -ne 1280) { throw 'Invalid manifest entry' }
+        # JSON whitespace/descriptor lengths are not artifact identity. Bound
+        # the input, then check its schema and exact source/hash descriptors.
+        if ($null -eq $manifestEntry -or $manifestEntry.Length -lt 1 -or $manifestEntry.Length -gt 131072) { throw 'Invalid manifest entry' }
         $inputStream = [IO.StreamReader]::new($manifestEntry.Open())
         try { $manifest = $inputStream.ReadToEnd() | ConvertFrom-Json } finally { $inputStream.Dispose() }
-        if ($manifest.build.runtime_identity.source_commit -ne $SourceCommit -or
+        if ($manifest.schema_version -ne 1 -or
+            $manifest.build.runtime_identity.source_commit -ne $SourceCommit -or
             $manifest.build.runtime_identity.engine_build_id -ne $SourceCommit) { throw 'Manifest source mismatch' }
         $allowed = @('clearra_wasm.manifest.json', 'clearra_wasm.retention-history.json',
             'clearra_wasm.js', 'clearra_wasm_bg.wasm', $manifest.bindings.path, $manifest.wasm.path)

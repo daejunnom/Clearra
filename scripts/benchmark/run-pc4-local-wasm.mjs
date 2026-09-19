@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { checkedDatasetRoot, openBenchmarkDataset } from './pc4-local-dataset.mjs';
 import { createPc4TraceComparison } from './pc4-trace-comparison.mjs';
+import { pc4SearchSummary } from './pc4-search-summary.mjs';
 import { createPc4RangeReader } from '../release/pc4/pc4-range-reader.mjs';
 import { pc4SearchRangePolicy } from '../release/pc4/pc4-search-range-policy.mjs';
 import { PC4_FRONTIER_MAX_GAP_BYTES, prefetchPc4LookupFrontier } from '../release/pc4/pc4-frontier-reader.mjs';
@@ -177,6 +178,7 @@ try {
     wasm_sha256: manifest.wasm.sha256, dataset_revision: dataset.plan.revision, module_prepare_ms: preparationMs,
     ...progress(), cancelled_by_probe: cancelled, demand_sha256: demandDigest.digest('hex'),
     ...(comparison ? comparison.finish() : {}),
+    search_report: pc4SearchSummary(terminal?.search_report),
     terminal: terminal ? { event: terminal.event, status: terminal.response?.status,
       diagnostics: terminal.response?.diagnostics, error: terminal.error } : null };
   console.log(JSON.stringify(report));

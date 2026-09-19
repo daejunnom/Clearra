@@ -198,7 +198,11 @@ impl Pc4CompactGraphUnion {
     /// Watermarks throttle new CPU demand before the hard retained-state
     /// limits are reached. They are counts, not whole-owner byte authority.
     pub(crate) fn io_demand_is_full(&self, fields: usize, continuations: usize) -> bool {
-        self.waiting.len() >= fields || self.waiting_count >= continuations
+        // Before its first verified record the root is a real pending demand,
+        // but has not been parked in `waiting` yet. Match pending_fields rather
+        // than silently reporting zero demand for that bootstrap phase.
+        let root = usize::from(!self.start_verified && !self.completed && !self.terminated);
+        self.waiting.len() + root >= fields || self.waiting_count + root >= continuations
     }
 
     pub(crate) fn prepare<G: Pc4GraphCandidateGuard>(

@@ -670,6 +670,18 @@ physical span). The same 22 local host/OPFS tests pass with these corrections.
 
 ## Remaining evidence
 
+The corrected host run [35433208647](https://github.com/daejunnom/Clearra/actions/runs/35433208647)
+at `785ddc64f2f0a89691dee9bfe924952c9d81fcfc` executed all three new asynchronous
+host contracts successfully. The compact group was 12 passed / 1 failed: its
+new initial-demand watermark assertion exposed that `pending_fields()` included
+the unverified root while `io_demand_is_full()` omitted it. The follow-up counts
+this real bootstrap demand; it retains the assertion rather than weakening it.
+All other requested jobs/groups passed (preview skipped). This is not an overall
+green run. A corrected non-publishing preview is requested for a real large-input
+local-dataset probe, with no 4194 replacement or additional dataset download.
+The scalar local probe reports counts, completeness and hashes without dumping
+solution keys; its timings must not be labeled as Web asynchronous transport A/B.
+
 Still required: complete 456,459-family validation/timing, input/hold-family
 scale tests, native/browser parity after these edits, real HTTP latency and
 completed-search frontier-batch A/B, independent profile qualification, remaining product contracts and release
