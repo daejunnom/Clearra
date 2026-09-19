@@ -827,3 +827,13 @@ compile/link와 callback 계약만 검사하며, 이어지는 실제 full-search
 runtime owner를 크게 늘리지 않고 libcurl multi의 진행 중 handle 추가·connection cache
 계약을 직접 검증하기 위함이다. 반대로 이 후보가 두 release target에서 링크 비용이나
 성능 회귀를 보이면 feature를 제거하고 기존 외부 curl batch를 유지한다.
+
+exact source `69c222b94322363bb54b09270da1595e1379b378`의 비게시
+[CI 35446511211](https://github.com/daejunnom/Clearra/actions/runs/35446511211)은 source,
+PC4 contracts, native CLI, surface contracts와 Ubuntu/Windows 후보 matrix가 모두
+성공했다. 후보 unit은 final redirect block의 bounded body/Content-Range 수집과 in-flight
+exact-ID dedup/identity-change 거부 2개이며 두 플랫폼 모두 경고 없이 통과했다. clean
+candidate build는 Ubuntu 1분 35초, Windows 4분 49초였다. 이는 compile/link와 순수 owner
+계약 증거이지 live HF 협상, finite batch 대비 전체 검색 성능, 다섯 프로필 자격 또는
+Jstris 빈 필드 P7P4 456,459개 완료 증거가 아니다. Windows 비용과 아직 남은 mixed-index
+tail 때문에 feature는 opt-in 상태를 유지한다.
