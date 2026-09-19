@@ -24,7 +24,6 @@ pub(crate) struct CompactSessionLimits {
     pub cache: Pc4LookupGraphCacheLimits,
     pub ranges: RangeAdmissionLimits,
     pub concurrent_lookups: NonZeroUsize,
-    pub lookups: NonZeroUsize,
 }
 
 struct ActiveLookup {
@@ -58,6 +57,18 @@ impl Pc4CompactCandidateSession {
         // This is a host-queue bound, not a claim about available CPU cores.
         if limits.concurrent_lookups.get() > 16 {
             return Err("pc4_compact_session_concurrency_invalid");
+        }
+        // At most two field records are pinned by each resident work item.
+        // The record bound must admit that set; encoded/decoded budgets are
+        // independently checked by every actual replacement plan.
+        if limits
+            .union
+            .resident_work
+            .get()
+            .checked_mul(2)
+            .is_none_or(|pins| pins > limits.cache.max_records())
+        {
+            return Err("pc4_compact_session_dependency_capacity_invalid");
         }
         let mut cache = Pc4LookupGraphCache::new(
             generation.activated_snapshot(),
@@ -112,14 +123,7 @@ impl Pc4CompactCandidateSession {
                 || self
                     .union
                     .as_ref()
-                    .is_some_and(|union| union.has_ready_work() && !self.backpressured(union)))
-    }
-
-    fn backpressured(&self, union: &Pc4CompactGraphUnion) -> bool {
-        union.io_demand_is_full(
-            self.limits.concurrent_lookups.get() * 2,
-            self.limits.concurrent_lookups.get() * 8,
-        )
+                    .is_some_and(|union| union.has_ready_work()))
     }
 
     pub(crate) fn advance<G: Pc4GraphCandidateGuard>(
@@ -142,10 +146,6 @@ impl Pc4CompactCandidateSession {
         if self.failed {
             return Err("pc4_compact_session_terminated");
         }
-        let throttled = self
-            .union
-            .as_ref()
-            .is_some_and(|union| self.backpressured(union));
         let union = self
             .union
             .as_mut()
@@ -155,7 +155,6 @@ impl Pc4CompactCandidateSession {
             return Ok(true);
         }
         let mut index = 0;
-        let mut admitted_record = false;
         while index < self.lookups.len() {
             // A pending response never blocks the other sessions or CPU work.
             if self.lookups[index].pending.is_some() {
@@ -172,8 +171,11 @@ impl Pc4CompactCandidateSession {
                     if hit.field_id != self.lookups[index].field {
                         return Err("pc4_compact_session_field_mismatch");
                     }
-                    self.cache.admit(&target, hit).map_err(|e| e.reason())?;
-                    admitted_record = true;
+                    self.cache
+                        .admit_replacing_unprotected(&target, hit, &|field| {
+                            union.protects_field(field)
+                        })
+                        .map_err(|e| e.reason())?;
                     self.lookups.swap_remove(index);
                 }
                 AppOnlinePc4LookupStep::Miss => return Err("pc4_online_field_miss"),
@@ -181,20 +183,16 @@ impl Pc4CompactCandidateSession {
                 AppOnlinePc4LookupStep::Cancelled => return Err("pc4_compact_session_cancelled"),
             }
         }
-        // When CPU demand outruns I/O, leave ready work queued until a response
-        // returns credit. One admitted record must always get a wakeup pass.
-        // A bounded quantum limits overshoot past the count watermarks.
-        let step = if throttled && !admitted_record {
-            CompactGraphUnionStep::Waiting
-        } else {
-            union
-                .advance(
-                    &self.cache,
-                    NonZeroUsize::new(work.get().min(64)).unwrap(),
-                    guard,
-                )
-                .map_err(|e| e.reason())?
-        };
+        // Only new resident admission is throttled. Ready dependency owners
+        // must keep progressing even when the I/O window is full; otherwise
+        // their pins/credits could never be released.
+        let step = union
+            .advance(
+                &self.cache,
+                NonZeroUsize::new(work.get().min(64)).unwrap(),
+                guard,
+            )
+            .map_err(|e| e.reason())?;
         if step == CompactGraphUnionStep::Complete {
             if !self.lookups.is_empty() {
                 return Err("pc4_compact_session_incomplete_io");
@@ -216,8 +214,11 @@ impl Pc4CompactCandidateSession {
             {
                 continue;
             }
-            if self.started_lookups == self.limits.lookups.get() {
-                return Err("pc4_compact_session_lookup_limit");
+            // A demand must originate in a charged graph work unit. Existing
+            // finite graph work and host HTTP byte/request budgets remain;
+            // a cumulative cache-size count is not an I/O residency budget.
+            if self.started_lookups >= union.usage().work {
+                return Err("pc4_compact_session_lookup_without_work");
             }
             let id =
                 LookupSessionId::new(self.next_lookup).ok_or("pc4_compact_session_id_overflow")?;

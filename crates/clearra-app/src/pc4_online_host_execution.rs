@@ -538,6 +538,7 @@ fn compact_session_limits() -> CompactSessionLimits {
             // Cache, result buffers and the source retain separate budgets;
             // finite whole-search requests still require the handoff authority.
             frontier_bytes: nz(256 * 1024 * 1024),
+            resident_work: nz(64),
             work: nz(1_000_000_000),
             candidates: nz(1_000_000),
             waiting_fields: nz(65_536),
@@ -552,7 +553,6 @@ fn compact_session_limits() -> CompactSessionLimits {
         ),
         ranges: range_limits(),
         concurrent_lookups: nz(8),
-        lookups: nz(100_000),
     }
 }
 fn frontier_budgets() -> Pc4ObservationFrontierBudgets {

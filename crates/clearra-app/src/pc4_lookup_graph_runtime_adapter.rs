@@ -4,8 +4,11 @@
 // placement materialization. Range transport, lookup paging, traversal,
 // terminal decisions, reducers, fallback, and product activation stay outside.
 
-use core::{fmt, mem::size_of, num::NonZeroUsize};
+use core::{cell::Cell, fmt, mem::size_of, num::NonZeroUsize};
 use std::collections::HashMap;
+
+#[path = "pc4_lookup_graph_cache_replacement.rs"]
+mod replacement;
 
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_core_executor::{
@@ -204,6 +207,8 @@ struct Pc4LookupGraphCacheEntry {
     field_hash: u64,
     encoded_record: Vec<u8>,
     decoded_record: DecodedHydraGraphRecordV1,
+    referenced: Cell<bool>,
+    replacement_plan: Cell<u64>,
 }
 
 /// Fixed-budget record cache bound to one activated generation and one
@@ -211,9 +216,10 @@ struct Pc4LookupGraphCacheEntry {
 ///
 /// New records are admitted atomically. Exact repeated records are
 /// idempotent, while a changed hash or byte body under an existing field
-/// identity fails closed. Records are retained until the owner drops the
-/// cache; exhausting any budget never evicts a record needed by an in-flight
-/// transactional traversal page.
+/// identity fails closed. Public admission retains records for transactional
+/// traversal pages. The compact owner alone may opt into protected replacement
+/// after declaring every resident source/target dependency; other producers
+/// keep the append-only contract.
 #[derive(Clone, Debug)]
 pub struct Pc4LookupGraphCache {
     snapshot: ActivatedSnapshot,
@@ -230,6 +236,10 @@ pub struct Pc4LookupGraphCache {
     // to produce results, so randomized hash order cannot change canonicality.
     by_id: HashMap<u32, usize>,
     by_hash: HashMap<u64, u32>,
+    admission_revision: u64,
+    evicted_records: u64,
+    replacement_clock: usize,
+    replacement_plan: u64,
 }
 
 impl Pc4LookupGraphCache {
@@ -259,6 +269,10 @@ impl Pc4LookupGraphCache {
             entries: Vec::new(),
             by_id: HashMap::new(),
             by_hash: HashMap::new(),
+            admission_revision: 0,
+            evicted_records: 0,
+            replacement_clock: 0,
+            replacement_plan: 0,
         })
     }
 
@@ -306,6 +320,32 @@ impl Pc4LookupGraphCache {
         &mut self,
         lookup_target: &QualifiedPc4TargetIdentity,
         hit: LookupHit,
+    ) -> Result<Pc4LookupGraphCacheAdmission, Pc4LookupGraphCacheError> {
+        self.admit_inner(lookup_target, hit, None)
+    }
+
+    pub(crate) fn admit_replacing_unprotected(
+        &mut self,
+        lookup_target: &QualifiedPc4TargetIdentity,
+        hit: LookupHit,
+        protected: &dyn Fn(u32) -> bool,
+    ) -> Result<Pc4LookupGraphCacheAdmission, Pc4LookupGraphCacheError> {
+        self.admit_inner(lookup_target, hit, Some(protected))
+    }
+
+    pub(crate) const fn admission_revision(&self) -> u64 {
+        self.admission_revision
+    }
+    #[cfg(test)]
+    pub(crate) const fn evicted_records(&self) -> u64 {
+        self.evicted_records
+    }
+
+    fn admit_inner(
+        &mut self,
+        lookup_target: &QualifiedPc4TargetIdentity,
+        hit: LookupHit,
+        protected: Option<&dyn Fn(u32) -> bool>,
     ) -> Result<Pc4LookupGraphCacheAdmission, Pc4LookupGraphCacheError> {
         self.validate_lookup_binding(lookup_target, &hit)?;
 
@@ -362,6 +402,11 @@ impl Pc4LookupGraphCache {
                 .checked_add(decoded_target_bytes)
                 .ok_or(Pc4LookupGraphCacheError::AccountingOverflow)?,
         };
+        let (next_usage, victims) = if let Some(protected) = protected {
+            self.plan_replacement(next_usage, protected)?
+        } else {
+            (next_usage, Vec::new())
+        };
         check_cache_budget(
             Pc4LookupGraphCacheBudgetKind::Records,
             self.limits.max_records(),
@@ -389,6 +434,27 @@ impl Pc4LookupGraphCache {
         self.by_hash
             .try_reserve(1)
             .map_err(|_| Pc4LookupGraphCacheError::AllocationFailed)?;
+        let revision = self
+            .admission_revision
+            .checked_add(1)
+            .ok_or(Pc4LookupGraphCacheError::AccountingOverflow)?;
+        let evicted = self
+            .evicted_records
+            .checked_add(victims.len() as u64)
+            .ok_or(Pc4LookupGraphCacheError::AccountingOverflow)?;
+        // Validation, budget planning and all fallible reservations precede
+        // removal. A rejected hit cannot discard or half-index old records.
+        for id in victims {
+            let index = self.by_id.remove(&id).expect("planned cache victim");
+            let old = self.entries.swap_remove(index);
+            self.by_hash.remove(&old.field_hash);
+            if let Some(moved) = self.entries.get(index) {
+                *self
+                    .by_id
+                    .get_mut(&moved.field_id)
+                    .expect("indexed moved record") = index;
+            }
+        }
         self.by_id.insert(hit.field_id, self.entries.len());
         self.by_hash.insert(hit.field_hash, hit.field_id);
         self.entries.push(Pc4LookupGraphCacheEntry {
@@ -396,8 +462,12 @@ impl Pc4LookupGraphCache {
             field_hash: hit.field_hash,
             encoded_record: hit.graph_record,
             decoded_record,
+            referenced: Cell::new(true),
+            replacement_plan: Cell::new(0),
         });
         self.usage = next_usage;
+        self.admission_revision = revision;
+        self.evicted_records = evicted;
         Ok(Pc4LookupGraphCacheAdmission::Inserted)
     }
 
@@ -475,6 +545,7 @@ impl Pc4LookupGraphCache {
         self.by_id.get(&field_id).map(|&index| {
             let entry = &self.entries[index];
             debug_assert_eq!(entry.field_id, field_id);
+            entry.referenced.set(true);
             entry
         })
     }
@@ -1053,6 +1124,184 @@ mod tests {
         field_hash: u64,
     ) -> LookupHit {
         hit(target, session, field_id, field_hash, [EMPTY_TARGETS; 7])
+    }
+
+    #[test]
+    fn pc4_compact_graph_union_cache_replacement_preserves_pins_indexes_and_revision() {
+        let snapshot = activated_snapshot("replacement", 600);
+        let bound = target(&snapshot, Pc4RuleProfile::Srs, Pc4TerminalUseCase::PcSearch);
+        let mut cache = Pc4LookupGraphCache::new(
+            &snapshot,
+            bound.clone(),
+            Pc4LookupGraphCacheLimits::new(nonzero(3), nonzero(1024), nonzero(1)),
+        )
+        .unwrap();
+        for id in 0..512 {
+            let previous_revision = cache.admission_revision();
+            cache
+                .admit_replacing_unprotected(
+                    &bound,
+                    empty_hit(&bound, id as u64 + 1, id, id as u64 + 1),
+                    &|id| id == 0,
+                )
+                .unwrap();
+            assert_eq!(cache.admission_revision(), previous_revision + 1);
+            assert!(cache.contains_field_id(0));
+            assert!(cache.contains_field_id(id));
+            assert!(cache.usage().record_count() <= 3);
+            assert_eq!(cache.by_id.len(), cache.entries.len());
+            assert_eq!(cache.by_hash.len(), cache.entries.len());
+            for (index, entry) in cache.entries.iter().enumerate() {
+                assert_eq!(cache.by_id.get(&entry.field_id), Some(&index));
+                assert_eq!(cache.by_hash.get(&entry.field_hash), Some(&entry.field_id));
+            }
+        }
+        assert_eq!(cache.evicted_records(), 509);
+        let usage = cache.usage();
+        let revision = cache.admission_revision();
+        cache
+            .admit_replacing_unprotected(&bound, empty_hit(&bound, 700, 0, 1), &|_| true)
+            .unwrap();
+        assert_eq!(
+            cache.admission_revision(),
+            revision,
+            "idempotent hit is not new admission"
+        );
+        assert!(cache
+            .admit_replacing_unprotected(&bound, empty_hit(&bound, 701, 550, 551), &|_| true)
+            .is_err());
+        assert_eq!(cache.usage(), usage);
+        assert_eq!(cache.admission_revision(), revision);
+        assert!(cache.contains_field_id(0) && cache.contains_field_id(511));
+        assert!(!cache.contains_field_id(550));
+        // A cold old record can be fetched again under the same immutable
+        // identity; retained record count is no longer cumulative work.
+        cache
+            .admit_replacing_unprotected(&bound, empty_hit(&bound, 702, 1, 2), &|id| id == 0)
+            .unwrap();
+        assert_eq!(cache.field_hash(1), Some(2));
+        assert_eq!(cache.usage().record_count(), 3);
+        assert_eq!(cache.admission_revision(), revision + 1);
+    }
+
+    #[test]
+    fn pc4_compact_graph_union_cache_replacement_checks_all_budgets_and_validates_before_removal() {
+        let snapshot = activated_snapshot("replacement-bytes", 32);
+        let bound = target(&snapshot, Pc4RuleProfile::Srs, Pc4TerminalUseCase::PcSearch);
+        let mut cache = Pc4LookupGraphCache::new(
+            &snapshot,
+            bound.clone(),
+            Pc4LookupGraphCacheLimits::new(nonzero(8), nonzero(1024), nonzero(16)),
+        )
+        .unwrap();
+        cache.admit(&bound, empty_hit(&bound, 1, 1, 1)).unwrap();
+        let targets = [4, 5, 6, 7];
+        cache
+            .admit(
+                &bound,
+                hit(
+                    &bound,
+                    2,
+                    2,
+                    2,
+                    [
+                        &targets,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                    ],
+                ),
+            )
+            .unwrap();
+        cache
+            .admit_replacing_unprotected(
+                &bound,
+                hit(
+                    &bound,
+                    3,
+                    3,
+                    3,
+                    [
+                        &targets,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                    ],
+                ),
+                &|_| false,
+            )
+            .unwrap();
+        assert!(
+            cache.contains_field_id(1),
+            "zero-target entry cannot pay a decoded-target deficit"
+        );
+        assert!(!cache.contains_field_id(2));
+        assert!(cache.contains_field_id(3));
+        assert_eq!(cache.usage().decoded_target_bytes(), 16);
+        assert_eq!(cache.evicted_records(), 1);
+        let before = cache.usage();
+        let revision = cache.admission_revision();
+        let mut malformed = empty_hit(&bound, 4, 4, 4);
+        malformed.graph_record[0] ^= 1;
+        assert!(cache
+            .admit_replacing_unprotected(&bound, malformed, &|_| false)
+            .is_err());
+        assert_eq!(cache.usage(), before);
+        assert_eq!(cache.admission_revision(), revision);
+        let oversized = [5, 6, 7, 8, 9];
+        assert!(cache
+            .admit_replacing_unprotected(
+                &bound,
+                hit(
+                    &bound,
+                    5,
+                    4,
+                    4,
+                    [
+                        &oversized,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS,
+                        EMPTY_TARGETS
+                    ]
+                ),
+                &|_| false
+            )
+            .is_err());
+        assert_eq!(
+            cache.usage(),
+            before,
+            "failed replacement planning removes no old record"
+        );
+        assert!(cache.contains_field_id(1) && cache.contains_field_id(3));
+        assert_eq!(cache.admission_revision(), revision);
+
+        let mut encoded = Pc4LookupGraphCache::new(
+            &snapshot,
+            bound.clone(),
+            Pc4LookupGraphCacheLimits::new(nonzero(8), nonzero(24), nonzero(1)),
+        )
+        .unwrap();
+        for id in 1..=3 {
+            encoded
+                .admit_replacing_unprotected(
+                    &bound,
+                    empty_hit(&bound, id as u64, id, id as u64),
+                    &|id| id == 1,
+                )
+                .unwrap();
+        }
+        assert_eq!(encoded.usage().encoded_graph_bytes(), 24);
+        assert_eq!(encoded.usage().record_count(), 2);
+        assert!(encoded.contains_field_id(1) && encoded.contains_field_id(3));
     }
 
     #[test]

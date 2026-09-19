@@ -345,3 +345,113 @@ CLI 소스의 요청별 process 생성/동기 대기도 그대로다. HF h2 병�
 HTTP/2·3의 stream multiplexing, libcurl multi의 공유 연결, safetensors의 offset
 header 및 memmap2의 file-mutation 안전성 계약은 해당 공식 문서와 다시 대조했다.
 이 검토로 `.safetensors` 변환이나 실제 QUIC/native mmap 구현이 완료되는 것은 아니다.
+
+## 9. 2026-09-19 재비교: 검증 소스, 작성 중 후보, 실제 전송을 분리
+
+이번 비교의 커밋 기준은 `def79304f59685e9ba3d5ae21d2f01dbc7f4f2b0`이다.
+그 HEAD는 직전 소스 후보 `1e4f9f4`의 검증 결과를 기록한 문서 변경이다. 아래의
+미커밋 cache/resident 변경은 아직 Rust 컴파일·실행 검증을 마치지 않은 후보이며,
+HEAD의 통과한 CI 또는 4194에 반영된 동작으로 취급하지 않는다. 이번 재비교에서는
+기존 Rust 변경을 보존하고, 탐색 재실행·4194 교체·CI·배포를 수행하지 않았다.
+
+### 9.1 현재 경계와 제안의 차이
+
+| 구분 | 현재 커밋에서 확인한 정책 | 남은 변경/검증 |
+| --- | --- | --- |
+| compact pattern App | 서로 다른 필드의 lookup 최대 8개; 같은 필드는 하나의 활성 lookup에 결합 | CPU 작업 훔치기와 별개이며 CPU 병렬 실행 증거가 아님 |
+| Web host | `batch`와 `can_advance`를 소비; 첫 완료 응답부터 admission, I/O 중 ready 계산 진행 | TB 자체는 `WasmJobRunner` 한 개이며 일반 PC의 distributed 경로를 사용하지 않음 |
+| Web 전송 | 물리 HTTP 기본 4개(설정 상한 16); exact in-flight 결합, byte 예약, index page 캐시 | 요청 M과 CPU P를 각각 계측/조정; 큰 in-flight span에 포함된 다른 키의 수요 결합은 별도 후보 |
+| 응답 버퍼 | 최대 16개 논리 slot, 각각 최대 64KiB; 완료됐어도 admission 전까지 slot 점유 | 이 제한은 전체 작업·캐시·결과의 메모리 상한이 아님 |
+| 기존 ready 제어 | waiting 16필드 또는 64 continuation에서 union 진행도 제한; graph admission 때 wakeup 허용 | 새 수요를 만드는 cold 확장만 제한하고 기존 resident/응답 처리 진행은 보장할 필요 |
+| 그 외 경로 | legacy/fixed-queue 경로에는 단일 pending await가 남음; CLI는 동기 drive와 요청별 curl 프로세스 | 모든 PC/Setup/CLI/Discord가 이미 비동기라고 표현하지 않음 |
+| 큰 입력 | 누적 lookup 100,000개와 append-only graph cache 한도가 별도로 존재 | 동시성 상한으로 오해하지 말고 bounded replacement와 전체 집합 정확성을 함께 검증 |
+
+작성 중인 후보는 resident work 최대 64개와 source/current-target pin을 두고,
+비보호 항목만 CLOCK 방식으로 교체한다. record 수가 교체 전후 같아도 응답 도착을
+놓치지 않도록 admission revision으로 깨운다. 누적 lookup을 cache 크기로 제한하는
+대신 이미 부과된 graph work 예산과 연결하며 HTTP 총 요청/전송 예산은 유지한다.
+이 후보의 eviction·응답 순서·취소·큰 입력 전체 집합 검증은 아직 남아 있다.
+
+CPU가 네트워크보다 빨리 수요를 생성할 때의 해결책은 무제한 제출도, 전체 CPU 정지도
+아니다. 신규 확장에는 byte credit을 요구하고, 받은 응답 반영·기존 작업 완료·pin 해제는
+독립적으로 진행해야 한다. 제어 메시지/취소를 처리하는 host도 긴 동기 계산으로 막지
+않는다. 다수 continuation이 같은 필드를 기다릴 때 요청은 한 번만 만들고 모두 깨운다.
+
+Tail은 세 가지로 구분한다: (1) 남은 큰 CPU 작업은 유한 조각 분할/작업 훔치기,
+(2) 느린 단일 HTTP는 먼저 온 다른 응답 처리와 공정한 수요 우선순위,
+(3) `offset -> graph -> 다음 필드` 사슬은 주소표/캐시로 의존 왕복을 단축한다.
+정확한 layer 합집합을 봉인하기 위한 장벽은 delta/fixpoint 증명 없이 제거하지 않는다.
+
+대략적인 비교 모델은 `T >= max(C/P, R*L/M, B/W, T_dependency)`다. 이는 일정한
+대표 지연 L과 실효 동시성 M을 가정한 병목 모델이지 실행시간 예측이나 속도 보장이
+아니다. CPU 추가보다 실제 물리 요청 R을 줄이는 효과가 클 수 있다. 요청 발생률이
+처리율보다 높으면 queue가 계속 커지므로 ready/waiting/result까지 포함한 bytes를
+계측해야 한다. 여러 인접 요청을 합칠지는 줄이는 왕복 비용과 추가 bytes/파싱 비용을
+비교하되, 마지막 의존이나 빈 CPU 큐가 batch 충전을 기다리지 않게 한다.
+
+### 9.2 이번 최소 네트워크 진단
+
+2026-09-19 10:29:17 UTC에 공개 metadata로 조회한 revision은 여전히
+`ea61380b31fa3dc9ffb4c8505c9a09c1b421ef31`이었다. 이 식별자는 관측 출처이며
+업데이트 금지 설정이 아니다. 기존 graph 크기도 510,917,451B와 일치했다.
+
+Node HTTP/2로 HTTPS HF origin과 허용된 HF CDN만 따라가며 metadata 최대 4MiB,
+Range 응답 각각 1B, redirect 최대 5회, 전체 진단 45초 상한을 적용했다. redirect
+본문은 중단하고 서명 URL/쿼리는 기록하지 않았다. 마지막에 모든 연결을 닫았다.
+
+| 관측 | 결과 |
+| --- | --- |
+| `huggingface.co` | h2 / 302 / 광고 stream 상한 128 |
+| `us.aws.cdn.hf.co` | h2 / 206 / 광고 stream 상한 100 / 첫 1B 확인 1,317.554ms |
+| 같은 CDN 연결의 `bytes=0-0` | 206 / 정확한 Content-Range·1B / 704.755ms |
+| 동시에 제출한 `bytes=1-1` | 206 / 정확한 Content-Range·1B / 700.880ms |
+| 위 두 요청의 벽시계 | 706.032ms |
+
+이는 **단일 연결의 병렬 Range 지원** 확인이다. 새 전체 탐색/A-B, 평균 WAN 지연,
+100개 동시 요청 허용량, 실제 GUI 프로토콜의 증거가 아니다. 이번 관측에서는 h3
+Alt-Svc 광고를 보지 못했다. 4절의 9월 14일 광고 관측을 지우거나 현재 관측과 혼합하지
+않으며, 어느 쪽도 실제 QUIC 성공 또는 미지원 확정을 뜻하지 않는다.
+
+이 PC의 `curl 8.21.0` Features에는 여전히 HTTP2/HTTP3가 없다. 요청마다 프로세스가
+끝나는 CLI 소스도 그대로다. HTTP/2 지원 curl로 교체하는 것만으로 프로세스 간 연결
+재사용이 생기지는 않는다. 지속 client/pool 또는 libcurl multi가 필요하다.
+브라우저 도구는 연결됐지만 탭 목록이 비어 있어 실제 GUI의 protocol은 unknown으로
+남겼다. 탭 생성/새로고침/탐색/다른 브라우저 전환은 하지 않았다.
+
+HTTP/1.1도 여러 연결로 비동기 동시 요청을 할 수 있다. HTTP/2·3은 CPU 스레드 기능이
+아니라 공유 연결의 stream 기능이다. HTTP/2의 TCP 손실에 따른 지연과 HTTP/3의
+stream 분리는 [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113.html)와
+[RFC 9114](https://www.rfc-editor.org/rfc/rfc9114.html)에 구분된다. Native는 우선
+[공유 multi/pool](https://curl.se/libcurl/c/CURLMOPT_PIPELINING.html)과 h2 협상,
+h3는 실제 환경 검증 이후의 추가 경로로 둔다. `Range: a-b,c-d` multipart 지원을
+이번 두 단일 Range의 stream 검증으로 대신하지 않는다.
+
+### 9.3 포맷/메타데이터/mmap 우선순위 재확인
+
+1. **Clearra 내부 변경 우선:** bounded continuation과 응답 처리 진행 보장,
+   graph cache 교체 정확성, CLI의 지속 연결/비동기 drive. 포맷 변경이 필요 없다.
+2. **논리 header 왕복 제거:** immutable profile/generation/artifact/layout에 묶인
+   검증된 GOFF-header witness를 공유한다. 5분 discovery 캐시나 4KiB byte 캐시는
+   이미 있지만 lookup마다 헤더를 요청하는 App/ABI 왕복은 여전히 남는다.
+3. **물리 offset 왕복 제거:** 기존 64-record sidecar 후보(949,112B, header 제외)를
+   large-frontier A/B 대상으로 유지한다. 순서/ID/간선을 바꾸지 않고 known ID의
+   block 위치를 정한다. 임의 초기 필드의 hash->ID 검색은 별개다. 기존 로컬 GOFF로
+   먼저 만들 수 있고, 이득이 확인된 뒤 upstream에 작은 sidecar 추가를 요청한다.
+4. **mmap은 native local 전용 별도 A/B:** 기존 `.bin` 그대로 positional read와
+   비교한다. GUI OPFS handle/Blob slice, HTTP, WASM zero-copy와 혼동하지 않는다.
+   immutable generation lease와 파일 변경/삭제 방지, 읽기 범위/수명 검증이 전제다.
+   [memmap2](https://docs.rs/memmap2/latest/memmap2/struct.MmapOptions.html)의
+   file-backed map 안전성 요구는 단순 `read-only` 옵션만으로 충족되지 않는다.
+5. **safetensors는 후순위:** offsets/packed bytes를 tensor 몇 개로 넣을 수 있으나
+   graph 주소 조회와 의존 사슬은 그대로다. 필드마다 JSON tensor entry를 만드는
+   1,518만-entry header는 피한다. u24를 u32로 넓히면 target payload +33.3%,
+   5B hash+3B ID를 u64+u32로 바꾸면 해당 index record +50%다. U8 packing으로
+   보존하면 크기 증가는 피하지만 기존 decoder가 필요하다. 이 구조적 판단은
+   [공식 포맷](https://github.com/safetensors/safetensors/blob/main/README.md)과
+   [부분 metadata 조회](https://huggingface.co/docs/safetensors/metadata_parsing)를
+   다시 대조했으며 변환 실행/속도 개선 증거는 아니다.
+
+다섯 킥 프로필마다 자격·파일 폭·캐시·명시 다운로드를 분리한다. muse918에게 보낼
+후보는 여전히 profile/schema/completion manifest와 기존 graph 호환 block directory다.
+필요시 block digest를 더할 수 있지만 새로운 세대/블록의 검증 계약이 먼저다.
+V*/최선 수/Krylov나 부분 집합으로 대체하지 않으며, 요청 메시지는 아직 보내지 않았다.

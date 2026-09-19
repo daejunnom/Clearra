@@ -1,7 +1,7 @@
 //! Compact union vs the existing exact observation producer; fixture graph
 //! qualification is synthetic, while placement materialization uses Core ILC.
 use super::*;
-use crate::pc4_lookup_graph_runtime_adapter::Pc4LookupGraphCache;
+use crate::pc4_lookup_graph_runtime_adapter::{Pc4LookupGraphCache, Pc4LookupGraphCacheLimits};
 use crate::pc_candidate_page_boundary::compact_graph_union::{
     CompactGraphUnionError, CompactGraphUnionLimits, CompactGraphUnionStep, Pc4CompactGraphUnion,
 };
@@ -40,6 +40,7 @@ fn compact_queue(pattern: &str) -> PcQueueInput {
 fn limits() -> CompactGraphUnionLimits {
     CompactGraphUnionLimits {
         frontier_bytes: nonzero(1024 * 1024),
+        resident_work: nonzero(64),
         work: nonzero(100_000),
         candidates: nonzero(512),
         waiting_fields: nonzero(128),
@@ -133,6 +134,25 @@ fn prepare_problem(
 }
 
 fn admit(cache: &mut Pc4LookupGraphCache, fixture: &ClearPath, id: u32) {
+    let target = cache.target().clone();
+    let hit = fixture_hit(cache, fixture, id);
+    cache.admit(&target, hit).unwrap();
+}
+
+fn admit_replacing(
+    cache: &mut Pc4LookupGraphCache,
+    fixture: &ClearPath,
+    id: u32,
+    union: &Pc4CompactGraphUnion,
+) {
+    let target = cache.target().clone();
+    let hit = fixture_hit(cache, fixture, id);
+    cache
+        .admit_replacing_unprotected(&target, hit, &|field| union.protects_field(field))
+        .unwrap();
+}
+
+fn fixture_hit(cache: &Pc4LookupGraphCache, fixture: &ClearPath, id: u32) -> LookupHit {
     let fields = &fixture.dataset.field_index[16 + id as usize * 8..];
     let mut hash = [0; 8];
     hash[..5].copy_from_slice(&fields[..5]);
@@ -148,20 +168,24 @@ fn admit(cache: &mut Pc4LookupGraphCache, fixture: &ClearPath, id: u32) {
             .unwrap(),
     ) as usize;
     let target = cache.target().clone();
-    cache
-        .admit(
-            &target,
-            LookupHit {
-                lookup_session: LookupSessionId::new(id as u64 + 1).unwrap(),
-                snapshot: target.snapshot().clone(),
-                profile: target.profile(),
-                field_id: id,
-                field_hash: u64::from_le_bytes(hash),
-                graph_target_encoding: GraphTargetEncoding::U24LittleEndian,
-                graph_record: fixture.dataset.graph[start..end].to_vec(),
-            },
-        )
-        .unwrap();
+    LookupHit {
+        lookup_session: LookupSessionId::new(id as u64 + 1).unwrap(),
+        snapshot: target.snapshot().clone(),
+        profile: target.profile(),
+        field_id: id,
+        field_hash: u64::from_le_bytes(hash),
+        graph_target_encoding: GraphTargetEncoding::U24LittleEndian,
+        graph_record: fixture.dataset.graph[start..end].to_vec(),
+    }
+}
+
+fn replacement_cache(cache: &Pc4LookupGraphCache, records: usize) -> Pc4LookupGraphCache {
+    Pc4LookupGraphCache::new(
+        cache.activated_snapshot(),
+        cache.target().clone(),
+        Pc4LookupGraphCacheLimits::new(nonzero(records), nonzero(65_536), nonzero(65_536)),
+    )
+    .unwrap()
 }
 
 fn drive(
@@ -187,7 +211,7 @@ fn drive(
         }
         // Deliberately admit one record at a time; no eager full-file shortcut.
         if let Some(id) = pending.first() {
-            admit(cache, fixture, *id);
+            admit_replacing(cache, fixture, *id, union);
         }
     }
     panic!("bounded compact graph fixture stalled");
@@ -238,6 +262,90 @@ fn pc4_compact_graph_union_matches_legacy_patterns_holds_profiles_and_nonbottom_
     }
     assert_eq!(pairs, 60);
     println!("pc4_compact_graph_union_exact_pairs={pairs}");
+}
+
+#[test]
+fn pc4_compact_graph_union_tiny_replacing_cache_preserves_exact_4l_set_and_digest() {
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
+    let fixture = clear_path(4);
+    let pattern = "[IO]III";
+    let hold = FixedQueueHoldState::Disabled;
+    let (mut old, old_guard) =
+        observation_contracts::start_pattern(&fixture, 4, Pc4RuleProfile::Jstris180, pattern, hold);
+    let (status, _) = observation_contracts::drive(&mut old, &old_guard, &fixture);
+    assert!(matches!(
+        status,
+        AppOnlinePc4FixedQueueCandidateStep::Complete { .. }
+    ));
+    let expected = old.into_completed_reducer_input(&old_guard).unwrap();
+
+    let mut bounded = limits();
+    bounded.resident_work = nonzero(1);
+    let (mut union, full_cache, guard) = prepare(
+        &fixture,
+        4,
+        Pc4RuleProfile::Jstris180,
+        pattern,
+        hold,
+        bounded,
+    );
+    let mut cache = replacement_cache(&full_cache, 2);
+    drive(&mut union, &mut cache, &fixture, &guard, true);
+    let usage = union.usage();
+    assert_eq!(usage.peak_resident_work, 1);
+    assert!(cache.evicted_records() > 0);
+    assert!(cache.usage().record_count() <= 2);
+    let actual = union.into_reducer_input(&guard).unwrap();
+    assert_eq!(actual.candidates(), expected.candidates());
+    assert_eq!(
+        actual.universe_identity().exact_candidate_count(),
+        expected.universe_identity().exact_candidate_count()
+    );
+    assert_eq!(
+        actual.universe_identity().candidate_set_digest(),
+        expected.universe_identity().candidate_set_digest()
+    );
+}
+
+#[test]
+fn pc4_compact_graph_union_cancellation_releases_resident_dependency_pins() {
+    let fixture = clear_path(2);
+    let mut bounded = limits();
+    bounded.resident_work = nonzero(1);
+    let (mut union, full_cache, guard) = prepare(
+        &fixture,
+        2,
+        Pc4RuleProfile::Srs,
+        "II",
+        FixedQueueHoldState::Disabled,
+        bounded,
+    );
+    let mut cache = replacement_cache(&full_cache, 2);
+    let mut waiting_with_resident = false;
+    for _ in 0..1_000 {
+        assert_ne!(
+            union.advance(&cache, nonzero(1), &guard).unwrap(),
+            CompactGraphUnionStep::Complete
+        );
+        let pending = union.pending_fields(8).unwrap();
+        if union.usage().peak_resident_work == 1 && !pending.is_empty() {
+            waiting_with_resident = true;
+            assert!(pending.iter().any(|field| union.protects_field(*field)));
+            break;
+        }
+        if let Some(field) = pending.first() {
+            admit_replacing(&mut cache, &fixture, *field, &union);
+        }
+    }
+    assert!(waiting_with_resident, "fixture reaches a pinned I/O wait");
+    guard.cancelled.set(true);
+    assert!(union.advance(&cache, nonzero(1), &guard).is_err());
+    assert!(union.pending_fields(8).unwrap().is_empty());
+    assert!(!union.has_ready_work());
+    for field in 0..cache.field_count() {
+        assert!(!union.protects_field(field));
+    }
+    assert!(union.into_reducer_input(&guard).is_err());
 }
 
 #[test]
@@ -606,20 +714,44 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
         .unwrap(),
     );
     let mut reference = None;
-    for reverse in [false, true] {
+    for (reverse, bounded_cache) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut union_limits = limits();
+        if bounded_cache {
+            union_limits.resident_work = nonzero(2);
+        }
         let (mut union, mut cache, guard) = prepare_problem(
             &fixture,
             2,
             Pc4RuleProfile::Srs,
             problem.clone(),
             FixedQueueHoldState::Disabled,
-            limits(),
+            union_limits,
         );
+        if bounded_cache {
+            cache = replacement_cache(&cache, 4);
+        }
         let mut maximum_pending = 0;
+        let mut observed_uncharged_resident_wait = false;
         for _ in 0..10_000 {
             let status = union.advance(&cache, nonzero(8), &guard).unwrap();
             if status == CompactGraphUnionStep::Complete {
                 break;
+            }
+            if bounded_cache
+                && union.residents == union.limits.resident_work.get()
+                && union.ready.front().is_some_and(|task| !task.resident)
+            {
+                let charged = union.usage().work;
+                assert_eq!(
+                    union.advance(&cache, nonzero(8), &guard).unwrap(),
+                    CompactGraphUnionStep::Waiting
+                );
+                assert_eq!(
+                    union.usage().work,
+                    charged,
+                    "I/O-only resident wait consumes no graph work"
+                );
+                observed_uncharged_resident_wait = true;
             }
             let mut pending = union.pending_fields(128).unwrap();
             assert_eq!(
@@ -635,10 +767,11 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
                 if reverse {
                     pending.reverse();
                 }
-                admit(
+                admit_replacing(
                     &mut cache,
                     &fixture,
                     *pending.first().expect("not complete without data"),
+                    &union,
                 );
             }
         }
@@ -659,6 +792,15 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
             usage.merged_states >= 3,
             "same partial layout/frame must merge before expansion"
         );
+        if bounded_cache {
+            assert!(cache.evicted_records() > 0);
+            assert!(cache.usage().record_count() <= 4);
+            assert!(usage.peak_resident_work <= 2);
+            assert!(
+                observed_uncharged_resident_wait,
+                "fixture reaches resident-full plus cold-ready backpressure"
+            );
+        }
         let actual = union.into_reducer_input(&guard).unwrap();
         let expected = clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity::from_placements(
             fixture.initial_board, fixture.original_placements.iter().map(|mask|
@@ -670,8 +812,13 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
         }
         reference = Some(actual.candidates().to_vec());
         println!(
-            "pc4_compact_graph_union_diamond reverse={reverse} work={} merged={} peak_pending={} frontier_bytes={} terminal_arrivals={}",
-            usage.work, usage.merged_states, usage.peak_waiting_fields, usage.peak_frontier_bytes, usage.terminal_arrivals
+            "pc4_compact_graph_union_diamond reverse={reverse} bounded_cache={bounded_cache} work={} merged={} peak_pending={} frontier_bytes={} terminal_arrivals={} evictions={}",
+            usage.work,
+            usage.merged_states,
+            usage.peak_waiting_fields,
+            usage.peak_frontier_bytes,
+            usage.terminal_arrivals,
+            cache.evicted_records()
         );
     }
 }
