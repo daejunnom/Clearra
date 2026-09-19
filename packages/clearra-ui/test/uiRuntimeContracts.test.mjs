@@ -200,6 +200,32 @@ test('generic runtime wrappers expose stable failure categories without private 
   }
 });
 
+test('tablebase transport failures remain distinct and never imply automatic offline fallback', () => {
+  for (const [reason, expected] of [
+    ['pc4_online_field_miss', 'tablebase-miss'],
+    ['pc4_online_offline', 'tablebase-offline'],
+    ['pc4_online_rate_limited', 'tablebase-rate-limited'],
+    ['pc4_online_timeout', 'tablebase-timeout'],
+    ['pc4_online_unavailable', 'tablebase-unavailable'],
+    ['pc4_online_profile_or_target_unavailable', 'tablebase-unavailable']
+  ]) {
+    const projected = production.projectWorkspacePublicFailure({
+      status: 'failed', responseStatus: 'execution-failed',
+      diagnostics: [{ code: reason, severity: 'error', message: reason }]
+    });
+    assert.deepEqual(projected.publicFailures, [{ code: expected, severity: 'error' }]);
+    for (const language of ['en', 'ko', 'ja']) {
+      const message = production.workspacePublicFailureMessage(language, projected.publicFailures[0]);
+      assert.match(message, language === 'ko'
+        ? /오프라인 탐색은 시작하지 않았|요청 한도/u
+        : language === 'ja'
+          ? /オフライン探索は開始していません|リクエスト上限/u
+          : /Offline search was not started|rate limit/u);
+      assert.doesNotMatch(message, /pc4_online_|execution-failed|resource-limit|unsupported/u);
+    }
+  }
+});
+
 test('workspace shows one concrete replay failure and retains every wrapping diagnostic', () => {
   const diagnostics = [
     { code: 'I_PC_QUERY_MVP_SUPPORTED', severity: 'info', message: 'PC query is supported' },

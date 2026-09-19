@@ -363,7 +363,7 @@ HEAD의 통과한 CI 또는 4194에 반영된 동작으로 취급하지 않는�
 | Web 전송 | 물리 HTTP 기본 4개(설정 상한 16); exact in-flight 결합, byte 예약, index page 캐시 | 요청 M과 CPU P를 각각 계측/조정; 큰 in-flight span에 포함된 다른 키의 수요 결합은 별도 후보 |
 | 응답 버퍼 | 최대 16개 논리 slot, 각각 최대 64KiB; 완료됐어도 admission 전까지 slot 점유 | 이 제한은 전체 작업·캐시·결과의 메모리 상한이 아님 |
 | 기존 ready 제어 | waiting 16필드 또는 64 continuation에서 union 진행도 제한; graph admission 때 wakeup 허용 | 새 수요를 만드는 cold 확장만 제한하고 기존 resident/응답 처리 진행은 보장할 필요 |
-| 그 외 경로 | legacy/fixed-queue 경로에는 단일 pending await가 남음; CLI는 동기 drive와 요청별 curl 프로세스 | 모든 PC/Setup/CLI/Discord가 이미 비동기라고 표현하지 않음 |
+| 그 외 경로 | 온라인 제품 CLI는 persistent multi/pool과 `pending_ranges()`를 소비한다. 로컬 파일 driver와 합성 test adapter만 scalar `pending_range()`를 유지한다. 순차 fixed-queue의 한 의존 요청은 병렬 host 누락이 아니라 graph dependency다. | 모든 lookup이 서로 독립이라고 과장하지 않고 큰 전체 집합의 mixed index/graph tail을 실제 A/B할 것 |
 | 큰 입력 | 누적 lookup 100,000개와 append-only graph cache 한도가 별도로 존재 | 동시성 상한으로 오해하지 말고 bounded replacement와 전체 집합 정확성을 함께 검증 |
 
 작성 중인 후보는 resident work 최대 64개와 source/current-target pin을 두고,
@@ -616,15 +616,13 @@ backlog 뒤의 graph가 다음 전송 slot을 얻어 resident 작업을 풀고, 
 source, native CLI, surface, PC4 계약, preview-WASM 다섯 job은 모두 성공했다. 실제 대형
 HTTP A/B는 여전히 남아 있다.
 
-CLI/Discord의 다음 구현 경계는 별도다. App은 이미 `pending_ranges()`와
-`has_ready_work()`를 제공하지만 native host driver는 첫 `pending_range()` 하나를 읽고
-요청마다 curl 프로세스를 끝낸다. 후속 후보는 (1) ready CPU를 먼저 drain하고,
-(2) 최대 16개의 generation/profile-bound range batch를 한 transport owner에 넘기며,
-(3) libcurl multi/pool 하나가 기본 4개의 transfer를 drive하고,
-(4) 첫 완료부터 exact lookup ID로 admission하는 구조다. HTTP/2를 지원하지 않는 환경은
-같은 broker가 bounded HTTP/1.1 연결을 사용하되 의미와 예산은 같아야 한다. 요청별
-curl thread 증대는 그 대체물이 아니다. 아래 9.10의 opt-in 후보가 이 owner 경계를
-구현하지만, 기본 제품 승격과 full-search A/B는 아직 남아 있다.
+CLI/Discord의 당시 다음 구현 경계는 별도였다. 이후 App의 `pending_ranges()`와
+`has_ready_work()`를 native host가 직접 소비하고, 최대 16개의 generation/profile-bound
+demand를 한 persistent libcurl multi/pool owner에 넘기며 기본 4개의 transfer와 첫 완료
+admission을 수행하도록 구현했다. HTTP/2를 지원하지 않는 환경도 같은 broker의 bounded
+HTTP/1.1 연결을 사용한다. 요청별 curl thread 증대는 사용하지 않는다. 로컬 파일 driver와
+합성 test adapter의 scalar 소비는 네트워크 경로가 아니며, 순차 graph dependency를
+억지로 병렬화하지 않는다. 남은 것은 기본 제품 승격과 실제 큰 full-search A/B다.
 
 ### 9.7 실제 로컬 블록 A/B와 활성화 판정
 
@@ -990,6 +988,12 @@ tail 해결을 주장하지 않는다.
 탐색을 자동 시작하지 않는다. 잘못된 Content-Range, whole-body 200, immutable identity
 불일치는 데이터/프로토콜 오류로 계속 분리한다. 이것은 실패 의미 보존의 완료이지,
 full-search tail이나 HF rate limit 자체를 제거했다는 증거는 아니다.
+
+제품 오류 투영도 같은 타입을 보존한다. Web은 miss/offline/rate-limit/timeout/
+unavailable을 서로 다른 공개 오류로 분리하고 CLI는 내부 `pc4_online_*` reason 대신
+언어별 안내를 출력한다. 두 surface 모두 자동 offline fallback을 시작하지 않으며,
+사용자가 TB를 끄거나 `--no-tablebase`로 다시 실행해야 offline 계산이 시작된다.
+GUI Stop과 CLI Ctrl+C가 그 명시 실행의 중단 경계다.
 
 Setup은 기존 수치가 동일한 TB on/off 입력이 아니므로 재사용 A/B를 만들지 않았다. 현재
 exact target receipt가 없어 실제 HF Setup arm을 실행하면 안 된다. 이후 동일 입력에서 두

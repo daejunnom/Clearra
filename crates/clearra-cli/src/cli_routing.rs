@@ -18,6 +18,7 @@ use clearra_app::AppTablebaseSession;
 use clearra_app::{io::AppFilePolicy, AppContext, AppStatus};
 #[cfg(feature = "wasm-cpu-runtime")]
 use clearra_app::{AppCoreExecutorService, AppServices};
+use clearra_i18n::LanguageId;
 
 #[cfg(all(feature = "wasm-cpu-runtime", not(feature = "online-pc4-tablebase")))]
 const PC4_COMPACT_TABLEBASE: &[u8] =
@@ -186,7 +187,10 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             match crate::tablebase_download::execute(context, request) {
                 Ok(response) => response,
                 Err(reason) => {
-                    return CliOutput::error(CliErrorCode::TablebaseLookupFailed, reason)
+                    return CliOutput::error(
+                        CliErrorCode::TablebaseLookupFailed,
+                        tablebase_lookup_failure_message(reason, language),
+                    )
                 }
             }
         } else {
@@ -293,6 +297,39 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
     }
 }
 
+fn tablebase_lookup_failure_message(reason: &str, language: LanguageId) -> &'static str {
+    let class = match reason {
+        "pc4_online_field_miss" => 0,
+        "pc4_online_offline" => 1,
+        "pc4_online_rate_limited" => 2,
+        "pc4_online_timeout" => 3,
+        "pc4_online_unavailable"
+        | "pc4_online_generation_unavailable"
+        | "pc4_online_profile_or_target_unavailable" => 4,
+        _ => 5,
+    };
+    match (language, class) {
+        (LanguageId::Ko, 0) => "선택한 테이블베이스에 이 필드의 항목이 없습니다. 오프라인 탐색은 시작하지 않았습니다. --tablebase를 제거하거나 --no-tablebase로 다시 실행하면 오프라인으로 탐색하며 Ctrl+C로 중단할 수 있습니다.",
+        (LanguageId::Ko, 1) => "테이블베이스 서비스에 연결할 수 없습니다. 오프라인 탐색은 시작하지 않았습니다. --tablebase를 제거하거나 --no-tablebase로 다시 실행하면 오프라인으로 탐색하며 Ctrl+C로 중단할 수 있습니다.",
+        (LanguageId::Ko, 2) => "테이블베이스 서비스의 요청 한도에 도달했습니다. 오프라인 탐색은 시작하지 않았습니다. 잠시 뒤 다시 시도하거나 --tablebase를 제거하고 오프라인으로 다시 실행해 주세요. 오프라인 탐색은 Ctrl+C로 중단할 수 있습니다.",
+        (LanguageId::Ko, 3) => "테이블베이스 요청 시간이 초과되었습니다. 오프라인 탐색은 시작하지 않았습니다. 다시 시도하거나 --tablebase를 제거하고 오프라인으로 다시 실행해 주세요. 오프라인 탐색은 Ctrl+C로 중단할 수 있습니다.",
+        (LanguageId::Ko, 4) => "이 규칙과 목표에 사용할 수 있도록 검증된 테이블베이스가 없습니다. 오프라인 탐색은 시작하지 않았습니다. --tablebase를 제거하거나 --no-tablebase로 다시 실행하면 오프라인으로 탐색하며 Ctrl+C로 중단할 수 있습니다.",
+        (LanguageId::Ko, _) => "테이블베이스 조회를 완료하지 못했습니다. 오프라인 탐색은 시작하지 않았습니다. --tablebase를 제거하거나 --no-tablebase로 다시 실행하면 오프라인으로 탐색하며 Ctrl+C로 중단할 수 있습니다.",
+        (LanguageId::Ja, 0) => "選択したテーブルベースにこのフィールドの項目がありません。オフライン探索は開始していません。--tablebaseを外すか--no-tablebaseで再実行するとオフラインで探索でき、Ctrl+Cで中断できます。",
+        (LanguageId::Ja, 1) => "テーブルベースサービスに接続できません。オフライン探索は開始していません。--tablebaseを外すか--no-tablebaseで再実行するとオフラインで探索でき、Ctrl+Cで中断できます。",
+        (LanguageId::Ja, 2) => "テーブルベースサービスのリクエスト上限に達しました。オフライン探索は開始していません。しばらく待って再試行するか、--tablebaseを外してオフラインで再実行してください。オフライン探索はCtrl+Cで中断できます。",
+        (LanguageId::Ja, 3) => "テーブルベースのリクエストがタイムアウトしました。オフライン探索は開始していません。再試行するか、--tablebaseを外してオフラインで再実行してください。オフライン探索はCtrl+Cで中断できます。",
+        (LanguageId::Ja, 4) => "このルールと目標に利用できる検証済みテーブルベースがありません。オフライン探索は開始していません。--tablebaseを外すか--no-tablebaseで再実行するとオフラインで探索でき、Ctrl+Cで中断できます。",
+        (LanguageId::Ja, _) => "テーブルベースの照会を完了できませんでした。オフライン探索は開始していません。--tablebaseを外すか--no-tablebaseで再実行するとオフラインで探索でき、Ctrl+Cで中断できます。",
+        (LanguageId::En, 0) => "The selected tablebase has no entry for this field. Offline search was not started. Re-run without --tablebase or with --no-tablebase to search offline; press Ctrl+C to stop it.",
+        (LanguageId::En, 1) => "The tablebase service could not be reached. Offline search was not started. Re-run without --tablebase or with --no-tablebase to search offline; press Ctrl+C to stop it.",
+        (LanguageId::En, 2) => "The tablebase service rate limit was reached. Offline search was not started. Wait and retry, or re-run without --tablebase to search offline; press Ctrl+C to stop it.",
+        (LanguageId::En, 3) => "The tablebase request timed out. Offline search was not started. Retry, or re-run without --tablebase to search offline; press Ctrl+C to stop it.",
+        (LanguageId::En, 4) => "No qualified tablebase is available for this rule and target. Offline search was not started. Re-run without --tablebase or with --no-tablebase to search offline; press Ctrl+C to stop it.",
+        (LanguageId::En, _) => "The tablebase lookup could not be completed. Offline search was not started. Re-run without --tablebase or with --no-tablebase to search offline; press Ctrl+C to stop it.",
+    }
+}
+
 #[cfg(all(feature = "wasm-cpu-runtime", not(feature = "online-pc4-tablebase")))]
 fn tablebase_session_for_command(
     command: &ParsedCliCommand,
@@ -363,7 +400,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{install_requested_tablebase, route_invocation};
+    use super::{install_requested_tablebase, route_invocation, tablebase_lookup_failure_message};
     use crate::args::CliParser;
     use crate::{error::CliErrorCode, exit::ExitCode};
     use clearra_app::decode_ctk3_exact;
@@ -958,5 +995,33 @@ mod tests {
         assert!(install_requested_tablebase(false, b"not-a-tablebase")
             .expect("disabled tablebase must not be installed")
             .is_none());
+    }
+
+    #[test]
+    fn tablebase_failures_are_publicly_typed_without_starting_offline_work() {
+        for (reason, expected) in [
+            ("pc4_online_field_miss", "no entry"),
+            ("pc4_online_offline", "could not be reached"),
+            ("pc4_online_rate_limited", "rate limit"),
+            ("pc4_online_timeout", "timed out"),
+            (
+                "pc4_online_profile_or_target_unavailable",
+                "No qualified tablebase",
+            ),
+            ("private_internal_detail", "could not be completed"),
+        ] {
+            let message = tablebase_lookup_failure_message(reason, LanguageId::En);
+            assert!(message.contains(expected), "{reason}: {message}");
+            assert!(message.contains("Offline search was not started"));
+            assert!(message.contains("--no-tablebase"));
+            assert!(message.contains("Ctrl+C"));
+            assert!(!message.contains(reason));
+        }
+        for language in [LanguageId::Ko, LanguageId::Ja] {
+            let message = tablebase_lookup_failure_message("pc4_online_timeout", language);
+            assert!(message.contains("Ctrl+C"));
+            assert!(message.contains("--tablebase"));
+            assert!(!message.contains("pc4_online_"));
+        }
     }
 }

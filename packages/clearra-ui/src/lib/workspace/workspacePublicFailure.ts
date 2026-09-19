@@ -14,6 +14,11 @@ export type WorkspacePublicFailureCode =
   | 'resource-limit'
   | 'result-incomplete'
   | 'result-invalid'
+  | 'tablebase-miss'
+  | 'tablebase-offline'
+  | 'tablebase-rate-limited'
+  | 'tablebase-timeout'
+  | 'tablebase-unavailable'
   | 'execution-failed'
   | 'execution-warning';
 
@@ -61,6 +66,11 @@ const PUBLIC_FAILURE_MESSAGE_KEYS: Record<WorkspacePublicFailureCode, WorkspaceM
   'resource-limit': 'workspaceFailureResourceLimit',
   'result-incomplete': 'workspaceFailureIncomplete',
   'result-invalid': 'workspaceFailureInvalidResult',
+  'tablebase-miss': 'workspaceFailureTablebaseMiss',
+  'tablebase-offline': 'workspaceFailureTablebaseOffline',
+  'tablebase-rate-limited': 'workspaceFailureTablebaseRateLimited',
+  'tablebase-timeout': 'workspaceFailureTablebaseTimeout',
+  'tablebase-unavailable': 'workspaceFailureTablebaseUnavailable',
   'execution-failed': 'workspaceFailureExecution',
   'execution-warning': 'workspaceFailureWarning'
 };
@@ -144,6 +154,8 @@ function classifyDiagnosticCode(
   severity: 'error' | 'warning'
 ): WorkspacePublicFailureCode {
   const normalized = code.toLowerCase();
+  const tablebase = knownTablebaseFailure(normalized);
+  if (tablebase) return tablebase;
   if (/(?:wasm|runtime).*trap/u.test(normalized)) return 'runtime-trap';
   if (/(?:cancel|abort)/u.test(normalized)) return 'request-cancelled';
   if (/(?:terminat|worker.*fail|panic)/u.test(normalized)) return 'worker-terminated';
@@ -164,6 +176,8 @@ function classifyDiagnosticCode(
 // Runtime wrappers often carry a generic code. Recognize only stable failure
 // classes in their evidence; never echo raw messages, fields, IDs or paths.
 function knownRuntimeFailure(message: string): WorkspacePublicFailureCode | null {
+  const tablebase = knownTablebaseFailure(message.toLowerCase());
+  if (tablebase) return tablebase;
   if (/(?:lease[-_ ]expired|heartbeat lease expired)/iu.test(message)) {
     return 'worker-lease-expired';
   }
@@ -175,6 +189,22 @@ function knownRuntimeFailure(message: string): WorkspacePublicFailureCode | null
   }
   if (/replay does not terminate at the requested cleared field/iu.test(message)) {
     return 'result-invalid';
+  }
+  return null;
+}
+
+// These are stable runtime reason codes, not user-visible diagnostics. Map
+// them before the generic unsupported/resource classifiers so a transport
+// outage is not presented as an unsupported command and a table miss is not
+// presented as a solver failure. The localized messages describe the only
+// explicit offline path; this projection never starts that work itself.
+function knownTablebaseFailure(value: string): WorkspacePublicFailureCode | null {
+  if (/pc4_online_(?:field_)?miss/u.test(value)) return 'tablebase-miss';
+  if (/pc4_online_offline/u.test(value)) return 'tablebase-offline';
+  if (/pc4_online_rate_limited/u.test(value)) return 'tablebase-rate-limited';
+  if (/pc4_online_timeout/u.test(value)) return 'tablebase-timeout';
+  if (/pc4_online_(?:generation_|profile_or_target_)?unavailable/u.test(value)) {
+    return 'tablebase-unavailable';
   }
   return null;
 }
