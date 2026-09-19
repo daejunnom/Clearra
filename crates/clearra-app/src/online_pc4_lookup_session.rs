@@ -6,11 +6,12 @@
 //! starts a separate exact-search request.
 
 use clearra_pc4_tablebase::{
-    LookupFailure, LookupHit, LookupMachine, LookupSessionId, LookupStartError, LookupStep,
-    Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, PinnedPc4Generation,
-    QualifiedPc4TargetIdentity, RangeAdmissionAttempt, RangeAdmissionError, RangeAdmissionGuard,
-    RangeAdmissionInput, RangeAdmissionLimits, RangeAdmissionOutcome, RangeAdmissionSession,
-    RangeRequest, RangeTransportFailure, SupplyError, UnsupportedProfileReason,
+    GraphOffsetsHeaderWitness, LookupFailure, LookupHit, LookupMachine, LookupSessionId,
+    LookupStartError, LookupStep, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase,
+    PinnedPc4Generation, QualifiedPc4TargetIdentity, RangeAdmissionAttempt, RangeAdmissionError,
+    RangeAdmissionGuard, RangeAdmissionInput, RangeAdmissionLimits, RangeAdmissionOutcome,
+    RangeAdmissionSession, RangeRequest, RangeTransportFailure, SupplyError,
+    UnsupportedProfileReason,
 };
 
 #[cfg(test)]
@@ -218,6 +219,7 @@ pub enum AppOnlinePc4LookupStep {
 pub struct AppQualifiedPc4LookupHit {
     target: QualifiedPc4TargetIdentity,
     lookup: LookupHit,
+    graph_offsets_header_witness: GraphOffsetsHeaderWitness,
 }
 
 impl AppQualifiedPc4LookupHit {
@@ -227,6 +229,10 @@ impl AppQualifiedPc4LookupHit {
 
     pub const fn lookup(&self) -> &LookupHit {
         &self.lookup
+    }
+
+    pub(crate) const fn graph_offsets_header_witness(&self) -> &GraphOffsetsHeaderWitness {
+        &self.graph_offsets_header_witness
     }
 
     pub fn into_parts(self) -> (QualifiedPc4TargetIdentity, LookupHit) {
@@ -318,18 +324,46 @@ impl AppOnlinePc4LookupSession {
         generation: PinnedPc4Generation,
         request: Pc4OnlineLookupRequest,
     ) -> Result<Self, AppOnlinePc4LookupStartError> {
+        Self::start_inner(generation, request, None)
+    }
+
+    pub(crate) fn start_with_graph_offsets_header(
+        generation: PinnedPc4Generation,
+        request: Pc4OnlineLookupRequest,
+        witness: &GraphOffsetsHeaderWitness,
+    ) -> Result<Self, AppOnlinePc4LookupStartError> {
+        Self::start_inner(generation, request, Some(witness))
+    }
+
+    fn start_inner(
+        generation: PinnedPc4Generation,
+        request: Pc4OnlineLookupRequest,
+        witness: Option<&GraphOffsetsHeaderWitness>,
+    ) -> Result<Self, AppOnlinePc4LookupStartError> {
         let snapshot = generation.activated_snapshot();
         if request.target().snapshot() != snapshot.qualified_identity() {
             return Err(AppOnlinePc4LookupStartError::TargetSnapshotMismatch);
         }
-        let machine = match request.field() {
-            Pc4OnlineLookupField::Hash(field_hash) => LookupMachine::start(
+        let machine = match (request.field(), witness) {
+            (Pc4OnlineLookupField::Hash(_), Some(_)) => {
+                Err(LookupStartError::GraphOffsetsHeaderWitnessMismatch)
+            }
+            (Pc4OnlineLookupField::Hash(field_hash), None) => LookupMachine::start(
                 snapshot,
                 request.profile(),
                 field_hash,
                 request.lookup_session(),
             ),
-            Pc4OnlineLookupField::Id(field_id) => LookupMachine::start_by_field_id(
+            (Pc4OnlineLookupField::Id(field_id), Some(witness)) => {
+                LookupMachine::start_by_field_id_with_graph_offsets_header(
+                    snapshot,
+                    request.profile(),
+                    field_id,
+                    request.lookup_session(),
+                    witness,
+                )
+            }
+            (Pc4OnlineLookupField::Id(field_id), None) => LookupMachine::start_by_field_id(
                 snapshot,
                 request.profile(),
                 field_id,
@@ -364,6 +398,11 @@ impl AppOnlinePc4LookupSession {
             LookupStep::Hit(hit) => AppOnlinePc4LookupStep::Hit(AppQualifiedPc4LookupHit {
                 target: self.request.target().clone(),
                 lookup: hit,
+                graph_offsets_header_witness: self
+                    .machine
+                    .graph_offsets_header_witness()
+                    .expect("a graph hit owns a validated offset-header witness")
+                    .clone(),
             }),
             LookupStep::Miss => AppOnlinePc4LookupStep::Miss,
             LookupStep::Failed(failure) => AppOnlinePc4LookupStep::Failed(failure),

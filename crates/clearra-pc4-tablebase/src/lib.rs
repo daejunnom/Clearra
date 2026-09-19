@@ -83,8 +83,8 @@ pub use lazy_materialized_path::{
     FixedQueuePathMaterializationRequest,
 };
 pub use lookup::{
-    FormatMismatch, LookupFailure, LookupHit, LookupMachine, LookupStartError, LookupStep,
-    SupplyError,
+    FormatMismatch, GraphOffsetsHeaderWitness, LookupFailure, LookupHit, LookupMachine,
+    LookupStartError, LookupStep, SupplyError,
 };
 pub use manifest::{
     ActivatedProfileError, ActivatedSnapshot, ActivationError, ArtifactDescriptor,

@@ -3,10 +3,10 @@ use core::cmp::Ordering;
 
 use crate::{
     manifest::{
-        ActivatedProfileError, ActivatedSnapshot, FieldIdIndexRelation, Pc4ArtifactRole,
-        Pc4ProfileManifest, Pc4RuleProfile, QualifiedSnapshotIdentity, UnsupportedProfileReason,
-        FIELD_HASH_INDEX_MAGIC, FIELD_HASH_RECORD_BYTES, GRAPH_OFFSETS_MAGIC, GRAPH_OFFSET_BYTES,
-        INDEX_HEADER_BYTES, RANGE_INDEX_VERSION,
+        ActivatedProfileError, ActivatedSnapshot, ArtifactDescriptor, FieldIdIndexRelation,
+        Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile, QualifiedSnapshotIdentity,
+        UnsupportedProfileReason, FIELD_HASH_INDEX_MAGIC, FIELD_HASH_RECORD_BYTES,
+        GRAPH_OFFSETS_MAGIC, GRAPH_OFFSET_BYTES, INDEX_HEADER_BYTES, RANGE_INDEX_VERSION,
     },
     protocol::{
         LookupSessionId, RangeRequest, RangeResponse, RangeResponseKind, RangeTransportFailure,
@@ -129,6 +129,7 @@ pub enum LookupStartError {
     ReverseFieldIdLookupNotQualified {
         profile: Pc4RuleProfile,
     },
+    GraphOffsetsHeaderWitnessMismatch,
 }
 
 impl LookupStartError {
@@ -140,7 +141,39 @@ impl LookupStartError {
             Self::ReverseFieldIdLookupNotQualified { .. } => {
                 "pc4_online_reverse_field_id_lookup_not_qualified"
             }
+            Self::GraphOffsetsHeaderWitnessMismatch => {
+                "pc4_online_graph_offsets_header_witness_mismatch"
+            }
         }
+    }
+}
+
+/// Proof that the graph-offset index header was read and validated for one
+/// exact immutable snapshot/profile/artifact. It carries no graph contents and
+/// cannot be constructed from manifest labels alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphOffsetsHeaderWitness {
+    snapshot: QualifiedSnapshotIdentity,
+    profile: Pc4RuleProfile,
+    artifact: ArtifactDescriptor,
+    field_count: u32,
+}
+
+impl GraphOffsetsHeaderWitness {
+    fn validated(snapshot: &QualifiedSnapshotIdentity, profile: &Pc4ProfileManifest) -> Self {
+        Self {
+            snapshot: snapshot.clone(),
+            profile: profile.profile(),
+            artifact: profile.graph_offsets().clone(),
+            field_count: profile.field_count(),
+        }
+    }
+
+    fn matches(&self, snapshot: &QualifiedSnapshotIdentity, profile: &Pc4ProfileManifest) -> bool {
+        self.snapshot == *snapshot
+            && self.profile == profile.profile()
+            && self.artifact == *profile.graph_offsets()
+            && self.field_count == profile.field_count()
     }
 }
 
@@ -191,6 +224,7 @@ pub struct LookupMachine {
     profile: Pc4ProfileManifest,
     selector: LookupSelector,
     field_hash: Option<u64>,
+    graph_offsets_header_witness: Option<GraphOffsetsHeaderWitness>,
     next_request_id: u64,
     phase: Phase,
     pending: Option<RangeRequest>,
@@ -273,6 +307,54 @@ impl LookupMachine {
         ))
     }
 
+    /// Starts a qualified field-ID lookup after a prior lookup in the same
+    /// immutable snapshot/profile validated the graph-offset header. The typed
+    /// witness removes only that repeated header request; offset and graph
+    /// bounds remain validated for every lookup.
+    pub fn start_by_field_id_with_graph_offsets_header(
+        snapshot: &ActivatedSnapshot,
+        profile: Pc4RuleProfile,
+        field_id: u32,
+        lookup_session: LookupSessionId,
+        witness: &GraphOffsetsHeaderWitness,
+    ) -> Result<Self, LookupStartError> {
+        let profile_manifest = qualified_profile(snapshot, profile)?;
+        if profile_manifest.field_id_index_relation() != FieldIdIndexRelation::RecordOrdinal {
+            return Err(LookupStartError::ReverseFieldIdLookupNotQualified { profile });
+        }
+        let field_count = profile_manifest.field_count();
+        if field_id >= field_count {
+            return Err(LookupStartError::FieldIdOutsidePc4Domain {
+                field_id,
+                field_count,
+            });
+        }
+        if profile_manifest.graph_source_field_encoding()
+            != GraphSourceFieldEncoding::HydraU40BigEndianPrefix
+            || !witness.matches(snapshot.qualified_identity(), profile_manifest)
+        {
+            return Err(LookupStartError::GraphOffsetsHeaderWitnessMismatch);
+        }
+        let mut machine = Self {
+            lookup_session,
+            snapshot: snapshot.qualified_identity().clone(),
+            profile: profile_manifest.clone(),
+            selector: LookupSelector::FieldId(field_id),
+            field_hash: None,
+            graph_offsets_header_witness: Some(witness.clone()),
+            next_request_id: 1,
+            phase: Phase::OffsetPair { field_id },
+            pending: None,
+            terminal: None,
+        };
+        machine.request(
+            Pc4ArtifactRole::GraphOffsets,
+            INDEX_HEADER_BYTES + u64::from(field_id) * GRAPH_OFFSET_BYTES,
+            (2 * GRAPH_OFFSET_BYTES) as u32,
+        );
+        Ok(machine)
+    }
+
     fn start_with_selector(
         snapshot: &ActivatedSnapshot,
         profile: Pc4ProfileManifest,
@@ -286,6 +368,7 @@ impl LookupMachine {
             profile,
             selector,
             field_hash,
+            graph_offsets_header_witness: None,
             next_request_id: 1,
             phase: Phase::FieldIndexHeader,
             pending: None,
@@ -323,6 +406,10 @@ impl LookupMachine {
                 .expect("non-terminal lookup always owns one pending Range request")
                 .clone(),
         )
+    }
+
+    pub const fn graph_offsets_header_witness(&self) -> Option<&GraphOffsetsHeaderWitness> {
+        self.graph_offsets_header_witness.as_ref()
     }
 
     pub fn supply(&mut self, response: RangeResponse) -> Result<(), SupplyError> {
@@ -510,6 +597,10 @@ impl LookupMachine {
             self.fail_format(error);
             return;
         }
+        self.graph_offsets_header_witness = Some(GraphOffsetsHeaderWitness::validated(
+            &self.snapshot,
+            &self.profile,
+        ));
         self.phase = Phase::OffsetPair { field_id };
         self.request(
             Pc4ArtifactRole::GraphOffsets,
@@ -900,10 +991,14 @@ mod tests {
                     LookupMachine::start_by_field_id(&manifest, profile, id as u32, session(1))
                         .unwrap();
                 let mut requests = 0;
+                let mut witness = None;
                 loop {
                     match machine.step() {
                         LookupStep::NeedRange(request) => {
                             requests += 1;
+                            let validated_header = request.artifact()
+                                == Pc4ArtifactRole::GraphOffsets
+                                && request.offset() == 0;
                             let bytes = match request.artifact() {
                                 Pc4ArtifactRole::GraphOffsets => &offsets,
                                 Pc4ArtifactRole::Graph => &graph,
@@ -912,6 +1007,9 @@ mod tests {
                                 }
                             };
                             respond(&mut machine, request, bytes);
+                            if validated_header {
+                                witness = machine.graph_offsets_header_witness().cloned();
+                            }
                         }
                         LookupStep::Hit(hit) => {
                             assert_eq!(requests, 3);
@@ -920,6 +1018,58 @@ mod tests {
                             break;
                         }
                         other => panic!("unexpected inline lookup outcome: {other:?}"),
+                    }
+                }
+                let witness = witness.expect("validated graph-offset header witness");
+                let other_profile = Pc4RuleProfile::ALL
+                    .into_iter()
+                    .find(|candidate| *candidate != profile)
+                    .expect("another qualified profile");
+                assert_eq!(
+                    LookupMachine::start_by_field_id_with_graph_offsets_header(
+                        &manifest,
+                        other_profile,
+                        id as u32,
+                        session(2),
+                        &witness,
+                    )
+                    .unwrap_err(),
+                    LookupStartError::GraphOffsetsHeaderWitnessMismatch
+                );
+                let mut warm = LookupMachine::start_by_field_id_with_graph_offsets_header(
+                    &manifest,
+                    profile,
+                    id as u32,
+                    session(3),
+                    &witness,
+                )
+                .expect("witness-bound lookup");
+                let mut warm_requests = 0;
+                loop {
+                    match warm.step() {
+                        LookupStep::NeedRange(request) => {
+                            warm_requests += 1;
+                            assert!(
+                                request.artifact() != Pc4ArtifactRole::GraphOffsets
+                                    || request.offset() != 0,
+                                "header request is skipped"
+                            );
+                            let bytes = match request.artifact() {
+                                Pc4ArtifactRole::GraphOffsets => &offsets,
+                                Pc4ArtifactRole::Graph => &graph,
+                                Pc4ArtifactRole::FieldHashIndex => {
+                                    panic!("witness-bound inline lookup needs no FHID read")
+                                }
+                            };
+                            respond(&mut warm, request, bytes);
+                        }
+                        LookupStep::Hit(hit) => {
+                            assert_eq!(warm_requests, 2);
+                            assert_eq!((hit.field_id, hit.field_hash), (id as u32, *hash));
+                            assert_eq!(warm.graph_offsets_header_witness(), Some(&witness));
+                            break;
+                        }
+                        other => panic!("unexpected witness-bound outcome: {other:?}"),
                     }
                 }
             }

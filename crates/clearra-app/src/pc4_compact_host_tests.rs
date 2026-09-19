@@ -92,6 +92,7 @@ fn pc4_compact_graph_union_host_out_of_order_and_scalar_local_http_parity() {
     ] {
         let mut execution = start(&fixture);
         let mut peak = 0;
+        let mut graph_offsets_headers = 0;
         let mut complete = false;
         for _ in 0..10_000 {
             match execution.advance(8, &control).unwrap() {
@@ -127,10 +128,17 @@ fn pc4_compact_graph_union_host_out_of_order_and_scalar_local_http_parity() {
                 ranges.reverse();
             }
             for range in ranges {
+                if range.artifact() == Pc4ArtifactRole::GraphOffsets && range.offset() == 0 {
+                    graph_offsets_headers += 1;
+                }
                 supply(&mut execution, &fixture, &range, &control, local);
             }
         }
         assert!(complete, "bounded host fixture stalled");
+        assert_eq!(
+            graph_offsets_headers, 1,
+            "one immutable snapshot/profile must validate its offsets header once"
+        );
         if !scalar {
             assert!(peak >= 2, "independent lookups must overlap");
         }

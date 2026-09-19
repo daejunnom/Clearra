@@ -14,8 +14,8 @@ use crate::{
     Pc4PreparedOnlineInput, PcCandidateReducerInput, PcCandidateSourceBinding,
 };
 use clearra_pc4_tablebase::{
-    LookupSessionId, PinnedPc4Generation, RangeAdmissionAttempt, RangeAdmissionGuard,
-    RangeAdmissionInput, RangeAdmissionLimits, RangeRequest,
+    GraphOffsetsHeaderWitness, LookupSessionId, PinnedPc4Generation, RangeAdmissionAttempt,
+    RangeAdmissionGuard, RangeAdmissionInput, RangeAdmissionLimits, RangeRequest,
 };
 use core::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 
@@ -37,6 +37,7 @@ pub(crate) struct Pc4CompactCandidateSession {
     generation: PinnedPc4Generation,
     limits: CompactSessionLimits,
     cache: Pc4LookupGraphCache,
+    graph_offsets_header_witness: GraphOffsetsHeaderWitness,
     union: Option<Pc4CompactGraphUnion>,
     lookups: Vec<ActiveLookup>,
     next_lookup: u64,
@@ -76,6 +77,7 @@ impl Pc4CompactCandidateSession {
             limits.cache,
         )
         .map_err(|e| e.reason())?;
+        let graph_offsets_header_witness = initial.graph_offsets_header_witness().clone();
         let (target, hit) = initial.into_parts();
         if &target != prepared.target() {
             return Err("pc4_compact_session_initial_target_mismatch");
@@ -101,6 +103,7 @@ impl Pc4CompactCandidateSession {
             generation,
             limits,
             cache,
+            graph_offsets_header_witness,
             union: Some(union),
             lookups,
             next_lookup,
@@ -167,6 +170,9 @@ impl Pc4CompactCandidateSession {
                     index += 1;
                 }
                 AppOnlinePc4LookupStep::Hit(hit) => {
+                    if hit.graph_offsets_header_witness() != &self.graph_offsets_header_witness {
+                        return Err("pc4_compact_session_graph_offsets_header_witness_mismatch");
+                    }
                     let (target, hit) = hit.into_parts();
                     if hit.field_id != self.lookups[index].field {
                         return Err("pc4_compact_session_field_mismatch");
@@ -226,7 +232,7 @@ impl Pc4CompactCandidateSession {
                 .next_lookup
                 .checked_add(1)
                 .ok_or("pc4_compact_session_id_overflow")?;
-            let owner = AppOnlinePc4LookupSession::start(
+            let owner = AppOnlinePc4LookupSession::start_with_graph_offsets_header(
                 self.generation.clone(),
                 Pc4OnlineLookupRequest::from_field_id(
                     id,
@@ -235,6 +241,7 @@ impl Pc4CompactCandidateSession {
                     self.limits.ranges,
                     Pc4OfflineFallbackAuthorization::NotAuthorized,
                 ),
+                &self.graph_offsets_header_witness,
             )
             .map_err(|e| e.reason())?;
             let AppOnlinePc4LookupStep::NeedRange(range) = owner.step() else {
