@@ -3563,8 +3563,7 @@ fn parse_build_probability_command(
         .with_queue_observation_policy(queue_knowledge);
     if matches!(
         result_mode,
-        BuildProbabilityResultMode::CompleteReplayPaths
-            | BuildProbabilityResultMode::FieldAverageScore
+        BuildProbabilityResultMode::FieldAverageScore
             | BuildProbabilityResultMode::FixedQueueMaximumScore
             | BuildProbabilityResultMode::HighestScoreMinimumSet
     ) {
@@ -3574,7 +3573,10 @@ fn parse_build_probability_command(
                 .with_score_profile(score_profile)
                 .with_initial_b2b(u32::from(initial_b2b)),
         );
-    } else if result_mode == BuildProbabilityResultMode::FailedQueues {
+    } else if matches!(
+        result_mode,
+        BuildProbabilityResultMode::CompleteReplayPaths | BuildProbabilityResultMode::FailedQueues
+    ) {
         request = request.with_objective(ObjectivePolicy::unique());
     } else if tiling_only {
         request = request.with_objective(ObjectivePolicy::tiling());

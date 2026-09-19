@@ -1206,8 +1206,16 @@ function buildCoverArguments(command, values) {
   if (height < visibleHeight) {
     throw new Error("height must include every occupied row in base and target.");
   }
-  if (resultMode === "complete-replay-paths" && height > 6) {
-    throw new Error("complete-replay-paths requires a Build height from 1 through 6.");
+  const compactResultMode = new Set([
+    "complete-replay-paths",
+    "field-average-score",
+    "fixed-queue-maximum-score",
+    "highest-score-minimum-set",
+  ]).has(resultMode);
+  if (compactResultMode && ((base.occupied | target.occupied) >> 60n) !== 0n) {
+    throw new Error(
+      "Build replay and score result modes require existing and target cells within the bottom six rows; empty display rows are allowed.",
+    );
   }
 
   const aggregationSource = optionalText(values, "aggregation", 16);

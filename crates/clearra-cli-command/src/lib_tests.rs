@@ -1508,7 +1508,11 @@ fn build_probability_result_aggregation_is_cli_owned_and_independent_from_engine
             command.query().aggregation(),
             BuildProbabilityAggregation::Buildability
         );
-        assert!(command.query().core_query().objective().score().requested());
+        assert_eq!(
+            command.query().core_query().objective().score().requested(),
+            expected != BuildProbabilityResultMode::CompleteReplayPaths,
+            "Complete Replay owns path materialization without requesting the score reducer",
+        );
         assert_eq!(request.resource_budget().workers(), 7);
         assert_eq!(command.query().core_query().execution_policy().workers(), 7);
     }

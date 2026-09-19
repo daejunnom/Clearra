@@ -500,14 +500,50 @@ test("Build probability result-mode compatibility and mode-only inputs fail clos
     ]),
     /requires result-mode=failed-queues/u,
   );
-  assert.throws(
-    () => buildSlashCommandArguments(command, [
-      ...common,
-      { name: "result-mode", value: "complete-replay-paths" },
-      { name: "height", value: 7 },
-    ]),
-    /height from 1 through 6/u,
-  );
+});
+
+test("Build replay and score modes bound occupied rows without rejecting empty display rows", () => {
+  const command = findSlashCommand("build").subcommands.probability;
+  const compactModes = [
+    "complete-replay-paths",
+    "field-average-score",
+    "fixed-queue-maximum-score",
+    "highest-score-minimum-set",
+  ];
+  const lowFields = [
+    { name: "next", value: "I" },
+    { name: "base", value: "__________" },
+    { name: "target", value: "####______" },
+    { name: "height", value: 8 },
+  ];
+  const occupiedSeventhRow = [
+    { name: "next", value: "I" },
+    {
+      name: "base",
+      value: ["####______", ...Array(6).fill("__________")].join("\n"),
+    },
+    { name: "target", value: "####______" },
+  ];
+
+  for (const mode of compactModes) {
+    const arguments_ = buildSlashCommandArguments(command, [
+      ...lowFields,
+      { name: "result-mode", value: mode },
+    ]);
+    assert.deepEqual(
+      arguments_.slice(arguments_.indexOf("--height"), arguments_.indexOf("--height") + 2),
+      ["--height", "8"],
+      `${mode} must preserve explicitly requested empty display rows`,
+    );
+    assert.throws(
+      () => buildSlashCommandArguments(command, [
+        ...occupiedSeventhRow,
+        { name: "result-mode", value: mode },
+      ]),
+      /bottom six rows; empty display rows are allowed/u,
+      mode,
+    );
+  }
 });
 
 test("finesse search forwards canonical masks, height, queue class, and policies", () => {
