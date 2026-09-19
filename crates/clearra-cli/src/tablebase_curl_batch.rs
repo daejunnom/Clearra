@@ -402,6 +402,7 @@ pub(super) struct NativeCurlPool {
     identities: BTreeMap<(u64, u64), DemandIdentity>,
     next_token: usize,
     next_scalar_request_id: u64,
+    observation: NativeCurlTransportObservation,
 }
 
 #[cfg(feature = "native-pc4-libcurl")]
@@ -438,6 +439,154 @@ struct LibcurlCollector {
     oversized: bool,
 }
 
+/// Monotonic, non-authoritative transport evidence for the opt-in live A/B.
+///
+/// A failed getinfo call is counted but never changes Range admission. These
+/// counters therefore diagnose connection reuse without becoming product
+/// authority or introducing a new search failure mode.
+#[cfg(feature = "native-pc4-libcurl")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct NativeCurlTransportObservation {
+    pub(super) completed_transfers: u64,
+    pub(super) connection_samples: u64,
+    pub(super) new_connections: u64,
+    pub(super) reused_connection_transfers: u64,
+    pub(super) http2_transfers: u64,
+    pub(super) redirects: u64,
+    pub(super) info_failures: u64,
+    pub(super) name_lookup_time: Duration,
+    pub(super) connect_time: Duration,
+    pub(super) tls_time: Duration,
+    pub(super) start_transfer_time: Duration,
+    pub(super) total_time: Duration,
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+impl NativeCurlTransportObservation {
+    pub(super) fn delta_since(self, previous: Self) -> Option<Self> {
+        Some(Self {
+            completed_transfers: self
+                .completed_transfers
+                .checked_sub(previous.completed_transfers)?,
+            connection_samples: self
+                .connection_samples
+                .checked_sub(previous.connection_samples)?,
+            new_connections: self.new_connections.checked_sub(previous.new_connections)?,
+            reused_connection_transfers: self
+                .reused_connection_transfers
+                .checked_sub(previous.reused_connection_transfers)?,
+            http2_transfers: self.http2_transfers.checked_sub(previous.http2_transfers)?,
+            redirects: self.redirects.checked_sub(previous.redirects)?,
+            info_failures: self.info_failures.checked_sub(previous.info_failures)?,
+            name_lookup_time: self
+                .name_lookup_time
+                .checked_sub(previous.name_lookup_time)?,
+            connect_time: self.connect_time.checked_sub(previous.connect_time)?,
+            tls_time: self.tls_time.checked_sub(previous.tls_time)?,
+            start_transfer_time: self
+                .start_transfer_time
+                .checked_sub(previous.start_transfer_time)?,
+            total_time: self.total_time.checked_sub(previous.total_time)?,
+        })
+    }
+
+    fn record(&mut self, sample: NativeCurlTransferObservation) {
+        self.completed_transfers = self.completed_transfers.saturating_add(1);
+        self.info_failures = self.info_failures.saturating_add(sample.info_failures);
+        if let Some(new_connections) = sample.new_connections {
+            self.connection_samples = self.connection_samples.saturating_add(1);
+            self.new_connections = self.new_connections.saturating_add(new_connections);
+            if new_connections == 0 {
+                self.reused_connection_transfers =
+                    self.reused_connection_transfers.saturating_add(1);
+            }
+        }
+        self.http2_transfers = self.http2_transfers.saturating_add(u64::from(sample.http2));
+        self.redirects = self
+            .redirects
+            .saturating_add(sample.redirects.unwrap_or_default());
+        self.name_lookup_time = self
+            .name_lookup_time
+            .saturating_add(sample.name_lookup_time.unwrap_or_default());
+        self.connect_time = self
+            .connect_time
+            .saturating_add(sample.connect_time.unwrap_or_default());
+        self.tls_time = self
+            .tls_time
+            .saturating_add(sample.tls_time.unwrap_or_default());
+        self.start_transfer_time = self
+            .start_transfer_time
+            .saturating_add(sample.start_transfer_time.unwrap_or_default());
+        self.total_time = self
+            .total_time
+            .saturating_add(sample.total_time.unwrap_or_default());
+    }
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeCurlTransferObservation {
+    new_connections: Option<u64>,
+    redirects: Option<u64>,
+    http2: bool,
+    info_failures: u64,
+    name_lookup_time: Option<Duration>,
+    connect_time: Option<Duration>,
+    tls_time: Option<Duration>,
+    start_transfer_time: Option<Duration>,
+    total_time: Option<Duration>,
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+impl NativeCurlTransferObservation {
+    fn read(handle: &EasyHandle, final_status_line: Option<&str>) -> Self {
+        let mut info_failures = 0;
+        let new_connections = observe_u32(handle.num_connects(), &mut info_failures);
+        let redirects = observe_u32(handle.redirect_count(), &mut info_failures);
+        let name_lookup_time = observe_duration(handle.namelookup_time(), &mut info_failures);
+        let connect_time = observe_duration(handle.connect_time(), &mut info_failures);
+        let tls_time = observe_duration(handle.appconnect_time(), &mut info_failures);
+        let start_transfer_time = observe_duration(handle.starttransfer_time(), &mut info_failures);
+        let total_time = observe_duration(handle.total_time(), &mut info_failures);
+        Self {
+            new_connections,
+            redirects,
+            http2: final_status_line.is_some_and(|line| line.starts_with("HTTP/2 ")),
+            info_failures,
+            name_lookup_time,
+            connect_time,
+            tls_time,
+            start_transfer_time,
+            total_time,
+        }
+    }
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+fn observe_u32(value: std::result::Result<u32, curl::Error>, failures: &mut u64) -> Option<u64> {
+    match value {
+        Ok(value) => Some(u64::from(value)),
+        Err(_) => {
+            *failures = failures.saturating_add(1);
+            None
+        }
+    }
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+fn observe_duration(
+    value: std::result::Result<Duration, curl::Error>,
+    failures: &mut u64,
+) -> Option<Duration> {
+    match value {
+        Ok(value) => Some(value),
+        Err(_) => {
+            *failures = failures.saturating_add(1);
+            None
+        }
+    }
+}
+
 #[cfg(feature = "native-pc4-libcurl")]
 impl NativeCurlPool {
     pub fn new(revision: &str) -> Result<Self> {
@@ -461,7 +610,12 @@ impl NativeCurlPool {
             identities: BTreeMap::new(),
             next_token: 1,
             next_scalar_request_id: 1,
+            observation: NativeCurlTransportObservation::default(),
         })
+    }
+
+    pub(super) const fn observation(&self) -> NativeCurlTransportObservation {
+        self.observation
     }
 
     /// Performs a bounded qualification read through this pool before the
@@ -666,6 +820,7 @@ impl NativeCurlPool {
                 .lock()
                 .map_err(|_| "pc4_online_transport_interrupted")?;
             let oversized = collector.oversized;
+            let status_line = collector.status_line.clone();
             let status_line_valid = collector
                 .status_line
                 .as_deref()
@@ -673,6 +828,8 @@ impl NativeCurlPool {
             let content_range = collector.content_range.clone().unwrap_or_default();
             let body = collector.body.clone();
             drop(collector);
+            let observation =
+                NativeCurlTransferObservation::read(&active.handle, status_line.as_deref());
             let _easy = self
                 .multi
                 .remove(active.handle)
@@ -706,6 +863,7 @@ impl NativeCurlPool {
                 active.transfer.offset,
                 active.transfer.length,
             )?;
+            self.observation.record(observation);
             for projection in &active.transfer.projections {
                 let begin = usize::try_from(projection.offset - active.transfer.offset)
                     .map_err(|_| "pc4_online_response_too_large")?;
@@ -1184,5 +1342,127 @@ mod tests {
             pool.plan_fresh(vec![changed]).unwrap_err(),
             "pc4_online_pending_identity_changed"
         );
+    }
+
+    #[cfg(feature = "native-pc4-libcurl")]
+    #[test]
+    fn native_pool_observation_delta_is_checked_and_counts_reuse() {
+        let before = NativeCurlTransportObservation::default();
+        let mut total = before;
+        total.record(NativeCurlTransferObservation {
+            new_connections: Some(1),
+            redirects: Some(1),
+            http2: true,
+            name_lookup_time: Some(Duration::from_millis(2)),
+            connect_time: Some(Duration::from_millis(5)),
+            tls_time: Some(Duration::from_millis(8)),
+            start_transfer_time: Some(Duration::from_millis(12)),
+            total_time: Some(Duration::from_millis(15)),
+            ..NativeCurlTransferObservation::default()
+        });
+        let after_qualification = total;
+        total.record(NativeCurlTransferObservation {
+            new_connections: Some(0),
+            redirects: Some(1),
+            http2: true,
+            total_time: Some(Duration::from_millis(4)),
+            ..NativeCurlTransferObservation::default()
+        });
+
+        let qualification = after_qualification.delta_since(before).unwrap();
+        assert_eq!(qualification.completed_transfers, 1);
+        assert_eq!(qualification.new_connections, 1);
+        assert_eq!(qualification.reused_connection_transfers, 0);
+        assert_eq!(qualification.http2_transfers, 1);
+        assert_eq!(qualification.total_time, Duration::from_millis(15));
+
+        let graph = total.delta_since(after_qualification).unwrap();
+        assert_eq!(graph.completed_transfers, 1);
+        assert_eq!(graph.connection_samples, 1);
+        assert_eq!(graph.new_connections, 0);
+        assert_eq!(graph.reused_connection_transfers, 1);
+        assert_eq!(graph.http2_transfers, 1);
+        assert_eq!(graph.total_time, Duration::from_millis(4));
+        assert!(before.delta_since(total).is_none());
+    }
+
+    /// Explicit public-HF diagnostic. It is ignored by every ordinary test and
+    /// is run only by the isolated non-publishing workflow with an opt-in env.
+    #[cfg(feature = "native-pc4-libcurl")]
+    #[test]
+    #[ignore = "explicit live public-HF connection-reuse A/B"]
+    fn native_pool_live_qualification_reuses_connection_for_graph_range() {
+        assert_eq!(
+            std::env::var("CLEARRA_PC4_HTTP_LIVE_AB").as_deref(),
+            Ok("1"),
+            "live HTTP A/B requires an explicit non-publishing opt-in"
+        );
+        let (revision, files) = super::super::transport::discover().unwrap();
+        let mut pool = NativeCurlPool::new(&revision).unwrap();
+        let before = pool.observation();
+        let generation =
+            super::super::format::qualify_with_reader(&revision, &files, |role, offset, length| {
+                pool.fetch_exact(role, &files[role], offset, length as u64)
+                    .map(|reply| reply.bytes)
+            })
+            .unwrap();
+        assert_eq!(generation["schema"], "clearra.pc4.host-generation.v1");
+        let qualified = pool
+            .observation()
+            .delta_since(before)
+            .expect("qualification observation is monotonic");
+
+        let graph = &files[2];
+        let graph_offset = 65_536_u64.min(graph.size.saturating_sub(1));
+        let graph_length = 4_096_u64.min(graph.size - graph_offset);
+        let before_graph = pool.observation();
+        let reply = pool
+            .fetch_exact(2, graph, graph_offset, graph_length)
+            .unwrap();
+        assert_eq!(reply.bytes.len() as u64, graph_length);
+        let graph_phase = pool
+            .observation()
+            .delta_since(before_graph)
+            .expect("graph observation is monotonic");
+
+        println!(
+            "pc4_http_live_ab revision={revision} phase=qualification transfers={} connection_samples={} new_connections={} reused={} http2={} redirects={} info_failures={} dns_ms={:.3} connect_ms={:.3} tls_ms={:.3} ttfb_ms={:.3} total_ms={:.3}",
+            qualified.completed_transfers,
+            qualified.connection_samples,
+            qualified.new_connections,
+            qualified.reused_connection_transfers,
+            qualified.http2_transfers,
+            qualified.redirects,
+            qualified.info_failures,
+            qualified.name_lookup_time.as_secs_f64() * 1_000.0,
+            qualified.connect_time.as_secs_f64() * 1_000.0,
+            qualified.tls_time.as_secs_f64() * 1_000.0,
+            qualified.start_transfer_time.as_secs_f64() * 1_000.0,
+            qualified.total_time.as_secs_f64() * 1_000.0,
+        );
+        println!(
+            "pc4_http_live_ab revision={revision} phase=graph transfers={} connection_samples={} new_connections={} reused={} http2={} redirects={} info_failures={} dns_ms={:.3} connect_ms={:.3} tls_ms={:.3} ttfb_ms={:.3} total_ms={:.3}",
+            graph_phase.completed_transfers,
+            graph_phase.connection_samples,
+            graph_phase.new_connections,
+            graph_phase.reused_connection_transfers,
+            graph_phase.http2_transfers,
+            graph_phase.redirects,
+            graph_phase.info_failures,
+            graph_phase.name_lookup_time.as_secs_f64() * 1_000.0,
+            graph_phase.connect_time.as_secs_f64() * 1_000.0,
+            graph_phase.tls_time.as_secs_f64() * 1_000.0,
+            graph_phase.start_transfer_time.as_secs_f64() * 1_000.0,
+            graph_phase.total_time.as_secs_f64() * 1_000.0,
+        );
+
+        assert!(qualified.completed_transfers > 1);
+        assert!(qualified.new_connections >= 1);
+        assert_eq!(graph_phase.completed_transfers, 1);
+        assert_eq!(graph_phase.connection_samples, 1);
+        assert_eq!(graph_phase.new_connections, 0);
+        assert_eq!(graph_phase.reused_connection_transfers, 1);
+        assert_eq!(graph_phase.http2_transfers, 1);
+        assert_eq!(graph_phase.info_failures, 0);
     }
 }

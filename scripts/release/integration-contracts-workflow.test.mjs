@@ -24,13 +24,13 @@ function isolated(source) {
   assert.equal((source.match(/persist-credentials: false/gu) ?? []).length,
     actions.filter(a => a === 'actions/checkout@v4').length);
   for (const name of ['native-cli', 'pc4-contracts', 'surface-contracts']) {
-    const job = source.split(`  ${name}:`)[1]?.split(/^  [a-z][a-z-]*:/mu)[0];
+    const job = source.split(`  ${name}:`)[1]?.split(/^  [a-z][a-z0-9-]*:/mu)[0];
     assert.ok(job);
     assert.match(job, /needs: source/u);
     assert.match(job, /timeout-minutes: (?:20|60)/u);
     assert.match(job, /invoke-clearra-build\.ps1 -Purpose experiment/u);
   }
-  const nativeHttp2 = source.split('  native-http2-candidate:')[1]?.split(/^  [a-z][a-z-]*:/mu)[0];
+  const nativeHttp2 = source.split('  native-http2-candidate:')[1]?.split(/^  [a-z][a-z0-9-]*:/mu)[0];
   assert.ok(nativeHttp2);
   assert.match(nativeHttp2, /needs: source/u);
   assert.match(nativeHttp2, /if: inputs\.pc4_native_http2 == true \|\| \(github\.event_name == 'push' && contains\(github\.event\.head_commit\.message, '\[pc4-http2-ab\]'\)\)/u);
@@ -38,6 +38,16 @@ function isolated(source) {
   assert.equal((nativeHttp2.match(/invoke-clearra-build\.ps1 -Purpose experiment/gu) ?? []).length, 2);
   assert.ok(nativeHttp2.includes('"--features","native-pc4-libcurl"'));
   assert.doesNotMatch(nativeHttp2, /upload-artifact|environment:|secrets\.|id-token/u);
+  const nativeHttp2Live = source.split('  native-http2-live-ab:')[1]?.split(/^  [a-z][a-z0-9-]*:/mu)[0];
+  assert.ok(nativeHttp2Live);
+  assert.match(nativeHttp2Live, /needs: source/u);
+  assert.match(nativeHttp2Live, /if: inputs\.pc4_native_http2_live_ab == true/u);
+  assert.match(nativeHttp2Live, /runs-on: ubuntu-latest/u);
+  assert.match(nativeHttp2Live, /CLEARRA_PC4_HTTP_LIVE_AB: "1"/u);
+  assert.match(nativeHttp2Live, /native_pool_live_qualification_reuses_connection_for_graph_range/u);
+  assert.match(nativeHttp2Live, /--ignored/u);
+  assert.equal((nativeHttp2Live.match(/invoke-clearra-build\.ps1 -Purpose experiment/gu) ?? []).length, 2);
+  assert.doesNotMatch(nativeHttp2Live, /upload-artifact|environment:|secrets\.|id-token/u);
   const preview = source.split('  preview-wasm:')[1];
   assert.ok(preview);
   assert.match(preview, /needs: source/u);

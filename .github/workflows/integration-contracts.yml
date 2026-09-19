@@ -13,6 +13,10 @@ on:
         description: Compile the opt-in native persistent HTTP/2 transport candidate
         type: boolean
         default: false
+      pc4_native_http2_live_ab:
+        description: Run the explicit public-HF qualification-to-graph connection reuse A/B
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -108,6 +112,29 @@ jobs:
         shell: pwsh
         run: |
           & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command cargo -ArgumentsJson '["test","--locked","--offline","-p","clearra-cli","--features","native-pc4-libcurl","--lib","native_pool_","-j","2","--","--test-threads=1"]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  native-http2-live-ab:
+    needs: source
+    if: inputs.pc4_native_http2_live_ab == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUST_MIN_STACK: "16777216"
+      CLEARRA_PC4_HTTP_LIVE_AB: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Resolve the locked candidate dependency graph
+        shell: pwsh
+        run: |
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command cargo -ArgumentsJson '["fetch","--locked"]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Measure qualification-to-graph HTTP/2 connection reuse
+        shell: pwsh
+        run: |
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command cargo -ArgumentsJson '["test","--locked","--offline","-p","clearra-cli","--features","native-pc4-libcurl","--lib","native_pool_live_qualification_reuses_connection_for_graph_range","-j","2","--","--ignored","--nocapture","--test-threads=1"]'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   surface-contracts:
