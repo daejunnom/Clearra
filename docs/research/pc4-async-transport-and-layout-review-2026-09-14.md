@@ -572,3 +572,24 @@ source GOFF/graph content identity, field count, target encoding, 완성 상태�
 content identity를 결박해야 한다. Jstris에서는 K=16을 실제 adapter/WAN A/B의 첫 후보로
 삼되, 다른 킥 프로필은 각각의 qualified graph에서 K와 최대 block을 다시 계산한다.
 그 A/B 전에는 muse918에게 파일 변경을 요청하지 않는다.
+
+### 9.6 중앙 broker의 Tail 우선순위
+
+Web의 계산/I/O 중첩 자체는 이미 원하는 비동기 구조다. 각 compact lookup은 응답을
+기다리는 동안 다른 lookup과 ready CPU work를 진행하고, host는 첫 완료 응답부터
+admission한다. 이를 CPU worker마다 독립 HTTP client를 두는 구조로 바꾸면 동일 span
+결합, immutable identity별 in-flight dedup, byte 예약, 취소와 연결 pool이 분산된다.
+따라서 바꿀 대상은 owner가 아니라 중앙 broker의 FIFO 선택 정책이다.
+
+단일 FIFO에서는 여러 offset/index 요청 뒤에 나중에 생성된 exact graph 요청이 설 수
+있다. graph 응답은 이미 resident credit을 점유한 작업을 풀지만, 새 index 응답은 아직
+다음 graph 의존을 하나 더 만든다. `scripts/release/pc4/pc4-range-reader.mjs`는 direct
+graph queue와 reusable/index queue를 분리하고, graph를 최대 3회 먼저 시작한 뒤 index
+한 번을 강제하는 bounded-fair 3:1 정책으로 바꿨다. 물리 동시성 기본 4, 논리 slot 16,
+64KiB 범위, 총 byte/request 예산은 바꾸지 않았다.
+
+집중 JS 계약 24개와 Web host 계약 12개가 통과했다. 추가 계약은 (1) 오래된 index
+backlog 뒤의 graph가 다음 전송 slot을 얻어 resident 작업을 풀고, (2) graph가 계속
+생겨도 세 번 뒤에는 index가 반드시 진행하며, (3) 취소·shared budget·in-flight 결합을
+그대로 보존함을 검사한다. 이는 실제 WAN tail 시간 개선량이나 물리 concurrency 4가
+최적이라는 증거가 아니다. exact-source PC4 CI와 실제 대형 HTTP A/B가 남아 있다.

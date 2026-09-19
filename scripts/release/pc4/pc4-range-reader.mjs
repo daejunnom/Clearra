@@ -9,6 +9,11 @@ export class Pc4OnlineError extends Error {
 const MAX_RANGE = 65_536;
 const MAX_CACHE_ENTRIES = 2_048;
 const MAX_WAITERS = 512;
+// Complete several exact graph records promptly so their resident CPU work can
+// resume, but force an index/window request after a bounded burst. A separate
+// HTTP client per worker would lose cache/in-flight joining and still need this
+// backpressure/fairness policy at a higher layer.
+const MAX_DIRECT_BURST = 3;
 
 export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = fetch,
   maxBytes = 64 * 1024 * 1024, maxRequests = 100_000, cacheBytes = 8 * 1024 * 1024,
@@ -26,20 +31,35 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
   const direct = new Set(directPaths);
 
   const pageSize = cacheBytes >= windowBytes && maxBytes >= windowBytes ? windowBytes : 0;
-  const cache = createPc4SpanCache(cacheBytes, MAX_CACHE_ENTRIES), inFlight = new Map(), controllers = new Set(), queue = [];
+  const cache = createPc4SpanCache(cacheBytes, MAX_CACHE_ENTRIES), inFlight = new Map(), controllers = new Set();
+  const directQueue = [], reusableQueue = [];
   let transferred = 0, requests = 0, reservedTotal = 0;
-  let active = 0, closed = false, reads = 0, cacheHits = 0, joined = 0;
+  let active = 0, closed = false, reads = 0, cacheHits = 0, joined = 0, directBurst = 0;
   const cancel = () => {
     closed = true;
     for (const controller of controllers) controller.abort();
-    for (const entry of queue.splice(0)) entry.reject(new Pc4OnlineError('pc4_online_cancelled'));
+    for (const queue of [directQueue, reusableQueue]) {
+      for (const entry of queue.splice(0)) entry.reject(new Pc4OnlineError('pc4_online_cancelled'));
+    }
     cache.clear();
   };
   signal?.addEventListener('abort', cancel, { once: true });
 
+  function nextQueued() {
+    if (directQueue.length && (!reusableQueue.length || directBurst < MAX_DIRECT_BURST)) {
+      directBurst = Math.min(MAX_DIRECT_BURST, directBurst + 1);
+      return directQueue.shift();
+    }
+    if (reusableQueue.length) {
+      directBurst = 0;
+      return reusableQueue.shift();
+    }
+    return null;
+  }
+
   function pump() {
-    while (!closed && active < maxConcurrent && queue.length) {
-      const entry = queue.shift();
+    while (!closed && active < maxConcurrent && (directQueue.length || reusableQueue.length)) {
+      const entry = nextQueued();
       active++;
       transport(entry.artifact, entry.offset, entry.length).then(entry.resolve, entry.reject).finally(() => {
         active--; pump();
@@ -57,8 +77,11 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
     }
     const pending = inFlight.get(key);
     if (pending) { joined++; return pending; }
-    if (queue.length >= MAX_WAITERS) return Promise.reject(new Pc4OnlineError('pc4_online_request_queue_limit'));
+    if (directQueue.length + reusableQueue.length >= MAX_WAITERS) {
+      return Promise.reject(new Pc4OnlineError('pc4_online_request_queue_limit'));
+    }
     const request = new Promise((resolve, reject) => {
+      const queue = direct.has(artifact.path) ? directQueue : reusableQueue;
       queue.push({ artifact, offset, length, resolve, reject }); pump();
     }).then(bytes => {
       inFlight.delete(key);

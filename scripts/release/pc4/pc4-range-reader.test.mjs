@@ -119,6 +119,47 @@ test('queued transport snapshots descriptors and keeps the active-request bound'
   } finally { f.reader.dispose(); }
 });
 
+test('queued exact graph work bypasses old index backlog with bounded index fairness', async () => {
+  const offsets = { ...artifact, path: 'graph_offsets.u32.bin' };
+  const resolvers = [], starts = [];
+  const reader = createPc4RangeReader(generation, { maxConcurrent: 1, windowBytes: 0,
+    directPaths: [artifact.path], fetcher: (url, init) => new Promise(resolve => {
+      const [, a, b] = /^bytes=(\d+)-(\d+)$/.exec(init.headers.Range);
+      const start = Number(a), end = Number(b), selected = url.endsWith('/graph.bin') ? artifact : offsets;
+      starts.push([selected.path, start]);
+      resolvers.push(() => resolve(new Response(values(start, end - start + 1), {
+        status: 206, headers: { 'content-range': `bytes ${start}-${end}/${selected.byte_length}` }
+      })));
+    }) });
+  try {
+    const firstIndex = reader.read(offsets, 0, 8);
+    const oldIndexBacklog = reader.read(offsets, 32, 8);
+    const graph = reader.read(artifact, 64, 8);
+    assert.deepEqual(starts, [[offsets.path, 0]]);
+    resolvers.shift()(); await setImmediate();
+    assert.deepEqual(starts, [[offsets.path, 0], [artifact.path, 64]],
+      'a graph response that releases resident work must not sit behind the old index FIFO');
+    resolvers.shift()(); await setImmediate();
+    assert.deepEqual(starts, [[offsets.path, 0], [artifact.path, 64], [offsets.path, 32]]);
+    resolvers.shift()();
+    assert.deepEqual(await Promise.all([firstIndex, oldIndexBacklog, graph]),
+      [values(0, 8), values(32, 8), values(64, 8)]);
+
+    // A graph flood cannot starve a queued reusable/index request: after at
+    // most three direct starts the fairness slot must return to the index.
+    starts.length = 0;
+    const gate = reader.read(artifact, 128, 8);
+    const waitingIndex = reader.read(offsets, 160, 8);
+    const direct = [192, 224, 256, 288].map(offset => reader.read(artifact, offset, 8));
+    resolvers.shift()(); await setImmediate();
+    resolvers.shift()(); await setImmediate();
+    resolvers.shift()(); await setImmediate();
+    assert.equal(starts[3][0], offsets.path, 'bounded burst returns one slot to reusable/index work');
+    while (resolvers.length) { resolvers.shift()(); await setImmediate(); }
+    await Promise.all([gate, waitingIndex, ...direct]);
+  } finally { reader.dispose(); }
+});
+
 test('exact/window/batch A/B returns identical bytes for a clustered lookup demand trace', async t => {
   const exact = fixture({ windowBytes: 0 }), windowed = fixture(), batched = fixture();
   try {
