@@ -329,10 +329,7 @@ impl LookupMachine {
                 field_count,
             });
         }
-        if profile_manifest.graph_source_field_encoding()
-            != GraphSourceFieldEncoding::HydraU40BigEndianPrefix
-            || !witness.matches(snapshot.qualified_identity(), profile_manifest)
-        {
+        if !witness.matches(snapshot.qualified_identity(), profile_manifest) {
             return Err(LookupStartError::GraphOffsetsHeaderWitnessMismatch);
         }
         let mut machine = Self {
@@ -343,15 +340,21 @@ impl LookupMachine {
             field_hash: None,
             graph_offsets_header_witness: Some(witness.clone()),
             next_request_id: 1,
-            phase: Phase::OffsetPair { field_id },
+            phase: Phase::FieldIndexHeader,
             pending: None,
             terminal: None,
         };
-        machine.request(
-            Pc4ArtifactRole::GraphOffsets,
-            INDEX_HEADER_BYTES + u64::from(field_id) * GRAPH_OFFSET_BYTES,
-            (2 * GRAPH_OFFSET_BYTES) as u32,
-        );
+        if profile_manifest.graph_source_field_encoding()
+            == GraphSourceFieldEncoding::HydraU40BigEndianPrefix
+        {
+            machine.request_offset_pair(field_id);
+        } else {
+            machine.request(
+                Pc4ArtifactRole::FieldHashIndex,
+                0,
+                INDEX_HEADER_BYTES as u32,
+            );
+        }
         Ok(machine)
     }
 
@@ -553,8 +556,7 @@ impl LookupMachine {
         };
         match candidate_hash.cmp(&requested_hash) {
             Ordering::Equal => {
-                self.phase = Phase::OffsetIndexHeader { field_id };
-                self.request(Pc4ArtifactRole::GraphOffsets, 0, INDEX_HEADER_BYTES as u32);
+                self.request_offset_header_or_pair(field_id);
             }
             Ordering::Less => self.request_field_record(index + 1, high),
             Ordering::Greater => self.request_field_record(low, index),
@@ -581,10 +583,7 @@ impl LookupMachine {
             return;
         }
         self.field_hash = Some(candidate_hash);
-        self.phase = Phase::OffsetIndexHeader {
-            field_id: expected_field_id,
-        };
-        self.request(Pc4ArtifactRole::GraphOffsets, 0, INDEX_HEADER_BYTES as u32);
+        self.request_offset_header_or_pair(expected_field_id);
     }
 
     fn consume_offset_index_header(&mut self, bytes: &[u8], field_id: u32) {
@@ -601,6 +600,19 @@ impl LookupMachine {
             &self.snapshot,
             &self.profile,
         ));
+        self.request_offset_pair(field_id);
+    }
+
+    fn request_offset_header_or_pair(&mut self, field_id: u32) {
+        if self.graph_offsets_header_witness.is_some() {
+            self.request_offset_pair(field_id);
+        } else {
+            self.phase = Phase::OffsetIndexHeader { field_id };
+            self.request(Pc4ArtifactRole::GraphOffsets, 0, INDEX_HEADER_BYTES as u32);
+        }
+    }
+
+    fn request_offset_pair(&mut self, field_id: u32) {
         self.phase = Phase::OffsetPair { field_id };
         self.request(
             Pc4ArtifactRole::GraphOffsets,
