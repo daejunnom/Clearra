@@ -1033,6 +1033,8 @@ type ClearraWasmWorkerEventBase = {
     requests: number;
     transferred_bytes: number;
     logical_reads?: number;
+    /** Reader calls after host span grouping; cache hits are not HTTP requests. */
+    transport_reads?: number;
     cache_hits?: number;
     joined_requests?: number;
     cache_bytes?: number;

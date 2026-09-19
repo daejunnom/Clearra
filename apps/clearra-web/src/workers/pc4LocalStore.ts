@@ -133,9 +133,10 @@ export async function removeLocalPc4(profile = PROFILE) {
   } catch (error) { if (!missing(error)) throw error; }
   finally { await release(); }
 }
-export async function openLocalPc4Reader(generation: Pc4HostGeneration, signal?: AbortSignal) {
+export async function openLocalPc4Reader(generation: Pc4HostGeneration, signal?: AbortSignal, profile = PROFILE) {
+  if (!PROFILES.includes(profile)) fail('pc4_download_profile_unavailable');
   if (!pc4LocalStorageSupported()) return null;
-  const release = await lease('shared');
+  const release = await lease('shared', profile);
   let transferred = false;
   const sources = new Map<string, Awaited<ReturnType<typeof openPc4LocalFileSource>>>();
   const closeSources = async () => {
@@ -144,10 +145,10 @@ export async function openLocalPc4Reader(generation: Pc4HostGeneration, signal?:
     if (failure?.status === 'rejected') throw failure.reason;
   };
   try {
-    const directory = await root(), active = await activeFrom(directory);
+    const directory = await root(false, profile), active = await activeFrom(directory, profile);
     if (!active || active.generation.revision !== generation.revision || active.generation.repository !== generation.repository) return null;
-    const plan = pc4DownloadPlan(active.generation, PROFILE);
-    const expected = pc4DownloadPlan(generation, PROFILE);
+    const plan = pc4DownloadPlan(active.generation, profile);
+    const expected = pc4DownloadPlan(generation, profile);
     if (plan.files.some((file, i) => file.path !== expected.files[i].path ||
         file.byte_length !== expected.files[i].byte_length || file.content_identity !== expected.files[i].content_identity)) {
       fail('pc4_download_local_manifest_invalid');

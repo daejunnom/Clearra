@@ -13,7 +13,7 @@ const generation = { schema: 'clearra.pc4.host-generation.v1', repository: 'muse
   revision: 'a'.repeat(40), profiles: [{ profile: 'jstris-180', status: 'ready', artifacts: {
     graph: { path: 'graph.bin', byte_length: 64000, content_identity: 'sha256:' + 'c'.repeat(64) }
   } }], transferred_bytes: 0 };
-const range = { lookup_session: 9, request_id: 1, offset: 16, length: 8,
+const range = { lookup_session: 9, request_id: 1, profile: 'jstris-180', offset: 16, length: 8,
   artifact: { path: 'field_hash_to_id.v1.bin', byte_length: 32, content_identity: 'sha256:' + 'b'.repeat(64) } };
 
 function fixture() {
@@ -193,6 +193,47 @@ function batchFixture(count = 3) {
   };
   return { wasm, requests, order, get cpu() { return cpu; }, get cancelled() { return cancelled; } };
 }
+
+test('host chooses transport and reports the qualified pending profile, never a Jstris default', async () => {
+  // Synthetic host descriptors exercise routing only. They do not grant any
+  // additional upstream profile qualification or downloader permission.
+  const original = fetch;
+  try {
+    for (const profile of ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']) {
+      const f = batchFixture(1);
+      const graph = { ...f.requests[0].artifact, path: `graph-test-${profile}.bin` };
+      f.requests[0].profile = profile; f.requests[0].artifact = graph;
+      const selected = { ...generation, profiles: [{ profile, status: 'ready', artifacts: { graph } }] };
+      let calls = 0;
+      globalThis.fetch = async (url, init) => {
+        assert.ok(url.endsWith('/' + graph.path));
+        assert.equal(init.headers.Range, 'bytes=0-0', 'selected graph uses exact reads, not an unrelated profile page policy');
+        calls++;
+        return new Response(new Uint8Array([10]), { status: 206,
+          headers: { 'content-range': `bytes 0-0/${graph.byte_length}` } });
+      };
+      const observed = [];
+      const result = await new WasmJobRunner(f.wasm, selected).run('typed-profile-fixture', event => observed.push(event));
+      assert.equal(result.event, 'final_response');
+      assert.equal(observed.at(-1).pc4_online.profile, profile); assert.equal(calls, 1);
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test('a mixed-profile pending batch or unqualified profile starts no transport', async () => {
+  const original = fetch;
+  let calls = 0;
+  try {
+    globalThis.fetch = async () => { calls++; throw new Error('must not read'); };
+    const mixed = batchFixture(2); mixed.requests[1].profile = 'srs';
+    await assert.rejects(new WasmJobRunner(mixed.wasm, generation).run('fixture', () => {}),
+      { code: 'pc4_online_pending_profile_changed' });
+    const unavailable = batchFixture(1); unavailable.requests[0].profile = 'srs';
+    await assert.rejects(new WasmJobRunner(unavailable.wasm, generation).run('fixture', () => {}),
+      { code: 'pc4_online_profile_not_qualified' });
+    assert.equal(calls, 0);
+  } finally { globalThis.fetch = original; }
+});
 
 function deferredFetch(f) {
   const pending = new Map(), starts = [];

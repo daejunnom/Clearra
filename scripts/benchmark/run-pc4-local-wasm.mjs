@@ -90,7 +90,7 @@ if (values.transport === 'http-model') {
     } });
 }
 const demandDigest = createHash('sha256'), artifactCounts = {}, started = performance.now();
-let job, steps = 0, reads = 0, computeMs = 0, ioMs = 0, bridgeMs = 0, terminal = null, lastReport = started, cancelled = false;
+let job, steps = 0, reads = 0, computeMs = 0, maximumAdvanceMs = 0, ioMs = 0, bridgeMs = 0, terminal = null, lastReport = started, cancelled = false;
 // One bounded local-only trace for the next HTTP planner experiment. Persist
 // after timing, not during reads; never record user input text or payloads.
 const trace = values.trace ? Buffer.alloc(Math.min(readLimit, 200000) * 12) : null;
@@ -98,7 +98,8 @@ let traceHandle, tracePath, traceCommitted = false, traceCount = 0;
 let comparison = null;
 let frontiers = 0, hintedIds = 0, maximumFrontier = 0;
 const progress = () => ({ elapsed_ms: performance.now() - started, steps, logical_reads: reads, file_reads: dataset.calls,
-  file_bytes: dataset.bytes, compute_ms: computeMs, io_ms: ioMs, bridge_ms: bridgeMs, artifact_reads: artifactCounts,
+  file_bytes: dataset.bytes, compute_ms: computeMs, maximum_advance_ms: maximumAdvanceMs,
+  io_ms: ioMs, bridge_ms: bridgeMs, artifact_reads: artifactCounts,
   wasm_memory_bytes: raw.memory.buffer.byteLength, cache_hits: reader.cacheHits ?? 0,
   ...(values.transport === 'http-model' ? { modeled_http_requests: reader.requests, modeled_http_bytes: reader.bytes,
     frontier_hints: frontiers, hinted_ids: hintedIds, maximum_frontier: maximumFrontier } : {}) });
@@ -133,7 +134,9 @@ try {
       break;
     }
     let at = performance.now();
-    const status = ok(raw.clearra_wasm_advance_job(job, 2048)); steps++; computeMs += performance.now() - at;
+    let status;
+    try { status = ok(raw.clearra_wasm_advance_job(job, 2048)); }
+    finally { const elapsed = performance.now() - at; steps++; computeMs += elapsed; maximumAdvanceMs = Math.max(maximumAdvanceMs, elapsed); }
     if (status === 0 || status === 4) {
       at = performance.now(); ok(raw.clearra_wasm_online_pc4_pending(job)); const range = JSON.parse(output()); bridgeMs += performance.now() - at;
       if (range) {
@@ -193,7 +196,19 @@ try {
     console.log(JSON.stringify({ event: 'trace-saved', records: traceCount, bytes: 4 + header.length + body.length, path: tracePath }));
   }
   if (terminal?.event === 'failed') process.exitCode = 1;
+} catch (error) {
+  // A typed App limit can return through the ABI error path without a terminal
+  // search report. Retain the last exact counters; never imply empty success.
+  console.log(JSON.stringify({ event: 'probe-failed', evidence: 'bounded-local-probe-not-complete',
+    transport: values.transport, source_commit: manifest.build?.runtime_identity?.source_commit,
+    wasm_sha256: manifest.wasm.sha256, dataset_revision: dataset.plan.revision,
+    ...progress(), search_report: null, error: String(error?.message ?? error).slice(0, 256) }));
+  process.exitCode = 1;
 } finally {
+  if (job && !terminal) {
+    try { raw.clearra_wasm_cancel_job(job); } catch { /* A failed owner may already be retired. */ }
+    try { raw.clearra_wasm_drain_job_events(job); output(); } catch { /* Process exit drops a trapped runtime. */ }
+  }
   if (traceHandle) { await traceHandle.close(); if (!traceCommitted) await unlink(tracePath); }
   reader.dispose?.();
   await dataset.close();

@@ -112,6 +112,7 @@ jobs:
           packages/clearra-ui/test/pcReplayPager.contract.ts
           packages/clearra-ui/test/runtimeShellI18n.test.mjs
           apps/clearra-web/test/onlinePc4Host.test.mjs
+          apps/clearra-web/test/pc4HostTypes.test.mjs
           apps/clearra-web/test/pc4LocalStore.test.mjs
           apps/clearra-web/test/LocalSearchProfile.contract.ts
 

@@ -80,6 +80,8 @@ test('explicit OPFS install supplies local slices and prevents deletion/update d
 test('per-profile lifecycle cannot use or remove another kick table data; updates keep one generation', async () => withStorage(async f => {
   await f.install();
   assert.equal(await api.localPc4Status('srs'), null);
+  assert.equal(await api.openLocalPc4Reader(f.generation, undefined, 'srs'), null,
+    'a different profile must never borrow the installed Jstris files');
   await api.removeLocalPc4('srs');
   assert.ok(await api.localPc4Status('jstris-180'));
   await f.install({ ...f.generation, revision: 'b'.repeat(40) });
@@ -113,7 +115,7 @@ test('WASM host uses typed local admission with zero HTTP and releases files bef
       events.push({ schema_version: 1, runtime: 'clearra-wasm', event: 'final_response', job_id: 7, response: { status: 'success' } });
       return 'completed';
     },
-    online_pc4_pending: () => admitted ? null : { lookup_session: 9, request_id: 1, offset: 4, length: 8, artifact: f.desc[2] },
+    online_pc4_pending: () => admitted ? null : { lookup_session: 9, request_id: 1, profile: 'jstris-180', offset: 4, length: 8, artifact: f.desc[2] },
     online_pc4_admit: (job, response) => {
       assert.equal(job, 7);
       assert.deepEqual(response, { lookup_session: 9, request_id: 1, source: 'verified-local-file', bytes: [...f.files.get('graph.bin').slice(4, 12)] });
@@ -249,8 +251,10 @@ test('a close error still closes other files, releases the lease and retires the
     access.close = () => { close(); throw new Error('close-failed'); };
     return access;
   };
-  let cancelled = 0;
-  const wasm = { start_job: () => 7, advance_job: () => { throw new Error('fixture-search-failed'); },
+  let cancelled = 0, admitted = false;
+  const wasm = { start_job: () => 7, advance_job: () => { if (!admitted) return 'pending'; throw new Error('fixture-search-failed'); },
+    online_pc4_pending: () => ({ lookup_session: 9, request_id: 1, profile: 'jstris-180', offset: 4, length: 8, artifact: f.desc[2] }),
+    online_pc4_admit: () => { admitted = true; },
     drain_job_events_json: () => '[]', cancel_job: () => { cancelled++; } };
   const runner = new WasmJobRunner(wasm, f.generation);
   await assert.rejects(runner.run('clearra pc --tablebase', () => {}), /close-failed/);

@@ -40,6 +40,7 @@ export class WasmJobRunner {
     let reader: ReturnType<typeof createPc4RangeReader> | Awaited<ReturnType<typeof openLocalPc4Reader>> = null;
     let rangePump: Pc4AsyncRangePump | null = null;
     let legacyReads = 0;
+    let selectedProfile: string | null = null;
     const admit = (range: Pc4RangeRequest, bytes: Uint8Array) => {
       if (this.cancellationRequested || this.jobId === null || !reader) return;
       // Local data has its own admission kind, never a fabricated HTTP
@@ -50,7 +51,7 @@ export class WasmJobRunner {
         bytes: Array.from(bytes) });
     };
     const emit = (event: ClearraWasmWorkerEvent) => onEvent(reader ? ({ ...event,
-      pc4_online: { provider: 'provider' in reader ? reader.provider : 'hf-graph', profile: 'jstris-180', revision: this.onlineGeneration!.revision,
+      pc4_online: { provider: 'provider' in reader ? reader.provider : 'hf-graph', profile: selectedProfile!, revision: this.onlineGeneration!.revision,
         requests: reader.requests, transferred_bytes: reader.bytes,
         logical_reads: legacyReads + (rangePump?.logicalReads ?? 0), transport_reads: reader.reads,
         local_bytes: 'localBytes' in reader ? reader.localBytes : 0,
@@ -63,15 +64,6 @@ export class WasmJobRunner {
       if (this.wasm.profile_start) {
         this.wasm.profile_start();
         profilingActive = true;
-      }
-      if (this.onlineGeneration) {
-        reader = await openLocalPc4Reader(this.onlineGeneration, this.onlineAbort!.signal)
-          ?? createPc4RangeReader(this.onlineGeneration, {
-            signal: this.onlineAbort!.signal, ...pc4SearchRangePolicy(this.onlineGeneration, 'jstris-180')
-          });
-        const openedReader = reader;
-        rangePump = new Pc4AsyncRangePump(range => openedReader.read(range.artifact, range.offset, range.length),
-          this.onlineAbort!.signal, 'provider' in openedReader ? undefined : PC4_FRONTIER_MAX_GAP_BYTES);
       }
       this.jobId = this.wasm.start_job(commandText);
       this.active = true;
@@ -91,8 +83,28 @@ export class WasmJobRunner {
           rangePump?.drain(admit);
           status = this.wasm.advance_job(this.jobId, SEARCH_WORK_BUDGET);
           advancesSinceDrain += 1;
-          if (reader && (status === 'pending' || status === 'progress')) {
+          if (this.onlineGeneration && (status === 'pending' || status === 'progress')) {
             const range = this.wasm.online_pc4_pending?.(this.jobId);
+            if (range) {
+              // Rust owns CLI/rule interpretation and supplies the qualified
+              // profile. Never borrow another profile's file lease or cache.
+              if ((selectedProfile !== null && selectedProfile !== range.profile) ||
+                  range.batch?.some(pending => pending.profile !== range.profile)) {
+                throw Object.assign(new Error('pc4_online_pending_profile_changed'), { code: 'pc4_online_pending_profile_changed' });
+              }
+              if (!reader) {
+                const policy = pc4SearchRangePolicy(this.onlineGeneration, range.profile);
+                try {
+                  reader = await openLocalPc4Reader(this.onlineGeneration, this.onlineAbort!.signal, range.profile)
+                    ?? createPc4RangeReader(this.onlineGeneration, { signal: this.onlineAbort!.signal, ...policy });
+                } catch (error) { if (this.cancellationRequested) continue; throw error; }
+                selectedProfile = range.profile;
+                const openedReader = reader;
+                rangePump = new Pc4AsyncRangePump(request => openedReader.read(request.artifact, request.offset, request.length),
+                  this.onlineAbort!.signal, 'provider' in openedReader ? undefined : PC4_FRONTIER_MAX_GAP_BYTES);
+              }
+              if (this.cancellationRequested) continue;
+            }
             if (range?.batch && !range.lookup_frontier?.length) {
               rangePump!.submit(range.batch);
               // Advance ready CPU work while I/O is outstanding. When only
@@ -105,8 +117,8 @@ export class WasmJobRunner {
               try {
                 // Local storage keeps its measured index-page/exact-record
                 // policy. Read-ahead groups known demands only for HTTP RTTs.
-                if (!('provider' in reader)) await prefetchPc4LookupFrontier(reader, this.onlineGeneration!, range);
-                bytes = await reader.read(range.artifact, range.offset, range.length);
+                if (!('provider' in reader!)) await prefetchPc4LookupFrontier(reader!, this.onlineGeneration!, range);
+                bytes = await reader!.read(range.artifact, range.offset, range.length);
               }
               catch (error) {
                 // Cancellation already has a terminal event waiting in Rust.

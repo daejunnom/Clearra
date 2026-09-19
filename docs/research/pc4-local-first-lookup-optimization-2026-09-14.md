@@ -682,6 +682,79 @@ local-dataset probe, with no 4194 replacement or additional dataset download.
 The scalar local probe reports counts, completeness and hashes without dumping
 solution keys; its timings must not be labeled as Web asynchronous transport A/B.
 
+Run [35433890617](https://github.com/daejunnom/Clearra/actions/runs/35433890617),
+source `053a23f6c54dee2be47c921ac97248b5a025c8b7`, subsequently passed all five
+jobs, including the unqualified preview. The compact group is now 13 passed;
+the 60-pair contract and all three independent host tests executed. Artifact
+10581767569 (11,703,157-byte ZIP, digest
+`146a1668426622e37c613627848aac8b5197197659ec70d57c3797bf2628c55f`) is used
+in memory for the next local-file probe. No extraction/build directory, new
+dataset download, native execution-policy bypass or 4194 update is involved.
+
+During this build, Web routing was corrected separately: the first qualified
+Rust pending range selects the exact profile's local lease and HTTP sizing;
+the runner no longer labels/selects Jstris unconditionally. Mixed-profile
+batches are rejected before transport. Existing unavailable-profile downloader
+guards remain unchanged. Host/OPFS contracts: 24 passed; the actual host/import
+graph also passes strict TypeScript no-emit checking. That check found and fixed
+the previously missing optional `transport_reads` common event field and is now
+included in the test-only workflow. These changes do not alter the preview's
+Rust algorithm and do not qualify additional upstream profiles.
+
+### 2026-09-19: real compact large-input probe exposes the state ceiling
+
+The verified preview's WASM digest is
+`b7673e2489e8bbfe5de66c634ca4249dd8b187f8d38417c4a0564f0ec6018f41`.
+Both probes use the existing Jstris dataset revision
+`ea61380b31fa3dc9ffb4c8505c9a09c1b421ef31`, empty field / 4L / P7P4 / unique,
+the scalar local driver and index 4KiB / exact graph reads. No internet lookup,
+full-file read, browser session or publication is involved. WASM preparation
+was outside search timing (108.75ms in the first probe).
+
+The initial calibration reached its **probe** limit of 100,000 logical reads:
+
+| Metric | Observed prefix |
+| --- | ---: |
+| Wall time | 33.528s |
+| App/WASM advance time | 21.317s |
+| Local reader wait time | 5.001s |
+| WASM/JS request and admission bridge | 6.671s |
+| Actual file reads / bytes | 34,466 / 9,736,440 |
+| Graph records read | 33,332 |
+| WASM linear-memory high water at termination | 57,016,320B |
+
+It cancelled safely, with **no complete search report**. The older producer's
+100k prefix record is retained, not rerun; different graph work/order means this
+is not an equal-work throughput comparison against that old trace. Native/Web
+parallelism is not measured by this scalar driver.
+
+One extended probe (180s / 350,000 logical reads) was then used to get past this
+measurement cap, not to repeat a completed-search A/B. It failed with the actual
+App reason **`pc4_compact_union_state_limit`**. Its last periodic sample was
+70.003s, 180,443 logical reads, 62,239 file reads / 17,287,915B, 60,147 graph
+records, 47.180s compute / 8.773s local I/O / 13.015s bridge, and 72,220,672B
+WASM memory. These are the last sample, **not exact failure counters/time**.
+The runner now reports bounded final counters also for ABI errors and records
+the maximum synchronous advance duration for future probes; no third probe is
+run to backfill those unavailable failure counters.
+
+This is a retained layer-state ceiling (65,536 across ready/current work and
+next-layer union), not HTTP waiting, `mmap` failure or a TB Miss. The bound can
+prevent completion even with local files and bounded independent lookup slots.
+Raising concurrency or treating a prefix as all 456,459 solutions cannot solve
+it. The next implementation needs an explicitly byte-governed frontier or a
+proven complete bounded partition/delta policy; do not merely raise the count
+limit or remove the layer completeness barrier. Terminal layouts also currently
+pass through the next layer before candidate collection, adding avoidable
+retained state. Any early terminal collection must preserve full-layout/source/
+terminal checks and count/digest parity.
+
+In the first prefix, even eliminating the entire measured 5.001s local reader
+wait, with all other costs unchanged, would give only about 1.175x speedup.
+This conditional arithmetic is not an `mmap` benchmark or a bound for different
+inputs. It explains why I/O format/mapping alone is insufficient for this local
+case; actual HTTP latency is a separate measurement still required.
+
 Still required: complete 456,459-family validation/timing, input/hold-family
 scale tests, native/browser parity after these edits, real HTTP latency and
 completed-search frontier-batch A/B, independent profile qualification, remaining product contracts and release

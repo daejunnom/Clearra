@@ -51,6 +51,7 @@ test('online PC4 discovery and real host transport contracts stay in non-publish
   assert.ok(source.includes('scripts/tools/rust-test-evidence.test.mjs'));
   const surfaces = workflow.split('  surface-contracts:')[1].split('  preview-wasm:')[0];
   assert.ok(surfaces.includes('apps/clearra-web/test/onlinePc4Host.test.mjs'));
+  assert.ok(surfaces.includes('apps/clearra-web/test/pc4HostTypes.test.mjs'));
   assert.ok(surfaces.includes('apps/clearra-web/test/pc4LocalStore.test.mjs'));
   assert.ok(surfaces.includes('apps/clearra-web/test/LocalSearchProfile.contract.ts'));
 });
