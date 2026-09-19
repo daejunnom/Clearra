@@ -243,11 +243,13 @@ pub(crate) fn query_objective(query: &SetupSearchQuery) -> SetupPcAccelerationOb
 
 #[cfg(test)]
 mod tests {
-    use clearra_core_domain::{board::board_size::BoardSize, pc::pc_target::PcTarget};
+    use clearra_core_domain::{
+        board::board_size::BoardSize, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
+    };
     use clearra_pc4_tablebase::Pc4TargetLines;
     use clearra_problem::{
-        GroupingMode, PieceBudget, SetupHoldPolicy, SetupLimits, SetupProbabilityFilter,
-        SetupQueueInput,
+        compile_setup_search_conditions, GroupingMode, PieceBudget, SetupHoldPolicy, SetupLimits,
+        SetupProbabilityFilter, SetupQueueInput,
     };
     use clearra_rules::profile::builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x};
 
@@ -324,5 +326,34 @@ mod tests {
             SetupPcAccelerationObjective::RankedJoint,
         );
         assert_eq!(validate_setup_query_binding(&query, &request), Ok(()));
+    }
+
+    #[test]
+    fn tablebase_binding_preserves_exact_qb_supply_for_shared_coverage_execution() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+            .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S])
+            .with_tablebase_requested(true);
+        let request = SetupPcAccelerationRequestBinding::new(
+            PcCandidateRequestIdentity::from_sha256([3; 32]),
+            Pc4RuleProfile::SrsPlus,
+            0,
+            Pc4TargetLines::new(4).expect("target"),
+            SetupPcAccelerationObjective::RankedJoint,
+        );
+
+        assert_eq!(validate_setup_query_binding(&query, &request), Ok(()));
+        let condition = compile_setup_search_conditions(&query)
+            .expect("tablebase QB setup condition")
+            .remove(0);
+        assert_eq!(condition.queue_based_start(), 2);
+        assert_eq!(condition.probability_pattern_count(), 10_080);
+        assert_eq!(
+            condition
+                .queue_based_expression()
+                .expect("exact QB expression")
+                .source(),
+            "OS"
+        );
     }
 }

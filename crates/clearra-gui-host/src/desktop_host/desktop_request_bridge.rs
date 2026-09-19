@@ -1919,10 +1919,7 @@ mod legacy_form_parser {
         if let Some(queue_based) =
             optional_nonempty_text(value, &["setup_qb", "qb_queue", "queue_based_pieces"])?
         {
-            request = request.with_setup_queue_based_pieces(parse_pieces(
-                queue_based,
-                "setup queue-based pieces",
-            )?);
+            request = request.with_setup_queue_based_source(queue_based.to_owned());
         }
         if let Some(next_cycle) = optional_nonempty_text(
             value,

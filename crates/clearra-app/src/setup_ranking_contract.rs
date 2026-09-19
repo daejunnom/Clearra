@@ -284,6 +284,10 @@ fn hash_queue(hasher: &mut Sha256, queue: &SetupQueueInput) {
             hash_text(hasher, "fixed");
             hash_pieces(hasher, sequence.pieces());
         }
+        SetupQueueInput::PatternExpression(expression) => {
+            hash_text(hasher, "pattern-expression");
+            hash_text(hasher, expression.source());
+        }
         SetupQueueInput::BagAlignedPattern(pattern) => {
             hash_text(hasher, "bag-aligned-pattern");
             hash_pieces(hasher, pattern.pieces());

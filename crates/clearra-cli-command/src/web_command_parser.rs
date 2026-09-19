@@ -2070,15 +2070,33 @@ fn parse_setup_command(
                     format!("invalid setup residue: {error:?}"),
                 )
             })?;
-    let queue_based_pieces = queue_based
+    let queue_based_source = queue_based
         .map(|value| {
-            clearra_supply::queue::queue_parser::parse_piece_sequence(&value.to_ascii_uppercase())
+            let normalized = value
+                .chars()
+                .filter(|character| !character.is_whitespace() && *character != ',')
+                .flat_map(char::to_uppercase)
+                .collect::<String>();
+            let sequence_len = if !normalized.is_empty()
+                && normalized
+                    .chars()
+                    .all(|piece| PieceKind::from_ascii(piece).is_ok())
+            {
+                normalized.chars().count()
+            } else {
+                QueuePatternExpression::parse(
+                    &normalized,
+                    clearra_problem::SetupLimits::default().max_patterns(),
+                )
                 .map_err(|error| {
                     WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
-                        format!("invalid observed QB pieces: {error:?}"),
+                        format!("invalid QB queue pattern: {error:?}"),
                     )
-                })
+                })?
+                .sequence_len()
+            };
+            Ok::<_, WebCommandError>((normalized, sequence_len))
         })
         .transpose()?;
     let next_cycle_remaining_pieces = next_cycle_remaining
@@ -2092,7 +2110,7 @@ fn parse_setup_command(
                 })
         })
         .transpose()?;
-    let search_mode = match (explicit_search_mode, queue_based_pieces.is_some()) {
+    let search_mode = match (explicit_search_mode, queue_based_source.is_some()) {
         (Some(clearra_problem::SetupSearchMode::ShapeOracle), true) => {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::InvalidValue,
@@ -2102,7 +2120,7 @@ fn parse_setup_command(
         (Some(clearra_problem::SetupSearchMode::QueueBased), false) => {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::InvalidValue,
-                "setup mode qb requires --qb observed pieces",
+                "setup mode qb requires --qb with an exact next-bag prefix or queue pattern",
             ));
         }
         (Some(mode), _) => mode,
@@ -2121,6 +2139,14 @@ fn parse_setup_command(
             WebCommandErrorCode::InvalidValue,
             "--allow-post-cycle-borrow requires exactly three remaining pieces",
         ));
+    }
+    if let Some((_, sequence_len)) = queue_based_source.as_ref() {
+        if pieces.len() + sequence_len > 11 {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "setup remaining pieces and QB supply may contain at most eleven pieces",
+            ));
+        }
     }
     if let Some(next_cycle_pieces) = next_cycle_remaining_pieces.as_ref() {
         let expected = setup_next_cycle_remaining_count(cycle);
@@ -2149,8 +2175,8 @@ fn parse_setup_command(
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_use_all_logical_processors(use_all_logical_processors)
         .with_tablebase_requested(tablebase_requested);
-    if let Some(pieces) = queue_based_pieces {
-        request = request.with_setup_queue_based_pieces(pieces);
+    if let Some((source, _)) = queue_based_source {
+        request = request.with_setup_queue_based_source(source);
     }
     if let Some(pieces) = next_cycle_remaining_pieces {
         request = request.with_setup_next_cycle_remaining_pieces(pieces);

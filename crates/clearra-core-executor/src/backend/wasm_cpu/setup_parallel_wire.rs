@@ -6,6 +6,9 @@ use clearra_problem::{
     SetupLimits, SetupPathDetail, SetupSearchMode, SetupSearchQuery,
 };
 use clearra_rules::profile::rule_profile::{RuleProfile, RuleProfileId};
+use clearra_supply::{
+    queue::queue_pattern_expression::QueuePatternExpression, QueueObservationPolicy,
+};
 
 use super::{
     setup_coverage_graph::{SetupCoverageEdge, SetupCoverageGraph, SetupCoverageNode},
@@ -13,7 +16,7 @@ use super::{
     WasmExactSearchError,
 };
 
-const INITIALIZATION_MAGIC: [u8; 4] = *b"CSPC";
+const INITIALIZATION_MAGIC: [u8; 4] = *b"CSQ2";
 const TASK_MAGIC: [u8; 4] = *b"CST2";
 const RESULT_MAGIC: [u8; 4] = *b"CSR5";
 const NO_WITNESS: u32 = u32::MAX;
@@ -110,25 +113,33 @@ pub(super) fn encode_initialization(
         SetupSearchMode::ShapeOracle => 0,
         SetupSearchMode::QueueBased => 1,
     });
-    let queue_based_pieces = match query.search_mode() {
-        SetupSearchMode::ShapeOracle => &[][..],
-        SetupSearchMode::QueueBased => query
-            .queue()
-            .as_fixed_sequence()
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "setup_parallel_queue_based_queue_missing",
-            ))?
-            .pieces(),
+    output.push(match query.queue_observation_policy() {
+        QueueObservationPolicy::FullQueueOracle => 0,
+        QueueObservationPolicy::VisibleSeven => 1,
+    });
+    let (queue_based_kind, queue_based_source) = match query.search_mode() {
+        SetupSearchMode::ShapeOracle => (0, String::new()),
+        SetupSearchMode::QueueBased => {
+            if let Some(sequence) = query.queue().as_fixed_sequence() {
+                (
+                    1,
+                    sequence
+                        .pieces()
+                        .iter()
+                        .map(|piece| piece.as_ascii())
+                        .collect(),
+                )
+            } else if let Some(expression) = query.queue().as_pattern_expression() {
+                (2, expression.source().to_owned())
+            } else {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_queue_based_queue_missing",
+                ));
+            }
+        }
     };
-    push_u32(
-        &mut output,
-        u32::try_from(queue_based_pieces.len()).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_parallel_queue_based_count_overflow")
-        })?,
-    );
-    for piece in queue_based_pieces {
-        output.push(piece_code(*piece));
-    }
+    output.push(queue_based_kind);
+    push_string(&mut output, &queue_based_source)?;
     let next_cycle_remaining_pieces = query.next_cycle_remaining_pieces().unwrap_or(&[]);
     push_u32(
         &mut output,
@@ -251,27 +262,24 @@ pub(super) fn decode_initialization(
             ));
         }
     };
-    let queue_based_count = reader.usize_from_u32("setup_parallel_queue_based_count_overflow")?;
-    if (search_mode == SetupSearchMode::ShapeOracle && queue_based_count != 0)
+    let queue_observation_policy = match reader.u8()? {
+        0 => QueueObservationPolicy::FullQueueOracle,
+        1 => QueueObservationPolicy::VisibleSeven,
+        _ => {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_queue_observation_policy_invalid",
+            ));
+        }
+    };
+    let queue_based_kind = reader.u8()?;
+    let queue_based_source = reader.string("setup_parallel_queue_based_source_invalid")?;
+    if (search_mode == SetupSearchMode::ShapeOracle
+        && (queue_based_kind != 0 || !queue_based_source.is_empty()))
         || (search_mode == SetupSearchMode::QueueBased
-            && (queue_based_count == 0 || queue_based_count + residue_count > 7))
+            && (!matches!(queue_based_kind, 1 | 2) || queue_based_source.is_empty()))
     {
         return Err(WasmExactSearchError::InvalidProblem(
-            "setup_parallel_queue_based_count_invalid",
-        ));
-    }
-    let mut queue_based_pieces = Vec::new();
-    queue_based_pieces
-        .try_reserve_exact(queue_based_count)
-        .map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_parallel_queue_based_storage_unavailable")
-        })?;
-    for _ in 0..queue_based_count {
-        queue_based_pieces.push(piece_from_code(reader.u8()?)?);
-    }
-    if has_duplicate_piece(&queue_based_pieces) {
-        return Err(WasmExactSearchError::InvalidProblem(
-            "setup_parallel_queue_based_observation_invalid",
+            "setup_parallel_queue_based_source_invalid",
         ));
     }
     let next_cycle_remaining_count =
@@ -396,9 +404,36 @@ pub(super) fn decode_initialization(
     let mut query = SetupSearchQuery::default()
         .with_rule(rule)
         .with_remaining_pieces(residue)
-        .with_hold_policy(hold_policy);
-    if search_mode == SetupSearchMode::QueueBased {
-        query = query.with_queue_based_pieces(queue_based_pieces);
+        .with_hold_policy(hold_policy)
+        .with_queue_observation_policy(queue_observation_policy);
+    if search_mode == SetupSearchMode::QueueBased && queue_based_kind == 1 {
+        let pieces = queue_based_source
+            .chars()
+            .map(|value| {
+                PieceKind::from_ascii(value).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "setup_parallel_queue_based_source_invalid",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if pieces.is_empty() || pieces.len() + residue_count > 11 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_queue_based_count_invalid",
+            ));
+        }
+        query = query.with_queue_based_pieces(pieces);
+    } else if search_mode == SetupSearchMode::QueueBased {
+        let expression = QueuePatternExpression::parse(&queue_based_source, limits.max_patterns())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("setup_parallel_queue_based_pattern_invalid")
+            })?;
+        if expression.sequence_len() + residue_count > 11 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_parallel_queue_based_count_invalid",
+            ));
+        }
+        query = query.with_queue_based_pattern_expression(expression);
     }
     if !next_cycle_remaining_pieces.is_empty() {
         query = query.with_next_cycle_remaining_pieces(next_cycle_remaining_pieces);
@@ -626,12 +661,6 @@ fn piece_from_code(code: u8) -> Result<PieceKind, WasmExactSearchError> {
         .ok_or(WasmExactSearchError::InvalidProblem(
             "setup_parallel_piece_code_invalid",
         ))
-}
-
-fn has_duplicate_piece(pieces: &[PieceKind]) -> bool {
-    PieceKind::STANDARD_TETROMINOES
-        .into_iter()
-        .any(|piece| pieces.iter().filter(|value| **value == piece).count() > 1)
 }
 
 fn rule_profile_code(profile: RuleProfileId) -> u8 {

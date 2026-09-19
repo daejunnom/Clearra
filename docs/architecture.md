@@ -1065,19 +1065,25 @@ not dominate probability ordering, while callers may select 10 to expose
 terminal PC solutions.
 
 Queue-based setup mode keeps the normal unordered cycle residue and conditions
-the next bag on a distinct observed piece group. The group's letter order does
-not fix draw order. Observed pieces are available to partial BuildUp but are not
-mandatory setup locks.
+the supply starting exactly at the next bag boundary. A plain sequence is an
+ordered prefix: `OS` means that the next bag starts with O and then S, while the
+other five pieces remain randomly ordered. It does not include `SO` or a queue
+such as `OLJIS`. A queue-pattern expression states alternatives explicitly;
+for example, `[OS]!` admits both `OS` and `SO`. The remaining inventory count
+plus the QB sequence length may be at most 11. QB pieces are available to
+partial BuildUp but are not mandatory setup locks.
 
 An independent optional terminal supply target may be used in either shape
 oracle or queue-based mode. The target is the multiset union of the terminal
 hold and the unconsumed standard-bag suffix. Its required cardinality is
 derived from the current cycle, and one duplicated piece kind is permitted
 only as hold carryover. The compiler preserves the broad source universe,
-derives compatible patterns from the terminal constraint, and retains the
-original global pattern IDs and weights. Filtered probability is never
-renormalized. Observed QB conditioning and terminal supply filtering may be
-combined without changing either contract.
+intersects it with the QB language at the next-bag boundary, and then derives
+compatible patterns from the terminal constraint. QB probabilities are
+conditional on and renormalized to the compatible QB subset. A later terminal-
+inventory filter retains the original global pattern IDs and does not
+renormalize that QB denominator. QB conditioning and terminal supply filtering
+may be combined without changing either contract.
 
 Coverage is evaluated on the exact product state:
 

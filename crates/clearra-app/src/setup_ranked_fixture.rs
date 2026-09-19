@@ -182,8 +182,8 @@ fn setup_candidate_set_hash(report: &SetupFinderReport) -> String {
 
 fn queue_based_pieces(queue: &SetupQueueInput) -> String {
     queue
-        .as_fixed_sequence()
-        .map(|queue| pieces_string(queue.pieces()))
+        .queue_based_source()
+        .map(|source| source.into_owned())
         .unwrap_or_default()
 }
 

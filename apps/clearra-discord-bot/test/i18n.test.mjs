@@ -40,11 +40,11 @@ test("released English, Korean, and Japanese Discord catalogs stay complete", ()
   assert.equal(matchDiscordLocale("ja"), "ja");
   assert.match(
     validationErrorText(new DiscordInputError("options.setup_qb_bag_capacity"), "en"),
-    /seven-piece bag/u,
+    /at most 11/u,
   );
   assert.match(
     validationErrorText(new DiscordInputError("options.setup_qb_bag_capacity"), "ko"),
-    /7개 미노 백/u,
+    /최대 11/u,
   );
 });
 

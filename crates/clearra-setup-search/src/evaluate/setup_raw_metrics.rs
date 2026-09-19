@@ -233,6 +233,13 @@ fn queue_prefix(query: &SetupSearchQuery) -> Vec<PieceKind> {
 
 fn bag_boundary_offsets(queue: &SetupQueueInput) -> Vec<usize> {
     match queue {
+        SetupQueueInput::PatternExpression(expression) => {
+            if expression.sequence_len() == 0 {
+                Vec::new()
+            } else {
+                vec![0]
+            }
+        }
         SetupQueueInput::BagAlignedPattern(pattern) => {
             if pattern.is_empty() {
                 Vec::new()
@@ -253,6 +260,7 @@ fn bag_boundary_offsets(queue: &SetupQueueInput) -> Vec<usize> {
 fn queue_pieces(queue: &SetupQueueInput) -> Vec<PieceKind> {
     match queue {
         SetupQueueInput::FixedSequence(sequence) => sequence.pieces().to_vec(),
+        SetupQueueInput::PatternExpression(expression) => expression.first_sequence().into_owned(),
         SetupQueueInput::BagAlignedPattern(pattern) => pattern.pieces().to_vec(),
         SetupQueueInput::Observed(queue) => queue.pieces().to_vec(),
     }

@@ -1,5 +1,9 @@
 import { tokenizeCommand } from "../clearra/command.mjs";
 import { DiscordInputError } from "./i18n.mjs";
+import {
+  isStandardBagQueue,
+  parseQueuePatternSource,
+} from "./queue-pattern-source.mjs";
 
 const SETTINGS_MAX_LENGTH = 256;
 const DAMAGE_SPIN_PROFILES = new Set([
@@ -80,17 +84,19 @@ export function setupFinderPackedArguments(command, values, remaining) {
     throw new DiscordInputError("options.setup_qb_oracle_conflict");
   }
   if (qbSource !== null) {
-    const qb = pieceInventory(qbSource, "qb");
-    if (qb.length > 7 || new Set(qb).size !== qb.length) {
-      throw invalidOption(
-        "qb",
-        "options qb must contain from 1 through 7 unique IOTSZJL pieces.",
-      );
+    let qb;
+    try {
+      qb = parseQueuePatternSource(qbSource, { name: "options qb", maxLength: 256 });
+    } catch (error) {
+      throw invalidOption("qb", error instanceof Error ? error.message : String(error));
     }
-    if (qb.length + remaining.length > 7) {
+    if (qb.kind === "fixed" && !isStandardBagQueue(qb.source)) {
+      throw invalidOption("qb", "options qb exact queues may not repeat a piece inside one seven-piece bag.");
+    }
+    if (qb.sequenceLength + remaining.length > 11) {
       throw new DiscordInputError("options.setup_qb_bag_capacity");
     }
-    output.push("--mode", "qb", "--qb", qb);
+    output.push("--mode", "qb", "--qb", qb.source);
   } else if (requestedMode !== null) {
     output.push("--mode", requestedMode);
   }

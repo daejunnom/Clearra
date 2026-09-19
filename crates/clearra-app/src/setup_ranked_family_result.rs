@@ -583,8 +583,8 @@ pub fn setup_ranked_candidate_id(condition_id: &str, candidate: &SetupCandidateR
 
 fn queue_based_pieces(queue: &SetupQueueInput) -> String {
     queue
-        .as_fixed_sequence()
-        .map(|queue| pieces_string(queue.pieces()))
+        .queue_based_source()
+        .map(|source| source.into_owned())
         .unwrap_or_default()
 }
 

@@ -5,7 +5,12 @@ import type {
   WorkspaceDeveloperFailureEvidence,
   WorkspacePublicFailure
 } from './workspacePublicFailure';
-import type { QueueKnowledge, RuleProfile } from './solverWorkspaceModel.ts';
+import {
+  normalizeQueueInput,
+  parseBrowserQueueInput,
+  type QueueKnowledge,
+  type RuleProfile
+} from './solverWorkspaceModel.ts';
 import {
   cliCommandRequestForDesktop,
   serializeCliCommandArguments
@@ -114,7 +119,8 @@ export function setupFinderValidationCodes(
   request: SetupFinderRequest
 ): SetupFinderValidationCode[] {
   const normalized = normalizedSetupResidue(request.remaining);
-  const normalizedQb = normalizedSetupResidue(request.qbQueue);
+  const normalizedQb = normalizeQueueInput(request.qbQueue);
+  const parsedQb = parseBrowserQueueInput(request.qbQueue);
   const normalizedNextCycle = normalizedSetupResidue(request.nextCycleRemaining);
   const codes: SetupFinderValidationCode[] = [];
   if ([...normalized].some((piece) => !PIECES.includes(piece))) {
@@ -134,14 +140,13 @@ export function setupFinderValidationCodes(
   if (request.searchMode === 'qb') {
     if (normalizedQb.length < 1) {
       codes.push('setup_qb_count_invalid');
-    }
-    if ([...normalizedQb].some((piece) => !PIECES.includes(piece))) {
+    } else if (!parsedQb) {
       codes.push('setup_qb_piece_invalid');
     }
-    if ([...new Set(normalizedQb)].length !== normalizedQb.length) {
+    if (parsedQb?.kind === 'fixed' && !isStandardBagPrefix(parsedQb.source)) {
       codes.push('setup_qb_duplicate_invalid');
     }
-    if (normalized.length + normalizedQb.length > 7) {
+    if (parsedQb && normalized.length + parsedQb.sequenceLength > 11) {
       codes.push('setup_qb_combined_count_invalid');
     }
   }
@@ -166,6 +171,14 @@ export function setupFinderValidationCodes(
     codes.push('setup_max_pieces_invalid');
   }
   return [...new Set(codes)];
+}
+
+function isStandardBagPrefix(source: string): boolean {
+  for (let start = 0; start < source.length; start += 7) {
+    const bag = source.slice(start, start + 7);
+    if (new Set(bag).size !== bag.length) return false;
+  }
+  return true;
 }
 
 export function buildSetupFinderCommand(
@@ -199,7 +212,7 @@ function buildSetupFinderCommandArgumentsWithRoute(
     remaining
   ];
   if (request.searchMode === 'qb') {
-    tokens.push('--mode', 'qb', '--qb', normalizedSetupResidue(request.qbQueue));
+    tokens.push('--mode', 'qb', '--qb', parseBrowserQueueInput(request.qbQueue)?.source ?? '');
   }
   tokens.push('--queue-knowledge', request.queueKnowledge);
   const nextCycleRemaining = normalizedSetupResidue(request.nextCycleRemaining);

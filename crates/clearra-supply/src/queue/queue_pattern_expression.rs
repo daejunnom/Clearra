@@ -187,6 +187,45 @@ impl QueuePatternExpression {
         self.sequences.len()
     }
 
+    /// Tests one complete sequence against this expression without expanding a
+    /// factorized pattern space. Setup QB conditioning uses this to intersect a
+    /// canonical 7-bag universe with the observed queue language.
+    pub fn matches_sequence(&self, sequence: &[PieceKind]) -> bool {
+        if sequence.len() != self.sequence_len {
+            return false;
+        }
+        match &self.sequences {
+            QueuePatternSequenceStorage::Explicit(sequences) => {
+                sequences.iter().any(|candidate| candidate == sequence)
+            }
+            QueuePatternSequenceStorage::Factorized(space) => {
+                let mut cursor = 0;
+                for atom in &space.atoms {
+                    let end = cursor + atom.draw_count;
+                    let Some(draws) = sequence.get(cursor..end) else {
+                        return false;
+                    };
+                    let mut seen = 0_u8;
+                    for piece in draws {
+                        let Some(index) = PieceKind::STANDARD_TETROMINOES
+                            .iter()
+                            .position(|candidate| candidate == piece)
+                        else {
+                            return false;
+                        };
+                        let bit = 1_u8 << index;
+                        if seen & bit != 0 || !atom.choices.contains(piece) {
+                            return false;
+                        }
+                        seen |= bit;
+                    }
+                    cursor = end;
+                }
+                cursor == sequence.len()
+            }
+        }
+    }
+
     /// Returns every heap byte retained by the expression, measured from
     /// allocation capacity. This includes source text plus explicit outer and
     /// nested sequence buffers, or the factorized atom and choice buffers. The
@@ -946,6 +985,55 @@ mod tests {
         assert_eq!(group_count.pattern_count(), 12);
         assert_eq!(group.sequence_len(), 4);
         assert_eq!(group.pattern_count(), 24);
+    }
+
+    #[test]
+    fn exact_sequence_matching_keeps_os_ordered() {
+        let exact = QueuePatternExpression::parse("OS", 1).expect("exact OS expression");
+
+        assert!(exact.matches_sequence(&[PieceKind::O, PieceKind::S]));
+        assert!(!exact.matches_sequence(&[PieceKind::S, PieceKind::O]));
+        assert!(!exact.matches_sequence(&[
+            PieceKind::O,
+            PieceKind::L,
+            PieceKind::J,
+            PieceKind::I,
+            PieceKind::S,
+        ]));
+    }
+
+    #[test]
+    fn group_and_factorized_sequence_matching_preserve_their_languages() {
+        let group = QueuePatternExpression::parse("[OS]!", 2).expect("OS group expression");
+        assert!(group.matches_sequence(&[PieceKind::O, PieceKind::S]));
+        assert!(group.matches_sequence(&[PieceKind::S, PieceKind::O]));
+
+        let factorized = QueuePatternExpression::parse("P7P3", 1_058_400)
+            .expect("two-bag factorized expression");
+        assert!(factorized.matches_sequence(&[
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
+            PieceKind::J,
+            PieceKind::L,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::T,
+        ]));
+        assert!(!factorized.matches_sequence(&[
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
+            PieceKind::J,
+            PieceKind::L,
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::T,
+        ]));
     }
 
     #[test]

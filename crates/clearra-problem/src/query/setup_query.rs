@@ -15,7 +15,10 @@ use clearra_core_domain::{
     board::board_size::BoardSize, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
 };
 use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
-use clearra_supply::{queue::fixed_sequence::FixedSequence, QueueObservationPolicy};
+use clearra_supply::{
+    queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
+    QueueObservationPolicy,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupPathDetail {
@@ -348,6 +351,15 @@ impl SetupSearchQuery {
 
     pub fn with_queue_based_pieces(mut self, pieces: Vec<PieceKind>) -> Self {
         self.queue = SetupQueueInput::fixed_sequence(FixedSequence::new(pieces));
+        self.search_mode = SetupSearchMode::QueueBased;
+        self
+    }
+
+    pub fn with_queue_based_pattern_expression(
+        mut self,
+        expression: QueuePatternExpression,
+    ) -> Self {
+        self.queue = SetupQueueInput::pattern_expression(expression);
         self.search_mode = SetupSearchMode::QueueBased;
         self
     }

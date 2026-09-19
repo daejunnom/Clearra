@@ -940,7 +940,7 @@ function registrationOptions(input, capabilityId = null) {
           64,
         ),
         setupModeOption(),
-        stringOption("qb", "Observed next-bag pieces; required only in QB mode", false, 64),
+        stringOption("qb", "Exact next-bag prefix or queue pattern; required only in QB mode", false, 64),
         setupQueueKnowledgeOption(),
         stringOption(
           "next-cycle-remaining",
@@ -1478,7 +1478,7 @@ function setupModeOption() {
   return choiceOption(
     "mode",
     "Setup supply mode; QB requires the qb option",
-    [["Oracle (default)", "oracle"], ["Observed QB group", "qb"]],
+    [["Oracle (default)", "oracle"], ["QB prefix / pattern", "qb"]],
   );
 }
 
@@ -1893,7 +1893,7 @@ function syntax(entry, locale = "en") {
       case "remaining":
         return `/${path} remaining:<순서 없는 IOTSZJL 목록> [priority:<all|build|pc>] [max-setup-pieces:1..10] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<정확한 목록>] [setup-length:<auto|longer|shorter>] [kicktable:<내장 프로필>] [options:<mode qb post-cycle-borrow>]`;
       case "setup-v2":
-        return `/${path} remaining:<순서 없는 IOTSZJL 목록> [mode:<oracle|qb>] [qb:<관측 미노>] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<정확한 목록>] [post-cycle-borrow:<on|off>] [setup-length:<auto|longer|shorter>] [max-setup-pieces:1..10] [kicktable:<내장 프로필>]`;
+        return `/${path} remaining:<순서 없는 IOTSZJL 목록> [mode:<oracle|qb>] [qb:<다음 가방의 정확한 접두사|패턴>] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<정확한 목록>] [post-cycle-borrow:<on|off>] [setup-length:<auto|longer|shorter>] [max-setup-pieces:1..10] [kicktable:<내장 프로필>]`;
       case "setup-score-v1":
         return `/${path} document-format:<ctk3|fumen> document:<색상 셋업 후보 문서> (setup-queue:<정확한 큐>|setup-patterns:<패턴>) (solution-queue:<정확한 큐>|solution-patterns:<패턴>) [clear:1..6] [hold:<on|off>] [score-profile:<tetrio|guideline|jstris-ultra>] [initial-b2b:0..4294967295] [kicktable:<내장 프로필>] [max-patterns:<개수>]`;
       case "spin-structure":
@@ -1980,7 +1980,7 @@ function syntax(entry, locale = "en") {
     case "remaining":
       return `/${path} remaining:<unordered IOTSZJL inventory> [priority:<all|build|pc>] [max-setup-pieces:1..10] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<exact inventory>] [setup-length:<auto|longer|shorter>] [kicktable:<built-in>] [options:<mode qb post-cycle-borrow>]`;
     case "setup-v2":
-      return `/${path} remaining:<unordered IOTSZJL inventory> [mode:<oracle|qb>] [qb:<observed pieces>] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<exact inventory>] [post-cycle-borrow:<on|off>] [setup-length:<auto|longer|shorter>] [max-setup-pieces:1..10] [kicktable:<built-in>]`;
+      return `/${path} remaining:<unordered IOTSZJL inventory> [mode:<oracle|qb>] [qb:<exact next-bag prefix|pattern>] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<exact inventory>] [post-cycle-borrow:<on|off>] [setup-length:<auto|longer|shorter>] [max-setup-pieces:1..10] [kicktable:<built-in>]`;
     case "setup-score-v1":
       return `/${path} document-format:<ctk3|fumen> document:<colored setup-candidate document> (setup-queue:<exact queue>|setup-patterns:<pattern>) (solution-queue:<exact queue>|solution-patterns:<pattern>) [clear:1..6] [hold:<on|off>] [score-profile:<tetrio|guideline|jstris-ultra>] [initial-b2b:0..4294967295] [kicktable:<built-in>] [max-patterns:<count>]`;
     case "spin-structure":
@@ -2210,14 +2210,14 @@ function inputHelp(entry, locale = "en") {
         "`max-setup-pieces` accepts 1–10 and defaults to 9; choose 10 to include complete perfect clears. `queue-knowledge` is `full-queue` (default) or `visible-7`.",
         "`next-cycle-remaining` is an exact unordered inventory for the following cycle. Its required count is determined by `remaining` (7→4, 4→1, 1→5, 5→2, 2→6, 6→3, 3→7), with the same duplicate rule.",
         "`setup-length` is `auto`, `longer`, or `shorter`. Auto favors longer setups for `all`/`build` and shorter setups for `pc`.",
-        "`options` keys are `mode`, `qb`, and `post-cycle-borrow`. QB mode requires `qb`; borrowing is limited to cycle 7 (`remaining` has three pieces).",
+        "`options` keys are `mode`, `qb`, and `post-cycle-borrow`. QB accepts an exact next-bag prefix or queue pattern; `OS` means O then S, while `[OS]!` permits OS or SO. Remaining count plus QB sequence length may be at most 11. Borrowing is limited to cycle 7 (`remaining` has three pieces).",
         nativeKickHelp,
       ];
     case "setup-v2":
       return [
         "`remaining` is an unordered 1–7-piece inventory. At most one piece kind may appear twice; that duplicate becomes the initial hold.",
         `/${commandPath(entry)} has the semantic ranking preset \`${entry.setupPriority}\`. Supply mode, QB observation, queue knowledge, next-cycle residue, borrowing, length, and maximum setup pieces are separate named options.`,
-        "QB mode requires `qb`; post-cycle borrowing is limited to a three-piece residue.",
+        "QB mode requires an exact next-bag prefix or queue pattern. `OS` fixes O then S and leaves the other five bag pieces randomly ordered; `[OS]!` permits OS or SO. Remaining count plus QB sequence length may be at most 11. Queue knowledge remains an independent oracle or visible-7 policy. Post-cycle borrowing is limited to a three-piece residue.",
         nativeKickHelp,
       ];
     case "setup-score-v1":
@@ -2511,14 +2511,14 @@ function koreanInputHelp(entry) {
         "`max-setup-pieces`는 1–10이며 기본값은 9입니다. 완성된 PC까지 포함하려면 10을 선택합니다. `queue-knowledge`는 전체 미래 큐를 쓰는 `full-queue`(기본값) 또는 `visible-7`입니다.",
         "`next-cycle-remaining`은 다음 회차에 남을 정확한 순서 없는 미노 목록입니다. 필요한 개수는 `remaining`에 따라 7→4, 4→1, 1→5, 5→2, 2→6, 6→3, 3→7이며 중복 규칙은 같습니다.",
         "`setup-length`는 `auto`, `longer`, `shorter` 중 하나입니다. 자동은 `all`/`build`에서 긴 셋업, `pc`에서 짧은 셋업을 우선합니다.",
-        "`options` 키는 `mode`, `qb`, `post-cycle-borrow`입니다. QB 모드에는 `qb`가 필요하며 빌리기는 remaining 3개인 7회차에서만 허용됩니다.",
+        "`options` 키는 `mode`, `qb`, `post-cycle-borrow`입니다. QB는 다음 가방의 정확한 접두사 또는 큐 패턴을 받습니다. `OS`는 O 다음 S를 뜻하고 `[OS]!`는 OS 또는 SO를 허용합니다. remaining 개수와 QB 시퀀스 길이의 합은 최대 11입니다. 빌리기는 remaining 3개인 7회차에서만 허용됩니다.",
         nativeKickHelp,
       ];
     case "setup-v2":
       return [
         "`remaining`은 순서 없는 IOTSZJL 미노 1–7개이며, 한 종류의 중복만 초기 홀드로 허용합니다.",
-        `/${commandPath(entry)}에는 \`${entry.setupPriority}\` 정렬 프리셋이 적용됩니다. 모드, QB 관측, 큐 공개 범위, 다음 회차 잔여, 빌리기, 길이, 최대 셋업 미노는 각각 명명 옵션입니다.`,
-        "QB 모드에는 `qb`가 필요하고 다음 회차 빌리기는 잔여 3개일 때만 허용합니다.",
+        `/${commandPath(entry)}에는 \`${entry.setupPriority}\` 정렬 프리셋이 적용됩니다. 모드, QB 공급, 큐 공개 범위, 다음 회차 잔여, 빌리기, 길이, 최대 셋업 미노는 각각 명명 옵션입니다.`,
+        "QB 모드는 다음 가방의 정확한 접두사 또는 큐 패턴을 받습니다. `OS`는 O 다음 S를 고정하고 나머지 5개는 무작위 순서이며, `[OS]!`는 OS 또는 SO를 허용합니다. remaining 개수와 QB 시퀀스 길이의 합은 최대 11입니다. 큐 공개 범위의 oracle과 visible-7은 독립된 정책입니다. 다음 회차 빌리기는 잔여 3개일 때만 허용합니다.",
         nativeKickHelp,
       ];
     case "setup-score-v1":
@@ -3174,7 +3174,7 @@ function koreanChoiceName(name, value, path = "") {
     })[value] ?? name;
   }
   if (path.endsWith(".mode")) {
-    return ({ oracle: "Oracle (기본값)", qb: "관측한 QB 그룹" })[value] ?? name;
+    return ({ oracle: "Oracle (기본값)", qb: "QB 접두사 / 패턴" })[value] ?? name;
   }
   if (path.endsWith(".spin-category")) {
     return ({ any: "모든 미노 (기본값)", t: "T 미노", other: "T 외 미노" })[value] ?? name;
@@ -3567,7 +3567,7 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   hold: "탐색 시작 시 사용할 홀드 상태 또는 홀드 사용 여부입니다",
   height: "입력 필드를 모두 포함하는 탐색 높이입니다",
   mode: "셋업 후보가 관측할 공급 모드입니다",
-  qb: "qb 모드에서 이미 관측한 현재 가방 미노입니다",
+  qb: "qb 모드의 다음 가방 접두 큐 또는 큐 패턴입니다. OS는 O 다음 S를 뜻합니다",
   aggregation: "빌드 가능성, 스핀 커버리지, 기하학 타일링 중 결과 집계 방식입니다",
   "result-mode": "구축 확률 탐색에 적용할 정확한 결과 집계 방식입니다",
   "score-profile": "퍼펙트 클리어 해법에 적용할 점수 프로필입니다",

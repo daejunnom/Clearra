@@ -33,6 +33,7 @@ use clearra_supply::{
         PatternPiecePositionIndexCompileAdvance, PatternPiecePositionIndexCompileSession,
     },
     piece_source::{PieceSourceId, PieceSourceKind},
+    queue::queue_pattern_expression::QueuePatternExpression,
 };
 
 use crate::{
@@ -429,14 +430,8 @@ pub(super) fn finish_setup_result(
         .collect::<String>();
     let queue_based_pieces = query
         .queue()
-        .as_fixed_sequence()
-        .map(|queue| {
-            queue
-                .pieces()
-                .iter()
-                .map(|piece| piece.as_ascii())
-                .collect::<String>()
-        })
+        .queue_based_source()
+        .map(|source| source.into_owned())
         .unwrap_or_default();
     let next_cycle_remaining_pieces = query
         .next_cycle_remaining_pieces()
@@ -1126,6 +1121,7 @@ enum SetupPatternIndexCompileStage {
         compatible_words: Vec<u64>,
         next_word: usize,
         compatible_count: usize,
+        qb_compatible_count: usize,
     },
     CollectIds {
         index: PatternPiecePositionIndex,
@@ -1140,9 +1136,13 @@ enum SetupPatternIndexCompileStage {
 pub(super) struct SetupPatternIndexCompileSession {
     universe: MaterializedPatternUniverse,
     terminal_supply_target: Option<SetupTerminalSupplyTarget>,
+    queue_based_expression: Option<QueuePatternExpression>,
+    queue_based_start: usize,
+    expected_qb_pattern_count: usize,
     max_patterns: usize,
     hold_enabled: bool,
     initial_cursor: u16,
+    sequence: Vec<PieceKind>,
     stage: SetupPatternIndexCompileStage,
 }
 
@@ -1163,9 +1163,13 @@ impl SetupPatternIndexCompileSession {
         Ok(Self {
             universe,
             terminal_supply_target: condition.terminal_supply_target(),
+            queue_based_expression: condition.queue_based_expression().cloned(),
+            queue_based_start: condition.queue_based_start(),
+            expected_qb_pattern_count: condition.probability_pattern_count(),
             max_patterns: condition.max_patterns(),
             hold_enabled: problem.supply().hold_enabled(),
             initial_cursor: problem.initial_hold().cursor(),
+            sequence: Vec::new(),
             stage: SetupPatternIndexCompileStage::Full(compiler),
         })
     }
@@ -1209,7 +1213,9 @@ impl SetupPatternIndexCompileSession {
                         Ok(SetupPatternIndexCompileAdvance::Pending)
                     }
                     PatternPiecePositionIndexCompileAdvance::Complete(index) => {
-                        if self.terminal_supply_target.is_none() {
+                        if self.terminal_supply_target.is_none()
+                            && self.queue_based_expression.is_none()
+                        {
                             return Ok(SetupPatternIndexCompileAdvance::Complete(index));
                         }
                         let mut compatible_words = Vec::new();
@@ -1226,6 +1232,7 @@ impl SetupPatternIndexCompileSession {
                             compatible_words,
                             next_word: 0,
                             compatible_count: 0,
+                            qb_compatible_count: 0,
                         };
                         Ok(SetupPatternIndexCompileAdvance::Pending)
                     }
@@ -1236,44 +1243,60 @@ impl SetupPatternIndexCompileSession {
                 mut compatible_words,
                 mut next_word,
                 mut compatible_count,
+                mut qb_compatible_count,
             } => {
-                let target =
-                    self.terminal_supply_target
-                        .ok_or(WasmExactSearchError::InvalidProblem(
-                            "setup_terminal_supply_pattern_filter_target_missing",
-                        ))?;
                 let end = next_word.saturating_add(budget).min(index.word_count());
                 while next_word < end {
                     let active = index.active_word(next_word);
-                    let mut compatible = 0_u64;
-                    if self.hold_enabled {
-                        for extra_draw in 0..EXTRA_DRAW_STATE_COUNT as u8 {
-                            for hold_code in 0..HOLD_STATE_COUNT as u8 {
-                                compatible |= terminal_supply_target_word(
-                                    &index,
-                                    target,
-                                    self.initial_cursor,
-                                    10,
-                                    extra_draw,
-                                    hold_code,
-                                    next_word,
-                                    active,
-                                );
-                            }
-                        }
-                    } else {
-                        compatible = terminal_supply_target_word(
+                    let qb_compatible = if let Some(expression) = &self.queue_based_expression {
+                        queue_based_condition_word(
+                            &self.universe,
                             &index,
-                            target,
-                            self.initial_cursor,
-                            10,
-                            0,
-                            0,
+                            expression,
+                            self.queue_based_start,
                             next_word,
                             active,
-                        );
-                    }
-                    compatible &= active;
+                            &mut self.sequence,
+                        )?
+                    } else {
+                        active
+                    };
+                    qb_compatible_count =
+                        qb_compatible_count.saturating_add(qb_compatible.count_ones() as usize);
+                    let mut compatible = if let Some(target) = self.terminal_supply_target {
+                        let mut terminal_compatible = 0_u64;
+                        if self.hold_enabled {
+                            for extra_draw in 0..EXTRA_DRAW_STATE_COUNT as u8 {
+                                for hold_code in 0..HOLD_STATE_COUNT as u8 {
+                                    terminal_compatible |= terminal_supply_target_word(
+                                        &index,
+                                        target,
+                                        self.initial_cursor,
+                                        10,
+                                        extra_draw,
+                                        hold_code,
+                                        next_word,
+                                        qb_compatible,
+                                    );
+                                }
+                            }
+                        } else {
+                            terminal_compatible = terminal_supply_target_word(
+                                &index,
+                                target,
+                                self.initial_cursor,
+                                10,
+                                0,
+                                0,
+                                next_word,
+                                qb_compatible,
+                            );
+                        }
+                        terminal_compatible
+                    } else {
+                        qb_compatible
+                    };
+                    compatible &= qb_compatible;
                     compatible_count =
                         compatible_count.saturating_add(compatible.count_ones() as usize);
                     if compatible_count > self.max_patterns {
@@ -1290,8 +1313,16 @@ impl SetupPatternIndexCompileSession {
                         compatible_words,
                         next_word,
                         compatible_count,
+                        qb_compatible_count,
                     };
                     return Ok(SetupPatternIndexCompileAdvance::Pending);
+                }
+                if self.queue_based_expression.is_some()
+                    && qb_compatible_count != self.expected_qb_pattern_count
+                {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "setup_qb_supply_pattern_incompatible",
+                    ));
                 }
                 if compatible_count == index.local_pattern_count() {
                     return Ok(SetupPatternIndexCompileAdvance::Complete(index));
@@ -1385,6 +1416,40 @@ impl SetupPatternIndexCompileSession {
     }
 }
 
+fn queue_based_condition_word(
+    universe: &MaterializedPatternUniverse,
+    index: &PatternPiecePositionIndex,
+    expression: &QueuePatternExpression,
+    start: usize,
+    word_index: usize,
+    active: u64,
+    sequence: &mut Vec<PieceKind>,
+) -> Result<u64, WasmExactSearchError> {
+    let end = start.checked_add(expression.sequence_len()).ok_or(
+        WasmExactSearchError::InvalidProblem("setup_qb_supply_window_overflow"),
+    )?;
+    if end > index.sequence_len() {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_qb_supply_window_out_of_range",
+        ));
+    }
+    let mut remaining = active;
+    let mut compatible = 0_u64;
+    while remaining != 0 {
+        let bit = remaining.trailing_zeros() as usize;
+        remaining &= remaining - 1;
+        let local_pattern = word_index * u64::BITS as usize + bit;
+        let global_pattern = index.global_pattern_index(local_pattern).ok_or(
+            WasmExactSearchError::InvalidProblem("setup_qb_supply_pattern_id_missing"),
+        )?;
+        universe.write_sequence_at(global_pattern, sequence);
+        if expression.matches_sequence(&sequence[start..end]) {
+            compatible |= 1_u64 << bit;
+        }
+    }
+    Ok(compatible)
+}
+
 #[cfg(test)]
 fn compile_setup_pattern_index_legacy(
     condition: &SetupSearchCondition,
@@ -1395,9 +1460,11 @@ fn compile_setup_pattern_index_legacy(
     )?;
     let full_index = PatternPiecePositionIndex::compile(universe)
         .map_err(|_| WasmExactSearchError::InvalidProblem("setup_pattern_index_compile_failed"))?;
-    let Some(target) = condition.terminal_supply_target() else {
+    let target = condition.terminal_supply_target();
+    let queue_based_expression = condition.queue_based_expression();
+    if target.is_none() && queue_based_expression.is_none() {
         return Ok(full_index);
-    };
+    }
 
     let mut compatible_words = Vec::new();
     compatible_words
@@ -1410,37 +1477,59 @@ fn compile_setup_pattern_index_legacy(
     let hold_enabled = problem.supply().hold_enabled();
     let initial_cursor = problem.initial_hold().cursor();
     let mut compatible_count = 0_usize;
+    let mut qb_compatible_count = 0_usize;
+    let mut sequence = Vec::new();
     for word_index in 0..full_index.word_count() {
         let active = full_index.active_word(word_index);
-        let mut compatible = 0_u64;
-        if hold_enabled {
-            for extra_draw in 0..EXTRA_DRAW_STATE_COUNT as u8 {
-                for hold_code in 0..HOLD_STATE_COUNT as u8 {
-                    compatible |= terminal_supply_target_word(
-                        &full_index,
-                        target,
-                        initial_cursor,
-                        10,
-                        extra_draw,
-                        hold_code,
-                        word_index,
-                        active,
-                    );
-                }
-            }
-        } else {
-            compatible = terminal_supply_target_word(
+        let qb_compatible = if let Some(expression) = queue_based_expression {
+            queue_based_condition_word(
+                universe,
                 &full_index,
-                target,
-                initial_cursor,
-                10,
-                0,
-                0,
+                expression,
+                condition.queue_based_start(),
                 word_index,
                 active,
-            );
-        }
-        compatible &= active;
+                &mut sequence,
+            )?
+        } else {
+            active
+        };
+        qb_compatible_count =
+            qb_compatible_count.saturating_add(qb_compatible.count_ones() as usize);
+        let mut compatible = if let Some(target) = target {
+            let mut terminal_compatible = 0_u64;
+            if hold_enabled {
+                for extra_draw in 0..EXTRA_DRAW_STATE_COUNT as u8 {
+                    for hold_code in 0..HOLD_STATE_COUNT as u8 {
+                        terminal_compatible |= terminal_supply_target_word(
+                            &full_index,
+                            target,
+                            initial_cursor,
+                            10,
+                            extra_draw,
+                            hold_code,
+                            word_index,
+                            qb_compatible,
+                        );
+                    }
+                }
+            } else {
+                terminal_compatible = terminal_supply_target_word(
+                    &full_index,
+                    target,
+                    initial_cursor,
+                    10,
+                    0,
+                    0,
+                    word_index,
+                    qb_compatible,
+                );
+            }
+            terminal_compatible
+        } else {
+            qb_compatible
+        };
+        compatible &= qb_compatible;
         compatible_count = compatible_count.saturating_add(compatible.count_ones() as usize);
         if compatible_count > condition.max_patterns() {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -1448,6 +1537,13 @@ fn compile_setup_pattern_index_legacy(
             ));
         }
         compatible_words.push(compatible);
+    }
+    if queue_based_expression.is_some()
+        && qb_compatible_count != condition.probability_pattern_count()
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_qb_supply_pattern_incompatible",
+        ));
     }
     if compatible_count == full_index.local_pattern_count() {
         return Ok(full_index);
@@ -2119,6 +2215,7 @@ struct SetupCoverageSession {
     coverage_graph: Arc<SetupCoverageGraph>,
     pattern_index: Arc<PatternPiecePositionIndex>,
     weights: WeightedPatternSet,
+    probability_scale: f64,
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
     projects_standard_bag_lookahead: bool,
@@ -2211,6 +2308,11 @@ impl SetupCoverageSession {
             coverage_graph,
             pattern_index,
             weights: universe.weights().clone(),
+            probability_scale: if condition.queue_based_expression().is_some() {
+                universe.pattern_count() as f64 / condition.probability_pattern_count() as f64
+            } else {
+                1.0
+            },
             hold_enabled: problem.supply().hold_enabled(),
             projects_unplaced_lookahead: problem.supply().projects_unplaced_lookahead(),
             projects_standard_bag_lookahead: problem.supply().projects_standard_bag_lookahead(),
@@ -2452,18 +2554,20 @@ impl SetupCoverageSession {
             for lane in 0..lane_count {
                 accumulator.build_covered_patterns += build[lane].count_ones() as usize;
                 accumulator.joint_covered_patterns += joint[lane].count_ones() as usize;
-                accumulator.build_weight += covered_word_weight(
-                    &self.pattern_index,
-                    &self.weights,
-                    word_start + lane,
-                    build[lane],
-                );
-                accumulator.joint_weight += covered_word_weight(
-                    &self.pattern_index,
-                    &self.weights,
-                    word_start + lane,
-                    joint[lane],
-                );
+                accumulator.build_weight += self.probability_scale
+                    * covered_word_weight(
+                        &self.pattern_index,
+                        &self.weights,
+                        word_start + lane,
+                        build[lane],
+                    );
+                accumulator.joint_weight += self.probability_scale
+                    * covered_word_weight(
+                        &self.pattern_index,
+                        &self.weights,
+                        word_start + lane,
+                        joint[lane],
+                    );
             }
             self.shape_build_words[shape_index] = EMPTY_COVERAGE_WORDS;
             self.shape_joint_words[shape_index] = EMPTY_COVERAGE_WORDS;
@@ -2897,7 +3001,7 @@ impl SetupCoverageSession {
                 self.condition_id.clone(),
                 self.initial_hold,
                 self.pattern_expression.clone(),
-                self.pattern_index.global_pattern_count(),
+                self.condition.probability_pattern_count(),
                 candidate_count,
                 false,
                 true,

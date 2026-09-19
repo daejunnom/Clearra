@@ -8,6 +8,10 @@ import { decoder as fumenDecoder } from "tetris-fumen";
 
 import { decodeViewerDocument } from "../viewer/document.mjs";
 import { DiscordInputError } from "./i18n.mjs";
+import {
+  isStandardBagQueue,
+  parseQueuePatternSource,
+} from "./queue-pattern-source.mjs";
 import { DISCORD_PC_FIELD_MAX_ROWS, DISCORD_WIDE_FIELD_MAX_ROWS } from "./field-limits.mjs";
 export { DISCORD_PC_FIELD_MAX_ROWS, DISCORD_WIDE_FIELD_MAX_ROWS } from "./field-limits.mjs";
 import {
@@ -2372,137 +2376,10 @@ export function automaticPcLines({ occupied, pieceCount }) {
 }
 
 export function queuePatternPieceCount(source) {
-  const normalized = normalizeSfinderPatternForLength(
+  return parseQueuePatternSource(
     requiredString(source, "next", NEXT_MAX_LENGTH),
-  );
-  const lengths = normalized.split(";").map(patternAlternativeLength);
-  if (lengths.some((length) => length !== lengths[0])) {
-    throw new Error("next pattern alternatives must have the same piece count.");
-  }
-  return lengths[0];
-}
-
-function normalizeSfinderPatternForLength(source) {
-  const characters = [...source];
-  let output = "";
-  for (let index = 0; index < characters.length; index += 1) {
-    const character = characters[index];
-    if (/\s/.test(character) || character === ",") continue;
-    if (character === "*") {
-      if (characters[index + 1] === "!") {
-        output += "P7";
-        index += 1;
-        continue;
-      }
-      if (/^[pP]$/.test(characters[index + 1] ?? "")) {
-        output += "P";
-        index += 1;
-        continue;
-      }
-      throw new Error("next '*' must be followed immediately by ! or pN.");
-    }
-    if (/^[pP]$/.test(character) && index > 0 && characters[index - 1] === "]") {
-      continue;
-    }
-    output += asciiUppercase(character);
-  }
-  return output;
-}
-
-function asciiUppercase(character) {
-  const code = character.codePointAt(0);
-  return code >= 0x61 && code <= 0x7a
-    ? String.fromCodePoint(code - 0x20)
-    : character;
-}
-
-function patternAlternativeLength(source) {
-  if (!source) throw new Error("next pattern contains an empty alternative.");
-  let count = 0;
-  let cursor = 0;
-  while (cursor < source.length) {
-    const character = source[cursor];
-    if (/[IOTSZJL]/.test(character)) {
-      count += 1;
-      cursor += 1;
-      continue;
-    }
-    if (character === "*") {
-      if (source[cursor + 1] === "!") {
-        count += 7;
-        cursor += 2;
-        continue;
-      }
-      if (source[cursor + 1] !== "P") {
-        throw new Error("next '*' must be followed by ! or pN.");
-      }
-      const parsed = readPatternCount(source, cursor + 2);
-      if (parsed.value > 7) {
-        throw new Error("next standard-bag draws may not exceed seven pieces per group.");
-      }
-      count += parsed.value;
-      cursor = parsed.cursor;
-      continue;
-    }
-    if (character === "P") {
-      const parsed = readPatternCount(source, cursor + 1);
-      if (parsed.value > 7) {
-        throw new Error("next standard-bag draws may not exceed seven pieces per group.");
-      }
-      count += parsed.value;
-      cursor = parsed.cursor;
-      continue;
-    }
-    if (character === "[") {
-      const close = source.indexOf("]", cursor + 1);
-      if (close < 0) throw new Error("next pattern has an unterminated piece group.");
-      const group = source.slice(cursor + 1, close);
-      const complement = group.startsWith("^");
-      const pieces = complement ? group.slice(1) : group;
-      if (!pieces || !/^[IOTSZJL]+$/.test(pieces)) {
-        throw new Error("next pattern contains an invalid piece group.");
-      }
-      const unique = new Set(pieces);
-      const groupSize = complement ? 7 - unique.size : unique.size;
-      if (groupSize < 1) {
-        throw new Error("next pattern piece group must leave at least one choice.");
-      }
-      cursor = close + 1;
-      if (source[cursor] === "!") {
-        count += groupSize;
-        cursor += 1;
-        continue;
-      }
-      if (source[cursor] === "P") {
-        throw new Error("next pattern has an unexpected bag token after a piece group.");
-      }
-      if (!/\d/.test(source[cursor] ?? "")) {
-        count += 1;
-        continue;
-      }
-      const parsed = readPatternCount(source, cursor);
-      if (parsed.value > groupSize) {
-        throw new Error("next pattern draws more pieces than its group contains.");
-      }
-      count += parsed.value;
-      cursor = parsed.cursor;
-      continue;
-    }
-    throw new Error(`next pattern contains unsupported token '${character}'.`);
-  }
-  if (count < 1) throw new Error("next pattern must contain at least one piece.");
-  return count;
-}
-
-function readPatternCount(source, cursor) {
-  const start = cursor;
-  while (cursor < source.length && /\d/.test(source[cursor])) cursor += 1;
-  if (cursor === start) throw new Error("next pattern draw count is missing.");
-  const value = Number(source.slice(start, cursor));
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error("next pattern draw count must be a positive integer.");
-  }
-  return { value, cursor };
+    { name: "next", maxLength: NEXT_MAX_LENGTH },
+  ).sequenceLength;
 }
 
 function popcount(mask) {
@@ -2798,17 +2675,19 @@ function setupNamedArguments(values, remaining) {
 
   const output = [];
   if (qbSource !== null) {
-    const qb = pieceInventory(qbSource, "qb");
-    if (qb.length > 7 || new Set(qb).size !== qb.length) {
-      throw invalidOption(
-        "qb",
-        "qb must contain from 1 through 7 unique IOTSZJL pieces.",
-      );
+    let qb;
+    try {
+      qb = parseQueuePatternSource(qbSource, { name: "qb", maxLength: 64 });
+    } catch (error) {
+      throw invalidOption("qb", error instanceof Error ? error.message : String(error));
     }
-    if (remaining.length + qb.length > 7) {
+    if (qb.kind === "fixed" && !isStandardBagQueue(qb.source)) {
+      throw invalidOption("qb", "qb exact queues may not repeat a piece inside one seven-piece bag.");
+    }
+    if (remaining.length + qb.sequenceLength > 11) {
       throw new DiscordInputError("options.setup_qb_bag_capacity");
     }
-    output.push("--mode", "qb", "--qb", qb);
+    output.push("--mode", "qb", "--qb", qb.source);
   } else if (mode !== null) {
     output.push("--mode", mode);
   }

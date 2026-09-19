@@ -617,7 +617,7 @@ function modalSelectSpec(command, name, locale = "en") {
   if (input === "setup-v2" && name === "mode") {
     return selectSpec("oracle", korean ? "셋업 공급 모드 선택" : "Choose setup supply mode", [
       { label: korean ? "Oracle (기본값)" : "Oracle (default)", value: "oracle" },
-      { label: korean ? "관측 QB 그룹" : "Observed QB group", value: "qb" },
+      { label: korean ? "QB 접두사 / 패턴" : "QB prefix / pattern", value: "qb" },
     ]);
   }
   if (

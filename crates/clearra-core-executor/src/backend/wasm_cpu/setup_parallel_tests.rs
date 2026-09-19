@@ -7,6 +7,9 @@ use clearra_problem::{
     SetupLengthPreference, SetupLimits, SetupPathDetail,
 };
 use clearra_rules::profile::builtin_rules::{jstris_180, srs_x};
+use clearra_supply::{
+    queue::queue_pattern_expression::QueuePatternExpression, QueueObservationPolicy,
+};
 #[cfg(not(target_family = "wasm"))]
 use std::sync::Arc;
 
@@ -419,6 +422,7 @@ fn initialization_wire_preserves_observed_qb_terminal_inventory_and_setup_piece_
         .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
         .with_hold_policy(SetupHoldPolicy::EnabledWithPiece(PieceKind::T))
         .with_queue_based_pieces(vec![PieceKind::O, PieceKind::S])
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
         .with_next_cycle_remaining_pieces(vec![
             PieceKind::O,
             PieceKind::O,
@@ -440,6 +444,10 @@ fn initialization_wire_preserves_observed_qb_terminal_inventory_and_setup_piece_
     assert!(decoded.query.tablebase_requested());
     assert_eq!(decoded.query.path_detail(), query.path_detail());
     assert_eq!(
+        decoded.query.queue_observation_policy(),
+        QueueObservationPolicy::VisibleSeven
+    );
+    assert_eq!(
         decoded
             .query
             .queue()
@@ -455,6 +463,37 @@ fn initialization_wire_preserves_observed_qb_terminal_inventory_and_setup_piece_
     assert_eq!(
         decoded.query.next_cycle_remaining_pieces(),
         query.next_cycle_remaining_pieces()
+    );
+}
+
+#[test]
+fn initialization_wire_preserves_qb_pattern_language_instead_of_flattening_it() {
+    let graph = SetupCoverageGraph::from_wire_parts(
+        vec![SetupCoverageNode::from_wire(0, 0, 0, 10, 1).expect("coverage node")],
+        Vec::new(),
+        0,
+    )
+    .expect("coverage graph");
+    let shapes = vec![SetupShape::new(0, 0, 0)];
+    let qb = QueuePatternExpression::parse("[OS]!", 2).expect("two QB orders");
+    let query = SetupSearchQuery::default()
+        .with_remaining_pieces(vec![PieceKind::T, PieceKind::I])
+        .with_queue_based_pattern_expression(qb)
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
+
+    let encoded = encode_initialization(&query, &graph, &shapes).expect("encode initialization");
+    let decoded = decode_initialization(&encoded).expect("decode initialization");
+    let decoded_expression = decoded
+        .query
+        .queue()
+        .as_pattern_expression()
+        .expect("QB pattern expression");
+
+    assert_eq!(decoded_expression.source(), "[OS]!");
+    assert_eq!(decoded_expression.pattern_count(), 2);
+    assert_eq!(
+        decoded.query.queue_observation_policy(),
+        QueueObservationPolicy::VisibleSeven
     );
 }
 

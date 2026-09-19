@@ -21,6 +21,9 @@ impl SetupPreset {
     pub fn into_scenario_query(self) -> ScenarioQuery {
         let queue = match self.query.queue().clone() {
             SetupQueueInput::FixedSequence(sequence) => PcQueueInput::fixed_sequence(sequence),
+            SetupQueueInput::PatternExpression(expression) => {
+                PcQueueInput::pattern_expression(expression)
+            }
             SetupQueueInput::BagAlignedPattern(pattern) => {
                 PcQueueInput::bag_aligned_pattern(pattern)
             }

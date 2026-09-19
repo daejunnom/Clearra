@@ -130,43 +130,47 @@ fn validate_residue(query: &SetupSearchQuery, report: &mut DiagnosticReport) {
 }
 
 fn validate_queue_based_input(query: &SetupSearchQuery, report: &mut DiagnosticReport) {
-    let Some(queue) = query.queue().as_fixed_sequence() else {
+    let Some(sequence_len) = query
+        .queue()
+        .as_fixed_sequence()
+        .map(|queue| queue.len())
+        .or_else(|| {
+            query
+                .queue()
+                .as_pattern_expression()
+                .map(|expression| expression.sequence_len())
+        })
+    else {
         report.push(invalid_setup_query(
             "setup.queue",
-            "queue-based setup search requires observed next-bag pieces",
-            "queue_based_setup_requires_fixed_queue",
+            "queue-based setup search requires a QB queue or queue-pattern expression",
+            "queue_based_setup_requires_queue_or_pattern",
         ));
         return;
     };
-    if queue.is_empty() {
+    if sequence_len == 0 {
         report.push(invalid_setup_query(
             "setup.queue",
-            "queue-based setup search requires at least one observed next-bag piece",
+            "queue-based setup search requires at least one QB supply piece",
             "queue_based_setup_requires_observed_piece",
         ));
     }
-    if queue.len() + query.residue().remaining_count() > 7 {
+    if sequence_len + query.residue().remaining_count() > 11 {
         report.push(invalid_setup_query(
             "setup.queue",
-            "observed queue-based pieces and remaining pieces must fit in one bag",
+            "remaining pieces and QB supply may contain at most eleven pieces",
             "queue_based_setup_observed_piece_count_out_of_range",
         ));
     }
-    if clearra_core_domain::piece::piece_kind::PieceKind::STANDARD_TETROMINOES
-        .into_iter()
-        .any(|piece| {
-            queue
-                .pieces()
-                .iter()
-                .filter(|value| **value == piece)
-                .count()
-                > 1
-        })
+    if query
+        .queue()
+        .as_pattern_expression()
+        .is_some_and(|expression| expression.pattern_count() > query.limits().max_patterns())
     {
         report.push(invalid_setup_query(
             "setup.queue",
-            "observed queue-based pieces must be distinct",
-            "queue_based_setup_observed_piece_duplicate",
+            "QB queue-pattern expansion exceeds the setup pattern limit",
+            "queue_based_setup_pattern_limit_exceeded",
         ));
     }
 }
