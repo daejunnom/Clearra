@@ -4,11 +4,12 @@
 use super::curl_batch::NativeCurlPool;
 #[cfg(not(feature = "native-pc4-libcurl"))]
 use super::curl_batch::{NativeCurlBatch, NativeCurlPlan};
+#[cfg(all(test, feature = "wasm-cpu-runtime"))]
+use super::host_execution::{drive, HostSlice};
 use super::{
     active,
     curl_batch::{NativeCurlPoll, NativeRangeAdmission, NativeRangeDemand},
     default_directory, format,
-    host_execution::{drive, HostSlice},
     http_range::{content_range, HttpReply, OnlineRangeReader},
     local_execution::execute_local_at,
     reject_links, transport, Artifact, Result,
@@ -68,6 +69,7 @@ fn preflight(request: &AppRequest) -> Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, feature = "wasm-cpu-runtime"))]
 pub(super) fn execute_online_with(
     context: AppContext,
     request: AppRequest,

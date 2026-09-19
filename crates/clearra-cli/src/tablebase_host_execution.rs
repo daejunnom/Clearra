@@ -6,6 +6,7 @@ use clearra_core_domain::execution_cancellation::ExecutionControl;
 
 pub(super) enum HostSlice {
     Local(Vec<u8>),
+    #[cfg(all(test, feature = "wasm-cpu-runtime"))]
     Http {
         bytes: Vec<u8>,
         content_range: String,
@@ -41,6 +42,7 @@ pub(super) fn drive(
                     bytes,
                     &control,
                 )?,
+                #[cfg(all(test, feature = "wasm-cpu-runtime"))]
                 HostSlice::Http {
                     bytes,
                     content_range,

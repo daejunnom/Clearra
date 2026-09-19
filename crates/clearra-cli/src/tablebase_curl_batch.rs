@@ -11,12 +11,16 @@ use super::{
 use std::{
     collections::BTreeMap,
     fs,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
+    time::Duration,
+};
+
+#[cfg(not(feature = "native-pc4-libcurl"))]
+use std::{
+    io::{BufRead, BufReader},
     process::{Child, ExitStatus},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread::JoinHandle,
-    time::Duration,
 };
 
 #[cfg(feature = "native-pc4-libcurl")]
@@ -166,6 +170,7 @@ impl NativeCurlPlan {
             .sum()
     }
 
+    #[cfg(not(feature = "native-pc4-libcurl"))]
     pub fn spawn(self, revision: &str) -> Result<NativeCurlBatch> {
         if !hex(revision, 40) {
             return Err("pc4_online_identity_invalid");
@@ -248,6 +253,7 @@ pub(super) enum NativeCurlPoll {
     Finished,
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 pub(super) struct NativeCurlBatch {
     child: Child,
     reader: Option<JoinHandle<()>>,
@@ -260,6 +266,7 @@ pub(super) struct NativeCurlBatch {
     exit: Option<ExitStatus>,
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 impl NativeCurlBatch {
     pub fn poll(&mut self, wait: bool) -> Result<NativeCurlPoll> {
         let event = if wait {
@@ -793,6 +800,7 @@ fn collect_libcurl_header(state: &mut LibcurlCollector, data: &[u8]) -> bool {
     true
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 impl Drop for NativeCurlBatch {
     fn drop(&mut self) {
         if self.exit.is_none() {
@@ -805,6 +813,7 @@ impl Drop for NativeCurlBatch {
     }
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 enum ReaderEvent {
     Receipt(Result<Receipt>),
     Finished,
@@ -1087,5 +1096,24 @@ mod tests {
         assert!(!collector.oversized);
         assert_eq!(collect_libcurl_body(&mut collector, b"x"), 0);
         assert!(collector.oversized);
+    }
+
+    #[cfg(feature = "native-pc4-libcurl")]
+    #[test]
+    fn native_pool_filters_exact_inflight_identity_and_rejects_aliases() {
+        let mut pool = NativeCurlPool::new(&"a".repeat(40)).unwrap();
+        let known = demand(2, 7, 100, 12);
+        pool.identities.insert(
+            (known.lookup_session, known.request_id),
+            demand_identity(&known),
+        );
+        assert!(pool.plan_fresh(vec![known.clone()]).unwrap().is_none());
+
+        let mut changed = known;
+        changed.offset += 1;
+        assert_eq!(
+            pool.plan_fresh(vec![changed]).unwrap_err(),
+            "pc4_online_pending_identity_changed"
+        );
     }
 }
