@@ -9,8 +9,8 @@ mod search;
 mod t_spin_acceleration;
 
 pub use parallel::{
-    ForwardParallelCoordinator, ForwardParallelError, ForwardParallelProduce,
-    ForwardParallelProgress, ForwardParallelWorker,
+    ForwardParallelBatchPolicy, ForwardParallelCoordinator, ForwardParallelError,
+    ForwardParallelProduce, ForwardParallelProgress, ForwardParallelWorker,
 };
 pub use query::{
     ForwardLineClearPolicy, ForwardPieceSource, ForwardSearchMode, ForwardSearchQuery,

@@ -12,9 +12,9 @@ use clearra_core_domain::{
     piece::piece_kind::PieceKind,
 };
 use clearra_forward_search::{
-    ForwardParallelCoordinator, ForwardParallelProduce, ForwardParallelWorker, ForwardSearchMode,
-    ForwardSearchOutcome, ForwardSearchQuery, ForwardSearchReport, ForwardSearchSession,
-    ForwardSpinCategory, ForwardSpinTarget,
+    ForwardParallelBatchPolicy, ForwardParallelCoordinator, ForwardParallelProduce,
+    ForwardParallelWorker, ForwardSearchMode, ForwardSearchOutcome, ForwardSearchQuery,
+    ForwardSearchReport, ForwardSearchSession, ForwardSpinCategory, ForwardSpinTarget,
 };
 use clearra_rules::profile::rule_profile::RuleProfileId;
 use clearra_scoring::profile::SpinProfileId;
@@ -33,7 +33,12 @@ fn main() {
     });
     let result = match options.mode.as_str() {
         "serial" => run_serial(query),
-        "parallel" => run_parallel(query, options.workers, options.batch_size),
+        "parallel" => run_parallel(
+            query,
+            options.workers,
+            options.batch_size,
+            options.batch_policy,
+        ),
         _ => Err("--mode must be serial or parallel".to_owned()),
     }
     .unwrap_or_else(|message| {
@@ -48,6 +53,7 @@ struct Options {
     mode: String,
     workers: usize,
     batch_size: usize,
+    batch_policy: ForwardParallelBatchPolicy,
 }
 
 impl Options {
@@ -56,6 +62,7 @@ impl Options {
         let mut mode = "parallel".to_owned();
         let mut workers = DEFAULT_WORKERS;
         let mut batch_size = DEFAULT_BATCH_SIZE;
+        let mut batch_policy = ForwardParallelBatchPolicy::Adaptive;
         let mut args = args.peekable();
         while let Some(option) = args.next() {
             let value = args
@@ -66,6 +73,13 @@ impl Options {
                 "--mode" => mode = value,
                 "--workers" => workers = positive(&value, "--workers")?,
                 "--batch-size" => batch_size = positive(&value, "--batch-size")?,
+                "--batch-policy" => {
+                    batch_policy = match value.as_str() {
+                        "fixed" => ForwardParallelBatchPolicy::Fixed,
+                        "adaptive" => ForwardParallelBatchPolicy::Adaptive,
+                        _ => return Err("--batch-policy must be fixed or adaptive".to_owned()),
+                    }
+                }
                 _ => return Err(format!("unsupported option {option}")),
             }
         }
@@ -77,6 +91,7 @@ impl Options {
             mode,
             workers,
             batch_size,
+            batch_policy,
         })
     }
 }
@@ -161,6 +176,11 @@ struct LayerMetrics {
     visited_states: u64,
     generated_locks: u64,
     peak_frontier: usize,
+    coarse_tail_wait: Duration,
+    runnable_idle_wait: Duration,
+    coarse_tail_samples: u64,
+    runnable_idle_samples: u64,
+    peak_idle_workers: usize,
 }
 
 impl LayerMetrics {
@@ -241,6 +261,7 @@ fn run_parallel(
     query: ForwardSearchQuery,
     workers: usize,
     batch_size: usize,
+    batch_policy: ForwardParallelBatchPolicy,
 ) -> Result<BenchmarkResult, String> {
     if workers < 2 {
         return Err("parallel benchmark requires at least two workers".to_owned());
@@ -251,7 +272,8 @@ fn run_parallel(
     let control = ExecutionControl::new(ExecutionCancellationToken::new());
     let prepare_started = Instant::now();
     let mut coordinator =
-        ForwardParallelCoordinator::new(query, workers).map_err(|error| error.reason())?;
+        ForwardParallelCoordinator::new_with_batch_policy(query, workers, batch_policy)
+            .map_err(|error| error.reason())?;
     let initialization = coordinator.worker_initialization();
     let prepare = prepare_started.elapsed();
 
@@ -333,6 +355,14 @@ fn run_parallel(
             }
             continue;
         }
+        let scheduling = coordinator.progress();
+        let idle_workers = available.len();
+        let runnable_tasks = scheduling
+            .layer_total
+            .saturating_sub(scheduling.layer_done)
+            .saturating_sub(scheduling.outstanding_tasks);
+        let coarse_tail = idle_workers > 0 && runnable_tasks == 0;
+        let runnable_idle = idle_workers > 0 && runnable_tasks > 0;
         let wait_started = Instant::now();
         let response = response_receiver
             .recv()
@@ -357,6 +387,15 @@ fn run_parallel(
                 metrics.worker_cpu += elapsed;
                 metrics.absorb += absorb;
                 metrics.wait += wait;
+                metrics.peak_idle_workers = metrics.peak_idle_workers.max(idle_workers);
+                if coarse_tail {
+                    metrics.coarse_tail_wait += wait;
+                    metrics.coarse_tail_samples = metrics.coarse_tail_samples.saturating_add(1);
+                }
+                if runnable_idle {
+                    metrics.runnable_idle_wait += wait;
+                    metrics.runnable_idle_samples = metrics.runnable_idle_samples.saturating_add(1);
+                }
                 metrics.work_items = metrics.work_items.saturating_add(items as u64);
                 debug_assert!(metrics.input_bytes >= input_bytes as u64);
                 metrics.output_bytes = metrics.output_bytes.saturating_add(output.len() as u64);
@@ -579,7 +618,10 @@ impl BenchmarkResult {
                         "\"worker_cpu_ns\":{},\"absorb_ns\":{},\"wait_ns\":{},",
                         "\"batches\":{},\"work_items\":{},\"input_bytes\":{},",
                         "\"output_bytes\":{},\"visited_states_end\":{},",
-                        "\"generated_locks_end\":{},\"peak_frontier\":{}}}"
+                        "\"generated_locks_end\":{},\"peak_frontier\":{},",
+                        "\"coarse_tail_wait_ns\":{},\"runnable_idle_wait_ns\":{},",
+                        "\"coarse_tail_samples\":{},\"runnable_idle_samples\":{},",
+                        "\"peak_idle_workers\":{}}}"
                     ),
                     index,
                     metrics.wall().as_nanos(),
@@ -594,6 +636,11 @@ impl BenchmarkResult {
                     metrics.visited_states,
                     metrics.generated_locks,
                     metrics.peak_frontier,
+                    metrics.coarse_tail_wait.as_nanos(),
+                    metrics.runnable_idle_wait.as_nanos(),
+                    metrics.coarse_tail_samples,
+                    metrics.runnable_idle_samples,
+                    metrics.peak_idle_workers,
                 )
             })
             .collect::<Vec<_>>()
@@ -601,7 +648,7 @@ impl BenchmarkResult {
         format!(
             concat!(
                 "{{\"schema_version\":1,\"scenario\":\"{}\",\"mode\":\"{}\",",
-                "\"workers\":{},\"batch_size\":{},\"prepare_ns\":{},",
+                "\"workers\":{},\"batch_size\":{},\"batch_policy\":\"{}\",\"prepare_ns\":{},",
                 "\"worker_initialization_ns\":{},\"search_ns\":{},\"finish_ns\":{},",
                 "\"complete\":{},\"workers_used\":{},\"visited_states\":{},",
                 "\"generated_locks\":{},\"peak_frontier\":{},\"outcome_count\":{},",
@@ -612,6 +659,10 @@ impl BenchmarkResult {
             options.mode,
             options.workers,
             options.batch_size,
+            match options.batch_policy {
+                ForwardParallelBatchPolicy::Fixed => "fixed",
+                ForwardParallelBatchPolicy::Adaptive => "adaptive",
+            },
             self.prepare.as_nanos(),
             self.worker_initialization.as_nanos(),
             self.search.as_nanos(),

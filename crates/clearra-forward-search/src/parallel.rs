@@ -31,6 +31,18 @@ const WIRE_VERSION: u32 = 10;
 const MAX_WIRE_ITEMS: usize = 10_000_000;
 const MAX_FIXED_TASKS_PER_BATCH: usize = 32;
 const MAX_REORDER_BATCHES_PER_WORKER: usize = 4;
+const TARGET_ADAPTIVE_BATCHES_PER_WORKER: usize = 8;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ForwardParallelBatchPolicy {
+    /// Preserves the original fixed 32-task production batches.
+    Fixed,
+    /// Keeps more independent batches available than compute workers so a
+    /// slow expansion cannot strand the rest of the pool behind one coarse
+    /// final batch.
+    #[default]
+    Adaptive,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForwardParallelProduce {
@@ -114,6 +126,8 @@ pub struct ForwardParallelCoordinator {
     next_absorb_task_id: u64,
     buffered_results: BTreeMap<u64, WireResult>,
     max_outstanding_tasks: usize,
+    parallel_workers: usize,
+    batch_policy: ForwardParallelBatchPolicy,
     progress: ForwardParallelProgress,
 }
 
@@ -197,7 +211,7 @@ impl ForwardParallelCoordinator {
                 .piece_source()
                 .pattern_count()
                 .saturating_mul(query.piece_source().sequence_len())
-                >= 8
+                >= 6
         } else {
             query.piece_source().sequence_len() >= 4
         }
@@ -206,6 +220,14 @@ impl ForwardParallelCoordinator {
     pub fn new(
         query: ForwardSearchQuery,
         worker_count: usize,
+    ) -> Result<Self, ForwardParallelError> {
+        Self::new_with_batch_policy(query, worker_count, ForwardParallelBatchPolicy::Adaptive)
+    }
+
+    pub fn new_with_batch_policy(
+        query: ForwardSearchQuery,
+        worker_count: usize,
+        batch_policy: ForwardParallelBatchPolicy,
     ) -> Result<Self, ForwardParallelError> {
         validate_query(&query)?;
         let config = ForwardSearchConfig::from_query(&query);
@@ -253,6 +275,8 @@ impl ForwardParallelCoordinator {
             next_absorb_task_id: 1,
             buffered_results: BTreeMap::new(),
             max_outstanding_tasks,
+            parallel_workers,
+            batch_policy,
             progress: ForwardParallelProgress::default(),
         })
     }
@@ -320,14 +344,9 @@ impl ForwardParallelCoordinator {
         if available_capacity == 0 {
             return Ok((ForwardParallelProduce::Pending, Vec::new()));
         }
-        let capacity = match &self.state {
-            CoordinatorState::Fixed(_) => capacity.clamp(1, MAX_FIXED_TASKS_PER_BATCH),
-            CoordinatorState::Pattern(pattern) if pattern.layered => {
-                capacity.clamp(1, MAX_FIXED_TASKS_PER_BATCH)
-            }
-            CoordinatorState::Pattern(_) => 1,
-        }
-        .min(available_capacity);
+        let capacity = self
+            .selected_batch_capacity(capacity)
+            .min(available_capacity);
         let mut tasks = Vec::with_capacity(capacity);
         match &mut self.state {
             CoordinatorState::Fixed(fixed) => {
@@ -672,6 +691,41 @@ impl ForwardParallelCoordinator {
             CoordinatorState::Pattern(pattern) => pattern.pending.len(),
         }
     }
+
+    fn selected_batch_capacity(&self, requested_capacity: usize) -> usize {
+        let maximum = requested_capacity.clamp(1, MAX_FIXED_TASKS_PER_BATCH);
+        if self.batch_policy == ForwardParallelBatchPolicy::Fixed {
+            return maximum;
+        }
+        let remaining = match &self.state {
+            CoordinatorState::Fixed(fixed) => fixed
+                .session
+                .current
+                .len()
+                .saturating_sub(fixed.session.current_cursor),
+            CoordinatorState::Pattern(pattern) if pattern.layered => {
+                pattern.active_session.as_ref().map_or(0, |session| {
+                    session.current.len().saturating_sub(session.current_cursor)
+                })
+            }
+            // Independent pattern searches are already the natural indivisible
+            // unit. Combining them would recreate the coarse-tail problem.
+            CoordinatorState::Pattern(_) => return 1,
+        };
+        let target_batches = self
+            .parallel_workers
+            .saturating_mul(TARGET_ADAPTIVE_BATCHES_PER_WORKER)
+            .max(1);
+        adaptive_batch_capacity(remaining, target_batches, maximum)
+    }
+}
+
+fn adaptive_batch_capacity(remaining: usize, target_batches: usize, maximum: usize) -> usize {
+    remaining
+        .saturating_add(target_batches.saturating_sub(1))
+        .checked_div(target_batches.max(1))
+        .unwrap_or(1)
+        .clamp(1, maximum.max(1))
 }
 
 fn should_layer_pattern_search(sequence_len: usize, pattern_count: usize, workers: usize) -> bool {
@@ -2153,6 +2207,47 @@ mod tests {
         assert!(!should_layer_pattern_search(6, 0, 8));
         assert!(!should_layer_pattern_search(6, 3, 8));
         assert!(!should_layer_pattern_search(7, 5_040, 8));
+    }
+
+    #[test]
+    fn forward_admission_includes_long_single_and_two_pattern_queries() {
+        let long_single = QueuePatternExpression::parse("IIIIII", 8).expect("pattern");
+        let two_short = QueuePatternExpression::parse("[IO]!T", 8).expect("pattern");
+        let below_threshold = QueuePatternExpression::parse("IIIII", 8).expect("pattern");
+        let query = |pattern| {
+            ForwardSearchQuery::new_with_source(
+                Board256Mask::EMPTY,
+                8,
+                ForwardPieceSource::pattern(pattern),
+                false,
+                RuleProfileId::SrsPlus,
+                SpinProfileId::TSpins,
+                None,
+                None,
+                ForwardSearchMode::MaximumDamage,
+            )
+        };
+
+        assert!(ForwardParallelCoordinator::is_worthwhile(
+            &query(long_single),
+            8
+        ));
+        assert!(ForwardParallelCoordinator::is_worthwhile(
+            &query(two_short),
+            8
+        ));
+        assert!(!ForwardParallelCoordinator::is_worthwhile(
+            &query(below_threshold),
+            8
+        ));
+    }
+
+    #[test]
+    fn adaptive_batches_keep_eight_waves_per_compute_worker_without_synthetic_roots() {
+        assert_eq!(adaptive_batch_capacity(140, 7 * 8, 32), 3);
+        assert_eq!(adaptive_batch_capacity(10, 7 * 8, 32), 1);
+        assert_eq!(adaptive_batch_capacity(10_000, 7 * 8, 32), 32);
+        assert_eq!(adaptive_batch_capacity(0, 7 * 8, 32), 1);
     }
 
     #[test]
