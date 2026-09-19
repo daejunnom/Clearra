@@ -39,8 +39,7 @@ fn compact_queue(pattern: &str) -> PcQueueInput {
 
 fn limits() -> CompactGraphUnionLimits {
     CompactGraphUnionLimits {
-        states: nonzero(4096),
-        supply_states: nonzero(65_536),
+        frontier_bytes: nonzero(1024 * 1024),
         work: nonzero(100_000),
         candidates: nonzero(512),
         waiting_fields: nonzero(128),
@@ -173,11 +172,16 @@ fn drive(
     reverse: bool,
 ) {
     for _ in 0..100_000 {
+        let promoted = union.usage().promoted_states;
         let step = union.advance(cache, nonzero(3), guard).unwrap();
+        assert!(
+            union.usage().promoted_states - promoted <= 3,
+            "layer moves share the CPU quantum"
+        );
         if step == CompactGraphUnionStep::Complete {
             return;
         }
-        let mut pending = union.pending_fields(128);
+        let mut pending = union.pending_fields(128).unwrap();
         if reverse {
             pending.reverse();
         }
@@ -312,11 +316,112 @@ fn pc4_compact_graph_union_zero_hit_and_incomplete_never_become_partial_completi
             attempted: 2
         }
     ));
-    assert!(union.pending_fields(10).is_empty());
+    assert!(union.pending_fields(10).unwrap().is_empty());
     assert_eq!(
         union.into_reducer_input(&guard).unwrap_err().reason(),
         "pc4_compact_union_incomplete"
     );
+}
+
+#[test]
+fn pc4_compact_graph_union_frontier_bytes_fail_closed_before_unbounded_growth() {
+    let fixture = clear_path(2);
+    let mut budget = limits();
+    budget.frontier_bytes = nonzero(4096);
+    let (mut union, mut cache, guard) = prepare(
+        &fixture,
+        2,
+        Pc4RuleProfile::Srs,
+        "II",
+        FixedQueueHoldState::Disabled,
+        budget,
+    );
+    admit(&mut cache, &fixture, fixture.ids_by_step[0]);
+    assert_eq!(
+        union
+            .advance(&cache, nonzero(8), &guard)
+            .unwrap_err()
+            .reason(),
+        "pc4_compact_union_frontier_byte_limit"
+    );
+    assert!(union.pending_fields(128).unwrap().is_empty());
+    assert_eq!(
+        union.into_reducer_input(&guard).unwrap_err().reason(),
+        "pc4_compact_union_incomplete"
+    );
+}
+
+#[test]
+fn pc4_compact_graph_union_cancel_during_layer_promotion_drops_partial_frontier() {
+    let fixture = clear_path(2);
+    let (mut union, mut cache, guard) = prepare(
+        &fixture,
+        2,
+        Pc4RuleProfile::Srs,
+        "II",
+        FixedQueueHoldState::Disabled,
+        limits(),
+    );
+    for _ in 0..1000 {
+        assert_ne!(
+            union.advance(&cache, nonzero(1), &guard).unwrap(),
+            CompactGraphUnionStep::Complete
+        );
+        if union.usage().promoted_states > 0 {
+            break;
+        }
+        if let Some(id) = union.pending_fields(1).unwrap().first() {
+            admit(&mut cache, &fixture, *id);
+        }
+    }
+    assert_eq!(union.usage().promoted_states, 1);
+    assert!(union.has_ready_work());
+    guard.cancelled.set(true);
+    assert!(union.advance(&cache, nonzero(1), &guard).is_err());
+    assert!(union.pending_fields(1).unwrap().is_empty());
+    assert!(union.into_reducer_input(&guard).is_err());
+}
+
+#[test]
+fn pc4_compact_graph_union_early_terminal_is_not_completion_or_another_layer() {
+    let fixture = clear_path(1);
+    for revoke in [false, true] {
+        let (mut union, mut cache, guard) = prepare(
+            &fixture,
+            1,
+            Pc4RuleProfile::Srs,
+            "I",
+            FixedQueueHoldState::Disabled,
+            limits(),
+        );
+        for _ in 0..1000 {
+            assert_ne!(
+                union.advance(&cache, nonzero(1), &guard).unwrap(),
+                CompactGraphUnionStep::Complete
+            );
+            if union.usage().terminal_arrivals != 0 {
+                break;
+            }
+            if let Some(id) = union.pending_fields(1).unwrap().first() {
+                admit(&mut cache, &fixture, *id);
+            }
+        }
+        assert!(union.usage().terminal_arrivals > 0);
+        assert_eq!(
+            union.usage().generated_states,
+            0,
+            "terminal must not become a next-layer task"
+        );
+        assert_eq!(union.usage().canonicalization_work, 0);
+        if revoke {
+            guard.cancelled.set(true);
+            assert!(union.advance(&cache, nonzero(1), &guard).is_err());
+        }
+        assert!(
+            union.into_reducer_input(&guard).is_err(),
+            "a found candidate alone is not the complete set"
+        );
+    }
 }
 
 #[test]
@@ -337,7 +442,7 @@ fn pc4_compact_graph_union_cancellation_and_stale_sources_fail_closed() {
             _ => guard.snapshot_current.set(false),
         }
         assert!(union.advance(&cache, nonzero(1), &guard).is_err());
-        assert!(union.pending_fields(128).is_empty());
+        assert!(union.pending_fields(128).unwrap().is_empty());
         assert!(union.into_reducer_input(&guard).is_err());
     }
 }
@@ -381,14 +486,14 @@ fn pc4_compact_graph_union_finalization_budget_and_late_revocation_cannot_publis
                 }
                 _ => {}
             }
-            if let Some(id) = owner.pending_fields(1).first() {
+            if let Some(id) = owner.pending_fields(1).unwrap().first() {
                 admit(&mut cache, &fixture, *id);
             }
         }
         assert_eq!(
             failed.expect("bounded finalization must reject").reason(),
             if memory_limit {
-                "pc_candidate_canonicalization_buffer_limit"
+                "pc4_compact_union_candidate_byte_limit"
             } else {
                 "pc4_compact_union_work_limit"
             }
@@ -405,7 +510,7 @@ fn pc4_compact_graph_union_finalization_budget_and_late_revocation_cannot_publis
             if owner.usage().canonicalization_work > 0 {
                 break;
             }
-            if let Some(id) = owner.pending_fields(1).first() {
+            if let Some(id) = owner.pending_fields(1).unwrap().first() {
                 admit(&mut cache, &fixture, *id);
             }
         }
@@ -516,7 +621,12 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
             if status == CompactGraphUnionStep::Complete {
                 break;
             }
-            let mut pending = union.pending_fields(128);
+            let mut pending = union.pending_fields(128).unwrap();
+            assert_eq!(
+                union.pending_fields(1).unwrap(),
+                pending.iter().take(1).copied().collect::<Vec<_>>()
+            );
+            assert!(union.pending_fields(0).unwrap().is_empty());
             maximum_pending = maximum_pending.max(pending.len());
             // Allow independent CPU branches to register their demands first.
             if status == CompactGraphUnionStep::Waiting {
@@ -538,6 +648,14 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
         );
         let usage = union.usage();
         assert!(
+            usage.terminal_arrivals > 1,
+            "convergent paths are collected without terminal frontier copies"
+        );
+        assert!(
+            usage.peak_frontier_bytes > 0
+                && usage.peak_frontier_bytes <= limits().frontier_bytes.get()
+        );
+        assert!(
             usage.merged_states >= 3,
             "same partial layout/frame must merge before expansion"
         );
@@ -552,8 +670,8 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
         }
         reference = Some(actual.candidates().to_vec());
         println!(
-            "pc4_compact_graph_union_diamond reverse={reverse} work={} merged={} peak_pending={}",
-            usage.work, usage.merged_states, usage.peak_waiting_fields
+            "pc4_compact_graph_union_diamond reverse={reverse} work={} merged={} peak_pending={} frontier_bytes={} terminal_arrivals={}",
+            usage.work, usage.merged_states, usage.peak_waiting_fields, usage.peak_frontier_bytes, usage.terminal_arrivals
         );
     }
 }

@@ -759,3 +759,44 @@ Still required: complete 456,459-family validation/timing, input/hold-family
 scale tests, native/browser parity after these edits, real HTTP latency and
 completed-search frontier-batch A/B, independent profile qualification, remaining product contracts and release
 acceptance. Do not mark v0.9.0 or the overall goal complete from these prefix tests.
+
+### 2026-09-19: retained-frontier and terminal-collection implementation candidate
+
+The intervening profile-routing source `c13fff27ecd256c00a7c252921aba53f5c49d6fc`
+passed all selected jobs in [non-publishing CI](https://github.com/daejunnom/Clearra/actions/runs/35434694210).
+Its preview job was intentionally skipped; it did not alter the measured Rust algorithm.
+
+The next candidate replaces the aggregate 65,536 state / 1,048,576 supply-state
+ceilings with a **256MiB retained frontier payload-capacity envelope**. This counts
+the ready queue, waiting hash table and nested work-vector capacities, next-layer
+table and its promotion iterator, and owned supply/target/placement vectors.
+Requested growth is checked before allocation and returned capacity immediately
+afterwards. Replacements account for old and new supply payloads together, then
+release old credit only after its owner drops. The model matches the existing
+logical capacity-ledger approach; allocator metadata/rounding, materializer
+temporaries, graph cache, input/source owners, I/O and product projection are
+**not** falsely presented as covered by this frontier authority. The finite
+whole-search-memory handoff rejection therefore remains in place.
+
+Last-piece arrivals now validate the qualified terminal and original full-layout
+mask and enter the deduplicated candidate set directly, without another layer
+entry or another supply-frontier copy. This is only candidate collection:
+completion still requires every branch/I/O to drain, cooperative canonical
+sorting/hash, and current source/snapshot checks. Candidate capacity plus the
+future output vector has its separate existing 256MiB envelope, prechecked at
+collection rather than discovering that predictable copy cost only at the end.
+
+Completed-layer migration now moves at most one entry per work unit, with the
+old table still charged until its iterator drops. No next-layer expansion can
+start midway through that migration. Demand-list creation allocates only the
+requested I/O window rather than all waiting IDs. Existing graph cache, lookup
+count, work, per-frontier supply, request and target qualification bounds stay
+fail-closed; this is not permission to raise the next encountered limit blindly.
+
+New contracts cover fallible supply copying/owner identity, live-old-plus-new
+credit accounting, byte-limit rejection, cancellation during layer migration,
+and early terminal collection without premature completeness. Existing 60 exact
+legacy/compact pairs and diamond admission-order checks remain. Local rustfmt
+and source checks alone are not execution evidence; these contracts and a new
+large-input probe await this candidate's exact-source CI/preview. 4194, main and
+deployment are unchanged by this candidate.

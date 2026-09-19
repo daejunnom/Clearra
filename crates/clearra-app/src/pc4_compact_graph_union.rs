@@ -4,6 +4,10 @@
 use core::{convert::Infallible, num::NonZeroUsize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+#[path = "pc4_frontier_retention.rs"]
+mod retention;
+use retention::{capacity_bytes, FrontierRetention, FrontierRetentionError};
+
 use clearra_core_domain::{
     board::standard_pc_board::StandardPcBoard,
     piece::piece_kind::PieceKind,
@@ -35,12 +39,11 @@ use crate::{
     },
 };
 
-/// Logical retained-state/work limits, in addition to the separately bounded
-/// graph cache and supply frontier. They never authorize a truncated union.
+/// Retained frontier bytes and independent work/result limits. Graph cache,
+/// source owners and I/O have separate bounds; no limit authorizes truncation.
 #[derive(Clone, Copy)]
 pub(crate) struct CompactGraphUnionLimits {
-    pub states: NonZeroUsize,
-    pub supply_states: NonZeroUsize,
+    pub frontier_bytes: NonZeroUsize,
     pub work: NonZeroUsize,
     pub candidates: NonZeroUsize,
     pub waiting_fields: NonZeroUsize,
@@ -58,6 +61,7 @@ pub(crate) enum CompactGraphUnionError {
     Placement(PlacementMaterializationError<Pc4LookupMaterializationError>),
     Boundary(PcCandidateBoundaryError),
     Canonicalization(CandidateCanonicalizationError),
+    Retention(FrontierRetentionError),
     Limit {
         kind: &'static str,
         limit: usize,
@@ -74,8 +78,15 @@ impl CompactGraphUnionError {
             Self::Placement(error) => error.reason(),
             Self::Boundary(error) => error.reason(),
             Self::Canonicalization(error) => error.reason(),
+            Self::Retention(error) => error.reason(),
             Self::Limit { kind, .. } => kind,
         }
+    }
+}
+
+impl From<FrontierRetentionError> for CompactGraphUnionError {
+    fn from(error: FrontierRetentionError) -> Self {
+        Self::Retention(error)
     }
 }
 
@@ -91,10 +102,13 @@ pub(crate) struct CompactGraphUnionUsage {
     pub work: usize,
     pub generated_states: usize,
     pub merged_states: usize,
+    pub promoted_states: usize,
     pub materialized_edges: usize,
     pub peak_waiting_fields: usize,
     pub canonicalization_work: usize,
     pub peak_canonicalization_buffer_bytes: usize,
+    pub peak_frontier_bytes: usize,
+    pub terminal_arrivals: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -102,6 +116,13 @@ struct StateKey {
     layout: StandardBoard64TilingIdentity,
     field: u32,
     frame: Pc4RowFrame,
+}
+
+/// Moving a completed layer is cooperative too: a large retained frontier
+/// must not become one uninterruptible O(layer size) queue conversion.
+struct LayerPromotion {
+    entries: std::collections::hash_map::IntoIter<StateKey, CompactPatternUnionFrontier>,
+    table_capacity: usize,
 }
 
 struct Work {
@@ -133,14 +154,36 @@ impl Work {
         self.supply.state_count() + self.next_supply.as_ref().map_or(0, |s| s.state_count())
     }
 
-    fn next_piece(&mut self) -> usize {
+    fn retained_payload_bytes(&self) -> Result<usize, CompactGraphUnionError> {
+        let mut bytes = self.supply.retained_state_capacity_bytes();
+        for payload in [
+            self.next_supply
+                .as_ref()
+                .map_or(0, |s| s.retained_state_capacity_bytes()),
+            capacity_bytes::<u32>(self.targets.as_ref().map_or(0, Vec::capacity))?,
+            capacity_bytes::<ClearraPlacementIdentity>(
+                self.placements.as_ref().map_or(0, Vec::capacity),
+            )?,
+        ] {
+            bytes = bytes
+                .checked_add(payload)
+                .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        }
+        Ok(bytes)
+    }
+
+    fn next_piece(&mut self) -> Result<(usize, usize), CompactGraphUnionError> {
+        let payload = self
+            .retained_payload_bytes()?
+            .checked_sub(self.supply.retained_state_capacity_bytes())
+            .ok_or(FrontierRetentionError::Underflow)?;
         let released = self.next_supply.take().map_or(0, |s| s.state_count());
         self.targets = None;
         self.placements = None;
         self.target_index = 0;
         self.placement_index = 0;
         self.piece += 1;
-        released
+        Ok((released, payload))
     }
 }
 
@@ -169,9 +212,11 @@ pub(crate) struct Pc4CompactGraphUnion {
     waiting: HashMap<u32, Vec<Work>>,
     waiting_count: usize,
     next_layer: HashMap<StateKey, CompactPatternUnionFrontier>,
+    promotion: Option<LayerPromotion>,
     candidates: HashSet<StandardBoard64TilingIdentity>,
     canonicalizer: Option<CooperativeCandidateCanonicalizer>,
     retained_supply_states: usize,
+    retention: FrontierRetention,
     cache_records_seen: usize,
     completed: bool,
     terminated: bool,
@@ -266,13 +311,12 @@ impl Pc4CompactGraphUnion {
         let frame = Pc4RowFrame::new(prefix)
             .map_err(|_| contract("pc4_compact_union_row_frame_invalid"))?;
         let retained_supply_states = supply.state_count();
-        limit(
-            "pc4_compact_union_supply_state_limit",
-            limits.supply_states,
-            retained_supply_states,
-        )?;
+        let mut retention = FrontierRetention::new(limits.frontier_bytes);
+        let initial_payload = supply.retained_state_capacity_bytes();
+        retention.authorize(capacity_bytes::<Work>(1)?, initial_payload)?;
         let mut ready = VecDeque::new();
         ready.try_reserve(1).map_err(|_| allocation())?;
+        retention.retain(capacity_bytes::<Work>(ready.capacity())?, initial_payload)?;
         ready.push_back(Work::new(
             StateKey {
                 layout,
@@ -297,9 +341,11 @@ impl Pc4CompactGraphUnion {
             waiting: HashMap::new(),
             waiting_count: 0,
             next_layer: HashMap::new(),
+            promotion: None,
             candidates: HashSet::new(),
             canonicalizer: None,
             retained_supply_states,
+            retention,
             cache_records_seen: 0,
             completed: false,
             terminated: false,
@@ -309,17 +355,36 @@ impl Pc4CompactGraphUnion {
 
     /// Bounded demand list: duplicates share one cache record. Exposing demands
     /// while CPU progress remains lets the host start I/O without a global wait.
-    pub(crate) fn pending_fields(&self, maximum: usize) -> Vec<u32> {
+    pub(crate) fn pending_fields(
+        &self,
+        maximum: usize,
+    ) -> Result<Vec<u32>, CompactGraphUnionError> {
         if self.terminated || self.completed || maximum == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
+        // The caller owns this small demand list. Never allocate every waiting
+        // ID merely to return at most the caller's I/O window (normally 16).
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(if self.start_verified {
+            maximum.min(self.waiting.len())
+        } else {
+            1
+        })
+        .map_err(|_| allocation())?;
         if !self.start_verified {
-            return vec![self.start_field];
+            ids.push(self.start_field);
+            return Ok(ids);
         }
-        let mut ids: Vec<_> = self.waiting.keys().copied().collect();
-        ids.sort_unstable();
-        ids.truncate(maximum);
-        ids
+        for &id in self.waiting.keys() {
+            let index = ids.binary_search(&id).unwrap_err();
+            if index < maximum {
+                if ids.len() == maximum {
+                    ids.pop();
+                }
+                ids.insert(index, id);
+            }
+        }
+        Ok(ids)
     }
 
     pub(crate) const fn usage(&self) -> CompactGraphUnionUsage {
@@ -339,14 +404,16 @@ impl Pc4CompactGraphUnion {
         if result.is_err() {
             self.terminated = true;
             self.completed = false;
-            self.ready.clear();
-            self.waiting.clear();
-            self.next_layer.clear();
-            self.candidates.clear();
+            self.ready = VecDeque::new();
+            self.waiting = HashMap::new();
+            self.next_layer = HashMap::new();
+            self.promotion = None;
+            self.candidates = HashSet::new();
             self.canonicalizer = None;
             self.waiting_count = 0;
             self.retained_supply_states = 0;
         }
+        self.usage.peak_frontier_bytes = self.retention.peak();
         result
     }
 
@@ -402,29 +469,57 @@ impl Pc4CompactGraphUnion {
             self.start_verified = true;
         }
         if cache.usage().record_count() != self.cache_records_seen || self.ready.is_empty() {
-            let available: Vec<_> = self
+            // The host bounds waiting fields with its I/O watermarks. Wake
+            // known records without allocating a second list of all waiters.
+            while let Some(id) = self
                 .waiting
                 .keys()
                 .copied()
-                .filter(|id| cache.contains_field_id(*id))
-                .collect();
-            for id in available {
+                .find(|id| cache.contains_field_id(*id))
+            {
                 let tasks = self.waiting.remove(&id).expect("collected waiting field");
-                self.ready
-                    .try_reserve(tasks.len())
-                    .map_err(|_| allocation())?;
+                let old_buffer = capacity_bytes::<Work>(tasks.capacity())?;
+                self.reserve_ready(tasks.len())?;
                 self.waiting_count -= tasks.len();
                 self.ready.extend(tasks);
+                self.retention.release(old_buffer)?;
             }
             self.cache_records_seen = cache.usage().record_count();
         }
         for _ in 0..work.get() {
             check_guard(&self.source, &self.target, guard)?;
+            if self.promotion.is_none() && self.ready.is_empty() && !self.waiting.is_empty() {
+                return Ok(CompactGraphUnionStep::Waiting);
+            }
+            self.usage.work = self
+                .usage
+                .work
+                .checked_add(1)
+                .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+            limit(
+                "pc4_compact_union_work_limit",
+                self.limits.work,
+                self.usage.work,
+            )?;
+            if let Some(promotion) = &mut self.promotion {
+                if let Some((key, supply)) = promotion.entries.next() {
+                    // All ready slots were admitted before promotion. The
+                    // supply payload changes owner, not allocation or credit.
+                    self.ready.push_back(Work::new(key, supply));
+                    self.usage.promoted_states += 1;
+                } else {
+                    self.promotion = None;
+                }
+                continue;
+            }
             if self.ready.is_empty() {
                 if !self.waiting.is_empty() {
                     return Ok(CompactGraphUnionStep::Waiting);
                 }
                 if self.next_layer.is_empty() {
+                    if self.retained_supply_states != 0 || self.retention.nested() != 0 {
+                        return Err(contract("pc4_compact_union_frontier_accounting_failed"));
+                    }
                     // No histories remain. Release queue backing stores before
                     // retaining both candidate buffers during canonicalization.
                     self.ready = VecDeque::new();
@@ -439,27 +534,24 @@ impl Pc4CompactGraphUnion {
                     );
                     return Ok(CompactGraphUnionStep::Progress);
                 }
-                self.ready
-                    .try_reserve(self.next_layer.len())
-                    .map_err(|_| allocation())?;
-                for (key, supply) in self.next_layer.drain() {
-                    self.ready.push_back(Work::new(key, supply));
-                }
+                self.reserve_ready(self.next_layer.len())?;
+                let old_layer = core::mem::take(&mut self.next_layer);
+                self.promotion = Some(LayerPromotion {
+                    table_capacity: old_layer.capacity(),
+                    entries: old_layer.into_iter(),
+                });
+                continue;
             }
-            self.usage.work = self
-                .usage
-                .work
-                .checked_add(1)
-                .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
-            limit(
-                "pc4_compact_union_work_limit",
-                self.limits.work,
-                self.usage.work,
-            )?;
             let mut task = self.ready.pop_front().expect("ready layer");
             match self.step_work(&mut task, cache, guard)? {
                 WorkStep::Continue => self.ready.push_back(task),
-                WorkStep::Done => self.retained_supply_states -= task.supply_states(),
+                WorkStep::Done => {
+                    let states = task.supply_states();
+                    let bytes = task.retained_payload_bytes()?;
+                    drop(task);
+                    self.retained_supply_states -= states;
+                    self.retention.release(bytes)?;
+                }
                 WorkStep::Missing(id) => {
                     if !self.waiting.contains_key(&id) {
                         limit(
@@ -467,11 +559,13 @@ impl Pc4CompactGraphUnion {
                             self.limits.waiting_fields,
                             self.waiting.len() + 1,
                         )?;
-                        self.waiting.try_reserve(1).map_err(|_| allocation())?;
+                        self.reserve_waiting_field()?;
                     }
-                    let waiting = self.waiting.entry(id).or_default();
-                    waiting.try_reserve(1).map_err(|_| allocation())?;
-                    waiting.push(task);
+                    self.reserve_waiting_work(id)?;
+                    self.waiting
+                        .get_mut(&id)
+                        .expect("reserved waiter")
+                        .push(task);
                     self.waiting_count += 1;
                     self.usage.peak_waiting_fields =
                         self.usage.peak_waiting_fields.max(self.waiting.len());
@@ -492,26 +586,7 @@ impl Pc4CompactGraphUnion {
             return Ok(WorkStep::Done);
         }
         if task.key.layout.placement_count() == self.placement_count {
-            if task.key.field == self.target.terminal_field().field_id() {
-                let occupied = task
-                    .key
-                    .layout
-                    .placement_masks()
-                    .iter()
-                    .fold(self.source.initial_board_mask(), |all, mask| all | mask);
-                if occupied != self.full_mask {
-                    return Err(contract("pc4_compact_union_terminal_layout_mismatch"));
-                }
-                if !self.candidates.contains(&task.key.layout) {
-                    limit(
-                        "pc4_compact_union_candidate_limit",
-                        self.limits.candidates,
-                        self.candidates.len() + 1,
-                    )?;
-                    self.candidates.try_reserve(1).map_err(|_| allocation())?;
-                    self.candidates.insert(task.key.layout);
-                }
-            }
+            self.accept_terminal(task.key.layout, task.key.field)?;
             return Ok(WorkStep::Done);
         }
         if task.piece == PieceKind::STANDARD_TETROMINOES.len() {
@@ -519,6 +594,11 @@ impl Pc4CompactGraphUnion {
         }
         let piece = PieceKind::STANDARD_TETROMINOES[task.piece];
         if task.next_supply.is_none() {
+            self.authorize_frontier(
+                self.language
+                    .maximum_frontier_capacity_bytes()
+                    .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?,
+            )?;
             let next = self
                 .language
                 .advance(&task.supply, piece, &|| {
@@ -529,11 +609,13 @@ impl Pc4CompactGraphUnion {
                 task.piece += 1;
                 return Ok(WorkStep::Continue);
             }
-            self.retain_supply(next.state_count())?;
+            self.retain_supply(next.state_count(), next.retained_state_capacity_bytes())?;
             task.next_supply = Some(next);
             return Ok(WorkStep::Continue);
         }
         if task.targets.is_none() {
+            // Qualified v1 records use seven cumulative u8 degree endpoints.
+            self.authorize_frontier(capacity_bytes::<u32>(usize::from(u8::MAX))?)?;
             let edges = match read_qualified_pc4_adjacency(
                 &self.target,
                 task.key.field,
@@ -550,20 +632,26 @@ impl Pc4CompactGraphUnion {
                 }
                 Err(error) => return Err(CompactGraphUnionError::Adjacency(error)),
             };
-            task.targets = Some(
-                edges
-                    .into_iter()
-                    .map(|edge| edge.target_field_id())
-                    .collect(),
-            );
+            let mut targets = Vec::new();
+            targets
+                .try_reserve_exact(edges.len())
+                .map_err(|_| allocation())?;
+            targets.extend(edges.into_iter().map(|edge| edge.target_field_id()));
+            self.retain_frontier(capacity_bytes::<u32>(targets.capacity())?)?;
+            task.targets = Some(targets);
             return Ok(WorkStep::Continue);
         }
         let targets = task.targets.as_ref().expect("prepared piece adjacency");
         let Some(&target_field) = targets.get(task.target_index) else {
-            self.retained_supply_states -= task.next_piece();
+            let (states, bytes) = task.next_piece()?;
+            self.retained_supply_states -= states;
+            self.retention.release(bytes)?;
             return Ok(WorkStep::Continue);
         };
         if task.placements.is_none() {
+            self.authorize_frontier(capacity_bytes::<ClearraPlacementIdentity>(
+                self.limits.edge_placements.get(),
+            )?)?;
             let edge = QualifiedPc4GraphEdge::from_qualified_record(
                 &self.target,
                 task.key.field,
@@ -590,6 +678,9 @@ impl Pc4CompactGraphUnion {
                 placements.len(),
             )?;
             self.usage.materialized_edges += 1;
+            self.retain_frontier(capacity_bytes::<ClearraPlacementIdentity>(
+                placements.capacity(),
+            )?)?;
             task.placements = Some(placements);
             return Ok(WorkStep::Continue);
         }
@@ -599,7 +690,10 @@ impl Pc4CompactGraphUnion {
             .expect("materialized edge")
             .get(task.placement_index)
         else {
-            task.placements = None;
+            let old = task.placements.take().expect("exhausted placements");
+            let bytes = capacity_bytes::<ClearraPlacementIdentity>(old.capacity())?;
+            drop(old);
+            self.retention.release(bytes)?;
             task.placement_index = 0;
             task.target_index += 1;
             return Ok(WorkStep::Continue);
@@ -630,26 +724,37 @@ impl Pc4CompactGraphUnion {
                 frame,
             };
             let supply = task.next_supply.as_ref().expect("advanced supply");
-            if let Some(previous) = self.next_layer.get(&key) {
+            if layout.placement_count() == self.placement_count {
+                // Existence is already witnessed by this nonempty supply
+                // prefix. A terminal has no successor to union/expand, so its
+                // canonical layout need not occupy the next layer or copy a
+                // supply frontier. Completion still waits for every branch.
+                self.accept_terminal(layout, target_field)?;
+            } else if let Some(previous) = self.next_layer.get(&key) {
                 let old_len = previous.state_count();
+                let old_bytes = previous.retained_state_capacity_bytes();
+                self.authorize_frontier(
+                    self.language
+                        .maximum_frontier_capacity_bytes()
+                        .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?,
+                )?;
                 let merged = self
                     .language
                     .merge(previous, supply, &|| {
                         PcCandidatePageGuard::is_cancelled(guard)
                     })
                     .map_err(CompactGraphUnionError::Supply)?;
-                self.retain_supply(merged.state_count() - old_len)?;
+                self.retain_supply(merged.state_count(), merged.retained_state_capacity_bytes())?;
                 self.next_layer.insert(key, merged);
+                self.retained_supply_states -= old_len;
+                self.retention.release(old_bytes)?;
                 self.usage.merged_states += 1;
             } else {
-                limit(
-                    "pc4_compact_union_state_limit",
-                    self.limits.states,
-                    self.ready.len() + self.waiting_count + self.next_layer.len() + 2,
-                )?;
-                self.retain_supply(supply.state_count())?;
-                self.next_layer.try_reserve(1).map_err(|_| allocation())?;
-                self.next_layer.insert(key, supply.clone());
+                self.reserve_next_layer()?;
+                self.authorize_frontier(supply.retained_state_capacity_bytes())?;
+                let copy = supply.try_clone().map_err(CompactGraphUnionError::Supply)?;
+                self.retain_supply(copy.state_count(), copy.retained_state_capacity_bytes())?;
+                self.next_layer.insert(key, copy);
                 self.usage.generated_states += 1;
             }
         }
@@ -657,18 +762,153 @@ impl Pc4CompactGraphUnion {
         Ok(WorkStep::Continue)
     }
 
-    fn retain_supply(&mut self, added: usize) -> Result<(), CompactGraphUnionError> {
+    fn retain_supply(&mut self, added: usize, bytes: usize) -> Result<(), CompactGraphUnionError> {
         let count = self
             .retained_supply_states
             .checked_add(added)
             .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
-        limit(
-            "pc4_compact_union_supply_state_limit",
-            self.limits.supply_states,
-            count,
-        )?;
+        self.retain_frontier(bytes)?;
         self.retained_supply_states = count;
         Ok(())
+    }
+
+    fn frontier_outer_bytes(&self) -> Result<usize, CompactGraphUnionError> {
+        let ready = capacity_bytes::<Work>(self.ready.capacity())?;
+        let waiting = capacity_bytes::<(u32, Vec<Work>)>(self.waiting.capacity())?;
+        let next =
+            capacity_bytes::<(StateKey, CompactPatternUnionFrontier)>(self.next_layer.capacity())?;
+        let promotion = capacity_bytes::<(StateKey, CompactPatternUnionFrontier)>(
+            self.promotion
+                .as_ref()
+                .map_or(0, |layer| layer.table_capacity),
+        )?;
+        ready
+            .checked_add(waiting)
+            .and_then(|n| n.checked_add(next))
+            .and_then(|n| n.checked_add(promotion))
+            .ok_or_else(|| FrontierRetentionError::Overflow.into())
+    }
+
+    fn authorize_frontier(&self, additional: usize) -> Result<(), CompactGraphUnionError> {
+        self.retention
+            .authorize(self.frontier_outer_bytes()?, additional)?;
+        Ok(())
+    }
+
+    fn retain_frontier(&mut self, bytes: usize) -> Result<(), CompactGraphUnionError> {
+        let outer = self.frontier_outer_bytes()?;
+        self.retention.retain(outer, bytes)?;
+        Ok(())
+    }
+
+    // Pre-admit requested growth, then measure actual capacity immediately.
+    // Hash table control/allocator metadata follows the existing logical
+    // payload model, not an invented process RSS claim.
+    fn reserve_ready(&mut self, additional: usize) -> Result<(), CompactGraphUnionError> {
+        let requested = self
+            .ready
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        self.authorize_frontier(capacity_bytes::<Work>(
+            requested.saturating_sub(self.ready.capacity()),
+        )?)?;
+        self.ready
+            .try_reserve(additional)
+            .map_err(|_| allocation())?;
+        let outer = self.frontier_outer_bytes()?;
+        self.retention.observe(outer)?;
+        Ok(())
+    }
+
+    fn reserve_waiting_field(&mut self) -> Result<(), CompactGraphUnionError> {
+        self.authorize_frontier(capacity_bytes::<(u32, Vec<Work>)>(
+            (self.waiting.len() + 1).saturating_sub(self.waiting.capacity()),
+        )?)?;
+        self.waiting.try_reserve(1).map_err(|_| allocation())?;
+        let outer = self.frontier_outer_bytes()?;
+        self.retention.observe(outer)?;
+        Ok(())
+    }
+
+    fn reserve_waiting_work(&mut self, id: u32) -> Result<(), CompactGraphUnionError> {
+        let (old_capacity, requested) = self
+            .waiting
+            .get(&id)
+            .map_or((0, 1), |tasks| (tasks.capacity(), tasks.len() + 1));
+        self.authorize_frontier(capacity_bytes::<Work>(
+            requested.saturating_sub(old_capacity),
+        )?)?;
+        let new_capacity = {
+            let tasks = self.waiting.entry(id).or_default();
+            tasks.try_reserve(1).map_err(|_| allocation())?;
+            tasks.capacity()
+        };
+        self.retain_frontier(capacity_bytes::<Work>(new_capacity - old_capacity)?)?;
+        Ok(())
+    }
+
+    fn reserve_next_layer(&mut self) -> Result<(), CompactGraphUnionError> {
+        self.authorize_frontier(capacity_bytes::<(StateKey, CompactPatternUnionFrontier)>(
+            (self.next_layer.len() + 1).saturating_sub(self.next_layer.capacity()),
+        )?)?;
+        self.next_layer.try_reserve(1).map_err(|_| allocation())?;
+        let outer = self.frontier_outer_bytes()?;
+        self.retention.observe(outer)?;
+        Ok(())
+    }
+
+    fn accept_terminal(
+        &mut self,
+        layout: StandardBoard64TilingIdentity,
+        field: u32,
+    ) -> Result<(), CompactGraphUnionError> {
+        if field != self.target.terminal_field().field_id() {
+            return Ok(());
+        }
+        let occupied = layout
+            .placement_masks()
+            .iter()
+            .fold(self.source.initial_board_mask(), |all, mask| all | mask);
+        if layout.placement_count() != self.placement_count || occupied != self.full_mask {
+            return Err(contract("pc4_compact_union_terminal_layout_mismatch"));
+        }
+        self.usage.terminal_arrivals += 1;
+        if self.candidates.contains(&layout) {
+            return Ok(());
+        }
+        let count = self
+            .candidates
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        limit(
+            "pc4_compact_union_candidate_limit",
+            self.limits.candidates,
+            count,
+        )?;
+        self.check_candidate_capacity(self.candidates.capacity().max(count), count)?;
+        self.candidates.try_reserve(1).map_err(|_| allocation())?;
+        self.check_candidate_capacity(self.candidates.capacity(), count)?;
+        self.candidates.insert(layout);
+        Ok(())
+    }
+
+    fn check_candidate_capacity(
+        &self,
+        table: usize,
+        count: usize,
+    ) -> Result<(), CompactGraphUnionError> {
+        // Reserve both the retained set and the eventual exact output vector;
+        // completing traversal must not discover a predictable copy cliff.
+        let elements = table
+            .checked_add(count)
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        limit(
+            "pc4_compact_union_candidate_byte_limit",
+            self.limits.canonicalization_bytes,
+            capacity_bytes::<StandardBoard64TilingIdentity>(elements)?,
+        )
     }
 
     /// Consuming handoff only after complete traversal/materialization. There
@@ -683,6 +923,7 @@ impl Pc4CompactGraphUnion {
             || !self.ready.is_empty()
             || !self.waiting.is_empty()
             || !self.next_layer.is_empty()
+            || self.promotion.is_some()
         {
             return Err(contract("pc4_compact_union_incomplete"));
         }

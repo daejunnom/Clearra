@@ -134,6 +134,21 @@ impl CompactPatternUnionFrontier {
     pub fn retained_state_capacity_bytes(&self) -> usize {
         self.states.capacity() * core::mem::size_of::<PlacementState>()
     }
+
+    /// Fallible owned copy for callers that reserve the returned payload under
+    /// a frontier-memory budget. A failed clone never changes the source.
+    pub fn try_clone(&self) -> Result<Self, CompactPatternUnionError> {
+        let mut states = Vec::new();
+        states
+            .try_reserve_exact(self.states.len())
+            .map_err(|_| CompactPatternUnionError::AllocationFailed)?;
+        states.extend_from_slice(&self.states);
+        Ok(Self {
+            owner: Arc::clone(&self.owner),
+            states,
+            placed_pieces: self.placed_pieces,
+        })
+    }
 }
 
 // This key is only for an in-memory graph x supply memo in the same family.
@@ -174,6 +189,16 @@ pub struct CompactPatternUnionLanguage {
 }
 
 impl CompactPatternUnionLanguage {
+    /// Conservative per-operation output reservation. A graph owner can keep
+    /// its old payload live while advance/merge creates a replacement. It must
+    /// still measure actual returned capacity before retaining that result.
+    pub fn maximum_frontier_capacity_bytes(&self) -> Option<usize> {
+        self.limits
+            .frontier_states
+            .get()
+            .checked_mul(core::mem::size_of::<PlacementState>())
+    }
+
     /// None means that the actual storage is not supported (explicit queues,
     /// observed bags or non-uniform weights), not an empty solution language.
     /// No expression text, descriptive structure label or numeric ID is used.

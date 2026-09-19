@@ -204,8 +204,9 @@ impl Pc4CompactCandidateSession {
         }
         // At most one live lookup per demanded field. Include occupied slots
         // in the read window so old IDs cannot starve new independent demands.
-        let demands =
-            union.pending_fields(self.limits.concurrent_lookups.get() + self.lookups.len());
+        let demands = union
+            .pending_fields(self.limits.concurrent_lookups.get() + self.lookups.len())
+            .map_err(|e| e.reason())?;
         for field in demands {
             if self.lookups.len() == self.limits.concurrent_lookups.get() {
                 break;

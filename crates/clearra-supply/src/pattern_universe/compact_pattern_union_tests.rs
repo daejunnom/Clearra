@@ -54,6 +54,36 @@ fn prepare(
 }
 
 #[test]
+fn compact_pattern_union_fallible_copy_preserves_future_language_and_owner() {
+    let source = expression_source("P7", 7);
+    let (language, root) = prepare(&source, initial(HoldPolicy::Allowed, None));
+    let frontier = language.advance(&root, PieceKind::I, &|| false).unwrap();
+    let copy = frontier.try_clone().unwrap();
+    assert_eq!(copy, frontier);
+    assert_eq!(
+        symbolic_outputs(&language, &copy, 2),
+        symbolic_outputs(&language, &frontier, 2)
+    );
+    assert!(
+        copy.retained_state_capacity_bytes() <= language.maximum_frontier_capacity_bytes().unwrap()
+    );
+    assert!(!core::ptr::eq(
+        copy.states.as_ptr(),
+        frontier.states.as_ptr()
+    ));
+    let (foreign, _) = prepare(&source, initial(HoldPolicy::Allowed, None));
+    assert_eq!(
+        foreign.advance(&copy, PieceKind::O, &|| false).unwrap_err(),
+        CompactPatternUnionError::ForeignFrontier
+    );
+    let empty = language.advance(&root, PieceKind::I, &|| false).unwrap();
+    let empty = language.advance(&empty, PieceKind::I, &|| false).unwrap();
+    let empty = language.advance(&empty, PieceKind::I, &|| false).unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(empty.try_clone().unwrap(), empty);
+}
+
+#[test]
 fn compact_pattern_union_merge_preserves_exact_future_union_and_input_ownership() {
     let source = expression_source("P7", 7);
     let (language, root) = prepare(&source, initial(HoldPolicy::Allowed, None));

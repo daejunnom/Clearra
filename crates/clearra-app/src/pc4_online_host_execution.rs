@@ -534,8 +534,10 @@ fn compact_session_limits() -> CompactSessionLimits {
     use clearra_supply::pattern_universe::CompactPatternUnionLimits;
     CompactSessionLimits {
         union: CompactGraphUnionLimits {
-            states: nz(65_536),
-            supply_states: nz(1_048_576),
+            // Retained queues/table payloads, not an arbitrary state count.
+            // Cache, result buffers and the source retain separate budgets;
+            // finite whole-search requests still require the handoff authority.
+            frontier_bytes: nz(256 * 1024 * 1024),
             work: nz(1_000_000_000),
             candidates: nz(1_000_000),
             waiting_fields: nz(65_536),
