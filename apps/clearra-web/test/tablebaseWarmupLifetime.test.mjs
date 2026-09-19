@@ -6,6 +6,10 @@ const worker = await readFile(
   new URL('../src/workers/clearraWorker.ts', import.meta.url),
   'utf8'
 );
+const assets = await readFile(
+  new URL('../src/workers/pc4TablebaseAssets.ts', import.meta.url),
+  'utf8'
+);
 
 function functionBody(name) {
   const marker = `function ${name}(`;
@@ -54,4 +58,14 @@ test('only terminal worker lifecycle owners discard online preparation', () => {
     assert.match(body, /tablebaseWarmupGeneration\s*\+=\s*1/u);
     assert.match(body, /releasePc4TablebaseAssets\s*\(\)/u);
   }
+});
+
+test('a cached online generation performs one bounded transport touch on re-enable', () => {
+  assert.match(assets, /cachedProvider !== 'online'/u);
+  assert.match(assets, /TRANSPORT_TOUCH_FLOOR_MS/u);
+  assert.match(assets, /touchPc4OnlineTransport\(bundle\.generation/u);
+  assert.match(assets, /maxBytes:\s*1/u);
+  assert.match(assets, /maxRequests:\s*1/u);
+  assert.match(assets, /reader\.read\(artifact, 0, 1\)/u);
+  assert.doesNotMatch(assets, /setInterval|setTimeout/u);
 });

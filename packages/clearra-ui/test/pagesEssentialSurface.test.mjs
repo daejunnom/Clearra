@@ -72,11 +72,15 @@ test('CTK owns the Pages render entry and executes it through the local browser 
   );
   // Ordinary tools stay local. Explicit online TB consent is the separate
   // HF Range transport; it must not load the retired bundled pruning asset.
-  assert.match(tablebaseAssets, /qualifyPc4UpstreamGeneration\(\{ signal: controller.signal \}\)/u);
+  assert.match(tablebaseAssets, /const signal = controller\.signal/u);
+  assert.match(tablebaseAssets, /qualifyPc4UpstreamGeneration\(\{ signal \}\)/u);
+  assert.match(tablebaseAssets, /touchPc4OnlineTransport\(bundle\.generation, controller\.signal\)/u);
   assert.doesNotMatch(tablebaseAssets, /pc4-compact-exact|ARTIFACT_SHA256|response\.arrayBuffer/u);
   const online = source('../../../scripts/release/pc4/qualify-upstream-generation.mjs');
-  assert.match(online, /credentials: 'omit'/u);
-  assert.match(online, /response.status !== 206/u);
+  const rangeReader = source('../../../scripts/release/pc4/pc4-range-reader.mjs');
+  assert.match(online, /createPc4RangeReader/u);
+  assert.match(rangeReader, /credentials: 'omit'/u);
+  assert.match(rangeReader, /response.status !== 206/u);
 });
 
 test('Setup path detail preserves results while rotating stale WASM only at its next run', () => {
