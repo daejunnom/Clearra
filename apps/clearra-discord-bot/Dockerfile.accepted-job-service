@@ -42,6 +42,11 @@ ENV CLEARRA_SEARCH_CONTRACT_REVISION=clearra.search.contract.v2
 ENV CLEARRA_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead.v1
 ENV CLEARRA_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --version | grep -q 'Protocols:.*https' \
+    && curl --version | grep -q 'Features:.*HTTP2'
 RUN node -e "const p=/^[0-9a-f]{40}$/;if(!p.test(process.env.CLEARRA_SOURCE_COMMIT||'')||process.env.CLEARRA_ENGINE_BUILD_ID!==process.env.CLEARRA_SOURCE_COMMIT)process.exit(1)"
 COPY --from=accepted-inputs /usr/local/bin/clearra /usr/local/bin/clearra
 COPY --from=accepted-inputs /workspace/node_modules ./node_modules

@@ -662,3 +662,117 @@ sidecar와 동일한 중앙 broker에서 exact 대비 전체 벽시계·tail·42
 정확한 요청 형식은
 [upstream graph-block sidecar 요청안](pc4-upstream-graph-block-sidecar-request-2026-09-19.md)에
 분리했다. `.safetensors` 변환이나 graph 재정렬은 요구하지 않는다.
+
+### 9.8 native 유한 batch 후보와 최종 multi-owner 경계
+
+기존 native CLI는 App이 독립 lookup을 여러 개 보유해도 `pending_range()` 하나를
+동기 `curl_range`로 처리했다. 각 Range마다 새 curl process와 연결 수립 경계가 생기고,
+그 응답이 끝날 때까지 같은 host에서 ready CPU work도 진행하지 못했다. 이 정책은
+요청 순서와 실패 지점이 단순하지만 WAN RTT가 lookup 수에 거의 직렬로 더해진다.
+
+후보 `483f260`은 이 경계를 다음처럼 바꾼다.
+
+- App의 최대 8개 독립 lookup과 `has_ready_work()`는 그대로 둔다. 이는 CPU worker
+  수가 아니라 동시에 보유하는 qualified continuation 수다.
+- 이미 cache에 있는 요청을 먼저 admission하고, 최대 16개 known graph demand를
+  4KiB gap/64KiB physical span 안에서 결합한다.
+- 한 `curl --parallel --parallel-max 4` process가 한 유한 batch를 소유한다. Range를
+  시작하기 전에 request/byte credit 전체를 예약하며, body는 transfer별 격리 파일에
+  쓰고 stdout에는 index/status/Content-Range receipt만 둔다.
+- 먼저 끝난 transfer부터 exact lookup/request ID로 admission한다. 그 사이 host는
+  ready CPU work를 계속 진행한다. HTTP 200/429/416, 잘못된 Content-Range, oversized,
+  truncated body는 body 파일을 정상 결과로 읽기 전에 서로 다른 오류로 분류한다.
+- shell, `.curlrc`, credential, 자동 retry, HTTP/3 강제는 사용하지 않는다. 동일한
+  immutable revision/artifact identity와 기존 취소·전체성 계약을 유지한다.
+
+첫 exact-source CI는 source/surface와 기존 PC4 Core/App 계약을 통과한 뒤 새 CLI 파일의
+`Vec<Transfer>` 타입 추론 오류로 native CLI/PC4 CLI 단계가 실패했다. 따라서 이 실행은
+성능 또는 실행 성공 증거가 아니다. `17821a2`에서 타입을 명시하고 command 구성 및
+HTTP receipt 분류 계약을 추가했다. 후속 exact-source 비게시 CI
+[35444261101](https://github.com/daejunnom/Clearra/actions/runs/35444261101)의 source,
+native CLI, surface, PC4 계약 job은 모두 성공했다. preview-WASM은 Rust/WASM 입력이
+없어 의도적으로 생략됐다. 이는 유한 native batch의 컴파일·계약 증거이며 persistent
+multi, Cloud image 또는 전체 검색 성능 증거는 아니다.
+
+이 후보는 제안한 최종 정책의 **중간 단계**다. 유한 curl process에는 실행 중 새 easy
+handle을 추가할 수 없으므로 batch의 세 요청이 끝나고 하나가 오래 남았을 때, 먼저 끝난
+응답이 만든 새 Range를 같은 연결의 빈 slot에 즉시 넣지 못한다. 또 현재 native 후보는
+재사용 index page 정책을 보존하기 위해 graph batch만 병렬화하고 index/offset은 기존
+scalar reader를 사용한다. 즉 다음 두 tail은 아직 남는다.
+
+1. 한 유한 batch 안의 마지막 느린 transfer가 다음 batch 생성을 막는 process tail
+2. graph와 index 요청이 섞였을 때 index scalar 왕복이 남기는 dependency tail
+
+같은 Windows HTTP/1.1 curl에서 전송 경계만 작은 실 A/B로 확인했다. exact Jstris
+revision의 `graph.bin`에서 서로 떨어진 4KiB Range 네 개를 사용했고, 먼저 두 경로를
+한 번씩 warm-up한 뒤 순서를 교차했다. 제품 App/해법 탐색은 실행하지 않았다.
+
+| 전송 경계 | 세 번의 벽시계 | 중앙값 |
+| --- | --- | ---: |
+| 기존과 같은 curl process 4회 직렬 | 4.252s, 4.275s, 4.257s | 4.257s |
+| curl process 1회, parallel max 4 | 1.300s, 1.321s, 1.278s | 1.300s |
+
+이 제한된 표본의 중앙값은 약 3.27배 차이지만, process/TLS/RTT를 함께 비교한
+transport-only 수치이며 전체 검색 가속률이 아니다. 같은 host에서
+`--parallel-immediate`는 기본 parallel 중앙값 1.285s 대비 1.088s로 약 15% 빨랐다.
+그러나 이 host에는 HTTP/2가 없어 다중 연결 시작 지연만 비교했다. HTTP/2 환경에서
+`--parallel-immediate`는 multiplex를 기다리는 대신 연결을 더 열 수 있으므로 Cloud
+exact-image A/B 전에는 제품 기본값으로 넣지 않는다.
+
+최종 native owner는 OS 계산 thread마다 HTTP client를 두지 않는다. 한 host-lifetime
+libcurl multi/pool owner가 logical queue를 소유하고, physical slot 기본 4개 중 하나가
+비는 즉시 새 easy handle을 추가해야 한다. libcurl multi는 진행 중에도 handle 추가가
+가능하고 완료별 message를 제공한다. graph direct와 reusable index queue는 Web과 같은
+bounded-fair 3:1을 사용한다. HTTP/2·3 multiplex stream은 같은 multi/easy owner의
+connection에만 추가할 수 있으므로 worker별 client는 오히려 연결 재사용, in-flight
+dedup, cache와 byte credit을 분산시킨다.
+
+연산이 HTTP보다 빠른 경우에도 CPU가 무제한 요청을 생산하지 않는다. concurrent lookup
+8, logical queue 16, physical transfer 4, 64KiB/span, 64MiB/request budget과 union의
+resident/waiting byte budget이 backpressure를 제공한다. 반대로 CPU가 느리면 broker는
+빈 slot을 허용하며 불필요한 speculative Range를 만들지 않는다. tail에서는 batch 크기를
+억지로 채우지 않고 ready demand를 즉시 시작한다. 성능 판정에는 평균만 쓰지 않고
+slot-idle time, queue wait p50/p95/p99, first/last completion, connection/TLS count,
+HTTP version, 429와 transferred bytes를 함께 기록한다.
+
+### 9.9 HTTP/2·HTTP/3, metadata cache, safetensors와 mmap 판정
+
+curl의 공식 multi 계약은 한 thread에서 다수 전송을 동시에 진행하고, 진행 중인 multi에
+handle을 추가하며, 완료별로 회수할 수 있게 한다. HTTPS curl은 빌드가 지원하면 ALPN으로
+HTTP/2를 기본 협상한다. 그러나 protocol은 소스 옵션이 아니라 **실행 curl의 feature**다.
+
+- 현재 Windows `curl 8.21.0 (Schannel)`의 feature 목록에는 HTTP2와 HTTP3가 모두 없다.
+  따라서 이 환경의 유한 batch는 HTTP/1.1 최대 네 연결로만 검증한다.
+- production의 `node:22-bookworm-slim` 경로는 현재 accepted runtime Dockerfile에 curl을
+  설치하지 않는다. Debian Bookworm `libcurl4`는 `libnghttp2-14`에 의존하므로 명시 설치한
+  curl은 HTTP/2 사용 후보지만, exact image에서 `curl --version`과 실제 `%{http_version}`
+  receipt를 확인하기 전에는 협상 성공을 주장하지 않는다.
+- Bookworm 기본 패키지에서 HTTP/3를 가정하지 않는다. curl의 HTTP/3는 QUIC backend가
+  들어간 별도 build가 필요하고 proxy에서는 제약이 있다. 이 workload는 작은 immutable
+  Range의 연결 재사용이 핵심이므로 우선순위는 persistent HTTP/2 multi이며, HTTP/3는
+  같은 A/B에서 handshake/packet-loss tail이 실제로 줄 때만 opt-in한다.
+
+`.safetensors`는 지금 요청할 upstream 변경이 아니다. 이 포맷의 작은 JSON header는
+named dense tensor의 dtype/shape/data offset을 찾는 데 유리하지만, PC4 `graph.bin`은
+GOFF가 구분하는 가변 길이 Hydra record다. 세 flat artifact는 이미 manifest에 byte
+length/content identity/role을 갖고 있어 safetensors header를 추가해도 graph record
+주소를 얻으려면 GOFF 또는 별도 block directory가 여전히 필요하다. 오히려 최초 header
+길이와 JSON을 위한 Range 두 번, 변환본 generation/identity, 다섯 프로필 독립 활성화
+복잡도가 늘어난다. upstream 요청은 기존 graph를 재포장하는 safetensors보다 source
+GOFF/graph identity에 결박된 작은 `graph block offsets v1` sidecar를 유지한다.
+
+metadata cache는 별도이며 우선순위가 높다. 캐시 가능한 것은 `(repository, resolved
+revision, profile, 세 artifact path/size/content identity)`에 결박된 qualified header,
+field count와 block-sidecar header다. `main` 이름 자체를 신뢰해 영구 캐시하지 않고,
+작업 시작 시 revision discovery를 갱신한 뒤 같은 exact revision의 검증 완료 metadata만
+재사용한다. body/Range admission은 여전히 exact Content-Range와 snapshot identity를
+검사한다. CLI의 프로세스 간 cache와 Discord의 host-lifetime cache는 서로 다른 owner로
+두며, cache miss/corruption은 원격 재검증이지 오프라인 탐색 허가가 아니다.
+
+`mmap`은 명시 다운로드한 로컬 파일에만 적용 가능한 후보다. HTTP 왕복을 줄이지 않으며
+Web/OPFS에도 그대로 적용할 수 없다. 현재 local reader는 index 4KiB page cache와 graph
+exact positional read를 쓰고, 저장된 큰 입력 prefix에서 전체 local-reader wait를 0으로
+가정해도 조건부 상한은 약 1.16~1.18배였다. mapping은 활성 generation lease가 파일
+교체/절단을 막는 동안 read-only로 만들고, Windows/Linux cold/warm cache, page fault,
+RSS와 전체 wall time을 기존 positional read와 A/B한 뒤에만 채택한다. 이 결과 없이
+`memmap2` 의존성을 제품에 추가하거나 local default를 바꾸지 않는다.

@@ -277,6 +277,12 @@ impl NativeCurlBatch {
         }
         if let Some(status) = self.exit.as_ref() {
             if !status.success() {
+                // `try_wait` may observe process exit just before the stdout
+                // reader publishes a final HTTP receipt. Let the reader drain
+                // first so 200/429/416 keep their precise fail-closed reason.
+                if !self.reader_finished {
+                    return Ok(NativeCurlPoll::Pending);
+                }
                 return Err("pc4_online_transport_interrupted");
             }
             if self.reader_finished && self.remaining != 0 {

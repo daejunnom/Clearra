@@ -241,6 +241,9 @@ function assertPackagingFlow(workflow, cloudConfig, dockerfile) {
   assert.match(dockerfile, /COPY inputs\/clearra \/usr\/local\/bin\/clearra/u);
   assert.match(dockerfile, /verify-linux-cli-runtime\.mjs/u);
   assert.match(dockerfile, /finesse_report\?\.mode!=='score'/u);
+  assert.match(dockerfile, /apt-get install -y --no-install-recommends ca-certificates curl/u);
+  assert.match(dockerfile, /curl --version \| grep -q 'Protocols:\.\*https'/u);
+  assert.match(dockerfile, /curl --version \| grep -q 'Features:\.\*HTTP2'/u);
   assert.equal((dockerfile.match(/sha256sum --check --strict/gu) ?? []).length, 2);
   assert.match(dockerfile, /^USER node$/mu);
 }
