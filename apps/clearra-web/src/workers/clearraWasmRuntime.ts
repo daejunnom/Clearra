@@ -6,10 +6,14 @@ import type {
 
 // SRP rationale: this module has one behavior-level change reason: adapting the validated
 // WASM ABI exports into the browser runtime contract.
-export type Pc4PendingRange = {
-  lookup_frontier?: number[];
+export type Pc4RangeRequest = {
   lookup_session: number; request_id: number; profile: string; offset: number; length: number;
   artifact: { path: string; byte_length: number; content_identity: string };
+};
+export type Pc4PendingRange = Pc4RangeRequest & {
+  lookup_frontier?: number[];
+  batch?: Pc4RangeRequest[];
+  can_advance?: boolean;
 };
 export type ClearraWasmModule = {
   configure_online_pc4?: (generation: unknown) => void;

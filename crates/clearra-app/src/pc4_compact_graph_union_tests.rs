@@ -10,6 +10,9 @@ use clearra_pc_graph::request::PcQueueInput;
 use clearra_supply::pattern_universe::CompactPatternUnionLimits;
 use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 
+#[path = "pc4_compact_host_tests.rs"]
+mod host_contracts;
+
 // Tiny expressions deliberately use explicit storage in the real compiler.
 // Append an unobserved suffix before projecting to the ORIGINAL visible length
 // to exercise real compact storage (5,040 weighted ordinals) with the same
@@ -517,6 +520,8 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
             maximum_pending = maximum_pending.max(pending.len());
             // Allow independent CPU branches to register their demands first.
             if status == CompactGraphUnionStep::Waiting {
+                assert!(union.io_demand_is_full(1, 1));
+                assert!(!union.io_demand_is_full(4096, 4096));
                 if reverse {
                     pending.reverse();
                 }

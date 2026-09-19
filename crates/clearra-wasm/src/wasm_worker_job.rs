@@ -1042,8 +1042,18 @@ impl WasmWorkerJobRuntime {
         else {
             return "null".to_owned();
         };
+        // Keep the scalar fields for existing native/benchmark hosts. New hosts
+        // may service these independent, still individually admitted ranges in
+        // any order; a network wait need not stop ready candidate work.
+        let batch: Vec<_> = online.pending_ranges().into_iter().map(|range| serde_json::json!({
+            "lookup_session": range.lookup_session().get(), "request_id": range.request_id(),
+            "profile": range.profile().as_str(), "offset": range.offset(), "length": range.length(),
+            "artifact": { "path": range.artifact_descriptor().path(), "byte_length": range.artifact_descriptor().byte_len(),
+                "content_identity": range.artifact_descriptor().content_identity() }
+        })).collect();
         serde_json::json!({ "lookup_session": range.lookup_session().get(), "request_id": range.request_id(),
             "profile": range.profile().as_str(), "offset": range.offset(), "length": range.length(),
+            "batch": batch, "can_advance": online.has_ready_work(),
             "lookup_frontier": online.pending_lookup_frontier(),
             "artifact": { "path": range.artifact_descriptor().path(), "byte_length": range.artifact_descriptor().byte_len(),
                 "content_identity": range.artifact_descriptor().content_identity() } }).to_string()

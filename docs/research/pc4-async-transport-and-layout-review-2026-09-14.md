@@ -3,7 +3,7 @@
 작성: 2026-09-14. 소스 기준: `6172f58eaa6c8e0e7cbde902e88a1077ec242d9f`,
 `codex/v0.9.0-stacked-on-v0.8.1-20260912` 작업 트리.
 
-이 문서는 사용자 제안과 현재 소스/실제 전송을 비교한 **미적용 설계 후보**다.
+이 문서의 1~7절은 2026-09-14 당시 사용자 제안과 소스/실제 전송을 비교한 설계 후보다.
 진행 중이던 compact union의 graph 연결 작업은 비교를 위해 일시 정지했다.
 기존 작성 중인 Rust helper를 완료·검증된 제품 구현으로 취급하지 않는다.
 4194 교체, 새 전체 탐색, 빌드, 배포 또는 프로필 활성화는 수행하지 않았다.
@@ -292,3 +292,31 @@ muse918에게 요청할 수 있는 최소 변경은 다음 두 가지다. 아직
 
 현 단계에는 전체 graph의 safetensors 변환, 파일 재정렬 또는 새 서버 batch API를
 요청할 필요가 없다. 비동기 탐색기/공유 client/캐시는 Clearra 내부에서 진행 가능하다.
+
+## 8. 2026-09-19 연결 구현의 범위
+
+이후 compact 합집합/협력적 finalizer는 `b23cb5e`의 비게시 CI에서 통과했다.
+후속 변경은 격리된 구현 브랜치의 compact pattern PC host에 독립 조회 owner를
+연결한다. 다음 값들은 CPU 워커 정책 또는 upstream 허용량을 뜻하지 않는다.
+
+| 경계 | 구현 제한/정책 |
+| --- | --- |
+| App lookup | 활성 최대 8개, 필드별 하나; 응답 대기는 다른 lookup과 ready CPU를 막지 않음 |
+| CPU backpressure | 대기 16필드 또는 64 continuation에서 확장 일시 중단; 응답 뒤 재개, work quantum 최대 64 |
+| Web continuation | 최대 16개, 각 응답 최대 64KiB; admission 전 완료 버퍼도 같은 slot을 점유 |
+| HTTP | 기존 4개 물리 요청 상한/byte reservation/cache/세대 identity 유지 |
+| 알려진 인접 수요 | 같은 프로필/파일 안에서만 4KiB gap, 최대 64KiB 단일 범위로 묶음; 새 수요를 기다려 batch를 채우지 않음 |
+| 응답 처리 | 먼저 완료된 span의 요청부터 admission; 전체 batch의 Promise.all 대기 없음 |
+| local | 이미 검증된 파일의 page/exact read 유지; HTTP 상태를 만들지 않으며 close 시 미완료 read를 먼저 정리 |
+
+브라우저 host/OPFS 관련 22개 Node 계약과 기존 reader 29개 계약을 로컬에서 통과했다.
+느린 첫 응답 전에 다른 두 응답이 admission되는 것, I/O 중 CPU 진행, 8개 논리 수요가
+4개 물리 요청 상한을 지키는 것, 취소/HTTP 200/초과 batch의 실패 처리를 확인했다.
+인접 수요 3개는 HTTP 1회로 읽고 원래 세 요청에 따로 admission했다. 이들은 통제된
+fixture의 계약 검증이지 WAN 시간 또는 456,459개 전체 탐색 가속 증거가 아니다.
+
+아직 구현되지 않은 경계도 구분한다. CPU work-stealing, 깊이 장벽 없는 delta 스케줄링,
+whole-owner 바이트 credit, CLI 지속 연결/비동기 client, sparse sidecar, mmap은 남아 있다.
+count watermark와 개별 버퍼 한도가 전체 RSS/사용자 memory budget을 대체하지 않는다.
+새 Rust host/다중 세션 계약은 exact-source 비게시 CI에서 확인한다. 4194/배포는 변경하지
+않으며 HTTP 프로토콜 진단도 다시 실행하지 않았다. 4절의 네트워크 관측일은 그대로다.

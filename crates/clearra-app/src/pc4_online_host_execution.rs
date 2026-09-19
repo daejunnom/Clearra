@@ -1,6 +1,7 @@
 //! SRP: host-driven online execution of the ordinary typed PC request.
 //! CLI compilation, supply semantics, candidate sealing and product reduction
 //! remain their existing owners. This module performs no HTTP or fallback.
+use crate::pc4_compact_candidate_session::{CompactSessionLimits, Pc4CompactCandidateSession};
 use crate::*;
 use clearra_core_domain::board::standard_pc_board::StandardPcBoard;
 use clearra_pc4_tablebase::*;
@@ -19,6 +20,7 @@ pub struct Pc4OnlineHostExecution {
     hold: FixedQueueHoldState,
     lookup: Option<AppOnlinePc4LookupSession>,
     candidates: Option<AppOnlinePc4CandidateSession>,
+    compact: Option<Pc4CompactCandidateSession>,
     product: Option<Pc4CandidateProductExecution>,
     pending: Option<RangeRequest>,
     ordinal: u32,
@@ -165,6 +167,7 @@ impl AppContext {
             hold,
             lookup: Some(lookup),
             candidates: None,
+            compact: None,
             product: None,
             pending: None,
             ordinal: 0,
@@ -175,7 +178,27 @@ impl AppContext {
 
 impl Pc4OnlineHostExecution {
     pub fn pending_range(&self) -> Option<&RangeRequest> {
-        self.pending.as_ref()
+        self.pending.as_ref().or_else(|| {
+            self.compact
+                .as_ref()
+                .and_then(|session| session.pending_ranges().next())
+        })
+    }
+
+    /// Legacy hosts may consume only `pending_range`; batch-aware hosts can
+    /// drive independent lookups concurrently without changing admission rules.
+    pub fn pending_ranges(&self) -> Vec<&RangeRequest> {
+        self.compact.as_ref().map_or_else(
+            || self.pending.iter().collect(),
+            |session| session.pending_ranges().collect(),
+        )
+    }
+
+    pub fn has_ready_work(&self) -> bool {
+        self.compact.as_ref().map_or(
+            self.pending.is_none(),
+            Pc4CompactCandidateSession::has_ready_work,
+        )
     }
 
     pub fn pending_lookup_frontier(&self) -> &[u32] {
@@ -198,7 +221,28 @@ impl Pc4OnlineHostExecution {
         };
         if control.is_cancelled() {
             self.pending = None;
+            self.compact = None;
             return Ok(CooperativeAppAdvance::Cancelled);
+        }
+        if let Some(compact) = &mut self.compact {
+            if compact.advance(nz(work.max(1)), &guard)? {
+                let input = self
+                    .compact
+                    .take()
+                    .expect("completed compact session")
+                    .into_reducer_input(&guard)?;
+                self.product = Some(
+                    self.context
+                        .start_pc4_owned_candidate_product(
+                            self.request.clone(),
+                            input,
+                            &guard,
+                            control,
+                        )
+                        .map_err(|e| e.reason())?,
+                );
+            }
+            return Ok(CooperativeAppAdvance::Pending);
         }
         if self.pending.is_some() {
             return Ok(CooperativeAppAdvance::Pending);
@@ -213,6 +257,23 @@ impl Pc4OnlineHostExecution {
                 AppOnlinePc4LookupStep::NeedRange(range) => self.pending = Some(range),
                 AppOnlinePc4LookupStep::Hit(hit) => {
                     let id = hit.lookup().field_id;
+                    if matches!(
+                        self.prepared.queue(),
+                        Pc4PreparedQueueInput::CompiledPattern(_)
+                    ) {
+                        if let Some(compact) = Pc4CompactCandidateSession::start(
+                            self.generation.clone(),
+                            &self.source,
+                            &self.prepared,
+                            hit,
+                            compact_session_limits(),
+                            &guard,
+                        )? {
+                            self.compact = Some(compact);
+                            self.lookup = None;
+                            return Ok(CooperativeAppAdvance::Pending);
+                        }
+                    }
                     let request = AppOnlinePc4ObservationCandidateRequest::for_prepared_input(
                         &self.source,
                         &self.prepared,
@@ -347,7 +408,17 @@ impl Pc4OnlineHostExecution {
         bytes: Vec<u8>,
         control: &ExecutionControl,
     ) -> Result<(), &'static str> {
-        let range = self.pending.as_ref().ok_or("pc4_online_no_pending_range")?;
+        let range = if let Some(compact) = &self.compact {
+            compact
+                .pending_ranges()
+                .find(|range| {
+                    range.lookup_session().get() == lookup_session
+                        && range.request_id() == request_id
+                })
+                .ok_or("pc4_online_response_id_mismatch")?
+        } else {
+            self.pending.as_ref().ok_or("pc4_online_no_pending_range")?
+        };
         if range.request_id() != request_id || range.lookup_session().get() != lookup_session {
             return Err("pc4_online_response_id_mismatch");
         }
@@ -355,7 +426,7 @@ impl Pc4OnlineHostExecution {
             source: &self.source,
             control,
         };
-        if self.lookup_id != Some(range.lookup_session()) {
+        if self.compact.is_none() && self.lookup_id != Some(range.lookup_session()) {
             self.ordinal = 0;
             self.lookup_id = Some(range.lookup_session());
         }
@@ -385,6 +456,9 @@ impl Pc4OnlineHostExecution {
             )),
             None => RangeAdmissionInput::VerifiedLocalSlice(Box::new(response)),
         };
+        if let Some(compact) = &mut self.compact {
+            return compact.admit(lookup_session, request_id, input, &guard);
+        }
         let attempt = RangeAdmissionAttempt::new(ordinal, NonZeroU16::new(1).unwrap());
         if let Some(lookup) = &mut self.lookup {
             lookup
@@ -453,6 +527,31 @@ fn range_limits() -> RangeAdmissionLimits {
         NonZeroU16::new(1).unwrap(),
         60,
     )
+}
+
+fn compact_session_limits() -> CompactSessionLimits {
+    use crate::pc_candidate_page_boundary::compact_graph_union::CompactGraphUnionLimits;
+    use clearra_supply::pattern_universe::CompactPatternUnionLimits;
+    CompactSessionLimits {
+        union: CompactGraphUnionLimits {
+            states: nz(65_536),
+            supply_states: nz(1_048_576),
+            work: nz(1_000_000_000),
+            candidates: nz(1_000_000),
+            waiting_fields: nz(65_536),
+            edge_placements: nz(256),
+            canonicalization_bytes: nz(256 * 1024 * 1024),
+            language: CompactPatternUnionLimits::new(nz(16), nz(4096), nz(65_536)),
+        },
+        cache: Pc4LookupGraphCacheLimits::new(
+            nz(100_000),
+            nz(32 * 1024 * 1024),
+            nz(64 * 1024 * 1024),
+        ),
+        ranges: range_limits(),
+        concurrent_lookups: nz(8),
+        lookups: nz(100_000),
+    }
 }
 fn frontier_budgets() -> Pc4ObservationFrontierBudgets {
     Pc4ObservationFrontierBudgets::new(

@@ -179,6 +179,28 @@ pub(crate) struct Pc4CompactGraphUnion {
 }
 
 impl Pc4CompactGraphUnion {
+    pub(crate) fn check_current<G: Pc4GraphCandidateGuard>(
+        &self,
+        guard: &G,
+    ) -> Result<(), CompactGraphUnionError> {
+        if self.terminated {
+            return Err(contract("pc4_compact_union_terminated"));
+        }
+        check_guard(&self.source, &self.target, guard)
+    }
+
+    pub(crate) fn has_ready_work(&self) -> bool {
+        !self.completed
+            && !self.terminated
+            && (self.canonicalizer.is_some() || !self.ready.is_empty() || self.waiting.is_empty())
+    }
+
+    /// Watermarks throttle new CPU demand before the hard retained-state
+    /// limits are reached. They are counts, not whole-owner byte authority.
+    pub(crate) fn io_demand_is_full(&self, fields: usize, continuations: usize) -> bool {
+        self.waiting.len() >= fields || self.waiting_count >= continuations
+    }
+
     pub(crate) fn prepare<G: Pc4GraphCandidateGuard>(
         source: &PcCandidateSourceBinding,
         prepared: &Pc4PreparedOnlineInput,

@@ -163,3 +163,145 @@ test('an outstanding host yield keeps Node alive but an idle runner does not', (
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /host_yield_drained=1/);
 });
+
+function batchFixture(count = 3) {
+  const requests = Array.from({ length: count }, (_, i) => ({ lookup_session: i + 10, request_id: 1,
+    profile: 'jstris-180', offset: i * 8192, length: 1, artifact: generation.profiles[0].artifacts.graph }));
+  const admitted = new Set(), order = [], events = [];
+  let cpu = 0, cancelled = false;
+  const wasm = {
+    start_job: () => 7,
+    advance_job() {
+      if (cpu < 16) cpu++;
+      if (admitted.size < count) return 'pending';
+      events.push({ event: 'final_response', job_id: 7, response: { status: 'success' } });
+      return 'completed';
+    },
+    online_pc4_pending() {
+      const batch = requests.filter(r => !admitted.has(r.lookup_session));
+      return batch.length ? { ...batch[0], batch, can_advance: cpu < 16 } : null;
+    },
+    online_pc4_admit(job, response) {
+      assert.equal(job, 7); assert.equal(cancelled, false);
+      assert.equal(admitted.has(response.lookup_session), false, 'no duplicate admission');
+      const range = requests.find(r => r.lookup_session === response.lookup_session);
+      assert.deepEqual(response.bytes, [range.lookup_session]);
+      admitted.add(response.lookup_session); order.push(response.lookup_session);
+    },
+    drain_job_events_json: () => JSON.stringify(events.splice(0)),
+    cancel_job() { cancelled = true; events.push({ event: 'cancelled', job_id: 7 }); }
+  };
+  return { wasm, requests, order, get cpu() { return cpu; }, get cancelled() { return cancelled; } };
+}
+
+function deferredFetch(f) {
+  const pending = new Map(), starts = [];
+  let active = 0, peak = 0, cpuAtFirst = -1, afterStart = () => {};
+  const fetch = (_url, { headers, signal }) => new Promise((resolve, reject) => {
+    const offset = Number(/^bytes=(\d+)-/.exec(headers.Range)[1]);
+    const request = f.requests.find(r => r.offset === offset);
+    assert.ok(request, 'only known demands are transmitted');
+    if (cpuAtFirst < 0) cpuAtFirst = f.cpu;
+    starts.push(request.lookup_session); active++; peak = Math.max(peak, active);
+    const abort = () => { active--; pending.delete(request.lookup_session); reject(new DOMException('cancelled', 'AbortError')); };
+    signal.addEventListener('abort', abort, { once: true });
+    pending.set(request.lookup_session, (status = 206) => {
+      signal.removeEventListener('abort', abort); active--; pending.delete(request.lookup_session);
+      resolve(new Response(Uint8Array.of(request.lookup_session), { status,
+        headers: { 'content-range': `bytes ${offset}-${offset}/64000` } }));
+    });
+    afterStart();
+  });
+  return { fetch, pending, starts, get peak() { return peak; }, get cpuAtFirst() { return cpuAtFirst; },
+    set afterStart(callback) { afterStart = callback; } };
+}
+
+test('batch host advances CPU while the first HTTP waits and admits faster responses without a batch barrier', { timeout: 5000 }, async () => {
+  const original = fetch, f = batchFixture(), transport = deferredFetch(f);
+  let firstDone = false;
+  try {
+    globalThis.fetch = transport.fetch;
+    transport.afterStart = () => {
+      if (transport.starts.length === 3) {
+        transport.pending.get(12)(); transport.pending.get(11)();
+      }
+    };
+    const admit = f.wasm.online_pc4_admit;
+    f.wasm.online_pc4_admit = (job, response) => {
+      assert.equal(firstDone, response.lookup_session === 10);
+      admit(job, response);
+      if (f.order.length === 2) { firstDone = true; transport.pending.get(10)(); }
+    };
+    const result = await new WasmJobRunner(f.wasm, generation).run('fixture', () => {});
+    assert.equal(result.event, 'final_response');
+    // Stream-body completion can reorder the two fast responses. Both must
+    // be admitted before the slow request; their mutual order is immaterial.
+    assert.deepEqual(f.order.slice(0, 2).sort(), [11, 12]);
+    assert.equal(f.order[2], 10);
+    assert.equal(transport.peak, 3);
+    assert.ok(f.cpu > transport.cpuAtFirst, 'CPU advances while real fetch promises are pending');
+    assert.equal(transport.starts.length, 3, 'repeated pending snapshots do not reissue requests');
+  } finally { globalThis.fetch = original; }
+});
+
+test('batch host retains the reader concurrency cap and cancellation discards every late response', { timeout: 5000 }, async () => {
+  const original = fetch, f = batchFixture(8), transport = deferredFetch(f);
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  transport.afterStart = () => { if (transport.starts.length === 4) started(); };
+  try {
+    globalThis.fetch = transport.fetch;
+    const runner = new WasmJobRunner(f.wasm, generation);
+    const run = runner.run('fixture', () => {});
+    await ready;
+    assert.equal(transport.peak, 4, 'CPU requests are not physical HTTP concurrency');
+    runner.cancel();
+    assert.equal((await run).event, 'cancelled');
+    assert.deepEqual(f.order, []);
+    assert.equal(transport.pending.size, 0);
+    assert.equal(transport.starts.length, 4, 'queued work is not sent after cancellation');
+  } finally { globalThis.fetch = original; }
+});
+
+test('one bad parallel HTTP response cancels peers and cannot publish partial completion', { timeout: 5000 }, async () => {
+  const original = fetch, f = batchFixture(), transport = deferredFetch(f);
+  transport.afterStart = () => { if (transport.starts.length === 3) transport.pending.get(11)(200); };
+  try {
+    globalThis.fetch = transport.fetch;
+    await assert.rejects(new WasmJobRunner(f.wasm, generation).run('fixture', () => {}),
+      { code: 'pc4_online_whole_content_rejected' });
+    assert.equal(transport.pending.size, 0);
+    assert.equal(f.cancelled, true);
+    assert.deepEqual(f.order, []);
+  } finally { globalThis.fetch = original; }
+});
+
+test('an oversized pending batch is rejected before any HTTP is emitted', async () => {
+  const original = fetch, f = batchFixture(17);
+  let calls = 0;
+  try {
+    globalThis.fetch = () => { calls++; assert.fail('invalid batch must not send'); };
+    await assert.rejects(new WasmJobRunner(f.wasm, generation).run('fixture', () => {}), { code: 'pc4_online_pending_limit' });
+    assert.equal(calls, 0); assert.equal(f.cancelled, true);
+  } finally { globalThis.fetch = original; }
+});
+
+test('known nearby batch ranges use one HTTP span but retain independent request admission', async () => {
+  const original = fetch, f = batchFixture();
+  f.requests.forEach((range, i) => { range.offset = i * 32; });
+  let calls = 0;
+  const events = [];
+  try {
+    globalThis.fetch = async (_url, init) => {
+      calls++; assert.equal(init.headers.Range, 'bytes=0-64');
+      const bytes = new Uint8Array(65);
+      for (const range of f.requests) bytes[range.offset] = range.lookup_session;
+      return new Response(bytes, { status: 206, headers: { 'content-range': 'bytes 0-64/64000' } });
+    };
+    await new WasmJobRunner(f.wasm, generation).run('fixture', event => events.push(event));
+    assert.equal(calls, 1);
+    assert.deepEqual(f.order, [10, 11, 12]);
+    assert.equal(events.at(-1).pc4_online.transferred_bytes, 65);
+    assert.equal(events.at(-1).pc4_online.requests, 1);
+  } finally { globalThis.fetch = original; }
+});

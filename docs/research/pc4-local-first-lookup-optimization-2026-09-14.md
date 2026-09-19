@@ -620,6 +620,44 @@ comparisons and nonzero executed-test checks remain automatic. Historical A/B
 values are retained without requesting another measurement. 4194, product
 selection, main and deployment remain unchanged.
 
+### 2026-09-19: finalizer accepted by test CI; independent lookup host candidate
+
+Run [34778873328](https://github.com/daejunnom/Clearra/actions/runs/34778873328)
+for `b23cb5ef8e04092d93c4ccb9e0436f6bd11fa28d` completed successfully in all
+requested jobs (preview-WASM intentionally skipped). The corrected 60-pair
+comparison and all ten compact graph/finalizer tests executed successfully.
+This supersedes the earlier fixture-error/pending-test notes, not the remaining
+large-input, whole-memory or release requirements.
+
+The follow-up branch candidate composes the compact producer with at most eight
+independent, individually qualified lookup sessions. Cache records wake their
+own suspended work; a slow request does not stop other ready work. An I/O
+watermark (16 waiting fields or 64 continuations for eight lookup slots) pauses
+new expansion until a response arrives. CPU quanta are capped at 64 work units.
+The existing generation pin, per-response ID/byte/header checks, no-implicit-
+fallback policy and exact candidate sealing remain authoritative. A complete
+owner is consumed, dropping its lookup cache before product ownership passes on.
+
+The WASM boundary adds a bounded batch and a ready-work flag while retaining
+scalar fields for old CLI/benchmark hosts. Web asynchronously submits each known
+batch, coalesces nearby demands under the existing gap/span policy and admits
+responses as individual spans finish. It does not wait for all independent I/O
+before advancing CPU or admitting a faster span. There are at most 16 host
+continuations of 64KiB each; physical HTTP still has its own four-request limit
+and pre-reserved lifetime transfer budget. Local readers keep their page/exact
+policy and typed local admission. Abort precedes pending-read drain and lease
+release; failures cannot publish a partial candidate family.
+
+Local Node contracts: host/OPFS 22 passed; existing HTTP/local reader 29 passed.
+New Rust host tests compare scalar/batched, local/HTTP and response order using
+a synthetic three-O diamond, and reject wrong/duplicate/late/error packets.
+Their execution is queued for this change's non-publishing CI. No local Rust
+build was attempted through the blocked execution surface. Current source now
+selects the new compact producer on this isolated feature branch only; no
+4194 WASM/main/deployed product change is implied. Whole-owner byte accounting,
+large-family tests, Setup and the native persistent async transport are still
+open. The current cooperative CPU owner is not multi-threaded graph expansion.
+
 ## Remaining evidence
 
 Still required: complete 456,459-family validation/timing, input/hold-family

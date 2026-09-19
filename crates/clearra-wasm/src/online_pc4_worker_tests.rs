@@ -131,6 +131,24 @@ fn online_pc4_worker_local_and_http_adapters_complete_the_same_one_piece_search(
             let state = runtime.advance_job(id, 256).unwrap();
             let range: Value = serde_json::from_str(&runtime.online_pc4_pending_json(id)).unwrap();
             if !range.is_null() {
+                let batch = range["batch"]
+                    .as_array()
+                    .expect("independent demand envelope");
+                assert!(!batch.is_empty() && batch.len() <= 8);
+                for field in [
+                    "lookup_session",
+                    "request_id",
+                    "profile",
+                    "offset",
+                    "length",
+                    "artifact",
+                ] {
+                    assert_eq!(
+                        range[field], batch[0][field],
+                        "scalar host remains compatible"
+                    );
+                }
+                assert!(range["can_advance"].is_boolean());
                 requests += 1;
                 runtime
                     .online_pc4_admit_json(id, &fixture.response(&range, local).to_string())

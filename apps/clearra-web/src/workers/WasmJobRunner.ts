@@ -1,10 +1,11 @@
 import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
 
-import type { ClearraWasmModule } from './clearraWasmRuntime';
+import type { ClearraWasmModule, Pc4RangeRequest } from './clearraWasmRuntime';
+import { Pc4AsyncRangePump } from './Pc4AsyncRangePump';
 import { onlinePc4Progress } from './OnlinePc4Progress';
 import { openLocalPc4Reader } from './pc4LocalStore';
 import { pc4SearchRangePolicy } from '../../../../scripts/release/pc4/pc4-search-range-policy.mjs';
-import { prefetchPc4LookupFrontier } from '../../../../scripts/release/pc4/pc4-frontier-reader.mjs';
+import { prefetchPc4LookupFrontier, PC4_FRONTIER_MAX_GAP_BYTES } from '../../../../scripts/release/pc4/pc4-frontier-reader.mjs';
 import { createPc4RangeReader, type Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 
 // Keep one synchronous WASM entry comfortably below the browser host turn.
@@ -39,6 +40,16 @@ export class WasmJobRunner {
     const onlineStarted = performance.now();
     this.onlineAbort = this.onlineGeneration ? new AbortController() : null;
     let reader: ReturnType<typeof createPc4RangeReader> | Awaited<ReturnType<typeof openLocalPc4Reader>> = null;
+    let rangePump: Pc4AsyncRangePump | null = null;
+    const admit = (range: Pc4RangeRequest, bytes: Uint8Array) => {
+      if (this.cancellationRequested || this.jobId === null || !reader) return;
+      // Local data has its own admission kind, never a fabricated HTTP
+      // status/header. The HTTP reader already checks the real 206 envelope.
+      this.wasm.online_pc4_admit!(this.jobId, { lookup_session: range.lookup_session, request_id: range.request_id,
+        ...('provider' in reader ? { source: 'verified-local-file' } : {
+          status: 206, content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}` }),
+        bytes: Array.from(bytes) });
+    };
     const emit = (event: ClearraWasmWorkerEvent) => onEvent(reader ? ({ ...event,
       pc4_online: { provider: 'provider' in reader ? reader.provider : 'hf-graph', profile: 'jstris-180', revision: this.onlineGeneration!.revision,
         requests: reader.requests, transferred_bytes: reader.bytes, logical_reads: reader.reads,
@@ -53,6 +64,9 @@ export class WasmJobRunner {
           ?? createPc4RangeReader(this.onlineGeneration, {
             signal: this.onlineAbort!.signal, ...pc4SearchRangePolicy(this.onlineGeneration, 'jstris-180')
           });
+        const openedReader = reader;
+        rangePump = new Pc4AsyncRangePump(range => openedReader.read(range.artifact, range.offset, range.length),
+          this.onlineAbort!.signal, 'provider' in openedReader ? undefined : PC4_FRONTIER_MAX_GAP_BYTES);
       }
       this.jobId = this.wasm.start_job(commandText);
       this.active = true;
@@ -69,11 +83,18 @@ export class WasmJobRunner {
           lastOnlineProgress = performance.now();
         }
         if (!this.cancellationRequested) {
+          rangePump?.drain(admit);
           status = this.wasm.advance_job(this.jobId, SEARCH_WORK_BUDGET);
           advancesSinceDrain += 1;
           if (reader && (status === 'pending' || status === 'progress')) {
             const range = this.wasm.online_pc4_pending?.(this.jobId);
-            if (range) {
+            if (range?.batch && !range.lookup_frontier?.length) {
+              rangePump!.submit(range.batch);
+              // Advance ready CPU work while I/O is outstanding. When only
+              // responses can unblock it, wait for the FIRST response, not
+              // for all requests or a fixed polling interval.
+              if (!range.can_advance) await rangePump!.waitForAny();
+            } else if (range) {
               let bytes: Uint8Array;
               try {
                 // Local storage keeps its measured index-page/exact-record
@@ -88,12 +109,7 @@ export class WasmJobRunner {
                 throw error;
               }
               if (this.cancellationRequested) continue;
-              // Local data has its own admission kind, never a fabricated
-              // HTTP status/header. Both retain exact generation/range checks.
-              this.wasm.online_pc4_admit!(this.jobId, { lookup_session: range.lookup_session, request_id: range.request_id,
-                ...('provider' in reader ? { source: 'verified-local-file' } : {
-                  status: 206, content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}` }),
-                bytes: Array.from(bytes) });
+              admit(range, bytes);
             }
           }
         }
@@ -131,20 +147,26 @@ export class WasmJobRunner {
       }
       return terminal;
     } finally {
-      try { await reader?.dispose(); }
+      // Abort before waiting, then drain in-flight reads before releasing a
+      // local generation/file lease. No callback may admit after job release.
+      this.onlineAbort?.abort();
+      try { await rangePump?.dispose(); }
       finally {
-        this.onlineAbort?.abort(); this.onlineAbort = null;
-        if (profilingActive && this.wasm.profile_finish) {
-          try {
-            this.wasm.profile_finish();
-          } catch {
-            // The worker owner will terminate a failed runtime; cleanup must not mask the failure.
+        try { await reader?.dispose(); }
+        finally {
+          this.onlineAbort = null;
+          if (profilingActive && this.wasm.profile_finish) {
+            try {
+              this.wasm.profile_finish();
+            } catch {
+              // The worker owner will terminate a failed runtime; cleanup must not mask the failure.
+            }
           }
-        }
-        if (terminal === null) this.releaseActiveJob();
-        else {
-          this.active = false;
-          this.jobId = null;
+          if (terminal === null) this.releaseActiveJob();
+          else {
+            this.active = false;
+            this.jobId = null;
+          }
         }
       }
     }
@@ -193,6 +215,7 @@ export class WasmJobRunner {
     const jobId = this.jobId;
     this.active = false;
     this.cancellationRequested = true;
+    this.onlineAbort?.abort();
     this.jobId = null;
     if (jobId === null) return;
     try {

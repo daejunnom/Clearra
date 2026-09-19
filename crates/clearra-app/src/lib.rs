@@ -41,6 +41,8 @@ mod online_pc4_lookup_session;
 mod online_pc4_observation_candidate_request;
 mod parity_page_store;
 #[cfg(feature = "online-pc4-tablebase")]
+mod pc4_compact_candidate_session;
+#[cfg(feature = "online-pc4-tablebase")]
 mod pc4_compiled_pattern_source;
 #[cfg(feature = "online-pc4-tablebase")]
 #[cfg_attr(not(test), allow(dead_code))]
