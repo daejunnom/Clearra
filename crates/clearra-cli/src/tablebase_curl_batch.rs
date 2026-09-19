@@ -4,7 +4,7 @@
 
 use super::{
     hex,
-    http_range::HttpReply,
+    http_range::{content_range, HttpReply},
     transport::{append_public_https_transfer, public_https_parallel_command},
     Artifact, Result, FILES, REPOSITORY,
 };
@@ -88,7 +88,7 @@ impl NativeCurlPlan {
             by_role.entry(demand.role).or_default().push(demand);
         }
 
-        let mut transfers = Vec::new();
+        let mut transfers: Vec<Transfer> = Vec::new();
         for (role, mut demands) in by_role {
             demands.sort_unstable_by_key(|d| (d.offset, d.length, d.lookup_session, d.request_id));
             let first = demands.first().ok_or("pc4_online_batch_invalid")?;
@@ -150,30 +150,7 @@ impl NativeCurlPlan {
             return Err("pc4_online_identity_invalid");
         }
         let scratch = Scratch::create(self.transfers.len())?;
-        let mut command = public_https_parallel_command();
-        for (index, transfer) in self.transfers.iter().enumerate() {
-            if index != 0 {
-                command.arg("--next");
-            }
-            let url = format!(
-                "https://huggingface.co/datasets/{REPOSITORY}/resolve/{revision}/{}",
-                transfer.artifact.path
-            );
-            append_public_https_transfer(&mut command, &url, transfer.length, 30)?;
-            command
-                .arg("--range")
-                .arg(format!(
-                    "{}-{}",
-                    transfer.offset,
-                    transfer.offset + transfer.length - 1
-                ))
-                .arg("--output")
-                .arg(&scratch.body_paths[index])
-                .arg("--write-out")
-                .arg(format!(
-                    "{RECEIPT_PREFIX}|{index}|%{{http_code}}|%header{{content-range}}\n"
-                ));
-        }
+        let mut command = self.command(revision, &scratch)?;
         let mut child = command
             .spawn()
             .map_err(|_| "pc4_online_transport_unavailable")?;
@@ -210,6 +187,37 @@ impl NativeCurlPlan {
             reader_finished: false,
             exit: None,
         })
+    }
+
+    fn command(&self, revision: &str, scratch: &Scratch) -> Result<std::process::Command> {
+        if !hex(revision, 40) || scratch.body_paths.len() != self.transfers.len() {
+            return Err("pc4_online_identity_invalid");
+        }
+        let mut command = public_https_parallel_command();
+        for (index, transfer) in self.transfers.iter().enumerate() {
+            if index != 0 {
+                command.arg("--next");
+            }
+            let url = format!(
+                "https://huggingface.co/datasets/{REPOSITORY}/resolve/{revision}/{}",
+                transfer.artifact.path
+            );
+            append_public_https_transfer(&mut command, &url, transfer.length, 30)?;
+            command
+                .arg("--range")
+                .arg(format!(
+                    "{}-{}",
+                    transfer.offset,
+                    transfer.offset + transfer.length - 1
+                ))
+                .arg("--output")
+                .arg(&scratch.body_paths[index])
+                .arg("--write-out")
+                .arg(format!(
+                    "{RECEIPT_PREFIX}|{index}|%{{http_code}}|%header{{content-range}}\n"
+                ));
+        }
+        Ok(command)
     }
 }
 
@@ -286,13 +294,17 @@ impl NativeCurlBatch {
             return Err("pc4_online_response_receipt_invalid");
         }
         let transfer = &self.transfers[receipt.index];
+        validate_receipt(transfer, &receipt)?;
         let body_path = &self.scratch.body_paths[receipt.index];
         let metadata =
             fs::symlink_metadata(body_path).map_err(|_| "pc4_online_transport_interrupted")?;
-        if !metadata.file_type().is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.len() != transfer.length
-        {
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err("pc4_online_transport_interrupted");
+        }
+        if metadata.len() > transfer.length {
+            return Err("pc4_online_response_too_large");
+        }
+        if metadata.len() < transfer.length {
             return Err("pc4_online_truncated_range");
         }
         let bytes = fs::read(body_path).map_err(|_| "pc4_online_transport_interrupted")?;
@@ -322,6 +334,22 @@ impl NativeCurlBatch {
         let _ = fs::remove_file(body_path);
         Ok(admissions)
     }
+}
+
+fn validate_receipt(transfer: &Transfer, receipt: &Receipt) -> Result<()> {
+    match receipt.status {
+        206 => {}
+        200 => return Err("pc4_online_whole_content_rejected"),
+        429 => return Err("pc4_online_rate_limited"),
+        416 => return Err("pc4_online_range_unsatisfiable"),
+        _ => return Err("pc4_online_range_response_invalid"),
+    }
+    if receipt.content_range
+        != content_range(transfer.offset, transfer.length, transfer.artifact.size)
+    {
+        return Err("pc4_online_content_range_mismatch");
+    }
+    Ok(())
 }
 
 impl Drop for NativeCurlBatch {
@@ -508,5 +536,83 @@ mod tests {
         ] {
             assert!(parse_receipt(value, 3).is_err());
         }
+    }
+
+    #[test]
+    fn native_batch_classifies_http_status_before_opening_a_body() {
+        let plan = NativeCurlPlan::new(vec![demand(2, 1, 100, 12)]).unwrap();
+        let transfer = &plan.transfers[0];
+        let receipt = |status, range: &str| Receipt {
+            index: 0,
+            status,
+            content_range: range.to_owned(),
+        };
+        let valid = content_range(100, 12, 131_072);
+        assert!(validate_receipt(transfer, &receipt(206, &valid)).is_ok());
+        assert_eq!(
+            validate_receipt(transfer, &receipt(200, "")).unwrap_err(),
+            "pc4_online_whole_content_rejected"
+        );
+        assert_eq!(
+            validate_receipt(transfer, &receipt(429, "")).unwrap_err(),
+            "pc4_online_rate_limited"
+        );
+        assert_eq!(
+            validate_receipt(transfer, &receipt(416, "")).unwrap_err(),
+            "pc4_online_range_unsatisfiable"
+        );
+        assert_eq!(
+            validate_receipt(transfer, &receipt(206, "bytes 99-110/131072")).unwrap_err(),
+            "pc4_online_content_range_mismatch"
+        );
+    }
+
+    #[test]
+    fn native_batch_command_repeats_secure_local_options_without_retry_or_http3() {
+        let plan =
+            NativeCurlPlan::new(vec![demand(2, 1, 0, 12), demand(2, 2, 70_000, 12)]).unwrap();
+        let scratch = Scratch::create(plan.transfers.len()).unwrap();
+        let revision = "a".repeat(40);
+        let command = plan.command(&revision, &scratch).unwrap();
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(arguments.first().map(String::as_str), Some("-q"));
+        assert_eq!(
+            arguments.iter().filter(|value| *value == "--url").count(),
+            2
+        );
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|value| *value == "--write-out")
+                .count(),
+            2
+        );
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|value| *value == "--no-buffer")
+                .count(),
+            2
+        );
+        assert_eq!(
+            arguments.iter().filter(|value| *value == "--next").count(),
+            1
+        );
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair[0] == "--parallel-max" && pair[1] == "4"));
+        assert!(!arguments
+            .iter()
+            .any(|value| matches!(value.as_str(), "--retry" | "--http3" | "--config")));
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|value| value.contains(&format!("/resolve/{revision}/graph.bin")))
+                .count(),
+            2
+        );
     }
 }
