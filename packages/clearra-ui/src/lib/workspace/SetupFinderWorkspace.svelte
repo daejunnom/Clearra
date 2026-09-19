@@ -635,6 +635,7 @@
     {validationCodes}
     tablebaseStatus={runtime === 'web' ? $wasmWorkerState.tablebaseWarmup.status : 'disabled'}
     tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
+    tablebaseProfiles={runtime === 'web' ? $wasmWorkerState.tablebaseWarmup.profiles ?? [] : []}
     {workerAuthority}
     on:change={(event) => updateRequest(event.detail)}
   />

@@ -78,6 +78,7 @@ async function qualifyProfiles(discovery, reader, signal) {
       if (evidence[0].hash !== 0 || evidence.at(-1).hash !== 2 ** 40 - 1) fail('pc4_online_terminal_mismatch');
       profiles.push({ ...base, status: 'ready', reader_contract: PC4_READER_CONTRACT,
         field_count: count, target_width: model.width, target_lines: [4],
+        pc_search_target_lines: [4], setup_search_target_lines: [],
         terminal_id: count - 1, artifacts: { fields, offsets, graph }, evidence });
     } catch (error) {
       if (signal?.aborted) throw new Pc4OnlineError('pc4_online_cancelled');

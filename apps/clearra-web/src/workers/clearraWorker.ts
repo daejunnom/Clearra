@@ -810,7 +810,19 @@ function postTablebaseWarmupPhase(
     phase,
     artifactSha256: pc4TablebaseArtifactSha256(),
     byteLength,
-    profiles: getPc4OnlineGeneration()?.profiles.map(({ profile, status, reason }) => ({ profile, status, reason })) ?? [],
+    profiles: getPc4OnlineGeneration()?.profiles.map(({
+      profile,
+      status,
+      reason,
+      pc_search_target_lines,
+      setup_search_target_lines
+    }) => ({
+      profile,
+      status,
+      reason,
+      pcSearchTargetLines: pc_search_target_lines ?? [],
+      setupSearchTargetLines: setup_search_target_lines ?? []
+    })) ?? [],
     ...(message ? { message } : {})
   });
 }

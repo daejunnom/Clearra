@@ -23,6 +23,8 @@ test('completion declaration and independent reader qualification enable only Js
   assert.equal(result.profiles.length, 5);
   assert.deepEqual(result.profiles.filter(p => p.status === 'ready').map(p => p.profile), ['jstris-180']);
   assert.deepEqual(result.profiles[3].target_lines, [4]);
+  assert.deepEqual(result.profiles[3].pc_search_target_lines, [4]);
+  assert.deepEqual(result.profiles[3].setup_search_target_lines, []);
   assert.equal(result.profiles[0].status, 'unavailable');
 });
 

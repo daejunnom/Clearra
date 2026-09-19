@@ -935,3 +935,22 @@ candidate·coverage count / first-result·wall·nodes·peak RSS`를 한 묶음�
 receipt가 있으면 A/B, offline이 동일 고정 예산에서 typed resource-limit 또는 timeout으로
 끝나고 TB만 완료하면 feasibility dominance다. 과거의 서로 다른 IOTS/broad fixture나
 사용자 중단을 offline 실패 receipt로 소급 변환하지 않는다.
+
+2026-09-20 구현에서는 이 경계를 실행 코드와 공개 표면에도 고정했다.
+
+- host generation의 `pc_search_target_lines`와 `setup_search_target_lines`를 분리했다. 현재
+  Jstris 세대는 PC Search 4L만 `[4]`이고 SetupSearch는 `[]`다. 따라서 PC 자격을 Setup
+  자격으로 빌려 쓸 수 없다.
+- Web Setup control은 선택한 profile의 `setup_search_target_lines`에 4가 있을 때만 켜지며,
+  이전 상태나 복원 상태에 남은 opt-in도 자격이 없으면 즉시 해제한다. CLI의 명시 요청은
+  `setup_pc_acceleration_not_qualified`로 fail-closed되고 offline을 자동 시작하지 않는다.
+- `scripts/release/pc4/setup-ab-receipt.mjs`는 위 필드를 exact-key로 검증한다. 양쪽 완료의
+  digest/candidate/coverage가 모두 같을 때만 `exact-parity`와 activation evidence가 된다.
+  offline timeout/resource-limit와 TB 완료 조합은 `feasibility-dominance`일 뿐 activation
+  evidence가 아니다. online receipt는 compute 전 prewarm을 필수로 하고, local receipt는
+  HTTP 요청·연결·전송량을 모두 0으로 강제한다.
+
+이는 Setup evaluator에 complete candidate family를 주입하는 기존 실행 기반을 공개 제품
+capability와 연결하기 위한 준비다. 아직 13개 upstream-omitted 전이의 생존 가능성이
+해소되지 않았고 동일 입력 Setup A/B도 없으므로, 현재 세대에서 SetupSearch를 켜거나 과거
+수치를 속도 향상 근거로 사용하지 않는다.

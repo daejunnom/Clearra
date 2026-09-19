@@ -58,6 +58,7 @@ fn preflight(request: &AppRequest) -> Result<()> {
             command.query().rule(),
             command.query().remaining_queue().observed_queue().is_some(),
         ),
+        AppCommand::Setup(_) => return Err("setup_pc_acceleration_not_qualified"),
         _ => return Err("pc4_online_product_not_supported"),
     };
     if rule.id() != RuleProfileId::Jstris180 {

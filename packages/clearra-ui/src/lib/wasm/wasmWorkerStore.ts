@@ -52,7 +52,13 @@ export type WasmWorkerState = {
 };
 
 export type WasmTablebaseWarmupState = {
-  profiles?: Array<{ profile: string; status: 'ready' | 'unavailable'; reason?: string }>;
+  profiles?: Array<{
+    profile: string;
+    status: 'ready' | 'unavailable';
+    reason?: string;
+    pcSearchTargetLines?: number[];
+    setupSearchTargetLines?: number[];
+  }>;
   status: 'disabled' | 'loading' | 'ready' | 'unavailable';
   artifactSha256: string;
   byteLength: number;

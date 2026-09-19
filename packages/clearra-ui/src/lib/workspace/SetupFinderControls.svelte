@@ -25,6 +25,11 @@
   export let validationCodes: SetupFinderValidationCode[] = [];
   export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
   export let tablebaseByteLength = 0;
+  export let tablebaseProfiles: Array<{
+    profile: string;
+    status: 'ready' | 'unavailable';
+    setupSearchTargetLines?: number[];
+  }> = [];
   export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: SetupFinderRequest }>();
@@ -34,10 +39,28 @@
   ) => workspaceMessage(language, key, values);
   $: cycle = setupCycle(request.remaining);
   $: nextRemainingCount = nextSetupCycleRemainingCount(request.remaining);
-  $: tablebaseStatusLabel = tablebaseMessage(tablebaseStatus, tablebaseByteLength);
+  $: setupTablebaseAvailable = setupTablebaseAvailableFor(request.rule);
+  $: tablebaseStatusLabel = tablebaseMessage(
+    setupTablebaseAvailable ? tablebaseStatus : 'unavailable',
+    tablebaseByteLength
+  );
+  $: if (!setupTablebaseAvailable && request.tablebaseEnabled) {
+    dispatch('change', { ...request, tablebaseEnabled: false });
+  }
 
   function update(change: Partial<SetupFinderRequest>) {
-    dispatch('change', { ...request, ...change });
+    const next = { ...request, ...change };
+    dispatch('change', setupTablebaseAvailableFor(next.rule)
+      ? next
+      : { ...next, tablebaseEnabled: false });
+  }
+
+  function setupTablebaseAvailableFor(rule: RuleProfile): boolean {
+    return tablebaseProfiles.some(profile =>
+      profile.profile === rule &&
+      profile.status === 'ready' &&
+      profile.setupSearchTargetLines?.includes(4)
+    );
   }
 
   function tablebaseMessage(status: typeof tablebaseStatus, byteLength: number): string {
@@ -161,6 +184,7 @@
           <input
             type="checkbox"
             checked={request.tablebaseEnabled}
+            disabled={!setupTablebaseAvailable}
             on:change={(event) => update({
               tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
             })}
@@ -168,7 +192,7 @@
           <span class="workspace-switch" aria-hidden="true"></span>
           <span>{label('tablebase')}</span>
         </label>
-        <small class="workspace-field-help">{label('tablebaseHelp')}</small>
+        <small class="workspace-field-help">{label('setupTablebaseHelp')}</small>
         <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
         <Pc4DownloadControl {language} />
       </div>

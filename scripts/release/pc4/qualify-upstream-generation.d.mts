@@ -1,7 +1,8 @@
 export type Pc4Artifact = { path: string; byte_length: number; content_identity: string };
 export type Pc4HostProfile = {
   profile: string; upstream_complete: boolean; status: 'ready' | 'unavailable'; reason?: string;
-  reader_contract?: string; field_count?: number; target_width?: number; target_lines?: number[]; terminal_id?: number;
+  reader_contract?: string; field_count?: number; target_width?: number; target_lines?: number[];
+  pc_search_target_lines?: number[]; setup_search_target_lines?: number[]; terminal_id?: number;
   artifacts?: { fields: Pc4Artifact; offsets: Pc4Artifact; graph: Pc4Artifact };
 };
 export type Pc4HostGeneration = {
