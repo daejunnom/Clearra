@@ -160,8 +160,8 @@ fn execute_online_native(
 }
 
 fn drive_native<F>(
-    mut execution: Pc4OnlineHostExecution,
-    mut reader: OnlineRangeReader<F>,
+    execution: Pc4OnlineHostExecution,
+    reader: OnlineRangeReader<F>,
     revision: &str,
     files: &[Artifact],
     field_count: u32,
@@ -425,6 +425,7 @@ where
     }
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 fn drain_batch(
     batch: &mut Option<NativeCurlBatch>,
     execution: &mut Pc4OnlineHostExecution,
