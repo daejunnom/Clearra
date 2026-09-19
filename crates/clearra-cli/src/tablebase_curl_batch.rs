@@ -634,44 +634,82 @@ impl NativeCurlPool {
         offset: u64,
         length: u64,
     ) -> Result<HttpReply> {
+        let mut replies = self.fetch_many_exact(vec![(role, artifact.clone(), offset, length)])?;
+        replies.pop().ok_or("pc4_online_response_receipt_invalid")
+    }
+
+    /// Fetches one qualification dependency stage through the same bounded
+    /// HTTP/2 pool. All immutable demands are validated and submitted before
+    /// waiting, so six sampled index/graph reads cost one staged wait rather
+    /// than six serialized network round trips. Returned replies preserve the
+    /// caller's logical order even when transfers complete out of order.
+    pub fn fetch_many_exact(
+        &mut self,
+        demands: Vec<(usize, Artifact, u64, u64)>,
+    ) -> Result<Vec<HttpReply>> {
         if self.is_active() {
             return Err("pc4_online_transport_busy");
         }
-        let request_id = self.next_scalar_request_id;
+        if demands.is_empty() || demands.len() > MAX_LOGICAL {
+            return Err("pc4_online_batch_invalid");
+        }
+        let request_count = u64::try_from(demands.len()).map_err(|_| "pc4_online_batch_invalid")?;
+        let first_request_id = self.next_scalar_request_id;
         self.next_scalar_request_id = self
             .next_scalar_request_id
-            .checked_add(1)
+            .checked_add(request_count)
             .filter(|next| *next != 0)
             .ok_or("pc4_online_transport_unavailable")?;
-        let demand = NativeRangeDemand {
-            role,
-            lookup_session: u64::MAX,
-            request_id,
-            artifact: artifact.clone(),
-            offset,
-            length,
-        };
+        let mut request_ids = Vec::with_capacity(demands.len());
+        let mut planned = Vec::with_capacity(demands.len());
+        for (index, (role, artifact, offset, length)) in demands.into_iter().enumerate() {
+            let request_id = first_request_id
+                .checked_add(u64::try_from(index).map_err(|_| "pc4_online_batch_invalid")?)
+                .ok_or("pc4_online_transport_unavailable")?;
+            request_ids.push(request_id);
+            planned.push(NativeRangeDemand {
+                role,
+                lookup_session: u64::MAX,
+                request_id,
+                artifact,
+                offset,
+                length,
+            });
+        }
         let plan = self
-            .plan_fresh(vec![demand])?
+            .plan_fresh(planned)?
             .ok_or("pc4_online_pending_missing")?;
         self.submit(plan)?;
+        let mut completed = BTreeMap::new();
         loop {
             match self.poll(true)? {
                 NativeCurlPoll::Admissions(admissions) => {
-                    let mut matching = admissions.into_iter().filter(|admission| {
-                        admission.lookup_session == u64::MAX && admission.request_id == request_id
-                    });
-                    let admission = matching
-                        .next()
-                        .ok_or("pc4_online_response_receipt_invalid")?;
-                    if matching.next().is_some() {
-                        return Err("pc4_online_response_receipt_invalid");
+                    for admission in admissions {
+                        if admission.lookup_session != u64::MAX
+                            || !request_ids.contains(&admission.request_id)
+                            || completed.insert(admission.request_id, admission).is_some()
+                        {
+                            return Err("pc4_online_response_receipt_invalid");
+                        }
                     }
-                    return Ok(HttpReply {
-                        status: 206,
-                        content_range: content_range(offset, length, artifact.size),
-                        bytes: admission.bytes,
-                    });
+                    if completed.len() == request_ids.len() {
+                        let mut replies = Vec::with_capacity(request_ids.len());
+                        for request_id in &request_ids {
+                            let admission = completed
+                                .remove(request_id)
+                                .ok_or("pc4_online_response_receipt_invalid")?;
+                            replies.push(HttpReply {
+                                status: 206,
+                                content_range: content_range(
+                                    admission.offset,
+                                    admission.length,
+                                    admission.total,
+                                ),
+                                bytes: admission.bytes,
+                            });
+                        }
+                        return Ok(replies);
+                    }
                 }
                 NativeCurlPoll::Pending => {}
                 NativeCurlPoll::Finished => {
@@ -1404,9 +1442,21 @@ mod tests {
         let mut pool = NativeCurlPool::new(&revision).unwrap();
         let before = pool.observation();
         let generation =
-            super::super::format::qualify_with_reader(&revision, &files, |role, offset, length| {
-                pool.fetch_exact(role, &files[role], offset, length as u64)
-                    .map(|reply| reply.bytes)
+            super::super::format::qualify_with_reader_many(&revision, &files, |demands| {
+                pool.fetch_many_exact(
+                    demands
+                        .iter()
+                        .map(|demand| {
+                            (
+                                demand.role,
+                                files[demand.role].clone(),
+                                demand.offset,
+                                demand.length as u64,
+                            )
+                        })
+                        .collect(),
+                )
+                .map(|replies| replies.into_iter().map(|reply| reply.bytes).collect())
             })
             .unwrap();
         assert_eq!(generation["schema"], "clearra.pc4.host-generation.v1");

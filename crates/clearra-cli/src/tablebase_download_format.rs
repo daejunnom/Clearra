@@ -35,28 +35,78 @@ pub(super) fn qualify_with_reader(
     artifacts: &[Artifact],
     mut reader: impl FnMut(usize, u64, usize) -> Result<Vec<u8>>,
 ) -> Result<Value> {
+    qualify_with_reader_many(revision, artifacts, |demands| {
+        demands
+            .iter()
+            .map(|demand| reader(demand.role, demand.offset, demand.length))
+            .collect()
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct QualificationDemand {
+    pub(super) role: usize,
+    pub(super) offset: u64,
+    pub(super) length: usize,
+}
+
+/// Runs the same qualification in three dependency stages: headers, sampled
+/// index addresses, then sampled graph records. A concurrent transport may
+/// submit every demand in one stage together while the scalar/local adapter
+/// above preserves the exact same validator and evidence contract.
+pub(super) fn qualify_with_reader_many(
+    revision: &str,
+    artifacts: &[Artifact],
+    mut reader: impl FnMut(&[QualificationDemand]) -> Result<Vec<Vec<u8>>>,
+) -> Result<Value> {
     if artifacts.len() != 3 || !super::hex(revision, 40) {
         return Err("tablebase: invalid generation for qualification");
     }
-    let mut read = |role: usize, offset: u64, length: usize| -> Result<Vec<u8>> {
-        if length == 0
-            || length > 65_536
-            || offset
-                .checked_add(length as u64)
-                .is_none_or(|end| end > artifacts[role].size)
-        {
-            return Err("tablebase: qualification slice is outside artifact bounds");
+    let mut read_stage = |demands: &[QualificationDemand]| -> Result<Vec<Vec<u8>>> {
+        if demands.is_empty() || demands.len() > 16 {
+            return Err("tablebase: qualification stage is outside transport bounds");
         }
-        let bytes = reader(role, offset, length)?;
-        if bytes.len() != length {
+        for demand in demands {
+            let artifact = artifacts
+                .get(demand.role)
+                .ok_or("tablebase: qualification slice is outside artifact bounds")?;
+            if demand.length == 0
+                || demand.length > 65_536
+                || demand
+                    .offset
+                    .checked_add(demand.length as u64)
+                    .is_none_or(|end| end > artifact.size)
+            {
+                return Err("tablebase: qualification slice is outside artifact bounds");
+            }
+        }
+        let bytes = reader(demands)?;
+        if bytes.len() != demands.len()
+            || bytes
+                .iter()
+                .zip(demands)
+                .any(|(bytes, demand)| bytes.len() != demand.length)
+        {
             return Err("tablebase: truncated qualification slice");
         }
         Ok(bytes)
     };
-    let count = header(&read(0, 0, 16)?, b"FHIDIDX1")?;
+    let headers = read_stage(&[
+        QualificationDemand {
+            role: 0,
+            offset: 0,
+            length: 16,
+        },
+        QualificationDemand {
+            role: 1,
+            offset: 0,
+            length: 16,
+        },
+    ])?;
+    let count = header(&headers[0], b"FHIDIDX1")?;
     if count < 2
         || count > 1 << 24
-        || count != header(&read(1, 0, 16)?, b"GOFFIDX1")?
+        || count != header(&headers[1], b"GOFFIDX1")?
         || artifacts[0].size != 16 + u64::from(count) * 8
         || artifacts[1].size != 16 + (u64::from(count) + 1) * 4
     {
@@ -68,14 +118,32 @@ pub(super) fn qualify_with_reader(
             ids.push(id);
         }
     }
-    let mut evidence = Vec::new();
-    for id in ids {
-        let field = read(0, 16 + u64::from(id) * 8, 8)?;
+    let index_demands = ids
+        .iter()
+        .flat_map(|id| {
+            [
+                QualificationDemand {
+                    role: 0,
+                    offset: 16 + u64::from(*id) * 8,
+                    length: 8,
+                },
+                QualificationDemand {
+                    role: 1,
+                    offset: 16 + u64::from(*id) * 4,
+                    length: 8,
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    let indices = read_stage(&index_demands)?;
+    let mut evidence = Vec::with_capacity(ids.len());
+    for (index, id) in ids.into_iter().enumerate() {
+        let field = &indices[index * 2];
         let hash = little(&field[..5]);
         if little(&field[5..]) != u64::from(id) {
             return Err("tablebase: field ID is not its index ordinal");
         }
-        let pair = read(1, 16 + u64::from(id) * 4, 8)?;
+        let pair = &indices[index * 2 + 1];
         let start = little(&pair[..4]);
         let end = little(&pair[4..]);
         if end <= start
@@ -86,12 +154,23 @@ pub(super) fn qualify_with_reader(
         {
             return Err("tablebase: graph bounds or terminal identity mismatch");
         }
-        let record = read(2, start, (end - start) as usize)?;
+        evidence.push((id, hash, start, end));
+    }
+    let record_demands = evidence
+        .iter()
+        .map(|(_, _, start, end)| QualificationDemand {
+            role: 2,
+            offset: *start,
+            length: (*end - *start) as usize,
+        })
+        .collect::<Vec<_>>();
+    let records = read_stage(&record_demands)?;
+    for (record, (_, hash, _, _)) in records.iter().zip(&evidence) {
         if record.len() < 12
             || record[..5]
                 .iter()
                 .fold(0_u64, |n, b| n * 256 + u64::from(*b))
-                != hash
+                != *hash
         {
             return Err("tablebase: graph source bitmap mismatch");
         }
@@ -121,8 +200,11 @@ pub(super) fn qualify_with_reader(
         if cursor != record.len() {
             return Err("tablebase: graph record has trailing bytes");
         }
-        evidence.push(json!({ "id": id, "hash": hash, "start": start, "end": end }));
     }
+    let evidence = evidence
+        .into_iter()
+        .map(|(id, hash, start, end)| json!({ "id": id, "hash": hash, "start": start, "end": end }))
+        .collect::<Vec<_>>();
     let profiles = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"].into_iter().map(|profile| {
         if profile != "jstris-180" { return json!({ "profile": profile, "upstream_complete": false, "status": "unavailable", "reason": "missing-profile-specific-index" }); }
         json!({ "profile": profile, "upstream_complete": true, "status": "ready",

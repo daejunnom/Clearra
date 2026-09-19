@@ -423,3 +423,30 @@ fn tablebase_download_shared_qualification_rejects_truncated_transport_slices() 
     let f = Fixture::new();
     assert!(format::qualify_with_reader(&"a".repeat(40), &f.files, |_, _, _| Ok(vec![0])).is_err());
 }
+
+#[cfg(feature = "online-pc4-tablebase")]
+#[test]
+fn tablebase_download_qualification_exposes_three_bounded_dependency_stages() {
+    let f = Fixture::new();
+    let mut stages = Vec::new();
+    let generation = format::qualify_with_reader_many(&"a".repeat(40), &f.files, |demands| {
+        stages.push(demands.to_vec());
+        demands
+            .iter()
+            .map(|demand| {
+                Ok(f.bytes[demand.role]
+                    [demand.offset as usize..demand.offset as usize + demand.length]
+                    .to_vec())
+            })
+            .collect()
+    })
+    .unwrap();
+    assert_eq!(generation["profiles"][3]["status"], "ready");
+    assert_eq!(
+        stages.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![2, 4, 2]
+    );
+    assert!(stages[0].iter().all(|demand| demand.offset == 0));
+    assert!(stages[1].iter().all(|demand| demand.role < 2));
+    assert!(stages[2].iter().all(|demand| demand.role == 2));
+}

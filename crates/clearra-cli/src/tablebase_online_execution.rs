@@ -127,6 +127,18 @@ where
     let generation = format::qualify_with_reader(revision, files, |role, offset, length| {
         reader.read(role, offset, length as u64)
     })?;
+    finish_prepare_online(context, request, reader, generation)
+}
+
+fn finish_prepare_online<F>(
+    context: AppContext,
+    request: AppRequest,
+    reader: OnlineRangeReader<F>,
+    generation: serde_json::Value,
+) -> Result<(OnlineRangeReader<F>, Pc4OnlineHostExecution, u32)>
+where
+    F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>,
+{
     let snapshot = clearra_app::activate_pc4_host_generation(&generation.to_string())?
         .ok_or("pc4_online_generation_unavailable")?;
     let field_count = generation["profiles"]
@@ -152,23 +164,43 @@ fn execute_online_native(
     let owned_revision = revision.to_owned();
     #[cfg(feature = "native-pc4-libcurl")]
     {
-        let shared_pool = Rc::new(RefCell::new(NativeCurlPool::new(&owned_revision)?));
+        preflight(&request)?;
+        let mut pool = NativeCurlPool::new(&owned_revision)?;
+        let generation = format::qualify_with_reader_many(&owned_revision, files, |demands| {
+            let demands = demands
+                .iter()
+                .map(|demand| {
+                    let artifact = files
+                        .get(demand.role)
+                        .ok_or("pc4_online_artifact_invalid")?;
+                    Ok((
+                        demand.role,
+                        artifact.clone(),
+                        demand.offset,
+                        demand.length as u64,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            pool.fetch_many_exact(demands).map(|replies| {
+                replies
+                    .into_iter()
+                    .map(|reply| reply.bytes)
+                    .collect::<Vec<_>>()
+            })
+        })?;
+        let shared_pool = Rc::new(RefCell::new(pool));
         let fetch_pool = Rc::clone(&shared_pool);
-        let (reader, execution, field_count) = prepare_online(
-            context,
-            request,
-            &owned_revision,
-            files,
-            move |artifact, offset, length| {
-                let role = files
-                    .iter()
-                    .position(|file| file.path == artifact.path)
-                    .ok_or("pc4_online_artifact_invalid")?;
-                fetch_pool
-                    .borrow_mut()
-                    .fetch_exact(role, artifact, offset, length)
-            },
-        )?;
+        let reader = OnlineRangeReader::new(files.to_vec(), move |artifact, offset, length| {
+            let role = files
+                .iter()
+                .position(|file| file.path == artifact.path)
+                .ok_or("pc4_online_artifact_invalid")?;
+            fetch_pool
+                .borrow_mut()
+                .fetch_exact(role, artifact, offset, length)
+        });
+        let (reader, execution, field_count) =
+            finish_prepare_online(context, request, reader, generation)?;
         return drive_native_pool(execution, reader, files, field_count, shared_pool);
     }
     #[cfg(not(feature = "native-pc4-libcurl"))]
