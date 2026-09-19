@@ -433,10 +433,11 @@ h3는 실제 환경 검증 이후의 추가 경로로 둔다. `Range: a-b,c-d` m
 2. **논리 header 왕복 제거:** immutable profile/generation/artifact/layout에 묶인
    검증된 GOFF-header witness를 공유한다. 5분 discovery 캐시나 4KiB byte 캐시는
    이미 있지만 lookup마다 헤더를 요청하는 App/ABI 왕복은 여전히 남는다.
-3. **물리 offset 왕복 제거:** 기존 64-record sidecar 후보(949,112B, header 제외)를
-   large-frontier A/B 대상으로 유지한다. 순서/ID/간선을 바꾸지 않고 known ID의
-   block 위치를 정한다. 임의 초기 필드의 hash->ID 검색은 별개다. 기존 로컬 GOFF로
-   먼저 만들 수 있고, 이득이 확인된 뒤 upstream에 작은 sidecar 추가를 요청한다.
+3. **물리 offset 왕복 제거:** 실제 demand trace 모델에서 bytes/요청 균형이 가장 좋았던
+   Jstris 16-record sidecar 후보(3,796,448B)를 large-frontier A/B의 첫 대상으로 둔다.
+   순서/ID/간선을 바꾸지 않고 known ID의 block 위치를 정한다. 임의 초기 필드의
+   hash->ID 검색은 별개다. 다른 프로필은 각각의 qualified GOFF/graph에서 K를 다시
+   선택하고, 이득이 확인된 뒤 upstream에 작은 sidecar 추가를 요청한다.
 4. **mmap은 native local 전용 별도 A/B:** 기존 `.bin` 그대로 positional read와
    비교한다. GUI OPFS handle/Blob slice, HTTP, WASM zero-copy와 혼동하지 않는다.
    immutable generation lease와 파일 변경/삭제 방지, 읽기 범위/수명 검증이 전제다.
@@ -504,3 +505,70 @@ admission, block directory로 논리·물리 호출을 줄이는 순서가 먼�
 호출 수가 실제로 줄어드는지를 각각 분리한다. sidecar가 large-frontier에서 요청 수와
 tail을 유의미하게 줄일 때만 muse918에게 동일 generation/profile/layout identity 및
 완성 manifest에 결박된 upstream 보조 파일을 요청한다.
+
+### 9.5 header witness 구현과 sparse block-directory 모델
+
+`8d17b25`는 최초 조회에서 검증한 GOFF header를 단순 boolean이 아니라
+snapshot/profile/artifact descriptor/field count에 결박된 typed witness로 만들었다.
+후속 field-ID lookup은 같은 witness가 정확히 일치할 때만 GOFF header 논리 요청을
+생략한다. 첫 비게시 CI는 inline Hydra 레이아웃만 허용한 조건 때문에 synthetic opaque
+레코드 계약 3개를 거절했다. `e8b6bfe`는 opaque 레이아웃에서 기존 FHID header/record
+검증은 유지하고 GOFF header만 건너뛰도록 바로잡았다. 즉 source hash가 graph record에
+inline인 Jstris 경로는 `offset pair -> graph`, opaque 경로는
+`FHID header/record -> offset pair -> graph`가 되며, 어느 쪽도 세대·프로필·필드 ID
+검증을 생략하지 않는다. [exact-source 비게시 CI 35439887487](https://github.com/daejunnom/Clearra/actions/runs/35439887487)의
+source, surface, native CLI, PC4 계약, preview-WASM 다섯 job이 모두 성공했다.
+
+그 preview-WASM과 같은 로컬 Jstris generation으로 기존 probe의 **동일한 333,332 graph
+demand 지점**까지 다시 실행했다. demand 순서가 같다는 것은 같은 benchmark 입력과
+정확히 같은 graph 논리 조회 수로 제한했고, 두 실행 모두 완료 전에 안전하게 취소됐다.
+따라서 456,459개 전체 집합·digest·완료 증거는 아니다.
+
+| 지표 | 반복 header | typed witness | 변화 |
+| --- | ---: | ---: | ---: |
+| 벽시계 | 92.720초 | 72.993초 | -21.3% |
+| 논리 조회 | 1,000,000 | 666,667 | -333,333 |
+| 물리 파일 읽기 | 390,678 | 390,674 | 사실상 동일 |
+| 파일 bytes | 273,225,460B | 273,209,391B | 사실상 동일 |
+| FHID / GOFF / graph 논리 조회 | 2 / 666,666 / 333,332 | 2 / 333,333 / 333,332 | header 반복 제거 |
+| WASM 계산 | 28.701초 | 26.964초 | -6.1% |
+| local I/O | 25.993초 | 18.265초 | -29.7% |
+| host/WASM bridge | 35.717초 | 25.932초 | -27.4% |
+
+물리 읽기/bytes가 변하지 않았는데 bridge와 benchmark-host I/O가 줄었으므로, 이 후보의
+주효과는 원격 데이터를 덜 받는 것이 아니라 캐시된 GOFF header를 매 lookup마다
+App/WASM 논리 응답으로 다시 전달하던 비용을 없앤 것이다. 실제 HTTP 왕복 수를 줄이는
+다음 단계는 아래 block directory 또는 서버 batch endpoint이며 별도 A/B가 필요하다.
+
+정적 HF/CDN에 `Range: bytes=0-0,2-2`를 보낸 1KiB/20초 bounded probe는 body 없이
+HTTP 416을 반환했다. 따라서 multipart/byteranges 한 요청으로 흩어진 graph record를
+묶는 설계는 현재 upstream 경로의 근거가 없다. 같은 h2 연결의 여러 **단일** Range
+stream을 쓰는 기존 결론은 유지한다.
+
+기존 30,000 real logical-demand trace(9,999 exact graph demands)와 로컬 Jstris generation을
+읽기 전용으로 사용해 sparse block-directory를 새로 모델링했다. 모델은 16B header,
+block 시작마다 u32 graph offset, 4KiB sidecar page, graph block span, 공유 8MiB/2,048-entry
+LRU 및 64KiB 단일 Range 상한을 적용한다. 검색/WAN 시간이나 sidecar 구현 완료가 아니다.
+
+| block records | sidecar bytes | modeled requests | modeled bytes | 최대 block |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | 15,185,728 | 13,883 | 17,672,295 | 1,719 |
+| 8 | 7,592,876 | 12,579 | 14,235,188 | 3,249 |
+| **16** | **3,796,448** | **11,316** | **12,593,754** | **6,018** |
+| 32 | 1,898,236 | 10,274 | 14,744,762 | 11,397 |
+| 64 | 949,128 | 9,459 | 23,214,851 | 21,141 |
+| 128 | 474,576 | 8,754 | 41,163,527 | 39,225 |
+
+같은 저장 trace의 채택된 기존 전송 기록은 14,998 requests/21,016,558B다. 모델상
+16-record가 요청과 bytes의 균형이 가장 좋지만, 두 숫자는 local-response causal model이며
+실제 HF 지연·전체 P7P4 완료·다른 프로필의 레코드 폭을 증명하지 않는다. 재현 도구는
+`scripts/benchmark/run-pc4-block-directory-model.mjs`이며 기존 trace와 파일을 수정하지
+않는다.
+
+upstream 요청 후보는 `.safetensors` 변환이 아니라 프로필별
+`graph block offsets v1`이다. body는 record ordinal `0, K, 2K, ... field_count`의 기존
+`graph.bin` byte offset이며 마지막 값은 graph byte length다. manifest에는 K,
+source GOFF/graph content identity, field count, target encoding, 완성 상태와 sidecar
+content identity를 결박해야 한다. Jstris에서는 K=16을 실제 adapter/WAN A/B의 첫 후보로
+삼되, 다른 킥 프로필은 각각의 qualified graph에서 K와 최대 block을 다시 계산한다.
+그 A/B 전에는 muse918에게 파일 변경을 요청하지 않는다.
