@@ -953,9 +953,12 @@ receipt가 있으면 A/B, offline이 동일 고정 예산에서 typed resource-l
   HTTP 요청·연결·전송량을 모두 0으로 강제한다.
 
 이는 Setup evaluator에 complete candidate family를 주입하는 기존 실행 기반을 공개 제품
-capability와 연결하기 위한 준비다. 아직 13개 upstream-omitted 전이의 생존 가능성이
-해소되지 않았고 동일 입력 Setup A/B도 없으므로, 현재 세대에서 SetupSearch를 켜거나 과거
-수치를 속도 향상 근거로 사용하지 않는다.
+capability와 연결하기 위한 준비다. 비게시
+[Integration Contracts run 35457548147](https://github.com/daejunnom/Clearra/actions/runs/35457548147)의
+독립 exact oracle은 13개 upstream-omitted 전이를 모두 dead로 분류했다(live 0,
+unknown 0, 8.89초). 다만 이는 generation 전체의 outgoing-edge/known-answer/offline-parity
+identity나 Setup differential receipt를 만들지 않는다. 동일 입력 Setup A/B도 없으므로,
+현재 세대에서 SetupSearch를 켜거나 과거 수치를 속도 향상 근거로 사용하지 않는다.
 
 #### 2026-09-20 재감사 결론
 

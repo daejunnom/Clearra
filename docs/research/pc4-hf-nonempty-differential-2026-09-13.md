@@ -99,18 +99,34 @@ focused filter is
 `classify_all_hf_omitted_pc4_targets_with_exact_completion_receipts`; the
 runner must pass `--ignored --nocapture` to retain the emitted JSON receipt.
 
-Current local validation is limited to Rust formatting/parser checks and JSON
-parsing. No native proof executable was built or run because the local native
-build policy was not bypassed. Consequently this section records the oracle's
-contract, not a dead/live result and not a profile-completeness receipt.
+At the time this oracle was introduced, local validation was limited to Rust
+formatting/parser checks and JSON parsing because the local native build policy
+was not bypassed. The hosted result below supersedes only that execution gap;
+it does not turn the oracle output into a whole-generation qualification.
+
+## Hosted exact proof result (2026-09-20)
+
+The explicit non-publishing [Integration Contracts run 35457548147](https://github.com/daejunnom/Clearra/actions/runs/35457548147)
+executed the ignored oracle in the existing managed PC4 compiler generation.
+All 13 cases completed exhaustive cover enumeration and were classified
+`dead`: live 0, unknown 0, no budget exhaustion. The focused proof took 8.89s
+and emitted `qualification=all-omissions-dead`; the entire source/native/PC4/
+surface workflow passed.
+
+This closes the 13-case survival question. It is one component of, not a
+substitute for, a generation-bound outgoing-edge completeness identity,
+known-answer identity, full offline exact-parity identity, or profile-specific
+Setup differential receipt. Product target capability therefore remains
+fail-closed until those independently scoped receipts exist.
 
 ## Next qualification work
 
-Resolve the 13 omissions with an efficient exact ordered-completion proof or
-construct concrete counterexample completions, then compare the actual upstream
-placement/kick model. Keep the canonical profile unqualified meanwhile. Check
-the other four graph/index/profile combinations independently. Also finish the
-multi-edge App/reducer/replay and per-target 1–4L tests before closing the plan's
+Bind the new 13-case result into the wider generation proof only after the
+actual upstream placement/kick model, complete outgoing-edge domain,
+known-answer set and offline exact parity have their own immutable identities.
+Keep the canonical profile unqualified meanwhile. Check the other four graph/
+index/profile combinations independently. Also finish the multi-edge App/
+reducer/replay and per-target 1–4L tests before closing the plan's
 materialization or profile-completeness checklist entries.
 
 Local raw evidence and experiment source:
