@@ -115,7 +115,6 @@ mod setup_score_document;
 mod solution_set_audit_postprocess;
 mod spin_structure_coverage_result;
 mod spin_structure_search_result;
-pub mod tablebase_runtime;
 mod typed_document_utility;
 
 /// The command value is public for request construction and inspection, but
@@ -437,7 +436,6 @@ pub use spin_structure_search_result::{
     spin_structure_search_candidate_id, SpinStructureSearchCandidateIdentity,
     SpinStructureSearchIdentities, SpinStructureSearchResult, SpinStructureSearchResultError,
 };
-pub use tablebase_runtime::{AppTablebaseInstallError, AppTablebaseSession};
 pub use typed_document_utility::{
     TypedFieldDocument, TypedFieldDocumentError, FIELD_DOCUMENT_MAX_INPUT_BYTES,
     FIELD_DOCUMENT_MAX_PAGES,

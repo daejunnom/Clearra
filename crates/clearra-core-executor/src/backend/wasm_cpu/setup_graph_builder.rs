@@ -12,9 +12,6 @@ use crate::performance::{ExecutorSearchStage, SearchStageSpan};
 use super::{
     catalog::GeometryCatalog,
     geometry::{pack_piece_counts, GeometryFamilyCompileAdvance, GeometryFamilyCompileSession},
-    pc4_tablebase::{
-        loaded_pc4_compact_tablebase, pc4_tablebase_profile_identity, Pc4CompactTablebase,
-    },
     setup_coverage_graph::SetupCoverageGraph,
     setup_finder::{
         CompletedSetupCoverage, SetupAdmissiblePrefixCompileAdvance,
@@ -121,7 +118,6 @@ pub(super) struct SetupGraphBuildSession {
     condition_pattern_word_counts: Option<Vec<usize>>,
     condition_pattern_indices: Option<Vec<Arc<PatternPiecePositionIndex>>>,
     catalog: Option<Arc<GeometryCatalog>>,
-    tablebase: Option<Arc<Pc4CompactTablebase>>,
     complete_candidates: Option<Arc<[StandardBoard64TilingIdentity]>>,
     cached_detail_coverage: Option<Arc<[CompletedSetupCoverage]>>,
     tablebase_status: &'static str,
@@ -205,7 +201,6 @@ impl SetupGraphBuildSession {
             condition_pattern_word_counts: None,
             condition_pattern_indices: None,
             catalog: None,
-            tablebase: None,
             complete_candidates,
             cached_detail_coverage: None,
             tablebase_status: "disabled",
@@ -407,24 +402,13 @@ impl SetupGraphBuildSession {
                     ));
                 }
                 if self.complete_candidates.is_some() {
-                    self.tablebase = None;
                     self.tablebase_status = "online-complete-candidates";
                 } else {
-                    let loaded_tablebase = self
-                        .query
-                        .tablebase_requested()
-                        .then(loaded_pc4_compact_tablebase)
-                        .flatten();
-                    let expected_tablebase_profile =
-                        pc4_tablebase_profile_identity(first.problem(), catalog.identity_digest());
-                    let (tablebase, tablebase_status) = select_setup_tablebase(
-                        self.query.tablebase_requested(),
-                        loaded_tablebase,
-                        catalog.identity_digest(),
-                        expected_tablebase_profile,
-                    );
-                    self.tablebase = tablebase;
-                    self.tablebase_status = tablebase_status;
+                    self.tablebase_status = if self.query.tablebase_requested() {
+                        "unavailable"
+                    } else {
+                        "disabled"
+                    };
                 }
                 self.catalog = Some(catalog);
                 self.stage = SetupGraphBuildStage::Prefixes(
@@ -520,11 +504,10 @@ impl SetupGraphBuildSession {
                         candidates,
                     )?
                 } else {
-                    GeometryFamilyCompileSession::new_with_tablebase(
+                    GeometryFamilyCompileSession::new(
                         catalog.required_cells(),
                         target_keys,
                         admissible_prefixes,
-                        self.tablebase.take(),
                     )?
                 };
                 self.stage = SetupGraphBuildStage::Geometry(geometry);
@@ -740,26 +723,6 @@ impl SetupGraphBuildSession {
     }
 }
 
-fn select_setup_tablebase(
-    requested: bool,
-    loaded: Option<Arc<Pc4CompactTablebase>>,
-    catalog_identity: u64,
-    compiler_identity: u64,
-) -> (Option<Arc<Pc4CompactTablebase>>, &'static str) {
-    match loaded {
-        None if requested => (None, "unavailable"),
-        None => (None, "disabled"),
-        Some(_) if !requested => (None, "disabled"),
-        Some(loaded)
-            if loaded.catalog_identity() != catalog_identity
-                || loaded.compiler_identity() != compiler_identity =>
-        {
-            (None, "profile-mismatch")
-        }
-        Some(loaded) => (Some(loaded), "connected-exact-dead-index"),
-    }
-}
-
 fn cached_setup_graph(query: &SetupSearchQuery) -> Option<CachedSetupGraph> {
     if query.path_detail().is_none() {
         SETUP_GRAPH_CACHE.with(|cache| *cache.borrow_mut() = None);
@@ -875,52 +838,4 @@ fn cached_detail_candidate_exists(
                     .any(|candidate| candidate.setup_id() == setup_id)
         })
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::select_setup_tablebase;
-    use crate::backend::wasm_cpu::pc4_tablebase::Pc4CompactTablebase;
-
-    const PRODUCT_ARTIFACT: &[u8] = include_bytes!(
-        "../../../../../apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin"
-    );
-
-    #[test]
-    fn setup_tablebase_selection_is_opt_in_and_profile_exact() {
-        let tablebase =
-            Arc::new(Pc4CompactTablebase::from_bytes(PRODUCT_ARTIFACT).expect("product tablebase"));
-        let catalog_identity = tablebase.catalog_identity();
-        let compiler_identity = tablebase.compiler_identity();
-
-        let (selected, status) = select_setup_tablebase(
-            false,
-            Some(Arc::clone(&tablebase)),
-            catalog_identity,
-            compiler_identity,
-        );
-        assert!(selected.is_none());
-        assert_eq!(status, "disabled");
-
-        let (selected, status) =
-            select_setup_tablebase(true, None, catalog_identity, compiler_identity);
-        assert!(selected.is_none());
-        assert_eq!(status, "unavailable");
-
-        let (selected, status) = select_setup_tablebase(
-            true,
-            Some(Arc::clone(&tablebase)),
-            catalog_identity ^ 1,
-            compiler_identity,
-        );
-        assert!(selected.is_none());
-        assert_eq!(status, "profile-mismatch");
-
-        let (selected, status) =
-            select_setup_tablebase(true, Some(tablebase), catalog_identity, compiler_identity);
-        assert!(selected.is_some());
-        assert_eq!(status, "connected-exact-dead-index");
-    }
 }

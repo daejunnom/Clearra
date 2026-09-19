@@ -18,9 +18,7 @@ use super::{
     geometry_domain::{hall_impossible, DomainPropagation, DomainStatus},
     geometry_family::{FamilyNodeKind, GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID},
     geometry_projection::ProjectionReachabilityCache,
-    mix_digest,
-    pc4_tablebase::{Pc4CompactTablebase, Pc4TablebaseLookup},
-    piece_index, WasmExactSearchError, MAX_BOARD64_PIECES,
+    mix_digest, piece_index, WasmExactSearchError, MAX_BOARD64_PIECES,
 };
 
 const NO_ROW: u32 = u32::MAX;
@@ -350,7 +348,6 @@ struct GeometryCompilerState {
     residual_memo: ResidualMemo,
     geometry_prefixes: Vec<u32>,
     projection_cache: ProjectionReachabilityCache,
-    tablebase: Option<Arc<Pc4CompactTablebase>>,
     compile_domain: FamilyCompileDomain,
 }
 
@@ -361,7 +358,6 @@ impl GeometryCompilerState {
             residual_memo: ResidualMemo::new(target_depth),
             geometry_prefixes,
             projection_cache: ProjectionReachabilityCache::default(),
-            tablebase: None,
             compile_domain: FamilyCompileDomain::PermutationClosedPostClearResidual,
         }
     }
@@ -793,14 +789,13 @@ struct CompileFrame {
     component_entry_cursor: usize,
     component_entry_end: usize,
     component_scratch_checkpoint: usize,
-    tablebase_eligible: bool,
     domain: DomainPropagation,
     union_levels: [u32; UNION_LEVEL_COUNT],
 }
 
 impl CompileFrame {
     fn root(remaining: u64) -> Self {
-        Self::child(remaining, 0, NO_ROW, 0, true)
+        Self::child(remaining, 0, NO_ROW, 0)
     }
 
     fn child(
@@ -808,7 +803,6 @@ impl CompileFrame {
         depth: u8,
         chosen_row: u32,
         component_scratch_checkpoint: usize,
-        tablebase_eligible: bool,
     ) -> Self {
         Self {
             remaining,
@@ -830,7 +824,6 @@ impl CompileFrame {
             component_entry_cursor: 0,
             component_entry_end: 0,
             component_scratch_checkpoint,
-            tablebase_eligible,
             domain: DomainPropagation::empty(),
             union_levels: [FAMILY_INVALID; UNION_LEVEL_COUNT],
         }
@@ -846,7 +839,6 @@ enum CompileAdvance {
 #[derive(Debug)]
 struct FamilyCompiler {
     targets: Arc<[TargetGroup]>,
-    tablebase: Option<Arc<Pc4CompactTablebase>>,
     admissible_prefixes: Vec<u32>,
     compile_domain: FamilyCompileDomain,
     used_counts: [u8; 7],
@@ -868,19 +860,14 @@ struct FamilyCompiler {
 }
 
 impl FamilyCompiler {
-    fn new(
-        required_cells: u64,
-        targets: Arc<[TargetGroup]>,
-        tablebase: Option<Arc<Pc4CompactTablebase>>,
-    ) -> Self {
+    fn new(required_cells: u64, targets: Arc<[TargetGroup]>) -> Self {
         let admissible_prefixes = compile_admissible_prefixes(&targets);
-        Self::new_with_admissible_prefixes(required_cells, targets, admissible_prefixes, tablebase)
+        Self::new_with_admissible_prefixes(required_cells, targets, admissible_prefixes)
     }
 
     fn try_new(
         required_cells: u64,
         targets: Arc<[TargetGroup]>,
-        tablebase: Option<Arc<Pc4CompactTablebase>>,
     ) -> Result<Self, WasmExactSearchError> {
         let admissible_prefixes = compile_admissible_prefixes_checked(&targets)?;
         let target_depth = targets.first().map_or(0, |target| target.key.total_count());
@@ -895,7 +882,6 @@ impl FamilyCompiler {
         stack.push(CompileFrame::root(required_cells));
         Ok(Self {
             targets,
-            tablebase,
             admissible_prefixes,
             compile_domain: FamilyCompileDomain::PermutationClosedGeometry,
             used_counts: [0; 7],
@@ -921,12 +907,10 @@ impl FamilyCompiler {
         required_cells: u64,
         targets: Arc<[TargetGroup]>,
         admissible_prefixes: Vec<u32>,
-        tablebase: Option<Arc<Pc4CompactTablebase>>,
     ) -> Self {
         let target_depth = targets.first().map_or(0, |target| target.key.total_count());
         Self {
             targets,
-            tablebase,
             admissible_prefixes,
             compile_domain: FamilyCompileDomain::PermutationClosedGeometry,
             used_counts: [0; 7],
@@ -958,11 +942,10 @@ impl FamilyCompiler {
         let depth = used_counts.iter().copied().sum();
         Self {
             targets,
-            tablebase: state.tablebase,
             admissible_prefixes: state.geometry_prefixes,
             compile_domain: state.compile_domain,
             used_counts,
-            stack: vec![CompileFrame::child(remaining, depth, NO_ROW, 0, true)],
+            stack: vec![CompileFrame::child(remaining, depth, NO_ROW, 0)],
             residual_memo: state.residual_memo,
             projection_cache: state.projection_cache,
             family: state.family,
@@ -986,7 +969,6 @@ impl FamilyCompiler {
             residual_memo: self.residual_memo,
             geometry_prefixes: self.admissible_prefixes,
             projection_cache: self.projection_cache,
-            tablebase: self.tablebase,
             compile_domain: self.compile_domain,
         }
     }
@@ -1006,16 +988,6 @@ impl FamilyCompiler {
             if let Some(family) = self.residual_memo.lookup(key) {
                 return self.finish_top(catalog, family, false);
             }
-            if self.stack[top_index].tablebase_eligible
-                && self.tablebase.as_ref().is_some_and(|tablebase| {
-                    tablebase.lookup_placed_field(catalog.required_cells() ^ remaining)
-                        == Pc4TablebaseLookup::ExactDead
-                })
-            {
-                self.tablebase_pruned_states = self.tablebase_pruned_states.saturating_add(1);
-                return self.finish_top(catalog, FAMILY_INVALID, true);
-            }
-
             self.expanded_nodes = self.expanded_nodes.saturating_add(1);
             self.peak_frontier = self.peak_frontier.max(self.stack.len());
             let depth = self.stack[top_index].depth;
@@ -1034,28 +1006,6 @@ impl FamilyCompiler {
             }
 
             let feasible_piece_mask = self.feasible_piece_mask();
-            if self.stack[top_index].tablebase_eligible
-                && self.tablebase.as_ref().is_some_and(|tablebase| {
-                    tablebase.lookup_placed_field_with_piece_mask(
-                        catalog.required_cells() ^ remaining,
-                        feasible_piece_mask,
-                    ) == Pc4TablebaseLookup::ExactDead
-                })
-            {
-                self.tablebase_pruned_states = self.tablebase_pruned_states.saturating_add(1);
-                return self.finish_top(catalog, FAMILY_INVALID, true);
-            }
-            if self.stack[top_index].tablebase_eligible
-                && self.tablebase.as_ref().is_some_and(|tablebase| {
-                    self.all_admissible_target_counts_are_dead(
-                        tablebase,
-                        catalog.required_cells() ^ remaining,
-                    )
-                })
-            {
-                self.tablebase_pruned_states = self.tablebase_pruned_states.saturating_add(1);
-                return self.finish_top(catalog, FAMILY_INVALID, true);
-            }
             if ProjectionReachabilityCache::cheap_residual_impossible(
                 catalog.projection_catalog(),
                 &self.targets,
@@ -1187,7 +1137,6 @@ impl FamilyCompiler {
                 frame.depth + component_piece_count,
                 NO_ROW,
                 self.component_entries.len(),
-                false,
             );
             child.chosen_component_family = entry.family;
             child.chosen_component_signature = entry.piece_signature;
@@ -1216,7 +1165,6 @@ impl FamilyCompiler {
                 frame.depth + 1,
                 row_id,
                 self.component_entries.len(),
-                frame.tablebase_eligible,
             ));
             return CompileAdvance::Pending;
         }
@@ -1312,33 +1260,6 @@ impl FamilyCompiler {
         feasible_piece_mask_for(&self.admissible_prefixes, self.used_counts)
     }
 
-    fn all_admissible_target_counts_are_dead(
-        &self,
-        tablebase: &Pc4CompactTablebase,
-        placed_field: u64,
-    ) -> bool {
-        let mut found_admissible_target = false;
-        for target in self.targets.iter() {
-            let target_counts = target.key.counts();
-            if target_counts
-                .iter()
-                .zip(self.used_counts)
-                .any(|(target, used)| *target < used)
-            {
-                continue;
-            }
-            found_admissible_target = true;
-            let remaining_counts =
-                std::array::from_fn(|piece| target_counts[piece] - self.used_counts[piece]);
-            if tablebase.lookup_placed_field_with_remaining_counts(placed_field, remaining_counts)
-                != Pc4TablebaseLookup::ExactDead
-            {
-                return false;
-            }
-        }
-        found_admissible_target
-    }
-
     fn completed_target(&self) -> Option<&TargetGroup> {
         let key = PieceMultisetKey::from_counts(self.used_counts);
         self.targets
@@ -1432,11 +1353,10 @@ pub(super) struct CompiledGeometryFamily {
 }
 
 impl GeometryFamilyCompileSession {
-    pub fn new_with_tablebase(
+    pub fn new(
         required_cells: u64,
         mut target_keys: Vec<PieceMultisetKey>,
         mut execution_prefixes: Vec<u32>,
-        tablebase: Option<Arc<Pc4CompactTablebase>>,
     ) -> Result<Self, WasmExactSearchError> {
         let (targets, compiler_prefixes, _target_depth) =
             prepare_setup_geometry_targets(&mut target_keys, &mut execution_prefixes)?;
@@ -1446,7 +1366,6 @@ impl GeometryFamilyCompileSession {
                     required_cells,
                     targets,
                     compiler_prefixes,
-                    tablebase,
                 ),
             )),
             execution_prefixes,
@@ -1653,11 +1572,10 @@ mod precomputed_geometry_tests {
 
         let control = ExecutionControl::new(ExecutionCancellationToken::new());
         let exact = compile_session(
-            GeometryFamilyCompileSession::new_with_tablebase(
+            GeometryFamilyCompileSession::new(
                 catalog.required_cells(),
                 target_keys.clone(),
                 execution_prefixes.clone(),
-                None,
             )
             .expect("exact session"),
             &catalog,
@@ -1847,7 +1765,6 @@ impl CompleteCandidateFamilyCompiler {
             residual_memo,
             geometry_prefixes: self.geometry_prefixes,
             projection_cache: ProjectionReachabilityCache::default(),
-            tablebase: None,
             compile_domain: FamilyCompileDomain::PermutationClosedGeometry,
         }
     }
@@ -2414,10 +2331,7 @@ pub(super) struct SharedTargetGroups {
 }
 
 enum TargetGroupPreparationMode {
-    Internal {
-        required_cells: u64,
-        tablebase: Option<Arc<Pc4CompactTablebase>>,
-    },
+    Internal { required_cells: u64 },
     External,
 }
 
@@ -3043,7 +2957,6 @@ impl GeometrySearch {
             required_cells,
             compile_pattern_indexes,
             None,
-            None,
         )
     }
 
@@ -3060,44 +2973,6 @@ impl GeometrySearch {
             family,
             required_cells,
             compile_pattern_indexes,
-            None,
-            Some((already_retained_bytes, max_memory_bytes)),
-        )
-    }
-
-    pub fn new_with_tablebase(
-        universe: &MaterializedPatternUniverse,
-        family: &PackingMultisetFamily,
-        required_cells: u64,
-        compile_pattern_indexes: bool,
-        tablebase: Arc<Pc4CompactTablebase>,
-    ) -> Result<Self, WasmExactSearchError> {
-        Self::new_deferred(
-            universe,
-            family,
-            required_cells,
-            compile_pattern_indexes,
-            Some(tablebase),
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_tablebase_and_memory_limit(
-        universe: &MaterializedPatternUniverse,
-        family: &PackingMultisetFamily,
-        required_cells: u64,
-        compile_pattern_indexes: bool,
-        tablebase: Arc<Pc4CompactTablebase>,
-        already_retained_bytes: u128,
-        max_memory_bytes: u128,
-    ) -> Result<Self, WasmExactSearchError> {
-        Self::new_deferred(
-            universe,
-            family,
-            required_cells,
-            compile_pattern_indexes,
-            Some(tablebase),
             Some((already_retained_bytes, max_memory_bytes)),
         )
     }
@@ -3107,7 +2982,6 @@ impl GeometrySearch {
         family: &PackingMultisetFamily,
         required_cells: u64,
         compile_pattern_indexes: bool,
-        tablebase: Option<Arc<Pc4CompactTablebase>>,
         memory_limit: Option<(u128, u128)>,
     ) -> Result<Self, WasmExactSearchError> {
         let mut preparation_peak = checked_target_group_build_peak_additional_bytes(
@@ -3157,13 +3031,9 @@ impl GeometrySearch {
                 group_pattern_index_bytes: target_nested_bytes,
             };
             return if memory_limit.is_some() {
-                Self::try_new_shared_with_tablebase(required_cells, &shared, tablebase)
+                Self::try_new_shared(required_cells, &shared)
             } else {
-                Ok(Self::new_shared_with_tablebase(
-                    required_cells,
-                    &shared,
-                    tablebase,
-                ))
+                Ok(Self::new_shared(required_cells, &shared))
             };
         }
         let retained_upper_bound_bytes = usize::try_from(preparation_peak).map_err(|_| {
@@ -3177,10 +3047,7 @@ impl GeometrySearch {
                 family,
                 retained_upper_bound_bytes,
             )?),
-            target_preparation_mode: Some(TargetGroupPreparationMode::Internal {
-                required_cells,
-                tablebase,
-            }),
+            target_preparation_mode: Some(TargetGroupPreparationMode::Internal { required_cells }),
             compiler: None,
             enumerator: None,
             expanded_nodes: 0,
@@ -3197,14 +3064,6 @@ impl GeometrySearch {
     }
 
     pub fn new_shared(required_cells: u64, shared: &SharedTargetGroups) -> Self {
-        Self::new_shared_with_tablebase(required_cells, shared, None)
-    }
-
-    fn new_shared_with_tablebase(
-        required_cells: u64,
-        shared: &SharedTargetGroups,
-        tablebase: Option<Arc<Pc4CompactTablebase>>,
-    ) -> Self {
         Self {
             group_pattern_index_bytes: shared.group_pattern_index_bytes,
             shared_family_bytes: 0,
@@ -3213,7 +3072,6 @@ impl GeometrySearch {
             compiler: Some(FamilyCompiler::new(
                 required_cells,
                 Arc::clone(&shared.targets),
-                tablebase,
             )),
             enumerator: None,
             expanded_nodes: 0,
@@ -3229,10 +3087,9 @@ impl GeometrySearch {
         }
     }
 
-    fn try_new_shared_with_tablebase(
+    fn try_new_shared(
         required_cells: u64,
         shared: &SharedTargetGroups,
-        tablebase: Option<Arc<Pc4CompactTablebase>>,
     ) -> Result<Self, WasmExactSearchError> {
         Ok(Self {
             group_pattern_index_bytes: shared.group_pattern_index_bytes,
@@ -3242,7 +3099,6 @@ impl GeometrySearch {
             compiler: Some(FamilyCompiler::try_new(
                 required_cells,
                 Arc::clone(&shared.targets),
-                tablebase,
             )?),
             enumerator: None,
             expanded_nodes: 0,
@@ -3407,15 +3263,11 @@ impl GeometrySearch {
                         );
                     };
                     match mode {
-                        TargetGroupPreparationMode::Internal {
-                            required_cells,
-                            tablebase,
-                        } => {
+                        TargetGroupPreparationMode::Internal { required_cells } => {
                             self.compiler = if self.resource_authoritative {
                                 match FamilyCompiler::try_new(
                                     required_cells,
                                     Arc::clone(&shared.targets),
-                                    tablebase,
                                 ) {
                                     Ok(compiler) => Some(compiler),
                                     Err(error) => {
@@ -3426,7 +3278,6 @@ impl GeometrySearch {
                                 Some(FamilyCompiler::new(
                                     required_cells,
                                     Arc::clone(&shared.targets),
-                                    tablebase,
                                 ))
                             };
                         }

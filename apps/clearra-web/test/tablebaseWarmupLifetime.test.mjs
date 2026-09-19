@@ -35,7 +35,7 @@ test('turning TB off preserves worker-owned online preparation', () => {
   assert.match(toggle, /if \(requested\)[\s\S]*startTablebaseTransportWarmup/u);
   assert.doesNotMatch(toggle, /tablebaseWarmupGeneration\s*\+=/u);
   assert.doesNotMatch(toggle, /releasePc4TablebaseAssets\s*\(/u);
-  assert.match(toggle, /loadedWasm\?\.release_tablebase\(\)/u);
+  assert.doesNotMatch(toggle, /release_tablebase/u);
 
   const warmup = functionBody('startTablebaseTransportWarmup');
   assert.match(

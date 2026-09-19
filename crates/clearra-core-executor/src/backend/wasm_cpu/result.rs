@@ -68,7 +68,6 @@ use super::{
     },
     kick_profiles::replay_profile_ids,
     mix_digest, mix_order_independent_candidate_digest,
-    pc4_tablebase::{loaded_pc4_compact_tablebase, pc4_tablebase_profile_identity},
     reachability::ReachabilityMetrics,
     standard_bag_coverage::StandardBagCoverage,
     WasmExactSearchError, MAX_BOARD64_PIECES,
@@ -1206,18 +1205,9 @@ impl WasmExactSearchSession {
         execution_admission: ExecutionAdmission,
     ) -> Result<Self, WasmExactSearchError> {
         let tablebase_requested = problem.backend_policy().tablebase_requested();
-        let loaded_tablebase = tablebase_requested
-            .then(loaded_pc4_compact_tablebase)
-            .flatten();
-        let tablebase_artifact_bytes = loaded_tablebase
-            .as_ref()
-            .map_or(0, |loaded| loaded.artifact_bytes());
-        let tablebase_retained_bytes = loaded_tablebase
-            .as_ref()
-            .map_or(0, |loaded| loaded.retained_bytes());
-        let tablebase_payload_sha256 = loaded_tablebase
-            .as_ref()
-            .map(|loaded| loaded.payload_sha256_hex());
+        let tablebase_artifact_bytes = 0;
+        let tablebase_retained_bytes = 0;
+        let tablebase_payload_sha256 = None;
         let target_piece_count = catalog.required_cells().count_ones() as usize / 4;
         if target_piece_count > MAX_BOARD64_PIECES {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -1272,27 +1262,10 @@ impl WasmExactSearchSession {
                 "wasm_supply_has_no_reachable_piece_multiset",
             ));
         }
-        let expected_tablebase_profile =
-            pc4_tablebase_profile_identity(problem.as_ref(), catalog.identity_digest());
-        let (tablebase, tablebase_status) = match loaded_tablebase.as_ref() {
-            None if tablebase_requested => (None, "unavailable"),
-            None => (None, "disabled"),
-            Some(_) if external_geometry => (None, "unsupported-backend"),
-            Some(_)
-                if catalog.width() != 10
-                    || catalog.height() != 4
-                    || catalog.initial_board() != 0
-                    || catalog.required_cells() != (1_u64 << 40) - 1 =>
-            {
-                (None, "unsupported-request")
-            }
-            Some(loaded)
-                if loaded.catalog_identity() != catalog.identity_digest()
-                    || loaded.compiler_identity() != expected_tablebase_profile =>
-            {
-                (None, "profile-mismatch")
-            }
-            Some(loaded) => (Some(Arc::clone(loaded)), "connected-exact-dead-index"),
+        let tablebase_status = if tablebase_requested {
+            "unavailable"
+        } else {
+            "disabled"
         };
         supply_span.finish(universe.pattern_count() as u64);
         let family_retained_bytes = multiset_family.checked_retained_bytes().ok_or_else(|| {
@@ -1369,26 +1342,6 @@ impl WasmExactSearchSession {
                     execution_admission.memory_cap_bytes(),
                 )),
             )?
-        } else if let Some(tablebase) = tablebase {
-            if parent_authorized {
-                GeometrySearch::new_with_tablebase_and_memory_limit(
-                    universe,
-                    &multiset_family,
-                    catalog.required_cells(),
-                    !omits_geometry_pattern_indices,
-                    tablebase,
-                    retained_before_geometry,
-                    execution_admission.memory_cap_bytes(),
-                )?
-            } else {
-                GeometrySearch::new_with_tablebase(
-                    universe,
-                    &multiset_family,
-                    catalog.required_cells(),
-                    !omits_geometry_pattern_indices,
-                    tablebase,
-                )?
-            }
         } else {
             if parent_authorized {
                 GeometrySearch::new_with_memory_limit(
@@ -4639,22 +4592,8 @@ impl WasmExactSearchSession {
             field("search_traversal", "canonical-skeleton-exact-cover"),
             field("tablebase_requested", self.tablebase_requested),
             field("tablebase_status", self.tablebase_status),
-            field(
-                "tablebase_tier",
-                if self.tablebase_status == "connected-exact-dead-index" {
-                    "pc4-compact-exact"
-                } else {
-                    "none"
-                },
-            ),
-            field(
-                "tablebase_semantics",
-                if self.tablebase_status == "connected-exact-dead-index" {
-                    "exact-dead-hit-or-unknown-with-generic-exact-fallback"
-                } else {
-                    "generic-exact"
-                },
-            ),
+            field("tablebase_tier", "none"),
+            field("tablebase_semantics", "generic-exact"),
             field("tablebase_artifact_bytes", self.tablebase_artifact_bytes),
             field(
                 "tablebase_payload_sha256",

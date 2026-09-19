@@ -1554,11 +1554,10 @@ mod tests {
             .binary_search(&pack_piece_counts(target_counts))
             .is_ok());
 
-        let mut geometry = GeometryFamilyCompileSession::new_with_tablebase(
+        let mut geometry = GeometryFamilyCompileSession::new(
             catalog.required_cells(),
             target_keys,
             admissible_prefixes,
-            None,
         )
         .expect("geometry session");
         let mut compiled = loop {
@@ -1678,11 +1677,10 @@ mod tests {
             target_keys.contains(&expected_target),
             "known completion target is absent from setup geometry targets"
         );
-        let mut geometry = GeometryFamilyCompileSession::new_with_tablebase(
+        let mut geometry = GeometryFamilyCompileSession::new(
             catalog.required_cells(),
             target_keys,
             admissible_prefixes,
-            None,
         )
         .expect("geometry session");
         let mut compiled = loop {

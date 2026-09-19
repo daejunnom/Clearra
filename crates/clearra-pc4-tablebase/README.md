@@ -11,11 +11,12 @@ into a graph artifact. A profile's u24/u32 target encoding is intentionally
 kept separate and may only be used after its qualified graph-record layout has
 delimited a target sequence.
 
-The existing pc4-compact-exact-v12 asset remains a separate, embedded
-exact-dead-state pruning accelerator until the v0.9 migration is qualified.
-It is deliberately not imported by this crate, and the online reader is not
-registered with the current runtime. This prevents either implementation from
-silently becoming an alternative source of product truth.
+The retired compact static beta is not a product authority in v0.9. Clearra
+does not embed or install a second exact-dead-state index; every accelerated
+candidate family comes from the qualified online graph generation and remains
+bound to its profile, target, request and immutable snapshot evidence. This
+prevents an older local artifact from silently becoming an alternative source
+of product truth.
 
 Production activation is fail-closed: one immutable snapshot generation keeps
 an explicit availability slot for each of SRS, SRS+, SRS-X, Jstris-180, and

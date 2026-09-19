@@ -103,18 +103,14 @@ pub use wasm_build_probability_backend::{
 #[cfg(feature = "webgpu-search")]
 pub use wasm_cpu::WasmWebGpuCandidateProducer;
 pub use wasm_cpu::{
-    canonical_wasm_candidate_packet_batch_sha256, compile_pc4_compact_tablebase,
-    encode_canonical_wasm_candidate_packet_batch, install_pc4_compact_tablebase,
-    materialize_pc4_ilc_transition, release_pc4_compact_tablebase, Pc4CompactTablebase,
-    Pc4CompactTablebaseArtifact, Pc4IlcMaterializationError, Pc4IlcPlacement, Pc4TablebaseError,
-    Pc4TablebaseLookup, WasmBuildProbabilityCandidateProducer,
-    WasmBuildProbabilityDistributedResultMerger, WasmBuildProbabilityDistributedVerifier,
-    WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
-    WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
-    WasmDistributedResultMerger, WasmDistributedVerifier, WasmPackedTilingIdentity,
-    WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance, WasmTilingRootChunk,
-    WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
-    PC4_COMPACT_TABLEBASE_MAX_BYTES,
+    canonical_wasm_candidate_packet_batch_sha256, encode_canonical_wasm_candidate_packet_batch,
+    materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
+    WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
+    WasmBuildProbabilityDistributedVerifier, WasmCandidatePacket, WasmCandidateProducerAdvance,
+    WasmCpuCandidateProducer, WasmDistributedBackendExecution, WasmDistributedGeometrySummary,
+    WasmDistributedProgress, WasmDistributedResultMerger, WasmDistributedVerifier,
+    WasmPackedTilingIdentity, WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance,
+    WasmTilingRootChunk, WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
 pub(crate) use wasm_cpu::{DocumentLockReachability, DocumentReachabilityEngine};
 pub use wasm_cpu_search_backend::{

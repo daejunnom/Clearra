@@ -25,10 +25,7 @@ pub use clearra_core_domain::execution_cancellation::ExecutionControl;
 pub use clearra_core_executor::backend::{
     prewarm_gpu_search, prewarm_gpu_search_async, GpuSearchWarmupReport,
 };
-pub use clearra_core_executor::{
-    install_pc4_compact_tablebase, release_pc4_compact_tablebase, Pc4TablebaseError,
-    TilingSolutionPageStore,
-};
+pub use clearra_core_executor::TilingSolutionPageStore;
 pub use distributed_runtime::{
     serialize_distributed_final_events, WasmDistributedCompletionAdvance,
     WasmDistributedCompletionSession, WasmDistributedCoordinator, WasmDistributedFallbackReason,

@@ -10,19 +10,10 @@ use crate::{
     },
     typed_document_utility_cli::prepare_native_typed_utility,
 };
-#[cfg(all(
-    feature = "wasm-cpu-runtime",
-    any(test, not(feature = "online-pc4-tablebase"))
-))]
-use clearra_app::AppTablebaseSession;
 use clearra_app::{io::AppFilePolicy, AppContext, AppStatus};
 #[cfg(feature = "wasm-cpu-runtime")]
 use clearra_app::{AppCoreExecutorService, AppServices};
 use clearra_i18n::LanguageId;
-
-#[cfg(all(feature = "wasm-cpu-runtime", not(feature = "online-pc4-tablebase")))]
-const PC4_COMPACT_TABLEBASE: &[u8] =
-    include_bytes!("../../../apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin");
 
 const TILING_ONLY_WARNING: &str = "WARNING: Tiling-only search skips BuildUp and probability calculation. Results may include solutions that cannot be built.";
 
@@ -163,11 +154,13 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
         );
         #[cfg(feature = "online-pc4-tablebase")]
         let online_tablebase = command_requests_tablebase(&command);
-        #[cfg(all(feature = "wasm-cpu-runtime", not(feature = "online-pc4-tablebase")))]
-        let _tablebase_session = match tablebase_session_for_command(&command) {
-            Ok(session) => session,
-            Err(output) => return output,
-        };
+        #[cfg(not(feature = "online-pc4-tablebase"))]
+        if command_requests_tablebase(&command) {
+            return CliOutput::error(
+                CliErrorCode::TablebaseLookupFailed,
+                tablebase_lookup_failure_message("pc4_online_unavailable", language),
+            );
+        }
 
         let assembly = match CliAppRequestAssembler::assemble(command, format) {
             Ok(assembly) => assembly,
@@ -330,15 +323,6 @@ fn tablebase_lookup_failure_message(reason: &str, language: LanguageId) -> &'sta
     }
 }
 
-#[cfg(all(feature = "wasm-cpu-runtime", not(feature = "online-pc4-tablebase")))]
-fn tablebase_session_for_command(
-    command: &ParsedCliCommand,
-) -> Result<Option<AppTablebaseSession>, CliOutput> {
-    let requested = command_requests_tablebase(command);
-    install_requested_tablebase(requested, PC4_COMPACT_TABLEBASE)
-}
-
-#[cfg(any(feature = "wasm-cpu-runtime", feature = "online-pc4-tablebase"))]
 fn command_requests_tablebase(command: &ParsedCliCommand) -> bool {
     match command {
         ParsedCliCommand::Pc(args) => args.tablebase_requested() == Some(true),
@@ -355,28 +339,6 @@ fn command_requests_tablebase(command: &ParsedCliCommand) -> bool {
             .unwrap_or(false),
         _ => false,
     }
-}
-
-#[cfg(all(
-    feature = "wasm-cpu-runtime",
-    any(test, not(feature = "online-pc4-tablebase"))
-))]
-fn install_requested_tablebase(
-    requested: bool,
-    artifact: &[u8],
-) -> Result<Option<AppTablebaseSession>, CliOutput> {
-    if !requested {
-        return Ok(None);
-    }
-
-    AppTablebaseSession::install_pc4_compact(artifact)
-        .map(Some)
-        .map_err(|error| {
-            CliOutput::error(
-                CliErrorCode::TablebaseInstallFailed,
-                format!("PC4 tablebase installation failed: {}", error.reason()),
-            )
-        })
 }
 
 fn product_app_context() -> AppContext {
@@ -400,11 +362,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{
-        install_requested_tablebase, route_invocation, tablebase_lookup_failure_message, LanguageId,
-    };
+    use super::{route_invocation, tablebase_lookup_failure_message, LanguageId};
     use crate::args::CliParser;
-    use crate::{error::CliErrorCode, exit::ExitCode};
+    use crate::exit::ExitCode;
     use clearra_app::decode_ctk3_exact;
 
     #[test]
@@ -978,25 +938,6 @@ mod tests {
                 assert!(!output.stdout().contains("portfolio"));
             }
         }
-    }
-
-    #[test]
-    fn explicit_tablebase_request_fails_closed_when_installation_fails() {
-        let output = install_requested_tablebase(true, b"not-a-tablebase")
-            .expect_err("an explicit request must not silently fall back");
-
-        assert_eq!(output.exit_code(), ExitCode::InternalError);
-        assert!(output
-            .stderr()
-            .contains(CliErrorCode::TablebaseInstallFailed.as_str()));
-        assert!(output.stderr().contains("pc4_tablebase_header_invalid"));
-    }
-
-    #[test]
-    fn unrequested_tablebase_does_not_touch_the_artifact() {
-        assert!(install_requested_tablebase(false, b"not-a-tablebase")
-            .expect("disabled tablebase must not be installed")
-            .is_none());
     }
 
     #[test]

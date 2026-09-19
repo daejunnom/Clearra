@@ -444,12 +444,8 @@ function setTablebaseRequested(requested: boolean) {
   // re-enabling TB does not repeat discovery/TLS setup. The generation guard
   // below prevents the completed promise from publishing a ready UI state
   // while the feature is disabled. Runtime disposal and fail-closed shutdown
-  // remain the only owners that abort and clear this cache.
-  try {
-    loadedWasm?.release_tablebase();
-  } catch (error) {
-    console.warn('Clearra tablebase release was incomplete', error);
-  }
+  // remain the only owners that abort and clear this cache. The retired
+  // static-beta installer has no v0.9 runtime state to release here.
   postTablebaseWarmupPhase('disabled', 0);
 }
 
@@ -591,11 +587,6 @@ function disposeRuntime() {
   deferredTablebaseRequested = false;
   tablebaseWarmupGeneration += 1;
   tablebaseWarmup = null;
-  try {
-    loadedWasm?.release_tablebase();
-  } catch {
-    // Closing the worker releases a trapped runtime's tablebase memory.
-  }
   releasePc4TablebaseAssets();
   const job = active;
   if (job) releaseJobResources(job);
@@ -674,11 +665,6 @@ function closeFailClosedWorker() {
   deferredTablebaseRequested = false;
   tablebaseWarmupGeneration += 1;
   tablebaseWarmup = null;
-  try {
-    loadedWasm?.release_tablebase();
-  } catch {
-    // Worker termination is the final fail-closed release boundary.
-  }
   releasePc4TablebaseAssets();
   loadedWasm = null;
   self.close();

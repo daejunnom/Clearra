@@ -257,14 +257,6 @@ test("TypeScript CTK package reaches Pages, desktop GUI, and Discord but not the
 test("runtime-consumer exceptions select the exact deployment surfaces", () => {
   for (const expected of [
     {
-      path: "apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin",
-      scope: "pages+discord+cli",
-      pages: true,
-      discord: true,
-      gui: false,
-      cli: true,
-    },
-    {
       path: "crates/clearra-wasm/src/wasm_command_runtime.rs",
       scope: "pages+gui",
       pages: true,
@@ -348,13 +340,13 @@ test("runtime-consumer exceptions select the exact deployment surfaces", () => {
 
 test("component deployment vector distinguishes desktop, Discord, PC4, and release infrastructure", () => {
   const tablebase = classifyDeploymentImpact([
-    "apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin",
+    "crates/clearra-pc4-tablebase/src/lib.rs",
   ]);
   assert.equal(tablebase.deployPages, true);
-  assert.equal(tablebase.deployDesktopGui, false);
-  assert.equal(tablebase.deployDiscordGateway, false);
+  assert.equal(tablebase.deployDesktopGui, true);
+  assert.equal(tablebase.deployDiscordGateway, true);
   assert.equal(tablebase.deployHeavyCloudRuntime, true);
-  assert.equal(tablebase.deployPc4LookupService, false);
+  assert.equal(tablebase.deployPc4LookupService, true);
   assert.equal(tablebase.deployPc4ActivationManifest, true);
   assert.equal(tablebase.releaseInfrastructureChanged, false);
 

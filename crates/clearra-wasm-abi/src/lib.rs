@@ -14,7 +14,6 @@ use clearra_wasm::prewarm_gpu_search_async;
 #[cfg(feature = "stage-profiling")]
 use clearra_wasm::ExecutorSearchProfileSession;
 use clearra_wasm::{
-    install_pc4_compact_tablebase, release_pc4_compact_tablebase,
     serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
     serialize_coverage_portfolio_retained_page, serialize_distributed_final_events,
     serialize_parity_report_exhausted, serialize_parity_report_page,
@@ -1098,53 +1097,6 @@ fn ensure_minimum_transfer_outer(
         completion.ensure_outer_capacity(prospective)?;
     }
     Ok(())
-}
-
-#[no_mangle]
-pub extern "C" fn clearra_wasm_tablebase_install() -> i32 {
-    if let Err(status) = ABI_STATE.with(|state| state.borrow().require_mutation_admission()) {
-        return status;
-    }
-    clear_panic_diagnostics();
-    let input = match ABI_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        debug_assert!(state.require_mutation_admission().is_ok());
-        Ok::<_, i32>(std::mem::take(&mut state.transfer_input))
-    }) {
-        Ok(input) => input,
-        Err(status) => return status,
-    };
-    let result = install_pc4_compact_tablebase(&input);
-    drop(input);
-    ABI_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        match result {
-            Ok(tablebase) => {
-                state.set_output(format!(
-                    "{{\"schema_version\":12,\"tier\":\"compact-exact\",\"artifact_bytes\":{},\"certified_states\":{},\"certified_targets\":{},\"payload_sha256\":\"{}\"}}",
-                    tablebase.artifact_bytes(),
-                    tablebase.certified_state_count(),
-                    tablebase.certified_target_count(),
-                    tablebase.payload_sha256_hex()
-                ));
-                ABI_OK
-            }
-            Err(error) => {
-                state.set_error("E_WASM_TABLEBASE_INSTALL", error);
-                ABI_ERROR
-            }
-        }
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn clearra_wasm_tablebase_release() -> i32 {
-    if let Err(status) = ABI_STATE.with(|state| state.borrow().require_mutation_admission()) {
-        return status;
-    }
-    clear_panic_diagnostics();
-    let released = release_pc4_compact_tablebase();
-    i32::from(released)
 }
 
 #[no_mangle]
@@ -5485,8 +5437,6 @@ mod tests {
             clearra_wasm_transfer_resize(u32::MAX),
             ABI_OUTPUT_NOT_RELEASED
         );
-        assert_eq!(clearra_wasm_tablebase_install(), ABI_OUTPUT_NOT_RELEASED);
-        assert_eq!(clearra_wasm_tablebase_release(), ABI_OUTPUT_NOT_RELEASED);
         assert_eq!(clearra_wasm_distributed_prepare(), ABI_OUTPUT_NOT_RELEASED);
         assert_eq!(
             clearra_wasm_distributed_worker_initialization(),

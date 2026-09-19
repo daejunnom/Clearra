@@ -72,17 +72,6 @@ export function classifyDeploymentImpact(paths) {
       releaseInfrastructure = true;
       continue;
     }
-    // This static browser asset is also compiled into the native CLI and is
-    // copied into the Discord current-job image before that CLI is built.
-    // Keep it ahead of the general Pages application rule.
-    if (path.startsWith("apps/clearra-web/static/tablebase/")) {
-      pages = true;
-      discord = true;
-      cli = true;
-      heavyCloudRuntime = true;
-      pc4ActivationManifest = true;
-      continue;
-    }
     if (path.startsWith("apps/clearra-web/")) {
       pages = true;
       continue;

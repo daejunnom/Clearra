@@ -36,11 +36,9 @@ pub mod tiling_solution_store;
 #[cfg(feature = "webgpu-search")]
 pub use backend::WasmWebGpuCandidateProducer;
 pub use backend::{
-    canonical_wasm_candidate_packet_batch_sha256, compile_pc4_compact_tablebase,
-    encode_canonical_wasm_candidate_packet_batch, install_pc4_compact_tablebase,
-    materialize_pc4_ilc_transition, release_pc4_compact_tablebase, Pc4CompactTablebase,
-    Pc4CompactTablebaseArtifact, Pc4IlcMaterializationError, Pc4IlcPlacement, Pc4TablebaseError,
-    Pc4TablebaseLookup, WasmBuildProbabilityAdvance, WasmBuildProbabilityBackend,
+    canonical_wasm_candidate_packet_batch_sha256, encode_canonical_wasm_candidate_packet_batch,
+    materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
+    WasmBuildProbabilityAdvance, WasmBuildProbabilityBackend,
     WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
     WasmBuildProbabilityDistributedVerifier, WasmBuildProbabilitySession, WasmCandidatePacket,
     WasmCandidateProducerAdvance, WasmCpuCandidateProducer, WasmCpuSearchAdvance,
@@ -52,7 +50,6 @@ pub use backend::{
     WasmSetupParallelWorker, WasmSetupParallelWorkerStep, WasmSetupSearchAdvance,
     WasmSetupSearchBackend, WasmSetupSearchSession, WasmTilingRootAdvance, WasmTilingRootChunk,
     WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
-    PC4_COMPACT_TABLEBASE_MAX_BYTES,
 };
 pub use buildup::{
     BuildUpEvent, BuildUpReducerReport, BuildUpRunResult, BuildUpRunner, BuildUpState,

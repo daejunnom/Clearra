@@ -9,8 +9,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY tools ./tools
 COPY assets ./assets
-COPY apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin \
-  ./apps/clearra-web/static/tablebase/pc4-compact-exact-v12.bin
 RUN printf '%s\n' "${CLEARRA_SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$' \
     && test "${CLEARRA_ENGINE_BUILD_ID}" = "${CLEARRA_SOURCE_COMMIT}"
 RUN cargo build \
