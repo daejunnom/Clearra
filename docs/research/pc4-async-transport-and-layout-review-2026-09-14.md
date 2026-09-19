@@ -455,3 +455,52 @@ h3는 실제 환경 검증 이후의 추가 경로로 둔다. `Range: a-b,c-d` m
 후보는 여전히 profile/schema/completion manifest와 기존 graph 호환 block directory다.
 필요시 block digest를 더할 수 있지만 새로운 세대/블록의 검증 계약이 먼저다.
 V*/최선 수/Krylov나 부분 집합으로 대체하지 않으며, 요청 메시지는 아직 보내지 않았다.
+
+### 9.4 bounded cache 검증과 새 대형 로컬 계측
+
+후보 구현은 `9f77a6a`에서 다음 경계를 제품 코드에 반영했고, 테스트 전용 private
+관측 경계만 바로잡은 정확한 소스는 `4840a3278c46a1be8f392b63b6eed94056f48c6e`다.
+
+- 신규 CPU 확장만 최대 64 resident work credit으로 제한한다.
+- work의 source와 현재 target record를 pin하고, 응답 처리·기존 resident 완료는
+  credit이 가득 찼어도 계속 진행한다.
+- cache는 pin되지 않은 record만 CLOCK 방식으로 교체하며 record 수가 같아도
+  admission revision으로 대기 work를 깨운다.
+- 누적 lookup을 cache 크기와 같게 제한하던 100,000회 상한은 제거한다. 새 lookup은
+  이미 부과된 유한 graph work에서만 파생되고, HTTP 요청·byte 및 App 작업 예산은
+  계속 독립적으로 적용된다.
+
+[비게시 CI 35438327542](https://github.com/daejunnom/Clearra/actions/runs/35438327542)의
+source, surface, native CLI, PC4 계약, preview-WASM 다섯 job이 모두 성공했다. cache
+교체 전 검증/예산/예약의 원자성, pin 보존, admission 순서, 취소 시 pin 해제, 2-record
+cache에서도 작은 4L exact candidate/count/digest 동등성, bounded diamond 탐색을
+검사했다. 이는 릴리스 acceptance나 대형 전체 집합 증명이 아니다.
+
+해당 실행의 메모리 직접 importer와 기존 로컬 Jstris 180 자산으로 빈 필드/P7P4/
+4L/unique 전체 탐색을 한 번 실행했다. 240초보다 먼저 1,000,000 논리 조회 한도에
+도달해 안전하게 취소했으며, 알려진 456,459개 전체 집합 또는 완료를 주장하지 않는다.
+
+| 지표 | 새 bounded-cache probe |
+| --- | ---: |
+| 벽시계 | 92.720초 |
+| 논리 조회 / 물리 파일 읽기 | 1,000,000 / 390,678 |
+| 파일 bytes / cache hit | 273,225,460B / 609,667 |
+| FHID / GOFF / graph 논리 조회 | 2 / 666,666 / 333,332 |
+| WASM 계산 / local I/O / bridge | 28.701초 / 25.993초 / 35.717초 |
+| 최대 한 번의 WASM advance | 20.701ms |
+| 마지막 WASM memory | 196,935,680B |
+
+이 계측은 기존 100,000 lookup 종료 지점을 실제로 넘었고, append-only graph cache의
+무제한 증가 대신 bounded 교체가 작동했음을 보인다. 반면 거의 정확한
+`GOFF pair 두 논리 호출 -> graph record 한 호출`이 계속되어 bridge가 가장 큰 누적
+구간이었고, 전체 완료 전에 333,332 graph demand가 발생했다. 로컬 직렬 benchmark
+host의 수치이므로 Web의 first-completion async pump나 인터넷 HTTP 시간을 대신하지
+않는다. 그래도 CPU worker 수만 늘리는 것보다 typed header/address witness, batch
+admission, block directory로 논리·물리 호출을 줄이는 순서가 먼저라는 근거다.
+
+다음 A/B는 이전 100k frontier 결과를 반복하지 않는다. 같은 기존 graph/GOFF로
+만드는 프로필별 sparse block directory가 known ID의 graph block을 GOFF 응답과
+동시에 준비할 수 있는지와, 여러 response를 한 ABI admission으로 넘겼을 때 bridge
+호출 수가 실제로 줄어드는지를 각각 분리한다. sidecar가 large-frontier에서 요청 수와
+tail을 유의미하게 줄일 때만 muse918에게 동일 generation/profile/layout identity 및
+완성 manifest에 결박된 upstream 보조 파일을 요청한다.
