@@ -9,6 +9,10 @@ on:
         description: Build an unqualified WASM for local 4194 review only
         type: boolean
         default: false
+      pc4_native_http2:
+        description: Compile the opt-in native persistent HTTP/2 transport candidate
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -78,6 +82,32 @@ jobs:
         shell: pwsh
         run: |
           & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command node -ArgumentsJson '["scripts/tools/check-pc4-app-contracts.mjs","--row-normalization","--fetch"]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  native-http2-candidate:
+    needs: source
+    if: inputs.pc4_native_http2 == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[pc4-http2-ab]'))
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Resolve the locked candidate dependency graph
+        shell: pwsh
+        run: |
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command cargo -ArgumentsJson '["fetch","--locked"]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile and test the persistent native HTTP/2 owner
+        shell: pwsh
+        run: |
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command cargo -ArgumentsJson '["test","--locked","--offline","-p","clearra-cli","--features","native-pc4-libcurl","--lib","native_pool_","-j","2","--","--test-threads=1"]'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   surface-contracts:

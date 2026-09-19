@@ -19,7 +19,20 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "native-pc4-libcurl")]
+use curl::{
+    easy::{Easy, HttpVersion},
+    multi::{EasyHandle, Multi},
+};
+#[cfg(feature = "native-pc4-libcurl")]
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
+
 const MAX_LOGICAL: usize = 16;
+#[cfg(feature = "native-pc4-libcurl")]
+const MAX_ACTIVE_TRANSFERS: usize = 4;
 const MAX_GAP_BYTES: u64 = 4_096;
 const MAX_RANGE_BYTES: u64 = 65_536;
 const RECEIPT_PREFIX: &str = "CLEARRA-PC4-HTTP-V1";
@@ -143,6 +156,14 @@ impl NativeCurlPlan {
             .iter()
             .map(|transfer| (transfer.role, transfer.offset, transfer.length))
             .collect()
+    }
+
+    #[cfg(feature = "native-pc4-libcurl")]
+    fn logical_count(&self) -> usize {
+        self.transfers
+            .iter()
+            .map(|transfer| transfer.projections.len())
+            .sum()
     }
 
     pub fn spawn(self, revision: &str) -> Result<NativeCurlBatch> {
@@ -356,6 +377,420 @@ fn validate_receipt(transfer: &Transfer, receipt: &Receipt) -> Result<()> {
         return Err("pc4_online_content_range_mismatch");
     }
     Ok(())
+}
+
+/// One native online execution's connection owner for the opt-in HTTP/2 A/B.
+///
+/// CPU lookup continuations submit immutable byte demands; this owner keeps
+/// one libcurl connection cache, admits the first completed transfer and lets
+/// callers add more handles while older transfers are still running. It is
+/// intentionally not enabled by default until build/runtime closure and the
+/// full-search A/B have passed on both release targets.
+#[cfg(feature = "native-pc4-libcurl")]
+pub(super) struct NativeCurlPool {
+    revision: String,
+    multi: Multi,
+    queued: VecDeque<LibcurlPending>,
+    active: BTreeMap<usize, LibcurlActive>,
+    identities: BTreeMap<(u64, u64), DemandIdentity>,
+    next_token: usize,
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+struct LibcurlPending {
+    easy: Easy,
+    transfer: Transfer,
+    collector: Arc<Mutex<LibcurlCollector>>,
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+struct LibcurlActive {
+    handle: EasyHandle,
+    transfer: Transfer,
+    collector: Arc<Mutex<LibcurlCollector>>,
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DemandIdentity {
+    role: usize,
+    path: &'static str,
+    digest: String,
+    offset: u64,
+    length: u64,
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+#[derive(Debug)]
+struct LibcurlCollector {
+    limit: usize,
+    body: Vec<u8>,
+    content_range: Option<String>,
+    status_line: Option<String>,
+    oversized: bool,
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+impl NativeCurlPool {
+    pub fn new(revision: &str) -> Result<Self> {
+        if !hex(revision, 40) {
+            return Err("pc4_online_identity_invalid");
+        }
+        curl::init();
+        let mut multi = Multi::new();
+        multi
+            .pipelining(false, true)
+            .and_then(|_| multi.set_max_host_connections(MAX_ACTIVE_TRANSFERS))
+            .and_then(|_| multi.set_max_total_connections(MAX_ACTIVE_TRANSFERS))
+            .and_then(|_| multi.set_max_connects(MAX_ACTIVE_TRANSFERS))
+            .and_then(|_| multi.set_max_concurrent_streams(MAX_ACTIVE_TRANSFERS))
+            .map_err(|_| "pc4_online_transport_unavailable")?;
+        Ok(Self {
+            revision: revision.to_owned(),
+            multi,
+            queued: VecDeque::new(),
+            active: BTreeMap::new(),
+            identities: BTreeMap::new(),
+            next_token: 1,
+        })
+    }
+
+    pub fn plan_fresh(&self, demands: Vec<NativeRangeDemand>) -> Result<Option<NativeCurlPlan>> {
+        let mut fresh = Vec::new();
+        let mut snapshot = BTreeMap::new();
+        for demand in demands {
+            let key = (demand.lookup_session, demand.request_id);
+            let identity = demand_identity(&demand);
+            if let Some(prior) = self.identities.get(&key).or_else(|| snapshot.get(&key)) {
+                if prior != &identity {
+                    return Err("pc4_online_pending_identity_changed");
+                }
+                continue;
+            }
+            snapshot.insert(key, identity);
+            fresh.push(demand);
+        }
+        if fresh.is_empty() {
+            return Ok(None);
+        }
+        if self.identities.len().saturating_add(fresh.len()) > MAX_LOGICAL {
+            return Err("pc4_online_pending_limit");
+        }
+        NativeCurlPlan::new(fresh).map(Some)
+    }
+
+    pub fn submit(&mut self, plan: NativeCurlPlan) -> Result<()> {
+        if self.identities.len().saturating_add(plan.logical_count()) > MAX_LOGICAL {
+            return Err("pc4_online_pending_limit");
+        }
+
+        // Configure every easy handle before mutating the live multi owner.
+        // A configuration error therefore cannot partially publish a batch.
+        let mut configured = VecDeque::with_capacity(plan.transfers.len());
+        for transfer in plan.transfers {
+            let collector = Arc::new(Mutex::new(LibcurlCollector {
+                limit: usize::try_from(transfer.length)
+                    .map_err(|_| "pc4_online_response_too_large")?,
+                body: Vec::with_capacity(
+                    usize::try_from(transfer.length)
+                        .map_err(|_| "pc4_online_response_too_large")?,
+                ),
+                content_range: None,
+                status_line: None,
+                oversized: false,
+            }));
+            let easy = configure_easy(&self.revision, &transfer, Arc::clone(&collector))?;
+            configured.push_back(LibcurlPending {
+                easy,
+                transfer,
+                collector,
+            });
+        }
+        for pending in &configured {
+            for projection in &pending.transfer.projections {
+                self.identities.insert(
+                    (projection.lookup_session, projection.request_id),
+                    DemandIdentity {
+                        role: pending.transfer.role,
+                        path: pending.transfer.artifact.path,
+                        digest: pending.transfer.artifact.digest.clone(),
+                        offset: projection.offset,
+                        length: projection.length,
+                    },
+                );
+            }
+        }
+        self.queued.append(&mut configured);
+        self.fill_slots()?;
+        Ok(())
+    }
+
+    fn fill_slots(&mut self) -> Result<()> {
+        while self.active.len() < MAX_ACTIVE_TRANSFERS {
+            let Some(pending) = self.queued.pop_front() else {
+                break;
+            };
+            let token = self.next_token;
+            self.next_token = self
+                .next_token
+                .checked_add(1)
+                .filter(|next| *next != 0)
+                .ok_or("pc4_online_transport_unavailable")?;
+            let mut handle = self
+                .multi
+                .add(pending.easy)
+                .map_err(|_| "pc4_online_transport_unavailable")?;
+            if handle.set_token(token).is_err() {
+                let _ = self.multi.remove(handle);
+                return Err("pc4_online_transport_unavailable");
+            }
+            self.active.insert(
+                token,
+                LibcurlActive {
+                    handle,
+                    transfer: pending.transfer,
+                    collector: pending.collector,
+                },
+            );
+        }
+        self.multi
+            .perform()
+            .map_err(|_| "pc4_online_transport_unavailable")?;
+        Ok(())
+    }
+
+    pub fn poll(&mut self, wait: bool) -> Result<NativeCurlPoll> {
+        self.multi
+            .perform()
+            .map_err(|_| "pc4_online_transport_interrupted")?;
+        let mut completed = self.completed_messages();
+        if completed.is_empty() && wait && !self.active.is_empty() {
+            self.multi
+                .wait(&mut [], Duration::from_millis(10))
+                .map_err(|_| "pc4_online_transport_interrupted")?;
+            self.multi
+                .perform()
+                .map_err(|_| "pc4_online_transport_interrupted")?;
+            completed = self.completed_messages();
+        }
+
+        let mut admissions = Vec::new();
+        for (token, transfer_result) in completed {
+            let active = self
+                .active
+                .remove(&token)
+                .ok_or("pc4_online_response_receipt_invalid")?;
+            let status = active
+                .handle
+                .response_code()
+                .ok()
+                .and_then(|status| u16::try_from(status).ok())
+                .ok_or("pc4_online_response_receipt_invalid")?;
+            let effective_https = active
+                .handle
+                .effective_url()
+                .ok()
+                .flatten()
+                .is_some_and(|url| url.starts_with("https://"));
+            let collector = active
+                .collector
+                .lock()
+                .map_err(|_| "pc4_online_transport_interrupted")?;
+            let oversized = collector.oversized;
+            let status_line_valid = collector
+                .status_line
+                .as_deref()
+                .is_some_and(|line| line.starts_with("HTTP/") && line.len() <= 64);
+            let content_range = collector.content_range.clone().unwrap_or_default();
+            let body = collector.body.clone();
+            drop(collector);
+            let _easy = self
+                .multi
+                .remove(active.handle)
+                .map_err(|_| "pc4_online_transport_interrupted")?;
+            for projection in &active.transfer.projections {
+                self.identities
+                    .remove(&(projection.lookup_session, projection.request_id));
+            }
+            if oversized {
+                return Err("pc4_online_response_too_large");
+            }
+            if transfer_result.is_err() {
+                return Err("pc4_online_transport_interrupted");
+            }
+            if !effective_https || !status_line_valid {
+                return Err("pc4_online_range_response_invalid");
+            }
+            let receipt = Receipt {
+                index: 0,
+                status,
+                content_range,
+            };
+            validate_receipt(&active.transfer, &receipt)?;
+            let bytes = HttpReply {
+                status,
+                content_range: receipt.content_range,
+                bytes: body,
+            }
+            .validate(
+                &active.transfer.artifact,
+                active.transfer.offset,
+                active.transfer.length,
+            )?;
+            for projection in &active.transfer.projections {
+                let begin = usize::try_from(projection.offset - active.transfer.offset)
+                    .map_err(|_| "pc4_online_response_too_large")?;
+                let length = usize::try_from(projection.length)
+                    .map_err(|_| "pc4_online_response_too_large")?;
+                admissions.push(NativeRangeAdmission {
+                    lookup_session: projection.lookup_session,
+                    request_id: projection.request_id,
+                    offset: projection.offset,
+                    length: projection.length,
+                    total: active.transfer.artifact.size,
+                    bytes: bytes[begin..begin + length].to_vec(),
+                });
+            }
+        }
+        self.fill_slots()?;
+        if !admissions.is_empty() {
+            Ok(NativeCurlPoll::Admissions(admissions))
+        } else if self.active.is_empty() && self.queued.is_empty() {
+            Ok(NativeCurlPoll::Finished)
+        } else {
+            Ok(NativeCurlPoll::Pending)
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        !self.active.is_empty() || !self.queued.is_empty()
+    }
+
+    fn completed_messages(&self) -> Vec<(usize, std::result::Result<(), curl::Error>)> {
+        let mut completed = Vec::new();
+        self.multi.messages(|message| {
+            if let (Ok(token), Some(result)) = (message.token(), message.result()) {
+                completed.push((token, result));
+            }
+        });
+        completed
+    }
+
+    fn rollback_added(&mut self, tokens: &[usize]) {
+        for token in tokens.iter().rev() {
+            if let Some(active) = self.active.remove(token) {
+                for projection in &active.transfer.projections {
+                    self.identities
+                        .remove(&(projection.lookup_session, projection.request_id));
+                }
+                let _ = self.multi.remove(active.handle);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+impl Drop for NativeCurlPool {
+    fn drop(&mut self) {
+        self.queued.clear();
+        let tokens = self.active.keys().copied().collect::<Vec<_>>();
+        self.rollback_added(&tokens);
+    }
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+fn demand_identity(demand: &NativeRangeDemand) -> DemandIdentity {
+    DemandIdentity {
+        role: demand.role,
+        path: demand.artifact.path,
+        digest: demand.artifact.digest.clone(),
+        offset: demand.offset,
+        length: demand.length,
+    }
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+fn configure_easy(
+    revision: &str,
+    transfer: &Transfer,
+    collector: Arc<Mutex<LibcurlCollector>>,
+) -> Result<Easy> {
+    let url = format!(
+        "https://huggingface.co/datasets/{REPOSITORY}/resolve/{revision}/{}",
+        transfer.artifact.path
+    );
+    let mut easy = Easy::new();
+    easy.url(&url)
+        .and_then(|_| easy.get(true))
+        .and_then(|_| easy.follow_location(true))
+        .and_then(|_| easy.unrestricted_auth(false))
+        .and_then(|_| easy.max_redirections(5))
+        .and_then(|_| easy.connect_timeout(Duration::from_secs(30)))
+        .and_then(|_| easy.timeout(Duration::from_secs(30)))
+        .and_then(|_| easy.low_speed_limit(1))
+        .and_then(|_| easy.low_speed_time(Duration::from_secs(60)))
+        .and_then(|_| easy.max_filesize(transfer.length))
+        .and_then(|_| {
+            easy.range(&format!(
+                "{}-{}",
+                transfer.offset,
+                transfer.offset + transfer.length - 1
+            ))
+        })
+        .and_then(|_| easy.http_version(HttpVersion::V2TLS))
+        .and_then(|_| easy.pipewait(true))
+        .and_then(|_| easy.http_09_allowed(false))
+        .map_err(|_| "pc4_online_transport_unavailable")?;
+
+    let body = Arc::clone(&collector);
+    easy.write_function(move |data| {
+        let Ok(mut state) = body.lock() else {
+            return Ok(0);
+        };
+        Ok(collect_libcurl_body(&mut state, data))
+    })
+    .map_err(|_| "pc4_online_transport_unavailable")?;
+    easy.header_function(move |data| {
+        let Ok(mut state) = collector.lock() else {
+            return false;
+        };
+        collect_libcurl_header(&mut state, data)
+    })
+    .map_err(|_| "pc4_online_transport_unavailable")?;
+    Ok(easy)
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+fn collect_libcurl_body(state: &mut LibcurlCollector, data: &[u8]) -> usize {
+    if state.body.len().saturating_add(data.len()) > state.limit {
+        state.oversized = true;
+        return 0;
+    }
+    state.body.extend_from_slice(data);
+    data.len()
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+fn collect_libcurl_header(state: &mut LibcurlCollector, data: &[u8]) -> bool {
+    if data.starts_with(b"HTTP/") {
+        // Redirect and proxy header blocks precede the final Range response.
+        // Only the body and Content-Range of the last status block are valid.
+        state.body.clear();
+        state.content_range = None;
+        state.oversized = false;
+        state.status_line = std::str::from_utf8(data)
+            .ok()
+            .map(|line| line.trim().to_owned());
+    } else if let Some(separator) = data.iter().position(|byte| *byte == b':') {
+        let (name, value) = data.split_at(separator);
+        let value = &value[1..];
+        if name.eq_ignore_ascii_case(b"content-range") && value.len() <= 130 {
+            state.content_range = std::str::from_utf8(value)
+                .ok()
+                .map(|value| value.trim().to_owned());
+        }
+    }
+    true
 }
 
 impl Drop for NativeCurlBatch {
@@ -620,5 +1055,37 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[cfg(feature = "native-pc4-libcurl")]
+    #[test]
+    fn native_pool_collector_keeps_only_the_final_bounded_response() {
+        let mut collector = LibcurlCollector {
+            limit: 12,
+            body: Vec::new(),
+            content_range: None,
+            status_line: None,
+            oversized: false,
+        };
+        assert!(collect_libcurl_header(
+            &mut collector,
+            b"HTTP/1.1 302 Found\r\n"
+        ));
+        assert_eq!(collect_libcurl_body(&mut collector, b"redirect"), 8);
+        assert!(collect_libcurl_header(&mut collector, b"HTTP/2 206\r\n"));
+        assert!(collect_libcurl_header(
+            &mut collector,
+            b"Content-Range: bytes 100-111/131072\r\n"
+        ));
+        assert_eq!(collect_libcurl_body(&mut collector, b"abcdefghijkl"), 12);
+        assert_eq!(collector.body, b"abcdefghijkl");
+        assert_eq!(
+            collector.content_range.as_deref(),
+            Some("bytes 100-111/131072")
+        );
+        assert_eq!(collector.status_line.as_deref(), Some("HTTP/2 206"));
+        assert!(!collector.oversized);
+        assert_eq!(collect_libcurl_body(&mut collector, b"x"), 0);
+        assert!(collector.oversized);
     }
 }

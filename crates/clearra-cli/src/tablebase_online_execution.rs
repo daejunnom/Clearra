@@ -1,10 +1,12 @@
 //! SRP: choose the explicitly requested profile's installed data or online
 //! Range adapter. Never install data, select moves, or start offline fallback.
+#[cfg(feature = "native-pc4-libcurl")]
+use super::curl_batch::NativeCurlPool;
+#[cfg(not(feature = "native-pc4-libcurl"))]
+use super::curl_batch::{NativeCurlBatch, NativeCurlPlan};
 use super::{
     active,
-    curl_batch::{
-        NativeCurlBatch, NativeCurlPlan, NativeCurlPoll, NativeRangeAdmission, NativeRangeDemand,
-    },
+    curl_batch::{NativeCurlPoll, NativeRangeAdmission, NativeRangeDemand},
     default_directory, format,
     host_execution::{drive, HostSlice},
     http_range::{content_range, HttpReply, OnlineRangeReader},
@@ -167,6 +169,27 @@ fn drive_native<F>(
 where
     F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>,
 {
+    #[cfg(feature = "native-pc4-libcurl")]
+    {
+        return drive_native_pool(execution, reader, revision, files, field_count);
+    }
+    #[cfg(not(feature = "native-pc4-libcurl"))]
+    {
+        drive_native_batch(execution, reader, revision, files, field_count)
+    }
+}
+
+#[cfg(not(feature = "native-pc4-libcurl"))]
+fn drive_native_batch<F>(
+    mut execution: Pc4OnlineHostExecution,
+    mut reader: OnlineRangeReader<F>,
+    revision: &str,
+    files: &[Artifact],
+    field_count: u32,
+) -> Result<AppResponse>
+where
+    F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>,
+{
     let control = ExecutionControl::default();
     let mut batch: Option<NativeCurlBatch> = None;
     loop {
@@ -275,6 +298,133 @@ where
     }
 }
 
+#[cfg(feature = "native-pc4-libcurl")]
+fn drive_native_pool<F>(
+    mut execution: Pc4OnlineHostExecution,
+    mut reader: OnlineRangeReader<F>,
+    revision: &str,
+    files: &[Artifact],
+    field_count: u32,
+) -> Result<AppResponse>
+where
+    F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>,
+{
+    let control = ExecutionControl::default();
+    let mut pool = NativeCurlPool::new(revision)?;
+    loop {
+        drain_pool(&mut pool, &mut execution, &control, false)?;
+        match execution.advance(2_048, &control)? {
+            CooperativeAppAdvance::Completed(response) => return Ok(response),
+            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+            CooperativeAppAdvance::Cancelled => return Err("tablebase: search cancelled"),
+            _ => return Err("tablebase: search did not complete; no offline fallback was started"),
+        }
+
+        let mut demands = Vec::new();
+        for range in execution.pending_ranges() {
+            let descriptor = range.artifact_descriptor();
+            let role = files
+                .iter()
+                .position(|file| file.path == descriptor.path())
+                .ok_or("pc4_online_artifact_invalid")?;
+            if descriptor.byte_len() != files[role].size
+                || descriptor.content_identity() != format!("sha256:{}", files[role].digest)
+            {
+                return Err("pc4_online_artifact_identity_mismatch");
+            }
+            demands.push(NativeRangeDemand {
+                role,
+                lookup_session: range.lookup_session().get(),
+                request_id: range.request_id(),
+                artifact: files[role].clone(),
+                offset: range.offset(),
+                length: u64::from(range.length()),
+            });
+        }
+        if demands.is_empty() {
+            if pool.is_active() && !execution.has_ready_work() {
+                drain_pool(&mut pool, &mut execution, &control, true)?;
+            }
+            continue;
+        }
+
+        let mut admitted_cached = false;
+        for demand in &demands {
+            if let Some(bytes) = reader.read_cached(demand.role, demand.offset, demand.length)? {
+                execution.admit_range(
+                    demand.lookup_session,
+                    demand.request_id,
+                    206,
+                    Some(content_range(
+                        demand.offset,
+                        demand.length,
+                        demand.artifact.size,
+                    )),
+                    bytes,
+                    &control,
+                )?;
+                admitted_cached = true;
+            }
+        }
+        if admitted_cached {
+            continue;
+        }
+
+        // Submit newly exposed exact graph records even while older streams are
+        // active. The pool adds at most four easy handles and retains the rest
+        // in its bounded logical queue, refilling a slot after each completion.
+        let graph_demands = demands
+            .iter()
+            .filter(|demand| demand.role == 2)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !graph_demands.is_empty() {
+            if let Some(plan) = pool.plan_fresh(graph_demands)? {
+                reader.reserve_external(&plan.reservations())?;
+                pool.submit(plan)?;
+            }
+        }
+        if execution.has_ready_work() {
+            continue;
+        }
+        if pool.is_active() {
+            drain_pool(&mut pool, &mut execution, &control, true)?;
+            continue;
+        }
+
+        // Index requests preserve the existing measured page/frontier cache.
+        // A future mixed-owner A/B may move them into the same pool, but must
+        // retain its bounded 3:1 graph/index fairness and cache semantics.
+        let demand = demands
+            .iter()
+            .find(|demand| demand.role != 2)
+            .ok_or("pc4_online_pending_missing")?;
+        if demand.role == 1 {
+            super::http_frontier::prefetch(
+                &mut reader,
+                field_count,
+                files[2].size,
+                demand.offset,
+                demand.length,
+                execution.pending_lookup_frontier(),
+            )?;
+        }
+        let bytes = reader.read(demand.role, demand.offset, demand.length)?;
+        execution.admit_range(
+            demand.lookup_session,
+            demand.request_id,
+            206,
+            Some(content_range(
+                demand.offset,
+                demand.length,
+                demand.artifact.size,
+            )),
+            bytes,
+            &control,
+        )?;
+    }
+}
+
 fn drain_batch(
     batch: &mut Option<NativeCurlBatch>,
     execution: &mut Pc4OnlineHostExecution,
@@ -296,6 +446,26 @@ fn drain_batch(
             NativeCurlPoll::Finished => {
                 batch.take();
                 return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(feature = "native-pc4-libcurl")]
+fn drain_pool(
+    pool: &mut NativeCurlPool,
+    execution: &mut Pc4OnlineHostExecution,
+    control: &ExecutionControl,
+    wait: bool,
+) -> Result<()> {
+    loop {
+        match pool.poll(wait)? {
+            NativeCurlPoll::Pending | NativeCurlPoll::Finished => return Ok(()),
+            NativeCurlPoll::Admissions(admissions) => {
+                admit_native_ranges(execution, admissions, control)?;
+                if wait {
+                    return Ok(());
+                }
             }
         }
     }

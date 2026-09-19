@@ -6,6 +6,7 @@ const workflow = await readFile(new URL('../../.github/workflows/integration-con
 const native = await readFile(new URL('../tools/check-native-cli-contracts.ps1', import.meta.url), 'utf8');
 const nativeCMake = await readFile(new URL('../../core-c/CMakeLists.txt', import.meta.url), 'utf8');
 const pc4Contracts = await readFile(new URL('../tools/check-pc4-app-contracts.mjs', import.meta.url), 'utf8');
+const cliManifest = await readFile(new URL('../../crates/clearra-cli/Cargo.toml', import.meta.url), 'utf8');
 function isolated(source) {
   assert.match(source, /^name: Integration Contracts \(Non-publishing\)$/mu);
   assert.match(source, /^    branches: \["codex\/v0\.9\.0-stacked-on-v0\.8\.1-20260912"\]$/mu);
@@ -27,6 +28,14 @@ function isolated(source) {
     assert.match(job, /timeout-minutes: (?:20|60)/u);
     assert.match(job, /invoke-clearra-build\.ps1 -Purpose experiment/u);
   }
+  const nativeHttp2 = source.split('  native-http2-candidate:')[1]?.split(/^  [a-z][a-z-]*:/mu)[0];
+  assert.ok(nativeHttp2);
+  assert.match(nativeHttp2, /needs: source/u);
+  assert.match(nativeHttp2, /if: inputs\.pc4_native_http2 == true \|\| \(github\.event_name == 'push' && contains\(github\.event\.head_commit\.message, '\[pc4-http2-ab\]'\)\)/u);
+  assert.match(nativeHttp2, /os: \[ubuntu-latest, windows-latest\]/u);
+  assert.equal((nativeHttp2.match(/invoke-clearra-build\.ps1 -Purpose experiment/gu) ?? []).length, 2);
+  assert.ok(nativeHttp2.includes('"--features","native-pc4-libcurl"'));
+  assert.doesNotMatch(nativeHttp2, /upload-artifact|environment:|secrets\.|id-token/u);
   const preview = source.split('  preview-wasm:')[1];
   assert.ok(preview);
   assert.match(preview, /needs: source/u);
@@ -42,6 +51,12 @@ function isolated(source) {
   assert.equal((preview.match(/node scripts\/tools\/build-clearra-wasm\.mjs/gu) ?? []).length, 1);
 }
 test('integration checks have only exact-branch read-only test authority', () => isolated(workflow));
+test('persistent native PC4 transport stays opt-in and HTTP/2-capable', () => {
+  assert.match(cliManifest, /^default = \["online-pc4-tablebase"\]$/mu);
+  assert.match(cliManifest, /^native-pc4-libcurl = \["online-pc4-tablebase", "dep:curl"\]$/mu);
+  assert.match(cliManifest, /^curl = \{ version = "0\.4\.50", optional = true, features = \["http2"\] \}$/mu);
+  assert.doesNotMatch(cliManifest, /^default = .*native-pc4-libcurl/mu);
+});
 test('online PC4 discovery and real host transport contracts stay in non-publishing checks', () => {
   const source = workflow.split('  source:')[1].split('  native-cli:')[0];
   assert.ok(source.includes('scripts/release/pc4/discover-upstream-generation.test.mjs'));

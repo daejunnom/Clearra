@@ -622,8 +622,9 @@ CLI/Discord의 다음 구현 경계는 별도다. App은 이미 `pending_ranges(
 (2) 최대 16개의 generation/profile-bound range batch를 한 transport owner에 넘기며,
 (3) libcurl multi/pool 하나가 기본 4개의 transfer를 drive하고,
 (4) 첫 완료부터 exact lookup ID로 admission하는 구조다. HTTP/2를 지원하지 않는 환경은
-같은 broker가 bounded HTTP/1.1 연결을 사용하되 의미와 예산은 같아야 한다. 이 native
-owner는 아직 구현하지 않았으며, 요청별 curl thread 증대는 그 대체물이 아니다.
+같은 broker가 bounded HTTP/1.1 연결을 사용하되 의미와 예산은 같아야 한다. 요청별
+curl thread 증대는 그 대체물이 아니다. 아래 9.10의 opt-in 후보가 이 owner 경계를
+구현하지만, 기본 제품 승격과 full-search A/B는 아직 남아 있다.
 
 ### 9.7 실제 로컬 블록 A/B와 활성화 판정
 
@@ -788,3 +789,41 @@ exact positional read를 쓰고, 저장된 큰 입력 prefix에서 전체 local-
 교체/절단을 막는 동안 read-only로 만들고, Windows/Linux cold/warm cache, page fault,
 RSS와 전체 wall time을 기존 positional read와 A/B한 뒤에만 채택한다. 이 결과 없이
 `memmap2` 의존성을 제품에 추가하거나 local default를 바꾸지 않는다.
+
+### 9.10 opt-in persistent libcurl 후보
+
+유한 process wave의 tail을 코드 수준에서 분리해 측정하기 위해
+`native-pc4-libcurl` feature를 추가한다. 기본 feature는 계속
+`online-pc4-tablebase`뿐이며 이 후보는 제품 기본 경로, 배포 산출물 또는 자격 증거가
+아니다. 후보는 한 native 온라인 실행 동안 하나의 `curl::multi::Multi`를 소유하고 다음
+경계를 지킨다.
+
+- logical demand는 최대 16개, active easy handle과 HTTP/2 stream 상한은 4개다.
+- CPU/App의 ready work를 먼저 진행하고, 이미 실행 중인 transfer가 있어도 새로 드러난
+  exact graph demand를 queue에 넣는다.
+- 완료 message를 exact `(lookup_session, request_id, artifact identity, offset, length)`에
+  대조해 admission한 즉시 빈 active slot을 채운다. 다음 wave 전체를 기다리지 않는다.
+- 기존 4KiB gap/64KiB span 결합, 64MiB/100,000 request 예산, HTTPS final URL,
+  HTTP 206/Content-Range/길이 검증과 취소 시 multi owner 폐기를 유지한다.
+- 연결은 easy handle별이 아니라 같은 multi handle의 cache를 공유한다. 빌드가 HTTP/2를
+  지원하면 TLS에서 HTTP/2를 우선하고, 그렇지 않으면 같은 네 slot의 bounded HTTP/1.1
+  fallback 의미를 유지한다. HTTP/3는 이 feature에 포함하지 않는다.
+
+첫 후보는 graph transport tail만 격리한다. FHID/GOFF index page와 frontier read-ahead는
+측정된 기존 scalar cache를 계속 사용하므로 mixed graph/index dependency tail과 Web의
+3:1 bounded fairness를 아직 닫지 않는다. Ubuntu/Windows 비게시 matrix는 feature의
+compile/link와 callback 계약만 검사하며, 이어지는 실제 full-search A/B가 다음을 동시에
+만족하기 전에는 기본 승격하지 않는다.
+
+1. exact solution/count/digest와 오류 분류가 기본 유한 batch와 같다.
+2. 서로 다른 실제 demand trace에서 first result, total wall, 마지막 10% tail이 악화되지
+   않는다.
+3. queue wait p50/p95/p99, slot idle, connection/TLS count, negotiated HTTP version,
+   transferred bytes와 429를 함께 기록한다.
+4. index를 같은 owner로 옮길 때 graph 3회 뒤 index 1회를 보장하고, index page cache와
+   graph in-flight dedup을 보존한다.
+
+`reqwest`/별도 async runtime은 이 첫 A/B에서 선택하지 않는다. CLI 기본 의존 그래프와
+runtime owner를 크게 늘리지 않고 libcurl multi의 진행 중 handle 추가·connection cache
+계약을 직접 검증하기 위함이다. 반대로 이 후보가 두 release target에서 링크 비용이나
+성능 회귀를 보이면 feature를 제거하고 기존 외부 curl batch를 유지한다.
