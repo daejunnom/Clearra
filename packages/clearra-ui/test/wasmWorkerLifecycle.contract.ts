@@ -141,6 +141,48 @@ async function duplicateRunIsRejectedBeforePosting() {
   controller.dispose();
 }
 
+async function activeSearchStartsOnlyTheNewTablebaseTransportIntent() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+  assert.equal(controller.run(), true);
+
+  controller.prewarm(3, true);
+  const tablebaseHints = worker.messages.filter(
+    (message) =>
+      (message as { type?: string; tablebaseRequested?: boolean }).type === 'prewarm_runtime' &&
+      (message as { tablebaseRequested?: boolean }).tablebaseRequested === true
+  );
+  assert.equal(tablebaseHints.length, 1);
+
+  controller.prewarm(3, false);
+  assert.equal(
+    worker.messages.filter(
+      (message) => (message as { type?: string }).type === 'prewarm_runtime'
+    ).length,
+    1,
+    'turning TB off remains deferred so it cannot release active runtime tables'
+  );
+  controller.dispose();
+}
+
+async function tablebaseToggleDoesNotRotateThePrewarmingWorker() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+
+  controller.prewarm(3, true);
+  controller.prewarm(3, false);
+  assert.equal(worker.terminateCount, 0);
+  assert.deepEqual(
+    worker.messages
+      .filter((message) => (message as { type?: string }).type === 'prewarm_runtime')
+      .map((message) => (message as { tablebaseRequested?: boolean }).tablebaseRequested),
+    [true, false]
+  );
+  controller.dispose();
+}
+
 async function boundedProgressWatchdogCoversPreparationAndSerialSearchStalls() {
   resetState();
   const startupWorker = new FakeWorker();
@@ -986,6 +1028,8 @@ try {
   await ownerDisposalIsForceTermination();
   await ownerTerminationReachesDescendants();
   await duplicateRunIsRejectedBeforePosting();
+  await activeSearchStartsOnlyTheNewTablebaseTransportIntent();
+  await tablebaseToggleDoesNotRotateThePrewarmingWorker();
   await boundedProgressWatchdogCoversPreparationAndSerialSearchStalls();
   await boundedProgressWatchdogRequiresAndAcceptsChangedDistributedWork();
   await workerCreationFailureBecomesTerminalFailure();
@@ -1017,6 +1061,8 @@ console.log(
     terminal_race: 'preserved',
     descendant_release_signal: 'delivered',
     duplicate_run: 'rejected',
+    active_tablebase_transport_prewarm: 'started-without-runtime-reconfiguration',
+    tablebase_toggle_worker_lifetime: 'preserved',
     worker_creation_failure: 'reported',
     non_success_response: 'failed',
     typed_failed_response: 'preserved',

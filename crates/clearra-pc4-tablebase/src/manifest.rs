@@ -86,6 +86,39 @@ pub enum Pc4TerminalUseCase {
     SetupSearch,
 }
 
+/// Setup result meaning whose complete-candidate substitution was compared
+/// against the ordinary offline Setup engine.
+///
+/// A target-complete graph is not sufficient evidence for this claim: ranking
+/// and path-detail modes have observably different product contracts. Keeping
+/// the four identities separate prevents one differential run from silently
+/// authorizing every Setup surface.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Pc4SetupDifferentialObjective {
+    RankedJoint,
+    RankedBuildProbability,
+    RankedConditionalPc,
+    ExactPathDetail,
+}
+
+impl Pc4SetupDifferentialObjective {
+    pub const ALL: [Self; 4] = [
+        Self::RankedJoint,
+        Self::RankedBuildProbability,
+        Self::RankedConditionalPc,
+        Self::ExactPathDetail,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RankedJoint => "ranked-joint",
+            Self::RankedBuildProbability => "ranked-build-probability",
+            Self::RankedConditionalPc => "ranked-conditional-pc",
+            Self::ExactPathDetail => "exact-path-detail",
+        }
+    }
+}
+
 /// Exact graph node which represents a completed target in one qualified
 /// profile generation.
 ///
@@ -357,6 +390,71 @@ pub struct ProfileTargetCompletenessQualification {
     outgoing_edge_completeness_identity: String,
     known_answer_identity: String,
     offline_exact_parity_identity: String,
+    setup_search_differential: Option<SetupSearchDifferentialQualification>,
+}
+
+/// Objective-specific Setup equivalence evidence attached to one immutable
+/// profile/target qualification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetupSearchDifferentialQualification {
+    ranked_joint_identity: String,
+    ranked_build_probability_identity: String,
+    ranked_conditional_pc_identity: String,
+    exact_path_detail_identity: String,
+}
+
+impl SetupSearchDifferentialQualification {
+    pub fn new(
+        ranked_joint_identity: impl Into<String>,
+        ranked_build_probability_identity: impl Into<String>,
+        ranked_conditional_pc_identity: impl Into<String>,
+        exact_path_detail_identity: impl Into<String>,
+    ) -> Result<Self, ManifestError> {
+        Ok(Self {
+            ranked_joint_identity: required_identity(
+                ranked_joint_identity.into(),
+                "profile_setup_ranked_joint_differential_identity_missing",
+            )?,
+            ranked_build_probability_identity: required_identity(
+                ranked_build_probability_identity.into(),
+                "profile_setup_ranked_build_probability_differential_identity_missing",
+            )?,
+            ranked_conditional_pc_identity: required_identity(
+                ranked_conditional_pc_identity.into(),
+                "profile_setup_ranked_conditional_pc_differential_identity_missing",
+            )?,
+            exact_path_detail_identity: required_identity(
+                exact_path_detail_identity.into(),
+                "profile_setup_exact_path_detail_differential_identity_missing",
+            )?,
+        })
+    }
+
+    pub fn identity(&self, objective: Pc4SetupDifferentialObjective) -> &str {
+        match objective {
+            Pc4SetupDifferentialObjective::RankedJoint => &self.ranked_joint_identity,
+            Pc4SetupDifferentialObjective::RankedBuildProbability => {
+                &self.ranked_build_probability_identity
+            }
+            Pc4SetupDifferentialObjective::RankedConditionalPc => {
+                &self.ranked_conditional_pc_identity
+            }
+            Pc4SetupDifferentialObjective::ExactPathDetail => &self.exact_path_detail_identity,
+        }
+    }
+
+    fn retained_heap_bytes(&self) -> Option<u128> {
+        [
+            self.ranked_joint_identity.capacity(),
+            self.ranked_build_probability_identity.capacity(),
+            self.ranked_conditional_pc_identity.capacity(),
+            self.exact_path_detail_identity.capacity(),
+        ]
+        .into_iter()
+        .try_fold(0_u128, |bytes, capacity| {
+            bytes.checked_add(capacity as u128)
+        })
+    }
 }
 
 impl ProfileTargetCompletenessQualification {
@@ -389,7 +487,23 @@ impl ProfileTargetCompletenessQualification {
                 offline_exact_parity_identity.into(),
                 "profile_target_offline_exact_parity_identity_missing",
             )?,
+            setup_search_differential: None,
         })
+    }
+
+    /// Attaches Setup-only differential authority. PC target evidence cannot
+    /// be upgraded into Setup authority by adding otherwise valid identities.
+    pub fn with_setup_search_differential(
+        mut self,
+        qualification: SetupSearchDifferentialQualification,
+    ) -> Result<Self, ManifestError> {
+        if self.use_case != Pc4TerminalUseCase::SetupSearch {
+            return Err(ManifestError::SetupDifferentialUseCaseMismatch {
+                use_case: self.use_case,
+            });
+        }
+        self.setup_search_differential = Some(qualification);
+        Ok(self)
     }
 
     pub const fn use_case(&self) -> Pc4TerminalUseCase {
@@ -418,6 +532,10 @@ impl ProfileTargetCompletenessQualification {
 
     pub fn offline_exact_parity_identity(&self) -> &str {
         &self.offline_exact_parity_identity
+    }
+
+    pub const fn setup_search_differential(&self) -> Option<&SetupSearchDifferentialQualification> {
+        self.setup_search_differential.as_ref()
     }
 }
 
@@ -972,6 +1090,7 @@ impl QualifiedPc4TargetIdentity {
             outgoing_edge_completeness_identity,
             known_answer_identity,
             offline_exact_parity_identity,
+            setup_search_differential,
         } = qualification;
         [
             terminal_semantics_identity.capacity(),
@@ -983,7 +1102,11 @@ impl QualifiedPc4TargetIdentity {
         .try_fold(
             snapshot.checked_retained_heap_bytes()?,
             |bytes, capacity| bytes.checked_add(capacity as u128),
-        )
+        )?
+        .checked_add(setup_search_differential.as_ref().map_or(
+            Some(0),
+            SetupSearchDifferentialQualification::retained_heap_bytes,
+        )?)
     }
 
     pub const fn snapshot(&self) -> &QualifiedSnapshotIdentity {
@@ -1004,6 +1127,15 @@ impl QualifiedPc4TargetIdentity {
 
     pub const fn qualification(&self) -> &ProfileTargetCompletenessQualification {
         &self.qualification
+    }
+
+    pub fn setup_differential_identity(
+        &self,
+        objective: Pc4SetupDifferentialObjective,
+    ) -> Option<&str> {
+        self.qualification
+            .setup_search_differential()
+            .map(|qualification| qualification.identity(objective))
     }
 
     pub const fn terminal_field(&self) -> Pc4TerminalFieldIdentity {
@@ -1115,6 +1247,9 @@ pub enum ManifestError {
         use_case: Pc4TerminalUseCase,
         target_lines: Pc4TargetLines,
     },
+    SetupDifferentialUseCaseMismatch {
+        use_case: Pc4TerminalUseCase,
+    },
     TerminalFieldHashOutsideDomain {
         field_hash: u64,
     },
@@ -1153,6 +1288,9 @@ impl ManifestError {
             }
             Self::DuplicateTargetQualification { .. } => {
                 "pc4_online_duplicate_target_qualification"
+            }
+            Self::SetupDifferentialUseCaseMismatch { .. } => {
+                "pc4_online_setup_differential_use_case_mismatch"
             }
             Self::TerminalFieldHashOutsideDomain { .. } => {
                 "pc4_online_terminal_field_hash_outside_domain"
@@ -1449,6 +1587,16 @@ pub(crate) mod tests {
         .expect("synthetic profile-target qualification")
     }
 
+    fn setup_differential_qualification() -> SetupSearchDifferentialQualification {
+        SetupSearchDifferentialQualification::new(
+            "setup-differential:ranked-joint",
+            "setup-differential:ranked-build-probability",
+            "setup-differential:ranked-conditional-pc",
+            "setup-differential:exact-path-detail",
+        )
+        .expect("synthetic Setup differential qualification")
+    }
+
     pub(crate) fn activated_snapshot(field_count: u32, graph_bytes: u64) -> ActivatedSnapshot {
         activated_snapshot_with_manifest_content(
             field_count,
@@ -1646,9 +1794,10 @@ pub(crate) mod tests {
             "capacity-test",
             "capacity-manifest",
             Pc4RuleProfile::Srs,
-            Pc4TerminalUseCase::PcSearch,
+            Pc4TerminalUseCase::SetupSearch,
             1,
         );
+        target.qualification.setup_search_differential = Some(setup_differential_qualification());
         let attestation = &mut target.snapshot.attestation;
         let mut snapshot_capacity = 0_u128;
         for value in [
@@ -1675,6 +1824,20 @@ pub(crate) mod tests {
             &mut qualification.offline_exact_parity_identity,
         ] {
             value.reserve_exact(2048);
+            assert!(value.capacity() > value.len());
+            target_capacity += value.capacity() as u128;
+        }
+        let setup = qualification
+            .setup_search_differential
+            .as_mut()
+            .expect("Setup memory fixture carries objective evidence");
+        for value in [
+            &mut setup.ranked_joint_identity,
+            &mut setup.ranked_build_probability_identity,
+            &mut setup.ranked_conditional_pc_identity,
+            &mut setup.exact_path_detail_identity,
+        ] {
+            value.reserve_exact(1024);
             assert!(value.capacity() > value.len());
             target_capacity += value.capacity() as u128;
         }
@@ -1992,6 +2155,86 @@ pub(crate) mod tests {
                 target_lines: Pc4TargetLines::new(3).expect("three rows"),
             })
         );
+    }
+
+    #[test]
+    fn setup_differential_authority_is_setup_only_and_objective_specific() {
+        let differential = setup_differential_qualification();
+        assert_eq!(
+            target_qualification(4).with_setup_search_differential(differential.clone()),
+            Err(ManifestError::SetupDifferentialUseCaseMismatch {
+                use_case: Pc4TerminalUseCase::PcSearch,
+            })
+        );
+
+        let setup = target_qualification_for(Pc4TerminalUseCase::SetupSearch, 4)
+            .with_setup_search_differential(differential)
+            .expect("Setup target accepts objective evidence");
+        let profile = qualified_profile(
+            Pc4RuleProfile::Jstris180,
+            2,
+            8,
+            GraphTargetEncoding::U24LittleEndian,
+        )
+        .with_target_qualifications(vec![setup])
+        .expect("qualified Setup target");
+        let profiles = Pc4RuleProfile::ALL
+            .into_iter()
+            .map(|candidate| {
+                if candidate == Pc4RuleProfile::Jstris180 {
+                    ProfileAvailability::qualified(profile.clone())
+                } else {
+                    ProfileAvailability::Unsupported {
+                        profile: candidate,
+                        reason: UnsupportedProfileReason::MissingProfileArtifacts,
+                    }
+                }
+            })
+            .collect();
+        let activated = DatasetSnapshotManifest::new(
+            SnapshotIdentity::new(
+                "synthetic/repository",
+                SYNTHETIC_REVISION_A,
+                "setup-objective-generation",
+            )
+            .expect("snapshot identity"),
+            ManifestContentIdentity::new("setup-objective-manifest").expect("manifest identity"),
+            profiles,
+        )
+        .expect("Setup objective manifest")
+        .activate(&mut SyntheticVerifier)
+        .expect("Setup objective snapshot");
+        let target = activated
+            .qualified_target(
+                Pc4RuleProfile::Jstris180,
+                Pc4TerminalUseCase::SetupSearch,
+                Pc4TargetLines::new(4).expect("four rows"),
+            )
+            .expect("qualified Setup identity");
+
+        for (objective, expected) in [
+            (
+                Pc4SetupDifferentialObjective::RankedJoint,
+                "setup-differential:ranked-joint",
+            ),
+            (
+                Pc4SetupDifferentialObjective::RankedBuildProbability,
+                "setup-differential:ranked-build-probability",
+            ),
+            (
+                Pc4SetupDifferentialObjective::RankedConditionalPc,
+                "setup-differential:ranked-conditional-pc",
+            ),
+            (
+                Pc4SetupDifferentialObjective::ExactPathDetail,
+                "setup-differential:exact-path-detail",
+            ),
+        ] {
+            assert_eq!(
+                target.setup_differential_identity(objective),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

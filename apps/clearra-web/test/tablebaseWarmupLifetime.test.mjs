@@ -10,6 +10,10 @@ const assets = await readFile(
   new URL('../src/workers/pc4TablebaseAssets.ts', import.meta.url),
   'utf8'
 );
+const controller = await readFile(
+  new URL('../../../packages/clearra-ui/src/lib/wasm/WasmTerminalWorkerController.ts', import.meta.url),
+  'utf8'
+);
 
 function functionBody(name) {
   const marker = `function ${name}(`;
@@ -38,6 +42,14 @@ test('turning TB off preserves worker-owned online preparation', () => {
     warmup,
     /generation !== tablebaseWarmupGeneration \|\| !tablebaseRequested/u
   );
+
+  const controllerPrewarmStart = controller.indexOf('  prewarm(');
+  const controllerPrewarmEnd = controller.indexOf('\n  cancel()', controllerPrewarmStart);
+  const controllerPrewarm = controller.slice(controllerPrewarmStart, controllerPrewarmEnd);
+  assert.doesNotMatch(
+    controllerPrewarm,
+    /tablebaseChanged[\s\S]*disposeOwnedWorker/u
+  );
 });
 
 test('TB transport handshake starts before the WASM capability join', () => {
@@ -50,6 +62,36 @@ test('TB transport handshake starts before the WASM capability join', () => {
 
   const transport = functionBody('startTablebaseTransportWarmup');
   assert.doesNotMatch(transport, /ClearraWasmModule|configure_online_pc4/u);
+});
+
+test('turning TB on during another job still starts transport preparation', () => {
+  const prewarm = functionBody('startRuntimePrewarm');
+  const activeGuard = prewarm.indexOf('if (active)');
+  const activeTransportIntent = prewarm.indexOf(
+    'if (requestedTablebase && !tablebaseRequested) setTablebaseRequested(true)',
+    activeGuard
+  );
+  assert.ok(activeGuard >= 0, 'active-job guard must exist');
+  assert.ok(
+    activeTransportIntent > activeGuard,
+    'the active-job branch must start the requested TB transport warmup'
+  );
+  assert.ok(
+    activeTransportIntent < prewarm.indexOf('return;', activeGuard),
+    'transport warmup must start before returning from the active-job branch'
+  );
+  assert.match(
+    controller,
+    /if \(this\.runInFlight\)[\s\S]*tablebaseChanged && tablebaseRequested && this\.worker[\s\S]*postPrewarmRuntime\(/u
+  );
+  const controllerPrewarmStart = controller.indexOf('  prewarm(');
+  const controllerActiveStart = controller.indexOf('if (this.runInFlight)', controllerPrewarmStart);
+  const controllerActiveEnd = controller.indexOf('\n      return;', controllerActiveStart);
+  assert.ok(controllerActiveStart >= 0 && controllerActiveEnd > controllerActiveStart);
+  assert.doesNotMatch(
+    controller.slice(controllerActiveStart, controllerActiveEnd),
+    /prewarmingWorker\s*=/u
+  );
 });
 
 test('only terminal worker lifecycle owners discard online preparation', () => {

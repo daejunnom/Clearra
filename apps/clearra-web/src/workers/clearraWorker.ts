@@ -322,7 +322,15 @@ function startRuntimePrewarm(
   );
   requestedPrewarmWorkerCount = boundedWorkerCount;
   deferredTablebaseRequested = requestedTablebase;
-  if (active) return;
+  if (active) {
+    // A running non-TB search still leaves the network handshake on the
+    // critical path of the next explicit TB request. Starting transport
+    // preparation is safe because it owns no WASM/search state; defer only
+    // the feature-off transition so an active TB job cannot lose its runtime
+    // tables underneath it.
+    if (requestedTablebase && !tablebaseRequested) setTablebaseRequested(true);
+    return;
+  }
   setTablebaseRequested(requestedTablebase);
   if (
     !normalizedWarmupPolicy.cpuWarmup &&

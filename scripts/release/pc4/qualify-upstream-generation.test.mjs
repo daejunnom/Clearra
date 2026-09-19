@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   PC4_PC_TERMINAL_SEMANTICS,
   PC4_READER_CONTRACT,
+  PC4_SETUP_TARGET_QUALIFICATION_RECEIPT_SCHEMA,
+  PC4_SETUP_TERMINAL_SEMANTICS,
   PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA,
   qualifyPc4UpstreamGeneration,
   createPc4RangeReader
@@ -40,6 +42,21 @@ function targetReceipt(discovery) {
     offline_exact_parity_identity: `sha256:${'23456789abcdef01'.repeat(4)}`,
   };
 }
+function setupTargetReceipt(discovery) {
+  const receipt = targetReceipt(discovery);
+  return {
+    ...receipt,
+    schema: PC4_SETUP_TARGET_QUALIFICATION_RECEIPT_SCHEMA,
+    use_case: 'setup-search',
+    terminal_semantics_identity: PC4_SETUP_TERMINAL_SEMANTICS,
+    setup_differential_identities: {
+      ranked_joint_identity: `sha256:${'3456789abcdef012'.repeat(4)}`,
+      ranked_build_probability_identity: `sha256:${'456789abcdef0123'.repeat(4)}`,
+      ranked_conditional_pc_identity: `sha256:${'56789abcdef01234'.repeat(4)}`,
+      exact_path_detail_identity: `sha256:${'6789abcdef012345'.repeat(4)}`,
+    },
+  };
+}
 test('completion declaration and reader qualification do not mint PC target authority', async () => {
   const f = data();
   const result = await qualifyPc4UpstreamGeneration({}, { discover: async () => f.discovery, reader: f.reader });
@@ -62,6 +79,38 @@ test('an exact generation-bound receipt alone enables its PC target', async () =
   });
   assert.deepEqual(result.profiles[3].pc_search_target_lines, [4]);
   assert.deepEqual(result.profiles[3].target_qualification_receipts, [receipt]);
+});
+
+test('Setup activation is separate and requires every objective differential identity', async () => {
+  const f = data();
+  const pc = targetReceipt(f.discovery);
+  const setup = setupTargetReceipt(f.discovery);
+  const result = await qualifyPc4UpstreamGeneration({}, {
+    discover: async () => f.discovery,
+    reader: f.reader,
+    targetQualificationReceipts: [setup, pc],
+  });
+  assert.deepEqual(result.profiles[3].pc_search_target_lines, [4]);
+  assert.deepEqual(result.profiles[3].setup_search_target_lines, [4]);
+  assert.deepEqual(result.profiles[3].target_qualification_receipts, [pc, setup]);
+
+  for (const mutate of [
+    receipt => { delete receipt.setup_differential_identities.exact_path_detail_identity; },
+    receipt => { receipt.setup_differential_identities.ranked_joint_identity = 'placeholder'; },
+    receipt => { receipt.schema = PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA; },
+    receipt => { receipt.use_case = 'pc-search'; },
+  ]) {
+    const candidate = setupTargetReceipt(f.discovery);
+    mutate(candidate);
+    await assert.rejects(
+      qualifyPc4UpstreamGeneration({}, {
+        discover: async () => f.discovery,
+        reader: f.reader,
+        targetQualificationReceipts: [candidate],
+      }),
+      error => error.code === 'pc4_online_target_qualification_invalid',
+    );
+  }
 });
 
 test('stale, cross-profile, placeholder, duplicate, and terminal-mismatched receipts fail closed', async () => {

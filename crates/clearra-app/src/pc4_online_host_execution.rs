@@ -5,6 +5,7 @@ use crate::pc4_compact_candidate_session::{CompactSessionLimits, Pc4CompactCandi
 use crate::*;
 use clearra_core_domain::board::standard_pc_board::StandardPcBoard;
 use clearra_pc4_tablebase::*;
+use clearra_problem::compile_setup_search_conditions;
 use std::{
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -12,7 +13,6 @@ use std::{
 
 pub struct Pc4OnlineHostExecution {
     context: AppContext,
-    request: AppRequest,
     generation: PinnedPc4Generation,
     source: PcCandidateSourceBinding,
     prepared: Pc4PreparedOnlineInput,
@@ -21,10 +21,89 @@ pub struct Pc4OnlineHostExecution {
     lookup: Option<AppOnlinePc4LookupSession>,
     candidates: Option<AppOnlinePc4CandidateSession>,
     compact: Option<Pc4CompactCandidateSession>,
-    product: Option<Pc4CandidateProductExecution>,
+    completion: Pc4OnlineCompletion,
     pending: Option<RangeRequest>,
     ordinal: u32,
     lookup_id: Option<LookupSessionId>,
+}
+
+enum Pc4OnlineCompletion {
+    Search {
+        request: AppRequest,
+        product: Option<Pc4CandidateProductExecution>,
+    },
+    Setup {
+        preparation: Option<PreparedDistributedSetupSearch>,
+        request: SetupPcAccelerationRequestBinding,
+        qualification: SetupPcAccelerationCompatibilityProof,
+    },
+}
+
+impl Pc4OnlineCompletion {
+    fn accept_candidates<G: PcCandidatePageGuard>(
+        &mut self,
+        context: &AppContext,
+        input: PcCandidateReducerInput,
+        guard: &G,
+        control: &ExecutionControl,
+    ) -> Result<Option<AppResponse>, &'static str> {
+        match self {
+            Self::Search { request, product } => {
+                *product = Some(
+                    context
+                        .start_pc4_owned_candidate_product(request.clone(), input, guard, control)
+                        .map_err(|error| error.reason())?,
+                );
+                Ok(None)
+            }
+            Self::Setup {
+                preparation,
+                request,
+                qualification,
+            } => {
+                let prepared = match admit_setup_pc_candidate_input(
+                    request.clone(),
+                    SetupPcCandidateAvailability::Complete(input),
+                    Some(qualification),
+                ) {
+                    SetupPcAccelerationDisposition::Admitted(prepared) => prepared,
+                    SetupPcAccelerationDisposition::ReferToOfflineFallbackOwner { reason } => {
+                        return Err(reason.reason())
+                    }
+                    SetupPcAccelerationDisposition::Cancelled => {
+                        return Err("setup_pc_acceleration_cancelled")
+                    }
+                };
+                let preparation = preparation
+                    .take()
+                    .ok_or("setup_pc_acceleration_already_completed")?;
+                let query = preparation.query().clone();
+                let workers = preparation.workers();
+                let (result, _) =
+                    execute_prepared_setup_pc_candidate_input(prepared, &query, workers, control)
+                        .map_err(|error| error.reason())?;
+                Ok(Some(preparation.complete(result)))
+            }
+        }
+    }
+
+    fn advance_product<G: PcCandidatePageGuard>(
+        &mut self,
+        work: usize,
+        guard: &G,
+        control: &ExecutionControl,
+    ) -> Result<Option<CooperativeAppAdvance>, &'static str> {
+        match self {
+            Self::Search {
+                product: Some(product),
+                ..
+            } => product
+                .advance(work, guard, control)
+                .map(Some)
+                .map_err(|error| error.reason()),
+            Self::Search { product: None, .. } | Self::Setup { .. } => Ok(None),
+        }
+    }
 }
 
 impl AppContext {
@@ -42,6 +121,9 @@ impl AppContext {
         snapshot: ActivatedSnapshot,
         surface: Pc4InputSurface,
     ) -> Result<Pc4OnlineHostExecution, &'static str> {
+        if matches!(request.command(), AppCommand::Setup(_)) {
+            return self.start_setup_pc4_execution(request, snapshot, surface);
+        }
         if !matches!(
             request.command(),
             AppCommand::Pc(_) | AppCommand::Scenario(_)
@@ -161,7 +243,6 @@ impl AppContext {
         .map_err(|e| e.reason())?;
         Ok(Pc4OnlineHostExecution {
             context: self.clone(),
-            request,
             generation,
             source,
             prepared,
@@ -170,7 +251,135 @@ impl AppContext {
             lookup: Some(lookup),
             candidates: None,
             compact: None,
-            product: None,
+            completion: Pc4OnlineCompletion::Search {
+                request,
+                product: None,
+            },
+            pending: None,
+            ordinal: 0,
+            lookup_id: None,
+        })
+    }
+
+    fn start_setup_pc4_execution(
+        &self,
+        request: AppRequest,
+        snapshot: ActivatedSnapshot,
+        surface: Pc4InputSurface,
+    ) -> Result<Pc4OnlineHostExecution, &'static str> {
+        let query = match request.command() {
+            AppCommand::Setup(command) if command.query().tablebase_requested() => {
+                command.query().clone()
+            }
+            AppCommand::Setup(_) => return Err("setup_pc_acceleration_not_requested"),
+            _ => return Err("pc4_online_product_not_supported"),
+        };
+        let profile = crate::setup_pc_candidate_execution::query_profile(query.rule().id())
+            .ok_or("pc4_online_rule_not_supported")?;
+        let board_size = query.board_size();
+        if board_size.width() != 10 || board_size.height() != 4 || query.target().lines() != 4 {
+            return Err("setup_pc_acceleration_target_not_supported");
+        }
+        let target = snapshot
+            .qualified_target(
+                profile,
+                Pc4TerminalUseCase::SetupSearch,
+                Pc4TargetLines::new(4).map_err(|_| "setup_pc_acceleration_target_not_supported")?,
+            )
+            .map_err(|_| "setup_pc_acceleration_not_qualified")?;
+        let mut conditions = compile_setup_search_conditions(&query)
+            .map_err(|_| "setup_pc_acceleration_compile_failed")?;
+        if conditions.len() != 1 {
+            return Err("setup_pc_acceleration_condition_family_not_supported");
+        }
+        let condition = conditions
+            .pop()
+            .ok_or("setup_pc_acceleration_condition_family_not_supported")?;
+        let problem = Arc::new(condition.problem().clone());
+        let mut pattern_preparation = Pc4CompiledPatternPreparation::begin(
+            problem,
+            Pc4CompiledPatternLimits::new(nz(5_000_000), nz(11), nz(256)),
+        )
+        .map_err(|error| error.reason())?;
+        pattern_preparation
+            .advance(nz(256), &|| false)
+            .map_err(|error| error.reason())?;
+        if !pattern_preparation.is_complete() {
+            return Err("pc4_online_explicit_pattern_preparation_required");
+        }
+        let pattern = pattern_preparation
+            .finish()
+            .map_err(|error| error.reason())?;
+        let input_identity = *pattern.identity().as_bytes();
+        let prepared =
+            Pc4PreparedOnlineInput::for_setup_compiled_pattern(target.clone(), surface, pattern)
+                .map_err(|error| error.reason())?;
+        let board = StandardPcBoard::from_words(4, [0, 0, 0, 0])
+            .map_err(|_| "pc4_online_initial_board_invalid")?;
+        let problem = match prepared.queue() {
+            Pc4PreparedQueueInput::CompiledPattern(pattern) => pattern.problem(),
+            _ => return Err("setup_pc_acceleration_compiled_pattern_required"),
+        };
+        let hold = crate::pc_candidate_execution_bridge::fixed_queue_hold_state(
+            problem.core_query().allow_hold(),
+            problem.core_query().hold_state(),
+        );
+        let source = PcCandidateSourceBinding::online_pc4_for_prepared_input(
+            PcCandidateSessionId::new(NonZeroU64::new(1).unwrap()),
+            PcCandidateSourceIdentity::from_sha256(input_identity),
+            &prepared,
+            board,
+            hold,
+        )
+        .map_err(|_| "pc4_online_source_binding_failed")?;
+        let setup_request = SetupPcAccelerationRequestBinding::new(
+            source.request_identity(),
+            profile,
+            0,
+            Pc4TargetLines::new(4).map_err(|_| "setup_pc_acceleration_target_not_supported")?,
+            crate::setup_pc_candidate_execution::query_objective(&query),
+        );
+        let qualification = SetupPcAccelerationCompatibilityProof::from_qualified_target(
+            setup_request.clone(),
+            &source,
+            target.clone(),
+        )
+        .map_err(SetupPcNoAccelerationReason::reason)?;
+        let preparation = match self.prepare_distributed_setup_search(request) {
+            DistributedSetupPreparation::Search(preparation) => preparation,
+            DistributedSetupPreparation::Ready(_) => {
+                return Err("setup_pc_acceleration_request_rejected")
+            }
+        };
+        let generation = pin(snapshot)?;
+        let hash = clearra_board64_mask_to_hydra_field_hash_v1(0)
+            .map_err(|_| "pc4_online_initial_board_invalid")?;
+        let lookup = AppOnlinePc4LookupSession::start(
+            generation.clone(),
+            Pc4OnlineLookupRequest::new(
+                LookupSessionId::new(1).unwrap(),
+                target,
+                hash,
+                range_limits(),
+                Pc4OfflineFallbackAuthorization::NotAuthorized,
+            ),
+        )
+        .map_err(|error| error.reason())?;
+        Ok(Pc4OnlineHostExecution {
+            context: self.clone(),
+            generation,
+            source,
+            prepared,
+            board,
+            hold,
+            lookup: Some(lookup),
+            candidates: None,
+            compact: None,
+            completion: Pc4OnlineCompletion::Setup {
+                preparation: Some(preparation),
+                request: setup_request,
+                qualification,
+            },
             pending: None,
             ordinal: 0,
             lookup_id: None,
@@ -233,26 +442,20 @@ impl Pc4OnlineHostExecution {
                     .take()
                     .expect("completed compact session")
                     .into_reducer_input(&guard)?;
-                self.product = Some(
-                    self.context
-                        .start_pc4_owned_candidate_product(
-                            self.request.clone(),
-                            input,
-                            &guard,
-                            control,
-                        )
-                        .map_err(|e| e.reason())?,
-                );
+                if let Some(response) =
+                    self.completion
+                        .accept_candidates(&self.context, input, &guard, control)?
+                {
+                    return Ok(CooperativeAppAdvance::Completed(response));
+                }
             }
             return Ok(CooperativeAppAdvance::Pending);
         }
         if self.pending.is_some() {
             return Ok(CooperativeAppAdvance::Pending);
         }
-        if let Some(product) = &mut self.product {
-            return product
-                .advance(work, &guard, control)
-                .map_err(|e| e.reason());
+        if let Some(advance) = self.completion.advance_product(work, &guard, control)? {
+            return Ok(advance);
         }
         if let Some(lookup) = &self.lookup {
             match lookup.step() {
@@ -342,6 +545,7 @@ impl Pc4OnlineHostExecution {
             }
             return Ok(CooperativeAppAdvance::Pending);
         }
+        let mut completed = false;
         let session = self
             .candidates
             .as_mut()
@@ -351,20 +555,26 @@ impl Pc4OnlineHostExecution {
                 self.pending = Some(range);
             }
             AppOnlinePc4CandidateStep::Complete { .. } => {
-                let input = session
-                    .completed_reducer_input()
-                    .ok_or("pc4_online_incomplete_candidate_source")?;
-                self.product = Some(
-                    self.context
-                        .start_pc4_candidate_product(self.request.clone(), input, &guard, control)
-                        .map_err(|e| e.reason())?,
-                );
-                self.candidates = None;
+                completed = true;
             }
             AppOnlinePc4CandidateStep::Failed(e) => return Err(e.reason()),
             AppOnlinePc4CandidateStep::Miss { .. } => return Err("pc4_online_field_miss"),
             AppOnlinePc4CandidateStep::Cancelled => return Ok(CooperativeAppAdvance::Cancelled),
             _ => {}
+        }
+        if completed {
+            let input = self
+                .candidates
+                .take()
+                .ok_or("pc4_online_execution_state")?
+                .into_completed_reducer_input(&guard)
+                .map_err(|error| error.reason())?;
+            if let Some(response) =
+                self.completion
+                    .accept_candidates(&self.context, input, &guard, control)?
+            {
+                return Ok(CooperativeAppAdvance::Completed(response));
+            }
         }
         Ok(CooperativeAppAdvance::Pending)
     }

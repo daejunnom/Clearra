@@ -88,9 +88,12 @@
     profile.status === 'ready' &&
     profile.pcSearchTargetLines?.includes(request.lines)
   );
-  $: if (!pcTablebaseAvailable && request.tablebaseEnabled) {
-    updateRequest({ ...request, tablebaseEnabled: false });
-  }
+  $: tablebaseQualificationSettled =
+    $wasmWorkerState.tablebaseWarmup.status === 'ready' ||
+    $wasmWorkerState.tablebaseWarmup.status === 'unavailable';
+  $: tablebaseBlocked = request.tablebaseEnabled &&
+    tablebaseQualificationSettled &&
+    !pcTablebaseAvailable;
   $: validationCodes = workspaceValidationCodes(request, runtime);
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: label = (
@@ -144,18 +147,13 @@
 
   function updateRequest(next: SolverWorkspaceRequest) {
     const targetIdentityChanged = next.rule !== request.rule || next.lines !== request.lines;
-    const targetQualified = tablebaseProfiles.some(profile =>
-      profile.profile === next.rule &&
-      profile.status === 'ready' &&
-      profile.pcSearchTargetLines?.includes(next.lines)
-    );
-    const qualifiedNext = !targetIdentityChanged && targetQualified
-      ? next
-      : { ...next, tablebaseEnabled: false };
-    const useAllChanged = qualifiedNext.useAllLogicalProcessors !== request.useAllLogicalProcessors;
+    const targetBoundNext = targetIdentityChanged
+      ? { ...next, tablebaseEnabled: false }
+      : next;
+    const useAllChanged = targetBoundNext.useAllLogicalProcessors !== request.useAllLogicalProcessors;
     const draftRequest = useAllChanged
-      ? { ...qualifiedNext, workers: automaticWorkerCount(qualifiedNext.useAllLogicalProcessors) }
-      : qualifiedNext;
+      ? { ...targetBoundNext, workers: automaticWorkerCount(targetBoundNext.useAllLogicalProcessors) }
+      : targetBoundNext;
     const workersChanged = draftRequest.workers !== request.workers;
     const tablebaseChanged = draftRequest.tablebaseEnabled !== request.tablebaseEnabled;
     request = draftRequest;
@@ -208,7 +206,7 @@
   }
 
   async function run() {
-    if (active || validationCodes.length) return;
+    if (active || validationCodes.length || tablebaseBlocked) return;
     const automaticRequest = normalizeWorkspaceRequest(withAutomaticBackend(request));
     const normalized = normalizeWorkspaceInitialField(automaticRequest);
     const executionRequest = normalized.request;
@@ -292,7 +290,7 @@
     dimensionMax={6}
     cancelLabel={label('cancel')}
     runLabel={label('run')}
-    runDisabled={validationCodes.length > 0}
+    runDisabled={validationCodes.length > 0 || tablebaseBlocked}
     on:language={(event) => setLanguage(event.detail)}
     on:dimension={(event) => setLines(event.detail)}
     on:cancel={cancel}

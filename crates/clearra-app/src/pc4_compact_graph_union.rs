@@ -16,8 +16,7 @@ use clearra_core_domain::{
 use clearra_pc4_tablebase::{
     clearra_board64_mask_to_hydra_field_hash_v1, materialize_qualified_graph_edge,
     read_qualified_pc4_adjacency, ClearraPlacementIdentity, FixedQueueTraversalPageError,
-    Pc4RowFrame, Pc4TerminalUseCase, PlacementMaterializationError, QualifiedPc4GraphEdge,
-    QualifiedPc4TargetIdentity,
+    Pc4RowFrame, PlacementMaterializationError, QualifiedPc4GraphEdge, QualifiedPc4TargetIdentity,
 };
 use clearra_supply::pattern_universe::{
     CompactPatternUnionError, CompactPatternUnionFrontier, CompactPatternUnionLanguage,
@@ -287,10 +286,7 @@ impl Pc4CompactGraphUnion {
             return Ok(None);
         };
         let target = prepared.target();
-        if target.use_case() != Pc4TerminalUseCase::PcSearch
-            || cache.target() != target
-            || start_field >= cache.field_count()
-        {
+        if cache.target() != target || start_field >= cache.field_count() {
             return Err(contract("pc4_compact_union_target_mismatch"));
         }
         check_guard(source, target, guard)?;

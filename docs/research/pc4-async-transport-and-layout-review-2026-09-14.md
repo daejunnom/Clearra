@@ -856,7 +856,10 @@ HTTPS 병목은 (1) revision discovery, (2) DNS/TCP/TLS/ALPN, (3) FHID/GOFF 의�
   무기한 연결 보장이 아니다.
 - Web은 사용자가 TB를 켜는 순간 generation discovery·header qualification을 WASM
   컴파일 및 worker warmup과 겹쳐 시작한다. WASM capability 검사는 두 준비 경로가 합류한
-  뒤에 별도로 수행한다. TB를 다시 꺼도 immutable generation asset과 진행 중 warmup은
+  뒤에 별도로 수행한다. 실행 중인 다른 검색이 있더라도 상위 controller가 transport-only
+  prewarm 메시지를 즉시 보내며, worker는 활성 검색의 WASM table을 건드리지 않고
+  discovery/handshake만 먼저 시작한다. 이 메시지는 runtime-prewarm 완료를 가장하지 않으며
+  전체 runtime 재설정은 현재 검색 종료 뒤로 미룬다. TB를 다시 꺼도 immutable generation asset과 진행 중 warmup은
   worker disposal/fail-close 전까지 유지한다. 따라서 재활성화는 같은 worker cache를
   재사용하지만, 브라우저의 HTTP connection pool/socket 만료는 애플리케이션이 소유하지
   않는다. 마지막 온라인 접촉에서 30초 이상 지난 뒤 재활성화하면 검색보다 먼저 자격된
@@ -943,9 +946,12 @@ receipt가 있으면 A/B, offline이 동일 고정 예산에서 typed resource-l
   exact target-qualified가 아니므로 두 목록 모두 `[]`다. 13개 omitted transition을 포함한
   exact outgoing-edge/known-answer/offline-parity receipt가 추가될 때 PC Search 4L만
   독립적으로 `[4]`가 될 수 있고, 그 자격을 Setup 자격으로 빌려 쓸 수 없다.
-- Web Setup control은 선택한 profile의 `setup_search_target_lines`에 4가 있을 때만 켜지며,
-  이전 상태나 복원 상태에 남은 opt-in도 자격이 없으면 즉시 해제한다. CLI의 명시 요청은
-  `setup_pc_acceleration_not_qualified`로 fail-closed되고 offline을 자동 시작하지 않는다.
+- Web PC/Setup control은 아직 generation을 읽지 않은 상태에서도 사용자가 opt-in할 수 있다.
+  opt-in이 먼저 transport prewarm을 시작하고, loading 동안에는 unavailable로 오표시하지
+  않는다. qualification이 끝난 뒤 선택한 profile의 해당 target 목록에 목표가 없으면 실행
+  버튼을 막고 unavailable을 표시한다. 따라서 최초 handshake를 시작하려면 이미 자격 정보가
+  필요했던 순환 의존은 없다. CLI의 명시 요청은 `setup_pc_acceleration_not_qualified`로
+  fail-closed되고 offline을 자동 시작하지 않는다.
 - `scripts/release/pc4/setup-ab-receipt.mjs`는 위 필드를 exact-key로 검증한다. 양쪽 완료의
   digest/candidate/coverage가 모두 같을 때만 `exact-parity`와 activation evidence가 된다.
   offline timeout/resource-limit와 TB 완료 조합은 `feasibility-dominance`일 뿐 activation
@@ -971,6 +977,14 @@ admit한다. native opt-in 경로도 qualification과 검색이 같은 multi con
 dead-peer 검출로만 유지하고, TFO는 TLS session cache 손실과 네트워크 호환성 위험 때문에
 기본 off를 유지한다.
 
+UI부터 worker까지의 호출 경계도 다시 추적했다. 실행 중 `prewarm()`을 모두 보류하던 상위
+controller를 수정해 **TB off→on 전이만** 활성 worker에 즉시 전달하고, off 전이와 worker
+pool 재설정은 기존처럼 terminal 뒤에 수행한다. worker 내부의 active-job branch와 상위
+controller 양쪽에 회귀 계약을 두었다. generation discovery 전 체크박스를 비활성화하던
+순환도 제거했으며, exact target 자격이 없는 generation은 탐색 실행만 계속 fail-closed한다.
+이 변경은 handshake 시작 시점을 앞당기지만 브라우저 socket 수명을 보장하거나 full-search
+tail 해결을 주장하지 않는다.
+
 전송 실패는 이제 HTTP 429의 bounded numeric `Retry-After`, offline, timeout, 일시적인
 408/425/5xx unavailable을 WASM/App의 typed Range failure로 전달한다. 이 경계는 offline
 탐색을 자동 시작하지 않는다. 잘못된 Content-Range, whole-body 200, immutable identity
@@ -982,3 +996,10 @@ exact target receipt가 없어 실제 HF Setup arm을 실행하면 안 된다. �
 arm이 모두 완료될 때만 수치 A/B를 남기고, offline이 고정 자원에서 typed timeout 또는
 resource-limit으로 끝나지만 target-qualified TB arm이 exact 완료한 최초 기록은 수치 배속이
 아닌 `feasibility-dominance`로만 분류한다.
+
+Setup 실행 ingress는 empty 10×4/4L과 한 compiled condition으로 제한해 연결했다. 명시 TB
+요청이 snapshot 없이 WASM에 들어오면 이제 `pc4_online_generation_unavailable`로 닫히며
+오프라인 Setup으로 조용히 하강하지 않는다. 현재 generation의
+`setup_search_target_lines`가 비어 있으므로 실제 HF arm 또는 feasibility-dominance receipt는
+아직 만들 수 없다. 첫 기록은 동일 입력·고정 자원에서 offline typed timeout/resource-limit과
+target-qualified TB exact completion이 동시에 남는 시점에만 생성한다.

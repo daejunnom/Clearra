@@ -100,6 +100,19 @@
   $: runtimeView = runtime === 'web'
     ? workspaceViewFromWasm($wasmWorkerState)
     : workspaceViewFromDesktop($desktopJobState);
+  $: setupTablebaseAvailable = runtime === 'web' &&
+    ($wasmWorkerState.tablebaseWarmup.profiles ?? []).some(profile =>
+      profile.profile === request.rule &&
+      profile.status === 'ready' &&
+      profile.setupSearchTargetLines?.includes(4)
+    );
+  $: tablebaseQualificationSettled = runtime === 'web' && (
+    $wasmWorkerState.tablebaseWarmup.status === 'ready' ||
+    $wasmWorkerState.tablebaseWarmup.status === 'unavailable'
+  );
+  $: tablebaseBlocked = request.tablebaseEnabled &&
+    tablebaseQualificationSettled &&
+    !setupTablebaseAvailable;
   $: validationCodes = setupFinderValidationCodes(request);
   $: mainJobActive = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: active = mainJobActive || detailWorkerBusy;
@@ -176,7 +189,7 @@
   }
 
   async function run() {
-    if (active || validationCodes.length) return;
+    if (active || validationCodes.length || tablebaseBlocked) return;
     disposeDetailWorker();
     pathDetails = {};
     resultRequest = { ...request };
@@ -623,7 +636,7 @@
   showDimension={false}
   cancelLabel={label('cancel')}
   runLabel={label('run')}
-  runDisabled={validationCodes.length > 0}
+  runDisabled={validationCodes.length > 0 || tablebaseBlocked}
   on:language={(event) => setLanguage(event.detail)}
   on:cancel={cancel}
   on:run={run}

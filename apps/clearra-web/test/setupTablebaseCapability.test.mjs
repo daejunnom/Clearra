@@ -10,13 +10,16 @@ test('host qualification keeps PC and Setup target authority separate', async ()
   assert.match(qualification, /dependencies\.targetQualificationReceipts\s*\?\?\s*\[\]/u);
   assert.match(
     qualification,
-    /pc_search_target_lines:\s*receipts\.map\(receipt\s*=>\s*receipt\.target_lines\)/u
+    /pc_search_target_lines:\s*pcReceipts\.map\(receipt\s*=>\s*receipt\.target_lines\)/u
   );
   assert.match(
     qualification,
-    /receipt\.use_case\s*!==\s*'pc-search'[\s\S]*receipt\.target_lines\s*!==\s*4/u
+    /receipt\.schema === PC4_SETUP_TARGET_QUALIFICATION_RECEIPT_SCHEMA[\s\S]*receipt\.use_case === 'setup-search'/u
   );
-  assert.match(qualification, /setup_search_target_lines:\s*\[\]/u);
+  assert.match(
+    qualification,
+    /setup_search_target_lines:\s*setupReceipts\.map\(receipt\s*=>\s*receipt\.target_lines\)/u
+  );
 
   const worker = await read('../src/workers/clearraWorker.ts');
   assert.match(worker, /pcSearchTargetLines:\s*pc_search_target_lines\s*\?\?\s*\[\]/u);
@@ -26,18 +29,15 @@ test('host qualification keeps PC and Setup target authority separate', async ()
 test('PC surface requires the selected profile and exact target receipt', async () => {
   const controls = await read('../../../packages/clearra-ui/src/lib/workspace/SearchControls.svelte');
   assert.match(controls, /profile\.pcSearchTargetLines\?\.includes\(lines\)/u);
-  assert.match(controls, /disabled=\{!pcTablebaseAvailable\s*\|\|/u);
-  assert.match(
-    controls,
-    /if \(!pcTablebaseAvailable && request\.tablebaseEnabled\)[\s\S]*tablebaseEnabled: false/u
-  );
+  assert.doesNotMatch(controls, /disabled=\{!pcTablebaseAvailable/u);
+  assert.doesNotMatch(controls, /if \(!pcTablebaseAvailable && request\.tablebaseEnabled\)/u);
   assert.match(
     controls,
     /targetIdentityChanged[\s\S]*\{ \.\.\.next, tablebaseEnabled: false \}/u
   );
   assert.match(
     controls,
-    /pcTablebaseAvailable\s*\?\s*tablebaseStatus\s*:\s*'unavailable'/u
+    /tablebaseStatus === 'loading'[\s\S]*\? 'loading'/u
   );
   assert.match(
     controls,
@@ -49,8 +49,10 @@ test('PC surface requires the selected profile and exact target receipt', async 
   assert.match(workspace, /profile\.pcSearchTargetLines\?\.includes\(request\.lines\)/u);
   assert.match(
     workspace,
-    /targetIdentityChanged[\s\S]*targetQualified[\s\S]*tablebaseEnabled: false/u
+    /targetIdentityChanged[\s\S]*tablebaseEnabled: false/u
   );
+  assert.match(workspace, /tablebaseBlocked[\s\S]*!pcTablebaseAvailable/u);
+  assert.match(workspace, /runDisabled=\{validationCodes\.length > 0 \|\| tablebaseBlocked\}/u);
   assert.match(workspace, /tablebaseEnabled:\s*bounded === request\.lines/u);
   assert.match(workspace, /tablebaseEnabled:\s*lines === request\.lines/u);
 
@@ -64,16 +66,32 @@ test('PC surface requires the selected profile and exact target receipt', async 
 test('Setup surface stays fail-closed until an exact SetupSearch target is qualified', async () => {
   const controls = await read('../../../packages/clearra-ui/src/lib/workspace/SetupFinderControls.svelte');
   assert.match(controls, /setupSearchTargetLines\?\.includes\(4\)/u);
-  assert.match(controls, /disabled=\{!setupTablebaseAvailable\}/u);
-  assert.match(
-    controls,
-    /if \(!setupTablebaseAvailable && request\.tablebaseEnabled\)[\s\S]*tablebaseEnabled: false/u
-  );
+  assert.doesNotMatch(controls, /disabled=\{!setupTablebaseAvailable\}/u);
+  assert.doesNotMatch(controls, /if \(!setupTablebaseAvailable && request\.tablebaseEnabled\)/u);
+  assert.match(controls, /tablebaseStatus === 'loading'[\s\S]*\? 'loading'/u);
   assert.match(controls, /setupTablebaseHelp/u);
   assert.doesNotMatch(controls, /label\('tablebaseHelp'\)/u);
 
+  const workspace = await read('../../../packages/clearra-ui/src/lib/workspace/SetupFinderWorkspace.svelte');
+  assert.match(workspace, /profile\.setupSearchTargetLines\?\.includes\(4\)/u);
+  assert.match(workspace, /tablebaseBlocked[\s\S]*!setupTablebaseAvailable/u);
+  assert.match(workspace, /runDisabled=\{validationCodes\.length > 0 \|\| tablebaseBlocked\}/u);
+
   const cli = await read('../../../crates/clearra-cli/src/tablebase_online_execution.rs');
-  assert.match(cli, /AppCommand::Setup\(_\)\s*=>\s*return Err\("setup_pc_acceleration_not_qualified"\)/u);
+  assert.match(cli, /AppCommand::Setup\(command\)\s*=>\s*\(command\.query\(\)\.rule\(\), false\)/u);
+  const host = await read('../../../crates/clearra-app/src/pc4_online_host_execution.rs');
+  assert.match(host, /Pc4TerminalUseCase::SetupSearch/u);
+  assert.match(host, /setup_pc_acceleration_not_qualified/u);
+  assert.match(host, /\.into_completed_reducer_input\(&guard\)/u);
+  assert.doesNotMatch(
+    host,
+    /completed_reducer_input\(\)[\s\S]{0,160}\.clone\(\)/u
+  );
+  const wasm = await read('../../../crates/clearra-wasm/src/wasm_command_runtime.rs');
+  assert.match(
+    wasm,
+    /AppCommand::Setup\(command\)\s*=>\s*command\.query\(\)\.tablebase_requested\(\)/u
+  );
 
   const help = await read('../../../crates/clearra-cli/src/args/cli_parser.rs');
   assert.match(help, /4-line SetupSearch target has full-solution and differential qualification/u);

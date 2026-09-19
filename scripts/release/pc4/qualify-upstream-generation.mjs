@@ -8,8 +8,12 @@ export { createPc4RangeReader, Pc4OnlineError } from './pc4-range-reader.mjs';
 export const PC4_READER_CONTRACT = 'hydra-jstris-180-complete-graph-v1';
 export const PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA =
   'clearra.pc4.exact-target-qualification.v1';
+export const PC4_SETUP_TARGET_QUALIFICATION_RECEIPT_SCHEMA =
+  'clearra.pc4.exact-setup-target-qualification.v1';
 export const PC4_PC_TERMINAL_SEMANTICS =
   'clearra.pc4.full-bottom-rows-after-clear.v1';
+export const PC4_SETUP_TERMINAL_SEMANTICS =
+  'clearra.pc4.setup-complete-bottom-rows-after-clear.v1';
 const EXACT_EVIDENCE_IDENTITY = /^sha256:[0-9a-f]{64}$/u;
 export const PC4_PROFILE_ARTIFACTS = Object.freeze([
   { profile: 'srs', graph: 'graph_no180.bin', suffix: '_no180', width: 3 },
@@ -88,10 +92,13 @@ async function qualifyProfiles(discovery, reader, signal, targetQualificationRec
       const receipts = targetQualificationReceipts
         .filter(receipt => receipt.profile === model.profile)
         .map(receipt => validateTargetReceiptForProfile(receipt, count));
+      const pcReceipts = receipts.filter(receipt => receipt.use_case === 'pc-search');
+      const setupReceipts = receipts.filter(receipt => receipt.use_case === 'setup-search');
       profiles.push({ ...base, status: 'ready', reader_contract: PC4_READER_CONTRACT,
         field_count: count, target_width: model.width, target_lines: [4],
-        pc_search_target_lines: receipts.map(receipt => receipt.target_lines),
-        setup_search_target_lines: [], target_qualification_receipts: receipts,
+        pc_search_target_lines: pcReceipts.map(receipt => receipt.target_lines),
+        setup_search_target_lines: setupReceipts.map(receipt => receipt.target_lines),
+        target_qualification_receipts: [...pcReceipts, ...setupReceipts],
         terminal_id: count - 1, artifacts: { fields, offsets, graph }, evidence });
     } catch (error) {
       if (signal?.aborted) throw new Pc4OnlineError('pc4_online_cancelled');
@@ -108,20 +115,27 @@ function validateTargetQualificationReceipts(discovery, receipts) {
   const keys = new Set();
   return receipts.map(receipt => {
     if (receipt === null || typeof receipt !== 'object' || Array.isArray(receipt) ||
-        receipt.schema !== PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA ||
         receipt.repository !== discovery.repository ||
         receipt.revision !== discovery.resolved_revision ||
         !profiles.has(receipt.profile) || receipt.profile !== 'jstris-180' ||
         receipt.reader_contract !== PC4_READER_CONTRACT ||
-        receipt.use_case !== 'pc-search' || receipt.target_lines !== 4 ||
+        receipt.target_lines !== 4 ||
         !Number.isSafeInteger(receipt.terminal_id) || receipt.terminal_id < 0 ||
         receipt.terminal_hash !== 2 ** 40 - 1 ||
-        receipt.terminal_semantics_identity !== PC4_PC_TERMINAL_SEMANTICS ||
         !exactEvidenceIdentity(receipt.outgoing_edge_completeness_identity) ||
         !exactEvidenceIdentity(receipt.known_answer_identity) ||
         !exactEvidenceIdentity(receipt.offline_exact_parity_identity)) {
       fail('pc4_online_target_qualification_invalid');
     }
+    const pc = receipt.schema === PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA &&
+      receipt.use_case === 'pc-search' &&
+      receipt.terminal_semantics_identity === PC4_PC_TERMINAL_SEMANTICS &&
+      receipt.setup_differential_identities === undefined;
+    const setup = receipt.schema === PC4_SETUP_TARGET_QUALIFICATION_RECEIPT_SCHEMA &&
+      receipt.use_case === 'setup-search' &&
+      receipt.terminal_semantics_identity === PC4_SETUP_TERMINAL_SEMANTICS &&
+      validSetupDifferentialIdentities(receipt.setup_differential_identities);
+    if (!pc && !setup) fail('pc4_online_target_qualification_invalid');
     const key = `${receipt.profile}:${receipt.use_case}:${receipt.target_lines}`;
     if (keys.has(key)) fail('pc4_online_target_qualification_invalid');
     keys.add(key);
@@ -139,8 +153,30 @@ function validateTargetQualificationReceipts(discovery, receipts) {
       outgoing_edge_completeness_identity: receipt.outgoing_edge_completeness_identity,
       known_answer_identity: receipt.known_answer_identity,
       offline_exact_parity_identity: receipt.offline_exact_parity_identity,
+      ...(setup ? { setup_differential_identities: Object.freeze({
+        ranked_joint_identity: receipt.setup_differential_identities.ranked_joint_identity,
+        ranked_build_probability_identity:
+          receipt.setup_differential_identities.ranked_build_probability_identity,
+        ranked_conditional_pc_identity:
+          receipt.setup_differential_identities.ranked_conditional_pc_identity,
+        exact_path_detail_identity: receipt.setup_differential_identities.exact_path_detail_identity,
+      }) } : {}),
     });
   });
+}
+
+function validSetupDifferentialIdentities(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).sort().join(',') === [
+      'exact_path_detail_identity',
+      'ranked_build_probability_identity',
+      'ranked_conditional_pc_identity',
+      'ranked_joint_identity',
+    ].join(',') &&
+    exactEvidenceIdentity(value.ranked_joint_identity) &&
+    exactEvidenceIdentity(value.ranked_build_probability_identity) &&
+    exactEvidenceIdentity(value.ranked_conditional_pc_identity) &&
+    exactEvidenceIdentity(value.exact_path_detail_identity);
 }
 
 function validateTargetReceiptForProfile(receipt, fieldCount) {

@@ -231,12 +231,35 @@ export class WasmTerminalWorkerController {
     this.tablebaseRequested = tablebaseRequested;
     if (this.runInFlight) {
       this.prewarmDeferred = true;
+      if (tablebaseChanged && tablebaseRequested && this.worker) {
+        // Transport preparation is independent of the active search state.
+        // Let the worker begin DNS/TCP/TLS/ALPN immediately, while keeping the
+        // full runtime reconfiguration deferred until the current job ends.
+        // Do not claim `prewarmingWorker`: an active worker deliberately emits
+        // no runtime-prewarm started/finished pair for this transport-only hint.
+        try {
+          postPrewarmRuntime(
+            this.worker,
+            this.prewarmWorkerCount,
+            true,
+            ensureWasmWorkerOwnerId(this.worker),
+            this.runtimeAuthority()
+          );
+        } catch (error) {
+          this.failClosedWorker(
+            this.worker,
+            'E_WASM_WORKER_PREWARM_FAILED',
+            errorMessage(error)
+          );
+        }
+      }
       return;
     }
     this.prewarmDeferred = false;
-    if (tablebaseChanged && this.worker && this.prewarmingWorker === this.worker) {
-      this.disposeOwnedWorker(this.worker);
-    }
+    // A TB toggle is not a worker-generation boundary. Reuse the same owner so
+    // an in-flight or completed immutable generation preparation survives TB
+    // off/on. The worker itself releases only WASM table memory on off; artifact
+    // rotation, owner disposal and fail-closed shutdown remain lifecycle exits.
     const worker = this.ensureWorker();
     if (worker) this.prewarmWorker(worker, this.prewarmWorkerCount);
   }

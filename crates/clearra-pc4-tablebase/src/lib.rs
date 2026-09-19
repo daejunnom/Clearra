@@ -90,12 +90,12 @@ pub use manifest::{
     ActivatedProfileError, ActivatedSnapshot, ActivationError, ArtifactDescriptor,
     DatasetSnapshotManifest, DatasetSnapshotVerifier, FieldIdIndexRelation,
     GraphSourceFieldEncoding, GraphTargetEncoding, ManifestContentIdentity, ManifestError,
-    Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile, Pc4TargetLines, Pc4TerminalFieldIdentity,
-    Pc4TerminalUseCase, ProfileAvailability, ProfileQualification,
-    ProfileTargetCompletenessQualification, QualifiedPc4TargetIdentity, QualifiedSnapshotIdentity,
-    SnapshotIdentity, SnapshotVerificationAttestation, SnapshotVerificationBinding,
-    SnapshotVerificationFailure, SnapshotVerificationRequest, TargetQualificationError,
-    UnsupportedProfileReason,
+    Pc4ArtifactRole, Pc4ProfileManifest, Pc4RuleProfile, Pc4SetupDifferentialObjective,
+    Pc4TargetLines, Pc4TerminalFieldIdentity, Pc4TerminalUseCase, ProfileAvailability,
+    ProfileQualification, ProfileTargetCompletenessQualification, QualifiedPc4TargetIdentity,
+    QualifiedSnapshotIdentity, SetupSearchDifferentialQualification, SnapshotIdentity,
+    SnapshotVerificationAttestation, SnapshotVerificationBinding, SnapshotVerificationFailure,
+    SnapshotVerificationRequest, TargetQualificationError, UnsupportedProfileReason,
 };
 pub use materializer::{
     materialize_qualified_graph_edge, ClearraPlacementIdentity, MaterializationGuard,

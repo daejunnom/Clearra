@@ -41,16 +41,19 @@
   $: nextRemainingCount = nextSetupCycleRemainingCount(request.remaining);
   $: setupTablebaseAvailable = setupTablebaseAvailableFor(request.rule);
   $: tablebaseStatusLabel = tablebaseMessage(
-    setupTablebaseAvailable ? tablebaseStatus : 'unavailable',
+    setupTablebaseAvailable
+      ? tablebaseStatus
+      : tablebaseStatus === 'loading'
+        ? 'loading'
+        : tablebaseStatus === 'ready' || tablebaseStatus === 'unavailable'
+          ? 'unavailable'
+          : 'disabled',
     tablebaseByteLength
   );
-  $: if (!setupTablebaseAvailable && request.tablebaseEnabled) {
-    dispatch('change', { ...request, tablebaseEnabled: false });
-  }
 
   function update(change: Partial<SetupFinderRequest>) {
     const next = { ...request, ...change };
-    dispatch('change', setupTablebaseAvailableFor(next.rule)
+    dispatch('change', next.rule === request.rule
       ? next
       : { ...next, tablebaseEnabled: false });
   }
@@ -184,7 +187,6 @@
           <input
             type="checkbox"
             checked={request.tablebaseEnabled}
-            disabled={!setupTablebaseAvailable}
             on:change={(event) => update({
               tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
             })}

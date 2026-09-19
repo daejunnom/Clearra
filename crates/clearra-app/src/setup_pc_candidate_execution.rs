@@ -215,7 +215,7 @@ fn validate_setup_query_binding(
     Ok(())
 }
 
-const fn query_profile(profile: RuleProfileId) -> Option<Pc4RuleProfile> {
+pub(crate) const fn query_profile(profile: RuleProfileId) -> Option<Pc4RuleProfile> {
     match profile {
         RuleProfileId::Srs => Some(Pc4RuleProfile::Srs),
         RuleProfileId::SrsPlus => Some(Pc4RuleProfile::SrsPlus),
@@ -226,7 +226,7 @@ const fn query_profile(profile: RuleProfileId) -> Option<Pc4RuleProfile> {
     }
 }
 
-fn query_objective(query: &SetupSearchQuery) -> SetupPcAccelerationObjective {
+pub(crate) fn query_objective(query: &SetupSearchQuery) -> SetupPcAccelerationObjective {
     if query.path_detail().is_some() {
         return SetupPcAccelerationObjective::ExactPathDetail;
     }

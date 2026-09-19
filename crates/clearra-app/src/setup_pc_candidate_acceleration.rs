@@ -7,19 +7,18 @@
 mod qualification_binding;
 
 use clearra_pc4_tablebase::{
-    Pc4RuleProfile, Pc4TargetLines, Pc4TerminalUseCase, QualifiedPc4TargetIdentity,
+    Pc4RuleProfile, Pc4SetupDifferentialObjective, Pc4TargetLines, Pc4TerminalUseCase,
+    QualifiedPc4TargetIdentity,
 };
 
 use crate::{
     PcCandidateProviderKind, PcCandidateReducerInput, PcCandidateRequestIdentity,
-    PcCandidateSourceIdentity,
+    PcCandidateSourceBinding, PcCandidateSourceIdentity,
 };
 use qualification_binding::{
     CandidateBinding, QualificationBinding, QualificationBindingRejection, RequestBinding,
 };
 
-#[cfg(test)]
-use crate::PcCandidateSourceBinding;
 #[cfg(test)]
 use clearra_pc4_tablebase::Pc4TerminalFieldIdentity;
 
@@ -35,6 +34,17 @@ pub enum SetupPcAccelerationObjective {
     RankedBuildProbability,
     RankedConditionalPc,
     ExactPathDetail,
+}
+
+impl SetupPcAccelerationObjective {
+    const fn pc4_differential_objective(self) -> Pc4SetupDifferentialObjective {
+        match self {
+            Self::RankedJoint => Pc4SetupDifferentialObjective::RankedJoint,
+            Self::RankedBuildProbability => Pc4SetupDifferentialObjective::RankedBuildProbability,
+            Self::RankedConditionalPc => Pc4SetupDifferentialObjective::RankedConditionalPc,
+            Self::ExactPathDetail => Pc4SetupDifferentialObjective::ExactPathDetail,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,6 +116,52 @@ pub struct SetupPcAccelerationCompatibilityProof {
 }
 
 impl SetupPcAccelerationCompatibilityProof {
+    /// Mints the App-local substitution proof only from an already verified
+    /// Setup target carrying evidence for this exact product objective. The
+    /// source and request identities are checked here and again at admission;
+    /// neither a PC-only target nor a generic offline-parity identity suffices.
+    pub(crate) fn from_qualified_target(
+        request: SetupPcAccelerationRequestBinding,
+        source: &PcCandidateSourceBinding,
+        target: QualifiedPc4TargetIdentity,
+    ) -> Result<Self, SetupPcNoAccelerationReason> {
+        if source.provider_kind() != PcCandidateProviderKind::OnlinePc4 {
+            return Err(SetupPcNoAccelerationReason::SourceIsNotOnlinePc4);
+        }
+        if source.request_identity() != request.request_identity() {
+            return Err(SetupPcNoAccelerationReason::RequestIdentityMismatch);
+        }
+        if source.profile() != request.profile() {
+            return Err(SetupPcNoAccelerationReason::RuleProfileMismatch);
+        }
+        if source.initial_board_mask() != request.initial_board_mask() {
+            return Err(SetupPcNoAccelerationReason::InitialBoardMismatch);
+        }
+        if target.use_case() != Pc4TerminalUseCase::SetupSearch {
+            return Err(SetupPcNoAccelerationReason::TargetUseCaseNotQualified);
+        }
+        if target.profile() != request.profile() {
+            return Err(SetupPcNoAccelerationReason::TargetProfileNotQualified);
+        }
+        if target.target_lines() != request.target() {
+            return Err(SetupPcNoAccelerationReason::TargetNotQualified);
+        }
+        if source.qualified_snapshot() != Some(target.snapshot()) {
+            return Err(SetupPcNoAccelerationReason::SnapshotGenerationNotQualified);
+        }
+        let evidence_identity = target
+            .setup_differential_identity(request.objective().pc4_differential_objective())
+            .filter(|identity| !identity.trim().is_empty())
+            .ok_or(SetupPcNoAccelerationReason::ObjectiveNotQualified)?
+            .to_owned();
+        Ok(Self {
+            request,
+            source_identity: source.source_identity(),
+            target,
+            evidence_identity,
+        })
+    }
+
     pub const fn request(&self) -> &SetupPcAccelerationRequestBinding {
         &self.request
     }
@@ -411,8 +467,8 @@ mod tests {
         ArtifactDescriptor, DatasetSnapshotManifest, DatasetSnapshotVerifier, GraphTargetEncoding,
         ManifestContentIdentity, Pc4ArtifactRole, Pc4ProfileManifest, Pc4TerminalUseCase,
         ProfileAvailability, ProfileQualification, ProfileTargetCompletenessQualification,
-        QualifiedPc4TargetIdentity, SnapshotIdentity, SnapshotVerificationAttestation,
-        SnapshotVerificationFailure, SnapshotVerificationRequest,
+        QualifiedPc4TargetIdentity, SetupSearchDifferentialQualification, SnapshotIdentity,
+        SnapshotVerificationAttestation, SnapshotVerificationFailure, SnapshotVerificationRequest,
     };
 
     use super::*;
@@ -439,6 +495,16 @@ mod tests {
         profile: Pc4RuleProfile,
         use_case: Pc4TerminalUseCase,
         target_lines: u8,
+    ) -> QualifiedPc4TargetIdentity {
+        qualified_target_with_setup_differential(generation, profile, use_case, target_lines, false)
+    }
+
+    fn qualified_target_with_setup_differential(
+        generation: &str,
+        profile: Pc4RuleProfile,
+        use_case: Pc4TerminalUseCase,
+        target_lines: u8,
+        setup_differential: bool,
     ) -> QualifiedPc4TargetIdentity {
         let identity = SnapshotIdentity::new(
             "synthetic/repository",
@@ -489,7 +555,7 @@ mod tests {
                     .into_iter()
                     .flat_map(|qualified_use_case| {
                         (Pc4TargetLines::MIN..=Pc4TargetLines::MAX).map(move |qualified_lines| {
-                            ProfileTargetCompletenessQualification::new(
+                            let qualification = ProfileTargetCompletenessQualification::new(
                                 qualified_use_case,
                                 Pc4TargetLines::new(qualified_lines).expect("target lines"),
                                 Pc4TerminalFieldIdentity::full_rows(
@@ -501,7 +567,24 @@ mod tests {
                                 format!("answers:{qualified_use_case:?}:{qualified_lines}"),
                                 format!("parity:{qualified_use_case:?}:{qualified_lines}"),
                             )
-                            .expect("target qualification")
+                            .expect("target qualification");
+                            if setup_differential
+                                && qualified_use_case == Pc4TerminalUseCase::SetupSearch
+                            {
+                                qualification
+                                    .with_setup_search_differential(
+                                        SetupSearchDifferentialQualification::new(
+                                            "setup-proof:ranked-joint",
+                                            "setup-proof:ranked-build-probability",
+                                            "setup-proof:ranked-conditional-pc",
+                                            "setup-proof:exact-path-detail",
+                                        )
+                                        .expect("Setup differential evidence"),
+                                    )
+                                    .expect("Setup-only differential attachment")
+                            } else {
+                                qualification
+                            }
                         })
                     })
                     .collect();
@@ -661,6 +744,79 @@ mod tests {
             assert_eq!(prepared.request(), &request);
             assert_eq!(prepared.candidate_input().source(), &source);
             assert_eq!(prepared.into_candidate_input().candidates().len(), 1);
+        }
+    }
+
+    #[test]
+    fn production_proof_requires_setup_and_selects_only_the_requested_objective() {
+        let source = source("generation-a", 1, 2, Pc4RuleProfile::Srs, 0);
+        let base_request = request(
+            1,
+            Pc4RuleProfile::Srs,
+            0,
+            4,
+            SetupPcAccelerationObjective::RankedJoint,
+        );
+        let generic_setup_target = qualified_target(
+            "generation-a",
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::SetupSearch,
+            4,
+        );
+        assert_eq!(
+            SetupPcAccelerationCompatibilityProof::from_qualified_target(
+                base_request.clone(),
+                &source,
+                generic_setup_target,
+            ),
+            Err(SetupPcNoAccelerationReason::ObjectiveNotQualified)
+        );
+        let pc_target = qualified_target(
+            "generation-a",
+            Pc4RuleProfile::Srs,
+            Pc4TerminalUseCase::PcSearch,
+            4,
+        );
+        assert_eq!(
+            SetupPcAccelerationCompatibilityProof::from_qualified_target(
+                base_request,
+                &source,
+                pc_target,
+            ),
+            Err(SetupPcNoAccelerationReason::TargetUseCaseNotQualified)
+        );
+
+        for (objective, expected) in [
+            (
+                SetupPcAccelerationObjective::RankedJoint,
+                "setup-proof:ranked-joint",
+            ),
+            (
+                SetupPcAccelerationObjective::RankedBuildProbability,
+                "setup-proof:ranked-build-probability",
+            ),
+            (
+                SetupPcAccelerationObjective::RankedConditionalPc,
+                "setup-proof:ranked-conditional-pc",
+            ),
+            (
+                SetupPcAccelerationObjective::ExactPathDetail,
+                "setup-proof:exact-path-detail",
+            ),
+        ] {
+            let request = request(1, Pc4RuleProfile::Srs, 0, 4, objective);
+            let target = qualified_target_with_setup_differential(
+                "generation-a",
+                Pc4RuleProfile::Srs,
+                Pc4TerminalUseCase::SetupSearch,
+                4,
+                true,
+            );
+            let proof = SetupPcAccelerationCompatibilityProof::from_qualified_target(
+                request, &source, target,
+            )
+            .expect("exact objective-specific Setup proof");
+            assert_eq!(proof.evidence_identity(), expected);
         }
     }
 

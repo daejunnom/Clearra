@@ -316,7 +316,29 @@ impl Pc4PreparedOnlineInput {
         surface: Pc4InputSurface,
         source: crate::Pc4CompiledPatternSource,
     ) -> Result<Self, crate::Pc4CompiledPatternError> {
-        if target.use_case() != Pc4TerminalUseCase::PcSearch
+        Self::for_compiled_pattern_use_case(target, surface, source, Pc4TerminalUseCase::PcSearch)
+    }
+
+    pub(crate) fn for_setup_compiled_pattern(
+        target: QualifiedPc4TargetIdentity,
+        surface: Pc4InputSurface,
+        source: crate::Pc4CompiledPatternSource,
+    ) -> Result<Self, crate::Pc4CompiledPatternError> {
+        Self::for_compiled_pattern_use_case(
+            target,
+            surface,
+            source,
+            Pc4TerminalUseCase::SetupSearch,
+        )
+    }
+
+    fn for_compiled_pattern_use_case(
+        target: QualifiedPc4TargetIdentity,
+        surface: Pc4InputSurface,
+        source: crate::Pc4CompiledPatternSource,
+        expected_use_case: Pc4TerminalUseCase,
+    ) -> Result<Self, crate::Pc4CompiledPatternError> {
+        if target.use_case() != expected_use_case
             || u16::from(target.target_lines().get())
                 != source.problem().initial_board().visible_height()
         {

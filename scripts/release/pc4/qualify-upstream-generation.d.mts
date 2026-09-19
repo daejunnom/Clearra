@@ -1,8 +1,12 @@
 export const PC4_READER_CONTRACT: 'hydra-jstris-180-complete-graph-v1';
 export const PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA:
   'clearra.pc4.exact-target-qualification.v1';
+export const PC4_SETUP_TARGET_QUALIFICATION_RECEIPT_SCHEMA:
+  'clearra.pc4.exact-setup-target-qualification.v1';
 export const PC4_PC_TERMINAL_SEMANTICS:
   'clearra.pc4.full-bottom-rows-after-clear.v1';
+export const PC4_SETUP_TERMINAL_SEMANTICS:
+  'clearra.pc4.setup-complete-bottom-rows-after-clear.v1';
 export type Pc4Artifact = { path: string; byte_length: number; content_identity: string };
 export type Pc4TargetQualificationReceipt = {
   schema: 'clearra.pc4.exact-target-qualification.v1';
@@ -14,11 +18,29 @@ export type Pc4TargetQualificationReceipt = {
   known_answer_identity: string;
   offline_exact_parity_identity: string;
 };
+export type Pc4SetupTargetQualificationReceipt = {
+  schema: 'clearra.pc4.exact-setup-target-qualification.v1';
+  repository: string; revision: string; profile: string;
+  reader_contract: string; use_case: 'setup-search'; target_lines: 4;
+  terminal_id: number; terminal_hash: number;
+  terminal_semantics_identity: string;
+  outgoing_edge_completeness_identity: string;
+  known_answer_identity: string;
+  offline_exact_parity_identity: string;
+  setup_differential_identities: {
+    ranked_joint_identity: string;
+    ranked_build_probability_identity: string;
+    ranked_conditional_pc_identity: string;
+    exact_path_detail_identity: string;
+  };
+};
 export type Pc4HostProfile = {
   profile: string; upstream_complete: boolean; status: 'ready' | 'unavailable'; reason?: string;
   reader_contract?: string; field_count?: number; target_width?: number; target_lines?: number[];
   pc_search_target_lines?: number[]; setup_search_target_lines?: number[]; terminal_id?: number;
-  target_qualification_receipts?: Pc4TargetQualificationReceipt[];
+  target_qualification_receipts?: Array<
+    Pc4TargetQualificationReceipt | Pc4SetupTargetQualificationReceipt
+  >;
   artifacts?: { fields: Pc4Artifact; offsets: Pc4Artifact; graph: Pc4Artifact };
 };
 export type Pc4HostGeneration = {

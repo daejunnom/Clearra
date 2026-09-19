@@ -4000,6 +4000,7 @@ impl WasmCommandRuntime {
             AppCommand::Scenario(command) => {
                 command.query().execution_policy().tablebase_requested()
             }
+            AppCommand::Setup(command) => command.query().tablebase_requested(),
             _ => false,
         };
         // A configured online host must not silently execute a different
@@ -4383,8 +4384,9 @@ impl std::error::Error for WasmCommandRuntimeError {}
 #[cfg(test)]
 mod finite_memory_tests {
     use super::*;
-    use clearra_app::render::AppRenderModel;
+    use clearra_app::{render::AppRenderModel, SetupAppCommand};
     use clearra_host_contract::{AppCommandKind, ResourceBudget};
+    use clearra_problem::SetupSearchQuery;
     use std::{
         collections::{hash_map::DefaultHasher, VecDeque},
         hash::{Hash, Hasher},
@@ -4401,6 +4403,28 @@ mod finite_memory_tests {
         runtime
             .prepare_command_text(FINITE_BUILD_COMMAND)
             .expect("finite Build command prepares")
+    }
+
+    #[test]
+    fn explicit_setup_tablebase_request_without_snapshot_fails_closed() {
+        let runtime = WasmCommandRuntime::default();
+        let request = AppRequest::new(AppCommand::Setup(SetupAppCommand::new(
+            SetupSearchQuery::default().with_tablebase_requested(true),
+        )));
+        let prepared = PreparedWasmCommand {
+            request,
+            webgpu_requested: false,
+        };
+
+        let mut execution = runtime.start_prepared_execution(prepared);
+        assert!(execution.execution.is_none());
+        assert!(execution.online_pc4.is_some());
+        match execution.advance(1, &ExecutionControl::default()) {
+            PreparedWasmAdvance::Failed(error) => {
+                assert_eq!(error.code(), "pc4_online_generation_unavailable");
+            }
+            _ => panic!("an explicit Setup tablebase request must not fall back offline"),
+        }
     }
 
     struct UnmeasuredProgressSink;

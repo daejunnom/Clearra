@@ -42,18 +42,13 @@
     request.scoreMode === 'score-minimals';
   $: scoreMinimalsOnly = request.scoreMode === 'score-minimals';
   $: pcTablebaseAvailable = pcTablebaseAvailableFor(request.rule, request.lines);
-  $: if (!pcTablebaseAvailable && request.tablebaseEnabled) {
-    dispatch('change', { ...request, tablebaseEnabled: false });
-  }
 
   function patch(change: Partial<SolverWorkspaceRequest>) {
     const next = updateWorkspaceDraft(request, change);
     const targetIdentityChanged = next.rule !== request.rule || next.lines !== request.lines;
-    dispatch('change',
-      !targetIdentityChanged && pcTablebaseAvailableFor(next.rule, next.lines)
-        ? next
-        : { ...next, tablebaseEnabled: false }
-    );
+    dispatch('change', targetIdentityChanged
+      ? { ...next, tablebaseEnabled: false }
+      : next);
   }
 
   function pcTablebaseAvailableFor(
@@ -67,8 +62,15 @@
     );
   }
 
+  $: displayedTablebaseStatus = pcTablebaseAvailable
+    ? tablebaseStatus
+    : tablebaseStatus === 'loading'
+      ? 'loading'
+      : tablebaseStatus === 'ready' || tablebaseStatus === 'unavailable'
+        ? 'unavailable'
+        : 'disabled';
   $: tablebaseStatusLabel = tablebaseMessage(
-    pcTablebaseAvailable ? tablebaseStatus : 'unavailable',
+    displayedTablebaseStatus,
     tablebaseByteLength,
     language
   );
@@ -249,7 +251,7 @@
           <input
             type="checkbox"
             checked={request.tablebaseEnabled}
-            disabled={!pcTablebaseAvailable || tilingOnly || pathOnly || fixedScoreProduct}
+            disabled={tilingOnly || pathOnly || fixedScoreProduct}
             on:change={(event) => patch({
               tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
             })}

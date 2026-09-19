@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 
 const CONTRACT: &str = "hydra-jstris-180-complete-graph-v1";
 const TARGET_RECEIPT_SCHEMA: &str = "clearra.pc4.exact-target-qualification.v1";
+const SETUP_TARGET_RECEIPT_SCHEMA: &str = "clearra.pc4.exact-setup-target-qualification.v1";
 const PC_TERMINAL_SEMANTICS: &str = "clearra.pc4.full-bottom-rows-after-clear.v1";
+const SETUP_TERMINAL_SEMANTICS: &str = "clearra.pc4.setup-complete-bottom-rows-after-clear.v1";
 pub fn configure(json: &str) -> Result<Option<ActivatedSnapshot>, &'static str> {
     if json == "null" {
         return Ok(None);
@@ -150,37 +152,51 @@ fn target_qualifications(
     terminal: u32,
 ) -> Result<Vec<ProfileTargetCompletenessQualification>, &'static str> {
     let pc_lines = declared_target_lines(slot, "pc_search_target_lines")?;
-    if !declared_target_lines(slot, "setup_search_target_lines")?.is_empty() {
-        return Err("pc4_online_target_qualification_invalid");
-    }
+    let setup_lines = declared_target_lines(slot, "setup_search_target_lines")?;
     let receipts = match &slot["target_qualification_receipts"] {
         Value::Null => &[][..],
         Value::Array(receipts) => receipts.as_slice(),
         _ => return Err("pc4_online_target_qualification_invalid"),
     };
-    if pc_lines.len() != receipts.len() {
+    if pc_lines.len().saturating_add(setup_lines.len()) != receipts.len() {
         return Err("pc4_online_target_qualification_invalid");
     }
     let mut qualifications = Vec::with_capacity(receipts.len());
-    for (index, receipt) in receipts.iter().enumerate() {
-        if receipt["schema"] != TARGET_RECEIPT_SCHEMA
-            || receipt["repository"] != repository
+    let mut seen_pc_lines = Vec::new();
+    let mut seen_setup_lines = Vec::new();
+    for receipt in receipts {
+        if receipt["repository"] != repository
             || receipt["revision"] != revision
             || receipt["profile"] != profile.as_str()
             || receipt["reader_contract"] != CONTRACT
-            || receipt["use_case"] != "pc-search"
             || receipt["terminal_id"].as_u64() != Some(u64::from(terminal))
         {
             return Err("pc4_online_target_qualification_invalid");
         }
+        let use_case = match (receipt["schema"].as_str(), receipt["use_case"].as_str()) {
+            (Some(TARGET_RECEIPT_SCHEMA), Some("pc-search")) => {
+                if !receipt["setup_differential_identities"].is_null() {
+                    return Err("pc4_online_target_qualification_invalid");
+                }
+                Pc4TerminalUseCase::PcSearch
+            }
+            (Some(SETUP_TARGET_RECEIPT_SCHEMA), Some("setup-search")) => {
+                Pc4TerminalUseCase::SetupSearch
+            }
+            _ => return Err("pc4_online_target_qualification_invalid"),
+        };
         let line = receipt["target_lines"]
             .as_u64()
             .and_then(|lines| u8::try_from(lines).ok())
             .ok_or("pc4_online_target_qualification_invalid")?;
         let lines =
             Pc4TargetLines::new(line).map_err(|_| "pc4_online_target_qualification_invalid")?;
-        if lines.get() != 4 || pc_lines[index] != lines.get() {
+        if lines.get() != 4 {
             return Err("pc4_online_target_qualification_invalid");
+        }
+        match use_case {
+            Pc4TerminalUseCase::PcSearch => seen_pc_lines.push(lines.get()),
+            Pc4TerminalUseCase::SetupSearch => seen_setup_lines.push(lines.get()),
         }
         let terminal_field = Pc4TerminalFieldIdentity::new(
             lines,
@@ -190,25 +206,56 @@ fn target_qualifications(
                 .ok_or("pc4_online_target_qualification_invalid")?,
         )
         .map_err(|_| "pc4_online_target_qualification_invalid")?;
-        if receipt["terminal_semantics_identity"] != PC_TERMINAL_SEMANTICS
+        let terminal_semantics = match use_case {
+            Pc4TerminalUseCase::PcSearch => PC_TERMINAL_SEMANTICS,
+            Pc4TerminalUseCase::SetupSearch => SETUP_TERMINAL_SEMANTICS,
+        };
+        if receipt["terminal_semantics_identity"] != terminal_semantics
             || terminal_field.field_id() >= field_count
         {
             return Err("pc4_online_target_qualification_invalid");
         }
-        qualifications.push(
-            ProfileTargetCompletenessQualification::new(
-                Pc4TerminalUseCase::PcSearch,
-                lines,
-                terminal_field,
-                PC_TERMINAL_SEMANTICS,
-                exact_evidence_identity(receipt, "outgoing_edge_completeness_identity")?,
-                exact_evidence_identity(receipt, "known_answer_identity")?,
-                exact_evidence_identity(receipt, "offline_exact_parity_identity")?,
-            )
-            .map_err(|_| "pc4_online_target_qualification_invalid")?,
-        );
+        let qualification = ProfileTargetCompletenessQualification::new(
+            use_case,
+            lines,
+            terminal_field,
+            terminal_semantics,
+            exact_evidence_identity(receipt, "outgoing_edge_completeness_identity")?,
+            exact_evidence_identity(receipt, "known_answer_identity")?,
+            exact_evidence_identity(receipt, "offline_exact_parity_identity")?,
+        )
+        .map_err(|_| "pc4_online_target_qualification_invalid")?;
+        let qualification = if use_case == Pc4TerminalUseCase::SetupSearch {
+            qualification
+                .with_setup_search_differential(setup_differential_qualification(receipt)?)
+                .map_err(|_| "pc4_online_target_qualification_invalid")?
+        } else {
+            qualification
+        };
+        qualifications.push(qualification);
+    }
+    seen_pc_lines.sort_unstable();
+    seen_setup_lines.sort_unstable();
+    if seen_pc_lines != pc_lines || seen_setup_lines != setup_lines {
+        return Err("pc4_online_target_qualification_invalid");
     }
     Ok(qualifications)
+}
+
+fn setup_differential_qualification(
+    receipt: &Value,
+) -> Result<SetupSearchDifferentialQualification, &'static str> {
+    let identities = receipt["setup_differential_identities"]
+        .as_object()
+        .filter(|identities| identities.len() == 4)
+        .ok_or("pc4_online_target_qualification_invalid")?;
+    SetupSearchDifferentialQualification::new(
+        exact_evidence_identity_from(identities, "ranked_joint_identity")?,
+        exact_evidence_identity_from(identities, "ranked_build_probability_identity")?,
+        exact_evidence_identity_from(identities, "ranked_conditional_pc_identity")?,
+        exact_evidence_identity_from(identities, "exact_path_detail_identity")?,
+    )
+    .map_err(|_| "pc4_online_target_qualification_invalid")
 }
 
 fn declared_target_lines(slot: &Value, key: &str) -> Result<Vec<u8>, &'static str> {
@@ -233,7 +280,22 @@ fn declared_target_lines(slot: &Value, key: &str) -> Result<Vec<u8>, &'static st
 }
 
 fn exact_evidence_identity<'a>(receipt: &'a Value, key: &str) -> Result<&'a str, &'static str> {
-    let identity = receipt[key]
+    exact_evidence_value(&receipt[key])
+}
+
+fn exact_evidence_identity_from<'a>(
+    identities: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, &'static str> {
+    exact_evidence_value(
+        identities
+            .get(key)
+            .ok_or("pc4_online_target_qualification_invalid")?,
+    )
+}
+
+fn exact_evidence_value(value: &Value) -> Result<&str, &'static str> {
+    let identity = value
         .as_str()
         .ok_or("pc4_online_target_qualification_invalid")?;
     let digest = identity
@@ -328,14 +390,36 @@ mod tests {
         })
     }
 
+    fn setup_exact_receipt(revision: &str) -> Value {
+        let mut receipt = exact_receipt(revision);
+        receipt["schema"] = serde_json::json!(SETUP_TARGET_RECEIPT_SCHEMA);
+        receipt["use_case"] = serde_json::json!("setup-search");
+        receipt["terminal_semantics_identity"] = serde_json::json!(SETUP_TERMINAL_SEMANTICS);
+        receipt["setup_differential_identities"] = serde_json::json!({
+            "ranked_joint_identity": format!("sha256:{}", "3456789abcdef012".repeat(4)),
+            "ranked_build_probability_identity": format!("sha256:{}", "456789abcdef0123".repeat(4)),
+            "ranked_conditional_pc_identity": format!("sha256:{}", "56789abcdef01234".repeat(4)),
+            "exact_path_detail_identity": format!("sha256:{}", "6789abcdef012345".repeat(4)),
+        });
+        receipt
+    }
+
     fn host_generation(receipt: Option<Value>) -> Value {
+        host_generation_with_receipts(receipt.into_iter().collect())
+    }
+
+    fn host_generation_with_receipts(receipts: Vec<Value>) -> Value {
         let revision = "a".repeat(40);
-        let receipts = receipt.into_iter().collect::<Vec<_>>();
-        let pc_lines = if receipts.is_empty() {
-            Vec::new()
-        } else {
-            vec![4]
-        };
+        let pc_lines = receipts
+            .iter()
+            .filter(|receipt| receipt["use_case"] == "pc-search")
+            .map(|_| 4)
+            .collect::<Vec<_>>();
+        let setup_lines = receipts
+            .iter()
+            .filter(|receipt| receipt["use_case"] == "setup-search")
+            .map(|_| 4)
+            .collect::<Vec<_>>();
         let profiles = Pc4RuleProfile::ALL
             .into_iter()
             .map(|profile| {
@@ -349,7 +433,8 @@ mod tests {
                     "profile": profile.as_str(), "upstream_complete": true, "status": "ready",
                     "reader_contract": CONTRACT, "field_count": 2, "target_width": 3,
                     "target_lines": [4], "pc_search_target_lines": pc_lines.clone(),
-                    "setup_search_target_lines": [], "target_qualification_receipts": receipts.clone(),
+                    "setup_search_target_lines": setup_lines.clone(),
+                    "target_qualification_receipts": receipts.clone(),
                     "terminal_id": 1,
                     "artifacts": {
                         "fields": { "path": "field_hash_to_id.v1.bin", "byte_length": 32,
@@ -439,6 +524,74 @@ mod tests {
             target.qualification().offline_exact_parity_identity(),
             receipt["offline_exact_parity_identity"].as_str().unwrap()
         );
+    }
+
+    #[test]
+    fn setup_receipt_mints_only_setup_target_and_binds_each_objective() {
+        let setup = setup_exact_receipt(&"a".repeat(40));
+        let generation = host_generation_with_receipts(vec![setup.clone()]);
+        let snapshot = configure(&generation.to_string()).unwrap().unwrap();
+        assert!(snapshot
+            .qualified_target(
+                Pc4RuleProfile::Jstris180,
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(4).unwrap(),
+            )
+            .is_err());
+        let target = snapshot
+            .qualified_target(
+                Pc4RuleProfile::Jstris180,
+                Pc4TerminalUseCase::SetupSearch,
+                Pc4TargetLines::new(4).unwrap(),
+            )
+            .unwrap();
+        for (objective, key) in [
+            (
+                Pc4SetupDifferentialObjective::RankedJoint,
+                "ranked_joint_identity",
+            ),
+            (
+                Pc4SetupDifferentialObjective::RankedBuildProbability,
+                "ranked_build_probability_identity",
+            ),
+            (
+                Pc4SetupDifferentialObjective::RankedConditionalPc,
+                "ranked_conditional_pc_identity",
+            ),
+            (
+                Pc4SetupDifferentialObjective::ExactPathDetail,
+                "exact_path_detail_identity",
+            ),
+        ] {
+            assert_eq!(
+                target.setup_differential_identity(objective),
+                setup["setup_differential_identities"][key].as_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn setup_receipt_missing_or_placeholder_objective_evidence_fails_closed() {
+        for mutate in [
+            |receipt: &mut Value| {
+                receipt["setup_differential_identities"]["ranked_joint_identity"] =
+                    serde_json::json!("placeholder")
+            },
+            |receipt: &mut Value| {
+                receipt["setup_differential_identities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("exact_path_detail_identity");
+            },
+        ] {
+            let mut receipt = setup_exact_receipt(&"a".repeat(40));
+            mutate(&mut receipt);
+            let generation = host_generation_with_receipts(vec![receipt]);
+            assert_eq!(
+                configure(&generation.to_string()).unwrap_err(),
+                "pc4_online_target_qualification_invalid"
+            );
+        }
     }
 
     #[test]
