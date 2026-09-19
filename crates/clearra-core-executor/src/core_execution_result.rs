@@ -13,7 +13,7 @@ use crate::{
     core_postprocess_execution::CorePostProcessExecution,
     core_postprocess_score_cell::CorePostProcessScoreCell,
     core_postprocess_spin_coverage::CorePostProcessSpinCoverage,
-    finesse_report::FinesseReport,
+    finesse_report::{FinesseReport, FinesseSearchSolutionFilterError},
     pc_chance_coverage_evidence::{
         DistributedPcChanceCoverageRows, PcChanceCoverageEvidence, PcScoreProblemEvidence,
     },
@@ -519,6 +519,22 @@ impl CoreExecutionResult {
             self.finesse_report = None;
         }
         self
+    }
+
+    /// Rebinds a finesse-search report to the final canonical solution set.
+    /// Score-mode reports do not own searched-solution rows and remain intact.
+    pub fn try_retain_finesse_search_solution_keys(
+        mut self,
+        accepted_solution_keys: &[String],
+    ) -> Result<Self, FinesseSearchSolutionFilterError> {
+        if let Some(report) = self.finesse_report.as_mut() {
+            match report.mode() {
+                "search" => report.retain_search_solution_keys(accepted_solution_keys)?,
+                "score" => {}
+                _ => return Err(FinesseSearchSolutionFilterError::UnsupportedReportMode),
+            }
+        }
+        Ok(self)
     }
 
     /// Canonicalizes invalid declared availability fields and physically removes every private

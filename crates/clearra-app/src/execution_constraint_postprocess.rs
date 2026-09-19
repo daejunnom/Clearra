@@ -22,6 +22,10 @@ use clearra_coverage::cover::{
 use clearra_coverage::pattern::{
     pattern_bitset::PatternBitSet, pattern_id::PatternId, weighted_pattern_set::WeightedPatternSet,
 };
+use clearra_coverage::reducer::pattern_coverage_aggregation::{
+    PatternCoverageAggregation, PatternCoverageCompleteness,
+};
+use clearra_coverage::universe::{CoverageUniverseGuard, PatternUniverseId, PatternWeightModelId};
 use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
 use clearra_postprocess::{
     BackToBackExecutionFilter, BackToBackFilterError, CandidatePatternCoverage,
@@ -880,6 +884,68 @@ fn apply_execution_constraints_inner(
     filtered_spin_batches = retain_accepted_spin_batches(filtered_spin_batches, &accepted)?;
     let union = coverage_union(accepted.iter().map(|(_, coverage)| coverage), pattern_count)?;
 
+    let coverage_aggregation = if result.field("coverage_aggregation_contract")
+        == Some(PatternCoverageAggregation::CONTRACT_ID)
+    {
+        if result.usize_field("materialized_pattern_count") != Some(pattern_count) {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_coverage_pattern_count_mismatch",
+            });
+        }
+        let pattern_universe_id = result
+            .u64_field("pattern_universe_id")
+            .filter(|value| *value != 0)
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_pattern_universe_identity_missing",
+            })?;
+        let pattern_weight_model_id = result
+            .u64_field("pattern_weight_model_id")
+            .filter(|value| *value != 0)
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_pattern_weight_identity_missing",
+            })?;
+        let aggregation_clone_bytes = union.checked_storage_retained_bytes().ok_or(
+            CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_memory_projection_overflow",
+            },
+        )?;
+        memory_guard(
+            &result,
+            pre_final_scratch
+                .checked_add(final_projection)
+                .and_then(|bytes| bytes.checked_add(aggregation_clone_bytes))
+                .ok_or(CoreExecutionError::RuntimeUnavailable {
+                    component: "b2b_preservation_memory_projection_overflow",
+                })?,
+        )?;
+        let aggregation = PatternCoverageAggregation::from_success_coverage(
+            CoverageUniverseGuard::new(
+                PatternUniverseId::new(pattern_universe_id),
+                PatternWeightModelId::new(pattern_weight_model_id),
+                pattern_count,
+            ),
+            accepted.len(),
+            &union,
+            &weights,
+            PatternCoverageCompleteness::new(probability_complete, true, true),
+        )
+        .map_err(|_| CoreExecutionError::RuntimeUnavailable {
+            component: "b2b_preservation_coverage_aggregation_invalid",
+        })?;
+        Some((
+            aggregation.source_row_count(),
+            aggregation.success_pattern_count(),
+            aggregation.failed_pattern_count(),
+            aggregation.success_probability().get(),
+            aggregation.failed_probability().get(),
+            aggregation.materialized_probability_mass().get(),
+            aggregation.availability().as_str(),
+            aggregation.completeness().is_complete(),
+        ))
+    } else {
+        None
+    };
+
     let mut identity_by_key = Vec::<(String, StandardBoard64TilingIdentity)>::new();
     let identity_capacity = filtered_scoring_batches
         .iter()
@@ -1034,9 +1100,6 @@ fn apply_execution_constraints_inner(
     };
     let mut replacements = vec![
         field("solution_found", solution_count != 0),
-        field("coverage_row_count", solution_count),
-        field("covered_pattern_count", union.count_ones()),
-        field("coverage_probability", canonical_probability(probability)),
         field("count_complete", count_complete),
         field("probability_complete", probability_complete),
         field(
@@ -1044,6 +1107,56 @@ fn apply_execution_constraints_inner(
             solution_probabilities_requested,
         ),
     ];
+    if let Some((
+        source_row_count,
+        success_pattern_count,
+        failed_pattern_count,
+        success_probability,
+        failed_probability,
+        materialized_probability_mass,
+        availability,
+        complete,
+    )) = coverage_aggregation
+    {
+        replacements.extend([
+            field("coverage_row_count", source_row_count),
+            field("covered_pattern_count", success_pattern_count),
+            field("failed_pattern_count", failed_pattern_count),
+            field(
+                "coverage_probability",
+                canonical_probability(success_probability),
+            ),
+            field(
+                "failed_coverage_probability",
+                canonical_probability(failed_probability),
+            ),
+            field(
+                "materialized_probability_mass",
+                canonical_probability(materialized_probability_mass),
+            ),
+            field(
+                "coverage_aggregation_contract",
+                PatternCoverageAggregation::CONTRACT_ID,
+            ),
+            field("coverage_aggregation_availability", availability),
+            field("coverage_aggregation_complete", complete),
+            field("coverage_aggregation_source_row_count", source_row_count),
+            field(
+                "coverage_probability_denominator",
+                "full-materialized-pattern-universe",
+            ),
+            field(
+                "success_conditional_probability_denominator",
+                canonical_probability(success_probability),
+            ),
+        ]);
+    } else {
+        replacements.extend([
+            field("coverage_row_count", solution_count),
+            field("covered_pattern_count", union.count_ones()),
+            field("coverage_probability", canonical_probability(probability)),
+        ]);
+    }
     if !worker_partial_authority {
         replacements.extend([
             field("solution_probability_count", solution_probabilities.len()),
@@ -1227,6 +1340,11 @@ fn apply_execution_constraints_inner(
     drop(union);
 
     let result = result
+        .try_retain_finesse_search_solution_keys(&normalized_keys)
+        .map_err(|error| CoreExecutionError::RuntimeUnavailable {
+            component: error.reason(),
+        })?;
+    let result = result
         .with_packing_candidate_keys(Vec::new())
         .with_path_steps(Vec::new())
         .with_representative_solution_identity(None)
@@ -1241,7 +1359,6 @@ fn apply_execution_constraints_inner(
         .with_spin_coverage_execution_batches(filtered_spin_batches)
         .with_pre_b2b_produced_solution_audit_checkpoint(pre_b2b_produced_solution_audit_checkpoint)
         .with_pre_b2b_solution_audit_checkpoint(pre_b2b_solution_audit_checkpoint)
-        .without_finesse_search_report()
         .without_tiling_solution_page_store();
     memory_guard(&result, replacement_bytes)?;
     result
@@ -2711,8 +2828,9 @@ mod tests {
     };
     use clearra_core_executor::{
         normalized_solution_probability_reports, solution_probability::probability_reports,
-        CoreExecutionError, CoreExecutionResult, CorePathStep, FinesseReport,
-        NormalizedSolutionCoverage, SolutionAverageScoreReport, SolutionCoverage,
+        CoreExecutionError, CoreExecutionResult, CorePathStep, FinessePolicyResult, FinesseReport,
+        FinesseRepresentativeWitness, FinesseSolutionAverage, NormalizedSolutionCoverage,
+        SolutionAverageScoreReport, SolutionCoverage,
     };
     use clearra_coverage::pattern::{
         pattern_bitset::PatternBitSet, weighted_pattern_set::WeightedPatternSet,
@@ -2729,7 +2847,7 @@ mod tests {
         apply_build_execution_constraints, apply_build_worker_execution_constraints,
         apply_execution_constraints, apply_execution_constraints_with_memory_guard,
         authoritative_solution_coverages, checked_merge_candidate_coverages_projection,
-        merge_candidate_coverages, try_owned_string_with_memory_guard,
+        merge_candidate_coverages, try_owned_string_with_memory_guard, PatternCoverageAggregation,
     };
 
     #[test]
@@ -3211,7 +3329,39 @@ mod tests {
                 ),
                 ("target_piece_count".to_owned(), "1".to_owned()),
                 ("coverage_pattern_count".to_owned(), "1".to_owned()),
+                ("materialized_pattern_count".to_owned(), "1".to_owned()),
+                ("pattern_universe_id".to_owned(), "1".to_owned()),
+                ("pattern_weight_model_id".to_owned(), "1".to_owned()),
+                (
+                    "coverage_aggregation_contract".to_owned(),
+                    PatternCoverageAggregation::CONTRACT_ID.to_owned(),
+                ),
+                (
+                    "coverage_aggregation_availability".to_owned(),
+                    "available".to_owned(),
+                ),
+                (
+                    "coverage_aggregation_complete".to_owned(),
+                    "true".to_owned(),
+                ),
+                (
+                    "coverage_aggregation_source_row_count".to_owned(),
+                    "2".to_owned(),
+                ),
+                ("coverage_row_count".to_owned(), "2".to_owned()),
                 ("covered_pattern_count".to_owned(), "1".to_owned()),
+                ("failed_pattern_count".to_owned(), "0".to_owned()),
+                ("coverage_probability".to_owned(), "1".to_owned()),
+                ("failed_coverage_probability".to_owned(), "0".to_owned()),
+                ("materialized_probability_mass".to_owned(), "1".to_owned()),
+                (
+                    "coverage_probability_denominator".to_owned(),
+                    "full-materialized-pattern-universe".to_owned(),
+                ),
+                (
+                    "success_conditional_probability_denominator".to_owned(),
+                    "1".to_owned(),
+                ),
                 ("solution_found".to_owned(), "true".to_owned()),
                 ("unique_solution_count".to_owned(), "2".to_owned()),
                 (
@@ -3263,13 +3413,32 @@ mod tests {
         .with_solution_average_scores(vec![SolutionAverageScoreReport::new(
             "reject", "100", 1, 1, true,
         )])
-        .with_finesse_report(FinesseReport::new(
-            "search",
-            "oracle",
-            true,
-            None,
-            Vec::new(),
-        ))
+        .with_finesse_report(
+            FinesseReport::new(
+                "search",
+                "oracle",
+                true,
+                None,
+                vec![FinessePolicyResult::new(
+                    "oracle",
+                    "1",
+                    true,
+                    vec![
+                        FinesseSolutionAverage::new("keep", "1", true),
+                        FinesseSolutionAverage::new("reject", "2", true),
+                    ],
+                )],
+            )
+            .with_representative_witness(FinesseRepresentativeWitness::new(
+                "oracle",
+                Some("keep".to_owned()),
+                vec![0],
+                vec![PieceKind::I],
+                1,
+                Vec::new(),
+                Vec::new(),
+            )),
+        )
         .with_spin_coverage_execution_batch(Some(SpinCoverageExecutionBatch::new(
             vec![vec![PieceKind::I]],
             0,
@@ -3356,9 +3525,40 @@ mod tests {
         assert_eq!(result.bool_field("solution_set_materialized"), Some(true));
         assert_eq!(result.bool_field("solution_keys_complete"), Some(true));
         assert_eq!(result.bool_field("solution_page_available"), Some(false));
+        assert_eq!(result.usize_field("coverage_row_count"), Some(1));
+        assert_eq!(
+            result.usize_field("coverage_aggregation_source_row_count"),
+            Some(1)
+        );
+        assert_eq!(result.usize_field("covered_pattern_count"), Some(1));
+        assert_eq!(result.usize_field("failed_pattern_count"), Some(0));
+        assert_eq!(result.field("coverage_probability"), Some("1"));
+        assert_eq!(result.field("failed_coverage_probability"), Some("0"));
+        assert_eq!(result.field("materialized_probability_mass"), Some("1"));
+        assert_eq!(
+            result.field("coverage_aggregation_availability"),
+            Some("available")
+        );
         assert!(result.packing_candidate_keys().is_empty());
         assert!(result.solution_average_scores().is_empty());
-        assert!(result.finesse_report().is_none());
+        let finesse = result
+            .finesse_report()
+            .expect("B2B-filtered finesse report");
+        assert_eq!(
+            finesse
+                .representative_witness()
+                .and_then(FinesseRepresentativeWitness::solution_key),
+            Some("keep")
+        );
+        assert_eq!(finesse.policy_results().len(), 1);
+        assert_eq!(
+            finesse.policy_results()[0]
+                .solution_averages()
+                .iter()
+                .map(FinesseSolutionAverage::solution_key)
+                .collect::<Vec<_>>(),
+            ["keep"]
+        );
         assert!(result.tiling_solution_page_store().is_none());
         let availability = result.execution_report().solution_set_availability();
         assert!(availability.contract_valid());

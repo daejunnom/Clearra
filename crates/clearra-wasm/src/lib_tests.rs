@@ -2358,6 +2358,41 @@ fn gui_build_probability_b2b_argv_runs_through_serial_and_distributed_wasm() {
 
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let combined = runtime
+        .run_command_text(
+            "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 1 \
+             --queue I --no-hold --no-mirror --workers 1 --preserve-b2b \
+             --spin-profile t-spins --finesse inputs --pattern-knowledge both",
+        )
+        .expect("GUI B2B plus finesse Build command");
+    let combined_report = combined
+        .search_report()
+        .expect("GUI B2B plus finesse report");
+    assert_build_coverage_aggregation_is_coherent(combined_report);
+    let finesse = combined_report
+        .finesse_report
+        .as_ref()
+        .expect("requested finesse report survives B2B materialization");
+    assert_eq!(finesse.mode, "search");
+    if let Some(solution_key) = finesse
+        .representative_witness
+        .as_ref()
+        .and_then(|witness| witness.solution_key.as_deref())
+    {
+        assert!(combined_report
+            .normalized_solution_keys
+            .binary_search_by(|candidate| candidate.as_str().cmp(solution_key))
+            .is_ok());
+    }
+    for policy in &finesse.policy_results {
+        assert!(policy
+            .solution_averages
+            .iter()
+            .all(|average| combined_report
+                .normalized_solution_keys
+                .binary_search(&average.solution_key)
+                .is_ok()));
+    }
     let serial = runtime
         .run_command_text(&commands[0])
         .expect("GUI serial B2B Build command");
@@ -2391,6 +2426,7 @@ fn gui_build_probability_b2b_argv_runs_through_serial_and_distributed_wasm() {
             .summary_fields
             .iter()
             .any(|(key, value)| { key == "execution_constraint_materialized" && value == "true" }));
+        assert_build_coverage_aggregation_is_coherent(report);
     }
 }
 
@@ -2911,6 +2947,65 @@ fn search_summary_field<'a>(report: &'a WasmSearchReport, key: &str) -> &'a str 
         .iter()
         .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
         .unwrap_or_else(|| panic!("missing search summary field {key}"))
+}
+
+fn assert_build_coverage_aggregation_is_coherent(report: &WasmSearchReport) {
+    assert_eq!(
+        search_summary_field(report, "coverage_aggregation_contract"),
+        "pattern-coverage-aggregation.v1"
+    );
+    assert_eq!(
+        search_summary_field(report, "coverage_aggregation_source_row_count")
+            .parse::<usize>()
+            .expect("canonical coverage source row count"),
+        report.unique_solution_count
+    );
+    assert_eq!(
+        search_summary_field(report, "coverage_row_count")
+            .parse::<usize>()
+            .expect("canonical coverage row count"),
+        report.unique_solution_count
+    );
+    let pattern_count = search_summary_field(report, "materialized_pattern_count")
+        .parse::<usize>()
+        .expect("canonical materialized pattern count");
+    let successful = search_summary_field(report, "covered_pattern_count")
+        .parse::<usize>()
+        .expect("canonical successful pattern count");
+    let failed = search_summary_field(report, "failed_pattern_count")
+        .parse::<usize>()
+        .expect("canonical failed pattern count");
+    assert_eq!(successful.checked_add(failed), Some(pattern_count));
+
+    let success_probability = search_summary_field(report, "coverage_probability")
+        .parse::<f64>()
+        .expect("canonical coverage probability");
+    let failed_probability = search_summary_field(report, "failed_coverage_probability")
+        .parse::<f64>()
+        .expect("canonical failed probability");
+    let materialized_probability = search_summary_field(report, "materialized_probability_mass")
+        .parse::<f64>()
+        .expect("canonical materialized probability mass");
+    let tolerance = f64::EPSILON * pattern_count.max(1) as f64 * 4.0;
+    assert!(
+        (success_probability + failed_probability - materialized_probability).abs() <= tolerance
+    );
+    assert_eq!(
+        search_summary_field(report, "success_conditional_probability_denominator"),
+        search_summary_field(report, "coverage_probability")
+    );
+    assert_eq!(
+        search_summary_field(report, "coverage_aggregation_complete"),
+        report.probability_complete.to_string()
+    );
+    assert_eq!(
+        search_summary_field(report, "coverage_aggregation_availability"),
+        if report.probability_complete {
+            "available"
+        } else {
+            "incomplete"
+        }
+    );
 }
 
 // These typed PC regressions intentionally exercise the process-global
