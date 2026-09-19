@@ -556,12 +556,12 @@ LRU 및 64KiB 단일 Range 상한을 적용한다. 검색/WAN 시간이나 sidec
 
 | block records | sidecar bytes | modeled requests | modeled bytes | 최대 block |
 | ---: | ---: | ---: | ---: | ---: |
-| 4 | 15,185,728 | 13,883 | 17,672,295 | 1,719 |
-| 8 | 7,592,876 | 12,579 | 14,235,188 | 3,249 |
-| **16** | **3,796,448** | **11,316** | **12,593,754** | **6,018** |
-| 32 | 1,898,236 | 10,274 | 14,744,762 | 11,397 |
-| 64 | 949,128 | 9,459 | 23,214,851 | 21,141 |
-| 128 | 474,576 | 8,754 | 41,163,527 | 39,225 |
+| 4 | 15,185,728 | 13,885 | 17,680,487 | 1,719 |
+| 8 | 7,592,876 | 12,582 | 14,247,476 | 3,249 |
+| **16** | **3,796,448** | **11,319** | **12,606,042** | **6,018** |
+| 32 | 1,898,236 | 10,278 | 14,761,146 | 11,397 |
+| 64 | 949,128 | 9,463 | 23,231,235 | 21,141 |
+| 128 | 474,576 | 8,756 | 41,171,719 | 39,225 |
 
 같은 저장 trace의 채택된 기존 전송 기록은 14,998 requests/21,016,558B다. 모델상
 16-record가 요청과 bytes의 균형이 가장 좋지만, 두 숫자는 local-response causal model이며
@@ -569,13 +569,25 @@ LRU 및 64KiB 단일 Range 상한을 적용한다. 검색/WAN 시간이나 sidec
 `scripts/benchmark/run-pc4-block-directory-model.mjs`이며 기존 trace와 파일을 수정하지
 않는다.
 
+모델만으로 레코드 경계를 가정하지 않도록 같은 도구의 `--verify-block 16` 경로에서
+3,796,448B `GBLKIDX1` sidecar를 메모리에 구성하고 실제 qualified `graph.bin`을 블록별로
+읽어 Hydra record 9,999개를 구조적으로 파싱했다. 공유 8MiB/2,048-entry LRU에서 실제
+sidecar 1,638회/6,707,616B와 graph block 9,681회/5,898,426B가 발생해 모델과 정확히 같은
+11,319회/12,606,042B가 나왔다. 각 레코드는 기존 GOFF exact 범위와 byte 대조했고 두
+aggregate SHA-256이 모두
+`bae61dc5c615a2fa68bfb8b9c915fd38040901f5f59ab25b10b552fb2004bbaf`로 일치했다. 비교용
+exact read 9,999회/370,095B는 검증 oracle 비용이므로 후보 전송 수치에 포함하지 않는다.
+이는 local adapter-format/record parity 증거이며 실제 네트워크 시간, 전체 탐색 결과,
+다른 네 프로필의 자격을 닫지 않는다.
+
 upstream 요청 후보는 `.safetensors` 변환이 아니라 프로필별
 `graph block offsets v1`이다. body는 record ordinal `0, K, 2K, ... field_count`의 기존
 `graph.bin` byte offset이며 마지막 값은 graph byte length다. manifest에는 K,
 source GOFF/graph content identity, field count, target encoding, 완성 상태와 sidecar
 content identity를 결박해야 한다. Jstris에서는 K=16을 실제 adapter/WAN A/B의 첫 후보로
-삼되, 다른 킥 프로필은 각각의 qualified graph에서 K와 최대 block을 다시 계산한다.
-그 A/B 전에는 muse918에게 파일 변경을 요청하지 않는다.
+삼는다. local adapter-format A/B는 위 9,999개 record에서 통과했지만 WAN A/B와 다른
+킥 프로필의 qualified graph별 K·최대 block 계산은 남아 있다. 그 검증 전에는
+muse918에게 파일 변경을 요청하지 않는다.
 
 ### 9.6 중앙 broker의 Tail 우선순위
 
