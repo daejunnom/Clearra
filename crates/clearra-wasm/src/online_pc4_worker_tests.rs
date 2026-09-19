@@ -282,25 +282,11 @@ fn online_pc4_worker_preserves_typed_transport_failures_without_starting_fallbac
         runtime
             .online_pc4_admit_json(id, &response.to_string())
             .expect("host-observed failure is admitted, not executed as fallback");
-        assert_eq!(
-            runtime.advance_job(id, 256).unwrap(),
-            WasmWorkerAdvanceStatus::Failed
-        );
+        let failure = runtime
+            .advance_job(id, 256)
+            .expect_err("the next cooperative advance surfaces the typed transport failure");
+        assert_eq!(failure.code(), expected_reason, "{transport_failure}");
         let events = runtime.drain_events(id);
-        let diagnostics = events
-            .iter()
-            .find_map(|event| match event {
-                WasmWorkerJobEvent::Failed { diagnostics, .. } => Some(diagnostics),
-                _ => None,
-            })
-            .expect("typed failure event");
-        assert!(
-            diagnostics
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.message().contains(expected_reason)),
-            "{transport_failure}: {diagnostics:?}"
-        );
         assert!(
             events
                 .iter()
