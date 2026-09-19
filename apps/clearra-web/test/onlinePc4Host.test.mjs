@@ -123,6 +123,55 @@ test('whole-body response fails without entering an offline solver', async () =>
   } finally { globalThis.fetch = original; }
 });
 
+function transportFailureFixture(expectedFailure, retryAfterSeconds) {
+  let observedFailure = null, terminalQueued = false, starts = 0;
+  const events = [], observed = [];
+  const wasm = {
+    start_job() { starts++; return 7; },
+    advance_job() {
+      if (!observedFailure) return 'pending';
+      if (!terminalQueued) {
+        terminalQueued = true;
+        events.push({ schema_version: 1, runtime: 'clearra-wasm', event: 'failed', job_id: 7,
+          diagnostics: [{ code: expectedFailure, severity: 'error', message: expectedFailure }] });
+      }
+      return 'failed';
+    },
+    online_pc4_pending() { return observedFailure ? null : range; },
+    online_pc4_admit(jobId, response) {
+      assert.equal(jobId, 7);
+      assert.deepEqual(response, { lookup_session: 9, request_id: 1,
+        transport_failure: expectedFailure,
+        ...(retryAfterSeconds === undefined ? {} : { retry_after_seconds: retryAfterSeconds }) });
+      observedFailure = response;
+    },
+    drain_job_events_json() { return JSON.stringify(events.splice(0)); },
+    cancel_job() { assert.fail('typed transport failure must not be replaced by cancellation'); }
+  };
+  return { wasm, observed, emit: event => observed.push(event), get starts() { return starts; } };
+}
+
+for (const [name, fetcher, failure, retryAfterSeconds] of [
+  ['rate limit', async () => new Response(null, {
+    status: 429,
+    headers: { 'retry-after': '17' }
+  }), 'rate-limited', 17],
+  ['upstream unavailable', async () => new Response(null, { status: 503 }), 'unavailable', undefined],
+  ['offline network', async () => { throw new TypeError('network unavailable'); }, 'offline', undefined]
+]) {
+  test(`${name} is admitted as a typed terminal cause without automatic offline fallback`, async () => {
+    const original = fetch;
+    try {
+      globalThis.fetch = fetcher;
+      const f = transportFailureFixture(failure, retryAfterSeconds);
+      const terminal = await new WasmJobRunner(f.wasm, generation).run('clearra pc --tablebase', f.emit);
+      assert.equal(terminal.event, 'failed');
+      assert.equal(f.starts, 1, 'the host must not start a second offline job');
+      assert.equal(f.observed.some(event => event.event === 'final_response'), false);
+    } finally { globalThis.fetch = original; }
+  });
+}
+
 test('cancelling an in-flight Range drains cancellation instead of reporting a network failure', async () => {
   const original = fetch;
   let started;

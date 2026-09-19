@@ -5,6 +5,7 @@ use crate::{
     AppStatus, CooperativeAppAdvance, Pc4OnlineHostExecution, ScenarioAppCommand,
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_pc4_tablebase::RangeTransportFailure;
 use clearra_pc_graph::request::{PcExecutionPolicy, PcScenarioBoard, PcScenarioQuery, PieceWindow};
 
 fn start(fixture: &ClearPath) -> Pc4OnlineHostExecution {
@@ -238,5 +239,38 @@ fn pc4_compact_graph_union_host_failure_cancellation_and_late_packets_cannot_com
                 &control
             )
             .is_err());
+    }
+}
+
+#[test]
+fn pc4_compact_graph_union_preserves_transport_failure_cause_until_host_advance() {
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
+    let fixture = three_o_fixture();
+    for (failure, expected) in [
+        (RangeTransportFailure::Offline, "pc4_online_offline"),
+        (
+            RangeTransportFailure::RateLimited {
+                retry_after_seconds: Some(30),
+            },
+            "pc4_online_rate_limited",
+        ),
+        (
+            RangeTransportFailure::Timeout,
+            "pc4_online_dataset_unavailable",
+        ),
+    ] {
+        let control = ExecutionControl::default();
+        let mut execution = reach_parallel(&fixture, &control);
+        let range = execution.pending_range().unwrap().clone();
+        execution
+            .admit_transport_failure(
+                range.lookup_session().get(),
+                range.request_id(),
+                failure,
+                &control,
+            )
+            .expect("valid transport observation is admitted before product termination");
+        assert!(execution.pending_ranges().is_empty());
+        assert_eq!(execution.advance(64, &control).unwrap_err(), expected);
     }
 }

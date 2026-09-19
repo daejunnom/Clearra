@@ -48,6 +48,15 @@ function isolated(source) {
   assert.match(nativeHttp2Live, /--ignored/u);
   assert.equal((nativeHttp2Live.match(/invoke-clearra-build\.ps1 -Purpose experiment/gu) ?? []).length, 2);
   assert.doesNotMatch(nativeHttp2Live, /upload-artifact|environment:|secrets\.|id-token/u);
+  const pc4ContractsJob = source.split('  pc4-contracts:')[1]?.split(/^  [a-z][a-z0-9-]*:/mu)[0];
+  assert.ok(pc4ContractsJob);
+  assert.match(pc4ContractsJob, /inputs\.pc4_completion_proof/u);
+  assert.match(pc4ContractsJob, /--completion-proof/u);
+  assert.equal(
+    (pc4ContractsJob.match(/invoke-clearra-build\.ps1 -Purpose experiment/gu) ?? []).length,
+    1,
+    'the explicit completion proof must reuse the existing managed PC4 build owner',
+  );
   const preview = source.split('  preview-wasm:')[1];
   assert.ok(preview);
   assert.match(preview, /needs: source/u);
@@ -98,6 +107,15 @@ test('ordinary regression checks do not repeat retained A/B measurements', () =>
   assert.match(pc4Contracts, /for \(const \[name, args\] of selectedChecks\)/u);
   assert.doesNotMatch(workflow, /--benchmarks/u);
 });
+test('the unresolved HF completion proof is explicit and reuses the PC4 compile generation', () => {
+  assert.match(pc4Contracts, /process\.argv\.includes\('--completion-proof'\)/u);
+  assert.match(pc4Contracts, /'pc4-hf-completion-proof'/u);
+  assert.match(
+    pc4Contracts,
+    /classify_all_hf_omitted_pc4_targets_with_exact_completion_receipts/u,
+  );
+  assert.match(pc4Contracts, /'--ignored', '--nocapture', '--test-threads=1'/u);
+});
 for (const [name, mutation] of [
   ['main trigger', s => s.replace('branches: ["codex/v0.9.0-stacked-on-v0.8.1-20260912"]', 'branches: ["main"]')],
   ['broad job admission', s => s.replace("if: github.ref == 'refs/heads/codex/v0.9.0-stacked-on-v0.8.1-20260912' && github.ref_type == 'branch'", 'if: true')],
@@ -120,7 +138,10 @@ test('native process checks preserve the local execution policy before archive b
   assert.doesNotMatch(native, /Unblock-File|Set-AuthenticodeSignature|ExecutionPolicy|\bwsl\b/u);
   assert.ok(native.indexOf('Assert-ClearraTrustedExecutionSurface') < native.indexOf('& cargo fetch --locked'));
   assert.match(workflow, /"-FetchDependencies"/u);
-  assert.match(workflow, /"--row-normalization","--fetch"/u);
+  assert.match(
+    workflow,
+    /\$arguments = @\('scripts\/tools\/check-pc4-app-contracts\.mjs', '--row-normalization', '--fetch'\)/u,
+  );
 });
 
 test('MSVC archive and C tests share the Rust-compatible CRT without changing build profiles', () => {

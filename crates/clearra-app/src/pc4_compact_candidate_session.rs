@@ -16,6 +16,7 @@ use crate::{
 use clearra_pc4_tablebase::{
     GraphOffsetsHeaderWitness, LookupSessionId, PinnedPc4Generation, RangeAdmissionAttempt,
     RangeAdmissionGuard, RangeAdmissionInput, RangeAdmissionLimits, RangeRequest,
+    RangeTransportFailure,
 };
 use core::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 
@@ -44,6 +45,7 @@ pub(crate) struct Pc4CompactCandidateSession {
     started_lookups: usize,
     complete: bool,
     failed: bool,
+    terminal_failure: Option<&'static str>,
 }
 
 impl Pc4CompactCandidateSession {
@@ -110,6 +112,7 @@ impl Pc4CompactCandidateSession {
             started_lookups: 0,
             complete: false,
             failed: false,
+            terminal_failure: None,
         }))
     }
 
@@ -146,6 +149,9 @@ impl Pc4CompactCandidateSession {
         work: NonZeroUsize,
         guard: &G,
     ) -> Result<bool, &'static str> {
+        if let Some(reason) = self.terminal_failure.take() {
+            return Err(reason);
+        }
         if self.failed {
             return Err("pc4_compact_session_terminated");
         }
@@ -299,9 +305,20 @@ impl Pc4CompactCandidateSession {
                 entry.pending = None;
                 Ok(())
             }
-            Ok(_) => {
-                self.fail();
-                Err("pc4_compact_session_range_failed")
+            Ok(AppOnlinePc4RangeDisposition::RangeNotSatisfiable { .. }) => {
+                self.fail_with_reason("pc4_online_dataset_unavailable");
+                Ok(())
+            }
+            Ok(AppOnlinePc4RangeDisposition::TransportFailure(failure)) => {
+                let reason = match failure {
+                    RangeTransportFailure::Offline => "pc4_online_offline",
+                    RangeTransportFailure::RateLimited { .. } => "pc4_online_rate_limited",
+                    RangeTransportFailure::Timeout | RangeTransportFailure::Unavailable => {
+                        "pc4_online_dataset_unavailable"
+                    }
+                };
+                self.fail_with_reason(reason);
+                Ok(())
             }
             Err(error) => {
                 let reason = error.reason();
@@ -329,5 +346,10 @@ impl Pc4CompactCandidateSession {
         self.complete = false;
         self.lookups.clear();
         self.union = None;
+    }
+
+    fn fail_with_reason(&mut self, reason: &'static str) {
+        self.fail();
+        self.terminal_failure = Some(reason);
     }
 }

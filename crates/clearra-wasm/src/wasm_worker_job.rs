@@ -1076,6 +1076,57 @@ impl WasmWorkerJobRuntime {
         let id = v["request_id"]
             .as_u64()
             .ok_or_else(|| error("pc4_online_response_invalid"))?;
+        let transport_failure = match v["transport_failure"].as_str() {
+            None => None,
+            Some("offline") => Some(clearra_pc4_tablebase::RangeTransportFailure::Offline),
+            Some("rate-limited") => {
+                let retry_after_seconds = if v["retry_after_seconds"].is_null() {
+                    None
+                } else {
+                    Some(
+                        v["retry_after_seconds"]
+                            .as_u64()
+                            .ok_or_else(|| error("pc4_online_response_invalid"))?,
+                    )
+                };
+                Some(clearra_pc4_tablebase::RangeTransportFailure::RateLimited {
+                    retry_after_seconds,
+                })
+            }
+            Some("timeout") => Some(clearra_pc4_tablebase::RangeTransportFailure::Timeout),
+            Some("unavailable") => Some(clearra_pc4_tablebase::RangeTransportFailure::Unavailable),
+            Some(_) => return Err(error("pc4_online_transport_failure_invalid")),
+        };
+        if transport_failure.is_some()
+            && (!v["source"].is_null()
+                || !v["status"].is_null()
+                || !v["content_range"].is_null()
+                || !v["bytes"].is_null())
+        {
+            return Err(error("pc4_online_transport_failure_mixed"));
+        }
+        if !matches!(
+            transport_failure,
+            Some(clearra_pc4_tablebase::RangeTransportFailure::RateLimited { .. })
+        ) && !v["retry_after_seconds"].is_null()
+        {
+            return Err(error("pc4_online_response_invalid"));
+        }
+        let job = self
+            .active_jobs
+            .get_mut(&job_id)
+            .ok_or_else(|| error("pc4_online_job_missing"))?;
+        let online = job
+            .execution
+            .as_mut()
+            .and_then(|execution| execution.online_pc4.as_mut())
+            .and_then(|online| online.as_mut().ok())
+            .ok_or_else(|| error("pc4_online_job_missing"))?;
+        if let Some(failure) = transport_failure {
+            return online
+                .admit_transport_failure(lookup, id, failure, job.scope.execution_control())
+                .map_err(error);
+        }
         let local = v["source"] == "verified-local-file";
         let status = if local {
             if !v["status"].is_null() || !v["content_range"].is_null() {
@@ -1094,16 +1145,6 @@ impl WasmWorkerJobRuntime {
         let content_range = v["content_range"].as_str().map(str::to_owned);
         let bytes: Vec<u8> = serde_json::from_value(v["bytes"].clone())
             .map_err(|_| error("pc4_online_response_invalid"))?;
-        let job = self
-            .active_jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| error("pc4_online_job_missing"))?;
-        let online = job
-            .execution
-            .as_mut()
-            .and_then(|execution| execution.online_pc4.as_mut())
-            .and_then(|online| online.as_mut().ok())
-            .ok_or_else(|| error("pc4_online_job_missing"))?;
         if local {
             return online
                 .admit_local_slice(lookup, id, bytes, job.scope.execution_control())

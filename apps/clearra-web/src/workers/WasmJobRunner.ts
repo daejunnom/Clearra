@@ -50,6 +50,16 @@ export class WasmJobRunner {
           status: 206, content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}` }),
         bytes: Array.from(bytes) });
     };
+    const reject = (range: Pc4RangeRequest, error: unknown) => {
+      if (this.cancellationRequested || this.jobId === null) return;
+      const observed = pc4RejectedRange(error, range);
+      if (!observed) throw error;
+      this.wasm.online_pc4_admit!(this.jobId, {
+        lookup_session: range.lookup_session,
+        request_id: range.request_id,
+        ...observed
+      });
+    };
     const emit = (event: ClearraWasmWorkerEvent) => onEvent(reader ? ({ ...event,
       pc4_online: { provider: 'provider' in reader ? reader.provider : 'hf-graph', profile: selectedProfile!, revision: this.onlineGeneration!.revision,
         requests: reader.requests, transferred_bytes: reader.bytes,
@@ -80,7 +90,7 @@ export class WasmJobRunner {
           lastOnlineProgress = performance.now();
         }
         if (!this.cancellationRequested) {
-          rangePump?.drain(admit);
+          rangePump?.drain(admit, reject);
           status = this.wasm.advance_job(this.jobId, SEARCH_WORK_BUDGET);
           advancesSinceDrain += 1;
           if (this.onlineGeneration && (status === 'pending' || status === 'progress')) {
@@ -124,7 +134,8 @@ export class WasmJobRunner {
                 // Cancellation already has a terminal event waiting in Rust.
                 // Do not turn an aborted HTTP request into a generic failure.
                 if (this.cancellationRequested) continue;
-                throw error;
+                reject(range, error);
+                continue;
               }
               if (this.cancellationRequested) continue;
               admit(range, bytes);
@@ -247,6 +258,41 @@ export class WasmJobRunner {
     } catch {
       // Worker termination remains the final ownership boundary after a trap.
     }
+  }
+}
+
+type Pc4RejectedRange =
+  | { transport_failure: 'offline' | 'timeout' | 'unavailable' }
+  | { transport_failure: 'rate-limited'; retry_after_seconds?: number }
+  | { status: 416; content_range: string; bytes: [] };
+
+function pc4RejectedRange(error: unknown, range: Pc4RangeRequest): Pc4RejectedRange | null {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : '';
+  switch (code) {
+    case 'pc4_online_offline':
+      return { transport_failure: 'offline' };
+    case 'pc4_online_rate_limited':
+      {
+        const retryAfterSeconds = (error as { retryAfterSeconds?: unknown }).retryAfterSeconds;
+        return typeof retryAfterSeconds === 'number' &&
+          Number.isSafeInteger(retryAfterSeconds) && retryAfterSeconds >= 0
+          ? { transport_failure: 'rate-limited', retry_after_seconds: retryAfterSeconds }
+          : { transport_failure: 'rate-limited' };
+      }
+    case 'pc4_online_timeout':
+      return { transport_failure: 'timeout' };
+    case 'pc4_online_unavailable':
+      return { transport_failure: 'unavailable' };
+    case 'pc4_online_range_unsatisfiable':
+      return {
+        status: 416,
+        content_range: `bytes */${range.artifact.byte_length}`,
+        bytes: []
+      };
+    default:
+      return null;
   }
 }
 

@@ -246,3 +246,78 @@ fn online_pc4_worker_local_source_rejects_http_headers_stale_ids_and_late_cancel
     );
     runtime.configure_online_pc4("null").unwrap();
 }
+
+#[test]
+fn online_pc4_worker_preserves_typed_transport_failures_without_starting_fallback() {
+    let fixture = Fixture::new();
+    for (transport_failure, retry_after_seconds, expected_reason) in [
+        ("offline", None, "pc4_online_offline"),
+        ("rate-limited", Some(30_u64), "pc4_online_rate_limited"),
+        ("timeout", None, "pc4_online_dataset_unavailable"),
+        ("unavailable", None, "pc4_online_dataset_unavailable"),
+    ] {
+        let (mut runtime, id) = fixture.start();
+        let range = Fixture::pending(&mut runtime, id);
+        let mut response = json!({
+            "lookup_session": range["lookup_session"],
+            "request_id": range["request_id"],
+            "transport_failure": transport_failure,
+        });
+        if let Some(seconds) = retry_after_seconds {
+            response["retry_after_seconds"] = json!(seconds);
+        }
+        runtime
+            .online_pc4_admit_json(id, &response.to_string())
+            .expect("host-observed failure is admitted, not executed as fallback");
+        assert_eq!(
+            runtime.advance_job(id, 256).unwrap(),
+            WasmWorkerAdvanceStatus::Failed
+        );
+        let events = runtime.drain_events(id);
+        let diagnostics = events
+            .iter()
+            .find_map(|event| match event {
+                WasmWorkerJobEvent::Failed { diagnostics, .. } => Some(diagnostics),
+                _ => None,
+            })
+            .expect("typed failure event");
+        assert!(
+            diagnostics
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains(expected_reason)),
+            "{transport_failure}: {diagnostics:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, WasmWorkerJobEvent::FinalResponse { .. })),
+            "a transport failure must not start or complete offline fallback"
+        );
+    }
+}
+
+#[test]
+fn online_pc4_worker_rejects_ambiguous_transport_failure_envelopes() {
+    let fixture = Fixture::new();
+    let (mut runtime, id) = fixture.start();
+    let range = Fixture::pending(&mut runtime, id);
+    let mixed = json!({
+        "lookup_session": range["lookup_session"],
+        "request_id": range["request_id"],
+        "transport_failure": "offline",
+        "status": 206,
+        "bytes": [],
+    });
+    assert_eq!(
+        runtime
+            .online_pc4_admit_json(id, &mixed.to_string())
+            .unwrap_err()
+            .code(),
+        "pc4_online_transport_failure_mixed"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&runtime.online_pc4_pending_json(id)).unwrap(),
+        range
+    );
+}

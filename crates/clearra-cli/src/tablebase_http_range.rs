@@ -46,6 +46,7 @@ impl HttpReply {
             200 => return Err("pc4_online_whole_content_rejected"),
             429 => return Err("pc4_online_rate_limited"),
             416 => return Err("pc4_online_range_unsatisfiable"),
+            408 | 425 | 500 | 502 | 503 | 504 => return Err("pc4_online_dataset_unavailable"),
             _ => return Err("pc4_online_range_response_invalid"),
         }
         if self.content_range != content_range(offset, length, artifact.size) {

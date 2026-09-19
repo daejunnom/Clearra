@@ -179,7 +179,12 @@ fn tablebase_download_http_requires_real_partial_content_before_cache_admission(
         (200, "pc4_online_whole_content_rejected"),
         (429, "pc4_online_rate_limited"),
         (416, "pc4_online_range_unsatisfiable"),
-        (503, "pc4_online_range_response_invalid"),
+        (408, "pc4_online_dataset_unavailable"),
+        (425, "pc4_online_dataset_unavailable"),
+        (500, "pc4_online_dataset_unavailable"),
+        (502, "pc4_online_dataset_unavailable"),
+        (503, "pc4_online_dataset_unavailable"),
+        (504, "pc4_online_dataset_unavailable"),
     ] {
         let mut reader = OnlineRangeReader::new(files(), |a, o, n| {
             let mut r = reply(a, o, n);

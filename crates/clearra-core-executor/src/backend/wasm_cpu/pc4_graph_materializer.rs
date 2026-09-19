@@ -242,6 +242,10 @@ fn bottom_full_row_prefix(cells: u64) -> Option<u16> {
 mod hf_tests;
 
 #[cfg(test)]
+#[path = "pc4_completion_proof_tests.rs"]
+mod completion_proof_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

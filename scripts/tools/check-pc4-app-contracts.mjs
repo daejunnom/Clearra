@@ -32,6 +32,17 @@ if (process.argv.includes('--row-normalization')) {
     ['pc4-replay-app', [...common, 'pc_replay_']],
   );
 }
+if (process.argv.includes('--completion-proof')) {
+  checks.push([
+    'pc4-hf-completion-proof',
+    [
+      'test', '--locked', '--offline', '--quiet', '-j', '2',
+      '-p', 'clearra-core-executor', '--lib',
+      'classify_all_hf_omitted_pc4_targets_with_exact_completion_receipts',
+      '--', '--ignored', '--nocapture', '--test-threads=1'
+    ]
+  ]);
+}
 // Even fetch probes rustc, so it must inherit this live managed owner.
 // Keep fetch and offline tests in one generation rather than replacing it.
 if (process.argv.includes('--fetch')) checks.unshift(['fetch-locked', ['fetch', '--locked']]);

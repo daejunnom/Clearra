@@ -131,6 +131,14 @@ fn tablebase_download_streams_verified_bytes_and_keeps_only_one_active_generatio
         pointer["generation"]["profiles"][3]["reader_contract"],
         "hydra-jstris-180-complete-graph-v1"
     );
+    assert_eq!(
+        pointer["generation"]["profiles"][3]["pc_search_target_lines"],
+        json!([])
+    );
+    assert_eq!(
+        pointer["generation"]["profiles"][3]["target_qualification_receipts"],
+        json!([])
+    );
 }
 
 #[test]
@@ -208,9 +216,9 @@ fn tablebase_download_requires_explicit_profile_and_lists_all_five_without_io() 
 
 #[cfg(all(feature = "online-pc4-tablebase", feature = "wasm-cpu-runtime"))]
 #[test]
-fn tablebase_download_native_search_uses_shared_app_and_rejects_cross_profile_reuse() {
+fn tablebase_download_reader_ready_files_do_not_grant_pc_target_or_cross_profile_authority() {
     use crate::{args::CliParser, assemble::CliAppRequestAssembler, output::RenderFormat};
-    use clearra_app::{AppContext, AppCoreExecutorService, AppServices, AppStatus};
+    use clearra_app::{AppContext, AppCoreExecutorService, AppServices};
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let f = Fixture::new();
     f.install(&"a".repeat(40), false).unwrap();
@@ -238,11 +246,10 @@ fn tablebase_download_native_search_uses_shared_app_and_rejects_cross_profile_re
             AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
         );
         let result = execute_local_at(&f.root, context, request);
-        if profile == "jstris-180" {
-            assert_eq!(result.unwrap().status(), AppStatus::Success);
-        } else {
-            assert!(result.is_err(), "SRS cannot reuse Jstris graph data");
-        }
+        assert!(
+            result.is_err(),
+            "reader-ready files cannot mint target authority"
+        );
     }
 }
 
@@ -310,8 +317,8 @@ fn one_piece_request(profile: &str) -> clearra_app::AppRequest {
 
 #[cfg(all(feature = "online-pc4-tablebase", feature = "wasm-cpu-runtime"))]
 #[test]
-fn tablebase_download_native_range_and_installed_files_return_the_same_complete_solution() {
-    use clearra_app::{AppContext, AppCoreExecutorService, AppServices, AppStatus};
+fn tablebase_download_native_range_and_installed_files_both_fail_closed_without_exact_receipt() {
+    use clearra_app::{AppContext, AppCoreExecutorService, AppServices};
     // These are complete App executions using the process-wide authority, not
     // independent transport-only tests. Share the existing CLI resource guard.
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
@@ -322,47 +329,49 @@ fn tablebase_download_native_range_and_installed_files_return_the_same_complete_
         )
     };
     let mut ranges = Vec::new();
-    let online =
-        online_execution::execute_with_online(
-            &f.root,
-            context(),
-            one_piece_request("jstris-180"),
-            |ctx, request| {
-                online_execution::execute_online_with(
-                    ctx,
-                    request,
-                    &"a".repeat(40),
-                    &f.files,
-                    |artifact, start, length| {
-                        let i = FILES
-                            .iter()
-                            .position(|path| *path == artifact.path)
-                            .unwrap();
-                        // Every physical request is partial and bounded. A repeated
-                        // index slice must be served by the verified cache shared
-                        // across qualification and the subsequent App traversal.
-                        assert!(length > 0 && length <= 65_536 && start + length <= artifact.size);
-                        if i < 2 {
-                            assert!(
-                                length < artifact.size,
-                                "a small read cannot download a whole index"
-                            );
-                            assert!(!ranges.iter().any(|&(role, previous, size)| {
-                            role == i && previous <= start && start + length <= previous + size
-                        }), "an already verified containing index span must not be fetched again");
-                        }
-                        ranges.push((i, start, length));
-                        Ok(http_range::HttpReply {
-                            status: 206,
-                            content_range: http_range::content_range(start, length, artifact.size),
-                            bytes: f.bytes[i][start as usize..(start + length) as usize].to_vec(),
-                        })
-                    },
-                )
-            },
-        )
-        .unwrap();
-    assert_eq!(online.status(), AppStatus::Success);
+    let online_error = online_execution::execute_with_online(
+        &f.root,
+        context(),
+        one_piece_request("jstris-180"),
+        |ctx, request| {
+            online_execution::execute_online_with(
+                ctx,
+                request,
+                &"a".repeat(40),
+                &f.files,
+                |artifact, start, length| {
+                    let i = FILES
+                        .iter()
+                        .position(|path| *path == artifact.path)
+                        .unwrap();
+                    // Every physical request is partial and bounded. A repeated
+                    // index slice must be served by the verified cache shared
+                    // across qualification and the subsequent App traversal.
+                    assert!(length > 0 && length <= 65_536 && start + length <= artifact.size);
+                    if i < 2 {
+                        assert!(
+                            length < artifact.size,
+                            "a small read cannot download a whole index"
+                        );
+                        assert!(
+                            !ranges.iter().any(|&(role, previous, size)| {
+                                role == i && previous <= start && start + length <= previous + size
+                            }),
+                            "an already verified containing index span must not be fetched again"
+                        );
+                    }
+                    ranges.push((i, start, length));
+                    Ok(http_range::HttpReply {
+                        status: 206,
+                        content_range: http_range::content_range(start, length, artifact.size),
+                        bytes: f.bytes[i][start as usize..(start + length) as usize].to_vec(),
+                    })
+                },
+            )
+        },
+    )
+    .unwrap_err();
+    assert_eq!(online_error, "pc4_online_profile_or_target_unavailable");
     assert!(ranges.iter().any(|&(role, _, _)| role == 0));
     assert!(ranges.iter().any(|&(role, _, _)| role == 1));
     assert!(ranges.iter().any(|&(role, _, _)| role == 2));
@@ -373,26 +382,14 @@ fn tablebase_download_native_range_and_installed_files_return_the_same_complete_
     );
     f.install(&"a".repeat(40), false).unwrap();
     File::create_new(f.root.join("store.lock")).unwrap();
-    // Retain the completed online response while starting local execution:
-    // only the search session, not its public response, may own compute slots.
-    let local = online_execution::execute_with_online(
+    let local_error = online_execution::execute_with_online(
         &f.root,
         context(),
         one_piece_request("jstris-180"),
         |_, _| panic!("installed data must not request network discovery"),
     )
-    .unwrap();
-    let keys = |response: &clearra_app::AppResponse| {
-        response
-            .render_model()
-            .unwrap()
-            .core_result()
-            .unwrap()
-            .normalized_solution_keys()
-            .to_vec()
-    };
-    assert_eq!(keys(&local).len(), 1);
-    assert_eq!(keys(&online), keys(&local));
+    .unwrap_err();
+    assert_eq!(local_error, "pc4_online_profile_or_target_unavailable");
     assert!(online_execution::execute_with_online(
         &f.root,
         context(),
@@ -442,6 +439,14 @@ fn tablebase_download_qualification_exposes_three_bounded_dependency_stages() {
     })
     .unwrap();
     assert_eq!(generation["profiles"][3]["status"], "ready");
+    assert_eq!(
+        generation["profiles"][3]["pc_search_target_lines"],
+        json!([])
+    );
+    assert_eq!(
+        generation["profiles"][3]["target_qualification_receipts"],
+        json!([])
+    );
     assert_eq!(
         stages.iter().map(Vec::len).collect::<Vec<_>>(),
         vec![2, 4, 2]

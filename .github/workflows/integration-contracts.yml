@@ -17,6 +17,10 @@ on:
         description: Run the explicit public-HF qualification-to-graph connection reuse A/B
         type: boolean
         default: false
+      pc4_completion_proof:
+        description: Run the explicit exact proof for the unresolved HF completion cases
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -86,7 +90,11 @@ jobs:
       - name: Verify materializer, graph paths and App contracts
         shell: pwsh
         run: |
-          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command node -ArgumentsJson '["scripts/tools/check-pc4-app-contracts.mjs","--row-normalization","--fetch"]'
+          $arguments = @('scripts/tools/check-pc4-app-contracts.mjs', '--row-normalization', '--fetch')
+          if ('${{ inputs.pc4_completion_proof }}' -eq 'true') {
+            $arguments += '--completion-proof'
+          }
+          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command node -ArgumentsJson ($arguments | ConvertTo-Json -Compress)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   native-http2-candidate:
@@ -160,7 +168,9 @@ jobs:
         run: >-
           node scripts/tools/run-focused-js-tests.mjs
           apps/clearra-discord-bot/test/typed-product-result.test.mjs
+          apps/clearra-discord-bot/test/build-v2-surface.test.mjs
           apps/clearra-discord-bot/test/capability-registry.test.mjs
+          apps/clearra-discord-bot/test/slash-command-input.test.mjs
           packages/clearra-ui/test/coveragePortfolioExportSource.test.mjs
           packages/clearra-ui/test/buildProbabilityAggregation.test.mjs
           packages/clearra-ui/test/buildV2Model.contract.ts

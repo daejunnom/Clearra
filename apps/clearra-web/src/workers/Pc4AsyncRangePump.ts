@@ -95,13 +95,23 @@ export class Pc4AsyncRangePump {
     }
   }
 
-  drain(admit: (range: Pc4RangeRequest, bytes: Uint8Array) => void) {
+  drain(
+    admit: (range: Pc4RangeRequest, bytes: Uint8Array) => void,
+    reject: (range: Pc4RangeRequest, error: unknown) => void
+  ) {
     if (this.closed || this.signal.aborted) return;
     while (this.settled.length) {
       const result = this.settled.shift()!;
-      // No partial success is published on a transport failure. Other tasks
-      // remain owned until the caller aborts and drains them in finally.
-      if ('error' in result) throw result.error;
+      // Admit exactly one typed failure and let Rust terminate the qualified
+      // lookup. Other tasks remain owned until the caller observes that
+      // terminal state, aborts the shared controller and drains them in
+      // finally. This prevents a transport error from becoming an unrelated
+      // JavaScript execution failure or an automatic offline search.
+      if ('error' in result) {
+        this.entries.delete(result.key);
+        reject(result.range, result.error);
+        return;
+      }
       admit(result.range, result.bytes!);
       this.entries.delete(result.key);
     }

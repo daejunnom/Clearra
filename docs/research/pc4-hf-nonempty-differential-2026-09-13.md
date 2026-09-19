@@ -65,6 +65,45 @@ preserved only under the local report directory, not compiled into product or
 default CI; neither the normal first-success kick policy nor product search
 was changed to make the comparison agree.
 
+## Candidate-first exact completion oracle
+
+The first qualification follow-up is now represented by a separate test-only
+fixture, `pc4-hf-unresolved-completions-20260913.json`, and the ignored explicit
+oracle `classify_all_hf_omitted_pc4_targets_with_exact_completion_receipts`.
+It does not call the 50,000-state forward DFS and does not change the product
+materializer, search hot path, or profile qualification.
+
+For each of the 13 targets, the oracle strips only the already-normalized full
+bottom-row prefix and independently lifts every standard tetromino rotation's
+occupied rows into every increasing target-row embedding. It deliberately
+omits the product projection filters, so the resulting geometry is a superset.
+Exact covers are streamed one candidate at a time using a minimum-remaining-
+values cell; no complete candidate inventory is retained.
+
+Each candidate has at most seven operations. Its ordered proof is therefore a
+finite operation-subset DAG of at most `2^7` nodes. A first pass admits every
+collision-free kick target and does not require ground support. Failure in that
+superset is a valid negative candidate certificate. A surviving candidate is
+then checked with the unchanged exhaustive Jstris-180 first-success reachability
+engine; only that pass can emit a concrete live witness. The receipt records
+row-lift and candidate counts, optimistic and exact subset counts, cache misses,
+per-candidate dead/live/unknown totals, a deterministic candidate digest, and
+the first exact witness when one exists.
+
+Cover, candidate, or subset work limits are deterministic safety envelopes.
+Reaching any one of them emits `unknown`, leaves enumeration incomplete, and
+fails the explicit qualification test. It can never increment the dead count
+or qualify an omitted edge. The explicit 13-case test remains ignored in the
+default suite until it is intentionally run and its receipt reviewed. Its
+focused filter is
+`classify_all_hf_omitted_pc4_targets_with_exact_completion_receipts`; the
+runner must pass `--ignored --nocapture` to retain the emitted JSON receipt.
+
+Current local validation is limited to Rust formatting/parser checks and JSON
+parsing. No native proof executable was built or run because the local native
+build policy was not bypassed. Consequently this section records the oracle's
+contract, not a dead/live result and not a profile-completeness receipt.
+
 ## Next qualification work
 
 Resolve the 13 omissions with an efficient exact ordered-completion proof or

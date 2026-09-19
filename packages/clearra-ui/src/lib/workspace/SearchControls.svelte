@@ -22,7 +22,12 @@
   export let dependencyDagControlAvailable = false;
   export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
   export let tablebaseByteLength = 0;
-  export let tablebaseProfiles: Array<{ profile: string; status: 'ready' | 'unavailable'; reason?: string }> = [];
+  export let tablebaseProfiles: Array<{
+    profile: string;
+    status: 'ready' | 'unavailable';
+    reason?: string;
+    pcSearchTargetLines?: number[];
+  }> = [];
   export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
@@ -36,14 +41,34 @@
     request.scoreMode === 'score-finder' ||
     request.scoreMode === 'score-minimals';
   $: scoreMinimalsOnly = request.scoreMode === 'score-minimals';
+  $: pcTablebaseAvailable = pcTablebaseAvailableFor(request.rule, request.lines);
+  $: if (!pcTablebaseAvailable && request.tablebaseEnabled) {
+    dispatch('change', { ...request, tablebaseEnabled: false });
+  }
 
   function patch(change: Partial<SolverWorkspaceRequest>) {
-    dispatch('change', updateWorkspaceDraft(request, change));
+    const next = updateWorkspaceDraft(request, change);
+    const targetIdentityChanged = next.rule !== request.rule || next.lines !== request.lines;
+    dispatch('change',
+      !targetIdentityChanged && pcTablebaseAvailableFor(next.rule, next.lines)
+        ? next
+        : { ...next, tablebaseEnabled: false }
+    );
+  }
+
+  function pcTablebaseAvailableFor(
+    rule: SolverWorkspaceRequest['rule'],
+    lines: number
+  ): boolean {
+    return tablebaseProfiles.some(profile =>
+      profile.profile === rule &&
+      profile.status === 'ready' &&
+      profile.pcSearchTargetLines?.includes(lines)
+    );
   }
 
   $: tablebaseStatusLabel = tablebaseMessage(
-    tablebaseStatus === 'ready' && (request.lines !== 4 || tablebaseProfiles.find(slot => slot.profile === request.rule)?.status !== 'ready')
-      ? 'unavailable' : tablebaseStatus,
+    pcTablebaseAvailable ? tablebaseStatus : 'unavailable',
     tablebaseByteLength,
     language
   );
@@ -224,7 +249,7 @@
           <input
             type="checkbox"
             checked={request.tablebaseEnabled}
-            disabled={tilingOnly || pathOnly || fixedScoreProduct}
+            disabled={!pcTablebaseAvailable || tilingOnly || pathOnly || fixedScoreProduct}
             on:change={(event) => patch({
               tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
             })}
@@ -239,7 +264,9 @@
           <ul class="tablebase-profiles">
             {#each tablebaseProfiles as slot}
               <li>{({'srs': 'SRS', 'srs-plus': 'SRS+', 'srs-x': 'SRS-X', 'jstris-180': 'Jstris 180', 'no-kick': 'No kick'} as Record<string, string>)[slot.profile] ?? slot.profile}:
-                {label(slot.status === 'ready' ? 'tablebaseAvailable' : 'tablebaseUnavailable')}</li>
+                {label(slot.status === 'ready' && slot.pcSearchTargetLines?.includes(request.lines)
+                  ? 'tablebaseAvailable'
+                  : 'tablebaseUnavailable')}</li>
             {/each}
           </ul>
         {/if}

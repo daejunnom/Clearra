@@ -1,5 +1,6 @@
-//! SRP: bounded validation of the complete Jstris graph/index file format.
-//! Completion is the upstream declaration; samples are format evidence only.
+//! SRP: bounded validation of the Jstris graph/index reader format.
+//! Upstream completion and sampled bytes make the reader ready, but never mint
+//! product target authority without a separate exact qualification receipt.
 use super::{Artifact, Result, REPOSITORY};
 use serde_json::{json, Value};
 use std::{
@@ -209,7 +210,9 @@ pub(super) fn qualify_with_reader_many(
         if profile != "jstris-180" { return json!({ "profile": profile, "upstream_complete": false, "status": "unavailable", "reason": "missing-profile-specific-index" }); }
         json!({ "profile": profile, "upstream_complete": true, "status": "ready",
             "reader_contract": "hydra-jstris-180-complete-graph-v1", "field_count": count,
-            "target_width": 3, "target_lines": [4], "terminal_id": count - 1,
+            "target_width": 3, "target_lines": [4], "pc_search_target_lines": [],
+            "setup_search_target_lines": [], "target_qualification_receipts": [],
+            "terminal_id": count - 1,
             "artifacts": { "fields": artifacts[0].value(), "offsets": artifacts[1].value(), "graph": artifacts[2].value() }, "evidence": evidence })
     }).collect::<Vec<_>>();
     Ok(

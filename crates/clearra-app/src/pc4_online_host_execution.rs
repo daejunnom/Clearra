@@ -400,6 +400,24 @@ impl Pc4OnlineHostExecution {
         self.admit_bytes(lookup_session, request_id, None, bytes, control)
     }
 
+    /// Supplies a host-observed transport failure to the same qualified
+    /// lookup owner that issued the pending Range request. This only ends the
+    /// online attempt with a typed cause; it never starts an offline search.
+    pub fn admit_transport_failure(
+        &mut self,
+        lookup_session: u64,
+        request_id: u64,
+        failure: RangeTransportFailure,
+        control: &ExecutionControl,
+    ) -> Result<(), &'static str> {
+        self.admit_input(
+            lookup_session,
+            request_id,
+            RangeAdmissionInput::TransportFailure(failure),
+            control,
+        )
+    }
+
     fn admit_bytes(
         &mut self,
         lookup_session: u64,
@@ -416,25 +434,16 @@ impl Pc4OnlineHostExecution {
                         && range.request_id() == request_id
                 })
                 .ok_or("pc4_online_response_id_mismatch")?
+                .clone()
         } else {
-            self.pending.as_ref().ok_or("pc4_online_no_pending_range")?
+            self.pending
+                .as_ref()
+                .ok_or("pc4_online_no_pending_range")?
+                .clone()
         };
         if range.request_id() != request_id || range.lookup_session().get() != lookup_session {
             return Err("pc4_online_response_id_mismatch");
         }
-        let guard = HostGuard {
-            source: &self.source,
-            control,
-        };
-        if self.compact.is_none() && self.lookup_id != Some(range.lookup_session()) {
-            self.ordinal = 0;
-            self.lookup_id = Some(range.lookup_session());
-        }
-        let ordinal = self
-            .ordinal
-            .checked_add(1)
-            .and_then(NonZeroU32::new)
-            .ok_or("pc4_online_request_count_overflow")?;
         let response = RangeResponse {
             lookup_session: range.lookup_session(),
             request_id: range.request_id(),
@@ -456,20 +465,55 @@ impl Pc4OnlineHostExecution {
             )),
             None => RangeAdmissionInput::VerifiedLocalSlice(Box::new(response)),
         };
+        self.admit_input(lookup_session, request_id, input, control)
+    }
+
+    fn admit_input(
+        &mut self,
+        lookup_session: u64,
+        request_id: u64,
+        input: RangeAdmissionInput,
+        control: &ExecutionControl,
+    ) -> Result<(), &'static str> {
+        let pending_lookup = if let Some(compact) = &self.compact {
+            compact.pending_ranges().find_map(|range| {
+                (range.lookup_session().get() == lookup_session && range.request_id() == request_id)
+                    .then_some(range.lookup_session())
+            })
+        } else {
+            self.pending.as_ref().and_then(|range| {
+                (range.lookup_session().get() == lookup_session && range.request_id() == request_id)
+                    .then_some(range.lookup_session())
+            })
+        };
+        let pending_lookup = pending_lookup.ok_or("pc4_online_response_id_mismatch")?;
+        let guard = HostGuard {
+            source: &self.source,
+            control,
+        };
         if let Some(compact) = &mut self.compact {
             return compact.admit(lookup_session, request_id, input, &guard);
         }
+        if self.lookup_id != Some(pending_lookup) {
+            self.ordinal = 0;
+            self.lookup_id = Some(pending_lookup);
+        }
+        let ordinal = self
+            .ordinal
+            .checked_add(1)
+            .and_then(NonZeroU32::new)
+            .ok_or("pc4_online_request_count_overflow")?;
         let attempt = RangeAdmissionAttempt::new(ordinal, NonZeroU16::new(1).unwrap());
         if let Some(lookup) = &mut self.lookup {
             lookup
                 .admit_range(attempt, input, &guard)
-                .map_err(|_| "pc4_online_range_admission_failed")?;
+                .map_err(|error| error.reason())?;
         } else {
             self.candidates
                 .as_mut()
                 .ok_or("pc4_online_execution_state")?
                 .admit_range(attempt, input, &guard)
-                .map_err(|_| "pc4_online_range_admission_failed")?;
+                .map_err(|error| error.reason())?;
         }
         self.ordinal = ordinal.get();
         self.pending = None;

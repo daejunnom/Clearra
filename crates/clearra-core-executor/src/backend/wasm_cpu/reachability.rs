@@ -884,6 +884,75 @@ pub(super) fn search_reachable_locks(
     }
 }
 
+/// Test-only optimistic reachability superset for independent completion proofs.
+///
+/// Unlike the product search, this traversal admits every collision-free kick
+/// target instead of only the first successful target and records poses without
+/// requiring ground support. Every product-reachable lock is therefore present,
+/// while an optimistic-only pose is never accepted as a live witness. The
+/// completion oracle may use absence from this set as a negative certificate;
+/// presence must still pass [`search_reachable_locks`].
+#[cfg(test)]
+pub(super) fn optimistic_reachable_poses(
+    template: &ReachabilityTemplate,
+    board: u64,
+) -> ReachableLocks {
+    let mut visited = vec![false; template.state_masks.len()];
+    let mut queue = Vec::with_capacity(template.state_masks.len());
+    for &seed in &template.sky_seeds {
+        let index = usize::from(seed);
+        if template.state_masks[index] != INVALID_STATE_MASK
+            && board & template.state_masks[index] == 0
+        {
+            visited[index] = true;
+            queue.push(seed);
+        }
+    }
+
+    let mut poses = ReachableLocks::default();
+    let mut cursor = 0;
+    while cursor < queue.len() {
+        let index = usize::from(queue[cursor]);
+        cursor += 1;
+        let state = state_from_index(template.width, template.ceiling, index);
+        if state.y < template.height as i8 {
+            poses.insert(template.width, state.rotation, state.x, state.y);
+        }
+
+        for &target in &template.translation_targets[index] {
+            push_optimistic_target(template, board, target, &mut visited, &mut queue);
+        }
+        let start = template.rotation_target_offsets[index * 3] as usize;
+        let end = template.rotation_target_offsets
+            [index * 3 + if template.allow_180 { 3 } else { 2 }] as usize;
+        for &target in &template.rotation_targets[start..end] {
+            push_optimistic_target(template, board, target, &mut visited, &mut queue);
+        }
+    }
+    poses
+}
+
+#[cfg(test)]
+fn push_optimistic_target(
+    template: &ReachabilityTemplate,
+    board: u64,
+    target: u16,
+    visited: &mut [bool],
+    queue: &mut Vec<u16>,
+) {
+    if target == INVALID_STATE_INDEX {
+        return;
+    }
+    let index = usize::from(target);
+    if !visited[index]
+        && template.state_masks[index] != INVALID_STATE_MASK
+        && board & template.state_masks[index] == 0
+    {
+        visited[index] = true;
+        queue.push(target);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct ReverseReachabilityResult {
     reachable: bool,

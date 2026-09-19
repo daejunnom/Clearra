@@ -348,7 +348,7 @@ export const japaneseWorkspaceMessages = Object.freeze({
   gpuDevice: 'GPUデバイス',
   useAllThreads: 'すべての論理プロセッサを使用',
   tablebase: 'PC4テーブルベース',
-  tablebaseHelp: 'オンラインで必要な部分だけを取得します。現在はJstris 180の4ラインPC探索に対応しています。利用できない場合、オフライン探索は自動開始しません。',
+  tablebaseHelp: 'オンラインで必要な部分だけを取得します。選択したルールプロファイルとPC目標ラインの正確な適格性レシートが必要です。readerの準備完了だけでは利用できず、利用不可の場合もオフライン探索は自動開始しません。',
   setupTablebaseHelp: '選択したルールの4ラインSetupSearchが全解と差分検証を完了するまで、セットアップ高速化は利用できません。オフライン探索は自動開始しません。',
   tablebaseAvailable: '利用可能',
   tablebaseDisabled: '未読み込み',

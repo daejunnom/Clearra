@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { qualifyPc4UpstreamGeneration, createPc4RangeReader } from './qualify-upstream-generation.mjs';
+import {
+  PC4_PC_TERMINAL_SEMANTICS,
+  PC4_READER_CONTRACT,
+  PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA,
+  qualifyPc4UpstreamGeneration,
+  createPc4RangeReader
+} from './qualify-upstream-generation.mjs';
 
 function le(value, width) { return Uint8Array.from({ length: width }, (_, i) => Math.floor(value / 256 ** i) % 256); }
 function data() {
@@ -17,15 +23,89 @@ function data() {
     const bytes = files.get(artifact.path); assert.ok(bytes); return bytes.slice(offset, offset + length);
   } } };
 }
-test('completion declaration and independent reader qualification enable only Jstris 180', async () => {
+function targetReceipt(discovery) {
+  return {
+    schema: PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA,
+    repository: discovery.repository,
+    revision: discovery.resolved_revision,
+    profile: 'jstris-180',
+    reader_contract: PC4_READER_CONTRACT,
+    use_case: 'pc-search',
+    target_lines: 4,
+    terminal_id: 1,
+    terminal_hash: 2 ** 40 - 1,
+    terminal_semantics_identity: PC4_PC_TERMINAL_SEMANTICS,
+    outgoing_edge_completeness_identity: `sha256:${'0123456789abcdef'.repeat(4)}`,
+    known_answer_identity: `sha256:${'123456789abcdef0'.repeat(4)}`,
+    offline_exact_parity_identity: `sha256:${'23456789abcdef01'.repeat(4)}`,
+  };
+}
+test('completion declaration and reader qualification do not mint PC target authority', async () => {
   const f = data();
   const result = await qualifyPc4UpstreamGeneration({}, { discover: async () => f.discovery, reader: f.reader });
   assert.equal(result.profiles.length, 5);
   assert.deepEqual(result.profiles.filter(p => p.status === 'ready').map(p => p.profile), ['jstris-180']);
   assert.deepEqual(result.profiles[3].target_lines, [4]);
-  assert.deepEqual(result.profiles[3].pc_search_target_lines, [4]);
+  assert.deepEqual(result.profiles[3].pc_search_target_lines, []);
   assert.deepEqual(result.profiles[3].setup_search_target_lines, []);
+  assert.deepEqual(result.profiles[3].target_qualification_receipts, []);
   assert.equal(result.profiles[0].status, 'unavailable');
+});
+
+test('an exact generation-bound receipt alone enables its PC target', async () => {
+  const f = data();
+  const receipt = targetReceipt(f.discovery);
+  const result = await qualifyPc4UpstreamGeneration({}, {
+    discover: async () => f.discovery,
+    reader: f.reader,
+    targetQualificationReceipts: [receipt],
+  });
+  assert.deepEqual(result.profiles[3].pc_search_target_lines, [4]);
+  assert.deepEqual(result.profiles[3].target_qualification_receipts, [receipt]);
+});
+
+test('stale, cross-profile, placeholder, duplicate, and terminal-mismatched receipts fail closed', async () => {
+  for (const mutate of [
+    receipt => { receipt.revision = 'b'.repeat(40); },
+    receipt => { receipt.profile = 'srs'; },
+    receipt => { receipt.use_case = 'setup-search'; },
+    receipt => { receipt.target_lines = 3; },
+    receipt => { receipt.reader_contract = 'other-reader'; },
+    receipt => { receipt.terminal_semantics_identity = 'placeholder'; },
+    receipt => { receipt.offline_exact_parity_identity = 'placeholder'; },
+  ]) {
+    const f = data();
+    const receipt = targetReceipt(f.discovery);
+    mutate(receipt);
+    await assert.rejects(
+      qualifyPc4UpstreamGeneration({}, {
+        discover: async () => f.discovery,
+        reader: f.reader,
+        targetQualificationReceipts: [receipt],
+      }),
+      error => error.code === 'pc4_online_target_qualification_invalid',
+    );
+  }
+  const duplicate = data();
+  const receipt = targetReceipt(duplicate.discovery);
+  await assert.rejects(
+    qualifyPc4UpstreamGeneration({}, {
+      discover: async () => duplicate.discovery,
+      reader: duplicate.reader,
+      targetQualificationReceipts: [receipt, { ...receipt }],
+    }),
+    error => error.code === 'pc4_online_target_qualification_invalid',
+  );
+  const terminal = data();
+  const mismatched = targetReceipt(terminal.discovery);
+  mismatched.terminal_id = 0;
+  const result = await qualifyPc4UpstreamGeneration({}, {
+    discover: async () => terminal.discovery,
+    reader: terminal.reader,
+    targetQualificationReceipts: [mismatched],
+  });
+  assert.equal(result.profiles[3].status, 'unavailable');
+  assert.equal(result.profiles[3].reason, 'pc4_online_target_qualification_invalid');
 });
 
 test('qualification batches three dependency stages without dropping any sample evidence', async () => {

@@ -6,6 +6,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const CONTRACT: &str = "hydra-jstris-180-complete-graph-v1";
+const TARGET_RECEIPT_SCHEMA: &str = "clearra.pc4.exact-target-qualification.v1";
+const PC_TERMINAL_SEMANTICS: &str = "clearra.pc4.full-bottom-rows-after-clear.v1";
 pub fn configure(json: &str) -> Result<Option<ActivatedSnapshot>, &'static str> {
     if json == "null" {
         return Ok(None);
@@ -109,7 +111,8 @@ pub fn configure(json: &str) -> Result<Option<ActivatedSnapshot>, &'static str> 
             format!("host-reader:{digest:x}"),
         )
         .map_err(|_| "pc4_online_profile_qualification_invalid")?;
-        let lines = Pc4TargetLines::new(4).unwrap();
+        let target_qualifications =
+            target_qualifications(slot, repository, revision, profile, count, terminal)?;
         let manifest = Pc4ProfileManifest::new(
             profile,
             count,
@@ -125,16 +128,7 @@ pub fn configure(json: &str) -> Result<Option<ActivatedSnapshot>, &'static str> 
         // CONTRACT qualifies Hydra's sorted graph records and their inline
         // 40-bit source bitmap, so following a graph ID needs no FHID read.
         .with_graph_source_field_encoding(GraphSourceFieldEncoding::HydraU40BigEndianPrefix)
-        .with_target_qualifications(vec![ProfileTargetCompletenessQualification::new(
-            Pc4TerminalUseCase::PcSearch,
-            lines,
-            Pc4TerminalFieldIdentity::full_rows(lines, terminal),
-            "hydra-full-bottom-four-rows",
-            "upstream-declared-complete-four-line-pc-graph",
-            format!("host-terminal:{digest:x}"),
-            "clearra-ilc-jstris180-materializer-v1",
-        )
-        .map_err(|_| "pc4_online_target_qualification_invalid")?])
+        .with_target_qualifications(target_qualifications)
         .map_err(|_| "pc4_online_target_qualification_invalid")?;
         profiles.push(ProfileAvailability::qualified(manifest));
     }
@@ -145,6 +139,115 @@ pub fn configure(json: &str) -> Result<Option<ActivatedSnapshot>, &'static str> 
         .activate(&mut verifier)
         .map(Some)
         .map_err(|_| "pc4_online_generation_activation_failed")
+}
+
+fn target_qualifications(
+    slot: &Value,
+    repository: &str,
+    revision: &str,
+    profile: Pc4RuleProfile,
+    field_count: u32,
+    terminal: u32,
+) -> Result<Vec<ProfileTargetCompletenessQualification>, &'static str> {
+    let pc_lines = declared_target_lines(slot, "pc_search_target_lines")?;
+    if !declared_target_lines(slot, "setup_search_target_lines")?.is_empty() {
+        return Err("pc4_online_target_qualification_invalid");
+    }
+    let receipts = match &slot["target_qualification_receipts"] {
+        Value::Null => &[][..],
+        Value::Array(receipts) => receipts.as_slice(),
+        _ => return Err("pc4_online_target_qualification_invalid"),
+    };
+    if pc_lines.len() != receipts.len() {
+        return Err("pc4_online_target_qualification_invalid");
+    }
+    let mut qualifications = Vec::with_capacity(receipts.len());
+    for (index, receipt) in receipts.iter().enumerate() {
+        if receipt["schema"] != TARGET_RECEIPT_SCHEMA
+            || receipt["repository"] != repository
+            || receipt["revision"] != revision
+            || receipt["profile"] != profile.as_str()
+            || receipt["reader_contract"] != CONTRACT
+            || receipt["use_case"] != "pc-search"
+            || receipt["terminal_id"].as_u64() != Some(u64::from(terminal))
+        {
+            return Err("pc4_online_target_qualification_invalid");
+        }
+        let line = receipt["target_lines"]
+            .as_u64()
+            .and_then(|lines| u8::try_from(lines).ok())
+            .ok_or("pc4_online_target_qualification_invalid")?;
+        let lines =
+            Pc4TargetLines::new(line).map_err(|_| "pc4_online_target_qualification_invalid")?;
+        if lines.get() != 4 || pc_lines[index] != lines.get() {
+            return Err("pc4_online_target_qualification_invalid");
+        }
+        let terminal_field = Pc4TerminalFieldIdentity::new(
+            lines,
+            terminal,
+            receipt["terminal_hash"]
+                .as_u64()
+                .ok_or("pc4_online_target_qualification_invalid")?,
+        )
+        .map_err(|_| "pc4_online_target_qualification_invalid")?;
+        if receipt["terminal_semantics_identity"] != PC_TERMINAL_SEMANTICS
+            || terminal_field.field_id() >= field_count
+        {
+            return Err("pc4_online_target_qualification_invalid");
+        }
+        qualifications.push(
+            ProfileTargetCompletenessQualification::new(
+                Pc4TerminalUseCase::PcSearch,
+                lines,
+                terminal_field,
+                PC_TERMINAL_SEMANTICS,
+                exact_evidence_identity(receipt, "outgoing_edge_completeness_identity")?,
+                exact_evidence_identity(receipt, "known_answer_identity")?,
+                exact_evidence_identity(receipt, "offline_exact_parity_identity")?,
+            )
+            .map_err(|_| "pc4_online_target_qualification_invalid")?,
+        );
+    }
+    Ok(qualifications)
+}
+
+fn declared_target_lines(slot: &Value, key: &str) -> Result<Vec<u8>, &'static str> {
+    let values = match &slot[key] {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(values) => values,
+        _ => return Err("pc4_online_target_qualification_invalid"),
+    };
+    let mut lines = Vec::with_capacity(values.len());
+    for value in values {
+        let line = value
+            .as_u64()
+            .and_then(|line| u8::try_from(line).ok())
+            .ok_or("pc4_online_target_qualification_invalid")?;
+        Pc4TargetLines::new(line).map_err(|_| "pc4_online_target_qualification_invalid")?;
+        if lines.last().is_some_and(|previous| *previous >= line) {
+            return Err("pc4_online_target_qualification_invalid");
+        }
+        lines.push(line);
+    }
+    Ok(lines)
+}
+
+fn exact_evidence_identity<'a>(receipt: &'a Value, key: &str) -> Result<&'a str, &'static str> {
+    let identity = receipt[key]
+        .as_str()
+        .ok_or("pc4_online_target_qualification_invalid")?;
+    let digest = identity
+        .strip_prefix("sha256:")
+        .ok_or("pc4_online_target_qualification_invalid")?;
+    if digest.len() != 64
+        || digest
+            .bytes()
+            .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
+        || digest.bytes().all(|byte| byte == b'0')
+    {
+        return Err("pc4_online_target_qualification_invalid");
+    }
+    Ok(identity)
 }
 struct HostReceiptVerifier {
     identity: SnapshotIdentity,
@@ -207,6 +310,68 @@ fn artifact(
 mod tests {
     use super::*;
 
+    fn exact_receipt(revision: &str) -> Value {
+        serde_json::json!({
+            "schema": TARGET_RECEIPT_SCHEMA,
+            "repository": "example/pc4",
+            "revision": revision,
+            "profile": "jstris-180",
+            "reader_contract": CONTRACT,
+            "use_case": "pc-search",
+            "target_lines": 4,
+            "terminal_id": 1,
+            "terminal_hash": 0xff_ffff_ffff_u64,
+            "terminal_semantics_identity": PC_TERMINAL_SEMANTICS,
+            "outgoing_edge_completeness_identity": format!("sha256:{}", "0123456789abcdef".repeat(4)),
+            "known_answer_identity": format!("sha256:{}", "123456789abcdef0".repeat(4)),
+            "offline_exact_parity_identity": format!("sha256:{}", "23456789abcdef01".repeat(4)),
+        })
+    }
+
+    fn host_generation(receipt: Option<Value>) -> Value {
+        let revision = "a".repeat(40);
+        let receipts = receipt.into_iter().collect::<Vec<_>>();
+        let pc_lines = if receipts.is_empty() {
+            Vec::new()
+        } else {
+            vec![4]
+        };
+        let profiles = Pc4RuleProfile::ALL
+            .into_iter()
+            .map(|profile| {
+                if profile != Pc4RuleProfile::Jstris180 {
+                    return serde_json::json!({
+                        "profile": profile.as_str(), "upstream_complete": false,
+                        "status": "unavailable", "reason": "missing-profile-specific-index"
+                    });
+                }
+                serde_json::json!({
+                    "profile": profile.as_str(), "upstream_complete": true, "status": "ready",
+                    "reader_contract": CONTRACT, "field_count": 2, "target_width": 3,
+                    "target_lines": [4], "pc_search_target_lines": pc_lines.clone(),
+                    "setup_search_target_lines": [], "target_qualification_receipts": receipts.clone(),
+                    "terminal_id": 1,
+                    "artifacts": {
+                        "fields": { "path": "field_hash_to_id.v1.bin", "byte_length": 32,
+                            "content_identity": format!("sha256:{}", "1".repeat(64)) },
+                        "offsets": { "path": "graph_offsets.u32.bin", "byte_length": 28,
+                            "content_identity": format!("sha256:{}", "2".repeat(64)) },
+                        "graph": { "path": "graph.bin", "byte_length": 27,
+                            "content_identity": format!("sha256:{}", "3".repeat(64)) }
+                    },
+                    "evidence": [
+                        { "id": 0, "hash": 0, "start": 0, "end": 15 },
+                        { "id": 1, "hash": 0xff_ffff_ffff_u64, "start": 15, "end": 27 }
+                    ]
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "schema": "clearra.pc4.host-generation.v1", "repository": "example/pc4",
+            "revision": revision, "profiles": profiles, "transferred_bytes": 0
+        })
+    }
+
     #[test]
     fn online_pc4_absent_or_malformed_host_receipt_never_activates_a_profile() {
         assert!(configure("null").unwrap().is_none());
@@ -235,5 +400,75 @@ mod tests {
         let mut invalid = value;
         invalid["content_identity"] = serde_json::json!("not-a-content-identity");
         assert!(artifact(&invalid, Pc4ArtifactRole::Graph, "graph.bin").is_err());
+    }
+
+    #[test]
+    fn reader_ready_profile_without_exact_receipt_cannot_mint_a_pc_target() {
+        let generation = host_generation(None);
+        let snapshot = configure(&generation.to_string()).unwrap().unwrap();
+        let profile = snapshot.profile(Pc4RuleProfile::Jstris180).unwrap();
+        assert!(profile.target_qualifications().is_empty());
+        assert!(snapshot
+            .qualified_target(
+                Pc4RuleProfile::Jstris180,
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(4).unwrap(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn exact_receipt_mints_only_its_generation_bound_pc_target() {
+        let receipt = exact_receipt(&"a".repeat(40));
+        let generation = host_generation(Some(receipt.clone()));
+        let snapshot = configure(&generation.to_string()).unwrap().unwrap();
+        let target = snapshot
+            .qualified_target(
+                Pc4RuleProfile::Jstris180,
+                Pc4TerminalUseCase::PcSearch,
+                Pc4TargetLines::new(4).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            target.qualification().outgoing_edge_completeness_identity(),
+            receipt["outgoing_edge_completeness_identity"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(
+            target.qualification().offline_exact_parity_identity(),
+            receipt["offline_exact_parity_identity"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn stale_mismatched_or_placeholder_exact_receipts_are_rejected() {
+        let mut mutations: Vec<Box<dyn Fn(&mut Value)>> = vec![
+            Box::new(|receipt| receipt["revision"] = serde_json::json!("b".repeat(40))),
+            Box::new(|receipt| receipt["profile"] = serde_json::json!("srs")),
+            Box::new(|receipt| receipt["use_case"] = serde_json::json!("setup-search")),
+            Box::new(|receipt| receipt["target_lines"] = serde_json::json!(3)),
+            Box::new(|receipt| receipt["terminal_id"] = serde_json::json!(0)),
+            Box::new(|receipt| receipt["terminal_hash"] = serde_json::json!(0)),
+            Box::new(|receipt| receipt["reader_contract"] = serde_json::json!("other")),
+            Box::new(|receipt| {
+                receipt["offline_exact_parity_identity"] = serde_json::json!("placeholder")
+            }),
+        ];
+        for mutate in mutations.drain(..) {
+            let mut receipt = exact_receipt(&"a".repeat(40));
+            mutate(&mut receipt);
+            let generation = host_generation(Some(receipt));
+            assert_eq!(
+                configure(&generation.to_string()).unwrap_err(),
+                "pc4_online_target_qualification_invalid"
+            );
+        }
+        let mut missing_receipt = host_generation(None);
+        missing_receipt["profiles"][3]["pc_search_target_lines"] = serde_json::json!([4]);
+        assert_eq!(
+            configure(&missing_receipt.to_string()).unwrap_err(),
+            "pc4_online_target_qualification_invalid"
+        );
     }
 }

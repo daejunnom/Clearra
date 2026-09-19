@@ -254,6 +254,41 @@ test('invalid limits and identities fail before opening a connection', async () 
   } finally { reader.dispose(); }
 });
 
+test('temporary upstream HTTP failures remain distinct from invalid immutable data', async () => {
+  for (const status of [408, 425, 500, 502, 503, 504]) {
+    const reader = createPc4RangeReader(generation, {
+      windowBytes: 0,
+      fetcher: async () => new Response(null, { status })
+    });
+    try {
+      await assert.rejects(reader.read(artifact, 0, 8), {
+        code: 'pc4_online_unavailable'
+      });
+    } finally {
+      reader.dispose();
+    }
+  }
+});
+
+test('rate limits preserve only a bounded numeric Retry-After hint', async () => {
+  for (const [header, expected] of [['17', 17], ['86400', 86400], ['86401', undefined],
+    ['Wed, 21 Oct 2015 07:28:00 GMT', undefined], ['-1', undefined]]) {
+    const reader = createPc4RangeReader(generation, {
+      windowBytes: 0,
+      fetcher: async () => new Response(null, {
+        status: 429,
+        headers: { 'retry-after': header }
+      })
+    });
+    try {
+      await assert.rejects(reader.read(artifact, 0, 8), error =>
+        error.code === 'pc4_online_rate_limited' && error.retryAfterSeconds === expected);
+    } finally {
+      reader.dispose();
+    }
+  }
+});
+
 test('search policy selects only the qualified profile and keeps graph reads exact without evicting indexes', async () => {
   const ready = { profile: 'jstris-180', status: 'ready', artifacts: { graph: artifact } };
   const configured = { ...generation, profiles: [{ ...ready, profile: 'srs', status: 'unavailable' }, ready] };

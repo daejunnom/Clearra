@@ -376,6 +376,7 @@ fn validate_receipt(transfer: &Transfer, receipt: &Receipt) -> Result<()> {
         200 => return Err("pc4_online_whole_content_rejected"),
         429 => return Err("pc4_online_rate_limited"),
         416 => return Err("pc4_online_range_unsatisfiable"),
+        408 | 425 | 500 | 502 | 503 | 504 => return Err("pc4_online_dataset_unavailable"),
         _ => return Err("pc4_online_range_response_invalid"),
     }
     if receipt.content_range
@@ -1279,6 +1280,12 @@ mod tests {
             validate_receipt(transfer, &receipt(416, "")).unwrap_err(),
             "pc4_online_range_unsatisfiable"
         );
+        for status in [408, 425, 500, 502, 503, 504] {
+            assert_eq!(
+                validate_receipt(transfer, &receipt(status, "")).unwrap_err(),
+                "pc4_online_dataset_unavailable"
+            );
+        }
         assert_eq!(
             validate_receipt(transfer, &receipt(206, "bytes 99-110/131072")).unwrap_err(),
             "pc4_online_content_range_mismatch"

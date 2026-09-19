@@ -3,7 +3,12 @@
 import { checkedPc4Read, planPc4ReadBatch } from './pc4-range-plan.mjs';
 import { createPc4SpanCache } from './pc4-span-cache.mjs';
 export class Pc4OnlineError extends Error {
-  constructor(code, detail = code) { super(detail); this.name = 'Pc4OnlineError'; this.code = code; }
+  constructor(code, detail = code, retryAfterSeconds = undefined) {
+    super(detail);
+    this.name = 'Pc4OnlineError';
+    this.code = code;
+    if (retryAfterSeconds !== undefined) this.retryAfterSeconds = retryAfterSeconds;
+  }
 }
 
 const MAX_RANGE = 65_536;
@@ -109,8 +114,19 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
       const expected = `bytes ${offset}-${offset + length - 1}/${artifact.byte_length}`;
       if (response.status !== 206 || response.headers.get('content-range') !== expected) {
         await response.body?.cancel();
-        fail(response.status === 429 ? 'pc4_online_rate_limited' : response.status === 416 ? 'pc4_online_range_unsatisfiable' :
-          response.status === 200 ? 'pc4_online_whole_content_rejected' : 'pc4_online_range_response_invalid');
+        if (response.status === 429) {
+          throw new Pc4OnlineError(
+            'pc4_online_rate_limited',
+            'pc4_online_rate_limited',
+            retryAfterSeconds(response.headers.get('retry-after'))
+          );
+        }
+        fail(response.status === 416 ? 'pc4_online_range_unsatisfiable' :
+          response.status === 200 ? 'pc4_online_whole_content_rejected' :
+          response.status === 408 || response.status === 425 || response.status === 500 || response.status === 502 ||
+          response.status === 503 || response.status === 504
+            ? 'pc4_online_unavailable'
+            : 'pc4_online_range_response_invalid');
       }
       const stream = response.body?.getReader();
       if (!stream) fail('pc4_online_empty_body');
@@ -226,6 +242,12 @@ export function createPc4RangeReader(discovery, { signal, onProgress, fetcher = 
       return result;
     }
   };
+}
+
+function retryAfterSeconds(value) {
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]{0,5})$/u.test(value)) return undefined;
+  const seconds = Number(value);
+  return Number.isSafeInteger(seconds) && seconds <= 86_400 ? seconds : undefined;
 }
 
 function fail(code) { throw new Pc4OnlineError(code); }

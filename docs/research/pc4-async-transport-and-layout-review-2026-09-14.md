@@ -938,9 +938,11 @@ receipt가 있으면 A/B, offline이 동일 고정 예산에서 typed resource-l
 
 2026-09-20 구현에서는 이 경계를 실행 코드와 공개 표면에도 고정했다.
 
-- host generation의 `pc_search_target_lines`와 `setup_search_target_lines`를 분리했다. 현재
-  Jstris 세대는 PC Search 4L만 `[4]`이고 SetupSearch는 `[]`다. 따라서 PC 자격을 Setup
-  자격으로 빌려 쓸 수 없다.
+- host generation의 `pc_search_target_lines`와 `setup_search_target_lines`를 분리했다.
+  upstream 선언과 bounded reader 표본만 통과한 현재 Jstris 세대는 reader-ready일 뿐
+  exact target-qualified가 아니므로 두 목록 모두 `[]`다. 13개 omitted transition을 포함한
+  exact outgoing-edge/known-answer/offline-parity receipt가 추가될 때 PC Search 4L만
+  독립적으로 `[4]`가 될 수 있고, 그 자격을 Setup 자격으로 빌려 쓸 수 없다.
 - Web Setup control은 선택한 profile의 `setup_search_target_lines`에 4가 있을 때만 켜지며,
   이전 상태나 복원 상태에 남은 opt-in도 자격이 없으면 즉시 해제한다. CLI의 명시 요청은
   `setup_pc_acceleration_not_qualified`로 fail-closed되고 offline을 자동 시작하지 않는다.
@@ -954,3 +956,26 @@ receipt가 있으면 A/B, offline이 동일 고정 예산에서 typed resource-l
 capability와 연결하기 위한 준비다. 아직 13개 upstream-omitted 전이의 생존 가능성이
 해소되지 않았고 동일 입력 Setup A/B도 없으므로, 현재 세대에서 SetupSearch를 켜거나 과거
 수치를 속도 향상 근거로 사용하지 않는다.
+
+#### 2026-09-20 재감사 결론
+
+연결 준비와 요청 병렬성은 다시 소스·계약 테스트로 대조했다. Web의 한 bounded reader는
+독립 Range를 최대 4개까지 즉시 시작하고 먼저 끝난 응답부터 exact lookup ID로 Rust에
+admit한다. native opt-in 경로도 qualification과 검색이 같은 multi connection pool을
+소유한다. 따라서 worker마다 별도 HTTP client를 만들거나 한 batch의 최후 응답까지 CPU를
+막는 구조로 되돌아가지 않는다. 브라우저 `fetch`의 `keepalive` 옵션은 socket 유지 옵션이
+아니라 문서 unload 뒤 요청 생존 옵션이므로 여기에 사용하지 않는다. TCP keepalive는 native
+dead-peer 검출로만 유지하고, TFO는 TLS session cache 손실과 네트워크 호환성 위험 때문에
+기본 off를 유지한다.
+
+전송 실패는 이제 HTTP 429의 bounded numeric `Retry-After`, offline, timeout, 일시적인
+408/425/5xx unavailable을 WASM/App의 typed Range failure로 전달한다. 이 경계는 offline
+탐색을 자동 시작하지 않는다. 잘못된 Content-Range, whole-body 200, immutable identity
+불일치는 데이터/프로토콜 오류로 계속 분리한다. 이것은 실패 의미 보존의 완료이지,
+full-search tail이나 HF rate limit 자체를 제거했다는 증거는 아니다.
+
+Setup은 기존 수치가 동일한 TB on/off 입력이 아니므로 재사용 A/B를 만들지 않았다. 현재
+exact target receipt가 없어 실제 HF Setup arm을 실행하면 안 된다. 이후 동일 입력에서 두
+arm이 모두 완료될 때만 수치 A/B를 남기고, offline이 고정 자원에서 typed timeout 또는
+resource-limit으로 끝나지만 target-qualified TB arm이 exact 완료한 최초 기록은 수치 배속이
+아닌 `feasibility-dominance`로만 분류한다.

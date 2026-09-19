@@ -6,6 +6,11 @@ import { createPc4RangeReader, Pc4OnlineError } from './pc4-range-reader.mjs';
 export { createPc4RangeReader, Pc4OnlineError } from './pc4-range-reader.mjs';
 
 export const PC4_READER_CONTRACT = 'hydra-jstris-180-complete-graph-v1';
+export const PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA =
+  'clearra.pc4.exact-target-qualification.v1';
+export const PC4_PC_TERMINAL_SEMANTICS =
+  'clearra.pc4.full-bottom-rows-after-clear.v1';
+const EXACT_EVIDENCE_IDENTITY = /^sha256:[0-9a-f]{64}$/u;
 export const PC4_PROFILE_ARTIFACTS = Object.freeze([
   { profile: 'srs', graph: 'graph_no180.bin', suffix: '_no180', width: 3 },
   { profile: 'srs-plus', graph: 'graph_srsplus.bin', suffix: '_srsplus', width: 3 },
@@ -19,12 +24,16 @@ export const PC4_PROFILE_ARTIFACTS = Object.freeze([
 export async function qualifyPc4UpstreamGeneration({ signal, onProgress } = {}, dependencies = {}) {
   const discovery = await (dependencies.discover ?? discoverPc4UpstreamGeneration)({ signal });
   if (signal?.aborted) throw new Pc4OnlineError('pc4_online_cancelled');
+  const targetQualificationReceipts = validateTargetQualificationReceipts(
+    discovery,
+    dependencies.targetQualificationReceipts ?? [],
+  );
   const reader = dependencies.reader ?? createPc4RangeReader(discovery, { signal, onProgress });
-  try { return await qualifyProfiles(discovery, reader, signal); }
+  try { return await qualifyProfiles(discovery, reader, signal, targetQualificationReceipts); }
   finally { if (!dependencies.reader) reader.dispose(); }
 }
 
-async function qualifyProfiles(discovery, reader, signal) {
+async function qualifyProfiles(discovery, reader, signal, targetQualificationReceipts) {
   const readMany = demands => reader.readMany ? reader.readMany(demands)
     : Promise.all(demands.map(d => reader.read(d.artifact, d.offset, d.length)));
   const entries = new Map(discovery.candidates.map(entry => [entry.path, entry]));
@@ -76,9 +85,13 @@ async function qualifyProfiles(discovery, reader, signal) {
       const records = await readMany(evidence.map(e => ({ artifact: graph, offset: e.start, length: e.end - e.start })));
       for (const [index, e] of evidence.entries()) validateGraphRecord(records[index], e.hash, model.width, count);
       if (evidence[0].hash !== 0 || evidence.at(-1).hash !== 2 ** 40 - 1) fail('pc4_online_terminal_mismatch');
+      const receipts = targetQualificationReceipts
+        .filter(receipt => receipt.profile === model.profile)
+        .map(receipt => validateTargetReceiptForProfile(receipt, count));
       profiles.push({ ...base, status: 'ready', reader_contract: PC4_READER_CONTRACT,
         field_count: count, target_width: model.width, target_lines: [4],
-        pc_search_target_lines: [4], setup_search_target_lines: [],
+        pc_search_target_lines: receipts.map(receipt => receipt.target_lines),
+        setup_search_target_lines: [], target_qualification_receipts: receipts,
         terminal_id: count - 1, artifacts: { fields, offsets, graph }, evidence });
     } catch (error) {
       if (signal?.aborted) throw new Pc4OnlineError('pc4_online_cancelled');
@@ -87,6 +100,57 @@ async function qualifyProfiles(discovery, reader, signal) {
   }
   return Object.freeze({ schema: 'clearra.pc4.host-generation.v1', repository: discovery.repository,
     revision: discovery.resolved_revision, profiles, transferred_bytes: reader.bytes ?? 0 });
+}
+
+function validateTargetQualificationReceipts(discovery, receipts) {
+  if (!Array.isArray(receipts) || receipts.length > 16) fail('pc4_online_target_qualification_invalid');
+  const profiles = new Set(PC4_PROFILE_ARTIFACTS.map(({ profile }) => profile));
+  const keys = new Set();
+  return receipts.map(receipt => {
+    if (receipt === null || typeof receipt !== 'object' || Array.isArray(receipt) ||
+        receipt.schema !== PC4_TARGET_QUALIFICATION_RECEIPT_SCHEMA ||
+        receipt.repository !== discovery.repository ||
+        receipt.revision !== discovery.resolved_revision ||
+        !profiles.has(receipt.profile) || receipt.profile !== 'jstris-180' ||
+        receipt.reader_contract !== PC4_READER_CONTRACT ||
+        receipt.use_case !== 'pc-search' || receipt.target_lines !== 4 ||
+        !Number.isSafeInteger(receipt.terminal_id) || receipt.terminal_id < 0 ||
+        receipt.terminal_hash !== 2 ** 40 - 1 ||
+        receipt.terminal_semantics_identity !== PC4_PC_TERMINAL_SEMANTICS ||
+        !exactEvidenceIdentity(receipt.outgoing_edge_completeness_identity) ||
+        !exactEvidenceIdentity(receipt.known_answer_identity) ||
+        !exactEvidenceIdentity(receipt.offline_exact_parity_identity)) {
+      fail('pc4_online_target_qualification_invalid');
+    }
+    const key = `${receipt.profile}:${receipt.use_case}:${receipt.target_lines}`;
+    if (keys.has(key)) fail('pc4_online_target_qualification_invalid');
+    keys.add(key);
+    return Object.freeze({
+      schema: receipt.schema,
+      repository: receipt.repository,
+      revision: receipt.revision,
+      profile: receipt.profile,
+      reader_contract: receipt.reader_contract,
+      use_case: receipt.use_case,
+      target_lines: receipt.target_lines,
+      terminal_id: receipt.terminal_id,
+      terminal_hash: receipt.terminal_hash,
+      terminal_semantics_identity: receipt.terminal_semantics_identity,
+      outgoing_edge_completeness_identity: receipt.outgoing_edge_completeness_identity,
+      known_answer_identity: receipt.known_answer_identity,
+      offline_exact_parity_identity: receipt.offline_exact_parity_identity,
+    });
+  });
+}
+
+function validateTargetReceiptForProfile(receipt, fieldCount) {
+  if (receipt.terminal_id !== fieldCount - 1) fail('pc4_online_target_qualification_invalid');
+  return receipt;
+}
+
+function exactEvidenceIdentity(value) {
+  return typeof value === 'string' && EXACT_EVIDENCE_IDENTITY.test(value) &&
+    value !== `sha256:${'0'.repeat(64)}`;
 }
 
 function header(bytes, magic) {

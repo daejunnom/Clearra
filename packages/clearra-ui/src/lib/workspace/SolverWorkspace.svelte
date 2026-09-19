@@ -80,6 +80,17 @@
   $: runtimeView = runtime === 'web'
     ? workspaceViewFromWasm($wasmWorkerState)
     : workspaceViewFromDesktop($desktopJobState);
+  $: tablebaseProfiles = runtime === 'web'
+    ? $wasmWorkerState.tablebaseWarmup.profiles ?? []
+    : [];
+  $: pcTablebaseAvailable = tablebaseProfiles.some(profile =>
+    profile.profile === request.rule &&
+    profile.status === 'ready' &&
+    profile.pcSearchTargetLines?.includes(request.lines)
+  );
+  $: if (!pcTablebaseAvailable && request.tablebaseEnabled) {
+    updateRequest({ ...request, tablebaseEnabled: false });
+  }
   $: validationCodes = workspaceValidationCodes(request, runtime);
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: label = (
@@ -132,10 +143,19 @@
   }
 
   function updateRequest(next: SolverWorkspaceRequest) {
-    const useAllChanged = next.useAllLogicalProcessors !== request.useAllLogicalProcessors;
+    const targetIdentityChanged = next.rule !== request.rule || next.lines !== request.lines;
+    const targetQualified = tablebaseProfiles.some(profile =>
+      profile.profile === next.rule &&
+      profile.status === 'ready' &&
+      profile.pcSearchTargetLines?.includes(next.lines)
+    );
+    const qualifiedNext = !targetIdentityChanged && targetQualified
+      ? next
+      : { ...next, tablebaseEnabled: false };
+    const useAllChanged = qualifiedNext.useAllLogicalProcessors !== request.useAllLogicalProcessors;
     const draftRequest = useAllChanged
-      ? { ...next, workers: automaticWorkerCount(next.useAllLogicalProcessors) }
-      : next;
+      ? { ...qualifiedNext, workers: automaticWorkerCount(qualifiedNext.useAllLogicalProcessors) }
+      : qualifiedNext;
     const workersChanged = draftRequest.workers !== request.workers;
     const tablebaseChanged = draftRequest.tablebaseEnabled !== request.tablebaseEnabled;
     request = draftRequest;
@@ -171,11 +191,12 @@
   function setLines(lines: number) {
     const bounded = Math.max(1, Math.min(6, Math.trunc(lines || 1)));
     clearedRowsWarning = 0;
-    request = {
+    updateRequest({
       ...request,
       lines: bounded,
-      boardMask: trimBoardMask(request.boardMask, bounded)
-    };
+      boardMask: trimBoardMask(request.boardMask, bounded),
+      tablebaseEnabled: bounded === request.lines ? request.tablebaseEnabled : false
+    });
   }
 
   function setBoardMask(boardMask: bigint) {
@@ -245,11 +266,12 @@
   function importBoard(event: CustomEvent<{ boardMask: bigint; lines: number }>) {
     const lines = Math.max(1, Math.min(6, event.detail.lines));
     clearedRowsWarning = 0;
-    request = {
+    updateRequest({
       ...request,
       lines,
-      boardMask: trimBoardMask(event.detail.boardMask, lines)
-    };
+      boardMask: trimBoardMask(event.detail.boardMask, lines),
+      tablebaseEnabled: lines === request.lines ? request.tablebaseEnabled : false
+    });
   }
 </script>
 
@@ -302,7 +324,7 @@
     dependencyDagControlAvailable
     tablebaseStatus={$wasmWorkerState.tablebaseWarmup.status}
     tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
-    tablebaseProfiles={$wasmWorkerState.tablebaseWarmup.profiles ?? []}
+    {tablebaseProfiles}
     {workerAuthority}
     on:change={(event) => updateRequest(event.detail)}
   />

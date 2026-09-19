@@ -1,0 +1,73 @@
+{
+  "schema": "clearra.pc4.hf-unresolved-completions.v1",
+  "profile": "jstris-180",
+  "source_fixture": "pc4-hf-nonempty-20260913.json",
+  "purpose": "Test-only exact completion classification for HF-omitted physical transitions; no product qualification authority.",
+  "cases": [
+    {
+      "source_case": "two-horizontal-I",
+      "omitted_edge_piece": "S",
+      "target_cells": 805699839
+    },
+    {
+      "source_case": "two-horizontal-I",
+      "omitted_edge_piece": "S",
+      "target_cells": 2153779455
+    },
+    {
+      "source_case": "two-horizontal-I",
+      "omitted_edge_piece": "T",
+      "target_cells": 14684415
+    },
+    {
+      "source_case": "two-horizontal-I",
+      "omitted_edge_piece": "T",
+      "target_cells": 269353215
+    },
+    {
+      "source_case": "two-horizontal-I",
+      "omitted_edge_piece": "Z",
+      "target_cells": 6303999
+    },
+    {
+      "source_case": "one-cleared-row-six-live-cells",
+      "omitted_edge_piece": "S",
+      "target_cells": 402915327
+    },
+    {
+      "source_case": "one-cleared-row-six-live-cells",
+      "omitted_edge_piece": "T",
+      "target_cells": 469958655
+    },
+    {
+      "source_case": "one-cleared-row-six-live-cells",
+      "omitted_edge_piece": "Z",
+      "target_cells": 275280756735
+    },
+    {
+      "source_case": "tileable-upper-clear",
+      "omitted_edge_piece": "J",
+      "target_cells": 470154457
+    },
+    {
+      "source_case": "tileable-upper-clear",
+      "omitted_edge_piece": "L",
+      "target_cells": 275347799257
+    },
+    {
+      "source_case": "tileable-upper-clear",
+      "omitted_edge_piece": "S",
+      "target_cells": 805829849
+    },
+    {
+      "source_case": "tileable-upper-clear",
+      "omitted_edge_piece": "S",
+      "target_cells": 412518317273
+    },
+    {
+      "source_case": "tileable-upper-clear",
+      "omitted_edge_piece": "T",
+      "target_cells": 268658687
+    }
+  ]
+}
