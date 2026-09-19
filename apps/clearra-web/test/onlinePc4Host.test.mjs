@@ -254,6 +254,7 @@ test('batch host retains the reader concurrency cap and cancellation discards ev
     const runner = new WasmJobRunner(f.wasm, generation);
     const run = runner.run('fixture', () => {});
     await ready;
+    await assert.rejects(runner.run('overlapping fixture', () => {}), /still releasing/);
     assert.equal(transport.peak, 4, 'CPU requests are not physical HTTP concurrency');
     runner.cancel();
     assert.equal((await run).event, 'cancelled');
@@ -303,5 +304,7 @@ test('known nearby batch ranges use one HTTP span but retain independent request
     assert.deepEqual(f.order, [10, 11, 12]);
     assert.equal(events.at(-1).pc4_online.transferred_bytes, 65);
     assert.equal(events.at(-1).pc4_online.requests, 1);
+    assert.equal(events.at(-1).pc4_online.logical_reads, 3);
+    assert.equal(events.at(-1).pc4_online.transport_reads, 1);
   } finally { globalThis.fetch = original; }
 });

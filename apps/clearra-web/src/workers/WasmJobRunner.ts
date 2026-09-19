@@ -17,6 +17,7 @@ const HOST_YIELD_BUDGET_MS = 8;
 const yieldToWorkerHost = createWorkerHostYield();
 
 export class WasmJobRunner {
+  private running = false;
   private active = false;
   private jobId: number | null = null;
   private cancellationRequested = false;
@@ -28,11 +29,8 @@ export class WasmJobRunner {
     commandText: string,
     onEvent: (event: ClearraWasmWorkerEvent) => void
   ): Promise<ClearraWasmWorkerEvent> {
+    if (this.running) throw new Error('WASM runner is still releasing its previous job');
     let profilingActive = false;
-    if (this.wasm.profile_start) {
-      this.wasm.profile_start();
-      profilingActive = true;
-    }
     let terminal: ClearraWasmWorkerEvent | null = null;
     let advancesSinceDrain = 0;
     let searchProfile: unknown = null;
@@ -41,6 +39,7 @@ export class WasmJobRunner {
     this.onlineAbort = this.onlineGeneration ? new AbortController() : null;
     let reader: ReturnType<typeof createPc4RangeReader> | Awaited<ReturnType<typeof openLocalPc4Reader>> = null;
     let rangePump: Pc4AsyncRangePump | null = null;
+    let legacyReads = 0;
     const admit = (range: Pc4RangeRequest, bytes: Uint8Array) => {
       if (this.cancellationRequested || this.jobId === null || !reader) return;
       // Local data has its own admission kind, never a fabricated HTTP
@@ -52,13 +51,19 @@ export class WasmJobRunner {
     };
     const emit = (event: ClearraWasmWorkerEvent) => onEvent(reader ? ({ ...event,
       pc4_online: { provider: 'provider' in reader ? reader.provider : 'hf-graph', profile: 'jstris-180', revision: this.onlineGeneration!.revision,
-        requests: reader.requests, transferred_bytes: reader.bytes, logical_reads: reader.reads,
+        requests: reader.requests, transferred_bytes: reader.bytes,
+        logical_reads: legacyReads + (rangePump?.logicalReads ?? 0), transport_reads: reader.reads,
         local_bytes: 'localBytes' in reader ? reader.localBytes : 0,
         local_file_reads: 'fileReads' in reader ? reader.fileReads : 0,
         ...('fileAccess' in reader ? { local_file_access: reader.fileAccess } : {}),
         cache_hits: reader.cacheHits, joined_requests: reader.joinedRequests, cache_bytes: reader.retainedBytes,
         elapsed_ms: performance.now() - onlineStarted } } as ClearraWasmWorkerEvent) : event);
+    this.running = true;
     try {
+      if (this.wasm.profile_start) {
+        this.wasm.profile_start();
+        profilingActive = true;
+      }
       if (this.onlineGeneration) {
         reader = await openLocalPc4Reader(this.onlineGeneration, this.onlineAbort!.signal)
           ?? createPc4RangeReader(this.onlineGeneration, {
@@ -95,6 +100,7 @@ export class WasmJobRunner {
               // for all requests or a fixed polling interval.
               if (!range.can_advance) await rangePump!.waitForAny();
             } else if (range) {
+              legacyReads++;
               let bytes: Uint8Array;
               try {
                 // Local storage keeps its measured index-page/exact-record
@@ -167,6 +173,7 @@ export class WasmJobRunner {
             this.active = false;
             this.jobId = null;
           }
+          this.running = false;
         }
       }
     }

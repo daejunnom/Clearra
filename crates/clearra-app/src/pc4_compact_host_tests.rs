@@ -38,7 +38,7 @@ fn bytes(fixture: &ClearPath, range: &clearra_pc4_tablebase::RangeRequest) -> Ve
         Pc4ArtifactRole::GraphOffsets => &fixture.dataset.graph_offsets,
         Pc4ArtifactRole::Graph => &fixture.dataset.graph,
     };
-    data[range.offset() as usize..(range.offset() + range.length()) as usize].to_vec()
+    data[range.offset() as usize..range.end_exclusive() as usize].to_vec()
 }
 
 fn supply(
@@ -62,7 +62,7 @@ fn supply(
         let header = format!(
             "bytes {}-{}/{}",
             range.offset(),
-            range.offset() + range.length() - 1,
+            range.end_exclusive() - 1,
             range.artifact_descriptor().byte_len()
         );
         execution

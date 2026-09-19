@@ -658,6 +658,16 @@ selects the new compact producer on this isolated feature branch only; no
 large-family tests, Setup and the native persistent async transport are still
 open. The current cooperative CPU owner is not multi-threaded graph expansion.
 
+The first host-connection CI, [35432992386](https://github.com/daejunnom/Clearra/actions/runs/35432992386)
+at `5c4678eb6114c63baaac844a12e4faea0e971cd1`, compiled the production code and
+passed the two public WASM boundary contracts, but new App test compilation
+failed at two `u64 offset + u32 length` expressions. The fixture now uses the
+protocol's checked `end_exclusive()` accessor. Those App tests are not counted
+as executed until the corrected run passes. A small follow-up also prevents
+overlapping reuse of a still-releasing Web runner and separates logical range
+demands from coalesced transport reads in its metrics (three demands may be one
+physical span). The same 22 local host/OPFS tests pass with these corrections.
+
 ## Remaining evidence
 
 Still required: complete 456,459-family validation/timing, input/hold-family

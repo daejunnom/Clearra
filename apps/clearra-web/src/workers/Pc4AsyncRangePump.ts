@@ -17,6 +17,7 @@ export class Pc4AsyncRangePump {
   private settled: Settled[] = [];
   private wake: (() => void) | null = null;
   private closed = false;
+  private submitted = 0;
   private readonly onAbort = () => this.notify();
 
   constructor(
@@ -24,6 +25,8 @@ export class Pc4AsyncRangePump {
     private readonly signal: AbortSignal,
     private readonly maxGapBytes?: number
   ) { signal.addEventListener('abort', this.onAbort, { once: true }); }
+
+  get logicalReads() { return this.submitted; }
 
   submit(ranges: readonly Pc4RangeRequest[]) {
     if (this.closed || this.signal.aborted) return;
@@ -65,6 +68,7 @@ export class Pc4AsyncRangePump {
           artifact: span.artifact, offset: span.offset, length: span.length },
         indices: span.demands.map(demand => indices[demand.index]) }));
     });
+    this.submitted += fresh.length;
     for (const { range: request, indices } of plan) {
       const task = (async () => {
         if (this.closed || this.signal.aborted) return;
