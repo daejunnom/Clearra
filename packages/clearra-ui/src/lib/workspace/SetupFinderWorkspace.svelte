@@ -646,6 +646,7 @@
     {request}
     {language}
     {validationCodes}
+    tablebaseControlAvailable={runtime === 'web'}
     tablebaseStatus={runtime === 'web' ? $wasmWorkerState.tablebaseWarmup.status : 'disabled'}
     tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
     tablebaseProfiles={runtime === 'web' ? $wasmWorkerState.tablebaseWarmup.profiles ?? [] : []}

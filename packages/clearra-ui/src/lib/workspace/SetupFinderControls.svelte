@@ -23,6 +23,7 @@
   export let request: SetupFinderRequest;
   export let language: WorkspaceLanguage;
   export let validationCodes: SetupFinderValidationCode[] = [];
+  export let tablebaseControlAvailable = false;
   export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
   export let tablebaseByteLength = 0;
   export let tablebaseProfiles: Array<{
@@ -182,22 +183,24 @@
       <h2 class="workspace-control-heading">
         <Layers3 size={16} strokeWidth={1.8} />{label('search')}
       </h2>
-      <div class="tablebase-control">
-        <label class="workspace-switch-label">
-          <input
-            type="checkbox"
-            checked={request.tablebaseEnabled}
-            on:change={(event) => update({
-              tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
-            })}
-          />
-          <span class="workspace-switch" aria-hidden="true"></span>
-          <span>{label('tablebase')}</span>
-        </label>
-        <small class="workspace-field-help">{label('setupTablebaseHelp')}</small>
-        <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
-        <Pc4DownloadControl {language} />
-      </div>
+      {#if tablebaseControlAvailable}
+        <div class="tablebase-control">
+          <label class="workspace-switch-label">
+            <input
+              type="checkbox"
+              checked={request.tablebaseEnabled}
+              on:change={(event) => update({
+                tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
+              })}
+            />
+            <span class="workspace-switch" aria-hidden="true"></span>
+            <span>{label('tablebase')}</span>
+          </label>
+          <small class="workspace-field-help">{label('setupTablebaseHelp')}</small>
+          <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
+          <Pc4DownloadControl {language} />
+        </div>
+      {/if}
       <div class="worker-policy-control">
         <label class="workspace-switch-label">
           <input

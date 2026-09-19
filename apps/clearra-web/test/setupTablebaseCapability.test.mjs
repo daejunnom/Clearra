@@ -65,6 +65,8 @@ test('PC surface requires the selected profile and exact target receipt', async 
 
 test('Setup surface stays fail-closed until an exact SetupSearch target is qualified', async () => {
   const controls = await read('../../../packages/clearra-ui/src/lib/workspace/SetupFinderControls.svelte');
+  assert.match(controls, /export let tablebaseControlAvailable = false/u);
+  assert.match(controls, /\{#if tablebaseControlAvailable\}[\s\S]*class="tablebase-control"/u);
   assert.match(controls, /setupSearchTargetLines\?\.includes\(4\)/u);
   assert.doesNotMatch(controls, /disabled=\{!setupTablebaseAvailable\}/u);
   assert.doesNotMatch(controls, /if \(!setupTablebaseAvailable && request\.tablebaseEnabled\)/u);
@@ -73,6 +75,7 @@ test('Setup surface stays fail-closed until an exact SetupSearch target is quali
   assert.doesNotMatch(controls, /label\('tablebaseHelp'\)/u);
 
   const workspace = await read('../../../packages/clearra-ui/src/lib/workspace/SetupFinderWorkspace.svelte');
+  assert.match(workspace, /tablebaseControlAvailable=\{runtime === 'web'\}/u);
   assert.match(workspace, /profile\.setupSearchTargetLines\?\.includes\(4\)/u);
   assert.match(workspace, /tablebaseBlocked[\s\S]*!setupTablebaseAvailable/u);
   assert.match(workspace, /runDisabled=\{validationCodes\.length > 0 \|\| tablebaseBlocked\}/u);
