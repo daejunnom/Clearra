@@ -1438,7 +1438,7 @@ impl GeometryFamilyCompileSession {
         mut execution_prefixes: Vec<u32>,
         tablebase: Option<Arc<Pc4CompactTablebase>>,
     ) -> Result<Self, WasmExactSearchError> {
-        let (targets, compiler_prefixes, target_depth) =
+        let (targets, compiler_prefixes, _target_depth) =
             prepare_setup_geometry_targets(&mut target_keys, &mut execution_prefixes)?;
         Ok(Self {
             compiler: Some(GeometryFamilyCompiler::Exact(

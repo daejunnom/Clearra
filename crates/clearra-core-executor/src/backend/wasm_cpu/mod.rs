@@ -81,7 +81,9 @@ pub(crate) use reachability::{DocumentLockReachability, DocumentReachabilityEngi
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
 #[cfg(not(target_family = "wasm"))]
-pub(crate) use setup_parallel::execute_setup_parallel_native;
+pub(crate) use setup_parallel::{
+    execute_setup_parallel_native, execute_setup_parallel_native_with_complete_candidates,
+};
 pub(crate) use setup_parallel::{
     WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
     WasmSetupParallelWorkerAdvance,
