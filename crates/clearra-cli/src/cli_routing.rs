@@ -400,7 +400,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{install_requested_tablebase, route_invocation, tablebase_lookup_failure_message};
+    use super::{
+        install_requested_tablebase, route_invocation, tablebase_lookup_failure_message, LanguageId,
+    };
     use crate::args::CliParser;
     use crate::{error::CliErrorCode, exit::ExitCode};
     use clearra_app::decode_ctk3_exact;
