@@ -443,6 +443,9 @@ h3는 실제 환경 검증 이후의 추가 경로로 둔다. `Range: a-b,c-d` m
    immutable generation lease와 파일 변경/삭제 방지, 읽기 범위/수명 검증이 전제다.
    [memmap2](https://docs.rs/memmap2/latest/memmap2/struct.MmapOptions.html)의
    file-backed map 안전성 요구는 단순 `read-only` 옵션만으로 충족되지 않는다.
+   witness 이후 probe에서 local I/O 18.265초를 전부 0으로 만드는 비현실적 상한조차
+   72.993초에서 약 54.727초(1.33배)다. page fault와 결과 복사는 남으므로 실제 mmap
+   기대치는 그보다 작으며, 원격 왕복/bridge보다 먼저 구현할 근거는 없다.
 5. **safetensors는 후순위:** offsets/packed bytes를 tensor 몇 개로 넣을 수 있으나
    graph 주소 조회와 의존 사슬은 그대로다. 필드마다 JSON tensor entry를 만드는
    1,518만-entry header는 피한다. u24를 u32로 넓히면 target payload +33.3%,
@@ -519,10 +522,11 @@ inline인 Jstris 경로는 `offset pair -> graph`, opaque 경로는
 검증을 생략하지 않는다. [exact-source 비게시 CI 35439887487](https://github.com/daejunnom/Clearra/actions/runs/35439887487)의
 source, surface, native CLI, PC4 계약, preview-WASM 다섯 job이 모두 성공했다.
 
-그 preview-WASM과 같은 로컬 Jstris generation으로 기존 probe의 **동일한 333,332 graph
-demand 지점**까지 다시 실행했다. demand 순서가 같다는 것은 같은 benchmark 입력과
-정확히 같은 graph 논리 조회 수로 제한했고, 두 실행 모두 완료 전에 안전하게 취소됐다.
-따라서 456,459개 전체 집합·digest·완료 증거는 아니다.
+그 preview-WASM과 같은 로컬 Jstris generation으로 기존 probe와 같은 입력을
+**333,332 graph demand 지점**까지 다시 실행했다. 이전 probe의 demand digest는 보존되지
+않았으므로 exact 순서 동등성을 주장하지 않고, 비교 기준은 같은 입력과 같은 graph
+논리 조회 수로 제한한다. 두 실행 모두 완료 전에 안전하게 취소됐으므로 456,459개 전체
+집합·digest·완료 증거도 아니다.
 
 | 지표 | 반복 header | typed witness | 변화 |
 | --- | ---: | ---: | ---: |
@@ -580,6 +584,10 @@ Web의 계산/I/O 중첩 자체는 이미 원하는 비동기 구조다. 각 com
 admission한다. 이를 CPU worker마다 독립 HTTP client를 두는 구조로 바꾸면 동일 span
 결합, immutable identity별 in-flight dedup, byte 예약, 취소와 연결 pool이 분산된다.
 따라서 바꿀 대상은 owner가 아니라 중앙 broker의 FIFO 선택 정책이다.
+[libcurl의 connection-share 계약](https://curl.se/libcurl/c/CURLSHOPT_SHARE.html)도
+HTTP/2·3 multiplex stream은 같은 multi/easy handle이 소유한 연결에만 추가되며 서로
+다른 thread가 공유 연결에 stream을 붙이는 방식은 지원하지 않는다고 명시한다. native
+CLI의 목표 역시 worker별 curl이 아니라 한 multi/pool owner여야 한다.
 
 단일 FIFO에서는 여러 offset/index 요청 뒤에 나중에 생성된 exact graph 요청이 설 수
 있다. graph 응답은 이미 resident credit을 점유한 작업을 풀지만, 새 index 응답은 아직
@@ -592,4 +600,15 @@ graph queue와 reusable/index queue를 분리하고, graph를 최대 3회 먼저
 backlog 뒤의 graph가 다음 전송 slot을 얻어 resident 작업을 풀고, (2) graph가 계속
 생겨도 세 번 뒤에는 index가 반드시 진행하며, (3) 취소·shared budget·in-flight 결합을
 그대로 보존함을 검사한다. 이는 실제 WAN tail 시간 개선량이나 물리 concurrency 4가
-최적이라는 증거가 아니다. exact-source PC4 CI와 실제 대형 HTTP A/B가 남아 있다.
+최적이라는 증거가 아니다. [exact-source 비게시 CI 35440710495](https://github.com/daejunnom/Clearra/actions/runs/35440710495)의
+source, native CLI, surface, PC4 계약, preview-WASM 다섯 job은 모두 성공했다. 실제 대형
+HTTP A/B는 여전히 남아 있다.
+
+CLI/Discord의 다음 구현 경계는 별도다. App은 이미 `pending_ranges()`와
+`has_ready_work()`를 제공하지만 native host driver는 첫 `pending_range()` 하나를 읽고
+요청마다 curl 프로세스를 끝낸다. 후속 후보는 (1) ready CPU를 먼저 drain하고,
+(2) 최대 16개의 generation/profile-bound range batch를 한 transport owner에 넘기며,
+(3) libcurl multi/pool 하나가 기본 4개의 transfer를 drive하고,
+(4) 첫 완료부터 exact lookup ID로 admission하는 구조다. HTTP/2를 지원하지 않는 환경은
+같은 broker가 bounded HTTP/1.1 연결을 사용하되 의미와 예산은 같아야 한다. 이 native
+owner는 아직 구현하지 않았으며, 요청별 curl thread 증대는 그 대체물이 아니다.
