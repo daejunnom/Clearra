@@ -422,7 +422,14 @@ function interruptIncompleteRuntimePrewarm() {
 function setTablebaseRequested(requested: boolean) {
   if (tablebaseRequested === requested) return;
   tablebaseRequested = requested;
-  if (requested) return;
+  if (requested) {
+    // Begin revision discovery and the bounded qualification reads as soon as
+    // the host expresses intent. This intentionally overlaps DNS/TCP/TLS/ALPN
+    // establishment with WASM compilation and worker preparation. The later
+    // WASM join still owns the runtime-capability check.
+    void startTablebaseTransportWarmup();
+    return;
+  }
   // The online generation preparation is owned by this worker lifetime, not
   // by the visible feature toggle. Let an
   // already-started qualification finish and retain its immutable revision so
@@ -490,7 +497,14 @@ function wasmHostCapabilities(
   };
 }
 
-function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
+async function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
+  await startTablebaseTransportWarmup();
+  if (tablebaseRequested && !wasm.configure_online_pc4) {
+    throw new Error('pc4_online_wasm_update_required');
+  }
+}
+
+function startTablebaseTransportWarmup(): Promise<void> {
   if (!tablebaseRequested) return Promise.resolve();
   if (tablebaseWarmup) return tablebaseWarmup;
   const generation = ++tablebaseWarmupGeneration;
@@ -504,7 +518,6 @@ function startTablebaseWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
     .then((bundle) => {
       if (generation !== tablebaseWarmupGeneration || !tablebaseRequested) return;
       postTablebaseWarmupPhase('loading', bundle.byteLength);
-      if (!wasm.configure_online_pc4) throw new Error('pc4_online_wasm_update_required');
       postTablebaseWarmupPhase(bundle.generation.profiles.some(slot => slot.status === 'ready') ? 'ready' : 'unavailable', bundle.byteLength);
     })
     .catch((error) => {

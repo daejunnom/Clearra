@@ -854,8 +854,9 @@ HTTPS 병목은 (1) revision discovery, (2) DNS/TCP/TLS/ALPN, (3) FHID/GOFF 의�
   그대로다. [`MAXAGE_CONN=300s`](https://curl.se/libcurl/c/CURLOPT_MAXAGE_CONN.html)는 너무 오래 idle한 연결을 재사용하지 않는 상한이고,
   [TCP keepalive](https://curl.se/libcurl/c/CURLOPT_TCP_KEEPALIVE.html) 60s/30s는 죽은 peer를 발견하기 위한 probe다. 둘 다 요청 heartbeat나
   무기한 연결 보장이 아니다.
-- Web은 사용자가 TB를 켜는 순간 generation discovery·header qualification을 worker
-  warmup과 함께 시작한다. TB를 다시 꺼도 immutable generation asset과 진행 중 warmup은
+- Web은 사용자가 TB를 켜는 순간 generation discovery·header qualification을 WASM
+  컴파일 및 worker warmup과 겹쳐 시작한다. WASM capability 검사는 두 준비 경로가 합류한
+  뒤에 별도로 수행한다. TB를 다시 꺼도 immutable generation asset과 진행 중 warmup은
   worker disposal/fail-close 전까지 유지한다. 따라서 재활성화는 같은 worker cache를
   재사용하지만, 브라우저의 HTTP connection pool/socket 만료는 애플리케이션이 소유하지
   않는다. 꺼진 동안 dummy Range를 주기적으로 보내는 heartbeat는 데이터 사용량·rate

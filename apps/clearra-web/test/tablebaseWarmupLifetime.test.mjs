@@ -24,16 +24,28 @@ function functionBody(name) {
 
 test('turning TB off preserves worker-owned online preparation', () => {
   const toggle = functionBody('setTablebaseRequested');
-  assert.match(toggle, /if \(requested\) return;/u);
+  assert.match(toggle, /if \(requested\)[\s\S]*startTablebaseTransportWarmup/u);
   assert.doesNotMatch(toggle, /tablebaseWarmupGeneration\s*\+=/u);
   assert.doesNotMatch(toggle, /releasePc4TablebaseAssets\s*\(/u);
   assert.match(toggle, /loadedWasm\?\.release_tablebase\(\)/u);
 
-  const warmup = functionBody('startTablebaseWarmupAfterWasm');
+  const warmup = functionBody('startTablebaseTransportWarmup');
   assert.match(
     warmup,
     /generation !== tablebaseWarmupGeneration \|\| !tablebaseRequested/u
   );
+});
+
+test('TB transport handshake starts before the WASM capability join', () => {
+  const toggle = functionBody('setTablebaseRequested');
+  assert.match(toggle, /void startTablebaseTransportWarmup\(\)/u);
+
+  const join = functionBody('startTablebaseWarmupAfterWasm');
+  assert.match(join, /await startTablebaseTransportWarmup\(\)/u);
+  assert.match(join, /!wasm\.configure_online_pc4/u);
+
+  const transport = functionBody('startTablebaseTransportWarmup');
+  assert.doesNotMatch(transport, /ClearraWasmModule|configure_online_pc4/u);
 });
 
 test('only terminal worker lifecycle owners discard online preparation', () => {
