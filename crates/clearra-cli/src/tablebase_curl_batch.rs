@@ -541,8 +541,8 @@ struct NativeCurlTransferObservation {
 impl NativeCurlTransferObservation {
     fn read(handle: &EasyHandle, final_status_line: Option<&str>) -> Self {
         let mut info_failures = 0;
-        let new_connections = observe_u32(handle.num_connects(), &mut info_failures);
-        let redirects = observe_u32(handle.redirect_count(), &mut info_failures);
+        let new_connections = observe_count(handle.num_connects(), &mut info_failures);
+        let redirects = observe_count(handle.redirect_count(), &mut info_failures);
         let name_lookup_time = observe_duration(handle.namelookup_time(), &mut info_failures);
         let connect_time = observe_duration(handle.connect_time(), &mut info_failures);
         let tls_time = observe_duration(handle.appconnect_time(), &mut info_failures);
@@ -563,9 +563,12 @@ impl NativeCurlTransferObservation {
 }
 
 #[cfg(feature = "native-pc4-libcurl")]
-fn observe_u32(value: std::result::Result<u32, curl::Error>, failures: &mut u64) -> Option<u64> {
+fn observe_count<T: Into<u64>>(
+    value: std::result::Result<T, curl::Error>,
+    failures: &mut u64,
+) -> Option<u64> {
     match value {
-        Ok(value) => Some(u64::from(value)),
+        Ok(value) => Some(value.into()),
         Err(_) => {
             *failures = failures.saturating_add(1);
             None
