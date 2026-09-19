@@ -859,13 +859,32 @@ HTTPS 병목은 (1) revision discovery, (2) DNS/TCP/TLS/ALPN, (3) FHID/GOFF 의�
   뒤에 별도로 수행한다. TB를 다시 꺼도 immutable generation asset과 진행 중 warmup은
   worker disposal/fail-close 전까지 유지한다. 따라서 재활성화는 같은 worker cache를
   재사용하지만, 브라우저의 HTTP connection pool/socket 만료는 애플리케이션이 소유하지
-  않는다. 꺼진 동안 dummy Range를 주기적으로 보내는 heartbeat는 데이터 사용량·rate
-  limit·백그라운드 throttling 때문에 만들지 않는다.
+  않는다. 마지막 온라인 접촉에서 30초 이상 지난 뒤 재활성화하면 검색보다 먼저 자격된
+  artifact에 정확히 1바이트/1요청만 허용한 Range를 보내 전송 경로를 다시 준비한다. 이
+  요청은 generation 자격을 새로 만들지 않고 실패 시 해당 온라인 실행만 typed unavailable로
+  닫는다. 꺼진 동안 dummy Range를 주기적으로 보내는 heartbeat나 timer는 데이터 사용량·
+  rate limit·백그라운드 throttling 때문에 만들지 않는다.
 - live A/B에서는 각 transfer의
   [`CURLINFO_NUM_CONNECTS`](https://curl.se/libcurl/c/CURLINFO_NUM_CONNECTS.html), redirect count, negotiated HTTP
   version, name lookup/connect/TLS/start-transfer time을 기록한다. 첫 qualification 뒤 실제
   graph wave에서 새 connection 수가 0인지가 handshake 재사용 판정이며, warm cache의 총
   시간만으로 판정하지 않는다.
+
+동일한 upstream revision `ea61380b31fa3dc9ffb4c8505c9a09c1b421ef31`에 대해 비게시
+live job을 한 번씩 실행했다. workflow의 나머지 중복 job은 측정 job 성공 뒤 취소했으므로
+아래 링크의 **live job 성공**만 증거이며 전체 workflow 성공을 뜻하지 않는다.
+
+| 구현/source | qualification 물리 transfer | qualification 누적 transfer time | 후속 graph | 전체 test wall |
+| --- | ---: | ---: | --- | ---: |
+| scalar `87c2cdd`, [job 105920505792](https://github.com/daejunnom/Clearra/actions/runs/35451928963/job/105920505792) | 20 | 4,227.487ms | 새 연결 0, 재사용 1, HTTP/2, 181.021ms | 4.77s |
+| 3단계 batch `cb65fe6`, [job 105922367034](https://github.com/daejunnom/Clearra/actions/runs/35452635266/job/105922367034) | 15 | 3,960.070ms | 새 연결 0, 재사용 1, HTTP/2, 125.145ms | 1.89s |
+
+두 실행 모두 qualification에서 origin/CDN용 새 연결 2개만 만들고 후속 graph에서는 새
+연결을 만들지 않았다. 단계 내부 multiplex와 인접 범위 결합으로 test wall은 이 한 표본에서
+약 60.4% 줄고 transfer는 25% 줄었다. 누적 transfer time은 동시에 열린 stream 시간을
+합한 값이므로 wall time처럼 해석하지 않는다. 이 결과는 최초 qualification RTT 병목을 크게
+완화하고 qualification-to-graph handshake 재사용을 입증하지만, P7P4 전체 검색의 mixed
+index/graph 의존 사슬·429·마지막 tail이 해결됐다는 증거는 아니다.
 
 [`TCP Fast Open`](https://curl.se/libcurl/c/CURLOPT_TCP_FASTOPEN.html)은 기본으로 켜지 않는다. 최초 TCP handshake에서 최대 한 RTT를 줄일 수
 있지만 libcurl 계약상 TFO를 켜면 TLS session cache가 작동하지 않고 일부 네트워크에서
@@ -875,9 +894,10 @@ HTTPS 병목은 (1) revision discovery, (2) DNS/TCP/TLS/ALPN, (3) FHID/GOFF 의�
 경우에만 다시 제안한다. HTTP/3 역시 Bookworm/브라우저가 실제 QUIC를 협상했다는 receipt와
 packet-loss tail 이득이 생기기 전에는 후보 우선순위를 올리지 않는다.
 
-따라서 이 시점의 판정은 **HTTPS owner/handshake 중복 결함은 코드상 제거했지만 전체 검색
-병목 해결은 미증명**이다. 제품 기본 native 경로는 여전히 유한 외부 curl batch이고,
-`native-pc4-libcurl`은 full-search A/B 전까지 opt-in이다.
+따라서 이 시점의 판정은 **HTTPS owner/handshake 중복 결함은 제거했고 qualification
+왕복은 실측상 크게 완화했지만 전체 검색 병목 해결은 미증명**이다. 제품 기본 native
+경로는 여전히 유한 외부 curl batch이고, `native-pc4-libcurl`은 full-search A/B 전까지
+opt-in이다.
 
 #### Setup 탐색 적용
 
@@ -908,3 +928,10 @@ complete candidate family를 공급하고 기존 Setup evaluator가 exact digest
 이를 **feasibility dominance(연산 가능성 우위)**로 기록한다. 이를 무한 배속이나 일반적
 성능 수치로 표현하지 않는다. 이번 bounded synthetic 검사는 주입 family와 offline exact
 geometry의 root row 집합 동등성만 확인하며 실제 HF/대형 Setup A/B를 대체하지 않는다.
+
+새 Setup receipt는 `source SHA / query digest / profile / immutable generation / worker 수 /
+CPU·memory·time budget / offline terminal state / TB terminal state / exact result digest /
+candidate·coverage count / first-result·wall·nodes·peak RSS`를 한 묶음으로 남긴다. 양쪽 완료
+receipt가 있으면 A/B, offline이 동일 고정 예산에서 typed resource-limit 또는 timeout으로
+끝나고 TB만 완료하면 feasibility dominance다. 과거의 서로 다른 IOTS/broad fixture나
+사용자 중단을 offline 실패 receipt로 소급 변환하지 않는다.
