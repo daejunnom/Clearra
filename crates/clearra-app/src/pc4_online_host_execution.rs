@@ -58,6 +58,18 @@ impl AppContext {
             _ => return Err("pc4_online_request_rejected"),
         };
         let problem = compiled.problem_arc();
+        // Disclosure is an input-safety boundary, not a profile capability
+        // probe. Reject an observed prefix before consulting the activated
+        // snapshot so local and online hosts cannot leak target availability
+        // or silently reinterpret partial knowledge as a fixed queue.
+        if problem
+            .core_query()
+            .remaining_queue()
+            .observed_queue()
+            .is_some()
+        {
+            return Err("pc4_online_disclosure_required");
+        }
         let profile = Pc4RuleProfile::ALL
             .into_iter()
             .find(|profile| validate_pc4_search_problem_compatibility(*profile, &problem).is_ok())
@@ -101,16 +113,6 @@ impl AppContext {
                 return Err("pc4_online_disclosure_required");
             };
             (prepared, *identity.as_bytes())
-        } else if problem
-            .core_query()
-            .remaining_queue()
-            .observed_queue()
-            .is_some()
-        {
-            // An observed prefix is not an exhaustive fixed queue or a full
-            // pattern universe. Its bag/reveal scope must be supplied through
-            // the disclosure boundary; never silently give it oracle knowledge.
-            return Err("pc4_online_disclosure_required");
         } else {
             let mut preparation = Pc4CompiledPatternPreparation::begin(
                 problem,

@@ -59,6 +59,19 @@ impl Fixture {
             json!({ "profile": profile, "status": "ready", "upstream_complete": true,
                 "reader_contract": "hydra-jstris-180-complete-graph-v1", "field_count": 3,
                 "terminal_id": 2, "target_width": 3, "target_lines": [4],
+                "pc_search_target_lines": [4], "setup_search_target_lines": [],
+                "target_qualification_receipts": [{
+                    "schema": "clearra.pc4.exact-target-qualification.v1",
+                    "repository": "muse918/tetris-4lpc-mdp-vstar-policy",
+                    "revision": "a".repeat(40), "profile": "jstris-180",
+                    "reader_contract": "hydra-jstris-180-complete-graph-v1",
+                    "use_case": "pc-search", "target_lines": 4,
+                    "terminal_id": 2, "terminal_hash": 0xff_ffff_ffff_u64,
+                    "terminal_semantics_identity": "clearra.pc4.full-bottom-rows-after-clear.v1",
+                    "outgoing_edge_completeness_identity": format!("sha256:{}", "0123456789abcdef".repeat(4)),
+                    "known_answer_identity": format!("sha256:{}", "123456789abcdef0".repeat(4)),
+                    "offline_exact_parity_identity": format!("sha256:{}", "23456789abcdef01".repeat(4))
+                }],
                 "artifacts": { "fields": artifact(0), "offsets": artifact(1), "graph": artifact(2) },
                 "evidence": [{ "id": 0, "hash": 0, "start": 0, "end": 12 },
                     { "id": 2, "hash": hashes[2], "start": 27, "end": 39 }] })

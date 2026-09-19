@@ -115,6 +115,11 @@ test('the unresolved HF completion proof is explicit and reuses the PC4 compile 
     /classify_all_hf_omitted_pc4_targets_with_exact_completion_receipts/u,
   );
   assert.match(pc4Contracts, /'--ignored', '--nocapture', '--test-threads=1'/u);
+  assert.match(
+    pc4Contracts,
+    /args\.some\(argument => argument\.startsWith\('--test-threads='\)\)/u,
+    'the shared runner must preserve an explicit proof thread count instead of appending a duplicate flag'
+  );
 });
 for (const [name, mutation] of [
   ['main trigger', s => s.replace('branches: ["codex/v0.9.0-stacked-on-v0.8.1-20260912"]', 'branches: ["main"]')],

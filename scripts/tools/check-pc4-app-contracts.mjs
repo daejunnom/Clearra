@@ -55,7 +55,14 @@ const failures = [];
 for (const [name, args] of selectedChecks) {
   console.log(`app_contract_check=${name} status=started`);
   const command = args[0] === 'test'
-    ? [...args, ...(args.includes('--') ? [] : ['--']), '--test-threads=2'] : args;
+    ? [
+        ...args,
+        ...(args.includes('--') ? [] : ['--']),
+        ...(args.some(argument => argument.startsWith('--test-threads='))
+          ? []
+          : ['--test-threads=2'])
+      ]
+    : args;
   const evidence = createRustTestEvidence();
   const result = await new Promise(resolve => {
     const child = spawn('cargo', command, {
