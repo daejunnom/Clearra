@@ -155,3 +155,14 @@ left the index would have a first outside successor, contradicting (3); and
 (2) excludes extra indexed states. This boundary-dead proof must still cover
 every shard and bind its closure to the same generation. It does not waive the
 separate complete offline PC Search result-family parity identity.
+
+The indexed-path component was then executed against the complete immutable
+generation. It scanned all 15,185,706 fields and 109,562,993 graph edges,
+verified every edge advanced exactly one area layer, and found zero indexed
+fields unreachable from the empty root and zero indexed fields unable to reach
+the terminal. The layer counts were
+`[1, 162, 10,191, 273,459, 2,554,536, 6,805,146, 4,769,952,
+752,753, 19,405, 100, 1]`. The non-authoritative receipt identity is
+`sha256:4517ead40658d5f2a884fd00719468fa5610fd6bdbebe975c9f9682c548d4647`.
+This closes indexed root/terminal path membership for this generation only;
+the all-shard exact adjacency and outside-boundary dead closure remain open.

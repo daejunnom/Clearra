@@ -89,6 +89,19 @@ The commands above illustrate the qualifier CLI. Repository builds must still
 use the managed build launcher documented for the current host; copying a
 binary out of its build transaction is not a supported shortcut.
 
+`indexed-path-proof` independently re-hashes and scans all three canonical
+artifacts. It verifies that every graph edge advances exactly one area layer,
+then proves every indexed field is reachable from the empty root and can reach
+the full four-row terminal. It emits only `indexed-path-domain-only` evidence:
+outside-index exact successors still need the separate complete dead proof.
+
+```powershell
+clearra-pc4-qualifier indexed-path-proof `
+  --dataset-root C:\absolute\pc4-data `
+  --profile jstris-180 `
+  --output C:\absolute\qualification\jstris-180-indexed-path.json
+```
+
 ## Deliberate authority limit
 
 This comparison proves adjacency parity only for exact forward targets already
