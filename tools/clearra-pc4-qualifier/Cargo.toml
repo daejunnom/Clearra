@@ -1,0 +1,17 @@
+[package]
+name = "clearra-pc4-qualifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clearra-core-domain = { path = "../../crates/clearra-core-domain" }
+clearra-core-executor = { path = "../../crates/clearra-core-executor" }
+clearra-pc4-tablebase = { path = "../../crates/clearra-pc4-tablebase" }
+clearra-rules = { path = "../../crates/clearra-rules" }
+serde_json.workspace = true
+sha2 = "0.10.9"
+
+[lints]
+workspace = true
