@@ -1,6 +1,10 @@
 *.sh text eol=lf
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+*.psd1 text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+/.gitattributes text eol=lf
 # The WASM source contract hashes actual compile-input bytes. Keep these
 # checkout bytes identical on Windows CI and local formatter-owned sources.
 *.rs text eol=lf

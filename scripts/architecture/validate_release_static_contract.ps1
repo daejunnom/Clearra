@@ -2473,6 +2473,10 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
+        '*.ps1 text eol=lf',
+        '*.psm1 text eol=lf',
+        '*.psd1 text eol=lf',
+        '/.gitattributes text eol=lf',
         'apps/clearra-discord-bot/scripts/restore-oracle-release text eol=lf',
         'scripts/release/create-exact-source-archive.mjs text eol=lf',
         'scripts/release/exact-source-tar-contract.mjs text eol=lf',
