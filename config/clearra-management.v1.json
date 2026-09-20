@@ -923,6 +923,11 @@
       "output_class": "receipt"
     },
     {
+      "path": "scripts/release/discord-production-checkpoint-receipt.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
       "path": "scripts/release/discord-recovery-debt.mjs",
       "producer": "release-evidence",
       "output_class": "receipt"
@@ -1083,6 +1088,11 @@
       "output_class": "receipt"
     },
     {
+      "path": "scripts/release/production-evidence-retry.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
       "path": "scripts/release/release-publication-evidence.mjs",
       "producer": "release-evidence",
       "output_class": "receipt"
@@ -1131,6 +1141,11 @@
       "path": "scripts/tools/audit-upstream-drift.mjs",
       "producer": "management",
       "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/benchmark-production-read-schedule.mjs",
+      "producer": "benchmark",
+      "output_class": "benchmark"
     },
     {
       "path": "scripts/tools/build-clearra-wasm.mjs",
@@ -1545,7 +1560,7 @@
       "purpose": "registered-process-execution"
     },
     {
-      "path": "scripts/release/observe-production-surfaces.mjs",
+      "path": "scripts/release/bounded-command.mjs",
       "producer": "release-evidence",
       "purpose": "registered-process-execution"
     },
@@ -1591,11 +1606,6 @@
     },
     {
       "path": "scripts/release/product-e2e-cli-artifact.test.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/production-surface-probe-adapter.mjs",
       "producer": "release-evidence",
       "purpose": "registered-process-execution"
     },

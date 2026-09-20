@@ -324,11 +324,11 @@ test("bootstrap path never assumes the absent v0.7.4 modern release helper", asy
 
   assert.match(
     workflow,
-    /node-version: \$\{\{ inputs\.mode == 'bootstrap-capture' && '22\.23\.2' \|\| '22' \}\}/u,
+    /node-version: 22\.23\.2/u,
   );
   assert.match(
     workflow,
-    /RUSTUP_TOOLCHAIN: \$\{\{ inputs\.mode == 'bootstrap-capture' && '1\.98\.0' \|\| 'stable' \}\}/u,
+    /RUSTUP_TOOLCHAIN: \$\{\{ inputs\.mode == 'bootstrap-capture' && '1\.98\.0' \|\| '1\.98\.1' \}\}/u,
   );
   const rustSetup = workflow.slice(
     workflow.indexOf("- name: Prepare Rust WASM toolchain"),
