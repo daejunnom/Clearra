@@ -52,6 +52,7 @@ pub(crate) struct Pc4CompactCandidateSession {
     complete: bool,
     failed: bool,
     terminal_failure: Option<&'static str>,
+    failure_diagnostic: Option<String>,
 }
 
 impl Pc4CompactCandidateSession {
@@ -120,6 +121,7 @@ impl Pc4CompactCandidateSession {
             complete: false,
             failed: false,
             terminal_failure: None,
+            failure_diagnostic: None,
         }))
     }
 
@@ -137,6 +139,10 @@ impl Pc4CompactCandidateSession {
                     .union
                     .as_ref()
                     .is_some_and(|union| union.has_ready_work()))
+    }
+
+    pub(crate) fn failure_diagnostic(&self) -> Option<&str> {
+        self.failure_diagnostic.as_deref()
     }
 
     pub(crate) fn advance<G: Pc4GraphCandidateGuard>(
@@ -205,13 +211,22 @@ impl Pc4CompactCandidateSession {
         // Only new resident admission is throttled. Ready dependency owners
         // must keep progressing even when the I/O window is full; otherwise
         // their pins/credits could never be released.
-        let step = union
-            .advance(
-                &self.cache,
-                NonZeroUsize::new(work.get().min(64)).unwrap(),
-                guard,
-            )
-            .map_err(|e| e.reason())?;
+        let step = match union.advance(
+            &self.cache,
+            NonZeroUsize::new(work.get().min(64)).unwrap(),
+            guard,
+        ) {
+            Ok(step) => step,
+            Err(error) => {
+                self.failure_diagnostic = Some(
+                    union
+                        .last_failure_diagnostic()
+                        .unwrap_or_else(|| error.reason())
+                        .to_owned(),
+                );
+                return Err(error.reason());
+            }
+        };
         if step == CompactGraphUnionStep::Complete {
             if !self.lookups.is_empty() {
                 return Err("pc4_compact_session_incomplete_io");

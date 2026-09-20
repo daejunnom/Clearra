@@ -81,6 +81,121 @@ The merged proof remains non-authoritative until every field in the merged
 outside boundary is proven terminal-dead and the independent offline PC Search
 result-family parity identity is present.
 
+`boundary-dead-proof` classifies one bound outside-boundary shard without
+generating the complete reverse state space below its anchor. It validates the
+exact reverse-domain provenance chain from layer 10 through `--anchor-layer`,
+binds the complete indexed-path receipt, and exhaustively enumerates every exact
+ILC target only below that anchor. The implementation advances one sorted,
+deduplicated layer frontier at a time and releases the previous layer rather
+than retaining a recursive per-root memo. Reaching an indexed field is sound because
+the bound indexed-path receipt proves terminal co-reachability; reaching the
+anchor is decided by exact membership in the reverse-domain layer. Any live
+boundary field fails the command, while an all-dead shard gets a separate
+non-authoritative receipt. Runtime duration and worker count are diagnostics,
+not receipt inputs, so the v3 receipt identity remains deterministic across
+equivalent executions.
+
+Before an outside field enters the expensive exact frontier, two independent
+necessary conditions may prove it dead. A completely occupied column is a
+permanent wall through every row clear, so each separated vacancy strip must
+contain a multiple of four cells. Fields that survive that check are tested
+against an optimistic inverse-clear projection that lifts tetromino rows while
+ignoring supply, timing, kicks, and reachability. Exhausting every projected
+exact cover proves impossibility; finding a cover proves nothing and retains
+the field. Reaching the fixed projection work limit is recorded as unknown and
+also retains the field, so a budget can never manufacture a negative proof.
+
+```powershell
+clearra-pc4-qualifier boundary-dead-proof `
+  --dataset-root C:\absolute\pc4-data --profile jstris-180 `
+  --boundary C:\absolute\shards\shard-00000000-00000101.bin `
+  --reverse-layers C:\absolute\reverse-layers --anchor-layer 7 `
+  --indexed-path-receipt C:\absolute\indexed-path.json --workers 8 `
+  --workspace C:\absolute\qualification-work\jstris-180-shard-00000000-00000101 `
+  --output C:\absolute\dead\shard-00000000-00000101.json
+```
+
+Workers own deterministic contiguous source ranges within each layer and
+publish fixed-size sorted runs into a bounded-fan-in external merge tree. The
+next layer is streamed from that file rather than retained as one resident
+vector. `--workspace` is optional; when supplied it must be a dedicated
+absolute directory whose parent already exists. After each completed layer, a
+self-hashed checkpoint records every future frontier's count and SHA-256 plus
+all cumulative proof metrics. A matching workspace resumes from its newest
+valid checkpoint after deleting only unreferenced partial runs; a mismatched or
+tampered marker, checkpoint, or run fails closed. A completed proof removes the
+workspace. This bounds both unsorted candidates and the unique frontier while
+preserving every exact successor. The proof is exact for that boundary file but
+does not by itself establish the whole source cover or the product-family parity
+identity.
+
+## Offline family and end-to-end tablebase parity
+
+`offline-family-proof` does not read graph adjacency. It runs the ordinary exact
+CPU solver for empty-board 4L Jstris 180 `P7P4`, requires the independently
+supplied known count, checks that the returned canonical identities form one
+strict sorted set, and recomputes the normalized family hash from those
+identities. The receipt is generation-bound evidence, not activation authority.
+
+```powershell
+clearra-pc4-qualifier offline-family-proof `
+  --dataset-root C:\absolute\pc4-data --profile jstris-180 `
+  --workers 12 --expected-count 456459 `
+  --output C:\absolute\qualification\jstris-180-offline-p7p4.json
+```
+
+`offline-family-materialize` performs the expensive ordinary solver run once
+more, requires exact agreement with that receipt, and atomically checkpoints
+every canonical identity in fixed-width `PC4FAM01` order. A separate self-hashed
+receipt binds the artifact SHA-256, byte length, dataset generation, input
+identity, exact count, and normalized set hash. Every later load re-hashes and
+fully decodes the artifact, checks strict ordering, and recomputes the family
+hash. The cache is therefore reusable computation, not additional authority and
+not an inference from the receipt's 64-bit display hash.
+
+```powershell
+clearra-pc4-qualifier offline-family-materialize `
+  --dataset-root C:\absolute\pc4-data --profile jstris-180 `
+  --workers 7 --expected-count 456459 `
+  --offline-proof C:\absolute\qualification\jstris-180-offline-p7p4.json `
+  --family-output C:\absolute\qualification\jstris-180-offline-p7p4.bin `
+  --output C:\absolute\qualification\jstris-180-offline-p7p4-materialization.json
+```
+
+`tablebase-family-proof` accepts only a complete outgoing merge, its exact
+matching outside-boundary dead proof, the offline receipt, and the validated
+materialization above. It drives the ordinary App tablebase path from verified
+local Range slices and compares every canonical solution identity in order.
+Count or the 64-bit display hash alone cannot pass this comparison. The
+temporary activated snapshot exists only inside this local qualifier process;
+it is never written as a production manifest.
+
+```powershell
+clearra-pc4-qualifier tablebase-family-proof `
+  --dataset-root C:\absolute\pc4-data --profile jstris-180 `
+  --workers 12 --expected-count 456459 `
+  --outgoing-proof C:\absolute\qualification\outgoing-proof.json `
+  --boundary-dead-proof C:\absolute\qualification\outside-boundary-dead.json `
+  --offline-proof C:\absolute\qualification\jstris-180-offline-p7p4.json `
+  --offline-family C:\absolute\qualification\jstris-180-offline-p7p4.bin `
+  --offline-materialization C:\absolute\qualification\jstris-180-offline-p7p4-materialization.json `
+  --output C:\absolute\qualification\jstris-180-tablebase-p7p4-parity.json
+```
+
+Finally, `target-qualification` combines those linked proofs into the exact
+`clearra.pc4.exact-target-qualification.v1` receipt consumed by generation
+discovery. It qualifies only Jstris 180 PC Search at 4L. It does not infer Setup
+Search authority or qualify another profile.
+
+```powershell
+clearra-pc4-qualifier target-qualification `
+  --dataset-root C:\absolute\pc4-data --profile jstris-180 `
+  --outgoing-proof C:\absolute\qualification\outgoing-proof.json `
+  --boundary-dead-proof C:\absolute\qualification\outside-boundary-dead.json `
+  --family-parity-proof C:\absolute\qualification\jstris-180-tablebase-p7p4-parity.json `
+  --output C:\absolute\qualification\jstris-180-pc-search-4l.json
+```
+
 ## Exact PC-completable domain
 
 `domain-run` builds resumable reverse and forward layers without trusting the
