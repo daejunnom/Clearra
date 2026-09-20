@@ -109,6 +109,11 @@ struct PlacementState {
     held: Option<PieceKind>,
 }
 
+#[derive(Debug)]
+struct FrontierOwner {
+    placed_pieces: usize,
+}
+
 /// A determinized set of supply states for one placement prefix, or an explicit
 /// union of equal-depth prefixes whose future geometry the caller proved
 /// equivalent. Distinct partial layouts/row frames remain distinct in that
@@ -116,10 +121,21 @@ struct PlacementState {
 /// cancellation cannot partially commit.
 #[derive(Clone, Debug)]
 pub struct CompactPatternUnionFrontier {
-    owner: Arc<()>,
-    states: Vec<PlacementState>,
-    placed_pieces: usize,
+    // One language-owned token per depth. The pointer therefore carries both
+    // the language identity and placement depth without retaining a separate
+    // `usize` in every geometry frontier entry.
+    owner: Arc<FrontierOwner>,
+    // A completed frontier is immutable. Seal it to exact length so millions
+    // of geometry entries do not retain Vec growth slack that can never be
+    // used. The slice remains independently owned; only the depth/language
+    // token is shared.
+    states: Box<[PlacementState]>,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: [(); 24] = [(); core::mem::size_of::<CompactPatternUnionFrontier>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 12] = [(); core::mem::size_of::<CompactPatternUnionFrontier>()];
 
 impl CompactPatternUnionFrontier {
     pub fn is_empty(&self) -> bool {
@@ -128,11 +144,11 @@ impl CompactPatternUnionFrontier {
     pub fn state_count(&self) -> usize {
         self.states.len()
     }
-    pub const fn placed_pieces(&self) -> usize {
-        self.placed_pieces
+    pub fn placed_pieces(&self) -> usize {
+        self.owner.placed_pieces
     }
     pub fn retained_state_capacity_bytes(&self) -> usize {
-        self.states.capacity() * core::mem::size_of::<PlacementState>()
+        self.states.len() * core::mem::size_of::<PlacementState>()
     }
 
     /// Fallible owned copy for callers that reserve the returned payload under
@@ -145,8 +161,7 @@ impl CompactPatternUnionFrontier {
         states.extend_from_slice(&self.states);
         Ok(Self {
             owner: Arc::clone(&self.owner),
-            states,
-            placed_pieces: self.placed_pieces,
+            states: states.into_boxed_slice(),
         })
     }
 }
@@ -156,16 +171,13 @@ impl CompactPatternUnionFrontier {
 // histories. A source with equal numeric IDs still has a different owner.
 impl PartialEq for CompactPatternUnionFrontier {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.owner, &other.owner)
-            && self.placed_pieces == other.placed_pieces
-            && self.states == other.states
+        Arc::ptr_eq(&self.owner, &other.owner) && self.states == other.states
     }
 }
 impl Eq for CompactPatternUnionFrontier {}
 impl Hash for CompactPatternUnionFrontier {
     fn hash<H: Hasher>(&self, state: &mut H) {
         core::ptr::hash(Arc::as_ptr(&self.owner), state);
-        self.placed_pieces.hash(state);
         self.states.hash(state);
     }
 }
@@ -180,7 +192,7 @@ impl Hash for CompactPatternUnionFrontier {
 /// irrelevant to existential union but remains in the original source owner.
 #[derive(Clone, Debug)]
 pub struct CompactPatternUnionLanguage {
-    owner: Arc<()>,
+    depth_owners: Arc<[Arc<FrontierOwner>]>,
     atoms: Arc<[DrawAtom]>,
     sequence_pieces: u16,
     source_pattern_count: usize,
@@ -244,7 +256,20 @@ impl CompactPatternUnionLanguage {
         }
         let sequence_pieces =
             u16::try_from(visible).map_err(|_| CompactPatternUnionError::CounterOverflow)?;
-        let owner = Arc::new(());
+        let mut depth_owners = Vec::new();
+        // One additional dead depth represents an attempted placement after
+        // the visible source is exhausted. It is an exact empty language, not
+        // a malformed frontier. Subsequent advances preserve that empty state.
+        let owner_depths = visible
+            .checked_add(2)
+            .ok_or(CompactPatternUnionError::CounterOverflow)?;
+        depth_owners
+            .try_reserve_exact(owner_depths)
+            .map_err(|_| CompactPatternUnionError::AllocationFailed)?;
+        for placed_pieces in 0..owner_depths {
+            depth_owners.push(Arc::new(FrontierOwner { placed_pieces }));
+        }
+        let depth_owners: Arc<[Arc<FrontierOwner>]> = depth_owners.into();
         let mut states = Vec::new();
         states
             .try_reserve_exact(1)
@@ -260,13 +285,12 @@ impl CompactPatternUnionLanguage {
         });
         check_cancelled(cancelled)?;
         let frontier = CompactPatternUnionFrontier {
-            owner: Arc::clone(&owner),
-            states,
-            placed_pieces: 0,
+            owner: Arc::clone(&depth_owners[0]),
+            states: states.into_boxed_slice(),
         };
         Ok(Some((
             Self {
-                owner,
+                depth_owners,
                 atoms: atoms.into(),
                 sequence_pieces,
                 source_pattern_count: count,
@@ -297,11 +321,16 @@ impl CompactPatternUnionLanguage {
         cancelled: &G,
     ) -> Result<CompactPatternUnionFrontier, CompactPatternUnionError> {
         check_cancelled(cancelled)?;
-        if !Arc::ptr_eq(&self.owner, &left.owner) || !Arc::ptr_eq(&self.owner, &right.owner) {
-            return Err(CompactPatternUnionError::ForeignFrontier);
-        }
-        if left.placed_pieces != right.placed_pieces {
+        if left.placed_pieces() != right.placed_pieces() {
             return Err(CompactPatternUnionError::PlacementDepthMismatch);
+        }
+        if !Arc::ptr_eq(&left.owner, &right.owner)
+            || self
+                .depth_owners
+                .get(left.placed_pieces())
+                .is_none_or(|owner| !Arc::ptr_eq(owner, &left.owner))
+        {
+            return Err(CompactPatternUnionError::ForeignFrontier);
         }
         let mut states = Vec::new();
         let limit = self.limits.frontier_states.get();
@@ -346,9 +375,8 @@ impl CompactPatternUnionLanguage {
         }
         check_cancelled(cancelled)?;
         Ok(CompactPatternUnionFrontier {
-            owner: Arc::clone(&self.owner),
-            states,
-            placed_pieces: left.placed_pieces,
+            owner: Arc::clone(&left.owner),
+            states: states.into_boxed_slice(),
         })
     }
 
@@ -362,16 +390,27 @@ impl CompactPatternUnionLanguage {
         cancelled: &G,
     ) -> Result<CompactPatternUnionFrontier, CompactPatternUnionError> {
         check_cancelled(cancelled)?;
-        if !Arc::ptr_eq(&self.owner, &frontier.owner) {
+        if self
+            .depth_owners
+            .get(frontier.placed_pieces())
+            .is_none_or(|owner| !Arc::ptr_eq(owner, &frontier.owner))
+        {
             return Err(CompactPatternUnionError::ForeignFrontier);
         }
+        if frontier.is_empty() {
+            return frontier.try_clone();
+        }
         let placed_pieces = frontier
-            .placed_pieces
+            .placed_pieces()
             .checked_add(1)
             .ok_or(CompactPatternUnionError::CounterOverflow)?;
+        let owner = self
+            .depth_owners
+            .get(placed_pieces)
+            .ok_or(CompactPatternUnionError::PlacementDepthMismatch)?;
         let mut states = Vec::new();
         let mut attempts = 0usize;
-        for state in &frontier.states {
+        for state in frontier.states.iter() {
             check_cancelled(cancelled)?;
             let execution = SupplyExecutionState {
                 cursor: state.draw.consumed,
@@ -425,9 +464,8 @@ impl CompactPatternUnionLanguage {
         }
         check_cancelled(cancelled)?;
         Ok(CompactPatternUnionFrontier {
-            owner: Arc::clone(&self.owner),
-            states,
-            placed_pieces,
+            owner: Arc::clone(owner),
+            states: states.into_boxed_slice(),
         })
     }
 

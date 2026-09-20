@@ -30,6 +30,13 @@ pub(crate) struct BoundarySummary {
     pub(crate) file_identity: String,
 }
 
+pub(crate) struct BoundaryScan {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    pub(crate) field_count: u64,
+    pub(crate) file_identity: String,
+}
+
 pub(crate) fn write(
     path: &Path,
     binding: [u8; 32],
@@ -131,6 +138,64 @@ pub(crate) fn read(
     Ok(BoundaryFile {
         fields,
         file_identity: format!("sha256:{}", hex(Sha256::digest(&bytes).as_slice())),
+    })
+}
+
+pub(crate) fn scan<F>(
+    path: &Path,
+    binding: [u8; 32],
+    expected_range: Option<(u32, u32)>,
+    mut visit: F,
+) -> Result<BoundaryScan, String>
+where
+    F: FnMut(u64) -> Result<(), String>,
+{
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("outside-boundary symlink or non-file rejected".to_owned());
+    }
+    let mut reader = BufReader::with_capacity(1024 * 1024, File::open(path).map_err(io_error)?);
+    let mut header = [0_u8; HEADER_BYTES];
+    reader.read_exact(&mut header).map_err(io_error)?;
+    validate_header(&header, binding, expected_range)?;
+    let start = read_u32(&header[12..16])?;
+    let end = read_u32(&header[16..20])?;
+    let field_count = read_u64(&header[56..64])?;
+    if metadata.len()
+        != (HEADER_BYTES as u64)
+            .checked_add(
+                field_count
+                    .checked_mul(8)
+                    .ok_or("outside-boundary byte length overflow")?,
+            )
+            .ok_or("outside-boundary byte length overflow")?
+    {
+        return Err("outside-boundary length mismatch".to_owned());
+    }
+    let mut digest = Sha256::new();
+    digest.update(header);
+    let mut prior = None;
+    let mut encoded = [0_u8; 8];
+    for _ in 0..field_count {
+        reader.read_exact(&mut encoded).map_err(io_error)?;
+        digest.update(encoded);
+        let value = u64::from_le_bytes(encoded);
+        validate_field(value)?;
+        if prior.is_some_and(|previous| previous >= value) {
+            return Err("outside-boundary fields must be strictly sorted and unique".to_owned());
+        }
+        prior = Some(value);
+        visit(value)?;
+    }
+    let mut trailing = [0_u8; 1];
+    if reader.read(&mut trailing).map_err(io_error)? != 0 {
+        return Err("outside-boundary has trailing bytes".to_owned());
+    }
+    Ok(BoundaryScan {
+        start,
+        end,
+        field_count,
+        file_identity: format!("sha256:{}", hex(digest.finalize().as_slice())),
     })
 }
 
@@ -441,6 +506,17 @@ mod tests {
         write(&path, [7; 32], 4, 9, &[0, 15, 255]).unwrap();
         let observed = read(&path, [7; 32], Some((4, 9))).unwrap();
         assert_eq!(observed.fields, [0, 15, 255]);
+        let mut streamed = Vec::new();
+        let scan = scan(&path, [7; 32], Some((4, 9)), |field| {
+            streamed.push(field);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(streamed, observed.fields);
+        assert_eq!(scan.start, 4);
+        assert_eq!(scan.end, 9);
+        assert_eq!(scan.field_count, 3);
+        assert_eq!(scan.file_identity, observed.file_identity);
         assert!(read(&path, [8; 32], Some((4, 9))).is_err());
         assert!(read(&path, [7; 32], Some((5, 9))).is_err());
         fs::remove_file(path).unwrap();

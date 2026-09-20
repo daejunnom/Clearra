@@ -458,9 +458,14 @@ version = "0.8.1"
 name = "clearra-pc4-qualifier"
 version = "0.8.1"
 dependencies = [
+ "clearra-app",
  "clearra-core-domain",
  "clearra-core-executor",
+ "clearra-objectives",
+ "clearra-pc-graph",
  "clearra-pc4-tablebase",
+ "clearra-piece-registry",
+ "clearra-problem",
  "clearra-rules",
  "serde_json",
  "sha2",

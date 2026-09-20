@@ -789,6 +789,7 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
             usage.merged_states >= 3,
             "same partial layout/frame must merge before expansion"
         );
+        assert!(usage.peak_ready_work <= limits().resident_work.get());
         if bounded_cache {
             assert!(cache.evicted_records() > 0);
             assert!(cache.usage().record_count() <= 4);
