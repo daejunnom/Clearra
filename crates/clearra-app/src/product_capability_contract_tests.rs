@@ -1210,7 +1210,9 @@ fn pc_minimals_unique_execution_preserves_the_v074_count_all_public_field_identi
     let legacy_core = legacy
         .render_model()
         .and_then(crate::AppRenderModel::core_result)
-        .expect("v0.7.4-style count-all minimum-cover public result");
+        .unwrap_or_else(|| {
+            panic!("v0.7.4-style count-all minimum-cover public result: {legacy:?}")
+        });
     let report = canonical
         .product_capability_result()
         .and_then(|result| result.pc_minimum_cover_v2())
