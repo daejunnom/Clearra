@@ -85,3 +85,34 @@ for this exact graph/index generation and a complete PC Search offline parity
 proof for the same profile, target, queue/hold semantics, and canonical result
 identity. Only those outputs may populate the two currently null identities and
 allow the separate exact target receipt builder to run.
+
+## Resumed indexed-domain proof infrastructure
+
+The local-only `clearra-pc4-qualifier` tool now provides deterministic,
+bounded `outgoing-shard` receipts and an exact-cover `merge-outgoing` step.
+Each shard binds the current immutable generation, re-hashes the complete field
+and offset indexes, hashes its exact graph-byte interval, and compares every
+encoded edge in its source-ID range with Clearra's independent exact forward
+lock enumeration. The merger accepts only non-overlapping source and graph-byte
+ranges that cover the whole generation exactly once, then re-hashes all three
+artifacts. Existing valid shard receipts are reusable, so interruption loses at
+most the current bounded shard.
+
+This evidence is intentionally weaker than
+`outgoing_edge_completeness_identity`. A forward-reachable normalized target
+that is absent from `field_hash_to_id.v1.bin` is counted, not declared dead.
+The first live measurements on the immutable Jstris 180 generation were:
+
+- source ID `[0, 1)`: 162 indexed edges, zero outside-index targets, exact
+  parity;
+- source IDs `[1, 101)`: 10,076 indexed edges and 4,289 outside-index legal
+  targets, exact indexed-domain parity.
+
+The second result rules out treating a whole-index adjacency scan as the final
+completeness proof. Individually invoking the exact-cover completion oracle for
+millions of outside-index successors would repeat large subproblems. The next
+proof owner must instead generate the exact terminal-co-reachable four-row
+domain once, by reverse lock-clear semantics under the same kick profile, and
+compare that set with the immutable field index. Only after domain equality,
+whole-index adjacency parity, and offline result-family parity may the target
+qualification identities be minted.
