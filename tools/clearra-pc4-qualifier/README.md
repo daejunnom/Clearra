@@ -39,6 +39,56 @@ re-hashes every artifact and every graph segment before writing its receipt.
   -ArgumentsJson '["run","--locked","--offline","-p","clearra-pc4-qualifier","--","merge-outgoing","--dataset-root","C:\\absolute\\pc4-data","--profile","jstris-180","--receipts","C:\\absolute\\receipts","--output","C:\\absolute\\merged\\indexed-domain.json"]'
 ```
 
+## Exact PC-completable domain
+
+`domain-run` builds resumable reverse and forward layers without trusting the
+upstream field index as the definition of the domain. Reverse generation starts
+at the full four-row terminal. For each layer it first unions geometric
+predecessor candidates across the complete next layer, then performs one exact
+forward ILC reachability search per unique `(source, piece)` pair. Forward
+generation starts at the empty board and retains only targets present in the
+corresponding exact reverse layer. Dynamic work claiming prevents a few costly
+boards from leaving a long static-partition tail.
+
+Every `PC4DOM02` file binds the immutable dataset generation, its derivation
+kind, the complete input-layer SHA-256, and (for a forward step) the reverse
+filter-layer SHA-256. Files are written atomically. A resumed run accepts an
+existing layer only when the entire derivation chain still matches; a valid
+but unrelated or partially regenerated layer fails closed. `--max-new-steps`
+bounds work per invocation while already-complete steps do not consume that
+limit.
+
+```powershell
+# Run through the supported WSL ext4 source copy and the single managed build
+# root. The example advances at most two previously missing reverse layers.
+clearra-pc4-qualifier domain-run `
+  --dataset-root C:\absolute\pc4-data `
+  --profile jstris-180 `
+  --direction reverse `
+  --layers C:\absolute\qualification\jstris-180 `
+  --workers 12 `
+  --max-new-steps 2
+
+# After all reverse layers exist, build the reachable intersection.
+clearra-pc4-qualifier domain-run `
+  --dataset-root C:\absolute\pc4-data `
+  --profile jstris-180 `
+  --direction forward `
+  --layers C:\absolute\qualification\jstris-180 `
+  --workers 12 `
+  --max-new-steps 10
+
+clearra-pc4-qualifier domain-compare `
+  --dataset-root C:\absolute\pc4-data `
+  --profile jstris-180 `
+  --layers C:\absolute\qualification\jstris-180 `
+  --output C:\absolute\qualification\jstris-180-domain-parity.json
+```
+
+The commands above illustrate the qualifier CLI. Repository builds must still
+use the managed build launcher documented for the current host; copying a
+binary out of its build transaction is not a supported shortcut.
+
 ## Deliberate authority limit
 
 This comparison proves adjacency parity only for exact forward targets already
