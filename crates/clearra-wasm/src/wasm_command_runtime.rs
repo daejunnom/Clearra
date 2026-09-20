@@ -3753,9 +3753,15 @@ pub(crate) struct PreparedWasmCommand {
 }
 
 pub(crate) struct PreparedWasmExecution {
-    execution: Option<CooperativeAppExecution>,
+    // CooperativeAppExecution contains the largest active backend session.
+    // Keeping it inline made even the small terminal-supply contract reserve
+    // that complete session on the Windows test/runtime stack.
+    execution: Option<Box<CooperativeAppExecution>>,
     webgpu_requested: bool,
-    pub(crate) online_pc4: Option<Result<clearra_app::Pc4OnlineHostExecution, &'static str>>,
+    // The online PC4 state owns several resumable product sessions. Keeping it
+    // inline makes every ordinary WASM execution reserve the largest PC4 frame
+    // on the Windows test/runtime stack even when tablebase use is disabled.
+    pub(crate) online_pc4: Option<Result<Box<clearra_app::Pc4OnlineHostExecution>, &'static str>>,
 }
 
 pub(crate) enum PreparedWasmAdvance {
@@ -4013,6 +4019,7 @@ impl WasmCommandRuntime {
                 .and_then(|snapshot| {
                     self.app_context
                         .start_online_pc4_execution(prepared.request, snapshot)
+                        .map(Box::new)
                 });
             return PreparedWasmExecution {
                 execution: None,
@@ -4021,10 +4028,10 @@ impl WasmCommandRuntime {
             };
         }
         PreparedWasmExecution {
-            execution: Some(
+            execution: Some(Box::new(
                 self.app_context
                     .start_cooperative_execution(prepared.request),
-            ),
+            )),
             webgpu_requested: prepared.webgpu_requested,
             online_pc4: None,
         }
@@ -4061,7 +4068,7 @@ impl WasmCommandRuntime {
             .start_finite_cooperative_execution(request, caller_memory)
             .map_err(finite_app_entry_error)?;
         Ok(PreparedWasmExecution {
-            execution: Some(execution),
+            execution: Some(Box::new(execution)),
             webgpu_requested,
             online_pc4: None,
         })
@@ -4079,10 +4086,14 @@ fn checked_finite_direct_start_retained_owner_bytes(
 
 fn checked_finite_direct_advance_retained_owner_bytes(control: &ExecutionControl) -> Option<u128> {
     (core::mem::size_of::<PreparedWasmExecution>() as u128)
-        .checked_sub(core::mem::size_of::<CooperativeAppExecution>() as u128)
+        .checked_sub(cooperative_execution_slot_inline_bytes())
         .and_then(|bytes| {
             bytes.checked_add(checked_finite_direct_control_retained_owner_bytes(control)?)
         })
+}
+
+const fn cooperative_execution_slot_inline_bytes() -> u128 {
+    core::mem::size_of::<Option<Box<CooperativeAppExecution>>>() as u128
 }
 
 fn checked_finite_direct_control_retained_owner_bytes(control: &ExecutionControl) -> Option<u128> {
@@ -4406,6 +4417,14 @@ mod finite_memory_tests {
     }
 
     #[test]
+    fn release_regression_ordinary_prepared_execution_does_not_inline_the_online_pc4_session() {
+        assert!(
+            core::mem::size_of::<PreparedWasmExecution>() <= 512,
+            "ordinary WASM jobs must keep a bounded stack frame"
+        );
+    }
+
+    #[test]
     fn explicit_setup_tablebase_request_without_snapshot_fails_closed() {
         let runtime = WasmCommandRuntime::default();
         let request = AppRequest::new(AppCommand::Setup(SetupAppCommand::new(
@@ -4546,7 +4565,7 @@ mod finite_memory_tests {
         assert_eq!(generation_one.generation(), 1);
         assert_eq!(generation_one.retained_owner_bytes(), advance_transport);
         let expected_advance_transport = (core::mem::size_of::<PreparedWasmExecution>() as u128)
-            .checked_sub(core::mem::size_of::<CooperativeAppExecution>() as u128)
+            .checked_sub(cooperative_execution_slot_inline_bytes())
             .and_then(|bytes| bytes.checked_add(core::mem::size_of::<ExecutionControl>() as u128))
             .and_then(|bytes| bytes.checked_add(core::mem::size_of::<AtomicU32>() as u128))
             .expect("finite direct advance transport fixture fits");

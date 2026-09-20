@@ -2360,6 +2360,41 @@ fn distributed_build_probability_b2b_constraint_matches_serial_exact_result() {
 }
 
 #[test]
+fn release_regression_distributed_extended_build_probability_reconstructs_b2b_execution_evidence() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    let base = "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 7 \
+        --queue I --no-hold --no-mirror --preserve-b2b --spin-profile t-spins";
+    let serial = runtime
+        .run_command_text(&format!("{base} --workers 1"))
+        .expect("serial extended B2B Build result");
+    let distributed = run_distributed_cpu(&runtime, &format!("{base} --workers 2"));
+    let serial_report = serial.search_report().expect("serial extended report");
+    let distributed_report = distributed
+        .search_report()
+        .expect("distributed extended report");
+
+    assert_eq!(serial_report.unique_solution_count, 1);
+    assert_eq!(serial_report.covered_pattern_count, 1);
+    assert_eq!(
+        distributed_report.unique_solution_count,
+        serial_report.unique_solution_count
+    );
+    assert_eq!(
+        distributed_report.normalized_solution_set_hash,
+        serial_report.normalized_solution_set_hash
+    );
+    assert_eq!(
+        distributed_report.covered_pattern_count,
+        serial_report.covered_pattern_count
+    );
+    assert!(distributed_report
+        .summary_fields
+        .iter()
+        .any(|(key, value)| { key == "execution_constraint_materialized" && value == "true" }));
+}
+
+#[test]
 fn gui_build_probability_b2b_argv_runs_through_serial_and_distributed_wasm() {
     let commands =
         include_str!("../../../tests/fixtures/contracts/gui_build_probability_b2b_argv.tsv")

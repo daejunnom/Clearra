@@ -4897,15 +4897,17 @@ fn checked_finesse_report_build_future_upper_bound(
     } else {
         let oracle = scalar_state_count
             .checked_mul(PRODUCT_STATE_BYTES_UPPER_BOUND.checked_add(cost_vector_bytes)?)?;
-        let visible =
-            if first.fixed_queue || matches!(pattern_knowledge, FinessePatternKnowledge::Oracle) {
-                0
-            } else {
-                let shift = u32::try_from(class_count).ok()?;
-                scalar_state_count
-                    .checked_mul(1_u128.checked_shl(shift)?)?
-                    .checked_mul(PRODUCT_STATE_BYTES_UPPER_BOUND.checked_add(cost_vector_bytes)?)?
-            };
+        let visible = if first.fixed_queue
+            || first.classes.fully_revealed_by_visible_seven()
+            || matches!(pattern_knowledge, FinessePatternKnowledge::Oracle)
+        {
+            0
+        } else {
+            let shift = u32::try_from(class_count).ok()?;
+            scalar_state_count
+                .checked_mul(1_u128.checked_shl(shift)?)?
+                .checked_mul(PRODUCT_STATE_BYTES_UPPER_BOUND.checked_add(cost_vector_bytes)?)?
+        };
         (oracle, visible)
     };
     let retained_cost_tables = effective_solution_count
@@ -7498,6 +7500,56 @@ mod finesse_integration_tests {
             )
             .is_some(),
             "an empty language catalog must not create an imaginary Visible-7 product",
+        );
+    }
+
+    #[test]
+    fn release_regression_finesse_projection_collapses_fully_visible_large_class_sets_to_oracle() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("finesse problem");
+        let pieces = [
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
+            PieceKind::J,
+            PieceKind::L,
+        ];
+        let patterns = (0..128)
+            .map(|index| {
+                QueuePattern::new(
+                    PatternId::new(index),
+                    vec![
+                        pieces[index % pieces.len()],
+                        pieces[(index / pieces.len()) % pieces.len()],
+                        pieces[(index / (pieces.len() * pieces.len())) % pieces.len()],
+                    ],
+                    probability(1.0 / 128.0),
+                )
+            })
+            .collect::<Vec<_>>();
+        let language = costed_finesse_language(&one_piece_language(PieceKind::I, 1)).unwrap();
+        let mut material =
+            FinesseSearchMaterial::new(&problem, vec![("solution".to_owned(), language)], false)
+                .expect("finesse material");
+        material.classes =
+            QueueClassSet::group(&patterns, false).expect("128 distinct queue classes");
+        assert!(material.classes.fully_revealed_by_visible_seven());
+
+        assert!(
+            checked_finesse_report_build_future_upper_bound(
+                &[material],
+                FinessePatternKnowledge::Both,
+            )
+            .is_some(),
+            "fully visible queues must not project the unreachable 2^class-count policy space",
         );
     }
 

@@ -17,6 +17,10 @@ use clearra_core_executor::{CoreExecutionResult, CorePostProcessExecution};
 use clearra_coverage::{
     cover::ExactMinimumCoverError,
     pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId},
+    reducer::pattern_coverage_aggregation::{
+        PatternCoverageAggregation, PatternCoverageCompleteness,
+    },
+    universe::coverage_universe_guard::CoverageUniverseGuard,
 };
 use clearra_host_contract::{
     BuildPathFamilyPayload, BuildV2CompletenessPayload, BuildV2ProductPayload,
@@ -1276,7 +1280,41 @@ pub(crate) fn decorate_build_failed_queues(
         })
         .ok_or("Build failed-queue memory projection overflow")?;
     budget.reserve_linear_workspace(example_limit, sequence_bytes)?;
-    let failed_probability = exact_build_failed_probability(&result)?;
+    for (key, expected) in [
+        ("pattern_universe_id", universe.pattern_universe_id().get()),
+        (
+            "pattern_weight_model_id",
+            universe.pattern_weight_model_id().get(),
+        ),
+    ] {
+        if result.field_occurrence_count(key) != 1 || result.u64_field(key) != Some(expected) {
+            return Err("Build failed-queue universe identity does not match the query");
+        }
+    }
+    if result.field_occurrence_count("materialized_pattern_count") != 1
+        || result.usize_field("materialized_pattern_count") != Some(universe.pattern_count())
+        || result.field_occurrence_count("coverage_pattern_count") != 1
+        || result.usize_field("coverage_pattern_count") != Some(universe.pattern_count())
+    {
+        return Err("Build failed-queue pattern universe does not match the query");
+    }
+    let coverage_source_row_count = result
+        .unique_field("coverage_aggregation_source_row_count")
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or("Build failed-queue coverage source authority is missing or invalid")?;
+    let aggregation = PatternCoverageAggregation::from_success_coverage(
+        CoverageUniverseGuard::new(
+            universe.pattern_universe_id(),
+            universe.pattern_weight_model_id(),
+            universe.pattern_count(),
+        ),
+        coverage_source_row_count,
+        &coverage,
+        universe.weights(),
+        PatternCoverageCompleteness::complete(),
+    )
+    .map_err(|_| "Build failed-queue probability authority could not be reconstructed")?;
+    let failed_probability = exact_build_failed_probability(&result, &aggregation)?;
     if result.field_occurrence_count("failed_pattern_count") != 1
         || result.usize_field("failed_pattern_count") != Some(failed_count)
         || result.field_occurrence_count("covered_pattern_count") != 1
@@ -1476,7 +1514,10 @@ fn sha256_hex(fields: &[&str]) -> String {
         .collect()
 }
 
-fn exact_build_failed_probability(result: &CoreExecutionResult) -> Result<&str, &'static str> {
+fn exact_build_failed_probability<'a>(
+    result: &'a CoreExecutionResult,
+    aggregation: &PatternCoverageAggregation,
+) -> Result<&'a str, &'static str> {
     for field in [
         "coverage_probability",
         "failed_coverage_probability",
@@ -1489,29 +1530,51 @@ fn exact_build_failed_probability(result: &CoreExecutionResult) -> Result<&str, 
     }
     if result.field("coverage_probability_denominator")
         != Some("full-materialized-pattern-universe")
-        || result.field("materialized_probability_mass") != Some("1")
+        || result.unique_field("coverage_aggregation_contract")
+            != Some(PatternCoverageAggregation::CONTRACT_ID)
+        || result.unique_field("coverage_aggregation_availability") != Some("available")
+        || result.bool_field("coverage_aggregation_complete") != Some(true)
     {
-        return Err("Build failed-queue probability denominator is not the complete universe");
+        return Err("Build failed-queue probability denominator is not authoritative");
     }
-    let success = result
+    let success_text = result
         .field("coverage_probability")
-        .and_then(canonical_probability_decimal)
-        .ok_or("Build success probability is not canonical")?;
+        .ok_or("Build success probability is unavailable")?;
     let failed_text = result
         .field("failed_coverage_probability")
         .ok_or("Build failed probability is unavailable")?;
-    let failed = canonical_probability_decimal(failed_text)
-        .ok_or("Build failed probability is not canonical")?;
-    if !decimal_probabilities_sum_to_one(success, failed) {
-        return Err("Build success and failed probabilities do not sum to one");
+    let materialized_text = result
+        .field("materialized_probability_mass")
+        .ok_or("Build materialized probability mass is unavailable")?;
+    for (actual, expected, error) in [
+        (
+            success_text,
+            aggregation.success_probability().get(),
+            "Build success probability does not match the exact coverage authority",
+        ),
+        (
+            failed_text,
+            aggregation.failed_probability().get(),
+            "Build failed probability does not match the exact coverage authority",
+        ),
+        (
+            materialized_text,
+            aggregation.materialized_probability_mass().get(),
+            "Build materialized probability mass does not match the exact coverage authority",
+        ),
+    ] {
+        if canonical_probability(actual) != Some(expected) {
+            return Err(error);
+        }
     }
     Ok(failed_text)
 }
 
-/// Parses Rust's canonical finite probability spelling into an exact base-10
-/// integer/scale pair. The product adapter only verifies the engine-owned
-/// complement; it never derives or rounds a replacement probability.
-fn canonical_probability_decimal(value: &str) -> Option<(u128, u32)> {
+/// Parses only Rust's canonical finite probability spelling. The independently
+/// reconstructed coverage aggregation remains the numeric authority, so valid
+/// floating summation noise is accepted without introducing an adapter-level
+/// epsilon or deriving a replacement public value.
+fn canonical_probability(value: &str) -> Option<f64> {
     let parsed = value.parse::<f64>().ok()?;
     if !parsed.is_finite() || !(0.0..=1.0).contains(&parsed) {
         return None;
@@ -1526,44 +1589,7 @@ fn canonical_probability_decimal(value: &str) -> Option<(u128, u32)> {
     if canonical != value {
         return None;
     }
-    let (mantissa, exponent) = match value.split_once(['e', 'E']) {
-        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
-        None => (value, 0),
-    };
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    if whole.is_empty()
-        || !whole.bytes().all(|byte| byte.is_ascii_digit())
-        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let digits = format!("{whole}{fraction}").parse::<u128>().ok()?;
-    let scale = i32::try_from(fraction.len()).ok()?.checked_sub(exponent)?;
-    if scale >= 0 {
-        Some((digits, u32::try_from(scale).ok()?))
-    } else {
-        let multiplier = 10_u128.checked_pow(scale.unsigned_abs())?;
-        Some((digits.checked_mul(multiplier)?, 0))
-    }
-}
-
-fn decimal_probabilities_sum_to_one(left: (u128, u32), right: (u128, u32)) -> bool {
-    let scale = left.1.max(right.1);
-    let Some(left_factor) = 10_u128.checked_pow(scale.saturating_sub(left.1)) else {
-        return false;
-    };
-    let Some(right_factor) = 10_u128.checked_pow(scale.saturating_sub(right.1)) else {
-        return false;
-    };
-    let Some(unit) = 10_u128.checked_pow(scale) else {
-        return false;
-    };
-    left.0.checked_mul(left_factor).and_then(|left| {
-        right
-            .0
-            .checked_mul(right_factor)
-            .and_then(|right| left.checked_add(right))
-    }) == Some(unit)
+    Some(parsed)
 }
 
 fn project_execution(
@@ -1966,27 +1992,99 @@ mod tests {
                     "coverage_probability_denominator".to_owned(),
                     "full-materialized-pattern-universe".to_owned(),
                 ),
+                (
+                    "coverage_aggregation_contract".to_owned(),
+                    PatternCoverageAggregation::CONTRACT_ID.to_owned(),
+                ),
+                (
+                    "coverage_aggregation_availability".to_owned(),
+                    "available".to_owned(),
+                ),
+                (
+                    "coverage_aggregation_complete".to_owned(),
+                    "true".to_owned(),
+                ),
             ],
             Vec::new(),
         )
     }
 
+    fn uniform_aggregation(
+        pattern_count: usize,
+        covered_count: usize,
+    ) -> PatternCoverageAggregation {
+        use clearra_coverage::{
+            pattern::weighted_pattern_set::WeightedPatternSet,
+            universe::{
+                pattern_universe_id::PatternUniverseId,
+                pattern_weight_model_id::PatternWeightModelId,
+            },
+        };
+
+        let mut coverage = PatternBitSet::new(pattern_count);
+        for pattern_index in 0..covered_count {
+            coverage.insert(PatternId::new(pattern_index)).unwrap();
+        }
+        PatternCoverageAggregation::from_success_coverage(
+            CoverageUniverseGuard::new(
+                PatternUniverseId::new(17),
+                PatternWeightModelId::new(23),
+                pattern_count,
+            ),
+            usize::from(covered_count != 0),
+            &coverage,
+            &WeightedPatternSet::uniform(pattern_count).unwrap(),
+            PatternCoverageCompleteness::complete(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn failed_queue_probability_reuses_the_exact_engine_complement() {
         let result = probability_result("0.25", "0.75");
+        let aggregation = uniform_aggregation(4, 1);
 
-        assert_eq!(exact_build_failed_probability(&result), Ok("0.75"));
+        assert_eq!(
+            exact_build_failed_probability(&result, &aggregation),
+            Ok("0.75")
+        );
+    }
+
+    #[test]
+    fn failed_queue_probability_accepts_the_reconstructed_p7_rounding_partition() {
+        let aggregation = uniform_aggregation(5040, 4620);
+        assert_eq!(
+            aggregation.success_probability().get().to_string(),
+            "0.9166666666666666"
+        );
+        assert_eq!(
+            aggregation.failed_probability().get().to_string(),
+            "0.08333333333333308"
+        );
+        let result = probability_result("0.9166666666666666", "0.08333333333333308");
+
+        assert_eq!(
+            exact_build_failed_probability(&result, &aggregation),
+            Ok("0.08333333333333308")
+        );
     }
 
     #[test]
     fn failed_queue_probability_rejects_noncanonical_or_mismatched_authority() {
-        assert!(exact_build_failed_probability(&probability_result("0.25", "0.5")).is_err());
-        assert!(exact_build_failed_probability(&probability_result("0.250", "0.75")).is_err());
+        let aggregation = uniform_aggregation(4, 1);
+        assert!(
+            exact_build_failed_probability(&probability_result("0.25", "0.5"), &aggregation)
+                .is_err()
+        );
+        assert!(
+            exact_build_failed_probability(&probability_result("0.250", "0.75"), &aggregation)
+                .is_err()
+        );
 
         let duplicated = probability_result("0.25", "0.75").with_additional_fields(vec![(
             "failed_coverage_probability".to_owned(),
             "0.75".to_owned(),
         )]);
-        assert!(exact_build_failed_probability(&duplicated).is_err());
+        assert!(exact_build_failed_probability(&duplicated, &aggregation).is_err());
     }
 }

@@ -1517,10 +1517,25 @@ impl ExtendedBuildProbabilitySession {
         &mut self,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
+        self.rebuild_distributed_solution_evidence(control, true)
+    }
+
+    pub(super) fn annotate_distributed_execution_constraints(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        self.rebuild_distributed_solution_evidence(control, false)
+    }
+
+    fn rebuild_distributed_solution_evidence(
+        &mut self,
+        control: &ExecutionControl,
+        collect_finesse: bool,
+    ) -> Result<(), WasmExactSearchError> {
         self.ensure_memory_bound(0)?;
         if self.external_geometry || self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
-                "wasm_extended_finesse_distributed_annotation_state_invalid",
+                "wasm_extended_distributed_evidence_annotation_state_invalid",
             ));
         }
         let universe = self.problem.piece_source().materialized_universe().ok_or(
@@ -1544,7 +1559,7 @@ impl ExtendedBuildProbabilitySession {
             .cloned()
             .collect::<Vec<_>>();
         solution_keys.sort_unstable();
-        self.reset_distributed_finesse_aggregation();
+        self.reset_distributed_evidence_aggregation(collect_finesse);
         for (ordinal, solution_key) in solution_keys.into_iter().enumerate() {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
@@ -1570,16 +1585,27 @@ impl ExtendedBuildProbabilitySession {
             let spin_candidate = (self.aggregation.requests_spin_coverage()
                 || self.problem.objective().execution_constraints().requested())
             .then(|| (tiling.digest(), solution_key.clone()));
-            let build = build_extended_order_graph_with_finesse(
-                &self.problem,
-                &self.catalog,
-                &candidate,
-                &mut self.build_order_workspace,
-                usize::MAX,
-                spin_candidate,
-                self.aggregation.requests_spin_coverage(),
-                control,
-            )?;
+            let build = if collect_finesse {
+                build_extended_order_graph_with_finesse(
+                    &self.problem,
+                    &self.catalog,
+                    &candidate,
+                    &mut self.build_order_workspace,
+                    usize::MAX,
+                    spin_candidate,
+                    self.aggregation.requests_spin_coverage(),
+                    control,
+                )
+            } else {
+                build_extended_order_graph(
+                    &self.catalog,
+                    &candidate,
+                    &mut self.build_order_workspace,
+                    usize::MAX,
+                    spin_candidate,
+                    control,
+                )
+            }?;
             self.apply_build_order_result(
                 &candidate,
                 tiling,
@@ -1592,8 +1618,8 @@ impl ExtendedBuildProbabilitySession {
         Ok(())
     }
 
-    fn reset_distributed_finesse_aggregation(&mut self) {
-        self.finesse_requested = true;
+    fn reset_distributed_evidence_aggregation(&mut self, collect_finesse: bool) {
+        self.finesse_requested = collect_finesse;
         self.covered_patterns = if self.trivial_target {
             PatternBitSet::all(self.covered_patterns.pattern_count())
         } else {

@@ -344,6 +344,18 @@ impl DistributedBuildProbabilitySession {
         }
     }
 
+    fn annotate_execution_constraints(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        match self {
+            // Compact finalization already reconstructs its exact scoring batch
+            // from the retained canonical tiling identities in `complete`.
+            Self::Compact(_) => Ok(()),
+            Self::Extended(session) => session.annotate_distributed_execution_constraints(control),
+        }
+    }
+
     fn finesse_search_material(&self) -> Result<FinesseSearchMaterial, WasmExactSearchError> {
         match self {
             Self::Compact(session) => session.finesse_search_material(),
@@ -1792,6 +1804,25 @@ impl WasmBuildProbabilityDistributedResultMerger {
                     .ok_or("wasm_finesse_search_material_projection_overflow")?;
                 self.ensure_memory_bound(local_retained)
                     .map_err(|_| "wasm_build_probability_aggregate_memory_budget_exceeded")?;
+            }
+        } else if self.execution_constraints_requested {
+            // Extended workers intentionally omit final-only execution graphs.
+            // Rebuild them once from the coordinator's canonical solution keys
+            // before B2B materialization; otherwise an empty graph batch is
+            // accepted as an authoritative zero-solution result.
+            self.spin_coverages.clear();
+            for pass_index in 0..self.passes.len() {
+                let coexisting_retained_bytes = self
+                    .checked_pass_finalization_coexisting_retained_bytes(
+                        pass_index,
+                        &results,
+                        &finesse_materials,
+                    )
+                    .ok_or("wasm_build_probability_aggregate_memory_projection_overflow")?;
+                self.passes[pass_index].set_coexisting_retained_bytes(coexisting_retained_bytes);
+                self.passes[pass_index]
+                    .annotate_execution_constraints(control)
+                    .map_err(map_error)?;
             }
         }
         for pass_index in 0..self.passes.len() {

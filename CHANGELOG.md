@@ -17,6 +17,9 @@
   without incorrectly requiring a score reducer.
 - Kept constrained Build probability, coverage, finesse, and B2B projections
   coherent after the authoritative solution set is reduced.
+- Restored extended distributed B2B evidence, fully visible-seven finesse,
+  exact failed-queue complements, bounded WASM session frames, and standalone
+  GUI prerendering from isolated release output directories.
 - Clarified and validated Build source-sequence length in English, Korean, and
   Japanese, rejecting queues or source windows that cannot supply the target.
 - Hardened SRS-X and multi-surface target-frame parity while preserving the

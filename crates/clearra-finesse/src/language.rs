@@ -597,6 +597,16 @@ impl QueueClassSet {
         &self.classes
     }
 
+    /// Returns true when the initial visible-seven observation contains every
+    /// remaining queue piece. Queue classes are already unique full queues, so
+    /// each initial observation group is then a singleton and the adaptive
+    /// visible policy is exactly the Oracle policy.
+    pub fn fully_revealed_by_visible_seven(&self) -> bool {
+        self.classes
+            .iter()
+            .all(|class| class.queue().len() <= VISIBLE_COUNT)
+    }
+
     pub const fn metadata(&self) -> QueueUniverseMetadata {
         self.metadata
     }
@@ -1736,6 +1746,17 @@ impl<'a> QueueClassProductEvaluator<'a> {
         initial_hold: Option<PieceKind>,
         mut is_cancelled: impl FnMut() -> bool,
     ) -> Result<VisibleSevenEvaluation, GeometryLanguageError> {
+        if classes.fully_revealed_by_visible_seven() {
+            let oracle = self.oracle_with_cancel(classes, initial_hold, &mut is_cancelled)?;
+            let score = score_costs(classes, &oracle.costs);
+            return Ok(VisibleSevenEvaluation {
+                costs: oracle.costs,
+                successful_probability_mass: score.probability_mass,
+                successful_unique_queue_count: score.unique_queue_count,
+                total_inputs: score.total_inputs,
+                universe: oracle.universe,
+            });
+        }
         let mut costs = QueueCostTable::unreachable(classes.classes.len())?;
         let all = (0..classes.classes.len()).collect::<Vec<_>>();
         let initial_groups = split_observations(&all, classes, 0, initial_hold);
@@ -2584,6 +2605,52 @@ mod tests {
         assert_eq!(classes.classes()[0].probability_mass(), 0.5);
         assert_eq!(classes.metadata().materialized_probability_mass, 0.6);
         assert!(!classes.metadata().complete);
+    }
+
+    #[test]
+    fn release_regression_visible_seven_reuses_oracle_when_every_queue_is_fully_revealed() {
+        let classes = QueueClassSet::group(
+            &[
+                QueuePattern::new(
+                    PatternId::new(0),
+                    vec![
+                        PieceKind::I,
+                        PieceKind::O,
+                        PieceKind::T,
+                        PieceKind::S,
+                        PieceKind::Z,
+                        PieceKind::J,
+                        PieceKind::L,
+                    ],
+                    probability(0.5),
+                ),
+                QueuePattern::new(
+                    PatternId::new(1),
+                    vec![
+                        PieceKind::O,
+                        PieceKind::I,
+                        PieceKind::T,
+                        PieceKind::S,
+                        PieceKind::Z,
+                        PieceKind::J,
+                        PieceKind::L,
+                    ],
+                    probability(0.5),
+                ),
+            ],
+            true,
+        )
+        .unwrap();
+        assert!(classes.fully_revealed_by_visible_seven());
+        let language = all_piece_language(1);
+        let evaluator = QueueClassProductEvaluator::new(&language);
+
+        let oracle = evaluator.oracle(&classes, None).unwrap();
+        let visible = evaluator.visible_seven(&classes, None).unwrap();
+
+        assert_eq!(visible.costs, oracle.costs);
+        assert_eq!(visible.successful_probability_mass, 1.0);
+        assert_eq!(visible.successful_unique_queue_count, 2);
     }
 
     #[test]

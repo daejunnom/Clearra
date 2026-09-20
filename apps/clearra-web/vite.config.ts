@@ -13,6 +13,7 @@ export default defineConfig(({ mode }) => {
     // Svelte runtime generations until a manual reload (blank first page).
     optimizeDeps: { include: ['@lucide/svelte', 'tetris-fumen', '@tauri-apps/api/core'] },
     plugins: [wasmArtifactGuard(), sveltekit()],
+    ssr: { noExternal: true },
     server: {
       strictPort: false,
       fs: { allow: [searchForWorkspaceRoot(frontend.appRoot), frontend.frontendRoot] },

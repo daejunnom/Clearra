@@ -7,6 +7,10 @@ export default defineConfig(() => {
   return {
     cacheDir: frontend.viteCacheDir,
     plugins: [sveltekit()],
+    // Managed product builds place SvelteKit output outside the workspace.
+    // Bundle the complete SSR dependency graph so prerendering never tries to
+    // resolve transitive packages by walking from that isolated directory.
+    ssr: { noExternal: true },
     server: {
       strictPort: false,
       fs: { allow: [searchForWorkspaceRoot(frontend.appRoot), frontend.frontendRoot] }
