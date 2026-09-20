@@ -71,6 +71,24 @@ try {
         }, $true))
         Assert-ArtifactPathCondition ($parseErrors.Count -eq 0 -and $ownedTry.Count -eq 1) "standalone_has_bound_try_finally_owner_$file"
     }
+    $syncTokens = $null
+    $syncParseErrors = $null
+    $syncAst = [Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $entryAuthority 'scripts/sync-wsl-workspace.ps1'),
+        [ref]$syncTokens,
+        [ref]$syncParseErrors
+    )
+    $syncOwnedTry = @($syncAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.TryStatementAst] -and
+        $null -ne $node.Finally -and
+        $node.Finally.Extent.Text.Contains('Exit-ClearraBuildArtifactCacheUsage') -and
+        $node.Body.Extent.Text.Contains('Sync-ClearraWslExt4Workspace') -and
+        $node.Body.Extent.Text.Contains('Test-ClearraBuildTransactionOwner') -and
+        $node.Body.Extent.Text.Contains('Complete-ClearraBuildTransaction')
+    }, $true))
+    Assert-ArtifactPathCondition `
+        ($syncParseErrors.Count -eq 0 -and $syncOwnedTry.Count -eq 1) `
+        'wsl_source_sync_releases_its_bound_build_owner'
     $readOnlyExport = Get-Content -LiteralPath (Join-Path $entryAuthority 'scripts/export-pc-artifact.ps1') -Raw
     Assert-ArtifactPathCondition (-not $readOnlyExport.Contains('Get-ClearraCargoTargetDir') -and
         $readOnlyExport.Contains('Get-ClearraBuildTransactionRoot')) 'prebuilt_export_does_not_create_or_replace_build'

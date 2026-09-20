@@ -77,6 +77,14 @@ function Get-ClearraStableDigest([string[]]$Lines) {
 
 function Get-ClearraWslSourceManifest([string]$RepositoryRoot) {
     $root = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
+    $executablePaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $stageLines = @(& git -C $root ls-files --stage)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read Git executable modes for the WSL source manifest.' }
+    foreach ($line in $stageLines) {
+        if ($line -match '^100755 [0-9a-f]{40,64} [0-9]+\t(.+)$') {
+            [void]$executablePaths.Add($Matches[1].Replace('\', '/'))
+        }
+    }
     $entries = [System.Collections.Generic.List[object]]::new()
     foreach ($file in Get-ClearraBuildInputFiles $root) {
         $relative = $file.FullName.Substring($root.Length).TrimStart('\', '/').Replace('\', '/')
@@ -85,6 +93,7 @@ function Get-ClearraWslSourceManifest([string]$RepositoryRoot) {
                 full_path = $file.FullName
                 sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
                 size = $file.Length
+                executable = $executablePaths.Contains($relative)
             })
     }
     $cargoConfig = Join-Path $root '.cargo/config.toml'
@@ -95,11 +104,12 @@ function Get-ClearraWslSourceManifest([string]$RepositoryRoot) {
                 full_path = $file.FullName
                 sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
                 size = $file.Length
+                executable = $false
             })
     }
     $ordered = @($entries | Sort-Object relative_path -Unique)
     $digestLines = @($ordered | ForEach-Object {
-            "$($_.relative_path)|$($_.size)|$($_.sha256)"
+            "$($_.relative_path)|$($_.size)|$($_.sha256)|$(if ($_.executable) { '100755' } else { '100644' })"
         })
     return [pscustomobject]@{
         files = $ordered
@@ -237,6 +247,16 @@ function Sync-ClearraWslExt4Workspace(
         & wsl.exe -d $WslDistribution -- mkdir -p -- $nextWorkspace
         if ($LASTEXITCODE -ne 0) { throw "Failed to create WSL staging workspace: $nextWorkspace" }
         Invoke-ClearraWslTarArchive $WslDistribution $archivePath $nextWorkspace
+        $linuxExecutables = @($manifest.files | Where-Object executable | ForEach-Object {
+                if ($_.relative_path -match '(^|/)\.\.(/|$)' -or $_.relative_path.StartsWith('/')) {
+                    throw "Unsafe executable path in WSL source manifest: $($_.relative_path)"
+                }
+                "$nextWorkspace/$($_.relative_path)"
+            })
+        if ($linuxExecutables.Count -ne 0) {
+            & wsl.exe -d $WslDistribution -- chmod 755 -- @linuxExecutables
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to restore Git executable modes in the WSL workspace.' }
+        }
         & wsl.exe -d $WslDistribution -- rm -rf -- $linuxWorkspace
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to replace the prior WSL workspace: $linuxWorkspace"
