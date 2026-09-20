@@ -455,6 +455,18 @@ name = "clearra-pc-next-probability"
 version = "0.8.1"
 
 [[package]]
+name = "clearra-pc4-qualifier"
+version = "0.8.1"
+dependencies = [
+ "clearra-core-domain",
+ "clearra-core-executor",
+ "clearra-pc4-tablebase",
+ "clearra-rules",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "clearra-pc4-tablebase"
 version = "0.8.1"
 

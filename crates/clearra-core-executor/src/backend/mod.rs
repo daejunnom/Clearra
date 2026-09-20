@@ -104,6 +104,7 @@ pub use wasm_build_probability_backend::{
 pub use wasm_cpu::WasmWebGpuCandidateProducer;
 pub use wasm_cpu::{
     canonical_wasm_candidate_packet_batch_sha256, encode_canonical_wasm_candidate_packet_batch,
+    enumerate_pc4_ilc_predecessor_fields, enumerate_pc4_ilc_target_fields,
     materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
     WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
     WasmBuildProbabilityDistributedVerifier, WasmCandidatePacket, WasmCandidateProducerAdvance,
