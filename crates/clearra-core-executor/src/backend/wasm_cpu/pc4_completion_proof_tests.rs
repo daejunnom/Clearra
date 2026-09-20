@@ -1,4 +1,6 @@
 //! Test-only exact completion oracle for the thirteen HF-omitted PC4 edges.
+//! SRP rationale: this test module's single change reason is independently
+//! proving the finite completion status of omitted-transition fixtures.
 //!
 //! This module deliberately does not participate in product search or profile
 //! qualification. It independently constructs a row-lift superset, streams

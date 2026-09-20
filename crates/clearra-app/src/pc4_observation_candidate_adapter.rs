@@ -1,4 +1,4 @@
-// SRP rationale: this module owns only the pure, target-qualified conversion from a
+// SRP rationale: this module's single change reason is the pure, target-qualified conversion from a
 // completely exhausted observation-graph path family to canonical concrete candidate
 // evidence. It does not own transport, fallback, observation policy, probability
 // reduction, product activation, or presentation.

@@ -158,12 +158,20 @@ function Assert-Pc4ProductDecisionSourceAbsence() {
 
     foreach ($file in Get-Pc4ProductAuthoritySourceFiles) {
         $contents = Get-Pc4ProductAuthorityProductionText $file
+        # The upstream repository's proper name contains "vstar", but that
+        # immutable transport locator is not a decision source. Remove only
+        # that exact public repository identity before rejecting every other
+        # V*/Krylov/policy/value occurrence in product authority sources.
+        $decisionSourceContents = $contents.Replace(
+            'muse918/tetris-4lpc-mdp-vstar-policy',
+            'muse918/pc4-qualified-graph-dataset'
+        )
         $patterns = @($globallyForbiddenPatterns)
-        if (Test-Pc4DecisionAuthorityContext -File $file -Contents $contents) {
+        if (Test-Pc4DecisionAuthorityContext -File $file -Contents $decisionSourceContents) {
             $patterns += $pc4DecisionPatterns
         }
         foreach ($pattern in $patterns) {
-            if ($contents -match $pattern) {
+            if ($decisionSourceContents -match $pattern) {
                 $relative = Get-Pc4ProductAuthorityRelativePath $file
                 Add-ArchitectureError "$relative contains forbidden PC4 decision-source semantics '$($Matches[0])'; v0.9 product authority is qualified graph/index data plus complete Clearra materialization"
             }
@@ -667,8 +675,8 @@ function Invoke-Pc4FullSolutionAuthorityContractValidation($WorkspaceDependencyG
         '/revision/${encodeURIComponent(channel)}',
         '/tree/${resolvedRevision}?recursive=false&expand=false',
         'qualification_status: "unqualified"',
-        'field_hash_to_id\.v1\.bin',
-        'graph_offsets\.u32\.bin',
+        'field_hash_to_id.v1.bin',
+        'graph_offsets.u32.bin',
         'graph(?:_[A-Za-z0-9]+)?\.bin',
         'MAX_RESPONSE_BYTES',
         'entry.lfs.size !== entry.size'

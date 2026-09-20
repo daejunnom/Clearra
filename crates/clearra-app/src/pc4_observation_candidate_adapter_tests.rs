@@ -1,3 +1,5 @@
+// SRP rationale: this test module's single change reason is executable parity
+// coverage for the observation candidate adapter's complete-output boundary.
 use core::{convert::Infallible, num::NonZeroUsize};
 use std::{cell::Cell, collections::BTreeMap};
 

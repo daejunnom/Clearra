@@ -1,4 +1,5 @@
-// SRP rationale: this module owns only bounded lazy enumeration of hidden draws
+// SRP rationale: this module's single change reason is bounded lazy enumeration
+// of hidden draws
 // from one exact multiset-bag state. Observation, hold, graph, and product policy
 // remain outside this family.
 use core::{fmt, num::NonZeroUsize};

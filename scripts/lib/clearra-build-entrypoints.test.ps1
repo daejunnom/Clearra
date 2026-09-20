@@ -15,7 +15,17 @@ function Invoke-ClearraEntryFailureProbe([string[]]$Arguments) {
         return [pscustomobject]@{ code=$LASTEXITCODE; output=($output -join "`n") }
     } finally { $ErrorActionPreference = $previousPreference }
 }
-New-Item -ItemType Directory -Path $entrySource | Out-Null
+    New-Item -ItemType Directory -Path $entrySource | Out-Null
+    foreach ($relative in @(
+        'core-c/src/coverage/fixture.c',
+        'crates/fixture/src/target/mod.rs',
+        'apps/fixture/build/generated.js',
+        'crates/fixture/target/generated.bin'
+    )) {
+        $fixturePath = Join-Path $entrySource $relative
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $fixturePath))
+        [IO.File]::WriteAllText($fixturePath, 'fixture')
+    }
 $env:LOCALAPPDATA = $entryCacheHome
 $env:XDG_CACHE_HOME = $entryCacheHome
 try {
@@ -73,6 +83,21 @@ try {
 
     . (Join-Path $entryAuthority 'scripts/lib/core-c-build.ps1')
     . (Join-Path $entryAuthority 'scripts/lib/clearra-build-wsl-dispatch.ps1')
+    $enumeratedBuildInputs = @(Get-ClearraBuildInputFiles $entrySource | ForEach-Object {
+        $_.FullName.Substring($entrySource.Length).TrimStart('\', '/').Replace('\', '/')
+    })
+    Assert-ArtifactPathCondition `
+        ($enumeratedBuildInputs -contains 'core-c/src/coverage/fixture.c' -and
+         $enumeratedBuildInputs -contains 'crates/fixture/src/target/mod.rs') `
+        'source_coverage_and_target_modules_are_build_inputs'
+    Assert-ArtifactPathCondition `
+        ($enumeratedBuildInputs -notcontains 'apps/fixture/build/generated.js' -and
+         $enumeratedBuildInputs -notcontains 'crates/fixture/target/generated.bin') `
+        'generated_build_and_target_directories_are_excluded'
+    $escapedWslArgument = ConvertTo-ClearraWslpathArgument 'C:\Users\한글 사용자\Clearra\build'
+    Assert-ArtifactPathCondition `
+        ($escapedWslArgument -ceq 'C:\\Users\\한글 사용자\\Clearra\\build') `
+        'wslpath_argument_preserves_windows_separators_and_unicode'
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Resolve-CoreCBuildDir 'unowned-core' }) 'core_library_cannot_create_without_owner'
     Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath (Join-Path $entryCacheHome 'Clearra'))) 'unowned_core_library_created_no_cache'
     $entryRecord = Initialize-ClearraBuildArtifactCache -RepositoryRoot $entrySource

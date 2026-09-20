@@ -6,6 +6,10 @@ export const PC4_UPSTREAM_DISCOVERY_SCHEMA =
   "clearra.pc4.upstream-discovery.v1";
 export const DEFAULT_PC4_DATASET_REPOSITORY =
   "muse918/tetris-4lpc-mdp-vstar-policy";
+export const PC4_SHARED_INDEX_PATHS = Object.freeze([
+  "field_hash_to_id.v1.bin",
+  "graph_offsets.u32.bin",
+]);
 
 const API_ORIGIN = "https://huggingface.co";
 const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;

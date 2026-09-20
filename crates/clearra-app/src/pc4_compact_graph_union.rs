@@ -1,4 +1,5 @@
-//! SRP: enumerate the complete canonical graph x compact-supply union without
+//! SRP rationale: this module's single change reason is enumeration of the
+//! complete canonical graph x compact-supply union without
 //! reveal histories. I/O, observation probabilities and product reduction stay
 //! outside. Missing records suspend individual work items, never mean no edge.
 use core::{convert::Infallible, num::NonZeroUsize};

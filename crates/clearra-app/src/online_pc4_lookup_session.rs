@@ -1,4 +1,6 @@
 //! Feature-off application owner for one online PC4 lookup session.
+//! SRP rationale: this module's single change reason is the state transition
+//! contract for one host-supplied, Range-admitted lookup session.
 //!
 //! This module deliberately owns no HTTP client and starts no offline solver.
 //! Hosts satisfy the emitted Range request, while a fallback remains a typed

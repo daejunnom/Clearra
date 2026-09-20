@@ -15,6 +15,22 @@ function Test-ClearraSecretOrGeneratedInput([System.IO.FileInfo]$File) {
     return $false
 }
 
+function Test-ClearraGeneratedInputDirectory([System.IO.DirectoryInfo]$Directory) {
+    if ($Directory.Name -in @(
+            '.git', '.cache', '.svelte-kit', '.vite-temp', '_local', 'dist', 'dist-server',
+            'node_modules', 'build', 'models', 'checkpoints'
+        )) {
+        return $true
+    }
+    if ($Directory.Name -in @('target', 'coverage')) {
+        # `src/target` and `src/coverage` are domain modules, while Cargo target
+        # trees and report coverage trees are generated. Fixture/golden
+        # directories likewise carry tracked build inputs.
+        return $Directory.Parent.Name -notin @('src', 'fixtures', 'golden')
+    }
+    return $false
+}
+
 function Get-ClearraBuildInputFiles([string]$RepositoryRoot) {
     $repository = [System.IO.Path]::GetFullPath($RepositoryRoot)
     $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
@@ -23,16 +39,6 @@ function Get-ClearraBuildInputFiles([string]$RepositoryRoot) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             $files.Add([System.IO.FileInfo]::new($path))
         }
-    }
-
-    $excludedDirectories = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
-    )
-    foreach ($name in @(
-            '.git', '.cache', '.svelte-kit', '.vite-temp', '_local', 'dist', 'dist-server', 'node_modules',
-            'target', 'build', 'coverage', 'models', 'checkpoints'
-        )) {
-        [void]$excludedDirectories.Add($name)
     }
 
     foreach ($relativeRoot in @('apps', 'assets', 'core-c', 'crates', 'packages', 'scripts', 'tests', 'tools')) {
@@ -46,7 +52,7 @@ function Get-ClearraBuildInputFiles([string]$RepositoryRoot) {
             $directory = $pending.Pop()
             foreach ($entry in $directory.EnumerateFileSystemInfos()) {
                 if ($entry -is [System.IO.DirectoryInfo]) {
-                    if (-not $excludedDirectories.Contains($entry.Name) -and
+                    if (-not (Test-ClearraGeneratedInputDirectory $entry) -and
                         -not (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
                         $pending.Push($entry)
                     }

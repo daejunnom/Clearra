@@ -1,4 +1,5 @@
-//! SRP: one finite native curl process owns one bounded set of immutable Range
+//! SRP rationale: this module's single change reason is one finite native curl
+//! process owning one bounded set of immutable Range
 //! transfers. It may reuse/multiplex connections, emits each completed span as
 //! soon as curl finishes it, and knows no graph or product semantics.
 

@@ -1,5 +1,6 @@
 //! No-I/O owner for one resumable online PC4 candidate session.
-// SRP rationale: one Range lifecycle is shared by fixed and observation producers.
+// SRP rationale: this owner's single change reason is the lifecycle of one
+// resumable, no-I/O fixed-queue candidate session.
 //!
 //! This module composes the range-admitted online lookup owner with the exact
 //! selected candidate runtime. It owns neither transport nor fallback, and

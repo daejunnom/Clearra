@@ -1,3 +1,5 @@
+// SRP rationale: this test module's single change reason is exhaustive contract
+// coverage for paging, copy identity, and source-completeness admission.
 use std::{cell::Cell, num::NonZeroU64};
 
 use clearra_core_domain::{

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   PC4_UPSTREAM_DISCOVERY_SCHEMA,
+  PC4_SHARED_INDEX_PATHS,
   discoverPc4UpstreamGeneration,
 } from "./discover-upstream-generation.mjs";
 
@@ -28,6 +29,10 @@ test("moving discovery resolves once then inventories the immutable revision wit
   assert.equal(result.schema, PC4_UPSTREAM_DISCOVERY_SCHEMA);
   assert.equal(result.resolved_revision, REVISION);
   assert.equal(result.qualification_status, "unqualified");
+  assert.deepEqual(PC4_SHARED_INDEX_PATHS, [
+    "field_hash_to_id.v1.bin",
+    "graph_offsets.u32.bin",
+  ]);
   assert.match(calls[0][0], /\/revision\/main$/u);
   assert.match(calls[1][0], new RegExp(`/tree/${REVISION}\\?`, "u"));
   assert.deepEqual(result.candidates.map(({ path }) => path), [

@@ -10,10 +10,22 @@ function Assert-ClearraWslDispatchSource([string]$LinuxSourceRoot) {
     return $LinuxSourceRoot
 }
 
+function ConvertTo-ClearraWslpathArgument([string]$WindowsPath) {
+    if ([string]::IsNullOrWhiteSpace($WindowsPath) -or
+        $WindowsPath -match '[\x00-\x1f]') {
+        throw 'Cannot pass an invalid Windows path to WSL.'
+    }
+    # wsl.exe performs one command-line escape pass before execve. Doubling
+    # separators preserves literal backslashes for /usr/bin/wslpath, including
+    # profiles whose Windows path contains non-ASCII characters.
+    return $WindowsPath.Replace('\', '\\')
+}
+
 function ConvertTo-ClearraWslBuildPath([string]$WindowsPath, [string]$Distribution = 'Ubuntu') {
     if ($Distribution -notmatch '^[A-Za-z0-9._-]+$') { throw 'Unsafe WSL distribution name.' }
     $path = Assert-ClearraNoReparseBuildPath $WindowsPath
-    $mapped = @(& wsl.exe -d $Distribution -- wslpath -a -u $path 2>$null)
+    $wslpathArgument = ConvertTo-ClearraWslpathArgument $path
+    $mapped = @(& wsl.exe -d $Distribution -- wslpath -a -u $wslpathArgument 2>$null)
     if ($LASTEXITCODE -ne 0 -or $mapped.Count -ne 1 -or
         ([string]$mapped[0]) -notmatch '^/mnt/[a-z]/' -or ([string]$mapped[0]) -match '[\x00-\x1f]') {
         throw 'Cannot map the Windows build authority into WSL.'

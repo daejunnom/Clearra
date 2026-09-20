@@ -1,4 +1,6 @@
 //! Feature-off input-disclosure boundary for online PC4 acceleration.
+//! SRP rationale: this module's single change reason is deciding whether one
+//! normalized input discloses enough bag state to start online acceleration.
 //!
 //! This module decides only whether a normalized queue input contains the
 //! exact bag remainder needed by the hidden-reveal state machine. It performs

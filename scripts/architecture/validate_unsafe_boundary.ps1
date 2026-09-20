@@ -4,7 +4,10 @@ function Test-RustUnsafeBoundaryAllowed([string]$RelativePath) {
         return $true
     }
 
-    if ($normalized -eq "crates/clearra-wasm-abi/src/lib.rs") {
+    if ($normalized -in @(
+            "crates/clearra-wasm-abi/src/lib.rs",
+            "crates/clearra-wasm-abi/src/online_pc4_exports.rs"
+        )) {
         return $true
     }
 

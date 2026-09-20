@@ -135,7 +135,7 @@ impl ClearraPlacementIdentity {
 pub(crate) fn rebase_concrete_placements(
     placements: &mut [ClearraPlacementIdentity],
 ) -> Result<(), PlacementIdentityError> {
-    let Some(first) = placements.first() else {
+    let Some((first, _remaining)) = placements.split_first() else {
         return Ok(());
     };
     let Some((prefix, _)) = first.graph_row_transition else {

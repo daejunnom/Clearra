@@ -103,6 +103,10 @@ pub struct PolicyValue;
 fn best_transition() {}
 '@
     Write-ContractFixture $temporaryRoot `
+        'crates/clearra-cli/src/pc4_upstream_transport.rs' @'
+const DATASET_REPOSITORY: &str = "muse918/tetris-4lpc-mdp-vstar-policy";
+'@
+    Write-ContractFixture $temporaryRoot `
         'packages/clearra-ui/test/Pc4Authority.test.mjs' 'const researchOnly = "Krylov";'
     Write-ContractFixture $temporaryRoot `
         'packages/clearra-ui/docs/pc4-authority.md' 'V* is documented but not product authority.'
@@ -135,6 +139,7 @@ fn best_transition() {}
     foreach ($allowedPath in @(
         'pc4_inline_test_only.rs',
         'queue_observation_policy.rs',
+        'pc4_upstream_transport.rs',
         'Pc4Authority.test.mjs',
         'pc4-authority.md',
         'clearra-pc-next-probability/src/lib.rs',
