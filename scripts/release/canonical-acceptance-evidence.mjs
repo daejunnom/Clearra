@@ -241,7 +241,6 @@ const REQUIRED_JOBS = Object.freeze(new Map([
   ])],
   ["windows-gui", Object.freeze([
     "Build standalone SvelteKit and Tauri GUI",
-    "Stage Windows GUI executable",
     "Upload Windows GUI artifact",
   ])],
 ]));
