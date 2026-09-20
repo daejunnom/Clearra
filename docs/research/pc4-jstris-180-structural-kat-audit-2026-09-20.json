@@ -1,0 +1,57 @@
+{
+  "schema": "clearra.pc4.structural-kat-audit.v1",
+  "authority": "non-target-qualification-evidence",
+  "target_qualification_schema": "clearra.pc4.exact-target-qualification.v1",
+  "evidence_scope": "complete-artifact-structure-and-bounded-observed-kat-only",
+  "repository": "muse918/tetris-4lpc-mdp-vstar-policy",
+  "revision": "ea61380b31fa3dc9ffb4c8505c9a09c1b421ef31",
+  "profile": "jstris-180",
+  "reader_contract": "hydra-jstris-180-complete-graph-v1",
+  "target_lines": 4,
+  "artifacts": {
+    "fields": {
+      "path": "field_hash_to_id.v1.bin",
+      "byte_length": 121485664,
+      "content_identity": "sha256:29a9e817cf529f33084f01e5a14b1faa1bb493ba43e618a7222178f0cfd2fd37"
+    },
+    "offsets": {
+      "path": "graph_offsets.u32.bin",
+      "byte_length": 60742844,
+      "content_identity": "sha256:dffb6453277860086f92f4a47f3860cb0fa5ca99edf43bda96bde15869921886"
+    },
+    "graph": {
+      "path": "graph.bin",
+      "byte_length": 510917451,
+      "content_identity": "sha256:7dc434e3611684756911480d6d338d37bf8ca5ade263611d651fa8709e0294f4"
+    }
+  },
+  "complete_structural_scan": {
+    "field_count": 15185706,
+    "field_index_records_checked": 15185706,
+    "graph_offsets_checked": 15185707,
+    "graph_records_checked": 15185706,
+    "graph_edges_checked": 109562993,
+    "maximum_record_bytes": 498,
+    "terminal_id": 15185705,
+    "terminal_hash": 1099511627775,
+    "terminal_outgoing_edges": 0,
+    "every_artifact_byte_hashed": true,
+    "every_record_source_bound_to_field_index": true,
+    "every_graph_target_in_domain": true
+  },
+  "bounded_known_answers": {
+    "identity": "sha256:b5e90cd4ca7f71dc84ecb4d9f6715148a4c8b163a412f8546f6ef51c7164b3db",
+    "scope": "tracked-root-and-nonempty-observation-fixtures",
+    "source_records_checked": 6,
+    "field_identities_checked": 361,
+    "target_references_checked": 356,
+    "indexed_misses_checked": 1
+  },
+  "qualification_status": "not-qualified",
+  "pc_search_target_receipt": null,
+  "missing_semantic_proof_identities": {
+    "outgoing_edge_completeness_identity": null,
+    "offline_exact_parity_identity": null
+  },
+  "audit_identity": "sha256:53c1343ca37f195429fa1e945762aa5b622996b17c312b71498ea330bdd53225"
+}
