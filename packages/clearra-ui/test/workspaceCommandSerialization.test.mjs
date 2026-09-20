@@ -25,6 +25,10 @@ const canonicalGuiPcFullSolutionArguments = readFileSync(
   new URL('../../../tests/fixtures/contracts/gui_pc_full_solution_argv.tsv', import.meta.url),
   'utf8'
 ).trimEnd().split('\t');
+const canonicalGuiBuildProbabilityB2bArguments = readFileSync(
+  new URL('../../../tests/fixtures/contracts/gui_build_probability_b2b_argv.tsv', import.meta.url),
+  'utf8'
+).trimEnd().split(/\r?\n/u).map((line) => line.split('\t'));
 
 test('browser command text and Desktop argv preserve the same quoted queue field', () => {
   const queue = 'I O"\\T';
@@ -137,6 +141,31 @@ test('queue-less Build minimum uses its finite standard bag as the sole source w
   assert.equal(arguments_[arguments_.indexOf('--patterns') + 1], 'P2');
   assert.equal(arguments_.includes('--source-pieces'), false);
   assert.deepEqual(buildProbabilityRequestForDesktop(request, 'en').arguments, arguments_);
+});
+
+test('Build B2B emits the canonical serial and distributed WASM argv in browser and Desktop', () => {
+  const base = {
+    ...createDefaultBuildProbabilityRequest(),
+    height: 4,
+    existingMask: 0n,
+    targetMask: 0xffffffffffn,
+    queue: 'OTSZJLIOTI',
+    holdEnabled: false,
+    aggregation: 'buildability',
+    preserveB2B: true,
+    spinProfile: 't-spins'
+  };
+
+  for (const [index, workers] of [1, 2].entries()) {
+    const request = { ...base, workers };
+    const arguments_ = buildProbabilityCommandArguments(request);
+    assert.deepEqual(arguments_, canonicalGuiBuildProbabilityB2bArguments[index]);
+    assert.deepEqual(buildProbabilityRequestForDesktop(request, 'en').arguments, arguments_);
+    assert.deepEqual(
+      tokenizeBrowserCommandForContract(serializeCliCommandArguments(arguments_)),
+      arguments_
+    );
+  }
 });
 
 test('browser command text and Desktop argv preserve literal process markers and C0 whitespace', () => {

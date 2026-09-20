@@ -95,7 +95,10 @@ const RESULT_NAME =
 const SEMVER_TAG = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/u;
 const BOOTSTRAP_COMMIT = "b1a56bc15b8d6decd1bcfc1b49163e0542e36cd6";
 const BOOTSTRAP_AT = "2026-08-30T17:12:23Z";
-const BOOTSTRAP_EXPIRES_AT = "2026-09-14T17:12:23Z";
+// This source-reviewed renewal keeps the original bootstrap epoch and therefore
+// every recovery debt after it.  It only gives the first v0.8.0 deployment
+// enough time to publish the durable annotated receipt that replaces bootstrap.
+const BOOTSTRAP_EXPIRES_AT = "2026-09-27T17:12:23Z";
 
 export function resolveDiscordRecoveryDebtCheckpoint(
   runList,

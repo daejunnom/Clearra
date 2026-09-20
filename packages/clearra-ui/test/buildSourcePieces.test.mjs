@@ -121,6 +121,53 @@ test('build source-pieces validation follows the portable positive native usize 
   }
 });
 
+test('build source validation rejects lengths that the native compiler cannot execute', () => {
+  const twoPieceTarget = validBuildRequest({ targetMask: 0xffn });
+
+  assert.deepEqual(
+    production.buildProbabilityValidationCodes({
+      ...twoPieceTarget,
+      queue: 'I'
+    }),
+    ['source_queue_too_short']
+  );
+  assert.deepEqual(
+    production.buildProbabilityValidationCodes({
+      ...twoPieceTarget,
+      sourcePieces: 1
+    }),
+    ['source_pieces_too_short']
+  );
+  assert.deepEqual(
+    production.buildProbabilityValidationCodes({
+      ...twoPieceTarget,
+      queue: 'IO',
+      sourcePieces: 3
+    }),
+    ['source_pieces_exceeds_queue']
+  );
+  assert.deepEqual(
+    production.buildProbabilityValidationCodes({
+      ...twoPieceTarget,
+      queue: 'IO',
+      sourcePieces: 2
+    }),
+    []
+  );
+
+  // Relationship checks wait for a valid, tileable target so the user sees
+  // the structural target error before any derived supply error.
+  assert.deepEqual(
+    production.buildProbabilityValidationCodes({
+      ...twoPieceTarget,
+      targetMask: 0x7n,
+      queue: 'I',
+      sourcePieces: 1
+    }),
+    ['build_target_not_tileable']
+  );
+});
+
 test('build source-pieces control explains the automatic dependency and result effect', () => {
   const controls = readFileSync(
     new URL('../src/lib/workspace/BuildProbabilityControls.svelte', import.meta.url),
@@ -135,13 +182,22 @@ test('build source-pieces control explains the automatic dependency and result e
   assert.doesNotMatch(sourcePiecesInput, /disabled=/u);
 
   assert.equal(production.workspaceMessage('en', 'sourcePiecesAutomatic'), 'Automatic (target/hold)');
-  assert.match(production.workspaceMessage('en', 'sourcePiecesHelp'), /target piece count and hold state/u);
+  assert.equal(production.workspaceMessage('en', 'sourcePieces'), 'Source sequence length');
+  assert.match(production.workspaceMessage('en', 'sourcePiecesHelp'), /complete pattern universe/u);
+  assert.match(production.workspaceMessage('en', 'sourcePiecesHelp'), /not a see-n visibility setting/u);
   assert.match(production.workspaceMessage('en', 'sourcePiecesHelp'), /every aggregation, including tiling/u);
-  assert.doesNotMatch(production.workspaceMessage('en', 'sourcePiecesHelp'), /not sent/u);
   assert.equal(production.workspaceMessage('ko', 'sourcePiecesAutomatic'), '자동 (목표/홀드)');
-  assert.match(production.workspaceMessage('ko', 'sourcePiecesHelp'), /목표 미노 수와 홀드 상태/u);
+  assert.equal(production.workspaceMessage('ko', 'sourcePieces'), '공급 시퀀스 미노 수');
+  assert.match(production.workspaceMessage('ko', 'sourcePiecesHelp'), /see-n 가시성 설정이 아닙니다/u);
   assert.match(production.workspaceMessage('ko', 'sourcePiecesHelp'), /타일링을 포함한 모든 집계 방식/u);
-  assert.doesNotMatch(production.workspaceMessage('ko', 'sourcePiecesHelp'), /전송하지 않습니다/u);
+  assert.equal(production.workspaceMessage('ja', 'sourcePieces'), '供給列のミノ数');
+  assert.match(production.workspaceMessage('ja', 'sourcePiecesHelp'), /see-n の可視範囲設定ではありません/u);
+  assert.equal(production.workspaceMessage('en', 'solutionProbabilities'), 'Build probability by solution');
+  assert.equal(production.workspaceMessage('en', 'solutionProbability'), 'Build probability');
+  assert.equal(production.workspaceMessage('ko', 'solutionProbabilities'), '해법별 구축 확률');
+  assert.equal(production.workspaceMessage('ko', 'solutionProbability'), '구축 확률');
+  assert.equal(production.workspaceMessage('ja', 'solutionProbabilities'), '解法ごとの構築確率');
+  assert.equal(production.workspaceMessage('ja', 'solutionProbability'), '構築確率');
 });
 
 test('build solution probabilities lower only when enabled and remain unavailable for tiling', () => {

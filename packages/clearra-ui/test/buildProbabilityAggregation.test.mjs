@@ -278,7 +278,7 @@ test('Build result modes lower to CLI-owned products without changing engine agg
   const minimumWithExplicitSourceWindow = production.buildProbabilityCommandArguments({
     ...base,
     queue: '',
-    sourcePieces: 0xffff_ffff,
+    sourcePieces: 12,
     resultMode: 'minimum-solutions'
   });
   assert.equal(

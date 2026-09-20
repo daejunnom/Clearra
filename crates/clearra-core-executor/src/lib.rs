@@ -68,7 +68,7 @@ pub use core_postprocess_score_cell::CorePostProcessScoreCell;
 pub use core_postprocess_spin_coverage::CorePostProcessSpinCoverage;
 pub use finesse_report::{
     FinessePolicyResult, FinesseReport, FinesseReportInput, FinesseReportPlacement,
-    FinesseRepresentativeWitness, FinesseSolutionAverage,
+    FinesseRepresentativeWitness, FinesseSearchSolutionFilterError, FinesseSolutionAverage,
 };
 pub use memory::ScopeGuard;
 pub use packing::{PackingExecutionPlan, PackingRunResult, PackingRunner, PackingState};

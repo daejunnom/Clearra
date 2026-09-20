@@ -471,6 +471,27 @@ pub struct FinesseReport {
     score_request_authority: Option<FinesseScoreRequestAuthority>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FinesseSearchSolutionFilterError {
+    UnsupportedReportMode,
+    NonCanonicalAcceptedSolutionKeys,
+    RepresentativeWitnessOutsideAcceptedSolutions,
+}
+
+impl FinesseSearchSolutionFilterError {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::UnsupportedReportMode => "finesse_search_solution_filter_mode_invalid",
+            Self::NonCanonicalAcceptedSolutionKeys => {
+                "finesse_search_solution_filter_keys_noncanonical"
+            }
+            Self::RepresentativeWitnessOutsideAcceptedSolutions => {
+                "finesse_search_solution_filter_witness_rejected"
+            }
+        }
+    }
+}
+
 impl FinesseReport {
     pub fn new(
         mode: impl Into<String>,
@@ -591,6 +612,50 @@ impl FinesseReport {
         &self.policy_results
     }
 
+    /// Restricts the per-solution search projection after an authoritative
+    /// execution constraint has reduced the solution set. The aggregate
+    /// policy statistics remain valid because the canonical search producer
+    /// applies the same execution constraint while constructing its finesse
+    /// languages; only rows owned by solutions removed at the later materialized
+    /// solution boundary are discarded here.
+    ///
+    /// This operation only drops retained values. It performs no allocation.
+    pub fn retain_search_solution_keys(
+        &mut self,
+        accepted_solution_keys: &[String],
+    ) -> Result<(), FinesseSearchSolutionFilterError> {
+        if self.mode != "search" {
+            return Err(FinesseSearchSolutionFilterError::UnsupportedReportMode);
+        }
+        if accepted_solution_keys
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(FinesseSearchSolutionFilterError::NonCanonicalAcceptedSolutionKeys);
+        }
+        let accepted = |key: &str| {
+            accepted_solution_keys
+                .binary_search_by(|candidate| candidate.as_str().cmp(key))
+                .is_ok()
+        };
+        if self
+            .representative_witness
+            .as_ref()
+            .and_then(FinesseRepresentativeWitness::solution_key)
+            .is_some_and(|key| !accepted(key))
+        {
+            return Err(
+                FinesseSearchSolutionFilterError::RepresentativeWitnessOutsideAcceptedSolutions,
+            );
+        }
+        for policy in &mut self.policy_results {
+            policy
+                .solution_averages
+                .retain(|average| accepted(average.solution_key()));
+        }
+        Ok(())
+    }
+
     /// Checked heap backing retained by the typed finesse report. Every owned
     /// `String` uses its actual capacity and every `Vec` includes its outer
     /// slot buffer as well as nested payloads.
@@ -654,6 +719,80 @@ fn checked_vec_capacity_bytes<T>(values: &Vec<T>) -> Option<u128> {
 
 fn checked_vec_len_bytes<T>(values: &[T]) -> Option<u128> {
     (values.len() as u128).checked_mul(core::mem::size_of::<T>() as u128)
+}
+
+#[cfg(test)]
+mod solution_filter_tests {
+    use super::{
+        FinessePolicyResult, FinesseReport, FinesseRepresentativeWitness,
+        FinesseSearchSolutionFilterError, FinesseSolutionAverage,
+    };
+
+    #[test]
+    fn search_report_retains_only_authoritative_solution_rows() {
+        let mut report = FinesseReport::new(
+            "search",
+            "oracle",
+            true,
+            None,
+            vec![FinessePolicyResult::new(
+                "oracle",
+                "1",
+                true,
+                vec![
+                    FinesseSolutionAverage::new("keep", "1", true),
+                    FinesseSolutionAverage::new("reject", "2", true),
+                ],
+            )],
+        )
+        .with_representative_witness(FinesseRepresentativeWitness::new(
+            "oracle",
+            Some("keep".to_owned()),
+            Vec::new(),
+            Vec::new(),
+            1,
+            Vec::new(),
+            Vec::new(),
+        ));
+
+        report
+            .retain_search_solution_keys(&["keep".to_owned()])
+            .expect("canonical retained solution set");
+
+        assert_eq!(
+            report.policy_results()[0]
+                .solution_averages()
+                .iter()
+                .map(FinesseSolutionAverage::solution_key)
+                .collect::<Vec<_>>(),
+            ["keep"]
+        );
+        assert_eq!(
+            report
+                .representative_witness()
+                .and_then(FinesseRepresentativeWitness::solution_key),
+            Some("keep")
+        );
+    }
+
+    #[test]
+    fn search_report_rejects_a_witness_outside_the_authoritative_solution_set() {
+        let mut report = FinesseReport::new("search", "oracle", true, None, Vec::new())
+            .with_representative_witness(FinesseRepresentativeWitness::new(
+                "oracle",
+                Some("reject".to_owned()),
+                Vec::new(),
+                Vec::new(),
+                1,
+                Vec::new(),
+                Vec::new(),
+            ));
+
+        assert_eq!(
+            report.retain_search_solution_keys(&["keep".to_owned()]),
+            Err(FinesseSearchSolutionFilterError::RepresentativeWitnessOutsideAcceptedSolutions)
+        );
+    }
 }
 
 #[cfg(test)]

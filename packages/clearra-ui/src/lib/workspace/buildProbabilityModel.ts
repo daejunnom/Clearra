@@ -64,6 +64,9 @@ export type BuildProbabilityValidationCode =
   | 'build_target_not_tileable'
   | 'build_target_overlap'
   | 'source_pieces_invalid'
+  | 'source_pieces_too_short'
+  | 'source_pieces_exceeds_queue'
+  | 'source_queue_too_short'
   | 'build_paths_height_invalid'
   | 'build_score_height_invalid'
   | 'fixed_queue_required'
@@ -167,10 +170,11 @@ export function buildProbabilityValidationCodes(
     'fixed-queue-maximum-score',
     'highest-score-minimum-set'
   ].includes(request.resultMode);
+  const parsedQueue = request.queue.trim() === '' ? null : parseBrowserQueueInput(request.queue);
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) {
     errors.push('target_lines_invalid');
   }
-  if (request.queue.trim() !== '' && !parseBrowserQueueInput(request.queue)) {
+  if (request.queue.trim() !== '' && !parsedQueue) {
     errors.push('queue_invalid');
   }
   const existing = trimBuildProbabilityMask(request.existingMask, request.height);
@@ -179,13 +183,38 @@ export function buildProbabilityValidationCodes(
   if (targetCellCount === 0) errors.push('build_target_empty');
   else if (targetCellCount % 4 !== 0) errors.push('build_target_not_tileable');
   if ((existing & target) !== 0n) errors.push('build_target_overlap');
+  const sourcePiecesValid =
+    request.sourcePieces == null ||
+    (Number.isInteger(request.sourcePieces) &&
+      request.sourcePieces >= BUILD_SOURCE_PIECES_MIN &&
+      request.sourcePieces <= BUILD_SOURCE_PIECES_MAX);
   if (
     request.sourcePieces != null &&
-    (!Number.isInteger(request.sourcePieces) ||
-      request.sourcePieces < BUILD_SOURCE_PIECES_MIN ||
-      request.sourcePieces > BUILD_SOURCE_PIECES_MAX)
+    !sourcePiecesValid
   ) {
     errors.push('source_pieces_invalid');
+  }
+  const targetPieceCount =
+    targetCellCount > 0 && targetCellCount % 4 === 0 ? targetCellCount / 4 : null;
+  if (targetPieceCount !== null) {
+    if (parsedQueue && parsedQueue.sequenceLength < targetPieceCount) {
+      errors.push('source_queue_too_short');
+    }
+    if (
+      sourcePiecesValid &&
+      request.sourcePieces != null &&
+      request.sourcePieces < targetPieceCount
+    ) {
+      errors.push('source_pieces_too_short');
+    }
+    if (
+      parsedQueue &&
+      sourcePiecesValid &&
+      request.sourcePieces != null &&
+      request.sourcePieces > parsedQueue.sequenceLength
+    ) {
+      errors.push('source_pieces_exceeds_queue');
+    }
   }
   const exceedsCompactField = ((existing | target) >> 60n) !== 0n;
   if (request.resultMode === 'complete-replay-paths' && exceedsCompactField) {
@@ -194,7 +223,7 @@ export function buildProbabilityValidationCodes(
   if (scoreResultMode && exceedsCompactField) errors.push('build_score_height_invalid');
   if (
     request.resultMode === 'fixed-queue-maximum-score' &&
-    parseBrowserQueueInput(request.queue)?.kind !== 'fixed'
+    parsedQueue?.kind !== 'fixed'
   ) {
     errors.push('fixed_queue_required');
   }
