@@ -116,3 +116,42 @@ domain once, by reverse lock-clear semantics under the same kick profile, and
 compare that set with the immutable field index. Only after domain equality,
 whole-index adjacency parity, and offline result-family parity may the target
 qualification identities be minted.
+
+## Exact-domain checkpoint and proof refinement
+
+The independent reverse generator is now executable as a local-only,
+checkpointed qualification producer. `PC4DOM02` files are bound to the
+immutable dataset generation and to the SHA-256 of the exact parent layer; a
+forward layer additionally binds the reverse layer used as its filter. Existing
+files with a different derivation chain fail closed. Unique geometric
+`(source, piece)` candidates are combined before one exact forward ILC replay,
+so different targets cannot force the same reachability search to run again.
+Dynamic work claiming, a sorted k-way merge, and buffered atomic output remove
+the observed static-tail, full-re-sort, and 8-byte mounted-filesystem write
+bottlenecks respectively.
+
+The first optimized Jstris 180 reverse checkpoints for revision
+`ea61380b31fa3dc9ffb4c8505c9a09c1b421ef31` are:
+
+| transition | input fields | geometric `(source,piece)` pairs | exact output fields |
+|---|---:|---:|---:|
+| layer 10 -> 9 | 1 | 162 | 100 |
+| layer 9 -> 8 | 100 | 82,556 | 24,748 |
+| layer 8 -> 7 | 24,748 | 8,458,302 | 2,015,406 |
+
+The immutable upstream index contains only 19,405 layer-8 and 752,753 layer-7
+fields, whereas the terminal-co-reachable reverse sets contain 24,748 and
+2,015,406. This is expected evidence that reverse completeness alone includes
+fields that are not reachable from the empty root. It also means the upstream
+index cannot be accepted as the reverse domain by assumption.
+
+For the final completeness proof, enumerating every reverse-only middle-layer
+field is not required if it becomes materially larger than the path domain.
+An equivalent and more targeted exact proof may combine: (1) complete indexed
+adjacency parity, (2) root reachability and terminal co-reachability of every
+indexed node, and (3) a memoized acyclic forward proof that every exact
+outside-index successor is terminal-dead. Any real root-to-terminal path that
+left the index would have a first outside successor, contradicting (3); and
+(2) excludes extra indexed states. This boundary-dead proof must still cover
+every shard and bind its closure to the same generation. It does not waive the
+separate complete offline PC Search result-family parity identity.
