@@ -995,6 +995,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $discordCatalogRelease = Read-Text 'apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs'
     $discordCatalogReleaseTest = Read-Text 'apps/clearra-discord-bot/test/discord-command-catalog-release.test.mjs'
     $productionObservation = Read-Text 'scripts/release/observe-production-surfaces.mjs'
+    $boundedCommand = Read-Text 'scripts/release/bounded-command.mjs'
     $productionProbeAdapter = Read-Text 'scripts/release/production-surface-probe-adapter.mjs'
     $productionProbeAdapterTest = Read-Text 'scripts/release/production-surface-probe-adapter.test.mjs'
     $productionProbeMaterializer = Read-Text 'scripts/release/materialize-production-probe-spec.mjs'
@@ -2159,7 +2160,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 Add-ArchitectureError "Canonical Pages consumer must not rebuild accepted WASM bytes: '$forbiddenPagesBuildMarker'"
             }
         }
-        if ($release -match 'pnpm --filter @clearra/discord-bot run test') {
+        if ($release -match '(?m)^\s*run:\s*pnpm --filter @clearra/discord-bot run test\s*$') {
             Add-ArchitectureError 'Release workflow must consume the accepted CTK3 build through the Discord built-only suite'
         }
         if ($metadataJob.IndexOf('apps/clearra-discord-bot/test/capability-registry.test.mjs', [System.StringComparison]::Ordinal) -ge 0) {
@@ -2283,7 +2284,7 @@ function Invoke-ReleaseIdentityGateValidation {
                         $windowsStepsStart,
                         $windowsArchiveStart - $windowsStepsStart
                     ) `
-                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22.23.2" `
+                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22.23.2`n      - name: Bind exact Corepack pnpm`n        shell: pwsh`n        run: |`n          corepack enable`n          corepack prepare pnpm@11.5.0 --activate`n          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }" `
                     -Contract 'Windows protected checkout and Node setup'
             }
             foreach ($step in @(
@@ -2865,8 +2866,8 @@ function Invoke-ReleaseIdentityGateValidation {
         'legacy_initial_evidence_base64: ${{ steps.authority.outputs.legacy_evidence_base64 }}',
         'LEGACY_RELEASE_TAG: ${{ inputs.legacy_release_tag }}',
         'REQUESTED_CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}',
-        'node-version: ${{ inputs.mode == ''bootstrap-capture'' && ''22.23.2'' || ''22'' }}',
-        'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''stable'' }}',
+        'node-version: 22.23.2',
+        'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''1.98.1'' }}',
         'pages-rollback-wasm-dependencies-v2-${{ runner.os }}-rust-${{ env.RUSTUP_TOOLCHAIN }}-',
         '[[ "$HOME" == "/home/runner" ]]',
         '[[ "${CARGO_HOME:-$HOME/.cargo}" == "/home/runner/.cargo" ]]',
@@ -2963,8 +2964,8 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError 'Pages bootstrap authority readbacks must have exactly two deployment read permissions'
         }
         foreach ($requiredBootstrapProducer in @(
-            'node-version: ${{ inputs.mode == ''bootstrap-capture'' && ''22.23.2'' || ''22'' }}',
-            'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''stable'' }}',
+            'node-version: 22.23.2',
+            'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''1.98.1'' }}',
             'if [[ "$CAPTURE_MODE" == "bootstrap-capture" ]]; then',
             '[[ "$HOME" == "/home/runner" ]]',
             '[[ "${CARGO_HOME:-$HOME/.cargo}" == "/home/runner/.cargo" ]]'
@@ -2977,8 +2978,8 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError 'Pages bootstrap producer must validate the natural hosted-runner HOME and CARGO_HOME without overriding them'
         }
         foreach ($conditionalScalar in @(
-            'node-version: ${{ inputs.mode == ''bootstrap-capture'' && ''22.23.2'' || ''22'' }}',
-            'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''stable'' }}'
+            'node-version: 22.23.2',
+            'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''1.98.1'' }}'
         )) {
             if ([regex]::Matches($captureSection, [regex]::Escape($conditionalScalar)).Count -ne 1) {
                 Add-ArchitectureError "Pages bootstrap producer must own conditional scalar exactly once: '$conditionalScalar'"
@@ -4175,7 +4176,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'initial observation does not open the claimed window',
         'Oracle fresh operation did not occur inside the observation window',
         'probe adapter SHA-256 changed',
-        'shell: false',
+        'runBoundedCommand',
         'actual four-surface production observation producer report is required'
     )) {
         $surfaceText = if ($required -eq 'actual four-surface production observation producer report is required') {
@@ -4185,6 +4186,16 @@ function Invoke-ReleaseIdentityGateValidation {
         }
         if ($surfaceText.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "Production observation evidence is missing '$required'"
+        }
+    }
+    foreach ($required in @(
+        ('sp' + 'awn(executable, arguments_'),
+        'shell: false',
+        'windowsHide: true',
+        'stdio: ["ignore", "pipe", "ignore"]'
+    )) {
+        if ($boundedCommand.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Bounded production probe command runner is missing '$required'"
         }
     }
     # The canonical metadata owner above executes production observation regressions.

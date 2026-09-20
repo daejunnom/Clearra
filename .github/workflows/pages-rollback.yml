@@ -107,11 +107,8 @@ jobs:
           ref: ${{ inputs.expected_current_main }}
           path: authority-source
       - uses: actions/setup-node@v4
-        if: ${{ inputs.mode == 'bootstrap-capture' }}
         with:
           node-version: 22.23.2
-          cache: npm
-          cache-dependency-path: snapshot-source/package-lock.json
       - name: Require managed frontend policy before legacy source compilation
         if: ${{ inputs.mode == 'bootstrap-capture' }}
         run: node authority-source/scripts/tools/validate-managed-frontend-source.mjs --source-root snapshot-source
