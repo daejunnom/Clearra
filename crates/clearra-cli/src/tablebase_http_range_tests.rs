@@ -144,7 +144,7 @@ fn tablebase_download_external_batch_reserves_every_span_before_parallel_io() {
     );
     assert_eq!((reader.requests, reader.reserved), (requests, reserved));
     assert_eq!(
-        reader.reserve_external(&[(2, 0, 12); 17]).unwrap_err(),
+        reader.reserve_external(&[(2, 0, 12); 65]).unwrap_err(),
         "pc4_online_batch_invalid"
     );
     assert_eq!((reader.requests, reader.reserved), (requests, reserved));

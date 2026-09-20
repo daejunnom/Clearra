@@ -11,7 +11,7 @@ const moduleUrl = `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[
 const { WasmJobRunner } = await import(moduleUrl);
 const generation = { schema: 'clearra.pc4.host-generation.v1', repository: 'muse918/tetris-4lpc-mdp-vstar-policy',
   revision: 'a'.repeat(40), profiles: [{ profile: 'jstris-180', status: 'ready', artifacts: {
-    graph: { path: 'graph.bin', byte_length: 64000, content_identity: 'sha256:' + 'c'.repeat(64) }
+    graph: { path: 'graph.bin', byte_length: 1_048_576, content_identity: 'sha256:' + 'c'.repeat(64) }
   } }], transferred_bytes: 0 };
 const range = { lookup_session: 9, request_id: 1, profile: 'jstris-180', offset: 16, length: 8,
   artifact: { path: 'field_hash_to_id.v1.bin', byte_length: 32, content_identity: 'sha256:' + 'b'.repeat(64) } };
@@ -298,7 +298,7 @@ function deferredFetch(f) {
     pending.set(request.lookup_session, (status = 206) => {
       signal.removeEventListener('abort', abort); active--; pending.delete(request.lookup_session);
       resolve(new Response(Uint8Array.of(request.lookup_session), { status,
-        headers: { 'content-range': `bytes ${offset}-${offset}/64000` } }));
+        headers: { 'content-range': `bytes ${offset}-${offset}/${request.artifact.byte_length}` } }));
     });
     afterStart();
   });
@@ -334,8 +334,8 @@ test('batch host advances CPU while the first HTTP waits and admits faster respo
   } finally { globalThis.fetch = original; }
 });
 
-test('batch host retains the reader concurrency cap and cancellation discards every late response', { timeout: 5000 }, async () => {
-  const original = fetch, f = batchFixture(8), transport = deferredFetch(f);
+test('a wide logical window retains the four-request transport cap and cancellation discards every late response', { timeout: 5000 }, async () => {
+  const original = fetch, f = batchFixture(64), transport = deferredFetch(f);
   let started;
   const ready = new Promise(resolve => { started = resolve; });
   transport.afterStart = () => { if (transport.starts.length === 4) started(); };
@@ -367,8 +367,8 @@ test('one bad parallel HTTP response cancels peers and cannot publish partial co
   } finally { globalThis.fetch = original; }
 });
 
-test('an oversized pending batch is rejected before any HTTP is emitted', async () => {
-  const original = fetch, f = batchFixture(17);
+test('a batch beyond the bounded logical window is rejected before any HTTP is emitted', async () => {
+  const original = fetch, f = batchFixture(65);
   let calls = 0;
   try {
     globalThis.fetch = () => { calls++; assert.fail('invalid batch must not send'); };
@@ -387,7 +387,8 @@ test('known nearby batch ranges use one HTTP span but retain independent request
       calls++; assert.equal(init.headers.Range, 'bytes=0-64');
       const bytes = new Uint8Array(65);
       for (const range of f.requests) bytes[range.offset] = range.lookup_session;
-      return new Response(bytes, { status: 206, headers: { 'content-range': 'bytes 0-64/64000' } });
+      return new Response(bytes, { status: 206,
+        headers: { 'content-range': `bytes 0-64/${f.requests[0].artifact.byte_length}` } });
     };
     await new WasmJobRunner(f.wasm, generation).run('fixture', event => events.push(event));
     assert.equal(calls, 1);
