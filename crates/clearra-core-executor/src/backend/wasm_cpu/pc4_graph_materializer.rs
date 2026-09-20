@@ -317,6 +317,105 @@ pub fn enumerate_pc4_ilc_target_fields(
     Ok(targets.into_iter().collect())
 }
 
+/// Enumerates every geometric predecessor candidate that could produce
+/// `target_cells` after one lock and line clear.
+///
+/// Unlike [`enumerate_pc4_ilc_predecessor_fields`], this function deliberately
+/// does not claim that the removed piece can reach the reconstructed lock. It
+/// exists for the local qualification producer, which unions candidates across
+/// an entire target layer and then performs one exact forward reachability
+/// search per unique `(source, piece)` pair. Callers must never treat this set
+/// as graph, reachability, or product authority on its own.
+pub fn enumerate_pc4_ilc_geometric_predecessor_fields(
+    target_cells: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+) -> Result<Vec<u64>, Pc4IlcMaterializationError> {
+    if target_cells & !FIELD_MASK != 0 {
+        return Err(Pc4IlcMaterializationError::TargetOutsideFourRows);
+    }
+    if builtin_kick_profile(kick_profile).is_none() {
+        return Err(Pc4IlcMaterializationError::UnsupportedKickProfile);
+    }
+    let target_deleted = bottom_full_row_prefix(target_cells)
+        .ok_or(Pc4IlcMaterializationError::TargetClearedRowsNotBottomPrefix)?;
+    let target_prefix = target_deleted.count_ones() as u8;
+    let expected_board = compact_target_board(WIDTH, HEIGHT, target_cells, target_deleted);
+    let definition =
+        standard_tetromino_registry()
+            .get(piece)
+            .ok_or(Pc4IlcMaterializationError::Geometry(
+                "pc4_reverse_piece_definition_missing",
+            ))?;
+    let mut candidates = BTreeSet::new();
+
+    for source_prefix in 0..=target_prefix {
+        let physical_height = HEIGHT - source_prefix;
+        if physical_height == 0 {
+            continue;
+        }
+        let newly_cleared = target_prefix - source_prefix;
+        for clear_rows in 0_u16..(1_u16 << physical_height) {
+            if clear_rows.count_ones() != u32::from(newly_cleared) {
+                continue;
+            }
+            let mut before_clear = 0_u64;
+            let mut surviving_row = 0_u8;
+            for row in 0..physical_height {
+                let cells = if clear_rows & (1 << row) != 0 {
+                    ROW_MASK
+                } else {
+                    let cells = (expected_board >> (surviving_row * WIDTH)) & ROW_MASK;
+                    surviving_row += 1;
+                    cells
+                };
+                before_clear |= cells << (row * WIDTH);
+            }
+            for rotation in RotationState::ALL {
+                let shape = definition.shape(rotation);
+                if shape.height() > physical_height {
+                    continue;
+                }
+                for y in 0..=(physical_height - shape.height()) {
+                    for x in 0..=(WIDTH - shape.width()) {
+                        let mut lock = 0_u64;
+                        for cell in shape.cells() {
+                            lock |= 1_u64
+                                << ((u32::from(y) + cell.y() as u32) * u32::from(WIDTH)
+                                    + u32::from(x)
+                                    + cell.x() as u32);
+                        }
+                        if lock & !before_clear != 0 {
+                            continue;
+                        }
+                        let current_board = before_clear & !lock;
+                        if (0..physical_height)
+                            .any(|row| (current_board >> (row * WIDTH)) & ROW_MASK == ROW_MASK)
+                        {
+                            continue;
+                        }
+                        let (next_board, actual_clears, _) =
+                            place_and_clear(WIDTH, physical_height, current_board | lock);
+                        if actual_clears != clear_rows || next_board != expected_board {
+                            continue;
+                        }
+                        let shift = u32::from(source_prefix) * u32::from(WIDTH);
+                        let cleared_prefix = if shift == 0 { 0 } else { (1_u64 << shift) - 1 };
+                        let source = (current_board << shift) | cleared_prefix;
+                        if source.count_ones() + 4 != target_cells.count_ones() {
+                            return Err(Pc4IlcMaterializationError::Geometry(
+                                "pc4_reverse_predecessor_area_mismatch",
+                            ));
+                        }
+                        candidates.insert(source);
+                    }
+                }
+            }
+        }
+    }
+    Ok(candidates.into_iter().collect())
+}
+
 /// Enumerates every normalized predecessor field from which one exact lock of
 /// `piece` reaches `target_cells`.
 ///
@@ -562,11 +661,18 @@ mod tests {
         let terminal = FIELD_MASK;
         let mut predecessors = BTreeSet::new();
         for piece in PieceKind::STANDARD_TETROMINOES {
+            let geometric = enumerate_pc4_ilc_geometric_predecessor_fields(
+                terminal,
+                piece,
+                KickTableProfileId::Jstris180,
+            )
+            .unwrap();
             for source in
                 enumerate_pc4_ilc_predecessor_fields(terminal, piece, KickTableProfileId::Jstris180)
                     .unwrap()
             {
                 assert_eq!(source.count_ones(), 36);
+                assert!(geometric.binary_search(&source).is_ok());
                 assert!(enumerate_pc4_ilc_target_fields(
                     source,
                     piece,

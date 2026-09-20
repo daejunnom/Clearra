@@ -8,6 +8,8 @@
 //! targets outside the upstream field index still require an independent dead
 //! proof before an outgoing-edge completeness identity can be minted.
 
+mod domain;
+
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_executor::enumerate_pc4_ilc_target_fields;
 use clearra_pc4_tablebase::{
@@ -48,15 +50,275 @@ fn run() -> Result<(), String> {
     let _program = arguments.next();
     let command = arguments
         .next()
-        .ok_or("expected outgoing-shard or merge-outgoing")?
+        .ok_or("expected a qualification command")?
         .into_string()
         .map_err(|_| "command must be UTF-8")?;
     let options = parse_options(arguments.collect())?;
     match command.as_str() {
         "outgoing-shard" => run_outgoing_shard(&options),
         "merge-outgoing" => run_merge(&options),
-        _ => Err("expected outgoing-shard or merge-outgoing".to_owned()),
+        "domain-seed" => run_domain_seed(&options),
+        "domain-step" => run_domain_step(&options),
+        "domain-run" => run_domain_run(&options),
+        "domain-compare" => run_domain_compare(&options),
+        _ => Err(
+            "expected outgoing-shard, merge-outgoing, domain-seed, domain-step, domain-run, or domain-compare".to_owned(),
+        ),
     }
+}
+
+fn run_domain_seed(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let direction = domain::DomainDirection::parse(required_option(options, "direction")?)?;
+    let output = absolute_option(options, "output")?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    let report = domain::seed(dataset.domain_binding()?, direction, &output)?;
+    println!(
+        "pc4_domain_seed={} direction={} layer={} fields={} identity={}",
+        report.disposition,
+        direction.as_str(),
+        report.layer,
+        report.field_count,
+        report.file_identity
+    );
+    Ok(())
+}
+
+fn run_domain_step(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let direction = domain::DomainDirection::parse(required_option(options, "direction")?)?;
+    let input = absolute_option(options, "input")?;
+    let output = absolute_option(options, "output")?;
+    let filter = options.get("filter").map(PathBuf::from);
+    if filter.as_ref().is_some_and(|path| !path.is_absolute()) {
+        return Err("--filter must be absolute".to_owned());
+    }
+    let workers = usize::try_from(numeric_option(options, "workers")?)
+        .map_err(|_| "worker count overflow")?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    let report = domain::step(
+        dataset.domain_binding()?,
+        direction,
+        &input,
+        filter.as_deref(),
+        &output,
+        workers,
+    )?;
+    print_domain_step(direction, &report);
+    Ok(())
+}
+
+fn print_domain_step(direction: domain::DomainDirection, report: &domain::StepReport) {
+    println!(
+        "pc4_domain_step={} direction={} input_layer={} output_layer={} input_fields={} output_fields={} candidate_pairs={} workers={} identity={}",
+        report.disposition,
+        direction.as_str(),
+        report.input_layer,
+        report.output_layer,
+        report.input_field_count,
+        report.output_field_count,
+        report.candidate_pair_count,
+        report.workers,
+        report.file_identity
+    );
+}
+
+fn run_domain_run(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let direction = domain::DomainDirection::parse(required_option(options, "direction")?)?;
+    let layers = absolute_option(options, "layers")?;
+    require_real_directory(&layers)?;
+    let workers = usize::try_from(numeric_option(options, "workers")?)
+        .map_err(|_| "worker count overflow")?;
+    let max_new_steps = usize::try_from(numeric_option(options, "max-new-steps")?)
+        .map_err(|_| "step count overflow")?;
+    if max_new_steps == 0 || max_new_steps > 10 {
+        return Err("max-new-steps outside 1..=10".to_owned());
+    }
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    let binding = dataset.domain_binding()?;
+    let seed_layer = match direction {
+        domain::DomainDirection::Reverse => 10,
+        domain::DomainDirection::Forward => 0,
+    };
+    let seed_path = layers.join(format!("{}-layer-{seed_layer:02}.bin", direction.as_str()));
+    let seed = domain::seed(binding, direction, &seed_path)?;
+    println!(
+        "pc4_domain_seed={} direction={} layer={} fields={} identity={}",
+        seed.disposition,
+        direction.as_str(),
+        seed.layer,
+        seed.field_count,
+        seed.file_identity
+    );
+
+    let transitions = match direction {
+        domain::DomainDirection::Reverse => (1_u8..=10)
+            .rev()
+            .map(|input_layer| (input_layer, input_layer - 1))
+            .collect::<Vec<_>>(),
+        domain::DomainDirection::Forward => (0_u8..10)
+            .map(|input_layer| (input_layer, input_layer + 1))
+            .collect::<Vec<_>>(),
+    };
+    let mut created = 0_usize;
+    for (input_layer, output_layer) in transitions {
+        let input = layers.join(format!("{}-layer-{input_layer:02}.bin", direction.as_str()));
+        let output = layers.join(format!(
+            "{}-layer-{output_layer:02}.bin",
+            direction.as_str()
+        ));
+        let filter = match direction {
+            domain::DomainDirection::Reverse => None,
+            domain::DomainDirection::Forward => {
+                Some(layers.join(format!("reverse-layer-{output_layer:02}.bin")))
+            }
+        };
+        let report = domain::step(
+            binding,
+            direction,
+            &input,
+            filter.as_deref(),
+            &output,
+            workers,
+        )?;
+        print_domain_step(direction, &report);
+        if report.disposition == "created" {
+            created += 1;
+            if created == max_new_steps {
+                break;
+            }
+        }
+    }
+    println!(
+        "pc4_domain_run=complete direction={} new_steps={created} max_new_steps={max_new_steps}",
+        direction.as_str()
+    );
+    Ok(())
+}
+
+fn run_domain_compare(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let layers = absolute_option(options, "layers")?;
+    let output = absolute_option(options, "output")?;
+    require_real_directory(&layers)?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    let binding = dataset.domain_binding()?;
+    let mut reverse_receipts = Vec::new();
+    let mut reverse_digests = BTreeMap::new();
+    for layer in (0_u8..=10).rev() {
+        let path = layers.join(format!("reverse-layer-{layer:02}.bin"));
+        let file = domain::read(&path, binding, Some(layer))?;
+        if layer == 10 {
+            if file.derivation != domain::DomainDerivation::ReverseSeed
+                || file.input_digest != [0; 32]
+                || file.filter_digest != [0; 32]
+            {
+                return Err("reverse domain seed provenance invalid".to_owned());
+            }
+        } else if file.derivation != domain::DomainDerivation::ReverseStep
+            || file.input_digest != reverse_digests[&(layer + 1)]
+            || file.filter_digest != [0; 32]
+        {
+            return Err("reverse domain chain provenance invalid".to_owned());
+        }
+        reverse_receipts.push(json!({
+            "layer": layer,
+            "field_count": file.fields.len(),
+            "file_identity": file.file_identity,
+        }));
+        reverse_digests.insert(layer, file.file_digest);
+    }
+
+    let mut layer_receipts = Vec::new();
+    let mut generated = Vec::new();
+    let mut prior_forward_digest = None;
+    for layer in 0_u8..=10 {
+        let path = layers.join(format!("forward-layer-{layer:02}.bin"));
+        let file = domain::read(&path, binding, Some(layer))?;
+        if layer == 0 {
+            if file.derivation != domain::DomainDerivation::ForwardSeed
+                || file.input_digest != [0; 32]
+                || file.filter_digest != [0; 32]
+            {
+                return Err("forward domain seed provenance invalid".to_owned());
+            }
+        } else if file.derivation != domain::DomainDerivation::ForwardStep
+            || file.input_digest != prior_forward_digest.expect("forward predecessor exists")
+            || file.filter_digest != reverse_digests[&layer]
+        {
+            return Err("forward domain chain provenance invalid".to_owned());
+        }
+        generated
+            .try_reserve(file.fields.len())
+            .map_err(|_| "domain comparison allocation failed")?;
+        generated.extend_from_slice(&file.fields);
+        layer_receipts.push(json!({
+            "layer": layer,
+            "field_count": file.fields.len(),
+            "file_identity": file.file_identity,
+        }));
+        prior_forward_digest = Some(file.file_digest);
+    }
+    generated.sort_unstable();
+    let before_dedup = generated.len();
+    generated.dedup();
+    if generated.len() != before_dedup {
+        return Err("forward domain layers overlap".to_owned());
+    }
+
+    let field_index = fs::read(&dataset.fields.path).map_err(io_error)?;
+    validate_index_bytes(
+        &field_index,
+        b"FHIDIDX1",
+        dataset.field_count,
+        dataset.fields.byte_len,
+    )?;
+    let field_identity = sha256_identity(&field_index);
+    require_identity(&field_identity, &dataset.fields.identity, "field index")?;
+    if generated.len()
+        != usize::try_from(dataset.field_count).map_err(|_| "field count overflow")?
+    {
+        return Err("forward domain and field index counts differ".to_owned());
+    }
+    for (field_id, generated_hash) in generated.iter().copied().enumerate() {
+        let indexed_hash = field_hash(
+            &field_index,
+            u32::try_from(field_id).map_err(|_| "field ID overflow")?,
+        )?;
+        if generated_hash != indexed_hash {
+            return Err(format!("forward domain differs at field ID {field_id}"));
+        }
+    }
+    let core = json!({
+        "schema": "clearra.pc4.forward-completable-domain-parity.v1",
+        "authority": "non-target-qualification-evidence",
+        "qualification_status": "domain-parity-only",
+        "repository": dataset.repository,
+        "revision": dataset.revision,
+        "profile": dataset.profile,
+        "kick_profile": dataset.kick_profile.as_str(),
+        "field_count": dataset.field_count,
+        "field_index": dataset.fields.public(),
+        "observed_field_index_identity": field_identity,
+        "domain_binding_identity": binding.identity_string(),
+        "reverse_layers": reverse_receipts,
+        "forward_layers": layer_receipts,
+        "outgoing_edge_completeness_identity": Value::Null,
+        "offline_exact_parity_identity": Value::Null,
+    });
+    let receipt = with_identity(core)?;
+    write_json_atomic(&output, &receipt)?;
+    println!(
+        "pc4_domain_compare=domain-parity-only fields={} receipt={}",
+        dataset.field_count,
+        receipt["receipt_identity"].as_str().unwrap_or("invalid")
+    );
+    Ok(())
 }
 
 fn run_outgoing_shard(options: &BTreeMap<String, String>) -> Result<(), String> {
@@ -635,6 +897,23 @@ impl Dataset {
             "offsets": self.offsets.public(),
             "graph": self.graph.public(),
         })
+    }
+
+    fn domain_binding(&self) -> Result<domain::DomainBinding, String> {
+        let value = json!({
+            "schema": "clearra.pc4.domain-binding.v1",
+            "repository": self.repository,
+            "revision": self.revision,
+            "profile": self.profile,
+            "kick_profile": self.kick_profile.as_str(),
+            "field_count": self.field_count,
+            "artifacts": self.public_artifacts(),
+        });
+        let canonical = canonical_json(&value)?;
+        Ok(domain::DomainBinding::new(
+            Sha256::digest(canonical.as_bytes()).into(),
+            self.kick_profile,
+        ))
     }
 }
 

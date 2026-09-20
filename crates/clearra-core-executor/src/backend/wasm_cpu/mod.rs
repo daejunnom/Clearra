@@ -69,8 +69,9 @@ pub use distributed::{
     WasmDistributedResultMerger, WasmDistributedVerifier,
 };
 pub use pc4_graph_materializer::{
-    enumerate_pc4_ilc_predecessor_fields, enumerate_pc4_ilc_target_fields,
-    materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
+    enumerate_pc4_ilc_geometric_predecessor_fields, enumerate_pc4_ilc_predecessor_fields,
+    enumerate_pc4_ilc_target_fields, materialize_pc4_ilc_transition, Pc4IlcMaterializationError,
+    Pc4IlcPlacement,
 };
 pub(crate) use reachability::{DocumentLockReachability, DocumentReachabilityEngine};
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
