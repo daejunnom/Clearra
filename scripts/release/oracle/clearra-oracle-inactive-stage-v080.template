@@ -550,15 +550,10 @@ assemble_candidate() {
   /usr/bin/tar --extract --no-same-owner --file="$input_root/node_modules.tar" --directory="$assemble_root"
   /usr/bin/install -o root -g root -m 0644 -- "$input_root/server-config.mjs" "$assemble_root/apps/clearra-discord-bot/src/admin/config.mjs"
 
-  for normalize_root in \
-    "$assemble_root/apps/clearra-discord-bot/src/admin" \
-    "$assemble_root/apps/clearra-discord-bot/test" \
-    "$assemble_root/packages/ctk3/dist" \
-    "$assemble_root/node_modules"
-  do
-    /usr/bin/find "$normalize_root" -xdev -type d -exec /usr/bin/chmod 0755 -- {} +
-    /usr/bin/find "$normalize_root" -xdev -type f -exec /usr/bin/chmod 0644 -- {} +
-  done
+  # Match the freeze helper's closed runtime executable policy even when the
+  # exact Git source archive contains executable build-only helpers.
+  /usr/bin/find "$assemble_root" -xdev -type d -exec /usr/bin/chmod 0755 -- {} +
+  /usr/bin/find "$assemble_root" -xdev -type f -exec /usr/bin/chmod 0644 -- {} +
   /usr/bin/chown -hR root:root -- "$assemble_root"
   /usr/bin/chmod 0755 -- \
     "$assemble_root/scripts/tools/package-release-cli.sh" \

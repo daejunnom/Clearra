@@ -264,6 +264,21 @@ test("v0.8 Oracle freeze helper seals uploads and preserves the active authority
   );
   assert.match(text, /assemble_candidate "\$candidate_root" "\$release_id"\nrequire_baseline_unchanged/u);
   assert.match(text, /apps\/clearra-discord-bot\/src\/admin\/config\.mjs/u);
+  const normalizeDirectories = text.indexOf(
+    '/usr/bin/find "$root" -xdev -type d -exec /usr/bin/chmod 0755 -- {} +',
+  );
+  const normalizeFiles = text.indexOf(
+    '/usr/bin/find "$root" -xdev -type f -exec /usr/bin/chmod 0644 -- {} +',
+  );
+  const runtimeAllowlist = text.indexOf(
+    '/usr/bin/chmod 0755 -- \\\n    "$root/scripts/tools/package-release-cli.sh"',
+  );
+  assert.ok(
+    normalizeDirectories >= 0 &&
+      normalizeFiles > normalizeDirectories &&
+      runtimeAllowlist > normalizeFiles,
+    "the complete candidate must be normalized before granting runtime execution",
+  );
   assert.match(text, /candidate_files0755" = 9/u);
   assert.match(text, /candidate_symlinks" = 2/u);
   assert.match(text, /oracle_manifest_base64=\$manifest_base64/u);

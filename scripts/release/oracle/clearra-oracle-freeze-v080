@@ -405,15 +405,11 @@ assemble_candidate() {
   /usr/bin/tar --extract --no-same-owner --file="$upload_root/ctk3-dist.tar" --directory="$root"
   /usr/bin/tar --extract --no-same-owner --file="$upload_root/node_modules.tar" --directory="$root"
   /usr/bin/install -o root -g root -m 0644 -- "$baseline_config_path" "$root/apps/clearra-discord-bot/src/admin/config.mjs"
-  for normalize_root in \
-    "$root/apps/clearra-discord-bot/src/admin" \
-    "$root/apps/clearra-discord-bot/test" \
-    "$root/packages/ctk3/dist" \
-    "$root/node_modules"
-  do
-    /usr/bin/find "$normalize_root" -xdev -type d -exec /usr/bin/chmod 0755 -- {} +
-    /usr/bin/find "$normalize_root" -xdev -type f -exec /usr/bin/chmod 0644 -- {} +
-  done
+  # Git preserves executable bits for build-only helpers. Normalize the whole
+  # assembled tree before granting execution only to the runtime allowlist
+  # below, so adding an unrelated executable cannot drift the sealed count.
+  /usr/bin/find "$root" -xdev -type d -exec /usr/bin/chmod 0755 -- {} +
+  /usr/bin/find "$root" -xdev -type f -exec /usr/bin/chmod 0644 -- {} +
   /usr/bin/chown -hR root:root -- "$root"
   /usr/bin/chmod 0755 -- \
     "$root/scripts/tools/package-release-cli.sh" \
