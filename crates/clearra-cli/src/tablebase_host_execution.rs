@@ -25,7 +25,18 @@ pub(super) fn drive(
             CooperativeAppAdvance::Cancelled => return Err("tablebase: search cancelled"),
             _ => return Err("tablebase: search did not complete; no offline fallback was started"),
         }
-        if let Some(range) = execution.pending_range().cloned() {
+        // Take one stable snapshot of every independent lookup exposed by the
+        // App. Local files are still read sequentially so this adapter does
+        // not create filesystem fan-out, but all responses are admitted before
+        // the next App advance. That preserves the 64-lookup logical window
+        // instead of collapsing it to one host/App round trip per record.
+        let frontier = execution.pending_lookup_frontier().to_vec();
+        let ranges = execution
+            .pending_ranges()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for range in ranges {
             let artifact = range.artifact_descriptor();
             let bytes = reader(
                 artifact.path(),
@@ -33,7 +44,7 @@ pub(super) fn drive(
                 artifact.content_identity(),
                 range.offset(),
                 u64::from(range.length()),
-                execution.pending_lookup_frontier(),
+                &frontier,
             )?;
             match bytes {
                 HostSlice::Local(bytes) => execution.admit_local_slice(

@@ -117,7 +117,7 @@ fn pc4_compact_graph_union_host_out_of_order_and_scalar_local_http_parity() {
             }
             let mut ranges: Vec<_> = execution.pending_ranges().into_iter().cloned().collect();
             peak = peak.max(ranges.len());
-            assert!(ranges.len() <= 8);
+            assert!(ranges.len() <= 64);
             // Do not force an I/O wait while there is independent CPU work.
             if !scalar && execution.has_ready_work() {
                 continue;
