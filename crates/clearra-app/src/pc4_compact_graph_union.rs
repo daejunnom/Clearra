@@ -112,13 +112,335 @@ pub(crate) struct CompactGraphUnionUsage {
     pub peak_frontier_bytes: usize,
     pub terminal_arrivals: usize,
     pub peak_resident_work: usize,
+    pub peak_ready_work: usize,
+    pub pin_compactions: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct StateKey {
-    layout: StandardBoard64TilingIdentity,
-    field: u32,
-    frame: Pc4RowFrame,
+    layout: CompactPc4LayoutIdentity,
+    // Qualified graph IDs currently occupy fewer than 24 bits and the exact
+    // row-frame subset occupies four. Keeping both in one word avoids four
+    // bytes of alignment padding in every hash key. Construction rejects a
+    // future graph outside that domain rather than truncating its identity.
+    field_frame: u32,
+}
+
+const PC4_CELL_COUNT: u32 = 40;
+const PC4_MAX_PLACEMENTS: usize = 10;
+// Terminal layouts are emitted immediately and never become frontier keys.
+// A four-line partial frontier therefore contains at most nine placements.
+const PC4_MAX_FRONTIER_PLACEMENTS: usize = PC4_MAX_PLACEMENTS - 1;
+const PC4_PLACEMENT_RANK_BITS: u32 = 17;
+const PC4_PLACEMENT_RANK_MASK: u32 = (1 << PC4_PLACEMENT_RANK_BITS) - 1;
+const PC4_PACKED_PLACEMENT_BITS: usize = 20;
+const PC4_PACKED_PLACEMENT_MASK: u32 = (1 << PC4_PACKED_PLACEMENT_BITS) - 1;
+const PC4_PACKED_LAYOUT_WORDS: usize =
+    (PC4_MAX_FRONTIER_PLACEMENTS * PC4_PACKED_PLACEMENT_BITS).div_ceil(u32::BITS as usize);
+const PC4_FIELD_BITS: u32 = 24;
+const PC4_FIELD_MASK: u32 = (1 << PC4_FIELD_BITS) - 1;
+
+/// Exact PC4-only partial-layout identity.
+///
+/// `StandardBoard64TilingIdentity` deliberately supports sixteen placements
+/// and arbitrary Board64 masks, so embedding it in every breadth-layer key
+/// retains 128 unused mask bytes for a four-line search. PC4 has exactly forty
+/// cells and at most ten placements. Rank each four-cell mask in the 40-choose-4
+/// domain and store the piece code beside that rank. Each exact code plus one
+/// occupies twenty bits; zero is the unused-slot sentinel. Terminal histories
+/// bypass the frontier, so nine placements need only 180 bits. Neither the
+/// occupied mask nor a count is retained in the hash key: both are reconstructed
+/// exactly from the packed placements. This
+/// remains collision-free and reconstructs the ordinary product identity at
+/// the terminal boundary; it is not a hash, quotient, colored-field merge, or
+/// change of solution meaning.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct CompactPc4LayoutIdentity {
+    words: [u32; PC4_PACKED_LAYOUT_WORDS],
+}
+
+const _: [(); 24] = [(); core::mem::size_of::<CompactPc4LayoutIdentity>()];
+const _: [(); 28] = [(); core::mem::size_of::<StateKey>()];
+const _: [(); 1] = [(); (core::mem::size_of::<CompactPatternUnionFrontier>() <= 32) as usize];
+#[cfg(target_pointer_width = "64")]
+const _: [(); 56] = [(); core::mem::size_of::<(StateKey, CompactPatternUnionFrontier)>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 40] = [(); core::mem::size_of::<(StateKey, CompactPatternUnionFrontier)>()];
+
+impl StateKey {
+    fn new(
+        layout: CompactPc4LayoutIdentity,
+        field: u32,
+        frame: Pc4RowFrame,
+    ) -> Result<Self, CompactGraphUnionError> {
+        if field > PC4_FIELD_MASK {
+            return Err(contract(
+                "pc4_compact_union_field_id_outside_compact_domain",
+            ));
+        }
+        let frame = u32::from(frame.surviving_original_rows_mask());
+        debug_assert!(frame < 16);
+        Ok(Self {
+            layout,
+            field_frame: field | (frame << PC4_FIELD_BITS),
+        })
+    }
+
+    const fn field(self) -> u32 {
+        self.field_frame & PC4_FIELD_MASK
+    }
+
+    fn frame(self) -> Result<Pc4RowFrame, CompactGraphUnionError> {
+        let mask = (self.field_frame >> PC4_FIELD_BITS) as u8;
+        Pc4RowFrame::from_surviving_original_rows_mask(mask)
+            .ok_or_else(|| contract("pc4_compact_union_row_frame_invalid"))
+    }
+}
+
+impl CompactPc4LayoutIdentity {
+    fn initial(initial_board_mask: u64) -> Result<Self, CompactGraphUnionError> {
+        if initial_board_mask >> PC4_CELL_COUNT != 0 {
+            return Err(contract("pc4_compact_union_initial_layout_invalid"));
+        }
+        Ok(Self {
+            words: [0; PC4_PACKED_LAYOUT_WORDS],
+        })
+    }
+
+    fn placement_count(self) -> usize {
+        (0..PC4_MAX_FRONTIER_PLACEMENTS)
+            .take_while(|&index| self.slot(index) != 0)
+            .count()
+    }
+
+    fn occupied(self, initial_board_mask: u64) -> Result<u64, CompactGraphUnionError> {
+        let mut occupied = initial_board_mask;
+        for index in 0..self.placement_count() {
+            let encoded = self
+                .slot(index)
+                .checked_sub(1)
+                .ok_or_else(|| contract("pc4_compact_union_layout_invalid"))?;
+            occupied |= decode_pc4_placement(encoded)?.cells_mask();
+        }
+        Ok(occupied)
+    }
+
+    fn with_placement(
+        self,
+        initial_board_mask: u64,
+        piece: PieceKind,
+        cells: u64,
+    ) -> Result<Self, CompactGraphUnionError> {
+        let count = self.placement_count();
+        if count == PC4_MAX_FRONTIER_PLACEMENTS
+            || cells.count_ones() != 4
+            || cells >> PC4_CELL_COUNT != 0
+            || self.occupied(initial_board_mask)? & cells != 0
+        {
+            return Err(contract("pc4_compact_union_layout_invalid"));
+        }
+        let encoded = encode_pc4_placement(piece, cells)?
+            .checked_add(1)
+            .ok_or_else(|| contract("pc4_compact_union_layout_invalid"))?;
+        if encoded > PC4_PACKED_PLACEMENT_MASK {
+            return Err(contract("pc4_compact_union_layout_invalid"));
+        }
+        let mut next = self;
+        let mut insertion = count;
+        while insertion > 0 && next.slot(insertion - 1) > encoded {
+            let previous = next.slot(insertion - 1);
+            next.set_slot(insertion, previous)?;
+            insertion -= 1;
+        }
+        next.set_slot(insertion, encoded)?;
+        Ok(next)
+    }
+
+    fn into_standard_with_placement(
+        self,
+        initial_board_mask: u64,
+        piece: PieceKind,
+        cells: u64,
+    ) -> Result<StandardBoard64TilingIdentity, CompactGraphUnionError> {
+        let count = self.placement_count();
+        if count >= PC4_MAX_PLACEMENTS
+            || cells.count_ones() != 4
+            || cells >> PC4_CELL_COUNT != 0
+            || self.occupied(initial_board_mask)? & cells != 0
+        {
+            return Err(contract("pc4_compact_union_layout_invalid"));
+        }
+        let encoded = encode_pc4_placement(piece, cells)?;
+        let mut placements = [0_u32; PC4_MAX_PLACEMENTS];
+        for (index, slot) in placements[..count].iter_mut().enumerate() {
+            *slot = self
+                .slot(index)
+                .checked_sub(1)
+                .ok_or_else(|| contract("pc4_compact_union_layout_invalid"))?;
+        }
+        let mut insertion = count;
+        while insertion > 0 && placements[insertion - 1] > encoded {
+            placements[insertion] = placements[insertion - 1];
+            insertion -= 1;
+        }
+        placements[insertion] = encoded;
+        standard_from_pc4_codes(initial_board_mask, &placements[..count + 1])
+    }
+
+    fn into_standard(
+        self,
+        initial_board_mask: u64,
+    ) -> Result<StandardBoard64TilingIdentity, CompactGraphUnionError> {
+        let mut placements = [0_u32; PC4_MAX_FRONTIER_PLACEMENTS];
+        let count = self.placement_count();
+        for (index, slot) in placements[..count].iter_mut().enumerate() {
+            *slot = self
+                .slot(index)
+                .checked_sub(1)
+                .ok_or_else(|| contract("pc4_compact_union_layout_invalid"))?;
+        }
+        standard_from_pc4_codes(initial_board_mask, &placements[..count])
+    }
+
+    fn slot(self, index: usize) -> u32 {
+        debug_assert!(index < PC4_MAX_FRONTIER_PLACEMENTS);
+        let bit = index * PC4_PACKED_PLACEMENT_BITS;
+        let word = bit / u32::BITS as usize;
+        let shift = bit % u32::BITS as usize;
+        let mut value = u64::from(self.words[word]) >> shift;
+        if shift + PC4_PACKED_PLACEMENT_BITS > u32::BITS as usize {
+            value |= u64::from(self.words[word + 1]) << (u32::BITS as usize - shift);
+        }
+        (value & u64::from(PC4_PACKED_PLACEMENT_MASK)) as u32
+    }
+
+    fn set_slot(&mut self, index: usize, value: u32) -> Result<(), CompactGraphUnionError> {
+        if index >= PC4_MAX_FRONTIER_PLACEMENTS || value > PC4_PACKED_PLACEMENT_MASK {
+            return Err(contract("pc4_compact_union_layout_invalid"));
+        }
+        let bit = index * PC4_PACKED_PLACEMENT_BITS;
+        let word = bit / u32::BITS as usize;
+        let shift = bit % u32::BITS as usize;
+        let low_mask = u64::from(PC4_PACKED_PLACEMENT_MASK) << shift;
+        let low_word_mask = low_mask as u32;
+        self.words[word] &= !low_word_mask;
+        self.words[word] |= ((u64::from(value) << shift) & low_mask) as u32;
+        if shift + PC4_PACKED_PLACEMENT_BITS > u32::BITS as usize {
+            let high_bits = shift + PC4_PACKED_PLACEMENT_BITS - u32::BITS as usize;
+            let high_mask = (1_u32 << high_bits) - 1;
+            self.words[word + 1] &= !high_mask;
+            self.words[word + 1] |= value >> (u32::BITS as usize - shift);
+        }
+        Ok(())
+    }
+}
+
+fn standard_from_pc4_codes(
+    initial_board_mask: u64,
+    placements: &[u32],
+) -> Result<StandardBoard64TilingIdentity, CompactGraphUnionError> {
+    let mut masks = [0_u64; PC4_MAX_PLACEMENTS];
+    let mut packed_piece_codes = 0_u64;
+    for (index, &encoded) in placements.iter().enumerate() {
+        let placement = decode_pc4_placement(encoded)?;
+        masks[index] = placement.cells_mask();
+        packed_piece_codes |= u64::from(pc4_piece_code(placement.piece())) << (index * 3);
+    }
+    StandardBoard64TilingIdentity::from_compact_parts(
+        initial_board_mask,
+        packed_piece_codes,
+        &masks[..placements.len()],
+    )
+    .map_err(|_| contract("pc4_compact_union_layout_invalid"))
+}
+
+fn encode_pc4_placement(piece: PieceKind, cells: u64) -> Result<u32, CompactGraphUnionError> {
+    let rank =
+        rank_four_cell_mask(cells).ok_or_else(|| contract("pc4_compact_union_layout_invalid"))?;
+    if rank > PC4_PLACEMENT_RANK_MASK {
+        return Err(contract("pc4_compact_union_layout_invalid"));
+    }
+    Ok((u32::from(pc4_piece_code(piece)) << PC4_PLACEMENT_RANK_BITS) | rank)
+}
+
+fn decode_pc4_placement(encoded: u32) -> Result<PiecePlacementMask, CompactGraphUnionError> {
+    let piece = pc4_piece_from_code((encoded >> PC4_PLACEMENT_RANK_BITS) as u8)
+        .ok_or_else(|| contract("pc4_compact_union_layout_invalid"))?;
+    let cells = unrank_four_cell_mask(encoded & PC4_PLACEMENT_RANK_MASK)
+        .ok_or_else(|| contract("pc4_compact_union_layout_invalid"))?;
+    Ok(PiecePlacementMask::new(piece, cells))
+}
+
+fn rank_four_cell_mask(cells: u64) -> Option<u32> {
+    if cells.count_ones() != 4 || cells >> PC4_CELL_COUNT != 0 {
+        return None;
+    }
+    let mut rank = 0_u32;
+    let mut ordinal = 1_u32;
+    for cell in 0..PC4_CELL_COUNT {
+        if cells & (1_u64 << cell) != 0 {
+            rank = rank.checked_add(binomial(cell, ordinal))?;
+            ordinal += 1;
+        }
+    }
+    (ordinal == 5).then_some(rank)
+}
+
+fn unrank_four_cell_mask(mut rank: u32) -> Option<u64> {
+    if rank >= binomial(PC4_CELL_COUNT, 4) {
+        return None;
+    }
+    let mut cells = 0_u64;
+    let mut upper = PC4_CELL_COUNT;
+    for ordinal in (1..=4).rev() {
+        let mut cell = upper.checked_sub(1)?;
+        while binomial(cell, ordinal) > rank {
+            cell = cell.checked_sub(1)?;
+        }
+        cells |= 1_u64 << cell;
+        rank -= binomial(cell, ordinal);
+        upper = cell;
+    }
+    Some(cells)
+}
+
+const fn binomial(n: u32, k: u32) -> u32 {
+    if k > n {
+        return 0;
+    }
+    let k = if k < n - k { k } else { n - k };
+    let mut value = 1_u32;
+    let mut i = 0_u32;
+    while i < k {
+        value = value * (n - i) / (i + 1);
+        i += 1;
+    }
+    value
+}
+
+const fn pc4_piece_code(piece: PieceKind) -> u8 {
+    match piece {
+        PieceKind::I => 0,
+        PieceKind::O => 1,
+        PieceKind::T => 2,
+        PieceKind::S => 3,
+        PieceKind::Z => 4,
+        PieceKind::J => 5,
+        PieceKind::L => 6,
+    }
+}
+
+const fn pc4_piece_from_code(code: u8) -> Option<PieceKind> {
+    match code {
+        0 => Some(PieceKind::I),
+        1 => Some(PieceKind::O),
+        2 => Some(PieceKind::T),
+        3 => Some(PieceKind::S),
+        4 => Some(PieceKind::Z),
+        5 => Some(PieceKind::J),
+        6 => Some(PieceKind::L),
+        _ => None,
+    }
 }
 
 /// Moving a completed layer is cooperative too: a large retained frontier
@@ -230,6 +552,7 @@ pub(crate) struct Pc4CompactGraphUnion {
     completed: bool,
     terminated: bool,
     usage: CompactGraphUnionUsage,
+    last_failure_diagnostic: Option<String>,
 }
 
 impl Pc4CompactGraphUnion {
@@ -323,9 +646,7 @@ impl Pc4CompactGraphUnion {
         else {
             return Ok(None);
         };
-        let layout =
-            StandardBoard64TilingIdentity::from_placements(source.initial_board_mask(), [])
-                .map_err(|_| contract("pc4_compact_union_initial_layout_invalid"))?;
+        let layout = CompactPc4LayoutIdentity::initial(source.initial_board_mask())?;
         let mut prefix = 0;
         while prefix < 4 && (source.initial_board_mask() >> (10 * prefix)) & 1023 == 1023 {
             prefix += 1;
@@ -340,15 +661,12 @@ impl Pc4CompactGraphUnion {
         ready.try_reserve(1).map_err(|_| allocation())?;
         retention.retain(capacity_bytes::<Work>(ready.capacity())?, initial_payload)?;
         ready.push_back(Work::new(
-            StateKey {
-                layout,
-                field: start_field,
-                frame,
-            },
+            StateKey::new(layout, start_field, frame)?,
             supply,
         ));
         let start_hash = clearra_board64_mask_to_hydra_field_hash_v1(source.initial_board_mask())
             .map_err(|_| contract("pc4_compact_union_initial_hash_invalid"))?;
+        let initial_ready_len = ready.len();
         Ok(Some(Self {
             source: source.clone(),
             target: target.clone(),
@@ -373,7 +691,11 @@ impl Pc4CompactGraphUnion {
             cache_revision_seen: 0,
             completed: false,
             terminated: false,
-            usage: CompactGraphUnionUsage::default(),
+            usage: CompactGraphUnionUsage {
+                peak_ready_work: initial_ready_len,
+                ..CompactGraphUnionUsage::default()
+            },
+            last_failure_diagnostic: None,
         }))
     }
 
@@ -415,6 +737,32 @@ impl Pc4CompactGraphUnion {
         self.usage
     }
 
+    fn render_failure_diagnostic(&self, error: &CompactGraphUnionError) -> String {
+        format!(
+            "error={error:?} outer_bytes={} nested_bytes={} retained_supply_states={} ready={}/{} waiting_fields={}/{} waiting_work={} next_layer={}/{} promotion_capacity={} pins={}/{} candidates={}/{} usage={:?}",
+            self.frontier_outer_bytes().unwrap_or(usize::MAX),
+            self.retention.nested(),
+            self.retained_supply_states,
+            self.ready.len(),
+            self.ready.capacity(),
+            self.waiting.len(),
+            self.waiting.capacity(),
+            self.waiting_count,
+            self.next_layer.len(),
+            self.next_layer.capacity(),
+            self.promotion.as_ref().map_or(0, |layer| layer.table_capacity),
+            self.pins.len(),
+            self.pins.capacity(),
+            self.candidates.len(),
+            self.candidates.capacity(),
+            self.usage,
+        )
+    }
+
+    pub(crate) fn last_failure_diagnostic(&self) -> Option<&str> {
+        self.last_failure_diagnostic.as_deref()
+    }
+
     pub(crate) fn advance<G: Pc4GraphCandidateGuard>(
         &mut self,
         cache: &Pc4LookupGraphCache,
@@ -425,7 +773,8 @@ impl Pc4CompactGraphUnion {
             return Err(contract("pc4_compact_union_terminated"));
         }
         let result = self.advance_inner(cache, work, guard);
-        if result.is_err() {
+        if let Err(error) = &result {
+            self.last_failure_diagnostic = Some(self.render_failure_diagnostic(error));
             self.terminated = true;
             self.completed = false;
             self.ready = VecDeque::new();
@@ -497,23 +846,45 @@ impl Pc4CompactGraphUnion {
         if cache.admission_revision() != self.cache_revision_seen || self.ready.is_empty() {
             // The host bounds waiting fields with its I/O watermarks. Wake
             // known records without allocating a second list of all waiters.
-            while let Some(id) = self
-                .waiting
-                .keys()
-                .copied()
-                .find(|id| cache.contains_field_id(*id))
-            {
-                let tasks = self.waiting.remove(&id).expect("collected waiting field");
-                let old_buffer = capacity_bytes::<Work>(tasks.capacity())?;
-                self.reserve_ready(tasks.len())?;
-                self.waiting_count -= tasks.len();
-                // Resumed residents precede cold work. Keep the same source
-                // resident until done or blocked, instead of pinning an entire
-                // large layer before any of its items can release a record.
-                for task in tasks.into_iter().rev() {
+            // Keep the ready backing store within the resident-work window:
+            // waking every task for one admitted field at once can leave a
+            // 128-slot deque behind even though at most 64 tasks may run.
+            while self.ready.len() < self.limits.resident_work.get() {
+                let Some(id) = self
+                    .waiting
+                    .keys()
+                    .copied()
+                    .find(|id| cache.contains_field_id(*id))
+                else {
+                    break;
+                };
+                let available = self.limits.resident_work.get() - self.ready.len();
+                let wake = self
+                    .waiting
+                    .get(&id)
+                    .expect("collected waiting field")
+                    .len()
+                    .min(available);
+                self.reserve_ready(wake)?;
+                self.waiting_count -= wake;
+                // Resumed residents precede cold work. Pop from the retained
+                // waiter buffer so a partial wake needs no temporary vector.
+                for _ in 0..wake {
+                    let task = self
+                        .waiting
+                        .get_mut(&id)
+                        .expect("collected waiting field")
+                        .pop()
+                        .expect("bounded wake");
                     self.ready.push_front(task);
                 }
-                self.retention.release(old_buffer)?;
+                if self.waiting.get(&id).is_some_and(|tasks| tasks.is_empty()) {
+                    let tasks = self.waiting.remove(&id).expect("empty waiting field");
+                    let old_buffer = capacity_bytes::<Work>(tasks.capacity())?;
+                    drop(tasks);
+                    self.retention.release(old_buffer)?;
+                }
+                self.usage.peak_ready_work = self.usage.peak_ready_work.max(self.ready.len());
             }
             self.cache_revision_seen = cache.admission_revision();
         }
@@ -540,11 +911,22 @@ impl Pc4CompactGraphUnion {
                 self.limits.work,
                 self.usage.work,
             )?;
-            if let Some(promotion) = &mut self.promotion {
-                if let Some((key, supply)) = promotion.entries.next() {
-                    // All ready slots were admitted before promotion. The
-                    // supply payload changes owner, not allocation or credit.
+            if self.promotion.is_some() && self.ready.len() < self.limits.resident_work.get() {
+                let entry = self
+                    .promotion
+                    .as_mut()
+                    .expect("checked promotion")
+                    .entries
+                    .next();
+                if let Some((key, supply)) = entry {
+                    // Keep the old hash allocation and nested supply payloads
+                    // under their existing credit while streaming only a
+                    // bounded number of work owners into the ready queue.
+                    // Draining an entire million-state layer before doing any
+                    // work would temporarily retain both full containers.
+                    self.reserve_ready(1)?;
                     self.ready.push_back(Work::new(key, supply));
+                    self.usage.peak_ready_work = self.usage.peak_ready_work.max(self.ready.len());
                     self.usage.promoted_states += 1;
                 } else {
                     self.promotion = None;
@@ -578,7 +960,6 @@ impl Pc4CompactGraphUnion {
                     );
                     return Ok(CompactGraphUnionStep::Progress);
                 }
-                self.reserve_ready(self.next_layer.len())?;
                 let old_layer = core::mem::take(&mut self.next_layer);
                 self.promotion = Some(LayerPromotion {
                     table_capacity: old_layer.capacity(),
@@ -588,7 +969,7 @@ impl Pc4CompactGraphUnion {
             }
             let mut task = self.ready.pop_front().expect("ready layer");
             if !task.resident {
-                self.pin_field(task.key.field)?;
+                self.pin_field(task.key.field())?;
                 self.residents += 1;
                 self.usage.peak_resident_work = self.usage.peak_resident_work.max(self.residents);
                 task.resident = true;
@@ -596,7 +977,7 @@ impl Pc4CompactGraphUnion {
             match self.step_work(&mut task, cache, guard)? {
                 WorkStep::Continue => self.ready.push_front(task),
                 WorkStep::Done => {
-                    self.unpin_field(task.key.field)?;
+                    self.unpin_field(task.key.field())?;
                     if let Some(field) = task.target_pin {
                         self.unpin_field(field)?;
                     }
@@ -641,7 +1022,12 @@ impl Pc4CompactGraphUnion {
             return Ok(WorkStep::Done);
         }
         if task.key.layout.placement_count() == self.placement_count {
-            self.accept_terminal(task.key.layout, task.key.field)?;
+            self.accept_terminal(
+                task.key
+                    .layout
+                    .into_standard(self.source.initial_board_mask())?,
+                task.key.field(),
+            )?;
             return Ok(WorkStep::Done);
         }
         if task.piece == PieceKind::STANDARD_TETROMINOES.len() {
@@ -673,7 +1059,7 @@ impl Pc4CompactGraphUnion {
             self.authorize_frontier(capacity_bytes::<u32>(usize::from(u8::MAX))?)?;
             let edges = match read_qualified_pc4_adjacency(
                 &self.target,
-                task.key.field,
+                task.key.field(),
                 crate::pc_candidate_execution_bridge::core_piece_to_graph(piece),
                 task.key.layout.placement_count(),
                 &mut cache.adjacency_provider(),
@@ -713,7 +1099,7 @@ impl Pc4CompactGraphUnion {
             )?)?;
             let edge = QualifiedPc4GraphEdge::from_qualified_record(
                 &self.target,
-                task.key.field,
+                task.key.field(),
                 crate::pc_candidate_execution_bridge::core_piece_to_graph(piece),
                 target_field,
             );
@@ -759,63 +1145,64 @@ impl Pc4CompactGraphUnion {
             return Ok(WorkStep::Continue);
         };
         let (lifted, frame) = placement
-            .rebase_in_frame(task.key.frame)
+            .rebase_in_frame(task.key.frame()?)
             .map_err(|e| contract(e.reason()))?;
         let cells = lifted.occupied_cells();
         // A graph edge can have several ILC realizations. A realization that
         // overlaps this original-frame history is not this history's child.
-        let occupied = task
-            .key
-            .layout
-            .placement_masks()
-            .iter()
-            .fold(self.source.initial_board_mask(), |all, mask| all | mask);
+        let occupied = task.key.layout.occupied(self.source.initial_board_mask())?;
         if cells & !self.full_mask == 0 && occupied & cells == 0 {
-            let layout = StandardBoard64TilingIdentity::from_placements(
-                self.source.initial_board_mask(),
-                (0..task.key.layout.placement_count())
-                    .map(|i| task.key.layout.placement(i).expect("bounded placement"))
-                    .chain([PiecePlacementMask::new(piece, cells)]),
-            )
-            .map_err(|_| contract("pc4_compact_union_layout_invalid"))?;
-            let key = StateKey {
-                layout,
-                field: target_field,
-                frame,
-            };
             let supply = task.next_supply.as_ref().expect("advanced supply");
-            if layout.placement_count() == self.placement_count {
+            if task.key.layout.placement_count() + 1 == self.placement_count {
                 // Existence is already witnessed by this nonempty supply
                 // prefix. A terminal has no successor to union/expand, so its
                 // canonical layout need not occupy the next layer or copy a
                 // supply frontier. Completion still waits for every branch.
-                self.accept_terminal(layout, target_field)?;
-            } else if let Some(previous) = self.next_layer.get(&key) {
-                let old_len = previous.state_count();
-                let old_bytes = previous.retained_state_capacity_bytes();
-                self.authorize_frontier(
-                    self.language
-                        .maximum_frontier_capacity_bytes()
-                        .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?,
+                self.accept_terminal(
+                    task.key.layout.into_standard_with_placement(
+                        self.source.initial_board_mask(),
+                        piece,
+                        cells,
+                    )?,
+                    target_field,
                 )?;
-                let merged = self
-                    .language
-                    .merge(previous, supply, &|| {
-                        PcCandidatePageGuard::is_cancelled(guard)
-                    })
-                    .map_err(CompactGraphUnionError::Supply)?;
-                self.retain_supply(merged.state_count(), merged.retained_state_capacity_bytes())?;
-                self.next_layer.insert(key, merged);
-                self.retained_supply_states -= old_len;
-                self.retention.release(old_bytes)?;
-                self.usage.merged_states += 1;
             } else {
-                self.reserve_next_layer()?;
-                self.authorize_frontier(supply.retained_state_capacity_bytes())?;
-                let copy = supply.try_clone().map_err(CompactGraphUnionError::Supply)?;
-                self.retain_supply(copy.state_count(), copy.retained_state_capacity_bytes())?;
-                self.next_layer.insert(key, copy);
-                self.usage.generated_states += 1;
+                let layout = task.key.layout.with_placement(
+                    self.source.initial_board_mask(),
+                    piece,
+                    cells,
+                )?;
+                let key = StateKey::new(layout, target_field, frame)?;
+                if let Some(previous) = self.next_layer.get(&key) {
+                    let old_len = previous.state_count();
+                    let old_bytes = previous.retained_state_capacity_bytes();
+                    self.authorize_frontier(
+                        self.language
+                            .maximum_frontier_capacity_bytes()
+                            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?,
+                    )?;
+                    let merged = self
+                        .language
+                        .merge(previous, supply, &|| {
+                            PcCandidatePageGuard::is_cancelled(guard)
+                        })
+                        .map_err(CompactGraphUnionError::Supply)?;
+                    self.retain_supply(
+                        merged.state_count(),
+                        merged.retained_state_capacity_bytes(),
+                    )?;
+                    self.next_layer.insert(key, merged);
+                    self.retained_supply_states -= old_len;
+                    self.retention.release(old_bytes)?;
+                    self.usage.merged_states += 1;
+                } else {
+                    self.reserve_next_layer()?;
+                    self.authorize_frontier(supply.retained_state_capacity_bytes())?;
+                    let copy = supply.try_clone().map_err(CompactGraphUnionError::Supply)?;
+                    self.retain_supply(copy.state_count(), copy.retained_state_capacity_bytes())?;
+                    self.next_layer.insert(key, copy);
+                    self.usage.generated_states += 1;
+                }
             }
         }
         task.placement_index += 1;
@@ -871,6 +1258,7 @@ impl Pc4CompactGraphUnion {
         let outer = self.frontier_outer_bytes()?;
         self.retention.observe(outer)?;
         self.pins.insert(field, 1);
+        self.compact_pins_if_oversized()?;
         Ok(())
     }
 
@@ -885,6 +1273,60 @@ impl Pc4CompactGraphUnion {
         if *count == 0 {
             self.pins.remove(&field);
         }
+        Ok(())
+    }
+
+    fn compact_pins_if_oversized(&mut self) -> Result<(), CompactGraphUnionError> {
+        // Every resident work item pins its source and at most one target.
+        // Repeated insert/remove churn can exhaust hash-table growth slots and
+        // double the backing table despite this finite live-key bound.
+        let maximum_live = self
+            .limits
+            .resident_work
+            .get()
+            .checked_mul(2)
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        if self.pins.len() > maximum_live {
+            return Err(contract("pc4_compact_union_pin_limit"));
+        }
+        let oversized = maximum_live
+            .checked_mul(3)
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        if self.pins.capacity() <= oversized {
+            return Ok(());
+        }
+        // A fresh table for at most `maximum_live` entries has a load-factor
+        // capacity below this conservative two-times bound. Charge the full
+        // temporary table while the old allocation is still live; if that
+        // transient allocation has no authority, retain the current table and
+        // retry after later work releases payloads.
+        let temporary_capacity = maximum_live
+            .checked_mul(2)
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        let temporary_bytes = capacity_bytes::<(u32, usize)>(temporary_capacity)?;
+        let outer = self.frontier_outer_bytes()?;
+        match self.retention.retain(outer, temporary_bytes) {
+            Ok(()) => {}
+            Err(FrontierRetentionError::Limit { .. }) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        let mut compact = HashMap::new();
+        if compact.try_reserve(self.pins.len()).is_err() {
+            self.retention.release(temporary_bytes)?;
+            return Err(allocation());
+        }
+        if compact.capacity() > temporary_capacity {
+            self.retention.release(temporary_bytes)?;
+            return Err(contract("pc4_compact_union_pin_capacity_invalid"));
+        }
+        for (field, count) in self.pins.drain() {
+            compact.insert(field, count);
+        }
+        let old = core::mem::replace(&mut self.pins, compact);
+        drop(old);
+        self.retention.release(temporary_bytes)?;
+        self.retention.observe(self.frontier_outer_bytes()?)?;
+        self.usage.pin_compactions += 1;
         Ok(())
     }
 
@@ -1079,4 +1521,108 @@ fn check_guard<G: Pc4GraphCandidateGuard>(
         return Err(contract("pc4_compact_union_stale_snapshot"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod compact_layout_tests {
+    use super::*;
+
+    #[test]
+    fn pc4_four_cell_combinadic_is_exact_and_matches_mask_order() {
+        let mut ranked = Vec::new();
+        for a in 0..PC4_CELL_COUNT {
+            for b in (a + 1)..PC4_CELL_COUNT {
+                for c in (b + 1)..PC4_CELL_COUNT {
+                    for d in (c + 1)..PC4_CELL_COUNT {
+                        let mask = (1_u64 << a) | (1_u64 << b) | (1_u64 << c) | (1_u64 << d);
+                        let rank = rank_four_cell_mask(mask).expect("valid four-cell mask");
+                        assert_eq!(unrank_four_cell_mask(rank), Some(mask));
+                        ranked.push((mask, rank));
+                    }
+                }
+            }
+        }
+        ranked.sort_unstable_by_key(|&(mask, _)| mask);
+        assert_eq!(ranked.len() as u32, binomial(PC4_CELL_COUNT, 4));
+        for (expected, &(_, rank)) in ranked.iter().enumerate() {
+            assert_eq!(rank as usize, expected);
+        }
+    }
+
+    #[test]
+    fn pc4_compact_layout_is_lossless_order_independent_and_smaller() {
+        let first = PiecePlacementMask::new(PieceKind::T, 0x0000_0000_0000_000f);
+        let second = PiecePlacementMask::new(PieceKind::I, 0x0000_0000_0000_00f0);
+        let left = CompactPc4LayoutIdentity::initial(0)
+            .unwrap()
+            .with_placement(0, first.piece(), first.cells_mask())
+            .unwrap()
+            .with_placement(0, second.piece(), second.cells_mask())
+            .unwrap();
+        let right = CompactPc4LayoutIdentity::initial(0)
+            .unwrap()
+            .with_placement(0, second.piece(), second.cells_mask())
+            .unwrap()
+            .with_placement(0, first.piece(), first.cells_mask())
+            .unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left.occupied(0).unwrap(), 0xff);
+        assert_eq!(
+            left.into_standard(0).unwrap(),
+            StandardBoard64TilingIdentity::from_placements(0, [first, second]).unwrap()
+        );
+        assert_eq!(core::mem::size_of::<CompactPc4LayoutIdentity>(), 24);
+        assert_eq!(core::mem::size_of::<StateKey>(), 28);
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(core::mem::size_of::<CompactPatternUnionFrontier>(), 24);
+            assert_eq!(
+                core::mem::size_of::<(StateKey, CompactPatternUnionFrontier)>(),
+                56
+            );
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            assert_eq!(core::mem::size_of::<CompactPatternUnionFrontier>(), 12);
+            assert_eq!(
+                core::mem::size_of::<(StateKey, CompactPatternUnionFrontier)>(),
+                40
+            );
+        }
+        assert!(
+            core::mem::size_of::<StateKey>()
+                < core::mem::size_of::<StandardBoard64TilingIdentity>()
+        );
+    }
+
+    #[test]
+    fn pc4_packed_layout_slots_round_trip_across_word_boundaries() {
+        let mut layout = CompactPc4LayoutIdentity::initial(0).unwrap();
+        for index in 0..PC4_MAX_FRONTIER_PLACEMENTS {
+            let value = ((index + 1) * 91_391) as u32 & PC4_PACKED_PLACEMENT_MASK;
+            layout.set_slot(index, value).unwrap();
+            assert_eq!(layout.slot(index), value);
+        }
+        for index in 0..PC4_MAX_FRONTIER_PLACEMENTS {
+            let value = ((index + 1) * 91_391) as u32 & PC4_PACKED_PLACEMENT_MASK;
+            assert_eq!(layout.slot(index), value);
+        }
+    }
+
+    #[test]
+    fn pc4_state_key_packs_field_and_exact_row_frame_without_truncation() {
+        let layout = CompactPc4LayoutIdentity::initial(0).unwrap();
+        for mask in 0..16 {
+            let frame = Pc4RowFrame::from_surviving_original_rows_mask(mask).unwrap();
+            let key = StateKey::new(layout, PC4_FIELD_MASK, frame).unwrap();
+            assert_eq!(key.field(), PC4_FIELD_MASK);
+            assert_eq!(key.frame().unwrap(), frame);
+        }
+        assert_eq!(
+            StateKey::new(layout, PC4_FIELD_MASK + 1, Pc4RowFrame::new(0).unwrap())
+                .unwrap_err()
+                .reason(),
+            "pc4_compact_union_field_id_outside_compact_domain"
+        );
+    }
 }

@@ -18,9 +18,14 @@ pub enum Pc4RowFrameError {
 /// converging graph paths can have different original-row correspondences.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Pc4RowFrame {
-    surviving_original_rows: [u8; 4],
-    remaining: u8,
+    // Physical rows always retain the ascending order of their original row
+    // IDs. The frame is therefore exactly one subset of four rows, not an
+    // arbitrary four-byte permutation plus a separate length. Bit `r` means
+    // original row `r` still survives; zero is the terminal empty frame.
+    surviving_original_rows: u8,
 }
+
+const _: [(); 1] = [(); core::mem::size_of::<Pc4RowFrame>()];
 
 impl Pc4RowFrame {
     /// The request's original frame is its starting normalized graph frame.
@@ -28,19 +33,35 @@ impl Pc4RowFrame {
         if cleared_bottom_prefix > ROWS {
             return Err(Pc4RowFrameError::ClearedPrefixOutsideDomain);
         }
-        let mut surviving_original_rows = [0; 4];
-        let remaining = ROWS - cleared_bottom_prefix;
-        for row in 0..remaining {
-            surviving_original_rows[usize::from(row)] = cleared_bottom_prefix + row;
-        }
+        let cleared = (1_u8 << cleared_bottom_prefix).wrapping_sub(1);
         Ok(Self {
-            surviving_original_rows,
-            remaining,
+            surviving_original_rows: ((1_u8 << ROWS) - 1) & !cleared,
         })
     }
 
-    pub const fn remaining_rows(self) -> u8 {
-        self.remaining
+    pub fn remaining_rows(self) -> u8 {
+        self.surviving_original_rows.count_ones() as u8
+    }
+
+    /// Exact four-bit wire/storage form of this row correspondence.
+    ///
+    /// Each bit identifies one surviving row in the request's original
+    /// four-row frame. This is deliberately exposed as a semantic encoding,
+    /// rather than exposing the representation field itself, so compact
+    /// frontier owners can pack it without recreating row-frame rules.
+    pub const fn surviving_original_rows_mask(self) -> u8 {
+        self.surviving_original_rows
+    }
+
+    /// Reconstruct a row frame from its exact four-bit semantic encoding.
+    pub const fn from_surviving_original_rows_mask(mask: u8) -> Option<Self> {
+        if mask < (1_u8 << ROWS) {
+            Some(Self {
+                surviving_original_rows: mask,
+            })
+        } else {
+            None
+        }
     }
 
     /// Lift a physical pre-clear placement into the request's fixed frame.
@@ -49,9 +70,8 @@ impl Pc4RowFrame {
     pub fn lift_physical_cells(self, cells: u64) -> Result<u64, Pc4RowFrameError> {
         self.check_cells(cells)?;
         let mut lifted = 0;
-        for physical in 0..self.remaining {
-            let row = (cells >> (u32::from(physical) * WIDTH)) & ROW;
-            let original = self.surviving_original_rows[usize::from(physical)];
+        for (physical, original) in (0_u32..).zip(self.original_rows()) {
+            let row = (cells >> (physical * WIDTH)) & ROW;
             lifted |= row << (u32::from(original) * WIDTH);
         }
         Ok(lifted)
@@ -60,37 +80,38 @@ impl Pc4RowFrame {
     /// Apply a physical line-clear mask after lifting the current placement.
     /// Returning a new frame leaves the old branch available for rollback.
     pub fn after_clear(self, physical_rows: u8) -> Result<Self, Pc4RowFrameError> {
-        if u16::from(physical_rows) >= (1_u16 << self.remaining) {
+        if u16::from(physical_rows) >= (1_u16 << self.remaining_rows()) {
             return Err(Pc4RowFrameError::ClearMaskOutsideRemainingRows);
         }
-        let mut next = Self {
-            surviving_original_rows: [0; 4],
-            remaining: 0,
-        };
-        for physical in 0..self.remaining {
+        let mut survivors = 0_u8;
+        for (physical, original) in (0_u8..).zip(self.original_rows()) {
             if physical_rows & (1 << physical) == 0 {
-                next.surviving_original_rows[usize::from(next.remaining)] =
-                    self.surviving_original_rows[usize::from(physical)];
-                next.remaining += 1;
+                survivors |= 1 << original;
             }
         }
-        Ok(next)
+        Ok(Self {
+            surviving_original_rows: survivors,
+        })
     }
 
     /// Reconstruct the graph's bottom-filled normalized mask from an already
     /// compacted physical board. Horizontal hash bit reversal is separate.
     pub fn normalized_graph_cells(self, physical_cells: u64) -> Result<u64, Pc4RowFrameError> {
         self.check_cells(physical_cells)?;
-        let shift = u32::from(ROWS - self.remaining) * WIDTH;
+        let shift = u32::from(ROWS - self.remaining_rows()) * WIDTH;
         Ok((physical_cells << shift) | ((1_u64 << shift) - 1))
     }
 
     fn check_cells(self, cells: u64) -> Result<(), Pc4RowFrameError> {
-        if cells >> (u32::from(self.remaining) * WIDTH) != 0 {
+        if cells >> (u32::from(self.remaining_rows()) * WIDTH) != 0 {
             Err(Pc4RowFrameError::PhysicalCellsOutsideRemainingRows)
         } else {
             Ok(())
         }
+    }
+
+    fn original_rows(self) -> impl Iterator<Item = u8> {
+        (0..ROWS).filter(move |&row| self.surviving_original_rows & (1 << row) != 0)
     }
 }
 
@@ -151,6 +172,7 @@ mod tests {
 
     #[test]
     fn invalid_inputs_and_terminal_empty_frame_are_explicit() {
+        assert_eq!(core::mem::size_of::<Pc4RowFrame>(), 1);
         assert_eq!(
             Pc4RowFrame::new(5),
             Err(Pc4RowFrameError::ClearedPrefixOutsideDomain)
@@ -169,5 +191,16 @@ mod tests {
         let frame = Pc4RowFrame::new(1).unwrap();
         assert!(frame.lift_physical_cells(1 << 30).is_err());
         assert!(frame.after_clear(8).is_err());
+    }
+
+    #[test]
+    fn every_exact_storage_mask_round_trips() {
+        for mask in 0..(1_u8 << ROWS) {
+            let frame = Pc4RowFrame::from_surviving_original_rows_mask(mask).unwrap();
+            assert_eq!(frame.surviving_original_rows_mask(), mask);
+            assert_eq!(frame.remaining_rows(), mask.count_ones() as u8);
+        }
+        assert!(Pc4RowFrame::from_surviving_original_rows_mask(1_u8 << ROWS).is_none());
+        assert!(Pc4RowFrame::from_surviving_original_rows_mask(u8::MAX).is_none());
     }
 }
