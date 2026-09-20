@@ -47,13 +47,14 @@ import {
   PRODUCTION_SURFACE_PROBE_SCHEMA_ID,
   validateSurfaceProbeResult,
 } from "./observe-production-surfaces.mjs";
+import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/u;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const PROJECT_ID = /^[a-z][a-z0-9-]{4,61}[a-z0-9]$/u;
 const REGION = /^[a-z]+(?:-[a-z0-9]+)+[0-9]$/u;
-const VERSION = "0.8.0";
+const VERSION = CURRENT_PRODUCT_VERSION;
 const PAGES_IDENTITY_SCHEMA = "clearra.pages.identity.v2";
 const MAX_HTTP_BYTES = 2 * 1024 * 1024;
 const MAX_CONTROL_PLANE_BYTES = 4 * 1024 * 1024;

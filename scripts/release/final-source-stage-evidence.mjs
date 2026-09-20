@@ -55,6 +55,7 @@ import {
 import {
   validateRollbackCaptureReport,
 } from "./pages-rollback-authority.mjs";
+import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
 
 export const FINAL_SOURCE_STAGE_EVIDENCE_SCHEMA_ID =
   "clearra.final-source-stage-evidence.v1";
@@ -655,7 +656,7 @@ export function validateOracleRollbackCapture(value) {
   ]) requireSha256(value[field], label);
   if (
     value.priorOracleSettingsBackup !==
-      `/etc/clearra-gateway/settings.pre-v0.8.0-${value.deploymentNonce}`
+      `/etc/clearra-gateway/settings.pre-${CURRENT_PRODUCT_TAG}-${value.deploymentNonce}`
   ) {
     throw new Error("Oracle prior settings backup differs from the deployment nonce");
   }
@@ -712,7 +713,7 @@ export function validateOracleObservation(
   requirePattern(value.candidateRevision, ORACLE_RELEASE_ID, "Oracle candidate revision");
   requirePattern(value.oracleReleaseId, ORACLE_RELEASE_ID, "Oracle release ID");
   if (
-    value.oracleReleaseId !== `v0.8.0-${commit.slice(0, 7)}` ||
+    value.oracleReleaseId !== `${CURRENT_PRODUCT_TAG}-${commit.slice(0, 7)}` ||
     value.activeReleasePath !== `/opt/clearra/releases/${value.oracleReleaseId}`
   ) {
     throw new Error("Oracle active release identity differs from the source commit");

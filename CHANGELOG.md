@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.8.1 - 2026-09-20
+
+- Added exact vertical-parity and modulo-four geometry rejection with exhaustive
+  differential coverage for one- through six-line PC targets and nonempty
+  initial fields, while keeping rule-specific legal-board pruning disabled.
+- Returned the first exact canonical minimum set before lazy enumeration of
+  later tied sets, with deterministic continuation, paging, copy, and Discord
+  representative contracts.
+- Improved distributed root scheduling, adaptive worker batches, work stealing,
+  and tail metrics without changing canonical result order across worker counts.
+- Restored CLI-owned PC and Build result semantics across Web, desktop, and
+  Discord, including complete replay paths that use their replay materializer
+  without incorrectly requiring a score reducer.
+- Kept constrained Build probability, coverage, finesse, and B2B projections
+  coherent after the authoritative solution set is reduced.
+- Clarified and validated Build source-sequence length in English, Korean, and
+  Japanese, rejecting queues or source windows that cannot supply the target.
+- Hardened SRS-X and multi-surface target-frame parity while preserving the
+  established command redesign and the shared CLI compiler as product authority.
+- Added fail-closed PC4 generation, transport, and structural-audit foundations;
+  unqualified profile targets remain unavailable and cannot mint release
+  authority before whole-domain completeness and offline exact parity exist.
+
 ## 0.8.0 - 2026-09-05
 
 - Retained complete, identity-checked source coverage for native parallel score

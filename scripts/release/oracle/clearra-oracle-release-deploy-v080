@@ -136,6 +136,18 @@ except (IndexError, ValueError):
 PY
 }
 
+release_tag_from_id() {
+  /usr/bin/python3 - "$1" <<'PY'
+import re
+import sys
+
+match = re.fullmatch(r"(v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))-[0-9a-f]{7}", sys.argv[1])
+if match is None:
+    raise SystemExit(2)
+print(match.group(1))
+PY
+}
+
 require_root_regular_0755() {
   path=$1
   [ -f "$path" ] && [ ! -L "$path" ] || fail 77
@@ -342,6 +354,7 @@ require_root_regular_0755 "$tree_digest"
 exec 9>/run/lock/clearra-oracle-release-deploy.lock
 "$flock_path" -n 9 || fail 75
 validate_script_release "$script_release_id" "$script_release_sha256"
+release_tag=$(release_tag_from_id "$script_release_id") || fail 64
 is_sha256 "$deployment_nonce" || fail 64
 
 capture_script="$release_root/$script_release_id/apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs"
@@ -357,9 +370,10 @@ case "$operation" in
     is_release_id "$prior_revision" || fail 64
     is_runtime_authority_kind "$prior_runtime_authority_kind" || fail 64
     [ -z "$proof$source_commit$candidate_url$candidate_revision$oracle_release_id$oracle_release_sha256$oracle_settings_sha256$verified_after$prior_release$prior_release_id$prior_release_sha256$prior_settings_backup$prior_settings_sha256$prior_runtime_authority_sha256$prior_job_url" ] || fail 64
-    [ ! -e "/etc/clearra-gateway/settings.pre-v0.8.0-$deployment_nonce" ] || fail 73
-    [ ! -e "/etc/clearra-gateway/settings.pre-v0.8.0-$deployment_nonce.tmp" ] || fail 73
+    [ ! -e "/etc/clearra-gateway/settings.pre-$release_tag-$deployment_nonce" ] || fail 73
+    [ ! -e "/etc/clearra-gateway/settings.pre-$release_tag-$deployment_nonce.tmp" ] || fail 73
     exec "$node_path" "$capture_script" \
+      --release-tag "$release_tag" \
       --prior-revision "$prior_revision" \
       --prior-runtime-authority-kind "$prior_runtime_authority_kind" \
       --deployment-nonce "$deployment_nonce"
@@ -377,7 +391,7 @@ case "$operation" in
     candidate_url=$(canonical_origin "$candidate_url") || fail 64
     verified_after=$(canonical_timestamp "$verified_after") || fail 64
     commit_prefix=$(/usr/bin/printf '%.7s' "$source_commit")
-    [ "$oracle_release_id" = "v0.8.0-$commit_prefix" ] || fail 64
+    [ "$oracle_release_id" = "$release_tag-$commit_prefix" ] || fail 64
     [ "$candidate_revision" = "clearra-current-job-v080-$commit_prefix" ] || fail 64
     [ "$proof" = "$proof_directory/clearra-oracle-candidate-$deployment_nonce.json" ] || fail 64
     [ ! -e "$proof" ] || fail 73
@@ -481,7 +495,7 @@ CLEARRA_CANDIDATE_SETTINGS_V080
     candidate_url=$(canonical_origin "$candidate_url") || fail 64
     verified_after=$(canonical_timestamp "$verified_after") || fail 64
     commit_prefix=$(/usr/bin/printf '%.7s' "$source_commit")
-    [ "$oracle_release_id" = "v0.8.0-$commit_prefix" ] || fail 64
+    [ "$oracle_release_id" = "$release_tag-$commit_prefix" ] || fail 64
     [ "$candidate_revision" = "clearra-current-job-v080-$commit_prefix" ] || fail 64
     exec "$node_path" "$observer_script" \
       --source-commit "$source_commit" \
@@ -505,7 +519,7 @@ CLEARRA_CANDIDATE_SETTINGS_V080
     [ "$oracle_release_sha256" = "$script_release_sha256" ] || fail 64
     candidate_url=$(canonical_origin "$candidate_url") || fail 64
     commit_prefix=$(/usr/bin/printf '%.7s' "$source_commit")
-    [ "$oracle_release_id" = "v0.8.0-$commit_prefix" ] || fail 64
+    [ "$oracle_release_id" = "$release_tag-$commit_prefix" ] || fail 64
     [ "$candidate_revision" = "clearra-current-job-v080-$commit_prefix" ] || fail 64
     is_release_id "$prior_revision" || fail 64
     is_release_id "$prior_release_id" || fail 64
@@ -540,7 +554,7 @@ CLEARRA_CANDIDATE_SETTINGS_V080
     is_runtime_authority_kind "$prior_runtime_authority_kind" || fail 64
     is_sha256 "$prior_runtime_authority_sha256" || fail 64
     [ "$prior_release" = "$release_root/$prior_release_id" ] || fail 64
-    [ "$prior_settings_backup" = "/etc/clearra-gateway/settings.pre-v0.8.0-$deployment_nonce" ] || fail 64
+    [ "$prior_settings_backup" = "/etc/clearra-gateway/settings.pre-$release_tag-$deployment_nonce" ] || fail 64
     prior_job_url=$(canonical_job_url "$prior_job_url") || fail 64
     verified_after=$(canonical_timestamp "$verified_after") || fail 64
     [ "$proof" = "$proof_directory/clearra-oracle-rollback-$deployment_nonce.json" ] || fail 64

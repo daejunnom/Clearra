@@ -44,12 +44,13 @@ import {
   CLEARRA_CONTRACT_SCHEMA_VERSION,
   CLEARRA_SUPPLY_SEMANTICS_ID,
 } from "../tools/clearra-wasm-build-contract.mjs";
+import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const DECIMAL_ID_PATTERN = /^[1-9][0-9]*$/u;
-const RELEASE_TAG = "v0.8.0";
+const RELEASE_TAG = CURRENT_PRODUCT_TAG;
 export const LEGACY_BOOTSTRAP_RELEASE_TAG = LEGACY_PAGES_RELEASE_TAG;
 const MINIMUM_RETENTION_MS = 89 * 24 * 60 * 60 * 1000;
 const HTTP_READ_TIMEOUT_MS = 30_000;

@@ -18,6 +18,10 @@ import { spawnSync } from "node:child_process";
 
 import { observePriorRuntimeAuthority } from "./oracle-runtime-authority.mjs";
 import { releaseTreeSha256 } from "./release-tree-digest.mjs";
+import {
+  oracleSettingsBackupPath,
+  requireOracleReleaseTag,
+} from "./oracle-release-identity.mjs";
 
 const RELEASE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -26,11 +30,13 @@ const CURRENT_LINK = "/opt/clearra/current";
 const SETTINGS_PATH = "/etc/clearra-gateway/settings";
 const SETTINGS_DIRECTORY = "/etc/clearra-gateway";
 const FINAL_BACKUP_PATH_PATTERN =
-  /^\/etc\/clearra-gateway\/settings\.pre-v0\.8\.0-[0-9a-f]{64}$/;
-const BACKUP_NAME_PATTERN = /^settings\.pre-v0\.8\.0-([0-9a-f]{64})(?:\.tmp)?$/;
+  /^\/etc\/clearra-gateway\/settings\.pre-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-[0-9a-f]{64}$/;
+const BACKUP_NAME_PATTERN =
+  /^settings\.pre-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-([0-9a-f]{64})(?:\.tmp)?$/;
 const MAX_STALE_BACKUPS = 16;
 
 export function captureOracleRollbackAuthority(options, dependencies = {}) {
+  const releaseTag = requireOracleReleaseTag(options?.releaseTag);
   const priorRevision = requiredMatch(
     options?.priorRevision,
     RELEASE_PATTERN,
@@ -103,7 +109,10 @@ export function captureOracleRollbackAuthority(options, dependencies = {}) {
     priorOracleReleaseId,
     health,
   });
-  const priorOracleSettingsBackup = `/etc/clearra-gateway/settings.pre-v0.8.0-${deploymentNonce}`;
+  const priorOracleSettingsBackup = oracleSettingsBackupPath(
+    releaseTag,
+    deploymentNonce,
+  );
   cleanupBackups(priorOracleSettingsBackup);
   writeBackup(priorOracleSettingsBackup, settingsBytes);
 
@@ -179,13 +188,13 @@ function cleanupStaleSettingsBackups(currentBackupPath) {
   if (stale.length > 0) fsyncDirectory(SETTINGS_DIRECTORY);
 }
 
-export function cleanupOracleRollbackBackup(deploymentNonce) {
+export function cleanupOracleRollbackBackup(deploymentNonce, releaseTag) {
   const nonce = requiredMatch(
     deploymentNonce,
     SHA256_PATTERN,
     "deployment nonce",
   );
-  const backupPath = `${SETTINGS_DIRECTORY}/settings.pre-v0.8.0-${nonce}`;
+  const backupPath = oracleSettingsBackupPath(releaseTag, nonce);
   reconcileInterruptedSettingsBackup(backupPath);
   const metadata = optionalLstat(backupPath, lstatSync);
   if (metadata === null) {
@@ -199,6 +208,7 @@ export function cleanupOracleRollbackBackup(deploymentNonce) {
 
 export function reconcileOracleRollbackBackupInterruption(
   deploymentNonce,
+  releaseTag,
   dependencies = {},
 ) {
   const nonce = requiredMatch(
@@ -207,7 +217,7 @@ export function reconcileOracleRollbackBackupInterruption(
     "deployment nonce",
   );
   return reconcileInterruptedSettingsBackup(
-    `${SETTINGS_DIRECTORY}/settings.pre-v0.8.0-${nonce}`,
+    oracleSettingsBackupPath(releaseTag, nonce),
     dependencies,
   );
 }
@@ -354,6 +364,7 @@ async function main() {
       "prior-runtime-authority-kind": { type: "string" },
       "deployment-nonce": { type: "string" },
       "cleanup-deployment-nonce": { type: "string" },
+      "release-tag": { type: "string" },
     },
     strict: true,
   });
@@ -365,10 +376,14 @@ async function main() {
       if (values["prior-revision"] || values["prior-runtime-authority-kind"] || values["deployment-nonce"]) {
         throw new Error("Oracle backup cleanup rejects capture arguments");
       }
-      console.log(JSON.stringify(cleanupOracleRollbackBackup(values["cleanup-deployment-nonce"])));
+      console.log(JSON.stringify(cleanupOracleRollbackBackup(
+        values["cleanup-deployment-nonce"],
+        values["release-tag"],
+      )));
       return;
     }
     const captured = captureOracleRollbackAuthority({
+      releaseTag: values["release-tag"],
       priorRevision: values["prior-revision"],
       priorRuntimeAuthorityKind: values["prior-runtime-authority-kind"],
       deploymentNonce: values["deployment-nonce"],

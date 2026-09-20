@@ -26,6 +26,10 @@ import {
 import {
   validateFinalSourceEventPayload,
 } from "./final-source-event-contract.mjs";
+import {
+  CURRENT_PRODUCT_TAG,
+  CURRENT_PRODUCT_VERSION,
+} from "./current-product-release.mjs";
 
 export const RELEASE_PUBLICATION_EVIDENCE_SCHEMA_ID =
   "clearra.release-publication-evidence.v1";
@@ -34,8 +38,8 @@ export const RELEASE_PUBLICATION_RECEIPT_SCHEMA_ID =
 export const RELEASE_PUBLICATION_FINAL_AUTHORITY_SCHEMA_ID =
   "clearra.release-publication-final-authority.v1";
 
-const RELEASE = "v0.8.0";
-const VERSION = "0.8.0";
+const RELEASE = CURRENT_PRODUCT_TAG;
+const VERSION = CURRENT_PRODUCT_VERSION;
 const WORKFLOW_PATH = ".github/workflows/release-cli.yml";
 const FINALIZER_WORKFLOW_PATH = ".github/workflows/finalize-release-publication.yml";
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;

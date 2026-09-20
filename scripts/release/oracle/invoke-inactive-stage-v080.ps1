@@ -40,6 +40,7 @@ $hostName = '157.151.254.175'
 $userName = 'ubuntu'
 $knownHostsPath = Join-Path $PSScriptRoot 'clearra-oracle-known-hosts'
 $generatorPath = Join-Path $PSScriptRoot 'create-inactive-stage-v080.mjs'
+$currentReleasePath = Join-Path $PSScriptRoot '../current-product-release.mjs'
 $launcherPath = Join-Path $PSScriptRoot 'clearra-oracle-release-deploy-v080'
 $digesterPath = Join-Path $PSScriptRoot 'clearra-release-tree-digest.py'
 
@@ -65,6 +66,16 @@ function Get-ExactLeaf {
 function Get-ExactSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-CurrentProductTag {
+    [void](Get-ExactLeaf -Path $currentReleasePath -Label 'Current product release authority')
+    $value = @(& node $currentReleasePath --format tag)
+    if ($LASTEXITCODE -ne 0 -or $value.Count -ne 1 -or
+        $value[0] -cnotmatch '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$') {
+        throw 'Current product release authority is invalid.'
+    }
+    return [string]$value[0]
 }
 
 function Get-OracleHostPlatform {
@@ -145,6 +156,7 @@ $generatorAudit = @(& node $generatorPath --manifest $ManifestPath --audit)
 if ($LASTEXITCODE -ne 0 -or $generatorAudit.Count -ne 7) {
     throw 'Oracle stage manifest or bootstrap template audit failed.'
 }
+$currentProductTag = Get-CurrentProductTag
 $auditValues = [ordered]@{}
 foreach ($line in $generatorAudit) {
     if ($line -cnotmatch '^([a-z0-9_]+)=([A-Za-z0-9._-]+)$' -or $auditValues.Contains($Matches[1])) {
@@ -168,7 +180,7 @@ foreach ($requiredKey in @(
 if ($auditValues.oracle_stage_manifest -cne 'ok' -or
     $auditValues.oracle_stage_mode -cne 'audit' -or
     $auditValues.oracle_source_commit -cnotmatch '^[0-9a-f]{40}$' -or
-    $auditValues.oracle_release_id -cne "v0.8.0-$($auditValues.oracle_source_commit.Substring(0, 7))" -or
+    $auditValues.oracle_release_id -cne "$currentProductTag-$($auditValues.oracle_source_commit.Substring(0, 7))" -or
     $auditValues.oracle_release_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
     $auditValues.oracle_bootstrap_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
     $auditValues.oracle_bootstrap_size -cnotmatch '^[1-9][0-9]{0,8}$') {

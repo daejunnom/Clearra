@@ -144,7 +144,7 @@ try {
     $manifest = [ordered]@{
         schemaVersion = 'clearra.oracle.inactive-stage.v080.v1'
         sourceCommit = '0123456789abcdef0123456789abcdef01234567'
-        releaseId = 'v0.8.0-0123456'
+        releaseId = 'v0.8.1-0123456'
         active = [ordered]@{
             releasePath = '/opt/clearra/releases/v0.7.5-042ec21'
             treeSha256 = 'a' * 64
@@ -230,7 +230,7 @@ try {
     if ($audit.Count -ne 6 -or
         $audit[0] -cne 'oracle_inactive_stage_invoker=audit-ok' -or
         $audit[1] -cne 'oracle_source_commit=0123456789abcdef0123456789abcdef01234567' -or
-        $audit[2] -cne 'oracle_release_id=v0.8.0-0123456') {
+        $audit[2] -cne 'oracle_release_id=v0.8.1-0123456') {
         throw 'AuditOnly attestation did not match.'
     }
 

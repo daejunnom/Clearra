@@ -10,6 +10,9 @@ import {
   executeOracleBoundedJobProbe,
   inspectActiveOracle,
 } from "./produce-oracle-deployment-proof.mjs";
+import {
+  oracleReleaseTagFromCandidateId,
+} from "./oracle-release-identity.mjs";
 
 export const ORACLE_OBSERVATION_CONTRACT = "clearra.oracle.candidate-observation.v1";
 
@@ -32,11 +35,12 @@ export function observeOracleCandidate(options, dependencies = {}) {
     `clearra-current-job-v080-${commitPrefix}`,
     "candidate revision",
   );
-  const oracleReleaseId = requiredExact(
+  const oracleReleaseId = requiredMatch(
     options?.oracleReleaseId,
-    `v0.8.0-${commitPrefix}`,
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u,
     "Oracle release ID",
   );
+  oracleReleaseTagFromCandidateId(oracleReleaseId, sourceCommit);
   const oracleReleaseSha256 = requiredMatch(
     options?.oracleReleaseSha256,
     SHA256_PATTERN,

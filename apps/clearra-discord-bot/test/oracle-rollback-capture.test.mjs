@@ -13,6 +13,7 @@ import {
 } from "../scripts/oracle-runtime-authority.mjs";
 
 const nonce = "9".repeat(64);
+const releaseTag = "v0.8.1";
 const priorRevision = "clearra-current-job-v075-701454b";
 const priorOracleReleaseId = "v0.7.4-701454b";
 const settings = Buffer.from(
@@ -38,6 +39,7 @@ test("rollback authority capture freezes exact v0.7.4 legacy authority without i
   let backup;
   const captured = captureOracleRollbackAuthority(
     {
+      releaseTag,
       priorRevision,
       priorRuntimeAuthorityKind: PRIOR_RUNTIME_LEGACY_HEALTH_KIND,
       deploymentNonce: nonce,
@@ -67,7 +69,7 @@ test("rollback authority capture freezes exact v0.7.4 legacy authority without i
   assert.equal(captured.priorJobUrl, "https://stable.example.run.app/jobs");
   assert.equal(
     backup.path,
-    `/etc/clearra-gateway/settings.pre-v0.8.0-${nonce}`,
+    `/etc/clearra-gateway/settings.pre-v0.8.1-${nonce}`,
   );
   assert.equal(backup.bytes, settings);
 });
@@ -75,6 +77,7 @@ test("rollback authority capture freezes exact v0.7.4 legacy authority without i
 test("rollback authority capture preserves the exact runtime-identity path", () => {
   const captured = captureOracleRollbackAuthority(
     {
+      releaseTag,
       priorRevision,
       priorRuntimeAuthorityKind: PRIOR_RUNTIME_IDENTITY_KIND,
       deploymentNonce: nonce,
@@ -95,6 +98,7 @@ test("rollback capture cleans bounded stale authority before writing the nonce-b
   const operations = [];
   captureOracleRollbackAuthority(
     {
+      releaseTag,
       priorRevision,
       priorRuntimeAuthorityKind: PRIOR_RUNTIME_LEGACY_HEALTH_KIND,
       deploymentNonce: nonce,
@@ -109,12 +113,12 @@ test("rollback capture cleans bounded stale authority before writing the nonce-b
       },
     }),
   );
-  const expected = `/etc/clearra-gateway/settings.pre-v0.8.0-${nonce}`;
+  const expected = `/etc/clearra-gateway/settings.pre-v0.8.1-${nonce}`;
   assert.deepEqual(operations, [`cleanup:${expected}`, `write:${expected}`]);
 });
 
 test("rollback backup reconciliation repairs only exact interrupted publication states", () => {
-  const backupPath = `/etc/clearra-gateway/settings.pre-v0.8.0-${nonce}`;
+  const backupPath = `/etc/clearra-gateway/settings.pre-v0.8.1-${nonce}`;
   const temporaryPath = `${backupPath}.tmp`;
   const metadata = ({ ino, nlink = 1, uid = 0, mode = 0o100600, dev = 9 }) => ({
     dev,
@@ -164,6 +168,7 @@ test("rollback backup reconciliation repairs only exact interrupted publication 
   assert.equal(
     reconcileOracleRollbackBackupInterruption(
       nonce,
+      releaseTag,
       interruptedAfterLink.dependencies,
     ),
     true,
@@ -178,6 +183,7 @@ test("rollback backup reconciliation repairs only exact interrupted publication 
   assert.equal(
     reconcileOracleRollbackBackupInterruption(
       nonce,
+      releaseTag,
       interruptedBeforeLink.dependencies,
     ),
     true,
@@ -193,7 +199,11 @@ test("rollback backup reconciliation repairs only exact interrupted publication 
     fixture({ temporary: metadata({ ino: 21, nlink: 2 }) }),
   ]) {
     assert.throws(
-      () => reconcileOracleRollbackBackupInterruption(nonce, unsafe.dependencies),
+      () => reconcileOracleRollbackBackupInterruption(
+        nonce,
+        releaseTag,
+        unsafe.dependencies,
+      ),
       /authority is invalid/u,
     );
     assert.deepEqual(unsafe.removed, []);
@@ -338,6 +348,7 @@ test("rollback capture rejects every implicit or malformed legacy downgrade befo
       () =>
         captureOracleRollbackAuthority(
           {
+            releaseTag,
             priorRevision,
             deploymentNonce: nonce,
             ...scenario.options,
@@ -378,6 +389,7 @@ test("runtime identity authority rejects health or identity key drift before bac
     assert.throws(() =>
       captureOracleRollbackAuthority(
         {
+          releaseTag,
           priorRevision,
           priorRuntimeAuthorityKind: PRIOR_RUNTIME_IDENTITY_KIND,
           deploymentNonce: nonce,
@@ -400,6 +412,7 @@ test("rollback authority capture fails before backup on invalid active authority
     () =>
       captureOracleRollbackAuthority(
         {
+          releaseTag,
           priorRevision,
           priorRuntimeAuthorityKind: PRIOR_RUNTIME_LEGACY_HEALTH_KIND,
           deploymentNonce: nonce,

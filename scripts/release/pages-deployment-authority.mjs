@@ -27,6 +27,7 @@ import {
   LEGACY_PAGES_PAYLOADS,
   validateLegacyDeployedPagesSnapshot,
 } from "./pages-legacy-contract.mjs";
+import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 
 export const PAGES_DEPLOYMENT_AUTHORITY_SCHEMA_ID =
   "clearra.pages.deployment-authority.v3";
@@ -35,7 +36,7 @@ const DECIMAL_ID = /^[1-9][0-9]*$/u;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const BASE_PATH = /^\/[A-Za-z0-9._-]+$/u;
 const ARTIFACT_DIGEST = /^sha256:([0-9a-f]{64})$/u;
-const FORWARD_VERSION = "0.8.0";
+const FORWARD_VERSION = CURRENT_PRODUCT_VERSION;
 const HTTP_READ_TIMEOUT_MS = 30_000;
 const MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_FORWARD_PUBLIC_FILE_COUNT = 1_024;

@@ -44,11 +44,12 @@ $userName = 'ubuntu'
 $knownHostsPath = Join-Path $PSScriptRoot 'clearra-oracle-known-hosts'
 $launcherPath = Join-Path $PSScriptRoot 'clearra-oracle-release-deploy-v080'
 $bundleManifestGeneratorPath = Join-Path $PSScriptRoot 'create-prestage-helper-bundle.mjs'
+$currentReleasePath = Join-Path $PSScriptRoot '../current-product-release.mjs'
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $remoteLauncherPath = '/usr/local/sbin/clearra-oracle-release-deploy'
 $releaseDeployLockPath = '/run/lock/clearra-oracle-release-deploy.lock'
 $releaseIdPattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
-$candidateReleaseIdPattern = '^v0\.8\.0-[0-9a-f]{7}$'
+$candidateReleaseIdPattern = '^(v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))-[0-9a-f]{7}$'
 $sha256Pattern = '^[0-9a-f]{64}$'
 $commitPattern = '^[0-9a-f]{40}$'
 $runtimeAuthorityKinds = @(
@@ -74,6 +75,26 @@ function Get-ExactLeaf {
 function Get-ExactSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-CurrentProductTag {
+    [void](Get-ExactLeaf -Path $currentReleasePath -Label 'Current product release authority')
+    $value = @(& node $currentReleasePath --format tag)
+    if ($LASTEXITCODE -ne 0 -or $value.Count -ne 1 -or
+        $value[0] -cnotmatch '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$') {
+        throw 'Current product release authority is invalid.'
+    }
+    return [string]$value[0]
+}
+
+function Get-CandidateReleaseTag {
+    param([Parameter(Mandatory = $true)][string] $ReleaseId)
+    $match = [regex]::Match($ReleaseId, $candidateReleaseIdPattern,
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $match.Success) {
+        throw 'Script release ID is invalid.'
+    }
+    return [string]$match.Groups[1].Value
 }
 
 function Get-OracleHostPlatform {
@@ -210,13 +231,14 @@ function Get-PrestageHelperBundleManifest {
         $manifest.operation -cne $Operation -or
         $manifest.bundle_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
         -not (Test-JsonSafePositiveInteger $manifest.file_count) -or
-        [long]$manifest.file_count -ne 4 -or
+        [long]$manifest.file_count -ne 5 -or
         -not (Test-JsonSafePositiveInteger $manifest.total_size) -or
         [long]$manifest.total_size -gt 4194304) {
         throw 'Oracle prestage helper manifest has an invalid closed authority.'
     }
     $expectedPaths = @(
         'apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs',
+        'apps/clearra-discord-bot/scripts/oracle-release-identity.mjs',
         'apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs',
         'apps/clearra-discord-bot/scripts/release-tree-digest.mjs',
         'apps/clearra-discord-bot/src/job-service/runtime-identity.mjs'
@@ -484,6 +506,11 @@ if ($Operation -notin @('capture-prestage-authority', 'cleanup-prestage-backup')
     [void](Require-Match -Value $ScriptReleaseId -Pattern $candidateReleaseIdPattern -Label 'Script release ID')
     [void](Require-Match -Value $ScriptReleaseSha256 -Pattern $sha256Pattern -Label 'Script release SHA-256')
 }
+$releaseTag = if ($Operation -in @('capture-prestage-authority', 'cleanup-prestage-backup')) {
+    Get-CurrentProductTag
+} else {
+    Get-CandidateReleaseTag -ReleaseId $ScriptReleaseId
+}
 
 $operationValues = @{
     PriorRevision = $PriorRevision
@@ -508,7 +535,7 @@ $usesPrestageHelperBundle = $Operation -in @(
     'capture-prestage-authority', 'cleanup-prestage-backup'
 )
 $remoteArguments = if ($usesPrestageHelperBundle) {
-    @()
+    @('--release-tag', $releaseTag)
 } else {
     @(
         'sudo', '-n', $remoteLauncherPath,
@@ -561,7 +588,7 @@ switch ($Operation) {
         )
         [void](Require-Match -Value $SourceCommit -Pattern $commitPattern -Label 'Source commit')
         $commitPrefix = $SourceCommit.Substring(0, 7)
-        if ($ScriptReleaseId -cne "v0.8.0-$commitPrefix") {
+        if ($ScriptReleaseId -cne "$releaseTag-$commitPrefix") {
             throw 'Script release ID does not match the source commit.'
         }
         $canonicalCandidateUrl = Get-CanonicalOrigin -Value $CandidateUrl
@@ -600,7 +627,7 @@ switch ($Operation) {
         )
         [void](Require-Match -Value $SourceCommit -Pattern $commitPattern -Label 'Source commit')
         $commitPrefix = $SourceCommit.Substring(0, 7)
-        if ($ScriptReleaseId -cne "v0.8.0-$commitPrefix") {
+        if ($ScriptReleaseId -cne "$releaseTag-$commitPrefix") {
             throw 'Script release ID does not match the source commit.'
         }
         $canonicalCandidateUrl = Get-CanonicalOrigin -Value $CandidateUrl
@@ -636,7 +663,7 @@ switch ($Operation) {
         )
         [void](Require-Match -Value $SourceCommit -Pattern $commitPattern -Label 'Source commit')
         $commitPrefix = $SourceCommit.Substring(0, 7)
-        if ($ScriptReleaseId -cne "v0.8.0-$commitPrefix" -or
+        if ($ScriptReleaseId -cne "$releaseTag-$commitPrefix" -or
             $OracleReleaseId -cne $ScriptReleaseId -or
             $OracleReleaseSha256 -cne $ScriptReleaseSha256) {
             throw 'Candidate Oracle authority does not match the script release.'
@@ -694,7 +721,7 @@ switch ($Operation) {
         if ($PriorRuntimeAuthorityKind -cnotin $runtimeAuthorityKinds) {
             throw 'Prior runtime authority kind is invalid.'
         }
-        $expectedSettingsBackup = "/etc/clearra-gateway/settings.pre-v0.8.0-$DeploymentNonce"
+        $expectedSettingsBackup = "/etc/clearra-gateway/settings.pre-$releaseTag-$DeploymentNonce"
         if ($PriorSettingsBackup -cne $expectedSettingsBackup) {
             throw 'Prior Oracle settings backup does not match the deployment nonce.'
         }
@@ -892,7 +919,7 @@ function Invoke-PrestageHelperBundle {
             RootPath = "$RootPath/$($entry.path)"
         }
     }
-    if ($localFiles.Count -ne 4) {
+    if ($localFiles.Count -ne 5) {
         throw 'Oracle prestage helper local file set is incomplete.'
     }
 

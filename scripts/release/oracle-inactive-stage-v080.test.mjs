@@ -30,7 +30,7 @@ function sampleManifest() {
   return {
     schemaVersion: "clearra.oracle.inactive-stage.v080.v1",
     sourceCommit,
-    releaseId: "v0.8.0-0123456",
+    releaseId: "v0.8.1-0123456",
     active: {
       releasePath: "/opt/clearra/releases/v0.7.5-042ec21",
       treeSha256: digest("a"),
@@ -94,7 +94,7 @@ test("v0.8 Oracle inactive-stage generator binds every frozen authority", () => 
   const bootstrap = generateBootstrap(manifest);
   const text = bootstrap.toString("utf8");
   assert.match(text, /^source_commit=0123456789abcdef0123456789abcdef01234567$/mu);
-  assert.match(text, /^release_id=v0\.8\.0-0123456$/mu);
+  assert.match(text, /^release_id=v0\.8\.1-0123456$/mu);
   assert.match(text, /^expected_tree_sha256=d{64}$/mu);
   assert.match(text, /^expected_source_sha256=e{64}$/mu);
   assert.match(text, /^expected_prior_digester_sha256=absent$/mu);
@@ -176,7 +176,7 @@ test("v0.8 Oracle manifest parser requires canonical closed JSON", () => {
     /closed schema/u,
   );
   assert.throws(
-    () => validateManifest({ ...value, releaseId: "v0.8.0-fffffff" }),
+    () => validateManifest({ ...value, releaseId: "v0.8.1-fffffff" }),
     /exact-source identity/u,
   );
   assert.throws(

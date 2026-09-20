@@ -37,12 +37,16 @@ import {
   createDiscordSuccessfulDeploymentTopologyContract,
   validateSuccessfulDiscordDeploymentAuthority,
 } from "./discord-deployment-recovery.mjs";
+import {
+  CURRENT_PRODUCT_TAG,
+  CURRENT_PRODUCT_VERSION,
+} from "./current-product-release.mjs";
 
 export const DISCORD_PRODUCTION_CHECKPOINT_RECEIPT_SCHEMA_ID =
   "clearra.discord-production-checkpoint-receipt.v1";
 
-const RELEASE = "v0.8.0";
-const VERSION = "0.8.0";
+const RELEASE = CURRENT_PRODUCT_TAG;
+const VERSION = CURRENT_PRODUCT_VERSION;
 const REPOSITORY_ID = "1309293231";
 const DISCORD_WORKFLOW_PATH = ".github/workflows/discord-deploy.yml";
 const ACCEPTANCE_WORKFLOW_PATH = ".github/workflows/release-cli.yml";
@@ -1561,7 +1565,9 @@ function requirePattern(value, pattern, label) {
 }
 
 function requireReleaseTag(value) {
-  if (value !== RELEASE) throw new Error("checkpoint finalizer accepts only v0.8.0");
+  if (value !== RELEASE) {
+    throw new Error(`checkpoint finalizer accepts only ${RELEASE}`);
+  }
   return value;
 }
 

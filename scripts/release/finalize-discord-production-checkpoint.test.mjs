@@ -336,8 +336,8 @@ test("self-validates every completed job and step retained in the durable receip
     schema_id: DISCORD_PRODUCTION_CHECKPOINT_RECEIPT_SCHEMA_ID,
     repository: candidate.repository,
     repository_id: String(REPOSITORY_ID),
-    release: "v0.8.0",
-    version: "0.8.0",
+    release: "v0.8.1",
+    version: "0.8.1",
     source_commit: candidate.source_commit,
     accepted_workflow_path: ".github/workflows/release-cli.yml",
     accepted_workflow_run_id: candidate.accepted_workflow_run_id,
@@ -366,7 +366,7 @@ test("self-validates every completed job and step retained in the durable receip
     completed_job_topology_sha256: createHash("sha256")
       .update(canonicalJson(topology), "utf8").digest("hex"),
     tag: {
-      name: "v0.8.0",
+      name: "v0.8.1",
       target_commit: candidate.source_commit,
       annotated: true,
       message_contract: "exact-canonical-receipt-bytes",
@@ -377,8 +377,8 @@ test("self-validates every completed job and step retained in the durable receip
       },
     },
     github_release_contract: {
-      tag: "v0.8.0",
-      title: "Clearra v0.8.0",
+      tag: "v0.8.1",
+      title: "Clearra v0.8.1",
       source_commit: candidate.source_commit,
       draft: false,
       prerelease: false,
@@ -496,23 +496,23 @@ test("preserves exact canonical receipt bytes through local and remote annotated
       .toString("utf8").trim();
     git([
       "-C", checkout, "tag", "-a", "--cleanup=verbatim", "-F", "-",
-      "v0.8.0", sourceCommit,
+      "v0.8.1", sourceCommit,
     ], {
       GIT_COMMITTER_DATE: "2026-08-31T00:00:40+00:00",
     }, message);
-    const tagObject = git(["-C", checkout, "rev-parse", "refs/tags/v0.8.0"])
+    const tagObject = git(["-C", checkout, "rev-parse", "refs/tags/v0.8.1"])
       .toString("utf8").trim();
     const local = parseRawTagObject(git(["-C", checkout, "cat-file", "tag", tagObject]));
     assert.equal(local.targetCommit, sourceCommit);
     assert.deepEqual(local.message, message);
     assert.deepEqual(parseCanonicalReceiptBytes(local.message).bytes, message);
     git(["-C", checkout, "remote", "add", "origin", remote]);
-    git(["-C", checkout, "push", "origin", "refs/tags/v0.8.0:refs/tags/v0.8.0"]);
+    git(["-C", checkout, "push", "origin", "refs/tags/v0.8.1:refs/tags/v0.8.1"]);
     const listing = git([
       "-C", checkout, "ls-remote", "origin",
-      "refs/tags/v0.8.0", "refs/tags/v0.8.0^{}",
+      "refs/tags/v0.8.1", "refs/tags/v0.8.1^{}",
     ]).toString("utf8");
-    const remoteIdentity = validateRemoteLsRemote(listing, "v0.8.0", sourceCommit);
+    const remoteIdentity = validateRemoteLsRemote(listing, "v0.8.1", sourceCommit);
     assert.equal(remoteIdentity.tagObjectSha, tagObject);
     const remoteObject = parseRawTagObject(git([
       "--git-dir", remote, "cat-file", "tag", remoteIdentity.tagObjectSha,
@@ -529,9 +529,9 @@ test("preserves exact canonical receipt bytes through local and remote annotated
 
 test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
   const acceptedArtifacts = [
-    ["linux-cli", "clearra-cli-linux-x64-v0.8.0", "d"],
-    ["windows-cli", "clearra-cli-windows-x64-v0.8.0.exe", "e"],
-    ["windows-gui", "clearra-gui-windows-x64-v0.8.0.exe", "f"],
+    ["linux-cli", "clearra-cli-linux-x64-v0.8.1", "d"],
+    ["windows-cli", "clearra-cli-windows-x64-v0.8.1.exe", "e"],
+    ["windows-gui", "clearra-gui-windows-x64-v0.8.1.exe", "f"],
   ].map(([role, name, nibble], index) => ({
     role,
     name,
@@ -543,7 +543,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
   assert.doesNotThrow(() => validateImmutableCheckpointReleaseReadback(release, {
     repository: REPOSITORY,
     sourceCommit: SOURCE_COMMIT,
-    tag: "v0.8.0",
+    tag: "v0.8.1",
     taggerAt: "2026-08-31T00:00:40Z",
     acceptedArtifacts,
   }));
@@ -553,7 +553,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
     () => validateImmutableCheckpointReleaseReadback(nonBot, {
       repository: REPOSITORY,
       sourceCommit: SOURCE_COMMIT,
-      tag: "v0.8.0",
+      tag: "v0.8.1",
       taggerAt: "2026-08-31T00:00:40Z",
       acceptedArtifacts,
     }),
@@ -565,7 +565,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
     () => validateImmutableCheckpointReleaseReadback(mutable, {
       repository: REPOSITORY,
       sourceCommit: SOURCE_COMMIT,
-      tag: "v0.8.0",
+      tag: "v0.8.1",
       taggerAt: "2026-08-31T00:00:40Z",
       acceptedArtifacts,
     }),
@@ -577,7 +577,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
     () => validateImmutableCheckpointReleaseReadback(wrongAsset, {
       repository: REPOSITORY,
       sourceCommit: SOURCE_COMMIT,
-      tag: "v0.8.0",
+      tag: "v0.8.1",
       taggerAt: "2026-08-31T00:00:40Z",
       acceptedArtifacts,
     }),
@@ -589,7 +589,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
     () => validateImmutableCheckpointReleaseReadback(sameSecond, {
       repository: REPOSITORY,
       sourceCommit: SOURCE_COMMIT,
-      tag: "v0.8.0",
+      tag: "v0.8.1",
       taggerAt: "2026-08-31T00:00:40Z",
       acceptedArtifacts,
     }),
@@ -600,7 +600,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
 test("binds candidate product fragments fieldwise to current canonical acceptance", () => {
   const fragments = [{
     role: "linux-cli",
-    name: "clearra-cli-linux-x64-v0.8.0",
+    name: "clearra-cli-linux-x64-v0.8.1",
     sha256: "d".repeat(64),
     size_bytes: 100,
     source_commit: SOURCE_COMMIT,
@@ -625,15 +625,15 @@ function immutableRelease(acceptedArtifacts) {
   };
   return {
     id: 900,
-    tag_name: "v0.8.0",
+    tag_name: "v0.8.1",
     target_commitish: SOURCE_COMMIT,
-    name: "Clearra v0.8.0",
+    name: "Clearra v0.8.1",
     draft: false,
     prerelease: false,
     immutable: true,
     published_at: "2026-08-31T00:00:41Z",
     url: `https://api.github.com/repos/${REPOSITORY}/releases/900`,
-    html_url: `https://github.com/${REPOSITORY}/releases/tag/v0.8.0`,
+    html_url: `https://github.com/${REPOSITORY}/releases/tag/v0.8.1`,
     assets_url: `https://api.github.com/repos/${REPOSITORY}/releases/900/assets`,
     upload_url:
       `https://uploads.github.com/repos/${REPOSITORY}/releases/900/assets{?name,label}`,
@@ -647,7 +647,7 @@ function immutableRelease(acceptedArtifacts) {
       url:
         `https://api.github.com/repos/${REPOSITORY}/releases/assets/${1000 + index}`,
       browser_download_url:
-        `https://github.com/${REPOSITORY}/releases/download/v0.8.0/${artifact.name}`,
+        `https://github.com/${REPOSITORY}/releases/download/v0.8.1/${artifact.name}`,
       uploader: structuredClone(bot),
     })),
   };

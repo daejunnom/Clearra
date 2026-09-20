@@ -13,7 +13,7 @@ if ($LASTEXITCODE -ne 0 -or $sourceCommit.Count -ne 1 -or
     throw 'Oracle wrapper test could not resolve the accepted source commit.'
 }
 $sourceCommit = [string]$sourceCommit[0]
-$scriptReleaseId = "v0.8.0-$($sourceCommit.Substring(0, 7))"
+$scriptReleaseId = "v0.8.1-$($sourceCommit.Substring(0, 7))"
 $scriptReleaseSha256 = 'b' * 64
 $deploymentNonce = 'a' * 64
 $candidateRevision = "clearra-current-job-v080-$($sourceCommit.Substring(0, 7))"
@@ -204,7 +204,7 @@ $rollback = @(& $wrapper `
     -PriorRelease '/opt/clearra/releases/v0.7.5-042ec21' `
     -PriorReleaseId 'v0.7.5-042ec21' `
     -PriorReleaseSha256 ('d' * 64) `
-    -PriorSettingsBackup "/etc/clearra-gateway/settings.pre-v0.8.0-$deploymentNonce" `
+    -PriorSettingsBackup "/etc/clearra-gateway/settings.pre-v0.8.1-$deploymentNonce" `
     -PriorSettingsSha256 ('e' * 64) `
     -PriorRuntimeAuthorityKind 'clearra.rollback.legacy-health-no-runtime.v1' `
     -PriorRuntimeAuthoritySha256 ('f' * 64) `
@@ -958,18 +958,19 @@ function Invoke-PrestageRemoteCommand {
         $entry = $model.Paths[$main]
         if ($null -eq $entry -or $entry.Type -cne 'file' -or
             $entry.Uid -ne 0 -or $entry.Gid -ne 0 -or $entry.Mode -cne '644' -or
-            $model.ScpCount -ne 4 -or $model.UploadFileAuthorityChecks -ne 4 -or
-            $model.UploadFileMetadataChecks -ne 4 -or
-            $model.UploadFileDigestChecks -ne 4 -or
-            $model.RootFileAuthorityChecks -ne 4 -or
-            $model.RootFileMetadataChecks -ne 4 -or
-            $model.RootFileDigestChecks -ne 4 -or
+            $model.ScpCount -ne 5 -or $model.UploadFileAuthorityChecks -ne 5 -or
+            $model.UploadFileMetadataChecks -ne 5 -or
+            $model.UploadFileDigestChecks -ne 5 -or
+            $model.RootFileAuthorityChecks -ne 5 -or
+            $model.RootFileMetadataChecks -ne 5 -or
+            $model.RootFileDigestChecks -ne 5 -or
             $model.UploadInventoryChecks -ne 1 -or $model.RootInventoryChecks -ne 1) {
             throw 'Prestage Node execution preceded exact transport verification.'
         }
         [string[]]$operationArguments = @($tokens[$nodePrefix.Count..($tokens.Count - 1)])
         if ($model.OperationSlug -ceq 'capture') {
             $expectedArguments = @(
+                '--release-tag', 'v0.8.1',
                 '--prior-revision', 'clearra-current-job-v075-042ec21',
                 '--prior-runtime-authority-kind', 'clearra.rollback.legacy-health-no-runtime.v1',
                 '--deployment-nonce', [string]$model.Nonce
@@ -982,7 +983,7 @@ function Invoke-PrestageRemoteCommand {
                 priorOracleRelease = '/opt/clearra/releases/v0.7.4-042ec21'
                 priorOracleReleaseId = 'v0.7.4-042ec21'
                 priorOracleReleaseSha256 = ('d' * 64)
-                priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-v0.8.0-$($model.Nonce)"
+                priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-v0.8.1-$($model.Nonce)"
                 priorOracleSettingsSha256 = ('e' * 64)
                 priorRuntimeAuthorityKind = 'clearra.rollback.legacy-health-no-runtime.v1'
                 priorRuntimeAuthoritySha256 = ('f' * 64)
@@ -990,7 +991,10 @@ function Invoke-PrestageRemoteCommand {
                 deploymentNonce = [string]$model.Nonce
             }
         } else {
-            $expectedArguments = @('--cleanup-deployment-nonce', [string]$model.Nonce)
+            $expectedArguments = @(
+                '--release-tag', 'v0.8.1',
+                '--cleanup-deployment-nonce', [string]$model.Nonce
+            )
             if (-not (Test-ExactCommand -Actual $operationArguments -Expected $expectedArguments)) {
                 throw 'Prestage cleanup Node argument contract drifted.'
             }
@@ -1187,11 +1191,14 @@ function New-PrestageGitFixture {
     }
     [IO.Directory]::CreateDirectory($TargetRoot) | Out-Null
     $fixtureFiles = @(
+        'Cargo.toml',
+        'scripts/release/current-product-release.mjs',
         'scripts/release/oracle/invoke-release-deploy-v080.ps1',
         'scripts/release/oracle/clearra-oracle-known-hosts',
         'scripts/release/oracle/clearra-oracle-release-deploy-v080',
         'scripts/release/oracle/create-prestage-helper-bundle.mjs',
         'apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs',
+        'apps/clearra-discord-bot/scripts/oracle-release-identity.mjs',
         'apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs',
         'apps/clearra-discord-bot/scripts/release-tree-digest.mjs',
         'apps/clearra-discord-bot/src/job-service/runtime-identity.mjs'
@@ -1275,16 +1282,16 @@ function Assert-ModeledPrestageTransport {
         $Model.ArmEventIndex -ge $Model.FirstTransportMutationEventIndex) {
         throw "$Label did not arm its watchdog before the first transport-path mutation."
     }
-    if ($Model.ScpCount -ne 4 -or
-        $Model.UploadFileAuthorityChecks -ne 4 -or
-        $Model.UploadFileMetadataChecks -ne 4 -or
-        $Model.UploadFileDigestChecks -ne 4 -or
-        $Model.RootFileAuthorityChecks -ne 4 -or
-        $Model.RootFileMetadataChecks -ne 4 -or
-        $Model.RootFileDigestChecks -ne 4 -or
+    if ($Model.ScpCount -ne 5 -or
+        $Model.UploadFileAuthorityChecks -ne 5 -or
+        $Model.UploadFileMetadataChecks -ne 5 -or
+        $Model.UploadFileDigestChecks -ne 5 -or
+        $Model.RootFileAuthorityChecks -ne 5 -or
+        $Model.RootFileMetadataChecks -ne 5 -or
+        $Model.RootFileDigestChecks -ne 5 -or
         $Model.UploadInventoryChecks -ne 1 -or
         $Model.RootInventoryChecks -ne 1) {
-        throw "$Label did not verify the exact four-file remote inventory and authority."
+        throw "$Label did not verify the exact five-file remote inventory and authority."
     }
     if ($Model.NodeInvocationCount -ne 1 -or -not $Model.SharedFlockEnvObserved) {
         throw "$Label did not execute once through the shared flock and clean environment."
@@ -1358,7 +1365,7 @@ try {
         priorOracleRelease = '/opt/clearra/releases/v0.7.5-042ec21'
         priorOracleReleaseId = 'v0.7.5-042ec21'
         priorOracleReleaseSha256 = ('d' * 64)
-        priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-v0.8.0-$deploymentNonce"
+        priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-v0.8.1-$deploymentNonce"
         priorOracleSettingsSha256 = ('e' * 64)
         priorRuntimeAuthorityKind = 'clearra.rollback.legacy-health-no-runtime.v1'
         priorRuntimeAuthoritySha256 = ('f' * 64)

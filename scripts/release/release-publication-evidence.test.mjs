@@ -94,13 +94,13 @@ test("failed tag attempts recover only an exact accepted partial draft before pu
       if (path === `/actions/runs/${RUN_ID}/attempts/2`) {
         return publicationRun({ attempt: 2, status: "in_progress", conclusion: null });
       }
-      if (path === "/git/ref/tags/v0.8.0") {
-        return { ref: "refs/tags/v0.8.0", object: { type: "tag", sha: TAG_OBJECT } };
+      if (path === "/git/ref/tags/v0.8.1") {
+        return { ref: "refs/tags/v0.8.1", object: { type: "tag", sha: TAG_OBJECT } };
       }
       if (path === `/git/tags/${TAG_OBJECT}`) {
-        return { sha: TAG_OBJECT, tag: "v0.8.0", object: { type: "commit", sha: COMMIT } };
+        return { sha: TAG_OBJECT, tag: "v0.8.1", object: { type: "commit", sha: COMMIT } };
       }
-      if (path === "/releases/tags/v0.8.0") {
+      if (path === "/releases/tags/v0.8.1") {
         return structuredClone([partial, complete, published][releaseRead++]);
       }
       throw new Error(`unexpected recovery API path: ${path}`);
@@ -494,7 +494,7 @@ function authority(acceptance, {
 } = {}) {
   return {
     repository: REPOSITORY,
-    tag: "v0.8.0",
+    tag: "v0.8.1",
     sourceCommit: COMMIT,
     workflowRunId: RUN_ID,
     workflowRunAttempt: runAttempt,
@@ -517,7 +517,7 @@ function releaseAsset(artifact, id) {
 function draftRelease(assets) {
   return {
     id: 800,
-    tag_name: "v0.8.0",
+    tag_name: "v0.8.1",
     draft: true,
     prerelease: false,
     immutable: false,
@@ -531,7 +531,7 @@ function publicationRun({ attempt, status, conclusion }) {
     id: Number(RUN_ID),
     run_attempt: attempt,
     event: "push",
-    head_branch: "v0.8.0",
+    head_branch: "v0.8.1",
     head_sha: COMMIT,
     path: ".github/workflows/release-cli.yml",
     status,
@@ -541,9 +541,9 @@ function publicationRun({ attempt, status, conclusion }) {
 
 function acceptanceEvidence() {
   const artifacts = [
-    ["linux-cli", "Clearra-CLI-v0.8.0-linux-x86_64", "3", 101],
-    ["windows-cli", "Clearra-CLI-v0.8.0-windows-x86_64.exe", "4", 102],
-    ["windows-gui", "Clearra-GUI-v0.8.0-windows-x86_64.exe", "5", 103],
+    ["linux-cli", "Clearra-CLI-v0.8.1-linux-x86_64", "3", 101],
+    ["windows-cli", "Clearra-CLI-v0.8.1-windows-x86_64.exe", "4", 102],
+    ["windows-gui", "Clearra-GUI-v0.8.1-windows-x86_64.exe", "5", 103],
   ].map(([role, name, digit, sizeBytes]) => ({
     role,
     name,
@@ -554,7 +554,7 @@ function acceptanceEvidence() {
   return sealCanonicalReport({
     schema_id: "clearra.canonical-acceptance-evidence.v1",
     repository: REPOSITORY,
-    release_version: "0.8.0",
+    release_version: "0.8.1",
     pages_base_path: "/Clearra",
     source_commit: COMMIT,
     run_id: "456",
@@ -634,24 +634,24 @@ function fakeApi({
       id: Number(RUN_ID),
       run_attempt: Number(runAttempt),
       event: "push",
-      head_branch: "v0.8.0",
+      head_branch: "v0.8.1",
       head_sha: COMMIT,
       path: ".github/workflows/release-cli.yml",
       status: runStatus,
       conclusion: runConclusion,
     }],
-    ["/git/ref/tags/v0.8.0", {
-      ref: "refs/tags/v0.8.0",
+    ["/git/ref/tags/v0.8.1", {
+      ref: "refs/tags/v0.8.1",
       object: { type: tagType, sha: TAG_OBJECT },
     }],
     [`/git/tags/${TAG_OBJECT}`, {
       sha: TAG_OBJECT,
-      tag: "v0.8.0",
+      tag: "v0.8.1",
       object: { type: "commit", sha: COMMIT },
     }],
-    ["/releases/tags/v0.8.0", {
+    ["/releases/tags/v0.8.1", {
       id: 8001,
-      tag_name: "v0.8.0",
+      tag_name: "v0.8.1",
       draft: false,
       prerelease: false,
       immutable,
@@ -672,7 +672,7 @@ function fakeApi({
       expires_at: new Date(created + retentionDays * 24 * 60 * 60 * 1000).toISOString(),
       workflow_run: {
         id: Number(RUN_ID),
-        head_branch: "v0.8.0",
+        head_branch: "v0.8.1",
         head_sha: artifactHead,
       },
     }],
@@ -689,7 +689,7 @@ function fakeApi({
         expired: false,
         workflow_run: {
           id: Number(RUN_ID),
-          head_branch: "v0.8.0",
+          head_branch: "v0.8.1",
           head_sha: artifactHead,
         },
       }],
@@ -701,7 +701,7 @@ function fakeApi({
       id: Number(RUN_ID),
       run_attempt: Number(attempt),
       event: "push",
-      head_branch: "v0.8.0",
+      head_branch: "v0.8.1",
       head_sha: COMMIT,
       path: ".github/workflows/release-cli.yml",
       status: "completed",

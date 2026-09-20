@@ -10,6 +10,8 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import { CURRENT_PRODUCT_TAG } from "../current-product-release.mjs";
+
 const SCHEMA_VERSION = "clearra.oracle.inactive-stage.v080.v1";
 const TEMPLATE_PATH = fileURLToPath(
   new URL("./clearra-oracle-inactive-stage-v080.template", import.meta.url),
@@ -132,8 +134,8 @@ export function validateManifest(value) {
     "manifest.sourceCommit",
   );
   const commitPrefix = sourceCommit.slice(0, 7);
-  if (value.releaseId !== `v0.8.0-${commitPrefix}`) {
-    fail("manifest.releaseId must be the v0.8.0 exact-source identity");
+  if (value.releaseId !== `${CURRENT_PRODUCT_TAG}-${commitPrefix}`) {
+    fail(`manifest.releaseId must be the ${CURRENT_PRODUCT_TAG} exact-source identity`);
   }
   exactString(value.releaseId, RELEASE_ID_PATTERN, "manifest.releaseId");
 

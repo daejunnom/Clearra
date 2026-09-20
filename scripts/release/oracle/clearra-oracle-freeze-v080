@@ -13,6 +13,7 @@ canonical_launcher=/usr/local/sbin/clearra-oracle-release-deploy
 canonical_digester=/usr/local/libexec/clearra-release-tree-digest
 
 source_commit=
+release_id=
 freeze_nonce=
 self_sha256=
 self_path=
@@ -51,6 +52,17 @@ is_source_commit() {
   value=$1
   [ "${#value}" -eq 40 ] || return 1
   case "$value" in *[!0-9a-f]* ) return 1 ;; esac
+}
+
+is_candidate_release_id() {
+  /usr/bin/python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+release_id, commit_prefix = sys.argv[1:]
+pattern = rf"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-{re.escape(commit_prefix)}"
+raise SystemExit(0 if re.fullmatch(pattern, release_id) else 1)
+PY
 }
 
 sha256_of() {
@@ -453,6 +465,7 @@ trap cleanup EXIT HUP INT TERM
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --source-commit) [ "$#" -ge 2 ] && [ -z "$source_commit" ] || fail 64; source_commit=$2; shift 2 ;;
+    --release-id) [ "$#" -ge 2 ] && [ -z "$release_id" ] || fail 64; release_id=$2; shift 2 ;;
     --nonce) [ "$#" -ge 2 ] && [ -z "$freeze_nonce" ] || fail 64; freeze_nonce=$2; shift 2 ;;
     --self-sha256) [ "$#" -ge 2 ] && [ -z "$self_sha256" ] || fail 64; self_sha256=$2; shift 2 ;;
     --self-path) [ "$#" -ge 2 ] && [ -z "$self_path" ] || fail 64; self_path=$2; shift 2 ;;
@@ -473,7 +486,7 @@ else
   overlay_mode=local
 fi
 commit_prefix=$(/usr/bin/printf '%.7s' "$source_commit")
-release_id=v0.8.0-$commit_prefix
+is_candidate_release_id "$release_id" "$commit_prefix" || fail 64
 case "$self_path" in /usr/local/sbin/.clearra-oracle-freeze-v080-$commit_prefix.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9] ) ;; * ) fail 64 ;; esac
 [ "$(/usr/bin/readlink -f -- "$0")" = "$self_path" ] || fail 77
 require_root_regular_mode "$self_path" 755

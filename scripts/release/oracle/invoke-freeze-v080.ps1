@@ -45,6 +45,7 @@ $freezePath = Join-Path $PSScriptRoot 'clearra-oracle-freeze-v080'
 $launcherPath = Join-Path $PSScriptRoot 'clearra-oracle-release-deploy-v080'
 $digesterPath = Join-Path $PSScriptRoot 'clearra-release-tree-digest.py'
 $generatorPath = Join-Path $PSScriptRoot 'create-inactive-stage-v080.mjs'
+$currentReleasePath = Join-Path $PSScriptRoot '../current-product-release.mjs'
 
 function Get-ExactLeaf {
     param(
@@ -64,6 +65,16 @@ function Get-ExactLeaf {
 function Get-ExactSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-CurrentProductTag {
+    [void](Get-ExactLeaf -Path $currentReleasePath -Label 'Current product release authority')
+    $value = @(& node $currentReleasePath --format tag)
+    if ($LASTEXITCODE -ne 0 -or $value.Count -ne 1 -or
+        $value[0] -cnotmatch '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$') {
+        throw 'Current product release authority is invalid.'
+    }
+    return [string]$value[0]
 }
 
 function Get-OracleHostPlatform {
@@ -192,6 +203,8 @@ foreach ($input in $localInputs) {
 }
 [void](Get-ExactLeaf -Path $knownHostsPath -Label 'Pinned Oracle host-key file')
 [void](Get-ExactLeaf -Path $generatorPath -Label 'Oracle stage manifest generator')
+$currentProductTag = Get-CurrentProductTag
+$expectedReleaseId = "$currentProductTag-$($SourceCommit.Substring(0, 7))"
 
 $manifestFullPath = [IO.Path]::GetFullPath($ManifestOutput)
 if (Test-Path -LiteralPath $manifestFullPath) {
@@ -231,7 +244,7 @@ Invoke-OraclePosixSyntaxAudit `
 if ($AuditOnly) {
     'oracle_freeze_invoker=audit-ok'
     "oracle_source_commit=$SourceCommit"
-    "oracle_release_id=v0.8.0-$($SourceCommit.Substring(0, 7))"
+    "oracle_release_id=$expectedReleaseId"
     "oracle_freeze_helper_sha256=$(Get-ExactSha256 -Path $freezePath)"
     return
 }
@@ -344,6 +357,7 @@ try {
     $helperArguments = @(
         'sudo', '-n', $helperRemote,
         '--source-commit', $SourceCommit,
+        '--release-id', $expectedReleaseId,
         '--nonce', $freezeNonce,
         '--self-sha256', $helperInput.Sha256,
         '--self-path', $helperRemote
@@ -380,7 +394,7 @@ try {
     }
     if ($values.oracle_freeze -cne 'ready' -or
         $values.oracle_source_commit -cne $SourceCommit -or
-        $values.oracle_release_id -cne "v0.8.0-$commitPrefix" -or
+        $values.oracle_release_id -cne $expectedReleaseId -or
         $values.oracle_candidate_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
         $values.oracle_manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
         $values.oracle_manifest_size -cnotmatch '^[1-9][0-9]{2,8}$' -or

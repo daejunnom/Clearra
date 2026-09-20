@@ -20,6 +20,7 @@ const FILE_CONTRACTS = Object.freeze([
   Object.freeze({
     path: "apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs",
     imports: Object.freeze([
+      "./oracle-release-identity.mjs",
       "./oracle-runtime-authority.mjs",
       "./release-tree-digest.mjs",
       "node:child_process",
@@ -29,6 +30,10 @@ const FILE_CONTRACTS = Object.freeze([
       "node:url",
       "node:util",
     ]),
+  }),
+  Object.freeze({
+    path: "apps/clearra-discord-bot/scripts/oracle-release-identity.mjs",
+    imports: Object.freeze([]),
   }),
   Object.freeze({
     path: "apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs",

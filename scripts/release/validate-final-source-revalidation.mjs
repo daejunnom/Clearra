@@ -16,6 +16,7 @@ import {
 import {
   FINAL_SOURCE_STAGE_ORDER,
 } from "./final-source-event-contract.mjs";
+import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
 
 export const FINAL_SOURCE_SCHEMA_ID = "clearra.final-source-revalidation.v1";
 
@@ -33,7 +34,7 @@ export function validateFinalSourceRevalidation(
   manifest,
   {
     expectedSourceCommit,
-    expectedRelease = "v0.8.0",
+    expectedRelease = CURRENT_PRODUCT_TAG,
     discordCatalogSyncReport,
     productionObservationReport,
   } = {},
@@ -95,7 +96,7 @@ export function validateFinalSourceRevalidationFromStages(
   manifest,
   {
     expectedSourceCommit,
-    expectedRelease = "v0.8.0",
+    expectedRelease = CURRENT_PRODUCT_TAG,
     acceptanceStageEvidence,
     acceptanceStageEvidenceFileSha256,
     deploymentStageEvidence,

@@ -8,6 +8,10 @@ import {
   sealCanonicalReport,
   verifyCanonicalReportHash,
 } from "./canonical-release-evidence.mjs";
+import {
+  CURRENT_PRODUCT_TAG,
+  expectedProductArtifactName,
+} from "./current-product-release.mjs";
 
 export const FINAL_SOURCE_EVENT_EVIDENCE_SCHEMA_ID =
   "clearra.final-source-event-evidence.v1";
@@ -53,9 +57,9 @@ const DISCORD_SNOWFLAKE = /^\d{17,20}$/u;
 const FORBIDDEN_PRIOR_AUTHORITY = /(?:^|[^0-9])v?0\.7\.5(?:[^0-9]|$)/iu;
 const REQUIRED_SURFACES = Object.freeze(["desktop", "discord", "native", "wasm"]);
 const REQUIRED_ARTIFACT_NAMES = Object.freeze(new Map([
-  ["linux-cli", "Clearra-CLI-v0.8.0-linux-x86_64"],
-  ["windows-cli", "Clearra-CLI-v0.8.0-windows-x86_64.exe"],
-  ["windows-gui", "Clearra-GUI-v0.8.0-windows-x86_64.exe"],
+  ["linux-cli", expectedProductArtifactName("linux-cli")],
+  ["windows-cli", expectedProductArtifactName("windows-cli")],
+  ["windows-gui", expectedProductArtifactName("windows-gui")],
 ]));
 
 export function stageForFinalSourceEventKind(kind) {
@@ -431,12 +435,14 @@ function validateTag(value, commit) {
     "remote_verified",
   ], "tag event payload");
   if (
-    value.name !== "v0.8.0" ||
+    value.name !== CURRENT_PRODUCT_TAG ||
     value.target_commit !== commit ||
     value.annotated !== true ||
     value.remote_verified !== true
   ) {
-    throw new Error("tag event is not the remotely verified annotated v0.8.0 tag");
+    throw new Error(
+      `tag event is not the remotely verified annotated ${CURRENT_PRODUCT_TAG} tag`,
+    );
   }
 }
 
@@ -451,7 +457,7 @@ function validateImmutableRelease(value, commit) {
   ], "immutable-release event payload");
   requireSameCommit(value.source_commit, commit, "immutable-release event");
   if (
-    value.tag !== "v0.8.0" ||
+    value.tag !== CURRENT_PRODUCT_TAG ||
     !DECIMAL_ID.test(value.workflow_run_id) ||
     value.immutable !== true ||
     value.asset_count !== 3 ||

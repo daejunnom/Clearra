@@ -12,6 +12,7 @@ import {
   observePriorRuntimeAuthority,
 } from "./oracle-runtime-authority.mjs";
 import { releaseTreeSha256 } from "./release-tree-digest.mjs";
+import { oracleReleaseTagFromCandidateId } from "./oracle-release-identity.mjs";
 
 export const ORACLE_CURRENT_AUTHORITY_CLASSIFICATION =
   "clearra.oracle.current-authority-classification.v1";
@@ -161,9 +162,7 @@ export function classifyOracleCurrentAuthority(options, dependencies = {}) {
 function validateOptions(options) {
   const sourceCommit = required(options?.sourceCommit, COMMIT, "source commit");
   const candidateReleaseId = required(options?.candidateReleaseId, RELEASE, "candidate release ID");
-  if (candidateReleaseId !== `v0.8.0-${sourceCommit.slice(0, 7)}`) {
-    throw new Error("candidate release ID differs from source commit");
-  }
+  oracleReleaseTagFromCandidateId(candidateReleaseId, sourceCommit);
   const candidateRevision = required(options?.candidateRevision, RELEASE, "candidate revision");
   if (candidateRevision !== `clearra-current-job-v080-${sourceCommit.slice(0, 7)}`) {
     throw new Error("candidate revision differs from source commit");

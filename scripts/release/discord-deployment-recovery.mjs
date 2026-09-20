@@ -19,6 +19,7 @@ import {
 } from "./discord-catalog-recovery-authority.mjs";
 import { validateDiscordCatalogRestoreReport } from
   "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
+import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
 
 export const DISCORD_RECOVERY_AUTHORITY_SCHEMA_ID =
   "clearra.discord-deployment-recovery-authority.v1";
@@ -2221,7 +2222,7 @@ export function sealDiscordPrestageIntent(options) {
     cloud_image_digest: cloudImageDigest,
     cloud_candidate_revision: `clearra-current-job-v080-${sourceCommit.slice(0, 7)}`,
     cloud_candidate_tag: `candidate-${sourceCommit.slice(0, 7)}`,
-    oracle_candidate_release_id: `v0.8.0-${sourceCommit.slice(0, 7)}`,
+    oracle_candidate_release_id: `${CURRENT_PRODUCT_TAG}-${sourceCommit.slice(0, 7)}`,
     remote_overlay_archive: remoteOverlayArchive,
     remote_overlay_sha256: overlaySha256,
   }));

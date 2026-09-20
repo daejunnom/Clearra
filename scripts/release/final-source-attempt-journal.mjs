@@ -20,13 +20,14 @@ import {
 import {
   validateFinalSourceRevalidationFromStages,
 } from "./validate-final-source-revalidation.mjs";
+import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
 
 export const FINAL_SOURCE_ATTEMPT_SCHEMA_ID =
   "clearra.final-source-attempt-journal.v1";
 export const FINAL_SOURCE_EVENT_SCHEMA_ID =
   "clearra.final-source-attempt-event.v1";
 
-const RELEASE = "v0.8.0";
+const RELEASE = CURRENT_PRODUCT_TAG;
 const SHA1 = /^[0-9a-f]{40}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const ATTEMPT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;

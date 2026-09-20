@@ -57,7 +57,7 @@ function identity(sourceCommit = SOURCE, files = forwardFileDescriptors()) {
     contractSchemaVersion: "clearra.search.contract.v2",
     supplySemanticsId: "clearra.supply.projected-terminal-lookahead.v1",
     artifactSchemaVersion: "clearra.solution-data.v1",
-    version: "0.8.0",
+    version: "0.8.1",
   };
   return {
     ...base,

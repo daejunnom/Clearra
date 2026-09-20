@@ -79,7 +79,7 @@ function validBundle() {
   );
   const manifest = {
     schema_id: "clearra.final-source-revalidation.v1",
-    release: "v0.8.0",
+    release: "v0.8.1",
     source: {
       commit: COMMIT,
       tree: "2".repeat(40),
@@ -118,9 +118,9 @@ function validBundle() {
       evidence("wasm-report", { surface: "wasm", status: "passed" }),
     ],
     release_artifacts: [
-      { role: "linux-cli", name: "Clearra-CLI-v0.8.0-linux-x86_64", sha256: HASH, size_bytes: 1, source_commit: COMMIT },
-      { role: "windows-cli", name: "Clearra-CLI-v0.8.0-windows-x86_64.exe", sha256: HASH, size_bytes: 2, source_commit: COMMIT },
-      { role: "windows-gui", name: "Clearra-GUI-v0.8.0-windows-x86_64.exe", sha256: HASH, size_bytes: 3, source_commit: COMMIT },
+      { role: "linux-cli", name: "Clearra-CLI-v0.8.1-linux-x86_64", sha256: HASH, size_bytes: 1, source_commit: COMMIT },
+      { role: "windows-cli", name: "Clearra-CLI-v0.8.1-windows-x86_64.exe", sha256: HASH, size_bytes: 2, source_commit: COMMIT },
+      { role: "windows-gui", name: "Clearra-GUI-v0.8.1-windows-x86_64.exe", sha256: HASH, size_bytes: 3, source_commit: COMMIT },
     ],
     deployment: {
       pages: {
@@ -159,13 +159,13 @@ function validBundle() {
       report_sha256: productionObservationReport.report_sha256,
     },
     tag: {
-      name: "v0.8.0",
+      name: "v0.8.1",
       target_commit: COMMIT,
       annotated: true,
       remote_verified: true,
     },
     immutable_release: {
-      tag: "v0.8.0",
+      tag: "v0.8.1",
       source_commit: COMMIT,
       workflow_run_id: "123",
       immutable: true,
@@ -244,7 +244,7 @@ function productionObservation(catalogSyncReportSha256) {
     pages: {
       source_commit: COMMIT,
       engine_build_id: COMMIT,
-      version: "0.8.0",
+      version: "0.8.1",
       deployment_id: "pages-1",
       artifact_sha256: HASH,
       base_path: "/Clearra",
@@ -325,7 +325,7 @@ function observationFreshness(surface, identity, sequence) {
   };
 }
 
-test("accepts exactly one fully observed v0.8.0 source identity", () => {
+test("accepts exactly one fully observed v0.8.1 source identity", () => {
   const bundle = validBundle();
   assert.equal(
     validateBundle(bundle, { expectedSourceCommit: COMMIT }),
@@ -349,7 +349,7 @@ test("requires exactly three named release artifacts and twenty observed minutes
   assert.throws(() => validateBundle(missingArtifact), /exactly three/u);
 
   const renamedArtifact = validBundle();
-  renamedArtifact.manifest.release_artifacts[2].name = "Clearra-GUI-v0.8.0-windows-x86_64.zip";
+  renamedArtifact.manifest.release_artifacts[2].name = "Clearra-GUI-v0.8.1-windows-x86_64.zip";
   assert.throws(
     () => validateBundle(renamedArtifact),
     /canonical release asset/u,

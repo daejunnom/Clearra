@@ -21,6 +21,7 @@ import {
   sealCanonicalReport,
   verifyCanonicalReportHash,
 } from "./canonical-release-evidence.mjs";
+import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 
 export const PRODUCTION_OBSERVATION_SCHEMA_ID =
   "clearra.production-observation.v1";
@@ -39,7 +40,7 @@ const REQUIRED_SURFACES = Object.freeze([
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/u;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
-const RELEASE_VERSION = "0.8.0";
+const RELEASE_VERSION = CURRENT_PRODUCT_VERSION;
 const CONTRACT_SCHEMA_VERSION = "clearra.search.contract.v2";
 const SUPPLY_SEMANTICS_ID =
   "clearra.supply.projected-terminal-lookahead.v1";

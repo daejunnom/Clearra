@@ -18,6 +18,7 @@ const REPOSITORY_ROOT = resolve(
 const NONCE = "a".repeat(64);
 const FILES = Object.freeze([
   "apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs",
+  "apps/clearra-discord-bot/scripts/oracle-release-identity.mjs",
   "apps/clearra-discord-bot/scripts/oracle-runtime-authority.mjs",
   "apps/clearra-discord-bot/scripts/release-tree-digest.mjs",
   "apps/clearra-discord-bot/src/job-service/runtime-identity.mjs",
@@ -51,7 +52,7 @@ async function fixture() {
   return { root, sourceCommit: git(root, "rev-parse", "HEAD") };
 }
 
-test("seals one exact accepted-source four-module prestage helper closure", async () => {
+test("seals one exact accepted-source five-module prestage helper closure", async () => {
   const { root, sourceCommit } = await fixture();
   try {
     const capture = await createPrestageHelperBundleManifest({
@@ -63,7 +64,7 @@ test("seals one exact accepted-source four-module prestage helper closure", asyn
     assert.equal(capture.schema_id, ORACLE_PRESTAGE_HELPER_SCHEMA);
     assert.equal(capture.source_commit, sourceCommit);
     assert.equal(capture.deployment_nonce, NONCE);
-    assert.equal(capture.file_count, 4);
+    assert.equal(capture.file_count, 5);
     assert.deepEqual(capture.files.map((entry) => entry.path), FILES);
     assert.equal(capture.files.every((entry) => entry.mode === "0644"), true);
     assert.equal(

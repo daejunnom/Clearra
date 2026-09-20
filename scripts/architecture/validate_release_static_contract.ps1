@@ -966,6 +966,7 @@ function Invoke-ReleaseIdentityGateValidation {
     $discordPackage = Read-Text 'apps/clearra-discord-bot/package.json'
     $uiPackage = Read-Text 'packages/clearra-ui/package.json'
     $webPackage = Read-Text 'apps/clearra-web/package.json'
+    $managedFrontendBuild = Read-Text 'scripts/tools/build-clearra-frontend.mjs'
     $uiContractTypecheck = Read-Text 'packages/clearra-ui/tsconfig.contract.json'
     $webContractTypecheck = Read-Text 'apps/clearra-web/tsconfig.contract.json'
     $productProcessSurface = Read-Text 'scripts/lib/product-process-surface.ps1'
@@ -1607,7 +1608,7 @@ function Invoke-ReleaseIdentityGateValidation {
         Assert-ReleaseYamlExactKeySet `
             -Text $releaseEnvironment `
             -Indentation 2 `
-            -ExpectedKeys @('CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID') `
+            -ExpectedKeys @('CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID', 'CLEARRA_BUILD_PURPOSE') `
             -Contract 'Release workflow environment'
         foreach ($identityVariable in @('CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID')) {
             Assert-ReleaseYamlExactScalar `
@@ -1617,6 +1618,12 @@ function Invoke-ReleaseIdentityGateValidation {
                 -ExpectedValue '${{ github.sha }}' `
                 -Contract "Release workflow $identityVariable"
         }
+        Assert-ReleaseYamlExactScalar `
+            -Text $releaseEnvironment `
+            -Indentation 2 `
+            -Key 'CLEARRA_BUILD_PURPOSE' `
+            -ExpectedValue 'product' `
+            -Contract 'Release workflow managed build purpose'
     }
     $metadataJobStart = $release.IndexOf("`n  metadata:", [System.StringComparison]::Ordinal)
     $ctk3JobStart = $release.IndexOf("`n  ctk3:", [System.StringComparison]::Ordinal)
@@ -1852,7 +1859,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 -ExpectedValue $job.Runner `
                 -Contract "$($job.Name) runner"
         }
-        $windowsProductCachePrefix = 'product-v2-${{ runner.os }}-${{ hashFiles(''Cargo.lock'', ''apps/clearra-desktop/src-tauri/Cargo.lock'', ''package-lock.json'') }}'
+        $windowsProductCachePrefix = 'product-v3-${{ runner.os }}-${{ hashFiles(''Cargo.lock'', ''apps/clearra-desktop/src-tauri/Cargo.lock'', ''package-lock.json'') }}'
         $windowsProductCacheKey = "key: $windowsProductCachePrefix-`${{ github.sha }}"
         $windowsProductCacheRestoreKeys = "restore-keys: |`n            $windowsProductCachePrefix-`n            $windowsProductCachePrefix"
         foreach ($productCacheJob in @(
@@ -2028,22 +2035,21 @@ function Invoke-ReleaseIdentityGateValidation {
             $releaseWasmContractsJob,
             $releaseWasmBuildJob
         ) -join "`n"
-        if ([regex]::Matches($releaseAcceptanceCacheText, 'actions/cache/restore@v4').Count -ne 7 -or
-            [regex]::Matches($release, 'actions/cache/save@v4').Count -ne 3 -or
+        if ([regex]::Matches($releaseAcceptanceCacheText, 'actions/cache/restore@v4').Count -ne 6 -or
+            [regex]::Matches($release, 'actions/cache/save@v4').Count -ne 2 -or
             [regex]::Matches($release, '(?m)^      - uses: actions/cache@v4\s*$').Count -ne 2) {
-            Add-ArchitectureError 'Canonical ReleaseAcceptance requires seven cache readers and one verified writer per native, WASM and sanitizer family'
+            Add-ArchitectureError 'Canonical ReleaseAcceptance requires six dependency-cache readers and one verified writer per native and WASM family'
         }
         foreach ($shardCache in @(
-            @{ Name = 'Foundation NoProductDebt'; Job = $releaseFoundationNoProductDebtJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
-            @{ Name = 'Foundation AdversarialCorrectness'; Job = $releaseFoundationAdversarialCorrectnessJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
-            @{ Name = 'Foundation DesktopHost'; Job = $releaseFoundationDesktopHostJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
-            @{ Name = 'Rust'; Job = $releaseRustJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
-            @{ Name = 'WASM contracts'; Job = $releaseWasmContractsJob; Family = 'native'; Version = 'v3'; BuildPath = '~/AppData/Local/Clearra/build' },
-            @{ Name = 'WASM producer'; Job = $releaseWasmBuildJob; Family = 'wasm'; Version = 'v4'; BuildPath = '~/.cache/Clearra/build/cargo-target' }
+            @{ Name = 'Foundation NoProductDebt'; Job = $releaseFoundationNoProductDebtJob; Family = 'native'; Version = 'v4' },
+            @{ Name = 'Foundation AdversarialCorrectness'; Job = $releaseFoundationAdversarialCorrectnessJob; Family = 'native'; Version = 'v4' },
+            @{ Name = 'Foundation DesktopHost'; Job = $releaseFoundationDesktopHostJob; Family = 'native'; Version = 'v4' },
+            @{ Name = 'Rust'; Job = $releaseRustJob; Family = 'native'; Version = 'v4' },
+            @{ Name = 'WASM contracts'; Job = $releaseWasmContractsJob; Family = 'native'; Version = 'v4' },
+            @{ Name = 'WASM producer'; Job = $releaseWasmBuildJob; Family = 'wasm'; Version = 'v5' }
         )) {
             foreach ($requiredRestoreMarker in @(
                 'actions/cache/restore@v4',
-                $shardCache.BuildPath,
                 ('key: release-acceptance-' + $shardCache.Family + '-' + $shardCache.Version + '-${{ runner.os }}-bindgen-0.2.126-'),
                 'restore-keys: |'
             )) {
@@ -2072,11 +2078,6 @@ function Invoke-ReleaseIdentityGateValidation {
                 Job = $releaseWasmBuildJob
                 Name = 'Save verified canonical WASM build cache'
                 Condition = 'if: ${{ success() && steps.rebound_wasm.outputs.reused != ''true'' && steps.release_toolchain_cache.outputs.cache-hit != ''true'' }}'
-            },
-            @{
-                Job = $releaseSanitizerJob
-                Name = 'Save verified sanitizer C build cache'
-                Condition = 'if: ${{ success() && steps.release_toolchain_cache.outputs.cache-hit != ''true'' }}'
             }
         )) {
             $cacheStepMatch = [regex]::Match($cacheOwner.Job,
@@ -2107,15 +2108,13 @@ function Invoke-ReleaseIdentityGateValidation {
                 Add-ArchitectureError "Canonical sanitizer cache must not restore unrelated toolchain payload '$forbiddenSanitizerCacheMarker'"
             }
         }
-        foreach ($requiredSanitizerCacheMarker in @(
-            'name: Restore sanitizer C build cache',
+        foreach ($forbiddenSanitizerCacheAction in @(
             'actions/cache/restore@v4',
-            'path: ~/AppData/Local/Clearra/build',
-            'key: release-acceptance-sanitizer-${{ runner.os }}-${{ github.sha }}',
-            'release-acceptance-sanitizer-${{ runner.os }}-'
+            'actions/cache/save@v4',
+            'actions/cache@v4'
         )) {
-            if ($releaseSanitizerJob.IndexOf($requiredSanitizerCacheMarker, [System.StringComparison]::Ordinal) -lt 0) {
-                Add-ArchitectureError "Canonical sanitizer isolated C build restore is missing '$requiredSanitizerCacheMarker'"
+            if ($releaseSanitizerJob.IndexOf($forbiddenSanitizerCacheAction, [System.StringComparison]::Ordinal) -ge 0) {
+                Add-ArchitectureError "Canonical sanitizer leaf must not restore or publish managed build state '$forbiddenSanitizerCacheAction'"
             }
         }
         if ($releasePagesJob.IndexOf('actions/cache/restore@v4', [System.StringComparison]::Ordinal) -ge 0 -or
@@ -2861,12 +2860,13 @@ function Invoke-ReleaseIdentityGateValidation {
         'REQUESTED_CURRENT_PAGES_SHA: ${{ inputs.current_pages_sha }}',
         'node-version: ${{ inputs.mode == ''bootstrap-capture'' && ''22.23.2'' || ''22'' }}',
         'RUSTUP_TOOLCHAIN: ${{ inputs.mode == ''bootstrap-capture'' && ''1.98.0'' || ''stable'' }}',
-        'pages-rollback-wasm-${{ runner.os }}-rust-${{ env.RUSTUP_TOOLCHAIN }}-',
+        'pages-rollback-wasm-dependencies-v2-${{ runner.os }}-rust-${{ env.RUSTUP_TOOLCHAIN }}-',
         '[[ "$HOME" == "/home/runner" ]]',
         '[[ "${CARGO_HOME:-$HOME/.cargo}" == "/home/runner/.cargo" ]]',
         'rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal',
         'rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown',
-        'wasm-bindgen-cli --version 0.2.126 --locked',
+        'invoke-clearra-build.ps1 -SourceRoot "$GITHUB_WORKSPACE/authority-source" -Purpose product -Command cargo',
+        '''["install","wasm-bindgen-cli","--version","0.2.126","--locked"]''',
         'Download exact accepted Pages build without rebuilding',
         'Prove accepted build and current public bytes before capture',
         'Reprove accepted build and public bytes immediately before sealing',
@@ -3531,8 +3531,7 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($package in @(
-        @{ Name = 'UI'; Text = $uiPackage; Config = $uiContractTypecheck },
-        @{ Name = 'Web'; Text = $webPackage; Config = $webContractTypecheck }
+        @{ Name = 'UI'; Text = $uiPackage; Config = $uiContractTypecheck }
     )) {
         foreach ($required in @(
             'npm exec tsc -- --noEmit -p tsconfig.contract.json',
@@ -3547,8 +3546,21 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "$($package.Name) TypeScript contract typecheck must compile every tracked .contract.ts without emitting artifacts"
         }
     }
-    if ($webPackage.IndexOf('"pretest": "npm run sync"', [System.StringComparison]::Ordinal) -lt 0) {
-        Add-ArchitectureError 'Web TypeScript contracts must generate the SvelteKit tsconfig before typechecking on a clean checkout'
+    foreach ($required in @(
+        '"test": "node ../../scripts/tools/build-clearra-frontend.mjs --app web --task test"',
+        "{ kind: 'sync', arguments: ['sync'] }",
+        "{ kind: 'typecheck', arguments: ['--noEmit', '-p', 'tsconfig.contract.json'] }",
+        "{ kind: 'contracts', arguments: ['./test'] }",
+        "contracts: resolve(sourceRoot, 'scripts/tools/run-typescript-contracts.mjs')"
+    )) {
+        $owner = if ($required.StartsWith('"test"')) { $webPackage } else { $managedFrontendBuild }
+        if ($owner.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-ArchitectureError "Web managed TypeScript contract gate is missing '$required'"
+        }
+    }
+    if ($webContractTypecheck.IndexOf('"noEmit": true', [System.StringComparison]::Ordinal) -lt 0 -or
+        $webContractTypecheck.IndexOf('"include": ["test/*.contract.ts"]', [System.StringComparison]::Ordinal) -lt 0) {
+        Add-ArchitectureError 'Web TypeScript contract typecheck must compile every tracked .contract.ts without emitting artifacts'
     }
     foreach ($required in @(
         'apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs',
@@ -4319,7 +4331,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'workflows: ["Publish Product Release"]',
         "github.event.workflow_run.conclusion == 'success'",
         "github.event.workflow_run.event == 'push'",
-        "github.event.workflow_run.head_branch == 'v0.8.0'",
+        "startsWith(github.event.workflow_run.head_branch, 'v')",
         'release-publication-evidence.mjs finalize',
         '--finalizer-workflow-run-id "$GITHUB_RUN_ID"',
         '--finalizer-workflow-run-attempt "$GITHUB_RUN_ATTEMPT"',
@@ -4742,12 +4754,12 @@ function Invoke-ReleaseIdentityGateValidation {
         }
     }
     foreach ($required in @(
-        'settings.pre-v0.8.0-$deployment_nonce',
-        'v0.8.0-$commit_prefix',
+        'settings.pre-$release_tag-$deployment_nonce',
+        '$release_tag-$commit_prefix',
         'clearra-current-job-v080-$commit_prefix'
     )) {
         if ($oracleDeployLauncher.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
-            Add-ArchitectureError "Oracle release launcher is missing v0.8.0 identity marker '$required'"
+            Add-ArchitectureError "Oracle release launcher is missing current-release identity marker '$required'"
         }
     }
     foreach ($forbidden in @(
@@ -5103,7 +5115,7 @@ function Invoke-ReleaseIdentityGateValidation {
         'active Oracle release is outside the immutable release root',
         'active Oracle settings must be a root-owned regular file',
         'active Oracle job URL must be a credential-free HTTPS /jobs URL',
-        '/etc/clearra-gateway/settings.pre-v0.8.0-',
+        'oracleSettingsBackupPath(',
         'openSync(temporaryPath, "wx", 0o600)',
         'linkSync(temporaryPath, backupPath)',
         'reconcileInterruptedSettingsBackup(backupPath)',

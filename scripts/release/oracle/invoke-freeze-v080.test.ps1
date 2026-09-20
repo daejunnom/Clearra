@@ -154,7 +154,7 @@ try {
     if ($audit.Count -ne 4 -or
         $audit[0] -cne 'oracle_freeze_invoker=audit-ok' -or
         $audit[1] -cne 'oracle_source_commit=0123456789abcdef0123456789abcdef01234567' -or
-        $audit[2] -cne 'oracle_release_id=v0.8.0-0123456' -or
+        $audit[2] -cne 'oracle_release_id=v0.8.1-0123456' -or
         $audit[3] -cnotmatch '^oracle_freeze_helper_sha256=[0-9a-f]{64}$') {
         throw 'AuditOnly attestation did not match.'
     }
