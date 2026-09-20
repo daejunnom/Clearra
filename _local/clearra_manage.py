@@ -3387,6 +3387,79 @@ def promote_candidate(
     return receipt
 
 
+def upload_candidate(
+    candidate: str, safety_receipt: str, policy: dict[str, Any]
+) -> dict[str, Any]:
+    """Publish a reviewed candidate with a normal fast-forward push and readback."""
+    pattern = policy["git_policy"]["candidate_pattern"]
+    if not fnmatch.fnmatch(candidate, pattern):
+        raise ManagementError(f"candidate branch must match {pattern}")
+    if run(("git", "check-ref-format", f"refs/heads/{candidate}"), check=False).returncode:
+        raise ManagementError("candidate is not a valid Git branch name")
+    if git("branch", "--show-current") != candidate:
+        raise ManagementError("candidate upload must run from the candidate branch")
+    if git("status", "--porcelain=v1", "-z", "--untracked-files=all"):
+        raise ManagementError("candidate worktree must be clean before upload")
+
+    sha = git("rev-parse", f"refs/heads/{candidate}^{{commit}}")
+    convergence = validate_convergence_review(safety_receipt, sha, policy)
+    git("fetch", "origin", "refs/heads/main:refs/remotes/origin/main")
+    origin_main = git("rev-parse", "refs/remotes/origin/main")
+    if run(
+        ("git", "merge-base", "--is-ancestor", origin_main, sha), check=False
+    ).returncode:
+        raise ManagementError("candidate is not a fast-forward of current origin/main")
+    remote_main = git("ls-remote", "origin", "refs/heads/main").split()
+    if not remote_main or remote_main[0] != origin_main:
+        raise ManagementError("origin/main changed during candidate upload preflight")
+
+    changed = git("diff", "--name-only", origin_main, sha).splitlines()
+    if any(is_secret_path(pathlib.Path(name), policy) for name in changed):
+        raise ManagementError(
+            "candidate changes a prohibited credential path; contents were not inspected"
+        )
+    authorized_pushers = authorized_github_maintainers(policy)
+
+    remote_ref = f"refs/heads/{candidate}"
+    remote_line = git("ls-remote", "--heads", "origin", remote_ref).split()
+    remote_before = remote_line[0] if remote_line else None
+    if remote_before and remote_before != sha:
+        tracking_ref = f"refs/remotes/origin/{candidate}"
+        git("fetch", "origin", f"{remote_ref}:{tracking_ref}")
+        if run(
+            ("git", "merge-base", "--is-ancestor", remote_before, sha), check=False
+        ).returncode:
+            raise ManagementError("candidate upload is not a fast-forward of its remote branch")
+
+    uploaded = remote_before != sha
+    if uploaded:
+        pushed = run(
+            ("git", "push", "origin", f"{sha}:{remote_ref}"),
+            check=False,
+        )
+        if pushed.returncode != 0:
+            detail = pushed.stderr.strip() or pushed.stdout.strip()
+            raise ManagementError(f"normal candidate push was rejected\n{detail}")
+    readback = git("ls-remote", "--heads", "origin", remote_ref).split()
+    if not readback or readback[0] != sha:
+        raise ManagementError("remote candidate readback does not equal the reviewed candidate")
+
+    receipt = {
+        "schema_id": "clearra.git-candidate-upload.v1",
+        "candidate": candidate,
+        "sha": sha,
+        "tree": git("rev-parse", f"{sha}^{{tree}}"),
+        "origin_main": origin_main,
+        "remote_candidate_before": remote_before,
+        "remote_candidate_after": readback[0],
+        "uploaded": uploaded,
+        "convergence": convergence,
+        "authorized_pushers": authorized_pushers,
+    }
+    receipt["receipt"] = str(write_receipt("git-candidate-upload", receipt))
+    return receipt
+
+
 def push_main_fast_forward(candidate_sha: str, expected_base: str) -> str:
     """Publish main once, with an immediate base check and exact readback."""
     current = git("ls-remote", "origin", "refs/heads/main").split()
@@ -3874,6 +3947,9 @@ def parser() -> argparse.ArgumentParser:
     decision_target.add_argument("--decide-worktree")
     review.add_argument("--decision", choices=("selected", "excluded"))
     review.add_argument("--reason")
+    upload = git_actions.add_parser("upload")
+    upload.add_argument("--candidate", required=True)
+    upload.add_argument("--safety-receipt", required=True)
     promote = git_actions.add_parser("promote")
     promote.add_argument("--candidate", required=True)
     promote.add_argument("--safety-receipt", required=True)
@@ -4002,6 +4078,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     arguments.safety_receipt, arguments.candidate, policy
                 )
                 print_json({"evidence": evidence, "decision": decision, **summary})
+                return 0
+            if arguments.action == "upload":
+                print_json(
+                    upload_candidate(arguments.candidate, arguments.safety_receipt, policy)
+                )
                 return 0
             if arguments.action == "promote":
                 print_json(

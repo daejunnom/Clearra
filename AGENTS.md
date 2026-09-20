@@ -13,8 +13,8 @@ only a person-reviewed summary selected for version control belongs there.
 
 Do not run raw `git pull`, destructive `git reset`, `git branch -D`, force
 pushes, or branch/worktree deletion. Use the management entry point with the
-`git inventory`, `git converge`, `git review`, `git promote`, and `git
-finalize` subcommands; unresolved unique commits or dirty worktrees are
+`git inventory`, `git converge`, `git review`, `git upload`, `git promote`, and
+`git finalize` subcommands; unresolved unique commits or dirty worktrees are
 blockers. Record every selected or excluded item with `git review`; do not edit
 the review JSON by hand. `git promote` performs one exact-SHA check lookup and
 must not be wrapped in a polling loop.

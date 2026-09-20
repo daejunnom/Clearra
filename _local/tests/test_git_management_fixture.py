@@ -240,6 +240,67 @@ class GitManagementFixtureTests(unittest.TestCase):
             self.git("ls-remote", "origin", "refs/heads/main").split()[0], raced_sha
         )
 
+    def test_candidate_upload_is_review_closed_and_never_force_pushes(self) -> None:
+        self.git("restore", "base.txt")
+        self.git("restore", "--staged", "staged.bin")
+        (self.repo / "staged.bin").unlink()
+        (self.repo / "notes.txt").unlink()
+        shutil.rmtree(self.repo / "build")
+        candidate = "codex/converge-upload-fixture"
+        self.git("switch", "-c", candidate, "main")
+        (self.repo / "candidate.txt").write_text(
+            "candidate\n", encoding="utf-8", newline="\n"
+        )
+        self.git("add", "candidate.txt")
+        self.git("commit", "-m", "candidate")
+        first_sha = self.git("rev-parse", "HEAD")
+
+        with mock.patch.object(
+            MANAGE,
+            "validate_convergence_review",
+            return_value={"selected": 1, "excluded": 0},
+        ), mock.patch.object(
+            MANAGE,
+            "authorized_github_maintainers",
+            return_value=[{"login": "fixture", "github_user_id": 1}],
+        ):
+            uploaded = MANAGE.upload_candidate(candidate, "fixture-receipt", self.policy)
+        self.assertTrue(uploaded["uploaded"])
+        self.assertEqual(uploaded["remote_candidate_after"], first_sha)
+        self.assertTrue(pathlib.Path(uploaded["receipt"]).is_file())
+
+        racer = self.base / "candidate-racer"
+        self.git("clone", "--branch", candidate, str(self.remote), str(racer), cwd=self.base)
+        self.git("config", "user.name", "Clearra Candidate Race Fixture", cwd=racer)
+        self.git("config", "user.email", "race@example.invalid", cwd=racer)
+        (racer / "remote-candidate.txt").write_text(
+            "remote\n", encoding="utf-8", newline="\n"
+        )
+        self.git("add", "remote-candidate.txt", cwd=racer)
+        self.git("commit", "-m", "advance remote candidate", cwd=racer)
+        self.git("push", "origin", candidate, cwd=racer)
+        raced_sha = self.git("rev-parse", "HEAD", cwd=racer)
+
+        (self.repo / "local-candidate.txt").write_text(
+            "local\n", encoding="utf-8", newline="\n"
+        )
+        self.git("add", "local-candidate.txt")
+        self.git("commit", "-m", "diverge local candidate")
+        with mock.patch.object(
+            MANAGE,
+            "validate_convergence_review",
+            return_value={"selected": 1, "excluded": 0},
+        ), mock.patch.object(
+            MANAGE,
+            "authorized_github_maintainers",
+            return_value=[{"login": "fixture", "github_user_id": 1}],
+        ), self.assertRaisesRegex(MANAGE.ManagementError, "not a fast-forward"):
+            MANAGE.upload_candidate(candidate, "fixture-receipt", self.policy)
+        self.assertEqual(
+            self.git("ls-remote", "--heads", "origin", f"refs/heads/{candidate}").split()[0],
+            raced_sha,
+        )
+
     def test_repository_lock_recovers_dead_owner_and_blocks_live_owner(self) -> None:
         identity = MANAGE.hashlib.sha256(MANAGE.normalized(self.repo).encode()).hexdigest()[:24]
         lock = MANAGE.state_root() / "git-locks" / f"{identity}.lock"
