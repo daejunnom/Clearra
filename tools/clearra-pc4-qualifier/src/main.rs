@@ -9,6 +9,7 @@
 //! proof before an outgoing-edge completeness identity can be minted.
 
 mod domain;
+mod indexed_path;
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_executor::enumerate_pc4_ilc_target_fields;
@@ -61,10 +62,19 @@ fn run() -> Result<(), String> {
         "domain-step" => run_domain_step(&options),
         "domain-run" => run_domain_run(&options),
         "domain-compare" => run_domain_compare(&options),
+        "indexed-path-proof" => run_indexed_path_proof(&options),
         _ => Err(
-            "expected outgoing-shard, merge-outgoing, domain-seed, domain-step, domain-run, or domain-compare".to_owned(),
+            "expected outgoing-shard, merge-outgoing, domain-seed, domain-step, domain-run, domain-compare, or indexed-path-proof".to_owned(),
         ),
     }
+}
+
+fn run_indexed_path_proof(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let output = absolute_option(options, "output")?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    indexed_path::prove(&dataset, &output)
 }
 
 fn run_domain_seed(options: &BTreeMap<String, String>) -> Result<(), String> {
