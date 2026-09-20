@@ -808,7 +808,10 @@ fn compact_session_limits() -> CompactSessionLimits {
             nz(64 * 1024 * 1024),
         ),
         ranges: range_limits(),
-        concurrent_lookups: nz(8),
+        // This is logical demand admission. HTTP remains independently capped
+        // by the host reader, while verified local files can drain the wider
+        // window without one JS/WASM round-trip per eight field records.
+        logical_lookup_window: nz(64),
     }
 }
 fn frontier_budgets() -> Pc4ObservationFrontierBudgets {

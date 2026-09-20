@@ -169,32 +169,52 @@ try {
     try { status = ok(raw.clearra_wasm_advance_job(job, 2048)); }
     finally { const elapsed = performance.now() - at; steps++; computeMs += elapsed; maximumAdvanceMs = Math.max(maximumAdvanceMs, elapsed); }
     if (status === 0 || status === 4) {
-      at = performance.now(); ok(raw.clearra_wasm_online_pc4_pending(job)); const range = JSON.parse(output()); bridgeMs += performance.now() - at;
-      if (range) {
+      at = performance.now(); ok(raw.clearra_wasm_online_pc4_pending(job)); const pending = JSON.parse(output()); bridgeMs += performance.now() - at;
+      if (pending) {
+        // Measure the batch-aware product ABI. The old probe consumed only the
+        // first legacy range and therefore reported one JS/WASM crossing for
+        // every lookup even when the product exposed a bounded logical window.
+        // Local reads are allowed to settle as one batch here; online request
+        // concurrency and accounting still belong to the real reader.
+        const demands = Array.isArray(pending.batch) && pending.batch.length && !pending.lookup_frontier?.length
+          ? pending.batch : [pending];
+        if (reads + demands.length > readLimit) {
+          cancelled = true; ok(raw.clearra_wasm_cancel_job(job));
+          ok(raw.clearra_wasm_drain_job_events(job));
+          terminal = JSON.parse(output()).findLast(e => ['final_response', 'failed', 'cancelled'].includes(e.event)) ?? null;
+          break;
+        }
         at = performance.now();
         if (values.frontier) {
-          if (!Array.isArray(range.lookup_frontier)) throw new Error('This WASM does not expose frontier hints; rebuild in trusted CI');
-          if (range.lookup_frontier.length >= 2 && range.artifact.path === dataset.plan.files[1].path && range.length === 8 && range.offset >= 16) {
-            frontiers++; hintedIds += range.lookup_frontier.length;
-            maximumFrontier = Math.max(maximumFrontier, range.lookup_frontier.length);
+          if (demands.length !== 1 || !Array.isArray(pending.lookup_frontier)) throw new Error('This WASM does not expose compatible frontier hints; rebuild in trusted CI');
+          if (pending.lookup_frontier.length >= 2 && pending.artifact.path === dataset.plan.files[1].path && pending.length === 8 && pending.offset >= 16) {
+            frontiers++; hintedIds += pending.lookup_frontier.length;
+            maximumFrontier = Math.max(maximumFrontier, pending.lookup_frontier.length);
           }
-          await prefetchPc4LookupFrontier(reader, dataset.generation, range, { maxGapBytes: frontierGapBytes });
+          await prefetchPc4LookupFrontier(reader, dataset.generation, pending, { maxGapBytes: frontierGapBytes });
         }
-        const bytes = await reader.read(range.artifact, range.offset, range.length); ioMs += performance.now() - at;
-        reads++; artifactCounts[range.artifact.path] = (artifactCounts[range.artifact.path] ?? 0) + 1;
-        demandDigest.update(`${range.artifact.path}:${range.offset}:${range.length}\n`).update(bytes);
-        comparison?.observe(range.artifact, range.offset, range.length, bytes);
-        if (trace && traceCount < trace.length / 12) {
-          const role = dataset.plan.files.findIndex(file => file.path === range.artifact.path);
-          if (role < 0 || !Number.isSafeInteger(range.offset) || range.offset > 0xffffffff) throw new Error('Trace address outside v1 format');
-          trace.writeUInt32LE(role, traceCount * 12);
-          trace.writeUInt32LE(range.offset, traceCount * 12 + 4);
-          trace.writeUInt32LE(range.length, traceCount * 12 + 8); traceCount++;
+        const results = demands.length > 1 && reader.readMany
+          ? await reader.readMany(demands.map(range => ({ artifact: range.artifact, offset: range.offset, length: range.length })),
+            values.transport === 'http-model' ? { maxGapBytes: frontierGapBytes } : undefined)
+          : await Promise.all(demands.map(range => reader.read(range.artifact, range.offset, range.length)));
+        ioMs += performance.now() - at;
+        for (const [index, range] of demands.entries()) {
+          const bytes = results[index];
+          reads++; artifactCounts[range.artifact.path] = (artifactCounts[range.artifact.path] ?? 0) + 1;
+          demandDigest.update(`${range.artifact.path}:${range.offset}:${range.length}\n`).update(bytes);
+          comparison?.observe(range.artifact, range.offset, range.length, bytes);
+          if (trace && traceCount < trace.length / 12) {
+            const role = dataset.plan.files.findIndex(file => file.path === range.artifact.path);
+            if (role < 0 || !Number.isSafeInteger(range.offset) || range.offset > 0xffffffff) throw new Error('Trace address outside v1 format');
+            trace.writeUInt32LE(role, traceCount * 12);
+            trace.writeUInt32LE(range.offset, traceCount * 12 + 4);
+            trace.writeUInt32LE(range.length, traceCount * 12 + 8); traceCount++;
+          }
+          at = performance.now(); input(JSON.stringify({ lookup_session: range.lookup_session, request_id: range.request_id,
+            ...(values.transport === 'local' ? { source: 'verified-local-file' } : { status: 206,
+              content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}` }), bytes: Array.from(bytes) }));
+          ok(raw.clearra_wasm_online_pc4_admit(job)); bridgeMs += performance.now() - at;
         }
-        at = performance.now(); input(JSON.stringify({ lookup_session: range.lookup_session, request_id: range.request_id,
-          ...(values.transport === 'local' ? { source: 'verified-local-file' } : { status: 206,
-            content_range: `bytes ${range.offset}-${range.offset + range.length - 1}/${range.artifact.byte_length}` }), bytes: Array.from(bytes) }));
-        ok(raw.clearra_wasm_online_pc4_admit(job)); bridgeMs += performance.now() - at;
       }
     }
     if (status !== 0 || steps % 16 === 0) {

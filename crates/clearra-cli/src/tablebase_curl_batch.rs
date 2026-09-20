@@ -33,7 +33,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const MAX_LOGICAL: usize = 16;
+// Logical response continuations are deliberately wider than transport
+// concurrency. Both libcurl multi and the process fallback keep at most four
+// physical transfers active; the remaining entries are bounded queued work.
+const MAX_LOGICAL: usize = 64;
 #[cfg(feature = "native-pc4-libcurl")]
 const MAX_ACTIVE_TRANSFERS: usize = 4;
 const MAX_GAP_BYTES: u64 = 4_096;
@@ -1226,7 +1229,7 @@ mod tests {
         );
         assert_eq!(plan.transfers[1].projections.len(), 2);
         assert!(NativeCurlPlan::new(Vec::new()).is_err());
-        assert!(NativeCurlPlan::new(vec![demand(2, 1, 0, 12); 17]).is_err());
+        assert!(NativeCurlPlan::new(vec![demand(2, 1, 0, 12); 65]).is_err());
     }
 
     #[test]
