@@ -146,7 +146,7 @@ impl<F: FnMut(&Artifact, u64, u64) -> Result<HttpReply>> OnlineRangeReader<F> {
     /// must spend the same request/byte budget as scalar `exact_span` reads.
     /// Validation is all-or-nothing so one malformed sibling starts no I/O.
     pub fn reserve_external(&mut self, spans: &[(usize, u64, u64)]) -> Result<()> {
-        if spans.is_empty() || spans.len() > 16 {
+        if spans.is_empty() || spans.len() > 64 {
             return Err("pc4_online_batch_invalid");
         }
         let mut bytes = 0_u64;

@@ -3,7 +3,10 @@
 import type { Pc4RangeRequest } from './clearraWasmRuntime';
 import { checkedPc4Read, planPc4ReadBatch } from '../../../../scripts/release/pc4/pc4-range-plan.mjs';
 
-const MAX_PENDING = 16;
+// Logical continuations are not physical connections. The HTTP reader keeps a
+// separate four-transfer cap; this window only bounds queued/settled ownership
+// (at most 4 MiB because every typed range is at most 64 KiB).
+const MAX_LOGICAL_PENDING = 64;
 const MAX_RANGE_BYTES = 65_536;
 type Entry = { range: Pc4RangeRequest; identity: string; task: Promise<void> };
 type Settled = { key: string; range: Pc4RangeRequest } & (
@@ -30,7 +33,7 @@ export class Pc4AsyncRangePump {
 
   submit(ranges: readonly Pc4RangeRequest[]) {
     if (this.closed || this.signal.aborted) return;
-    if (ranges.length === 0 || ranges.length > MAX_PENDING) fail('pc4_online_pending_limit');
+    if (ranges.length === 0 || ranges.length > MAX_LOGICAL_PENDING) fail('pc4_online_pending_limit');
     // Validate the entire snapshot before starting any of its new I/O. Retained
     // responses occupy a slot until admission, bounding both tasks and bytes.
     const checked = new Map<string, { range: Pc4RangeRequest; identity: string }>();
@@ -49,7 +52,7 @@ export class Pc4AsyncRangePump {
       checked.set(key, { range: { ...range, artifact: { ...range.artifact } }, identity });
     }
     const fresh = [...checked].filter(([key]) => !this.entries.has(key));
-    if (this.entries.size + fresh.length > MAX_PENDING) fail('pc4_online_pending_limit');
+    if (this.entries.size + fresh.length > MAX_LOGICAL_PENDING) fail('pc4_online_pending_limit');
     // Group only demands already available NOW. Never wait for another batch
     // to fill; never cross a profile/immutable artifact boundary. Local files
     // keep their existing page/exact policy without network-oriented gaps.

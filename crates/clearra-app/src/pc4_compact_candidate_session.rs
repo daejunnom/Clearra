@@ -20,11 +20,17 @@ use clearra_pc4_tablebase::{
 };
 use core::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 
+// Logical lookup continuations are cheap owners. The host transport applies its
+// own, smaller physical-I/O concurrency limit (four for HTTP today). Keeping
+// these bounds separate lets local files and queued HTTP overlap enough work to
+// amortize host/WASM crossings without turning the logical window into sockets.
+const MAX_LOGICAL_LOOKUP_WINDOW: usize = 64;
+
 pub(crate) struct CompactSessionLimits {
     pub union: CompactGraphUnionLimits,
     pub cache: Pc4LookupGraphCacheLimits,
     pub ranges: RangeAdmissionLimits,
-    pub concurrent_lookups: NonZeroUsize,
+    pub logical_lookup_window: NonZeroUsize,
 }
 
 struct ActiveLookup {
@@ -57,8 +63,9 @@ impl Pc4CompactCandidateSession {
         limits: CompactSessionLimits,
         guard: &G,
     ) -> Result<Option<Self>, &'static str> {
-        // This is a host-queue bound, not a claim about available CPU cores.
-        if limits.concurrent_lookups.get() > 16 {
+        // This is a bounded continuation window, not a claim about available
+        // CPU cores or permission to open the same number of HTTP requests.
+        if limits.logical_lookup_window.get() > MAX_LOGICAL_LOOKUP_WINDOW {
             return Err("pc4_compact_session_concurrency_invalid");
         }
         // At most two field records are pinned by each resident work item.
@@ -99,7 +106,7 @@ impl Pc4CompactCandidateSession {
         };
         let mut lookups = Vec::new();
         lookups
-            .try_reserve_exact(limits.concurrent_lookups.get())
+            .try_reserve_exact(limits.logical_lookup_window.get())
             .map_err(|_| "pc4_compact_session_allocation_failed")?;
         Ok(Some(Self {
             generation,
@@ -215,10 +222,10 @@ impl Pc4CompactCandidateSession {
         // At most one live lookup per demanded field. Include occupied slots
         // in the read window so old IDs cannot starve new independent demands.
         let demands = union
-            .pending_fields(self.limits.concurrent_lookups.get() + self.lookups.len())
+            .pending_fields(self.limits.logical_lookup_window.get() + self.lookups.len())
             .map_err(|e| e.reason())?;
         for field in demands {
-            if self.lookups.len() == self.limits.concurrent_lookups.get() {
+            if self.lookups.len() == self.limits.logical_lookup_window.get() {
                 break;
             }
             if self.cache.contains_field_id(field)
