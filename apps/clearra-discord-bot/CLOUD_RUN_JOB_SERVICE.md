@@ -809,7 +809,7 @@ try {
       --active-health-url ([string]$activeService.status.url)
     if ($LASTEXITCODE -ne 0) { throw "accepted runtime preflight failed before command sync" }
 
-    npm ci --ignore-scripts
+    pnpm install --frozen-lockfile --ignore-scripts
     if ($LASTEXITCODE -ne 0) { throw "command-sync dependency install failed" }
     node scripts/tools/accepted-ctk3-dist.mjs `
       --verify $acceptedCtk3Dist `

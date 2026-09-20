@@ -60,7 +60,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Require attempt 1, exact current main, and no earlier exact-source run
         env:
           GH_TOKEN: ${{ github.token }}
@@ -292,7 +292,7 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Download exact impact plan
         uses: actions/download-artifact@v4
         with:
@@ -351,7 +351,7 @@ jobs:
           ref: ${{ needs.authority.outputs.source_commit }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Download pre-classification verified baseline
         uses: actions/download-artifact@v4
         with:
@@ -387,9 +387,23 @@ jobs:
           ref: ${{ needs.authority.outputs.source_commit }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --ignore-scripts
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+      - name: Resolve the exact pnpm store
+        id: pnpm-store
+        shell: pwsh
+        run: |
+          "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
+      - name: Cache only the exact pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: clearra-pnpm-${{ runner.os }}-${{ runner.arch }}-node-22.23.2-pnpm-11.5.0-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Run closed Pages component tests
         run: node scripts/tools/run-focused-js-tests.mjs apps/clearra-web/test/ClearraWasmRuntime.contract.ts packages/clearra-ui/test/pagesEssentialSurface.test.mjs
       - name: Seal Pages qualification evidence
@@ -416,9 +430,23 @@ jobs:
           ref: ${{ needs.authority.outputs.source_commit }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --ignore-scripts
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+      - name: Resolve the exact pnpm store
+        id: pnpm-store
+        shell: pwsh
+        run: |
+          "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
+      - name: Cache only the exact pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: clearra-pnpm-${{ runner.os }}-${{ runner.arch }}-node-22.23.2-pnpm-11.5.0-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Run closed Desktop GUI component tests
         run: node scripts/tools/run-focused-js-tests.mjs packages/clearra-ui/test/desktopProductPageCancellation.test.mjs packages/clearra-ui/test/uiRuntimeContracts.test.mjs
       - name: Seal Desktop GUI qualification evidence
@@ -448,7 +476,7 @@ jobs:
           ref: ${{ needs.authority.outputs.source_commit }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Run closed CLI component test
         run: >-
           pwsh -NoProfile -File scripts/tools/invoke-clearra-build.ps1 -SourceRoot . -Purpose product -Command cargo -ArgumentsJson '["test","-p","clearra-cli","--test","product_cli_surface_contract","--","--test-threads=1"]'
@@ -476,9 +504,23 @@ jobs:
           ref: ${{ needs.authority.outputs.source_commit }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --ignore-scripts
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+      - name: Resolve the exact pnpm store
+        id: pnpm-store
+        shell: pwsh
+        run: |
+          "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
+      - name: Cache only the exact pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: clearra-pnpm-${{ runner.os }}-${{ runner.arch }}-node-22.23.2-pnpm-11.5.0-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Run closed Discord gateway component tests
         run: node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/capability-registry.test.mjs apps/clearra-discord-bot/test/cli-authority-result-paths.test.mjs
       - name: Seal Discord gateway qualification evidence
@@ -505,9 +547,23 @@ jobs:
           ref: ${{ needs.authority.outputs.source_commit }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --ignore-scripts
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+      - name: Resolve the exact pnpm store
+        id: pnpm-store
+        shell: pwsh
+        run: |
+          "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
+      - name: Cache only the exact pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: clearra-pnpm-${{ runner.os }}-${{ runner.arch }}-node-22.23.2-pnpm-11.5.0-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Run closed heavy Cloud runtime component tests
         run: node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/cloud-candidate-smoke-job.test.mjs apps/clearra-discord-bot/test/current-job-container-closure.test.mjs
       - name: Seal heavy Cloud runtime qualification evidence
@@ -563,7 +619,7 @@ jobs:
           ref: ${{ needs.authority.outputs.source_commit }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Require exact conditional job topology
         env:
           GATE_MODE: ${{ needs.authority.outputs.gate_mode }}

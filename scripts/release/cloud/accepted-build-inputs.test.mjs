@@ -124,7 +124,7 @@ async function buildFixture(t) {
     options: {sourceProvenanceHash: ['SHA256']},
     sourceProvenance: {resolvedStorageSource: {bucket: 'clearra-cloud_cloudbuild', object: 'source/transport.tgz', generation: '7'},
       fileHashes: {'gs://clearra-cloud_cloudbuild/source/transport.tgz#7': {fileHash: [{type: 'SHA256', value: `${Buffer.from(archiveHash, 'hex').toString('base64url')}=`}]}}},
-    steps: [{id: 'verify-accepted-inputs', name: 'node:22-bookworm-slim', status: 'SUCCESS'},
+    steps: [{id: 'verify-accepted-inputs', name: 'node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9', status: 'SUCCESS'},
       {id: 'package-accepted-runtime', name: 'gcr.io/cloud-builders/docker', status: 'SUCCESS', args: ['build', '-f', 'source/apps/clearra-discord-bot/Dockerfile.accepted-job-service']}] };
   const buildReadbackPath = join(f.root, 'build.json');
   await writeFile(buildReadbackPath, JSON.stringify(build));
@@ -234,9 +234,9 @@ function assertPackagingFlow(workflow, cloudConfig, dockerfile) {
   assert.doesNotMatch(cloudConfig, /allowFailure|allowExitCodes|cargo build|npm run build|Dockerfile\.current-job-service/u);
   assert.equal((cloudConfig.match(/^  - id:/gmu) ?? []).length, 2);
   const from = [...dockerfile.matchAll(/^FROM (\S+) AS /gmu)].map((match) => match[1]);
-  assert.deepEqual(from, ['node:22-bookworm-slim', 'node:22-bookworm-slim']);
+  assert.deepEqual(from, ['node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9', 'node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9']);
   assert.doesNotMatch(dockerfile, /cargo|rustup|npm run build|npm exec|npx|--from=clearra-build/u);
-  assert.match(dockerfile, /RUN npm ci --omit=dev --ignore-scripts/u);
+  assert.match(dockerfile, /pnpm install --prod --frozen-lockfile --ignore-scripts/u);
   assert.match(dockerfile, /COPY inputs\/ctk3\/ .\/packages\/ctk3\/dist\//u);
   assert.match(dockerfile, /COPY inputs\/clearra \/usr\/local\/bin\/clearra/u);
   assert.match(dockerfile, /verify-linux-cli-runtime\.mjs/u);
@@ -260,13 +260,23 @@ test('production only packages exact-run accepted products and verifies the hand
   ]) assert.throws(() => assertPackagingFlow(changed, config, dockerfile));
   assert.throws(() => assertPackagingFlow(workflow, config.replace('sourceProvenanceHash: [SHA256]', ''), dockerfile));
   assert.throws(() => assertPackagingFlow(workflow, config, dockerfile + '\nRUN cargo build\n'));
-  assert.throws(() => assertPackagingFlow(workflow, config, dockerfile.replace('--omit=dev --ignore-scripts', '--omit=dev')));
+  assert.throws(() => assertPackagingFlow(
+    workflow,
+    config,
+    dockerfile.replace('--frozen-lockfile --ignore-scripts', '--frozen-lockfile'),
+  ));
   assert.throws(() => assertPackagingFlow(workflow, config + '\n  allowFailure: true\n', dockerfile));
   const recovery = await read('scripts/release/discord-deployment-recovery.mjs');
   for (const name of ['Build the exact source archive once in Cloud Build', 'Download the already accepted Linux CLI',
     'Seal accepted Cloud build inputs without recompilation', 'Package accepted products in Cloud Build without recompilation']) assert.ok(recovery.includes(`"${name}"`));
   const standalone = await read('apps/clearra-discord-bot/Dockerfile.current-job-service');
-  assert.match(standalone, /^FROM rust:1\.96-bookworm AS clearra-build$/mu);
+  assert.match(
+    standalone,
+    /^FROM rust:1\.98\.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS clearra-build$/mu,
+  );
   const release = await read('.github/workflows/release-cli.yml');
-  assert.match(release.split('\n  linux-cli:')[1].split('\n  discord-bot:')[0], /container: rust:1\.96-bookworm/u);
+  assert.match(
+    release.split('\n  linux-cli:')[1].split('\n  discord-bot:')[0],
+    /container: rust:1\.98\.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e/u,
+  );
 });

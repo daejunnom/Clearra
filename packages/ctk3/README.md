@@ -9,7 +9,7 @@ CTK85 documents remain readable.
 ## Install
 
 ```sh
-npm install ctk3 tetris-fumen
+pnpm add ctk3 tetris-fumen
 ```
 
 `tetris-fumen` is a runtime dependency of `ctk3`; listing both dependencies is

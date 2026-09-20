@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Run guarded traffic and inherited timestamp regressions
         run: >-
           node --test scripts/release/cloud/recovery-traffic.test.mjs

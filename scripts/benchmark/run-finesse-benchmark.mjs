@@ -1384,17 +1384,17 @@ function artifactProvenance(root, snapshot) {
 function browserBuildToolchainIdentity(root) {
   const lockStatus = commandOutput(
     'git',
-    ['status', '--porcelain', '--untracked-files=no', '--', 'package-lock.json'],
+    ['status', '--porcelain', '--untracked-files=no', '--', 'pnpm-lock.yaml'],
     root
   );
   if (lockStatus.length > 0) {
-    throw new Error('package-lock.json must be clean for a provenance-bound benchmark run');
+    throw new Error('pnpm-lock.yaml must be clean for a provenance-bound benchmark run');
   }
   return {
     package_manager: 'npm',
     package_lock_git_oid: commandOutput(
       'git',
-      ['rev-parse', 'HEAD:package-lock.json'],
+      ['rev-parse', 'HEAD:pnpm-lock.yaml'],
       root
     ),
     npm: npmCommandOutput(['--version'], root),

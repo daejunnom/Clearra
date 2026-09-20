@@ -366,7 +366,7 @@ wrapper on Windows PowerShell 5.1 or newer:
 ```powershell
 $env:DISCORD_APPLICATION_ID = "1533373054309371924"
 try {
-  npm run register:commands:windows --workspace @clearra/discord-bot
+  pnpm --filter @clearra/discord-bot run register:commands:windows
 } finally {
   Remove-Item Env:DISCORD_APPLICATION_ID -ErrorAction SilentlyContinue
 }

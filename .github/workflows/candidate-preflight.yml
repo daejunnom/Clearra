@@ -68,21 +68,27 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
       - name: Install JavaScript workspace
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
       # Read a compatible canonical build snapshot, but never publish cache or
       # acceptance evidence from this unqualified branch.
       - name: Restore verified native build inputs
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/bin/wasm-bindgen.exe
+            build/tools/cargo/wasm-bindgen-cli/0.2.126
             ~/.cargo/registry
             ~/.cargo/git
-          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-
       - name: Prepare acceptance toolchains
         shell: powershell
         run: |
@@ -90,7 +96,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $tool = Get-Command wasm-bindgen -ErrorAction SilentlyContinue
           if ($null -eq $tool -or (& wasm-bindgen --version) -ne 'wasm-bindgen 0.2.126') {
-            & ./scripts/tools/invoke-clearra-build.ps1 -SourceRoot $env:GITHUB_WORKSPACE -Purpose experiment -Command cargo -ArgumentsJson '["install","wasm-bindgen-cli","--version","0.2.126","--locked"]'
+            & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - name: Check non-publishing workflow and artifact boundaries
@@ -147,17 +153,17 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Restore verified native build inputs
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/bin/wasm-bindgen.exe
+            build/tools/cargo/wasm-bindgen-cli/0.2.126
             ~/.cargo/registry
             ~/.cargo/git
-          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}
+          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-${{ github.sha }}
           restore-keys: |
-            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-
+            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-
       - name: Bind trusted native regression source
         shell: powershell
         run: |
@@ -196,12 +202,12 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Restore verified WASM build inputs
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/bin/wasm-bindgen
+            build/tools/cargo/wasm-bindgen-cli/0.2.126
             ~/.cargo/registry
             ~/.cargo/git
           key: release-acceptance-wasm-v5-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-${{ github.sha }}
@@ -222,7 +228,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $tool = Get-Command wasm-bindgen -ErrorAction SilentlyContinue
           if ($null -eq $tool -or (& wasm-bindgen --version) -ne 'wasm-bindgen 0.2.126') {
-            & ./scripts/tools/invoke-clearra-build.ps1 -SourceRoot $env:GITHUB_WORKSPACE -Purpose experiment -Command cargo -ArgumentsJson '["install","wasm-bindgen-cli","--version","0.2.126","--locked"]'
+            & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - name: Check non-publishing focused feedback boundaries
@@ -273,7 +279,7 @@ jobs:
       - uses: actions/setup-node@v4
         id: node
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Check release metadata and smoke wiring
         id: metadata
         run: node scripts/release/validate-release-metadata.mjs --tag v0.8.0
@@ -372,7 +378,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - run: npm ci --ignore-scripts
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Compile GUI components without running the test matrix
         run: node scripts/desktop-ui-compile-check.mjs

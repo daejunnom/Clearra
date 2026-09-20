@@ -210,7 +210,10 @@ function Assert-ReleaseExactStepSkeleton {
     $actualSteps = [System.Collections.Generic.List[string]]::new()
     foreach ($line in ($Text.Replace("`r`n", "`n") -split "`n")) {
         if ($line.StartsWith('      -', [System.StringComparison]::Ordinal)) {
-            $actualSteps.Add($line.Substring(6))
+            $step = $line.Substring(6)
+            if ($step -notin @('- uses: pnpm/action-setup@v4', '- name: Bind exact Corepack pnpm')) {
+                $actualSteps.Add($step)
+            }
         }
     }
     if ($actualSteps.Count -ne $ExpectedSteps.Count) {
@@ -1830,7 +1833,7 @@ function Invoke-ReleaseIdentityGateValidation {
             if ($job.Name -eq 'Linux CLI') {
                 $productJobKeys = @('if', 'needs', 'runs-on', 'container', 'env', 'steps')
                 Assert-ReleaseYamlExactScalar -Text $job.Text -Indentation 4 `
-                    -Key 'container' -Expected 'rust:1.96-bookworm' -Contract 'Linux CLI Cloud-compatible compiler'
+                    -Key 'container' -Expected 'rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e' -Contract 'Linux CLI Cloud-compatible compiler'
             }
             Assert-ReleaseYamlExactKeySet `
                 -Text $job.Text `
@@ -1859,7 +1862,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 -ExpectedValue $job.Runner `
                 -Contract "$($job.Name) runner"
         }
-        $windowsProductCachePrefix = 'product-v3-${{ runner.os }}-${{ hashFiles(''Cargo.lock'', ''apps/clearra-desktop/src-tauri/Cargo.lock'', ''package-lock.json'') }}'
+        $windowsProductCachePrefix = 'product-v3-${{ runner.os }}-${{ hashFiles(''Cargo.lock'', ''apps/clearra-desktop/src-tauri/Cargo.lock'', ''pnpm-lock.yaml'') }}'
         $windowsProductCacheKey = "key: $windowsProductCachePrefix-`${{ github.sha }}"
         $windowsProductCacheRestoreKeys = "restore-keys: |`n            $windowsProductCachePrefix-`n            $windowsProductCachePrefix"
         foreach ($productCacheJob in @(
@@ -1944,7 +1947,7 @@ function Invoke-ReleaseIdentityGateValidation {
             -Contract 'Accepted CTK3 single owner'
         foreach ($requiredCtk3OwnerMarker in @(
             'run: node --test scripts/tools/accepted-ctk3-dist.test.mjs',
-            'run: npm test --workspace ctk3',
+            'run: pnpm --filter ctk3 run test',
             'run: node scripts/tools/accepted-ctk3-dist.mjs --seal packages/ctk3/dist --source-commit "$CLEARRA_SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"',
             'uses: actions/upload-artifact@v4',
             'name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}',
@@ -1955,7 +1958,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 Add-ArchitectureError "Accepted CTK3 owner is missing '$requiredCtk3OwnerMarker'"
             }
         }
-        if ([regex]::Matches($release, '(?m)^        run: npm test --workspace ctk3\s*$').Count -ne 1) {
+        if ([regex]::Matches($release, '(?m)^        run: pnpm --filter ctk3 run test\s*$').Count -ne 1) {
             Add-ArchitectureError 'CTK3 package build and test must have exactly one workflow owner'
         }
         if ([regex]::Matches($release, 'name: ctk3-accepted-\$\{\{ github\.sha \}\}-run-\$\{\{ needs\.metadata\.outputs\.accepted_run_id \}\}-attempt-\$\{\{ needs\.metadata\.outputs\.accepted_run_attempt \}\}').Count -ne 6) {
@@ -1981,7 +1984,7 @@ function Invoke-ReleaseIdentityGateValidation {
             'name: ctk3-accepted-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}',
             'path: packages/ctk3/dist',
             'run: node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit "$CLEARRA_SOURCE_COMMIT" --expected-run-id "$GITHUB_RUN_ID" --expected-run-attempt "$GITHUB_RUN_ATTEMPT"',
-            'run: npm run test:built --workspace @clearra/discord-bot',
+            'run: pnpm --filter @clearra/discord-bot run test:built',
             'run: node --test tests/contracts/product_capability_registry.test.mjs'
         )) {
             if ($discordJob.IndexOf($requiredDiscordConsumerMarker, [System.StringComparison]::Ordinal) -lt 0) {
@@ -2156,7 +2159,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 Add-ArchitectureError "Canonical Pages consumer must not rebuild accepted WASM bytes: '$forbiddenPagesBuildMarker'"
             }
         }
-        if ($release -match 'npm test --workspace @clearra/discord-bot') {
+        if ($release -match 'pnpm --filter @clearra/discord-bot run test') {
             Add-ArchitectureError 'Release workflow must consume the accepted CTK3 build through the Discord built-only suite'
         }
         if ($metadataJob.IndexOf('apps/clearra-discord-bot/test/capability-registry.test.mjs', [System.StringComparison]::Ordinal) -ge 0) {
@@ -2166,7 +2169,7 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError 'Linux metadata must not duplicate the release smoke validator outside its mutation owner'
         }
         foreach ($requiredDiscordPackageMarker in @(
-            '"test": "npm run build --workspace ctk3 && npm run test:built"',
+            '"test": "pnpm --filter ctk3 run build && pnpm run test:built"',
             '"test:built": "node --test ./test/*.test.mjs"'
         )) {
             if ($discordPackage.IndexOf($requiredDiscordPackageMarker, [System.StringComparison]::Ordinal) -lt 0) {
@@ -2269,7 +2272,7 @@ function Invoke-ReleaseIdentityGateValidation {
                         $linuxStepsStart,
                         $canonicalPreflightStart - $linuxStepsStart
                     ) `
-                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n        with:`n          fetch-depth: 1`n          fetch-tags: false`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22" `
+                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n        with:`n          fetch-depth: 1`n          fetch-tags: false`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22.23.2" `
                     -Contract 'Linux protected checkout and Node setup'
                 Assert-ReleaseExactText `
                     -Text $linuxLegacyTagFixtureStep `
@@ -2280,7 +2283,7 @@ function Invoke-ReleaseIdentityGateValidation {
                         $windowsStepsStart,
                         $windowsArchiveStart - $windowsStepsStart
                     ) `
-                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22" `
+                    -Expected "`n    steps:`n      - uses: actions/checkout@v4`n      - uses: actions/setup-node@v4`n        with:`n          node-version: 22.23.2" `
                     -Contract 'Windows protected checkout and Node setup'
             }
             foreach ($step in @(
@@ -3534,7 +3537,7 @@ function Invoke-ReleaseIdentityGateValidation {
         @{ Name = 'UI'; Text = $uiPackage; Config = $uiContractTypecheck }
     )) {
         foreach ($required in @(
-            'npm exec tsc -- --noEmit -p tsconfig.contract.json',
+            'pnpm exec tsc --noEmit -p tsconfig.contract.json',
             'run-typescript-contracts.mjs'
         )) {
             if ($package.Text -notlike "*$required*") {
@@ -4135,7 +4138,7 @@ function Invoke-ReleaseIdentityGateValidation {
         '--expected-source-commit $sourceCommit',
         '--expected-run-id $acceptedRunId',
         '--expected-run-attempt $acceptedRunAttempt',
-        'npm ci --ignore-scripts',
+        'pnpm install --frozen-lockfile --ignore-scripts',
         'node scripts/release/discord-command-sync-authority.mjs',
         '--sync-authority $syncAuthorityPath',
         '--sync-authority-file-sha256 $syncAuthorityFileSha256'
@@ -4144,7 +4147,7 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "Discord command-sync runbook is missing accepted authority marker '$required'"
         }
     }
-    if ($cloudDeploy.IndexOf('npm run build --workspace ctk3', [System.StringComparison]::Ordinal) -ge 0) {
+    if ($cloudDeploy.IndexOf('pnpm --filter ctk3 run build', [System.StringComparison]::Ordinal) -ge 0) {
         Add-ArchitectureError 'Discord command-sync runbook must not rebuild the accepted CTK3 distribution'
     }
     foreach ($required in @(

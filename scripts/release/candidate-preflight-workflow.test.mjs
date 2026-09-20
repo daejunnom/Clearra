@@ -45,6 +45,7 @@ function assertIsolated(source) {
   assert.doesNotMatch(source, /\bgh\s|\bgcloud\s|\bssh\s|\bscp\s|git\s+(?:push|tag)|actions\/deploy-pages|\/dispatches/u);
   const actions = [...source.matchAll(/^\s*(?:- )?uses: (\S+)/gmu)].map((match) => match[1]);
   for (const action of actions) assert.ok(['actions/checkout@v4', 'actions/setup-node@v4',
+    'pnpm/action-setup@v4',
     'actions/upload-artifact@v4', 'actions/cache/restore@v4'].includes(action), action);
   const checkouts = source.match(/uses: actions\/checkout@v4/gmu) ?? [];
   assert.equal((source.match(/persist-credentials: false/gmu) ?? []).length, checkouts.length);
@@ -88,7 +89,11 @@ test('full selection runs the unchanged eight-stage entry point once and skips l
   assert.match(workflow, /runs-on: windows-latest/u);
   assert.match(workflow, /-ExecutionSurface Trusted -RuntimeEnvironment windows/u);
   assert.match(workflow, /RUST_MIN_STACK: "16777216"/u);
-  assert.match(workflow, /"wasm-bindgen-cli","--version","0\.2\.126","--locked"/u);
+  assert.match(
+    workflow,
+    /install-managed-cargo-tool\.ps1 -Purpose (?:experiment|product) -ToolName wasm-bindgen-cli -Version 0\.2\.126/u,
+  );
+  assert.doesNotMatch(workflow, /cargo(?:\s+'?\+1\.98\.1'?)?\s+install/u);
   assert.doesNotMatch(workflow, /-ExecutionPolicy|Unblock-File|Set-AuthenticodeSignature|\bwsl\b/u);
 });
 
@@ -134,7 +139,11 @@ test('candidate build leaves only read matching canonical cache families and sti
     assert.ok(canonical.includes(cache.trimEnd()), `${name} must match the canonical producer cache paths and keys`);
     assert.ok(cache.includes(`key: release-acceptance-${family}-v${version}-`));
     assert.match(cache, /-\$\{\{ github.sha \}\}/u);
-    assert.doesNotMatch(cache, /Clearra\/build|cargo-target/u, 'CI caches must not restore owner generations');
+    assert.doesNotMatch(
+      cache,
+      /build\/(?!tools\/cargo\/wasm-bindgen-cli\/0\.2\.126)|cargo-target/u,
+      'CI caches may restore the managed Cargo tool but not build generations',
+    );
     assert.equal((job.match(/actions\/cache\/restore@v4/gu) ?? []).length, 1);
     assert.doesNotMatch(job, /cache-hit/u, 'a cache hit is not a reason to skip the source build or tests');
   }

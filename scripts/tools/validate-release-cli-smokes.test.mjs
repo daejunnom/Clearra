@@ -226,8 +226,8 @@ test("rejects rebuilding the verified ProductE2E CLI in RustProduct", async () =
   const changed = replaceExactlyOnceAfter(
     normalizedWorkflow,
     "\n  release-acceptance-rust-product:",
-    "      - name: Install JavaScript workspace\n        run: npm ci --ignore-scripts\n",
-    "      - name: Install JavaScript workspace\n        run: npm ci --ignore-scripts\n      - name: Rebuild ProductE2E CLI\n        run: cargo build\n",
+    "      - name: Install JavaScript workspace\n        run: pnpm install --frozen-lockfile --ignore-scripts\n",
+    "      - name: Install JavaScript workspace\n        run: pnpm install --frozen-lockfile --ignore-scripts\n      - name: Rebuild ProductE2E CLI\n        run: cargo build\n",
   );
   const result = await runValidator(changed);
   assert.notEqual(result.status, 0, diagnostic(result));
@@ -397,7 +397,7 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - name: Build and test CTK3 once\n        run: npm test --workspace ctk3\n",
+        "      - name: Build and test CTK3 once\n        run: pnpm --filter ctk3 run test\n",
         "      - name: Build and test CTK3 once\n        run: echo skipped\n",
       ),
   ],
@@ -415,8 +415,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "        run: npm run test:built --workspace @clearra/discord-bot\n",
-        "        run: npm test --workspace @clearra/discord-bot\n",
+        "        run: pnpm --filter @clearra/discord-bot run test:built\n",
+        "        run: pnpm --filter @clearra/discord-bot run test\n",
       ),
   ],
   [
@@ -813,13 +813,13 @@ for (const [name, mutate] of [
   [
     "rejects a Linux product cache that cannot advance after source edits",
     (source) => replaceExactlyOnce(source,
-      "          key: product-linux-bookworm-rust-1.96-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n",
-      "          key: product-linux-bookworm-rust-1.96-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n"),
+      "          key: product-linux-bookworm-rust-1.98.1-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n",
+      "          key: product-linux-bookworm-rust-1.98.1-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n"),
   ],
   [
     "rejects a Cloud-compatible CLI claim built against a different glibc baseline",
-    (source) => replaceExactlyOnce(source, '    container: rust:1.96-bookworm\n',
-      '    container: rust:1.96-trixie\n'),
+    (source) => replaceExactlyOnce(source, '    container: rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e\n',
+      '    container: rust:1.98.1-trixie\n'),
   ],
   [
     "rejects masking a slim-runtime loader failure",
@@ -866,8 +866,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n",
-        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}\n",
+        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-${{ github.sha }}\n",
+        "      - uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}\n",
       ),
   ],
   [
@@ -875,17 +875,18 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n          restore-keys: |\n            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-\n            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}\n",
-        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-${{ github.sha }}\n          restore-keys: |\n            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}-\n",
+        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-${{ github.sha }}\n          restore-keys: |\n            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-\n            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}\n",
+        "      - uses: actions/cache@v4\n        with:\n          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-${{ github.sha }}\n          restore-keys: |\n            product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-\n",
       ),
   ],
   [
     "rejects turning the Windows CLI cache reader into a writer",
     (source) =>
-      replaceExactlyOnce(
+      replaceExactlyOnceAfter(
         source,
-        "  windows-cli:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n    runs-on: windows-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - uses: actions/cache/restore@v4\n",
-        "  windows-cli:\n    if: github.event_name == 'workflow_dispatch'\n    needs: metadata\n    runs-on: windows-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - uses: actions/cache@v4\n",
+        "\n  windows-cli:",
+        "      - uses: actions/cache/restore@v4\n",
+        "      - uses: actions/cache@v4\n",
       ),
   ],
   [
@@ -893,8 +894,8 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/bin/wasm-bindgen.exe\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: release-acceptance-",
-        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n        with:\n          path: |\n            ~/.cargo/bin/wasm-bindgen.exe\n            ~/.cargo/registry\n            ~/.cargo/git\n            ~/AppData/Local/Clearra/build\n          key: release-acceptance-",
+        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n        with:\n          path: |\n            build/tools/cargo/wasm-bindgen-cli/0.2.126\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: release-acceptance-",
+        "          }\n      - id: release_toolchain_cache\n        name: Restore canonical release toolchain cache\n        uses: actions/cache/restore@v4\n        with:\n          path: |\n            build/tools/cargo/wasm-bindgen-cli/0.2.126\n            ${{ runner.temp }}/Clearra/build/cargo-target\n            ~/.cargo/registry\n            ~/.cargo/git\n          key: release-acceptance-",
       ),
   ],
   [

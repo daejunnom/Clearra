@@ -49,7 +49,7 @@ export async function createAcceptedBuildImageAuthority(options) {
     if (build.substitutions?.[key] !== value) throw new Error(`Cloud packaging substitution differs: ${key}`);
   }
   if (!Array.isArray(build.steps) || build.steps.length !== 2 ||
-      build.steps[0]?.id !== 'verify-accepted-inputs' || build.steps[0]?.name !== 'node:22-bookworm-slim' ||
+      build.steps[0]?.id !== 'verify-accepted-inputs' || build.steps[0]?.name !== 'node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9' ||
       build.steps[1]?.id !== 'package-accepted-runtime' || build.steps[1]?.name !== 'gcr.io/cloud-builders/docker' ||
       build.steps.some((step) => step.status !== 'SUCCESS' || step.allowFailure === true ||
         (step.allowExitCodes?.length ?? 0) !== 0) ||

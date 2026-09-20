@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Check exact source and isolated authority
         shell: bash
         run: |
@@ -67,7 +67,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Build native archive and execute real CLI process tests
         shell: pwsh
         run: |
@@ -86,7 +86,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Verify materializer, graph paths and App contracts
         shell: pwsh
         run: |
@@ -156,9 +156,25 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+      - name: Resolve the exact pnpm store
+        id: pnpm-store
+        shell: pwsh
+        run: |
+          "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
+      - name: Cache only the exact pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: clearra-pnpm-${{ runner.os }}-${{ runner.arch }}-node-22.23.2-pnpm-11.5.0-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install exact selected workspace dependencies without lifecycle builds
-        run: npm ci --ignore-scripts --no-audit --no-fund --workspace ctk3 --workspace @clearra/ui --workspace @clearra/discord-bot --workspace @clearra/web --include-workspace-root
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Build this source's CTK exports
         shell: pwsh
         run: |
@@ -201,7 +217,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Prepare isolated preview toolchain
         shell: pwsh
         run: |
@@ -210,7 +226,7 @@ jobs:
           Assert-ClearraTrustedExecutionSurface -TaskName 'IntegrationPreviewWasm' -ExecutionSurface Trusted -RuntimeEnvironment wasm
           rustup target add wasm32-unknown-unknown
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command cargo -ArgumentsJson '["install","wasm-bindgen-cli","--version","0.2.126","--locked"]'
+          & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build exact-source development WASM once
         id: preview

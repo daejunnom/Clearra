@@ -55,7 +55,7 @@ to a small source edit.
 | One Rust crate or one named Rust integration test | `scripts/run-rust-test.ps1 -Package <package> -Lib -ExecutionSurface Trusted` or `-Test <target>`; use `-Filter <name>` when one regression owns the change |
 | `packages/clearra-ui/**` | Run the exact owning files, for example `node scripts/tools/run-focused-js-tests.mjs packages/clearra-ui/test/uiRuntimeContracts.test.mjs packages/clearra-ui/test/productResultPager.contract.ts` |
 | `apps/clearra-web/**` | Run the exact owning contracts, for example `node scripts/tools/run-focused-js-tests.mjs apps/clearra-web/test/ClearraWasmRuntime.contract.ts` |
-| `packages/ctk3/**` | Run `npm run build --workspace ctk3` once only when changed source must refresh its generated module, then run exact files such as `node scripts/tools/run-focused-js-tests.mjs packages/ctk3/test/compatibility.test.mjs`; do not add its other tests automatically |
+| `packages/ctk3/**` | Run `pnpm --filter ctk3 run build` once only when changed source must refresh its generated module, then run exact files such as `node scripts/tools/run-focused-js-tests.mjs packages/ctk3/test/compatibility.test.mjs`; do not add its other tests automatically |
 | `apps/clearra-discord-bot/**` | Run the exact owning files, for example `node scripts/tools/run-focused-js-tests.mjs apps/clearra-discord-bot/test/pc-score-minimals-result.test.mjs` |
 | `core-c/**` or the C ABI | `scripts/run-c-core-tests.ps1` with the required aggregate, split, or sanitizer option; do not add Rust/UI suites unless that boundary also changed |
 | Static architecture ownership only | `powershell -NoProfile -File scripts/validate_architecture.ps1 -TaskName "<owned architecture task>" -QuietProgress` |

@@ -4,8 +4,8 @@
   "version": "0.8.1",
   "identifier": "dev.clearra.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm run build",
     "devUrl": "http://127.0.0.1:4194",
     "frontendDist": "../build"
   },

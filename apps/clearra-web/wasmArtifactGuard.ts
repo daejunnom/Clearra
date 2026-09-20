@@ -317,7 +317,7 @@ function isArtifactPath(
 function missingArtifactError(path: string, cause: unknown): Error {
   return new Error(
     `Clearra WASM artifact is missing or incomplete: ${path}. ` +
-      'Run "npm run wasm:build" before invoking Vite directly.',
+      'Run "pnpm run wasm:build" before invoking Vite directly.',
     { cause }
   );
 }

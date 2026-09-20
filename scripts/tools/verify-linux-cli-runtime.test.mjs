@@ -65,8 +65,8 @@ test('parallel release CLI uses the Cloud compiler baseline and then the slim ru
   const job = workflow.split('  linux-cli:')[1].split('  discord-bot:')[0];
   const builder = dockerfile.match(/^FROM (\S+) AS clearra-build$/mu)?.[1];
   const runtime = dockerfile.match(/^FROM (\S+) AS runtime$/mu)?.[1];
-  assert.equal(builder, 'rust:1.96-bookworm');
-  assert.equal(runtime, 'node:22-bookworm-slim');
+  assert.equal(builder, 'rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e');
+  assert.equal(runtime, 'node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9');
   assert.ok(job.includes(`container: ${builder}`));
   assert.ok(job.includes(`uses: docker://${runtime}`));
   assert.match(job, /needs: \[metadata, ctk3\]/u);

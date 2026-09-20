@@ -338,8 +338,22 @@ jobs:
       - name: Set up Node.js for immutable candidate preparation
         uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm for candidate preparation
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+      - name: Resolve the exact pnpm store
+        id: pnpm-store
+        shell: pwsh
+        run: |
+          "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
+      - name: Cache only the exact pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: clearra-pnpm-${{ runner.os }}-${{ runner.arch }}-node-22.23.2-pnpm-11.5.0-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Download the exact pre-candidate recovery-debt clearance
         uses: actions/download-artifact@v4
         with:
@@ -407,7 +421,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$GCP_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,61}[a-z0-9]$ ]] || { echo 'GCP_PROJECT_ID is invalid' >&2; exit 2; }
-          npm ci --ignore-scripts
+          pnpm install --frozen-lockfile --ignore-scripts
           node scripts/tools/accepted-ctk3-dist.mjs \
             --verify evidence/accepted-ctk3 \
             --expected-source-commit "$SOURCE_COMMIT" \
@@ -569,7 +583,7 @@ jobs:
       - name: Set up Node.js for protected release validators
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Download the exact prepared state
         uses: actions/download-artifact@v4
         with:
@@ -1130,10 +1144,24 @@ jobs:
       - name: Set up Node.js for global synchronization
         uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm for synchronization
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+      - name: Resolve the exact pnpm store
+        id: pnpm-store
+        shell: pwsh
+        run: |
+          "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
+      - name: Cache only the exact pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: clearra-pnpm-${{ runner.os }}-${{ runner.arch }}-node-22.23.2-pnpm-11.5.0-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install the frozen runtime dependencies for synchronization
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Download the exact protected promotion evidence
         uses: actions/download-artifact@v4
         with:

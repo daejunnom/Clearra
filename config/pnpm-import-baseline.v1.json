@@ -1,0 +1,36 @@
+{
+  "schema_id": "clearra.pnpm-import-baseline.v1",
+  "package_lock_sha256": "009e19f9e4aa93d3a10f49e0d00235f820fa7b6ff9fd98e2ecda36d4dfdb2fa6",
+  "pnpm_lock_sha256": "6d7da16410508211eca372aed5df888d42dd41c61573a9836c19dc6b2d260ebc",
+  "npm_resolved_count": 115,
+  "pnpm_resolved_count": 115,
+  "resolved_graph_sha256": "fc9f5ab4c469227a75206da04d8e7df8b711936aec52161b3eb447a204786006",
+  "missing": [],
+  "added": [],
+  "accepted": true,
+  "validated_pnpm_lock_sha256": "fa66ebaec69d4b82f4e2622b39decdd290b0bfdad18ec422d5f4e95050d047e8",
+  "post_import_adjustments": [
+    {
+      "workspace": "packages/clearra-ui",
+      "reason": "declare direct test and typecheck dependencies previously resolved only through npm hoisting",
+      "added_dev_dependencies": {
+        "@sveltejs/vite-plugin-svelte": "^5.0.0",
+        "esbuild": "^0.25.0",
+        "typescript": "^5.9.3",
+        "vite": "^6.0.0"
+      },
+      "resolved_graph_changed": false
+    },
+    {
+      "workspace": ".",
+      "reason": "declare direct dependencies imported by repository-level build and contract scripts",
+      "added_dev_dependencies": {
+        "@sveltejs/vite-plugin-svelte": "^5.0.0",
+        "esbuild": "^0.25.0",
+        "svelte": "^5.0.0",
+        "vite": "^6.0.0"
+      },
+      "resolved_graph_changed": false
+    }
+  ]
+}

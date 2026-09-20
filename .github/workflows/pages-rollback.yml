@@ -95,7 +95,7 @@ jobs:
       # rustc 1.98.0, and /home/runner/.cargo. Keep that producer contract
       # exact for the one legacy reconstruction. Regular canonical captures
       # skip every toolchain and build step.
-      RUSTUP_TOOLCHAIN: ${{ inputs.mode == 'bootstrap-capture' && '1.98.0' || 'stable' }}
+      RUSTUP_TOOLCHAIN: ${{ inputs.mode == 'bootstrap-capture' && '1.98.0' || '1.98.1' }}
     steps:
       - uses: actions/checkout@v4
         if: ${{ inputs.mode == 'bootstrap-capture' }}
@@ -109,7 +109,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: ${{ inputs.mode == 'bootstrap-capture' }}
         with:
-          node-version: ${{ inputs.mode == 'bootstrap-capture' && '22.23.2' || '22' }}
+          node-version: 22.23.2
           cache: npm
           cache-dependency-path: snapshot-source/package-lock.json
       - name: Require managed frontend policy before legacy source compilation

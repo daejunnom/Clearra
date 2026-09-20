@@ -1,0 +1,1809 @@
+{
+  "schema_id": "clearra.management.v1",
+  "policy_version": 1,
+  "canonical_source": {
+    "commit": "6618142e4fe8452985ae3ee94a595f33f410fde6",
+    "release_run_id": 35508135887,
+    "release_run_attempt": 1,
+    "artifact": "release-gate-evidence-6618142e4fe8452985ae3ee94a595f33f410fde6-run-35508135887-attempt-1",
+    "artifact_sha256": "766a5967eeed81abafe4612f7e186f4099409d7f85eeab1df8716dd4c166e51b",
+    "toolchain_report_sha256": "bab3f801b89c12dbbafcaace19d6df82cc14a535823b065517769465f852ec33"
+  },
+  "toolchains": {
+    "node": "22.23.2",
+    "npm": "10.9.8",
+    "pnpm": "11.5.0",
+    "rust": "1.98.1",
+    "cargo": "1.98.1",
+    "wasm_bindgen": "0.2.126"
+  },
+  "repository_roots": [
+    {
+      "id": "build-publication",
+      "path": "build",
+      "classes": [
+        "publication",
+        "container-stage"
+      ],
+      "lifecycle": "reproducible-until-explicit-clean",
+      "owners": [
+        "cargo",
+        "frontend",
+        "wasm",
+        "discord-container",
+        "release-evidence"
+      ]
+    },
+    {
+      "id": "coverage",
+      "path": "coverage",
+      "classes": [
+        "coverage"
+      ],
+      "lifecycle": "ephemeral-until-explicit-clean",
+      "owners": [
+        "cargo"
+      ]
+    },
+    {
+      "id": "local-artifacts",
+      "path": "_local/artifacts",
+      "classes": [
+        "test",
+        "benchmark",
+        "analysis",
+        "research"
+      ],
+      "lifecycle": "retained-run-evidence",
+      "owners": [
+        "cargo",
+        "frontend",
+        "wasm",
+        "ctk3",
+        "discord-container",
+        "benchmark",
+        "browser",
+        "management"
+      ]
+    },
+    {
+      "id": "local-state",
+      "path": "_local/state",
+      "classes": [
+        "receipt",
+        "lock",
+        "checkpoint"
+      ],
+      "lifecycle": "transaction-state-until-receipted-clean",
+      "owners": [
+        "management"
+      ]
+    },
+    {
+      "id": "local-temp",
+      "path": "_local/tmp",
+      "classes": [
+        "temporary"
+      ],
+      "lifecycle": "process-lifetime",
+      "owners": [
+        "management"
+      ]
+    },
+    {
+      "id": "dependency-links",
+      "path": "node_modules",
+      "classes": [
+        "pnpm-links"
+      ],
+      "lifecycle": "frozen-install-link-view",
+      "owners": [
+        "management"
+      ]
+    },
+    {
+      "id": "desktop-dependency-links",
+      "path": "apps/clearra-desktop/node_modules",
+      "classes": [
+        "pnpm-links"
+      ],
+      "lifecycle": "frozen-install-link-view",
+      "owners": [
+        "management"
+      ]
+    },
+    {
+      "id": "discord-dependency-links",
+      "path": "apps/clearra-discord-bot/node_modules",
+      "classes": [
+        "pnpm-links"
+      ],
+      "lifecycle": "frozen-install-link-view",
+      "owners": [
+        "management"
+      ]
+    },
+    {
+      "id": "web-dependency-links",
+      "path": "apps/clearra-web/node_modules",
+      "classes": [
+        "pnpm-links"
+      ],
+      "lifecycle": "frozen-install-link-view",
+      "owners": [
+        "management"
+      ]
+    },
+    {
+      "id": "ui-dependency-links",
+      "path": "packages/clearra-ui/node_modules",
+      "classes": [
+        "pnpm-links"
+      ],
+      "lifecycle": "frozen-install-link-view",
+      "owners": [
+        "management"
+      ]
+    },
+    {
+      "id": "ctk3-dependency-links",
+      "path": "packages/ctk3/node_modules",
+      "classes": [
+        "pnpm-links"
+      ],
+      "lifecycle": "frozen-install-link-view",
+      "owners": [
+        "management"
+      ]
+    },
+    {
+      "id": "ctk3-package",
+      "path": "packages/ctk3/dist",
+      "classes": [
+        "package-output"
+      ],
+      "lifecycle": "reproducible-package-output",
+      "owners": [
+        "ctk3"
+      ]
+    },
+    {
+      "id": "web-public-wasm",
+      "path": "apps/clearra-web/static/wasm",
+      "classes": [
+        "publication"
+      ],
+      "lifecycle": "reproducible-publication",
+      "owners": [
+        "wasm"
+      ]
+    },
+    {
+      "id": "web-export",
+      "path": "apps/clearra-web/build",
+      "classes": [
+        "publication"
+      ],
+      "lifecycle": "reproducible-publication",
+      "owners": [
+        "frontend"
+      ]
+    },
+    {
+      "id": "desktop-export",
+      "path": "apps/clearra-desktop/build",
+      "classes": [
+        "publication"
+      ],
+      "lifecycle": "reproducible-publication",
+      "owners": [
+        "frontend"
+      ]
+    }
+  ],
+  "curated_read_only_roots": [
+    "docs/research"
+  ],
+  "external_roots": [
+    {
+      "id": "build-cache",
+      "windows": "${LOCALAPPDATA}/Clearra/build",
+      "linux": "${XDG_CACHE_HOME:-${HOME}/.cache}/Clearra/build",
+      "lifecycle": "clearra-owned-receipted-clean-only"
+    },
+    {
+      "id": "cache",
+      "windows": "${LOCALAPPDATA}/Clearra/cache",
+      "linux": "${XDG_CACHE_HOME:-${HOME}/.cache}/Clearra/cache",
+      "lifecycle": "clearra-owned-receipted-clean-only"
+    },
+    {
+      "id": "state",
+      "windows": "${LOCALAPPDATA}/Clearra/state",
+      "linux": "${XDG_STATE_HOME:-${HOME}/.local/state}/Clearra",
+      "lifecycle": "clearra-owned-receipted-clean-only"
+    },
+    {
+      "id": "logs",
+      "windows": "${LOCALAPPDATA}/Clearra/logs",
+      "linux": "${XDG_STATE_HOME:-${HOME}/.local/state}/Clearra/logs",
+      "lifecycle": "clearra-owned-receipted-clean-only"
+    },
+    {
+      "id": "browser",
+      "windows": "${LOCALAPPDATA}/Clearra/browser",
+      "linux": "${XDG_STATE_HOME:-${HOME}/.local/state}/Clearra/browser",
+      "lifecycle": "clearra-owned-receipted-clean-only"
+    },
+    {
+      "id": "npm-cache",
+      "resolver": "npm config get cache",
+      "shared": true,
+      "lifecycle": "shared-tool-owned-never-auto-clean"
+    },
+    {
+      "id": "pnpm-store",
+      "resolver": "pnpm store path --silent",
+      "shared": true,
+      "lifecycle": "shared-tool-owned-never-auto-clean"
+    },
+    {
+      "id": "cargo-home",
+      "environment": "CARGO_HOME",
+      "fallback": "${HOME}/.cargo",
+      "shared": true,
+      "lifecycle": "shared-tool-owned-never-auto-clean"
+    },
+    {
+      "id": "rustup-home",
+      "environment": "RUSTUP_HOME",
+      "fallback": "${HOME}/.rustup",
+      "shared": true,
+      "lifecycle": "shared-tool-owned-never-auto-clean"
+    }
+  ],
+  "producers": [
+    {
+      "id": "cargo",
+      "classes": [
+        "build-cache",
+        "test"
+      ]
+    },
+    {
+      "id": "frontend",
+      "classes": [
+        "build-cache",
+        "publication",
+        "test"
+      ]
+    },
+    {
+      "id": "wasm",
+      "classes": [
+        "build-cache",
+        "publication",
+        "test"
+      ]
+    },
+    {
+      "id": "ctk3",
+      "classes": [
+        "package-output",
+        "benchmark"
+      ]
+    },
+    {
+      "id": "discord-container",
+      "classes": [
+        "container-stage",
+        "receipt",
+        "test",
+        "state"
+      ]
+    },
+    {
+      "id": "release-evidence",
+      "classes": [
+        "receipt",
+        "publication"
+      ]
+    },
+    {
+      "id": "benchmark",
+      "classes": [
+        "benchmark",
+        "analysis"
+      ]
+    },
+    {
+      "id": "browser",
+      "classes": [
+        "browser",
+        "test"
+      ]
+    },
+    {
+      "id": "management",
+      "classes": [
+        "receipt",
+        "lock",
+        "temporary",
+        "test"
+      ]
+    }
+  ],
+  "git_policy": {
+    "remote": "origin",
+    "canonical_branch": "main",
+    "candidate_pattern": "codex/converge-*",
+    "required_checks": [
+      "Clearra management policy"
+    ],
+    "safety_ref_prefix": "refs/clearra-safety",
+    "allow_force_push": false,
+    "allow_branch_deletion_before_verification": false,
+    "allow_implicit_pull_merge": false
+  },
+  "secret_path_patterns": [
+    ".env",
+    ".env.*",
+    "*.key",
+    "*.pem",
+    "*credential*",
+    "*credentials*",
+    "*api-key*",
+    "*apikey*",
+    "*private-key*",
+    "*private_key*",
+    "*service-account*.json",
+    "*service_account*.json"
+  ],
+  "writer_registry": [
+    {
+      "path": "_local/tests/test_clearra_manage.py",
+      "producer": "management",
+      "output_class": "test"
+    },
+    {
+      "path": "_local/tests/test_git_management_fixture.py",
+      "producer": "management",
+      "output_class": "test"
+    },
+    {
+      "path": "_local/clearra_manage.py",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs",
+      "producer": "discord-container",
+      "output_class": "receipt"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs",
+      "producer": "discord-container",
+      "output_class": "receipt"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs",
+      "producer": "discord-container",
+      "output_class": "receipt"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/register-commands.ps1",
+      "producer": "discord-container",
+      "output_class": "receipt"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/verify-oracle-candidate-proof.mjs",
+      "producer": "discord-container",
+      "output_class": "receipt"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/verify-oracle-rollback-proof.mjs",
+      "producer": "discord-container",
+      "output_class": "receipt"
+    },
+    {
+      "path": "apps/clearra-discord-bot/src/discord/access-preferences.mjs",
+      "producer": "discord-container",
+      "output_class": "receipt"
+    },
+    {
+      "path": "apps/clearra-discord-bot/src/discord/locale-preferences.mjs",
+      "producer": "discord-container",
+      "output_class": "receipt"
+    },
+    {
+      "path": "apps/clearra-discord-bot/test/access-preferences.test.mjs",
+      "producer": "discord-container",
+      "output_class": "test"
+    },
+    {
+      "path": "apps/clearra-discord-bot/test/discord-command-catalog-release.test.mjs",
+      "producer": "discord-container",
+      "output_class": "test"
+    },
+    {
+      "path": "apps/clearra-discord-bot/test/job-service.test.mjs",
+      "producer": "discord-container",
+      "output_class": "test"
+    },
+    {
+      "path": "apps/clearra-discord-bot/test/locale-preferences.test.mjs",
+      "producer": "discord-container",
+      "output_class": "test"
+    },
+    {
+      "path": "apps/clearra-discord-bot/test/oracle-rollback-contract.test.mjs",
+      "producer": "discord-container",
+      "output_class": "test"
+    },
+    {
+      "path": "apps/clearra-discord-bot/test/release-tree-digest.test.mjs",
+      "producer": "discord-container",
+      "output_class": "test"
+    },
+    {
+      "path": "apps/clearra-web/scripts/prepare-pages-fallback.mjs",
+      "producer": "frontend",
+      "output_class": "publication"
+    },
+    {
+      "path": "apps/clearra-web/test/wasmArtifactGuard.test.mjs",
+      "producer": "frontend",
+      "output_class": "test"
+    },
+    {
+      "path": "crates/clearra-app/src/native_build_probability_host_runtime.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-cli/src/assemble/cover_query_assembler_tests.rs",
+      "producer": "cargo",
+      "output_class": "test"
+    },
+    {
+      "path": "crates/clearra-cli/src/cli_entry_document_utility_tests.rs",
+      "producer": "cargo",
+      "output_class": "test"
+    },
+    {
+      "path": "crates/clearra-cli/src/cli_routing.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-cli/src/commands/pc_scenario_command_tests.rs",
+      "producer": "cargo",
+      "output_class": "test"
+    },
+    {
+      "path": "crates/clearra-cli/src/fixture/pc_scenario_fixture_tests.rs",
+      "producer": "cargo",
+      "output_class": "test"
+    },
+    {
+      "path": "crates/clearra-cli/src/output/cli_output_dispatcher_tests.rs",
+      "producer": "cargo",
+      "output_class": "test"
+    },
+    {
+      "path": "crates/clearra-cli/src/output/solution_artifact_output.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-cli/src/tablebase_curl_batch.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-cli/src/tablebase_download.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-cli/src/tablebase_download_tests.rs",
+      "producer": "cargo",
+      "output_class": "test"
+    },
+    {
+      "path": "crates/clearra-cli/src/tie_snapshot.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-core-executor/src/resource/durable_delegation_journal.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-core-ffi/src/raw/owned_packing_buffer.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-ctk3/src/codec.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-gui-host/src/settings/settings_save.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-output/src/artifact/atomic_bytes_sink.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-output/src/artifact/atomic_file_sink.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-platform-fs/src/windows.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-platform-fs/tests/native_atomic_publication.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-render/src/bin/clearra_asset_import.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "crates/clearra-wasm/tests/pc_minimals_ctk3_stage_probe.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "packages/ctk3/scripts/build.mjs",
+      "producer": "ctk3",
+      "output_class": "package-output"
+    },
+    {
+      "path": "scripts/architecture/validate_build_system.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/architecture/validate_managed_build_contract.test.ps1",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/architecture/validate_pc4_full_solution_authority_contract.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/architecture/validate_pc4_full_solution_authority_contract.test.ps1",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/architecture/validate_release_static_contract.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/benchmark/pc4-local-dataset.mjs",
+      "producer": "benchmark",
+      "output_class": "benchmark"
+    },
+    {
+      "path": "scripts/benchmark/run-build-probability-optimization.mjs",
+      "producer": "benchmark",
+      "output_class": "benchmark"
+    },
+    {
+      "path": "scripts/benchmark/run-finesse-benchmark.mjs",
+      "producer": "benchmark",
+      "output_class": "benchmark"
+    },
+    {
+      "path": "scripts/benchmark/run-pc4-local-wasm.mjs",
+      "producer": "benchmark",
+      "output_class": "benchmark"
+    },
+    {
+      "path": "scripts/benchmark/run-wasm-p7-matrix.mjs",
+      "producer": "benchmark",
+      "output_class": "benchmark"
+    },
+    {
+      "path": "scripts/benchmark/wasm-product-browser/vite.config.mjs",
+      "producer": "benchmark",
+      "output_class": "benchmark"
+    },
+    {
+      "path": "scripts/clearra.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/collect-windows-block-events.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/compare-pc-runtime-environments.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/diagnose-c-core-test-artifacts.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/diagnose-windows-block.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/export-pc-artifact.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/adversarial-correctness.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/clearra-artifact-cache.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/clearra-build-entrypoints.test.ps1",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/lib/clearra-build-lifecycle.test.ps1",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/lib/clearra-build-product-catalog.test.ps1",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/lib/clearra-build-transaction-record.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/clearra-native-helpers.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/clearra-path-helpers.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/clearra-runtime-environment.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/clearra-verify-helpers.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/core-c-build.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/gpu-worker-tasks.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/no-product-debt.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/product-e2e-build.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/product-e2e-report.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/product-e2e-run.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/product-process-surface.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/render-golden-gate.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/rust-exact-tests.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/lib/wasm-release-gate.ps1",
+      "producer": "wasm",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/lib/worker-e2e-process.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/accepted-pages-build.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/accepted-pages-build.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/accepted-wasm-build.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/accepted-wasm-build.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/candidate-preflight-artifacts.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/candidate-preflight-artifacts.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/canonical-acceptance-evidence.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/canonical-acceptance-evidence.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/cloud/accepted-build-image-authority.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/cloud/accepted-build-inputs.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/cloud/accepted-build-inputs.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/cloud/candidate-release-v080.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/cloud/candidate-release-v080.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/cloud/cloud-build-image-authority-v080.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/cloud/cloud-build-image-authority-v080.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/cloud/prior-runtime-authority-v080.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/cloud/recovery-prestage-preflight.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/create-exact-source-archive.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/create-production-probe-authority-v080.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/current-product-release.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-catalog-recovery-authority.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-catalog-recovery-authority.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-command-sync-authority.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-command-sync-authority.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-deploy-workflow.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-deployment-recovery.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-deployment-recovery.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-deployment-state.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-deployment-state.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-production-checkpoint-receipt.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-recovery-debt.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/discord-recovery-debt.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/fast-fix-qualification-evidence.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/final-source-attempt-journal.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/final-source-attempt-journal.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/final-source-stage-evidence.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/final-source-stage-evidence.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/invoke-discord-runtime-recovery-v080.ps1",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/materialize-production-probe-spec.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/materialize-production-probe-spec.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/observe-production-surfaces.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/observe-production-surfaces.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle-freeze-v080.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle-inactive-stage-v080.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle/create-inactive-stage-v080.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle/create-prestage-helper-bundle.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-freeze-v080.ps1",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-freeze-v080.test.ps1",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-inactive-stage-v080.ps1",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-inactive-stage-v080.test.ps1",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-release-deploy-v080.test.ps1",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle/remote-overlay-copy-v080.test.py",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/pages-canonical-capture.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/pages-deployment-authority.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/pages-deployment-run.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/pages-legacy-contract.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/pages-rollback-authority.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/pages-rollback-authority.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/pages-rollback-package.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/prepare-native-build-identity.ps1",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/product-e2e-cli-artifact.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/product-e2e-cli-artifact.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/release-publication-evidence.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/reusable-accepted-wasm-build.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/try-reuse-accepted-wasm-build.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/validate-release-metadata.test.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/test_artifact_path_policy.ps1",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/test_execution_surface_policy.ps1",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/test_product_process_contract.ps1",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/tools/accepted-ctk3-dist.mjs",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/accepted-ctk3-dist.test.mjs",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/tools/audit-upstream-drift.mjs",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/build-clearra-wasm.mjs",
+      "producer": "wasm",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/tools/cargo-jobserver-stdio.test.mjs",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/tools/clearra-build-owner.mjs",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/clearra-build-policy.test.mjs",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/tools/clearra-frontend-paths.mjs",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/clearra-wasm-build-contract.contract.mjs",
+      "producer": "wasm",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/tools/clearra-wasm-generation-retention.test.mjs",
+      "producer": "wasm",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/tools/import-verified-clearra-wasm.mjs",
+      "producer": "wasm",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/tools/import-verified-clearra-wasm.test.mjs",
+      "producer": "wasm",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/tools/install-managed-cargo-tool.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/managed-cmake-builds.test.mjs",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/tools/managed-transient-directory.contract.mjs",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/managed-transient-directory.mjs",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/prepare-clearra-rustc-launcher.mjs",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/public-command-docs.test.mjs",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/tools/retain-clearra-debug-builds.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/retain-clearra-debug-builds.test.mjs",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/tools/run-focused-js-tests.test.mjs",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/tools/run-typescript-contracts.mjs",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/run-wasm-browser-benchmark.mjs",
+      "producer": "wasm",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/tools/stage-clearra-wasm.mjs",
+      "producer": "wasm",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/tools/validate-release-cli-smokes.mjs",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/validate-release-cli-smokes.test.mjs",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/tools/verify-pnpm-import.py",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/ux-smoke.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/verify.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/wasm-command-runtime-check.ps1",
+      "producer": "wasm",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/windows/clearra-local-services-watchdog.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/windows/install-clearra-local-services-watchdog.ps1",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "tools/asset-import/import_skin.ps1",
+      "producer": "frontend",
+      "output_class": "publication"
+    },
+    {
+      "path": "tools/asset-import/svg_rasterize.ps1",
+      "producer": "frontend",
+      "output_class": "publication"
+    },
+    {
+      "path": "tools/asset-import/svg_sanitize.ps1",
+      "producer": "frontend",
+      "output_class": "publication"
+    },
+    {
+      "path": "tools/clearra-pc-artifact/src/artifact.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "tools/clearra-pc-artifact/src/artifact_batch.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    },
+    {
+      "path": "tools/clearra-pc-artifact/src/bin/clearra-solution-key-fumen.rs",
+      "producer": "cargo",
+      "output_class": "build-cache"
+    }
+  ],
+  "process_registry": [
+    {
+      "path": "_local/clearra_manage.py",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "_local/tests/test_git_management_fixture.py",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/classify-oracle-current-authority.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/verify-accepted-source.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/src/job-service/runner.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/test/async-gif.test.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/test/discord-command-catalog-release.test.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-discord-bot/test/oracle-rollback-contract.test.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "apps/clearra-web/test/onlinePc4Host.test.mjs",
+      "producer": "frontend",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "crates/clearra-i18n/tests/japanese_cli_source.test.mjs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "crates/clearra-platform-fs/src/windows.rs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "crates/clearra-platform-fs/tests/native_atomic_publication.rs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "crates/clearra-render/src/bin/clearra_asset_import.rs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "crates/clearra-wasm/tests/pc_minimals_ctk3_stage_probe.rs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "packages/ctk3/scripts/build.mjs",
+      "producer": "ctk3",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/architecture/validate_host_runtime_contract.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/architecture/validate_runner_progress_contract.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/architecture/validate_security_regression_tests_contract.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/benchmark/finesse-source-snapshot.mjs",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/benchmark/run-build-probability-optimization.mjs",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/benchmark/run-finesse-benchmark.mjs",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/benchmark/run-wasm-p7-matrix.mjs",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/benchmark/wasm-product-browser/vite.config.mjs",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/accepted-wasm-build.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/accepted-wasm-build.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/canonical-acceptance-evidence.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/canonical-acceptance-run.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/cloud/accepted-build-inputs.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/cloud/candidate-release-v080.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/cloud/candidate-release-v080.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/create-exact-source-archive.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/create-exact-source-archive.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/deployment-impact.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/discord-approval-transition.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/discord-command-sync-authority.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/discord-recovery-debt.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/fast-fix-qualification-workflow.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/final-source-stage-evidence.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/final-source-stage-evidence.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/finalize-discord-production-checkpoint.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/finalize-discord-production-checkpoint.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/github/github-wif-bootstrap.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/observe-production-surfaces.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/oracle-freeze-v080.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/oracle-inactive-stage-v080.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/oracle/candidate-settings-v080.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/oracle/create-prestage-helper-bundle.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/oracle/create-prestage-helper-bundle.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/oracle/remote-overlay-copy-v080.test.py",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/pages-deployment-run.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/pages-legacy-contract.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/product-e2e-cli-artifact.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/production-surface-probe-adapter.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/queue-pages-publication.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/release-failure-summary.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/release-publication-evidence.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/reusable-accepted-wasm-build.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/release/validate-final-source-revalidation.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/audit-upstream-drift.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/build-clearra-frontend.mjs",
+      "producer": "frontend",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/build-clearra-wasm.mjs",
+      "producer": "wasm",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/cargo-jobserver-stdio.test.mjs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/check-pc4-app-contracts.mjs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/clearra-build-policy.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/clearra-build-policy.test.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/clearra-frontend-paths.mjs",
+      "producer": "frontend",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/clearra-rustc-guard.mjs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/clearra-rustc-launcher.rs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/invoke-clearra-build.mjs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/managed-cmake-builds.test.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/prepare-clearra-rustc-launcher.mjs",
+      "producer": "cargo",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/retain-clearra-debug-builds.test.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/run-wasm-browser-benchmark.mjs",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/stage-clearra-wasm.mjs",
+      "producer": "wasm",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/validate-release-cli-smokes.test.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/tools/verify-linux-cli-runtime.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/windows/clearra-local-services-watchdog.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "scripts/windows/clearra-local-services-watchdog.test.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution"
+    },
+    {
+      "path": "tests/contracts/product_capability_registry.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution"
+    }
+  ],
+  "toolchain_sources": {
+    "node": {
+      "source": "release-artifact",
+      "release_run_id": 35508135887,
+      "commit": "6618142e4fe8452985ae3ee94a595f33f410fde6",
+      "release_version_evidence_sha256": "bab3f801b89c12dbbafcaace19d6df82cc14a535823b065517769465f852ec33",
+      "official_shasums_url": "https://nodejs.org/dist/v22.23.2/SHASUMS256.txt",
+      "distribution_sha256": {
+        "linux-x64.tar.gz": "b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a",
+        "linux-x64.tar.xz": "d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307",
+        "win-x64.zip": "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97",
+        "x64.msi": "ce9572ae220c345fbae2340bbb4d084e8ca5e0fe093ee7067d43094ae23be989"
+      }
+    },
+    "npm": {
+      "source": "canonical-node-distribution",
+      "independent_upgrade": false
+    },
+    "pnpm": {
+      "source": "corepack",
+      "activation": "pnpm@11.5.0"
+    },
+    "rust": {
+      "source": "rustup-exact-toolchain",
+      "channel": "1.98.1",
+      "profile": "minimal"
+    },
+    "cargo": {
+      "source": "bundled-with-rust-1.98.1"
+    },
+    "wasm_bindgen": {
+      "source": "cargo-install-locked",
+      "managed_root": "build/tools/cargo/wasm-bindgen-cli/0.2.126/<platform>"
+    }
+  },
+  "rollback_reproduction_only": {
+    "node": "22.23.2",
+    "rust": "1.98.0",
+    "may_propagate_to_normal_builds": false
+  },
+  "package_policy": {
+    "authority": "pnpm",
+    "workspace_patterns": [
+      "apps/*",
+      "packages/*"
+    ],
+    "install": [
+      "pnpm install --frozen-lockfile --ignore-scripts"
+    ],
+    "npm_allowed_roles": [
+      "registry-auth-check",
+      "registry-metadata-read",
+      "publish-verified-exact-tarball-with-provenance"
+    ],
+    "npm_forbidden_roles": [
+      "dependency-install",
+      "workspace-script-runner",
+      "general-exec"
+    ],
+    "publish": {
+      "pack_with": "pnpm",
+      "require_exact_tarball_path": true,
+      "require_sha256_and_file_manifest": true,
+      "command": "npm publish <exact-tarball> --provenance"
+    },
+    "shared_store_cleanup": "never-delete-other-project-content"
+  },
+  "override_policy": {
+    "flag": "--force-unmanaged-output",
+    "reason_flag": "--force-reason",
+    "local_tty_only": true,
+    "prohibited_contexts": [
+      "ci",
+      "release",
+      "deployment",
+      "non-interactive",
+      "git-ref-change",
+      "lockfile-mismatch",
+      "credential-path",
+      "symlink-or-junction-escape"
+    ],
+    "recommendation": "not-recommended"
+  },
+  "container_images": {
+    "node_22_23_2_bookworm_slim": "node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9",
+    "rust_1_98_1_bookworm": "rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+    "digest_source": "Docker Registry V2 Docker-Content-Digest readback"
+  }
+}

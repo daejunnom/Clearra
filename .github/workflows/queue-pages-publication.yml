@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
       - name: Await exact acceptance, capture rollback, then publish Pages
         env:
           GH_TOKEN: ${{ github.token }}

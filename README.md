@@ -137,9 +137,11 @@ locked `build/transient/<purpose>` slot and overwrite its previous contents;
 the default runtime comparison report similarly replaces
 `reports/runtime-environments/latest`. Pass an explicit output path only when
 an additional local history is intentionally required.
-`_local/` is reserved for Git-ignored, nonproduct diagnostics. It is not a
-build/report output destination or a product dependency, and neither accepted
-Git source archives nor Docker contexts include those experiments.
+`_local/clearra_manage.py` and `_local/tests/` are reviewed management source.
+The remaining `_local/` subdirectories are reserved for Git-ignored,
+nonproduct artifacts, state, and temporary output under the management policy.
+They are not product dependencies, and accepted product archives and Docker
+contexts exclude those generated entries.
 
 ## Web Runtime
 
@@ -147,19 +149,19 @@ The web app builds the Rust command runtime before Vite. This browser artifact
 is independent of the Windows native product and is never a Windows fallback:
 
 ```text
-cargo install wasm-bindgen-cli --version 0.2.126 --locked
-npm install --ignore-scripts
-npm run build -w @clearra/web
+python -B _local/clearra_manage.py toolchain sync
+python -B _local/clearra_manage.py deps install
+pnpm --filter @clearra/web run build
 ```
 
 The default build uses the host-native Rust and `wasm-bindgen` toolchain. A
 Windows host never crosses into WSL implicitly. Builders that explicitly own a
-WSL toolchain can instead run `npm run build:wsl -w @clearra/web`. Neither path
+WSL toolchain can instead run `pnpm --filter @clearra/web run build:wsl`. Neither path
 falls back to the other after a failure.
 
-For local development, run `npm run dev -w @clearra/web` and open the URL
+For local development, run `pnpm --filter @clearra/web run dev` and open the URL
 printed by Vite. Use `dev:wsl` only when WSL was selected explicitly. To preview the deployable static SPA, run
-`npm exec -w @clearra/web -- vite preview --host 127.0.0.1` after the build.
+`pnpm --filter @clearra/web exec vite preview --host 127.0.0.1` after the build.
 
 It uses the source-built `wasm-bindgen` CLI rather than a downloaded helper
 executable. Generated JS/WASM lives in `apps/clearra-web/static/wasm` and is not
@@ -264,7 +266,7 @@ SvelteKit/Tauri -> clearra-gui-host -> clearra-app -> AppResponse
 ```
 
 On a source-execution-capable development host, start it with
-`npm run tauri -w @clearra/desktop -- dev`.
+`pnpm --filter @clearra/desktop run tauri -- dev`.
 
 The tagged Windows GUI is the same product surface packaged as one Tauri
 executable; no separate CLI window or frontend directory is distributed.

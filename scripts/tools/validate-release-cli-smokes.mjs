@@ -786,7 +786,7 @@ requireText(
   "actions/setup-node@v4",
   "Linux JSON validator Node setup",
 );
-requireText(linuxJob, "node-version: 22", "Linux JSON validator Node version");
+requireExactYamlScalar(linuxJob, "node-version", "22.23.2", "Linux JSON validator Node version", 10);
 requireExactYamlFlowSequence(linuxJob, "needs", ["metadata", "ctk3"],
   "Linux CLI dependency on the accepted renderer artifact");
 requireText(linuxJob,
@@ -1036,7 +1036,7 @@ for (const [name, job, runner] of [
   }
 }
 const windowsProductCachePrefix =
-  "product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}";
+  "product-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}";
 const windowsProductCacheKey =
   `key: ${windowsProductCachePrefix}-` + "${{ github.sha }}";
 const windowsProductCacheRestoreKeys = [
@@ -1044,7 +1044,7 @@ const windowsProductCacheRestoreKeys = [
   `            ${windowsProductCachePrefix}-`,
   `            ${windowsProductCachePrefix}`,
 ].join("\n");
-requireExactYamlScalar(linuxJob, "container", "rust:1.96-bookworm", "Linux CLI Cloud-compatible build baseline");
+requireExactYamlScalar(linuxJob, "container", "rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e", "Linux CLI Cloud-compatible build baseline");
 const linuxEnvironment = section(linuxJob, "\n    env:", "\n    steps:");
 requireExactYamlKeySet(linuxEnvironment, 6, ["CARGO_HOME"], "Linux compiler container environment");
 requireExactYamlScalar(linuxEnvironment, "CARGO_HOME", "/github/home/.cargo", "Linux compiler container cache root", 6);
@@ -1052,13 +1052,13 @@ const slimRuntimeStep = section(linuxJob,
   "\n      - name: Verify CLI in the Cloud Run base image without rebuilding",
   "\n      - name: Upload Linux CLI artifact");
 requireExactYamlKeySet(slimRuntimeStep, 8, ["uses", "with"], "Cloud-compatible CLI runtime probe");
-requireExactYamlScalar(slimRuntimeStep, "uses", "docker://node:22-bookworm-slim", "Cloud-compatible CLI runtime base", 8);
+requireExactYamlScalar(slimRuntimeStep, "uses", "docker://node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9", "Cloud-compatible CLI runtime base", 8);
 requireExactYamlKeySet(slimRuntimeStep, 10, ["entrypoint", "args"], "Cloud-compatible CLI runtime invocation");
 requireExactYamlScalar(slimRuntimeStep, "entrypoint", "node", "Cloud-compatible CLI runtime entry", 10);
 requireExactYamlScalar(slimRuntimeStep, "args",
   "scripts/tools/verify-linux-cli-runtime.mjs --version ${{ needs.metadata.outputs.version }} --source-commit ${{ github.sha }}",
   "Cloud-compatible CLI runtime arguments", 10);
-const linuxProductCachePrefix = "product-linux-bookworm-rust-1.96-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}";
+const linuxProductCachePrefix = "product-linux-bookworm-rust-1.98.1-v4-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}";
 requireText(linuxJob, `key: ${linuxProductCachePrefix}-` + "${{ github.sha }}",
   "Linux CLI exact-source incremental cache key");
 requireText(linuxJob, ["restore-keys: |", `            ${linuxProductCachePrefix}-`].join("\n"),
@@ -1140,7 +1140,7 @@ requireExactStepSkeleton(
 );
 for (const [marker, description] of [
   ["run: node --test scripts/tools/accepted-ctk3-dist.test.mjs", "artifact contract unit"],
-  ["run: npm test --workspace ctk3", "single package build and test"],
+  ["run: pnpm --filter ctk3 run test", "single package build and test"],
   [
     'run: node scripts/tools/accepted-ctk3-dist.mjs --seal packages/ctk3/dist --source-commit "$CLEARRA_SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"',
     "source-and-attempt-bound artifact seal",
@@ -1175,7 +1175,7 @@ requireExactYamlScalar(
   "accepted CTK3 missing artifact policy",
   10,
 );
-if ((workflow.match(/npm test --workspace ctk3/gu) ?? []).length !== 1) {
+if ((workflow.match(/pnpm --filter ctk3 run test/gu) ?? []).length !== 1) {
   throw new Error("CTK3 package build and test must have exactly one workflow owner");
 }
 requireMatch(
@@ -1379,10 +1379,10 @@ requireText(
 );
 requireText(
   discordJob,
-  "run: npm run test:built --workspace @clearra/discord-bot",
+  "run: pnpm --filter @clearra/discord-bot run test:built",
   "Discord built-only suite",
 );
-if (workflow.includes("npm test --workspace @clearra/discord-bot")) {
+if (/pnpm --filter @clearra\/discord-bot run test(?:\r?\n|$)/u.test(workflow)) {
   throw new Error("release workflow must not rebuild CTK3 through the Discord suite");
 }
 requireExactYamlKeySet(
@@ -1973,14 +1973,16 @@ for (const { name, job, family, ownsWriter = false } of releaseToolchainCacheRea
   }
   const windowsNative = family === "native";
   const manifestHash = windowsNative
-    ? "${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'package-lock.json') }}"
+    ? "${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}"
     : "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}";
   const version = windowsNative ? 4 : 5;
   const prefix = `release-acceptance-${family}-v${version}-` +
     `\${{ runner.os }}-bindgen-0.2.126-${manifestHash}`;
-  const paths = windowsNative
-    ? ["~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git"]
-    : ["~/.cargo/bin/wasm-bindgen", "~/.cargo/registry", "~/.cargo/git"];
+  const paths = [
+    "build/tools/cargo/wasm-bindgen-cli/0.2.126",
+    "~/.cargo/registry",
+    "~/.cargo/git",
+  ];
   requireText(job, `path: |\n${paths.map((entry) => `            ${entry}`).join("\n")}\n          key:`,
     `${name} dependency/tool-only cache paths`);
   for (const marker of [
@@ -2016,11 +2018,13 @@ if ((workflow.match(/actions\/cache\/save@v4/gu) ?? []).length !== 2) {
 for (const [job, name, upload, paths, saveCondition] of [
   [releaseAcceptanceRustJob, "Save verified canonical native build cache",
     "Upload canonical release acceptance RustExact shard", [
-      "~/.cargo/bin/wasm-bindgen.exe", "~/.cargo/registry", "~/.cargo/git",
+      "build/tools/cargo/wasm-bindgen-cli/0.2.126",
+      "~/.cargo/registry", "~/.cargo/git",
     ], "${{ success() && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
   [releaseAcceptanceWasmBuildJob, "Save verified canonical WASM build cache",
     "Upload accepted WASM build", [
-      "~/.cargo/bin/wasm-bindgen", "~/.cargo/registry", "~/.cargo/git",
+      "build/tools/cargo/wasm-bindgen-cli/0.2.126",
+      "~/.cargo/registry", "~/.cargo/git",
     ], "${{ success() && steps.rebound_wasm.outputs.reused != 'true' && steps.release_toolchain_cache.outputs.cache-hit != 'true' }}"],
 ]) {
   const step = section(job, `\n      - name: ${name}`, `\n      - name: ${upload}`);
@@ -2271,7 +2275,7 @@ const expectedSummaryTail = [
   "      - uses: actions/checkout@v4",
   "      - uses: actions/setup-node@v4",
   "        with:",
-  "          node-version: 22",
+  "          node-version: 22.23.2",
   "      - name: Report every failure and blocked consumer without release authority",
   "        env:",
   "          CLEARRA_DIAGNOSTIC_NEEDS: ${{ toJSON(needs) }}",
@@ -3153,7 +3157,7 @@ requireExactNormalizedText(
 );
 requireExactNormalizedText(
   linuxSetupNodeStep,
-  "\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22",
+  "\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22.23.2",
   "Linux protected Node setup step",
 );
 requireExactNormalizedText(
@@ -3163,7 +3167,7 @@ requireExactNormalizedText(
 );
 requireExactNormalizedText(
   windowsSetupNodeStep,
-  "\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22",
+  "\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22.23.2\n      - name: Bind exact Corepack pnpm\n        shell: pwsh\n        run: |\n          corepack enable\n          corepack prepare pnpm@11.5.0 --activate\n          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }",
   "Windows protected Node setup step",
 );
 requireExactYamlFlowSequence(
@@ -3354,7 +3358,11 @@ function requireExactStepSkeleton(source, expected, description) {
     .replaceAll("\r\n", "\n")
     .split("\n")
     .filter((line) => line.startsWith("      -"))
-    .map((line) => line.slice(6));
+    .map((line) => line.slice(6))
+    .filter((line) => ![
+      "- uses: pnpm/action-setup@v4",
+      "- name: Bind exact Corepack pnpm",
+    ].includes(line));
   if (
     actual.length !== expected.length ||
     expected.some((entry, index) => actual[index] !== entry)

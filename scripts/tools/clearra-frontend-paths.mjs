@@ -14,7 +14,7 @@ export function frontendPaths(app, { sourceRoot = repositoryRoot, environment = 
   sourceRoot = resolve(sourceRoot);
   const hasOwner = Boolean(environment.CLEARRA_BUILD_SESSION_ID);
   if (!hasOwner && requireOwner) {
-    throw new Error('Frontend compilation requires a live Clearra build owner; use npm run build, dev, or sync');
+    throw new Error('Frontend compilation requires a live Clearra build owner; use pnpm run build, dev, or sync');
   }
   if (!hasOwner && ['CLEARRA_BUILD_TRANSACTION_ROOT', 'CLEARRA_BUILD_SOURCE_ROOT',
     'CLEARRA_BUILD_SOURCE_ID', 'CLEARRA_BUILD_CACHE_OWNER_PID'].some(key => environment[key])) {

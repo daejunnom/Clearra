@@ -70,7 +70,7 @@ test('package and repository entrypoints preserve public contracts while adoptin
   assert.equal(package_.types, './dist/index.d.ts');
   assert.deepEqual(package_.exports['.'], { types: './dist/index.d.ts', import: './dist/index.js', require: './dist/index.cjs', default: './dist/index.js' });
   const workspace = JSON.parse(await readFile(resolve(packageRoot, '../../package.json'), 'utf8'));
-  assert.equal(workspace.scripts['build:ctk3'], 'npm run build --workspace ctk3');
+  assert.equal(workspace.scripts['build:ctk3'], 'pnpm --filter ctk3 run build');
   const source = await readFile(new URL('./build.mjs', import.meta.url), 'utf8');
   assert.ok(source.indexOf('enterManagedBuildOrRelaunch(sourceRoot') < source.indexOf("await import('esbuild')"));
   assert.match(source, /`build-\$\{randomUUID\(\)\}`/u);

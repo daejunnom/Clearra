@@ -3,7 +3,7 @@ $script:ClearraArtifactCacheSchemaVersion = 3
 
 function Test-ClearraSecretOrGeneratedInput([System.IO.FileInfo]$File) {
     $name = $File.Name
-    if ($name -eq 'package-lock.json' -or
+    if ($name -eq 'pnpm-lock.yaml' -or
         $name -eq '.env' -or
         $name.StartsWith('.env.', [System.StringComparison]::OrdinalIgnoreCase)) {
         return $true
