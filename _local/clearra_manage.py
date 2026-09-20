@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import uuid
@@ -90,12 +91,35 @@ def git(*arguments: str, cwd: pathlib.Path | None = None, check: bool = True) ->
     return run(("git", *arguments), cwd=cwd, check=check).stdout.strip()
 
 
+def delete_refs_atomically(refs: Sequence[tuple[str, str]]) -> None:
+    """Delete refs in one transaction without platform newline translation."""
+    if not refs:
+        return
+    material = "start\0"
+    material += "".join(f"delete {ref}\0{old_sha}\0" for ref, old_sha in refs)
+    material += "prepare\0commit\0"
+    run(("git", "update-ref", "--stdin", "-z"), input_text=material)
+
+
 def sha256_file(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def write_json_atomic(path: pathlib.Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".{uuid.uuid4().hex[:12]}.tmp")
+    temporary.write_text(
+        json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
 
 
 def utc_stamp() -> str:
@@ -1148,7 +1172,12 @@ def verify_static_management_policy(policy: dict[str, Any]) -> None:
 
 
 def deps_command(
-    action: str, policy: dict[str, Any], *, clean_links: bool = False
+    action: str,
+    policy: dict[str, Any],
+    *,
+    clean_links: bool = False,
+    update_manager: str | None = None,
+    update_arguments: Sequence[str] = (),
 ) -> int:
     verify_static_management_policy(policy)
     require_pnpm(policy)
@@ -1194,6 +1223,10 @@ def deps_command(
             print(completed.stderr, file=sys.stderr, end="")
         print(f"receipt={receipt}")
         return completed.returncode
+    if action == "update":
+        if update_manager is None:
+            raise ManagementError("dependency update requires an explicit manager")
+        return dependency_update(update_manager, update_arguments, policy)
     if action != "verify":
         raise ManagementError(f"unsupported dependency action: {action}")
     failures: list[str] = []
@@ -1209,6 +1242,515 @@ def deps_command(
         raise ManagementError("dependency policy verification failed:\n" + "\n".join(sorted(set(failures))))
     print("dependency_policy=accepted")
     return 0
+
+
+def require_clean_source(operation: str) -> None:
+    status = git("status", "--porcelain=v1", "-z", "--untracked-files=normal")
+    if status:
+        raise ManagementError(f"{operation} requires a clean source worktree")
+
+
+def dependency_authority_paths(manager: str) -> list[pathlib.Path]:
+    tracked = [pathlib.Path(value) for value in git("ls-files", "-z").split("\0") if value]
+    if manager == "pnpm":
+        selected = [
+            relative
+            for relative in tracked
+            if relative.as_posix() in {"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"}
+            or (
+                relative.name == "package.json"
+                and relative.parts
+                and relative.parts[0] in {"apps", "packages"}
+            )
+        ]
+    elif manager == "cargo":
+        selected = [
+            relative
+            for relative in tracked
+            if relative.name in {"Cargo.toml", "Cargo.lock"}
+        ]
+    else:
+        raise ManagementError(f"unsupported dependency update manager: {manager}")
+    return [ROOT / relative for relative in sorted(selected)]
+
+
+def dependency_graph_snapshot(manager: str, policy: dict[str, Any]) -> dict[str, Any]:
+    if manager == "pnpm":
+        command = (
+            "pnpm",
+            "list",
+            "--recursive",
+            "--depth",
+            "Infinity",
+            "--json",
+            "--lockfile-only",
+        )
+    elif manager == "cargo":
+        command = (
+            "cargo",
+            f"+{policy['toolchains']['rust']}",
+            "metadata",
+            "--format-version",
+            "1",
+            "--locked",
+        )
+    else:
+        raise ManagementError(f"unsupported dependency graph manager: {manager}")
+    result = run(command, check=False)
+    material = result.stdout.strip()
+    packages: set[str] = set()
+    parse_error: str | None = None
+    if result.returncode == 0 and material:
+        try:
+            parsed = json.loads(material)
+            if manager == "cargo":
+                values = parsed.get("packages", []) if isinstance(parsed, dict) else []
+                packages.update(
+                    f"{item.get('name')}@{item.get('version')}#{item.get('source') or 'workspace'}"
+                    for item in values
+                )
+            else:
+                stack = list(parsed if isinstance(parsed, list) else [parsed])
+                while stack:
+                    item = stack.pop()
+                    if not isinstance(item, dict):
+                        continue
+                    name = item.get("name")
+                    version = item.get("version")
+                    if name and version:
+                        packages.add(f"{name}@{version}")
+                    for key in ("dependencies", "devDependencies", "optionalDependencies"):
+                        children = item.get(key, {})
+                        if isinstance(children, dict):
+                            for child_name, child in children.items():
+                                if isinstance(child, dict):
+                                    child = {"name": child_name, **child}
+                                    stack.append(child)
+                                elif child:
+                                    packages.add(f"{child_name}@{child}")
+        except (TypeError, ValueError) as error:
+            parse_error = type(error).__name__
+    return {
+        "command": list(command),
+        "exit_code": result.returncode,
+        "stdout_sha256": sha256_bytes(material.encode("utf-8")),
+        "package_count": len(packages),
+        "packages": sorted(packages),
+        "parse_error": parse_error,
+    }
+
+
+def dependency_authority_snapshot(
+    manager: str, policy: dict[str, Any]
+) -> dict[str, Any]:
+    files = []
+    authority_paths = dependency_authority_paths(manager)
+    for path in authority_paths:
+        if path.is_file():
+            files.append(
+                {
+                    "path": path.relative_to(ROOT).as_posix(),
+                    "bytes": path.stat().st_size,
+                    "sha256": sha256_file(path),
+                }
+            )
+    integrity_values: list[str] = []
+    for path in authority_paths:
+        if not path.is_file() or path.name not in {"pnpm-lock.yaml", "Cargo.lock"}:
+            continue
+        material = path.read_text(encoding="utf-8", errors="strict")
+        if manager == "pnpm":
+            integrity_values.extend(
+                match.strip("'\"")
+                for match in re.findall(r"\bintegrity:\s*([^\s,}]+)", material)
+            )
+        else:
+            integrity_values.extend(
+                match
+                for match in re.findall(r'^checksum\s*=\s*"([0-9a-f]+)"\s*$', material, re.M)
+            )
+    sorted_integrity = sorted(integrity_values)
+    return {
+        "files": files,
+        "graph": dependency_graph_snapshot(manager, policy),
+        "integrity": {
+            "count": len(sorted_integrity),
+            "sha256": sha256_bytes("\n".join(sorted_integrity).encode("utf-8")),
+            "values": sorted_integrity,
+        },
+    }
+
+
+def validate_dependency_update_arguments(manager: str, arguments: Sequence[str]) -> list[str]:
+    values = list(arguments)
+    if values and values[0] == "--":
+        values = values[1:]
+    for value in values:
+        lowered = value.casefold()
+        if re.search(r"(?:auth|token|secret|password|credential|api[-_]?key|otp)", lowered):
+            raise ManagementError("dependency update arguments contain prohibited credential material")
+        if re.search(r"https?://[^/\s]+@", value, re.I):
+            raise ManagementError("dependency update arguments contain URL credentials")
+    if manager == "pnpm":
+        prohibited = (
+            "--dir",
+            "-c",
+            "--global",
+            "-g",
+            "--lockfile-dir",
+            "--store-dir",
+            "--virtual-store-dir",
+            "--global-dir",
+            "--state-dir",
+            "--config-dir",
+            "--config",
+            "--registry",
+            "--userconfig",
+            "--globalconfig",
+        )
+    elif manager == "cargo":
+        prohibited = (
+            "--manifest-path",
+            "--config",
+            "--target-dir",
+            "--root",
+        )
+    else:
+        raise ManagementError(f"unsupported dependency update manager: {manager}")
+    for value in values:
+        lowered = value.casefold()
+        if any(lowered == option or lowered.startswith(option + "=") for option in prohibited):
+            raise ManagementError(f"dependency update cannot override managed paths: {value}")
+    return values
+
+
+def dependency_changed_paths() -> list[str]:
+    changed = {
+        value
+        for value in git("diff", "--name-only", "-z", "HEAD").split("\0")
+        if value
+    }
+    changed.update(
+        value
+        for value in git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
+        if value
+    )
+    return sorted(changed)
+
+
+def dependency_update(
+    manager: str, arguments: Sequence[str], policy: dict[str, Any]
+) -> int:
+    require_clean_source("dependency update")
+    values = validate_dependency_update_arguments(manager, arguments)
+    before = dependency_authority_snapshot(manager, policy)
+    if (
+        before["graph"]["exit_code"] != 0
+        or before["graph"]["parse_error"] is not None
+    ):
+        raise ManagementError("cannot capture the pre-update dependency graph")
+    if manager == "pnpm":
+        require_pnpm(policy)
+        store_result = run(("pnpm", "store", "path", "--silent"), check=False)
+        if store_result.returncode != 0 or not store_result.stdout.strip():
+            raise ManagementError("unable to resolve the pnpm shared store")
+        shared_root = pathlib.Path(store_result.stdout.strip())
+        command = ("pnpm", "update", "--lockfile-only", "--ignore-scripts", *values)
+        environment = None
+    else:
+        shared_root = pathlib.Path(
+            os.environ.get("CARGO_HOME", str(pathlib.Path.home() / ".cargo"))
+        )
+        command = (
+            "cargo",
+            f"+{policy['toolchains']['rust']}",
+            "update",
+            *values,
+        )
+        environment = os.environ.copy()
+        environment["CARGO_TARGET_DIR"] = str(
+            ROOT / "build" / "cargo" / "host" / "dependency-update"
+        )
+    shared_before = tree_identity_snapshot(shared_root, max_depth=1)
+    completed = run(command, check=False, env=environment)
+    shared_after = tree_identity_snapshot(shared_root, max_depth=1)
+    after = dependency_authority_snapshot(manager, policy)
+    changed = dependency_changed_paths()
+    if manager == "pnpm":
+        unexpected = [
+            path
+            for path in changed
+            if path != "pnpm-lock.yaml"
+            and not (
+                path.endswith("/package.json")
+                and path.split("/", 1)[0] in {"apps", "packages"}
+            )
+            and path != "package.json"
+        ]
+    else:
+        unexpected = [path for path in changed if not path.endswith("Cargo.lock")]
+    receipt = write_receipt(
+        "dependency-update",
+        {
+            "manager": manager,
+            "command": list(command),
+            "exit_code": completed.returncode,
+            "before": before,
+            "after": after,
+            "changed_paths": changed,
+            "unexpected_paths": unexpected,
+            "shared_store_changes": tree_identity_delta(
+                shared_root, shared_before, shared_after
+            ),
+        },
+    )
+    print(f"receipt={receipt}")
+    if unexpected:
+        raise ManagementError(
+            "dependency update changed files outside its authority; "
+            f"receipt={receipt}"
+        )
+    if (
+        after["graph"]["exit_code"] != 0
+        or after["graph"]["parse_error"] is not None
+    ):
+        raise ManagementError(
+            f"updated dependency graph is invalid; receipt={receipt}"
+        )
+    return completed.returncode
+
+
+def workspace_package_manifest(package_name: str, policy: dict[str, Any]) -> tuple[pathlib.Path, dict[str, Any]]:
+    allowed = set(policy.get("package_policy", {}).get("publishable_packages", []))
+    if package_name not in allowed:
+        raise ManagementError(f"package is not registered for publication: {package_name}")
+    matches: list[tuple[pathlib.Path, dict[str, Any]]] = []
+    for path in dependency_authority_paths("pnpm"):
+        if path.name != "package.json" or not path.is_file():
+            continue
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if value.get("name") == package_name:
+            matches.append((path, value))
+    if len(matches) != 1:
+        raise ManagementError("publishable package must resolve to exactly one workspace")
+    path, manifest = matches[0]
+    if manifest.get("private") is True or not manifest.get("version"):
+        raise ManagementError("publishable package must be non-private and versioned")
+    return path, manifest
+
+
+def inspect_package_tarball(
+    tarball: pathlib.Path, expected_name: str, expected_version: str
+) -> dict[str, Any]:
+    if not tarball.is_file() or is_reparse_point(tarball):
+        raise ManagementError("package tarball must be a regular managed file")
+    members: list[dict[str, Any]] = []
+    packed_manifest: dict[str, Any] | None = None
+    member_names: set[str] = set()
+    total_bytes = 0
+    try:
+        with tarfile.open(tarball, "r:gz") as archive:
+            archived_members = archive.getmembers()
+            if len(archived_members) > 10_000:
+                raise ManagementError("package tarball contains too many members")
+            for member in archived_members:
+                pure = pathlib.PurePosixPath(member.name)
+                if (
+                    pure.is_absolute()
+                    or ".." in pure.parts
+                    or not pure.parts
+                    or pure.parts[0] != "package"
+                    or member.issym()
+                    or member.islnk()
+                    or member.isdev()
+                ):
+                    raise ManagementError(f"package tarball contains an unsafe member: {member.name}")
+                normalized_name = pure.as_posix()
+                if normalized_name in member_names:
+                    raise ManagementError(
+                        f"package tarball contains a duplicate member: {normalized_name}"
+                    )
+                member_names.add(normalized_name)
+                total_bytes += member.size
+                if total_bytes > 512 * 1024 * 1024:
+                    raise ManagementError("package tarball expands beyond the managed size limit")
+                entry: dict[str, Any] = {
+                    "path": normalized_name,
+                    "bytes": member.size,
+                    "type": "file" if member.isfile() else "directory",
+                }
+                if member.isfile():
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        raise ManagementError(f"package tar member is unreadable: {member.name}")
+                    content = stream.read()
+                    entry["sha256"] = sha256_bytes(content)
+                    if pure.as_posix() == "package/package.json":
+                        packed_manifest = json.loads(content.decode("utf-8"))
+                elif not member.isdir():
+                    raise ManagementError(f"package tarball contains an unsupported member: {member.name}")
+                members.append(entry)
+    except (tarfile.TarError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        raise ManagementError(f"invalid package tarball: {type(error).__name__}") from error
+    if packed_manifest is None:
+        raise ManagementError("package tarball has no package/package.json")
+    if (
+        packed_manifest.get("name") != expected_name
+        or packed_manifest.get("version") != expected_version
+        or packed_manifest.get("private") is True
+    ):
+        raise ManagementError("packed package identity does not match the requested workspace")
+    return {
+        "path": str(tarball),
+        "bytes": tarball.stat().st_size,
+        "sha256": sha256_file(tarball),
+        "name": expected_name,
+        "version": expected_version,
+        "members": sorted(members, key=lambda item: item["path"]),
+    }
+
+
+def package_pack(package_name: str, policy: dict[str, Any]) -> dict[str, Any]:
+    verify_static_management_policy(policy)
+    require_pnpm(policy)
+    require_clean_source("package pack")
+    manifest_path, manifest = workspace_package_manifest(package_name, policy)
+    version = str(manifest["version"])
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", package_name).strip("-")
+    run_id = utc_stamp() + "-" + uuid.uuid4().hex[:12]
+    stage = ROOT / "build" / "package" / slug / run_id
+    assert_output_path(stage, policy)
+    stage.mkdir(parents=True, exist_ok=False)
+    tarball = stage / f"{slug}-{version}.tgz"
+    completed = run(
+        (
+            "pnpm",
+            "--filter",
+            package_name,
+            "pack",
+            "--out",
+            str(tarball),
+            "--json",
+        ),
+        check=False,
+    )
+    if completed.returncode != 0:
+        receipt = write_receipt(
+            "package-pack-failed",
+            {
+                "package": package_name,
+                "version": version,
+                "manifest": manifest_path.relative_to(ROOT).as_posix(),
+                "stage": str(stage),
+                "exit_code": completed.returncode,
+            },
+        )
+        raise ManagementError(f"pnpm pack failed; receipt={receipt}")
+    require_clean_source("package pack lifecycle")
+    inspection = inspect_package_tarball(tarball, package_name, version)
+    payload = {
+        "source_sha": git("rev-parse", "HEAD"),
+        "source_tree": git("rev-parse", "HEAD^{tree}"),
+        "package": package_name,
+        "version": version,
+        "manifest": manifest_path.relative_to(ROOT).as_posix(),
+        "tarball": inspection,
+        "owned_paths": [str(stage)],
+    }
+    receipt = write_receipt("package-pack", payload)
+    return {**payload, "receipt": str(receipt)}
+
+
+def load_package_pack_receipt(
+    value: str, policy: dict[str, Any]
+) -> tuple[pathlib.Path, dict[str, Any], dict[str, Any]]:
+    path = pathlib.Path(value).resolve(strict=True)
+    root = state_root() / "receipts"
+    if not is_within(path, root) or is_secret_path(path, policy):
+        raise ManagementError("package publication requires a managed pack receipt")
+    assert_no_link_escape(path, root)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    if receipt.get("schema_id") != "clearra.management-receipt.v1" or receipt.get("kind") != "package-pack":
+        raise ManagementError("unsupported package pack receipt")
+    tarball_record = receipt.get("tarball", {})
+    tarball = pathlib.Path(str(tarball_record.get("path") or "")).resolve(strict=True)
+    build_root = (ROOT / "build").resolve(strict=False)
+    if not is_within(tarball, build_root):
+        raise ManagementError("package tarball escaped the managed build root")
+    assert_no_link_escape(tarball, build_root)
+    current = inspect_package_tarball(
+        tarball, str(receipt.get("package") or ""), str(receipt.get("version") or "")
+    )
+    if current != tarball_record:
+        raise ManagementError("package tarball no longer matches its pack receipt")
+    return path, receipt, current
+
+
+def package_publish(
+    receipt_value: str,
+    policy: dict[str, Any],
+    *,
+    tag: str,
+    access: str,
+    apply: bool,
+) -> dict[str, Any]:
+    verify_static_management_policy(policy)
+    require_pnpm(policy)
+    receipt_path, receipt, tarball = load_package_pack_receipt(receipt_value, policy)
+    require_clean_source("package publication")
+    current_sha = git("rev-parse", "HEAD")
+    current_tree = git("rev-parse", "HEAD^{tree}")
+    if current_sha != receipt.get("source_sha") or current_tree != receipt.get("source_tree"):
+        raise ManagementError("package source no longer matches the packed source identity")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", tag):
+        raise ManagementError("invalid npm distribution tag")
+    if access not in {"public", "restricted"}:
+        raise ManagementError("invalid npm package access")
+    command = [
+        "npm",
+        "publish",
+        tarball["path"],
+        "--provenance",
+        "--ignore-scripts",
+        "--tag",
+        tag,
+        "--access",
+        access,
+    ]
+    plan = {
+        "package": receipt["package"],
+        "version": receipt["version"],
+        "source_sha": current_sha,
+        "source_tree": current_tree,
+        "pack_receipt": str(receipt_path),
+        "tarball_sha256": tarball["sha256"],
+        "tarball_bytes": tarball["bytes"],
+        "command": command,
+        "apply": apply,
+    }
+    if not apply:
+        return plan
+    npm_version = run(("npm", "--version"), check=False).stdout.strip()
+    if npm_version != policy["toolchains"]["npm"]:
+        raise ManagementError(
+            f"npm {policy['toolchains']['npm']} is required; found {npm_version or 'unavailable'}"
+        )
+    identity = run(("npm", "whoami"), check=False)
+    if identity.returncode != 0 or not identity.stdout.strip():
+        raise ManagementError("npm registry authentication is unavailable")
+    completed = run(command, check=False)
+    publication_receipt = write_receipt(
+        "package-publication",
+        {
+            **plan,
+            "npm_identity": identity.stdout.strip(),
+            "exit_code": completed.returncode,
+        },
+    )
+    result = {**plan, "exit_code": completed.returncode, "receipt": str(publication_receipt)}
+    if completed.returncode != 0:
+        raise ManagementError(f"npm publication failed; receipt={publication_receipt}")
+    return result
 
 
 @dataclass
@@ -1667,13 +2209,13 @@ def check_candidate_once(candidate: str, policy: dict[str, Any]) -> tuple[str, l
     return sha, selected
 
 
-def validate_convergence_review(
-    receipt_value: str, candidate_sha: str, policy: dict[str, Any]
-) -> dict[str, Any]:
+def load_safety_transaction(
+    receipt_value: str, policy: dict[str, Any]
+) -> tuple[pathlib.Path, dict[str, Any], pathlib.Path, dict[str, Any]]:
     receipt_path = pathlib.Path(receipt_value).resolve(strict=True)
     safety_root = state_root() / "git-safety"
     if not is_within(receipt_path, safety_root) or is_secret_path(receipt_path, policy):
-        raise ManagementError("promotion requires a managed Git safety receipt")
+        raise ManagementError("operation requires a managed Git safety receipt")
     assert_no_link_escape(receipt_path, safety_root)
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     if receipt.get("schema_id") != "clearra.git-safety.v1":
@@ -1681,20 +2223,506 @@ def validate_convergence_review(
     if not receipt.get("ready_for_review") or receipt.get("credential_path_blockers"):
         raise ManagementError("Git safety receipt has unresolved prohibited-path blockers")
     bundle = pathlib.Path(receipt.get("bundle", "")).resolve(strict=True)
-    if not is_within(bundle, receipt_path.parent) or sha256_file(bundle) != receipt.get("bundle_sha256"):
+    if not is_within(bundle, receipt_path.parent):
+        raise ManagementError("Git safety bundle escaped its transaction")
+    if sha256_file(bundle) != receipt.get("bundle_sha256"):
         raise ManagementError("Git safety bundle is missing or its digest changed")
     run(("git", "bundle", "verify", str(bundle)))
     review_path = pathlib.Path(receipt.get("review_decisions", "")).resolve(strict=True)
     if not is_within(review_path, receipt_path.parent):
         raise ManagementError("convergence review escaped its safety transaction")
+    assert_no_link_escape(review_path, receipt_path.parent)
     review = json.loads(review_path.read_text(encoding="utf-8"))
     if (
         review.get("schema_id") != "clearra.git-convergence-review.v1"
         or review.get("transaction") != receipt.get("transaction")
     ):
         raise ManagementError("convergence review does not match the safety transaction")
-    selected = 0
-    excluded = 0
+    return receipt_path, receipt, review_path, review
+
+
+def safe_archive_relative(value: str) -> pathlib.PurePosixPath:
+    relative = pathlib.PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or "\\" in value
+    ):
+        raise ManagementError("safety archive contains an unsafe relative path")
+    return relative
+
+
+def validate_dirty_candidate_evidence(
+    item: dict[str, Any],
+    evidence_reference: Any,
+    candidate_sha: str,
+    receipt_path: pathlib.Path,
+    receipt: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(evidence_reference, dict):
+        raise ManagementError("selected dirty worktree evidence must be a structured reference")
+    if evidence_reference.get("schema_id") != "clearra.git-dirty-evidence-reference.v1":
+        raise ManagementError("selected dirty worktree evidence has an unsupported schema")
+    evidence_path = pathlib.Path(str(evidence_reference.get("receipt", ""))).resolve(strict=True)
+    if not is_within(evidence_path, receipt_path.parent / "evidence"):
+        raise ManagementError("dirty worktree evidence escaped its safety transaction")
+    assert_no_link_escape(evidence_path, receipt_path.parent)
+    if sha256_file(evidence_path) != evidence_reference.get("sha256"):
+        raise ManagementError("dirty worktree evidence digest changed")
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if (
+        evidence.get("schema_id") != "clearra.git-dirty-candidate-evidence.v1"
+        or evidence.get("transaction") != receipt.get("transaction")
+        or evidence.get("source_head") != item.get("head")
+        or normalized(pathlib.Path(evidence.get("worktree", "")))
+        != normalized(pathlib.Path(item.get("worktree", "")))
+    ):
+        raise ManagementError("dirty worktree evidence does not match its review item")
+    evidence_sha = str(evidence.get("candidate_sha") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", evidence_sha):
+        raise ManagementError("dirty worktree evidence has an invalid candidate SHA")
+    if run(
+        ("git", "merge-base", "--is-ancestor", evidence_sha, candidate_sha),
+        check=False,
+    ).returncode != 0:
+        raise ManagementError("dirty worktree evidence is not contained in the candidate")
+    actual_tree = git("rev-parse", f"{evidence_sha}^{{tree}}")
+    if (
+        evidence.get("candidate_tree") != actual_tree
+        or evidence.get("reconstructed_tree") != actual_tree
+        or not evidence.get("verified_exact_tree")
+    ):
+        raise ManagementError("dirty worktree evidence no longer proves exact tree equality")
+    archive = receipt_path.parent / "worktree-uncommitted.zip"
+    manifest = receipt_path.parent / "untracked-manifest.json"
+    if (
+        sha256_file(archive) != evidence.get("archive_sha256")
+        or sha256_file(manifest) != evidence.get("untracked_manifest_sha256")
+    ):
+        raise ManagementError("dirty worktree evidence inputs changed")
+    return {
+        "receipt": str(evidence_path),
+        "sha256": evidence_reference["sha256"],
+        "candidate_sha": evidence_sha,
+        "candidate_tree": actual_tree,
+    }
+
+
+def validate_ref_candidate_evidence(
+    item: dict[str, Any],
+    evidence_reference: Any,
+    candidate_sha: str,
+    receipt_path: pathlib.Path,
+) -> dict[str, Any]:
+    if not isinstance(evidence_reference, dict):
+        raise ManagementError("selected ref is neither contained nor backed by replay evidence")
+    if evidence_reference.get("schema_id") != "clearra.git-ref-evidence-reference.v1":
+        raise ManagementError("selected ref replay evidence has an unsupported schema")
+    evidence_path = pathlib.Path(str(evidence_reference.get("receipt", ""))).resolve(strict=True)
+    if not is_within(evidence_path, receipt_path.parent / "evidence"):
+        raise ManagementError("selected ref replay evidence escaped its safety transaction")
+    assert_no_link_escape(evidence_path, receipt_path.parent)
+    if sha256_file(evidence_path) != evidence_reference.get("sha256"):
+        raise ManagementError("selected ref replay evidence digest changed")
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    source_sha = str(item.get("sha") or "")
+    if (
+        evidence.get("schema_id") != "clearra.git-ref-replay-evidence.v1"
+        or source_sha not in evidence.get("selected_tips", [])
+        or evidence_reference.get("source_tip") != source_sha
+    ):
+        raise ManagementError("selected ref replay evidence does not match its review item")
+    initial_sha = str(evidence.get("initial_sha") or "")
+    final_sha = str(evidence.get("final_sha") or "")
+    if run(
+        ("git", "merge-base", "--is-ancestor", final_sha, candidate_sha), check=False
+    ).returncode != 0:
+        raise ManagementError("selected ref replay result is not contained in the candidate")
+    expected = set(
+        git("rev-list", source_sha, "--not", initial_sha).splitlines()
+    )
+    covered = {
+        str(entry.get("source"))
+        for entry in evidence.get("applied", [])
+        if entry.get("classification")
+        in {"replayed", "already-contained", "patch-equivalent-empty"}
+    }
+    if not expected.issubset(covered):
+        raise ManagementError("selected ref replay evidence does not cover its source history")
+    if evidence.get("final_tree") != git("rev-parse", f"{final_sha}^{{tree}}"):
+        raise ManagementError("selected ref replay evidence final tree changed")
+    return {
+        "receipt": str(evidence_path),
+        "sha256": evidence_reference["sha256"],
+        "source_tip": source_sha,
+        "final_sha": final_sha,
+    }
+
+
+def record_dirty_candidate_evidence(
+    receipt_value: str,
+    worktree_value: str,
+    evidence_candidate: str,
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    receipt_path, receipt, review_path, review = load_safety_transaction(
+        receipt_value, policy
+    )
+    worktree_path = pathlib.Path(worktree_value).resolve(strict=True)
+    matches = [
+        item
+        for item in review.get("items", [])
+        if item.get("kind") == "dirty-worktree"
+        and normalized(pathlib.Path(item.get("worktree", ""))) == normalized(worktree_path)
+    ]
+    if len(matches) != 1:
+        raise ManagementError("exactly one dirty worktree review item is required")
+    item = matches[0]
+    candidate_sha = git("rev-parse", f"{evidence_candidate}^{{commit}}")
+    candidate_tree = git("rev-parse", f"{candidate_sha}^{{tree}}")
+    inventory_path = receipt_path.parent / "inventory.json"
+    archive_path = receipt_path.parent / "worktree-uncommitted.zip"
+    manifest_path = receipt_path.parent / "untracked-manifest.json"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    indexes = [
+        index
+        for index, entry in enumerate(inventory.get("worktrees", []))
+        if normalized(pathlib.Path(entry.get("path", ""))) == normalized(worktree_path)
+    ]
+    if len(indexes) != 1:
+        raise ManagementError("dirty worktree is missing from the safety inventory")
+    index = indexes[0]
+    prefix = f"worktree-{index:03d}"
+    evidence_directory = receipt_path.parent / "evidence"
+    evidence_directory.mkdir(parents=True, exist_ok=True)
+    clone_directory = evidence_directory / (
+        f"materialize-{index:03d}-{candidate_sha[:12]}-{uuid.uuid4().hex[:8]}"
+    )
+    patch_digests: dict[str, str] = {}
+    archived_untracked: list[dict[str, Any]] = []
+    generated_entries = 0
+    try:
+        run(("git", "clone", "--no-checkout", str(receipt["bundle"]), str(clone_directory)))
+        git("config", "core.autocrlf", "false", cwd=clone_directory)
+        git("checkout", "--detach", str(item["head"]), cwd=clone_directory)
+        with zipfile.ZipFile(archive_path) as archive:
+            names = set(archive.namelist())
+            for patch_name, indexed in (("staged.patch", True), ("unstaged.patch", False)):
+                member = f"{prefix}/{patch_name}"
+                if member not in names:
+                    continue
+                material = archive.read(member)
+                patch_digests[patch_name] = sha256_bytes(material)
+                command = ["git", "apply", "--binary", "--whitespace=nowarn"]
+                if indexed:
+                    command.append("--index")
+                patch_file = clone_directory / f".clearra-evidence-{patch_name}"
+                patch_file.write_bytes(material)
+                try:
+                    applied = run(
+                        [*command, str(patch_file)],
+                        cwd=clone_directory,
+                        check=False,
+                    )
+                finally:
+                    patch_file.unlink(missing_ok=True)
+                if applied.returncode != 0:
+                    raise ManagementError(
+                        f"cannot reconstruct dirty worktree {patch_name}: "
+                        f"{applied.stderr.strip() or applied.stdout.strip()}"
+                    )
+            for entry in manifest:
+                if normalized(pathlib.Path(entry.get("worktree", ""))) != normalized(
+                    worktree_path
+                ):
+                    continue
+                if entry.get("classification") == "reproducible-generated":
+                    generated_entries += 1
+                    continue
+                relative = safe_archive_relative(str(entry.get("path", "")))
+                if is_secret_path(pathlib.Path(*relative.parts), policy):
+                    raise ManagementError("dirty evidence encountered a prohibited path")
+                member = f"{prefix}/untracked/{relative.as_posix()}"
+                if member not in names:
+                    raise ManagementError("dirty evidence archive is missing an untracked file")
+                material = archive.read(member)
+                if (
+                    sha256_bytes(material) != entry.get("sha256")
+                    or len(material) != int(entry.get("bytes", -1))
+                ):
+                    raise ManagementError("dirty evidence untracked file digest changed")
+                destination = clone_directory.joinpath(*relative.parts)
+                if not is_within(destination, clone_directory):
+                    raise ManagementError("dirty evidence path escaped its materialization root")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(material)
+                archived_untracked.append(
+                    {
+                        "path": relative.as_posix(),
+                        "sha256": entry["sha256"],
+                        "bytes": entry["bytes"],
+                    }
+                )
+        git("add", "-A", cwd=clone_directory)
+        reconstructed_tree = git("write-tree", cwd=clone_directory)
+        if reconstructed_tree != candidate_tree:
+            failure = {
+                "schema_id": "clearra.git-dirty-candidate-evidence-failure.v1",
+                "transaction": receipt["transaction"],
+                "worktree": str(worktree_path),
+                "source_head": item["head"],
+                "candidate_sha": candidate_sha,
+                "candidate_tree": candidate_tree,
+                "reconstructed_tree": reconstructed_tree,
+                "materialization": str(clone_directory),
+            }
+            failure_path = evidence_directory / (
+                f"failed-{index:03d}-{candidate_sha[:12]}-{utc_stamp()}.json"
+            )
+            write_json_atomic(failure_path, failure)
+            raise ManagementError(
+                f"dirty worktree does not reconstruct the candidate tree; evidence={failure_path}"
+            )
+        evidence = {
+            "schema_id": "clearra.git-dirty-candidate-evidence.v1",
+            "transaction": receipt["transaction"],
+            "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "worktree": str(worktree_path),
+            "worktree_index": index,
+            "source_head": item["head"],
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "reconstructed_tree": reconstructed_tree,
+            "verified_exact_tree": True,
+            "archive_sha256": sha256_file(archive_path),
+            "untracked_manifest_sha256": sha256_file(manifest_path),
+            "patch_sha256": patch_digests,
+            "untracked": archived_untracked,
+            "generated_entries_omitted": generated_entries,
+        }
+        evidence_path = evidence_directory / (
+            f"dirty-{index:03d}-{candidate_sha[:12]}.json"
+        )
+        write_json_atomic(evidence_path, evidence)
+        evidence_digest = sha256_file(evidence_path)
+        item["candidate_evidence"] = {
+            "schema_id": "clearra.git-dirty-evidence-reference.v1",
+            "receipt": str(evidence_path),
+            "sha256": evidence_digest,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+        }
+        write_json_atomic(review_path, review)
+        decision = record_review_decision(
+            receipt_value,
+            policy,
+            decision="selected",
+            reason=(
+                f"safety archive reconstructs candidate {candidate_sha} "
+                "with exact tree equality"
+            ),
+            worktree=str(worktree_path),
+        )
+        return {
+            "worktree": str(worktree_path),
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "evidence": str(evidence_path),
+            "evidence_sha256": evidence_digest,
+            "review": str(review_path),
+            "decision_receipt": decision["receipt"],
+        }
+    finally:
+        if clone_directory.exists():
+            remove_owned_path(clone_directory, policy)
+
+
+def git_review_summary(
+    receipt_value: str, candidate: str, policy: dict[str, Any]
+) -> dict[str, Any]:
+    receipt_path, receipt, _review_path, review = load_safety_transaction(
+        receipt_value, policy
+    )
+    candidate_sha = git("rev-parse", f"{candidate}^{{commit}}")
+    groups: dict[str, dict[str, Any]] = {}
+    dirty: list[dict[str, Any]] = []
+    for item in review.get("items", []):
+        if item.get("kind") == "ref":
+            sha = str(item.get("sha"))
+            group = groups.setdefault(
+                sha,
+                {
+                    "sha": sha,
+                    "tree": item.get("tree"),
+                    "refs": [],
+                    "decisions": [],
+                    "contained_in_candidate": run(
+                        ("git", "merge-base", "--is-ancestor", sha, candidate_sha),
+                        check=False,
+                    ).returncode
+                    == 0,
+                },
+            )
+            group["refs"].append(item.get("ref"))
+            group["decisions"].append(item.get("decision"))
+        elif item.get("kind") == "dirty-worktree":
+            dirty.append(
+                {
+                    "worktree": item.get("worktree"),
+                    "head": item.get("head"),
+                    "dirty_entries": item.get("dirty_entries"),
+                    "decision": item.get("decision"),
+                    "has_candidate_evidence": isinstance(
+                        item.get("candidate_evidence"), dict
+                    ),
+                }
+            )
+    summary = {
+        "schema_id": "clearra.git-convergence-summary.v1",
+        "transaction": receipt["transaction"],
+        "candidate_sha": candidate_sha,
+        "ref_groups": sorted(groups.values(), key=lambda item: item["sha"]),
+        "dirty_worktrees": dirty,
+        "counts": {
+            "ref_items": sum(len(item["refs"]) for item in groups.values()),
+            "unique_ref_shas": len(groups),
+            "dirty_worktrees": len(dirty),
+            "pending": sum(
+                1 for item in review.get("items", []) if item.get("decision") == "pending"
+            ),
+            "selected": sum(
+                1 for item in review.get("items", []) if item.get("decision") == "selected"
+            ),
+            "excluded": sum(
+                1 for item in review.get("items", []) if item.get("decision") == "excluded"
+            ),
+        },
+    }
+    summary_path = receipt_path.parent / "review-summary.json"
+    write_json_atomic(summary_path, summary)
+    return {**summary, "summary": str(summary_path)}
+
+
+def record_review_decision(
+    receipt_value: str,
+    policy: dict[str, Any],
+    *,
+    decision: str,
+    reason: str,
+    ref: str | None = None,
+    worktree: str | None = None,
+) -> dict[str, Any]:
+    if decision not in {"selected", "excluded"}:
+        raise ManagementError("review decision must be selected or excluded")
+    if not reason.strip():
+        raise ManagementError("review decision requires a non-empty reason")
+    if bool(ref) == bool(worktree):
+        raise ManagementError("review decision requires exactly one ref or worktree target")
+    receipt_path, receipt, review_path, review = load_safety_transaction(
+        receipt_value, policy
+    )
+    matches: list[dict[str, Any]] = []
+    for item in review.get("items", []):
+        if ref is not None and item.get("kind") == "ref" and item.get("ref") == ref:
+            matches.append(item)
+        if worktree is not None and item.get("kind") == "dirty-worktree":
+            requested = pathlib.Path(worktree).resolve(strict=False)
+            recorded = pathlib.Path(str(item.get("worktree") or "")).resolve(strict=False)
+            if normalized(requested) == normalized(recorded):
+                matches.append(item)
+    if len(matches) != 1:
+        raise ManagementError("review target must match exactly one pending inventory item")
+    item = matches[0]
+    if (
+        decision == "selected"
+        and item.get("kind") == "dirty-worktree"
+        and not isinstance(item.get("candidate_evidence"), dict)
+    ):
+        raise ManagementError(
+            "dirty worktree selection requires exact candidate evidence first"
+        )
+    previous = {"decision": item.get("decision"), "reason": item.get("reason")}
+    event = {
+        "schema_id": "clearra.git-convergence-review-decision.v1",
+        "transaction": receipt["transaction"],
+        "target": {
+            key: item.get(key)
+            for key in ("kind", "ref", "sha", "worktree", "head")
+            if item.get(key) is not None
+        },
+        "previous": previous,
+        "decision": decision,
+        "reason": reason.strip(),
+        "repository_head": repository_head(),
+    }
+    event_path = receipt_path.parent / (
+        f"review-decision-{utc_stamp()}-{uuid.uuid4().hex[:12]}.json"
+    )
+    write_json_atomic(event_path, event)
+    event_reference = {
+        "receipt": str(event_path),
+        "sha256": sha256_file(event_path),
+    }
+    item["decision"] = decision
+    item["reason"] = reason.strip()
+    item.setdefault("decision_receipts", []).append(event_reference)
+    write_json_atomic(review_path, review)
+    return {
+        **event,
+        "receipt": str(event_path),
+        "receipt_sha256": event_reference["sha256"],
+    }
+
+
+def validate_review_decision_receipt(
+    item: dict[str, Any],
+    receipt_path: pathlib.Path,
+    receipt: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    references = item.get("decision_receipts")
+    if not isinstance(references, list) or not references:
+        raise ManagementError("review decision has no immutable decision receipt")
+    reference = references[-1]
+    path = pathlib.Path(str(reference.get("receipt") or "")).resolve(strict=True)
+    if not is_within(path, receipt_path.parent) or is_secret_path(path, policy):
+        raise ManagementError("review decision receipt escaped its safety transaction")
+    assert_no_link_escape(path, receipt_path.parent)
+    if sha256_file(path) != reference.get("sha256"):
+        raise ManagementError("review decision receipt digest changed")
+    event = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        event.get("schema_id") != "clearra.git-convergence-review-decision.v1"
+        or event.get("transaction") != receipt.get("transaction")
+        or event.get("decision") != item.get("decision")
+        or event.get("reason") != item.get("reason")
+    ):
+        raise ManagementError("review decision receipt does not match the active decision")
+    target = event.get("target", {})
+    for key in ("kind", "ref", "sha", "head"):
+        if item.get(key) is not None and target.get(key) != item.get(key):
+            raise ManagementError("review decision receipt target changed")
+    if item.get("worktree") is not None and normalized(
+        pathlib.Path(str(target.get("worktree") or ""))
+    ) != normalized(pathlib.Path(str(item["worktree"]))):
+        raise ManagementError("review decision receipt worktree target changed")
+    return {
+        "receipt": str(path),
+        "sha256": reference["sha256"],
+        "decision": event["decision"],
+    }
+
+
+def convergence_replay_selection(
+    receipt_value: str, candidate_sha: str, policy: dict[str, Any]
+) -> tuple[pathlib.Path, dict[str, Any], pathlib.Path, dict[str, Any], list[str]]:
+    receipt_path, receipt, review_path, review = load_safety_transaction(
+        receipt_value, policy
+    )
+    selected_tips: list[str] = []
     for item in review.get("items", []):
         decision = item.get("decision")
         reason = str(item.get("reason") or "").strip()
@@ -1702,22 +2730,304 @@ def validate_convergence_review(
             raise ManagementError("convergence review still contains pending items")
         if not reason:
             raise ManagementError("every selected or excluded convergence item needs a reason")
+        validate_review_decision_receipt(item, receipt_path, receipt, policy)
+        if decision == "excluded":
+            continue
+        if item.get("kind") == "ref":
+            source_sha = str(item.get("sha") or "")
+            if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+                raise ManagementError("selected ref has an invalid commit SHA")
+            selected_tips.append(source_sha)
+        elif item.get("kind") == "dirty-worktree":
+            validate_dirty_candidate_evidence(
+                item,
+                item.get("candidate_evidence"),
+                candidate_sha,
+                receipt_path,
+                receipt,
+                policy,
+            )
+        else:
+            raise ManagementError("convergence review contains an unknown item kind")
+    return receipt_path, receipt, review_path, review, sorted(set(selected_tips))
+
+
+def replay_conflict_evidence(policy: dict[str, Any]) -> dict[str, Any]:
+    conflicts: dict[str, dict[str, Any]] = {}
+    unmerged = run(("git", "ls-files", "-u", "-z"), check=False).stdout
+    for record in [value for value in unmerged.split("\0") if value]:
+        metadata, _, path_value = record.partition("\t")
+        fields = metadata.split()
+        if len(fields) != 3 or not path_value:
+            continue
+        mode, blob, stage = fields
+        if is_secret_path(pathlib.Path(path_value), policy):
+            key = "prohibited-path-redacted"
+            entry = conflicts.setdefault(key, {"credential_path_blocker_count": 0, "stages": []})
+            entry["credential_path_blocker_count"] += 1
+            continue
+        entry = conflicts.setdefault(path_value, {"stages": []})
+        entry["stages"].append({"stage": int(stage), "mode": mode, "blob": blob})
+        path = ROOT / path_value
+        if path.is_file() and not is_reparse_point(path):
+            entry["worktree_sha256"] = sha256_file(path)
+            entry["worktree_bytes"] = path.stat().st_size
+    return {"files": conflicts, "count": len(conflicts)}
+
+
+def apply_convergence_review(
+    receipt_value: str, candidate: str, policy: dict[str, Any]
+) -> dict[str, Any]:
+    pattern = policy["git_policy"]["candidate_pattern"]
+    branch = git("branch", "--show-current")
+    if not branch or not fnmatch.fnmatch(branch, pattern):
+        raise ManagementError(f"current branch must match {pattern}")
+    if candidate != branch:
+        raise ManagementError("convergence replay must target the current candidate branch")
+    status = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if status:
+        raise ManagementError("candidate worktree must be clean before convergence replay")
+    initial_sha = git("rev-parse", f"{candidate}^{{commit}}")
+    if git("rev-parse", "HEAD") != initial_sha:
+        raise ManagementError("current HEAD does not equal the requested candidate")
+    origin_main = git("rev-parse", "refs/remotes/origin/main")
+    if run(
+        ("git", "merge-base", "--is-ancestor", origin_main, initial_sha),
+        check=False,
+    ).returncode != 0:
+        raise ManagementError("candidate is not based on the current origin/main")
+    receipt_path, receipt, review_path, review, selected_tips = (
+        convergence_replay_selection(receipt_value, initial_sha, policy)
+    )
+    original_review = json.loads(json.dumps(review))
+    review_updated = False
+    commits: list[str] = []
+    if selected_tips:
+        commits = git(
+            "rev-list",
+            "--reverse",
+            "--topo-order",
+            *selected_tips,
+            "--not",
+            initial_sha,
+        ).splitlines()
+    merge_commits = [
+        commit
+        for commit in commits
+        if len(git("rev-list", "--parents", "-n", "1", commit).split()) > 2
+    ]
+    if merge_commits:
+        blocker = {
+            "schema_id": "clearra.git-convergence-replay-blocked.v1",
+            "transaction": receipt["transaction"],
+            "candidate": branch,
+            "candidate_sha": initial_sha,
+            "reason": "selected history contains merge commits requiring an explicit mainline",
+            "merge_commits": merge_commits,
+        }
+        blocker_path = receipt_path.parent / f"replay-blocked-{utc_stamp()}.json"
+        write_json_atomic(blocker_path, blocker)
+        raise ManagementError(f"selected history contains merge commits; receipt={blocker_path}")
+    applied: list[dict[str, Any]] = []
+    replay_transaction = utc_stamp() + "-" + uuid.uuid4().hex[:12]
+    rollback_ref = (
+        policy["git_policy"]["safety_ref_prefix"].rstrip("/")
+        + f"/{receipt['transaction']}/replay-{replay_transaction}"
+    )
+    try:
+        for source_sha in commits:
+            before = git("rev-parse", "HEAD")
+            if run(
+                ("git", "merge-base", "--is-ancestor", source_sha, before),
+                check=False,
+            ).returncode == 0:
+                applied.append(
+                    {"source": source_sha, "result": before, "classification": "already-contained"}
+                )
+                continue
+            names = git(
+                "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", source_sha
+            ).splitlines()
+            if any(is_secret_path(pathlib.Path(name), policy) for name in names):
+                raise ManagementError("selected commit changes a prohibited credential path")
+            picked = run(("git", "cherry-pick", "-x", source_sha), check=False)
+            if picked.returncode != 0:
+                conflict = replay_conflict_evidence(policy)
+                cherry_head = run(
+                    ("git", "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"),
+                    check=False,
+                )
+                if (
+                    conflict["count"] == 0
+                    and cherry_head.returncode == 0
+                    and run(("git", "diff", "--quiet"), check=False).returncode == 0
+                    and run(("git", "diff", "--cached", "--quiet"), check=False).returncode
+                    == 0
+                ):
+                    git("cherry-pick", "--skip")
+                    applied.append(
+                        {
+                            "source": source_sha,
+                            "result": git("rev-parse", "HEAD"),
+                            "classification": "patch-equivalent-empty",
+                        }
+                    )
+                    continue
+                partial = git("rev-parse", "HEAD")
+                git("update-ref", rollback_ref, partial)
+                abort = run(("git", "cherry-pick", "--abort"), check=False)
+                if abort.returncode != 0:
+                    raise ManagementError(
+                        "convergence replay failed and cherry-pick abort also failed; "
+                        f"preserved at {rollback_ref}"
+                    )
+                git("reset", "--hard", initial_sha)
+                receipt_material = {
+                    "schema_id": "clearra.git-convergence-replay-conflict.v1",
+                    "transaction": receipt["transaction"],
+                    "replay_transaction": replay_transaction,
+                    "candidate": branch,
+                    "initial_sha": initial_sha,
+                    "source_commit": source_sha,
+                    "partial_head": partial,
+                    "rollback_ref": rollback_ref,
+                    "applied_before_conflict": applied,
+                    "conflict": conflict,
+                    "stderr": picked.stderr.strip(),
+                    "restored_head": git("rev-parse", "HEAD"),
+                }
+                conflict_path = receipt_path.parent / (
+                    f"replay-conflict-{replay_transaction}.json"
+                )
+                write_json_atomic(conflict_path, receipt_material)
+                raise ManagementError(
+                    f"convergence replay conflicted and was rolled back; receipt={conflict_path}"
+                )
+            result_sha = git("rev-parse", "HEAD")
+            applied.append(
+                {
+                    "source": source_sha,
+                    "source_tree": git("rev-parse", f"{source_sha}^{{tree}}"),
+                    "before": before,
+                    "result": result_sha,
+                    "result_tree": git("rev-parse", f"{result_sha}^{{tree}}"),
+                    "changed_files": names,
+                    "classification": "replayed",
+                }
+            )
+        final_sha = git("rev-parse", "HEAD")
+        final_tree = git("rev-parse", f"{final_sha}^{{tree}}")
+        replay_evidence = {
+            "schema_id": "clearra.git-ref-replay-evidence.v1",
+            "transaction": receipt["transaction"],
+            "replay_transaction": replay_transaction,
+            "candidate": branch,
+            "initial_sha": initial_sha,
+            "final_sha": final_sha,
+            "final_tree": final_tree,
+            "selected_tips": selected_tips,
+            "applied": applied,
+        }
+        evidence_directory = receipt_path.parent / "evidence"
+        evidence_path = evidence_directory / (
+            f"replay-{replay_transaction}.json"
+        )
+        write_json_atomic(evidence_path, replay_evidence)
+        evidence_digest = sha256_file(evidence_path)
+        for item in review.get("items", []):
+            if item.get("kind") != "ref" or item.get("decision") != "selected":
+                continue
+            source_sha = str(item.get("sha") or "")
+            if run(
+                ("git", "merge-base", "--is-ancestor", source_sha, final_sha),
+                check=False,
+            ).returncode == 0:
+                continue
+            item["candidate_evidence"] = {
+                "schema_id": "clearra.git-ref-evidence-reference.v1",
+                "receipt": str(evidence_path),
+                "sha256": evidence_digest,
+                "source_tip": source_sha,
+                "final_sha": final_sha,
+            }
+        write_json_atomic(review_path, review)
+        review_updated = True
+        convergence = validate_convergence_review(receipt_value, final_sha, policy)
+        material = {
+            "schema_id": "clearra.git-convergence-replay.v1",
+            "transaction": receipt["transaction"],
+            "replay_transaction": replay_transaction,
+            "candidate": branch,
+            "initial_sha": initial_sha,
+            "final_sha": final_sha,
+            "final_tree": final_tree,
+            "selected_tips": selected_tips,
+            "applied": applied,
+            "replay_evidence": str(evidence_path),
+            "replay_evidence_sha256": evidence_digest,
+            "convergence": convergence,
+        }
+        replay_path = receipt_path.parent / f"replay-{replay_transaction}.json"
+        write_json_atomic(replay_path, material)
+        return {**material, "receipt": str(replay_path)}
+    except Exception:
+        if review_updated:
+            write_json_atomic(review_path, original_review)
+        if git("rev-parse", "HEAD") != initial_sha:
+            current = git("rev-parse", "HEAD")
+            git("update-ref", rollback_ref, current)
+            run(("git", "cherry-pick", "--abort"), check=False)
+            git("reset", "--hard", initial_sha)
+        raise
+
+
+def validate_convergence_review(
+    receipt_value: str, candidate_sha: str, policy: dict[str, Any]
+) -> dict[str, Any]:
+    receipt_path, receipt, review_path, review = load_safety_transaction(
+        receipt_value, policy
+    )
+    selected = 0
+    excluded = 0
+    dirty_evidence: list[dict[str, Any]] = []
+    ref_evidence: list[dict[str, Any]] = []
+    for item in review.get("items", []):
+        decision = item.get("decision")
+        reason = str(item.get("reason") or "").strip()
+        if decision not in {"selected", "excluded"}:
+            raise ManagementError("convergence review still contains pending items")
+        if not reason:
+            raise ManagementError("every selected or excluded convergence item needs a reason")
+        validate_review_decision_receipt(item, receipt_path, receipt, policy)
         if decision == "excluded":
             excluded += 1
             continue
         selected += 1
         if item.get("kind") == "ref":
             source_sha = item.get("sha")
-            if not source_sha or run(
+            contained = bool(source_sha) and run(
                 ("git", "merge-base", "--is-ancestor", source_sha, candidate_sha),
                 check=False,
-            ).returncode != 0:
-                raise ManagementError(
-                    f"selected ref is not contained in the candidate: {item.get('ref')}"
+            ).returncode == 0
+            if not contained:
+                ref_evidence.append(
+                    validate_ref_candidate_evidence(
+                        item,
+                        item.get("candidate_evidence"),
+                        candidate_sha,
+                        receipt_path,
+                    )
                 )
-        elif not item.get("candidate_evidence"):
-            raise ManagementError(
-                "a selected dirty worktree needs candidate_evidence in the convergence review"
+        else:
+            dirty_evidence.append(
+                validate_dirty_candidate_evidence(
+                    item,
+                    item.get("candidate_evidence"),
+                    candidate_sha,
+                    receipt_path,
+                    receipt,
+                    policy,
+                )
             )
     return {
         "receipt": str(receipt_path),
@@ -1726,6 +3036,8 @@ def validate_convergence_review(
         "review_sha256": sha256_file(review_path),
         "selected": selected,
         "excluded": excluded,
+        "dirty_evidence": dirty_evidence,
+        "ref_evidence": ref_evidence,
     }
 
 
@@ -1768,8 +3080,8 @@ def verify_independent_main_checkout(
     directory = state_root() / "git-verification" / repo_id / transaction
     directory.parent.mkdir(parents=True, exist_ok=True)
     remote_url = git("remote", "get-url", policy["git_policy"]["remote"])
-    run(("git", "clone", "--no-local", "--no-checkout", remote_url, str(directory)))
     try:
+        run(("git", "clone", "--no-local", "--no-checkout", remote_url, str(directory)))
         run(("git", "checkout", "--detach", expected_sha), cwd=directory)
         actual_sha = run(("git", "rev-parse", "HEAD"), cwd=directory).stdout.strip()
         actual_tree = run(("git", "rev-parse", "HEAD^{tree}"), cwd=directory).stdout.strip()
@@ -1797,17 +3109,117 @@ def verify_independent_main_checkout(
                 raise ManagementError(
                     f"independent checkout policy verification failed: {' '.join(arguments[3:])}\n{detail}"
                 )
+        validation_commands: list[tuple[tuple[str, ...], pathlib.Path]] = [
+            (
+                (sys.executable, "-B", "_local/clearra_manage.py", "toolchain", "sync"),
+                directory,
+            ),
+            (
+                (sys.executable, "-B", "_local/clearra_manage.py", "deps", "install"),
+                directory,
+            ),
+            (("pnpm", "--filter", "ctk3", "run", "test"), directory),
+            (("pnpm", "--filter", "@clearra/ui", "run", "test"), directory),
+            (
+                (
+                    "pnpm",
+                    "deploy",
+                    "--filter",
+                    "@clearra/discord-bot",
+                    "--prod",
+                    "build/discord-container/independent-main",
+                ),
+                directory,
+            ),
+            (
+                (
+                    "node",
+                    "--input-type=module",
+                    "-e",
+                    "await import('./src/clearra/command.mjs'); "
+                    "await import('./src/job-service/server.mjs'); await import('ctk3')",
+                ),
+                directory / "build" / "discord-container" / "independent-main",
+            ),
+            (
+                (
+                    sys.executable,
+                    "-B",
+                    "_local/clearra_manage.py",
+                    "storage",
+                    "run",
+                    "--producer",
+                    "cargo",
+                    "--",
+                    "cargo",
+                    "fmt",
+                    "--all",
+                    "--check",
+                ),
+                directory,
+            ),
+            (
+                (
+                    sys.executable,
+                    "-B",
+                    "_local/clearra_manage.py",
+                    "storage",
+                    "run",
+                    "--producer",
+                    "cargo",
+                    "--",
+                    "cargo",
+                    "check",
+                    "--workspace",
+                    "--locked",
+                ),
+                directory,
+            ),
+        ]
+        executed: list[dict[str, Any]] = []
+        for command, command_cwd in validation_commands:
+            started = time.monotonic()
+            result = run(command, cwd=command_cwd, check=False)
+            executed.append(
+                {
+                    "command": list(command),
+                    "cwd": str(command_cwd.relative_to(directory))
+                    if command_cwd != directory
+                    else ".",
+                    "exit_code": result.returncode,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                }
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                raise ManagementError(
+                    "independent checkout core validation failed: "
+                    f"{' '.join(command)}\n{detail}"
+                )
         evidence = {
             "path": str(directory),
             "sha": actual_sha,
             "tree": actual_tree,
             "file_sha256": digests,
             "policy_verification": "accepted",
+            "core_validation": executed,
         }
         return evidence, directory
-    except Exception:
-        # A failed independent verification remains available for diagnosis.
-        raise
+    except Exception as error:
+        # Keep the failed checkout and bind its location to an external receipt.
+        failure_receipt = write_receipt(
+            "git-independent-verification-failed",
+            {
+                "expected_sha": expected_sha,
+                "checkout": str(directory),
+                "error_type": type(error).__name__,
+                "owned_paths": [str(directory)],
+            },
+        )
+        raise ManagementError(
+            "independent main verification failed; the checkout was retained; "
+            f"receipt={failure_receipt}"
+        ) from error
 
 
 def promote_candidate(
@@ -1831,10 +3243,8 @@ def promote_candidate(
         run(("git", "diff", "--binary", before, sha)).stdout.encode("utf-8")
     ).hexdigest()
     main_path, local_before = default_main_preflight(sha)
-    git("push", "origin", f"{sha}:refs/heads/main")
-    remote = git("ls-remote", "origin", "refs/heads/main").split()[0]
-    if remote != sha:
-        raise ManagementError("origin/main readback does not equal the promoted candidate")
+    ruleset = apply_ruleset(policy)
+    remote = push_main_fast_forward(sha, before)
     run(("git", "merge", "--ff-only", sha), cwd=main_path)
     local_update = run(("git", "rev-parse", "HEAD"), cwd=main_path).stdout.strip()
     if local_update != sha:
@@ -1842,7 +3252,6 @@ def promote_candidate(
     independent, verification_path = verify_independent_main_checkout(sha, policy)
     if independent["sha"] != sha or independent["tree"] != git("rev-parse", f"{sha}^{{tree}}"):
         raise ManagementError("independent main verification did not converge")
-    remove_owned_path(verification_path, policy)
     receipt = {
         "candidate": candidate,
         "sha": sha,
@@ -1853,21 +3262,139 @@ def promote_candidate(
         "checks": checks,
         "ci_run_ids": [item["id"] for item in checks],
         "convergence": convergence,
+        "ruleset": ruleset,
         "policy_sha256": sha256_file(ROOT / "config" / "clearra-management.v1.json"),
         "lockfile_sha256": sha256_file(ROOT / "pnpm-lock.yaml"),
         "toolchain_sha256": sha256_file(ROOT / "rust-toolchain.toml"),
         "diff_sha256": diff_digest,
         "local_main_before": local_before,
         "local_main_update": local_update,
-        "independent_checkout": {**independent, "path": "removed-after-verification"},
+        "independent_checkout": independent,
     }
     receipt["receipt"] = str(write_receipt("git-promotion", receipt))
     return receipt
 
 
+def push_main_fast_forward(candidate_sha: str, expected_base: str) -> str:
+    """Publish main once, with an immediate base check and exact readback."""
+    current = git("ls-remote", "origin", "refs/heads/main").split()
+    if not current or current[0] != expected_base:
+        raise ManagementError("origin/main changed after candidate preflight")
+    pushed = run(
+        ("git", "push", "origin", f"{candidate_sha}:refs/heads/main"),
+        check=False,
+    )
+    if pushed.returncode != 0:
+        detail = pushed.stderr.strip() or pushed.stdout.strip()
+        raise ManagementError(f"normal fast-forward push was rejected\n{detail}")
+    readback = git("ls-remote", "origin", "refs/heads/main").split()
+    if not readback or readback[0] != candidate_sha:
+        raise ManagementError("origin/main readback does not equal the promoted candidate")
+    return readback[0]
+
+
+def authorized_github_maintainers(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    configured = policy["git_policy"].get("authorized_maintainers", [])
+    if not configured:
+        raise ManagementError("Git policy has no authorized maintainers")
+    expected = {
+        (str(item.get("login") or "").casefold(), int(item.get("github_user_id") or 0))
+        for item in configured
+    }
+    if any(not login or identifier <= 0 for login, identifier in expected):
+        raise ManagementError("Git policy contains an invalid authorized maintainer")
+    repo = repository_name()
+    current = json.loads(run(("gh", "api", "user")).stdout)
+    current_identity = (str(current.get("login") or "").casefold(), int(current.get("id") or 0))
+    if current_identity not in expected:
+        raise ManagementError("authenticated GitHub user is not an authorized maintainer")
+    collaborators = json.loads(
+        run(("gh", "api", f"repos/{repo}/collaborators?affiliation=all&per_page=100")).stdout
+    )
+    pushers = [
+        {
+            "login": item.get("login"),
+            "github_user_id": item.get("id"),
+            "permissions": item.get("permissions", {}),
+        }
+        for item in collaborators
+        if item.get("permissions", {}).get("push")
+        or item.get("permissions", {}).get("maintain")
+        or item.get("permissions", {}).get("admin")
+    ]
+    actual = {
+        (str(item.get("login") or "").casefold(), int(item.get("github_user_id") or 0))
+        for item in pushers
+    }
+    if actual != expected:
+        raise ManagementError(
+            "repository push collaborators do not exactly match authorized_maintainers"
+        )
+    return pushers
+
+
+def verify_ruleset_readback(
+    value: dict[str, Any], policy: dict[str, Any]
+) -> dict[str, Any]:
+    if (
+        value.get("name") != "Clearra main fast-forward gate"
+        or value.get("target") != "branch"
+        or value.get("enforcement") != "active"
+    ):
+        raise ManagementError("GitHub ruleset readback identity does not match policy")
+    includes = value.get("conditions", {}).get("ref_name", {}).get("include", [])
+    excludes = value.get("conditions", {}).get("ref_name", {}).get("exclude", [])
+    if includes != ["~DEFAULT_BRANCH"] or excludes != []:
+        raise ManagementError("GitHub ruleset does not target only the default branch")
+    if value.get("bypass_actors"):
+        raise ManagementError("GitHub ruleset unexpectedly grants a bypass actor")
+    rules = value.get("rules", [])
+    types = [item.get("type") for item in rules]
+    expected_types = {
+        "deletion",
+        "non_fast_forward",
+        "required_linear_history",
+        "required_status_checks",
+    }
+    if set(types) != expected_types or len(types) != len(expected_types):
+        raise ManagementError("GitHub ruleset rule types do not exactly match policy")
+    required = next(item for item in rules if item.get("type") == "required_status_checks")
+    parameters = required.get("parameters", {})
+    status_checks = parameters.get("required_status_checks", [])
+    contexts = [item.get("context") for item in status_checks]
+    expected_contexts = policy["git_policy"]["required_checks"]
+    if sorted(contexts) != sorted(expected_contexts) or len(contexts) != len(
+        expected_contexts
+    ):
+        raise ManagementError("GitHub ruleset required checks do not match policy")
+    if (
+        parameters.get("strict_required_status_checks_policy") is not True
+        or parameters.get("do_not_enforce_on_create") is not True
+    ):
+        raise ManagementError("GitHub ruleset status-check parameters do not match policy")
+    return {
+        "id": value.get("id"),
+        "name": value.get("name"),
+        "target": value.get("target"),
+        "enforcement": value.get("enforcement"),
+        "ref_include": includes,
+        "rule_types": sorted(types),
+        "required_checks": sorted(contexts),
+        "bypass_actors": [],
+    }
+
+
+def read_ruleset(ruleset_id: int | str) -> dict[str, Any]:
+    """Read one repository ruleset through a narrow, fixture-friendly boundary."""
+    return json.loads(
+        run(("gh", "api", f"repos/{repository_name()}/rulesets/{ruleset_id}")).stdout
+    )
+
+
 def apply_ruleset(policy: dict[str, Any]) -> dict[str, Any]:
     repo = repository_name()
     name = "Clearra main fast-forward gate"
+    maintainers = authorized_github_maintainers(policy)
     payload = {
         "name": name,
         "target": "branch",
@@ -1896,7 +3423,258 @@ def apply_ruleset(policy: dict[str, Any]) -> dict[str, Any]:
         response = run(("gh", "api", "--method", "PUT", f"repos/{repo}/rulesets/{match['id']}", "--input", "-"), input_text=json.dumps(payload))
     else:
         response = run(("gh", "api", "--method", "POST", f"repos/{repo}/rulesets", "--input", "-"), input_text=json.dumps(payload))
-    return json.loads(response.stdout)
+    changed = json.loads(response.stdout)
+    ruleset_id = changed.get("id")
+    if not ruleset_id:
+        raise ManagementError("GitHub ruleset mutation did not return an id")
+    readback = read_ruleset(ruleset_id)
+    verified = verify_ruleset_readback(readback, policy)
+    receipt = {
+        "repository": repo,
+        "ruleset": verified,
+        "authorized_maintainers": maintainers,
+    }
+    receipt["receipt"] = str(write_receipt("github-ruleset", receipt))
+    return receipt
+
+
+def load_promotion_receipt(
+    value: str, policy: dict[str, Any]
+) -> tuple[pathlib.Path, dict[str, Any]]:
+    path = pathlib.Path(value).resolve(strict=True)
+    root = state_root() / "receipts"
+    if not is_within(path, root) or is_secret_path(path, policy):
+        raise ManagementError("finalization requires a managed promotion receipt")
+    assert_no_link_escape(path, root)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        receipt.get("schema_id") != "clearra.management-receipt.v1"
+        or receipt.get("kind") != "git-promotion"
+    ):
+        raise ManagementError("unsupported Git promotion receipt")
+    return path, receipt
+
+
+def ref_is_reviewed_or_equivalent(
+    ref: str,
+    sha: str,
+    main_sha: str,
+    review_by_ref: dict[str, dict[str, Any]],
+    reviewed_shas: set[str],
+) -> tuple[bool, str]:
+    if ref in review_by_ref:
+        decision = str(review_by_ref[ref].get("decision"))
+        if decision in {"selected", "excluded"}:
+            return True, f"review-{decision}"
+    if sha in reviewed_shas:
+        return True, "reviewed-sha"
+    classification = classify_ref(sha, main_sha)
+    return classification in {"ancestor", "tree-identical", "patch-equivalent"}, classification
+
+
+def finalize_candidate(
+    candidate: str,
+    safety_receipt_value: str,
+    promotion_receipt_value: str,
+    policy: dict[str, Any],
+    *,
+    apply: bool,
+) -> dict[str, Any]:
+    promotion_path, promotion = load_promotion_receipt(promotion_receipt_value, policy)
+    sha = str(promotion.get("sha") or "")
+    if promotion.get("candidate") != candidate or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ManagementError("promotion receipt does not match the requested candidate")
+    safety_path, safety, _review_path, review = load_safety_transaction(
+        safety_receipt_value, policy
+    )
+    convergence = validate_convergence_review(safety_receipt_value, sha, policy)
+    remote_main_material = git("ls-remote", "origin", "refs/heads/main").split()
+    if not remote_main_material or remote_main_material[0] != sha:
+        raise ManagementError("origin/main does not equal the promoted candidate")
+    main_worktrees = [
+        item
+        for item in parse_worktrees(git("worktree", "list", "--porcelain"))
+        if item.branch == "refs/heads/main"
+    ]
+    if len(main_worktrees) != 1:
+        raise ManagementError("finalization requires exactly one local main worktree")
+    main_worktree = main_worktrees[0]
+    if main_worktree.head != sha:
+        raise ManagementError("local main does not equal the promoted candidate")
+    if run(
+        ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+        cwd=main_worktree.path,
+    ).stdout:
+        raise ManagementError("local main must be clean before finalization")
+    if normalized(ROOT) != normalized(main_worktree.path):
+        raise ManagementError("git finalize must run from the default main checkout")
+
+    independent = promotion.get("independent_checkout", {})
+    independent_path = pathlib.Path(str(independent.get("path") or "")).resolve(strict=True)
+    verification_root = state_root() / "git-verification"
+    if not is_within(independent_path, verification_root):
+        raise ManagementError("independent verification checkout escaped its managed root")
+    assert_no_link_escape(independent_path, verification_root)
+    independent_sha = git("rev-parse", "HEAD", cwd=independent_path)
+    independent_tree = git("rev-parse", "HEAD^{tree}", cwd=independent_path)
+    if independent_sha != sha or independent_tree != promotion.get("tree"):
+        raise ManagementError("independent verification checkout no longer matches promotion")
+
+    ruleset_id = promotion.get("ruleset", {}).get("ruleset", {}).get("id")
+    if not ruleset_id:
+        raise ManagementError("promotion receipt has no verified GitHub ruleset")
+    ruleset = read_ruleset(ruleset_id)
+    ruleset_readback = verify_ruleset_readback(ruleset, policy)
+
+    review_by_ref = {
+        str(item.get("ref")): item
+        for item in review.get("items", [])
+        if item.get("kind") == "ref"
+    }
+    reviewed_shas = {
+        str(item.get("sha"))
+        for item in review_by_ref.values()
+        if item.get("decision") in {"selected", "excluded"}
+    }
+    worktrees = parse_worktrees(git("worktree", "list", "--porcelain"))
+    removable_worktrees: list[dict[str, Any]] = []
+    blocked_worktrees: list[dict[str, Any]] = []
+    for worktree in worktrees:
+        if normalized(worktree.path) == normalized(main_worktree.path):
+            continue
+        dirty = run(
+            ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+            cwd=worktree.path,
+        ).stdout
+        if dirty:
+            blocked_worktrees.append(
+                {"path": str(worktree.path), "head": worktree.head, "reason": "dirty"}
+            )
+            continue
+        branch_ref = worktree.branch or ""
+        safe, reason = ref_is_reviewed_or_equivalent(
+            branch_ref, worktree.head, sha, review_by_ref, reviewed_shas
+        )
+        if not safe and candidate == branch_ref.removeprefix("refs/heads/"):
+            safe, reason = True, "promoted-candidate"
+        target = {"path": str(worktree.path), "head": worktree.head, "reason": reason}
+        (removable_worktrees if safe else blocked_worktrees).append(target)
+    if blocked_worktrees:
+        raise ManagementError(
+            f"worktree finalization remains blocked for {len(blocked_worktrees)} worktrees"
+        )
+
+    local_refs: list[dict[str, str]] = []
+    for line in git(
+        "for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads"
+    ).splitlines():
+        ref, object_sha = line.split("\0", 1)
+        if ref == "refs/heads/main":
+            continue
+        safe, reason = ref_is_reviewed_or_equivalent(
+            ref, object_sha, sha, review_by_ref, reviewed_shas
+        )
+        if ref == f"refs/heads/{candidate}":
+            safe, reason = True, "promoted-candidate"
+        if not safe:
+            raise ManagementError(f"local ref remains unreviewed: {ref}")
+        local_refs.append({"ref": ref, "sha": object_sha, "reason": reason})
+
+    remote_refs: list[dict[str, str]] = []
+    remote_lines = git(
+        "for-each-ref", "--format=%(refname)%00%(objectname)", "refs/remotes/origin"
+    ).splitlines()
+    for line in remote_lines:
+        ref, object_sha = line.split("\0", 1)
+        if ref in {"refs/remotes/origin/main", "refs/remotes/origin/HEAD"}:
+            continue
+        safe, reason = ref_is_reviewed_or_equivalent(
+            ref, object_sha, sha, review_by_ref, reviewed_shas
+        )
+        branch_name = ref.removeprefix("refs/remotes/origin/")
+        if branch_name == candidate:
+            safe, reason = True, "promoted-candidate"
+        if not safe:
+            raise ManagementError(f"remote ref remains unreviewed: {ref}")
+        remote_refs.append(
+            {"ref": ref, "branch": branch_name, "sha": object_sha, "reason": reason}
+        )
+
+    prefix = policy["git_policy"]["safety_ref_prefix"].rstrip("/") + "/" + safety["transaction"]
+    safety_refs = [
+        {"ref": line.split("\0", 1)[0], "sha": line.split("\0", 1)[1]}
+        for line in git(
+            "for-each-ref", "--format=%(refname)%00%(objectname)", prefix
+        ).splitlines()
+        if "\0" in line
+    ]
+    plan = {
+        "schema_id": "clearra.git-finalization-plan.v1",
+        "candidate": candidate,
+        "sha": sha,
+        "tree": promotion.get("tree"),
+        "promotion_receipt": str(promotion_path),
+        "safety_receipt": str(safety_path),
+        "convergence": convergence,
+        "ruleset": ruleset_readback,
+        "main_worktree": str(main_worktree.path),
+        "independent_checkout": str(independent_path),
+        "worktrees": removable_worktrees,
+        "local_refs": local_refs,
+        "remote_refs": remote_refs,
+        "safety_refs": safety_refs,
+        "apply": apply,
+    }
+    if not apply:
+        return plan
+
+    for worktree in removable_worktrees:
+        git("worktree", "remove", worktree["path"])
+    if remote_refs:
+        git(
+            "push",
+            "--atomic",
+            "origin",
+            "--delete",
+            *[entry["branch"] for entry in remote_refs],
+        )
+    if local_refs:
+        delete_refs_atomically(
+            [(entry["ref"], entry["sha"]) for entry in local_refs]
+        )
+    remaining_remote = {
+        line.split()[1]
+        for line in git("ls-remote", "--heads", "origin").splitlines()
+        if len(line.split()) == 2
+    }
+    if remaining_remote != {"refs/heads/main"}:
+        raise ManagementError("remote branch cleanup did not converge to main only")
+    remaining_local = git("for-each-ref", "--format=%(refname)", "refs/heads").splitlines()
+    if remaining_local != ["refs/heads/main"]:
+        raise ManagementError("local branch cleanup did not converge to main only")
+    remaining_worktrees = parse_worktrees(git("worktree", "list", "--porcelain"))
+    if len(remaining_worktrees) != 1 or normalized(remaining_worktrees[0].path) != normalized(
+        main_worktree.path
+    ):
+        raise ManagementError("worktree cleanup did not converge to local main only")
+    remove_owned_path(independent_path, policy)
+    if safety_refs:
+        delete_refs_atomically(
+            [(entry["ref"], entry["sha"]) for entry in safety_refs]
+        )
+    safety_directory = safety_path.parent
+    remove_owned_path(safety_directory, policy)
+    final = {
+        **plan,
+        "apply": True,
+        "remote_main_readback": git("ls-remote", "origin", "refs/heads/main").split()[0],
+        "local_main_readback": git("rev-parse", "HEAD", cwd=main_worktree.path),
+        "local_tree_readback": git("rev-parse", "HEAD^{tree}", cwd=main_worktree.path),
+        "independent_checkout_removed": not independent_path.exists(),
+        "safety_transaction_removed": not safety_directory.exists(),
+    }
+    final["receipt"] = str(write_receipt("git-finalization", final))
+    return final
 
 
 def print_json(value: Any) -> None:
@@ -1932,17 +3710,50 @@ def parser() -> argparse.ArgumentParser:
     deps_actions.add_parser("import-lock")
     install = deps_actions.add_parser("install")
     install.add_argument("--clean-links", action="store_true")
+    update = deps_actions.add_parser("update")
+    update.add_argument("--manager", choices=("pnpm", "cargo"), required=True)
+    update.add_argument("arguments", nargs=argparse.REMAINDER)
     deps_actions.add_parser("verify")
+
+    package = domains.add_parser("package")
+    package_actions = package.add_subparsers(dest="action", required=True)
+    pack = package_actions.add_parser("pack")
+    pack.add_argument("--package", required=True)
+    publish = package_actions.add_parser("publish")
+    publish.add_argument("--receipt", required=True)
+    publish.add_argument("--tag", default="latest")
+    publish.add_argument("--access", choices=("public", "restricted"), default="public")
+    publish.add_argument("--apply", action="store_true")
 
     git_parser = domains.add_parser("git")
     git_actions = git_parser.add_subparsers(dest="action", required=True)
     inventory = git_actions.add_parser("inventory")
     inventory.add_argument("--fetch", action="store_true")
-    git_actions.add_parser("converge")
+    converge = git_actions.add_parser("converge")
+    converge.add_argument("--apply", action="store_true")
+    converge.add_argument("--safety-receipt")
+    converge.add_argument("--candidate")
+    review = git_actions.add_parser("review")
+    review.add_argument("--safety-receipt", required=True)
+    review.add_argument("--candidate", required=True)
+    review.add_argument("--record-worktree")
+    review.add_argument("--evidence-commit")
+    decision_target = review.add_mutually_exclusive_group()
+    decision_target.add_argument("--decide-ref")
+    decision_target.add_argument("--decide-worktree")
+    review.add_argument("--decision", choices=("selected", "excluded"))
+    review.add_argument("--reason")
     promote = git_actions.add_parser("promote")
     promote.add_argument("--candidate", required=True)
     promote.add_argument("--safety-receipt", required=True)
-    git_actions.add_parser("protect")
+    protect = git_actions.add_parser("protect")
+    protect.add_argument("--candidate", required=True)
+    protect.add_argument("--safety-receipt", required=True)
+    finalize = git_actions.add_parser("finalize")
+    finalize.add_argument("--candidate", required=True)
+    finalize.add_argument("--safety-receipt", required=True)
+    finalize.add_argument("--promotion-receipt", required=True)
+    finalize.add_argument("--apply", action="store_true")
     return root
 
 
@@ -1985,7 +3796,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.action,
             policy,
             clean_links=getattr(arguments, "clean_links", False),
+            update_manager=getattr(arguments, "manager", None),
+            update_arguments=getattr(arguments, "arguments", ()),
         )
+    if arguments.domain == "package":
+        if arguments.action == "pack":
+            print_json(package_pack(arguments.package, policy))
+            return 0
+        if arguments.action == "publish":
+            print_json(
+                package_publish(
+                    arguments.receipt,
+                    policy,
+                    tag=arguments.tag,
+                    access=arguments.access,
+                    apply=arguments.apply,
+                )
+            )
+            return 0
     if arguments.domain == "git":
         with repository_lock():
             if arguments.action == "inventory":
@@ -1994,7 +3822,55 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print_json({**inventory, "receipt": str(path)})
                 return 0
             if arguments.action == "converge":
-                print_json(prepare_git_safety(policy))
+                if arguments.apply:
+                    if not arguments.safety_receipt or not arguments.candidate:
+                        raise ManagementError(
+                            "git converge --apply requires --safety-receipt and --candidate"
+                        )
+                    print_json(
+                        apply_convergence_review(
+                            arguments.safety_receipt, arguments.candidate, policy
+                        )
+                    )
+                else:
+                    if arguments.safety_receipt or arguments.candidate:
+                        raise ManagementError(
+                            "--safety-receipt and --candidate require --apply"
+                        )
+                    print_json(prepare_git_safety(policy))
+                return 0
+            if arguments.action == "review":
+                if bool(arguments.record_worktree) != bool(arguments.evidence_commit):
+                    raise ManagementError(
+                        "--record-worktree and --evidence-commit must be supplied together"
+                    )
+                deciding = bool(arguments.decide_ref or arguments.decide_worktree)
+                if deciding != bool(arguments.decision and arguments.reason):
+                    raise ManagementError(
+                        "a review decision requires one target, --decision, and --reason"
+                    )
+                evidence = None
+                if arguments.record_worktree:
+                    evidence = record_dirty_candidate_evidence(
+                        arguments.safety_receipt,
+                        arguments.record_worktree,
+                        arguments.evidence_commit,
+                        policy,
+                    )
+                decision = None
+                if deciding:
+                    decision = record_review_decision(
+                        arguments.safety_receipt,
+                        policy,
+                        decision=arguments.decision,
+                        reason=arguments.reason,
+                        ref=arguments.decide_ref,
+                        worktree=arguments.decide_worktree,
+                    )
+                summary = git_review_summary(
+                    arguments.safety_receipt, arguments.candidate, policy
+                )
+                print_json({"evidence": evidence, "decision": decision, **summary})
                 return 0
             if arguments.action == "promote":
                 print_json(
@@ -2002,7 +3878,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
             if arguments.action == "protect":
-                print_json(apply_ruleset(policy))
+                sha, checks = check_candidate_once(arguments.candidate, policy)
+                convergence = validate_convergence_review(
+                    arguments.safety_receipt, sha, policy
+                )
+                default_main_preflight(sha)
+                print_json(
+                    {
+                        "sha": sha,
+                        "checks": checks,
+                        "convergence": convergence,
+                        "ruleset": apply_ruleset(policy),
+                    }
+                )
+                return 0
+            if arguments.action == "finalize":
+                print_json(
+                    finalize_candidate(
+                        arguments.candidate,
+                        arguments.safety_receipt,
+                        arguments.promotion_receipt,
+                        policy,
+                        apply=arguments.apply,
+                    )
+                )
                 return 0
     raise ManagementError("unreachable management command")
 

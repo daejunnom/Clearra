@@ -22,8 +22,11 @@
       "id": "build-publication",
       "path": "build",
       "classes": [
+        "build-cache",
         "publication",
-        "container-stage"
+        "container-stage",
+        "package-output",
+        "tool-binary"
       ],
       "lifecycle": "reproducible-until-explicit-clean",
       "owners": [
@@ -31,7 +34,8 @@
         "frontend",
         "wasm",
         "discord-container",
-        "release-evidence"
+        "release-evidence",
+        "management"
       ]
     },
     {
@@ -329,7 +333,9 @@
         "receipt",
         "lock",
         "temporary",
-        "test"
+        "test",
+        "package-output",
+        "tool-binary"
       ]
     }
   ],
@@ -339,6 +345,12 @@
     "candidate_pattern": "codex/converge-*",
     "required_checks": [
       "Clearra management policy"
+    ],
+    "authorized_maintainers": [
+      {
+        "login": "daejunnom",
+        "github_user_id": 271715321
+      }
     ],
     "safety_ref_prefix": "refs/clearra-safety",
     "allow_force_push": false,
@@ -1760,6 +1772,9 @@
   },
   "package_policy": {
     "authority": "pnpm",
+    "publishable_packages": [
+      "ctk3"
+    ],
     "workspace_patterns": [
       "apps/*",
       "packages/*"

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import pathlib
+import tarfile
+import copy
 import sys
 import tempfile
 import unittest
@@ -81,6 +84,30 @@ class ManagementPolicyTests(unittest.TestCase):
                     force_reason="test-only reason",
                 )
 
+    def test_force_override_is_one_call_local_tty_capability(self) -> None:
+        unmanaged = ROOT / "crates" / "one-call-unmanaged-output.bin"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CI": "",
+                "GITHUB_ACTIONS": "",
+                "CLEARRA_RELEASE": "",
+                "CLEARRA_DEPLOYMENT": "",
+            },
+            clear=False,
+        ), mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch.object(
+            sys.stderr, "isatty", return_value=True
+        ):
+            accepted = MANAGE.assert_output_path(
+                unmanaged,
+                self.policy,
+                force=True,
+                force_reason="isolated local fixture",
+            )
+        self.assertEqual(accepted, unmanaged.resolve(strict=False))
+        with self.assertRaises(MANAGE.ManagementError):
+            MANAGE.assert_output_path(unmanaged, self.policy)
+
     def test_cargo_output_overrides_are_rejected_before_execution(self) -> None:
         for option in (
             "--target-dir=outside",
@@ -110,13 +137,28 @@ class ManagementPolicyTests(unittest.TestCase):
         self.assertIn("강제 실행은 권장하지 않습니다", MANAGE.WARNING)
 
     def test_policy_json_is_stable_and_has_unique_ids(self) -> None:
-        material = json.loads((ROOT / "config" / "clearra-management.v1.json").read_text(encoding="utf-8"))
+        def reject_duplicate_keys(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise AssertionError(f"duplicate JSON key: {key}")
+                value[key] = item
+            return value
+
+        material = json.loads(
+            (ROOT / "config" / "clearra-management.v1.json").read_text(
+                encoding="utf-8"
+            ),
+            object_pairs_hook=reject_duplicate_keys,
+        )
         for key in ("repository_roots", "external_roots", "producers"):
             ids = [entry["id"] for entry in material[key]]
             self.assertEqual(len(ids), len(set(ids)), key)
         for key in ("writer_registry", "process_registry"):
             paths = [entry["path"] for entry in material[key]]
             self.assertEqual(len(paths), len(set(paths)), key)
+        self.assertEqual(material["package_policy"]["authority"], "pnpm")
+        self.assertEqual(material["package_policy"]["publishable_packages"], ["ctk3"])
 
     def test_writer_registry_exactly_matches_detected_writers(self) -> None:
         registered = {entry["path"] for entry in self.policy["writer_registry"]}
@@ -169,6 +211,114 @@ class ManagementPolicyTests(unittest.TestCase):
             self.assertTrue(exact["complete"])
             self.assertEqual(exact["measurement_kind"], "exact")
             self.assertEqual(exact["bytes"], 3)
+
+    def test_ruleset_readback_requires_the_exact_closed_policy(self) -> None:
+        value = {
+            "id": 42,
+            "name": "Clearra main fast-forward gate",
+            "target": "branch",
+            "enforcement": "active",
+            "bypass_actors": [],
+            "conditions": {
+                "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}
+            },
+            "rules": [
+                {"type": "deletion"},
+                {"type": "non_fast_forward"},
+                {"type": "required_linear_history"},
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "strict_required_status_checks_policy": True,
+                        "do_not_enforce_on_create": True,
+                        "required_status_checks": [
+                            {"context": "Clearra management policy"}
+                        ],
+                    },
+                },
+            ],
+        }
+        accepted = MANAGE.verify_ruleset_readback(value, self.policy)
+        self.assertEqual(accepted["id"], 42)
+
+        invalid_values = []
+        bypass = copy.deepcopy(value)
+        bypass["bypass_actors"] = [{"actor_id": 1, "actor_type": "RepositoryRole"}]
+        invalid_values.append(bypass)
+        pull_request = copy.deepcopy(value)
+        pull_request["rules"].append({"type": "pull_request", "parameters": {}})
+        invalid_values.append(pull_request)
+        duplicate_check = copy.deepcopy(value)
+        duplicate_check["rules"][-1]["parameters"]["required_status_checks"].append(
+            {"context": "Clearra management policy"}
+        )
+        invalid_values.append(duplicate_check)
+        excluded_ref = copy.deepcopy(value)
+        excluded_ref["conditions"]["ref_name"]["exclude"] = ["refs/heads/release"]
+        invalid_values.append(excluded_ref)
+        non_strict = copy.deepcopy(value)
+        non_strict["rules"][-1]["parameters"][
+            "strict_required_status_checks_policy"
+        ] = False
+        invalid_values.append(non_strict)
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid), self.assertRaises(MANAGE.ManagementError):
+                MANAGE.verify_ruleset_readback(invalid, self.policy)
+
+    def test_dependency_update_arguments_reject_path_and_credential_overrides(self) -> None:
+        self.assertEqual(
+            MANAGE.validate_dependency_update_arguments(
+                "pnpm", ["--", "ctk3", "--latest"]
+            ),
+            ["ctk3", "--latest"],
+        )
+        for manager, values in (
+            ("pnpm", ["--store-dir=outside"]),
+            ("pnpm", ["--registry=https://token@example.invalid"]),
+            ("cargo", ["--manifest-path", "outside/Cargo.toml"]),
+            ("cargo", ["--config=net.token=secret"]),
+        ):
+            with self.subTest(manager=manager, values=values), self.assertRaises(
+                MANAGE.ManagementError
+            ):
+                MANAGE.validate_dependency_update_arguments(manager, values)
+
+    def test_package_tarball_inspection_seals_members_and_identity(self) -> None:
+        parent = ROOT / "_local" / "tmp" / "management-tests"
+        parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=parent) as directory:
+            valid = pathlib.Path(directory) / "valid.tgz"
+            with tarfile.open(valid, "w:gz") as archive:
+                manifest = json.dumps({"name": "ctk3", "version": "0.1.1"}).encode()
+                info = tarfile.TarInfo("package/package.json")
+                info.size = len(manifest)
+                archive.addfile(info, io.BytesIO(manifest))
+                source = b"export const value = 1;\n"
+                info = tarfile.TarInfo("package/dist/index.js")
+                info.size = len(source)
+                archive.addfile(info, io.BytesIO(source))
+            inspected = MANAGE.inspect_package_tarball(valid, "ctk3", "0.1.1")
+            self.assertEqual(inspected["name"], "ctk3")
+            self.assertEqual(len(inspected["members"]), 2)
+
+            unsafe = pathlib.Path(directory) / "unsafe.tgz"
+            with tarfile.open(unsafe, "w:gz") as archive:
+                content = b"escape"
+                info = tarfile.TarInfo("package/../escape.txt")
+                info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+            with self.assertRaisesRegex(MANAGE.ManagementError, "unsafe member"):
+                MANAGE.inspect_package_tarball(unsafe, "ctk3", "0.1.1")
+
+            duplicate = pathlib.Path(directory) / "duplicate.tgz"
+            with tarfile.open(duplicate, "w:gz") as archive:
+                manifest = json.dumps({"name": "ctk3", "version": "0.1.1"}).encode()
+                for _ in range(2):
+                    info = tarfile.TarInfo("package/package.json")
+                    info.size = len(manifest)
+                    archive.addfile(info, io.BytesIO(manifest))
+            with self.assertRaisesRegex(MANAGE.ManagementError, "duplicate member"):
+                MANAGE.inspect_package_tarball(duplicate, "ctk3", "0.1.1")
 
 
 if __name__ == "__main__":

@@ -127,16 +127,21 @@ See [docs/test-policy.md](docs/test-policy.md) for the exact gate contract.
 
 ## Artifacts
 
-Build/cache artifacts live below the platform Clearra artifact root, normally
-`%LOCALAPPDATA%\Clearra\build` on Windows. Reports use the separate Clearra
-report root. Repository-local `target`, `build`, and report output are rejected.
-The external CMake/Cargo trees are reused across source changes and rely on
-their native dependency tracking; only cache-budget overflow or a different
-workspace/schema identity resets the complete tree. Disposable builds reuse a
-locked `build/transient/<purpose>` slot and overwrite its previous contents;
-the default runtime comparison report similarly replaces
-`reports/runtime-environments/latest`. Pass an explicit output path only when
-an additional local history is intentionally required.
+The committed management policy distinguishes two managed build areas. Direct
+management runs place reproducible Cargo targets, package tarballs, container
+staging, and project-owned Cargo tools under repository `build/<producer>/`.
+The product build owner retains its cross-worktree cache under the registered
+platform root, normally `%LOCALAPPDATA%\Clearra\build` on Windows. The latter is
+a shared Clearra cache, never a source or release authority, and cleanup only
+removes entries proven to be owned by a Clearra receipt. Arbitrary
+repository-local `target` directories and report files remain forbidden.
+
+Test, benchmark, analysis, and research run evidence belongs under
+`_local/artifacts/<class>/<run-id>`. Transaction state and temporary files use
+`_local/state` and `_local/tmp`; accepted human-reviewed research summaries may
+be committed under `docs/research`. See
+[docs/management-policy.md](docs/management-policy.md) for the command and
+lifecycle contract.
 `_local/clearra_manage.py` and `_local/tests/` are reviewed management source.
 The remaining `_local/` subdirectories are reserved for Git-ignored,
 nonproduct artifacts, state, and temporary output under the management policy.

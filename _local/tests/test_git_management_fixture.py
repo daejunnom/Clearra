@@ -3,11 +3,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -93,6 +95,24 @@ class GitManagementFixtureTests(unittest.TestCase):
         MANAGE.state_root = self.original_state_root
         self.temporary.cleanup()
 
+    def decide(
+        self,
+        receipt: str,
+        item: dict,
+        decision: str,
+        reason: str = "fixture records an explicit reviewed decision",
+    ) -> None:
+        MANAGE.record_review_decision(
+            receipt,
+            self.policy,
+            decision=decision,
+            reason=reason,
+            ref=item.get("ref") if item.get("kind") == "ref" else None,
+            worktree=(
+                item.get("worktree") if item.get("kind") == "dirty-worktree" else None
+            ),
+        )
+
     def test_inventory_classifies_refs_and_preserves_dirty_detached_worktree(self) -> None:
         inventory = MANAGE.git_inventory(self.policy, fetch=False)
         classifications = {item["ref"]: item["classification"] for item in inventory["refs"]}
@@ -129,11 +149,13 @@ class GitManagementFixtureTests(unittest.TestCase):
         review_path = pathlib.Path(receipt["review_decisions"])
         review = json.loads(review_path.read_text(encoding="utf-8"))
         for item in review["items"]:
-            item["decision"] = "excluded"
-            item["reason"] = "fixture explicitly excludes this preserved change"
-        review_path.write_text(
-            json.dumps(review, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+            self.decide(
+                result["receipt"],
+                item,
+                "excluded",
+                "fixture explicitly excludes this preserved change",
+            )
+        review = json.loads(review_path.read_text(encoding="utf-8"))
         accepted = MANAGE.validate_convergence_review(
             result["receipt"], self.git("rev-parse", "refs/remotes/origin/main"), self.policy
         )
@@ -142,6 +164,307 @@ class GitManagementFixtureTests(unittest.TestCase):
     def test_dirty_default_main_blocks_promotion_before_remote_mutation(self) -> None:
         with self.assertRaisesRegex(MANAGE.ManagementError, "default checkout main is dirty"):
             MANAGE.default_main_preflight(self.git("rev-parse", "refs/remotes/origin/main"))
+
+    def test_candidate_check_is_single_lookup_and_exact_sha_closed(self) -> None:
+        candidate = "codex/converge-check-fixture"
+        self.git("branch", candidate, "main")
+        self.git("push", "origin", candidate)
+        sha = self.git("rev-parse", "main")
+        original_run = MANAGE.run
+
+        def exercise(checks):
+            calls = []
+
+            def fixture_run(command, **kwargs):
+                if list(command[:2]) == ["gh", "api"]:
+                    calls.append(list(command))
+                    return subprocess.CompletedProcess(
+                        command, 0, json.dumps({"check_runs": checks}), ""
+                    )
+                return original_run(command, **kwargs)
+
+            with mock.patch.object(MANAGE, "repository_name", return_value="owner/repo"), mock.patch.object(
+                MANAGE, "run", side_effect=fixture_run
+            ):
+                result = MANAGE.check_candidate_once(candidate, self.policy)
+            self.assertEqual(len(calls), 1)
+            return result
+
+        success = {
+            "id": 2,
+            "name": "Clearra management policy",
+            "head_sha": sha,
+            "status": "completed",
+            "conclusion": "success",
+            "html_url": "https://example.invalid/run/2",
+        }
+        accepted_sha, selected = exercise(
+            [
+                {**success, "id": 1, "head_sha": "0" * 40},
+                success,
+            ]
+        )
+        self.assertEqual(accepted_sha, sha)
+        self.assertEqual(selected[0]["id"], 2)
+
+        with self.assertRaisesRegex(MANAGE.ManagementError, "missing"):
+            exercise([{**success, "head_sha": "0" * 40}])
+        with self.assertRaisesRegex(MANAGE.ManagementError, "not successful"):
+            exercise([{**success, "status": "in_progress", "conclusion": None}])
+        with self.assertRaisesRegex(MANAGE.ManagementError, "not successful"):
+            exercise([{**success, "conclusion": "failure"}])
+
+    def test_remote_main_race_blocks_candidate_push_without_data_loss(self) -> None:
+        self.git("switch", "-c", "codex/converge-race")
+        (self.repo / "candidate.txt").write_text(
+            "candidate\n", encoding="utf-8", newline="\n"
+        )
+        self.git("add", "candidate.txt")
+        self.git("commit", "-m", "candidate")
+        candidate_sha = self.git("rev-parse", "HEAD")
+        expected_base = self.git("rev-parse", "refs/remotes/origin/main")
+
+        racer = self.base / "racer"
+        self.git("clone", "--branch", "main", str(self.remote), str(racer), cwd=self.base)
+        self.git("config", "user.name", "Clearra Race Fixture", cwd=racer)
+        self.git("config", "user.email", "race@example.invalid", cwd=racer)
+        (racer / "remote.txt").write_text("remote\n", encoding="utf-8", newline="\n")
+        self.git("add", "remote.txt", cwd=racer)
+        self.git("commit", "-m", "advance remote main", cwd=racer)
+        self.git("push", "origin", "main", cwd=racer)
+        raced_sha = self.git("rev-parse", "HEAD", cwd=racer)
+
+        with self.assertRaisesRegex(MANAGE.ManagementError, "changed after"):
+            MANAGE.push_main_fast_forward(candidate_sha, expected_base)
+        self.assertEqual(
+            self.git("ls-remote", "origin", "refs/heads/main").split()[0], raced_sha
+        )
+
+    def test_dirty_worktree_evidence_reconstructs_the_exact_candidate_tree(self) -> None:
+        result = MANAGE.prepare_git_safety(self.policy)
+        self.git("add", "base.txt", "staged.bin", "notes.txt")
+        self.git("commit", "-m", "preserve reviewed dirty worktree")
+        candidate = self.git("rev-parse", "HEAD")
+        evidence = MANAGE.record_dirty_candidate_evidence(
+            result["receipt"], str(self.repo), candidate, self.policy
+        )
+        self.assertEqual(evidence["candidate_sha"], candidate)
+
+        receipt = json.loads(pathlib.Path(result["receipt"]).read_text(encoding="utf-8"))
+        review_path = pathlib.Path(receipt["review_decisions"])
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        dirty = [item for item in review["items"] if item["kind"] == "dirty-worktree"]
+        self.assertEqual(len(dirty), 1)
+        self.assertEqual(dirty[0]["decision"], "selected")
+        self.assertIsInstance(dirty[0].get("candidate_evidence"), dict)
+        for item in review["items"]:
+            if item["decision"] == "pending":
+                self.decide(
+                    result["receipt"],
+                    item,
+                    "excluded",
+                    "fixture explicitly excludes this preserved change",
+                )
+
+        accepted = MANAGE.validate_convergence_review(
+            result["receipt"], candidate, self.policy
+        )
+        self.assertEqual(accepted["selected"], 1)
+        self.assertEqual(len(accepted["dirty_evidence"]), 1)
+
+        evidence_path = pathlib.Path(evidence["evidence"])
+        material = json.loads(evidence_path.read_text(encoding="utf-8"))
+        material["verified_exact_tree"] = False
+        MANAGE.write_json_atomic(evidence_path, material)
+        with self.assertRaisesRegex(MANAGE.ManagementError, "digest changed"):
+            MANAGE.validate_convergence_review(result["receipt"], candidate, self.policy)
+
+    def test_selected_unique_ref_is_replayed_with_verifiable_provenance(self) -> None:
+        result = MANAGE.prepare_git_safety(self.policy)
+        self.git("restore", "base.txt")
+        self.git("restore", "--staged", "staged.bin")
+        (self.repo / "staged.bin").unlink()
+        (self.repo / "notes.txt").unlink()
+        shutil.rmtree(self.repo / "build")
+        self.git("switch", "-c", "codex/converge-fixture")
+
+        receipt = json.loads(pathlib.Path(result["receipt"]).read_text(encoding="utf-8"))
+        review_path = pathlib.Path(receipt["review_decisions"])
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        unique_sha = self.git("rev-parse", "refs/heads/unique")
+        for item in review["items"]:
+            if item.get("kind") == "ref" and item.get("sha") == unique_sha:
+                self.decide(
+                    result["receipt"],
+                    item,
+                    "selected",
+                    "fixture selects this unique source history",
+                )
+            else:
+                self.decide(
+                    result["receipt"],
+                    item,
+                    "excluded",
+                    "fixture explicitly excludes this preserved change",
+                )
+
+        replay = MANAGE.apply_convergence_review(
+            result["receipt"], "codex/converge-fixture", self.policy
+        )
+        self.assertNotEqual(replay["initial_sha"], replay["final_sha"])
+        self.assertEqual((self.repo / "unique.txt").read_text(encoding="utf-8"), "unique\n")
+        self.assertEqual(len(replay["convergence"]["ref_evidence"]), 1)
+        self.assertNotEqual(replay["applied"][0]["source"], replay["applied"][0]["result"])
+        accepted = MANAGE.validate_convergence_review(
+            result["receipt"], replay["final_sha"], self.policy
+        )
+        self.assertEqual(accepted["selected"], 1)
+
+    def test_conflicting_selected_ref_is_receipted_and_candidate_is_restored(self) -> None:
+        self.git("restore", "base.txt")
+        self.git("restore", "--staged", "staged.bin")
+        (self.repo / "staged.bin").unlink()
+        (self.repo / "notes.txt").unlink()
+        shutil.rmtree(self.repo / "build")
+
+        self.git("switch", "-c", "conflicting-source", self.base_sha)
+        (self.repo / "base.txt").write_text(
+            "selected history\n", encoding="utf-8", newline="\n"
+        )
+        self.git("add", "base.txt")
+        self.git("commit", "-m", "selected conflicting change")
+        conflicting_sha = self.git("rev-parse", "HEAD")
+
+        self.git("switch", "-c", "codex/converge-conflict", "main")
+        (self.repo / "base.txt").write_text(
+            "candidate history\n", encoding="utf-8", newline="\n"
+        )
+        self.git("add", "base.txt")
+        self.git("commit", "-m", "candidate conflicting change")
+        initial_sha = self.git("rev-parse", "HEAD")
+        result = MANAGE.prepare_git_safety(self.policy)
+
+        receipt = json.loads(pathlib.Path(result["receipt"]).read_text(encoding="utf-8"))
+        review_path = pathlib.Path(receipt["review_decisions"])
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        for item in review["items"]:
+            if item.get("kind") == "ref" and item.get("sha") == conflicting_sha:
+                self.decide(
+                    result["receipt"],
+                    item,
+                    "selected",
+                    "fixture selects a deliberately conflicting commit",
+                )
+            else:
+                self.decide(
+                    result["receipt"],
+                    item,
+                    "excluded",
+                    "fixture explicitly excludes this preserved change",
+                )
+
+        with self.assertRaisesRegex(MANAGE.ManagementError, "rolled back"):
+            MANAGE.apply_convergence_review(
+                result["receipt"], "codex/converge-conflict", self.policy
+            )
+        self.assertEqual(self.git("rev-parse", "HEAD"), initial_sha)
+        self.assertEqual(self.git("status", "--porcelain=v1"), "")
+        conflict_receipts = list(
+            pathlib.Path(result["receipt"]).parent.glob("replay-conflict-*.json")
+        )
+        self.assertEqual(len(conflict_receipts), 1)
+        conflict = json.loads(conflict_receipts[0].read_text(encoding="utf-8"))
+        self.assertEqual(conflict["restored_head"], initial_sha)
+        self.assertEqual(conflict["source_commit"], conflicting_sha)
+        self.assertEqual(conflict["conflict"]["count"], 1)
+        self.assertTrue(conflict["rollback_ref"].startswith("refs/clearra-safety/"))
+        self.assertEqual(self.git("rev-parse", conflict["rollback_ref"]), initial_sha)
+
+    def test_finalization_removes_only_fully_reviewed_and_verified_git_state(self) -> None:
+        result = MANAGE.prepare_git_safety(self.policy)
+        self.git("restore", "base.txt")
+        self.git("restore", "--staged", "staged.bin")
+        (self.repo / "staged.bin").unlink()
+        (self.repo / "notes.txt").unlink()
+        shutil.rmtree(self.repo / "build")
+
+        receipt = json.loads(pathlib.Path(result["receipt"]).read_text(encoding="utf-8"))
+        review_path = pathlib.Path(receipt["review_decisions"])
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        for item in review["items"]:
+            self.decide(
+                result["receipt"],
+                item,
+                "excluded",
+                "fixture explicitly excludes this safely bundled state",
+            )
+
+        candidate = "codex/converge-fixture"
+        candidate_path = self.base / "candidate"
+        self.git("branch", candidate, "main")
+        self.git("push", "origin", candidate)
+        self.git("worktree", "add", str(candidate_path), candidate)
+        sha = self.git("rev-parse", "main")
+        tree = self.git("rev-parse", "main^{tree}")
+
+        independent = self.base / "state" / "git-verification" / "fixture"
+        self.git("clone", "--no-checkout", str(self.remote), str(independent), cwd=self.base)
+        self.git("checkout", "--detach", sha, cwd=independent)
+        promotion_path = MANAGE.write_receipt(
+            "git-promotion",
+            {
+                "candidate": candidate,
+                "sha": sha,
+                "tree": tree,
+                "ruleset": {"ruleset": {"id": 42}},
+                "independent_checkout": {"path": str(independent), "sha": sha, "tree": tree},
+            },
+        )
+        ruleset = {
+            "id": 42,
+            "name": "Clearra main fast-forward gate",
+            "target": "branch",
+            "enforcement": "active",
+            "bypass_actors": [],
+            "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+            "rules": [
+                {"type": "deletion"},
+                {"type": "non_fast_forward"},
+                {"type": "required_linear_history"},
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "strict_required_status_checks_policy": True,
+                        "do_not_enforce_on_create": True,
+                        "required_status_checks": [
+                            {"context": "Clearra management policy"}
+                        ],
+                    },
+                },
+            ],
+        }
+        with mock.patch.object(MANAGE, "read_ruleset", return_value=ruleset):
+            plan = MANAGE.finalize_candidate(
+                candidate,
+                result["receipt"],
+                str(promotion_path),
+                self.policy,
+                apply=False,
+            )
+            self.assertGreaterEqual(len(plan["worktrees"]), 2)
+            final = MANAGE.finalize_candidate(
+                candidate,
+                result["receipt"],
+                str(promotion_path),
+                self.policy,
+                apply=True,
+            )
+        self.assertTrue(final["independent_checkout_removed"])
+        self.assertTrue(final["safety_transaction_removed"])
+        self.assertEqual(self.git("branch", "--format=%(refname)"), "refs/heads/main")
+        self.assertEqual(
+            self.git("ls-remote", "--heads", "origin").split()[1], "refs/heads/main"
+        )
 
 
 if __name__ == "__main__":

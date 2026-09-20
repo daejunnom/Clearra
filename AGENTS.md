@@ -13,15 +13,20 @@ only a person-reviewed summary selected for version control belongs there.
 
 Do not run raw `git pull`, destructive `git reset`, `git branch -D`, force
 pushes, or branch/worktree deletion. Use the management entry point with the
-`git inventory`, `git converge`, and `git promote` subcommands; unresolved
-unique commits or dirty worktrees are blockers.
+`git inventory`, `git converge`, `git review`, `git promote`, and `git
+finalize` subcommands; unresolved unique commits or dirty worktrees are
+blockers. Record every selected or excluded item with `git review`; do not edit
+the review JSON by hand. `git promote` performs one exact-SHA check lookup and
+must not be wrapped in a polling loop.
 Remote material may remain as a working copy only in the default checkout's
 local `main` after exact-SHA CI, remote readback, local fast-forward, and an
 independent checkout all agree.
 
 pnpm is the workspace package manager. Do not run `npm install`, `npm ci`, or
 general `npm exec`. npm is reserved for registry inspection and publication of
-an already verified tarball. Installs must use the frozen pnpm lockfile.
+an already verified tarball. Installs must use the frozen pnpm lockfile. Use
+`deps update` for a receipted lockfile update and `package pack` followed by
+`package publish --apply` for publication; never publish a workspace directory.
 
 Do not run `rustup update`, floating Rust toolchains, or `cargo install` into
 the shared Cargo binary directory. The exact Rust toolchain is declared in

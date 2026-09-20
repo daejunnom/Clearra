@@ -58,7 +58,13 @@ jobs:
           python -B _local/clearra_manage.py deps verify
           python -B _local/clearra_manage.py storage verify --path _local/artifacts/test/management-policy
       - name: Install the frozen workspace without lifecycle scripts
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: |
+          python -B _local/clearra_manage.py deps install --clean-links
+          git diff --exit-code
+      - name: Verify frozen reinstall is idempotent
+        run: |
+          python -B _local/clearra_manage.py deps install
+          git diff --exit-code
       - name: Validate package and workflow migration
         run: |
           pnpm --filter ctk3 run test
