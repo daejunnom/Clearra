@@ -45,6 +45,7 @@ members = [
     "crates/clearra-ui-schema",
     "crates/clearra-invariant-tests",
     "tools/clearra-pc-artifact",
+    "tools/clearra-pc4-qualifier",
 ]
 exclude = ["apps/clearra-desktop/src-tauri"]
 

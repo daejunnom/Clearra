@@ -37,6 +37,7 @@ pub mod tiling_solution_store;
 pub use backend::WasmWebGpuCandidateProducer;
 pub use backend::{
     canonical_wasm_candidate_packet_batch_sha256, encode_canonical_wasm_candidate_packet_batch,
+    enumerate_pc4_ilc_predecessor_fields, enumerate_pc4_ilc_target_fields,
     materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
     WasmBuildProbabilityAdvance, WasmBuildProbabilityBackend,
     WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
