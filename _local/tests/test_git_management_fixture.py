@@ -240,6 +240,45 @@ class GitManagementFixtureTests(unittest.TestCase):
             self.git("ls-remote", "origin", "refs/heads/main").split()[0], raced_sha
         )
 
+    def test_repository_lock_recovers_dead_owner_and_blocks_live_owner(self) -> None:
+        identity = MANAGE.hashlib.sha256(MANAGE.normalized(self.repo).encode()).hexdigest()[:24]
+        lock = MANAGE.state_root() / "git-locks" / f"{identity}.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(
+            json.dumps({"pid": 2_147_483_647, "created_utc": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        with MANAGE.repository_lock() as acquired:
+            owner = json.loads(acquired.read_text(encoding="utf-8"))
+            self.assertEqual(owner["pid"], MANAGE.os.getpid())
+            self.assertEqual(owner["recovered_stale_owner"]["pid"], 2_147_483_647)
+            with self.assertRaisesRegex(MANAGE.ManagementError, "another Clearra"):
+                with MANAGE.repository_lock():
+                    self.fail("a live repository lock must not be replaced")
+        self.assertFalse(lock.exists())
+        recovery_receipts = list(
+            MANAGE.state_root().rglob("*-git-stale-lock-recovered-*.json")
+        )
+        self.assertEqual(len(recovery_receipts), 1)
+
+    def test_reviewed_ref_tip_covers_its_unique_ancestor_for_finalization(self) -> None:
+        self.git("switch", "unique")
+        ancestor = self.git("rev-parse", "HEAD")
+        self.git("switch", "-c", "reviewed-descendant")
+        (self.repo / "reviewed-descendant.txt").write_text(
+            "reviewed descendant\n", encoding="utf-8", newline="\n"
+        )
+        self.git("add", "reviewed-descendant.txt")
+        self.git("commit", "-m", "reviewed descendant")
+        reviewed_tip = self.git("rev-parse", "HEAD")
+        self.git("switch", "main")
+
+        accepted, reason = MANAGE.ref_is_reviewed_or_equivalent(
+            "", ancestor, self.git("rev-parse", "main"), {}, {reviewed_tip}
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(reason, "ancestor-of-reviewed-sha")
+
     def test_dirty_worktree_evidence_reconstructs_the_exact_candidate_tree(self) -> None:
         result = MANAGE.prepare_git_safety(self.policy)
         self.git("add", "base.txt", "staged.bin", "notes.txt")
@@ -444,6 +483,22 @@ class GitManagementFixtureTests(unittest.TestCase):
             ],
         }
         with mock.patch.object(MANAGE, "read_ruleset", return_value=ruleset):
+            blocker = self.detached / "late-unreviewed.txt"
+            blocker.write_text("late dirty state\n", encoding="utf-8", newline="\n")
+            with self.assertRaisesRegex(MANAGE.ManagementError, "receipt=") as blocked:
+                MANAGE.finalize_candidate(
+                    candidate,
+                    result["receipt"],
+                    str(promotion_path),
+                    self.policy,
+                    apply=False,
+                )
+            blocker_receipt = pathlib.Path(str(blocked.exception).split("receipt=", 1)[1])
+            blocked_material = json.loads(blocker_receipt.read_text(encoding="utf-8"))
+            self.assertEqual(
+                blocked_material["blocked_worktrees"][0]["path"], str(self.detached)
+            )
+            blocker.unlink()
             plan = MANAGE.finalize_candidate(
                 candidate,
                 result["receipt"],

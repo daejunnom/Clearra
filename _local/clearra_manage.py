@@ -1974,19 +1974,88 @@ def git_inventory(policy: dict[str, Any], *, fetch: bool = False) -> dict[str, A
     }
 
 
+def process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return ctypes.get_last_error() == 5
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def repository_lock_owner(path: pathlib.Path) -> dict[str, Any] | None:
+    try:
+        material = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    pid = material.get("pid") if isinstance(material, dict) else None
+    created = material.get("created_utc") if isinstance(material, dict) else None
+    if not isinstance(pid, int) or pid <= 0 or not isinstance(created, str) or not created:
+        return None
+    return {"pid": pid, "created_utc": created}
+
+
 @contextlib.contextmanager
 def repository_lock() -> Iterator[pathlib.Path]:
     identity = hashlib.sha256(normalized(ROOT).encode()).hexdigest()[:24]
     directory = state_root() / "git-locks"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{identity}.lock"
+    recovered: dict[str, Any] | None = None
+    while True:
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError as error:
+            owner = repository_lock_owner(path)
+            if owner is None or process_is_alive(owner["pid"]):
+                raise ManagementError(
+                    f"another Clearra Git management operation owns {path}"
+                ) from error
+            stale = path.with_name(path.name + f".stale-{uuid.uuid4().hex[:12]}")
+            try:
+                os.replace(path, stale)
+            except FileNotFoundError:
+                continue
+            recovered = owner
+            stale.unlink(missing_ok=True)
     try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as error:
-        raise ManagementError(f"another Clearra Git management operation owns {path}") from error
-    try:
-        os.write(descriptor, json.dumps({"pid": os.getpid(), "created_utc": dt.datetime.now(dt.timezone.utc).isoformat()}).encode())
-        os.close(descriptor)
+        payload: dict[str, Any] = {
+            "pid": os.getpid(),
+            "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        if recovered is not None:
+            payload["recovered_stale_owner"] = recovered
+        try:
+            os.write(descriptor, json.dumps(payload).encode())
+        finally:
+            os.close(descriptor)
+        if recovered is not None:
+            write_receipt(
+                "git-stale-lock-recovered",
+                {
+                    "lock": str(path),
+                    "stale_owner": recovered,
+                    "new_owner_pid": os.getpid(),
+                },
+            )
         yield path
     finally:
         path.unlink(missing_ok=True)
@@ -3512,7 +3581,15 @@ def ref_is_reviewed_or_equivalent(
     if sha in reviewed_shas:
         return True, "reviewed-sha"
     classification = classify_ref(sha, main_sha)
-    return classification in {"ancestor", "tree-identical", "patch-equivalent"}, classification
+    if classification in {"ancestor", "tree-identical", "patch-equivalent"}:
+        return True, classification
+    for reviewed_sha in sorted(reviewed_shas):
+        if run(
+            ("git", "merge-base", "--is-ancestor", sha, reviewed_sha),
+            check=False,
+        ).returncode == 0:
+            return True, "ancestor-of-reviewed-sha"
+    return False, classification
 
 
 def finalize_candidate(
@@ -3603,8 +3680,19 @@ def finalize_candidate(
         target = {"path": str(worktree.path), "head": worktree.head, "reason": reason}
         (removable_worktrees if safe else blocked_worktrees).append(target)
     if blocked_worktrees:
+        blocker_receipt = write_receipt(
+            "git-finalization-blocked",
+            {
+                "candidate": candidate,
+                "sha": sha,
+                "safety_receipt": str(safety_path),
+                "promotion_receipt": str(promotion_path),
+                "blocked_worktrees": blocked_worktrees,
+            },
+        )
         raise ManagementError(
-            f"worktree finalization remains blocked for {len(blocked_worktrees)} worktrees"
+            f"worktree finalization remains blocked for {len(blocked_worktrees)} worktrees; "
+            f"receipt={blocker_receipt}"
         )
 
     local_refs: list[dict[str, str]] = []
