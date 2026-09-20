@@ -59,6 +59,10 @@ pub(crate) fn apply_execution_constraints_with_memory_guard(
     control: &ExecutionControl,
     memory_guard: &mut impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
 ) -> Result<CoreExecutionResult, CoreExecutionError> {
+    if result.field("execution_constraint_preserve_b2b") != Some("true") {
+        memory_guard(&result, 0)?;
+        return Ok(result);
+    }
     let authority = if result.field("execution_constraint_preserve_b2b") == Some("true")
         && result.field("search_kind") == Some("build-probability")
     {
@@ -81,6 +85,10 @@ pub(crate) fn apply_build_execution_constraints_with_memory_guard(
     control: &ExecutionControl,
     memory_guard: &mut impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
 ) -> Result<CoreExecutionResult, CoreExecutionError> {
+    if result.field("execution_constraint_preserve_b2b") != Some("true") {
+        memory_guard(&result, 0)?;
+        return Ok(result);
+    }
     apply_execution_constraints_inner(
         result,
         Some(BuildExecutionConstraintInputAuthority::Final(
@@ -97,6 +105,10 @@ pub(crate) fn apply_build_worker_execution_constraints_with_memory_guard(
     control: &ExecutionControl,
     memory_guard: &mut impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
 ) -> Result<CoreExecutionResult, CoreExecutionError> {
+    if result.field("execution_constraint_preserve_b2b") != Some("true") {
+        memory_guard(&result, 0)?;
+        return Ok(result);
+    }
     apply_execution_constraints_inner(
         result,
         Some(BuildExecutionConstraintInputAuthority::WorkerPartial(
