@@ -19,6 +19,7 @@ $testTempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\','
 $fixtureRoot = Join-Path $testTempParent ('clearra-build-policy-' + [Guid]::NewGuid().ToString('N'))
 $fixtureEnvironmentNames = @($script:ClearraBuildTransactionEnvironmentNames) + @(
     'LOCALAPPDATA','XDG_CACHE_HOME','WSL_DISTRO_NAME','WSL_INTEROP',
+    'GITHUB_ACTIONS','RUNNER_TEMP','GITHUB_WORKSPACE',
     'CARGO_BUILD_TARGET_DIR','CARGO_BUILD_BUILD_DIR','CARGO_BUILD_RUSTC_WRAPPER',
     'CLEARRA_WSL_CARGO_TARGET_DIR','CLEARRA_RELEASE_BUILD_ROOT','CLEARRA_WSL_NATIVE_BUILD_ROOT',
     'CLEARRA_CORE_C_BUILD_DIR','RUSTC_WORKSPACE_WRAPPER'
@@ -36,6 +37,21 @@ try {
     $fixtureSource = Join-Path $fixtureRoot 'source'
     $otherSource = Join-Path $fixtureRoot 'other-source'
     New-Item -ItemType Directory -Path $fixtureSource,$otherSource | Out-Null
+
+    if (Test-StartTestsWindows) {
+        $hostedRunnerTemp = Join-Path $fixtureRoot 'hosted-runner-temp'
+        $env:GITHUB_ACTIONS = 'true'
+        $env:RUNNER_TEMP = $hostedRunnerTemp
+        $env:GITHUB_WORKSPACE = $fixtureSource
+        try {
+            Assert-ArtifactPathCondition ((Get-ClearraCanonicalBuildRoot) -eq
+                (Join-Path $hostedRunnerTemp 'Clearra/build')) 'github_windows_build_root_shares_checkout_volume'
+        } finally {
+            $env:GITHUB_ACTIONS = $null
+            $env:RUNNER_TEMP = $null
+            $env:GITHUB_WORKSPACE = $null
+        }
+    }
 
     $repository = [IO.Path]::GetFullPath($RepositoryRoot)
     $reportRoot = [IO.Path]::GetFullPath((Get-ClearraReportRoot))

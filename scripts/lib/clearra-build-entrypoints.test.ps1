@@ -94,9 +94,15 @@ try {
         ($enumeratedBuildInputs -notcontains 'apps/fixture/build/generated.js' -and
          $enumeratedBuildInputs -notcontains 'crates/fixture/target/generated.bin') `
         'generated_build_and_target_directories_are_excluded'
-    $escapedWslArgument = ConvertTo-ClearraWslpathArgument 'C:\Users\한글 사용자\Clearra\build'
+    # Windows PowerShell 5.1 reads BOM-less UTF-8 scripts through the active
+    # ANSI code page. Keep the source ASCII while still exercising a Unicode
+    # Windows path so hosted runners parse the test before reaching this case.
+    $unicodeUser = -join @([char]0xD55C, [char]0xAE00, [char]0x20, [char]0xC0AC, [char]0xC6A9, [char]0xC790)
+    $unicodeWindowsPath = "C:\Users\$unicodeUser\Clearra\build"
+    $escapedWslArgument = ConvertTo-ClearraWslpathArgument $unicodeWindowsPath
+    $expectedEscapedWslArgument = $unicodeWindowsPath.Replace('\', '\\')
     Assert-ArtifactPathCondition `
-        ($escapedWslArgument -ceq 'C:\\Users\\한글 사용자\\Clearra\\build') `
+        ($escapedWslArgument -ceq $expectedEscapedWslArgument) `
         'wslpath_argument_preserves_windows_separators_and_unicode'
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Resolve-CoreCBuildDir 'unowned-core' }) 'core_library_cannot_create_without_owner'
     Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath (Join-Path $entryCacheHome 'Clearra'))) 'unowned_core_library_created_no_cache'

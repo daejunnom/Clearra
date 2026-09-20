@@ -35,6 +35,9 @@ async function runPolicy({ session = true, binary = 'managed', outputs = [] } = 
     for (const key of Object.keys(environment)) {
       if (/^(?:CLEARRA_|CARGO_|RUSTC_|WSL_)/u.test(key) || ['NODE_OPTIONS', 'BASH_ENV', 'ENV'].includes(key)) delete environment[key];
     }
+    environment.GITHUB_ACTIONS = '';
+    environment.RUNNER_TEMP = '';
+    environment.GITHUB_WORKSPACE = '';
     environment.LOCALAPPDATA = fixture;
     environment.XDG_CACHE_HOME = fixture;
     const root = join(fixture, 'Clearra/build');

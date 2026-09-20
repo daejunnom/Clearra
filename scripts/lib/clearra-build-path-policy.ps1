@@ -28,11 +28,26 @@ function Assert-ClearraNoReparseBuildPath([string]$Path) {
 
 function Get-ClearraCanonicalBuildRoot {
     if (Test-StartTestsWindows) {
-        $base = $env:LOCALAPPDATA
-        if ([string]::IsNullOrWhiteSpace($base)) {
-            $base = [Environment]::GetFolderPath('LocalApplicationData')
+        if ($env:GITHUB_ACTIONS -ceq 'true') {
+            if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -or
+                [string]::IsNullOrWhiteSpace($env:GITHUB_WORKSPACE) -or
+                -not [IO.Path]::IsPathRooted($env:RUNNER_TEMP) -or
+                -not [IO.Path]::IsPathRooted($env:GITHUB_WORKSPACE)) {
+                throw 'GitHub Windows builds require rooted RUNNER_TEMP and GITHUB_WORKSPACE paths.'
+            }
+            $runnerVolume = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($env:RUNNER_TEMP))
+            $workspaceVolume = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($env:GITHUB_WORKSPACE))
+            if (-not $runnerVolume.Equals($workspaceVolume, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'GitHub Windows RUNNER_TEMP must share the checkout volume.'
+            }
+            $base = $env:RUNNER_TEMP
+        } else {
+            $base = $env:LOCALAPPDATA
+            if ([string]::IsNullOrWhiteSpace($base)) {
+                $base = [Environment]::GetFolderPath('LocalApplicationData')
+            }
+            if ([string]::IsNullOrWhiteSpace($base)) { throw 'Windows LOCALAPPDATA is required.' }
         }
-        if ([string]::IsNullOrWhiteSpace($base)) { throw 'Windows LOCALAPPDATA is required.' }
         $root = Join-Path $base 'Clearra/build'
     } elseif (-not [string]::IsNullOrWhiteSpace($env:WSL_DISTRO_NAME) -or
               -not [string]::IsNullOrWhiteSpace($env:WSL_INTEROP)) {

@@ -38,6 +38,17 @@ export function nativeBuildPath(value, platform = process.platform) {
 }
 export function canonicalBuildRoot(environment = process.env, platform = process.platform) {
   if (platform === 'win32') {
+    if (environment.GITHUB_ACTIONS === 'true') {
+      const runnerTemp = environment.RUNNER_TEMP;
+      const workspace = environment.GITHUB_WORKSPACE;
+      if (!/^[A-Za-z]:[\\/]/u.test(runnerTemp ?? '') || !/^[A-Za-z]:[\\/]/u.test(workspace ?? '')) {
+        throw new Error('GitHub Windows builds require rooted RUNNER_TEMP and GITHUB_WORKSPACE paths');
+      }
+      if (win32.parse(runnerTemp).root.toLowerCase() !== win32.parse(workspace).root.toLowerCase()) {
+        throw new Error('GitHub Windows RUNNER_TEMP must share the checkout volume');
+      }
+      return win32.resolve(runnerTemp, 'Clearra', 'build');
+    }
     if (!environment.LOCALAPPDATA) throw new Error('LOCALAPPDATA is required for the fixed Clearra build root');
     return win32.resolve(environment.LOCALAPPDATA, 'Clearra', 'build');
   }
