@@ -39,6 +39,48 @@ re-hashes every artifact and every graph segment before writing its receipt.
   -ArgumentsJson '["run","--locked","--offline","-p","clearra-pc4-qualifier","--","merge-outgoing","--dataset-root","C:\\absolute\\pc4-data","--profile","jstris-180","--receipts","C:\\absolute\\receipts","--output","C:\\absolute\\merged\\indexed-domain.json"]'
 ```
 
+For the authority-bearing continuation, `outgoing-proof-shard` additionally
+writes every unique exact successor absent from the immutable index to a
+generation- and source-range-bound `PC4BND02` file. The scan dynamically shares
+small source batches across `--workers`; metrics, mismatch ordering, and the
+sorted boundary are deterministic. `merge-outgoing-proof` accepts only an
+exact source/graph-byte cover of v2 receipts, independently re-hashes all graph
+segments, binds the complete indexed-path receipt, and k-way merges every
+boundary file. An incomplete, overlapping, mixed-generation, renamed, or
+tampered set fails closed.
+
+```powershell
+clearra-pc4-qualifier outgoing-proof-shard `
+  --dataset-root C:\absolute\pc4-data --profile jstris-180 `
+  --start 0 --end 262144 --workers 12 `
+  --output C:\absolute\shards\shard-00000000-00262144.json `
+  --boundary-output C:\absolute\shards\shard-00000000-00262144.bin
+
+clearra-pc4-qualifier outgoing-proof-run `
+  --dataset-root C:\absolute\pc4-data --profile jstris-180 `
+  --output-directory C:\absolute\shards --start 0 `
+  --shard-size 262144 --workers 12 --max-new-shards 8
+
+clearra-pc4-qualifier merge-outgoing-proof `
+  --dataset-root C:\absolute\pc4-data --profile jstris-180 `
+  --receipts C:\absolute\shards --boundaries C:\absolute\shards `
+  --indexed-path-receipt C:\absolute\indexed-path.json `
+  --boundary-output C:\absolute\merged\outside-boundary.bin `
+  --output C:\absolute\merged\outgoing-proof.json
+```
+
+`outgoing-proof-run` keeps one compiled process alive, validates and reuses
+already completed deterministic shard names, and stops after the requested
+number of newly created shards. The proof merger never accumulates every shard
+boundary in memory: it validates each bound input while performing a streaming
+k-way merge with one current field per shard, then atomically publishes the
+deduplicated result. This matters because a single maximum-size Jstris 180
+shard can contain more than ten million unique outside-index fields.
+
+The merged proof remains non-authoritative until every field in the merged
+outside boundary is proven terminal-dead and the independent offline PC Search
+result-family parity identity is present.
+
 ## Exact PC-completable domain
 
 `domain-run` builds resumable reverse and forward layers without trusting the

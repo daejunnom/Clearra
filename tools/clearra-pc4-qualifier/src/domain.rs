@@ -40,6 +40,10 @@ impl DomainBinding {
     pub(crate) fn identity_string(self) -> String {
         format!("sha256:{}", hex(&self.identity))
     }
+
+    pub(crate) const fn raw_identity(self) -> [u8; 32] {
+        self.identity
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
