@@ -60,6 +60,19 @@ class ManagementPolicyTests(unittest.TestCase):
             with self.subTest(remote=remote), self.assertRaises(MANAGE.ManagementError):
                 MANAGE.github_https_clone_url(remote)
 
+    def test_local_windows_cargo_tool_bootstrap_uses_one_job(self) -> None:
+        local_windows = {"CARGO_BUILD_JOBS": "12"}
+        MANAGE.constrain_managed_cargo_install_jobs(local_windows, platform_name="nt")
+        self.assertEqual(local_windows["CARGO_BUILD_JOBS"], "1")
+
+        ci_windows = {"CI": "true", "CARGO_BUILD_JOBS": "2"}
+        MANAGE.constrain_managed_cargo_install_jobs(ci_windows, platform_name="nt")
+        self.assertEqual(ci_windows["CARGO_BUILD_JOBS"], "2")
+
+        local_linux = {"CARGO_BUILD_JOBS": "8"}
+        MANAGE.constrain_managed_cargo_install_jobs(local_linux, platform_name="posix")
+        self.assertEqual(local_linux["CARGO_BUILD_JOBS"], "8")
+
     def test_repository_roots_accept_only_descendants(self) -> None:
         self.assertTrue(MANAGE.allowed_repository_path(ROOT / "coverage" / "cargo" / "report", self.policy))
         self.assertTrue(MANAGE.allowed_repository_path(ROOT / "_local" / "artifacts" / "test" / "one", self.policy))

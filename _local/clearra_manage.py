@@ -770,6 +770,14 @@ def toolchain_check(policy: dict[str, Any]) -> int:
     return 1 if failed else 0
 
 
+def constrain_managed_cargo_install_jobs(
+    environment: dict[str, str], *, platform_name: str = os.name
+) -> None:
+    """Bound local Windows tool bootstrap memory without changing workspace builds."""
+    if platform_name == "nt" and not environment.get("CI"):
+        environment["CARGO_BUILD_JOBS"] = "1"
+
+
 def toolchain_sync(policy: dict[str, Any]) -> int:
     verify_static_management_policy(policy)
     versions = policy["toolchains"]
@@ -836,6 +844,7 @@ def toolchain_sync(policy: dict[str, Any]) -> int:
                 "TMP": str(temporary),
             }
         )
+        constrain_managed_cargo_install_jobs(install_environment)
         install_environment.pop("RUSTC_WRAPPER", None)
         install_environment.pop("RUSTC_WORKSPACE_WRAPPER", None)
         try:
@@ -3130,18 +3139,21 @@ def verify_independent_main_checkout(
                 raise ManagementError(
                     f"independent checkout policy verification failed: {' '.join(arguments[3:])}\n{detail}"
                 )
-        validation_commands: list[tuple[tuple[str, ...], pathlib.Path]] = [
+        validation_commands: list[tuple[str, tuple[str, ...], pathlib.Path]] = [
             (
+                "toolchain-sync",
                 (sys.executable, "-B", "_local/clearra_manage.py", "toolchain", "sync"),
                 directory,
             ),
             (
+                "deps-install",
                 (sys.executable, "-B", "_local/clearra_manage.py", "deps", "install"),
                 directory,
             ),
-            (("pnpm", "--filter", "ctk3", "run", "test"), directory),
-            (("pnpm", "--filter", "@clearra/ui", "run", "test"), directory),
+            ("ctk3-test", ("pnpm", "--filter", "ctk3", "run", "test"), directory),
+            ("ui-test", ("pnpm", "--filter", "@clearra/ui", "run", "test"), directory),
             (
+                "discord-production-deploy",
                 (
                     "pnpm",
                     "deploy",
@@ -3153,6 +3165,7 @@ def verify_independent_main_checkout(
                 directory,
             ),
             (
+                "discord-runtime-smoke",
                 (
                     "node",
                     "--input-type=module",
@@ -3163,6 +3176,7 @@ def verify_independent_main_checkout(
                 directory / "build" / "discord-container" / "independent-main",
             ),
             (
+                "cargo-fmt",
                 (
                     sys.executable,
                     "-B",
@@ -3180,6 +3194,7 @@ def verify_independent_main_checkout(
                 directory,
             ),
             (
+                "cargo-check",
                 (
                     sys.executable,
                     "-B",
@@ -3198,8 +3213,8 @@ def verify_independent_main_checkout(
             ),
         ]
         executed: list[dict[str, Any]] = []
-        for command, command_cwd in validation_commands:
-            failure_phase = "core-" + pathlib.Path(command[0]).name + "-" + command[1]
+        for validation_id, command, command_cwd in validation_commands:
+            failure_phase = "core-" + validation_id
             started = time.monotonic()
             result = run(command, cwd=command_cwd, check=False)
             executed.append(
