@@ -40,6 +40,26 @@ class ManagementPolicyTests(unittest.TestCase):
         )
         self.assertEqual(self.policy["canonical_source"]["release_run_id"], 35508135887)
 
+    def test_independent_clone_normalizes_github_transports_without_credentials(self) -> None:
+        expected = "https://github.com/daejunnom/Clearra.git"
+        for remote in (
+            "git@github.com:daejunnom/Clearra.git",
+            "ssh://git@github.com/daejunnom/Clearra.git",
+            "https://github.com/daejunnom/Clearra.git",
+            "https://github.com/daejunnom/Clearra",
+        ):
+            with self.subTest(remote=remote):
+                self.assertEqual(MANAGE.github_https_clone_url(remote), expected)
+
+        for remote in (
+            "https://token@github.com/daejunnom/Clearra.git",
+            "https://example.invalid/daejunnom/Clearra.git",
+            "git@github.com:../Clearra.git",
+            "git@github.com:daejunnom/../Clearra.git",
+        ):
+            with self.subTest(remote=remote), self.assertRaises(MANAGE.ManagementError):
+                MANAGE.github_https_clone_url(remote)
+
     def test_repository_roots_accept_only_descendants(self) -> None:
         self.assertTrue(MANAGE.allowed_repository_path(ROOT / "coverage" / "cargo" / "report", self.policy))
         self.assertTrue(MANAGE.allowed_repository_path(ROOT / "_local" / "artifacts" / "test" / "one", self.policy))

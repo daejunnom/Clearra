@@ -2177,6 +2177,21 @@ def repository_name() -> str:
     return match.group(1)
 
 
+def github_https_clone_url(remote_url: str) -> str:
+    """Return a credential-free HTTPS URL for an exact GitHub repository."""
+    value = remote_url.strip()
+    match = re.fullmatch(
+        r"(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)"
+        r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if not match or any(part in {".", ".."} for part in match.groups()):
+        raise ManagementError("independent checkout requires a credential-free GitHub origin URL")
+    owner, repository = match.groups()
+    return f"https://github.com/{owner}/{repository}.git"
+
+
 def check_candidate_once(candidate: str, policy: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     remote_ref = f"refs/remotes/origin/{candidate}"
     git("fetch", "origin", f"refs/heads/{candidate}:{remote_ref}")
@@ -3079,10 +3094,15 @@ def verify_independent_main_checkout(
     repo_id = hashlib.sha256(normalized(ROOT).encode()).hexdigest()[:24]
     directory = state_root() / "git-verification" / repo_id / transaction
     directory.parent.mkdir(parents=True, exist_ok=True)
-    remote_url = git("remote", "get-url", policy["git_policy"]["remote"])
+    remote_url = github_https_clone_url(
+        git("remote", "get-url", policy["git_policy"]["remote"])
+    )
+    failure_phase = "clone"
     try:
         run(("git", "clone", "--no-local", "--no-checkout", remote_url, str(directory)))
+        failure_phase = "checkout"
         run(("git", "checkout", "--detach", expected_sha), cwd=directory)
+        failure_phase = "identity"
         actual_sha = run(("git", "rev-parse", "HEAD"), cwd=directory).stdout.strip()
         actual_tree = run(("git", "rev-parse", "HEAD^{tree}"), cwd=directory).stdout.strip()
         expected_tree = git("rev-parse", f"{expected_sha}^{{tree}}")
@@ -3103,6 +3123,7 @@ def verify_independent_main_checkout(
             (sys.executable, "-B", "_local/clearra_manage.py", "deps", "verify"),
             (sys.executable, "-B", "_local/clearra_manage.py", "storage", "verify"),
         ):
+            failure_phase = "policy-" + "-".join(arguments[3:])
             result = run(arguments, cwd=directory, check=False)
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout.strip()
@@ -3178,6 +3199,7 @@ def verify_independent_main_checkout(
         ]
         executed: list[dict[str, Any]] = []
         for command, command_cwd in validation_commands:
+            failure_phase = "core-" + pathlib.Path(command[0]).name + "-" + command[1]
             started = time.monotonic()
             result = run(command, cwd=command_cwd, check=False)
             executed.append(
@@ -3206,18 +3228,24 @@ def verify_independent_main_checkout(
         }
         return evidence, directory
     except Exception as error:
-        # Keep the failed checkout and bind its location to an external receipt.
+        # Keep a checkout that was actually created and bind its location and
+        # closed failure phase to an external receipt. Never persist child
+        # output because it may contain environment-specific sensitive text.
+        checkout_retained = directory.exists()
         failure_receipt = write_receipt(
             "git-independent-verification-failed",
             {
                 "expected_sha": expected_sha,
                 "checkout": str(directory),
+                "checkout_retained": checkout_retained,
+                "failure_phase": failure_phase,
                 "error_type": type(error).__name__,
-                "owned_paths": [str(directory)],
+                "owned_paths": [str(directory)] if checkout_retained else [],
             },
         )
+        disposition = "the checkout was retained" if checkout_retained else "no checkout was created"
         raise ManagementError(
-            "independent main verification failed; the checkout was retained; "
+            f"independent main verification failed during {failure_phase}; {disposition}; "
             f"receipt={failure_receipt}"
         ) from error
 
