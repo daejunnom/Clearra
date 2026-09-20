@@ -335,8 +335,6 @@ fn invalid_result_mode_reason(
                 Some("complete Build replay paths cannot be combined with finesse aggregation")
             } else if !query.field().is_compact() {
                 Some("complete Build replay paths currently require a compact six-row field")
-            } else if !query.core_query().objective().score().requested() {
-                Some("complete Build replay paths require exact execution evidence")
             } else {
                 None
             }
@@ -552,6 +550,29 @@ mod tests {
         );
         assert!(response.public_result_payload().is_none());
         assert!(response.public_page_source_owner().is_none());
+    }
+
+    #[test]
+    fn complete_replay_uses_path_materialization_without_requesting_score() {
+        let query = one_piece_query();
+        assert!(!query.core_query().objective().score().requested());
+        assert_eq!(
+            super::BuildProbabilityAppCommand::new(query.clone())
+                .with_result_mode(BuildProbabilityResultMode::CompleteReplayPaths)
+                .invalid_reason(),
+            None
+        );
+
+        for mode in [
+            BuildProbabilityResultMode::FieldAverageScore,
+            BuildProbabilityResultMode::FixedQueueMaximumScore,
+            BuildProbabilityResultMode::HighestScoreMinimumSet,
+        ] {
+            assert!(super::BuildProbabilityAppCommand::new(query.clone())
+                .with_result_mode(mode)
+                .invalid_reason()
+                .is_some_and(|reason| reason.contains("score execution evidence")));
+        }
     }
 
     #[test]
