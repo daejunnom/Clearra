@@ -190,3 +190,115 @@ The data disproves any assumption that all partial boundaries can safely remain
 resident during merge. The merger now re-hashes and k-way merges the sorted
 files as streams, with memory proportional to shard count rather than boundary
 cardinality. Full source coverage and terminal-dead classification remain open.
+
+The exact outgoing scan was then completed as 61 deterministic shards covering
+`[0,15,185,706)` exactly once. The complete generation produced 109,562,993
+encoded graph edges and the same 109,562,993 independently reconstructed
+indexed edges, with zero piece-record mismatches and zero duplicate graph
+edges. Exact ILC enumeration also observed 322,355,650 outside-index target
+occurrences. The 61 receipts and their 61 bound `PC4BND02` files occupy about
+1.931 GiB. This closes the all-shard indexed-adjacency axis, but it does not
+classify the outside-boundary union and therefore does not mint the outgoing
+completeness identity.
+
+The first boundary-dead worst-case probe uses the `[0,101)` shard's 4,257
+unique fields: 554 at layer 2, 3,277 at layer 3 and 426 at layer 4. A candidate
+that retained unbounded raw successors exceeded 5.4 GiB RSS on the 16 GiB host
+and was safely interrupted. Its replacement retains one layer at a time and
+feeds fixed-size sorted worker runs through a deterministic merge tree. On the
+same input it completed layer 2 in 25 ms and layer 3 in 2.29 s; layer 4 expanded
+2,470,858 fields through 123,819,650 exact targets into 44,958,830 unique
+successors in 85.642 s. Runtime duration and worker count remain diagnostics,
+not inputs to a proof-receipt identity. Layer 5 then produced hundreds of
+millions of raw successors and made clear that bounded storage alone did not
+make this a viable whole-generation algorithm; that run was terminated with its
+build lease released normally.
+
+The replacement first applies two independent necessary conditions already
+validated by the product-side omission audit. A fully occupied column remains
+a wall under every clear, so a separated strip with a non-multiple-of-four
+vacancy count is terminal-dead. The second oracle enumerates a deliberately
+optimistic inverse-clear row projection and streams an MRV exact-cover search.
+No projected cover is a negative proof, while a cover or its fixed-budget
+`unknown` result stays in the exact ILC frontier. On the same 4,257-field input,
+the retained layer-2 frontier fell from 554 to 51 and layer 4 from 2,470,858 to
+139,073. The complete run expanded 2,829,797 frontiers and 40,633,340 exact
+targets in 94.644 s, with 8,258,075 permanent-strip negatives, 5,500,620
+projected-cover negatives, zero projection unknowns, and 4,842,562 exact
+reverse-anchor checks. Its deterministic v3 receipt is
+`sha256:ff096bf7204610e9acadf005713e8fa7128b8c2bba9ebd3b9a7bd3d700546afc`.
+
+Each completed layer now writes a self-hashed checkpoint that binds cumulative
+metrics and the count/SHA-256 of every future sorted frontier. A controlled
+interruption after layer 4 resumed at layer 5, discarded only the unfinished
+layer-6 worker runs, and reproduced the same receipt identity exactly. The 61
+boundary files were also streaming-merged into 203,247,116 unique fields; the
+non-authoritative merge receipt is
+`sha256:529a6d02e17864a5c628262566758254ca41c60ac26e4a75a1092cb449b8bbee`.
+The merged boundary's terminal-dead run and the independent offline complete
+result-family parity remain required before an outgoing completeness identity
+can be minted.
+
+The generation-wide boundary-dead run subsequently completed. It consumed the
+exact 203,247,116-field merged boundary, expanded 27,161,047 surviving
+frontiers, generated 381,862,902 exact ILC targets, and performed 48,969,609
+reverse-anchor checks. The final frontier was empty; no outside-index successor
+could re-enter the exact terminal-co-reachable domain. Its deterministic receipt
+is
+`sha256:de7b85a603797a063cc327f96144c1ffde833e49a368aa1c30c3d2dab9febd02`.
+Together with the 61-shard exact cover and indexed-path receipt, this closes the
+outgoing-completeness proof inputs for this immutable generation. It does not
+by itself qualify a product target.
+
+The graph-independent ordinary CPU solver was then run for empty-board 4L,
+Jstris 180, `P7P4`, hold enabled and empty, unique objective. It returned one
+strictly sorted and deduplicated family of **456,459** identities with normalized
+set hash `cts1:2fcbc950acdffa31`; count/probability completeness were true and
+resource truncation was false. The generation-bound receipt is
+`sha256:89f55a561287b00dbaf7c82ffb0693331f65fefa580092e7222a36de4f6b0f5b`.
+This confirms the user-provided Jstris 180 count and also demonstrates why the
+older generic/SRS count cannot be reused for this kick profile.
+
+The expensive family was rerun once and atomically materialized as 456,459
+fixed-width canonical records (`40,168,432` bytes). Its artifact identity is
+`sha256:d4a726a522d101845d992d4c1254a6a9a9886829c906a0ccc51b29462333448a`
+and the generation/input/count/set-hash-bound receipt is
+`sha256:c8d8873ffb03f1aec2454f924e1139b6f3bb70c3a93ce317f3cb2da08beebc46`.
+Every reuse re-hashes and fully decodes the file, verifies strict canonical
+ordering, and recomputes `cts1:2fcbc950acdffa31`; it avoids another 1,022,353 ms
+ordinary-solver run without becoming separate qualification authority.
+
+The first end-to-end local tablebase replay failed closed before returning a
+family because the breadth-layer key embedded the general sixteen-placement
+`StandardBoard64TilingIdentity` in every four-line partial state and crossed the
+product's 256 MiB retained-frontier authority. The correction does not raise
+that authority or merge colored fields. A PC4-private identity now ranks each
+four-cell mask bijectively in the `40 choose 4` domain and stores at most ten
+piece-plus-rank values; terminal states are reconstructed into the unchanged
+canonical product identity before candidate admission. Full tablebase/offline
+identity-sequence parity remains required before a target receipt is minted.
+
+The first packed rerun exposed a separate whole-layer ownership cliff. It
+attempted to reserve the entire promoted layer before releasing the source hash
+table and jumped from a measured 242,880,108-byte peak to a 432,538,688-byte
+request. Promotion now streams at most the bounded resident-work window while
+the old table remains the owner. The next exact rerun progressed farther, then
+failed closed at 284,806,808 bytes: the 1,835,008-bucket source layer and the
+growing 917,504-bucket successor layer legitimately overlapped, while nested
+supply frontiers retained 86,594,200 bytes. This diagnostic showed that the
+remaining excess was key representation, not a reason to raise the 256 MiB
+authority. `Pc4RowFrame` is an order-preserving subset of four original rows,
+so its five-byte array/length representation was replaced by the exact four-bit
+survivor mask. Compile-time size assertions now require the 64-bit partial key
+to remain at most 32 bytes. The final full-family rerun remains the authority;
+none of these intermediate failures issues a parity or target receipt.
+
+That compact-key rerun crossed the former cliff, but a later nested-frontier
+admission failed closed by exactly 136 bytes (`268,435,592 > 268,435,456`). The
+diagnostic had only 63 ready tasks but a 128-slot deque: one cache admission had
+woken every waiter before the 64-task resident window could consume them. Cache
+wake-up now moves only the available resident-window slots and leaves the rest
+inside their already-accounted waiting owner. This preserves all work and the
+64-way execution window while preventing an idle doubled backing allocation.
+The subsequent full-family rerun, rather than the 136-byte estimate, remains the
+acceptance evidence.

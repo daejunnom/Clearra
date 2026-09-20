@@ -9,8 +9,15 @@
 //! proof before an outgoing-edge completeness identity can be minted.
 
 mod boundary;
+mod boundary_completion;
+mod boundary_dead;
+mod boundary_dead_store;
 mod domain;
 mod indexed_path;
+mod offline_family;
+mod offline_materialization;
+mod tablebase_family;
+mod target_qualification;
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_executor::enumerate_pc4_ilc_target_fields;
@@ -44,12 +51,24 @@ const FIELD_RECORD_BYTES: usize = 8;
 const MAX_SHARD_FIELDS: u32 = 262_144;
 const IO_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_MISMATCH_SAMPLES: usize = 16;
+const QUALIFICATION_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 fn main() {
-    if let Err(error) = run() {
+    if let Err(error) = run_on_qualification_stack() {
         eprintln!("pc4_qualifier_error={error}");
         std::process::exit(1);
     }
+}
+
+fn run_on_qualification_stack() -> Result<(), String> {
+    let worker = thread::Builder::new()
+        .name("clearra-pc4-qualification".to_owned())
+        .stack_size(QUALIFICATION_STACK_BYTES)
+        .spawn(run)
+        .map_err(|error| format!("qualification worker start failed: {error}"))?;
+    worker
+        .join()
+        .map_err(|_| "qualification worker panicked".to_owned())?
 }
 
 fn run() -> Result<(), String> {
@@ -67,15 +86,125 @@ fn run() -> Result<(), String> {
         "outgoing-proof-run" => run_outgoing_proof_sequence(&options),
         "merge-outgoing" => run_merge(&options),
         "merge-outgoing-proof" => run_proof_merge(&options),
+        "boundary-dead-proof" => run_boundary_dead_proof(&options),
         "domain-seed" => run_domain_seed(&options),
         "domain-step" => run_domain_step(&options),
         "domain-run" => run_domain_run(&options),
         "domain-compare" => run_domain_compare(&options),
         "indexed-path-proof" => run_indexed_path_proof(&options),
+        "offline-family-proof" => run_offline_family_proof(&options),
+        "offline-family-materialize" => run_offline_family_materialize(&options),
+        "tablebase-family-proof" => run_tablebase_family_proof(&options),
+        "target-qualification" => run_target_qualification(&options),
         _ => Err(
-            "expected outgoing-shard, outgoing-proof-shard, outgoing-proof-run, merge-outgoing, merge-outgoing-proof, domain-seed, domain-step, domain-run, domain-compare, or indexed-path-proof".to_owned(),
+            "expected outgoing-shard, outgoing-proof-shard, outgoing-proof-run, merge-outgoing, merge-outgoing-proof, boundary-dead-proof, domain-seed, domain-step, domain-run, domain-compare, indexed-path-proof, offline-family-proof, offline-family-materialize, tablebase-family-proof, or target-qualification".to_owned(),
         ),
     }
+}
+
+fn run_offline_family_materialize(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let workers = usize::try_from(numeric_option(options, "workers")?)
+        .map_err(|_| "worker count overflow")?;
+    let expected_count = usize::try_from(numeric_option(options, "expected-count")?)
+        .map_err(|_| "expected count overflow")?;
+    let offline_proof = absolute_option(options, "offline-proof")?;
+    let family_output = absolute_option(options, "family-output")?;
+    let output = absolute_option(options, "output")?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    offline_materialization::materialize(
+        &dataset,
+        workers,
+        expected_count,
+        &offline_proof,
+        &family_output,
+        &output,
+    )
+}
+
+fn run_offline_family_proof(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let workers = usize::try_from(numeric_option(options, "workers")?)
+        .map_err(|_| "worker count overflow")?;
+    let expected_count = usize::try_from(numeric_option(options, "expected-count")?)
+        .map_err(|_| "expected count overflow")?;
+    let output = absolute_option(options, "output")?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    offline_family::prove(&dataset, workers, expected_count, &output)
+}
+
+fn run_tablebase_family_proof(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let workers = usize::try_from(numeric_option(options, "workers")?)
+        .map_err(|_| "worker count overflow")?;
+    let expected_count = usize::try_from(numeric_option(options, "expected-count")?)
+        .map_err(|_| "expected count overflow")?;
+    let outgoing_proof = absolute_option(options, "outgoing-proof")?;
+    let boundary_dead_proof = absolute_option(options, "boundary-dead-proof")?;
+    let offline_proof = absolute_option(options, "offline-proof")?;
+    let offline_family = absolute_option(options, "offline-family")?;
+    let offline_materialization = absolute_option(options, "offline-materialization")?;
+    let output = absolute_option(options, "output")?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    tablebase_family::prove(
+        &dataset,
+        workers,
+        expected_count,
+        &outgoing_proof,
+        &boundary_dead_proof,
+        &offline_proof,
+        &offline_family,
+        &offline_materialization,
+        &output,
+    )
+}
+
+fn run_target_qualification(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let outgoing_proof = absolute_option(options, "outgoing-proof")?;
+    let boundary_dead_proof = absolute_option(options, "boundary-dead-proof")?;
+    let family_parity_proof = absolute_option(options, "family-parity-proof")?;
+    let output = absolute_option(options, "output")?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    target_qualification::qualify(
+        &dataset,
+        &outgoing_proof,
+        &boundary_dead_proof,
+        &family_parity_proof,
+        &output,
+    )
+}
+
+fn run_boundary_dead_proof(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let boundary = absolute_option(options, "boundary")?;
+    let reverse_layers = absolute_option(options, "reverse-layers")?;
+    let anchor_layer = u8::try_from(numeric_option(options, "anchor-layer")?)
+        .map_err(|_| "anchor layer overflow")?;
+    let indexed_path_receipt = absolute_option(options, "indexed-path-receipt")?;
+    let workers = usize::try_from(numeric_option(options, "workers")?)
+        .map_err(|_| "worker count overflow")?;
+    let output = absolute_option(options, "output")?;
+    let workspace = options
+        .contains_key("workspace")
+        .then(|| absolute_option(options, "workspace"))
+        .transpose()?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    boundary_dead::prove(
+        &dataset,
+        &boundary,
+        &reverse_layers,
+        anchor_layer,
+        &indexed_path_receipt,
+        workers,
+        workspace.as_deref(),
+        &output,
+    )
 }
 
 fn run_outgoing_proof_sequence(options: &BTreeMap<String, String>) -> Result<(), String> {

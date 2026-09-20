@@ -412,6 +412,15 @@ impl Pc4OnlineHostExecution {
         )
     }
 
+    /// Local qualification diagnostic. Product-facing failure semantics remain
+    /// the stable typed reason returned by `advance`; this string only exposes
+    /// the bounded frontier owner's last exact accounting snapshot.
+    pub fn compact_failure_diagnostic(&self) -> Option<&str> {
+        self.compact
+            .as_ref()
+            .and_then(Pc4CompactCandidateSession::failure_diagnostic)
+    }
+
     pub fn pending_lookup_frontier(&self) -> &[u32] {
         if self.pending.is_none() {
             return &[];

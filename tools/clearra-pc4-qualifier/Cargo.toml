@@ -6,9 +6,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
+clearra-app = { path = "../../crates/clearra-app", features = ["online-pc4-tablebase", "parallel"] }
 clearra-core-domain = { path = "../../crates/clearra-core-domain" }
-clearra-core-executor = { path = "../../crates/clearra-core-executor" }
+clearra-core-executor = { path = "../../crates/clearra-core-executor", features = ["parallel"] }
+clearra-objectives = { path = "../../crates/clearra-objectives" }
 clearra-pc4-tablebase = { path = "../../crates/clearra-pc4-tablebase" }
+clearra-pc-graph = { path = "../../crates/clearra-pc-graph" }
+clearra-piece-registry = { path = "../../crates/clearra-piece-registry" }
+clearra-problem = { path = "../../crates/clearra-problem" }
 clearra-rules = { path = "../../crates/clearra-rules" }
 serde_json.workspace = true
 sha2 = "0.10.9"
