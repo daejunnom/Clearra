@@ -111,8 +111,10 @@ try {
     Assert-ArtifactPathCondition ($entryCore -eq (Join-Path $entryRecord.transaction_root 'core-c-fixture')) 'core_library_uses_bound_source_not_policy_root'
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-CoreCManagedConfigureArgs @('-B',$entryOutside) }) 'cmake_output_override_rejected'
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-CoreCManagedConfigureArgs @('-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=' + $entryOutside) }) 'cmake_library_output_override_rejected'
-    Assert-CoreCManagedConfigureArgs @('-DBUILD_TESTING=OFF','-DCLEARRA_CORE_SPLIT_TESTS=ON','-DCMAKE_BUILD_TYPE=Release')
+    Assert-CoreCManagedConfigureArgs @('-DBUILD_TESTING=OFF','-DCLEARRA_BUILD_TEST_ORACLE=ON','-DCLEARRA_CORE_SPLIT_TESTS=ON','-DCMAKE_BUILD_TYPE=Release')
     Assert-ArtifactPathCondition $true 'cmake_managed_options_preserved'
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-CoreCManagedConfigureArgs @('-DCLEARRA_BUILD_TEST_ORACLE=MAYBE') }) 'cmake_test_oracle_invalid_value_rejected'
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-CoreCManagedConfigureArgs @('-DCLEARRA_UNKNOWN_TEST_ORACLE=ON') }) 'cmake_unknown_test_oracle_rejected'
 
     # Stub path conversion only; construction and identity checks are real.
     $entryOriginalMapping = ${function:ConvertTo-ClearraWslBuildPath}

@@ -13,7 +13,7 @@ function Assert-CoreCActiveBuildTransaction {
 }
 function Assert-CoreCManagedConfigureArgs([string[]]$ConfigureArgs) {
     foreach ($argument in @($ConfigureArgs)) {
-        if ($argument -notmatch '^-D(BUILD_TESTING|CLEARRA_CORE_SPLIT_TESTS|CLEARRA_CORE_ADVERSARIAL_TESTS|CLEARRA_CORE_ENABLE_ASAN|CLEARRA_CORE_ENABLE_UBSAN|CLEARRA_ENABLE_STAGE_PROFILING)=(ON|OFF)$' -and
+        if ($argument -notmatch '^-D(BUILD_TESTING|CLEARRA_BUILD_TEST_ORACLE|CLEARRA_CORE_SPLIT_TESTS|CLEARRA_CORE_ADVERSARIAL_TESTS|CLEARRA_CORE_ENABLE_ASAN|CLEARRA_CORE_ENABLE_UBSAN|CLEARRA_ENABLE_STAGE_PROFILING)=(ON|OFF)$' -and
             $argument -notmatch '^-DCMAKE_BUILD_TYPE=[A-Za-z0-9_-]+$') {
             throw "CMake configure argument '$argument' is not a managed build option; output, source and toolchain overrides are forbidden."
         }
