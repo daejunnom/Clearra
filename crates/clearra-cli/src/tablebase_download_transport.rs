@@ -127,6 +127,7 @@ fn public_https_command(url: &str, limit: u64, timeout: u32) -> Result<Command> 
 /// body limits as scalar reads. Curl may multiplex these transfers on HTTP/2;
 /// an HTTP/1.1 build remains a bounded four-connection fallback.
 #[cfg(feature = "online-pc4-tablebase")]
+#[cfg(not(feature = "native-pc4-libcurl"))]
 pub(super) fn public_https_parallel_command() -> Command {
     let mut command = Command::new("curl");
     // -q MUST be first: never load .curlrc or credentials/config from it.
@@ -182,6 +183,7 @@ pub(super) fn append_public_https_transfer(
 }
 
 #[cfg(feature = "online-pc4-tablebase")]
+#[cfg(not(feature = "native-pc4-libcurl"))]
 pub(super) fn curl_range(
     revision: &str,
     artifact: &Artifact,

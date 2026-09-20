@@ -887,6 +887,18 @@ live job을 한 번씩 실행했다. workflow의 나머지 중복 job은 측정 
 완화하고 qualification-to-graph handshake 재사용을 입증하지만, P7P4 전체 검색의 mixed
 index/graph 의존 사슬·429·마지막 tail이 해결됐다는 증거는 아니다.
 
+2026-09-20에 같은 live test를 Windows/Schannel 개발 호스트와 source
+`fb9f9bc6850dbd5f7f4c876bb2dfa9fdbb741338`에서 재실행한 결과는 성공
+표본과 달랐다. qualification 15 transfer가 누적 새 연결 22개,
+HTTP/2 0개, 재사용 0개를 기록했고, 후속 4KiB graph Range도 새 연결
+1개/HTTP/2 0개/약 828ms였다. 따라서 엄격한 live 계약은 의도대로
+실패했다. redirect를 포함한 연결 수이므로 transfer 수보다 클 수 있으며,
+이 수치를 Linux/Bookworm 성공 receipt와 합쳐 평균내지 않는다. 이 반례는
+`native-pc4-libcurl`을 기본 feature로 승격하지 않는 결정을 강화한다.
+Windows에서 HTTP/2·connection reuse가 실제로 확인되지 않으면 명시 전체
+다운로드 로컬 TB가 대형 탐색의 우선 성능 경로이며, HTTP 경로는 bounded
+호환 경로이지 성능 동등 경로가 아니다.
+
 [`TCP Fast Open`](https://curl.se/libcurl/c/CURLOPT_TCP_FASTOPEN.html)은 기본으로 켜지 않는다. 최초 TCP handshake에서 최대 한 RTT를 줄일 수
 있지만 libcurl 계약상 TFO를 켜면 TLS session cache가 작동하지 않고 일부 네트워크에서
 문제가 알려져 있다. 이번 workload는 한 번의 cold connect보다 같은 TLS/HTTP/2 connection

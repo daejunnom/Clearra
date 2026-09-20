@@ -113,6 +113,10 @@ pub(super) fn execute_online_with(
     )
 }
 
+#[cfg(any(
+    not(feature = "native-pc4-libcurl"),
+    all(test, feature = "wasm-cpu-runtime")
+))]
 fn prepare_online<F>(
     context: AppContext,
     request: AppRequest,

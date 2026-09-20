@@ -13,6 +13,7 @@ pub(super) struct HttpReply {
     pub bytes: Vec<u8>,
 }
 impl HttpReply {
+    #[cfg(any(not(feature = "native-pc4-libcurl"), test))]
     pub fn from_curl_output(mut bytes: Vec<u8>) -> Result<Self> {
         let marker = b"\nCLEARRA-PC4-HTTP\n";
         let at = bytes

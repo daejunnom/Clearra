@@ -2,22 +2,20 @@
 //! transfers. It may reuse/multiplex connections, emits each completed span as
 //! soon as curl finishes it, and knows no graph or product semantics.
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
+use super::transport::{append_public_https_transfer, public_https_parallel_command};
 use super::{
     hex,
     http_range::{content_range, HttpReply},
-    transport::{append_public_https_transfer, public_https_parallel_command},
     Artifact, Result, FILES, REPOSITORY,
 };
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::BTreeMap, time::Duration};
 
 #[cfg(not(feature = "native-pc4-libcurl"))]
 use std::{
+    fs,
     io::{BufRead, BufReader},
+    path::{Path, PathBuf},
     process::{Child, ExitStatus},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread::JoinHandle,
@@ -39,6 +37,7 @@ const MAX_LOGICAL: usize = 16;
 const MAX_ACTIVE_TRANSFERS: usize = 4;
 const MAX_GAP_BYTES: u64 = 4_096;
 const MAX_RANGE_BYTES: u64 = 65_536;
+#[cfg(not(feature = "native-pc4-libcurl"))]
 const RECEIPT_PREFIX: &str = "CLEARRA-PC4-HTTP-V1";
 
 #[derive(Clone, Debug)]
@@ -215,6 +214,7 @@ impl NativeCurlPlan {
         })
     }
 
+    #[cfg(not(feature = "native-pc4-libcurl"))]
     fn command(&self, revision: &str, scratch: &Scratch) -> Result<std::process::Command> {
         if !hex(revision, 40) || scratch.body_paths.len() != self.transfers.len() {
             return Err("pc4_online_identity_invalid");
@@ -328,7 +328,7 @@ impl NativeCurlBatch {
             return Err("pc4_online_response_receipt_invalid");
         }
         let transfer = &self.transfers[receipt.index];
-        validate_receipt(transfer, &receipt)?;
+        validate_receipt(transfer, receipt.status, &receipt.content_range)?;
         let body_path = &self.scratch.body_paths[receipt.index];
         let metadata =
             fs::symlink_metadata(body_path).map_err(|_| "pc4_online_transport_interrupted")?;
@@ -370,8 +370,8 @@ impl NativeCurlBatch {
     }
 }
 
-fn validate_receipt(transfer: &Transfer, receipt: &Receipt) -> Result<()> {
-    match receipt.status {
+fn validate_receipt(transfer: &Transfer, status: u16, received_content_range: &str) -> Result<()> {
+    match status {
         206 => {}
         200 => return Err("pc4_online_whole_content_rejected"),
         429 => return Err("pc4_online_rate_limited"),
@@ -379,7 +379,7 @@ fn validate_receipt(transfer: &Transfer, receipt: &Receipt) -> Result<()> {
         408 | 425 | 500 | 502 | 503 | 504 => return Err("pc4_online_dataset_unavailable"),
         _ => return Err("pc4_online_range_response_invalid"),
     }
-    if receipt.content_range
+    if received_content_range
         != content_range(transfer.offset, transfer.length, transfer.artifact.size)
     {
         return Err("pc4_online_content_range_mismatch");
@@ -464,6 +464,7 @@ pub(super) struct NativeCurlTransportObservation {
 
 #[cfg(feature = "native-pc4-libcurl")]
 impl NativeCurlTransportObservation {
+    #[cfg(test)]
     pub(super) fn delta_since(self, previous: Self) -> Option<Self> {
         Some(Self {
             completed_transfers: self
@@ -618,6 +619,7 @@ impl NativeCurlPool {
         })
     }
 
+    #[cfg(test)]
     pub(super) const fn observation(&self) -> NativeCurlTransportObservation {
         self.observation
     }
@@ -889,15 +891,10 @@ impl NativeCurlPool {
             if !effective_https || !status_line_valid {
                 return Err("pc4_online_range_response_invalid");
             }
-            let receipt = Receipt {
-                index: 0,
-                status,
-                content_range,
-            };
-            validate_receipt(&active.transfer, &receipt)?;
+            validate_receipt(&active.transfer, status, &content_range)?;
             let bytes = HttpReply {
                 status,
-                content_range: receipt.content_range,
+                content_range,
                 bytes: body,
             }
             .validate(
@@ -1088,12 +1085,14 @@ enum ReaderEvent {
     Finished,
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 struct Receipt {
     index: usize,
     status: u16,
     content_range: String,
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 fn parse_receipt(line: &str, transfer_count: usize) -> Result<Receipt> {
     let line = line.strip_suffix('\r').unwrap_or(line);
     let mut fields = line.split('|');
@@ -1123,11 +1122,13 @@ fn parse_receipt(line: &str, transfer_count: usize) -> Result<Receipt> {
     })
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 struct Scratch {
     directory: PathBuf,
     body_paths: Vec<PathBuf>,
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 impl Scratch {
     fn create(count: usize) -> Result<Self> {
         let base = std::env::temp_dir();
@@ -1164,6 +1165,7 @@ impl Scratch {
     }
 }
 
+#[cfg(not(feature = "native-pc4-libcurl"))]
 impl Drop for Scratch {
     fn drop(&mut self) {
         for path in &self.body_paths {
@@ -1173,14 +1175,14 @@ impl Drop for Scratch {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(not(feature = "native-pc4-libcurl"), unix))]
 fn restrict_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .map_err(|_| "pc4_online_transport_unavailable")
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(feature = "native-pc4-libcurl"), not(unix)))]
 fn restrict_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -1243,6 +1245,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "native-pc4-libcurl"))]
     fn native_batch_receipts_are_indexed_and_strict() {
         let receipt = parse_receipt("CLEARRA-PC4-HTTP-V1|2|206|bytes 100-111/131072\r", 3).unwrap();
         assert_eq!((receipt.index, receipt.status), (2, 206));
@@ -1261,38 +1264,34 @@ mod tests {
     fn native_batch_classifies_http_status_before_opening_a_body() {
         let plan = NativeCurlPlan::new(vec![demand(2, 1, 100, 12)]).unwrap();
         let transfer = &plan.transfers[0];
-        let receipt = |status, range: &str| Receipt {
-            index: 0,
-            status,
-            content_range: range.to_owned(),
-        };
         let valid = content_range(100, 12, 131_072);
-        assert!(validate_receipt(transfer, &receipt(206, &valid)).is_ok());
+        assert!(validate_receipt(transfer, 206, &valid).is_ok());
         assert_eq!(
-            validate_receipt(transfer, &receipt(200, "")).unwrap_err(),
+            validate_receipt(transfer, 200, "").unwrap_err(),
             "pc4_online_whole_content_rejected"
         );
         assert_eq!(
-            validate_receipt(transfer, &receipt(429, "")).unwrap_err(),
+            validate_receipt(transfer, 429, "").unwrap_err(),
             "pc4_online_rate_limited"
         );
         assert_eq!(
-            validate_receipt(transfer, &receipt(416, "")).unwrap_err(),
+            validate_receipt(transfer, 416, "").unwrap_err(),
             "pc4_online_range_unsatisfiable"
         );
         for status in [408, 425, 500, 502, 503, 504] {
             assert_eq!(
-                validate_receipt(transfer, &receipt(status, "")).unwrap_err(),
+                validate_receipt(transfer, status, "").unwrap_err(),
                 "pc4_online_dataset_unavailable"
             );
         }
         assert_eq!(
-            validate_receipt(transfer, &receipt(206, "bytes 99-110/131072")).unwrap_err(),
+            validate_receipt(transfer, 206, "bytes 99-110/131072").unwrap_err(),
             "pc4_online_content_range_mismatch"
         );
     }
 
     #[test]
+    #[cfg(not(feature = "native-pc4-libcurl"))]
     fn native_batch_command_repeats_secure_local_options_without_retry_or_http3() {
         let plan =
             NativeCurlPlan::new(vec![demand(2, 1, 0, 12), demand(2, 2, 70_000, 12)]).unwrap();
