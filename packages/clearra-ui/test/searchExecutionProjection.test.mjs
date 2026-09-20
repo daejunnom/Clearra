@@ -719,12 +719,12 @@ test('PC minimum-cover and score GUI modes lower only to their canonical product
   const minimals = { ...base, scoreMode: 'minimum-cover' };
   const minimalsTokens = commandTokens(production.buildWorkspaceCommand(minimals));
   assert.deepEqual(minimalsTokens.slice(0, 3), ['clearra', 'pc', 'minimals']);
+  assert.equal(hasOption(minimalsTokens, '--tablebase'), true);
+  assert.equal(hasOption(minimalsTokens, '--no-tablebase'), false);
   for (const option of [
     '--objective',
     '--count',
     '--score',
-    '--tablebase',
-    '--no-tablebase',
     '--build-dependency-dag',
     '--no-build-dependency-dag',
     '--max-memory-mib'
@@ -755,6 +755,8 @@ test('PC minimum-cover and score GUI modes lower only to their canonical product
   assert.equal(optionValue(scoreTokens, '--workers'), '8');
   assert.equal(hasOption(scoreTokens, '--cpu-warmup'), false);
   assert.equal(hasOption(scoreTokens, '--use-all-cpu-threads'), true);
+  assert.equal(hasOption(scoreTokens, '--tablebase'), true);
+  assert.equal(hasOption(scoreTokens, '--no-tablebase'), false);
   for (const option of [
     '--objective',
     '--count',
@@ -765,8 +767,6 @@ test('PC minimum-cover and score GUI modes lower only to their canonical product
     '--no-backend-fallback',
     '--solution-probabilities',
     '--preserve-b2b',
-    '--tablebase',
-    '--no-tablebase',
     '--build-dependency-dag',
     '--no-build-dependency-dag',
     '--max-patterns'
@@ -800,13 +800,15 @@ test('PC path GUI mode lowers to the complete ordinary replay-family contract', 
   assert.equal(normalized.initialB2B, 0);
   assert.equal(normalized.preserveB2B, false);
   assert.equal(normalized.solutionProbabilities, false);
-  assert.equal(normalized.tablebaseEnabled, false);
+  assert.equal(normalized.tablebaseEnabled, true);
   assert.equal(normalized.precomputeBuildDependencies, false);
 
   const tokens = commandTokens(production.buildWorkspaceCommand(request));
   assert.deepEqual(tokens.slice(0, 3), ['clearra', 'pc', 'path']);
   assert.equal(optionValue(tokens, '--queue'), 'I');
   assert.equal(optionValue(tokens, '--rule'), request.rule);
+  assert.equal(hasOption(tokens, '--tablebase'), true);
+  assert.equal(hasOption(tokens, '--no-tablebase'), false);
   for (const option of [
     '--objective',
     '--count',
@@ -816,8 +818,6 @@ test('PC path GUI mode lowers to the complete ordinary replay-family contract', 
     '--initial-b2b',
     '--solution-probabilities',
     '--preserve-b2b',
-    '--tablebase',
-    '--no-tablebase',
     '--build-dependency-dag',
     '--no-build-dependency-dag'
   ]) {
@@ -942,7 +942,7 @@ test('PC score-minimals GUI mode binds score-only minimum cover with CPU worker 
   assert.equal(normalized.gpuDevice, 'auto');
   assert.equal(normalized.workers, 8);
   assert.equal(normalized.useAllLogicalProcessors, true);
-  assert.equal(normalized.tablebaseEnabled, false);
+  assert.equal(normalized.tablebaseEnabled, true);
   assert.equal(normalized.precomputeBuildDependencies, false);
   assert.equal(normalized.maxPatterns, undefined);
 
@@ -954,6 +954,8 @@ test('PC score-minimals GUI mode binds score-only minimum cover with CPU worker 
   assert.equal(optionValue(tokens, '--workers'), '8');
   assert.equal(hasOption(tokens, '--cpu-warmup'), false);
   assert.equal(hasOption(tokens, '--use-all-cpu-threads'), true);
+  assert.equal(hasOption(tokens, '--tablebase'), true);
+  assert.equal(hasOption(tokens, '--no-tablebase'), false);
   for (const option of [
     '--objective',
     '--count',
@@ -964,8 +966,6 @@ test('PC score-minimals GUI mode binds score-only minimum cover with CPU worker 
     '--no-backend-fallback',
     '--solution-probabilities',
     '--preserve-b2b',
-    '--tablebase',
-    '--no-tablebase',
     '--build-dependency-dag',
     '--no-build-dependency-dag',
     '--max-patterns'

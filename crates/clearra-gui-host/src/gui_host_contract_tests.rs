@@ -507,6 +507,24 @@ mod case_gui_pc_portfolio_authority_boundary {
     }
 
     #[test]
+    fn canonical_gui_candidate_products_preserve_explicit_tablebase_policy() {
+        for mode in ["minimum-cover", "path", "summary", "score-minimals"] {
+            let command = ScenarioRequestBuilder::build_command(
+                &scenario_form(mode),
+                &GuiBackendForm::default().with_tablebase_requested(true),
+            )
+            .unwrap_or_else(|error| panic!("{mode}: {error}"));
+            let AppCommand::Scenario(command) = command else {
+                panic!("expected scenario PC command for {mode}");
+            };
+            assert!(
+                command.query().execution_policy().tablebase_requested(),
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
     fn generic_minimum_alias_does_not_gain_pc_minimals_product_authority() {
         let state = GuiAppState::default()
             .with_problem_form(GuiProblemForm::ScenarioPc(scenario_form("minimum")));
@@ -525,7 +543,6 @@ mod case_gui_pc_portfolio_authority_boundary {
     fn canonical_gui_portfolio_modes_reject_unaccounted_execution_overrides() {
         for backend in [
             GuiBackendForm::default().with_memory_budget_mb(64),
-            GuiBackendForm::default().with_tablebase_requested(true),
             GuiBackendForm::default().with_precompute_build_dependencies(true),
         ] {
             let error =

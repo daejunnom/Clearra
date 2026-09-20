@@ -267,7 +267,6 @@ fn pc_minimals_rejects_semantic_overrides_and_unaccounted_memory_caps() {
         "--tiling-only",
         "--queue-knowledge visible-7",
         "--max-memory-mib 64",
-        "--tablebase",
         "--precompute-build-dependencies",
     ] {
         let command = format!(
@@ -325,7 +324,6 @@ fn pc_path_rejects_semantic_and_resource_overrides() {
         "--solution-probabilities",
         "--queue-knowledge visible-7",
         "--max-memory-mib 64",
-        "--tablebase",
         "--precompute-build-dependencies",
     ] {
         let source = format!(
@@ -671,6 +669,46 @@ fn shared_cli_tablebase_is_opt_in_for_pc_and_setup() {
         panic!("expected AppCommand::Setup");
     };
     assert!(!command.query().tablebase_requested());
+}
+
+#[test]
+fn typed_pc_candidate_products_preserve_explicit_tablebase_policy() {
+    for (product, input) in [
+        (
+            "minimals",
+            "--lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty",
+        ),
+        (
+            "path",
+            "--lines 1 --board-mask 0x3f0 --height 1 --pieces 1 --queue I --hold empty",
+        ),
+        ("score", "--lines 2 --patterns [TIOSZ]!"),
+        ("score-minimals", "--lines 2 --patterns [TIOSZ]!"),
+    ] {
+        for (option, expected) in [("--tablebase", true), ("--no-tablebase", false)] {
+            let source = format!("clearra pc {product} {input} {option}");
+            let request = CliCommandParser::parse(&source)
+                .expect(&source)
+                .to_app_request()
+                .expect("typed tablebase AppRequest");
+            let policy = match request.command() {
+                AppCommand::Pc(command) => command.query().execution_policy(),
+                AppCommand::Scenario(command) => command.query().execution_policy(),
+                command => panic!("expected typed PC command, got {command:?}"),
+            };
+            assert_eq!(policy.tablebase_requested(), expected, "{source}");
+        }
+    }
+
+    for option in ["--tablebase", "--no-tablebase"] {
+        let source = format!(
+            "clearra pc score-finder --lines 2 --board-mask 0 --height 2 --pieces 5 \
+             --queue TIOSZJL --no-hold {option}"
+        );
+        let error = CliCommandParser::parse(&source).expect_err(&source);
+        assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{source}");
+        assert!(error.message().contains("score-finder"), "{source}");
+    }
 }
 
 #[test]
@@ -2918,8 +2956,6 @@ fn pc_score_rejects_authority_overrides_and_unaccounted_resource_limits() {
         "--gpu-warmup",
         "--allow-backend-fallback",
         "--no-backend-fallback",
-        "--tablebase",
-        "--no-tablebase",
         "--build-dependency-dag",
         "--no-build-dependency-dag",
         "--retained-traces 1",

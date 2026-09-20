@@ -826,12 +826,9 @@ impl WebCommandRequest {
                 {
                     return Err(invalid("pc path requires objective all and count all"));
                 }
-                if self.solution_probabilities
-                    || self.tablebase_requested
-                    || self.precompute_build_dependencies
-                {
+                if self.solution_probabilities || self.precompute_build_dependencies {
                     return Err(invalid(
-                        "pc path does not accept probability, tablebase, or build-dependency semantics",
+                        "pc path does not accept probability or build-dependency semantics",
                     ));
                 }
                 if self
@@ -951,9 +948,9 @@ impl WebCommandRequest {
                 if self.queue_observation_policy != QueueObservationPolicy::FullQueueOracle {
                     return Err(invalid("pc minimals requires full-queue oracle knowledge"));
                 }
-                if self.tablebase_requested || self.precompute_build_dependencies {
+                if self.precompute_build_dependencies {
                     return Err(invalid(
-                        "pc minimals does not accept tablebase or build-dependency semantics",
+                        "pc minimals does not accept build-dependency semantics",
                     ));
                 }
                 if self
@@ -971,7 +968,6 @@ impl WebCommandRequest {
                     || self.allow_backend_fallback
                     || self.gpu_device != GpuDeviceSelection::Auto
                     || self.gpu_warmup
-                    || self.tablebase_requested
                     || self.precompute_build_dependencies
                 {
                     return Err(invalid(

@@ -572,7 +572,6 @@ fn parse_pc_minimals_command(
                 | "--score"
                 | "--tiling-only"
                 | "--max-memory-mib"
-                | "--tablebase"
                 | "--precompute-build-dependencies"
         ) {
             return Err(WebCommandError::new(
@@ -605,8 +604,6 @@ fn parse_pc_path_command(
                 | "--solution-probabilities"
                 | "--queue-knowledge"
                 | "--max-memory-mib"
-                | "--tablebase"
-                | "--tb"
                 | "--precompute-build-dependencies"
                 | "--build-dependency-dag"
         ) {
@@ -687,6 +684,12 @@ fn validate_pc_score_finder_options(tokens: &[String]) -> Result<(), WebCommandE
                     "pc score-finder owns its fixed jstris-ultra and t-spins profiles",
                 ));
             }
+            "--tablebase" | "--tb" | "--no-tablebase" | "--no-tb" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "pc score-finder does not accept tablebase semantics",
+                ));
+            }
             "--queue" => {
                 if fixed_queue {
                     return Err(WebCommandError::new(
@@ -760,10 +763,6 @@ fn validate_pc_score_options(tokens: &[String]) -> Result<(), WebCommandError> {
             | "--gpu-warmup"
             | "--allow-backend-fallback"
             | "--no-backend-fallback"
-            | "--tablebase"
-            | "--tb"
-            | "--no-tablebase"
-            | "--no-tb"
             | "--build-dependency-dag"
             | "--no-build-dependency-dag"
             | "--retained-traces"

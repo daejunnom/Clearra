@@ -557,7 +557,6 @@ fn validate_pc_path_common_request_contract(
         return Err("pc path requires full-queue oracle knowledge");
     }
     if execution_policy.max_memory_mib().is_some()
-        || execution_policy.tablebase_requested()
         || execution_policy.precompute_build_dependencies()
     {
         return Err("pc path does not accept incomplete execution overrides");
@@ -911,6 +910,9 @@ fn validate_pc_score_scenario_request_contract_with_origin(
     }
     validate_pc_score_queue_contract(query.remaining_queue())?;
     if origin.is_some_and(PcScoreIngressOrigin::is_score_finder) {
+        if query.execution_policy().tablebase_requested() {
+            return Err("pc score-finder does not accept a tablebase request");
+        }
         if !matches!(
             query.remaining_queue(),
             PcQueueInput::FixedSequence(sequence) if !sequence.is_empty()
@@ -992,7 +994,6 @@ fn validate_pc_score_execution_policy(policy: &PcExecutionPolicy) -> Result<(), 
     if policy.requested_backend() != RequestedSearchBackend::Cpu
         || matches!(policy.worker_policy(), WorkerPolicy::Fixed(0))
         || policy.gpu_warmup()
-        || policy.tablebase_requested()
         || policy.precompute_build_dependencies()
         || policy.allow_backend_fallback()
         || policy.gpu_device() != baseline.gpu_device()

@@ -1801,13 +1801,12 @@ mod legacy_form_parser {
                 || preserve_b2b
                 || solution_probabilities
                 || precompute_build_dependencies
-                || tablebase_requested
                 || queue_observation_policy.requires_observation_policy()
                 || finesse != "off"
                 || pattern_knowledge != "both")
         {
             return Err(DesktopTauriCommandError::invalid_request(
-                "desktop pc path requires objective-all/count-all and no score, probability, observation, tablebase, finesse, or dependency override",
+                "desktop pc path requires objective-all/count-all and no score, probability, observation, finesse, or dependency override",
             ));
         }
         if canonical_pc_score_minimals
@@ -1815,13 +1814,12 @@ mod legacy_form_parser {
                 || preserve_b2b
                 || solution_probabilities
                 || precompute_build_dependencies
-                || tablebase_requested
                 || queue_observation_policy.requires_observation_policy()
                 || finesse != "off"
                 || pattern_knowledge != "both")
         {
             return Err(DesktopTauriCommandError::invalid_request(
-                "desktop pc score-minimals request requires count-all score-only semantics and contains no constraint, probability, observation, tablebase, finesse, or dependency override",
+                "desktop pc score-minimals request requires count-all score-only semantics and contains no constraint, probability, observation, finesse, or dependency override",
             ));
         }
         if canonical_pc_score_finder
@@ -6139,7 +6137,8 @@ mod tests {
                 "hold_enabled": true,
                 "hold_piece": "empty",
                 "count_policy": "all",
-                "score_mode": "minimum-cover"
+                "score_mode": "minimum-cover",
+                "tablebase_requested": true
             }"#,
         )
         .expect("canonical desktop pc minimals request");
@@ -6156,6 +6155,7 @@ mod tests {
         );
         assert_eq!(command.query().count_policy(), PcCountPolicy::CountUnique);
         assert_eq!(command.query().exact_pieces(), Some(1));
+        assert!(command.query().execution_policy().tablebase_requested());
 
         let score = desktop_request_builds_app_request(
             r#"{
@@ -6174,7 +6174,8 @@ mod tests {
                 "spin_profile": "t-spins",
                 "backend": "cpu",
                 "workers": 1,
-                "allow_backend_fallback": false
+                "allow_backend_fallback": false,
+                "tablebase_requested": true
             }"#,
         )
         .expect("canonical desktop pc score request");
@@ -6196,6 +6197,7 @@ mod tests {
         assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
         assert!(!policy.allow_backend_fallback());
         assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+        assert!(policy.tablebase_requested());
 
         let score_minimals = desktop_request_builds_app_request(
             r#"{
@@ -6214,7 +6216,8 @@ mod tests {
                 "spin_profile": "t-spins",
                 "backend": "cpu",
                 "workers": 1,
-                "allow_backend_fallback": false
+                "allow_backend_fallback": false,
+                "tablebase_requested": true
             }"#,
         )
         .expect("canonical desktop pc score-minimals request");
@@ -6243,6 +6246,7 @@ mod tests {
         assert_eq!(policy.worker_policy(), WorkerPolicy::Fixed(1));
         assert!(!policy.allow_backend_fallback());
         assert_eq!(policy.max_patterns(), PC_SCORE_MAX_PATTERNS);
+        assert!(policy.tablebase_requested());
     }
 
     #[test]
@@ -6339,7 +6343,8 @@ mod tests {
                 "hold_enabled": true,
                 "hold_piece": "empty",
                 "count_policy": "all",
-                "score_mode": "path"
+                "score_mode": "path",
+                "tablebase_requested": true
             }"#,
         )
         .expect("canonical desktop pc.path request");
@@ -6356,6 +6361,7 @@ mod tests {
         );
         assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
         assert_eq!(command.query().exact_pieces(), Some(1));
+        assert!(command.query().execution_policy().tablebase_requested());
     }
 
     #[cfg(feature = "wasm-cpu-runtime")]

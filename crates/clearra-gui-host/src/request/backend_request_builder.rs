@@ -89,7 +89,6 @@ impl BackendRequestBuilder {
             form.backend(),
             crate::GuiBackendChoice::Auto | crate::GuiBackendChoice::Cpu
         ) || form.precompute_build_dependencies()
-            || form.tablebase_requested()
             || form.memory_budget_mb() != 0
             || form
                 .gpu_device()
@@ -106,6 +105,7 @@ impl BackendRequestBuilder {
             .with_worker_hardware_limit(WorkerPolicy::hardware_worker_limit())
             .with_use_all_logical_processors(form.use_all_logical_processors())
             .with_deterministic(form.deterministic())
+            .with_tablebase_requested(form.tablebase_requested())
             .with_allow_backend_fallback(false)
             .with_max_patterns(PC_SCORE_MAX_PATTERNS);
         if let Some(workers) = form.workers_requested() {

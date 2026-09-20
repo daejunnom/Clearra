@@ -150,13 +150,11 @@ impl ScenarioRequestBuilder {
             ));
         }
         if canonical_pc_minimals
-            && (backend.memory_budget_mb() != 0
-                || backend.precompute_build_dependencies()
-                || backend.tablebase_requested())
+            && (backend.memory_budget_mb() != 0 || backend.precompute_build_dependencies())
         {
             return Err(RequestBuildError::new(
                 RequestBuildErrorCode::ValidationFailed,
-                "canonical GUI pc minimals request contains an unaccounted memory, tablebase, or dependency-analysis override",
+                "canonical GUI pc minimals request contains an unaccounted memory or dependency-analysis override",
             ));
         }
         if canonical_pc_path
@@ -170,12 +168,11 @@ impl ScenarioRequestBuilder {
                     .queue_observation_policy()
                     .requires_observation_policy()
                 || backend.memory_budget_mb() != 0
-                || backend.precompute_build_dependencies()
-                || backend.tablebase_requested())
+                || backend.precompute_build_dependencies())
         {
             return Err(RequestBuildError::new(
                 RequestBuildErrorCode::ValidationFailed,
-                "canonical GUI pc path requires objective-all/count-all and no score, probability, observation, memory, tablebase, or dependency override",
+                "canonical GUI pc path requires objective-all/count-all and no score, probability, observation, memory, or dependency override",
             ));
         }
         if canonical_pc_score_minimals
@@ -185,12 +182,11 @@ impl ScenarioRequestBuilder {
                 || form
                     .queue_observation_policy()
                     .requires_observation_policy()
-                || backend.precompute_build_dependencies()
-                || backend.tablebase_requested())
+                || backend.precompute_build_dependencies())
         {
             return Err(RequestBuildError::new(
                 RequestBuildErrorCode::ValidationFailed,
-                "canonical GUI pc score-minimals request requires count-all and contains no constraint, probability, observation, tablebase, or dependency-analysis override",
+                "canonical GUI pc score-minimals request requires count-all and contains no constraint, probability, observation, or dependency-analysis override",
             ));
         }
         if canonical_pc_score_finder

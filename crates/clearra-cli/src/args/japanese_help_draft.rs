@@ -88,23 +88,23 @@ pub(super) fn product_help_body(topic: ProductHelpTopic) -> &'static str {
 PC専用の幾何学的配置検索を実行し、供給されるミノと正確に適合する配置群を返します。BuildUp、到達可能性、カバー率、確率、ルール、スピン、B2B、スコア、visible-7、tablebase、依存DAG、実行制約の意味付けは利用できません。実際には組めない配置が含まれる場合があります。汎用形式の`clearra pc --tiling-only`と`clearra pc --objective tiling`は上級者向けの汎用PCリクエストとして維持され、この専用結果と同じ意味にはなりません。"#
         }
         ProductHelpTopic::PcMinimals => {
-            r#"使い方: clearra pc minimals --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N]
+            r#"使い方: clearra pc minimals --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N]
   または: clearra pc minimals --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [--hold empty|PIECE|--no-hold] [検索オプション]
-最小解法集合の専用検索を実行します。入力全体のカバー状況を完全にリプレイ検証した後、その検索条件に対する正確な最小カバーを返します。明示的なメモリ上限、スコア、tiling-only、visible-7、tablebase、依存DAGは利用できません。トップレベルのminimalsとsfinder minimalsは従来互換の汎用結果を返します。"#
+最小解法集合の専用検索を実行します。入力全体のカバー状況を完全にリプレイ検証した後、その検索条件に対する正確な最小カバーを返します。明示的なメモリ上限、スコア、tiling-only、visible-7、依存DAGは利用できません。--tablebaseは正確に適格化された完全候補群だけを使用し、オフライン探索を自動開始しません。トップレベルのminimalsとsfinder minimalsは従来互換の汎用結果を返します。"#
         }
         ProductHelpTopic::PcPath => {
-            r#"使い方: clearra pc path --lines 2|4|6 (--queue QUEUE | --patterns PATTERN) [--hold|--no-hold] [--rule RULE] [検索オプション]
-  または: clearra pc path --board-mask HEX --height 1..6 --pieces N --lines same-as-height (--queue QUEUE | --patterns PATTERN) [--hold empty|PIECE|--no-hold] [--rule RULE] [検索オプション]
-objective all、count allで完全なリプレイ経路を専用検索します。各手順は配置、元のミノ列、ホールドと読み取り位置の遷移、消費ミノ数、ライン消去を保持します。最適集合の同率候補ではなく、同率集合のメタデータやページ継続カーソルは含みません。"#
+            r#"使い方: clearra pc path --lines 2|4|6 (--queue QUEUE | --patterns PATTERN) [--hold|--no-hold] [--rule RULE] [--tablebase|--no-tablebase] [検索オプション]
+  または: clearra pc path --board-mask HEX --height 1..6 --pieces N --lines same-as-height (--queue QUEUE | --patterns PATTERN) [--hold empty|PIECE|--no-hold] [--rule RULE] [--tablebase|--no-tablebase] [検索オプション]
+objective all、count allで完全なリプレイ経路を専用検索します。各手順は配置、元のミノ列、ホールドと読み取り位置の遷移、消費ミノ数、ライン消去を保持します。--tablebaseは正確に適格化された完全候補群だけを使用し、オフライン探索を自動開始しません。最適集合の同率候補ではなく、同率集合のメタデータやページ継続カーソルは含みません。"#
         }
         ProductHelpTopic::PcChance => {
             r#"使い方: clearra pc chance --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--max-patterns N]
 PC確率の専用検索を実行し、入力ミノ順全体に対する完全な確率を返します。トップレベルのchanceとpercentは従来互換の汎用結果を返します。"#
         }
         ProductHelpTopic::PcScore => {
-            r#"使い方: clearra pc score --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile disabled|t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup]
-  または: clearra pc score --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [スコアオプション] [CPUワーカーオプション]
-ネイティブCPU実行には通常のローカルワーカー設定を使用します。自動実行は--use-all-cpu-threadsがない限り論理プロセッサを1個予約し、--workersは固定並列数を指定します。ブラウザーでは管理側がNを保持し、分離された各WASM子処理を1ワーカーに正規化してワーカープールの入れ子を防ぎます。入力は元のミノ16個以内と、因数分解されたパターン式1個に制限されます。P7P7P2は記号的に処理できます。PC盤面ごとの平均スコアを返します。スコアは基本的な近似値であり、プロファイルごとの厳密値ではありません。トップレベルのscoreとsfinder scoreは従来互換の汎用結果を返します。"#
+            r#"使い方: clearra pc score --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile disabled|t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--tablebase|--no-tablebase]
+  または: clearra pc score --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [スコアオプション] [CPUワーカーオプション] [--tablebase|--no-tablebase]
+ネイティブCPU実行には通常のローカルワーカー設定を使用します。自動実行は--use-all-cpu-threadsがない限り論理プロセッサを1個予約し、--workersは固定並列数を指定します。ブラウザーでは管理側がNを保持し、分離された各WASM子処理を1ワーカーに正規化してワーカープールの入れ子を防ぎます。--tablebaseは適格化された完全候補ソースだけを置換し、このスコアreducerを維持します。オフライン探索は自動開始しません。入力は元のミノ16個以内と、因数分解されたパターン式1個に制限されます。P7P7P2は記号的に処理できます。PC盤面ごとの平均スコアを返します。スコアは基本的な近似値であり、プロファイルごとの厳密値ではありません。トップレベルのscoreとsfinder scoreは従来互換の汎用結果を返します。"#
         }
         ProductHelpTopic::PcScoreFinder => {
             r#"使い方: clearra pc score-finder --lines 2|4|6 --queue QUEUE [--hold|--no-hold] [--initial-b2b 0|1] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--ties]
@@ -112,9 +112,9 @@ PC確率の専用検索を実行し、入力ミノ順全体に対する完全な
 専用のjstris-ultraスコアプロファイルとt-spinsスピンプロファイルを使用し、固定ミノ順の最高スコアを検索します。ネイティブCPU実行は通常のローカルワーカー設定を使用します。自動実行は--use-all-cpu-threadsがない限り論理プロセッサを1個予約し、--workersは固定並列数を指定します。ブラウザーでは管理側がNを保持し、分離された各WASM子処理は1ワーカーを使用します。最高スコアの同率判定と順序には整数のスコアだけを使用します。攻撃力は参考値であり、同率の順位決定には使用しません。通常の結果に最適集合の同率メタデータはありません。--tiesを明示すると同じ最高スコアを持つすべての手順を通常の解法群として表示します。--tie-snapshotは使用できません。"#
         }
         ProductHelpTopic::PcScoreMinimals => {
-            r#"使い方: clearra pc score-minimals --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile disabled|t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--ties --tie-snapshot PATH]
-  または: clearra pc score-minimals --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [スコアオプション] [CPUワーカーオプション] [--ties --tie-snapshot PATH]
-スコアだけを基準とするB-optionの最高スコア最小集合検索を実行します。ネイティブCPU実行は通常のローカルワーカー設定を使用します。自動実行は--use-all-cpu-threadsがない限り論理プロセッサを1個予約し、--workersは固定並列数を指定します。ブラウザーでは管理側がNを保持し、分離された各WASM子処理は1ワーカーを使用します。スコアの同率判定、候補の適格性、並び順、集合の構成、決定的な選択に攻撃力は使わず、参考値としてのみ扱います。--tiesがなければ一定の規則で並べた最初の集合を表示します。--tiesを明示すると、再開可能な正確なスナップショットを作成します。同じ最小個数を持つすべての最適集合を`clearra continue --tie-snapshot PATH --tie-cursor TOKEN`でページ単位で取得できます。"#
+            r#"使い方: clearra pc score-minimals --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile disabled|t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--tablebase|--no-tablebase] [--ties --tie-snapshot PATH]
+  または: clearra pc score-minimals --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [スコアオプション] [CPUワーカーオプション] [--tablebase|--no-tablebase] [--ties --tie-snapshot PATH]
+スコアだけを基準とするB-optionの最高スコア最小集合検索を実行します。ネイティブCPU実行は通常のローカルワーカー設定を使用します。自動実行は--use-all-cpu-threadsがない限り論理プロセッサを1個予約し、--workersは固定並列数を指定します。ブラウザーでは管理側がNを保持し、分離された各WASM子処理は1ワーカーを使用します。--tablebaseは適格化された完全候補ソースだけを置換し、スコアだけのreducerを維持します。オフライン探索は自動開始しません。スコアの同率判定、候補の適格性、並び順、集合の構成、決定的な選択に攻撃力は使わず、参考値としてのみ扱います。--tiesがなければ一定の規則で並べた最初の集合を表示します。--tiesを明示すると、再開可能な正確なスナップショットを作成します。同じ最小個数を持つすべての最適集合を`clearra continue --tie-snapshot PATH --tie-cursor TOKEN`でページ単位で取得できます。"#
         }
         ProductHelpTopic::PcSaves => {
             r#"使い方: clearra pc saves --lines 2|4|6 [--patterns PATTERN] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [検索オプション]

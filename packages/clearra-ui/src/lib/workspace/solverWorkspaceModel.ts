@@ -129,7 +129,6 @@ export function normalizeWorkspaceRequest(
       preserveB2B: false,
       initialB2B: 0,
       solutionProbabilities: false,
-      tablebaseEnabled: false,
       precomputeBuildDependencies: false
     };
   }
@@ -148,7 +147,7 @@ export function normalizeWorkspaceRequest(
       solutionProbabilities: false,
       backend: 'cpu',
       gpuDevice: 'auto',
-      tablebaseEnabled: false,
+      tablebaseEnabled: request.scoreMode === 'score-finder' ? false : request.tablebaseEnabled,
       precomputeBuildDependencies: false,
       maxPatterns: undefined
     };
@@ -160,7 +159,6 @@ export function normalizeWorkspaceRequest(
       scoreProfile: 'tetrio',
       spinProfile: request.preserveB2B ? request.spinProfile : 't-spins',
       initialB2B: 0,
-      tablebaseEnabled: false,
       precomputeBuildDependencies: false
     };
   }
@@ -564,15 +562,18 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
     tokens.push('--score-profile', request.scoreProfile);
     tokens.push('--spin-profile', request.spinProfile);
     tokens.push('--initial-b2b', String(Math.max(0, Math.trunc(request.initialB2B))));
+    tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
     tokens.push(...workspaceScoreWorkerCommandArguments(request));
   } else if (request.scoreMode === 'path') {
     tokens.push('--rule', request.rule);
+    tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
     if (request.maxPatterns !== undefined) {
       tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
     }
   } else if (request.scoreMode === 'minimum-cover') {
     tokens.push('--rule', request.rule);
+    tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
     if (request.solutionProbabilities) tokens.push('--solution-probabilities');
     if (request.preserveB2B) {
       tokens.push('--spin-profile', request.spinProfile, '--preserve-b2b');
