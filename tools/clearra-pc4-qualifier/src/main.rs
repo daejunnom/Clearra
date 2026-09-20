@@ -8,6 +8,7 @@
 //! targets outside the upstream field index still require an independent dead
 //! proof before an outgoing-edge completeness identity can be minted.
 
+mod boundary;
 mod domain;
 mod indexed_path;
 
@@ -27,10 +28,15 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU32, Ordering},
+    thread,
+    time::Instant,
 };
 
 const SHARD_SCHEMA: &str = "clearra.pc4.indexed-domain-outgoing-shard.v1";
+const PROOF_SHARD_SCHEMA: &str = "clearra.pc4.indexed-domain-outgoing-proof-shard.v2";
 const MERGED_SCHEMA: &str = "clearra.pc4.indexed-domain-outgoing-merge.v1";
+const PROOF_MERGED_SCHEMA: &str = "clearra.pc4.indexed-domain-outgoing-proof-merge.v2";
 const ACTIVE_SCHEMA: &str = "clearra.pc4.benchmark-files.v1";
 const GENERATION_SCHEMA: &str = "clearra.pc4.host-generation.v1";
 const HEADER_BYTES: usize = 16;
@@ -56,17 +62,90 @@ fn run() -> Result<(), String> {
         .map_err(|_| "command must be UTF-8")?;
     let options = parse_options(arguments.collect())?;
     match command.as_str() {
-        "outgoing-shard" => run_outgoing_shard(&options),
+        "outgoing-shard" => run_outgoing_shard(&options, false),
+        "outgoing-proof-shard" => run_outgoing_shard(&options, true),
+        "outgoing-proof-run" => run_outgoing_proof_sequence(&options),
         "merge-outgoing" => run_merge(&options),
+        "merge-outgoing-proof" => run_proof_merge(&options),
         "domain-seed" => run_domain_seed(&options),
         "domain-step" => run_domain_step(&options),
         "domain-run" => run_domain_run(&options),
         "domain-compare" => run_domain_compare(&options),
         "indexed-path-proof" => run_indexed_path_proof(&options),
         _ => Err(
-            "expected outgoing-shard, merge-outgoing, domain-seed, domain-step, domain-run, domain-compare, or indexed-path-proof".to_owned(),
+            "expected outgoing-shard, outgoing-proof-shard, outgoing-proof-run, merge-outgoing, merge-outgoing-proof, domain-seed, domain-step, domain-run, domain-compare, or indexed-path-proof".to_owned(),
         ),
     }
+}
+
+fn run_outgoing_proof_sequence(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?.to_owned();
+    let output_directory = absolute_option(options, "output-directory")?;
+    require_real_directory(&output_directory)?;
+    let mut start = numeric_option(options, "start")?;
+    let shard_size = numeric_option(options, "shard-size")?;
+    let workers = numeric_option(options, "workers")?;
+    let max_new_shards = numeric_option(options, "max-new-shards")?;
+    if shard_size == 0 || shard_size > MAX_SHARD_FIELDS {
+        return Err("proof sequence shard size outside 1..=262144".to_owned());
+    }
+    if workers == 0 || workers > 64 || max_new_shards == 0 {
+        return Err("proof sequence workers or max-new-shards invalid".to_owned());
+    }
+    let dataset = Dataset::open(&dataset_root, &profile)?;
+    if start >= dataset.field_count {
+        return Err("proof sequence start outside field domain".to_owned());
+    }
+    let mut created = 0_u32;
+    let mut covered_end = start;
+    while start < dataset.field_count {
+        let end = dataset.field_count.min(start.saturating_add(shard_size));
+        let stem = format!("shard-{start:08}-{end:08}");
+        let receipt = output_directory.join(format!("{stem}.json"));
+        let boundary = output_directory.join(format!("{stem}.bin"));
+        let existed = receipt.exists();
+        let mut shard_options = BTreeMap::new();
+        shard_options.insert(
+            "dataset-root".to_owned(),
+            dataset_root
+                .to_str()
+                .ok_or("dataset root must be UTF-8")?
+                .to_owned(),
+        );
+        shard_options.insert("profile".to_owned(), profile.clone());
+        shard_options.insert("start".to_owned(), start.to_string());
+        shard_options.insert("end".to_owned(), end.to_string());
+        shard_options.insert("workers".to_owned(), workers.to_string());
+        shard_options.insert(
+            "output".to_owned(),
+            receipt
+                .to_str()
+                .ok_or("proof receipt path must be UTF-8")?
+                .to_owned(),
+        );
+        shard_options.insert(
+            "boundary-output".to_owned(),
+            boundary
+                .to_str()
+                .ok_or("proof boundary path must be UTF-8")?
+                .to_owned(),
+        );
+        run_outgoing_shard(&shard_options, true)?;
+        if !existed {
+            created += 1;
+        }
+        covered_end = end;
+        start = end;
+        if created == max_new_shards {
+            break;
+        }
+    }
+    println!(
+        "pc4_outgoing_proof_run=complete new_shards={created} covered_end={covered_end} field_count={}",
+        dataset.field_count
+    );
+    Ok(())
 }
 
 fn run_indexed_path_proof(options: &BTreeMap<String, String>) -> Result<(), String> {
@@ -331,19 +410,34 @@ fn run_domain_compare(options: &BTreeMap<String, String>) -> Result<(), String> 
     Ok(())
 }
 
-fn run_outgoing_shard(options: &BTreeMap<String, String>) -> Result<(), String> {
+fn run_outgoing_shard(
+    options: &BTreeMap<String, String>,
+    capture_outside_boundary: bool,
+) -> Result<(), String> {
     let dataset_root = absolute_option(options, "dataset-root")?;
     let profile = required_option(options, "profile")?;
     let start = numeric_option(options, "start")?;
     let end = numeric_option(options, "end")?;
     let output = absolute_option(options, "output")?;
+    let boundary_output = if capture_outside_boundary {
+        Some(absolute_option(options, "boundary-output")?)
+    } else {
+        None
+    };
+    if boundary_output.as_ref() == Some(&output) {
+        return Err("receipt and outside-boundary outputs must differ".to_owned());
+    }
     let dataset = Dataset::open(&dataset_root, profile)?;
     if start >= end || end > dataset.field_count || end - start > MAX_SHARD_FIELDS {
         return Err("invalid bounded shard range".to_owned());
     }
     if output.exists() {
         let existing = read_json(&output, 16 * 1024 * 1024)?;
-        validate_existing_shard(&existing, &dataset, start, end)?;
+        if let Some(boundary_path) = boundary_output.as_deref() {
+            validate_existing_proof_shard(&existing, &dataset, start, end, boundary_path)?;
+        } else {
+            validate_existing_shard(&existing, &dataset, start, end)?;
+        }
         println!(
             "pc4_outgoing_shard=already-complete start={start} end={end} receipt={}",
             existing["receipt_identity"].as_str().unwrap_or("invalid")
@@ -383,112 +477,75 @@ fn run_outgoing_shard(options: &BTreeMap<String, String>) -> Result<(), String> 
     let graph_bytes = read_exact_range(&dataset.graph.path, graph_start, graph_end - graph_start)?;
     let graph_segment_identity = sha256_identity(&graph_bytes);
 
-    let mut metrics = ShardMetrics::default();
-    let mut mismatch_samples = Vec::new();
-    for source_id in start..end {
-        let source_hash = field_hash(&field_index, source_id)?;
-        let source_cells = hydra_field_hash_v1_to_clearra_board64_mask(source_hash)
-            .map_err(|error| error.reason().to_owned())?;
-        if !source_cells.count_ones().is_multiple_of(4) {
-            return Err("source field area is not tetromino aligned".to_owned());
-        }
-        let source_layer =
-            usize::try_from(source_cells.count_ones() / 4).map_err(|_| "source layer overflow")?;
-        let layer_count = metrics
-            .source_area_layers
-            .get_mut(source_layer)
-            .ok_or("source layer outside four-row domain")?;
-        *layer_count = layer_count.checked_add(1).ok_or("metric overflow")?;
-        let record_start = graph_offset(&offsets, source_id)?;
-        let record_end = graph_offset(&offsets, source_id + 1)?;
-        let local_start = usize::try_from(record_start - graph_start)
-            .map_err(|_| "graph shard offset overflow")?;
-        let local_end =
-            usize::try_from(record_end - graph_start).map_err(|_| "graph shard offset overflow")?;
-        let record = graph_bytes
-            .get(local_start..local_end)
-            .ok_or("graph record outside shard bytes")?;
-        let decoded = decode_hydra_graph_record_v1(
-            record,
-            source_hash,
-            dataset.target_encoding,
-            dataset.field_count,
-        )
-        .map_err(|error| error.reason().to_owned())?;
-
-        for (graph_piece, piece) in PIECES {
-            let targets =
-                enumerate_pc4_ilc_target_fields(source_cells, piece, dataset.kick_profile)
-                    .map_err(|error| error.reason().to_owned())?;
-            metrics.forward_target_fields = metrics
-                .forward_target_fields
-                .checked_add(targets.len() as u64)
-                .ok_or("metric overflow")?;
-            let mut expected = BTreeSet::new();
-            for cells in targets {
-                let hash = clearra_board64_mask_to_hydra_field_hash_v1(cells)
-                    .map_err(|error| error.reason().to_owned())?;
-                if let Some(target_id) = lookup_field_id(&field_index, dataset.field_count, hash)? {
-                    expected.insert(target_id);
-                } else {
-                    metrics.outside_index_reachable_targets = metrics
-                        .outside_index_reachable_targets
-                        .checked_add(1)
-                        .ok_or("metric overflow")?;
-                }
-            }
-            metrics.expected_indexed_edges = metrics
-                .expected_indexed_edges
-                .checked_add(expected.len() as u64)
-                .ok_or("metric overflow")?;
-
-            let encoded = decoded.targets(graph_piece);
-            metrics.graph_edges = metrics
-                .graph_edges
-                .checked_add(encoded.len() as u64)
-                .ok_or("metric overflow")?;
-            let actual = encoded.iter().copied().collect::<BTreeSet<_>>();
-            metrics.duplicate_graph_edges = metrics
-                .duplicate_graph_edges
-                .checked_add((encoded.len() - actual.len()) as u64)
-                .ok_or("metric overflow")?;
-            let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
-            let extra = actual.difference(&expected).copied().collect::<Vec<_>>();
-            if !missing.is_empty() || !extra.is_empty() || encoded.len() != actual.len() {
-                metrics.mismatched_piece_records = metrics
-                    .mismatched_piece_records
-                    .checked_add(1)
-                    .ok_or("metric overflow")?;
-                metrics.missing_indexed_edges = metrics
-                    .missing_indexed_edges
-                    .checked_add(missing.len() as u64)
-                    .ok_or("metric overflow")?;
-                metrics.extra_graph_edges = metrics
-                    .extra_graph_edges
-                    .checked_add(extra.len() as u64)
-                    .ok_or("metric overflow")?;
-                if mismatch_samples.len() < MAX_MISMATCH_SAMPLES {
-                    mismatch_samples.push(json!({
-                        "source_id": source_id,
-                        "source_hash": source_hash,
-                        "piece": graph_piece_name(graph_piece),
-                        "missing_target_ids": missing,
-                        "extra_target_ids": extra,
-                        "encoded_degree": encoded.len(),
-                        "unique_degree": actual.len(),
-                    }));
-                }
-            }
-        }
-        metrics.source_records += 1;
+    let requested_workers = if capture_outside_boundary {
+        options
+            .get("workers")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .map_err(|_| "--workers must be a usize".to_owned())
+            })
+            .transpose()?
+            .unwrap_or_else(|| thread::available_parallelism().map_or(1, usize::from))
+    } else {
+        1
+    };
+    if requested_workers == 0 || requested_workers > 64 {
+        return Err("outgoing proof worker count outside 1..=64".to_owned());
     }
+    let scan_started = Instant::now();
+    let scan = scan_outgoing_sources(
+        &dataset,
+        &field_index,
+        &offsets,
+        &graph_bytes,
+        graph_start,
+        start,
+        end,
+        requested_workers,
+        capture_outside_boundary,
+    )?;
+    let scan_elapsed_ms = scan_started.elapsed().as_millis();
+    let metrics = scan.metrics;
+    let mismatch_samples = scan.mismatch_samples;
+    let outside_boundary = scan.outside_boundary;
 
     let passed = metrics.mismatched_piece_records == 0 && metrics.duplicate_graph_edges == 0;
+    let boundary_evidence = if let Some(path) = boundary_output.as_deref() {
+        let fields = outside_boundary.into_iter().collect::<Vec<_>>();
+        let binding = dataset.domain_binding()?.raw_identity();
+        let identity = if path.exists() {
+            let existing = boundary::read(path, binding, Some((start, end)))?;
+            if existing.fields != fields {
+                return Err(
+                    "existing outside-boundary content differs from exact shard scan".to_owned(),
+                );
+            }
+            existing.file_identity
+        } else {
+            boundary::write(path, binding, start, end, &fields)?
+        };
+        json!({
+            "schema": "clearra.pc4.outside-boundary.v2",
+            "file_name": path.file_name().and_then(|value| value.to_str())
+                .ok_or("outside-boundary file name must be UTF-8")?,
+            "field_count": fields.len(),
+            "content_identity": identity,
+        })
+    } else {
+        Value::Null
+    };
     let core = json!({
-        "schema": SHARD_SCHEMA,
+        "schema": if capture_outside_boundary { PROOF_SHARD_SCHEMA } else { SHARD_SCHEMA },
         "authority": "non-target-qualification-evidence",
-        "evidence_scope": "exact-forward-parity-with-indexed-target-domain-only",
-        "qualification_status": if passed { "indexed-domain-parity-only" } else { "failed" },
+        "evidence_scope": if capture_outside_boundary {
+            "exact-forward-parity-with-complete-outside-boundary"
+        } else {
+            "exact-forward-parity-with-indexed-target-domain-only"
+        },
+        "qualification_status": if passed {
+            if capture_outside_boundary { "indexed-domain-parity-with-boundary" } else { "indexed-domain-parity-only" }
+        } else { "failed" },
         "repository": dataset.repository,
         "revision": dataset.revision,
         "profile": dataset.profile,
@@ -505,6 +562,7 @@ fn run_outgoing_shard(options: &BTreeMap<String, String>) -> Result<(), String> 
             "graph_segment": graph_segment_identity,
         },
         "metrics": metrics.as_json(),
+        "outside_boundary": boundary_evidence,
         "mismatch_samples": mismatch_samples,
         "missing_semantic_proofs": {
             "outside_index_target_dead_proof": metrics.outside_index_reachable_targets,
@@ -514,12 +572,15 @@ fn run_outgoing_shard(options: &BTreeMap<String, String>) -> Result<(), String> 
     let receipt = with_identity(core)?;
     write_json_atomic(&output, &receipt)?;
     println!(
-        "pc4_outgoing_shard={} start={} end={} indexed_edges={} outside_index={} receipt={}",
+        "pc4_outgoing_shard={} start={} end={} indexed_edges={} outside_index={} unique_boundary={} workers={} scan_elapsed_ms={} receipt={}",
         if passed { "passed" } else { "failed" },
         start,
         end,
         metrics.expected_indexed_edges,
         metrics.outside_index_reachable_targets,
+        receipt["outside_boundary"]["field_count"].as_u64().unwrap_or(0),
+        requested_workers.min((end - start) as usize).max(1),
+        scan_elapsed_ms,
         receipt["receipt_identity"].as_str().unwrap_or("invalid")
     );
     if passed {
@@ -555,7 +616,7 @@ fn run_merge(options: &BTreeMap<String, String>) -> Result<(), String> {
         }
         let value = read_json(&entry.path(), 16 * 1024 * 1024)?;
         validate_receipt_identity(&value)?;
-        validate_receipt_dataset_binding(&value, &dataset)?;
+        validate_receipt_dataset_binding(&value, &dataset, SHARD_SCHEMA)?;
         receipts.push(value);
     }
     receipts.sort_by_key(|receipt| {
@@ -694,6 +755,411 @@ fn run_merge(options: &BTreeMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
+fn run_proof_merge(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let receipts_directory = absolute_option(options, "receipts")?;
+    let boundaries_directory = absolute_option(options, "boundaries")?;
+    let indexed_path_receipt_path = absolute_option(options, "indexed-path-receipt")?;
+    let boundary_output = absolute_option(options, "boundary-output")?;
+    let output = absolute_option(options, "output")?;
+    if output == boundary_output {
+        return Err("merged receipt and boundary outputs must differ".to_owned());
+    }
+    require_real_directory(&receipts_directory)?;
+    require_real_directory(&boundaries_directory)?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    let indexed_path_receipt = read_json(&indexed_path_receipt_path, 16 * 1024 * 1024)?;
+    validate_indexed_path_receipt(&indexed_path_receipt, &dataset)?;
+
+    let mut receipts = Vec::new();
+    for entry in fs::read_dir(&receipts_directory).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        if entry.file_type().map_err(io_error)?.is_symlink() {
+            return Err("proof receipt symlink rejected".to_owned());
+        }
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let value = read_json(&entry.path(), 16 * 1024 * 1024)?;
+        validate_receipt_identity(&value)?;
+        validate_receipt_dataset_binding(&value, &dataset, PROOF_SHARD_SCHEMA)?;
+        receipts.push(value);
+    }
+    receipts.sort_by_key(|receipt| {
+        receipt["source_range"]["start"]
+            .as_u64()
+            .unwrap_or(u64::MAX)
+    });
+    if receipts.is_empty() {
+        return Err("no proof shard receipts found".to_owned());
+    }
+
+    let offsets = fs::read(&dataset.offsets.path).map_err(io_error)?;
+    validate_index_bytes(
+        &offsets,
+        b"GOFFIDX1",
+        dataset.field_count,
+        dataset.offsets.byte_len,
+    )?;
+    let offsets_identity = sha256_identity(&offsets);
+    require_identity(
+        &offsets_identity,
+        &dataset.offsets.identity,
+        "graph offsets",
+    )?;
+
+    let mut next_source = 0_u64;
+    let mut next_graph_byte = 0_u64;
+    let mut totals = ShardMetrics::default();
+    let mut receipt_identities = Vec::with_capacity(receipts.len());
+    let mut boundary_inputs = Vec::with_capacity(receipts.len());
+    let mut graph = File::open(&dataset.graph.path).map_err(io_error)?;
+    let mut graph_digest = Sha256::new();
+    for receipt in &receipts {
+        if receipt["qualification_status"] != "indexed-domain-parity-with-boundary" {
+            return Err("failed or incomplete proof shard rejected".to_owned());
+        }
+        let start = receipt["source_range"]["start"]
+            .as_u64()
+            .ok_or("invalid source start")?;
+        let end = receipt["source_range"]["end"]
+            .as_u64()
+            .ok_or("invalid source end")?;
+        let graph_start = receipt["graph_byte_range"]["start"]
+            .as_u64()
+            .ok_or("invalid graph start")?;
+        let graph_end = receipt["graph_byte_range"]["end"]
+            .as_u64()
+            .ok_or("invalid graph end")?;
+        if start != next_source
+            || graph_start != next_graph_byte
+            || end <= start
+            || graph_end <= graph_start
+        {
+            return Err("proof shards do not form one exact non-overlapping cover".to_owned());
+        }
+        let start_id = u32::try_from(start).map_err(|_| "source start overflow")?;
+        let end_id = u32::try_from(end).map_err(|_| "source end overflow")?;
+        if graph_start != graph_offset(&offsets, start_id)?
+            || graph_end != graph_offset(&offsets, end_id)?
+        {
+            return Err("proof shard graph range is not bound to its source range".to_owned());
+        }
+        let segment_identity = hash_open_range(
+            &mut graph,
+            graph_start,
+            graph_end - graph_start,
+            Some(&mut graph_digest),
+        )?;
+        if receipt["observed_identities"]["graph_segment"].as_str() != Some(&segment_identity) {
+            return Err("proof shard graph segment identity drift".to_owned());
+        }
+
+        let boundary_name = receipt["outside_boundary"]["file_name"]
+            .as_str()
+            .ok_or("proof shard boundary name missing")?;
+        let mut components = Path::new(boundary_name).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err("proof shard boundary name must be one safe file name".to_owned());
+        }
+        let boundary_path = boundaries_directory.join(boundary_name);
+        let boundary_field_count = receipt["outside_boundary"]["field_count"]
+            .as_u64()
+            .ok_or("proof shard boundary field count missing")?;
+        let boundary_identity = receipt["outside_boundary"]["content_identity"]
+            .as_str()
+            .ok_or("proof shard boundary identity missing")?
+            .to_owned();
+        checked_identity(&boundary_identity)?;
+        boundary_inputs.push(boundary::MergeInput {
+            path: boundary_path,
+            start: start_id,
+            end: end_id,
+            field_count: boundary_field_count,
+            file_identity: boundary_identity,
+        });
+        totals.add_json(&receipt["metrics"])?;
+        receipt_identities.push(
+            receipt["receipt_identity"]
+                .as_str()
+                .ok_or("missing proof shard receipt identity")?
+                .to_owned(),
+        );
+        next_source = end;
+        next_graph_byte = graph_end;
+    }
+    if next_source != u64::from(dataset.field_count) || next_graph_byte != dataset.graph.byte_len {
+        return Err("proof shards do not cover the complete graph domain".to_owned());
+    }
+    if totals.source_records != u64::from(dataset.field_count)
+        || totals.source_area_layers.iter().sum::<u64>() != u64::from(dataset.field_count)
+        || totals.mismatched_piece_records != 0
+        || totals.duplicate_graph_edges != 0
+    {
+        return Err("proof shard metrics do not describe one successful full cover".to_owned());
+    }
+    let graph_identity = format!("sha256:{}", hex_digest(graph_digest.finalize().as_slice()));
+    require_identity(&graph_identity, &dataset.graph.identity, "graph")?;
+    let fields_identity = hash_file(&dataset.fields.path)?;
+    require_identity(&fields_identity, &dataset.fields.identity, "field index")?;
+
+    let binding = dataset.domain_binding()?.raw_identity();
+    let merged_boundary = boundary::merge_files(
+        &boundary_output,
+        binding,
+        0,
+        dataset.field_count,
+        &boundary_inputs,
+    )?;
+    let core = json!({
+        "schema": PROOF_MERGED_SCHEMA,
+        "authority": "non-target-qualification-evidence",
+        "qualification_status": "indexed-path-and-boundary-unclassified",
+        "repository": dataset.repository,
+        "revision": dataset.revision,
+        "profile": dataset.profile,
+        "kick_profile": dataset.kick_profile.as_str(),
+        "reader_contract": dataset.reader_contract,
+        "field_count": dataset.field_count,
+        "artifacts": dataset.public_artifacts(),
+        "observed_identities": {
+            "fields": fields_identity,
+            "offsets": offsets_identity,
+            "graph": graph_identity,
+        },
+        "exact_source_cover": { "start": 0, "end": dataset.field_count },
+        "proof_shard_count": receipts.len(),
+        "proof_shard_receipt_identities": receipt_identities,
+        "indexed_path_receipt_identity": indexed_path_receipt["receipt_identity"],
+        "metrics": totals.as_json(),
+        "outside_boundary": {
+            "schema": "clearra.pc4.outside-boundary.v2",
+            "file_name": boundary_output.file_name().and_then(|value| value.to_str())
+                .ok_or("merged boundary file name must be UTF-8")?,
+            "field_count": merged_boundary.field_count,
+            "content_identity": merged_boundary.file_identity,
+        },
+        "outgoing_edge_completeness_identity": Value::Null,
+        "offline_exact_parity_identity": Value::Null,
+        "missing_semantic_proofs": {
+            "outside_index_boundary_dead_proof": merged_boundary.field_count,
+            "offline_exact_result_family_parity": true,
+        },
+    });
+    let receipt = with_identity(core)?;
+    write_json_atomic(&output, &receipt)?;
+    println!(
+        "pc4_outgoing_proof_merge=boundary-unclassified shards={} unique_boundary={} receipt={}",
+        receipts.len(),
+        merged_boundary.field_count,
+        receipt["receipt_identity"].as_str().unwrap_or("invalid")
+    );
+    Ok(())
+}
+
+#[derive(Default)]
+struct OutgoingScan {
+    metrics: ShardMetrics,
+    mismatch_samples: Vec<Value>,
+    outside_boundary: BTreeSet<u64>,
+}
+
+fn scan_outgoing_sources(
+    dataset: &Dataset,
+    field_index: &[u8],
+    offsets: &[u8],
+    graph_bytes: &[u8],
+    graph_start: u64,
+    start: u32,
+    end: u32,
+    requested_workers: usize,
+    capture_outside_boundary: bool,
+) -> Result<OutgoingScan, String> {
+    let workers = requested_workers.min((end - start) as usize).max(1);
+    let cursor = AtomicU32::new(start);
+    let partials = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for _ in 0..workers {
+            let cursor = &cursor;
+            handles.push(scope.spawn(move || {
+                let mut partial = OutgoingScan::default();
+                loop {
+                    let begin = cursor.fetch_add(8, Ordering::Relaxed);
+                    if begin >= end {
+                        break;
+                    }
+                    for source_id in begin..end.min(begin + 8) {
+                        scan_outgoing_source(
+                            dataset,
+                            field_index,
+                            offsets,
+                            graph_bytes,
+                            graph_start,
+                            source_id,
+                            capture_outside_boundary,
+                            &mut partial,
+                        )?;
+                    }
+                }
+                Ok(partial)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| "outgoing proof worker panicked".to_owned())?
+            })
+            .collect::<Result<Vec<_>, String>>()
+    })?;
+
+    let mut merged = OutgoingScan::default();
+    for partial in partials {
+        merged.metrics.add_metrics(&partial.metrics)?;
+        merged.mismatch_samples.extend(partial.mismatch_samples);
+        merged.outside_boundary.extend(partial.outside_boundary);
+    }
+    merged.mismatch_samples.sort_by(|left, right| {
+        let left_key = (
+            left["source_id"].as_u64().unwrap_or(u64::MAX),
+            left["piece"].as_str().unwrap_or(""),
+        );
+        let right_key = (
+            right["source_id"].as_u64().unwrap_or(u64::MAX),
+            right["piece"].as_str().unwrap_or(""),
+        );
+        left_key.cmp(&right_key)
+    });
+    merged.mismatch_samples.truncate(MAX_MISMATCH_SAMPLES);
+    Ok(merged)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_outgoing_source(
+    dataset: &Dataset,
+    field_index: &[u8],
+    offsets: &[u8],
+    graph_bytes: &[u8],
+    graph_start: u64,
+    source_id: u32,
+    capture_outside_boundary: bool,
+    output: &mut OutgoingScan,
+) -> Result<(), String> {
+    let source_hash = field_hash(field_index, source_id)?;
+    let source_cells = hydra_field_hash_v1_to_clearra_board64_mask(source_hash)
+        .map_err(|error| error.reason().to_owned())?;
+    if !source_cells.count_ones().is_multiple_of(4) {
+        return Err("source field area is not tetromino aligned".to_owned());
+    }
+    let source_layer =
+        usize::try_from(source_cells.count_ones() / 4).map_err(|_| "source layer overflow")?;
+    let layer_count = output
+        .metrics
+        .source_area_layers
+        .get_mut(source_layer)
+        .ok_or("source layer outside four-row domain")?;
+    *layer_count = layer_count.checked_add(1).ok_or("metric overflow")?;
+    let record_start = graph_offset(offsets, source_id)?;
+    let record_end = graph_offset(offsets, source_id + 1)?;
+    let local_start =
+        usize::try_from(record_start - graph_start).map_err(|_| "graph shard offset overflow")?;
+    let local_end =
+        usize::try_from(record_end - graph_start).map_err(|_| "graph shard offset overflow")?;
+    let record = graph_bytes
+        .get(local_start..local_end)
+        .ok_or("graph record outside shard bytes")?;
+    let decoded = decode_hydra_graph_record_v1(
+        record,
+        source_hash,
+        dataset.target_encoding,
+        dataset.field_count,
+    )
+    .map_err(|error| error.reason().to_owned())?;
+
+    for (graph_piece, piece) in PIECES {
+        let targets = enumerate_pc4_ilc_target_fields(source_cells, piece, dataset.kick_profile)
+            .map_err(|error| error.reason().to_owned())?;
+        output.metrics.forward_target_fields = output
+            .metrics
+            .forward_target_fields
+            .checked_add(targets.len() as u64)
+            .ok_or("metric overflow")?;
+        let mut expected = BTreeSet::new();
+        for cells in targets {
+            let hash = clearra_board64_mask_to_hydra_field_hash_v1(cells)
+                .map_err(|error| error.reason().to_owned())?;
+            if let Some(target_id) = lookup_field_id(field_index, dataset.field_count, hash)? {
+                expected.insert(target_id);
+            } else {
+                output.metrics.outside_index_reachable_targets = output
+                    .metrics
+                    .outside_index_reachable_targets
+                    .checked_add(1)
+                    .ok_or("metric overflow")?;
+                if capture_outside_boundary {
+                    output.outside_boundary.insert(hash);
+                }
+            }
+        }
+        output.metrics.expected_indexed_edges = output
+            .metrics
+            .expected_indexed_edges
+            .checked_add(expected.len() as u64)
+            .ok_or("metric overflow")?;
+
+        let encoded = decoded.targets(graph_piece);
+        output.metrics.graph_edges = output
+            .metrics
+            .graph_edges
+            .checked_add(encoded.len() as u64)
+            .ok_or("metric overflow")?;
+        let actual = encoded.iter().copied().collect::<BTreeSet<_>>();
+        output.metrics.duplicate_graph_edges = output
+            .metrics
+            .duplicate_graph_edges
+            .checked_add((encoded.len() - actual.len()) as u64)
+            .ok_or("metric overflow")?;
+        let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
+        let extra = actual.difference(&expected).copied().collect::<Vec<_>>();
+        if !missing.is_empty() || !extra.is_empty() || encoded.len() != actual.len() {
+            output.metrics.mismatched_piece_records = output
+                .metrics
+                .mismatched_piece_records
+                .checked_add(1)
+                .ok_or("metric overflow")?;
+            output.metrics.missing_indexed_edges = output
+                .metrics
+                .missing_indexed_edges
+                .checked_add(missing.len() as u64)
+                .ok_or("metric overflow")?;
+            output.metrics.extra_graph_edges = output
+                .metrics
+                .extra_graph_edges
+                .checked_add(extra.len() as u64)
+                .ok_or("metric overflow")?;
+            if output.mismatch_samples.len() < MAX_MISMATCH_SAMPLES {
+                output.mismatch_samples.push(json!({
+                    "source_id": source_id,
+                    "source_hash": source_hash,
+                    "piece": graph_piece_name(graph_piece),
+                    "missing_target_ids": missing,
+                    "extra_target_ids": extra,
+                    "encoded_degree": encoded.len(),
+                    "unique_degree": actual.len(),
+                }));
+            }
+        }
+    }
+    output.metrics.source_records = output
+        .metrics
+        .source_records
+        .checked_add(1)
+        .ok_or("metric overflow")?;
+    Ok(())
+}
+
 #[derive(Default)]
 struct ShardMetrics {
     source_records: u64,
@@ -748,6 +1214,34 @@ impl ShardMetrics {
             *total = total
                 .checked_add(layer.as_u64().ok_or("invalid source area layer")?)
                 .ok_or("merged metric overflow")?;
+        }
+        add!(forward_target_fields);
+        add!(expected_indexed_edges);
+        add!(outside_index_reachable_targets);
+        add!(graph_edges);
+        add!(duplicate_graph_edges);
+        add!(mismatched_piece_records);
+        add!(missing_indexed_edges);
+        add!(extra_graph_edges);
+        Ok(())
+    }
+
+    fn add_metrics(&mut self, other: &Self) -> Result<(), String> {
+        macro_rules! add {
+            ($field:ident) => {
+                self.$field = self
+                    .$field
+                    .checked_add(other.$field)
+                    .ok_or("merged metric overflow")?;
+            };
+        }
+        add!(source_records);
+        for (total, layer) in self
+            .source_area_layers
+            .iter_mut()
+            .zip(other.source_area_layers)
+        {
+            *total = total.checked_add(layer).ok_or("merged metric overflow")?;
         }
         add!(forward_target_fields);
         add!(expected_indexed_edges);
@@ -995,7 +1489,7 @@ fn validate_existing_shard(
     end: u32,
 ) -> Result<(), String> {
     validate_receipt_identity(receipt)?;
-    validate_receipt_dataset_binding(receipt, dataset)?;
+    validate_receipt_dataset_binding(receipt, dataset, SHARD_SCHEMA)?;
     if receipt["schema"] != SHARD_SCHEMA
         || receipt["qualification_status"] != "indexed-domain-parity-only"
         || receipt["source_range"]["start"].as_u64() != Some(u64::from(start))
@@ -1013,8 +1507,49 @@ fn validate_existing_shard(
     Ok(())
 }
 
-fn validate_receipt_dataset_binding(receipt: &Value, dataset: &Dataset) -> Result<(), String> {
-    if receipt["schema"] != SHARD_SCHEMA
+fn validate_existing_proof_shard(
+    receipt: &Value,
+    dataset: &Dataset,
+    start: u32,
+    end: u32,
+    boundary_path: &Path,
+) -> Result<(), String> {
+    validate_receipt_identity(receipt)?;
+    validate_receipt_dataset_binding(receipt, dataset, PROOF_SHARD_SCHEMA)?;
+    if receipt["qualification_status"] != "indexed-domain-parity-with-boundary"
+        || receipt["source_range"]["start"].as_u64() != Some(u64::from(start))
+        || receipt["source_range"]["end"].as_u64() != Some(u64::from(end))
+    {
+        return Err("existing proof shard receipt does not match requested work".to_owned());
+    }
+    let boundary = boundary::read(
+        boundary_path,
+        dataset.domain_binding()?.raw_identity(),
+        Some((start, end)),
+    )?;
+    if receipt["outside_boundary"]["file_name"].as_str()
+        != boundary_path.file_name().and_then(|value| value.to_str())
+        || receipt["outside_boundary"]["field_count"].as_u64() != Some(boundary.fields.len() as u64)
+        || receipt["outside_boundary"]["content_identity"].as_str() != Some(&boundary.file_identity)
+    {
+        return Err("existing proof shard outside-boundary binding mismatch".to_owned());
+    }
+    let mut metrics = ShardMetrics::default();
+    metrics.add_json(&receipt["metrics"])?;
+    if metrics.source_records != u64::from(end - start)
+        || metrics.source_area_layers.iter().sum::<u64>() != u64::from(end - start)
+    {
+        return Err("existing proof shard source metrics mismatch".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_receipt_dataset_binding(
+    receipt: &Value,
+    dataset: &Dataset,
+    expected_schema: &str,
+) -> Result<(), String> {
+    if receipt["schema"] != expected_schema
         || receipt["repository"].as_str() != Some(&dataset.repository)
         || receipt["revision"].as_str() != Some(&dataset.revision)
         || receipt["profile"].as_str() != Some(&dataset.profile)
@@ -1022,6 +1557,23 @@ fn validate_receipt_dataset_binding(receipt: &Value, dataset: &Dataset) -> Resul
         || receipt["artifacts"] != dataset.public_artifacts()
     {
         return Err("shard receipt dataset binding mismatch".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_indexed_path_receipt(receipt: &Value, dataset: &Dataset) -> Result<(), String> {
+    validate_receipt_identity(receipt)?;
+    if receipt["schema"] != "clearra.pc4.indexed-path-domain-proof.v1"
+        || receipt["qualification_status"] != "indexed-path-domain-only"
+        || receipt["repository"].as_str() != Some(&dataset.repository)
+        || receipt["revision"].as_str() != Some(&dataset.revision)
+        || receipt["profile"].as_str() != Some(&dataset.profile)
+        || receipt["field_count"].as_u64() != Some(u64::from(dataset.field_count))
+        || receipt["artifacts"] != dataset.public_artifacts()
+        || receipt["unreachable_indexed_fields"].as_u64() != Some(0)
+        || receipt["terminal_dead_indexed_fields"].as_u64() != Some(0)
+    {
+        return Err("indexed-path receipt does not prove this dataset generation".to_owned());
     }
     Ok(())
 }

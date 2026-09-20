@@ -166,3 +166,27 @@ the terminal. The layer counts were
 `sha256:4517ead40658d5f2a884fd00719468fa5610fd6bdbebe975c9f9682c548d4647`.
 This closes indexed root/terminal path membership for this generation only;
 the all-shard exact adjacency and outside-boundary dead closure remain open.
+
+The resumable outgoing shard was subsequently extended with a v2 boundary
+artifact. On source IDs `[0,101)`, the exact scan reproduced 10,238 indexed
+edges, observed 4,289 outside-index transition occurrences, and reduced them to
+4,257 unique generation-bound boundary fields. Its receipt identity is
+`sha256:05b2615c4edde0b801db5b93e33c9fc48b24ba95931f286fbf764f7d2fa760cc`.
+The v2 merger requires an exact source and graph-byte cover and binds the
+complete indexed-path receipt before producing one sorted unique boundary.
+This small shard validates the boundary contract only; the remaining source
+ranges have not yet been scanned and no dead-proof identity has been minted.
+
+The first two maximum-size continuation shards made the scale explicit. Source
+IDs `[2,101,264,245)` produced 5,184,472 indexed edges, 12,404,817 outside
+occurrences and 11,044,906 unique boundary fields in 10,817 ms of exact scan.
+`[264,245,526,389)` produced 3,027,996 indexed edges, 9,717,490 outside
+occurrences and 8,574,189 unique boundary fields in 10,005 ms. Their receipt
+identities are respectively
+`sha256:c312e95b3edffd497cfb563530840858fdde5be93a6eb42c77228d1fdc52f0d4`
+and
+`sha256:2020e0691680ae09458a05dd1ad7d85de0b5dc58274f7f9fc6d3952fa33176c2`.
+The data disproves any assumption that all partial boundaries can safely remain
+resident during merge. The merger now re-hashes and k-way merges the sorted
+files as streams, with memory proportional to shard count rather than boundary
+cardinality. Full source coverage and terminal-dead classification remain open.
