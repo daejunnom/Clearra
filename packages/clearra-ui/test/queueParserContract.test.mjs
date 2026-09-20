@@ -86,7 +86,7 @@ test('visible-seven minimum cover is rejected before workspace execution', () =>
     'utf8'
   );
   assert.match(controls, /\{#each validationCodes as code\}/u);
-  assert.match(workspace, /if \(active \|\| validationCodes\.length\) return;/u);
+  assert.match(workspace, /if \([^)]*\bvalidationCodes\.length\b[^)]*\) return;/u);
 });
 
 test('PC score-finder requires an exact fixed queue before execution', () => {

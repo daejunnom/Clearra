@@ -91,7 +91,7 @@ try {
         $entry = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'clearra.ps1') -Raw
         $normalize = $entry.IndexOf('$resolvedRequestedRuntime = Resolve-ClearraRuntimeEnvironment $RuntimeEnvironment')
         $admit = $entry.IndexOf('Assert-ClearraRequestedTaskSurfaces')
-        $workspace = $entry.IndexOf('$Root = Resolve-ClearraRoot')
+        $workspace = $entry.IndexOf('$Root = Resolve-ClearraBuildSourceRoot')
         Assert-PolicyValue ($normalize -ge 0 -and $normalize -lt $admit -and $admit -lt $workspace) 'Runtime normalization/admission no longer precedes workspace work'
         Assert-PolicyValue ($entry.Substring($admit, $workspace - $admit).Contains('$resolvedRequestedRuntime')) 'Normalized runtime is not passed to admission'
     }
