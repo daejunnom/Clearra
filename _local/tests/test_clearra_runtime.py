@@ -378,9 +378,11 @@ class RuntimeContractTests(unittest.TestCase):
             profile="control",
             echo=False,
         )
+        self.assertEqual(result.returncode, 0)
         self.assertEqual(result.reason, "normal")
         self.assertIsNone(result.error_code)
         self.assertIn("posix-bounded-runtime-ok", result.stdout)
+        self.assertNotIn("Fatal Python error", result.stderr)
         self.assertTrue(result.process_tree_stopped)
         self.assertEqual(
             result.containment["lease_wrapper"],

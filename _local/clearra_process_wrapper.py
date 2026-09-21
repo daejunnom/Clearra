@@ -48,11 +48,14 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def _read_exact(stream: object, size: int) -> bytes:
+def _read_exact_fd(file_descriptor: int, size: int) -> bytes:
     chunks: list[bytes] = []
     remaining = size
     while remaining:
-        chunk = stream.read(remaining)  # type: ignore[attr-defined]
+        try:
+            chunk = os.read(file_descriptor, remaining)
+        except InterruptedError:
+            continue
         if not chunk:
             raise EOFError("runtime lease ended before stdin payload was complete")
         chunks.append(chunk)
@@ -197,8 +200,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     if os.getppid() != parent_pid or not _pid_alive(parent_pid):
         lease_lost.set()
 
+    stdin_file_descriptor = sys.stdin.fileno()
     try:
-        input_payload = _read_exact(sys.stdin.buffer, int(options.input_size))
+        input_payload = _read_exact_fd(stdin_file_descriptor, int(options.input_size))
     except EOFError:
         return 125
     if lease_lost.is_set() or os.getppid() != parent_pid or not _pid_alive(parent_pid):
@@ -220,18 +224,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
         except BrokenPipeError:
             pass
 
-    def watch_lease() -> None:
+    os.set_blocking(stdin_file_descriptor, False)
+    while command.poll() is None and not lease_lost.is_set():
         try:
-            while sys.stdin.buffer.read(4096):
-                pass
-        finally:
+            if os.read(stdin_file_descriptor, 4096) == b"":
+                lease_lost.set()
+                break
+        except BlockingIOError:
+            pass
+        except InterruptedError:
+            continue
+        except OSError:
             lease_lost.set()
-
-    lease_thread = threading.Thread(target=watch_lease, name="clearra-runtime-lease", daemon=True)
-    lease_thread.start()
-
-    while command.poll() is None and not lease_lost.wait(0.1):
-        pass
+            break
+        lease_lost.wait(0.1)
 
     if lease_lost.is_set() and command.poll() is None:
         parent_gone = os.getppid() != parent_pid or not _pid_alive(parent_pid)
