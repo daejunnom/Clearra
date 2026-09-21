@@ -104,10 +104,53 @@ function Assert-ClearraRepositoryArtifactPolicy(
 ) {
     $repository = [System.IO.Path]::GetFullPath($RepositoryRoot)
     Assert-ClearraLocalToolDirectoryPolicy $repository
-    foreach ($name in @("target", "build")) {
-        $forbidden = Join-Path $repository $name
-        if (Test-Path -LiteralPath $forbidden) {
-            throw "Repository-local artifact directory is forbidden: $forbidden"
+    $forbiddenTarget = Join-Path $repository "target"
+    if (Test-Path -LiteralPath $forbiddenTarget) {
+        throw "Repository-local artifact directory is forbidden: $forbiddenTarget"
+    }
+
+    # Repository build staging is a declared management root and is excluded
+    # from compiler source snapshots. Its presence is valid only while the
+    # manifest, ignore boundary, and Git ownership all retain that contract.
+    $repositoryBuild = Join-Path $repository "build"
+    if (Test-Path -LiteralPath $repositoryBuild) {
+        $repositoryBuildEntry = Get-Item -LiteralPath $repositoryBuild -Force
+        if (-not $repositoryBuildEntry.PSIsContainer -or
+            ($repositoryBuildEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Repository-local build root must be a real directory: $repositoryBuild"
+        }
+        $policyPath = Join-Path $repository "config/clearra-management.v1.json"
+        if (-not (Test-Path -LiteralPath $policyPath -PathType Leaf)) {
+            throw "Repository-local build directory is not declared by the management policy: $repositoryBuild"
+        }
+        try {
+            $policy = Get-Content -LiteralPath $policyPath -Raw | ConvertFrom-Json
+        } catch {
+            throw "Repository-local build policy cannot be parsed: $policyPath"
+        }
+        $repositoryRoots = $policy.PSObject.Properties['repository_roots']
+        $buildDeclarations = if ($null -eq $repositoryRoots) {
+            @()
+        } else {
+            @($repositoryRoots.Value | Where-Object {
+                $_.id -ceq 'build-publication' -and $_.path -ceq 'build'
+            })
+        }
+        if ($buildDeclarations.Count -ne 1) {
+            throw "Repository-local build directory is not declared exactly once: $repositoryBuild"
+        }
+
+        $gitIgnorePath = Join-Path $repository '.gitignore'
+        if (-not (Test-Path -LiteralPath $gitIgnorePath -PathType Leaf) -or
+            (Get-Content -LiteralPath $gitIgnorePath -Raw) -notmatch '(?m)^/build/\s*$') {
+            throw "Repository-local build directory must remain root-ignored: $repositoryBuild"
+        }
+        $trackedBuildEntries = @(& git -C $repository ls-files -- build 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not verify repository-local build ownership: $repositoryBuild"
+        }
+        if ($trackedBuildEntries.Count -ne 0) {
+            throw "Repository-local build output must not be tracked: $($trackedBuildEntries[0])"
         }
     }
     $cargoRoot = Join-Path $repository ".cargo"

@@ -2805,13 +2805,13 @@
       "path": "scripts/test_artifact_path_policy.ps1",
       "producer": "management",
       "purpose": "registered-process-execution",
-      "profile": "build-test",
+      "profile": "control",
       "runtime": "host",
       "tree_ownership": "supervisor-inherited",
-      "timeout": 5400,
-      "termination_grace": 10,
+      "timeout": 300,
+      "termination_grace": 5,
       "memory_enforcement": "profile-hard-limit",
-      "output_limit": 67108864,
+      "output_limit": 16777216,
       "oom_policy": "fail-no-retry"
     },
     {
@@ -3375,6 +3375,19 @@
       "termination_grace": 10,
       "memory_enforcement": "profile-hard-limit",
       "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/clearra-path-helpers.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "control",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 300,
+      "termination_grace": 5,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 16777216,
       "oom_policy": "fail-no-retry"
     },
     {

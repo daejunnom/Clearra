@@ -85,6 +85,31 @@ try {
     Remove-Item -LiteralPath (Join-Path $localFixture '_local/measurement.json')
     Assert-ClearraRepositoryArtifactPolicy $localFixture
     Assert-ArtifactPathCondition $true 'intentional_tracked_diagnostic_deletion_is_valid'
+
+    $managedBuildMarker = Join-Path $localFixture 'build/management/default/marker.txt'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $managedBuildMarker) -Force | Out-Null
+    [IO.File]::WriteAllText($managedBuildMarker, 'managed')
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows {
+        Assert-ClearraRepositoryArtifactPolicy $localFixture
+    }) 'undeclared_repository_build_rejected'
+    New-Item -ItemType Directory -Path (Join-Path $localFixture 'config') -Force | Out-Null
+    [IO.File]::WriteAllText(
+        (Join-Path $localFixture 'config/clearra-management.v1.json'),
+        '{"repository_roots":[{"id":"build-publication","path":"build"}]}'
+    )
+    [IO.File]::AppendAllText((Join-Path $localFixture '.gitignore'), "/build/" + [Environment]::NewLine)
+    Assert-ClearraRepositoryArtifactPolicy $localFixture
+    Assert-ArtifactPathCondition $true 'declared_ignored_repository_build_allowed'
+    & git -C $localFixture add --force -- build/management/default/marker.txt
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stage isolated managed-build fixture.' }
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows {
+        Assert-ClearraRepositoryArtifactPolicy $localFixture
+    }) 'tracked_repository_build_rejected'
+    & git -C $localFixture rm --cached --quiet -- build/management/default/marker.txt
+    if ($LASTEXITCODE -ne 0) { throw 'Could not unstage isolated managed-build fixture.' }
+    Assert-ClearraRepositoryArtifactPolicy $localFixture
+    Assert-ArtifactPathCondition $true 'untracked_managed_build_remains_valid'
+
     foreach ($reference in @('import "../../_local/probe.mjs"', 'path = "../_local/probe"')) {
         $inputFile = [pscustomobject]@{ RelativePath='product/input'; Text=$reference }
         Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-ClearraProductExcludesLocalDiagnostics @($inputFile) }) 'product_cannot_import_diagnostics'
