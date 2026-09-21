@@ -475,6 +475,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clearra-pc4-product-host"
+version = "0.8.1"
+dependencies = [
+ "clearra-app",
+ "clearra-pc4-activation",
+ "clearra-pc4-tablebase",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "clearra-pc4-qualifier"
 version = "0.8.1"
 dependencies = [
