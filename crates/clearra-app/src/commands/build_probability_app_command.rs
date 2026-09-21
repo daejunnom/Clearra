@@ -109,6 +109,21 @@ impl BuildProbabilityAppCommand {
         )
     }
 
+    /// Retains the exact execution graph needed by the closed replay product
+    /// without turning that product into a score request. The evidence policy
+    /// is private to the compiled problem and is consumed before the public
+    /// Build response is projected.
+    pub(crate) fn with_private_product_evidence(
+        &self,
+        problem: clearra_problem::SearchProblem,
+    ) -> clearra_problem::SearchProblem {
+        if self.result_mode == BuildProbabilityResultMode::CompleteReplayPaths {
+            problem.with_pc_path_v2_evidence()
+        } else {
+            problem
+        }
+    }
+
     pub(crate) fn into_query(self) -> BuildProbabilityQuery {
         self.query
     }
@@ -266,7 +281,7 @@ impl RunnableAppCommand for BuildProbabilityAppCommand {
             );
         }
         let problem = match ProblemCompiler::compile_scenario_pc(self.query.core_query()) {
-            Ok(problem) => problem,
+            Ok(problem) => self.with_private_product_evidence(problem),
             Err(error) => {
                 return AppResponse::failed(
                     AppStatus::ExecutionFailed,

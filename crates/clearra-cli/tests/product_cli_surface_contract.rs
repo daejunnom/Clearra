@@ -84,6 +84,57 @@ fn json_from_stdout(stdout: &str) -> Value {
     serde_json::from_str(stdout).expect("valid json stdout")
 }
 
+#[cfg(feature = "wasm-cpu-runtime")]
+fn build_probability_result_json(result_mode: &str, extra_args: &[&str]) -> Value {
+    let mut args = [
+        "--format",
+        "json",
+        "build-probability",
+        "--base-mask",
+        "0",
+        "--target-mask",
+        "15",
+        "--height",
+        "4",
+        "--queue",
+        "I",
+        "--no-hold",
+        "--no-mirror",
+        "--aggregate",
+        "buildability",
+        "--result-mode",
+        result_mode,
+        "--rule",
+        "srs-plus",
+        "--backend",
+        "cpu",
+        "--workers",
+        "1",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    args.extend(extra_args.iter().copied().map(str::to_owned));
+    json_from_stdout(&json_stdout_from_owned_args(args))
+}
+
+#[cfg(feature = "wasm-cpu-runtime")]
+fn assert_json_command_kind(json: &Value, expected: &str) {
+    assert_eq!(json["kind"], expected);
+    assert_eq!(json["contract"]["command"]["kind"], expected);
+}
+
+#[cfg(feature = "wasm-cpu-runtime")]
+fn assert_score_selection_coordinate_excludes_attack(summary: &Value, field: &str) {
+    let coordinate = summary[field]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing score selection coordinate {field}: {summary}"));
+    assert!(
+        !coordinate.contains("attack"),
+        "attack must not participate in {field}: {coordinate}"
+    );
+}
+
 fn string_field<'a>(json: &'a Value, field_name: &str) -> &'a str {
     find_field(json, field_name)
         .and_then(Value::as_str)
@@ -257,4 +308,177 @@ fn cover_reports_build_union_probability() {
         string_field(&json, "coverage_reducer"),
         "pattern-bitset-union"
     );
+}
+
+#[cfg(feature = "wasm-cpu-runtime")]
+#[test]
+fn native_cli_build_probability_result_modes_publish_their_closed_contracts() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+
+    let all = build_probability_result_json("all-solutions", &[]);
+    assert_json_command_kind(&all, "build-probability");
+    assert_eq!(all["summary"]["search_kind"], "build-probability");
+    assert_eq!(
+        all["summary"]["actual_backend"],
+        "wasm-cpu-build-probability"
+    );
+
+    let paths = build_probability_result_json("complete-replay-paths", &[]);
+    assert_json_command_kind(&paths, "build-path-family.v1");
+    assert_eq!(
+        paths["summary"]["capability_id"],
+        "build.complete-replay-paths"
+    );
+    assert_eq!(
+        paths["summary"]["witness_contract"],
+        "build-path-witness.v1"
+    );
+    assert_eq!(
+        paths["summary"]["canonical_selection"],
+        "smallest-canonical-candidate-id"
+    );
+    assert_eq!(paths["summary"]["complete"], true);
+
+    let field_average = build_probability_result_json(
+        "field-average-score",
+        &["--score-profile", "tetrio", "--initial-b2b", "0"],
+    );
+    assert_json_command_kind(&field_average, "build-field-average-score.v1");
+    assert_eq!(
+        field_average["summary"]["capability_id"],
+        "build.field-average-score"
+    );
+    assert_eq!(
+        field_average["summary"]["result_contract"],
+        "build-field-average-score.v1"
+    );
+    assert_eq!(
+        field_average["summary"]["payload_kind"],
+        "pc-score-field-summary"
+    );
+    assert_eq!(
+        field_average["summary"]["score_solution_field_contract"],
+        "build-solution-field-average.v1"
+    );
+    assert_eq!(field_average["summary"]["score_summary_complete"], true);
+
+    let fixed_score = build_probability_result_json(
+        "fixed-queue-maximum-score",
+        &["--score-profile", "tetrio", "--initial-b2b", "0"],
+    );
+    assert_json_command_kind(&fixed_score, "build-fixed-score-witness.v1");
+    assert_eq!(
+        fixed_score["summary"]["capability_id"],
+        "build.fixed-queue-maximum-score"
+    );
+    assert_eq!(
+        fixed_score["summary"]["result_contract"],
+        "build-fixed-score-witness.v1"
+    );
+    assert_eq!(
+        fixed_score["summary"]["score_pattern_winner_contract"],
+        "build-score-pattern-winner.v1"
+    );
+    assert_eq!(
+        fixed_score["summary"]["score_pattern_winner_equality"],
+        "score-only-attack-informational"
+    );
+    assert_eq!(
+        fixed_score["summary"]["score_pattern_winner_complete"],
+        true
+    );
+    assert_score_selection_coordinate_excludes_attack(
+        &fixed_score["summary"],
+        "score_pattern_winner_ordering",
+    );
+    assert_score_selection_coordinate_excludes_attack(
+        &fixed_score["summary"],
+        "score_pattern_canonical_selection",
+    );
+
+    let score_minimum = build_probability_result_json(
+        "highest-score-minimum-set",
+        &["--score-profile", "tetrio", "--initial-b2b", "0"],
+    );
+    assert_json_command_kind(&score_minimum, "build-probability-score-minimum.v1");
+    assert_eq!(
+        score_minimum["summary"]["capability_id"],
+        "build.highest-score-minimum-set"
+    );
+    assert_eq!(
+        score_minimum["summary"]["result_contract"],
+        "build-probability-score-minimum.v1"
+    );
+    assert_eq!(score_minimum["summary"]["payload_kind"], "score-portfolio");
+    assert_eq!(score_minimum["summary"]["objective"], "max-score-cover");
+    assert_eq!(
+        score_minimum["summary"]["score_equality_basis"],
+        "score-only"
+    );
+    assert_eq!(
+        score_minimum["summary"]["completeness"]["exact_minimum_proven"],
+        true
+    );
+    assert_score_selection_coordinate_excludes_attack(
+        &score_minimum["summary"],
+        "score_equality_basis",
+    );
+    assert_score_selection_coordinate_excludes_attack(&score_minimum["summary"], "objective");
+
+    let failed = build_probability_result_json("failed-queues", &["--failed-count", "1"]);
+    assert_json_command_kind(&failed, "build-probability");
+    assert_eq!(failed["summary"]["result_mode"], "build-failed-queues");
+    assert_eq!(
+        failed["summary"]["build_failed_queue_contract"],
+        "exact-build-coverage-complement.v1"
+    );
+    assert_eq!(failed["summary"]["failed_pattern_count_complete"], true);
+    assert_eq!(
+        failed["summary"]["failed_pattern_scope"],
+        "materialized-build-universe"
+    );
+}
+
+#[cfg(feature = "wasm-cpu-runtime")]
+#[test]
+fn native_cli_build_min_cover_publishes_the_exact_portfolio_contract() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let json = json_from_stdout(&json_stdout_from_owned_args(
+        [
+            "--format",
+            "json",
+            "build",
+            "cover",
+            "--base-mask",
+            "0",
+            "--target-mask",
+            "15",
+            "--height",
+            "4",
+            "--queue",
+            "I",
+            "--no-hold",
+            "--objective",
+            "min-cover",
+            "--workers",
+            "1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    ));
+
+    assert_json_command_kind(&json, "build-coverage-portfolio.v2");
+    assert_eq!(json["summary"]["capability_id"], "build.cover");
+    assert_eq!(
+        json["summary"]["result_contract"],
+        "build-coverage-portfolio.v2"
+    );
+    assert_eq!(json["summary"]["payload_kind"], "portfolio");
+    assert_eq!(json["summary"]["objective"], "min-cover");
+    assert_eq!(
+        json["summary"]["completeness"]["exact_minimum_proven"],
+        true
+    );
+    assert_eq!(json["summary"]["page_source_available"], true);
 }
