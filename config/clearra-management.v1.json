@@ -240,6 +240,18 @@
       "lifecycle": "clearra-owned-receipted-clean-only"
     },
     {
+      "id": "pc4-qualification",
+      "environment": "CLEARRA_PC4_QUALIFICATION_ROOT",
+      "fallback": "${HOME}/.local/share/Clearra/qualification",
+      "lifecycle": "clearra-owned-receipted-clean-only"
+    },
+    {
+      "id": "pc4-activation",
+      "environment": "CLEARRA_PC4_ACTIVATION_ROOT",
+      "fallback": "${HOME}/.local/share/Clearra/pc4-activation",
+      "lifecycle": "clearra-owned-receipted-clean-only"
+    },
+    {
       "id": "npm-cache",
       "resolver": "npm config get cache",
       "shared": true,
@@ -311,6 +323,14 @@
       "classes": [
         "receipt",
         "publication"
+      ]
+    },
+    {
+      "id": "pc4-activation",
+      "classes": [
+        "receipt",
+        "publication",
+        "test"
       ]
     },
     {
@@ -1322,6 +1342,36 @@
       "path": "tools/clearra-pc-artifact/src/bin/clearra-solution-key-fumen.rs",
       "producer": "cargo",
       "output_class": "build-cache"
+    },
+    {
+      "path": "tools/clearra-pc4-qualifier/src/boundary.rs",
+      "producer": "benchmark",
+      "output_class": "research"
+    },
+    {
+      "path": "tools/clearra-pc4-qualifier/src/boundary_dead_store.rs",
+      "producer": "benchmark",
+      "output_class": "research"
+    },
+    {
+      "path": "tools/clearra-pc4-qualifier/src/domain.rs",
+      "producer": "benchmark",
+      "output_class": "research"
+    },
+    {
+      "path": "tools/clearra-pc4-qualifier/src/main.rs",
+      "producer": "benchmark",
+      "output_class": "research"
+    },
+    {
+      "path": "tools/clearra-pc4-qualifier/src/offline_materialization.rs",
+      "producer": "benchmark",
+      "output_class": "research"
+    },
+    {
+      "path": "tools/clearra-pc4-qualifier/src/tablebase_family.rs",
+      "producer": "benchmark",
+      "output_class": "research"
     }
   ],
   "process_registry": [
