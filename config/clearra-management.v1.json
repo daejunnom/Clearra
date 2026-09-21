@@ -3844,9 +3844,9 @@
       "hard_containment_required": false,
       "oom_policy": "fail-no-retry",
       "explicit_timeout_required": true,
-      "admission_basis": "physical",
-      "start_admission": "strict-working-set",
-      "memory_pressure_action": "fail-close",
+      "admission_basis": "runtime-pressure",
+      "start_admission": "critical-reserve",
+      "memory_pressure_action": "gc-then-fail-close",
       "concurrency_class": "memory-intensive"
     },
     "local-service": {

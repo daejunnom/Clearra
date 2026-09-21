@@ -77,8 +77,10 @@ availability at the low frequency in the manifest, requests cooperative full
 GC where a runtime acknowledges that protocol, remeasures, and fail-closes only
 the Clearra-owned tree if the small recovery reserve is still unavailable.
 Never claim that a child performed full GC without its matching acknowledgement.
-Benchmark search keeps strict working-set admission and skips GC recovery so a
-memory-pressure intervention cannot be mistaken for a valid timing sample.
+Benchmark search uses the same critical-start-margin and bounded GC recovery
+policy. It still requires an explicit timeout, preserves the requested worker
+count, and records pressure recovery in the receipt so a benchmark result can
+identify an intervened run.
 
 Never read, archive, print, or otherwise inspect `.env` files, keys, service
 account files, API keys, or credential files. Report only that a prohibited

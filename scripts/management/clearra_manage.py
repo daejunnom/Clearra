@@ -1395,9 +1395,9 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
             "memory-intensive",
         ),
         "benchmark-search": (
-            "physical",
-            "strict-working-set",
-            "fail-close",
+            "runtime-pressure",
+            "critical-reserve",
+            "gc-then-fail-close",
             "memory-intensive",
         ),
         "local-service": (

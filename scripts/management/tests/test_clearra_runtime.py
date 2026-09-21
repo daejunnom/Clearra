@@ -133,17 +133,19 @@ class RuntimeContractTests(unittest.TestCase):
             "benchmark-search",
             snapshot=RUNTIME.MemorySnapshot(
                 16 * RUNTIME.GIB,
-                8 * RUNTIME.GIB,
+                768 * RUNTIME.MIB,
                 32 * RUNTIME.GIB,
-                20 * RUNTIME.GIB,
+                2 * RUNTIME.GIB,
             ),
             platform_name="posix",
         )
+        self.assertEqual(benchmark.reserve_bytes, 128 * RUNTIME.MIB)
+        self.assertEqual(benchmark.minimum_bytes, 4 * RUNTIME.GIB)
         self.assertEqual(
-            benchmark.reserve_bytes, int(16 * RUNTIME.GIB * 0.20)
+            benchmark.hard_limit_bytes, 16 * RUNTIME.GIB - 512 * RUNTIME.MIB
         )
-        self.assertEqual(benchmark.capacity_basis, "physical-strict")
-        self.assertEqual(benchmark.start_admission_mode, "strict-working-set")
+        self.assertEqual(benchmark.capacity_basis, "runtime-pressure")
+        self.assertEqual(benchmark.start_admission_mode, "critical-reserve")
 
         cloud = RUNTIME.calculate_admission(
             self.policy,
@@ -343,15 +345,26 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(result.containment["cleanup_owner"], "outer-supervisor")
         self.assertTrue(result.containment["cleanup_deferred_to_outer"])
 
-    def test_admission_never_reduces_declared_minimum(self) -> None:
+    def test_relaxed_admission_preserves_minimum_without_preallocation(self) -> None:
+        admission = RUNTIME.calculate_admission(
+            self.policy,
+            "benchmark-search",
+            snapshot=RUNTIME.MemorySnapshot(16 * RUNTIME.GIB, 768 * RUNTIME.MIB),
+            minimum_override_mib=6144,
+            platform_name="posix",
+        )
+        self.assertEqual(admission.minimum_bytes, 6 * RUNTIME.GIB)
+        self.assertGreaterEqual(admission.hard_limit_bytes, admission.minimum_bytes)
+
         with self.assertRaisesRegex(
             RUNTIME.RuntimePolicyError, RUNTIME.ADMISSION_ERROR
         ):
             RUNTIME.calculate_admission(
                 self.policy,
                 "benchmark-search",
-                snapshot=RUNTIME.MemorySnapshot(16 * RUNTIME.GIB, 8 * RUNTIME.GIB),
+                snapshot=RUNTIME.MemorySnapshot(16 * RUNTIME.GIB, 64 * RUNTIME.MIB),
                 minimum_override_mib=6144,
+                platform_name="posix",
             )
 
     def test_argv_redaction_preserves_shape_without_secret_values(self) -> None:
@@ -723,10 +736,12 @@ class RuntimeContractTests(unittest.TestCase):
         )
         self.assertTrue(result.memory_pressure["channel_removed"])
 
-    def test_benchmark_pressure_action_fail_closes_without_gc(self) -> None:
+    def test_benchmark_pressure_action_uses_gc_before_fail_close(self) -> None:
         policy = self._integration_policy()
         policy["resource_profiles"]["control"]["memory_pressure_action"] = (
-            "fail-close"
+            policy["resource_profiles"]["benchmark-search"][
+                "memory_pressure_action"
+            ]
         )
         policy["runtime_policy"]["memory_pressure"]["sample_interval_seconds"] = 0.02
         healthy = RUNTIME.MemorySnapshot(
@@ -746,7 +761,13 @@ class RuntimeContractTests(unittest.TestCase):
         def snapshot() -> RUNTIME.MemorySnapshot:
             return next(samples, pressured)
 
-        with mock.patch.object(RUNTIME, "memory_snapshot", side_effect=snapshot):
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "_local" / "tmp"
+        ) as directory, mock.patch.dict(
+            os.environ, {"CLEARRA_STATE_ROOT": directory}
+        ), mock.patch.object(
+            RUNTIME, "memory_snapshot", side_effect=snapshot
+        ):
             result = RUNTIME.run_host_process(
                 [sys.executable, "-B", "-c", "import time; time.sleep(60)"],
                 cwd=ROOT,
@@ -758,8 +779,9 @@ class RuntimeContractTests(unittest.TestCase):
 
         self.assertEqual(result.reason, "host-memory-pressure")
         self.assertEqual(result.memory_pressure["events"], 1)
-        self.assertEqual(result.memory_pressure["supervisor_full_gc_runs"], 0)
-        self.assertEqual(result.memory_pressure["cooperative_gc_requests"], 0)
+        self.assertEqual(result.memory_pressure["supervisor_full_gc_runs"], 1)
+        self.assertEqual(result.memory_pressure["cooperative_gc_requests"], 1)
+        self.assertTrue(result.memory_pressure["fail_closed"])
 
     def test_acknowledged_child_full_gc_still_fail_closes_if_pressure_remains(
         self,
