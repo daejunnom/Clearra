@@ -6,7 +6,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { acquireBuildOwner } from './clearra-build-owner.mjs';
-import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot } from './clearra-build-policy.mjs';
+import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot, nativeBuildPath } from './clearra-build-policy.mjs';
 
 function cleanBuildEnvironment() {
   const environment = { ...process.env };
@@ -36,6 +36,8 @@ async function fixture(t) {
 
 test('path identity is stable across Windows, WSL mounts, and WSL-native sources', () => {
   assert.equal(buildPathIdentity('C:\\Users\\Example\\AppData\\Local\\Clearra\\build'), buildPathIdentity('/mnt/c/Users/Example/AppData/Local/Clearra/build'));
+  assert.equal(nativeBuildPath('/mnt/c/Users/Example/AppData/Local/Clearra/build', 'win32'), 'C:\\Users\\Example\\AppData\\Local\\Clearra\\build');
+  assert.equal(nativeBuildPath('C:\\Users\\Example\\AppData\\Local\\Clearra\\build', 'linux'), '/mnt/c/Users/Example/AppData/Local/Clearra/build');
   assert.equal(buildPathIdentity('/home/clearra/workspaces/source'), '/home/clearra/workspaces/source');
   assert.throws(() => assertBuildPathWithin('/tmp/clearra-build-other', '/tmp/clearra-build'));
   assert.throws(() => assertBuildPathWithin('/tmp/clearra-build/../escape', '/tmp/clearra-build'));
@@ -132,6 +134,7 @@ test('source, lease and output mismatches cannot compile', async t => {
 test('product keeps five complete generations and zero failed generations', async t => {
   const options = await fixture(t);
   let productRoot;
+  let crossHostGeneration;
   for (let index = 0; index < 7; index += 1) {
     const owner = await acquireBuildOwner({ ...options, purpose: 'product' });
     assert.equal(owner.environment.CARGO_INCREMENTAL, '0');
@@ -139,8 +142,22 @@ test('product keeps five complete generations and zero failed generations', asyn
     productRoot = resolve(owner.transaction.transaction_root, '..');
     await writeFile(join(owner.transaction.cargo_target_dir, 'product'), String(index));
     await owner.finish(true);
+    if (index === 0 && process.platform === 'win32') {
+      crossHostGeneration = owner.transaction.transaction_root;
+      const markerPath = join(crossHostGeneration, '.clearra-build-transaction.json');
+      const marker = JSON.parse(await readFile(markerPath, 'utf8'));
+      const toWslMount = value => {
+        const normalized = resolve(value).replaceAll('\\', '/');
+        return `/mnt/${normalized[0].toLowerCase()}/${normalized.slice(3)}`;
+      };
+      marker.source_root = toWslMount(marker.source_root);
+      marker.transaction_root = toWslMount(marker.transaction_root);
+      marker.cargo_target_dir = toWslMount(marker.cargo_target_dir);
+      await writeFile(markerPath, `${JSON.stringify(marker)}\n`);
+    }
   }
   assert.equal((await readdir(productRoot)).length, 5);
+  if (crossHostGeneration) await assert.rejects(stat(crossHostGeneration), { code: 'ENOENT' });
   const failed = await acquireBuildOwner({ ...options, purpose: 'product' });
   await assert.rejects(acquireBuildOwner({ ...options, purpose: 'product' }), /independent product builds/u);
   await failed.finish(false);

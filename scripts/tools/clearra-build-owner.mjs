@@ -7,7 +7,7 @@ import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareRustcLauncher } from './prepare-clearra-rustc-launcher.mjs';
 import { BUILD_TRANSACTION_MARKER, BUILD_TRANSACTION_SCHEMA, FORBIDDEN_BUILD_ALIASES, assertBuildRecord, assertBuildPathWithin, assertNoBuildLinks, assertManagedBuildTransaction,
-  buildPathIdentity, buildSourceId, canonicalBuildRoot } from './clearra-build-policy.mjs';
+  buildPathIdentity, buildSourceId, canonicalBuildRoot, nativeBuildPath } from './clearra-build-policy.mjs';
 
 const authorityRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const buildInputRoots = ['apps', 'assets', 'core-c', 'crates', 'packages', 'scripts', 'tests', 'tools'];
@@ -123,28 +123,30 @@ async function releaseLease(path, identity) {
   await rm(path);
 }
 async function removeOwnedGeneration(marker, root) {
-  assertBuildRecord(marker, root, marker.transaction_root);
-  assertBuildPathWithin(marker.transaction_root, root);
-  assertNoBuildLinks(marker.transaction_root);
-  const current = await readJson(resolve(marker.transaction_root, BUILD_TRANSACTION_MARKER));
+  const transactionRoot = nativeBuildPath(marker.transaction_root);
+  assertBuildRecord(marker, root, transactionRoot);
+  assertBuildPathWithin(transactionRoot, root);
+  assertNoBuildLinks(transactionRoot);
+  const current = await readJson(resolve(transactionRoot, BUILD_TRANSACTION_MARKER));
   for (const key of ['schema_version', 'purpose', 'source_root', 'source_id', 'session_id', 'transaction_root', 'cargo_target_dir', 'owner_pid']) {
     if (current[key] !== marker[key]) throw new Error('Build generation ownership changed before retirement');
   }
   if (buildPathIdentity(marker.transaction_root) === buildPathIdentity(root)) throw new Error('Cannot remove the whole build root');
-  await rm(marker.transaction_root, { recursive: true, force: false });
+  await rm(transactionRoot, { recursive: true, force: false });
 }
 async function retainExperimentCompilerCache(marker, root) {
-  assertBuildRecord(marker, root, marker.transaction_root);
+  const transactionRoot = nativeBuildPath(marker.transaction_root);
+  assertBuildRecord(marker, root, transactionRoot);
   if (marker.schema_version !== BUILD_TRANSACTION_SCHEMA || marker.purpose !== 'experiment' || marker.status !== 'complete') return false;
-  const target = resolve(marker.transaction_root, 'cargo-target');
+  const target = resolve(transactionRoot, 'cargo-target');
   let metadata;
   try { metadata = await lstat(target); }
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
   assertNoBuildLinks(target);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
-  for (const entry of await readdir(marker.transaction_root, { withFileTypes: true })) {
+  for (const entry of await readdir(transactionRoot, { withFileTypes: true })) {
     if ([BUILD_TRANSACTION_MARKER, 'cargo-target'].includes(entry.name)) continue;
-    const path = resolve(marker.transaction_root, entry.name);
+    const path = resolve(transactionRoot, entry.name);
     assertNoBuildLinks(path);
     await rm(path, { recursive: entry.isDirectory(), force: false });
   }

@@ -32,6 +32,11 @@ export function buildSourceId(value) {
   return createHash('sha256').update(buildPathIdentity(value)).digest('hex').slice(0, 24);
 }
 export function nativeBuildPath(value, platform = process.platform) {
+  if (platform === 'win32') {
+    const mounted = /^\/mnt\/([a-z])(?:\/(.*))?$/iu.exec(value);
+    if (mounted) return win32.resolve(`${mounted[1].toUpperCase()}:\\`, (mounted[2] ?? '').replaceAll('/', '\\'));
+    return win32.resolve(value);
+  }
   if (platform !== 'win32' && /^[A-Za-z]:[\\/]/u.test(value)) {
     const normalized = win32.resolve(value).replaceAll('\\', '/');
     return `/mnt/${normalized[0].toLowerCase()}/${normalized.slice(3)}`;
