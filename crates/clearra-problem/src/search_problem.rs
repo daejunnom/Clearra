@@ -630,9 +630,7 @@ mod retained_capacity {
                 || !matches!(self.search_goal, SearchGoal::ClearToEmpty)
                 || self.output_policy != SearchOutputPolicy::Trace
                 || !(self.pc_chance_evidence_policy == PcChanceEvidencePolicy::Disabled
-                    || self
-                        .pc_chance_evidence_policy
-                        .retains_pc_path_v2_evidence())
+                    || self.pc_chance_evidence_policy.retains_pc_path_v2_evidence())
                 || !matches!(
                     (self.preset, self.problem_kind, self.scenario.source()),
                     (
