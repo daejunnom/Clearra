@@ -764,6 +764,7 @@
         "I",
         "--hold",
         "empty",
+        "--no-tablebase",
         "--rule",
         "srs-plus"
       ],
@@ -782,6 +783,7 @@
         "I",
         "--hold",
         "empty",
+        "--no-tablebase",
         "--rule",
         "srs-plus"
       ],
@@ -831,8 +833,8 @@
       ],
       "canonical_text_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
       "alias_text_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
-      "canonical_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus",
-      "alias_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus"
+      "canonical_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --no-tablebase --rule srs-plus",
+      "alias_web_command": "clearra pc minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --no-tablebase --rule srs-plus"
     },
     {
       "id": "pc.score-minimals/score-minimals/",
@@ -904,6 +906,7 @@
         "empty",
         "--score-profile",
         "jstris-ultra",
+        "--no-tablebase",
         "--rule",
         "srs-plus"
       ],
@@ -924,6 +927,7 @@
         "empty",
         "--score-profile",
         "jstris-ultra",
+        "--no-tablebase",
         "--rule",
         "srs-plus"
       ],
@@ -977,8 +981,8 @@
       ],
       "canonical_text_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
       "alias_text_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --rule srs-plus --no-tablebase --no-build-dependency-dag --format text",
-      "canonical_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --rule srs-plus",
-      "alias_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --rule srs-plus"
+      "canonical_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --no-tablebase --rule srs-plus",
+      "alias_web_command": "clearra pc score-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --score-profile jstris-ultra --no-tablebase --rule srs-plus"
     },
     {
       "id": "pc.score-finder/score-finder/",

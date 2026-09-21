@@ -1017,7 +1017,7 @@ test("canonical PC scoring owns typed summary authority while legacy score stays
   assert.deepEqual(
     score.registration.options.map(({ name }) => name),
     [
-      "next", "field", "lines", "hold", "kicktable", "score-profile",
+      "next", "field", "lines", "hold", "kicktable", "tablebase", "score-profile",
       "spin-profile", "initial-b2b",
     ],
   );
@@ -1037,7 +1037,7 @@ test("canonical PC scoring owns typed summary authority while legacy score stays
     "--queue", "IOTSZ",
     "--hold", "empty",
     "--score-profile", "tetrio",
-    "--rule", "srs-plus",
+    "--no-tablebase", "--rule", "srs-plus",
   ]);
   assert.equal(canonical.includes("--objective"), false);
   assert.equal(canonical.includes("--score"), false);
@@ -1051,7 +1051,7 @@ test("canonical PC scoring owns typed summary authority while legacy score stays
     "--queue", "IOTSZ",
     "--hold", "empty",
     "--score-profile", "tetrio",
-    "--rule", "srs-plus",
+    "--no-tablebase", "--rule", "srs-plus",
   ]);
   for (const forbidden of ["--objective", "--score", "--solution-probabilities", "--ties", "--tie-snapshot", "--tie-cursor"]) {
     assert.equal(scoreMinimalsArguments.includes(forbidden), false, forbidden);
@@ -1123,7 +1123,7 @@ test("canonical PC routes use native typed observation, B2B, probability, tiling
       "pc", "path", "--lines", "2", "--board-mask", "0x0", "--height", "2",
       "--pieces", "5", "--queue", "IOTSZ", "--hold", "T",
       "--spin-profile", "all-spin-plus", "--preserve-b2b",
-      "--rule", "no-kick",
+      "--no-tablebase", "--rule", "no-kick",
     ],
   );
   for (const name of [
@@ -1253,7 +1253,7 @@ test("pc.minimals lowers only through the typed v2 minimum-cover authority", () 
     [
       "pc", "minimals", "--lines", "2", "--board-mask", "0x0",
       "--height", "2", "--pieces", "5", "--queue", "IOTSZ",
-      "--hold", "empty", "--rule", "srs-plus",
+      "--hold", "empty", "--no-tablebase", "--rule", "srs-plus",
     ],
   );
   const publicContract = DISCORD_PUBLIC_SEARCH_CONTRACT.find(
@@ -1441,8 +1441,11 @@ function presetOptionName(field) {
 }
 
 function withoutRetiredPcExecutionFlags(arguments_) {
+  const tablebaseCapable = arguments_[0] === "pc" &&
+    new Set(["path", "minimals", "score", "score-minimals"]).has(arguments_[1]);
   return arguments_.filter((token) =>
-    token !== "--no-tablebase" && token !== "--no-build-dependency-dag"
+    token !== "--no-build-dependency-dag" &&
+    (token !== "--no-tablebase" || tablebaseCapable)
   );
 }
 

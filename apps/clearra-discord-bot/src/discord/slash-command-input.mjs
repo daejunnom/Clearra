@@ -756,6 +756,7 @@ function nativePcArguments(command, values, mode = {}) {
   const typedScoreProduct = typedScoreSummary || typedScoreMinimals;
   const typedMinimumCover = command.capabilityId === "pc.minimals";
   const typedSave = mode.save === true;
+  const tablebaseCapable = mode.path || typedMinimumCover || typedScoreProduct;
   const field = normalizeSearchField(values.get("field"));
   const next = validatedNext(values, false);
   const lines = optionalInteger(values, "lines", 1, DISCORD_PC_FIELD_MAX_ROWS);
@@ -840,6 +841,9 @@ function nativePcArguments(command, values, mode = {}) {
   const failedCount = mode.failedQueue
     ? optionalInteger(values, "failed-count", 1, 4_294_967_295)
     : null;
+  const tablebase = tablebaseCapable
+    ? onOffValue(values, "tablebase", false)
+    : false;
   return [
     ...command.argvPrefix,
     "--lines", String(lines),
@@ -866,6 +870,9 @@ function nativePcArguments(command, values, mode = {}) {
     ...(initialB2b !== null ? ["--initial-b2b", String(initialB2b)] : []),
     ...(solutionProbabilities ? ["--solution-probabilities"] : []),
     ...(failedCount !== null ? ["--failed-count", String(failedCount)] : []),
+    ...(tablebaseCapable
+      ? [tablebase ? "--tablebase" : "--no-tablebase"]
+      : []),
     ...(mode.tiling ? [] : nativeRuleArguments(values)),
   ];
 }
@@ -2759,6 +2766,7 @@ function allowedOptionNames(command) {
         "spin-profile",
         "preserve-b2b",
         "solution-probabilities",
+        ...(command.capabilityId === "pc.minimals" ? ["tablebase"] : []),
       ]);
     case "pc-path-v2":
       return new Set([
@@ -2769,6 +2777,7 @@ function allowedOptionNames(command) {
         "kicktable",
         "spin-profile",
         "preserve-b2b",
+        "tablebase",
       ]);
     case "pc-chance-v2":
       return new Set(["field", "next", "lines", "hold", "kicktable"]);
@@ -2785,6 +2794,7 @@ function allowedOptionNames(command) {
             "score-profile",
             "spin-profile",
             "initial-b2b",
+            "tablebase",
           ])
         : new Set([
             "field",
