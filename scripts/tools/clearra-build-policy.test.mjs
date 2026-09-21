@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { acquireBuildOwner } from './clearra-build-owner.mjs';
+import { acquireBuildOwner, recoverStaleExperimentBuild } from './clearra-build-owner.mjs';
 import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot } from './clearra-build-policy.mjs';
 
 async function fixture(t) {
@@ -61,7 +61,7 @@ test('outside target and compiler overrides fail before directory creation', asy
   await assert.rejects(stat(options.environment.LOCALAPPDATA), { code: 'ENOENT' });
 });
 
-test('experimental source purpose retains exactly one whole current build', async t => {
+test('experimental source purpose retains exactly one reusable current build', async t => {
   const options = await fixture(t);
   const first = await acquireBuildOwner(options);
   const target = first.transaction.cargo_target_dir;
@@ -71,9 +71,12 @@ test('experimental source purpose retains exactly one whole current build', asyn
   const second = await acquireBuildOwner(options);
   assert.equal(second.transaction.transaction_root, first.transaction.transaction_root);
   assert.notEqual(second.transaction.session_id, first.transaction.session_id);
-  await assert.rejects(stat(join(target, 'old-hashed-dependency.rlib')), { code: 'ENOENT' });
+  assert.equal(await readFile(join(target, 'old-hashed-dependency.rlib'), 'utf8'), 'old');
   assert.deepEqual(await readdir(resolve(target, '../..')), ['current']);
   await second.finish(false);
+  const third = await acquireBuildOwner(options);
+  await assert.rejects(stat(join(target, 'old-hashed-dependency.rlib')), { code: 'ENOENT' });
+  await third.finish(true);
 });
 
 test('independent owners cannot steal a purpose; nested owner reuses it', async t => {
@@ -142,6 +145,27 @@ test('active generation without a lease and nested aliases fail closed', async t
   assert.equal(JSON.parse(await readFile(join(owner.transaction.transaction_root, '.clearra-build-transaction.json'), 'utf8')).status, 'active');
 });
 
+test('explicit stale experiment recovery requires one dead exact owner', async t => {
+  const options = await fixture(t);
+  const owner = await acquireBuildOwner(options);
+  await assert.rejects(recoverStaleExperimentBuild(options), /still alive/u);
+  const markerPath = join(owner.transaction.transaction_root, '.clearra-build-transaction.json');
+  const leasePath = join(owner.environment.CLEARRA_BUILD_ROOT, '.leases', `experiment-${owner.transaction.source_id}.lock`);
+  const deadPid = 2147483647;
+  const marker = JSON.parse(await readFile(markerPath, 'utf8'));
+  const lease = JSON.parse(await readFile(leasePath, 'utf8'));
+  marker.owner_pid = deadPid;
+  lease.owner_pid = deadPid;
+  await writeFile(markerPath, `${JSON.stringify(marker)}\n`);
+  await writeFile(leasePath, `${JSON.stringify(lease)}\n`);
+  const recovered = await recoverStaleExperimentBuild(options);
+  assert.equal(recovered.session_id, owner.transaction.session_id);
+  await assert.rejects(stat(owner.transaction.transaction_root), { code: 'ENOENT' });
+  await assert.rejects(stat(leasePath), { code: 'ENOENT' });
+  const next = await acquireBuildOwner(options);
+  await next.finish(true);
+});
+
 test('Node and PowerShell reuse the same lease without nested completion', { skip: process.platform !== 'win32' }, async t => {
   const options = await fixture(t);
   const owner = await acquireBuildOwner(options);
@@ -154,6 +178,9 @@ test('Node and PowerShell reuse the same lease without nested completion', { ski
   assert.equal(buildPathIdentity(nested.stdout.trim()), buildPathIdentity(owner.transaction.cargo_target_dir));
   await owner.finish(true);
   const environment = { ...process.env, ...options.environment, CLEARRA_TEST_SOURCE: options.sourceRoot, CLEARRA_TEST_HELPER: helper, CLEARRA_TEST_PATHS: paths };
+  for (const name of ['CLEARRA_BUILD_ROOT', 'CLEARRA_BUILD_PURPOSE', 'CLEARRA_BUILD_SOURCE_ROOT', 'CLEARRA_BUILD_SOURCE_ID',
+    'CLEARRA_BUILD_SESSION_ID', 'CLEARRA_BUILD_TRANSACTION_ROOT', 'CLEARRA_BUILD_CACHE_OWNER_PID',
+    'CLEARRA_BUILD_CACHE_SESSION_KEY', 'CARGO_TARGET_DIR', 'CARGO_INCREMENTAL', 'RUSTC_WRAPPER']) delete environment[name];
   const reverse = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
     "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; try { Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:CLEARRA_TEST_SOURCE; node $env:CLEARRA_TEST_PATHS --field cargo-target; if($LASTEXITCODE -ne 0){throw 'Node rejected PS owner'}; Complete-ClearraBuildTransaction } finally { Exit-ClearraBuildArtifactCacheUsage }"], { env: environment, encoding: 'utf8', windowsHide: true });
   assert.equal(reverse.status, 0, reverse.stderr + reverse.stdout);

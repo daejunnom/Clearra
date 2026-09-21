@@ -86,11 +86,23 @@ Remove-TransientBuildDir $slot
 $slotAgain = New-TransientBuildDir 'probe'
 Assert-ArtifactPathCondition ($slotAgain -eq $slot -and -not (Test-Path -LiteralPath (Join-Path $slot 'old.txt'))) 'transient_reuses_only_its_fixed_slot'
 Remove-TransientBuildDir $slotAgain
+Complete-ClearraBuildTransaction
 Exit-ClearraBuildArtifactCacheUsage
 Assert-ArtifactPathCondition (-not (Test-ClearraBuildTransactionOwner)) 'owner_public_predicate_false_after_exit'
 Assert-ArtifactPathCondition ([string]::IsNullOrWhiteSpace($env:RUSTC_WRAPPER) -and [string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) 'owner_restores_environment'
 $second = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
-Assert-ArtifactPathCondition ($second.transaction_root -eq $experimentRoot -and $second.session_id -ne $firstSession -and -not (Test-Path -LiteralPath $oldDependency)) 'new_experiment_replaces_entire_dependency_graph'
+Assert-ArtifactPathCondition ($second.transaction_root -eq $experimentRoot -and $second.session_id -ne $firstSession -and (Test-Path -LiteralPath $oldDependency)) 'new_experiment_reuses_completed_dependency_graph'
+Complete-ClearraBuildTransaction
+Exit-ClearraBuildArtifactCacheUsage
+
+# Failed experimental output is not an authoritative reusable cache. A later
+# owner reclaims the same fixed slot, but starts from an empty payload.
+$failedExperiment = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
+$failedPayload = Join-Path $failedExperiment.cargo_target_dir 'failed-partial.rlib'
+[IO.File]::WriteAllText($failedPayload, 'untrusted partial output')
+Exit-ClearraBuildArtifactCacheUsage
+$afterFailure = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
+Assert-ArtifactPathCondition ($afterFailure.transaction_root -eq $experimentRoot -and -not (Test-Path -LiteralPath $failedPayload)) 'failed_experiment_is_replaced_before_reuse'
 Complete-ClearraBuildTransaction
 Exit-ClearraBuildArtifactCacheUsage
 

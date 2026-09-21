@@ -37,16 +37,60 @@ async function releaseLease(path, identity) {
   if (Object.keys(identity).some(key => current[key] !== identity[key])) throw new Error('Refusing to release another build owner lease');
   await rm(path);
 }
-async function removeOwnedGeneration(marker, root) {
-  assertBuildRecord(marker, root, marker.transaction_root);
-  assertBuildPathWithin(marker.transaction_root, root);
-  assertNoBuildLinks(marker.transaction_root);
-  const current = await readJson(resolve(marker.transaction_root, BUILD_TRANSACTION_MARKER));
+async function removeOwnedGeneration(marker, root, discoveredTransactionRoot = marker.transaction_root) {
+  assertBuildRecord(marker, root, discoveredTransactionRoot);
+  assertBuildPathWithin(discoveredTransactionRoot, root);
+  assertNoBuildLinks(discoveredTransactionRoot);
+  const current = await readJson(resolve(discoveredTransactionRoot, BUILD_TRANSACTION_MARKER));
   for (const key of ['schema_version', 'purpose', 'source_root', 'source_id', 'session_id', 'transaction_root', 'cargo_target_dir', 'owner_pid']) {
     if (current[key] !== marker[key]) throw new Error('Build generation ownership changed before retirement');
   }
-  if (buildPathIdentity(marker.transaction_root) === buildPathIdentity(root)) throw new Error('Cannot remove the whole build root');
-  await rm(marker.transaction_root, { recursive: true, force: false });
+  if (buildPathIdentity(discoveredTransactionRoot) === buildPathIdentity(root)) throw new Error('Cannot remove the whole build root');
+  await rm(discoveredTransactionRoot, { recursive: true, force: false });
+}
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    // EPERM proves that a process still owns the PID even when this caller
+    // cannot signal it. Any unknown result must fail closed as well.
+    return true;
+  }
+}
+export async function recoverStaleExperimentBuild({ sourceRoot, environment = process.env } = {}) {
+  sourceRoot = resolve(sourceRoot);
+  const root = canonicalBuildRoot(environment);
+  const sourceId = buildSourceId(sourceRoot);
+  const transactionRoot = resolve(root, 'experiments', sourceId, 'current');
+  const path = resolve(root, '.leases', `experiment-${sourceId}.lock`);
+  assertNoBuildLinks(root);
+  assertNoBuildLinks(sourceRoot);
+  assertNoBuildLinks(path);
+  assertNoBuildLinks(transactionRoot);
+  const lease = await readJson(path);
+  const marker = await readJson(resolve(transactionRoot, BUILD_TRANSACTION_MARKER));
+  assertBuildRecord(marker, root, transactionRoot);
+  if (marker.purpose !== 'experiment' || marker.status !== 'active') {
+    throw new Error('Only an active experimental build can be recovered');
+  }
+  if (buildPathIdentity(marker.source_root) !== buildPathIdentity(sourceRoot) || marker.source_id !== sourceId) {
+    throw new Error('Stale build recovery source does not own this generation');
+  }
+  const identity = leaseIdentity(marker);
+  if (Object.keys(identity).some(key => lease[key] !== identity[key])) {
+    throw new Error('Stale build recovery lease and marker do not agree');
+  }
+  if (processIsAlive(marker.owner_pid)) {
+    throw new Error('Build owner is still alive; refusing stale recovery');
+  }
+  // Keep the stale lease held until its exact owned generation has been
+  // retired. A concurrent acquisition therefore cannot observe a partially
+  // removed cache or inherit outputs from an interrupted compiler.
+  await removeOwnedGeneration(marker, root);
+  await releaseLease(path, identity);
+  return { source_id: sourceId, session_id: marker.session_id, transaction_root: transactionRoot };
 }
 export async function retainProductBuildGenerations(root) {
   const productRoot = resolve(root, 'products');
@@ -59,15 +103,15 @@ export async function retainProductBuildGenerations(root) {
     const marker = await readJson(resolve(directory, BUILD_TRANSACTION_MARKER));
     assertBuildRecord(marker, root, directory);
     if (marker.purpose !== 'product') throw new Error('Unowned product build directory; refusing retention');
-    if (marker.status === 'complete' && Number.isFinite(Date.parse(marker.completed_utc))) complete.push(marker);
+    if (marker.status === 'complete' && Number.isFinite(Date.parse(marker.completed_utc))) complete.push({ marker, directory });
   }
-  complete.sort((a, b) => b.completed_utc.localeCompare(a.completed_utc) || b.session_id.localeCompare(a.session_id));
-  for (const marker of complete.slice(5)) {
+  complete.sort((a, b) => b.marker.completed_utc.localeCompare(a.marker.completed_utc) || b.marker.session_id.localeCompare(a.marker.session_id));
+  for (const { marker, directory } of complete.slice(5)) {
     const path = leasePath(root, marker);
     const identity = leaseIdentity(marker, process.pid);
     try { await claimLease(path, identity); }
     catch (error) { if (error.code === 'EEXIST') continue; throw error; }
-    try { await removeOwnedGeneration(marker, root); }
+    try { await removeOwnedGeneration(marker, root, directory); }
     finally { await releaseLease(path, identity); }
   }
 }
@@ -142,7 +186,11 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
         assertBuildRecord(previous, root, transactionRoot);
         if (previous.status === 'active') throw new Error('An active experimental generation cannot be replaced, even without a lease');
         if (previous.schema_version !== 3 || previous.source_id !== sourceId || previous.purpose !== purpose || buildPathIdentity(previous.transaction_root) !== buildPathIdentity(transactionRoot)) throw new Error('Experimental current slot has a different owner');
-        await removeOwnedGeneration(previous, root);
+        // A completed current slot is the sole cache for this source/purpose.
+        // Keep its payload and rotate only the lease/marker so build tools can
+        // perform their own exact input invalidation. Failed partial output is
+        // not a reusable trust boundary and is reclaimed in full.
+        if (previous.status !== 'complete') await removeOwnedGeneration(previous, root);
       } else {
         try { await stat(transactionRoot); throw new Error('Experimental slot exists without ownership metadata'); }
         catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -178,4 +226,13 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
   try { if (process.platform === 'win32') prepareRustcLauncher(childEnvironment); }
   catch (error) { await owner.finish(false); throw error; }
   return owner;
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  const [action, flag, sourceRoot, ...extra] = process.argv.slice(2);
+  if (action !== 'recover-stale-experiment' || flag !== '--source-root' || !sourceRoot || extra.length !== 0) {
+    throw new Error('Usage: clearra-build-owner.mjs recover-stale-experiment --source-root <path>');
+  }
+  const recovered = await recoverStaleExperimentBuild({ sourceRoot });
+  process.stdout.write(`build_recovery=${JSON.stringify(recovered)}\n`);
 }

@@ -152,6 +152,23 @@ class ManagementPolicyTests(unittest.TestCase):
             with self.subTest(option=option), self.assertRaises(MANAGE.ManagementError):
                 MANAGE.validate_managed_command("cargo", ["cargo", "check", option])
 
+    def test_managed_cargo_runs_through_the_single_build_owner(self) -> None:
+        command = MANAGE.managed_execution_command("cargo", ["cargo", "test", "--locked"])
+        self.assertEqual(command[0], "node")
+        self.assertEqual(
+            pathlib.Path(command[1]),
+            ROOT / "scripts" / "tools" / "invoke-clearra-build.mjs",
+        )
+        self.assertEqual(
+            command[2:7],
+            ["--source-root", str(ROOT), "--purpose", "experiment", "--"],
+        )
+        self.assertEqual(command[7:], ["cargo", "test", "--locked"])
+        self.assertEqual(
+            MANAGE.managed_execution_command("management", ["python", "-V"]),
+            ["python", "-V"],
+        )
+
     def test_secret_names_are_never_accepted(self) -> None:
         for name in (".env", ".env.production", "deploy.key", "service-account-prod.json", "API-KEY.txt"):
             self.assertTrue(MANAGE.is_secret_path(pathlib.Path("nested") / name, self.policy), name)

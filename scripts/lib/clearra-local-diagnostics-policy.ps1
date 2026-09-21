@@ -11,8 +11,17 @@ function Assert-ClearraLocalToolDirectoryPolicy([string]$RepositoryRoot) {
         }
     }
     $ignoreFile = Join-Path $repository '.gitignore'
-    if (-not (Test-Path -LiteralPath $ignoreFile -PathType Leaf) -or
-        (Get-Content -LiteralPath $ignoreFile -Raw) -notmatch '(?m)^/_local/\s*$') {
+    $ignoreText = if (Test-Path -LiteralPath $ignoreFile -PathType Leaf) {
+        Get-Content -LiteralPath $ignoreFile -Raw
+    } else {
+        ''
+    }
+    $fullyIgnored = $ignoreText -match '(?m)^/_local/\s*$'
+    $managedSourcesOnly = $ignoreText -match '(?m)^/_local/\*\s*$' -and
+        $ignoreText -match '(?m)^!/_local/clearra_manage\.py\s*$' -and
+        $ignoreText -match '(?m)^!/_local/tests/\s*$' -and
+        $ignoreText -match '(?m)^!/_local/tests/\*\*\s*$'
+    if (-not $fullyIgnored -and -not $managedSourcesOnly) {
         throw 'Local diagnostics require the explicit /_local/ Git ignore boundary.'
     }
     $gitRoot = @(& git -C $repository rev-parse --show-toplevel 2>$null)
@@ -25,17 +34,25 @@ function Assert-ClearraLocalToolDirectoryPolicy([string]$RepositoryRoot) {
     if ($LASTEXITCODE -ne 0) { throw 'Could not verify local diagnostics Git ownership.' }
     $deleted = @(& git -C $repository -c core.quotepath=false ls-files --deleted -- _local)
     if ($LASTEXITCODE -ne 0) { throw 'Could not verify intentionally removed local diagnostics.' }
-    Assert-ClearraLocalGitOwnership $tracked $deleted
+    Assert-ClearraLocalGitOwnership $tracked $deleted -AllowManagementSources:$managedSourcesOnly
 }
 
-function Assert-ClearraLocalGitOwnership([string[]]$TrackedPaths, [string[]]$DeletedPaths) {
+function Assert-ClearraLocalGitOwnership(
+    [string[]]$TrackedPaths,
+    [string[]]$DeletedPaths,
+    [switch]$AllowManagementSources
+) {
     $deleted = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($path in $DeletedPaths) { [void]$deleted.Add($path) }
     foreach ($path in $TrackedPaths) {
         # Compare the same Git-rendered names, including C-quoted unusual names.
         # Feeding a quoted name to Test-Path could misclassify a present file as
         # deleted. Intentional tracked deletion alone is allowed, never restored.
-        if (-not $deleted.Contains($path)) {
+        $normalized = $path.Replace('\', '/')
+        $isManagementSource = $AllowManagementSources.IsPresent -and
+            ($normalized -ceq '_local/clearra_manage.py' -or
+             $normalized.StartsWith('_local/tests/', [System.StringComparison]::Ordinal))
+        if (-not $deleted.Contains($path) -and -not $isManagementSource) {
             throw "Local diagnostics must not be tracked product/release inputs: $path"
         }
     }

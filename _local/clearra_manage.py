@@ -615,6 +615,22 @@ def validate_managed_command(producer: str, command: Sequence[str]) -> None:
         raise ManagementError("Cargo output and config overrides are owned by Clearra management")
 
 
+def managed_execution_command(producer: str, command: Sequence[str]) -> list[str]:
+    original = list(command)
+    if producer != "cargo" or pathlib.Path(original[0]).stem.casefold() != "cargo":
+        return original
+    return [
+        "node",
+        str(ROOT / "scripts" / "tools" / "invoke-clearra-build.mjs"),
+        "--source-root",
+        str(ROOT),
+        "--purpose",
+        "experiment",
+        "--",
+        *original,
+    ]
+
+
 def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
     verify_static_management_policy(policy)
     if arguments.producer not in producer_ids(policy):
@@ -624,9 +640,10 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
         command.pop(0)
     if not command:
         raise ManagementError("storage run requires a command after --")
-    executable = shutil.which(command[0])
+    execution_command = managed_execution_command(arguments.producer, command)
+    executable = shutil.which(execution_command[0])
     if not executable:
-        raise ManagementError(f"required command is unavailable: {command[0]}")
+        raise ManagementError(f"required command is unavailable: {execution_command[0]}")
     validate_managed_command(arguments.producer, command)
     export_paths = []
     for value in arguments.export_path:
@@ -657,6 +674,8 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
             output_roots[output_class] = str(managed_temp)
         elif output_class == "browser":
             output_roots[output_class] = str(browser_root() / run_id)
+        elif output_class == "build-cache":
+            output_roots[output_class] = str(build_root())
         else:
             output_roots[output_class] = str(ROOT / "build" / arguments.producer / "default")
     environment = os.environ.copy()
@@ -672,16 +691,10 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
             "CLEARRA_EXPORT_PATHS": json.dumps(export_paths, separators=(",", ":")),
         }
     )
-    if arguments.producer == "cargo":
-        environment["CARGO_TARGET_DIR"] = str(ROOT / "build" / "cargo" / "host" / "debug")
-        environment["CARGO_INCREMENTAL"] = "0"
-        environment["CARGO_BUILD_RUSTC_WRAPPER"] = ""
-        environment.pop("RUSTC_WRAPPER", None)
-        environment.pop("RUSTC_WORKSPACE_WRAPPER", None)
     started = time.monotonic()
     try:
         completed = subprocess.run(
-            [executable, *command[1:]],
+            [executable, *execution_command[1:]],
             cwd=ROOT,
             env=environment,
             check=False,

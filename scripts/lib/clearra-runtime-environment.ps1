@@ -75,6 +75,18 @@ function Get-ClearraStableDigest([string[]]$Lines) {
     }
 }
 
+function Get-ClearraFileDigest([string]$Path) {
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    $stream = [System.IO.File]::OpenRead($resolved)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Get-ClearraWslSourceManifest([string]$RepositoryRoot) {
     $root = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
     $executablePaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -91,7 +103,7 @@ function Get-ClearraWslSourceManifest([string]$RepositoryRoot) {
         $entries.Add([pscustomobject]@{
                 relative_path = $relative
                 full_path = $file.FullName
-                sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                sha256 = Get-ClearraFileDigest $file.FullName
                 size = $file.Length
                 executable = $executablePaths.Contains($relative)
             })
@@ -102,7 +114,7 @@ function Get-ClearraWslSourceManifest([string]$RepositoryRoot) {
         $entries.Add([pscustomobject]@{
                 relative_path = '.cargo/config.toml'
                 full_path = $file.FullName
-                sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                sha256 = Get-ClearraFileDigest $file.FullName
                 size = $file.Length
                 executable = $false
             })
@@ -257,13 +269,44 @@ function Sync-ClearraWslExt4Workspace(
             & wsl.exe -d $WslDistribution -- chmod 755 -- @linuxExecutables
             if ($LASTEXITCODE -ne 0) { throw 'Failed to restore Git executable modes in the WSL workspace.' }
         }
-        & wsl.exe -d $WslDistribution -- rm -rf -- $linuxWorkspace
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to replace the prior WSL workspace: $linuxWorkspace"
-        }
-        & wsl.exe -d $WslDistribution -- mv -- $nextWorkspace $linuxWorkspace
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to activate the WSL workspace: $linuxWorkspace"
+        & wsl.exe -d $WslDistribution -- test -d $linuxWorkspace
+        $workspaceExists = $LASTEXITCODE -eq 0
+        if ($workspaceExists) {
+            # Replacing the complete ext4 tree gives every tracked source a new
+            # inode/mtime and makes Cargo rebuild the whole workspace for a
+            # one-file edit. Preserve byte-identical files while rsync stages
+            # changed files with delayed renames. The old digest marker stays
+            # authoritative until the entire source update succeeds.
+            & wsl.exe -d $WslDistribution -- sh -c 'command -v rsync >/dev/null 2>&1'
+            if ($LASTEXITCODE -ne 0) {
+                throw 'WSL source synchronization requires rsync.'
+            }
+            & wsl.exe -d $WslDistribution -- rsync `
+                --archive --delete --checksum --delay-updates `
+                --exclude=.clearra-source-digest -- `
+                "$nextWorkspace/" "$linuxWorkspace/"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to incrementally synchronize the WSL workspace: $linuxWorkspace"
+            }
+            $nextDigestMarker = "$nextWorkspace/.clearra-source-digest"
+            $pendingDigestMarker = "$linuxWorkspace/.clearra-source-digest.next"
+            & wsl.exe -d $WslDistribution -- cp -- $nextDigestMarker $pendingDigestMarker
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to stage the WSL source digest: $pendingDigestMarker"
+            }
+            & wsl.exe -d $WslDistribution -- mv -- $pendingDigestMarker $digestMarker
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to activate the WSL source digest: $digestMarker"
+            }
+            & wsl.exe -d $WslDistribution -- rm -rf -- $nextWorkspace
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to clear the synchronized WSL staging workspace: $nextWorkspace"
+            }
+        } else {
+            & wsl.exe -d $WslDistribution -- mv -- $nextWorkspace $linuxWorkspace
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to activate the WSL workspace: $linuxWorkspace"
+            }
         }
     } finally {
         Remove-TransientBuildDir $transaction

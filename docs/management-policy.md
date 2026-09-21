@@ -88,8 +88,10 @@ Run the phases explicitly. None of these commands polls CI.
 4. `git converge --apply` replays selected linear history on the current
    `codex/converge-*` branch. A conflict records stage blobs and worktree
    hashes, preserves a safety ref, aborts, and restores the initial candidate.
-5. Push the candidate normally. The push starts the required candidate CI; do
-   not poll it.
+5. Upload the clean reviewed candidate with `python -B _local/clearra_manage.py
+   git upload --candidate <branch> --safety-receipt <receipt>`. The managed
+   upload performs the exact candidate and remote readback checks and starts
+   the required candidate CI; do not poll it.
 6. `git promote` later reads required checks once for the exact candidate SHA.
    Only a successful closed check set proceeds. It verifies the GitHub ruleset
    and maintainer set, uses a normal fast-forward `candidate:main` push, reads

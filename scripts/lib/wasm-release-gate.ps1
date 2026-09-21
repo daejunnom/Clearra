@@ -293,19 +293,19 @@ function Invoke-WasmBuildTestGate {
         ) 'clearra-wasm exact worker probe'
         $env:CLEARRA_WEB_PUBLIC_DIR = $webPublicDir
 
-        $npmName = if ($env:OS -eq 'Windows_NT') { 'npm.cmd' } else { 'npm' }
-        $npmCommand = Get-Command $npmName -ErrorAction SilentlyContinue
-        if ($null -eq $npmCommand) {
-            throw 'WASM release requires npm on PATH'
+        $pnpmName = if ($env:OS -eq 'Windows_NT') { 'pnpm.cmd' } else { 'pnpm' }
+        $pnpmCommand = Get-Command $pnpmName -ErrorAction SilentlyContinue
+        if ($null -eq $pnpmCommand) {
+            throw 'WASM release requires pnpm on PATH'
         }
-        Invoke-WasmReleaseCommand $npmCommand.Source @(
-            'test', '--workspace', '@clearra/ui'
+        Invoke-WasmReleaseCommand $pnpmCommand.Source @(
+            '--filter', '@clearra/ui', 'run', 'test'
         ) 'clearra-ui runtime contracts'
-        Invoke-WasmReleaseCommand $npmCommand.Source @(
-            'test', '--workspace', '@clearra/web'
+        Invoke-WasmReleaseCommand $pnpmCommand.Source @(
+            '--filter', '@clearra/web', 'run', 'test'
         ) 'clearra-web worker contracts'
-        Invoke-WasmReleaseCommand $npmCommand.Source @(
-            'exec', '--workspace', '@clearra/web', '--', 'vite', 'build', '--configLoader', 'runner'
+        Invoke-WasmReleaseCommand $pnpmCommand.Source @(
+            '--filter', '@clearra/web', 'run', 'build'
         ) 'clearra-web frontend build'
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'apps/clearra-web/scripts/prepare-pages-fallback.mjs')

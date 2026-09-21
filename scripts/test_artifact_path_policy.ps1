@@ -85,6 +85,26 @@ try {
     Remove-Item -LiteralPath (Join-Path $localFixture '_local/measurement.json')
     Assert-ClearraRepositoryArtifactPolicy $localFixture
     Assert-ArtifactPathCondition $true 'intentional_tracked_diagnostic_deletion_is_valid'
+    $managedFixture = Join-Path $fixtureRoot 'managed-local-source'
+    New-Item -ItemType Directory -Path (Join-Path $managedFixture '_local/tests') -Force | Out-Null
+    & git -C $managedFixture init --quiet
+    if ($LASTEXITCODE -ne 0) { throw 'Could not initialize managed local-source fixture.' }
+    [IO.File]::WriteAllText(
+        (Join-Path $managedFixture '.gitignore'),
+        "/_local/*`n!/_local/clearra_manage.py`n!/_local/tests/`n!/_local/tests/**`n"
+    )
+    [IO.File]::WriteAllText((Join-Path $managedFixture '_local/clearra_manage.py'), '# fixture')
+    [IO.File]::WriteAllText((Join-Path $managedFixture '_local/tests/test_fixture.py'), '# fixture')
+    & git -C $managedFixture add -- .gitignore _local/clearra_manage.py _local/tests/test_fixture.py
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stage managed local-source fixture.' }
+    Assert-ClearraRepositoryArtifactPolicy $managedFixture
+    Assert-ArtifactPathCondition $true 'tracked_management_sources_preserve_ignored_diagnostics_boundary'
+    [IO.File]::WriteAllText((Join-Path $managedFixture '_local/unexpected.py'), '# fixture')
+    & git -C $managedFixture add --force -- _local/unexpected.py
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stage unexpected local-source fixture.' }
+    Assert-ArtifactPathCondition `
+        (Test-ArtifactPathThrows { Assert-ClearraRepositoryArtifactPolicy $managedFixture }) `
+        'managed_local_source_allowlist_rejects_unexpected_files'
     foreach ($reference in @('import "../../_local/probe.mjs"', 'path = "../_local/probe"')) {
         $inputFile = [pscustomobject]@{ RelativePath='product/input'; Text=$reference }
         Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-ClearraProductExcludesLocalDiagnostics @($inputFile) }) 'product_cannot_import_diagnostics'

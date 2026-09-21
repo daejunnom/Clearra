@@ -101,6 +101,20 @@ try {
 
     . (Join-Path $entryAuthority 'scripts/lib/core-c-build.ps1')
     . (Join-Path $entryAuthority 'scripts/lib/clearra-build-wsl-dispatch.ps1')
+    . (Join-Path $entryAuthority 'scripts/lib/clearra-runtime-environment.ps1')
+    $digestFixture = Join-Path $entrySource 'digest-fixture.txt'
+    [IO.File]::WriteAllText($digestFixture, 'fixture', [Text.UTF8Encoding]::new($false))
+    Assert-ArtifactPathCondition `
+        ((Get-ClearraFileDigest $digestFixture) -ceq 'f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d') `
+        'wsl_source_manifest_hash_is_independent_of_powershell_module_discovery'
+    $runtimeEnvironmentSource = Get-Content -LiteralPath `
+        (Join-Path $entryAuthority 'scripts/lib/clearra-runtime-environment.ps1') -Raw
+    Assert-ArtifactPathCondition `
+        ($runtimeEnvironmentSource.Contains('--checksum --delay-updates') -and
+         $runtimeEnvironmentSource.Contains('--exclude=.clearra-source-digest') -and
+         $runtimeEnvironmentSource.Contains('.clearra-source-digest.next') -and
+         -not $runtimeEnvironmentSource.Contains('rm -rf -- $linuxWorkspace')) `
+        'wsl_source_sync_preserves_unchanged_cargo_inputs_and_commits_digest_last'
     $enumeratedBuildInputs = @(Get-ClearraBuildInputFiles $entrySource | ForEach-Object {
         $_.FullName.Substring($entrySource.Length).TrimStart('\', '/').Replace('\', '/')
     })

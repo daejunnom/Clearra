@@ -1,5 +1,5 @@
-# One physical build root; one replaceable experiment per source; five completed
-# product generations. Never resets a root or cleans legacy paths.
+# One physical build root; one reusable experiment cache per source; five
+# completed product generations. Never resets a root or cleans legacy paths.
 . (Join-Path $PSScriptRoot 'clearra-build-transaction-record.ps1')
 . (Join-Path $PSScriptRoot 'clearra-build-inputs.ps1')
 . (Join-Path $PSScriptRoot 'clearra-build-product-catalog.ps1')
@@ -126,7 +126,16 @@ function Initialize-ClearraBuildArtifactCache(
             if ($previous.status -eq 'active') {
                 throw 'An active or interrupted experiment requires explicit owner-aware recovery.'
             }
-            Remove-ClearraOwnedBuildTransaction $previous $lease
+            if ($previous.status -eq 'complete') {
+                # The lease already binds this source/purpose to the new
+                # session. Keep the sole completed experiment payload so Cargo,
+                # CMake, and WASM tools can invalidate by content instead of
+                # recompiling their full dependency graphs after every run.
+                # A failed slot is never trusted as a cache boundary.
+                Assert-ClearraBuildTreeNoReparse $transaction
+            } else {
+                Remove-ClearraOwnedBuildTransaction $previous $lease
+            }
         }
         New-Item -ItemType Directory -Path $transaction -Force | Out-Null
         Write-ClearraBuildTransactionRecord $record
