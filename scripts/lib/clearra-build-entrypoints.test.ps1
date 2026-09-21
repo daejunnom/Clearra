@@ -30,7 +30,10 @@ $env:LOCALAPPDATA = $entryCacheHome
 $env:XDG_CACHE_HOME = $entryCacheHome
 try {
     foreach ($case in @(
-        @{ file='clearra.ps1'; arguments=@('-Task','Validate','-CoreCBuildDir',$entryOutside) },
+        # Linux CI cannot resolve the Windows/WSL-only `auto` runtime. Select
+        # the non-native WASM surface so this probe reaches the build-path
+        # preflight that it is specifically responsible for exercising.
+        @{ file='clearra.ps1'; arguments=@('-Task','Validate','-RuntimeEnvironment','wasm','-CoreCBuildDir',$entryOutside) },
         @{ file='verify.ps1'; arguments=@('-CoreCBuildDir',$entryOutside) },
         @{ file='build-core-c.ps1'; arguments=@('-BuildDir',$entryOutside) },
         @{ file='run-c-core-tests.ps1'; arguments=@('-BuildDir',$entryOutside) },
