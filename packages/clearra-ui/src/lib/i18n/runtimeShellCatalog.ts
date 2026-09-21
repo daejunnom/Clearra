@@ -96,6 +96,7 @@ export const RUNTIME_SHELL_MESSAGES = {
   resourceMismatch: { en: 'WASM failed-event resource evidence was inconsistent', ko: 'WASM 실패 이벤트의 리소스 근거가 일치하지 않습니다.', ja: 'WASMの失敗イベントのリソース根拠が一致しません。' },
   partialResult: { en: 'partial: {label}', ko: '부분 결과: {label}', ja: '部分結果: {label}' },
   workerRequired: { en: 'A browser worker factory is required to start the WASM runtime.', ko: 'WASM 실행 환경을 시작하려면 브라우저 워커 생성기가 필요합니다.', ja: 'WASM実行環境を開始するにはブラウザーワーカーの生成器が必要です。' },
+  idleWorkerMemoryCeilingRequired: { en: 'idleWorkerMemoryCeilingBytes must be a positive safe integer', ko: 'idleWorkerMemoryCeilingBytes는 양의 안전한 정수여야 합니다.', ja: 'idleWorkerMemoryCeilingBytesには正の安全な整数が必要です。' },
   replacedSolutionPages: { en: 'a new search replaced the previous solution pages', ko: '새 검색이 이전 해법 페이지를 대체했습니다.', ja: '新しい検索で以前の解法ページを置き換えました。' },
   replacedProductPages: { en: 'a new search replaced the previous product pages', ko: '새 검색이 이전 결과 페이지를 대체했습니다.', ja: '新しい検索で以前の結果ページを置き換えました。' },
   productPageCancelled: { en: 'product page runtime was cancelled', ko: '결과 페이지 처리가 취소되었습니다.', ja: '結果ページの処理をキャンセルしました。' },

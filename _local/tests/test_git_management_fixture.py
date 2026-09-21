@@ -46,8 +46,21 @@ class GitManagementFixtureTests(unittest.TestCase):
         self.git("config", "user.name", "Clearra Fixture")
         self.git("config", "user.email", "fixture@example.invalid")
         self.git("config", "core.autocrlf", "false")
+        (self.repo / "config").mkdir()
+        shutil.copy2(
+            ROOT / "config" / "clearra-management.v1.json",
+            self.repo / "config" / "clearra-management.v1.json",
+        )
+        shutil.copy2(ROOT / "pnpm-lock.yaml", self.repo / "pnpm-lock.yaml")
+        shutil.copy2(ROOT / "rust-toolchain.toml", self.repo / "rust-toolchain.toml")
         (self.repo / "base.txt").write_text("base\n", encoding="utf-8", newline="\n")
-        self.git("add", "base.txt")
+        self.git(
+            "add",
+            "base.txt",
+            "config/clearra-management.v1.json",
+            "pnpm-lock.yaml",
+            "rust-toolchain.toml",
+        )
         self.git("commit", "-m", "base")
         self.base_sha = self.git("rev-parse", "HEAD")
         self.git("remote", "add", "origin", str(self.remote))
@@ -301,6 +314,77 @@ class GitManagementFixtureTests(unittest.TestCase):
             raced_sha,
         )
 
+    def test_detached_exact_sha_upload_does_not_move_protected_local_candidate(self) -> None:
+        self.git("restore", "base.txt")
+        self.git("restore", "--staged", "staged.bin")
+        (self.repo / "staged.bin").unlink()
+        (self.repo / "notes.txt").unlink()
+        shutil.rmtree(self.repo / "build")
+        candidate = "codex/converge-detached-upload-fixture"
+        protected = self.base / "protected-candidate"
+        self.git("branch", candidate, "main")
+        protected_sha = self.git("rev-parse", candidate)
+        self.git("push", "origin", candidate)
+        self.git("worktree", "add", str(protected), candidate)
+        (protected / "protected-uncommitted.txt").write_text(
+            "must remain untouched\n", encoding="utf-8", newline="\n"
+        )
+
+        self.git("switch", "--detach", "main")
+        (self.repo / "detached-candidate.txt").write_text(
+            "reviewed detached candidate\n", encoding="utf-8", newline="\n"
+        )
+        self.git("add", "detached-candidate.txt")
+        self.git("commit", "-m", "detached exact candidate")
+        detached_sha = self.git("rev-parse", "HEAD")
+
+        with mock.patch.object(
+            MANAGE,
+            "validate_convergence_review",
+            return_value={"selected": 1, "excluded": 0},
+        ), mock.patch.object(
+            MANAGE,
+            "authorized_github_maintainers",
+            return_value=[{"login": "fixture", "github_user_id": 1}],
+        ):
+            uploaded = MANAGE.upload_candidate(
+                candidate,
+                "fixture-receipt",
+                self.policy,
+                exact_commit=detached_sha,
+            )
+
+        self.assertEqual(uploaded["source_mode"], "detached-exact-sha")
+        self.assertEqual(uploaded["remote_candidate_after"], detached_sha)
+        self.assertEqual(uploaded["local_candidate_ref_sha"], protected_sha)
+        self.assertEqual(uploaded["local_candidate_worktrees"][0]["head"], protected_sha)
+        self.assertEqual(uploaded["local_candidate_worktrees"][0]["dirty_entries"], 1)
+        self.assertTrue(uploaded["local_candidate_worktrees"][0]["preserved"])
+        self.assertEqual(uploaded["parents"], [protected_sha])
+        self.assertRegex(uploaded["diff_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(self.git("rev-parse", candidate), protected_sha)
+        self.assertEqual(
+            self.git("status", "--porcelain=v1", cwd=protected),
+            "?? protected-uncommitted.txt",
+        )
+
+        self.git("switch", "main")
+        with mock.patch.object(
+            MANAGE,
+            "validate_convergence_review",
+            return_value={"selected": 1, "excluded": 0},
+        ), mock.patch.object(
+            MANAGE,
+            "authorized_github_maintainers",
+            return_value=[{"login": "fixture", "github_user_id": 1}],
+        ), self.assertRaisesRegex(MANAGE.ManagementError, "detached clean worktree"):
+            MANAGE.upload_candidate(
+                candidate,
+                "fixture-receipt",
+                self.policy,
+                exact_commit=detached_sha,
+            )
+
     def test_repository_lock_recovers_dead_owner_and_blocks_live_owner(self) -> None:
         identity = MANAGE.hashlib.sha256(MANAGE.normalized(self.repo).encode()).hexdigest()[:24]
         lock = MANAGE.state_root() / "git-locks" / f"{identity}.lock"
@@ -339,6 +423,24 @@ class GitManagementFixtureTests(unittest.TestCase):
         )
         self.assertTrue(accepted)
         self.assertEqual(reason, "ancestor-of-reviewed-sha")
+
+    def test_moved_ref_does_not_inherit_an_older_review_decision(self) -> None:
+        reviewed_sha = self.git("rev-parse", "main")
+        moved_sha = self.git("rev-parse", "unique")
+        accepted, reason = MANAGE.ref_is_reviewed_or_equivalent(
+            "refs/heads/moved-after-review",
+            moved_sha,
+            reviewed_sha,
+            {
+                "refs/heads/moved-after-review": {
+                    "sha": reviewed_sha,
+                    "decision": "excluded",
+                }
+            },
+            {reviewed_sha},
+        )
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "unique")
 
     def test_dirty_worktree_evidence_reconstructs_the_exact_candidate_tree(self) -> None:
         result = MANAGE.prepare_git_safety(self.policy)

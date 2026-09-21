@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+if [[ -z "${CLEARRA_WSL_MARKER_DIGEST:-}" ]]; then
+    export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+fi
 hash -r
 case "$PATH" in *"/mnt/"*) printf 'Windows PATH entry leaked into WSL native execution\n' >&2; exit 2 ;; esac
 
@@ -48,15 +50,17 @@ while [[ $# -gt 0 ]]; do
         *) printf 'Unknown WSL C-test argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
-[[ "$WORKERS" =~ ^[0-9]+$ ]] || { printf 'Invalid worker count\n' >&2; exit 2; }
+[[ "$WORKERS" =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid worker count\n' >&2; exit 2; }
 [[ "$SANITIZER" =~ ^(none|address|undefined)$ ]] || { printf 'Invalid sanitizer\n' >&2; exit 2; }
 [[ -z "$TEST_NAME" || "$TEST_NAME" =~ ^[A-Za-z0-9_]+$ ]] || {
     printf 'Invalid aggregate test selector\n' >&2
     exit 2
 }
-WORKERS=$(( WORKERS < 1 ? 1 : WORKERS ))
 CPU_COUNT="$(nproc)"
-WORKERS=$(( WORKERS > CPU_COUNT ? CPU_COUNT : WORKERS ))
+[[ "$WORKERS" -le "$CPU_COUNT" ]] || {
+    printf 'Requested workers exceed the WSL logical processor count; no silent reduction is permitted\n' >&2
+    exit 2
+}
 
 CORE_ROOT="$ROOT/core-c"
 SOURCE_MANIFEST="$CORE_ROOT/cmake/source_manifest.cmake"

@@ -14,8 +14,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-runtime:
+    name: Clearra management Windows runtime
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.7"
+      - name: Verify Windows Job Object process ownership
+        shell: pwsh
+        run: >-
+          python -B _local/clearra_manage.py runtime run
+          --producer management --profile control --timeout 300 --
+          python -B -m unittest discover -s _local/tests -p "test_clearra_runtime.py" -v
+
   management-policy:
     name: Clearra management policy
+    needs: windows-runtime
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -51,31 +70,36 @@ jobs:
             build/tools/cargo/wasm-bindgen-cli/0.2.126
           key: clearra-cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-wasm-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock') }}
       - name: Synchronize and verify exact managed toolchains
-        run: python -B _local/clearra_manage.py toolchain sync
+        run: >-
+          python -B _local/clearra_manage.py runtime run
+          --producer management --profile build-test --timeout 5400 --
+          python -B _local/clearra_manage.py toolchain sync
       - name: Verify management contracts
         run: |
-          python -B -m unittest discover -s _local/tests -v
-          python -B _local/clearra_manage.py deps verify
-          python -B _local/clearra_manage.py storage verify --path _local/artifacts/test/management-policy
+          python -B _local/clearra_manage.py runtime run --producer management --profile build-test --timeout 5400 -- python -B -m unittest discover -s _local/tests -v
+          python -B _local/clearra_manage.py runtime run --producer management --profile build-test --timeout 5400 -- python -B _local/clearra_manage.py deps verify
+          python -B _local/clearra_manage.py runtime run --producer management --profile control --timeout 300 -- python -B _local/clearra_manage.py storage verify --path _local/artifacts/test/management-policy
       - name: Install the frozen workspace without lifecycle scripts
         run: |
-          python -B _local/clearra_manage.py deps install --clean-links
-          git diff --exit-code
+          python -B _local/clearra_manage.py runtime run --producer frontend --profile build-test --timeout 5400 -- python -B _local/clearra_manage.py deps install --clean-links
+          python -B _local/clearra_manage.py runtime run --producer management --profile control --timeout 300 -- git diff --exit-code
       - name: Verify frozen reinstall is idempotent
         run: |
-          python -B _local/clearra_manage.py deps install
-          git diff --exit-code
+          python -B _local/clearra_manage.py runtime run --producer frontend --profile build-test --timeout 5400 -- python -B _local/clearra_manage.py deps install
+          python -B _local/clearra_manage.py runtime run --producer management --profile control --timeout 300 -- git diff --exit-code
       - name: Validate package and workflow migration
         run: |
-          pnpm --filter ctk3 run test
-          pnpm --filter @clearra/ui run test
-          pnpm deploy --filter @clearra/discord-bot --prod build/discord-container/ci-deploy
-          cd build/discord-container/ci-deploy
-          node --input-type=module -e "await import('./src/clearra/command.mjs'); await import('./src/job-service/server.mjs'); await import('ctk3')"
-          cd ../../..
-          node --test scripts/tools/accepted-ctk3-dist.test.mjs
-          node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/cloud/accepted-build-inputs.test.mjs
-          node scripts/tools/validate-release-cli-smokes.mjs
+          python -B _local/clearra_manage.py runtime run --producer ctk3 --profile build-test --timeout 5400 -- pnpm --filter ctk3 run test
+          python -B _local/clearra_manage.py runtime run --producer frontend --profile build-test --timeout 5400 -- pnpm --filter @clearra/ui run test
+          python -B _local/clearra_manage.py runtime run --producer discord-container --profile build-test --timeout 5400 -- pnpm --filter @clearra/discord-bot run test:built
+          python -B _local/clearra_manage.py runtime run --producer management --profile build-test --timeout 5400 -- node --test scripts/tools/managed-shell-builds.test.mjs scripts/windows/clearra-local-services-watchdog.test.mjs
+          python -B _local/clearra_manage.py runtime run --producer management --profile build-test --timeout 5400 -- pwsh -NoProfile -File scripts/test_artifact_path_policy.ps1
+          python -B _local/clearra_manage.py runtime run --producer management --profile control --timeout 300 -- bash -n scripts/runtime/clearra-wsl-sanitize.sh scripts/runtime/clearra-wsl-session.sh scripts/runtime/clearra-wsl-provision.sh scripts/runtime/clearra-wsl-guest.sh
+          python -B _local/clearra_manage.py runtime run --producer discord-container --profile build-test --timeout 5400 -- pnpm deploy --filter @clearra/discord-bot --prod build/discord-container/ci-deploy
+          python -B _local/clearra_manage.py runtime run --producer discord-container --profile build-test --timeout 5400 -- pnpm --dir build/discord-container/ci-deploy exec node --input-type=module -e "await import('./src/clearra/command.mjs'); await import('./src/job-service/server.mjs'); await import('ctk3')"
+          python -B _local/clearra_manage.py runtime run --producer ctk3 --profile build-test --timeout 5400 -- node --test scripts/tools/accepted-ctk3-dist.test.mjs
+          python -B _local/clearra_manage.py runtime run --producer release-evidence --profile build-test --timeout 5400 -- node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/cloud/accepted-build-inputs.test.mjs
+          python -B _local/clearra_manage.py runtime run --producer release-evidence --profile build-test --timeout 5400 -- node scripts/tools/validate-release-cli-smokes.mjs
       - name: Verify locked Rust workspace
         run: |
           python -B _local/clearra_manage.py storage run --producer cargo -- cargo fmt --all --check

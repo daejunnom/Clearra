@@ -4,7 +4,16 @@ import http from 'node:http';
 import { extname, resolve, sep } from 'node:path';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 
+export const BENCHMARK_PORT = 4195;
+
 const options = parseArgs(process.argv.slice(2));
+if (process.env.CLEARRA_RUNTIME_SUPERVISED !== '1' ||
+    process.env.CLEARRA_RUNTIME_PROFILE !== 'benchmark-search') {
+  throw new Error(
+    'browser benchmarks require: python -B _local/clearra_manage.py runtime run ' +
+    '--producer benchmark --profile benchmark-search --timeout <seconds> -- <command>'
+  );
+}
 const root = resolve(options.root);
 const benchmarkEntry = resolve(root, 'index.html');
 if (!fs.existsSync(benchmarkEntry) || !fs.statSync(benchmarkEntry).isFile()) {
@@ -14,8 +23,11 @@ if (!fs.existsSync(benchmarkEntry) || !fs.statSync(benchmarkEntry).isFile()) {
 }
 const timeoutMs = positiveInteger(options.timeout ?? '3600000', 'timeout');
 const benchmarkPort = options.port === undefined
-  ? 0
+  ? BENCHMARK_PORT
   : positiveInteger(options.port, 'port');
+if (benchmarkPort !== BENCHMARK_PORT) {
+  throw new Error(`browser A/B benchmarks must use the reserved ${BENCHMARK_PORT} port`);
+}
 const cacheBase = process.platform === 'win32'
   ? process.env.LOCALAPPDATA || process.env.TEMP || resolve(process.env.USERPROFILE || '.', 'AppData', 'Local')
   : process.env.XDG_CACHE_HOME || resolve(process.env.HOME || '.', '.cache');
@@ -58,7 +70,7 @@ try {
       serveStatic(root, request, response);
     });
     server.once('error', rejectResult);
-    server.listen(benchmarkPort, '127.0.0.1', () => {
+    server.listen({ host: '127.0.0.1', port: benchmarkPort, exclusive: true }, () => {
       const address = server.address();
       if (!address || typeof address === 'string') {
         rejectResult(new Error('benchmark server did not expose a TCP port'));

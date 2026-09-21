@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+if [[ -z "${CLEARRA_WSL_MARKER_DIGEST:-}" ]]; then
+    export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+fi
 hash -r
 case "$PATH" in *"/mnt/"*) printf 'Windows PATH entry leaked into WSL runtime\n' >&2; exit 2 ;; esac
 

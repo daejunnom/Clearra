@@ -10,7 +10,7 @@ param(
     [string]$ExecutionSurface = "ManagedLocal",
     [ValidateSet("auto", "windows", "wsl")]
     [string]$RuntimeEnvironment = "auto",
-    [string]$WslDistribution = "Ubuntu",
+    [string]$WslDistribution = "Clearra-Build",
     [switch]$VerboseLog,
     [switch]$Json,
     [int]$OutputExcerptLines = 40,

@@ -783,15 +783,35 @@ function formatByteCount(bytes: number): string {
 }
 
 function postWorkerEvent(event: ClearraWasmWorkerEvent) {
-  self.postMessage(event);
+  const runtimeMemoryBytes = currentRuntimeMemoryBytes();
+  self.postMessage(
+    isTerminal(event) && runtimeMemoryBytes !== undefined
+      ? { ...event, runtime_memory_bytes: runtimeMemoryBytes }
+      : event
+  );
 }
 
 function postRuntimePrewarmPhase(phase: 'started' | 'finished', workerCount: number) {
+  const runtimeMemoryBytes = phase === 'finished' ? currentRuntimeMemoryBytes() : undefined;
   self.postMessage({
     type: 'runtime_prewarm',
     phase,
-    workerCount
+    workerCount,
+    ...(runtimeMemoryBytes === undefined ? {} : { runtimeMemoryBytes })
   });
+}
+
+function currentRuntimeMemoryBytes(): number | undefined {
+  try {
+    const bytes = loadedWasm?.linear_memory_bytes();
+    return typeof bytes === 'number' && Number.isSafeInteger(bytes) && bytes >= 0
+      ? bytes
+      : undefined;
+  } catch {
+    // Memory accounting is advisory at this boundary. A detached or trapped
+    // runtime must still be able to publish its original terminal event.
+    return undefined;
+  }
 }
 
 function postTablebaseWarmupPhase(

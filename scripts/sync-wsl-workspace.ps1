@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Distribution = 'Ubuntu',
+    [string]$Distribution = 'Clearra-Build',
     [switch]$AsJson
 )
 
@@ -9,6 +9,7 @@ Set-StrictMode -Version Latest
 $Root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $PSScriptRoot 'lib/clearra-path-helpers.ps1')
 . (Join-Path $PSScriptRoot 'lib/clearra-artifact-cache.ps1')
+. (Join-Path $PSScriptRoot 'lib/clearra-build-wsl-dispatch.ps1')
 . (Join-Path $PSScriptRoot 'lib/clearra-runtime-environment.ps1')
 
 $result = Sync-ClearraWslExt4Workspace $Root $Distribution

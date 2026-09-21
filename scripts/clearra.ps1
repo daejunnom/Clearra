@@ -30,7 +30,7 @@ param(
     [string]$ReleaseAcceptanceShard = "Full",
     [ValidateSet("auto", "windows", "wsl", "wasm")]
     [string]$RuntimeEnvironment = "auto",
-    [string]$WslDistribution = "Ubuntu",
+    [string]$WslDistribution = "Clearra-Build",
     [string]$CargoPath = "cargo",
     [string]$PowerShellPath = "powershell"
 )
@@ -108,7 +108,9 @@ $ClearraScriptRoot = $PSScriptRoot
 if ($Workers -lt 1) {
     throw "-Workers must be at least 1."
 }
-$Workers = [Math]::Min($Workers, [Math]::Max(1, [Environment]::ProcessorCount))
+if ($Workers -gt [Math]::Max(1, [Environment]::ProcessorCount)) {
+    throw "-Workers exceeds the host logical processor count; Clearra does not silently reduce explicit workers."
+}
 if ($OutputExcerptLines -lt 1) {
     throw "-OutputExcerptLines must be at least 1."
 }

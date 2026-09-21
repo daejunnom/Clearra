@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import io
 import json
@@ -10,6 +11,7 @@ import copy
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -215,6 +217,299 @@ class ManagementPolicyTests(unittest.TestCase):
             and MANAGE.process_candidate(path)
         }
         self.assertEqual(registered, actual)
+        required = {
+            "profile",
+            "runtime",
+            "tree_ownership",
+            "timeout",
+            "termination_grace",
+            "memory_enforcement",
+            "output_limit",
+            "oom_policy",
+        }
+        for entry in self.policy["process_registry"]:
+            with self.subTest(path=entry["path"]):
+                self.assertFalse(required - set(entry))
+                if entry["profile"] == "benchmark-search":
+                    self.assertTrue(entry.get("explicit_timeout"))
+                if entry["profile"] == "local-service":
+                    self.assertTrue(entry.get("explicit_lease"))
+
+    def test_process_surface_mutations_are_detected(self) -> None:
+        fixtures = {
+            "call-operator.ps1": "$result = @(& $python -V)\n",
+            "node-fork.mjs": (
+                'import { fork } from "node:child_process";\n'
+                'fork("worker.mjs");\n'
+            ),
+            "python-spawn.py": "import os\nos.spawnve(os.P_WAIT, 'x', ['x'], {})\n",
+            "shell-exec.sh": "if true; then exec node tool.mjs; fi\n",
+        }
+        parent = ROOT / "_local" / "tmp" / "management-tests"
+        parent.mkdir(parents=True, exist_ok=True)
+        try:
+            for name, source in fixtures.items():
+                fixture = parent / name
+                fixture.write_text(source, encoding="utf-8")
+                with self.subTest(name=name):
+                    self.assertTrue(MANAGE.process_candidate(fixture))
+        finally:
+            for name in fixtures:
+                (parent / name).unlink(missing_ok=True)
+
+    def test_runtime_policy_mutations_are_rejected(self) -> None:
+        missing_profile = copy.deepcopy(self.policy)
+        del missing_profile["process_registry"][0]["profile"]
+        self.assertTrue(MANAGE.runtime_policy_failures(missing_profile))
+
+        duplicate_process = copy.deepcopy(self.policy)
+        duplicate_process["process_registry"].append(
+            copy.deepcopy(duplicate_process["process_registry"][0])
+        )
+        self.assertTrue(
+            any(
+                "duplicate process registration" in failure
+                for failure in MANAGE.runtime_policy_failures(duplicate_process)
+            )
+        )
+
+        retrying_oom = copy.deepcopy(self.policy)
+        retrying_oom["process_registry"][0]["oom_policy"] = "retry"
+        self.assertTrue(
+            any(
+                "permits retry" in failure
+                for failure in MANAGE.runtime_policy_failures(retrying_oom)
+            )
+        )
+
+        unlimited = copy.deepcopy(self.policy)
+        unlimited["process_registry"][0]["timeout"] = 0
+        self.assertTrue(
+            any(
+                "unbounded" in failure
+                for failure in MANAGE.runtime_policy_failures(unlimited)
+            )
+        )
+
+        unmanaged_tree = copy.deepcopy(self.policy)
+        unmanaged_tree["process_registry"][0]["tree_ownership"] = "unmanaged"
+        self.assertTrue(
+            any(
+                "tree termination is unmanaged" in failure
+                for failure in MANAGE.runtime_policy_failures(unmanaged_tree)
+            )
+        )
+
+        unmanaged_memory = copy.deepcopy(self.policy)
+        unmanaged_memory["process_registry"][0]["memory_enforcement"] = "none"
+        self.assertTrue(
+            any(
+                "memory enforcement is unmanaged" in failure
+                for failure in MANAGE.runtime_policy_failures(unmanaged_memory)
+            )
+        )
+
+        weakened_cloud = copy.deepcopy(self.policy)
+        weakened_cloud["resource_profiles"]["cloud-job"]["concurrency"] = 2
+        self.assertTrue(
+            any(
+                "single-job contract" in failure
+                for failure in MANAGE.runtime_policy_failures(weakened_cloud)
+            )
+        )
+
+        no_kill_on_close = copy.deepcopy(self.policy)
+        no_kill_on_close["runtime_policy"]["process_tree_contract"][
+            "windows_job_kill_on_close"
+        ] = False
+        self.assertTrue(
+            any(
+                "process-tree termination contract" in failure
+                for failure in MANAGE.runtime_policy_failures(no_kill_on_close)
+            )
+        )
+
+        no_wsl_parent_loss_poweroff = copy.deepcopy(self.policy)
+        no_wsl_parent_loss_poweroff["runtime_policy"]["process_tree_contract"][
+            "wsl_guest_parent_loss_poweroff"
+        ] = False
+        self.assertTrue(
+            any(
+                "process-tree termination contract" in failure
+                for failure in MANAGE.runtime_policy_failures(no_wsl_parent_loss_poweroff)
+            )
+        )
+
+        unsafe_bootstrap = copy.deepcopy(self.policy)
+        unsafe_bootstrap["runtime_policy"]["wsl"]["bootstrap"][
+            "first_boot_systemd"
+        ] = True
+        self.assertTrue(
+            any(
+                "bootstrap policy" in failure
+                for failure in MANAGE.runtime_policy_failures(unsafe_bootstrap)
+            )
+        )
+
+        unsafe_contexts = copy.deepcopy(self.policy)
+        del unsafe_contexts["runtime_policy"]["hard_containment_context_env"][
+            "deployment"
+        ]
+        self.assertTrue(
+            any(
+                "hard-containment contexts" in failure
+                for failure in MANAGE.runtime_policy_failures(unsafe_contexts)
+            )
+        )
+
+        unsafe_idle_memory = copy.deepcopy(self.policy)
+        unsafe_idle_memory["runtime_policy"]["browser_wasm"][
+            "idle_worker_memory_ceiling_bytes"
+        ] = 0
+        self.assertTrue(
+            any(
+                "idle-memory lifecycle" in failure
+                for failure in MANAGE.runtime_policy_failures(unsafe_idle_memory)
+            )
+        )
+
+        mixed_port_roles = copy.deepcopy(self.policy)
+        mixed_port_roles["runtime_policy"]["local_ports"]["4195"]["role"] = (
+            "local-product-test"
+        )
+        self.assertTrue(
+            any(
+                "port roles differ" in failure
+                for failure in MANAGE.runtime_policy_failures(mixed_port_roles)
+            )
+        )
+
+        unsupervised_git = copy.deepcopy(self.policy)
+        unsupervised_git["runtime_policy"]["management_command_profiles"]["git"][
+            "upload"
+        ] = "build-test"
+        self.assertTrue(
+            any(
+                "management subcommands" in failure
+                for failure in MANAGE.runtime_policy_failures(unsupervised_git)
+            )
+        )
+
+    def test_management_subcommands_select_the_committed_runtime_profile(self) -> None:
+        cases = {
+            ("storage", "audit"): "control",
+            ("storage", "verify"): "control",
+            ("storage", "clean"): "control",
+            ("toolchain", "check"): "control",
+            ("toolchain", "sync"): "build-test",
+            ("deps", "install"): "build-test",
+            ("package", "pack"): "build-test",
+            ("git", "review"): "control",
+            ("git", "promote"): "build-test",
+        }
+        for (domain, action), expected in cases.items():
+            with self.subTest(domain=domain, action=action):
+                arguments = argparse.Namespace(domain=domain, action=action)
+                self.assertEqual(
+                    MANAGE.management_command_profile(arguments, self.policy),
+                    expected,
+                )
+        self.assertIsNone(
+            MANAGE.management_command_profile(
+                argparse.Namespace(domain="runtime", action="audit"), self.policy
+            )
+        )
+
+    def test_direct_management_subcommand_enters_the_runtime_supervisor_once(self) -> None:
+        arguments = [
+            "git",
+            "check",
+            "--candidate",
+            "codex/converge-supervision-fixture",
+        ]
+        environment = os.environ.copy()
+        environment.pop("CLEARRA_RUNTIME_SUPERVISED", None)
+        with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(
+            MANAGE, "run_management_command_supervised", return_value=17
+        ) as supervised:
+            self.assertEqual(MANAGE.main(arguments), 17)
+        supervised.assert_called_once()
+        self.assertEqual(supervised.call_args.args[0], arguments)
+        self.assertEqual(supervised.call_args.args[1].domain, "git")
+        self.assertEqual(supervised.call_args.args[1].action, "check")
+
+    def test_release_management_commands_activate_hard_containment(self) -> None:
+        arguments = argparse.Namespace(domain="package", action="publish", apply=True)
+        result = SimpleNamespace(returncode=0, receipt=lambda: {"reason": "normal"})
+        with mock.patch.object(
+            MANAGE.runtime_owner, "run_host_process", return_value=result
+        ) as supervised, mock.patch.object(MANAGE, "write_receipt"):
+            self.assertEqual(
+                MANAGE.run_management_command_supervised(
+                    ["package", "publish", "--apply"], arguments, self.policy
+                ),
+                0,
+            )
+        self.assertEqual(supervised.call_args.kwargs["env"]["CLEARRA_RELEASE"], "1")
+
+    def test_benchmark_and_local_service_require_explicit_runtime_leases(self) -> None:
+        for domain in ("runtime", "storage"):
+            for producer, profile in (
+                ("benchmark", "benchmark-search"),
+                ("browser", "local-service"),
+            ):
+                arguments = argparse.Namespace(
+                    domain=domain,
+                    producer=producer,
+                    profile=profile,
+                    timeout=None,
+                    minimum_memory_mib=None,
+                    export_path=[],
+                    command=[sys.executable, "-V"],
+                )
+                with self.subTest(domain=domain, profile=profile), self.assertRaisesRegex(
+                    MANAGE.ManagementError, "explicit --timeout"
+                ):
+                    MANAGE.storage_run(arguments, self.policy)
+
+    def test_local_benchmark_server_uses_only_the_reserved_port(self) -> None:
+        material = (
+            ROOT / "scripts" / "tools" / "run-wasm-browser-benchmark.mjs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("export const BENCHMARK_PORT = 4195;", material)
+        self.assertIn("benchmarkPort !== BENCHMARK_PORT", material)
+        self.assertIn(
+            "server.listen({ host: '127.0.0.1', port: benchmarkPort, exclusive: true }",
+            material,
+        )
+
+    def test_producer_cannot_downgrade_to_an_unregistered_profile(self) -> None:
+        arguments = argparse.Namespace(
+            domain="runtime",
+            producer="cargo",
+            profile="control",
+            timeout=300,
+            minimum_memory_mib=None,
+            export_path=[],
+            command=[sys.executable, "-V"],
+        )
+        with self.assertRaisesRegex(
+            MANAGE.ManagementError, "profile is not registered for producer"
+        ):
+            MANAGE.storage_run(arguments, self.policy)
+
+    def test_raw_wsl_mutation_is_detected_outside_supervisor(self) -> None:
+        parent = ROOT / "_local" / "tmp" / "management-tests"
+        parent.mkdir(parents=True, exist_ok=True)
+        fixture = parent / "raw-wsl-mutation.py"
+        fixture.write_text(
+            "import subprocess\nsubprocess.run(['wsl.exe', '--list'])\n",
+            encoding="utf-8",
+        )
+        try:
+            self.assertTrue(MANAGE.raw_wsl_invocation(fixture))
+        finally:
+            fixture.unlink(missing_ok=True)
 
     def test_shared_store_delta_records_file_identity_without_contents(self) -> None:
         before = {"a": {"file_id": "1:1", "bytes": 2, "mtime_ns": 3}}

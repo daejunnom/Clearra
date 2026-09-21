@@ -77,6 +77,7 @@ export type ClearraWasmModule = {
   cancel_gpu_warmup: () => void;
   profile_start?: () => void;
   profile_finish?: () => unknown;
+  linear_memory_bytes: () => number;
   failure_diagnostics: () => ClearraWasmFailureDiagnostics;
 };
 
@@ -999,6 +1000,9 @@ function wrapRawModule(
     } : {}),
     compiled_module() {
       return compiledModule;
+    },
+    linear_memory_bytes() {
+      return raw.memory.buffer.byteLength;
     },
     failure_diagnostics() {
       // Evidence extraction must not replace the original trap with a second

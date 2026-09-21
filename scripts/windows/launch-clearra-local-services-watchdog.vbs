@@ -1,25 +1,26 @@
 Option Explicit
 
-Dim fileSystem
 Dim shell
-Dim runtimeDirectory
-Dim watcherPath
-Dim configPath
 Dim command
 Dim exitCode
 
-Set fileSystem = CreateObject("Scripting.FileSystemObject")
+If WScript.Arguments.Count <> 4 Then
+    WScript.Quit 2
+End If
+
 Set shell = CreateObject("WScript.Shell")
-runtimeDirectory = fileSystem.GetParentFolderName(WScript.ScriptFullName)
-watcherPath = fileSystem.BuildPath(runtimeDirectory, "clearra-local-services-watchdog.ps1")
-configPath = fileSystem.BuildPath(runtimeDirectory, "clearra-local-services-watchdog.json")
+command = Quote(WScript.Arguments(0)) & _
+    " -B " & Quote(WScript.Arguments(1)) & _
+    " runtime run --producer management --profile local-service --timeout 7200 -- " & _
+    "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File " & _
+    Quote(WScript.Arguments(2)) & " -ConfigPath " & Quote(WScript.Arguments(3))
 
-command = "powershell.exe -NoLogo -NoProfile -NonInteractive " & _
-    "-ExecutionPolicy Bypass -WindowStyle Hidden -File """ & watcherPath & """ " & _
-    "-ConfigPath """ & configPath & """"
-
-' Window style 0 is mandatory: the launcher and child PowerShell stay hidden.
-' Waiting keeps Task Scheduler bound to the watchdog lifetime and propagates a
-' crash so the registered one-minute restart policy can actually run.
+' Window style 0 keeps the launcher, Python supervisor, PowerShell watchdog,
+' and descendants hidden. Waiting keeps Task Scheduler bound to the complete
+' 120-minute lease and lets a typed timeout trigger the configured restart.
 exitCode = shell.Run(command, 0, True)
 WScript.Quit exitCode
+
+Function Quote(value)
+    Quote = Chr(34) & Replace(value, Chr(34), Chr(34) & Chr(34)) & Chr(34)
+End Function

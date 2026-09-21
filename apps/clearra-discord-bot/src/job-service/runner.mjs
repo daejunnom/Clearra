@@ -29,6 +29,7 @@ export class ClearraCommandRunner {
     this.now = options.now ?? Date.now;
     this.setTimeout = options.setTimeout ?? setTimeout;
     this.clearTimeout = options.clearTimeout ?? clearTimeout;
+    this.readOomKillCount = options.readOomKillCount ?? readCgroupOomKillCount;
   }
 
   async verifyCapabilities() {
@@ -97,6 +98,14 @@ export class ClearraCommandRunner {
     const arguments_ = artifactPlan
       ? [...preparedArguments, "--output", artifactPlan.outputPath]
       : preparedArguments;
+    const readOomEvidence = async () => {
+      try {
+        return await this.readOomKillCount();
+      } catch {
+        return null;
+      }
+    };
+    const oomKillCountBefore = await readOomEvidence();
 
     try {
       return await new Promise((resolveJob, rejectJob) => {
@@ -188,6 +197,13 @@ export class ClearraCommandRunner {
         const stdoutText = Buffer.concat(stdout).toString("utf8").trim();
         const stderrText = Buffer.concat(stderr).toString("utf8").trim();
         void (async () => {
+          const oomKillCountAfter = signal === "SIGKILL"
+            ? await readOomEvidence()
+            : oomKillCountBefore;
+          const confirmedOom = signal === "SIGKILL" &&
+            Number.isSafeInteger(oomKillCountBefore) &&
+            Number.isSafeInteger(oomKillCountAfter) &&
+            oomKillCountAfter > oomKillCountBefore;
           const artifact = code === 0 && artifactPlan
             ? await readRenderArtifact(artifactPlan, stdoutText)
             : null;
@@ -197,6 +213,11 @@ export class ClearraCommandRunner {
           finish(() => resolveJob(assertDiscordCanonicalOnlyResult({
             exitCode: code ?? -1,
             signal: signal ?? null,
+            terminationReason: confirmedOom
+              ? "oom"
+              : signal === "SIGKILL" ? "forced-signal" : "exit",
+            oomKillCountBefore,
+            oomKillCountAfter,
             stdout: sanitizedStdout,
             stderr: stderrText,
             ...(artifact ? { artifact } : {}),
@@ -210,6 +231,23 @@ export class ClearraCommandRunner {
     } finally {
       await cleanupRenderArtifactPlan(artifactPlan);
     }
+  }
+}
+
+async function readCgroupOomKillCount() {
+  if (process.platform !== "linux") return null;
+  try {
+    const membership = await readFile("/proc/self/cgroup", "utf8");
+    const unified = membership.split(/\r?\n/u).find((line) => line.startsWith("0::"));
+    if (!unified) return null;
+    const relative = unified.slice(3).replace(/^\/+|\/+$/gu, "");
+    const eventsPath = join("/sys/fs/cgroup", relative, "memory.events");
+    const events = await readFile(eventsPath, "utf8");
+    const value = /^oom_kill\s+(\d+)$/mu.exec(events)?.[1];
+    const parsed = value === undefined ? null : Number.parseInt(value, 10);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
 }
 

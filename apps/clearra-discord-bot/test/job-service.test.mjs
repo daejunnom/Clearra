@@ -585,6 +585,50 @@ test("job runner sends curated sfinder argv without shell interpretation", async
   ]);
 });
 
+test("SIGKILL is classified as OOM only when the container counter advances", async () => {
+  for (const fixture of [
+    { counts: [7, 8], expected: "oom" },
+    { counts: [7, 7], expected: "forced-signal" },
+    { counts: [null, null], expected: "forced-signal" },
+  ]) {
+    let index = 0;
+    const runner = new ClearraCommandRunner(
+      {
+        executable: "clearra",
+        processLogicalProcessors: 1,
+        searchWorkersPerSession: 1,
+        useAllLogicalProcessors: false,
+        searchTimeoutMs: 5_000,
+        maxOutputBytes: 1024 * 1024,
+        terminationGraceMs: 100,
+      },
+      {
+        readOomKillCount: async () => fixture.counts[index++],
+        spawn: () => {
+          const child = new EventEmitter();
+          child.stdout = new PassThrough();
+          child.stderr = new PassThrough();
+          child.exitCode = null;
+          child.signalCode = null;
+          child.kill = () => true;
+          queueMicrotask(() => {
+            child.signalCode = "SIGKILL";
+            child.emit("close", null, "SIGKILL");
+          });
+          return child;
+        },
+      },
+    );
+    const result = await runner.execute({
+      arguments: ["sfinder", "chance", "v115@vhAAgH", "P7P3", "4"],
+      deadlineUnixMs: Date.now() + 5_000,
+      maxOutputBytes: 1024 * 1024,
+    });
+    assert.equal(result.terminationReason, fixture.expected);
+    assert.equal(result.signal, "SIGKILL");
+  }
+});
+
 test("job runner transports one exact bounded render artifact and cleans its private path", async () => {
   const bytes = Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),

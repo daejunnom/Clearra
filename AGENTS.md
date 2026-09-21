@@ -38,6 +38,45 @@ manifest before it writes. A path-policy warning may mention the local
 forcing is not recommended. CI, release, deployment, Git ref mutations,
 credential paths, and link escapes never accept that override.
 
+Every process execution point must also register a resource profile and the
+complete tree-ownership, timeout, termination-grace, hard-memory, output-limit,
+and no-OOM-retry contract in `config/clearra-management.v1.json`. Launch host
+commands with `python -B _local/clearra_manage.py runtime run --producer <id>
+--profile <profile> -- <command>`; the compatible `storage run` command
+delegates to the same supervisor. Do not add raw `spawn`, `Start-Process`,
+`subprocess`, `std::process`, workflow/Docker launchers, or shell `exec` sites
+without that registration.
+
+The documented `storage audit|verify|clean`, `toolchain`, `deps`, `package`, and
+`git` management subcommands enter their manifest-selected supervisor profile
+automatically when called directly. `storage run` and `runtime run` are the
+supervisor entrypoints themselves. If an outer managed command already owns the
+tree, nested management commands inherit that boundary and do not create a
+second supervisor.
+The manifest automatically marks the `release-evidence` producer, applied
+package publication, `main` promotion, and applied ruleset changes as release
+contexts. Do not clear `CLEARRA_RELEASE` or bypass the finite cgroup/Job Object
+requirement for those operations.
+
+`_local/clearra_runtime.py` is the only production source allowed to invoke
+the WSL host executable. Do not invoke raw `wsl`, its `.exe` launcher, arbitrary
+`bash -lc`, or the global WSL shutdown command. WSL work must use a registered
+fixed guest entrypoint through `python -B _local/clearra_manage.py runtime wsl
+run --entry <id> -- <arguments>`. Clearra owns only the dedicated
+`Clearra-Build` distribution, terminates only that distribution after each
+lease, and treats `.wslconfig` as read-only. A new WSL entrypoint must declare
+its profile and source requirement in the manifest before it runs.
+
+Do not silently lower worker counts, enable normal-path `MemoryHigh` or RSS
+sampling, or retry an OOM with different resources. Admission failure and OOM
+must remain distinct typed failures, and the outer process boundary owns all
+descendants without adding supervisor work to solver hot paths.
+
 Never read, archive, print, or otherwise inspect `.env` files, keys, service
 account files, API keys, or credential files. Report only that a prohibited
 path blocked the operation.
+
+Local port ownership is fixed: `4194` is the local product-test GUI, `4195` is
+the finite A/B benchmark GUI, and `8790` is the Discord bot management surface
+reached through its managed local SSH forward. Do not substitute one port for
+another or let the benchmark helper adopt the product or management listener.

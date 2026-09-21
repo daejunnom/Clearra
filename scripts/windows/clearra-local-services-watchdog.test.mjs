@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile as readFileCallback, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readFile as readFileCallback, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
@@ -37,10 +36,13 @@ test("local-services watcher is one hidden 60-second owner for ports 4194 and 87
   assert.match(watcher, /"--app", "web", "--task", "dev", "--recovery"/u);
   assert.match(watcher, /\$escapedFrontendPath/u);
   assert.doesNotMatch(watcher, /-ArgumentList[^\r\n]*-f \$vitePath/u);
-  assert.doesNotMatch(watcher, /-ArgumentList @\(\$NpmCliPath, "run", "dev"/u);
+  assert.doesNotMatch(watcher, /NpmCliPath|npm_cli_path|npm-cli/iu);
+  assert.doesNotMatch(installer, /npmCliPath|npm_cli_path|npm-cli/iu);
 
   assert.match(launcher, /exitCode = shell\.Run\(command, 0, True\)/u);
   assert.match(launcher, /WScript\.Quit exitCode/u);
+  assert.match(launcher, /runtime run --producer management --profile local-service --timeout 7200/u);
+  assert.match(launcher, /powershell\.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden/u);
   assert.match(installer, /\$legacyTaskNames = @\("Clearra Local Runtime"\)/u);
   assert.match(installer, /\$existingTaskWasRunning/u);
   assert.match(installer, /Register-ScheduledTask[\s\S]*-Force/u);
@@ -54,14 +56,25 @@ test("local-services watcher is one hidden 60-second owner for ports 4194 and 87
   assert.match(installer, /-Hidden/u);
   assert.match(installer, /-RestartCount 3/u);
   assert.match(installer, /-RestartInterval \(New-TimeSpan -Minutes 1\)/u);
+  assert.match(installer, /-RepetitionInterval \(New-TimeSpan -Minutes 5\)/u);
+  assert.match(installer, /_local\\clearra_manage\.py/u);
   assert.match(installer, /clearra-local-services-watchdog\.json/u);
+  assert.match(watcher, /Clearra\\logs\\local-services-v2\.log/u);
+  assert.match(installer, /Clearra\\state\\local-services-v2/u);
+  assert.doesNotMatch(watcher + installer, /Clearra\\startup/u);
+  assert.match(watcher, /storage verify --path \$EventLogPath/u);
+  assert.match(installer, /storage verify --path \$runtimeDirectory/u);
+  assert.match(watcher, /Assert-ManagedStateInput -Path \$ConfigPath/u);
   assert.match(launcher, /-ConfigPath/u);
   assert.match(installer, /wscript\.exe/u);
   assert.doesNotMatch(installer, /Register-ScheduledTask[\s\S]*cmd\.exe/iu);
 });
 
 test("occupied GUI port is preserved without attempting a replacement process", { skip: process.platform !== "win32" }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "clearra-watchdog-test-"));
+  const outputRoots = JSON.parse(process.env.CLEARRA_MANAGED_OUTPUT_ROOTS ?? "{}");
+  const temporaryRoot = outputRoots.temporary ?? join(root, "_local", "tmp", "management");
+  await mkdir(temporaryRoot, { recursive: true });
+  const directory = await mkdtemp(join(temporaryRoot, "watchdog-test-"));
   const logPath = join(directory, "watchdog.log");
   const server = createServer();
   await new Promise((resolveListen, reject) => {
@@ -81,12 +94,11 @@ test("occupied GUI port is preserved without attempting a replacement process", 
       "-GuiPort", String(address.port),
       "-RepoRoot", root,
       "-NodePath", join(directory, "missing-node.exe"),
-      "-NpmCliPath", join(directory, "missing-npm-cli.js"),
       "-EventLogPath", logPath,
     ]);
     assert.equal(result.code, 0, result.stderr);
     const log = await readFileCallback(logPath, "utf8");
-    assert.match(log, new RegExp(`gui preserved: port=${address.port} already-in-use`, "u"));
+    assert.match(log, /once gui-port-in-use=True/u);
     assert.doesNotMatch(log, /gui start requested|gui start failed/u);
     assert.equal(server.listening, true, "the occupied listener must remain active");
     assert.equal(await listenerOwner(address.port), before, "the listener PID must be preserved");

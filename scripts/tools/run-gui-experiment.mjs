@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// A leased audit server, not the persistent 4194 watchdog and not a search timeout.
+// A leased 4195 A/B benchmark server, separate from the persistent 4194
+// product-test GUI and the 8790 Discord bot management listener.
 import { fork } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createServer as createPortProbe } from 'node:net';
@@ -128,6 +129,12 @@ export async function serveOwnedExperiment(options, { events = process, loadVite
 if (process.argv[1] && resolve(process.argv[1]) === SELF) {
   try {
     const child = process.argv[2] === '--owned-server';
+    if (process.env.CLEARRA_RUNTIME_SUPERVISED !== '1' ||
+        process.env.CLEARRA_RUNTIME_PROFILE !== 'local-service') {
+      throw new Error(
+        'The 4195 A/B benchmark GUI must run through clearra_manage.py runtime run with the local-service profile'
+      );
+    }
     const options = experimentOptions(process.argv.slice(child ? 3 : 2));
     if (child) await serveOwnedExperiment(options);
     else await startExperiment(options);

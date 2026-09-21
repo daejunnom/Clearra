@@ -9,7 +9,7 @@ param(
     [string]$GpuInventoryMode = 'auto',
     [int]$Workers = [Math]::Max(1, [Environment]::ProcessorCount),
     [long]$WasmMaxNodes = 100000000,
-    [string]$Distribution = 'Ubuntu',
+    [string]$Distribution = 'Clearra-Build',
     [string]$OutputDirectory = '',
     [string]$WindowsBinaryPath = '',
     [string]$WslBinaryPath = '',
@@ -50,7 +50,6 @@ $selectedEnvironments = if ($Environment -eq 'all') {
     @($Environment)
 }
 $needsWindowsBuildOwner = $Prepare.IsPresent -and 'wasm' -in $selectedEnvironments
-$needsWslSourceOwner = $Prepare.IsPresent -and 'wsl' -in $selectedEnvironments
 if ($needsWindowsBuildOwner) {
     Assert-ClearraRequestedBuildPath -Path $WasmModuleDirectory -RepositoryRoot $Root | Out-Null
 }
@@ -166,10 +165,9 @@ function NativeBatchArtifactArguments([string]$BatchOutput, [int]$WorkerCount) {
 
 function Invoke-WindowsEnvironment {
     Assert-ClearraRuntimeEnvironmentAvailable 'windows' | Out-Null
-    $workerCount = if ($workersExplicitlyRequested) {
-        [Math]::Min([Math]::Max(1, $Workers), [Environment]::ProcessorCount)
-    } else {
-        [Math]::Max(1, [Environment]::ProcessorCount)
+    $workerCount = [Math]::Max(1, $Workers)
+    if ($workerCount -gt [Math]::Max(1, [Environment]::ProcessorCount)) {
+        throw 'Requested workers exceed the Windows logical processor count; no silent reduction is permitted.'
     }
     $prepareMs = 0.0
     if ($Prepare.IsPresent) {
@@ -253,122 +251,91 @@ function Invoke-WindowsEnvironment {
 }
 
 function Invoke-WslEnvironment {
-    $linuxHome = (& wsl.exe -d $Distribution -- sh -c 'printf %s "$HOME"' | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $linuxHome -notmatch '^/home/[^/]+$') { throw 'Could not resolve the WSL home.' }
-    $workspaceId = (Get-ClearraStableDigest @($Root.ToLowerInvariant())).Substring(0, 16)
-    $linuxSource = "$linuxHome/.local/share/Clearra/workspaces/$workspaceId/source"
-    $wslTransaction = Get-ClearraIndependentWslTransactionRoot $linuxSource $Distribution
-    $binary = if ([string]::IsNullOrWhiteSpace($WslBinaryPath)) {
-        "$wslTransaction/cargo-target/release/clearra-pc-artifact"
-    } else { $WslBinaryPath }
-    if ($binary -notmatch '^/') { throw 'The WSL runtime artifact must be an absolute Linux path.' }
-    if ($Prepare.IsPresent -and $binary -cne "$wslTransaction/cargo-target/release/clearra-pc-artifact") {
-        throw 'WSL preparation can execute only the exact binary produced by its selected transaction.'
+    if (-not $Prepare.IsPresent) {
+        throw 'The managed WSL comparison requires -Prepare; cached or caller-supplied WSL binaries are not accepted.'
     }
-    $sync = if ($Prepare.IsPresent) {
-        Ensure-ClearraBuildArtifactCache -RepositoryRoot $Root
-        Sync-ClearraWslExt4Workspace $Root $Distribution
+    if ($Distribution -cne 'Clearra-Build') {
+        throw 'Only the managed Clearra-Build distribution is available to Clearra.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WslBinaryPath)) {
+        throw 'A caller-supplied WSL binary cannot bypass the managed build-and-batch entrypoint.'
+    }
+    $workerSelection = if ($workersExplicitlyRequested) {
+        ([Math]::Max(1, $Workers)).ToString()
     } else {
-        # Consuming a prebuilt binary must not synchronize source or initialize
-        # a transient owner that replaces prior Windows experiment artifacts.
-        [pscustomobject]@{ workspace=$linuxSource; sync_performed=$false }
+        'auto'
     }
-    $linuxCores = [int]((& wsl.exe -d $Distribution -- nproc | Out-String).Trim())
-    $workerCount = if ($workersExplicitlyRequested) {
-        [Math]::Min([Math]::Max(1, $Workers), $linuxCores)
-    } else {
-        [Math]::Max(1, $linuxCores - 1)
-    }
-    $linuxReportRoot = "$linuxHome/.local/state/Clearra/reports/runtime-environments/latest"
+    $linuxReportRoot = '/home/clearra/.local/state/Clearra/reports/runtime-environments/latest'
     $inventoryMode = if (Get-GpuInventoryRequested) { 'query' } else { 'skip' }
     $profileMode = if ($ProfileStages.IsPresent) { 'profile' } else { 'no-profile' }
-    $prepareMs = 0.0
-    if ($Prepare.IsPresent) {
-        $cargoFeatures = if ($ProfileStages.IsPresent) {
-            'gpu-backend,stage-profiling'
-        } else {
-            'gpu-backend'
-        }
-        $prepareArguments = New-ClearraIndependentWslBuildArguments `
-            -LinuxSourceRoot $sync.workspace -Distribution $Distribution `
-            -ScriptName 'wsl-pc-runtime-build-and-batch.sh' `
-            -CommandArguments @($cargoFeatures, $linuxReportRoot, $Backend, $GpuDevice, $workerCount.ToString(), $inventoryMode, $profileMode) `
-            -AdditionalEnvironment @{ CLEARRA_WSL_ENABLE_STAGE_PROFILING = $(if ($ProfileStages.IsPresent) { '1' } else { '0' }) }
-        $batch = Invoke-CapturedCommand 'wsl.exe' $prepareArguments
-        $prepareTime = [regex]::Match($batch.output, '(?m)^wsl_preparation_elapsed_ns=(\d+)\s*$')
-        $batchTime = [regex]::Match($batch.output, '(?m)^wsl_host_batch_elapsed_ns=(\d+)\s*$')
-        if (-not $prepareTime.Success -or -not $batchTime.Success) { throw 'WSL build/runtime timing records are missing.' }
-        $prepareMs = [double]$prepareTime.Groups[1].Value / 1000000.0
-        $batch.elapsed_ms = [double]$batchTime.Groups[1].Value / 1000000.0
+    $cargoFeatures = if ($ProfileStages.IsPresent) {
+        'gpu-backend,stage-profiling'
     } else {
-        & wsl.exe -d $Distribution -- test -x $binary
-        if ($LASTEXITCODE -ne 0) { throw "Prepared WSL artifact executable is missing: $binary" }
-        $authority = ConvertTo-ClearraWslBuildPath $script:ClearraPathPolicyRepositoryRoot $Distribution
-        $batch = Invoke-CapturedCommand 'wsl.exe' @(
-            '-d', $Distribution, '--', 'bash', "$authority/scripts/tools/wsl-pc-runtime-batch.sh",
-            $binary, $linuxReportRoot, $Backend, $GpuDevice, $workerCount.ToString(), $inventoryMode, $profileMode
-        )
+        'gpu-backend'
     }
-    $inventoryStatus = (& wsl.exe -d $Distribution -- cat "$linuxReportRoot/gpu-inventory.status" | Out-String).Trim()
-    $inventoryElapsedMs = [double]((& wsl.exe -d $Distribution -- cat "$linuxReportRoot/gpu-inventory-time-ns" | Out-String).Trim()) / 1000000.0
+    $sessionOutput = Join-Path $outputRoot '_wsl-managed-session'
+    New-Item -ItemType Directory -Force -Path $sessionOutput | Out-Null
+    $python = (Get-Command 'python' -ErrorAction Stop).Source
+    $arguments = New-ClearraManagedWslEntryArguments `
+        -RepositoryRoot $Root `
+        -Entry 'pc-runtime-build-batch' `
+        -CommandArguments @(
+        '--host-output', $sessionOutput,
+        $cargoFeatures, $linuxReportRoot, $Backend, $GpuDevice,
+        $workerSelection, $inventoryMode, $profileMode
+    )
+    $batch = Invoke-CapturedCommand $python $arguments
+    $prepareTime = [regex]::Match($batch.output, '(?m)^wsl_preparation_elapsed_ns=(\d+)\s*$')
+    $batchTime = [regex]::Match($batch.output, '(?m)^wsl_host_batch_elapsed_ns=(\d+)\s*$')
+    if (-not $prepareTime.Success -or -not $batchTime.Success) {
+        throw 'Managed WSL build/runtime timing records are missing.'
+    }
+    $hostInfo = Get-Content -LiteralPath (Join-Path $sessionOutput 'clearra-runtime-host.json') -Raw | ConvertFrom-Json
+    $workerCount = [int]$hostInfo.workers
+    if ($workerCount -gt [int]$hostInfo.logical_processors) {
+        throw 'The managed WSL session accepted an invalid worker count.'
+    }
+    $inventoryStatus = (Get-Content -LiteralPath (Join-Path $sessionOutput 'gpu-inventory.status') -Raw).Trim()
+    $inventoryElapsedMs = [double]((Get-Content -LiteralPath (Join-Path $sessionOutput 'gpu-inventory-time-ns') -Raw).Trim()) / 1000000.0
     if ($inventoryStatus -eq 'not-requested') {
         $inventory = New-SkippedGpuInventory
     } elseif ([int]$inventoryStatus -eq 0) {
-        $inventoryJson = (& wsl.exe -d $Distribution -- cat "$linuxReportRoot/gpu-inventory.json" | Out-String)
         $inventory = Convert-GpuInventoryResult ([pscustomobject]@{
             exit_code = 0
-            output = $inventoryJson
+            output = Get-Content -LiteralPath (Join-Path $sessionOutput 'gpu-inventory.json') -Raw
             elapsed_ms = $inventoryElapsedMs
         })
     } else {
-        $inventoryError = (& wsl.exe -d $Distribution -- cat "$linuxReportRoot/gpu-inventory.error" | Out-String).Trim()
         $inventory = Convert-GpuInventoryResult ([pscustomobject]@{
             exit_code = [int]$inventoryStatus
-            output = $inventoryError
+            output = (Get-Content -LiteralPath (Join-Path $sessionOutput 'gpu-inventory.error') -Raw).Trim()
             elapsed_ms = $inventoryElapsedMs
         })
     }
     $caseTimes = @{}
-    $caseTimeLines = (& wsl.exe -d $Distribution -- cat "$linuxReportRoot/case-times.tsv" | Out-String) -split "`r?`n"
-    foreach ($line in $caseTimeLines) {
+    foreach ($line in @(Get-Content -LiteralPath (Join-Path $sessionOutput 'case-times.tsv'))) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $parts = $line -split "`t"
         if ($parts.Count -ne 3 -or [int]$parts[2] -ne 0) {
-            throw "Invalid WSL runtime batch timing record: $line"
+            throw "Invalid managed WSL runtime batch timing record: $line"
         }
         $caseTimes[$parts[0]] = [double]$parts[1] / 1000000.0
     }
     $results = foreach ($case in $cases) {
-        $linuxCaseOutput = "$linuxReportRoot/$($case.id)"
-        $summaryJson = (& wsl.exe -d $Distribution -- cat "$linuxCaseOutput/summary.json" | Out-String)
-        if ($LASTEXITCODE -ne 0) { throw "Failed to read WSL summary: $linuxCaseOutput" }
+        $sessionCaseOutput = Join-Path $sessionOutput $case.id
+        $summaryJson = Get-Content -LiteralPath (Join-Path $sessionCaseOutput 'summary.json') -Raw
         $summary = $summaryJson | ConvertFrom-Json
         $hostCaseOutput = Join-Path $outputRoot "wsl-$($case.id)"
         New-Item -ItemType Directory -Force -Path $hostCaseOutput | Out-Null
-        [System.IO.File]::WriteAllText(
-            (Join-Path $hostCaseOutput 'summary.json'),
-            $summaryJson,
-            [System.Text.UTF8Encoding]::new($false)
-        )
         foreach ($artifactName in @(
-            'solutions.fumen',
-            'solution-probabilities.jsonl',
-            'timings.json',
-            'stdout.log',
-            'stderr.log'
+            'summary.json', 'solutions.fumen', 'solution-probabilities.jsonl', 'timings.json'
         )) {
-            if ($artifactName -in @('stdout.log', 'stderr.log')) {
-                Copy-ClearraWslFileToWindows `
-                    $Distribution `
-                    "$linuxReportRoot/$artifactName" `
-                    (Join-Path $hostCaseOutput $artifactName) `
-                    -AllowEmpty | Out-Null
-            } else {
-                Copy-ClearraWslFileToWindows `
-                    $Distribution `
-                    "$linuxCaseOutput/$artifactName" `
-                    (Join-Path $hostCaseOutput $artifactName) | Out-Null
-            }
+            Copy-Item -LiteralPath (Join-Path $sessionCaseOutput $artifactName) `
+                -Destination (Join-Path $hostCaseOutput $artifactName) -Force
+        }
+        foreach ($artifactName in @('stdout.log', 'stderr.log')) {
+            Copy-Item -LiteralPath (Join-Path $sessionOutput $artifactName) `
+                -Destination (Join-Path $hostCaseOutput $artifactName) -Force
         }
         [pscustomobject]@{
             scenario = $case.id
@@ -387,18 +354,18 @@ function Invoke-WslEnvironment {
     }
     return [pscustomobject]@{
         environment = 'wsl-native'
-        distribution = $Distribution
-        runtime_root = $sync.workspace
-        runtime_artifact = $binary
-        prepared_this_run = $Prepare.IsPresent
-        runtime_filesystem = (& wsl.exe -d $Distribution -- stat -f -c %T $sync.workspace | Out-String).Trim()
-        windows_mount_used_by_runtime = $binary.StartsWith('/mnt/')
+        distribution = 'Clearra-Build'
+        runtime_root = $hostInfo.runtime_root
+        runtime_artifact = 'managed:clearra-pc-artifact'
+        prepared_this_run = $true
+        runtime_filesystem = $hostInfo.runtime_filesystem
+        windows_mount_used_by_runtime = $false
         windows_path_entries_used_by_runtime = $false
-        source_sync_performed = $sync.sync_performed
+        source_sync_performed = $true
         preparation_excluded_from_case_timings = $true
-        preparation_elapsed_ms = $prepareMs
-        host_batch_elapsed_ms = $batch.elapsed_ms
-        logical_processors = $linuxCores
+        preparation_elapsed_ms = [double]$prepareTime.Groups[1].Value / 1000000.0
+        host_batch_elapsed_ms = [double]$batchTime.Groups[1].Value / 1000000.0
+        logical_processors = [int]$hostInfo.logical_processors
         workers_used_limit = $workerCount
         gpu_inventory = $inventory
         results = @($results)
@@ -560,7 +527,7 @@ if ($environmentFailures.Count -gt 0) {
     $failedNames = @($environmentFailures | ForEach-Object { $_.environment }) -join ', '
     throw "Runtime environment comparison is incomplete for: $failedNames. Report: $comparisonPath"
 }
-if (($needsWindowsBuildOwner -or $needsWslSourceOwner) -and (Test-ClearraBuildTransactionOwner)) { Complete-ClearraBuildTransaction }
+if ($needsWindowsBuildOwner -and (Test-ClearraBuildTransactionOwner)) { Complete-ClearraBuildTransaction }
 } finally {
-    if ($needsWindowsBuildOwner -or $needsWslSourceOwner) { Exit-ClearraBuildArtifactCacheUsage }
+    if ($needsWindowsBuildOwner) { Exit-ClearraBuildArtifactCacheUsage }
 }

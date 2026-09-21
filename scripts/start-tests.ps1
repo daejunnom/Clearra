@@ -19,7 +19,7 @@ param(
     [string]$ExecutionSurface = "ManagedLocal",
     [ValidateSet("auto", "windows", "wsl", "wasm")]
     [string]$RuntimeEnvironment = "auto",
-    [string]$WslDistribution = "Ubuntu",
+    [string]$WslDistribution = "Clearra-Build",
 
     [string]$CargoPath = "cargo",
     [string]$PowerShellPath = "powershell"

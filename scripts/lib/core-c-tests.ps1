@@ -115,7 +115,9 @@ function Invoke-CoreCTestWsl(
     }
 
     $repositoryRoot = Resolve-ClearraBuildSourceRoot
-    $sync = Sync-ClearraWslExt4Workspace $repositoryRoot $WslDistribution
+    if ($WslDistribution -cne 'Clearra-Build') {
+        throw 'Clearra C tests use only the managed Clearra-Build distribution.'
+    }
     $workerCount = [Math]::Max(1, $Workers)
     $commandArguments = @('--workers', [string]$workerCount)
     if (Test-CoreCTestConfigureArgEnabled $ConfigureArgs 'CLEARRA_CORE_ENABLE_ASAN') {
@@ -129,12 +131,12 @@ function Invoke-CoreCTestWsl(
     if (-not [string]::IsNullOrWhiteSpace($testName)) {
         $commandArguments += @('--test', $testName)
     }
-    $arguments = New-ClearraIndependentWslBuildArguments `
-        -LinuxSourceRoot $sync.workspace -Distribution $WslDistribution `
-        -ScriptName 'wsl-core-c-tests.sh' -CommandArguments $commandArguments
-    $wslTransaction = Get-ClearraIndependentWslTransactionRoot $sync.workspace $WslDistribution
-
-    $result = Invoke-CoreCNativeCapture 'wsl.exe' $arguments 'WSL aggregate C tests'
+    $python = (Get-Command 'python' -ErrorAction Stop).Source
+    $arguments = New-ClearraManagedWslEntryArguments `
+        -RepositoryRoot $repositoryRoot `
+        -Entry 'core-c-tests' `
+        -CommandArguments $commandArguments
+    $result = Invoke-CoreCNativeCapture $python $arguments 'managed WSL aggregate C tests'
     if ($result.ExitCode -ne 0) {
         Write-CoreCFailureExcerpt $result.Output
         throw "WSL aggregate C tests failed with exit code $($result.ExitCode)"
@@ -148,9 +150,9 @@ function Invoke-CoreCTestWsl(
         -TestCount 1 `
         -TestLayout 'wsl-aggregate' `
         -InternalTestCount $internalTestCount `
-        -BuildDir $wslTransaction `
+        -BuildDir 'Clearra-Build managed ext4 transaction' `
         -Output $result.Output `
-        -Command "wsl.exe $($arguments -join ' ')"
+        -Command "python -B _local/clearra_manage.py runtime wsl run --entry core-c-tests"
 }
 function Invoke-CoreCTest(
     [string]$BuildDir,
@@ -163,15 +165,15 @@ function Invoke-CoreCTest(
     [int]$Workers = 1,
     [ValidateSet('auto', 'windows', 'wsl')]
     [string]$RuntimeEnvironment = 'auto',
-    [string]$WslDistribution = 'Ubuntu'
+    [string]$WslDistribution = 'Clearra-Build'
 ) {
     $record = Assert-CoreCActiveBuildTransaction
     Assert-ClearraRequestedBuildPath -Path $BuildDir -RepositoryRoot $record.source_root | Out-Null
     Assert-CoreCManagedConfigureArgs $ConfigureArgs
-    $workerCount = [Math]::Min(
-        [Math]::Max(1, $Workers),
-        [Math]::Max(1, [Environment]::ProcessorCount)
-    )
+    $workerCount = [Math]::Max(1, $Workers)
+    if ($workerCount -gt [Math]::Max(1, [Environment]::ProcessorCount)) {
+        throw 'Requested C-test workers exceed the host logical processor count; no silent reduction is permitted.'
+    }
     if ([string]::IsNullOrWhiteSpace($BuildDir)) {
         $BuildDir = if ($BuildOnly.IsPresent) {
             "core-c-library-cache"

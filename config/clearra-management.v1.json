@@ -240,6 +240,18 @@
       "lifecycle": "clearra-owned-receipted-clean-only"
     },
     {
+      "id": "temporary",
+      "windows": "${LOCALAPPDATA}/Clearra/tmp",
+      "linux": "${XDG_RUNTIME_DIR:-/tmp}/Clearra",
+      "lifecycle": "process-lifetime-receipted-clean-only"
+    },
+    {
+      "id": "wsl-runtime",
+      "windows": "${LOCALAPPDATA}/Clearra/wsl",
+      "linux": "${XDG_STATE_HOME:-${HOME}/.local/state}/Clearra/wsl",
+      "lifecycle": "dedicated-runtime-explicit-lifecycle"
+    },
+    {
       "id": "npm-cache",
       "resolver": "npm config get cache",
       "shared": true,
@@ -272,7 +284,8 @@
       "classes": [
         "build-cache",
         "test"
-      ]
+      ],
+      "default_profile": "build-test"
     },
     {
       "id": "frontend",
@@ -280,7 +293,8 @@
         "build-cache",
         "publication",
         "test"
-      ]
+      ],
+      "default_profile": "build-test"
     },
     {
       "id": "wasm",
@@ -288,14 +302,16 @@
         "build-cache",
         "publication",
         "test"
-      ]
+      ],
+      "default_profile": "build-test"
     },
     {
       "id": "ctk3",
       "classes": [
         "package-output",
         "benchmark"
-      ]
+      ],
+      "default_profile": "build-test"
     },
     {
       "id": "discord-container",
@@ -304,14 +320,16 @@
         "receipt",
         "test",
         "state"
-      ]
+      ],
+      "default_profile": "build-test"
     },
     {
       "id": "release-evidence",
       "classes": [
         "receipt",
         "publication"
-      ]
+      ],
+      "default_profile": "build-test"
     },
     {
       "id": "benchmark",
@@ -319,14 +337,16 @@
         "benchmark",
         "analysis",
         "research"
-      ]
+      ],
+      "default_profile": "benchmark-search"
     },
     {
       "id": "browser",
       "classes": [
         "browser",
         "test"
-      ]
+      ],
+      "default_profile": "local-service"
     },
     {
       "id": "management",
@@ -334,10 +354,12 @@
         "receipt",
         "lock",
         "temporary",
+        "state",
         "test",
         "package-output",
         "tool-binary"
-      ]
+      ],
+      "default_profile": "control"
     }
   ],
   "git_policy": {
@@ -374,7 +396,27 @@
   ],
   "writer_registry": [
     {
+      "path": "_local/clearra_manage.py",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
+      "path": "_local/clearra_runtime.py",
+      "producer": "management",
+      "output_class": "state"
+    },
+    {
+      "path": "_local/clearra_process_wrapper.py",
+      "producer": "management",
+      "output_class": "state"
+    },
+    {
       "path": "_local/tests/test_clearra_manage.py",
+      "producer": "management",
+      "output_class": "test"
+    },
+    {
+      "path": "_local/tests/test_clearra_runtime.py",
       "producer": "management",
       "output_class": "test"
     },
@@ -382,11 +424,6 @@
       "path": "_local/tests/test_git_management_fixture.py",
       "producer": "management",
       "output_class": "test"
-    },
-    {
-      "path": "_local/clearra_manage.py",
-      "producer": "management",
-      "output_class": "receipt"
     },
     {
       "path": "apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs",
@@ -709,11 +746,6 @@
       "output_class": "receipt"
     },
     {
-      "path": "scripts/lib/clearra-runtime-environment.ps1",
-      "producer": "management",
-      "output_class": "receipt"
-    },
-    {
       "path": "scripts/lib/clearra-verify-helpers.ps1",
       "producer": "management",
       "output_class": "receipt"
@@ -859,6 +891,11 @@
       "output_class": "receipt"
     },
     {
+      "path": "scripts/release/collect-discord-primary-attempt-catalog.sh",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
       "path": "scripts/release/create-exact-source-archive.test.mjs",
       "producer": "release-evidence",
       "output_class": "receipt"
@@ -999,7 +1036,17 @@
       "output_class": "receipt"
     },
     {
+      "path": "scripts/release/oracle/create-actions-layers-v080.sh",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
       "path": "scripts/release/oracle/create-inactive-stage-v080.mjs",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
+      "path": "scripts/release/oracle/create-local-layers-v080.sh",
       "producer": "release-evidence",
       "output_class": "receipt"
     },
@@ -1099,6 +1146,11 @@
       "output_class": "receipt"
     },
     {
+      "path": "scripts/release/restore-discord-catalog-v080.sh",
+      "producer": "release-evidence",
+      "output_class": "receipt"
+    },
+    {
       "path": "scripts/release/reusable-accepted-wasm-build.mjs",
       "producer": "release-evidence",
       "output_class": "receipt"
@@ -1112,6 +1164,26 @@
       "path": "scripts/release/validate-release-metadata.test.mjs",
       "producer": "release-evidence",
       "output_class": "receipt"
+    },
+    {
+      "path": "scripts/runtime/clearra-wsl-guest.sh",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/runtime/clearra-wsl-provision.sh",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/runtime/clearra-wsl-sanitize.sh",
+      "producer": "management",
+      "output_class": "temporary"
+    },
+    {
+      "path": "scripts/runtime/clearra-wsl-session.sh",
+      "producer": "management",
+      "output_class": "temporary"
     },
     {
       "path": "scripts/test_artifact_path_policy.ps1",
@@ -1214,6 +1286,11 @@
       "output_class": "receipt"
     },
     {
+      "path": "scripts/tools/package-release-cli.sh",
+      "producer": "management",
+      "output_class": "receipt"
+    },
+    {
       "path": "scripts/tools/prepare-clearra-rustc-launcher.mjs",
       "producer": "management",
       "output_class": "receipt"
@@ -1267,6 +1344,21 @@
       "path": "scripts/tools/verify-pnpm-import.py",
       "producer": "management",
       "output_class": "receipt"
+    },
+    {
+      "path": "scripts/tools/wsl-core-c-tests.sh",
+      "producer": "cargo",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/tools/wsl-native-cargo.sh",
+      "producer": "cargo",
+      "output_class": "test"
+    },
+    {
+      "path": "scripts/tools/wsl-pc-runtime-batch.sh",
+      "producer": "cargo",
+      "output_class": "test"
     },
     {
       "path": "scripts/ux-smoke.ps1",
@@ -1326,419 +1418,2253 @@
   ],
   "process_registry": [
     {
+      "path": ".github/workflows/candidate-preflight.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/discord-deploy-recovery.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/discord-deploy.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/discord-recovery-pr-checks.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/fast-fix-qualification.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/finalize-release-publication.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/integration-contracts.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/management-policy.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/pages-rollback.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/pages.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/queue-pages-publication.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": ".github/workflows/release-cli.yml",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
       "path": "_local/clearra_manage.py",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "control",
+      "runtime": "host-supervisor",
+      "tree_ownership": "root-supervisor",
+      "timeout": 300,
+      "termination_grace": 5,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 16777216,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "_local/clearra_runtime.py",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "control",
+      "runtime": "host-supervisor",
+      "tree_ownership": "root-supervisor",
+      "timeout": 300,
+      "termination_grace": 5,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 16777216,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "_local/clearra_process_wrapper.py",
+      "producer": "management",
+      "purpose": "posix-parent-lease-and-process-tree-cleanup",
+      "profile": "control",
+      "runtime": "posix-lease-wrapper",
+      "tree_ownership": "runtime-supervisor-owned",
+      "timeout": 300,
+      "termination_grace": 5,
+      "memory_enforcement": "supervisor-cgroup-hard-limit",
+      "output_limit": 16777216,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "_local/tests/test_clearra_manage.py",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "profile-hard-limit",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "_local/tests/test_clearra_runtime.py",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "control",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "profile-hard-limit",
+      "timeout": 300,
+      "termination_grace": 5,
+      "output_limit": 16777216,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "_local/tests/test_git_management_fixture.py",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "apps/clearra-discord-bot/Dockerfile.accepted-job-service",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "apps/clearra-discord-bot/Dockerfile.current-job-service",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "apps/clearra-discord-bot/Dockerfile.job-service",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/scripts/capture-oracle-rollback-authority.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/scripts/classify-oracle-current-authority.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/scripts/observe-oracle-candidate.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/scripts/prepare-cloud-runtime-service-account.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/scripts/produce-oracle-deployment-proof.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "apps/clearra-discord-bot/scripts/register-commands.ps1",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "profile-hard-limit",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/scripts/verify-accepted-source.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/src/job-service/runner.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "cloud-job",
+      "runtime": "container-cgroup",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 840,
+      "termination_grace": 10,
+      "memory_enforcement": "container-cgroup",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "apps/clearra-discord-bot/src/viewer/async-gif.mjs",
+      "producer": "discord-container",
+      "purpose": "registered-process-execution",
+      "profile": "cloud-job",
+      "runtime": "container-cgroup",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "container-cgroup",
+      "timeout": 840,
+      "termination_grace": 10,
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/test/async-gif.test.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/test/discord-command-catalog-release.test.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-discord-bot/test/oracle-rollback-contract.test.mjs",
       "producer": "discord-container",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "apps/clearra-web/test/onlinePc4Host.test.mjs",
       "producer": "frontend",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "crates/clearra-i18n/tests/japanese_cli_source.test.mjs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "crates/clearra-platform-fs/src/windows.rs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "crates/clearra-platform-fs/tests/native_atomic_publication.rs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "crates/clearra-render/src/bin/clearra_asset_import.rs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "crates/clearra-wasm/tests/pc_minimals_ctk3_stage_probe.rs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "packages/ctk3/scripts/build.mjs",
       "producer": "ctk3",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
-      "path": "scripts/architecture/validate_host_runtime_contract.ps1",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "path": "scripts/architecture/validate_managed_build_contract.test.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/architecture/validate_runner_progress_contract.ps1",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/architecture/validate_security_regression_tests_contract.ps1",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/benchmark/finesse-source-snapshot.mjs",
       "producer": "benchmark",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "benchmark-search",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 134217728,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout": true
+    },
+    {
+      "path": "scripts/benchmark/read-ci-preview-wasm.ps1",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution",
+      "profile": "benchmark-search",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 134217728,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout": true
     },
     {
       "path": "scripts/benchmark/run-build-probability-optimization.mjs",
       "producer": "benchmark",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "benchmark-search",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 134217728,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout": true
     },
     {
       "path": "scripts/benchmark/run-finesse-benchmark.mjs",
       "producer": "benchmark",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "benchmark-search",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 134217728,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout": true
     },
     {
       "path": "scripts/benchmark/run-wasm-p7-matrix.mjs",
       "producer": "benchmark",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "benchmark-search",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 134217728,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout": true
     },
     {
       "path": "scripts/benchmark/wasm-product-browser/vite.config.mjs",
       "producer": "benchmark",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "local-service",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 33554432,
+      "oom_policy": "fail-no-retry",
+      "explicit_lease": true
+    },
+    {
+      "path": "scripts/build-core-c.sh",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/export-pc-artifact.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/adversarial-correctness.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/architecture-validation.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/clearra-artifact-cache.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "profile-hard-limit",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/clearra-build-transaction-record.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/independent-gate-sequence.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/progress/native_progress_runner.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/progress/progress_case_runner.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/accepted-wasm-build.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/accepted-wasm-build.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/canonical-acceptance-evidence.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/canonical-acceptance-run.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/cloud/accepted-build-inputs.test.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/cloud/candidate-release-v080.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/cloud/candidate-release-v080.test.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/create-exact-source-archive.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/create-exact-source-archive.test.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/deployment-impact.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/discord-approval-transition.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/discord-command-sync-authority.test.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/discord-recovery-debt.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/fast-fix-qualification-workflow.test.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/final-source-stage-evidence.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/final-source-stage-evidence.test.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/finalize-discord-production-checkpoint.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/finalize-discord-production-checkpoint.test.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
-    },
-    {
-      "path": "scripts/release/github/github-wif-bootstrap.mjs",
-      "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/bounded-command.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/canonical-acceptance-evidence.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/canonical-acceptance-run.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/cloud/accepted-build-inputs.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/cloud/candidate-release-v080.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/cloud/candidate-release-v080.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/collect-discord-primary-attempt-catalog.sh",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/create-exact-source-archive.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/create-exact-source-archive.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/deployment-impact.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/discord-approval-transition.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/discord-command-sync-authority.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/discord-recovery-debt.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/fast-fix-qualification-workflow.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/final-source-stage-evidence.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/final-source-stage-evidence.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/finalize-discord-production-checkpoint.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/finalize-discord-production-checkpoint.test.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/github/github-wif-bootstrap.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/invoke-discord-runtime-recovery-v080.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "profile-hard-limit",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/oracle-freeze-v080.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/oracle-inactive-stage-v080.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/oracle/candidate-settings-v080.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/oracle/create-actions-layers-v080.sh",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/oracle/create-local-layers-v080.sh",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/oracle/create-prestage-helper-bundle.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/oracle/create-prestage-helper-bundle.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-freeze-v080.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-inactive-stage-v080.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "profile-hard-limit",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-inactive-stage-v080.test.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-release-deploy-v080.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-release-deploy-v080.test.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/oracle/remote-overlay-copy-v080.test.py",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/pages-deployment-run.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/pages-legacy-contract.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/product-e2e-cli-artifact.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/queue-pages-publication.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/release-failure-summary.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/release-publication-evidence.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/restore-discord-catalog-v080.sh",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/reusable-accepted-wasm-build.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/release/validate-final-source-revalidation.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/runtime/clearra-wsl-guest.sh",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "wsl-guest",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "wsl-cgroup-v2",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/runtime/clearra-wsl-provision.sh",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "wsl-guest",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "wsl-cgroup-v2",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/runtime/clearra-wsl-sanitize.sh",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "wsl-bootstrap",
+      "tree_ownership": "runtime-supervisor-owned",
+      "timeout": 900,
+      "termination_grace": 10,
+      "memory_enforcement": "wsl-cgroup-v2",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/runtime/clearra-wsl-session.sh",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "wsl-guest",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "wsl-cgroup-v2",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/test_artifact_path_policy.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/test_execution_surface_policy.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/test_independent_gate_sequence.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/test_product_process_contract.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/audit-upstream-drift.mjs",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/build-clearra-frontend.mjs",
       "producer": "frontend",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/build-clearra-wasm.mjs",
       "producer": "wasm",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/cargo-jobserver-stdio.test.mjs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/check-native-cli-contracts.ps1",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "profile-hard-limit",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/check-pc4-app-contracts.mjs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/clearra-build-policy.mjs",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/clearra-build-policy.test.mjs",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/clearra-frontend-paths.mjs",
       "producer": "frontend",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/clearra-rustc-guard.mjs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/clearra-rustc-guard.sh",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/clearra-rustc-launcher.rs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/invoke-clearra-build.mjs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/invoke-clearra-build.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/invoke-clearra-debug-cargo.ps1",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "profile-hard-limit",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/managed-cmake-builds.test.mjs",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/package-release-cli.sh",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/prepare-clearra-rustc-launcher.mjs",
       "producer": "cargo",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/retain-clearra-debug-builds.test.mjs",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/run-wasm-browser-benchmark.mjs",
       "producer": "benchmark",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "benchmark-search",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 134217728,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout": true
     },
     {
       "path": "scripts/tools/stage-clearra-wasm.mjs",
       "producer": "wasm",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/validate-release-cli-smokes.test.mjs",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/tools/verify-linux-cli-runtime.mjs",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/wasm-pc-distributed-environment-probe.mjs",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution",
+      "profile": "benchmark-search",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "memory_enforcement": "profile-hard-limit",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "output_limit": 134217728,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout": true
+    },
+    {
+      "path": "scripts/tools/wsl-core-c-tests.sh",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "wsl-guest",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "wsl-cgroup-v2",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/wsl-native-cargo.sh",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "wsl-guest",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "wsl-cgroup-v2",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/wsl-pc-runtime-batch.sh",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "wsl-guest",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "wsl-cgroup-v2",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/wsl-pc-runtime-build-and-batch.sh",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "wsl-guest",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "wsl-cgroup-v2",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
     {
       "path": "scripts/windows/clearra-local-services-watchdog.ps1",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "local-service",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 33554432,
+      "oom_policy": "fail-no-retry",
+      "explicit_lease": true
     },
     {
       "path": "scripts/windows/clearra-local-services-watchdog.test.mjs",
       "producer": "management",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     },
+    {
+      "path": "scripts/windows/install-clearra-local-services-watchdog.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "control",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 300,
+      "termination_grace": 5,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 16777216,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/architecture/validate_build_system.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/architecture/validate_no_product_debt.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/architecture/validate_product_golden_tests_contract.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/compare-pc-runtime-environments.ps1",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution",
+      "profile": "benchmark-search",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 134217728,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout": true
+    },
+    {
+      "path": "scripts/lib/clearra-build-entrypoints.test.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/clearra-build-inputs.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/clearra-build-lifecycle.test.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/clearra-build-path-policy.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/clearra-local-diagnostics-policy.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/clearra-native-helpers.ps1",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/clearra-runtime-environment.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/core-c-build.ps1",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/lib/product-e2e-build.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/oracle/invoke-freeze-v080.test.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/prepare-native-build-identity.ps1",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/verify-remote-annotated-tag.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/install-managed-cargo-tool.ps1",
+      "producer": "cargo",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/verify.ps1",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    }
+,
+    {
+      "path": "apps/clearra-web/wasmArtifactGuard.ts",
+      "producer": "frontend",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/candidate-preflight-regressions.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/cloud/recovery-traffic-client.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/release/cloud/remove-failed-deploy-candidate-tag.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/powershell-test-process.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/powershell-test-process.test.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/run-focused-js-tests.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "scripts/tools/run-gui-experiment.mjs",
+      "producer": "browser",
+      "purpose": "registered-process-execution",
+      "profile": "local-service",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 33554432,
+      "oom_policy": "fail-no-retry",
+      "explicit_lease": true
+    },
+    {
+      "path": "scripts/tools/run-release-regression-tests.mjs",
+      "producer": "release-evidence",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    }
+,
     {
       "path": "tests/contracts/product_capability_registry.test.mjs",
       "producer": "release-evidence",
-      "purpose": "registered-process-execution"
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "tools/asset-import/import_skin.ps1",
+      "producer": "frontend",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "tools/asset-import/svg_rasterize.ps1",
+      "producer": "frontend",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
+      "path": "tools/asset-import/svg_sanitize.ps1",
+      "producer": "frontend",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
     }
   ],
   "toolchain_sources": {
@@ -1831,5 +3757,260 @@
     "node_22_23_2_bookworm_slim": "node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9",
     "rust_1_98_1_bookworm": "rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
     "digest_source": "Docker Registry V2 Docker-Content-Digest readback"
+  },
+  "resource_profiles": {
+    "control": {
+      "minimum_memory_mib": 256,
+      "maximum_memory_mib": 1024,
+      "timeout_seconds": 300,
+      "maximum_timeout_seconds": 300,
+      "termination_grace_seconds": 5,
+      "maximum_descendant_processes": 32,
+      "output_limit_bytes": 16777216,
+      "hard_containment_required": false,
+      "oom_policy": "fail-no-retry"
+    },
+    "build-test": {
+      "minimum_memory_mib": 3072,
+      "maximum_memory_mib": null,
+      "timeout_seconds": 5400,
+      "maximum_timeout_seconds": 5400,
+      "termination_grace_seconds": 10,
+      "maximum_descendant_processes": 512,
+      "output_limit_bytes": 67108864,
+      "hard_containment_required": false,
+      "oom_policy": "fail-no-retry"
+    },
+    "benchmark-search": {
+      "minimum_memory_mib": 4096,
+      "maximum_memory_mib": null,
+      "timeout_seconds": 7200,
+      "maximum_timeout_seconds": 7200,
+      "termination_grace_seconds": 10,
+      "maximum_descendant_processes": 256,
+      "output_limit_bytes": 134217728,
+      "hard_containment_required": false,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout_required": true
+    },
+    "local-service": {
+      "minimum_memory_mib": 512,
+      "maximum_memory_mib": 2048,
+      "timeout_seconds": 7200,
+      "maximum_timeout_seconds": 7200,
+      "termination_grace_seconds": 10,
+      "maximum_descendant_processes": 64,
+      "output_limit_bytes": 33554432,
+      "hard_containment_required": false,
+      "oom_policy": "fail-no-retry",
+      "explicit_lease_required": true
+    },
+    "cloud-job": {
+      "minimum_memory_mib": 16384,
+      "maximum_memory_mib": 16384,
+      "timeout_seconds": 840,
+      "maximum_timeout_seconds": 900,
+      "termination_grace_seconds": 10,
+      "maximum_descendant_processes": 64,
+      "output_limit_bytes": 67108864,
+      "hard_containment_required": true,
+      "oom_policy": "fail-no-retry",
+      "cpu_count": 8,
+      "concurrency": 1,
+      "maximum_jobs": 1
+    }
+  },
+  "runtime_policy": {
+    "schema_id": "clearra.runtime-policy.v1",
+    "management_command_profiles": {
+      "storage": {
+        "audit": "control",
+        "verify": "control",
+        "clean": "control"
+      },
+      "toolchain": {
+        "check": "control",
+        "sync": "build-test"
+      },
+      "deps": {
+        "import-lock": "build-test",
+        "install": "build-test",
+        "update": "build-test",
+        "verify": "build-test"
+      },
+      "package": {
+        "pack": "build-test",
+        "publish": "build-test"
+      },
+      "git": {
+        "inventory": "build-test",
+        "converge": "build-test",
+        "review": "control",
+        "upload": "control",
+        "check": "control",
+        "promote": "build-test",
+        "protect": "control",
+        "finalize": "build-test"
+      }
+    },
+    "host_reserve": {
+      "minimum_mib": 2048,
+      "physical_fraction": 0.2
+    },
+    "worker_policy": {
+      "allow_silent_reduction": false,
+      "allow_oom_retry": false
+    },
+    "normal_path": {
+      "memory_high": false,
+      "rss_polling": false
+    },
+    "browser_wasm": {
+      "idle_worker_memory_ceiling_bytes": 536870912,
+      "retain_prewarm_within_ceiling": true,
+      "discard_over_ceiling_at_idle_transfer_or_next_run": true
+    },
+    "hard_containment_context_env": {
+      "release": "CLEARRA_RELEASE",
+      "deployment": "CLEARRA_DEPLOYMENT"
+    },
+    "producer_hard_containment_contexts": {
+      "release-evidence": "release"
+    },
+    "management_hard_containment_contexts": {
+      "package.publish.apply": "release",
+      "git.promote": "release",
+      "git.protect.apply": "release"
+    },
+    "process_tree_contract": {
+      "windows_job_kill_on_close": true,
+      "windows_aggregate_memory_limit": true,
+      "windows_active_process_limit": true,
+      "posix_parent_lease_wrapper": "_local/clearra_process_wrapper.py",
+      "linux_cgroup_oom_group": true,
+      "wsl_terminate_distribution": "Clearra-Build",
+      "wsl_guest_parent_loss_poweroff": true,
+      "wsl_global_shutdown_allowed": false
+    },
+    "cleanup_admission": {
+      "profile": "control",
+      "hard_limit_mib": 256,
+      "maximum_timeout_seconds": 60,
+      "allowed_operations": [
+        "wsl-list-running",
+        "wsl-terminate-dedicated",
+        "wsl-unregister-owned-partial-import"
+      ]
+    },
+    "local_ports": {
+      "4194": {
+        "role": "local-product-test",
+        "profiles": [
+          "local-service"
+        ],
+        "persistent": true
+      },
+      "4195": {
+        "role": "local-benchmark-ab",
+        "profiles": [
+          "local-service",
+          "benchmark-search"
+        ],
+        "persistent": false,
+        "strict_port": true
+      },
+      "8790": {
+        "role": "discord-bot-management",
+        "profiles": [
+          "local-service"
+        ],
+        "persistent": true,
+        "transport": "ssh-local-forward"
+      }
+    },
+    "wsl": {
+      "distribution": "Clearra-Build",
+      "source_distribution": "Ubuntu",
+      "install_root_windows": "${LOCALAPPDATA}/Clearra/wsl/Clearra-Build",
+      "temporary_root_windows": "${LOCALAPPDATA}/Clearra/tmp",
+      "marker": "/etc/clearra/runtime.json",
+      "global_config_management": "read-only",
+      "allow_shutdown": false,
+      "terminate_only_dedicated_distribution": true,
+      "bootstrap": {
+        "source_must_be_stopped": true,
+        "source_storage_metadata_must_remain_unchanged": true,
+        "first_boot_systemd": false,
+        "archive_metadata_injected_before_import": true,
+        "sanitizer": "scripts/runtime/clearra-wsl-sanitize.sh",
+        "sanitizer_profile": "build-test",
+        "sanitizer_memory_enforcement": "wsl-cgroup-v2",
+        "temporary_export_retained": false,
+        "source_credentials_copied": false
+      },
+      "entrypoints": {
+        "verify": {
+          "profile": "control",
+          "requires_source": false
+        },
+        "sync-workspace": {
+          "profile": "build-test",
+          "requires_source": true
+        },
+        "wasm-build": {
+          "profile": "build-test",
+          "requires_source": true
+        },
+        "core-c-tests": {
+          "profile": "build-test",
+          "requires_source": true
+        },
+        "oracle-local-layers-v080": {
+          "profile": "build-test",
+          "requires_source": false
+        },
+        "pc-runtime-build-batch": {
+          "profile": "benchmark-search",
+          "requires_source": true,
+          "timeout_seconds": 7200
+        },
+        "fixture-normal": {
+          "profile": "control",
+          "requires_source": false,
+          "test_only": true
+        },
+        "fixture-nonzero": {
+          "profile": "control",
+          "requires_source": false,
+          "test_only": true
+        },
+        "fixture-timeout": {
+          "profile": "control",
+          "requires_source": false,
+          "test_only": true,
+          "timeout_seconds": 5
+        },
+        "fixture-oom": {
+          "profile": "control",
+          "requires_source": false,
+          "test_only": true
+        },
+        "fixture-tree": {
+          "profile": "control",
+          "requires_source": false,
+          "test_only": true,
+          "timeout_seconds": 5
+        },
+        "posix-syntax-audit": {
+          "profile": "control",
+          "requires_source": false
+        },
+        "native-cargo": {
+          "profile": "build-test",
+          "requires_source": true
+        }
+      }
+    },
+    "direct_wsl_owner": "_local/clearra_runtime.py"
   }
 }

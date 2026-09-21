@@ -23,6 +23,7 @@ import {
   type WorkerAuthorityReport
 } from './hostCapabilitySnapshot';
 import {
+  DEFAULT_IDLE_WASM_WORKER_MEMORY_CEILING_BYTES,
   ensureWasmWorkerOwnerId,
   terminateOwnedWasmWorker,
   type ClearraWasmForcedTerminationReason
@@ -50,17 +51,20 @@ export type WasmTerminalWorkerControllerOptions = {
   preparationProgressStallTimeoutMs?: number;
   searchProgressStallTimeoutMs?: number;
   productPageStallTimeoutMs?: number;
+  idleWorkerMemoryCeilingBytes?: number;
 };
 
 type RuntimePrewarmWorkerEvent = {
   type: 'runtime_prewarm';
   phase: 'started' | 'finished';
   workerCount: number;
+  runtimeMemoryBytes?: number;
 };
 
 export class WasmTerminalWorkerController {
   private worker: Worker | null = null;
   private workerArtifactGeneration: string | null = null;
+  private workerLinearMemoryBytes = 0;
   private cancellingWorker: Worker | null = null;
   private prewarmingWorker: Worker | null = null;
   private prewarmWorkerCount = 1;
@@ -81,6 +85,7 @@ export class WasmTerminalWorkerController {
   private readonly preparationProgressStallTimeoutMs: number;
   private readonly searchProgressStallTimeoutMs: number;
   private readonly productPageStallTimeoutMs: number;
+  private readonly idleWorkerMemoryCeilingBytes: number;
   private productPageGeneration = 0;
   private nextSolutionPageRequestId = 1;
   private nextProductPageRequestId = 1;
@@ -120,6 +125,10 @@ export class WasmTerminalWorkerController {
     this.productPageStallTimeoutMs = positiveTimeout(
       options.productPageStallTimeoutMs,
       PRODUCT_PAGE_STALL_TIMEOUT_MS
+    );
+    this.idleWorkerMemoryCeilingBytes = positiveMemoryCeiling(
+      options.idleWorkerMemoryCeilingBytes,
+      DEFAULT_IDLE_WASM_WORKER_MEMORY_CEILING_BYTES
     );
   }
 
@@ -463,9 +472,14 @@ export class WasmTerminalWorkerController {
       this.disposeOwnedWorker(this.worker);
       return null;
     }
+    if (this.workerLinearMemoryBytes > this.idleWorkerMemoryCeilingBytes) {
+      this.disposeOwnedWorker(this.worker);
+      return null;
+    }
     const worker = this.worker;
     this.worker = null;
     this.workerArtifactGeneration = null;
+    this.workerLinearMemoryBytes = 0;
     worker.onmessage = null;
     worker.onerror = null;
     worker.onmessageerror = null;
@@ -502,6 +516,7 @@ export class WasmTerminalWorkerController {
       const worker = this.workerFactory();
       this.worker = worker;
       this.workerArtifactGeneration = currentWasmArtifactGeneration();
+      this.workerLinearMemoryBytes = 0;
       worker.onmessage = (
         message: MessageEvent<
           | ClearraWasmWorkerEvent
@@ -522,12 +537,16 @@ export class WasmTerminalWorkerController {
         }
         if (isRuntimePrewarmWorkerEvent(message.data)) {
           this.prewarmingWorker = message.data.phase === 'started' ? worker : null;
+          if (message.data.phase === 'finished') {
+            this.observeWorkerMemory(message.data.runtimeMemoryBytes);
+          }
           return;
         }
         if (isTablebaseWarmupWorkerEvent(message.data)) {
           applyTablebaseWarmupEvent(message.data);
           return;
         }
+        this.observeWorkerMemory(message.data.runtime_memory_bytes);
         if (this.cancellingWorker === worker) {
           if (message.data.event === 'started') {
             this.cancellingJobId = message.data.job_id;
@@ -764,6 +783,7 @@ export class WasmTerminalWorkerController {
     terminateOwnedWasmWorker(worker, reason);
     this.worker = null;
     this.workerArtifactGeneration = null;
+    this.workerLinearMemoryBytes = 0;
   }
 
   private disposeOwnedWorker(worker: Worker) {
@@ -779,6 +799,7 @@ export class WasmTerminalWorkerController {
     worker.onmessageerror = null;
     this.worker = null;
     this.workerArtifactGeneration = null;
+    this.workerLinearMemoryBytes = 0;
     try {
       worker.postMessage({ type: 'dispose_runtime' });
     } catch {}
@@ -789,14 +810,21 @@ export class WasmTerminalWorkerController {
     const worker = this.worker;
     if (
       !worker ||
-      isCurrentWasmArtifactGeneration(this.workerArtifactGeneration)
+      (isCurrentWasmArtifactGeneration(this.workerArtifactGeneration) &&
+        this.workerLinearMemoryBytes <= this.idleWorkerMemoryCeilingBytes)
     ) {
       return;
     }
-    // A new run already invalidates retained solution/product pages. Rotate at
-    // this boundary instead of on the update event so a result that is being
-    // inspected or copied is never destroyed underneath the user.
+    // A new run invalidates retained pages. Rotate stale generations and
+    // over-ceiling idle linear memory here, after the user had a chance to
+    // inspect or copy the previous result.
     this.disposeOwnedWorker(worker);
+  }
+
+  private observeWorkerMemory(value: number | undefined) {
+    if (Number.isSafeInteger(value) && (value ?? -1) >= 0) {
+      this.workerLinearMemoryBytes = value!;
+    }
   }
 
   private runtimeAuthority() {
@@ -924,6 +952,14 @@ function errorMessage(error: unknown): string {
 function positiveTimeout(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value) || value < 0) return fallback;
   return Math.floor(value);
+}
+
+function positiveMemoryCeiling(value: number | undefined, fallback: number): number {
+  const selected = value ?? fallback;
+  if (!Number.isSafeInteger(selected) || selected < 1) {
+    throw new Error('idleWorkerMemoryCeilingBytes must be a positive safe integer');
+  }
+  return selected;
 }
 
 function boundedProgressFingerprint(

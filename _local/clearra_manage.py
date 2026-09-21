@@ -26,8 +26,16 @@ import tempfile
 import time
 import uuid
 import zipfile
+from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Sequence
+
+
+LOCAL_MODULE_ROOT = pathlib.Path(__file__).resolve().parent
+if str(LOCAL_MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(LOCAL_MODULE_ROOT))
+import clearra_runtime as runtime_owner
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -313,6 +321,23 @@ def external_root_entries(policy: dict[str, Any]) -> list[tuple[dict[str, Any], 
             resolved = run(parts, check=False)
             if resolved.returncode == 0 and resolved.stdout.strip():
                 roots.append((entry, pathlib.Path(resolved.stdout.strip())))
+        elif os.name == "nt" and "windows" in entry:
+            roots.append((entry, pathlib.Path(os.path.expandvars(entry["windows"]))))
+        elif os.name != "nt" and "linux" in entry:
+            value = entry["linux"]
+            # Resolve the two XDG defaults used by the committed policy without
+            # accepting a general shell expansion language.
+            value = value.replace(
+                "${XDG_CACHE_HOME:-${HOME}/.cache}",
+                os.environ.get("XDG_CACHE_HOME", str(home / ".cache")),
+            ).replace(
+                "${XDG_STATE_HOME:-${HOME}/.local/state}",
+                os.environ.get("XDG_STATE_HOME", str(home / ".local" / "state")),
+            ).replace(
+                "${XDG_RUNTIME_DIR:-/tmp}",
+                os.environ.get("XDG_RUNTIME_DIR", "/tmp"),
+            ).replace("${HOME}", str(home))
+            roots.append((entry, pathlib.Path(value)))
     return roots
 
 
@@ -628,6 +653,27 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
     if not executable:
         raise ManagementError(f"required command is unavailable: {command[0]}")
     validate_managed_command(arguments.producer, command)
+    producer = next(item for item in policy["producers"] if item["id"] == arguments.producer)
+    selected_profile = getattr(arguments, "profile", None) or producer["default_profile"]
+    selected_contract = runtime_owner.profile_contract(policy, selected_profile)
+    allowed_profiles = {producer["default_profile"]}
+    allowed_profiles.update(
+        entry["profile"]
+        for entry in policy.get("process_registry", [])
+        if entry.get("producer") == arguments.producer
+    )
+    if selected_profile not in allowed_profiles:
+        raise ManagementError(
+            f"runtime profile is not registered for producer: "
+            f"{arguments.producer}/{selected_profile}"
+        )
+    if (
+        selected_contract.get("explicit_timeout_required")
+        or selected_contract.get("explicit_lease_required")
+    ) and getattr(arguments, "timeout", None) is None:
+        raise ManagementError(
+            f"runtime profile requires an explicit --timeout: {selected_profile}"
+        )
     export_paths = []
     for value in arguments.export_path:
         lexical = pathlib.Path(os.path.abspath(os.fspath(pathlib.Path(value).expanduser())))
@@ -643,7 +689,6 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
     managed_temp = ROOT / "_local" / "tmp" / arguments.producer / run_id
     managed_state.mkdir(parents=True, exist_ok=False)
     managed_temp.mkdir(parents=True, exist_ok=False)
-    producer = next(item for item in policy["producers"] if item["id"] == arguments.producer)
     output_roots: dict[str, str] = {}
     artifact_classes = {"test", "benchmark", "analysis", "research"}
     for output_class in producer["classes"]:
@@ -651,7 +696,7 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
             output_roots[output_class] = str(
                 ROOT / "_local" / "artifacts" / output_class / run_id
             )
-        elif output_class in {"receipt", "lock", "checkpoint"}:
+        elif output_class in {"receipt", "lock", "checkpoint", "state"}:
             output_roots[output_class] = str(managed_state)
         elif output_class == "temporary":
             output_roots[output_class] = str(managed_temp)
@@ -668,6 +713,7 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
             "CLEARRA_CACHE_ROOT": str(cache_root()),
             "CLEARRA_BUILD_ROOT": str(build_root()),
             "CLEARRA_MANAGED_RUN_ID": run_id,
+            "CLEARRA_RUNTIME_SUPERVISED": "1",
             "CLEARRA_MANAGED_OUTPUT_ROOTS": json.dumps(output_roots, separators=(",", ":")),
             "CLEARRA_EXPORT_PATHS": json.dumps(export_paths, separators=(",", ":")),
         }
@@ -678,15 +724,47 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
         environment["CARGO_BUILD_RUSTC_WRAPPER"] = ""
         environment.pop("RUSTC_WRAPPER", None)
         environment.pop("RUSTC_WORKSPACE_WRAPPER", None)
+    environment["CLEARRA_RUNTIME_PROFILE"] = selected_profile
+    producer_context = policy.get("runtime_policy", {}).get(
+        "producer_hard_containment_contexts", {}
+    ).get(arguments.producer)
+    if producer_context:
+        context_variable = policy["runtime_policy"]["hard_containment_context_env"].get(
+            producer_context
+        )
+        if not context_variable:
+            raise ManagementError(
+                f"producer has an unknown hard-containment context: {arguments.producer}"
+            )
+        environment[str(context_variable)] = "1"
+    redacted_command = runtime_owner.redact_argv(command)
     started = time.monotonic()
     try:
-        completed = subprocess.run(
-            [executable, *command[1:]],
-            cwd=ROOT,
-            env=environment,
-            check=False,
-            shell=False,
-        )
+        try:
+            runtime_result = runtime_owner.run_host_process(
+                [executable, *command[1:]],
+                cwd=ROOT,
+                env=environment,
+                policy=policy,
+                profile=selected_profile,
+                minimum_override_mib=getattr(arguments, "minimum_memory_mib", None),
+                timeout_override_seconds=getattr(arguments, "timeout", None),
+            )
+        except runtime_owner.RuntimePolicyError as error:
+            denied_receipt = write_receipt(
+                "managed-run-denied",
+                {
+                    "producer": arguments.producer,
+                    "profile": selected_profile,
+                    "command": redacted_command,
+                    "command_sha256": runtime_owner.command_digest(command),
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                    "output_roots": output_roots,
+                    "owned_paths": [str(managed_state)],
+                },
+            )
+            raise ManagementError(f"{error}; receipt={denied_receipt}") from error
     finally:
         remove_owned_path(managed_temp, policy)
     owned_paths = [str(managed_state)]
@@ -694,30 +772,30 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
         candidate = pathlib.Path(value)
         if run_id in candidate.parts and candidate.exists() and candidate != managed_temp:
             owned_paths.append(str(candidate))
-    redacted_command: list[str] = []
-    redact_next = False
-    for argument in command:
-        if redact_next:
-            redacted_command.append("<redacted>")
-            redact_next = False
-            continue
-        redacted_command.append(argument)
-        redact_next = bool(re.search(r"(?:token|secret|password|credential|api[-_]?key)", argument, re.I))
     receipt = write_receipt(
         "managed-run",
         {
             "producer": arguments.producer,
+            "profile": selected_profile,
             "command": redacted_command,
-            "exit_code": completed.returncode,
+            "command_sha256": runtime_result.command_sha256,
+            "exit_code": runtime_result.returncode,
             "duration_ms": round((time.monotonic() - started) * 1000),
+            "runtime": runtime_result.receipt(),
             "output_roots": output_roots,
             "export_capability_count": len(export_paths),
             "owned_paths": owned_paths,
             "cleaned_paths": [str(managed_temp)],
         },
     )
-    print(f"receipt={receipt}")
-    return completed.returncode
+    receipt_stream = sys.stderr if getattr(arguments, "domain", None) == "runtime" else sys.stdout
+    print(f"receipt={receipt}", file=receipt_stream)
+    if runtime_result.error_code:
+        print(
+            f"{runtime_result.error_code}: process ended with reason={runtime_result.reason}",
+            file=sys.stderr,
+        )
+    return runtime_result.returncode
 
 
 def exact_tool_versions(policy: dict[str, Any]) -> dict[str, tuple[list[str], re.Pattern[str]]]:
@@ -1030,28 +1108,378 @@ def writer_candidate(path: pathlib.Path) -> bool:
         r"\.(?:write_text|write_bytes)\(",
         r"\b(?:New-Item|Out-File|Set-Content|Add-Content|Copy-Item|Move-Item|Remove-Item)\b",
         r"\b(?:create_dir|create_dir_all|fs::write|File::create|fs::copy|fs::rename|fs::remove_)\b",
+        r"\b(?:tarfile\.open|os\.open)\b|\.(?:mkdir|unlink)\(",
+        r"(?m)^\s*(?:rm|cp|mv|mkdir|install|tar)\s+",
     )
     return any(re.search(pattern, material) for pattern in patterns)
 
 
 def process_candidate(path: pathlib.Path) -> bool:
-    if path.suffix.lower() not in {".py", ".mjs", ".js", ".ts", ".mts", ".ps1", ".sh", ".rs"}:
+    suffix = path.suffix.lower()
+    relative = path.relative_to(ROOT).as_posix()
+    if path.name.startswith("Dockerfile"):
+        material = path.read_text(encoding="utf-8", errors="replace")
+        return bool(re.search(r"(?m)^\s*(?:RUN|CMD|ENTRYPOINT)\b", material))
+    if suffix in {".yml", ".yaml"} and relative.startswith(".github/workflows/"):
+        material = path.read_text(encoding="utf-8", errors="replace")
+        return bool(re.search(r"(?m)^\s*run:\s*", material))
+    if suffix not in {".py", ".mjs", ".js", ".ts", ".mts", ".ps1", ".sh", ".rs"}:
         return False
     material = path.read_text(encoding="utf-8", errors="replace")
     return bool(
-        re.search(r"subprocess\.(?:run|Popen|check_call|check_output)\b", material)
-        or re.search(r"\bStart-Process\b", material)
+        (suffix == ".py" and re.search(
+            r"(?:subprocess\.(?:run|Popen|call|check_call|check_output)|"
+            r"asyncio\.create_subprocess_(?:exec|shell)|"
+            r"os\.(?:system|popen|posix_spawn|spawn(?:l|le|lp|lpe|v|ve|vp|vpe)|"
+            r"exec(?:l|le|lp|lpe|v|ve|vp|vpe)))\b",
+            material,
+        ))
+        or (suffix == ".ps1" and re.search(
+            r"\b(?:Start-Process|System\.Diagnostics\.Process|Diagnostics\.Process|"
+            r"ProcessStartInfo)\b",
+            material,
+        ))
+        or (suffix == ".ps1" and re.search(
+            r"(?m)(?:^|[;|({=,])\s*@?\(?\s*&\s+"
+            r"(?:['\"]|\$[A-Za-z_]|[A-Za-z0-9_.-]+)",
+            material,
+        ))
         or (
-            "node:child_process" in material
-            and re.search(
-                r"\b(?:spawn|spawnSync|execFile|execFileSync|execSync)\s*\(", material
-            )
+            suffix in {".mjs", ".js", ".ts", ".mts"}
+            and re.search(r"(?:node:)?child_process", material)
         )
         or (
+            suffix in {".mjs", ".js", ".ts", ".mts"}
+            and re.search(r"(?:node:)?worker_threads", material)
+            and re.search(r"\bWorker\b", material)
+        )
+        or (
+            suffix == ".rs"
+            and
             re.search(r"(?:std|tokio)::process", material)
             and re.search(r"\bCommand::new\s*\(", material)
         )
+        or (
+            suffix == ".sh"
+            and re.search(
+                r"(?m)(?:^|[;&|({]|\bthen\b|\belse\b|\bdo\b)\s*(?:exec\s+|systemd-run\s|systemctl\s|runuser\s|curl\s|"
+                r"cargo\s|rustc\s|node\s|pnpm\s|python3?\s|bash\s|dash\s|sh\s)",
+                material,
+            )
+        )
     )
+
+
+def raw_wsl_invocation(path: pathlib.Path) -> bool:
+    relative = path.relative_to(ROOT).as_posix()
+    if relative == "_local/clearra_runtime.py" or ".test." in path.name:
+        return False
+    if relative.startswith("_local/tests/") or relative.startswith("tests/"):
+        return False
+    if path.suffix.lower() not in {".py", ".mjs", ".js", ".ts", ".mts", ".ps1", ".sh", ".rs"}:
+        return False
+    material = path.read_text(encoding="utf-8", errors="replace")
+    patterns = (
+        r"(?i)\b(?:spawn|spawnSync|execFile|execFileSync|capture|run)\s*\(\s*(?:\[\s*)?['\"]wsl(?:\.exe)?['\"]",
+        r"(?i)\bInvoke-[A-Za-z0-9_-]+\s+['\"]wsl(?:\.exe)?['\"]",
+        r"(?i)&\s*wsl(?:\.exe)?\b",
+        r"(?mi)\b(?:Get-Command|Start-Process)\s+['\"]?wsl(?:\.exe)?\b",
+        r"(?mi)\b(?:ProjectionCommand|SyntaxCommand)\s*=\s*['\"]wsl\.exe['\"]",
+    )
+    return any(re.search(pattern, material) for pattern in patterns)
+
+
+def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    profiles = policy.get("resource_profiles", {})
+    required_profile_fields = {
+        "minimum_memory_mib",
+        "maximum_memory_mib",
+        "timeout_seconds",
+        "maximum_timeout_seconds",
+        "termination_grace_seconds",
+        "maximum_descendant_processes",
+        "output_limit_bytes",
+        "hard_containment_required",
+        "oom_policy",
+    }
+    for profile, contract in profiles.items():
+        missing = required_profile_fields - set(contract)
+        if missing:
+            failures.append(f"resource profile is incomplete: {profile} ({', '.join(sorted(missing))})")
+        elif (
+            int(contract["minimum_memory_mib"]) <= 0
+            or (
+                contract.get("maximum_memory_mib") is not None
+                and int(contract["maximum_memory_mib"])
+                < int(contract["minimum_memory_mib"])
+            )
+            or int(contract["timeout_seconds"]) <= 0
+            or int(contract["maximum_timeout_seconds"]) < int(contract["timeout_seconds"])
+            or int(contract["termination_grace_seconds"]) < 0
+            or int(contract["maximum_descendant_processes"]) <= 0
+            or int(contract["output_limit_bytes"]) <= 0
+        ):
+            failures.append(f"resource profile has an invalid bound: {profile}")
+    expected_profiles = {
+        "control": (256, 1024, 300, 300, 32),
+        "build-test": (3072, None, 5400, 5400, 512),
+        "benchmark-search": (4096, None, 7200, 7200, 256),
+        "local-service": (512, 2048, 7200, 7200, 64),
+        "cloud-job": (16384, 16384, 840, 900, 64),
+    }
+    for profile, expected in expected_profiles.items():
+        contract = profiles.get(profile)
+        actual = None if not isinstance(contract, Mapping) else (
+            contract.get("minimum_memory_mib"),
+            contract.get("maximum_memory_mib"),
+            contract.get("timeout_seconds"),
+            contract.get("maximum_timeout_seconds"),
+            contract.get("maximum_descendant_processes"),
+        )
+        if actual != expected:
+            failures.append(f"resource profile differs from its bounded contract: {profile}")
+    cloud = profiles.get("cloud-job", {})
+    if (
+        cloud.get("cpu_count") != 8
+        or cloud.get("concurrency") != 1
+        or cloud.get("maximum_jobs") != 1
+        or cloud.get("hard_containment_required") is not True
+    ):
+        failures.append("cloud-job must preserve the 8-vCPU 16-GiB single-job contract")
+    if not profiles.get("benchmark-search", {}).get("explicit_timeout_required"):
+        failures.append("benchmark-search must require an explicit timeout")
+    if not profiles.get("local-service", {}).get("explicit_lease_required"):
+        failures.append("local-service must require an explicit lease")
+    required_process_fields = {
+        "profile",
+        "runtime",
+        "tree_ownership",
+        "timeout",
+        "termination_grace",
+        "memory_enforcement",
+        "output_limit",
+        "oom_policy",
+    }
+    allowed_tree_ownership = {
+        "root-supervisor",
+        "runtime-supervisor-owned",
+        "supervisor-inherited",
+    }
+    allowed_memory_enforcement = {
+        "host": "profile-hard-limit",
+        "host-supervisor": "profile-hard-limit",
+        "container-cgroup": "container-cgroup",
+        "posix-lease-wrapper": "supervisor-cgroup-hard-limit",
+        "wsl-bootstrap": "wsl-cgroup-v2",
+        "wsl-guest": "wsl-cgroup-v2",
+    }
+    process_registry = policy.get("process_registry", [])
+    duplicate_process_paths = sorted(
+        path
+        for path, count in Counter(
+            str(entry.get("path")) for entry in process_registry
+        ).items()
+        if count > 1
+    )
+    failures.extend(
+        f"duplicate process registration: {path}" for path in duplicate_process_paths
+    )
+    for entry in process_registry:
+        missing = required_process_fields - set(entry)
+        if missing:
+            failures.append(
+                f"process registration has no complete resource contract: {entry.get('path')} "
+                f"({', '.join(sorted(missing))})"
+            )
+            continue
+        if entry["profile"] not in profiles:
+            failures.append(
+                f"process registration has unknown resource profile: {entry.get('path')} "
+                f"({entry.get('profile')})"
+            )
+        elif int(entry["timeout"]) > int(profiles[entry["profile"]]["maximum_timeout_seconds"]):
+            failures.append(f"process timeout exceeds profile: {entry.get('path')}")
+        elif int(entry["timeout"]) <= 0:
+            failures.append(f"process timeout is unbounded: {entry.get('path')}")
+        if entry["tree_ownership"] not in allowed_tree_ownership:
+            failures.append(f"process tree termination is unmanaged: {entry.get('path')}")
+        expected_enforcement = allowed_memory_enforcement.get(entry["runtime"])
+        if expected_enforcement is None:
+            failures.append(f"process runtime is unknown: {entry.get('path')}")
+        elif entry["memory_enforcement"] != expected_enforcement:
+            failures.append(f"process memory enforcement is unmanaged: {entry.get('path')}")
+        if entry["profile"] == "benchmark-search" and not entry.get("explicit_timeout"):
+            failures.append(f"benchmark process lacks an explicit timeout: {entry.get('path')}")
+        if entry["profile"] == "local-service" and not entry.get("explicit_lease"):
+            failures.append(f"local service lacks an explicit lease: {entry.get('path')}")
+        if int(entry["termination_grace"]) != int(
+            profiles.get(entry["profile"], {}).get("termination_grace_seconds", -1)
+        ):
+            failures.append(f"process termination grace differs from its profile: {entry.get('path')}")
+        if int(entry["output_limit"]) > int(
+            profiles.get(entry["profile"], {}).get("output_limit_bytes", -1)
+        ) or int(entry["output_limit"]) <= 0:
+            failures.append(f"process output limit is invalid: {entry.get('path')}")
+        if entry["oom_policy"] != "fail-no-retry":
+            failures.append(f"process OOM policy permits retry: {entry.get('path')}")
+    for path in repository_policy_files():
+        if not path.is_file() or is_secret_path(path, policy):
+            continue
+        if raw_wsl_invocation(path):
+            failures.append(
+                "raw WSL invocation outside runtime supervisor: "
+                + path.relative_to(ROOT).as_posix()
+            )
+        if path.suffix.lower() in {".py", ".mjs", ".js", ".ts", ".mts", ".ps1", ".sh"}:
+            material = path.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(?i)\bwsl(?:\.exe)?\s+--shutdown\b", material):
+                failures.append(
+                    "global WSL shutdown is prohibited: " + path.relative_to(ROOT).as_posix()
+                )
+    runtime_policy = policy.get("runtime_policy", {})
+    if runtime_policy.get("management_command_profiles") != {
+        "storage": {
+            "audit": "control",
+            "verify": "control",
+            "clean": "control",
+        },
+        "toolchain": {"check": "control", "sync": "build-test"},
+        "deps": {
+            "import-lock": "build-test",
+            "install": "build-test",
+            "update": "build-test",
+            "verify": "build-test",
+        },
+        "package": {"pack": "build-test", "publish": "build-test"},
+        "git": {
+            "inventory": "build-test",
+            "converge": "build-test",
+            "review": "control",
+            "upload": "control",
+            "check": "control",
+            "promote": "build-test",
+            "protect": "control",
+            "finalize": "build-test",
+        },
+    }:
+        failures.append("management subcommands do not have exact runtime profiles")
+    if runtime_policy.get("normal_path", {}).get("memory_high"):
+        failures.append("MemoryHigh throttling is prohibited on the normal path")
+    if runtime_policy.get("normal_path", {}).get("rss_polling"):
+        failures.append("production RSS polling is prohibited on the normal path")
+    if runtime_policy.get("browser_wasm") != {
+        "idle_worker_memory_ceiling_bytes": 536870912,
+        "retain_prewarm_within_ceiling": True,
+        "discard_over_ceiling_at_idle_transfer_or_next_run": True,
+    }:
+        failures.append("browser WASM idle-memory lifecycle contract is incomplete")
+    if runtime_policy.get("worker_policy", {}).get("allow_silent_reduction"):
+        failures.append("silent worker reduction is prohibited")
+    if runtime_policy.get("worker_policy", {}).get("allow_oom_retry"):
+        failures.append("automatic OOM retry is prohibited")
+    if runtime_policy.get("hard_containment_context_env") != {
+        "release": "CLEARRA_RELEASE",
+        "deployment": "CLEARRA_DEPLOYMENT",
+    }:
+        failures.append("release and deployment hard-containment contexts are incomplete")
+    if runtime_policy.get("producer_hard_containment_contexts") != {
+        "release-evidence": "release"
+    }:
+        failures.append("release producer hard-containment routing is incomplete")
+    if runtime_policy.get("management_hard_containment_contexts") != {
+        "package.publish.apply": "release",
+        "git.promote": "release",
+        "git.protect.apply": "release",
+    }:
+        failures.append("management release hard-containment routing is incomplete")
+    tree_contract = runtime_policy.get("process_tree_contract", {})
+    if (
+        tree_contract.get("windows_job_kill_on_close") is not True
+        or tree_contract.get("windows_aggregate_memory_limit") is not True
+        or tree_contract.get("windows_active_process_limit") is not True
+        or tree_contract.get("posix_parent_lease_wrapper")
+        != "_local/clearra_process_wrapper.py"
+        or tree_contract.get("linux_cgroup_oom_group") is not True
+        or tree_contract.get("wsl_terminate_distribution") != "Clearra-Build"
+        or tree_contract.get("wsl_guest_parent_loss_poweroff") is not True
+        or tree_contract.get("wsl_global_shutdown_allowed") is not False
+    ):
+        failures.append("cross-platform process-tree termination contract is incomplete")
+    cleanup = runtime_policy.get("cleanup_admission", {})
+    control_minimum = profiles.get("control", {}).get("minimum_memory_mib")
+    if (
+        cleanup.get("profile") != "control"
+        or cleanup.get("hard_limit_mib") != control_minimum
+        or int(cleanup.get("maximum_timeout_seconds", 0)) > 60
+        or set(cleanup.get("allowed_operations", []))
+        != {
+            "wsl-list-running",
+            "wsl-terminate-dedicated",
+            "wsl-unregister-owned-partial-import",
+        }
+    ):
+        failures.append("WSL cleanup admission is not narrowly bounded")
+    if runtime_policy.get("local_ports") != {
+        "4194": {
+            "role": "local-product-test",
+            "profiles": ["local-service"],
+            "persistent": True,
+        },
+        "4195": {
+            "role": "local-benchmark-ab",
+            "profiles": ["local-service", "benchmark-search"],
+            "persistent": False,
+            "strict_port": True,
+        },
+        "8790": {
+            "role": "discord-bot-management",
+            "profiles": ["local-service"],
+            "persistent": True,
+            "transport": "ssh-local-forward",
+        },
+    }:
+        failures.append("local product, benchmark, and Discord management port roles differ")
+    wsl = runtime_policy.get("wsl", {})
+    if (
+        wsl.get("distribution") != "Clearra-Build"
+        or wsl.get("global_config_management") != "read-only"
+        or wsl.get("allow_shutdown") is not False
+        or wsl.get("terminate_only_dedicated_distribution") is not True
+    ):
+        failures.append("dedicated WSL ownership policy is incomplete")
+    bootstrap = wsl.get("bootstrap", {})
+    if (
+        bootstrap.get("source_must_be_stopped") is not True
+        or bootstrap.get("source_storage_metadata_must_remain_unchanged") is not True
+        or bootstrap.get("first_boot_systemd") is not False
+        or bootstrap.get("archive_metadata_injected_before_import") is not True
+        or bootstrap.get("sanitizer") != "scripts/runtime/clearra-wsl-sanitize.sh"
+        or bootstrap.get("sanitizer_profile") != "build-test"
+        or bootstrap.get("sanitizer_memory_enforcement") != "wsl-cgroup-v2"
+        or bootstrap.get("temporary_export_retained") is not False
+        or bootstrap.get("source_credentials_copied") is not False
+    ):
+        failures.append("dedicated WSL bootstrap policy is incomplete")
+    for entry, contract in wsl.get("entrypoints", {}).items():
+        profile = contract.get("profile")
+        if profile not in profiles or not isinstance(contract.get("requires_source"), bool):
+            failures.append(f"invalid WSL guest entrypoint contract: {entry}")
+        if profiles.get(profile, {}).get("explicit_timeout_required") and not contract.get(
+            "timeout_seconds"
+        ):
+            failures.append(f"WSL benchmark entrypoint lacks an explicit timeout: {entry}")
+    direct_owner = runtime_policy.get("direct_wsl_owner")
+    if direct_owner != "_local/clearra_runtime.py":
+        failures.append("direct WSL owner is not the runtime supervisor")
+    else:
+        owner_path = ROOT / direct_owner
+        if not owner_path.is_file() or not re.search(
+            r"shutil\.which\(['\"]wsl\.exe['\"]\)",
+            owner_path.read_text(encoding="utf-8", errors="replace") if owner_path.is_file() else "",
+        ):
+            failures.append("runtime supervisor does not own the concrete WSL launcher")
+    return failures
 
 
 def workflow_job_blocks(material: str) -> list[tuple[str, str]]:
@@ -1150,6 +1578,7 @@ def verify_static_management_policy(policy: dict[str, Any]) -> None:
     failures = dependency_policy_failures(policy)
     failures.extend(workflow_policy_failures(policy))
     failures.extend(container_policy_failures(policy))
+    failures.extend(runtime_policy_failures(policy))
     failures.extend(f"unregistered writer: {path}" for path in sorted(actual - registered))
     failures.extend(f"stale writer registration: {path}" for path in sorted(registered - actual))
     failures.extend(
@@ -2270,7 +2699,14 @@ def github_https_clone_url(remote_url: str) -> str:
     return f"https://github.com/{owner}/{repository}.git"
 
 
-def check_candidate_once(candidate: str, policy: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+def candidate_check_status_once(
+    candidate: str, policy: dict[str, Any]
+) -> tuple[str, list[dict[str, Any]]]:
+    pattern = policy["git_policy"]["candidate_pattern"]
+    if not fnmatch.fnmatch(candidate, pattern) or run(
+        ("git", "check-ref-format", f"refs/heads/{candidate}"), check=False
+    ).returncode:
+        raise ManagementError(f"candidate branch must match {pattern}")
     remote_ref = f"refs/remotes/origin/{candidate}"
     git("fetch", "origin", f"refs/heads/{candidate}:{remote_ref}")
     sha = git("rev-parse", remote_ref)
@@ -2285,7 +2721,17 @@ def check_candidate_once(candidate: str, policy: dict[str, Any]) -> tuple[str, l
             if check.get("name") == name and check.get("head_sha") == sha
         ]
         if not matches:
-            raise ManagementError(f"required exact-SHA check is missing for {sha}: {name}")
+            selected.append(
+                {
+                    "id": None,
+                    "name": name,
+                    "head_sha": sha,
+                    "status": "missing",
+                    "conclusion": None,
+                    "url": None,
+                }
+            )
+            continue
         check = max(matches, key=lambda item: int(item.get("id") or 0))
         selected.append(
             {
@@ -2297,8 +2743,21 @@ def check_candidate_once(candidate: str, policy: dict[str, Any]) -> tuple[str, l
                 "url": check.get("html_url"),
             }
         )
-        if check.get("status") != "completed" or check.get("conclusion") != "success":
-            raise ManagementError(f"required check is not successful for {sha}: {name} ({check.get('status')}/{check.get('conclusion')})")
+    return sha, selected
+
+
+def check_candidate_once(candidate: str, policy: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    sha, selected = candidate_check_status_once(candidate, policy)
+    for check in selected:
+        if check["status"] == "missing":
+            raise ManagementError(
+                f"required exact-SHA check is missing for {sha}: {check['name']}"
+            )
+        if check["status"] != "completed" or check["conclusion"] != "success":
+            raise ManagementError(
+                f"required check is not successful for {sha}: {check['name']} "
+                f"({check['status']}/{check['conclusion']})"
+            )
     return sha, selected
 
 
@@ -3388,7 +3847,11 @@ def promote_candidate(
 
 
 def upload_candidate(
-    candidate: str, safety_receipt: str, policy: dict[str, Any]
+    candidate: str,
+    safety_receipt: str,
+    policy: dict[str, Any],
+    *,
+    exact_commit: str | None = None,
 ) -> dict[str, Any]:
     """Publish a reviewed candidate with a normal fast-forward push and readback."""
     pattern = policy["git_policy"]["candidate_pattern"]
@@ -3396,12 +3859,52 @@ def upload_candidate(
         raise ManagementError(f"candidate branch must match {pattern}")
     if run(("git", "check-ref-format", f"refs/heads/{candidate}"), check=False).returncode:
         raise ManagementError("candidate is not a valid Git branch name")
-    if git("branch", "--show-current") != candidate:
-        raise ManagementError("candidate upload must run from the candidate branch")
     if git("status", "--porcelain=v1", "-z", "--untracked-files=all"):
         raise ManagementError("candidate worktree must be clean before upload")
-
-    sha = git("rev-parse", f"refs/heads/{candidate}^{{commit}}")
+    branch = git("branch", "--show-current")
+    if exact_commit is None:
+        if branch != candidate:
+            raise ManagementError("candidate upload must run from the candidate branch")
+        sha = git("rev-parse", f"refs/heads/{candidate}^{{commit}}")
+        source_mode = "candidate-branch"
+    else:
+        if not re.fullmatch(r"[0-9a-f]{40}", exact_commit):
+            raise ManagementError("detached candidate upload requires an exact commit SHA")
+        if branch:
+            raise ManagementError(
+                "exact commit upload is allowed only from a detached clean worktree"
+            )
+        sha = git("rev-parse", f"{exact_commit}^{{commit}}")
+        if sha != exact_commit or git("rev-parse", "HEAD") != sha:
+            raise ManagementError(
+                "detached candidate upload requires HEAD to equal the exact commit SHA"
+            )
+        source_mode = "detached-exact-sha"
+    local_candidate_lookup = run(
+        ("git", "rev-parse", "--verify", f"refs/heads/{candidate}^{{commit}}"),
+        check=False,
+    )
+    local_candidate_sha = (
+        local_candidate_lookup.stdout.strip()
+        if local_candidate_lookup.returncode == 0
+        else None
+    )
+    local_candidate_worktrees: list[dict[str, Any]] = []
+    for worktree in parse_worktrees(git("worktree", "list", "--porcelain")):
+        if worktree.branch != f"refs/heads/{candidate}":
+            continue
+        status = run(
+            ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+            cwd=worktree.path,
+        ).stdout
+        local_candidate_worktrees.append(
+            {
+                "path": str(worktree.path),
+                "head": worktree.head,
+                "dirty_entries": len([entry for entry in status.split("\0") if entry]),
+                "preserved": True,
+            }
+        )
     convergence = validate_convergence_review(safety_receipt, sha, policy)
     git("fetch", "origin", "refs/heads/main:refs/remotes/origin/main")
     origin_main = git("rev-parse", "refs/remotes/origin/main")
@@ -3449,10 +3952,20 @@ def upload_candidate(
         "candidate": candidate,
         "sha": sha,
         "tree": git("rev-parse", f"{sha}^{{tree}}"),
+        "parents": git("rev-list", "--parents", "-n", "1", sha).split()[1:],
+        "source_mode": source_mode,
+        "local_candidate_ref_sha": local_candidate_sha,
+        "local_candidate_worktrees": local_candidate_worktrees,
         "origin_main": origin_main,
         "remote_candidate_before": remote_before,
         "remote_candidate_after": readback[0],
         "uploaded": uploaded,
+        "diff_sha256": hashlib.sha256(
+            git("diff", "--binary", origin_main, sha).encode("utf-8")
+        ).hexdigest(),
+        "policy_sha256": sha256_file(ROOT / "config" / "clearra-management.v1.json"),
+        "lockfile_sha256": sha256_file(ROOT / "pnpm-lock.yaml"),
+        "toolchain_sha256": sha256_file(ROOT / "rust-toolchain.toml"),
         "convergence": convergence,
         "authorized_pushers": authorized_pushers,
     }
@@ -3648,8 +4161,9 @@ def ref_is_reviewed_or_equivalent(
     reviewed_shas: set[str],
 ) -> tuple[bool, str]:
     if ref in review_by_ref:
-        decision = str(review_by_ref[ref].get("decision"))
-        if decision in {"selected", "excluded"}:
+        reviewed = review_by_ref[ref]
+        decision = str(reviewed.get("decision"))
+        if reviewed.get("sha") == sha and decision in {"selected", "excluded"}:
             return True, f"review-{decision}"
     if sha in reviewed_shas:
         return True, "reviewed-sha"
@@ -3748,7 +4262,11 @@ def finalize_candidate(
         safe, reason = ref_is_reviewed_or_equivalent(
             branch_ref, worktree.head, sha, review_by_ref, reviewed_shas
         )
-        if not safe and candidate == branch_ref.removeprefix("refs/heads/"):
+        if (
+            not safe
+            and candidate == branch_ref.removeprefix("refs/heads/")
+            and worktree.head == sha
+        ):
             safe, reason = True, "promoted-candidate"
         target = {"path": str(worktree.path), "head": worktree.head, "reason": reason}
         (removable_worktrees if safe else blocked_worktrees).append(target)
@@ -3778,7 +4296,7 @@ def finalize_candidate(
         safe, reason = ref_is_reviewed_or_equivalent(
             ref, object_sha, sha, review_by_ref, reviewed_shas
         )
-        if ref == f"refs/heads/{candidate}":
+        if ref == f"refs/heads/{candidate}" and object_sha == sha:
             safe, reason = True, "promoted-candidate"
         if not safe:
             raise ManagementError(f"local ref remains unreviewed: {ref}")
@@ -3796,7 +4314,7 @@ def finalize_candidate(
             ref, object_sha, sha, review_by_ref, reviewed_shas
         )
         branch_name = ref.removeprefix("refs/remotes/origin/")
-        if branch_name == candidate:
+        if branch_name == candidate and object_sha == sha:
             safe, reason = True, "promoted-candidate"
         if not safe:
             raise ManagementError(f"remote ref remains unreviewed: {ref}")
@@ -3885,6 +4403,164 @@ def print_json(value: Any) -> None:
     print(json.dumps(value, indent=2, ensure_ascii=False))
 
 
+def wsl_supervisor(policy: dict[str, Any]) -> runtime_owner.WslSupervisor:
+    temporary_value = policy["runtime_policy"]["wsl"]["temporary_root_windows"]
+    temporary_root = pathlib.Path(os.path.expandvars(temporary_value))
+    assert_output_path(temporary_root, policy)
+
+    def validate_output(path: pathlib.Path) -> pathlib.Path:
+        try:
+            return assert_output_path(path, policy)
+        except ManagementError as error:
+            raise runtime_owner.RuntimePolicyError(str(error)) from error
+
+    return runtime_owner.WslSupervisor(
+        root=ROOT,
+        policy=policy,
+        state_root=state_root(),
+        temporary_root=temporary_root,
+        secret_predicate=lambda path: is_secret_path(path, policy),
+        output_validator=validate_output,
+    )
+
+
+def runtime_audit_command(policy: dict[str, Any]) -> int:
+    audit = runtime_owner.runtime_audit(root=ROOT, policy=policy)
+    try:
+        verify_static_management_policy(policy)
+        audit["static_policy"] = {"accepted": True, "failures": []}
+    except ManagementError as error:
+        audit["static_policy"] = {"accepted": False, "error": str(error)}
+    receipt = write_receipt("runtime-audit", audit)
+    print_json({**audit, "receipt": str(receipt)})
+    return 0 if audit["static_policy"]["accepted"] else 1
+
+
+def runtime_wsl_command(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
+    verify_static_management_policy(policy)
+    supervisor = wsl_supervisor(policy)
+    try:
+        if arguments.wsl_action == "provision":
+            result = supervisor.provision(arguments.source_distro)
+            kind = "runtime-wsl-provision"
+            exit_code = 0
+        elif arguments.wsl_action == "verify":
+            result = supervisor.verify()
+            kind = "runtime-wsl-verify"
+            exit_code = int(result["runtime"]["returncode"])
+        elif arguments.wsl_action == "run":
+            command_arguments = list(arguments.arguments)
+            if command_arguments and command_arguments[0] == "--":
+                command_arguments.pop(0)
+            result = supervisor.run_entry(
+                arguments.entry,
+                command_arguments,
+                minimum_override_mib=arguments.minimum_memory_mib,
+            )
+            kind = "runtime-wsl-run"
+            exit_code = int(result["runtime"]["returncode"])
+        else:
+            raise ManagementError("unsupported runtime WSL action")
+    except runtime_owner.RuntimePolicyError as error:
+        receipt = write_receipt(
+            "runtime-wsl-failed",
+            {
+                "action": arguments.wsl_action,
+                "entry": getattr(arguments, "entry", None),
+                "error_type": type(error).__name__,
+                "error": str(error),
+                "details": getattr(error, "details", {}),
+            },
+        )
+        raise ManagementError(f"{error}; receipt={receipt}") from error
+    durable = dict(result)
+    durable.pop("runtime_stdout", None)
+    durable.pop("runtime_stderr", None)
+    receipt = write_receipt(kind, durable)
+    print_json({**durable, "receipt": str(receipt)})
+    return exit_code
+
+
+def management_command_profile(
+    arguments: argparse.Namespace, policy: dict[str, Any]
+) -> str | None:
+    domain = str(getattr(arguments, "domain", ""))
+    action = str(getattr(arguments, "action", ""))
+    domains = policy.get("runtime_policy", {}).get("management_command_profiles", {})
+    actions = domains.get(domain, {}) if isinstance(domains, Mapping) else {}
+    profile = actions.get(action) if isinstance(actions, Mapping) else None
+    return str(profile) if profile else None
+
+
+def run_management_command_supervised(
+    requested_argv: Sequence[str],
+    arguments: argparse.Namespace,
+    policy: dict[str, Any],
+) -> int:
+    profile = management_command_profile(arguments, policy)
+    if profile is None:
+        raise ManagementError("management command has no registered runtime profile")
+    contract = runtime_owner.profile_contract(policy, profile)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CLEARRA_MANAGED_PRODUCER": "management",
+            "CLEARRA_RUNTIME_PROFILE": profile,
+            "CLEARRA_RUNTIME_SUPERVISED": "1",
+        }
+    )
+    context_key = f"{arguments.domain}.{arguments.action}"
+    if bool(getattr(arguments, "apply", False)):
+        context_key += ".apply"
+    context = policy.get("runtime_policy", {}).get(
+        "management_hard_containment_contexts", {}
+    ).get(context_key)
+    if context:
+        context_variable = policy["runtime_policy"]["hard_containment_context_env"].get(
+            context
+        )
+        if not context_variable:
+            raise ManagementError(
+                f"management command has an unknown hard-containment context: {context_key}"
+            )
+        environment[str(context_variable)] = "1"
+    command = [sys.executable, "-B", str(pathlib.Path(__file__).resolve()), *requested_argv]
+    try:
+        result = runtime_owner.run_host_process(
+            command,
+            cwd=ROOT,
+            env=environment,
+            policy=policy,
+            profile=profile,
+            timeout_override_seconds=int(contract["maximum_timeout_seconds"]),
+        )
+    except runtime_owner.RuntimePolicyError as error:
+        receipt = write_receipt(
+            "management-command-denied",
+            {
+                "domain": arguments.domain,
+                "action": arguments.action,
+                "profile": profile,
+                "command": runtime_owner.redact_argv(command),
+                "command_sha256": runtime_owner.command_digest(command),
+                "error_type": type(error).__name__,
+                "error": str(error),
+            },
+        )
+        raise ManagementError(f"{error}; receipt={receipt}") from error
+    receipt = write_receipt(
+        "management-command-runtime",
+        {
+            "domain": arguments.domain,
+            "action": arguments.action,
+            "profile": profile,
+            "runtime": result.receipt(),
+        },
+    )
+    print(f"management_runtime_receipt={receipt}", file=sys.stderr)
+    return result.returncode
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     domains = root.add_subparsers(dest="domain", required=True)
@@ -3901,8 +4577,31 @@ def parser() -> argparse.ArgumentParser:
     clean.add_argument("--apply", action="store_true")
     managed_run = storage_actions.add_parser("run")
     managed_run.add_argument("--producer", required=True)
+    managed_run.add_argument("--profile")
+    managed_run.add_argument("--minimum-memory-mib", type=int)
+    managed_run.add_argument("--timeout", type=int)
     managed_run.add_argument("--export-path", action="append", default=[])
     managed_run.add_argument("command", nargs=argparse.REMAINDER)
+
+    runtime_parser = domains.add_parser("runtime")
+    runtime_actions = runtime_parser.add_subparsers(dest="action", required=True)
+    runtime_actions.add_parser("audit")
+    runtime_run = runtime_actions.add_parser("run")
+    runtime_run.add_argument("--producer", required=True)
+    runtime_run.add_argument("--profile", required=True)
+    runtime_run.add_argument("--minimum-memory-mib", type=int)
+    runtime_run.add_argument("--timeout", type=int)
+    runtime_run.add_argument("--export-path", action="append", default=[])
+    runtime_run.add_argument("command", nargs=argparse.REMAINDER)
+    runtime_wsl = runtime_actions.add_parser("wsl")
+    runtime_wsl_actions = runtime_wsl.add_subparsers(dest="wsl_action", required=True)
+    runtime_wsl_provision = runtime_wsl_actions.add_parser("provision")
+    runtime_wsl_provision.add_argument("--source-distro", default="Ubuntu")
+    runtime_wsl_actions.add_parser("verify")
+    runtime_wsl_run = runtime_wsl_actions.add_parser("run")
+    runtime_wsl_run.add_argument("--entry", required=True)
+    runtime_wsl_run.add_argument("--minimum-memory-mib", type=int)
+    runtime_wsl_run.add_argument("arguments", nargs=argparse.REMAINDER)
 
     toolchain = domains.add_parser("toolchain")
     toolchain_actions = toolchain.add_subparsers(dest="action", required=True)
@@ -3950,6 +4649,15 @@ def parser() -> argparse.ArgumentParser:
     upload = git_actions.add_parser("upload")
     upload.add_argument("--candidate", required=True)
     upload.add_argument("--safety-receipt", required=True)
+    upload.add_argument(
+        "--commit",
+        help=(
+            "exact detached HEAD SHA to upload when the local candidate branch is "
+            "checked out by a protected worktree"
+        ),
+    )
+    check = git_actions.add_parser("check")
+    check.add_argument("--candidate", required=True)
     promote = git_actions.add_parser("promote")
     promote.add_argument("--candidate", required=True)
     promote.add_argument("--safety-receipt", required=True)
@@ -3982,8 +4690,14 @@ def storage_clean(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = parser().parse_args(argv)
+    requested_argv = list(argv if argv is not None else sys.argv[1:])
+    arguments = parser().parse_args(requested_argv)
     policy = load_policy()
+    if (
+        management_command_profile(arguments, policy) is not None
+        and os.environ.get("CLEARRA_RUNTIME_SUPERVISED") != "1"
+    ):
+        return run_management_command_supervised(requested_argv, arguments, policy)
     if arguments.domain == "storage":
         if arguments.action == "audit":
             audit = storage_audit(policy)
@@ -3996,6 +4710,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return storage_run(arguments, policy)
         if arguments.action == "clean":
             return storage_clean(arguments, policy)
+    if arguments.domain == "runtime":
+        if arguments.action == "audit":
+            return runtime_audit_command(policy)
+        if arguments.action == "run":
+            return storage_run(arguments, policy)
+        if arguments.action == "wsl":
+            return runtime_wsl_command(arguments, policy)
     if arguments.domain == "toolchain":
         return toolchain_check(policy) if arguments.action == "check" else toolchain_sync(policy)
     if arguments.domain == "deps":
@@ -4081,7 +4802,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             if arguments.action == "upload":
                 print_json(
-                    upload_candidate(arguments.candidate, arguments.safety_receipt, policy)
+                    upload_candidate(
+                        arguments.candidate,
+                        arguments.safety_receipt,
+                        policy,
+                        exact_commit=arguments.commit,
+                    )
+                )
+                return 0
+            if arguments.action == "check":
+                sha, checks = candidate_check_status_once(arguments.candidate, policy)
+                print_json(
+                    {
+                        "schema_id": "clearra.git-candidate-check-once.v1",
+                        "candidate": arguments.candidate,
+                        "sha": sha,
+                        "checks": checks,
+                        "queried_once": True,
+                    }
                 )
                 return 0
             if arguments.action == "promote":
@@ -4121,6 +4859,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except ManagementError as error:
+    except (ManagementError, runtime_owner.RuntimePolicyError) as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(2)

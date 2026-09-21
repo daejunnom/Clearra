@@ -94,16 +94,6 @@ try {
         ($enumeratedBuildInputs -notcontains 'apps/fixture/build/generated.js' -and
          $enumeratedBuildInputs -notcontains 'crates/fixture/target/generated.bin') `
         'generated_build_and_target_directories_are_excluded'
-    # Windows PowerShell 5.1 reads BOM-less UTF-8 scripts through the active
-    # ANSI code page. Keep the source ASCII while still exercising a Unicode
-    # Windows path so hosted runners parse the test before reaching this case.
-    $unicodeUser = -join @([char]0xD55C, [char]0xAE00, [char]0x20, [char]0xC0AC, [char]0xC6A9, [char]0xC790)
-    $unicodeWindowsPath = "C:\Users\$unicodeUser\Clearra\build"
-    $escapedWslArgument = ConvertTo-ClearraWslpathArgument $unicodeWindowsPath
-    $expectedEscapedWslArgument = $unicodeWindowsPath.Replace('\', '\\')
-    Assert-ArtifactPathCondition `
-        ($escapedWslArgument -ceq $expectedEscapedWslArgument) `
-        'wslpath_argument_preserves_windows_separators_and_unicode'
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Resolve-CoreCBuildDir 'unowned-core' }) 'core_library_cannot_create_without_owner'
     Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath (Join-Path $entryCacheHome 'Clearra'))) 'unowned_core_library_created_no_cache'
     $entryRecord = Initialize-ClearraBuildArtifactCache -RepositoryRoot $entrySource
@@ -116,31 +106,28 @@ try {
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-CoreCManagedConfigureArgs @('-DCLEARRA_BUILD_TEST_ORACLE=MAYBE') }) 'cmake_test_oracle_invalid_value_rejected'
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-CoreCManagedConfigureArgs @('-DCLEARRA_UNKNOWN_TEST_ORACLE=ON') }) 'cmake_unknown_test_oracle_rejected'
 
-    # Stub path conversion only; construction and identity checks are real.
-    $entryOriginalMapping = ${function:ConvertTo-ClearraWslBuildPath}
-    function ConvertTo-ClearraWslBuildPath([string]$WindowsPath, [string]$Distribution) {
-        if ($WindowsPath -eq (Get-ClearraCanonicalBuildRoot)) { return '/mnt/c/fixture-cache/Clearra/build' }
-        return '/mnt/c/current-policy'
-    }
-    try {
-        $linuxSource = '/home/fixture/.local/share/Clearra/workspaces/0123456789abcdef/source'
-        $dispatch = @(New-ClearraIndependentWslBuildArguments -LinuxSourceRoot $linuxSource `
-            -ScriptName 'wsl-core-c-tests.sh' -CommandArguments @('--workers','1'))
-        foreach ($name in @($script:ClearraBuildTransactionEnvironmentNames) + @('RUSTC_WORKSPACE_WRAPPER','CLEARRA_CORE_C_BUILD_DIR')) {
-            $position = [Array]::IndexOf($dispatch, $name)
-            Assert-ArtifactPathCondition ($position -gt 0 -and $dispatch[$position - 1] -eq '-u') "wsl_detaches_windows_binding_$name"
-        }
-        Assert-ArtifactPathCondition ($dispatch -contains 'CLEARRA_BUILD_PURPOSE=experiment' -and
-            $dispatch -contains 'CLEARRA_BUILD_ROOT=/mnt/c/fixture-cache/Clearra/build' -and
-            $dispatch -contains 'CLEARRA_WSL_WORKSPACE=/home/fixture/.local/share/Clearra/workspaces/0123456789abcdef/source' -and
-            $dispatch -contains '/mnt/c/current-policy/scripts/tools/wsl-core-c-tests.sh') 'wsl_uses_shared_physical_root_and_current_authority'
-        $linuxTransaction = Get-ClearraIndependentWslTransactionRoot $linuxSource
-        $linuxOtherCase = Get-ClearraIndependentWslTransactionRoot $linuxSource.Replace('/fixture/','/Fixture/')
-        Assert-ArtifactPathCondition ($linuxTransaction -match '^/mnt/c/fixture-cache/Clearra/build/experiments/[0-9a-f]{24}/current$' -and
-            $linuxTransaction -ne $linuxOtherCase) 'wsl_source_identity_is_independent_and_case_sensitive'
-        Assert-ArtifactPathCondition (Test-ArtifactPathThrows { New-ClearraIndependentWslBuildArguments -LinuxSourceRoot '/mnt/c/source' -ScriptName 'wsl-core-c-tests.sh' }) 'wsl_dispatch_refuses_unvalidated_source_copy'
-        Assert-ArtifactPathCondition (Test-ArtifactPathThrows { New-ClearraIndependentWslBuildArguments -LinuxSourceRoot $linuxSource -ScriptName 'wsl-core-c-tests.sh' -AdditionalEnvironment @{ CARGO_TARGET_DIR=$entryOutside } }) 'wsl_dispatch_cannot_reintroduce_output_override'
-    } finally { ${function:ConvertTo-ClearraWslBuildPath} = $entryOriginalMapping }
+    $unicodeUser = -join @([char]0xD55C, [char]0xAE00, [char]0x20, [char]0xC0AC, [char]0xC6A9, [char]0xC790)
+    $unicodeArgument = "C:\Users\$unicodeUser\Clearra\build"
+    $dispatch = @(New-ClearraManagedWslEntryArguments `
+        -RepositoryRoot $entryAuthority `
+        -Entry 'core-c-tests' `
+        -CommandArguments @('--workers', '1', '--fixture-path', $unicodeArgument))
+    $expectedPrefix = @(
+        '-B', (Join-Path $entryAuthority '_local/clearra_manage.py'),
+        'runtime', 'wsl', 'run', '--entry', 'core-c-tests', '--'
+    )
+    Assert-ArtifactPathCondition `
+        (($dispatch[0..7] -join "`n") -ceq ($expectedPrefix -join "`n")) `
+        'wsl_dispatch_uses_only_the_registered_runtime_entry'
+    Assert-ArtifactPathCondition `
+        ($dispatch[-1] -ceq $unicodeArgument -and $dispatch -notcontains 'wsl.exe') `
+        'wsl_dispatch_preserves_unicode_without_raw_wsl'
+    Assert-ArtifactPathCondition `
+        (Test-ArtifactPathThrows {
+            New-ClearraManagedWslEntryArguments -RepositoryRoot $entryAuthority `
+                -Entry 'core-c-tests' -CommandArguments @("bad`nargument")
+        }) `
+        'wsl_dispatch_rejects_control_characters'
     Complete-ClearraBuildTransaction
     Exit-ClearraBuildArtifactCacheUsage
 } finally {

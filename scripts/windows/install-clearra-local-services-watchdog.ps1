@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference = "Stop"
 $sourceDirectory = Split-Path -Parent $PSCommandPath
 $repoRoot = Split-Path -Parent (Split-Path -Parent $sourceDirectory)
-$runtimeDirectory = Join-Path $env:LOCALAPPDATA "Clearra\startup-v2"
+$runtimeDirectory = Join-Path $env:LOCALAPPDATA "Clearra\state\local-services-v2"
 $watcherSource = Join-Path $sourceDirectory "clearra-local-services-watchdog.ps1"
 $launcherSource = Join-Path $sourceDirectory "launch-clearra-local-services-watchdog.vbs"
 $watcherTarget = Join-Path $runtimeDirectory "clearra-local-services-watchdog.ps1"
@@ -20,7 +20,12 @@ $launcherTarget = Join-Path $runtimeDirectory "launch-clearra-local-services-wat
 $configurationTarget = Join-Path $runtimeDirectory "clearra-local-services-watchdog.json"
 $node = Get-Command node.exe -ErrorAction Stop
 $nodePath = $node.Source
-$npmCliPath = Join-Path (Split-Path -Parent $nodePath) "node_modules\npm\bin\npm-cli.js"
+$pythonPath = (Get-Command python.exe -ErrorAction Stop).Source
+$managerPath = Join-Path $repoRoot '_local\clearra_manage.py'
+& $pythonPath -B $managerPath storage verify --path $runtimeDirectory | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw 'E_CLEARRA_STORAGE_PATH_NOT_ALLOWED: watchdog state path failed management verification.'
+}
 
 function Get-ListenerOwner {
     param([Parameter(Mandatory)][int]$Port)
@@ -34,7 +39,10 @@ function Get-ListenerOwner {
     return [int]$listener.OwningProcess
 }
 
-foreach ($path in @($watcherSource, $launcherSource, $nodePath, $npmCliPath, $SshKeyPath)) {
+foreach ($path in @(
+    $watcherSource, $launcherSource, $nodePath,
+    $pythonPath, $managerPath, $SshKeyPath
+)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required local-services file is unavailable: $path"
     }
@@ -46,7 +54,6 @@ if (-not $SshDestination.Trim()) {
 $configuration = [ordered]@{
     repo_root = $repoRoot
     node_path = $nodePath
-    npm_cli_path = $npmCliPath
     ssh_path = "$env:WINDIR\System32\OpenSSH\ssh.exe"
     ssh_key_path = $SshKeyPath
     ssh_destination = $SshDestination
@@ -108,9 +115,14 @@ foreach ($legacyTaskName in $legacyTaskNames) {
 
 $action = New-ScheduledTaskAction `
     -Execute "$env:WINDIR\System32\wscript.exe" `
-    -Argument ('"{0}"' -f $launcherTarget) `
+    -Argument ('"{0}" "{1}" "{2}" "{3}" "{4}"' -f `
+        $launcherTarget, $pythonPath, $managerPath, $watcherTarget, $configurationTarget) `
     -WorkingDirectory $runtimeDirectory
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$leaseRecoveryTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At ((Get-Date).AddMinutes(1)) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 $principal = New-ScheduledTaskPrincipal `
     -UserId $env:USERNAME `
     -LogonType Interactive `
@@ -125,7 +137,7 @@ $settings = New-ScheduledTaskSettingsSet `
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
-    -Trigger $trigger `
+    -Trigger @($trigger, $leaseRecoveryTrigger) `
     -Principal $principal `
     -Settings $settings `
     -Description "Single-owner hidden watchdog for Clearra ports 4194 and 8790." `
@@ -152,4 +164,4 @@ if ($existingTaskWasRunning) {
     Start-ScheduledTask -TaskName $TaskName
 }
 
-Write-Output "Installed one hidden Clearra local-services watchdog with a 60-second poll."
+Write-Output "Installed one hidden Clearra local-services watchdog with a 60-second poll and a bounded 120-minute runtime lease."

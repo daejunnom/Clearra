@@ -26,18 +26,6 @@ function ssh-keygen {
     '256 SHA256:mdw7bdzZOBrd6sCebPmMVuTaps+ct2OaOle/gaZMBKU 157.151.254.175 (ED25519)'
 }
 
-function wsl.exe {
-    $global:LASTEXITCODE = 0
-    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq '/usr/bin/wslpath') {
-        '/tmp/clearra-oracle-release-deploy-v080'
-        return
-    }
-    if ($args.Count -ge 2 -and $args[0] -ceq '-e' -and $args[1] -ceq '/usr/bin/dash') {
-        return
-    }
-    throw 'Unexpected WSL invocation in Oracle evidence boundary test.'
-}
-
 function Invoke-ExtractedWrapperFunction {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -86,17 +74,18 @@ $windowsContract = Invoke-ExtractedWrapperFunction `
     -Path $wrapper `
     -FunctionName 'Get-OraclePosixSyntaxAuditContract' `
     -Arguments @('windows', $windowsTarget)
-if ($windowsContract.ProjectionCommand -cne 'wsl.exe' -or
-    $windowsContract.SyntaxCommand -cne 'wsl.exe') {
+if ($null -ne $windowsContract.ProjectionCommand -or
+    @($windowsContract.ProjectionArguments).Count -ne 0 -or
+    [IO.Path]::GetFileName($windowsContract.SyntaxCommand) -notin @('python', 'python.exe')) {
     throw 'Windows release-deploy syntax-audit command contract drifted.'
 }
 Assert-ExactStringSequence `
-    -Actual @($windowsContract.ProjectionArguments) `
-    -Expected @('-e', '/usr/bin/wslpath', '-a', '--', $windowsTarget) `
-    -Label 'Windows release-deploy projection'
-Assert-ExactStringSequence `
     -Actual @($windowsContract.SyntaxArguments) `
-    -Expected @('-e', '/usr/bin/dash', '-n', '--') `
+    -Expected @(
+        '-B', (Join-Path $repositoryRoot '_local/clearra_manage.py'),
+        'runtime', 'wsl', 'run', '--entry', 'posix-syntax-audit', '--',
+        '--host-path', $windowsTarget
+    ) `
     -Label 'Windows release-deploy syntax audit'
 $windowsSshConfig = Invoke-ExtractedWrapperFunction `
     -Path $wrapper -FunctionName 'Get-OracleSshConfigPath' -Arguments @('windows')

@@ -113,14 +113,15 @@ function Get-OraclePosixSyntaxAuditContract {
         [string] $Path
     )
     if ($Platform -ceq 'windows') {
+        $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
         return [pscustomobject]@{
-            ProjectionCommand = 'wsl.exe'
-            ProjectionArguments = [string[]]@(
-                '-e', '/usr/bin/wslpath', '-a', '--', $Path
-            )
-            SyntaxCommand = 'wsl.exe'
+            ProjectionCommand = $null
+            ProjectionArguments = [string[]]@()
+            SyntaxCommand = (Get-Command 'python' -ErrorAction Stop).Source
             SyntaxArguments = [string[]]@(
-                '-e', '/usr/bin/dash', '-n', '--'
+                '-B', (Join-Path $repositoryRoot '_local/clearra_manage.py'),
+                'runtime', 'wsl', 'run', '--entry', 'posix-syntax-audit', '--',
+                '--host-path', $Path
             )
         }
     }

@@ -4,7 +4,6 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CLEARRA_UNVERIFIED_BUILD_ID,
   clearraWasmBuildContractsEqual,
   createClearraWasmBuildContract,
   serializeClearraWasmManifest,
@@ -62,7 +61,7 @@ const benchmarkSourceSnapshot = options.benchmarkProvenance
 const benchmarkProducer = options.benchmarkProvenance
   ? await benchmarkProducerIdentity()
   : null;
-const benchmarkToolchain = options.benchmarkProvenance
+let benchmarkToolchain = options.benchmarkProvenance && options.environment !== 'wsl'
   ? await benchmarkToolchainIdentity()
   : null;
 try {
@@ -70,7 +69,8 @@ try {
     if (process.platform !== 'win32') {
       throw new Error('--environment wsl is available only from a Windows host');
     }
-    await buildWithWsl();
+    const wslToolchain = await buildWithWsl();
+    if (options.benchmarkProvenance) benchmarkToolchain = wslToolchain;
   } else {
     await buildNative();
   }
@@ -94,7 +94,13 @@ try {
     ) {
       throw new Error('benchmark producer changed while the WASM artifact was being built');
     }
-    const finalToolchain = await benchmarkToolchainIdentity();
+    // A dedicated WSL build verifies its immutable toolchain marker and emits
+    // the exact versions inside the same bounded session. Starting a second
+    // distribution session merely to repeat the probe would violate the
+    // one-boot-per-high-level-job contract.
+    const finalToolchain = options.environment === 'wsl'
+      ? benchmarkToolchain
+      : await benchmarkToolchainIdentity();
     if (stableJson(benchmarkToolchain) !== stableJson(finalToolchain)) {
       throw new Error('benchmark toolchain changed while the WASM artifact was being built');
     }
@@ -115,47 +121,30 @@ try {
 }
 
 async function buildWithWsl() {
-  const distribution = process.env.CLEARRA_WSL_DISTRIBUTION || 'Ubuntu';
-  const cargoFeatures = options.stageProfiling ? ' --features stage-profiling' : '';
-  const identityEnvironment =
-    wasmBuildContract.runtime_identity.source_commit === CLEARRA_UNVERIFIED_BUILD_ID
-      ? ''
-      :
-        `CLEARRA_SOURCE_COMMIT=${shellQuote(wasmBuildContract.runtime_identity.source_commit)} ` +
-        `CLEARRA_ENGINE_BUILD_ID=${shellQuote(wasmBuildContract.runtime_identity.engine_build_id)} `;
-  const script = `set -euo pipefail
-ROOT=$(wslpath -a ${shellQuote(root)})
-DESTINATION=$(wslpath -a ${shellQuote(stagingDir)})
-TARGET_ROOT=$(wslpath -a ${shellQuote(buildOwner.cargoTarget)})
-export LOCALAPPDATA=${shellQuote(process.env.LOCALAPPDATA)}
-export CLEARRA_BUILD_ROOT=${shellQuote(process.env.CLEARRA_BUILD_ROOT)}
-export CLEARRA_BUILD_PURPOSE=${shellQuote(process.env.CLEARRA_BUILD_PURPOSE)}
-export CLEARRA_BUILD_SOURCE_ROOT=${shellQuote(process.env.CLEARRA_BUILD_SOURCE_ROOT)}
-export CLEARRA_BUILD_SOURCE_ID=${shellQuote(process.env.CLEARRA_BUILD_SOURCE_ID)}
-export CLEARRA_BUILD_SESSION_ID=${shellQuote(process.env.CLEARRA_BUILD_SESSION_ID)}
-export CLEARRA_BUILD_CACHE_SESSION_KEY=${shellQuote(process.env.CLEARRA_BUILD_CACHE_SESSION_KEY)}
-export CLEARRA_BUILD_TRANSACTION_ROOT=${shellQuote(process.env.CLEARRA_BUILD_TRANSACTION_ROOT)}
-export CLEARRA_BUILD_CACHE_OWNER_PID=${shellQuote(process.env.CLEARRA_BUILD_CACHE_OWNER_PID)}
-export CARGO_TARGET_DIR="$TARGET_ROOT" CARGO_INCREMENTAL=0
-export RUSTC_WRAPPER="$(wslpath -a ${shellQuote(resolve(scriptRoot, 'scripts/tools/clearra-rustc-guard.sh'))})"
-chmod +x "$RUSTC_WRAPPER"
-node "$(wslpath -a ${shellQuote(resolve(scriptRoot, 'scripts/tools/clearra-build-paths.mjs'))})" --field cargo-target >/dev/null
-mkdir -p "$TARGET_ROOT" "$DESTINATION"
-${options.verify ? `${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --locked --manifest-path "$ROOT/Cargo.toml" --package clearra-cli-command --lib --tests
-${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo check --locked --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --lib --tests
-${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo test --locked --manifest-path "$ROOT/Cargo.toml" --package clearra-wasm --test wasm_host_contract` : ''}
-${identityEnvironment}CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --locked --manifest-path "$ROOT/Cargo.toml" --target wasm32-unknown-unknown --release -p clearra-wasm-abi${cargoFeatures}
-wasm-bindgen "$TARGET_ROOT/wasm32-unknown-unknown/release/clearra_wasm.wasm" --target web --out-dir "$DESTINATION" --out-name clearra_wasm --no-typescript
-`;
-  const encoded = Buffer.from(script, 'utf8').toString('base64');
-  await run('wsl.exe', [
-    '-d',
-    distribution,
-    '--exec',
-    'bash',
-    '-lc',
-    `printf '%s' '${encoded}' | base64 -d | bash`
-  ]);
+  await assertDefaultRustBuildEnvironment();
+  const args = [
+    '-B',
+    resolve(root, '_local', 'clearra_manage.py'),
+    'runtime',
+    'wsl',
+    'run',
+    '--entry',
+    'wasm-build',
+    '--',
+    '--staging',
+    stagingDir,
+    '--source-commit',
+    wasmBuildContract.runtime_identity.source_commit,
+    '--engine-build-id',
+    wasmBuildContract.runtime_identity.engine_build_id,
+  ];
+  if (options.verify) args.push('--verify');
+  if (options.stageProfiling) args.push('--stage-profiling');
+  await run(process.env.PYTHON || 'python', args);
+  const identityPath = resolve(stagingDir, '.clearra-wsl-toolchain.json');
+  const identity = JSON.parse(await readFile(identityPath, 'utf8'));
+  await rm(identityPath, { force: true });
+  return identity;
 }
 
 async function buildNative() {
@@ -361,18 +350,7 @@ async function benchmarkProducerIdentity() {
 async function benchmarkToolchainIdentity() {
   await assertDefaultRustBuildEnvironment();
   if (options.environment === 'wsl') {
-    const distribution = process.env.CLEARRA_WSL_DISTRIBUTION || 'Ubuntu';
-    return {
-      environment: 'wsl',
-      distribution,
-      rustc: await capture('wsl.exe', ['-d', distribution, '--exec', 'bash', '-lc', 'rustc -Vv']),
-      cargo: await capture('wsl.exe', ['-d', distribution, '--exec', 'bash', '-lc', 'cargo -V']),
-      wasm_bindgen: await capture(
-        'wsl.exe',
-        ['-d', distribution, '--exec', 'bash', '-lc', 'wasm-bindgen --version']
-      ),
-      rust_build_environment: 'default',
-    };
+    throw new Error('WSL toolchain identity is emitted by the single managed build session');
   }
   return {
     environment: 'native',
@@ -384,25 +362,6 @@ async function benchmarkToolchainIdentity() {
 }
 
 async function assertDefaultRustBuildEnvironment() {
-  if (options.environment === 'wsl') {
-    const distribution = process.env.CLEARRA_WSL_DISTRIBUTION || 'Ubuntu';
-    const keys = PERFORMANCE_RUST_ENV_KEYS.join(' ');
-    const result = await capture('wsl.exe', [
-      '-d',
-      distribution,
-      '--exec',
-      'bash',
-      '-lc',
-      `for key in ${keys}; do if [ -n "\${!key}" ]; then printf '%s\\n' "$key"; fi; done; printf '%s\\n' checked`,
-    ]);
-    const configured = result.split(/\r?\n/).filter((entry) => entry !== 'checked');
-    if (configured.length > 0) {
-      throw new Error(
-        `benchmark Rust build environment must be default; unset ${configured.join(', ')}`
-      );
-    }
-    return;
-  }
   const configured = PERFORMANCE_RUST_ENV_KEYS.filter(
     (key) => String(process.env[key] ?? '').length > 0
   );
@@ -447,10 +406,6 @@ function versionedArtifact(prefix, suffix, bytes) {
     bytes: bytes.byteLength,
     sha256
   };
-}
-
-function shellQuote(value) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function run(command, args, extraEnvironment = {}) {

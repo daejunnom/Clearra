@@ -11,29 +11,76 @@ param(
 
     [string]$RepoRoot = "",
     [string]$NodePath = "",
-    [string]$NpmCliPath = "",
 
     [string]$SshPath = "$env:WINDIR\System32\OpenSSH\ssh.exe",
     [string]$SshKeyPath = "",
     [string]$SshDestination = "",
     [string]$ConfigPath = "",
-    [string]$EventLogPath = "$env:LOCALAPPDATA\Clearra\startup\local-services-v2.log",
+    [string]$EventLogPath = "$env:LOCALAPPDATA\Clearra\logs\local-services-v2.log",
     [switch]$DisableTunnel,
     [switch]$Once
 )
 
 $ErrorActionPreference = "Stop"
+
+function Assert-ManagedStateInput {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $stateRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $env:LOCALAPPDATA "Clearra\state")
+    ).TrimEnd('\', '/')
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    if (-not $resolved.StartsWith(
+        $stateRoot + [System.IO.Path]::DirectorySeparatorChar,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'E_CLEARRA_STORAGE_PATH_NOT_ALLOWED: watchdog configuration must be under the managed Clearra state root.'
+    }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+        throw 'E_CLEARRA_STORAGE_PATH_NOT_ALLOWED: watchdog configuration is not a regular file.'
+    }
+    $inputItem = Get-Item -LiteralPath $resolved -Force
+    if (($inputItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'E_CLEARRA_STORAGE_PATH_NOT_ALLOWED: watchdog configuration is a link or junction.'
+    }
+    $cursor = [System.IO.DirectoryInfo]::new((Split-Path -Parent $resolved))
+    while ($null -ne $cursor -and $cursor.FullName.Length -ge $stateRoot.Length) {
+        if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'E_CLEARRA_STORAGE_PATH_NOT_ALLOWED: watchdog configuration traverses a link or junction.'
+        }
+        if ($cursor.FullName.Equals($stateRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $cursor = $cursor.Parent
+    }
+    return $resolved
+}
+
 if ($ConfigPath) {
+    $ConfigPath = Assert-ManagedStateInput -Path $ConfigPath
     $configuration = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
     $RepoRoot = [string]$configuration.repo_root
     $NodePath = [string]$configuration.node_path
-    $NpmCliPath = [string]$configuration.npm_cli_path
     $SshPath = [string]$configuration.ssh_path
     $SshKeyPath = [string]$configuration.ssh_key_path
     $SshDestination = [string]$configuration.ssh_destination
 }
-if (-not $RepoRoot -or -not $NodePath -or -not $NpmCliPath) {
-    throw "RepoRoot, NodePath, and NpmCliPath are required."
+if (-not $RepoRoot -or -not $NodePath) {
+    throw "RepoRoot and NodePath are required."
+}
+$pythonPath = (Get-Command 'python' -ErrorAction Stop).Source
+$managerPath = Join-Path $RepoRoot '_local\clearra_manage.py'
+if (-not (Test-Path -LiteralPath $managerPath -PathType Leaf)) {
+    throw 'The Clearra management entrypoint is unavailable.'
+}
+& $pythonPath -B $managerPath storage verify --path $EventLogPath | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw 'E_CLEARRA_STORAGE_PATH_NOT_ALLOWED: watchdog log path failed management verification.'
+}
+if (-not $Once.IsPresent -and
+    ($env:CLEARRA_RUNTIME_SUPERVISED -cne '1' -or
+     $env:CLEARRA_RUNTIME_PROFILE -cne 'local-service')) {
+    throw 'The persistent watchdog must run through the Clearra local-service runtime supervisor.'
 }
 # Keep the installed default owner identity stable. An isolated custom-port
 # diagnostic must not silently exit because the real 4194 watchdog is alive.
@@ -254,8 +301,13 @@ try {
     Write-WatchdogEvent "watchdog v2 started: poll-seconds=$PollSeconds"
     do {
         try {
-            Ensure-DeveloperGui
-            Ensure-AdminTunnel
+            if ($Once.IsPresent) {
+                Write-WatchdogEvent "once gui-port-in-use=$(Test-PortInUse -Port $GuiPort)"
+                Write-WatchdogEvent "once tunnel-port-in-use=$(Test-PortInUse -Port $TunnelPort)"
+            } else {
+                Ensure-DeveloperGui
+                Ensure-AdminTunnel
+            }
         } catch {
             Write-WatchdogEvent "watchdog cycle failed"
         }

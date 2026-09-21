@@ -194,7 +194,7 @@ Create the exact public source archive from the accepted commit:
 
 ```powershell
 $sourceCommit = '<full-lowercase-40-character-accepted-commit>'
-$sourceArchive = '<absolute-output-directory>/source.tar.gz'
+$sourceArchive = Join-Path (Get-Location).Path 'build/release-evidence/oracle-source/source.tar.gz'
 node scripts/release/create-exact-source-archive.mjs `
   --source-commit $sourceCommit `
   --output $sourceArchive
@@ -212,8 +212,8 @@ $repository = (Get-Location).Path
 $acceptedRunId = '<canonical-successful-workflow-dispatch-run-id>'
 $acceptedRunAttempt = '<exact-positive-run-attempt>'
 $acceptedCtk3ArtifactName = "ctk3-accepted-$sourceCommit-run-$acceptedRunId-attempt-$acceptedRunAttempt"
-$acceptedCtk3Directory = '<new-absolute-accepted-ctk3-directory>'
-$evidenceDirectory = '<new-absolute-evidence-directory>'
+$acceptedCtk3Directory = Join-Path $repository 'build/release-evidence/oracle-accepted-ctk3'
+$evidenceDirectory = Join-Path $repository 'build/release-evidence/oracle-local-layers'
 
 gh run download $acceptedRunId `
   --name $acceptedCtk3ArtifactName `
@@ -226,16 +226,14 @@ node scripts/tools/accepted-ctk3-dist.mjs `
   --expected-run-attempt $acceptedRunAttempt
 if ($LASTEXITCODE -ne 0) { throw 'accepted CTK3 artifact authority failed' }
 
-$repositoryWsl = (& wsl.exe -e wslpath -a -- $repository).Trim()
-$acceptedCtk3Wsl = (& wsl.exe -e wslpath -a -- $acceptedCtk3Directory).Trim()
-$evidenceWsl = (& wsl.exe -e wslpath -a -- $evidenceDirectory).Trim()
-& wsl.exe -e bash "$repositoryWsl/scripts/release/oracle/create-local-layers-v080.sh" `
-  $repositoryWsl `
-  $acceptedCtk3Wsl `
-  $sourceCommit `
-  $acceptedRunId `
-  $acceptedRunAttempt `
-  $evidenceWsl
+$python = (Get-Command python -ErrorAction Stop).Source
+& $python -B _local/clearra_manage.py runtime wsl run `
+  --entry oracle-local-layers-v080 -- `
+  --accepted-ctk3 $acceptedCtk3Directory `
+  --output $evidenceDirectory `
+  --source-commit $sourceCommit `
+  --accepted-run-id $acceptedRunId `
+  --accepted-run-attempt $acceptedRunAttempt
 if ($LASTEXITCODE -ne 0) { throw 'Oracle local layer freeze failed' }
 
 $overlayArchive = Join-Path $evidenceDirectory 'private-overlay-no-config.tar'
@@ -505,9 +503,9 @@ node --test apps/clearra-discord-bot/test/oracle-candidate-observation.test.mjs
 pwsh -NoProfile -File scripts/release/oracle/invoke-freeze-v080.test.ps1
 pwsh -NoProfile -File scripts/release/oracle/invoke-inactive-stage-v080.test.ps1
 pwsh -NoProfile -File scripts/release/oracle/invoke-release-deploy-v080.test.ps1
-$wslRepository = (wsl.exe -e wslpath -a -- (Get-Location).Path).Trim()
-wsl.exe -e bash -n "$wslRepository/scripts/release/oracle/create-local-layers-v080.sh"
-wsl.exe -e bash -n "$wslRepository/scripts/release/oracle/create-actions-layers-v080.sh"
-wsl.exe -e dash -n "$wslRepository/scripts/release/oracle/clearra-oracle-freeze-v080"
-wsl.exe -e dash -n "$wslRepository/scripts/release/oracle/clearra-oracle-release-deploy-v080"
+python -B _local/clearra_manage.py runtime wsl run --entry posix-syntax-audit -- `
+  --shell bash --host-path scripts/release/oracle/create-local-layers-v080.sh `
+  --shell bash --host-path scripts/release/oracle/create-actions-layers-v080.sh `
+  --shell dash --host-path scripts/release/oracle/clearra-oracle-freeze-v080 `
+  --shell dash --host-path scripts/release/oracle/clearra-oracle-release-deploy-v080
 ```

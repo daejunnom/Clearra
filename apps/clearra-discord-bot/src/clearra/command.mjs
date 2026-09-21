@@ -1258,10 +1258,33 @@ function terminalJobResult(job, maxOutputBytes, maxArtifactBytes) {
   if (result.signal !== null && result.signal !== undefined && typeof result.signal !== "string") {
     throw new Error("Clearra job service returned an invalid process signal.");
   }
+  const terminationReason = result.terminationReason;
+  if (
+    terminationReason !== undefined &&
+    !new Set(["exit", "oom", "forced-signal"]).has(terminationReason)
+  ) {
+    throw new Error("Clearra job service returned an invalid termination reason.");
+  }
+  for (const value of [result.oomKillCountBefore, result.oomKillCountAfter]) {
+    if (
+      value !== undefined &&
+      value !== null &&
+      (!Number.isSafeInteger(value) || value < 0)
+    ) {
+      throw new Error("Clearra job service returned an invalid OOM counter.");
+    }
+  }
   const artifact = validateTransportArtifact(result.artifact, maxArtifactBytes);
   return assertDiscordCanonicalOnlyResult({
     exitCode: result.exitCode,
     signal: result.signal ?? null,
+    ...(terminationReason ? { terminationReason } : {}),
+    ...(result.oomKillCountBefore === undefined
+      ? {}
+      : { oomKillCountBefore: result.oomKillCountBefore }),
+    ...(result.oomKillCountAfter === undefined
+      ? {}
+      : { oomKillCountAfter: result.oomKillCountAfter }),
     stdout: stdout.trim(),
     stderr: stderr.trim(),
     ...(artifact ? { artifact } : {}),

@@ -183,6 +183,69 @@ async function tablebaseToggleDoesNotRotateThePrewarmingWorker() {
   controller.dispose();
 }
 
+async function idleMemoryCeilingRotatesOnlyOverLimitWorkers() {
+  resetState();
+  assert.equal(
+    announceWasmArtifactGeneration({
+      sourceSha256: '7'.repeat(64),
+      bindingsSha256: '8'.repeat(64),
+      wasmSha256: '9'.repeat(64)
+    }),
+    true
+  );
+  const workers = [new FakeWorker(), new FakeWorker()];
+  let created = 0;
+  const controller = new WasmTerminalWorkerController(
+    () => workers[created++] as unknown as Worker,
+    undefined,
+    { idleWorkerMemoryCeilingBytes: 100 }
+  );
+  controller.prewarm(1);
+  workers[0].emit({
+    type: 'runtime_prewarm',
+    phase: 'finished',
+    workerCount: 1,
+    runtimeMemoryBytes: 101
+  } as unknown as ClearraWasmWorkerEvent);
+  assert.equal(controller.run(), true);
+  assert.equal(workers[0].terminateCount, 1, 'over-ceiling idle memory rotates at new-run');
+  assert.equal(created, 2);
+  controller.dispose();
+
+  const retained = new FakeWorker();
+  const retainedController = new WasmTerminalWorkerController(
+    () => retained as unknown as Worker,
+    undefined,
+    { idleWorkerMemoryCeilingBytes: 100 }
+  );
+  retainedController.prewarm(1);
+  retained.emit({
+    type: 'runtime_prewarm',
+    phase: 'finished',
+    workerCount: 1,
+    runtimeMemoryBytes: 100
+  } as unknown as ClearraWasmWorkerEvent);
+  assert.equal(retainedController.run(), true);
+  assert.equal(retained.terminateCount, 0, 'at-ceiling prewarm is reused');
+  retainedController.dispose();
+
+  const transferred = new FakeWorker();
+  const transferController = new WasmTerminalWorkerController(
+    () => transferred as unknown as Worker,
+    undefined,
+    { idleWorkerMemoryCeilingBytes: 100 }
+  );
+  transferController.prewarm(1);
+  transferred.emit({
+    type: 'runtime_prewarm',
+    phase: 'finished',
+    workerCount: 1,
+    runtimeMemoryBytes: 101
+  } as unknown as ClearraWasmWorkerEvent);
+  assert.equal(transferController.takeIdleWorker(), null);
+  assert.equal(transferred.terminateCount, 1, 'over-ceiling worker is not transferred');
+}
+
 async function boundedProgressWatchdogCoversPreparationAndSerialSearchStalls() {
   resetState();
   const startupWorker = new FakeWorker();
@@ -1030,6 +1093,7 @@ try {
   await duplicateRunIsRejectedBeforePosting();
   await activeSearchStartsOnlyTheNewTablebaseTransportIntent();
   await tablebaseToggleDoesNotRotateThePrewarmingWorker();
+  await idleMemoryCeilingRotatesOnlyOverLimitWorkers();
   await boundedProgressWatchdogCoversPreparationAndSerialSearchStalls();
   await boundedProgressWatchdogRequiresAndAcceptsChangedDistributedWork();
   await workerCreationFailureBecomesTerminalFailure();
@@ -1063,6 +1127,7 @@ console.log(
     duplicate_run: 'rejected',
     active_tablebase_transport_prewarm: 'started-without-runtime-reconfiguration',
     tablebase_toggle_worker_lifetime: 'preserved',
+    idle_worker_memory_ceiling: 'over-limit-rotated-within-limit-retained',
     worker_creation_failure: 'reported',
     non_success_response: 'failed',
     typed_failed_response: 'preserved',

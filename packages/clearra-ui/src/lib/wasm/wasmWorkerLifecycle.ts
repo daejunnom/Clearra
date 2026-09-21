@@ -1,4 +1,5 @@
 const WASM_OWNER_LIFECYCLE_CHANNEL = 'clearra-wasm-owner-lifecycle-v1';
+export const DEFAULT_IDLE_WASM_WORKER_MEMORY_CEILING_BYTES = 512 * 1024 * 1024;
 
 export type ClearraWasmForcedTerminationReason =
   | 'cancel-timeout'

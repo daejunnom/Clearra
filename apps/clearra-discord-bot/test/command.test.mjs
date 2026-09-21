@@ -1060,6 +1060,9 @@ test("Clearra executor submits an idempotent POST job without shell interpretati
         result: {
           exitCode: 0,
           signal: null,
+          terminationReason: "exit",
+          oomKillCountBefore: 2,
+          oomKillCountAfter: 2,
           stdout: "done",
           stderr: "",
         },
@@ -1074,6 +1077,9 @@ test("Clearra executor submits an idempotent POST job without shell interpretati
 
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, "done");
+  assert.equal(result.terminationReason, "exit");
+  assert.equal(result.oomKillCountBefore, 2);
+  assert.equal(result.oomKillCountAfter, 2);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "https://jobs.example.test/v1/jobs");
   assert.equal(requests[0].request.method, "POST");

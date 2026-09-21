@@ -1022,6 +1022,8 @@ type ClearraWasmWorkerEventBase = {
   schema_version: 1;
   runtime: 'clearra-wasm';
   job_id: number;
+  /** Linear-memory capacity retained by this worker after the event. */
+  runtime_memory_bytes?: number;
   /** Host I/O observations only; never completeness or scheduling authority. */
   pc4_online?: {
     provider: 'hf-graph' | 'local-graph';

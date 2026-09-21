@@ -57,17 +57,19 @@ $windowsContract = Invoke-ExtractedWrapperFunction `
     -Path $wrapper `
     -FunctionName 'Get-OraclePosixSyntaxAuditContract' `
     -Arguments @('windows', $windowsTarget)
-if ($windowsContract.ProjectionCommand -cne 'wsl.exe' -or
-    $windowsContract.SyntaxCommand -cne 'wsl.exe') {
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
+if ($null -ne $windowsContract.ProjectionCommand -or
+    @($windowsContract.ProjectionArguments).Count -ne 0 -or
+    [IO.Path]::GetFileName($windowsContract.SyntaxCommand) -notin @('python', 'python.exe')) {
     throw 'Windows freeze syntax-audit command contract drifted.'
 }
 Assert-ExactStringSequence `
-    -Actual @($windowsContract.ProjectionArguments) `
-    -Expected @('-e', '/usr/bin/wslpath', '-a', '--', $windowsTarget) `
-    -Label 'Windows freeze projection'
-Assert-ExactStringSequence `
     -Actual @($windowsContract.SyntaxArguments) `
-    -Expected @('-e', '/usr/bin/dash', '-n', '--') `
+    -Expected @(
+        '-B', (Join-Path $repositoryRoot '_local/clearra_manage.py'),
+        'runtime', 'wsl', 'run', '--entry', 'posix-syntax-audit', '--',
+        '--host-path', $windowsTarget
+    ) `
     -Label 'Windows freeze syntax audit'
 $windowsSshConfig = Invoke-ExtractedWrapperFunction `
     -Path $wrapper -FunctionName 'Get-OracleSshConfigPath' -Arguments @('windows')
