@@ -128,8 +128,10 @@ for ($index=0; $index -lt 7; $index++) {
     Complete-ClearraBuildTransaction
     Exit-ClearraBuildArtifactCacheUsage
 }
-Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $productPaths[0]) -and -not (Test-Path -LiteralPath $productPaths[1])) 'old_completed_products_pruned'
-Assert-ArtifactPathCondition (@(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Directory).Count -eq 5) 'latest_five_completed_products_retained'
+$retainedProductDirectories = @(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Directory)
+$prunedProductPaths = @($productPaths | Where-Object { -not (Test-Path -LiteralPath $_) })
+Assert-ArtifactPathCondition ($prunedProductPaths.Count -eq 2) 'old_completed_products_pruned'
+Assert-ArtifactPathCondition ($retainedProductDirectories.Count -eq 5) 'latest_five_completed_products_retained'
 Assert-ArtifactPathCondition ((Test-Path -LiteralPath $rootSentinel) -and (Test-Path -LiteralPath $experimentRoot)) 'retention_never_resets_physical_root_or_experiments'
 $failed = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource -Purpose product
 $failedPath = $failed.transaction_root
@@ -137,7 +139,13 @@ $failedPath = $failed.transaction_root
 Exit-ClearraBuildArtifactCacheUsage
 Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $failedPath)) 'failed_product_is_reclaimed_and_not_counted'
 
-$protectedRecord = Read-ClearraBuildTransactionRecord $productPaths[2]
+$retainedProductRecords = @($retainedProductDirectories | ForEach-Object {
+    Read-ClearraBuildTransactionRecord $_.FullName
+} | Sort-Object @{ Expression = { [DateTimeOffset]::Parse($_.completed_utc) }; Descending = $true },
+    @{ Expression = { $_.session_id }; Descending = $true })
+# Protect the exact record that retention would evict. Creation order alone is
+# not authoritative when several completions share the same platform clock tick.
+$protectedRecord = $retainedProductRecords[-1]
 $protectedLease = Enter-ClearraBuildLease $protectedRecord
 try {
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource -Purpose product }) 'unreleased_product_session_blocks_independent_product'
@@ -147,11 +155,12 @@ try {
     $product.session_id = [Guid]::NewGuid().ToString('N')
     $product.transaction_root = Join-Path $canonicalFixtureRoot ('products/' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + $product.session_id)
     $product.cargo_target_dir = Join-Path $product.transaction_root 'cargo-target'
-    $product.completed_utc = [DateTime]::UtcNow.ToString('o')
+    $product.completed_utc = ([DateTimeOffset]::Parse($retainedProductRecords[0].completed_utc)).AddTicks(1).ToString('o')
     New-Item -ItemType Directory -Path $product.transaction_root | Out-Null
     Write-ClearraBuildTransactionRecord $product
     Invoke-ClearraBuildArtifactCacheRetention -RepositoryRoot $fixtureSource | Out-Null
-    Assert-ArtifactPathCondition (Test-Path -LiteralPath $protectedRecord.transaction_root) 'active_product_lease_preserved_during_retention'
+    Assert-ArtifactPathCondition ((Test-Path -LiteralPath $protectedRecord.transaction_root) -and
+        @(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Directory).Count -eq 6) 'active_product_lease_preserved_during_retention'
 } finally { Exit-ClearraBuildLease $protectedLease }
 Invoke-ClearraBuildArtifactCacheRetention -RepositoryRoot $fixtureSource | Out-Null
 Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $protectedRecord.transaction_root) -and @(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Directory).Count -eq 5) 'released_product_lease_allows_five_generation_recovery'
