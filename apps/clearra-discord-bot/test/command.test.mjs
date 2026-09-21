@@ -65,6 +65,22 @@ test("Clearrabot applies direction-specific search and interaction limits", () =
   assert.equal(config.jobPollIntervalMs, 250);
   assert.equal(config.jobCancelTimeoutMs, 2_000);
   assert.equal(config.accessStorePath, null);
+  assert.equal(config.localTablebaseExecutionEnabled, false);
+});
+
+test("Discord local tablebase routing requires an explicit host opt-in", () => {
+  const enabled = loadDiscordBotConfig({
+    DISCORD_TOKEN: "test-token",
+    CLEARRA_PC4_LOCAL_EXECUTION_ENABLED: "1",
+  });
+  assert.equal(enabled.localTablebaseExecutionEnabled, true);
+  assert.throws(
+    () => loadDiscordBotConfig({
+      DISCORD_TOKEN: "test-token",
+      CLEARRA_PC4_LOCAL_EXECUTION_ENABLED: "yes",
+    }),
+    /boolean setting is invalid/u,
+  );
 });
 
 test("search timeout policy classifies native and sfinder argv consistently", () => {
