@@ -16,6 +16,7 @@ members = [
     "crates/clearra-supply",
     "crates/clearra-pc-graph",
     "crates/clearra-pc4-tablebase",
+    "crates/clearra-pc4-activation",
     "crates/clearra-pc-next-probability",
     "crates/clearra-two-line",
     "crates/clearra-exact-cover",
@@ -55,6 +56,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+ed25519-dalek = { version = "=2.2.0", default-features = false }
 libc = "=0.2.186"
 serde_json = "=1.0.145"
 windows-sys = { version = "=0.61.2", default-features = false }
