@@ -116,6 +116,43 @@ fn compact_pattern_union_merge_preserves_exact_future_union_and_input_ownership(
     assert_eq!((left, right), before);
 }
 
+#[test]
+fn compact_pattern_union_layer_shard_deduplicates_owner_without_changing_merge() {
+    let source = expression_source("P7", 7);
+    let (language, root) = prepare(&source, initial(HoldPolicy::Allowed, None));
+    let left = language.advance(&root, PieceKind::I, &|| false).unwrap();
+    let right = language.advance(&root, PieceKind::O, &|| false).unwrap();
+    let expected = language.merge(&left, &right, &|| false).unwrap();
+    let owner = left.layer_owner();
+    let mut shard = CompactPatternUnionLayerShard::<u32>::new();
+    shard.try_reserve(1).unwrap();
+    assert!(!shard.insert(7, left.try_clone().unwrap(), &owner).unwrap());
+    let retained = shard.get(&7, &owner).unwrap();
+    assert_eq!(retained.state_count(), left.state_count());
+    assert_eq!(
+        retained.retained_state_capacity_bytes(),
+        left.retained_state_capacity_bytes()
+    );
+    let merged = language.merge_layer(retained, &right, &|| false).unwrap();
+    assert_eq!(merged, expected);
+    assert!(shard.insert(7, merged, &owner).unwrap());
+
+    let (_, foreign_root) = prepare(&source, initial(HoldPolicy::Allowed, None));
+    let foreign_owner = foreign_root.layer_owner();
+    assert!(!owner.same_identity(&foreign_owner));
+    assert_eq!(
+        shard.insert(8, foreign_root, &owner).unwrap_err(),
+        CompactPatternUnionError::ForeignFrontier
+    );
+
+    let recovered = shard.into_iter(owner).collect::<Vec<_>>();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].0, 7);
+    assert_eq!(recovered[0].1, expected);
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(CompactPatternUnionLayerShard::<u32>::entry_size(), 24);
+}
+
 fn symbolic_outputs(
     language: &CompactPatternUnionLanguage,
     frontier: &CompactPatternUnionFrontier,

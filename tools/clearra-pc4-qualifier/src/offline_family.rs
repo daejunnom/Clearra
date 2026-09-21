@@ -19,7 +19,7 @@ use clearra_pc_graph::request::{
 };
 use clearra_problem::ProblemCompiler;
 use clearra_rules::profile::builtin_rules::jstris_180;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{path::Path, time::Instant};
 
 pub(crate) const SCHEMA: &str = "clearra.pc4.offline-exact-result-family.v1";
@@ -85,7 +85,36 @@ pub(crate) fn prove(
         ));
     }
 
-    let core = json!({
+    let core = receipt_core(
+        dataset,
+        expected_count,
+        count,
+        &exact.normalized_hash_algorithm,
+        &exact.normalized_hash,
+    );
+    let receipt = with_identity(core)?;
+    write_json_atomic(output, &receipt)?;
+    println!(
+        "pc4_offline_family_proof=passed solutions={} hash={} workers={} elapsed_ms={} receipt={}",
+        count,
+        receipt["normalized_solution_set_hash"]
+            .as_str()
+            .unwrap_or("invalid"),
+        workers,
+        elapsed_ms,
+        receipt["receipt_identity"].as_str().unwrap_or("invalid")
+    );
+    Ok(())
+}
+
+pub(crate) fn receipt_core(
+    dataset: &Dataset,
+    expected_count: usize,
+    count: usize,
+    normalized_hash_algorithm: &str,
+    normalized_hash: &str,
+) -> Value {
+    json!({
         "schema": SCHEMA,
         "authority": "non-target-qualification-evidence",
         "qualification_status": "offline-exact-family-complete",
@@ -103,27 +132,14 @@ pub(crate) fn prove(
         "objective": "unique",
         "expected_unique_solution_count": expected_count,
         "unique_solution_count": count,
-        "normalized_solution_set_hash_algorithm": exact.normalized_hash_algorithm,
-        "normalized_solution_set_hash": exact.normalized_hash,
+        "normalized_solution_set_hash_algorithm": normalized_hash_algorithm,
+        "normalized_solution_set_hash": normalized_hash,
         "identity_order": "strict-canonical-ascending",
         "count_complete": true,
         "probability_complete": true,
         "resource_truncated": false,
         "offline_exact_parity_identity": serde_json::Value::Null,
-    });
-    let receipt = with_identity(core)?;
-    write_json_atomic(output, &receipt)?;
-    println!(
-        "pc4_offline_family_proof=passed solutions={} hash={} workers={} elapsed_ms={} receipt={}",
-        count,
-        receipt["normalized_solution_set_hash"]
-            .as_str()
-            .unwrap_or("invalid"),
-        workers,
-        elapsed_ms,
-        receipt["receipt_identity"].as_str().unwrap_or("invalid")
-    );
-    Ok(())
+    })
 }
 
 pub(crate) fn execute(workers: usize) -> Result<ExactFamily, String> {

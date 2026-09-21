@@ -16,7 +16,8 @@ pub use bag_multiset_reachability::{
 };
 pub use compact_pattern_union::{
     CompactPatternUnionError, CompactPatternUnionFrontier, CompactPatternUnionLanguage,
-    CompactPatternUnionLimits,
+    CompactPatternUnionLayerFrontierRef, CompactPatternUnionLayerIntoIter,
+    CompactPatternUnionLayerOwner, CompactPatternUnionLayerShard, CompactPatternUnionLimits,
 };
 pub use materialized_pattern_universe::{
     MaterializedPatternUniverse, MaterializedPatternUniverseError,

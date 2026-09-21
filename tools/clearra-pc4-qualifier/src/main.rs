@@ -94,12 +94,31 @@ fn run() -> Result<(), String> {
         "indexed-path-proof" => run_indexed_path_proof(&options),
         "offline-family-proof" => run_offline_family_proof(&options),
         "offline-family-materialize" => run_offline_family_materialize(&options),
+        "offline-family-recover" => run_offline_family_recover(&options),
         "tablebase-family-proof" => run_tablebase_family_proof(&options),
         "target-qualification" => run_target_qualification(&options),
         _ => Err(
-            "expected outgoing-shard, outgoing-proof-shard, outgoing-proof-run, merge-outgoing, merge-outgoing-proof, boundary-dead-proof, domain-seed, domain-step, domain-run, domain-compare, indexed-path-proof, offline-family-proof, offline-family-materialize, tablebase-family-proof, or target-qualification".to_owned(),
+            "expected outgoing-shard, outgoing-proof-shard, outgoing-proof-run, merge-outgoing, merge-outgoing-proof, boundary-dead-proof, domain-seed, domain-step, domain-run, domain-compare, indexed-path-proof, offline-family-proof, offline-family-materialize, offline-family-recover, tablebase-family-proof, or target-qualification".to_owned(),
         ),
     }
+}
+
+fn run_offline_family_recover(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let dataset_root = absolute_option(options, "dataset-root")?;
+    let profile = required_option(options, "profile")?;
+    let expected_count = usize::try_from(numeric_option(options, "expected-count")?)
+        .map_err(|_| "expected count overflow")?;
+    let family = absolute_option(options, "family")?;
+    let materialization = absolute_option(options, "materialization")?;
+    let output = absolute_option(options, "output")?;
+    let dataset = Dataset::open(&dataset_root, profile)?;
+    offline_materialization::recover_offline_receipt(
+        &dataset,
+        expected_count,
+        &family,
+        &materialization,
+        &output,
+    )
 }
 
 fn run_offline_family_materialize(options: &BTreeMap<String, String>) -> Result<(), String> {

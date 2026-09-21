@@ -81,6 +81,20 @@ fn supply(
 
 #[test]
 fn pc4_compact_graph_union_host_out_of_order_and_scalar_local_http_parity() {
+    // The unoptimized all-feature test body crosses several deliberately
+    // large typed product facades. Keep that diagnostic-only frame off the
+    // test harness's 2 MiB worker stack; optimized product entry points do not
+    // use this helper or create an extra thread.
+    std::thread::Builder::new()
+        .name("pc4-compact-host-parity".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(pc4_compact_graph_union_host_out_of_order_and_scalar_local_http_parity_inner)
+        .expect("spawn bounded parity test")
+        .join()
+        .expect("bounded parity test panicked");
+}
+
+fn pc4_compact_graph_union_host_out_of_order_and_scalar_local_http_parity_inner() {
     let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
     let fixture = three_o_fixture();
     let control = ExecutionControl::default();
