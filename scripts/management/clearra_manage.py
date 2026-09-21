@@ -38,7 +38,7 @@ if str(LOCAL_MODULE_ROOT) not in sys.path:
 import clearra_runtime as runtime_owner
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 POLICY_PATH = ROOT / "config" / "clearra-management.v1.json"
 ERROR_CODE = "E_CLEARRA_STORAGE_PATH_NOT_ALLOWED"
 WARNING = (
@@ -1172,9 +1172,9 @@ def process_candidate(path: pathlib.Path) -> bool:
 
 def raw_wsl_invocation(path: pathlib.Path) -> bool:
     relative = path.relative_to(ROOT).as_posix()
-    if relative == "_local/clearra_runtime.py" or ".test." in path.name:
+    if relative == "scripts/management/clearra_runtime.py" or ".test." in path.name:
         return False
-    if relative.startswith("_local/tests/") or relative.startswith("tests/"):
+    if relative.startswith("scripts/management/tests/") or relative.startswith("tests/"):
         return False
     if path.suffix.lower() not in {".py", ".mjs", ".js", ".ts", ".mts", ".ps1", ".sh", ".rs"}:
         return False
@@ -1202,6 +1202,8 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
         "output_limit_bytes",
         "hard_containment_required",
         "oom_policy",
+        "admission_basis",
+        "concurrency_class",
     }
     for profile, contract in profiles.items():
         missing = required_profile_fields - set(contract)
@@ -1222,7 +1224,7 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
         ):
             failures.append(f"resource profile has an invalid bound: {profile}")
     expected_profiles = {
-        "control": (256, 1024, 300, 300, 32),
+        "control": (256, 512, 300, 300, 32),
         "build-test": (3072, None, 5400, 5400, 512),
         "benchmark-search": (4096, None, 7200, 7200, 256),
         "local-service": (512, 2048, 7200, 7200, 64),
@@ -1338,6 +1340,37 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
                     "global WSL shutdown is prohibited: " + path.relative_to(ROOT).as_posix()
                 )
     runtime_policy = policy.get("runtime_policy", {})
+    expected_memory_routing = {
+        "control": ("windows-commit-control", "control"),
+        "build-test": ("physical", "memory-intensive"),
+        "benchmark-search": ("physical", "memory-intensive"),
+        "local-service": ("physical", "local-service"),
+        "cloud-job": ("physical", "cloud-job"),
+    }
+    for profile, expected in expected_memory_routing.items():
+        contract = profiles.get(profile, {})
+        if (
+            contract.get("admission_basis"),
+            contract.get("concurrency_class"),
+        ) != expected:
+            failures.append(f"resource profile has invalid memory routing: {profile}")
+    if runtime_policy.get("windows_commit_control") != {
+        "minimum_physical_reserve_mib": 1024,
+        "physical_reserve_fraction": 0.0625,
+        "minimum_commit_reserve_mib": 4096,
+        "commit_reserve_fraction": 0.125,
+    }:
+        failures.append("Windows control admission does not preserve RAM and commit reserves")
+    if runtime_policy.get("parallel_admission") != {
+        "stale_slot_grace_seconds": 30,
+        "classes": {
+            "control": {"maximum_parallel": 2},
+            "memory-intensive": {"maximum_parallel": 1},
+            "local-service": {"maximum_parallel": 1},
+            "cloud-job": {"maximum_parallel": 1},
+        },
+    }:
+        failures.append("parallel runtime admission classes differ from the bounded contract")
     if runtime_policy.get("management_command_profiles") != {
         "storage": {
             "audit": "control",
@@ -1399,7 +1432,7 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
         or tree_contract.get("windows_aggregate_memory_limit") is not True
         or tree_contract.get("windows_active_process_limit") is not True
         or tree_contract.get("posix_parent_lease_wrapper")
-        != "_local/clearra_process_wrapper.py"
+        != "scripts/management/clearra_process_wrapper.py"
         or tree_contract.get("linux_cgroup_oom_group") is not True
         or tree_contract.get("wsl_terminate_distribution") != "Clearra-Build"
         or tree_contract.get("wsl_guest_parent_loss_poweroff") is not True
@@ -1470,7 +1503,7 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
         ):
             failures.append(f"WSL benchmark entrypoint lacks an explicit timeout: {entry}")
     direct_owner = runtime_policy.get("direct_wsl_owner")
-    if direct_owner != "_local/clearra_runtime.py":
+    if direct_owner != "scripts/management/clearra_runtime.py":
         failures.append("direct WSL owner is not the runtime supervisor")
     else:
         owner_path = ROOT / direct_owner
@@ -3657,8 +3690,8 @@ def verify_independent_main_checkout(
                 raise ManagementError(f"independent checkout is missing {relative}")
             digests[relative] = sha256_file(path)
         for arguments in (
-            (sys.executable, "-B", "_local/clearra_manage.py", "deps", "verify"),
-            (sys.executable, "-B", "_local/clearra_manage.py", "storage", "verify"),
+            (sys.executable, "-B", "scripts/management/clearra_manage.py", "deps", "verify"),
+            (sys.executable, "-B", "scripts/management/clearra_manage.py", "storage", "verify"),
         ):
             failure_phase = "policy-" + "-".join(arguments[3:])
             result = run(arguments, cwd=directory, check=False)
@@ -3670,12 +3703,12 @@ def verify_independent_main_checkout(
         validation_commands: list[tuple[str, tuple[str, ...], pathlib.Path]] = [
             (
                 "toolchain-sync",
-                (sys.executable, "-B", "_local/clearra_manage.py", "toolchain", "sync"),
+                (sys.executable, "-B", "scripts/management/clearra_manage.py", "toolchain", "sync"),
                 directory,
             ),
             (
                 "deps-install",
-                (sys.executable, "-B", "_local/clearra_manage.py", "deps", "install"),
+                (sys.executable, "-B", "scripts/management/clearra_manage.py", "deps", "install"),
                 directory,
             ),
             ("ctk3-test", ("pnpm", "--filter", "ctk3", "run", "test"), directory),
@@ -3708,7 +3741,7 @@ def verify_independent_main_checkout(
                 (
                     sys.executable,
                     "-B",
-                    "_local/clearra_manage.py",
+                    "scripts/management/clearra_manage.py",
                     "storage",
                     "run",
                     "--producer",
@@ -3726,7 +3759,7 @@ def verify_independent_main_checkout(
                 (
                     sys.executable,
                     "-B",
-                    "_local/clearra_manage.py",
+                    "scripts/management/clearra_manage.py",
                     "storage",
                     "run",
                     "--producer",

@@ -66,7 +66,7 @@ if ($null -ne $windowsContract.ProjectionCommand -or
 Assert-ExactStringSequence `
     -Actual @($windowsContract.SyntaxArguments) `
     -Expected @(
-        '-B', (Join-Path $repositoryRoot '_local/clearra_manage.py'),
+        '-B', (Join-Path $repositoryRoot 'scripts/management/clearra_manage.py'),
         'runtime', 'wsl', 'run', '--entry', 'posix-syntax-audit', '--',
         '--host-path', $windowsTarget
     ) `

@@ -102,28 +102,36 @@ def _signal_pids(pids: set[int], requested_signal: int) -> None:
             os.kill(pid, requested_signal)
 
 
+def _reap_adopted_descendants(command_pid: int) -> None:
+    for pid in _descendants(os.getpid()):
+        if pid == command_pid:
+            continue
+        with contextlib.suppress(ChildProcessError, ProcessLookupError):
+            os.waitpid(pid, os.WNOHANG)
+
+
 def _terminate_descendants(command: subprocess.Popen[bytes], grace: float) -> str:
+    started = time.monotonic()
+    deadline = started + grace
+    term_deadline = started + (grace * 0.5)
     with contextlib.suppress(ProcessLookupError):
         os.killpg(command.pid, signal.SIGTERM)
     _signal_pids(_descendants(os.getpid()), signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    while time.monotonic() < deadline:
+    while time.monotonic() < term_deadline:
+        command.poll()
+        _reap_adopted_descendants(command.pid)
         if not _descendants(os.getpid()):
             return "term"
         time.sleep(0.05)
     with contextlib.suppress(ProcessLookupError):
         os.killpg(command.pid, signal.SIGKILL)
     _signal_pids(_descendants(os.getpid()), signal.SIGKILL)
-    deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        try:
-            waited, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
+        command.poll()
+        _reap_adopted_descendants(command.pid)
+        if not _descendants(os.getpid()):
             break
-        if waited == 0:
-            if not _descendants(os.getpid()):
-                break
-            time.sleep(0.05)
+        time.sleep(0.05)
     return "kill"
 
 

@@ -18,7 +18,7 @@ Install from an ordinary PowerShell session, supplying the local SSH key path
 and destination without committing either value:
 
 ```powershell
-python -B .\_local\clearra_manage.py runtime run `
+python -B .\scripts\management\clearra_manage.py runtime run `
   --producer management --profile control --timeout 300 -- `
   powershell.exe -NoLogo -NoProfile -NonInteractive -File `
   .\scripts\windows\install-clearra-local-services-watchdog.ps1 `
@@ -42,7 +42,7 @@ management listener on 8790. Use 4195 only for the finite local A/B benchmark;
 never fall back to 4196 or an ephemeral port. From the tooling checkout, run:
 
 ```powershell
-python -B _local/clearra_manage.py runtime run `
+python -B scripts/management/clearra_manage.py runtime run `
   --producer browser --profile local-service --timeout 1800 -- `
   node scripts/tools/run-gui-experiment.mjs `
   --source-root '<absolute-benchmark-worktree>' --lease-minutes 30

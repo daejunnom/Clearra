@@ -15,8 +15,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("clearra_manage", ROOT / "_local" / "clearra_manage.py")
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+SPEC = importlib.util.spec_from_file_location("clearra_manage", ROOT / "scripts" / "management" / "clearra_manage.py")
 assert SPEC and SPEC.loader
 MANAGE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MANAGE

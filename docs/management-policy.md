@@ -2,7 +2,7 @@
 
 `config/clearra-management.v1.json` is the single policy source for generated
 paths, toolchain versions, package authority, and lossless Git convergence.
-`python -B _local/clearra_manage.py` is the common entry point. A new writer or
+`python -B scripts/management/clearra_manage.py` is the common entry point. A new writer or
 process launcher must register its source path, producer, output class, and
 lifecycle before CI accepts it.
 
@@ -27,16 +27,16 @@ never cleans another project's entries.
 Use these checks before a managed operation:
 
 ```text
-python -B _local/clearra_manage.py storage audit
-python -B _local/clearra_manage.py storage verify
-python -B _local/clearra_manage.py toolchain check
-python -B _local/clearra_manage.py deps verify
+python -B scripts/management/clearra_manage.py storage audit
+python -B scripts/management/clearra_manage.py storage verify
+python -B scripts/management/clearra_manage.py toolchain check
+python -B scripts/management/clearra_manage.py deps verify
 ```
 
 Run a registered producer with:
 
 ```text
-python -B _local/clearra_manage.py storage run --producer cargo -- cargo check --workspace --locked
+python -B scripts/management/clearra_manage.py storage run --producer cargo -- cargo check --workspace --locked
 ```
 
 The local TTY-only unmanaged-output override is intentionally unavailable to
@@ -48,7 +48,7 @@ escapes. Its warning states that forcing is not recommended.
 pnpm is the sole workspace installer. Frozen installs use:
 
 ```text
-python -B _local/clearra_manage.py deps install
+python -B scripts/management/clearra_manage.py deps install
 ```
 
 Only the dependency-update command may mutate lockfiles. It starts from a clean
@@ -56,8 +56,8 @@ worktree, records before and after package graphs and authority-file hashes,
 and rejects changes outside the selected manager's files:
 
 ```text
-python -B _local/clearra_manage.py deps update --manager pnpm -- ctk3 --latest
-python -B _local/clearra_manage.py deps update --manager cargo -- -p package-name --precise 1.2.3
+python -B scripts/management/clearra_manage.py deps update --manager pnpm -- ctk3 --latest
+python -B scripts/management/clearra_manage.py deps update --manager cargo -- -p package-name --precise 1.2.3
 ```
 
 Publishing is a two-step exact-tarball operation. `pack` runs pnpm, rejects
@@ -68,9 +68,9 @@ tarball again, checks the exact npm version and registry identity, then invokes
 `npm publish <exact-tarball> --provenance --ignore-scripts` once.
 
 ```text
-python -B _local/clearra_manage.py package pack --package ctk3
-python -B _local/clearra_manage.py package publish --receipt <pack-receipt>
-python -B _local/clearra_manage.py package publish --receipt <pack-receipt> --apply
+python -B scripts/management/clearra_manage.py package pack --package ctk3
+python -B scripts/management/clearra_manage.py package publish --receipt <pack-receipt>
+python -B scripts/management/clearra_manage.py package publish --receipt <pack-receipt> --apply
 ```
 
 ## Lossless Git convergence
@@ -104,8 +104,8 @@ Run the phases explicitly. None of these commands polls CI.
 Examples for review decisions:
 
 ```text
-python -B _local/clearra_manage.py git review --safety-receipt <receipt> --candidate <branch> --decide-ref refs/heads/topic --decision selected --reason "required source change"
-python -B _local/clearra_manage.py git review --safety-receipt <receipt> --candidate <branch> --decide-worktree <absolute-path> --decision excluded --reason "generated local experiment"
+python -B scripts/management/clearra_manage.py git review --safety-receipt <receipt> --candidate <branch> --decide-ref refs/heads/topic --decision selected --reason "required source change"
+python -B scripts/management/clearra_manage.py git review --safety-receipt <receipt> --candidate <branch> --decide-worktree <absolute-path> --decision excluded --reason "generated local experiment"
 ```
 
 Raw `git pull`, destructive reset, force push, pre-verification deletion,

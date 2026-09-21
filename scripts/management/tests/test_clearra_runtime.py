@@ -17,9 +17,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
-    "clearra_runtime", ROOT / "_local" / "clearra_runtime.py"
+    "clearra_runtime", ROOT / "scripts" / "management" / "clearra_runtime.py"
 )
 assert SPEC and SPEC.loader
 RUNTIME = importlib.util.module_from_spec(SPEC)
@@ -39,14 +39,22 @@ class RuntimeContractTests(unittest.TestCase):
         cls.policy = load_policy()
         (ROOT / "_local" / "tmp").mkdir(parents=True, exist_ok=True)
 
-    def test_admission_uses_physical_and_available_reserve(self) -> None:
+    def test_windows_control_admission_preserves_ram_and_commit_reserves(self) -> None:
         admission = RUNTIME.calculate_admission(
             self.policy,
             "control",
-            snapshot=RUNTIME.MemorySnapshot(16 * RUNTIME.GIB, 8 * RUNTIME.GIB),
+            snapshot=RUNTIME.MemorySnapshot(
+                16 * RUNTIME.GIB,
+                2 * RUNTIME.GIB,
+                32 * RUNTIME.GIB,
+                12 * RUNTIME.GIB,
+            ),
+            platform_name="nt",
         )
-        self.assertEqual(admission.reserve_bytes, int(16 * RUNTIME.GIB * 0.20))
-        self.assertEqual(admission.hard_limit_bytes, RUNTIME.GIB)
+        self.assertEqual(admission.reserve_bytes, RUNTIME.GIB)
+        self.assertEqual(admission.commit_reserve_bytes, 4 * RUNTIME.GIB)
+        self.assertEqual(admission.hard_limit_bytes, 512 * RUNTIME.MIB)
+        self.assertEqual(admission.capacity_basis, "windows-commit-control")
 
         with self.assertRaisesRegex(
             RUNTIME.RuntimePolicyError, RUNTIME.ADMISSION_ERROR
@@ -54,8 +62,67 @@ class RuntimeContractTests(unittest.TestCase):
             RUNTIME.calculate_admission(
                 self.policy,
                 "control",
-                snapshot=RUNTIME.MemorySnapshot(16 * RUNTIME.GIB, 3 * RUNTIME.GIB),
+                snapshot=RUNTIME.MemorySnapshot(
+                    16 * RUNTIME.GIB,
+                    1200 * RUNTIME.MIB,
+                    32 * RUNTIME.GIB,
+                    12 * RUNTIME.GIB,
+                ),
+                platform_name="nt",
             )
+
+    def test_performance_profiles_use_physical_memory_only(self) -> None:
+        admission = RUNTIME.calculate_admission(
+            self.policy,
+            "build-test",
+            snapshot=RUNTIME.MemorySnapshot(
+                16 * RUNTIME.GIB,
+                8 * RUNTIME.GIB,
+                32 * RUNTIME.GIB,
+                20 * RUNTIME.GIB,
+            ),
+            platform_name="nt",
+        )
+        self.assertEqual(admission.reserve_bytes, int(16 * RUNTIME.GIB * 0.20))
+        self.assertEqual(admission.capacity_basis, "physical")
+
+        with self.assertRaisesRegex(
+            RUNTIME.RuntimePolicyError, RUNTIME.ADMISSION_ERROR
+        ):
+            RUNTIME.calculate_admission(
+                self.policy,
+                "build-test",
+                snapshot=RUNTIME.MemorySnapshot(
+                    16 * RUNTIME.GIB,
+                    5 * RUNTIME.GIB,
+                    32 * RUNTIME.GIB,
+                    20 * RUNTIME.GIB,
+                ),
+                platform_name="nt",
+            )
+
+    def test_parallel_heavy_runtime_slot_is_single_owner_and_reusable(self) -> None:
+        admission = RUNTIME.Admission(
+            profile="build-test",
+            physical_bytes=16 * RUNTIME.GIB,
+            available_bytes=8 * RUNTIME.GIB,
+            reserve_bytes=4 * RUNTIME.GIB,
+            hard_limit_bytes=4 * RUNTIME.GIB,
+            minimum_bytes=3 * RUNTIME.GIB,
+            maximum_bytes=None,
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT / "_local" / "tmp") as directory:
+            with mock.patch.dict(os.environ, {"CLEARRA_STATE_ROOT": directory}):
+                first = RUNTIME._RuntimeSlot.acquire(self.policy, "build-test", admission)
+                try:
+                    with self.assertRaisesRegex(
+                        RUNTIME.RuntimePolicyError, RUNTIME.CONCURRENCY_ERROR
+                    ):
+                        RUNTIME._RuntimeSlot.acquire(self.policy, "build-test", admission)
+                finally:
+                    first.release()
+                second = RUNTIME._RuntimeSlot.acquire(self.policy, "build-test", admission)
+                second.release()
 
     def test_admission_never_reduces_declared_minimum(self) -> None:
         with self.assertRaisesRegex(
@@ -218,7 +285,7 @@ class RuntimeContractTests(unittest.TestCase):
         provision = (
             ROOT / "scripts" / "runtime" / "clearra-wsl-provision.sh"
         ).read_text(encoding="utf-8")
-        runtime = (ROOT / "_local" / "clearra_runtime.py").read_text(
+        runtime = (ROOT / "scripts" / "management" / "clearra_runtime.py").read_text(
             encoding="utf-8"
         )
         cargo = self.policy["toolchains"]["cargo"]
@@ -386,7 +453,7 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertTrue(result.process_tree_stopped)
         self.assertEqual(
             result.containment["lease_wrapper"],
-            "_local/clearra_process_wrapper.py",
+            "scripts/management/clearra_process_wrapper.py",
         )
 
     def test_linux_timeout_kills_detached_descendant(self) -> None:
@@ -430,7 +497,7 @@ class RuntimeContractTests(unittest.TestCase):
             helper_path.write_text(
                 "import importlib.util,json,os,pathlib,sys\n"
                 f"root=pathlib.Path({str(ROOT)!r})\n"
-                "spec=importlib.util.spec_from_file_location('runtime_under_crash',root/'_local/clearra_runtime.py')\n"
+                "spec=importlib.util.spec_from_file_location('runtime_under_crash',root/'scripts/management/clearra_runtime.py')\n"
                 "module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)\n"
                 f"pid_path=pathlib.Path({str(child_pid_path)!r})\n"
                 f"cgroup_path=pathlib.Path({str(child_cgroup_path)!r})\n"
@@ -623,7 +690,7 @@ class RuntimeContractTests(unittest.TestCase):
             helper_path.write_text(
                 "import importlib.util,json,os,pathlib,sys\n"
                 f"root=pathlib.Path({str(ROOT)!r})\n"
-                "spec=importlib.util.spec_from_file_location('runtime_under_crash',root/'_local/clearra_runtime.py')\n"
+                "spec=importlib.util.spec_from_file_location('runtime_under_crash',root/'scripts/management/clearra_runtime.py')\n"
                 "module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)\n"
                 f"pid_path=pathlib.Path({str(child_pid_path)!r})\n"
                 "program=\"import pathlib,time;pathlib.Path(%r).write_text(str(__import__('os').getpid()),encoding='ascii');time.sleep(60)\" % str(pid_path)\n"

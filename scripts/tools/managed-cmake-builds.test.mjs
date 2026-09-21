@@ -50,8 +50,11 @@ async function runPolicy({ session = true, binary = 'managed', outputs = [] } = 
       await mkdir(transaction, { recursive: true });
       await mkdir(join(root, '.leases'), { recursive: true });
       await writeFile(join(transaction, '.clearra-build-transaction.json'), JSON.stringify({
-        ...lease, schema_version: 3, source_root: sourceRoot, transaction_root: transaction,
+        ...lease, schema_version: 4, source_root: sourceRoot, transaction_root: transaction,
         cargo_target_dir: cargoTarget, status: 'active', created_utc: new Date().toISOString(), completed_utc: null,
+        compiler_snapshot_sha256: '1'.repeat(64), compiler_input_file_count: 1,
+        incremental_cache_mode: 'enabled', incremental_context_sha256: '2'.repeat(64),
+        incremental_seed_session_id: null, incremental_seed_snapshot_sha256: null,
       }));
       await writeFile(join(root, '.leases', `experiment-${sourceId}.lock`), JSON.stringify(lease));
       Object.assign(environment, {

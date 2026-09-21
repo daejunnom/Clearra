@@ -35,6 +35,7 @@ from typing import Any, BinaryIO, Callable, Mapping, Sequence
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 ADMISSION_ERROR = "E_CLEARRA_MEMORY_ADMISSION_DENIED"
+CONCURRENCY_ERROR = "E_CLEARRA_RUNTIME_CONCURRENCY_LIMIT"
 MEMORY_LIMIT_ERROR = "E_CLEARRA_PROCESS_MEMORY_LIMIT"
 TIMEOUT_ERROR = "E_CLEARRA_PROCESS_TIMEOUT"
 OUTPUT_LIMIT_ERROR = "E_CLEARRA_PROCESS_OUTPUT_LIMIT"
@@ -59,6 +60,8 @@ class RuntimePolicyError(RuntimeError):
 class MemorySnapshot:
     physical_bytes: int
     available_bytes: int
+    commit_limit_bytes: int | None = None
+    commit_available_bytes: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -70,6 +73,10 @@ class Admission:
     hard_limit_bytes: int
     minimum_bytes: int
     maximum_bytes: int | None
+    capacity_basis: str = "physical"
+    commit_limit_bytes: int | None = None
+    commit_available_bytes: int | None = None
+    commit_reserve_bytes: int | None = None
 
 
 @dataclasses.dataclass
@@ -179,7 +186,12 @@ def memory_snapshot() -> MemorySnapshot:
         status.dwLength = ctypes.sizeof(status)
         if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
             raise RuntimePolicyError("could not read Windows memory status")
-        return MemorySnapshot(int(status.ullTotalPhys), int(status.ullAvailPhys))
+        return MemorySnapshot(
+            int(status.ullTotalPhys),
+            int(status.ullAvailPhys),
+            int(status.ullTotalPageFile),
+            int(status.ullAvailPageFile),
+        )
 
     meminfo: dict[str, int] = {}
     try:
@@ -202,7 +214,14 @@ def memory_snapshot() -> MemorySnapshot:
                 available = min(available, max(0, cgroup_limit - cgroup_current))
     if physical <= 0 or available < 0:
         raise RuntimePolicyError("Linux memory status is incomplete")
-    return MemorySnapshot(physical, available)
+    commit_limit = meminfo.get("CommitLimit")
+    committed = meminfo.get("Committed_AS")
+    commit_available = (
+        max(0, commit_limit - committed)
+        if commit_limit is not None and committed is not None
+        else None
+    )
+    return MemorySnapshot(physical, available, commit_limit, commit_available)
 
 
 def profile_contract(policy: Mapping[str, Any], profile: str) -> Mapping[str, Any]:
@@ -221,20 +240,58 @@ def calculate_admission(
     *,
     snapshot: MemorySnapshot | None = None,
     minimum_override_mib: int | None = None,
+    platform_name: str | None = None,
 ) -> Admission:
     contract = profile_contract(policy, profile)
     current = snapshot or memory_snapshot()
     runtime_policy = policy.get("runtime_policy", {})
     reserve_policy = runtime_policy.get("host_reserve", {})
-    reserve_floor = int(reserve_policy.get("minimum_mib", 2048)) * MIB
-    reserve_fraction = float(reserve_policy.get("physical_fraction", 0.20))
-    reserve = max(reserve_floor, int(current.physical_bytes * reserve_fraction))
+    platform_value = os.name if platform_name is None else platform_name
+    use_windows_commit = (
+        platform_value == "nt"
+        and contract.get("admission_basis") == "windows-commit-control"
+        and current.commit_limit_bytes is not None
+        and current.commit_available_bytes is not None
+    )
+    if use_windows_commit:
+        commit_policy = runtime_policy.get("windows_commit_control", {})
+        reserve = max(
+            int(commit_policy.get("minimum_physical_reserve_mib", 1024)) * MIB,
+            int(
+                current.physical_bytes
+                * float(commit_policy.get("physical_reserve_fraction", 0.0625))
+            ),
+        )
+        commit_reserve = max(
+            int(commit_policy.get("minimum_commit_reserve_mib", 4096)) * MIB,
+            int(
+                current.commit_limit_bytes
+                * float(commit_policy.get("commit_reserve_fraction", 0.125))
+            ),
+        )
+        capacity_basis = "windows-commit-control"
+    else:
+        reserve_floor = int(reserve_policy.get("minimum_mib", 2048)) * MIB
+        reserve_fraction = float(reserve_policy.get("physical_fraction", 0.20))
+        reserve = max(reserve_floor, int(current.physical_bytes * reserve_fraction))
+        commit_reserve = None
+        capacity_basis = "physical"
     minimum = int(contract["minimum_memory_mib"]) * MIB
     if minimum_override_mib is not None:
         minimum = max(minimum, int(minimum_override_mib) * MIB)
     configured_max = contract.get("maximum_memory_mib")
     maximum = int(configured_max) * MIB if configured_max is not None else None
     candidates = [current.physical_bytes - reserve, current.available_bytes - reserve]
+    if use_windows_commit:
+        assert current.commit_limit_bytes is not None
+        assert current.commit_available_bytes is not None
+        assert commit_reserve is not None
+        candidates.extend(
+            [
+                current.commit_limit_bytes - commit_reserve,
+                current.commit_available_bytes - commit_reserve,
+            ]
+        )
     if maximum is not None:
         candidates.append(maximum)
     hard_limit = max(0, min(candidates))
@@ -242,6 +299,8 @@ def calculate_admission(
         raise RuntimePolicyError(
             f"{ADMISSION_ERROR}: profile={profile} minimum_bytes={minimum} "
             f"available_bytes={current.available_bytes} reserve_bytes={reserve} "
+            f"commit_available_bytes={current.commit_available_bytes} "
+            f"commit_reserve_bytes={commit_reserve} capacity_basis={capacity_basis} "
             f"admitted_bytes={hard_limit}"
         )
     return Admission(
@@ -252,7 +311,214 @@ def calculate_admission(
         hard_limit_bytes=hard_limit,
         minimum_bytes=minimum,
         maximum_bytes=maximum,
+        capacity_basis=capacity_basis,
+        commit_limit_bytes=current.commit_limit_bytes,
+        commit_available_bytes=current.commit_available_bytes,
+        commit_reserve_bytes=commit_reserve,
     )
+
+
+def _runtime_state_root() -> pathlib.Path:
+    configured = os.environ.get("CLEARRA_STATE_ROOT")
+    if configured:
+        return pathlib.Path(configured)
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        base = pathlib.Path(local_app_data) if local_app_data else pathlib.Path.home() / "AppData" / "Local"
+        return base / "Clearra" / "state"
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    base = pathlib.Path(xdg_state) if xdg_state else pathlib.Path.home() / ".local" / "state"
+    return base / "Clearra"
+
+
+def _process_start_token(pid: int) -> str | None:
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        process_query_limited_information = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [
+            ctypes.wintypes.DWORD,
+            ctypes.wintypes.BOOL,
+            ctypes.wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            ctypes.wintypes.HANDLE,
+            ctypes.POINTER(ctypes.wintypes.FILETIME),
+            ctypes.POINTER(ctypes.wintypes.FILETIME),
+            ctypes.POINTER(ctypes.wintypes.FILETIME),
+            ctypes.POINTER(ctypes.wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = ctypes.wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+        kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return None
+        try:
+            creation = ctypes.wintypes.FILETIME()
+            exit_time = ctypes.wintypes.FILETIME()
+            kernel = ctypes.wintypes.FILETIME()
+            user = ctypes.wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                return None
+            return f"windows:{creation.dwHighDateTime:08x}{creation.dwLowDateTime:08x}"
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        material = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        close = material.rfind(")")
+        remainder = material[close + 2 :].split()
+        return f"linux:{remainder[19]}" if close >= 0 else None
+    except (OSError, IndexError):
+        return None
+
+
+def _runtime_slot_owner_active(owner: Mapping[str, Any]) -> bool:
+    try:
+        pid = int(owner["pid"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not _pid_alive(pid):
+        return False
+    expected = owner.get("process_start_token")
+    actual = _process_start_token(pid)
+    return expected is None or actual is None or str(expected) == actual
+
+
+def _recover_stale_runtime_slot(path: pathlib.Path, grace_seconds: float) -> bool:
+    marker = path / "owner.json"
+    try:
+        age = max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        return True
+    owner: Mapping[str, Any] | None = None
+    if marker.is_file():
+        try:
+            value = json.loads(marker.read_text(encoding="utf-8"))
+            owner = value if isinstance(value, Mapping) else None
+        except (OSError, json.JSONDecodeError):
+            owner = None
+    if owner is not None and _runtime_slot_owner_active(owner):
+        return False
+    if owner is None and age < grace_seconds:
+        return False
+    try:
+        entries = {entry.name for entry in path.iterdir()}
+    except OSError:
+        return True
+    if not entries.issubset({"owner.json"}):
+        return False
+    with contextlib.suppress(FileNotFoundError):
+        marker.unlink()
+    try:
+        path.rmdir()
+    except OSError:
+        return False
+    return True
+
+
+@dataclasses.dataclass
+class _RuntimeSlot:
+    path: pathlib.Path
+    nonce: str
+    class_id: str
+    index: int
+
+    @classmethod
+    def acquire(
+        cls,
+        policy: Mapping[str, Any],
+        profile: str,
+        admission: Admission,
+    ) -> "_RuntimeSlot":
+        contract = profile_contract(policy, profile)
+        class_id = str(contract.get("concurrency_class", profile))
+        if not re.fullmatch(r"[a-z0-9-]+", class_id):
+            raise RuntimePolicyError(f"invalid runtime concurrency class: {class_id}")
+        parallel = policy.get("runtime_policy", {}).get("parallel_admission", {})
+        classes = parallel.get("classes", {}) if isinstance(parallel, Mapping) else {}
+        class_contract = classes.get(class_id, {}) if isinstance(classes, Mapping) else {}
+        maximum = int(class_contract.get("maximum_parallel", 0))
+        if maximum <= 0:
+            raise RuntimePolicyError(f"runtime concurrency class is not configured: {class_id}")
+        stale_grace = float(parallel.get("stale_slot_grace_seconds", 30))
+        root = _runtime_state_root() / "runtime-slots" / class_id
+        root.mkdir(parents=True, exist_ok=True)
+        owner_pid = os.getpid()
+        token = _process_start_token(owner_pid)
+        active: list[dict[str, Any]] = []
+        for index in range(maximum):
+            path = root / f"slot-{index}"
+            for _attempt in range(2):
+                try:
+                    path.mkdir()
+                except FileExistsError:
+                    if _recover_stale_runtime_slot(path, stale_grace):
+                        continue
+                    marker = path / "owner.json"
+                    try:
+                        value = json.loads(marker.read_text(encoding="utf-8"))
+                        if isinstance(value, Mapping):
+                            active.append(
+                                {
+                                    "slot": index,
+                                    "pid": value.get("pid"),
+                                    "profile": value.get("profile"),
+                                }
+                            )
+                    except (OSError, json.JSONDecodeError):
+                        active.append({"slot": index, "pid": None, "profile": None})
+                    break
+                nonce = uuid.uuid4().hex
+                owner = {
+                    "schema_id": "clearra.runtime-slot-owner.v1",
+                    "pid": owner_pid,
+                    "process_start_token": token,
+                    "nonce": nonce,
+                    "profile": profile,
+                    "class": class_id,
+                    "slot": index,
+                    "hard_limit_bytes": admission.hard_limit_bytes,
+                    "created_utc": utc_now(),
+                }
+                try:
+                    (path / "owner.json").write_text(
+                        json.dumps(owner, ensure_ascii=False, separators=(",", ":")),
+                        encoding="utf-8",
+                    )
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        (path / "owner.json").unlink()
+                    with contextlib.suppress(OSError):
+                        path.rmdir()
+                    raise
+                return cls(path=path, nonce=nonce, class_id=class_id, index=index)
+        raise RuntimePolicyError(
+            f"{CONCURRENCY_ERROR}: profile={profile} class={class_id} "
+            f"maximum_parallel={maximum}",
+            details={"active_slots": active},
+        )
+
+    def release(self) -> None:
+        marker = self.path / "owner.json"
+        try:
+            owner = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(owner, Mapping) or owner.get("nonce") != self.nonce:
+            return
+        with contextlib.suppress(FileNotFoundError):
+            marker.unlink()
+        with contextlib.suppress(OSError):
+            self.path.rmdir()
 
 
 class _OutputCollector:
@@ -899,7 +1165,7 @@ def run_host_process(
                 "memory_oom_group": True,
                 "parent_pid": parent_pid,
                 "parent_loss_kills_tree": monitor_parent,
-                "lease_wrapper": "_local/clearra_process_wrapper.py",
+                "lease_wrapper": "scripts/management/clearra_process_wrapper.py",
                 "hard_containment_required": hard_containment_required,
                 "hard_containment_contexts": active_hard_contexts,
             }
@@ -927,7 +1193,7 @@ def run_host_process(
                 "requested_process_limit": process_limit,
                 "parent_pid": parent_pid,
                 "parent_loss_kills_tree": monitor_parent,
-                "lease_wrapper": "_local/clearra_process_wrapper.py",
+                "lease_wrapper": "scripts/management/clearra_process_wrapper.py",
                 "hard_containment_required": hard_containment_required,
                 "hard_containment_contexts": active_hard_contexts,
             }
@@ -941,7 +1207,7 @@ def run_host_process(
             "--parent-pid",
             str(os.getpid()),
             "--grace-seconds",
-            str(grace),
+            str(max(0.0, grace - 1.0)),
             "--input-size",
             str(len(input_bytes or b"")),
         ]
@@ -950,6 +1216,16 @@ def run_host_process(
         if owned_cgroup is not None:
             invoked.extend(("--owned-cgroup", str(owned_cgroup.path)))
         invoked.extend(("--", executable, *command[1:]))
+    try:
+        runtime_slot = _RuntimeSlot.acquire(policy, profile, admission)
+    except BaseException:
+        if job is not None:
+            job.close()
+        if owned_cgroup is not None:
+            owned_cgroup.close()
+        raise
+    containment["concurrency_class"] = runtime_slot.class_id
+    containment["concurrency_slot"] = runtime_slot.index
     events_before = _memory_events(cgroup)
     stdin_mode: Any = (
         subprocess.PIPE
@@ -1035,40 +1311,43 @@ def run_host_process(
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=max(5.0, grace))
     finally:
-        if (
-            process is not None
-            and (os.name != "nt" or keep_stdin_open)
-            and process.stdin is not None
-        ):
-            with contextlib.suppress(Exception):
-                process.stdin.close()
-        peak = None
-        descendants = None
-        job_oom = False
-        if job is not None:
-            peak, descendants, active_descendants, job_oom = job.metrics()
-            if active_descendants:
-                job.terminate()
-                process_tree_stopped = job.wait_until_empty(max(5.0, grace))
-                if termination_stage == "none":
-                    termination_stage = "job-close-descendants"
-            else:
+        try:
+            if (
+                process is not None
+                and (os.name != "nt" or keep_stdin_open)
+                and process.stdin is not None
+            ):
+                with contextlib.suppress(Exception):
+                    process.stdin.close()
+            peak = None
+            descendants = None
+            job_oom = False
+            if job is not None:
+                peak, descendants, active_descendants, job_oom = job.metrics()
+                if active_descendants:
+                    job.terminate()
+                    process_tree_stopped = job.wait_until_empty(max(5.0, grace))
+                    if termination_stage == "none":
+                        termination_stage = "job-close-descendants"
+                else:
+                    process_tree_stopped = True
+                job.close()
+            owned_events_after: dict[str, int] | None = None
+            if owned_cgroup is not None:
+                peak, descendants, owned_events_after = owned_cgroup.metrics()
+                process_tree_stopped = owned_cgroup.close()
+            elif (
+                os.name != "nt"
+                and process is not None
+                and _posix_group_alive(process.pid)
+            ):
+                termination_stage = _terminate_posix_group(process, grace)
+                process_tree_stopped = not _posix_group_alive(process.pid)
+            elif os.name != "nt":
                 process_tree_stopped = True
-            job.close()
-        owned_events_after: dict[str, int] | None = None
-        if owned_cgroup is not None:
-            peak, descendants, owned_events_after = owned_cgroup.metrics()
-            process_tree_stopped = owned_cgroup.close()
-        elif (
-            os.name != "nt"
-            and process is not None
-            and _posix_group_alive(process.pid)
-        ):
-            termination_stage = _terminate_posix_group(process, grace)
-            process_tree_stopped = not _posix_group_alive(process.pid)
-        elif os.name != "nt":
-            process_tree_stopped = True
-        stdout, stderr = collector.finish(threads)
+            stdout, stderr = collector.finish(threads)
+        finally:
+            runtime_slot.release()
     returncode = process.returncode if process is not None and process.returncode is not None else 125
     events_after = owned_events_after if owned_events_after is not None else _memory_events(cgroup)
     oom_before = events_before.get("oom_kill")

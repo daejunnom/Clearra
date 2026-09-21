@@ -53,7 +53,7 @@ if (Test-StartTestsWindows) {
 $cargoRoot = Get-ClearraCargoTargetDir
 Assert-ArtifactPathCondition (Test-ClearraBuildTransactionOwner) 'owner_public_predicate_matches_bound_session'
 Assert-ArtifactPathCondition ($first.purpose -eq 'experiment' -and $cargoRoot -eq (Join-Path $experimentRoot 'cargo-target')) 'experiment_uses_one_bound_cargo_target'
-Assert-ArtifactPathCondition ($env:RUSTC_WRAPPER -eq (Get-ClearraExpectedRustcWrapper) -and $env:CARGO_INCREMENTAL -eq '0') 'owner_installs_guard_and_incremental_policy'
+Assert-ArtifactPathCondition ($env:RUSTC_WRAPPER -eq (Get-ClearraExpectedRustcWrapper) -and $env:CARGO_INCREMENTAL -eq '1') 'experiment_owner_installs_guard_and_incremental_policy'
 $oldDependency = Join-Path $cargoRoot 'debug/deps/old-library.rlib'
 New-Item -ItemType Directory -Path (Split-Path -Parent $oldDependency) -Force | Out-Null
 [IO.File]::WriteAllText($oldDependency,'disposable fixture dependency')
@@ -86,11 +86,14 @@ Remove-TransientBuildDir $slot
 $slotAgain = New-TransientBuildDir 'probe'
 Assert-ArtifactPathCondition ($slotAgain -eq $slot -and -not (Test-Path -LiteralPath (Join-Path $slot 'old.txt'))) 'transient_reuses_only_its_fixed_slot'
 Remove-TransientBuildDir $slotAgain
+Complete-ClearraBuildTransaction
 Exit-ClearraBuildArtifactCacheUsage
 Assert-ArtifactPathCondition (-not (Test-ClearraBuildTransactionOwner)) 'owner_public_predicate_false_after_exit'
 Assert-ArtifactPathCondition ([string]::IsNullOrWhiteSpace($env:RUSTC_WRAPPER) -and [string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) 'owner_restores_environment'
 $second = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
-Assert-ArtifactPathCondition ($second.transaction_root -eq $experimentRoot -and $second.session_id -ne $firstSession -and -not (Test-Path -LiteralPath $oldDependency)) 'new_experiment_replaces_entire_dependency_graph'
+Assert-ArtifactPathCondition ($second.transaction_root -eq $experimentRoot -and $second.session_id -ne $firstSession -and
+    (Test-Path -LiteralPath $oldDependency) -and $second.incremental_seed_session_id -eq $firstSession -and
+    $second.incremental_seed_snapshot_sha256 -eq $first.compiler_snapshot_sha256) 'new_experiment_reuses_only_complete_compiler_cache_with_provenance'
 Complete-ClearraBuildTransaction
 Exit-ClearraBuildArtifactCacheUsage
 

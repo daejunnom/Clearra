@@ -1,5 +1,5 @@
 # Source/identity compatibility APIs used by source transport. No lifecycle or deletion.
-$script:ClearraArtifactCacheSchemaVersion = 3
+$script:ClearraArtifactCacheSchemaVersion = 4
 
 function Test-ClearraSecretOrGeneratedInput([System.IO.FileInfo]$File) {
     $name = $File.Name
@@ -34,10 +34,14 @@ function Test-ClearraGeneratedInputDirectory([System.IO.DirectoryInfo]$Directory
 function Get-ClearraBuildInputFiles([string]$RepositoryRoot) {
     $repository = [System.IO.Path]::GetFullPath($RepositoryRoot)
     $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    foreach ($name in @('Cargo.toml', 'Cargo.lock', 'CMakeLists.txt', 'package.json', '.cargo/config.toml')) {
+    foreach ($name in @('Cargo.toml', 'Cargo.lock', 'CMakeLists.txt', 'package.json', 'rust-toolchain.toml', '.cargo/config.toml')) {
         $path = Join-Path $repository $name
         if (Test-Path -LiteralPath $path -PathType Leaf) {
-            $files.Add([System.IO.FileInfo]::new($path))
+            $file = [System.IO.FileInfo]::new($path)
+            if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Clearra compiler snapshot refuses a linked input file: $($file.FullName)"
+            }
+            $files.Add($file)
         }
     }
 
@@ -52,14 +56,19 @@ function Get-ClearraBuildInputFiles([string]$RepositoryRoot) {
             $directory = $pending.Pop()
             foreach ($entry in $directory.EnumerateFileSystemInfos()) {
                 if ($entry -is [System.IO.DirectoryInfo]) {
-                    if (-not (Test-ClearraGeneratedInputDirectory $entry) -and
-                        -not (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                    if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw "Clearra compiler snapshot refuses a linked input directory: $($entry.FullName)"
+                    }
+                    if (-not (Test-ClearraGeneratedInputDirectory $entry)) {
                         $pending.Push($entry)
                     }
                     continue
                 }
                 if ($entry -is [System.IO.FileInfo] -and
                     -not (Test-ClearraSecretOrGeneratedInput $entry)) {
+                    if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw "Clearra compiler snapshot refuses a linked input file: $($entry.FullName)"
+                    }
                     $files.Add($entry)
                 }
             }
@@ -99,36 +108,54 @@ function Get-ClearraCommandVersionMetadata([string]$Name, [string[]]$Arguments) 
 
 function Get-ClearraWorkspaceBuildSignature([string]$RepositoryRoot) {
     $repository = [System.IO.Path]::GetFullPath($RepositoryRoot)
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add("schema=$script:ClearraArtifactCacheSchemaVersion")
-    $lines.Add("repository=$repository")
-    $lines.Add("os=$([System.Environment]::OSVersion.VersionString)")
-    $lines.Add("architecture=$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)")
-    $lines.Add("execution_surface=$($env:CLEARRA_EXECUTION_SURFACE)")
-    $lines.Add("rustflags=$($env:RUSTFLAGS)")
-    $lines.Add("windows_rustflags=$($env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS)")
-    $lines.Add((Get-ClearraCommandMetadata 'cargo'))
-    $lines.Add((Get-ClearraCommandMetadata 'rustc'))
-    $lines.Add((Get-ClearraCommandMetadata 'cmake'))
-    $lines.Add((Get-ClearraCommandVersionMetadata 'cargo' @('--version', '--verbose')))
-    $lines.Add((Get-ClearraCommandVersionMetadata 'rustc' @('--version', '--verbose')))
-    $lines.Add((Get-ClearraCommandVersionMetadata 'cmake' @('--version')))
-
+    $sourceLines = [System.Collections.Generic.List[string]]::new()
+    $sourceLines.Add('clearra.compiler-input-snapshot.v1')
     $inputFiles = @(Get-ClearraBuildInputFiles $repository)
     foreach ($file in $inputFiles) {
         $relative = $file.FullName.Substring($repository.Length).TrimStart('\', '/').Replace('\', '/')
-        $lines.Add("$relative|$($file.Length)|$($file.LastWriteTimeUtc.Ticks)")
+        $fileSha = [System.Security.Cryptography.SHA256]::Create()
+        $stream = $null
+        try {
+            $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'Read')
+            $digest = $fileSha.ComputeHash($stream)
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+            $fileSha.Dispose()
+        }
+        $fileDigest = ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+        $sourceLines.Add("$relative`0$($file.Length)`0$fileDigest")
     }
+    $contextLines = [System.Collections.Generic.List[string]]::new()
+    $contextLines.Add('schema=clearra.incremental-context.v1')
+    $contextLines.Add('owner=powershell-v1')
+    $contextLines.Add("os=$([System.Environment]::OSVersion.VersionString)")
+    $contextLines.Add("architecture=$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)")
+    $contextLines.Add("execution_surface=$($env:CLEARRA_EXECUTION_SURFACE)")
+    $contextLines.Add("rustflags=$($env:RUSTFLAGS)")
+    $contextLines.Add("windows_rustflags=$($env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS)")
+    $contextLines.Add("cargo_build_target=$($env:CARGO_BUILD_TARGET)")
+    $contextLines.Add((Get-ClearraCommandMetadata 'cargo'))
+    $contextLines.Add((Get-ClearraCommandMetadata 'rustc'))
+    $contextLines.Add((Get-ClearraCommandMetadata 'cmake'))
+    $contextLines.Add((Get-ClearraCommandVersionMetadata 'cargo' @('--version', '--verbose')))
+    $contextLines.Add((Get-ClearraCommandVersionMetadata 'rustc' @('--version', '--verbose')))
+    $contextLines.Add((Get-ClearraCommandVersionMetadata 'cmake' @('--version')))
 
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+    $sourceBytes = [System.Text.Encoding]::UTF8.GetBytes(($sourceLines -join "`n"))
+    $contextBytes = [System.Text.Encoding]::UTF8.GetBytes(($contextLines -join "`n"))
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $digest = $sha.ComputeHash($bytes)
+        $sourceDigest = ([System.BitConverter]::ToString($sha.ComputeHash($sourceBytes))).Replace('-', '').ToLowerInvariant()
+        $contextDigest = ([System.BitConverter]::ToString($sha.ComputeHash($contextBytes))).Replace('-', '').ToLowerInvariant()
+        $signatureBytes = [System.Text.Encoding]::UTF8.GetBytes("source=$sourceDigest`ncontext=$contextDigest")
+        $signatureDigest = $sha.ComputeHash($signatureBytes)
     } finally {
         $sha.Dispose()
     }
     return [pscustomobject]@{
-        signature = ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+        signature = ([System.BitConverter]::ToString($signatureDigest)).Replace('-', '').ToLowerInvariant()
+        source_snapshot_sha256 = $sourceDigest
+        incremental_context_sha256 = $contextDigest
         input_file_count = $inputFiles.Count
     }
 }

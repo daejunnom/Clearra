@@ -152,7 +152,7 @@ function Invoke-CoreCTestWsl(
         -InternalTestCount $internalTestCount `
         -BuildDir 'Clearra-Build managed ext4 transaction' `
         -Output $result.Output `
-        -Command "python -B _local/clearra_manage.py runtime wsl run --entry core-c-tests"
+        -Command "python -B scripts/management/clearra_manage.py runtime wsl run --entry core-c-tests"
 }
 function Invoke-CoreCTest(
     [string]$BuildDir,

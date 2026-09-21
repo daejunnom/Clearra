@@ -66,12 +66,7 @@ Thumbs.db
 /project_bundle.txt
 /package-bundle.txt
 # Local experiments are never product imports or accepted source inputs.
-/_local/*
-!/_local/clearra_manage.py
-!/_local/clearra_runtime.py
-!/_local/clearra_process_wrapper.py
-!/_local/tests/
-!/_local/tests/**
+/_local/
 /research-data/
 /*.local
 /*.local.*

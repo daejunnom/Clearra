@@ -42,7 +42,8 @@ foreach ($requiredCachePolicy in @(
     "CLEARRA_BUILD_TRANSACTION_ROOT",
     "CLEARRA_BUILD_SOURCE_ID",
     "CLEARRA_BUILD_PURPOSE",
-    "CARGO_INCREMENTAL = '0'",
+    "CARGO_INCREMENTAL = if (`$Record.purpose -eq 'experiment') { '1' } else { '0' }",
+    "incremental_seed_snapshot_sha256",
     ".clearra-build-transaction.json",
     "Select-Object -Skip 5",
     "CreateNew"

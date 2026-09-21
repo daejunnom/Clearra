@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const BUILD_TRANSACTION_MARKER = '.clearra-build-transaction.json';
+export const BUILD_TRANSACTION_SCHEMA = 4;
 export const FORBIDDEN_BUILD_ALIASES = ['CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR', 'CARGO_BUILD_RUSTC_WRAPPER',
   'RUSTC_WORKSPACE_WRAPPER', 'CLEARRA_WSL_CARGO_TARGET_DIR', 'CLEARRA_RELEASE_BUILD_ROOT',
   'CLEARRA_WSL_NATIVE_BUILD_ROOT', 'CLEARRA_CORE_C_BUILD_DIR'];
@@ -79,12 +80,31 @@ export function assertNoBuildLinks(path) {
   }
 }
 export function assertBuildRecord(marker, root, directory) {
-  const expectedFields = ['schema_version', 'purpose', 'source_root', 'source_id', 'session_id', 'transaction_root',
-    'cargo_target_dir', 'owner_pid', 'status', 'created_utc', 'completed_utc'].sort();
-  if (!marker || Object.keys(marker).sort().join('|') !== expectedFields.join('|') || marker.schema_version !== 3 ||
+  const commonFields = ['schema_version', 'purpose', 'source_root', 'source_id', 'session_id', 'transaction_root',
+    'cargo_target_dir', 'owner_pid', 'status', 'created_utc', 'completed_utc'];
+  const incrementalFields = ['compiler_snapshot_sha256', 'compiler_input_file_count', 'incremental_cache_mode',
+    'incremental_context_sha256', 'incremental_seed_session_id', 'incremental_seed_snapshot_sha256'];
+  const expectedFields = marker?.schema_version === BUILD_TRANSACTION_SCHEMA
+    ? [...commonFields, ...incrementalFields].sort()
+    : commonFields.sort();
+  if (!marker || Object.keys(marker).sort().join('|') !== expectedFields.join('|') || ![3, BUILD_TRANSACTION_SCHEMA].includes(marker.schema_version) ||
       !['experiment', 'product'].includes(marker.purpose) || !['active', 'complete', 'failed'].includes(marker.status) ||
       !Number.isSafeInteger(marker.owner_pid) || marker.owner_pid < 1 || !/^[a-f0-9]{32}$/u.test(marker.session_id) ||
       marker.source_id !== buildSourceId(marker.source_root)) throw new Error('Invalid Clearra build ownership metadata');
+  if (marker.schema_version === BUILD_TRANSACTION_SCHEMA) {
+    const seedIsNull = marker.incremental_seed_session_id === null && marker.incremental_seed_snapshot_sha256 === null;
+    const seedIsValid = /^[a-f0-9]{32}$/u.test(marker.incremental_seed_session_id ?? '') &&
+      /^[a-f0-9]{64}$/u.test(marker.incremental_seed_snapshot_sha256 ?? '') &&
+      marker.incremental_seed_session_id !== marker.session_id;
+    if (!/^[a-f0-9]{64}$/u.test(marker.compiler_snapshot_sha256) ||
+        !Number.isSafeInteger(marker.compiler_input_file_count) || marker.compiler_input_file_count < 0 ||
+        !/^[a-f0-9]{64}$/u.test(marker.incremental_context_sha256) ||
+        !['enabled', 'disabled'].includes(marker.incremental_cache_mode) ||
+        (marker.purpose === 'experiment' ? marker.incremental_cache_mode !== 'enabled' : marker.incremental_cache_mode !== 'disabled') ||
+        (!seedIsNull && !seedIsValid) || (marker.purpose === 'product' && !seedIsNull)) {
+      throw new Error('Invalid Clearra incremental build provenance');
+    }
+  }
   const actual = buildPathIdentity(directory);
   const rootId = buildPathIdentity(root);
   const name = actual.slice(actual.lastIndexOf('/') + 1);
@@ -114,7 +134,7 @@ export function assertManagedBuildTransaction({ environment = process.env, platf
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16384) throw new Error('Clearra build transaction marker is invalid');
   const marker = JSON.parse(readFileSync(markerPath, 'utf8').replace(/^\uFEFF/u, ''));
   assertBuildRecord(marker, expectedRoot, transaction);
-  if (marker.schema_version !== 3 || marker.status !== 'active' || !['experiment', 'product'].includes(marker.purpose)) throw new Error('Clearra requires an active managed build transaction');
+  if (marker.schema_version !== BUILD_TRANSACTION_SCHEMA || marker.status !== 'active' || !['experiment', 'product'].includes(marker.purpose)) throw new Error('Clearra requires an active managed build transaction');
   if (environment.CLEARRA_BUILD_CACHE_SESSION_KEY !== marker.session_id) throw new Error('Clearra build session alias binding mismatch');
   for (const [field, name] of Object.entries(fields)) {
     const expected = pathFields.has(field) ? buildPathIdentity(marker[field]) : String(marker[field]);

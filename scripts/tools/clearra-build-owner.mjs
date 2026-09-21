@@ -1,14 +1,99 @@
 // Native Node owner for hosts without PowerShell (notably the Bookworm builder).
 // Lease and marker schemas are shared with clearra-build-transaction.ps1.
-import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareRustcLauncher } from './prepare-clearra-rustc-launcher.mjs';
-import { BUILD_TRANSACTION_MARKER, FORBIDDEN_BUILD_ALIASES, assertBuildRecord, assertBuildPathWithin, assertNoBuildLinks, assertManagedBuildTransaction,
+import { BUILD_TRANSACTION_MARKER, BUILD_TRANSACTION_SCHEMA, FORBIDDEN_BUILD_ALIASES, assertBuildRecord, assertBuildPathWithin, assertNoBuildLinks, assertManagedBuildTransaction,
   buildPathIdentity, buildSourceId, canonicalBuildRoot } from './clearra-build-policy.mjs';
 
 const authorityRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const buildInputRoots = ['apps', 'assets', 'core-c', 'crates', 'packages', 'scripts', 'tests', 'tools'];
+const buildInputFiles = ['Cargo.toml', 'Cargo.lock', 'CMakeLists.txt', 'package.json', 'rust-toolchain.toml', '.cargo/config.toml'];
+const generatedDirectories = new Set(['.git', '.cache', '.svelte-kit', '.vite-temp', '_local', 'dist', 'dist-server',
+  'node_modules', 'build', 'models', 'checkpoints']);
+
+function secretOrGeneratedInput(path) {
+  const name = basename(path);
+  return name === 'pnpm-lock.yaml' || name === '.env' || name.toLowerCase().startsWith('.env.') ||
+    /(credential|service[-_]?account|api[-_]?key|^id_(rsa|dsa|ecdsa|ed25519)(\.|$)|^authorized_keys$)/iu.test(name) ||
+    /^\.(pem|key|pfx|p12)$/iu.test(extname(name));
+}
+function generatedInputDirectory(path) {
+  const name = basename(path);
+  if (generatedDirectories.has(name)) return true;
+  return ['target', 'coverage'].includes(name) && !['src', 'fixtures', 'golden'].includes(basename(dirname(path)));
+}
+async function collectBuildInputFiles(sourceRoot) {
+  const inputs = [];
+  const addFile = async path => {
+    let metadata;
+    try { metadata = await lstat(path); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    if (metadata.isSymbolicLink()) throw new Error(`Clearra compiler snapshot refuses a linked input: ${path}`);
+    if (metadata.isFile() && !secretOrGeneratedInput(path)) inputs.push(path);
+  };
+  for (const name of buildInputFiles) await addFile(resolve(sourceRoot, name));
+  for (const relativeRoot of buildInputRoots) {
+    const root = resolve(sourceRoot, relativeRoot);
+    let rootMetadata;
+    try { rootMetadata = await lstat(root); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    if (rootMetadata.isSymbolicLink()) throw new Error(`Clearra compiler snapshot refuses a linked input root: ${root}`);
+    if (!rootMetadata.isDirectory()) continue;
+    const pending = [root];
+    while (pending.length > 0) {
+      const directory = pending.pop();
+      const entries = await readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        const path = resolve(directory, entry.name);
+        if (entry.isSymbolicLink()) throw new Error(`Clearra compiler snapshot refuses a linked input: ${path}`);
+        if (entry.isDirectory()) {
+          if (!generatedInputDirectory(path)) pending.push(path);
+        } else if (entry.isFile() && !secretOrGeneratedInput(path)) inputs.push(path);
+      }
+    }
+  }
+  return [...new Set(inputs)].sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'case' }));
+}
+function commandVersion(command, arguments_, environment) {
+  const result = spawnSync(command, arguments_, {
+    encoding: 'utf8', env: { ...process.env, ...environment }, windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.signal || result.status !== 0) return `${command}=unavailable`;
+  return `${command}=${`${result.stdout ?? ''}${result.stderr ?? ''}`.trim().replace(/\r?\n/gu, '|')}`;
+}
+export async function buildCompilerSnapshot(sourceRoot, environment = process.env) {
+  const files = await collectBuildInputFiles(sourceRoot);
+  const sourceHash = createHash('sha256');
+  sourceHash.update('clearra.compiler-input-snapshot.v1\n');
+  for (const path of files) {
+    const bytes = await readFile(path);
+    const relativePath = relative(sourceRoot, path).replaceAll('\\', '/');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    sourceHash.update(`${relativePath}\0${bytes.byteLength}\0${digest}\n`);
+  }
+  const context = [
+    'schema=clearra.incremental-context.v1',
+    'owner=node-v1',
+    `platform=${process.platform}`,
+    `architecture=${process.arch}`,
+    `execution_surface=${environment.CLEARRA_EXECUTION_SURFACE ?? ''}`,
+    `rustflags=${environment.RUSTFLAGS ?? ''}`,
+    `windows_rustflags=${environment.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS ?? ''}`,
+    `cargo_build_target=${environment.CARGO_BUILD_TARGET ?? ''}`,
+    commandVersion('cargo', ['--version', '--verbose'], environment),
+    commandVersion('rustc', ['--version', '--verbose'], environment),
+    commandVersion('cmake', ['--version'], environment),
+  ];
+  return {
+    sourceSha256: sourceHash.digest('hex'),
+    inputFileCount: files.length,
+    contextSha256: createHash('sha256').update(context.join('\n')).digest('hex'),
+  };
+}
 function leaseIdentity(marker, ownerPid = marker.owner_pid) {
   return { schema_version: 1, purpose: marker.purpose, source_id: marker.source_id, session_id: marker.session_id, owner_pid: ownerPid };
 }
@@ -47,6 +132,23 @@ async function removeOwnedGeneration(marker, root) {
   }
   if (buildPathIdentity(marker.transaction_root) === buildPathIdentity(root)) throw new Error('Cannot remove the whole build root');
   await rm(marker.transaction_root, { recursive: true, force: false });
+}
+async function retainExperimentCompilerCache(marker, root) {
+  assertBuildRecord(marker, root, marker.transaction_root);
+  if (marker.schema_version !== BUILD_TRANSACTION_SCHEMA || marker.purpose !== 'experiment' || marker.status !== 'complete') return false;
+  const target = resolve(marker.transaction_root, 'cargo-target');
+  let metadata;
+  try { metadata = await lstat(target); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  assertNoBuildLinks(target);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
+  for (const entry of await readdir(marker.transaction_root, { withFileTypes: true })) {
+    if ([BUILD_TRANSACTION_MARKER, 'cargo-target'].includes(entry.name)) continue;
+    const path = resolve(marker.transaction_root, entry.name);
+    assertNoBuildLinks(path);
+    await rm(path, { recursive: entry.isDirectory(), force: false });
+  }
+  return true;
 }
 export async function retainProductBuildGenerations(root) {
   const productRoot = resolve(root, 'products');
@@ -113,8 +215,12 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
   assertNoBuildLinks(transactionRoot);
   assertNoBuildLinks(sourceRoot);
   await stat(resolve(sourceRoot, 'Cargo.toml'));
-  const marker = { schema_version: 3, purpose, source_root: sourceRoot, source_id: sourceId, session_id: sessionId,
-    transaction_root: transactionRoot, cargo_target_dir: cargoTarget, owner_pid: process.pid, status: 'active', created_utc: created, completed_utc: null };
+  const compilerSnapshot = await buildCompilerSnapshot(sourceRoot, environment);
+  const marker = { schema_version: BUILD_TRANSACTION_SCHEMA, purpose, source_root: sourceRoot, source_id: sourceId, session_id: sessionId,
+    transaction_root: transactionRoot, cargo_target_dir: cargoTarget, owner_pid: process.pid, status: 'active', created_utc: created, completed_utc: null,
+    compiler_snapshot_sha256: compilerSnapshot.sourceSha256, compiler_input_file_count: compilerSnapshot.inputFileCount,
+    incremental_cache_mode: purpose === 'experiment' ? 'enabled' : 'disabled', incremental_context_sha256: compilerSnapshot.contextSha256,
+    incremental_seed_session_id: null, incremental_seed_snapshot_sha256: null };
   const identity = leaseIdentity(marker);
   assertNoBuildLinks(resolve(root, '.leases'));
   await mkdir(resolve(root, '.leases'), { recursive: true });
@@ -141,8 +247,16 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
       if (previous) {
         assertBuildRecord(previous, root, transactionRoot);
         if (previous.status === 'active') throw new Error('An active experimental generation cannot be replaced, even without a lease');
-        if (previous.schema_version !== 3 || previous.source_id !== sourceId || previous.purpose !== purpose || buildPathIdentity(previous.transaction_root) !== buildPathIdentity(transactionRoot)) throw new Error('Experimental current slot has a different owner');
-        await removeOwnedGeneration(previous, root);
+        if (previous.source_id !== sourceId || previous.purpose !== purpose || buildPathIdentity(previous.transaction_root) !== buildPathIdentity(transactionRoot)) throw new Error('Experimental current slot has a different owner');
+        const reusable = previous.schema_version === BUILD_TRANSACTION_SCHEMA && previous.status === 'complete' &&
+          previous.incremental_cache_mode === 'enabled' && previous.incremental_context_sha256 === compilerSnapshot.contextSha256 &&
+          await retainExperimentCompilerCache(previous, root);
+        if (reusable) {
+          marker.incremental_seed_session_id = previous.session_id;
+          marker.incremental_seed_snapshot_sha256 = previous.compiler_snapshot_sha256;
+        } else {
+          await removeOwnedGeneration(previous, root);
+        }
       } else {
         try { await stat(transactionRoot); throw new Error('Experimental slot exists without ownership metadata'); }
         catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -158,13 +272,26 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
   const childEnvironment = { ...environment, CLEARRA_BUILD_ROOT: root, CLEARRA_BUILD_PURPOSE: purpose,
     CLEARRA_BUILD_SOURCE_ROOT: sourceRoot, CLEARRA_BUILD_SOURCE_ID: sourceId, CLEARRA_BUILD_SESSION_ID: sessionId,
     CLEARRA_BUILD_TRANSACTION_ROOT: transactionRoot, CLEARRA_BUILD_CACHE_OWNER_PID: String(process.pid),
-    CLEARRA_BUILD_CACHE_SESSION_KEY: sessionId, CARGO_TARGET_DIR: cargoTarget, CARGO_INCREMENTAL: '0', RUSTC_WRAPPER: guard };
+    CLEARRA_BUILD_CACHE_SESSION_KEY: sessionId, CARGO_TARGET_DIR: cargoTarget,
+    CARGO_INCREMENTAL: purpose === 'experiment' ? '1' : '0', RUSTC_WRAPPER: guard };
   if (process.platform !== 'win32' && /^[A-Za-z]:\//u.test(buildPathIdentity(root))) childEnvironment.LOCALAPPDATA = buildPathIdentity(root).replace(/\/Clearra\/build$/iu, '').replaceAll('/', '\\');
   let finished = false;
   const owner = { environment: childEnvironment, transaction: marker, finish: async success => {
     if (finished) return;
     assertManagedBuildTransaction({ environment: childEnvironment, sourceRoot });
     finished = true;
+    let snapshotError;
+    if (success) {
+      try {
+        const finalSnapshot = await buildCompilerSnapshot(sourceRoot, environment);
+        if (finalSnapshot.sourceSha256 !== marker.compiler_snapshot_sha256 ||
+            finalSnapshot.inputFileCount !== marker.compiler_input_file_count ||
+            finalSnapshot.contextSha256 !== marker.incremental_context_sha256) {
+          snapshotError = new Error('Clearra build inputs changed while the transaction was active; the incremental seed was not sealed');
+          success = false;
+        }
+      } catch (error) { snapshotError = error; success = false; }
+    }
     marker.status = success ? 'complete' : 'failed';
     marker.completed_utc = success ? new Date().toISOString() : null;
     try {
@@ -174,6 +301,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
       } finally { await releaseLease(path, identity); }
       if (purpose === 'product' && success) await retainProductBuildGenerations(root);
     } finally { if (catalogOwned) await releaseLease(catalogPath, identity); }
+    if (snapshotError) throw snapshotError;
   } };
   try { if (process.platform === 'win32') prepareRustcLauncher(childEnvironment); }
   catch (error) { await owner.finish(false); throw error; }

@@ -396,32 +396,32 @@
   ],
   "writer_registry": [
     {
-      "path": "_local/clearra_manage.py",
+      "path": "scripts/management/clearra_manage.py",
       "producer": "management",
       "output_class": "receipt"
     },
     {
-      "path": "_local/clearra_runtime.py",
+      "path": "scripts/management/clearra_runtime.py",
       "producer": "management",
       "output_class": "state"
     },
     {
-      "path": "_local/clearra_process_wrapper.py",
+      "path": "scripts/management/clearra_process_wrapper.py",
       "producer": "management",
       "output_class": "state"
     },
     {
-      "path": "_local/tests/test_clearra_manage.py",
+      "path": "scripts/management/tests/test_clearra_manage.py",
       "producer": "management",
       "output_class": "test"
     },
     {
-      "path": "_local/tests/test_clearra_runtime.py",
+      "path": "scripts/management/tests/test_clearra_runtime.py",
       "producer": "management",
       "output_class": "test"
     },
     {
-      "path": "_local/tests/test_git_management_fixture.py",
+      "path": "scripts/management/tests/test_git_management_fixture.py",
       "producer": "management",
       "output_class": "test"
     },
@@ -1574,7 +1574,7 @@
       "oom_policy": "fail-no-retry"
     },
     {
-      "path": "_local/clearra_manage.py",
+      "path": "scripts/management/clearra_manage.py",
       "producer": "management",
       "purpose": "registered-process-execution",
       "profile": "control",
@@ -1587,7 +1587,7 @@
       "oom_policy": "fail-no-retry"
     },
     {
-      "path": "_local/clearra_runtime.py",
+      "path": "scripts/management/clearra_runtime.py",
       "producer": "management",
       "purpose": "registered-process-execution",
       "profile": "control",
@@ -1600,7 +1600,7 @@
       "oom_policy": "fail-no-retry"
     },
     {
-      "path": "_local/clearra_process_wrapper.py",
+      "path": "scripts/management/clearra_process_wrapper.py",
       "producer": "management",
       "purpose": "posix-parent-lease-and-process-tree-cleanup",
       "profile": "control",
@@ -1613,7 +1613,7 @@
       "oom_policy": "fail-no-retry"
     },
     {
-      "path": "_local/tests/test_clearra_manage.py",
+      "path": "scripts/management/tests/test_clearra_manage.py",
       "producer": "management",
       "purpose": "registered-process-execution",
       "profile": "build-test",
@@ -1626,7 +1626,7 @@
       "oom_policy": "fail-no-retry"
     },
     {
-      "path": "_local/tests/test_clearra_runtime.py",
+      "path": "scripts/management/tests/test_clearra_runtime.py",
       "producer": "management",
       "purpose": "registered-process-execution",
       "profile": "control",
@@ -1639,7 +1639,7 @@
       "oom_policy": "fail-no-retry"
     },
     {
-      "path": "_local/tests/test_git_management_fixture.py",
+      "path": "scripts/management/tests/test_git_management_fixture.py",
       "producer": "management",
       "purpose": "registered-process-execution",
       "profile": "build-test",
@@ -2932,6 +2932,19 @@
       "oom_policy": "fail-no-retry"
     },
     {
+      "path": "scripts/tools/clearra-build-owner.mjs",
+      "producer": "management",
+      "purpose": "registered-process-execution",
+      "profile": "build-test",
+      "runtime": "host",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 5400,
+      "termination_grace": 10,
+      "memory_enforcement": "profile-hard-limit",
+      "output_limit": 67108864,
+      "oom_policy": "fail-no-retry"
+    },
+    {
       "path": "scripts/tools/clearra-build-policy.mjs",
       "producer": "management",
       "purpose": "registered-process-execution",
@@ -3761,14 +3774,16 @@
   "resource_profiles": {
     "control": {
       "minimum_memory_mib": 256,
-      "maximum_memory_mib": 1024,
+      "maximum_memory_mib": 512,
       "timeout_seconds": 300,
       "maximum_timeout_seconds": 300,
       "termination_grace_seconds": 5,
       "maximum_descendant_processes": 32,
       "output_limit_bytes": 16777216,
       "hard_containment_required": false,
-      "oom_policy": "fail-no-retry"
+      "oom_policy": "fail-no-retry",
+      "admission_basis": "windows-commit-control",
+      "concurrency_class": "control"
     },
     "build-test": {
       "minimum_memory_mib": 3072,
@@ -3779,7 +3794,9 @@
       "maximum_descendant_processes": 512,
       "output_limit_bytes": 67108864,
       "hard_containment_required": false,
-      "oom_policy": "fail-no-retry"
+      "oom_policy": "fail-no-retry",
+      "admission_basis": "physical",
+      "concurrency_class": "memory-intensive"
     },
     "benchmark-search": {
       "minimum_memory_mib": 4096,
@@ -3791,7 +3808,9 @@
       "output_limit_bytes": 134217728,
       "hard_containment_required": false,
       "oom_policy": "fail-no-retry",
-      "explicit_timeout_required": true
+      "explicit_timeout_required": true,
+      "admission_basis": "physical",
+      "concurrency_class": "memory-intensive"
     },
     "local-service": {
       "minimum_memory_mib": 512,
@@ -3803,7 +3822,9 @@
       "output_limit_bytes": 33554432,
       "hard_containment_required": false,
       "oom_policy": "fail-no-retry",
-      "explicit_lease_required": true
+      "explicit_lease_required": true,
+      "admission_basis": "physical",
+      "concurrency_class": "local-service"
     },
     "cloud-job": {
       "minimum_memory_mib": 16384,
@@ -3817,7 +3838,9 @@
       "oom_policy": "fail-no-retry",
       "cpu_count": 8,
       "concurrency": 1,
-      "maximum_jobs": 1
+      "maximum_jobs": 1,
+      "admission_basis": "physical",
+      "concurrency_class": "cloud-job"
     }
   },
   "runtime_policy": {
@@ -3857,6 +3880,29 @@
       "minimum_mib": 2048,
       "physical_fraction": 0.2
     },
+    "windows_commit_control": {
+      "minimum_physical_reserve_mib": 1024,
+      "physical_reserve_fraction": 0.0625,
+      "minimum_commit_reserve_mib": 4096,
+      "commit_reserve_fraction": 0.125
+    },
+    "parallel_admission": {
+      "stale_slot_grace_seconds": 30,
+      "classes": {
+        "control": {
+          "maximum_parallel": 2
+        },
+        "memory-intensive": {
+          "maximum_parallel": 1
+        },
+        "local-service": {
+          "maximum_parallel": 1
+        },
+        "cloud-job": {
+          "maximum_parallel": 1
+        }
+      }
+    },
     "worker_policy": {
       "allow_silent_reduction": false,
       "allow_oom_retry": false
@@ -3886,7 +3932,7 @@
       "windows_job_kill_on_close": true,
       "windows_aggregate_memory_limit": true,
       "windows_active_process_limit": true,
-      "posix_parent_lease_wrapper": "_local/clearra_process_wrapper.py",
+      "posix_parent_lease_wrapper": "scripts/management/clearra_process_wrapper.py",
       "linux_cgroup_oom_group": true,
       "wsl_terminate_distribution": "Clearra-Build",
       "wsl_guest_parent_loss_poweroff": true,
@@ -4011,6 +4057,6 @@
         }
       }
     },
-    "direct_wsl_owner": "_local/clearra_runtime.py"
+    "direct_wsl_owner": "scripts/management/clearra_runtime.py"
   }
 }

@@ -14,7 +14,7 @@ function New-ClearraManagedWslEntryArguments(
     [string[]]$CommandArguments = @()
 ) {
     $root = [System.IO.Path]::GetFullPath($RepositoryRoot)
-    $manager = Join-Path $root '_local/clearra_manage.py'
+    $manager = Join-Path $root 'scripts/management/clearra_manage.py'
     if (-not (Test-Path -LiteralPath $manager -PathType Leaf)) {
         throw 'The Clearra runtime manager is missing from the selected repository.'
     }

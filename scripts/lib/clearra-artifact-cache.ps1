@@ -49,7 +49,7 @@ function Set-ClearraBuildTransactionEnvironment($Record) {
         CLEARRA_BUILD_CACHE_OWNER_PID = [string]$Record.owner_pid
         CLEARRA_BUILD_CACHE_SESSION_KEY = $Record.session_id
         CARGO_TARGET_DIR = $Record.cargo_target_dir
-        CARGO_INCREMENTAL = '0'
+        CARGO_INCREMENTAL = if ($Record.purpose -eq 'experiment') { '1' } else { '0' }
         RUSTC_WRAPPER = (Get-ClearraExpectedRustcWrapper)
     }
     foreach ($name in $values.Keys) { [Environment]::SetEnvironmentVariable($name, [string]$values[$name], 'Process') }
@@ -63,6 +63,27 @@ function Initialize-ClearraNativeRustcLauncher {
         & node (Join-Path $PSScriptRoot '../tools/prepare-clearra-rustc-launcher.mjs')
         if ($LASTEXITCODE -ne 0) { throw 'Native Windows compiler guard preparation failed.' }
     }
+}
+
+function Preserve-ClearraExperimentCompilerCache($Record, $Lease) {
+    if ($Record.schema_version -ne 4 -or $Record.purpose -ne 'experiment' -or $Record.status -ne 'complete') {
+        return $false
+    }
+    $verified = Read-ClearraBuildTransactionRecord $Record.transaction_root
+    $leaseIdentity = Read-ClearraBuildLease $Lease.Path
+    if ($verified.session_id -ne $Record.session_id -or $verified.source_id -ne $Record.source_id -or
+        $leaseIdentity.owner_pid -ne $PID -or $leaseIdentity.source_id -ne $Record.source_id -or
+        $leaseIdentity.purpose -ne 'experiment') {
+        throw 'Incremental cache reuse requires the verified experiment owner lease.'
+    }
+    $cargo = Join-Path $verified.transaction_root 'cargo-target'
+    if (-not (Test-Path -LiteralPath $cargo -PathType Container)) { return $false }
+    Assert-ClearraBuildTreeNoReparse $verified.transaction_root
+    foreach ($entry in Get-ChildItem -LiteralPath $verified.transaction_root -Force) {
+        if ($entry.Name -in @('.clearra-build-transaction.json','cargo-target')) { continue }
+        Remove-Item -LiteralPath $entry.FullName -Recurse -Force
+    }
+    return $true
 }
 
 function Initialize-ClearraBuildArtifactCache(
@@ -102,10 +123,17 @@ function Initialize-ClearraBuildArtifactCache(
         -not ([IO.Path]::GetFullPath($env:CARGO_TARGET_DIR).TrimEnd('\','/')).Equals($cargo, $comparison)) {
         throw "CARGO_TARGET_DIR must be the selected transaction's exact cargo-target: $cargo"
     }
+    $compilerSnapshot = Get-ClearraWorkspaceBuildSignature $source
     $record = [pscustomobject][ordered]@{
-        schema_version = 3; purpose = $Purpose; source_root = $source; source_id = $sourceId
+        schema_version = 4; purpose = $Purpose; source_root = $source; source_id = $sourceId
         session_id = $session; transaction_root = $transaction; cargo_target_dir = $cargo
         owner_pid = $PID; status = 'active'; created_utc = [DateTime]::UtcNow.ToString('o'); completed_utc = $null
+        compiler_snapshot_sha256 = $compilerSnapshot.source_snapshot_sha256
+        compiler_input_file_count = $compilerSnapshot.input_file_count
+        incremental_cache_mode = if ($Purpose -eq 'experiment') { 'enabled' } else { 'disabled' }
+        incremental_context_sha256 = $compilerSnapshot.incremental_context_sha256
+        incremental_seed_session_id = $null
+        incremental_seed_snapshot_sha256 = $null
     }
     # All explicit path/environment checks above precede this first mutation.
     $lease = $null
@@ -126,7 +154,16 @@ function Initialize-ClearraBuildArtifactCache(
             if ($previous.status -eq 'active') {
                 throw 'An active or interrupted experiment requires explicit owner-aware recovery.'
             }
-            Remove-ClearraOwnedBuildTransaction $previous $lease
+            $reusable = $previous.schema_version -eq 4 -and $previous.status -eq 'complete' -and
+                $previous.incremental_cache_mode -eq 'enabled' -and
+                $previous.incremental_context_sha256 -eq $compilerSnapshot.incremental_context_sha256 -and
+                (Preserve-ClearraExperimentCompilerCache $previous $lease)
+            if ($reusable) {
+                $record.incremental_seed_session_id = $previous.session_id
+                $record.incremental_seed_snapshot_sha256 = $previous.compiler_snapshot_sha256
+            } else {
+                Remove-ClearraOwnedBuildTransaction $previous $lease
+            }
         }
         New-Item -ItemType Directory -Path $transaction -Force | Out-Null
         Write-ClearraBuildTransactionRecord $record
@@ -195,6 +232,15 @@ function Complete-ClearraBuildTransaction {
     }
     if ($record.status -eq 'complete') { return }
     if ($record.status -ne 'active') { throw 'Only an active transaction may be completed.' }
+    $finalSnapshot = Get-ClearraWorkspaceBuildSignature $record.source_root
+    if ($finalSnapshot.source_snapshot_sha256 -ne $record.compiler_snapshot_sha256 -or
+        $finalSnapshot.input_file_count -ne $record.compiler_input_file_count -or
+        $finalSnapshot.incremental_context_sha256 -ne $record.incremental_context_sha256) {
+        $record.status = 'failed'
+        Write-ClearraBuildTransactionRecord $record
+        $script:ClearraBuildTransaction = $record
+        throw 'Clearra build inputs changed while the transaction was active; the incremental seed was not sealed.'
+    }
     $record.status = 'complete'
     $record.completed_utc = [DateTime]::UtcNow.ToString('o')
     Write-ClearraBuildTransactionRecord $record

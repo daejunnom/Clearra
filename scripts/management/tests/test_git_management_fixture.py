@@ -12,9 +12,9 @@ import zipfile
 from unittest import mock
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
-    "clearra_manage_git_fixture", ROOT / "_local" / "clearra_manage.py"
+    "clearra_manage_git_fixture", ROOT / "scripts" / "management" / "clearra_manage.py"
 )
 assert SPEC and SPEC.loader
 MANAGE = importlib.util.module_from_spec(SPEC)

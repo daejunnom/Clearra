@@ -65,14 +65,34 @@ function Read-ClearraBuildTransactionRecord([string]$TransactionRoot) {
     # into returning them; keep the size guard without treating them as absent.
     if ((Get-Item -LiteralPath $marker -Force).Length -gt 16384) { throw 'Build transaction metadata is too large.' }
     $record = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
-    $expected = @('schema_version','purpose','source_root','source_id','session_id','transaction_root',
-                  'cargo_target_dir','owner_pid','status','created_utc','completed_utc') | Sort-Object
+    $common = @('schema_version','purpose','source_root','source_id','session_id','transaction_root',
+                'cargo_target_dir','owner_pid','status','created_utc','completed_utc')
+    $incremental = @('compiler_snapshot_sha256','compiler_input_file_count','incremental_cache_mode',
+                     'incremental_context_sha256','incremental_seed_session_id','incremental_seed_snapshot_sha256')
+    $expected = @(if ($record.schema_version -eq 4) { $common + $incremental } else { $common }) | Sort-Object
     $actual = @($record.PSObject.Properties.Name) | Sort-Object
-    if (($actual -join '|') -ne ($expected -join '|') -or $record.schema_version -ne 3 -or
+    if (($actual -join '|') -ne ($expected -join '|') -or $record.schema_version -notin @(3,4) -or
         $record.purpose -notin @('experiment','product') -or
         $record.source_id -notmatch '^[0-9a-f]{24}$' -or $record.session_id -notmatch '^[0-9a-f]{32}$' -or
         $record.status -notin @('active','complete','failed') -or $record.owner_pid -le 0) {
         throw "Invalid managed build transaction metadata: $marker"
+    }
+    if ($record.schema_version -eq 4) {
+        $inputCount = [long]0
+        $seedIsNull = $null -eq $record.incremental_seed_session_id -and $null -eq $record.incremental_seed_snapshot_sha256
+        $seedIsValid = $record.incremental_seed_session_id -match '^[0-9a-f]{32}$' -and
+            $record.incremental_seed_snapshot_sha256 -match '^[0-9a-f]{64}$' -and
+            $record.incremental_seed_session_id -ne $record.session_id
+        if ($record.compiler_snapshot_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            -not [long]::TryParse([string]$record.compiler_input_file_count, [ref]$inputCount) -or $inputCount -lt 0 -or
+            $record.incremental_context_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            $record.incremental_cache_mode -notin @('enabled','disabled') -or
+            ($record.purpose -eq 'experiment' -and $record.incremental_cache_mode -ne 'enabled') -or
+            ($record.purpose -eq 'product' -and $record.incremental_cache_mode -ne 'disabled') -or
+            (-not $seedIsNull -and -not $seedIsValid) -or
+            ($record.purpose -eq 'product' -and -not $seedIsNull)) {
+            throw "Invalid managed incremental build provenance: $marker"
+        }
     }
     if ($record.source_id -ne (Get-ClearraBuildMetadataSourceIdentity $record.source_root)) { throw 'Build source identity mismatch.' }
     $source = Get-ClearraBuildRecordLocalSafetyRoot $record
@@ -183,7 +203,7 @@ function Get-ClearraInheritedBuildTransaction([string]$RepositoryRoot, [string]$
     $transaction = Assert-ClearraCanonicalBuildPath $env:CLEARRA_BUILD_TRANSACTION_ROOT $RepositoryRoot
     $record = Read-ClearraBuildTransactionRecord $transaction
     $comparison = Get-ClearraBuildPathComparison
-    if ($record.status -ne 'active' -or $record.purpose -ne $Purpose -or
+    if ($record.schema_version -ne 4 -or $record.status -ne 'active' -or $record.purpose -ne $Purpose -or
         -not ([string]$record.source_root).Equals($RepositoryRoot, $comparison) -or
         -not ([string]$record.source_root).Equals($env:CLEARRA_BUILD_SOURCE_ROOT, $comparison) -or
         $record.source_id -ne $env:CLEARRA_BUILD_SOURCE_ID -or

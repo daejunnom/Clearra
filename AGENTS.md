@@ -2,12 +2,12 @@
 
 `config/clearra-management.v1.json` is the authority for generated paths,
 toolchain versions, package managers, and Git convergence. Repository-provided
-tools and automated agents must use `python -B _local/clearra_manage.py` for
+tools and automated agents must use `python -B scripts/management/clearra_manage.py` for
 storage, dependency, toolchain, and Git management operations.
 
 Before adding or running a tool that writes files or starts another process,
 register its source path, producer ID, output class, and lifecycle in the
-manifest. Run it through `python -B _local/clearra_manage.py storage run
+manifest. Run it through `python -B scripts/management/clearra_manage.py storage run
 --producer <id> -- <command>`. Do not write raw reports into `docs/research/`;
 only a person-reviewed summary selected for version control belongs there.
 
@@ -41,7 +41,7 @@ credential paths, and link escapes never accept that override.
 Every process execution point must also register a resource profile and the
 complete tree-ownership, timeout, termination-grace, hard-memory, output-limit,
 and no-OOM-retry contract in `config/clearra-management.v1.json`. Launch host
-commands with `python -B _local/clearra_manage.py runtime run --producer <id>
+commands with `python -B scripts/management/clearra_manage.py runtime run --producer <id>
 --profile <profile> -- <command>`; the compatible `storage run` command
 delegates to the same supervisor. Do not add raw `spawn`, `Start-Process`,
 `subprocess`, `std::process`, workflow/Docker launchers, or shell `exec` sites
@@ -58,10 +58,10 @@ package publication, `main` promotion, and applied ruleset changes as release
 contexts. Do not clear `CLEARRA_RELEASE` or bypass the finite cgroup/Job Object
 requirement for those operations.
 
-`_local/clearra_runtime.py` is the only production source allowed to invoke
+`scripts/management/clearra_runtime.py` is the only production source allowed to invoke
 the WSL host executable. Do not invoke raw `wsl`, its `.exe` launcher, arbitrary
 `bash -lc`, or the global WSL shutdown command. WSL work must use a registered
-fixed guest entrypoint through `python -B _local/clearra_manage.py runtime wsl
+fixed guest entrypoint through `python -B scripts/management/clearra_manage.py runtime wsl
 run --entry <id> -- <arguments>`. Clearra owns only the dedicated
 `Clearra-Build` distribution, terminates only that distribution after each
 lease, and treats `.wslconfig` as read-only. A new WSL entrypoint must declare

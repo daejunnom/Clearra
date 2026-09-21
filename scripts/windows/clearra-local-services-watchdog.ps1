@@ -69,7 +69,7 @@ if (-not $RepoRoot -or -not $NodePath) {
     throw "RepoRoot and NodePath are required."
 }
 $pythonPath = (Get-Command 'python' -ErrorAction Stop).Source
-$managerPath = Join-Path $RepoRoot '_local\clearra_manage.py'
+$managerPath = Join-Path $RepoRoot 'scripts\management\clearra_manage.py'
 if (-not (Test-Path -LiteralPath $managerPath -PathType Leaf)) {
     throw 'The Clearra management entrypoint is unavailable.'
 }

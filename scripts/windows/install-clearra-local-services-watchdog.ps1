@@ -21,7 +21,7 @@ $configurationTarget = Join-Path $runtimeDirectory "clearra-local-services-watch
 $node = Get-Command node.exe -ErrorAction Stop
 $nodePath = $node.Source
 $pythonPath = (Get-Command python.exe -ErrorAction Stop).Source
-$managerPath = Join-Path $repoRoot '_local\clearra_manage.py'
+$managerPath = Join-Path $repoRoot 'scripts\management\clearra_manage.py'
 & $pythonPath -B $managerPath storage verify --path $runtimeDirectory | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw 'E_CLEARRA_STORAGE_PATH_NOT_ALLOWED: watchdog state path failed management verification.'

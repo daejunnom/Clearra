@@ -139,7 +139,7 @@ function Get-OraclePosixSyntaxAuditContract {
             ProjectionArguments = [string[]]@()
             SyntaxCommand = (Get-Command 'python' -ErrorAction Stop).Source
             SyntaxArguments = [string[]]@(
-                '-B', (Join-Path $repositoryRoot '_local/clearra_manage.py'),
+                '-B', (Join-Path $repositoryRoot 'scripts/management/clearra_manage.py'),
                 'runtime', 'wsl', 'run', '--entry', 'posix-syntax-audit', '--',
                 '--host-path', $Path
             )
