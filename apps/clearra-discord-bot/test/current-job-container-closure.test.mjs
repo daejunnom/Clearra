@@ -11,6 +11,7 @@ const runtimeEntries = Object.freeze([
   "src/job-service/server.mjs",
 ]);
 const appSourcePrefix = "/workspace/apps/clearra-discord-bot/";
+const deployedRuntimePrefix = "/workspace/discord-runtime/";
 
 const staticModuleSpecifier =
   /\b(?:import|export)\s+(?:(?:[^;]*?)\s+from\s+)?["']([^"']+)["']/gu;
@@ -26,11 +27,13 @@ for (const [file, stage] of [
     const copyRules = runtimeCopyRules(dockerfile);
     const closure = await relativeEsmClosure(runtimeEntries);
 
-    for (const modulePath of ["src", "scripts/run-cloud-candidate-smoke-job.mjs"]) {
-      assert.ok(dockerfile.split(/\r?\n/u).includes(
-        `COPY --from=${stage} ${appSourcePrefix}${modulePath} ./${modulePath}`,
-      ));
-    }
+    assert.match(
+      dockerfile,
+      /pnpm deploy --filter @clearra\/discord-bot --prod \/workspace\/discord-runtime/u,
+    );
+    assert.ok(dockerfile.split(/\r?\n/u).includes(
+      `COPY --from=${stage} ${deployedRuntimePrefix} ./`,
+    ));
     assert.doesNotMatch(dockerfile, /benchmark-cloud-cli-parity/u);
 
     for (const modulePath of closure) {
@@ -100,6 +103,10 @@ function runtimeCopyRules(dockerfile) {
   const rules = [];
   const copyRule = /^COPY --from=(?:node-build|accepted-inputs) (\S+) (\S+)$/gmu;
   for (const match of dockerfile.matchAll(copyRule)) {
+    if (match[1] === deployedRuntimePrefix && match[2] === "./") {
+      rules.push({ source: "", destination: "" });
+      continue;
+    }
     if (!match[1].startsWith(appSourcePrefix) || !match[2].startsWith("./")) {
       continue;
     }
@@ -112,6 +119,7 @@ function runtimeCopyRules(dockerfile) {
 }
 
 function copyRulePreservesModulePath(rule, modulePath) {
+  if (rule.source === "") return rule.destination === "";
   if (modulePath === rule.source) return rule.destination === modulePath;
   if (!modulePath.startsWith(`${rule.source}/`)) return false;
   const suffix = modulePath.slice(rule.source.length + 1);
