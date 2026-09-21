@@ -1948,7 +1948,7 @@ test("bot execution keeps typed pc score separate from the generic score preset"
     "--height", "1", "--pieces", "1", "--queue", "I",
     "--hold", "empty", "--score-profile", "guideline",
     "--spin-profile", "all-mini-plus", "--initial-b2b", "2",
-    "--rule", "srs", "--format", "json", "--include-solution-data",
+    "--rule", "srs", "--no-tablebase", "--format", "json", "--include-solution-data",
   ]);
   assert.deepEqual(invocations[1].slice(0, 2), ["sfinder", "score"]);
   assert.equal(invocations[0].includes("--objective"), false);

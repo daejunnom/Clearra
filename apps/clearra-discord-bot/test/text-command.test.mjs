@@ -285,6 +285,27 @@ test("pc score text is typed while top-level score remains independently generic
   );
 });
 
+test("text PC products preserve one explicit tablebase decision", () => {
+  const base = "--field XXXXXX____ --patterns I --lines 1 --kicktable srs";
+  for (const product of ["path", "minimals", "score", "score-minimals"]) {
+    const request = parseClearraTextRequest(
+      `$pc ${product} ${base} --tablebase`,
+      "$",
+      remoteExecution,
+    );
+    assert.equal(
+      request.arguments_.filter((token) => token === "--tablebase").length,
+      1,
+      product,
+    );
+    assert.equal(request.arguments_.includes("--no-tablebase"), false, product);
+  }
+  assert.throws(
+    () => parseClearraTextRequest(`$pc chance ${base} --tablebase`, "$", remoteExecution),
+    /does not expose option '--tablebase'/i,
+  );
+});
+
 test("advanced text objectives reject duplicate, unknown, non-base, and incompatible use", () => {
   const base = "XXXXXX____ I 1";
   const rejected = [

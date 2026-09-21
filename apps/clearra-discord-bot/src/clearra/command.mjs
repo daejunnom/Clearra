@@ -424,6 +424,18 @@ const CONTROLLED_OPTIONS = new Map([
   ["--format", 1],
   ["--include-solution-data", 0],
 ]);
+const TABLEBASE_OPTIONS = new Map([
+  ["--tablebase", true],
+  ["--tb", true],
+  ["--no-tablebase", false],
+  ["--no-tb", false],
+]);
+const DISCORD_TABLEBASE_PC_SUBCOMMANDS = new Set([
+  "path",
+  "minimals",
+  "score",
+  "score-minimals",
+]);
 const FORBIDDEN_TIE_OPTIONS = new Set([
   "--ties",
   "--tie-snapshot",
@@ -538,6 +550,7 @@ export function prepareClearraArguments(tokens, execution = {}) {
   }
 
   const output = [command];
+  let tablebaseRequested = null;
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     const normalizedToken = token.toLowerCase();
@@ -563,6 +576,17 @@ export function prepareClearraArguments(tokens, execution = {}) {
     if (FILE_OPTIONS.has(optionName) && !inlineOperationDocument) {
       throw new Error("File and custom-code inputs are not available through Discord.");
     }
+    const tablebaseValue = TABLEBASE_OPTIONS.get(optionName);
+    if (tablebaseValue !== undefined) {
+      if (equalsIndex >= 0) {
+        throw new Error("Discord tablebase controls do not accept an inline value.");
+      }
+      if (tablebaseRequested !== null && tablebaseRequested !== tablebaseValue) {
+        throw new Error("Discord tablebase controls conflict.");
+      }
+      tablebaseRequested = tablebaseValue;
+      continue;
+    }
     const controlledWidth = CONTROLLED_OPTIONS.get(optionName);
     if (controlledWidth !== undefined) {
       if (equalsIndex < 0) index += controlledWidth;
@@ -573,6 +597,18 @@ export function prepareClearraArguments(tokens, execution = {}) {
 
   const canonicalPcSubcommand = command === "pc" &&
     DISCORD_PC_SUBCOMMANDS.has(normalizedSearchCommand(tokens[1]));
+  const tablebasePcSubcommand = command === "pc"
+    ? normalizedSearchCommand(tokens[1])
+    : null;
+  if (tablebaseRequested === true &&
+      !DISCORD_TABLEBASE_PC_SUBCOMMANDS.has(tablebasePcSubcommand)) {
+    throw new Error(
+      "Discord tablebase lookup is available only for path, minimals, score, and score-minimals.",
+    );
+  }
+  if (DISCORD_TABLEBASE_PC_SUBCOMMANDS.has(tablebasePcSubcommand)) {
+    output.push(tablebaseRequested === true ? "--tablebase" : "--no-tablebase");
+  }
   if (command === "failed-queue" || command === "pc" && !canonicalPcSubcommand) {
     output.push("--no-tablebase", "--no-build-dependency-dag");
   } else if (

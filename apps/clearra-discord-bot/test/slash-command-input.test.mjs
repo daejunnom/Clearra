@@ -112,6 +112,40 @@ test("advanced objective selection is absent from slash input contracts", () => 
   );
 });
 
+test("Discord exposes explicit tablebase control only on qualified PC products", () => {
+  const pc = findSlashCommand("pc");
+  const supported = new Set(["path", "minimals", "score", "score-minimals"]);
+  for (const [name, command] of Object.entries(pc.subcommands)) {
+    assert.equal(
+      command.registration.options.some(({ name: option }) => option === "tablebase"),
+      supported.has(name),
+      name,
+    );
+  }
+
+  for (const name of supported) {
+    const command = pc.subcommands[name];
+    const enabled = buildSlashCommandArguments(command, [
+      { name: "field", value: "XXXXXX____" },
+      { name: "next", value: "I" },
+      { name: "lines", value: 1 },
+      { name: "hold", value: "disabled" },
+      { name: "tablebase", value: "on" },
+    ]);
+    assert.equal(enabled.filter((token) => token === "--tablebase").length, 1, name);
+    assert.equal(enabled.includes("--no-tablebase"), false, name);
+
+    const disabled = buildSlashCommandArguments(command, [
+      { name: "field", value: "XXXXXX____" },
+      { name: "next", value: "I" },
+      { name: "lines", value: 1 },
+      { name: "hold", value: "disabled" },
+    ]);
+    assert.equal(disabled.filter((token) => token === "--no-tablebase").length, 1, name);
+    assert.equal(disabled.includes("--tablebase"), false, name);
+  }
+});
+
 test("All-Spin PC slash contracts separate exact witnesses from pattern probability", () => {
   const pc = findSlashCommand("pc");
   const exact = pc.subcommands["allspin-sol"];

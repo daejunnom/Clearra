@@ -713,8 +713,8 @@ test("command tokenizer preserves quoted queue syntax", () => {
 });
 
 test("Discord commands always use the Clearra exact product path", () => {
-  assert.deepEqual(
-    prepareClearraArguments([
+  assert.throws(
+    () => prepareClearraArguments([
       "pc",
       "--lines",
       "4",
@@ -723,15 +723,51 @@ test("Discord commands always use the Clearra exact product path", () => {
       "--format",
       "json",
     ]),
-    [
+    /tablebase lookup is available only for path, minimals, score, and score-minimals/,
+  );
+  for (const product of ["path", "minimals", "score", "score-minimals"]) {
+    assert.deepEqual(
+      prepareClearraArguments([
+        "pc",
+        product,
+        "--lines",
+        "4",
+        "--tablebase",
+        "--format",
+        "json",
+      ]),
+      [
+        "pc",
+        product,
+        "--lines",
+        "4",
+        "--tablebase",
+        "--format",
+        "text",
+      ],
+      product,
+    );
+  }
+  assert.deepEqual(
+    prepareClearraArguments([
       "pc",
+      "path",
       "--lines",
       "4",
       "--no-tablebase",
-      "--no-build-dependency-dag",
-      "--format",
-      "text",
-    ],
+    ]),
+    ["pc", "path", "--lines", "4", "--no-tablebase", "--format", "text"],
+  );
+  assert.throws(
+    () => prepareClearraArguments([
+      "pc",
+      "path",
+      "--lines",
+      "4",
+      "--tablebase",
+      "--no-tablebase",
+    ]),
+    /tablebase controls conflict/,
   );
   assert.equal(
     parseClearraMessage("!setup --remaining SZ --priority pc"),
@@ -893,6 +929,7 @@ test("Discord applies its Cloud worker authority to every typed PC score product
       product,
       "--lines",
       "4",
+      ...(["score", "score-minimals"].includes(product) ? ["--no-tablebase"] : []),
       "--auto-workers",
       "4",
       "--use-all-cpu-threads",
