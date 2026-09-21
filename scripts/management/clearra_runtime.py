@@ -45,6 +45,7 @@ PARENT_LOST_ERROR = "E_CLEARRA_PROCESS_PARENT_LOST"
 NONZERO_ERROR = "E_CLEARRA_PROCESS_NONZERO_EXIT"
 TREE_CLEANUP_ERROR = "E_CLEARRA_PROCESS_TREE_CLEANUP"
 HOST_MEMORY_PRESSURE_ERROR = "E_CLEARRA_HOST_MEMORY_PRESSURE"
+INHERITED_BOUNDARY_ERROR = "E_CLEARRA_RUNTIME_BOUNDARY_INVALID"
 WSL_DISTRIBUTION = "Clearra-Build"
 SIGTERM_NUMBER = int(getattr(signal, "SIGTERM", 15))
 SIGKILL_NUMBER = int(getattr(signal, "SIGKILL", 9))
@@ -505,6 +506,168 @@ def _runtime_slot_owner_active(owner: Mapping[str, Any]) -> bool:
     return expected is None or actual is None or str(expected) == actual
 
 
+def _parent_process_id(pid: int) -> int | None:
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        snapshot_flag = 0x00000002  # TH32CS_SNAPPROCESS
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.wintypes.DWORD),
+                ("cntUsage", ctypes.wintypes.DWORD),
+                ("th32ProcessID", ctypes.wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", ctypes.wintypes.DWORD),
+                ("cntThreads", ctypes.wintypes.DWORD),
+                ("th32ParentProcessID", ctypes.wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.wintypes.DWORD),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateToolhelp32Snapshot.argtypes = [
+            ctypes.wintypes.DWORD,
+            ctypes.wintypes.DWORD,
+        ]
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [
+            ctypes.wintypes.HANDLE,
+            ctypes.POINTER(PROCESSENTRY32W),
+        ]
+        kernel32.Process32FirstW.restype = ctypes.wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [
+            ctypes.wintypes.HANDLE,
+            ctypes.POINTER(PROCESSENTRY32W),
+        ]
+        kernel32.Process32NextW.restype = ctypes.wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+        kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+        invalid_handle = ctypes.c_void_p(-1).value
+        snapshot = kernel32.CreateToolhelp32Snapshot(snapshot_flag, 0)
+        if snapshot == invalid_handle:
+            return None
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            found = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while found:
+                if int(entry.th32ProcessID) == pid:
+                    return int(entry.th32ParentProcessID)
+                found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return None
+    try:
+        material = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        close = material.rfind(")")
+        remainder = material[close + 2 :].split()
+        return int(remainder[1]) if close >= 0 else None
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _is_descendant_process(pid: int, ancestor_pid: int) -> bool:
+    current = pid
+    visited: set[int] = set()
+    for _ in range(256):
+        if current == ancestor_pid:
+            return True
+        if current <= 1 or current in visited:
+            return False
+        visited.add(current)
+        parent = _parent_process_id(current)
+        if parent is None or parent == current:
+            return False
+        current = parent
+    return False
+
+
+def inherited_runtime_boundary(policy: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Validate a live outer runtime slot before a nested command reuses it."""
+
+    if os.environ.get("CLEARRA_RUNTIME_SUPERVISED") != "1":
+        return None
+    raw_path = os.environ.get("CLEARRA_RUNTIME_BOUNDARY_PATH")
+    nonce = os.environ.get("CLEARRA_RUNTIME_BOUNDARY_NONCE")
+    if not raw_path or not nonce:
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: supervised environment has no runtime-slot proof"
+        )
+    try:
+        root = (_runtime_state_root() / "runtime-slots").resolve(strict=True)
+        path = pathlib.Path(raw_path).resolve(strict=True)
+        relative = path.relative_to(root)
+    except (OSError, ValueError) as error:
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot proof escaped the managed state root"
+        ) from error
+    if len(relative.parts) != 2 or not re.fullmatch(r"slot-[0-9]+", relative.parts[1]):
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot proof has an invalid location"
+        )
+    marker = path / "owner.json"
+    try:
+        owner = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot owner proof is unavailable"
+        ) from error
+    if not isinstance(owner, Mapping) or owner.get("schema_id") != "clearra.runtime-slot-owner.v1":
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot owner proof has an invalid schema"
+        )
+    if str(owner.get("nonce") or "") != nonce:
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot nonce does not match"
+        )
+    class_id = str(owner.get("class") or "")
+    profile = str(owner.get("profile") or "")
+    if class_id != relative.parts[0]:
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot class does not match its path"
+        )
+    try:
+        contract = profile_contract(policy, profile)
+    except RuntimePolicyError as error:
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot profile is not registered"
+        ) from error
+    if str(contract.get("concurrency_class", profile)) != class_id:
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot profile and class disagree"
+        )
+    if not _runtime_slot_owner_active(owner):
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot owner is no longer active"
+        )
+    try:
+        owner_pid = int(owner["pid"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: runtime-slot owner PID is invalid"
+        ) from error
+    if not _is_descendant_process(os.getpid(), owner_pid):
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: current process is not owned by the runtime slot"
+        )
+    return {
+        "kind": "inherited-runtime-boundary",
+        "outer_profile": profile,
+        "concurrency_class": class_id,
+        "concurrency_slot": int(owner.get("slot", -1)),
+        "owner_pid": owner_pid,
+        "hard_limit_bytes": int(owner.get("hard_limit_bytes") or 0),
+        "maximum_descendant_processes": int(
+            owner.get("maximum_descendant_processes") or 0
+        ),
+        "timeout_seconds": int(owner.get("timeout_seconds") or 0),
+        "slot_path": str(path),
+        "cleanup_owner": "outer-supervisor",
+    }
+
+
 def _recover_stale_runtime_slot(path: pathlib.Path, grace_seconds: float) -> bool:
     marker = path / "owner.json"
     try:
@@ -550,6 +713,9 @@ class _RuntimeSlot:
         policy: Mapping[str, Any],
         profile: str,
         admission: Admission,
+        *,
+        timeout_seconds: int | None = None,
+        maximum_descendant_processes: int | None = None,
     ) -> "_RuntimeSlot":
         contract = profile_contract(policy, profile)
         class_id = str(contract.get("concurrency_class", profile))
@@ -599,6 +765,8 @@ class _RuntimeSlot:
                     "class": class_id,
                     "slot": index,
                     "hard_limit_bytes": admission.hard_limit_bytes,
+                    "timeout_seconds": timeout_seconds,
+                    "maximum_descendant_processes": maximum_descendant_processes,
                     "created_utc": utc_now(),
                 }
                 try:
@@ -618,6 +786,13 @@ class _RuntimeSlot:
             f"maximum_parallel={maximum}",
             details={"active_slots": active},
         )
+
+    def inheritance_environment(self) -> dict[str, str]:
+        return {
+            "CLEARRA_RUNTIME_SUPERVISED": "1",
+            "CLEARRA_RUNTIME_BOUNDARY_PATH": str(self.path),
+            "CLEARRA_RUNTIME_BOUNDARY_NONCE": self.nonce,
+        }
 
     def release(self) -> None:
         marker = self.path / "owner.json"
@@ -1227,6 +1402,150 @@ def _close_gc_pressure_channel(channel: Mapping[str, Any] | None) -> bool:
     return not root.exists()
 
 
+def run_inherited_host_process(
+    command: Sequence[str],
+    *,
+    cwd: pathlib.Path,
+    env: Mapping[str, str],
+    policy: Mapping[str, Any],
+    profile: str,
+    input_bytes: bytes | None = None,
+    echo: bool = True,
+    timeout_override_seconds: int | None = None,
+    boundary: Mapping[str, Any] | None = None,
+) -> RuntimeResult:
+    """Run one nested command inside an already validated outer boundary."""
+
+    if not command:
+        raise RuntimePolicyError("runtime command is empty")
+    inherited = dict(boundary or inherited_runtime_boundary(policy) or {})
+    if not inherited:
+        raise RuntimePolicyError(
+            f"{INHERITED_BOUNDARY_ERROR}: nested command has no outer runtime boundary"
+        )
+    contract = profile_contract(policy, profile)
+    timeout = int(
+        contract["timeout_seconds"]
+        if timeout_override_seconds is None
+        else timeout_override_seconds
+    )
+    if timeout <= 0 or timeout > int(contract["maximum_timeout_seconds"]):
+        raise RuntimePolicyError(
+            f"runtime timeout exceeds profile maximum: profile={profile} timeout={timeout}"
+        )
+    outer_timeout = int(inherited.get("timeout_seconds") or 0)
+    if outer_timeout > 0:
+        timeout = min(timeout, outer_timeout)
+    output_limit = int(contract["output_limit_bytes"])
+    executable = shutil.which(command[0], path=env.get("PATH"))
+    if not executable:
+        raise RuntimePolicyError(f"required command is unavailable: {command[0]}")
+    requested = [command[0], *command[1:]]
+    invoked = [executable, *command[1:]]
+    started_utc = utc_now()
+    started = time.monotonic()
+    returncode = 125
+    reason = "nonzero"
+    error_code: str | None = NONZERO_ERROR
+    termination_stage = "outer-boundary-owned"
+    collector = _OutputCollector(output_limit, echo)
+    process: subprocess.Popen[bytes] | None = None
+    threads: list[threading.Thread] = []
+    grace = float(contract["termination_grace_seconds"])
+    try:
+        process = subprocess.Popen(
+            invoked,
+            cwd=cwd,
+            env=dict(env),
+            stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+        if input_bytes is not None:
+            assert process.stdin is not None
+            process.stdin.write(input_bytes)
+            process.stdin.close()
+        threads = collector.start(process)
+        deadline = started + timeout
+        while process.poll() is None:
+            if collector.exceeded.is_set():
+                reason = "output-limit"
+                error_code = OUTPUT_LIMIT_ERROR
+                termination_stage = "output-cap-outer-cleanup"
+                process.terminate()
+                break
+            if time.monotonic() >= deadline:
+                reason = "timeout"
+                error_code = TIMEOUT_ERROR
+                termination_stage = "child-timeout-outer-cleanup"
+                process.terminate()
+                break
+            time.sleep(0.05)
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(1.0, grace))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=max(1.0, grace))
+        returncode = int(process.returncode if process.returncode is not None else 125)
+        if reason in {"timeout", "output-limit"}:
+            returncode = 124 if reason == "timeout" else 125
+        elif returncode == 0:
+            reason = "normal"
+            error_code = None
+        else:
+            reason = "nonzero"
+            error_code = NONZERO_ERROR
+    finally:
+        if process is not None and process.stdin is not None:
+            with contextlib.suppress(Exception):
+                process.stdin.close()
+        stdout, stderr = collector.finish(threads)
+    if collector.exceeded.is_set():
+        returncode = 125
+        reason = "output-limit"
+        error_code = OUTPUT_LIMIT_ERROR
+        termination_stage = "output-cap-outer-cleanup"
+    containment = dict(inherited)
+    containment.update(
+        {
+            "requested_profile": profile,
+            "cleanup_deferred_to_outer": True,
+            "process_rss_polling": False,
+        }
+    )
+    return RuntimeResult(
+        command=redact_argv(requested),
+        command_sha256=command_digest(requested),
+        returncode=returncode,
+        reason=reason,
+        error_code=error_code,
+        started_utc=started_utc,
+        ended_utc=utc_now(),
+        duration_ms=round((time.monotonic() - started) * 1000),
+        timeout_seconds=timeout,
+        termination_stage=termination_stage,
+        stdout=stdout,
+        stderr=stderr,
+        output_bytes=collector.total,
+        output_limit_bytes=output_limit,
+        admission={
+            "profile": profile,
+            "inherited": True,
+            "outer_profile": inherited.get("outer_profile"),
+            "hard_limit_bytes": inherited.get("hard_limit_bytes"),
+        },
+        containment=containment,
+        peak_memory_bytes=None,
+        descendant_processes=None,
+        oom_counter_before=None,
+        oom_counter_after=None,
+        process_tree_stopped=False,
+        memory_pressure={"inherited_from_outer": True},
+    )
+
+
 def run_host_process(
     command: Sequence[str],
     *,
@@ -1445,7 +1764,13 @@ def run_host_process(
             invoked.extend(("--owned-cgroup", str(owned_cgroup.path)))
         invoked.extend(("--", executable, *command[1:]))
     try:
-        runtime_slot = _RuntimeSlot.acquire(policy, profile, admission)
+        runtime_slot = _RuntimeSlot.acquire(
+            policy,
+            profile,
+            admission,
+            timeout_seconds=timeout,
+            maximum_descendant_processes=process_limit,
+        )
     except BaseException:
         if job is not None:
             job.close()
@@ -1475,6 +1800,7 @@ def run_host_process(
     recovery_deadline: float | None = None
     next_pressure_check = started
     child_environment = dict(env)
+    child_environment.update(runtime_slot.inheritance_environment())
 
     def observe_pressure() -> dict[str, Any]:
         pressure_state["checks"] += 1

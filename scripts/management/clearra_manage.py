@@ -755,15 +755,27 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
     started = time.monotonic()
     try:
         try:
-            runtime_result = runtime_owner.run_host_process(
-                [executable, *command[1:]],
-                cwd=ROOT,
-                env=environment,
-                policy=policy,
-                profile=selected_profile,
-                minimum_override_mib=getattr(arguments, "minimum_memory_mib", None),
-                timeout_override_seconds=getattr(arguments, "timeout", None),
-            )
+            inherited_boundary = runtime_owner.inherited_runtime_boundary(policy)
+            if inherited_boundary is not None:
+                runtime_result = runtime_owner.run_inherited_host_process(
+                    [executable, *command[1:]],
+                    cwd=ROOT,
+                    env=environment,
+                    policy=policy,
+                    profile=selected_profile,
+                    timeout_override_seconds=getattr(arguments, "timeout", None),
+                    boundary=inherited_boundary,
+                )
+            else:
+                runtime_result = runtime_owner.run_host_process(
+                    [executable, *command[1:]],
+                    cwd=ROOT,
+                    env=environment,
+                    policy=policy,
+                    profile=selected_profile,
+                    minimum_override_mib=getattr(arguments, "minimum_memory_mib", None),
+                    timeout_override_seconds=getattr(arguments, "timeout", None),
+                )
         except runtime_owner.RuntimePolicyError as error:
             denied_receipt = write_receipt(
                 "managed-run-denied",
@@ -4606,6 +4618,7 @@ def run_management_command_supervised(
             "CLEARRA_MANAGED_PRODUCER": "management",
             "CLEARRA_RUNTIME_PROFILE": profile,
             "CLEARRA_RUNTIME_SUPERVISED": "1",
+            "CLEARRA_STATE_ROOT": str(state_root()),
         }
     )
     context_key = f"{arguments.domain}.{arguments.action}"
@@ -4792,11 +4805,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     requested_argv = list(argv if argv is not None else sys.argv[1:])
     arguments = parser().parse_args(requested_argv)
     policy = load_policy()
-    if (
-        management_command_profile(arguments, policy) is not None
-        and os.environ.get("CLEARRA_RUNTIME_SUPERVISED") != "1"
-    ):
-        return run_management_command_supervised(requested_argv, arguments, policy)
+    selected_management_profile = management_command_profile(arguments, policy)
+    if selected_management_profile is not None:
+        if os.environ.get("CLEARRA_RUNTIME_SUPERVISED") == "1":
+            try:
+                runtime_owner.inherited_runtime_boundary(policy)
+            except runtime_owner.RuntimePolicyError as error:
+                raise ManagementError(str(error)) from error
+        else:
+            return run_management_command_supervised(requested_argv, arguments, policy)
     if arguments.domain == "storage":
         if arguments.action == "audit":
             audit = storage_audit(policy)

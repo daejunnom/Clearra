@@ -440,6 +440,88 @@ class ManagementPolicyTests(unittest.TestCase):
         self.assertEqual(supervised.call_args.args[1].domain, "git")
         self.assertEqual(supervised.call_args.args[1].action, "check")
 
+    def test_claimed_supervision_without_a_slot_proof_is_rejected(self) -> None:
+        environment = os.environ.copy()
+        environment["CLEARRA_RUNTIME_SUPERVISED"] = "1"
+        environment.pop("CLEARRA_RUNTIME_BOUNDARY_PATH", None)
+        environment.pop("CLEARRA_RUNTIME_BOUNDARY_NONCE", None)
+        with mock.patch.dict(os.environ, environment, clear=True), self.assertRaisesRegex(
+            MANAGE.ManagementError, MANAGE.runtime_owner.INHERITED_BOUNDARY_ERROR
+        ):
+            MANAGE.main(
+                [
+                    "git",
+                    "check",
+                    "--candidate",
+                    "codex/converge-supervision-fixture",
+                ]
+            )
+
+    def test_storage_run_reuses_a_validated_outer_boundary(self) -> None:
+        arguments = argparse.Namespace(
+            domain="storage",
+            producer="management",
+            profile="control",
+            timeout=None,
+            minimum_memory_mib=None,
+            export_path=[],
+            command=[sys.executable, "-c", "print('nested')"],
+        )
+        boundary = {
+            "kind": "inherited-runtime-boundary",
+            "outer_profile": "verification",
+            "concurrency_class": "memory-intensive",
+            "concurrency_slot": 0,
+            "owner_pid": os.getpid(),
+            "hard_limit_bytes": 2 * 1024 * 1024 * 1024,
+            "maximum_descendant_processes": 512,
+            "timeout_seconds": 5400,
+            "slot_path": "fixture",
+            "cleanup_owner": "outer-supervisor",
+        }
+        runtime_result = MANAGE.runtime_owner.RuntimeResult(
+            command=[sys.executable, "-c", "print('nested')"],
+            command_sha256="digest",
+            returncode=0,
+            reason="normal",
+            error_code=None,
+            started_utc="start",
+            ended_utc="end",
+            duration_ms=1,
+            timeout_seconds=300,
+            termination_stage="outer-boundary-owned",
+            stdout="nested\n",
+            stderr="",
+            output_bytes=7,
+            output_limit_bytes=1024,
+            admission={"profile": "control", "inherited": True},
+            containment=boundary,
+            peak_memory_bytes=None,
+            descendant_processes=None,
+            oom_counter_before=None,
+            oom_counter_after=None,
+            process_tree_stopped=True,
+            memory_pressure={"inherited_from_outer": True},
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT / "_local" / "tmp") as directory:
+            state = pathlib.Path(directory) / "state"
+            with mock.patch.object(MANAGE, "state_root", return_value=state), mock.patch.object(
+                MANAGE.runtime_owner,
+                "inherited_runtime_boundary",
+                return_value=boundary,
+            ), mock.patch.object(
+                MANAGE.runtime_owner,
+                "run_inherited_host_process",
+                return_value=runtime_result,
+            ) as inherited, mock.patch.object(
+                MANAGE.runtime_owner, "run_host_process"
+            ) as standalone, mock.patch.object(
+                MANAGE, "write_receipt", return_value=state / "receipt.json"
+            ):
+                self.assertEqual(MANAGE.storage_run(arguments, self.policy), 0)
+        inherited.assert_called_once()
+        standalone.assert_not_called()
+
     def test_release_management_commands_activate_hard_containment(self) -> None:
         arguments = argparse.Namespace(domain="package", action="publish", apply=True)
         result = SimpleNamespace(returncode=0, receipt=lambda: {"reason": "normal"})

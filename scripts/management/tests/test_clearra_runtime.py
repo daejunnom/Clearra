@@ -273,6 +273,76 @@ class RuntimeContractTests(unittest.TestCase):
                 second = RUNTIME._RuntimeSlot.acquire(self.policy, "build-test", admission)
                 second.release()
 
+    def test_runtime_slot_proof_allows_only_the_live_owner_tree(self) -> None:
+        admission = RUNTIME.Admission(
+            profile="verification",
+            physical_bytes=16 * RUNTIME.GIB,
+            available_bytes=8 * RUNTIME.GIB,
+            reserve_bytes=128 * RUNTIME.MIB,
+            hard_limit_bytes=2 * RUNTIME.GIB,
+            minimum_bytes=768 * RUNTIME.MIB,
+            maximum_bytes=2 * RUNTIME.GIB,
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT / "_local" / "tmp") as directory:
+            environment = {"CLEARRA_STATE_ROOT": directory}
+            with mock.patch.dict(os.environ, environment, clear=False):
+                slot = RUNTIME._RuntimeSlot.acquire(
+                    self.policy,
+                    "verification",
+                    admission,
+                    timeout_seconds=5400,
+                    maximum_descendant_processes=512,
+                )
+                try:
+                    with mock.patch.dict(
+                        os.environ, slot.inheritance_environment(), clear=False
+                    ):
+                        inherited = RUNTIME.inherited_runtime_boundary(self.policy)
+                        self.assertIsNotNone(inherited)
+                        assert inherited is not None
+                        self.assertEqual(inherited["outer_profile"], "verification")
+                        self.assertEqual(inherited["concurrency_class"], "memory-intensive")
+                        self.assertEqual(inherited["hard_limit_bytes"], 2 * RUNTIME.GIB)
+                        self.assertEqual(inherited["timeout_seconds"], 5400)
+                        self.assertEqual(inherited["maximum_descendant_processes"], 512)
+
+                    invalid = slot.inheritance_environment()
+                    invalid["CLEARRA_RUNTIME_BOUNDARY_NONCE"] = "not-the-owner"
+                    with mock.patch.dict(os.environ, invalid, clear=False), self.assertRaisesRegex(
+                        RUNTIME.RuntimePolicyError, RUNTIME.INHERITED_BOUNDARY_ERROR
+                    ):
+                        RUNTIME.inherited_runtime_boundary(self.policy)
+                finally:
+                    slot.release()
+
+    def test_inherited_command_uses_outer_boundary_without_another_slot(self) -> None:
+        boundary = {
+            "kind": "inherited-runtime-boundary",
+            "outer_profile": "verification",
+            "concurrency_class": "memory-intensive",
+            "concurrency_slot": 0,
+            "owner_pid": os.getpid(),
+            "hard_limit_bytes": 2 * RUNTIME.GIB,
+            "maximum_descendant_processes": 512,
+            "timeout_seconds": 5400,
+            "slot_path": "fixture",
+            "cleanup_owner": "outer-supervisor",
+        }
+        result = RUNTIME.run_inherited_host_process(
+            [sys.executable, "-c", "print('nested-ok')"],
+            cwd=ROOT,
+            env=os.environ.copy(),
+            policy=self.policy,
+            profile="verification",
+            echo=False,
+            boundary=boundary,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.reason, "normal")
+        self.assertEqual(result.stdout.strip(), "nested-ok")
+        self.assertEqual(result.containment["cleanup_owner"], "outer-supervisor")
+        self.assertTrue(result.containment["cleanup_deferred_to_outer"])
+
     def test_admission_never_reduces_declared_minimum(self) -> None:
         with self.assertRaisesRegex(
             RUNTIME.RuntimePolicyError, RUNTIME.ADMISSION_ERROR
