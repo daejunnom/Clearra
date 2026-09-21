@@ -6,6 +6,7 @@ import {
   tilingOnlyRequested,
 } from "./clearra/command.mjs";
 import { ClearraDirectExecutor } from "./clearra/direct-executor.mjs";
+import { ClearraExecutionRouter } from "./clearra/execution-router.mjs";
 import { buildDiscordDocumentUtilityResult } from "./clearra/document-utility-result.mjs";
 import { parseClearraTextRequest } from "./clearra/text-command.mjs";
 import { buildCtk3Result } from "./clearra/ctk3-result.mjs";
@@ -117,9 +118,10 @@ export class Clearrabot {
   constructor(rest, config, options = {}) {
     this.rest = rest;
     this.config = config;
-    this.executor =
-      options.executor ??
-      (config.jobEndpoint
+    if (options.executor) {
+      this.executor = options.executor;
+    } else {
+      const primaryExecutor = config.jobEndpoint
         ? new ClearraJobExecutor({
             endpoint: config.jobEndpoint,
             authorizationToken: config.jobToken,
@@ -137,8 +139,16 @@ export class Clearrabot {
             maxArtifactBytes: config.maxGifBytes,
             pollIntervalMs: config.jobPollIntervalMs,
             cancelTimeoutMs: config.jobCancelTimeoutMs,
-          })
-        : new ClearraDirectExecutor(config));
+            })
+        : new ClearraDirectExecutor(config);
+      const tablebaseExecutor = config.localTablebaseExecutionEnabled
+        ? new ClearraDirectExecutor(config)
+        : null;
+      this.executor = new ClearraExecutionRouter(
+        primaryExecutor,
+        tablebaseExecutor,
+      );
+    }
     this.applicationId = options.applicationId ?? null;
     this.botUserId = options.botUserId ?? null;
     this.interactionAcknowledger =

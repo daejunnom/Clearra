@@ -54,6 +54,10 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     remoteIdentityRequired,
     expectedJobRuntimeIdentity,
   );
+  const localTablebaseExecutionEnabled = booleanSetting(
+    environment.CLEARRA_PC4_LOCAL_EXECUTION_ENABLED,
+    false,
+  );
   const oracleRenderEnabled = booleanSetting(
     environment.CLEARRA_ORACLE_RENDER_ENABLED,
     false,
@@ -206,6 +210,7 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     jobEndpoint,
     jobToken,
     expectedJobRuntimeIdentity,
+    localTablebaseExecutionEnabled,
     jobPollIntervalMs: positiveInteger(
       environment.CLEARRA_JOB_POLL_INTERVAL_MS,
       250,
