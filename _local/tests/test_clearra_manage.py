@@ -333,6 +333,71 @@ class ManagementPolicyTests(unittest.TestCase):
             ):
                 MANAGE.validate_dependency_update_arguments(manager, values)
 
+    def test_exact_cargo_dependency_admission_accepts_only_new_exact_pin(self) -> None:
+        lock_material = """version = 4
+
+[[package]]
+name = "serde"
+version = "1.0.0"
+"""
+        manifests = {
+            "Cargo.toml": """[workspace.dependencies]
+ed25519-dalek = { version = "=2.2.0", default-features = false }
+""",
+            "crates/signer/Cargo.toml": """[dependencies]
+ed25519-dalek.workspace = true
+""",
+        }
+        self.assertEqual(
+            MANAGE.exact_cargo_dependency_admission(
+                ["-p", "ed25519-dalek", "--precise", "2.2.0"],
+                manifests,
+                lock_material,
+            ),
+            {
+                "kind": "exact-new-cargo-dependency",
+                "package": "ed25519-dalek",
+                "precise_version": "2.2.0",
+                "manifest_paths": ["Cargo.toml"],
+            },
+        )
+
+        rejected = (
+            (
+                ["-p", "ed25519-dalek", "--precise", "2.2.0"],
+                {"Cargo.toml": "[workspace.dependencies]\ned25519-dalek = \"2.2.0\"\n"},
+                lock_material,
+            ),
+            (
+                ["-p", "ed25519-dalek", "--precise", "2.2.0"],
+                manifests,
+                lock_material
+                + '\n[[package]]\nname = "ed25519-dalek"\nversion = "2.2.0"\n',
+            ),
+            (
+                ["-p", "ed25519-dalek", "--precise", "2.2.0", "--dry-run"],
+                manifests,
+                lock_material,
+            ),
+            (
+                ["--precise", "2.2.0", "-p", "ed25519-dalek"],
+                manifests,
+                lock_material,
+            ),
+            (
+                ["-p", "ed25519-dalek", "--precise", "2.2"],
+                manifests,
+                lock_material,
+            ),
+        )
+        for arguments, candidate_manifests, candidate_lock in rejected:
+            with self.subTest(arguments=arguments):
+                self.assertIsNone(
+                    MANAGE.exact_cargo_dependency_admission(
+                        arguments, candidate_manifests, candidate_lock
+                    )
+                )
+
     def test_package_tarball_inspection_seals_members_and_identity(self) -> None:
         parent = ROOT / "_local" / "tmp" / "management-tests"
         parent.mkdir(parents=True, exist_ok=True)

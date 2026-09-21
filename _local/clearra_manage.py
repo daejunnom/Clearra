@@ -1446,6 +1446,111 @@ def validate_dependency_update_arguments(manager: str, arguments: Sequence[str])
     return values
 
 
+def exact_cargo_dependency_admission(
+    arguments: Sequence[str],
+    manifests: dict[str, str],
+    lock_material: str,
+) -> dict[str, Any] | None:
+    """Classify the one safe stale-lock case: a new, exactly pinned crate.
+
+    This is deliberately narrower than general Cargo resolution.  The caller
+    must still require a clean source tree, run the managed exact-toolchain
+    update, reject changes outside Cargo.lock, and validate the resulting
+    locked graph.
+    """
+
+    values = list(arguments)
+    if (
+        len(values) != 4
+        or values[0] not in {"-p", "--package"}
+        or values[2] != "--precise"
+    ):
+        return None
+    package, precise_version = values[1], values[3]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", package):
+        return None
+    if not re.fullmatch(
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+        r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+        r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+        precise_version,
+    ):
+        return None
+
+    if not re.search(r"(?m)^version\s*=\s*[0-9]+\s*$", lock_material):
+        return None
+    if re.search(
+        rf'(?m)^name\s*=\s*"{re.escape(package)}"\s*$', lock_material
+    ):
+        return None
+
+    exact_spec = f"={precise_version}"
+    matching_paths: list[str] = []
+
+    for manifest_path, material in sorted(manifests.items()):
+        section = ""
+        for line in material.splitlines():
+            section_match = re.fullmatch(r"\s*\[([^]]+)]\s*(?:#.*)?", line)
+            if section_match:
+                section = section_match.group(1).strip()
+                continue
+            section_tail = section.rsplit(".", 1)[-1].strip('"\'')
+            if section_tail not in {
+                "dependencies",
+                "dev-dependencies",
+                "build-dependencies",
+            }:
+                continue
+            declaration_match = re.match(
+                r"\s*(?:\"([^\"]+)\"|([A-Za-z0-9_-]+))\s*=\s*(.+?)\s*$",
+                line,
+            )
+            if not declaration_match:
+                continue
+            dependency_name = declaration_match.group(1) or declaration_match.group(2)
+            declaration = declaration_match.group(3)
+            declared_package = dependency_name
+            package_match = re.search(
+                r'\bpackage\s*=\s*"([A-Za-z0-9_-]+)"', declaration
+            )
+            if package_match:
+                declared_package = package_match.group(1)
+            if declared_package != package:
+                continue
+            direct_version = re.fullmatch(
+                rf'"{re.escape(exact_spec)}"\s*(?:#.*)?', declaration
+            )
+            table_version = re.search(
+                rf'\bversion\s*=\s*"{re.escape(exact_spec)}"', declaration
+            )
+            if direct_version or table_version:
+                matching_paths.append(manifest_path)
+                break
+
+    if not matching_paths:
+        return None
+    return {
+        "kind": "exact-new-cargo-dependency",
+        "package": package,
+        "precise_version": precise_version,
+        "manifest_paths": sorted(set(matching_paths)),
+    }
+
+
+def cargo_dependency_admission(arguments: Sequence[str]) -> dict[str, Any] | None:
+    manifests: dict[str, str] = {}
+    lock_material = ""
+    for path in dependency_authority_paths("cargo"):
+        if not path.is_file():
+            continue
+        material = path.read_text(encoding="utf-8", errors="strict")
+        if path.name == "Cargo.lock":
+            lock_material = material
+        elif path.name == "Cargo.toml":
+            manifests[path.relative_to(ROOT).as_posix()] = material
+    return exact_cargo_dependency_admission(arguments, manifests, lock_material)
+
+
 def dependency_changed_paths() -> list[str]:
     changed = {
         value
@@ -1466,11 +1571,15 @@ def dependency_update(
     require_clean_source("dependency update")
     values = validate_dependency_update_arguments(manager, arguments)
     before = dependency_authority_snapshot(manager, policy)
+    admission = None
     if (
         before["graph"]["exit_code"] != 0
         or before["graph"]["parse_error"] is not None
     ):
-        raise ManagementError("cannot capture the pre-update dependency graph")
+        if manager == "cargo":
+            admission = cargo_dependency_admission(values)
+        if admission is None:
+            raise ManagementError("cannot capture the pre-update dependency graph")
     if manager == "pnpm":
         require_pnpm(policy)
         store_result = run(("pnpm", "store", "path", "--silent"), check=False)
@@ -1519,6 +1628,7 @@ def dependency_update(
             "exit_code": completed.returncode,
             "before": before,
             "after": after,
+            "admission": admission,
             "changed_paths": changed,
             "unexpected_paths": unexpected,
             "shared_store_changes": tree_identity_delta(
