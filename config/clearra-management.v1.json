@@ -3800,7 +3800,8 @@
     },
     "build-test": {
       "minimum_memory_mib": 3072,
-      "maximum_memory_mib": null,
+      "maximum_memory_mib": 6144,
+      "gc_recovery_headroom_mib": 768,
       "timeout_seconds": 5400,
       "maximum_timeout_seconds": 5400,
       "termination_grace_seconds": 10,
@@ -3808,7 +3809,7 @@
       "output_limit_bytes": 67108864,
       "hard_containment_required": false,
       "oom_policy": "fail-no-retry",
-      "admission_basis": "physical",
+      "admission_basis": "windows-commit-build-test",
       "concurrency_class": "memory-intensive"
     },
     "benchmark-search": {
@@ -3896,6 +3897,12 @@
     "windows_commit_control": {
       "minimum_physical_reserve_mib": 1024,
       "physical_reserve_fraction": 0.0625,
+      "minimum_commit_reserve_mib": 4096,
+      "commit_reserve_fraction": 0.125
+    },
+    "windows_commit_build_test": {
+      "minimum_physical_reserve_mib": 2048,
+      "physical_reserve_fraction": 0.125,
       "minimum_commit_reserve_mib": 4096,
       "commit_reserve_fraction": 0.125
     },

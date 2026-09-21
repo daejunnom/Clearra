@@ -34,8 +34,9 @@ async function fixture(t) {
   return { temporary, sourceRoot, environment };
 }
 
-test('one physical path identity matches Windows and its WSL mount', () => {
+test('path identity is stable across Windows, WSL mounts, and WSL-native sources', () => {
   assert.equal(buildPathIdentity('C:\\Users\\Example\\AppData\\Local\\Clearra\\build'), buildPathIdentity('/mnt/c/Users/Example/AppData/Local/Clearra/build'));
+  assert.equal(buildPathIdentity('/home/clearra/workspaces/source'), '/home/clearra/workspaces/source');
   assert.throws(() => assertBuildPathWithin('/tmp/clearra-build-other', '/tmp/clearra-build'));
   assert.throws(() => assertBuildPathWithin('/tmp/clearra-build/../escape', '/tmp/clearra-build'));
 });

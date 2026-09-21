@@ -77,6 +77,8 @@ class Admission:
     commit_limit_bytes: int | None = None
     commit_available_bytes: int | None = None
     commit_reserve_bytes: int | None = None
+    gc_recovery_headroom_bytes: int = 0
+    gc_recovery_headroom_backing: str = "none"
 
 
 @dataclasses.dataclass
@@ -247,14 +249,19 @@ def calculate_admission(
     runtime_policy = policy.get("runtime_policy", {})
     reserve_policy = runtime_policy.get("host_reserve", {})
     platform_value = os.name if platform_name is None else platform_name
+    admission_basis = str(contract.get("admission_basis") or "physical")
+    windows_commit_policy = {
+        "windows-commit-control": "windows_commit_control",
+        "windows-commit-build-test": "windows_commit_build_test",
+    }.get(admission_basis)
     use_windows_commit = (
         platform_value == "nt"
-        and contract.get("admission_basis") == "windows-commit-control"
+        and windows_commit_policy is not None
         and current.commit_limit_bytes is not None
         and current.commit_available_bytes is not None
     )
     if use_windows_commit:
-        commit_policy = runtime_policy.get("windows_commit_control", {})
+        commit_policy = runtime_policy.get(str(windows_commit_policy), {})
         reserve = max(
             int(commit_policy.get("minimum_physical_reserve_mib", 1024)) * MIB,
             int(
@@ -269,7 +276,7 @@ def calculate_admission(
                 * float(commit_policy.get("commit_reserve_fraction", 0.125))
             ),
         )
-        capacity_basis = "windows-commit-control"
+        capacity_basis = admission_basis
     else:
         reserve_floor = int(reserve_policy.get("minimum_mib", 2048)) * MIB
         reserve_fraction = float(reserve_policy.get("physical_fraction", 0.20))
@@ -279,9 +286,30 @@ def calculate_admission(
     minimum = int(contract["minimum_memory_mib"]) * MIB
     if minimum_override_mib is not None:
         minimum = max(minimum, int(minimum_override_mib) * MIB)
+    gc_recovery_headroom = int(contract.get("gc_recovery_headroom_mib", 0)) * MIB
+    required_hard_limit = minimum + gc_recovery_headroom
     configured_max = contract.get("maximum_memory_mib")
     maximum = int(configured_max) * MIB if configured_max is not None else None
-    candidates = [current.physical_bytes - reserve, current.available_bytes - reserve]
+    if maximum is not None and maximum < required_hard_limit:
+        raise RuntimePolicyError(
+            f"runtime profile cannot preserve its GC recovery headroom: {profile}"
+        )
+    commit_backed_gc = (
+        gc_recovery_headroom
+        if capacity_basis == "windows-commit-build-test"
+        else 0
+    )
+    gc_recovery_backing = (
+        "windows-commit"
+        if commit_backed_gc
+        else "physical"
+        if gc_recovery_headroom
+        else "none"
+    )
+    candidates = [
+        current.physical_bytes - reserve + commit_backed_gc,
+        current.available_bytes - reserve + commit_backed_gc,
+    ]
     if use_windows_commit:
         assert current.commit_limit_bytes is not None
         assert current.commit_available_bytes is not None
@@ -295,9 +323,12 @@ def calculate_admission(
     if maximum is not None:
         candidates.append(maximum)
     hard_limit = max(0, min(candidates))
-    if hard_limit < minimum:
+    if hard_limit < required_hard_limit:
         raise RuntimePolicyError(
             f"{ADMISSION_ERROR}: profile={profile} minimum_bytes={minimum} "
+            f"gc_recovery_headroom_bytes={gc_recovery_headroom} "
+            f"gc_recovery_headroom_backing={gc_recovery_backing} "
+            f"required_hard_limit_bytes={required_hard_limit} "
             f"available_bytes={current.available_bytes} reserve_bytes={reserve} "
             f"commit_available_bytes={current.commit_available_bytes} "
             f"commit_reserve_bytes={commit_reserve} capacity_basis={capacity_basis} "
@@ -315,6 +346,8 @@ def calculate_admission(
         commit_limit_bytes=current.commit_limit_bytes,
         commit_available_bytes=current.commit_available_bytes,
         commit_reserve_bytes=commit_reserve,
+        gc_recovery_headroom_bytes=gc_recovery_headroom,
+        gc_recovery_headroom_backing=gc_recovery_backing,
     )
 
 

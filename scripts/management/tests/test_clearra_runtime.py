@@ -71,34 +71,70 @@ class RuntimeContractTests(unittest.TestCase):
                 platform_name="nt",
             )
 
-    def test_performance_profiles_use_physical_memory_only(self) -> None:
+    def test_windows_build_admission_preserves_gc_physical_and_commit_reserves(self) -> None:
         admission = RUNTIME.calculate_admission(
             self.policy,
             "build-test",
             snapshot=RUNTIME.MemorySnapshot(
                 16 * RUNTIME.GIB,
-                8 * RUNTIME.GIB,
+                6 * RUNTIME.GIB,
                 32 * RUNTIME.GIB,
-                20 * RUNTIME.GIB,
+                14 * RUNTIME.GIB,
             ),
             platform_name="nt",
         )
-        self.assertEqual(admission.reserve_bytes, int(16 * RUNTIME.GIB * 0.20))
-        self.assertEqual(admission.capacity_basis, "physical")
+        self.assertEqual(admission.reserve_bytes, 2 * RUNTIME.GIB)
+        self.assertEqual(admission.commit_reserve_bytes, 4 * RUNTIME.GIB)
+        self.assertEqual(admission.minimum_bytes, 3 * RUNTIME.GIB)
+        self.assertEqual(admission.gc_recovery_headroom_bytes, 768 * RUNTIME.MIB)
+        self.assertEqual(
+            admission.hard_limit_bytes, 4 * RUNTIME.GIB + 768 * RUNTIME.MIB
+        )
+        self.assertEqual(admission.gc_recovery_headroom_backing, "windows-commit")
+        self.assertEqual(admission.maximum_bytes, 6 * RUNTIME.GIB)
+        self.assertEqual(admission.capacity_basis, "windows-commit-build-test")
 
-        with self.assertRaisesRegex(
-            RUNTIME.RuntimePolicyError, RUNTIME.ADMISSION_ERROR
+        for available, commit_available in (
+            (5000 * RUNTIME.MIB, 14 * RUNTIME.GIB),
+            (8 * RUNTIME.GIB, 7500 * RUNTIME.MIB),
         ):
-            RUNTIME.calculate_admission(
+            with self.subTest(
+                available=available, commit_available=commit_available
+            ), self.assertRaisesRegex(
+                RUNTIME.RuntimePolicyError, RUNTIME.ADMISSION_ERROR
+            ):
+                RUNTIME.calculate_admission(
+                    self.policy,
+                    "build-test",
+                    snapshot=RUNTIME.MemorySnapshot(
+                        16 * RUNTIME.GIB,
+                        available,
+                        32 * RUNTIME.GIB,
+                        commit_available,
+                    ),
+                    platform_name="nt",
+                )
+
+    def test_benchmark_and_non_windows_build_admission_remain_physical(self) -> None:
+        for profile in ("build-test", "benchmark-search"):
+            admission = RUNTIME.calculate_admission(
                 self.policy,
-                "build-test",
+                profile,
                 snapshot=RUNTIME.MemorySnapshot(
                     16 * RUNTIME.GIB,
-                    5 * RUNTIME.GIB,
+                    8 * RUNTIME.GIB,
                     32 * RUNTIME.GIB,
                     20 * RUNTIME.GIB,
                 ),
-                platform_name="nt",
+                platform_name="posix",
+            )
+            self.assertEqual(
+                admission.reserve_bytes, int(16 * RUNTIME.GIB * 0.20)
+            )
+            self.assertEqual(admission.capacity_basis, "physical")
+            self.assertEqual(
+                admission.gc_recovery_headroom_backing,
+                "physical" if profile == "build-test" else "none",
             )
 
     def test_parallel_heavy_runtime_slot_is_single_owner_and_reusable(self) -> None:

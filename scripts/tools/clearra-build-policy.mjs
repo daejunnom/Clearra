@@ -1,7 +1,7 @@
 // One physical build root. Validation never creates or retires a generation.
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
-import { dirname, isAbsolute, resolve, win32 } from 'node:path';
+import { dirname, isAbsolute, posix, resolve, win32 } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -24,6 +24,7 @@ export function buildPathIdentity(value) {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return win32.resolve(value).replaceAll('\\', '/').toLowerCase();
   const mounted = /^\/mnt\/([a-z])\/(.*)$/u.exec(value);
   if (mounted) return win32.resolve(`${mounted[1]}:/${mounted[2]}`).replaceAll('\\', '/').toLowerCase();
+  if (/^\/(?!\/)/u.test(value)) return posix.resolve(value);
   if (!isAbsolute(value)) throw new Error('Clearra build paths must be absolute');
   return resolve(value);
 }

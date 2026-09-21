@@ -1225,7 +1225,7 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
             failures.append(f"resource profile has an invalid bound: {profile}")
     expected_profiles = {
         "control": (256, 512, 300, 300, 32),
-        "build-test": (3072, None, 5400, 5400, 512),
+        "build-test": (3072, 6144, 5400, 5400, 512),
         "benchmark-search": (4096, None, 7200, 7200, 256),
         "local-service": (512, 2048, 7200, 7200, 64),
         "cloud-job": (16384, 16384, 840, 900, 64),
@@ -1253,6 +1253,9 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
         failures.append("benchmark-search must require an explicit timeout")
     if not profiles.get("local-service", {}).get("explicit_lease_required"):
         failures.append("local-service must require an explicit lease")
+    build_test = profiles.get("build-test", {})
+    if build_test.get("gc_recovery_headroom_mib") != 768:
+        failures.append("build-test must preserve bounded GC recovery headroom")
     required_process_fields = {
         "profile",
         "runtime",
@@ -1342,7 +1345,7 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
     runtime_policy = policy.get("runtime_policy", {})
     expected_memory_routing = {
         "control": ("windows-commit-control", "control"),
-        "build-test": ("physical", "memory-intensive"),
+        "build-test": ("windows-commit-build-test", "memory-intensive"),
         "benchmark-search": ("physical", "memory-intensive"),
         "local-service": ("physical", "local-service"),
         "cloud-job": ("physical", "cloud-job"),
@@ -1361,6 +1364,13 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
         "commit_reserve_fraction": 0.125,
     }:
         failures.append("Windows control admission does not preserve RAM and commit reserves")
+    if runtime_policy.get("windows_commit_build_test") != {
+        "minimum_physical_reserve_mib": 2048,
+        "physical_reserve_fraction": 0.125,
+        "minimum_commit_reserve_mib": 4096,
+        "commit_reserve_fraction": 0.125,
+    }:
+        failures.append("Windows build admission does not preserve RAM and commit reserves")
     if runtime_policy.get("parallel_admission") != {
         "stale_slot_grace_seconds": 30,
         "classes": {
