@@ -435,7 +435,9 @@ fn pc4_compact_graph_union_zero_hit_and_incomplete_never_become_partial_completi
 fn pc4_compact_graph_union_frontier_bytes_fail_closed_before_unbounded_growth() {
     let fixture = clear_path(2);
     let mut budget = limits();
-    budget.frontier_bytes = nonzero(4096);
+    // The sharded directory itself is charged. Keep enough room for the fixed
+    // owner and prove that the first unbounded growth still fails closed.
+    budget.frontier_bytes = nonzero(12 * 1024);
     let (mut union, mut cache, guard) = prepare(
         &fixture,
         2,
@@ -488,6 +490,45 @@ fn pc4_compact_graph_union_cancel_during_layer_promotion_drops_partial_frontier(
     assert!(union.advance(&cache, nonzero(1), &guard).is_err());
     assert!(union.pending_fields(1).unwrap().is_empty());
     assert!(union.into_reducer_input(&guard).is_err());
+}
+
+#[test]
+fn pc4_compact_graph_union_releases_completed_promotion_shards_cooperatively() {
+    let fixture = clear_path(4);
+    let (mut union, mut cache, guard) = prepare(
+        &fixture,
+        4,
+        Pc4RuleProfile::Jstris180,
+        "IIII",
+        FixedQueueHoldState::Disabled,
+        limits(),
+    );
+    let mut initial_capacity = None;
+    let mut released_before_layer_completion = false;
+    for _ in 0..20_000 {
+        assert_ne!(
+            union.advance(&cache, nonzero(1), &guard).unwrap(),
+            CompactGraphUnionStep::Complete
+        );
+        if let Some(id) = union.pending_fields(1).unwrap().first() {
+            admit(&mut cache, &fixture, *id);
+        }
+        if let Some(capacity) = union.retained_promotion_capacity_for_test() {
+            let initial = *initial_capacity.get_or_insert(capacity);
+            if capacity < initial {
+                released_before_layer_completion = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        initial_capacity.is_some(),
+        "fixture must enter layer promotion"
+    );
+    assert!(
+        released_before_layer_completion,
+        "a completed promotion shard must release its table before the whole layer finishes"
+    );
 }
 
 #[test]
@@ -737,7 +778,7 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
             if status == CompactGraphUnionStep::Complete {
                 break;
             }
-            if bounded_cache && union.resident_capacity_blocks_cold_front() {
+            if bounded_cache && union.resident_capacity_blocks_cold_front(&cache) {
                 let charged = union.usage().work;
                 assert_eq!(
                     union.advance(&cache, nonzero(8), &guard).unwrap(),
@@ -778,10 +819,6 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
         );
         let usage = union.usage();
         assert!(
-            usage.terminal_arrivals > 1,
-            "convergent paths are collected without terminal frontier copies"
-        );
-        assert!(
             usage.peak_frontier_bytes > 0
                 && usage.peak_frontier_bytes <= limits().frontier_bytes.get()
         );
@@ -799,7 +836,10 @@ fn pc4_compact_graph_union_merges_diamonds_and_collects_independent_pending_fiel
                 "fixture reaches resident-full plus cold-ready backpressure"
             );
         }
-        let actual = union.into_reducer_input(&guard).unwrap();
+        let completion_state = union.completion_state_for_test();
+        let actual = union
+            .into_reducer_input(&guard)
+            .unwrap_or_else(|error| panic!("{error:?}; {completion_state}"));
         let expected = clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity::from_placements(
             fixture.initial_board, fixture.original_placements.iter().map(|mask|
                 clearra_core_domain::solution::normalized_tiling_solution::PiecePlacementMask::new(

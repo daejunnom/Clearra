@@ -194,6 +194,85 @@ pub(crate) fn load(
     })
 }
 
+pub(crate) fn recover_offline_receipt(
+    dataset: &Dataset,
+    expected_count: usize,
+    family_path: &Path,
+    materialization_path: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    let receipt = read_json(materialization_path, 16 * 1024 * 1024)?;
+    validate_receipt_identity(&receipt)?;
+    if receipt["schema"] != SCHEMA
+        || receipt["qualification_status"] != "offline-exact-family-materialized"
+        || receipt["repository"].as_str() != Some(&dataset.repository)
+        || receipt["revision"].as_str() != Some(&dataset.revision)
+        || receipt["profile"].as_str() != Some(&dataset.profile)
+        || receipt["artifacts"] != dataset.public_artifacts()
+        || receipt["input_identity"] != offline_family::INPUT_IDENTITY
+        || receipt["unique_solution_count"].as_u64() != u64::try_from(expected_count).ok()
+        || receipt["identity_order"] != "strict-canonical-ascending"
+        || receipt["materialization"]["format"] != "PC4FAM01"
+        || receipt["materialization"]["version"].as_u64() != Some(u64::from(VERSION))
+        || receipt["materialization"]["record_bytes"].as_u64() != Some(u64::from(RECORD_BYTES))
+        || receipt["materialization"]["placements_per_record"].as_u64()
+            != Some(PLACEMENTS_PER_RECORD as u64)
+        || receipt["materialization"]["initial_board_mask"].as_u64() != Some(0)
+    {
+        return Err("offline family recovery materialization mismatch".to_owned());
+    }
+    require_regular_file(family_path)?;
+    if receipt["materialization"]["file_name"].as_str()
+        != family_path.file_name().and_then(|value| value.to_str())
+    {
+        return Err("offline family recovery file name mismatch".to_owned());
+    }
+    let byte_length = fs::metadata(family_path).map_err(io_error)?.len();
+    if receipt["materialization"]["byte_length"].as_u64() != Some(byte_length)
+        || receipt["materialization"]["content_identity"].as_str()
+            != Some(hash_file(family_path)?.as_str())
+    {
+        return Err("offline family recovery artifact identity mismatch".to_owned());
+    }
+    let identities = read_family(family_path, expected_count)?;
+    if identities.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err("offline family recovery identities are not strictly ordered".to_owned());
+    }
+    let normalized_hash =
+        normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(&identities);
+    let normalized_hash_algorithm = receipt["normalized_solution_set_hash_algorithm"]
+        .as_str()
+        .ok_or("offline family recovery hash algorithm missing")?;
+    if receipt["normalized_solution_set_hash"].as_str() != Some(&normalized_hash) {
+        return Err("offline family recovery normalized hash mismatch".to_owned());
+    }
+    let recovered = with_identity(offline_family::receipt_core(
+        dataset,
+        expected_count,
+        identities.len(),
+        normalized_hash_algorithm,
+        &normalized_hash,
+    ))?;
+    if receipt["offline_family_receipt_identity"] != recovered["receipt_identity"] {
+        return Err("offline family recovery receipt identity mismatch".to_owned());
+    }
+    if output.exists() {
+        let existing = read_json(output, 16 * 1024 * 1024)?;
+        validate_receipt_identity(&existing)?;
+        if existing != recovered {
+            return Err("existing recovered offline proof differs".to_owned());
+        }
+    } else {
+        write_json_atomic(output, &recovered)?;
+    }
+    println!(
+        "pc4_offline_family_recovery=passed solutions={} receipt={}",
+        identities.len(),
+        recovered["receipt_identity"].as_str().unwrap_or("invalid")
+    );
+    Ok(())
+}
+
 fn validate_offline_receipt(
     offline: &Value,
     dataset: &Dataset,

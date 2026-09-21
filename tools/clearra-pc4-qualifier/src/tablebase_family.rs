@@ -40,6 +40,8 @@ const OFFLINE_SCHEMA: &str = "clearra.pc4.offline-exact-result-family.v1";
 const INPUT_IDENTITY: &str = "empty-board-4l-jstris-180-standard-7-bag-hold-empty-v1";
 const LOCAL_INDEX_PAGE_BYTES: u64 = 4_096;
 const LOCAL_INDEX_MAX_PAGES: usize = 512;
+const LOCAL_GRAPH_PAGE_BYTES: u64 = 4_096;
+const LOCAL_GRAPH_MAX_PAGES: usize = 8_192;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prove(
@@ -270,7 +272,9 @@ pub(crate) fn prove(
             "physical_file_bytes": physical_file_bytes,
             "index_page_bytes": LOCAL_INDEX_PAGE_BYTES,
             "index_page_capacity_per_artifact": LOCAL_INDEX_MAX_PAGES,
-            "graph_policy": "exact-record",
+            "graph_policy": "bounded-page-cache",
+            "graph_page_bytes": LOCAL_GRAPH_PAGE_BYTES,
+            "graph_page_capacity": LOCAL_GRAPH_MAX_PAGES,
         },
         "outgoing_proof_receipt_identity": outgoing["receipt_identity"],
         "boundary_dead_proof_receipt_identity": boundary["receipt_identity"],
@@ -298,6 +302,11 @@ fn tablebase_request(workers: usize) -> AppRequest {
     let policy = PcExecutionPolicy::mvp_default()
         .with_requested_backend(RequestedSearchBackend::Cpu)
         .with_workers(workers)
+        // The qualifier is an isolated, explicitly sized proof job. Its
+        // `--workers` value is therefore also the user's all-CPU opt-in when
+        // it reaches the host's complete logical-processor count. Ordinary
+        // product requests keep the reserved-processor default.
+        .with_use_all_logical_processors(true)
         .with_cpu_warmup(true)
         .with_tablebase_requested(true);
     let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
@@ -441,13 +450,24 @@ struct ArtifactFiles {
 impl ArtifactFiles {
     fn open(dataset: &Dataset) -> Result<Self, String> {
         Ok(Self {
-            fields: LocalArtifactFile::open(&dataset.fields.path, dataset.fields.byte_len, true)?,
+            fields: LocalArtifactFile::open(
+                &dataset.fields.path,
+                dataset.fields.byte_len,
+                LOCAL_INDEX_PAGE_BYTES,
+                LOCAL_INDEX_MAX_PAGES,
+            )?,
             offsets: LocalArtifactFile::open(
                 &dataset.offsets.path,
                 dataset.offsets.byte_len,
-                true,
+                LOCAL_INDEX_PAGE_BYTES,
+                LOCAL_INDEX_MAX_PAGES,
             )?,
-            graph: LocalArtifactFile::open(&dataset.graph.path, dataset.graph.byte_len, false)?,
+            graph: LocalArtifactFile::open(
+                &dataset.graph.path,
+                dataset.graph.byte_len,
+                LOCAL_GRAPH_PAGE_BYTES,
+                LOCAL_GRAPH_MAX_PAGES,
+            )?,
         })
     }
 
@@ -482,7 +502,8 @@ impl ArtifactFiles {
 struct LocalArtifactFile {
     source: File,
     length: u64,
-    cache_index: bool,
+    page_bytes: u64,
+    max_pages: usize,
     pages: BTreeMap<u64, Vec<u8>>,
     insertion_order: VecDeque<u64>,
     physical_reads: u64,
@@ -490,11 +511,15 @@ struct LocalArtifactFile {
 }
 
 impl LocalArtifactFile {
-    fn open(path: &Path, length: u64, cache_index: bool) -> Result<Self, String> {
+    fn open(path: &Path, length: u64, page_bytes: u64, max_pages: usize) -> Result<Self, String> {
+        if !page_bytes.is_power_of_two() || max_pages == 0 {
+            return Err("local tablebase page policy invalid".to_owned());
+        }
         Ok(Self {
             source: File::open(path).map_err(io_error)?,
             length,
-            cache_index,
+            page_bytes,
+            max_pages,
             pages: BTreeMap::new(),
             insertion_order: VecDeque::new(),
             physical_reads: 0,
@@ -512,23 +537,19 @@ impl LocalArtifactFile {
         {
             return Err("local tablebase range outside artifact".to_owned());
         }
-        if !self.cache_index {
-            return self.read_exact_at(offset, length);
-        }
         let mut result = vec![0_u8; length];
         let end = offset + length_u64;
-        let mut page_start = offset / LOCAL_INDEX_PAGE_BYTES * LOCAL_INDEX_PAGE_BYTES;
+        let mut page_start = offset / self.page_bytes * self.page_bytes;
         while page_start < end {
             if !self.pages.contains_key(&page_start) {
-                let page_length =
-                    usize::try_from(LOCAL_INDEX_PAGE_BYTES.min(self.length - page_start))
-                        .map_err(|_| "local index page length overflow")?;
+                let page_length = usize::try_from(self.page_bytes.min(self.length - page_start))
+                    .map_err(|_| "local tablebase page length overflow")?;
                 let page = self.read_exact_at(page_start, page_length)?;
-                if self.pages.len() == LOCAL_INDEX_MAX_PAGES {
+                if self.pages.len() == self.max_pages {
                     let evicted = self
                         .insertion_order
                         .pop_front()
-                        .ok_or("local index page order drift")?;
+                        .ok_or("local tablebase page order drift")?;
                     self.pages.remove(&evicted);
                 }
                 self.pages.insert(page_start, page);
@@ -544,8 +565,8 @@ impl LocalArtifactFile {
                 &page[(begin - page_start) as usize..(finish - page_start) as usize],
             );
             page_start = page_start
-                .checked_add(LOCAL_INDEX_PAGE_BYTES)
-                .ok_or("local index page offset overflow")?;
+                .checked_add(self.page_bytes)
+                .ok_or("local tablebase page offset overflow")?;
         }
         Ok(result)
     }
@@ -635,21 +656,45 @@ mod tests {
     }
 
     #[test]
-    fn local_qualification_reader_matches_product_index_page_and_exact_graph_policy() {
+    fn local_qualification_reader_caches_index_and_graph_pages() {
         let source = (0..10_000)
             .map(|value| (value % 251) as u8)
             .collect::<Vec<_>>();
         let file = TemporaryFile::new(&source);
-        let mut paged = LocalArtifactFile::open(&file.0, source.len() as u64, true).unwrap();
+        let mut paged = LocalArtifactFile::open(
+            &file.0,
+            source.len() as u64,
+            LOCAL_INDEX_PAGE_BYTES,
+            LOCAL_INDEX_MAX_PAGES,
+        )
+        .unwrap();
         assert_eq!(paged.read(17, 73).unwrap(), source[17..90]);
         assert_eq!(paged.read(79, 41).unwrap(), source[79..120]);
         assert_eq!(paged.physical_reads, 1);
         assert_eq!(paged.physical_bytes, LOCAL_INDEX_PAGE_BYTES);
 
-        let mut exact = LocalArtifactFile::open(&file.0, source.len() as u64, false).unwrap();
-        assert_eq!(exact.read(17, 73).unwrap(), source[17..90]);
-        assert_eq!(exact.read(79, 41).unwrap(), source[79..120]);
-        assert_eq!(exact.physical_reads, 2);
-        assert_eq!(exact.physical_bytes, 114);
+        let mut graph = LocalArtifactFile::open(
+            &file.0,
+            source.len() as u64,
+            LOCAL_GRAPH_PAGE_BYTES,
+            LOCAL_GRAPH_MAX_PAGES,
+        )
+        .unwrap();
+        assert_eq!(graph.read(17, 73).unwrap(), source[17..90]);
+        assert_eq!(graph.read(79, 41).unwrap(), source[79..120]);
+        assert_eq!(graph.physical_reads, 1);
+        assert_eq!(graph.physical_bytes, LOCAL_GRAPH_PAGE_BYTES);
+    }
+
+    #[test]
+    fn explicit_qualifier_workers_include_the_reserved_processor_opt_in() {
+        let request = tablebase_request(8);
+        let AppCommand::Pc(command) = request.command() else {
+            panic!("tablebase qualifier must build a PC request");
+        };
+        let policy = command.query().execution_policy();
+        assert_eq!(policy.workers(), 8);
+        assert!(policy.use_all_logical_processors());
+        assert!(policy.tablebase_requested());
     }
 }
